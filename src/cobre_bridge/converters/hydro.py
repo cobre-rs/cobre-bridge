@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
+import pandas as pd
 from inewave.newave import Confhd, Hidr, Ree
 
 from cobre_bridge.id_map import NewaveIdMap
@@ -16,7 +18,6 @@ _SCHEMA_URL = (
     "/book/src/schemas/hydros.schema.json"
 )
 
-# Month abbreviations used by inewave in the Hidr cadastro DataFrame.
 _EVAP_MONTHS = [
     "JAN",
     "FEV",
@@ -99,7 +100,7 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
         vol_max = float(hreg["volume_maximo"])
 
         # Generation parameters.
-        productivity = float(hreg["produtibilidade_especifica"])
+        productivity = _compute_productivity(hreg)
         n_sets = int(hreg["numero_conjuntos_maquinas"])
 
         max_turbined = 0.0
@@ -111,16 +112,41 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
             max_turbined += q_nominal * n_machines
             max_generation += p_nominal * n_machines
 
-        # Minimum turbined flow from historical minimum discharge.
+        # Apply TEIF/IP availability derating to max_generation only.
+        teif = float(hreg.get("teif", 0.0) or 0.0)
+        ip = float(hreg.get("ip", 0.0) or 0.0)
+        if math.isnan(teif):
+            teif = 0.0
+        if math.isnan(ip):
+            ip = 0.0
+
+        def _clamp_to_100(value: float, label: str) -> float:
+            if value > 100.0:
+                _LOG.warning(
+                    "%s exceeds 100%% for plant %s (%s=%.2f); clamping to 100.",
+                    label,
+                    name,
+                    label.lower(),
+                    value,
+                )
+                return 100.0
+            return value
+
+        teif = _clamp_to_100(teif, "teif")
+        ip = _clamp_to_100(ip, "ip")
+        max_generation *= ((100.0 - teif) / 100.0) * ((100.0 - ip) / 100.0)
+
+        # Minimum outflow from historical minimum
         vazao_min_hist = hreg.get("vazao_minima_historica")
-        min_turbined = (
+        min_outflow = (
             float(vazao_min_hist)
             if vazao_min_hist and float(vazao_min_hist) > 0
             else 0.0
         )
-        min_generation = min_turbined * productivity
+        min_generation = min_outflow * productivity
 
         # Downstream cascade linkage.
+        downstream_id: int | None = None
         jusante_raw = row.get("codigo_usina_jusante")
         if (
             jusante_raw is not None
@@ -128,11 +154,9 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
             and int(jusante_raw) != 0
         ):
             try:
-                downstream_id: int | None = id_map.hydro_id(int(jusante_raw))
+                downstream_id = id_map.hydro_id(int(jusante_raw))
             except KeyError:
-                downstream_id = None
-        else:
-            downstream_id = None
+                pass
 
         # Bus assignment via REE -> subsystem.
         ree_code = int(row["ree"])
@@ -148,6 +172,16 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
         evap_coeffs = [float(hreg[f"evaporacao_{m}"]) for m in _EVAP_MONTHS]
         has_evaporation = any(v != 0.0 for v in evap_coeffs)
 
+        # Hydraulic loss model derived from tipo_perda / perdas columns.
+        tipo_perda = int(hreg.get("tipo_perda", 0) or 0)
+        perdas_val = float(hreg.get("perdas", 0.0) or 0.0)
+        if tipo_perda == 1 and perdas_val > 0 and not math.isnan(perdas_val):
+            hydraulic_losses: dict | None = {"type": "factor", "value": perdas_val}
+        elif tipo_perda == 2 and perdas_val > 0 and not math.isnan(perdas_val):
+            hydraulic_losses = {"type": "constant", "value_m": perdas_val}
+        else:
+            hydraulic_losses = None
+
         hydro_entry: dict = {
             "id": id_map.hydro_id(newave_code),
             "name": name,
@@ -158,13 +192,13 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
                 "max_storage_hm3": vol_max,
             },
             "outflow": {
-                "min_outflow_m3s": 0.0,
+                "min_outflow_m3s": min_outflow,
                 "max_outflow_m3s": None,
             },
             "generation": {
                 "model": "constant_productivity",
                 "productivity_mw_per_m3s": productivity,
-                "min_turbined_m3s": min_turbined,
+                "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": max_turbined,
                 "min_generation_mw": min_generation,
                 "max_generation_mw": max_generation,
@@ -176,7 +210,7 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
             "diversion": None,
             "filling": None,
             "efficiency": None,
-            "hydraulic_losses": None,
+            "hydraulic_losses": hydraulic_losses,
             "penalties": None,
             "entry_stage_id": None,
             "exit_stage_id": None,
@@ -191,18 +225,100 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
     }
 
 
+def _compute_productivity(hreg: pd.Series) -> float:
+    """Compute average productivity in MW/(m^3/s) for a hydro plant.
+
+    Reads polynomial coefficients ``volume_cota_0`` through
+    ``volume_cota_4`` from the plant's cadastro row to map storage volume
+    (hm3) to upstream height (m).  Subtracts ``canal_fuga_medio`` to
+    obtain gross drop, applies the loss model defined by ``tipo_perda``
+    and ``perdas``, then multiplies by ``produtibilidade_especifica``.
+
+    For monthly-regulated plants (``tipo_regulacao == "M"``) the height
+    is the integral average of the polynomial over
+    ``[volume_minimo, volume_maximo]``.  For all other plant types the
+    polynomial is evaluated at ``volume_referencia``.
+
+    Parameters
+    ----------
+    hreg:
+        One row of ``Hidr.cadastro``, indexed by column name.
+
+    Returns
+    -------
+    float
+        Average productivity in MW/(m^3/s).  Returns zero if all
+        polynomial coefficients are zero (no usable head).
+    """
+    coeffs = [float(hreg[f"volume_cota_{i}"]) for i in range(5)]
+
+    if all(c == 0.0 for c in coeffs):
+        _LOG.warning(
+            "All volume_cota coefficients are zero for plant; "
+            "returning zero productivity.",
+            extra={"plant": hreg.get("nome_usina", "unknown")},
+        )
+        return 0.0
+
+    def _poly(v: float) -> float:
+        """Evaluate h(v) = c0 + c1*v + c2*v^2 + c3*v^3 + c4*v^4."""
+        return (
+            coeffs[0]
+            + coeffs[1] * v
+            + coeffs[2] * v**2
+            + coeffs[3] * v**3
+            + coeffs[4] * v**4
+        )
+
+    def _poly_antiderivative(v: float) -> float:
+        """Evaluate the antiderivative F(v) = c0*v + c1*v^2/2 + ..."""
+        return (
+            coeffs[0] * v
+            + coeffs[1] * v**2 / 2.0
+            + coeffs[2] * v**3 / 3.0
+            + coeffs[3] * v**4 / 4.0
+            + coeffs[4] * v**5 / 5.0
+        )
+
+    canal_fuga = float(hreg["canal_fuga_medio"])
+    tipo_regulacao = str(hreg["tipo_regulacao"]).strip()
+    vol_min = float(hreg["volume_minimo"])
+    vol_max = float(hreg["volume_maximo"])
+
+    if tipo_regulacao == "M":
+        if vol_min == vol_max:
+            # Degenerate interval: fall back to point evaluation.
+            avg_height = _poly(vol_min)
+        else:
+            avg_height = (
+                _poly_antiderivative(vol_max) - _poly_antiderivative(vol_min)
+            ) / (vol_max - vol_min)
+        net_drop = avg_height - canal_fuga
+    else:
+        vol_ref = float(hreg["volume_referencia"])
+        net_drop = _poly(vol_ref) - canal_fuga
+
+    # Apply loss model.
+    tipo_perda = int(hreg["tipo_perda"])
+    perdas = float(hreg["perdas"])
+    if tipo_perda == 1:
+        # Multiplicative factor: adjusted_drop = net_drop * (1 - perdas)
+        adjusted_drop = net_drop * (1.0 - perdas)
+    elif tipo_perda == 2:
+        # Additive meters: adjusted_drop = net_drop - perdas
+        adjusted_drop = net_drop - perdas
+    else:
+        adjusted_drop = net_drop
+
+    produtibilidade = float(hreg["produtibilidade_especifica"])
+    return produtibilidade * adjusted_drop
+
+
 def _is_na(value: object) -> bool:
     """Return True if *value* is a pandas NA/NaN sentinel."""
+    if isinstance(value, float) and math.isnan(value):
+        return True
     try:
-        import math
-
-        if isinstance(value, float) and math.isnan(value):
-            return True
-    except (TypeError, ValueError):
-        pass
-    try:
-        import pandas as pd
-
         return pd.isna(value)  # type: ignore[return-value]
-    except (TypeError, ImportError):
+    except (TypeError, ValueError):
         return False

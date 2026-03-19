@@ -14,10 +14,6 @@ import pytest
 
 from cobre_bridge.id_map import NewaveIdMap
 
-# ---------------------------------------------------------------------------
-# NewaveIdMap
-# ---------------------------------------------------------------------------
-
 
 class TestNewaveIdMap:
     def test_bus_id_remapping(self) -> None:
@@ -74,11 +70,6 @@ class TestNewaveIdMap:
         assert a.bus_id(3) == b.bus_id(3)
 
 
-# ---------------------------------------------------------------------------
-# Helpers: synthetic DataFrames / mock objects
-# ---------------------------------------------------------------------------
-
-
 def _make_confhd_df() -> pd.DataFrame:
     """Two hydros: plant 1 upstream of plant 2, in REE 1 (subsystem 1)."""
     return pd.DataFrame(
@@ -96,7 +87,27 @@ def _make_confhd_df() -> pd.DataFrame:
 
 
 def _make_hidr_cadastro() -> pd.DataFrame:
-    """Synthetic Hidr.cadastro for two plants."""
+    """Synthetic Hidr.cadastro for two plants.
+
+    Both plants use ``tipo_regulacao="M"`` with a simple linear polynomial
+    ``h(v) = 300 + 0.1*v`` (volume_cota_0=300, volume_cota_1=0.1, rest
+    zero) and ``canal_fuga_medio=50.0``.  With ``tipo_perda=1`` and
+    ``perdas=0.0`` the loss model leaves the net drop unchanged.
+
+    USINA_A: [volume_minimo=100, volume_maximo=1000]
+    - F(v) = 300*v + 0.05*v^2
+    - avg_height = (F(1000)-F(100)) / 900 = (350000-30500)/900 = 355.0
+    - net_drop = 355.0 - 50.0 = 305.0
+    - productivity_A = 0.9 * 305.0 = 274.5
+
+    USINA_B: [volume_minimo=50, volume_maximo=500]
+    - avg_height = (F(500)-F(50)) / 450 = (162500-15125)/450 = 327.5
+    - net_drop = 327.5 - 50.0 = 277.5
+    - productivity_B = 0.85 * 277.5 = 235.875
+
+    Both productivities differ from their raw ``produtibilidade_especifica``
+    values (0.9 and 0.85) because ``canal_fuga_medio`` is nonzero.
+    """
     months = [
         "JAN",
         "FEV",
@@ -120,8 +131,17 @@ def _make_hidr_cadastro() -> pd.DataFrame:
         "desvio": [pd.NA, pd.NA],
         "volume_minimo": [100.0, 50.0],
         "volume_maximo": [1000.0, 500.0],
-        "produtibilidade_especifica": [0.9, 0.85],
+        "volume_referencia": [550.0, 275.0],
+        "canal_fuga_medio": [50.0, 50.0],
+        "tipo_regulacao": ["M", "M"],
+        "tipo_perda": [1, 1],
         "perdas": [0.0, 0.0],
+        "volume_cota_0": [300.0, 300.0],
+        "volume_cota_1": [0.1, 0.1],
+        "volume_cota_2": [0.0, 0.0],
+        "volume_cota_3": [0.0, 0.0],
+        "volume_cota_4": [0.0, 0.0],
+        "produtibilidade_especifica": [0.9, 0.85],
         "numero_conjuntos_maquinas": [1, 2],
         "maquinas_conjunto_1": [4, 3],
         "maquinas_conjunto_2": [0, 2],
@@ -139,6 +159,8 @@ def _make_hidr_cadastro() -> pd.DataFrame:
         "vazao_nominal_conjunto_4": [0.0, 0.0],
         "vazao_nominal_conjunto_5": [0.0, 0.0],
         "vazao_minima_historica": [0, 0],
+        "teif": [0.0, 0.0],
+        "ip": [0.0, 0.0],
         "fator_carga_maximo": [1.0, 1.0],
         "fator_carga_minimo": [0.0, 0.0],
     }
@@ -269,11 +291,6 @@ def _make_intercambio_df() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# Hydro conversion
-# ---------------------------------------------------------------------------
-
-
 class TestConvertHydros:
     def _make_id_map(self) -> NewaveIdMap:
         return NewaveIdMap(
@@ -388,6 +405,13 @@ class TestConvertHydros:
         # USINA_A: 1 set, 4 machines, 200 MW each, flow 222.2 each.
         assert gen["max_generation_mw"] == pytest.approx(4 * 200.0)
         assert gen["max_turbined_m3s"] == pytest.approx(4 * 222.2)
+        # Productivity from new formula (see _make_hidr_cadastro docstring):
+        # avg_height = 300 + 0.1 * (100+1000)/2 = 355.0
+        # net_drop = 355.0 - 50.0 = 305.0; adjusted (no loss) = 305.0
+        # productivity_A = 0.9 * 305.0 = 274.5
+        assert gen["productivity_mw_per_m3s"] == pytest.approx(0.9 * 305.0)
+        # Verify it differs from raw produtibilidade_especifica (0.9).
+        assert gen["productivity_mw_per_m3s"] != pytest.approx(0.9)
 
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
@@ -444,6 +468,196 @@ class TestConvertHydros:
         with pytest.raises(ValueError, match="not found in hidr.dat"):
             convert_hydros(tmp_path, id_map)
 
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_hydraulic_losses_factor(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """tipo_perda=1 and perdas=0.05 -> hydraulic_losses factor dict."""
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        cadastro = _make_hidr_cadastro().copy()
+        cadastro["tipo_perda"] = 1
+        cadastro["perdas"] = 0.05
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_ree = MagicMock()
+        mock_ree.rees = _make_ree_df()
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(tmp_path, self._make_id_map())
+        for h in result["hydros"]:
+            assert h["hydraulic_losses"] == {
+                "type": "factor",
+                "value": pytest.approx(0.05),
+            }
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_hydraulic_losses_constant(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """tipo_perda=2 and perdas=3.5 -> hydraulic_losses constant dict."""
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        cadastro = _make_hidr_cadastro().copy()
+        cadastro["tipo_perda"] = 2
+        cadastro["perdas"] = 3.5
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_ree = MagicMock()
+        mock_ree.rees = _make_ree_df()
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(tmp_path, self._make_id_map())
+        for h in result["hydros"]:
+            assert h["hydraulic_losses"] == {
+                "type": "constant",
+                "value_m": pytest.approx(3.5),
+            }
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_hydraulic_losses_none_when_zero(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """perdas=0.0 produces hydraulic_losses=None regardless of tipo_perda."""
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        cadastro = _make_hidr_cadastro().copy()
+        cadastro["tipo_perda"] = 1
+        cadastro["perdas"] = 0.0
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_ree = MagicMock()
+        mock_ree.rees = _make_ree_df()
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(tmp_path, self._make_id_map())
+        for h in result["hydros"]:
+            assert h["hydraulic_losses"] is None
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_teif_ip_derating_reduces_max_generation(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """TEIF=5%, IP=3% reduces max_generation by factor 0.95 * 0.97 = 0.9215."""
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        cadastro = _make_hidr_cadastro().copy()
+        # Override only USINA_A (code=1) with non-zero TEIF/IP.
+        cadastro.loc[1, "teif"] = 5.0
+        cadastro.loc[1, "ip"] = 3.0
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_ree = MagicMock()
+        mock_ree.rees = _make_ree_df()
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(tmp_path, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        # USINA_A nominal: 4 machines * 200 MW = 800 MW
+        # Derating: 800 * 0.95 * 0.97 = 737.2
+        expected = 800.0 * 0.95 * 0.97
+        assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(expected)
+        # max_turbined_m3s must NOT be derated
+        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(4 * 222.2)
+        # min_generation_mw must NOT be derated (it is zero here)
+        assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_zero_teif_ip_no_derating(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """TEIF=0% and IP=0% leaves max_generation_mw unchanged."""
+        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(tmp_path, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        # teif=0, ip=0 -> factor = 1.0 -> no change from nominal 800 MW
+        assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_nan_teif_treated_as_zero(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """NaN teif is treated as 0.0 — no derating, no error."""
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        cadastro = _make_hidr_cadastro().copy()
+        cadastro.loc[1, "teif"] = float("nan")
+        cadastro.loc[1, "ip"] = float("nan")
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_ree = MagicMock()
+        mock_ree.rees = _make_ree_df()
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(tmp_path, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        # NaN treated as 0 -> factor = 1.0 -> no change from nominal 800 MW
+        assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
+
 
 def _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path):
     """Create dummy files and wire mock read() returns."""
@@ -461,6 +675,205 @@ def _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path):
     mock_ree = MagicMock()
     mock_ree.rees = _make_ree_df()
     mock_ree_cls.read.return_value = mock_ree
+
+
+def _make_hreg(overrides: dict) -> pd.Series:
+    """Build a minimal plant cadastro row (pd.Series) for unit tests.
+
+    Provides sensible defaults for all columns consumed by
+    ``_compute_productivity``.  Pass ``overrides`` to customise
+    individual fields.
+    """
+    defaults: dict = {
+        "nome_usina": "TEST",
+        "produtibilidade_especifica": 0.009,
+        "volume_minimo": 100.0,
+        "volume_maximo": 1000.0,
+        "volume_referencia": 500.0,
+        "canal_fuga_medio": 250.0,
+        "tipo_regulacao": "M",
+        "tipo_perda": 1,
+        "perdas": 0.05,
+        "volume_cota_0": 300.0,
+        "volume_cota_1": 0.1,
+        "volume_cota_2": 0.0,
+        "volume_cota_3": 0.0,
+        "volume_cota_4": 0.0,
+    }
+    defaults.update(overrides)
+    return pd.Series(defaults)
+
+
+# ---------------------------------------------------------------------------
+# _compute_productivity unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestComputeProductivity:
+    """Unit tests for the ``_compute_productivity`` helper."""
+
+    def test_monthly_regulated_linear_polynomial(self) -> None:
+        """tipo_regulacao='M': uses integral average of poly over [vmin, vmax]."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "M",
+                "volume_cota_0": 300.0,
+                "volume_cota_1": 0.1,
+                "volume_cota_2": 0.0,
+                "volume_cota_3": 0.0,
+                "volume_cota_4": 0.0,
+                "volume_minimo": 100.0,
+                "volume_maximo": 1000.0,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 1,
+                "perdas": 0.05,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # Integral average of (300 + 0.1*v) over [100, 1000]:
+        #   F(v) = 300*v + 0.1*v^2/2
+        #   avg = (F(1000) - F(100)) / (1000 - 100)
+        #       = (300*1000 + 0.05*1000^2 - 300*100 - 0.05*100^2) / 900
+        #       = (300000 + 50000 - 30000 - 500) / 900
+        #       = 319500 / 900 = 355.0
+        # net_drop = 355.0 - 250.0 = 105.0
+        # adjusted_drop = 105.0 * (1 - 0.05) = 99.75
+        # result = 0.009 * 99.75 = 0.89775
+        avg_height = 355.0
+        expected = 0.009 * (1.0 - 0.05) * (avg_height - 250.0)
+        result = _compute_productivity(hreg)
+        assert result == pytest.approx(expected)
+
+    def test_run_of_river_point_evaluation(self) -> None:
+        """tipo_regulacao='D': evaluates poly at volume_referencia."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "D",
+                "volume_referencia": 500.0,
+                "volume_cota_0": 300.0,
+                "volume_cota_1": 0.1,
+                "volume_cota_2": 0.0,
+                "volume_cota_3": 0.0,
+                "volume_cota_4": 0.0,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 1,
+                "perdas": 0.05,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # poly(500) = 300 + 0.1*500 = 350.0
+        # net_drop = 350.0 - 250.0 = 100.0
+        # adjusted_drop = 100.0 * (1 - 0.05) = 95.0
+        # result = 0.009 * 95.0 = 0.855
+        expected = 0.009 * (1.0 - 0.05) * (350.0 - 250.0)
+        result = _compute_productivity(hreg)
+        assert result == pytest.approx(expected)
+
+    def test_multiplicative_loss(self) -> None:
+        """tipo_perda=1: adjusted_drop = net_drop * (1 - perdas)."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "D",
+                "volume_referencia": 500.0,
+                "volume_cota_0": 300.0,
+                "volume_cota_1": 0.1,
+                "volume_cota_2": 0.0,
+                "volume_cota_3": 0.0,
+                "volume_cota_4": 0.0,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 1,
+                "perdas": 0.10,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # net_drop = (300 + 50) - 250 = 100.0
+        # adjusted = 100.0 * (1 - 0.10) = 90.0
+        expected = 0.009 * 90.0
+        result = _compute_productivity(hreg)
+        assert result == pytest.approx(expected)
+
+    def test_additive_loss(self) -> None:
+        """tipo_perda=2: adjusted_drop = net_drop - perdas."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "D",
+                "volume_referencia": 500.0,
+                "volume_cota_0": 300.0,
+                "volume_cota_1": 0.1,
+                "volume_cota_2": 0.0,
+                "volume_cota_3": 0.0,
+                "volume_cota_4": 0.0,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 2,
+                "perdas": 3.5,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # net_drop = 350.0 - 250.0 = 100.0
+        # adjusted = 100.0 - 3.5 = 96.5
+        expected = 0.009 * 96.5
+        result = _compute_productivity(hreg)
+        assert result == pytest.approx(expected)
+
+    def test_no_loss(self) -> None:
+        """tipo_perda=0 (or unknown): no loss applied, adjusted_drop = net_drop."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "D",
+                "volume_referencia": 500.0,
+                "volume_cota_0": 300.0,
+                "volume_cota_1": 0.1,
+                "volume_cota_2": 0.0,
+                "volume_cota_3": 0.0,
+                "volume_cota_4": 0.0,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 0,
+                "perdas": 99.0,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # tipo_perda=0 -> no loss applied, perdas value ignored
+        # net_drop = 350.0 - 250.0 = 100.0
+        expected = 0.009 * 100.0
+        result = _compute_productivity(hreg)
+        assert result == pytest.approx(expected)
+
+    def test_equal_volumes_fallback(self) -> None:
+        """tipo_regulacao='M' with volume_minimo==volume_maximo: falls back to point eval."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "M",
+                "volume_minimo": 500.0,
+                "volume_maximo": 500.0,
+                "volume_cota_0": 300.0,
+                "volume_cota_1": 0.1,
+                "volume_cota_2": 0.0,
+                "volume_cota_3": 0.0,
+                "volume_cota_4": 0.0,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 1,
+                "perdas": 0.0,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # Falls back to poly(500) = 300 + 0.1*500 = 350.0
+        # net_drop = 350.0 - 250.0 = 100.0; no loss
+        # result = 0.009 * 100.0
+        expected = 0.009 * 100.0
+        result = _compute_productivity(hreg)
+        assert result == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------
