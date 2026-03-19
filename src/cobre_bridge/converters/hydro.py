@@ -6,8 +6,10 @@ import logging
 import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-from inewave.newave import Confhd, Ghmin, Hidr, Modif, Ree
+import pyarrow as pa
+from inewave.newave import Confhd, Ghmin, Hidr, Modif, Penalid, Ree
 
 from cobre_bridge.id_map import NewaveIdMap
 
@@ -302,6 +304,108 @@ def _read_ghmin(newave_dir: Path) -> dict[int, float]:
     }
 
 
+# Mapping from PENALID.DAT variable names to Cobre penalty field names.
+_PENALID_VAR_MAP: dict[str, str] = {
+    "DESVIO": "spillage_cost",
+    "VAZMIN": "outflow_violation_below_cost",
+    "VAZMAX": "outflow_violation_above_cost",
+    "GHMIN": "generation_violation_below_cost",
+    "TURBMN": "turbined_violation_below_cost",
+    # TURBMX has no direct Cobre mapping — intentionally excluded.
+}
+
+
+def _read_penalid(newave_dir: Path) -> dict[int, dict[str, float]]:
+    """Read PENALID.DAT and return per-REE penalty override mappings.
+
+    Uses case-insensitive file lookup.  If ``PENALID.DAT`` does not exist,
+    returns an empty dict.  Only the first patamar tier
+    (``patamar_penalidade == 1``) is used — tier 2 has NaN costs (unbounded)
+    and is skipped.  NaN values within tier 1 are also skipped.
+
+    Parameters
+    ----------
+    newave_dir:
+        Path to the NEWAVE case directory.
+
+    Returns
+    -------
+    dict[int, dict[str, float]]
+        Mapping from REE/subsystem code to a dict of Cobre penalty field
+        names -> cost in R$/MWh.  Only fields with valid (non-NaN) values
+        are included.  Returns an empty dict if the file is absent or
+        contains no usable rows.
+    """
+    penalid_path = _find_file_case_insensitive(newave_dir, "penalid.dat")
+    if penalid_path is None:
+        _LOG.debug(
+            "PENALID.DAT not found in %s; leaving all plant penalties as None.",
+            newave_dir,
+        )
+        return {}
+
+    penalid = Penalid.read(str(penalid_path))
+    df: pd.DataFrame | None = penalid.penalidades
+    if df is None or df.empty:
+        return {}
+
+    # Keep only first-tier rows (patamar_penalidade == 1).
+    tier1 = df[df["patamar_penalidade"] == 1]
+    if tier1.empty:
+        return {}
+
+    result: dict[int, dict[str, float]] = {}
+    for _, row in tier1.iterrows():
+        variavel = str(row["variavel"]).strip()
+        cobre_field = _PENALID_VAR_MAP.get(variavel)
+        if cobre_field is None:
+            # Variable not mapped (e.g. TURBMX, ELETRI) — skip silently.
+            continue
+
+        ree_code = int(row["codigo_ree_submercado"])
+        valor = row["valor_R$_MWh"]
+
+        # Skip NaN values.
+        if pd.isna(valor):
+            continue
+
+        cost = float(valor)
+        if ree_code not in result:
+            result[ree_code] = {}
+        result[ree_code][cobre_field] = cost
+
+    return result
+
+
+def read_cadastro(newave_dir: Path) -> pd.DataFrame:
+    """Read ``hidr.dat`` and apply permanent MODIF.DAT overrides.
+
+    Parameters
+    ----------
+    newave_dir:
+        Path to the NEWAVE case directory.
+
+    Returns
+    -------
+    pd.DataFrame
+        The ``Hidr.cadastro`` DataFrame indexed by ``codigo_usina`` with all
+        permanent MODIF.DAT overrides (VAZMIN, VOLMAX, VOLMIN, NUMCNJ,
+        NUMMAQ) already applied.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``hidr.dat`` is absent from *newave_dir*.
+    """
+    hidr_path = newave_dir / "hidr.dat"
+    if not hidr_path.exists():
+        raise FileNotFoundError(f"Required NEWAVE file not found: {hidr_path}")
+
+    hidr = Hidr.read(str(hidr_path))
+    cadastro = hidr.cadastro
+    return _apply_permanent_overrides(cadastro, newave_dir)
+
+
 def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE hydro plant data to a Cobre ``hydros.json`` dict.
 
@@ -311,7 +415,8 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
 
     Also reads ``MODIF.DAT`` (if present) to apply permanent parameter
     overrides and extract temporal override metadata.  Reads ``GHMIN.DAT``
-    (if present) to override computed minimum generation values.
+    (if present) to override computed minimum generation values.  Reads
+    ``PENALID.DAT`` (if present) to populate per-plant penalty overrides.
 
     Parameters
     ----------
@@ -357,6 +462,9 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
 
     # Read GHMIN.DAT minimum generation map.
     ghmin_map = _read_ghmin(newave_dir)
+
+    # Read PENALID.DAT per-REE penalty overrides.
+    penalid_map = _read_penalid(newave_dir)
 
     # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
@@ -491,6 +599,10 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
         else:
             hydraulic_losses = None
 
+        # Penalty overrides from PENALID.DAT — look up by the plant's REE code.
+        ree_penalties = penalid_map.get(ree_code)
+        penalties: dict | None = ree_penalties if ree_penalties else None
+
         hydro_entry: dict = {
             "id": id_map.hydro_id(newave_code),
             "name": name,
@@ -520,7 +632,7 @@ def convert_hydros(newave_dir: Path, id_map: NewaveIdMap) -> dict:
             "filling": None,
             "efficiency": None,
             "hydraulic_losses": hydraulic_losses,
-            "penalties": None,
+            "penalties": penalties,
             "entry_stage_id": None,
             "exit_stage_id": None,
         }
@@ -621,6 +733,116 @@ def _compute_productivity(hreg: pd.Series) -> float:
 
     produtibilidade = float(hreg["produtibilidade_especifica"])
     return produtibilidade * adjusted_drop
+
+
+def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.Table:
+    """Generate a VHA curve table for all hydro plants in *id_map*.
+
+    For each plant code in ``id_map.all_hydro_codes``, samples 100 uniformly
+    spaced volume points on ``[volume_minimo, volume_maximo]``, evaluates the
+    volume-to-height polynomial (``a0_volume_cota`` through
+    ``a4_volume_cota``), then evaluates the height-to-area polynomial
+    (``a0_cota_area`` through ``a4_cota_area``), and collects the results
+    into a PyArrow Table.
+
+    Plants where ``volume_minimo == volume_maximo`` (run-of-river with no
+    reservoir) are skipped.  Plants whose volume_cota polynomial coefficients
+    are all zero are logged as a warning and skipped.  Negative height or area
+    values produced by the polynomials are clamped to 0.0.
+
+    Parameters
+    ----------
+    cadastro:
+        The ``Hidr.cadastro`` DataFrame (indexed by ``codigo_usina``) with
+        permanent MODIF.DAT overrides already applied.
+    id_map:
+        Pre-built ID mapping; ``id_map.all_hydro_codes`` determines which
+        plants are processed.
+
+    Returns
+    -------
+    pa.Table
+        Schema: ``(hydro_id: INT32, volume_hm3: DOUBLE, height_m: DOUBLE,
+        area_km2: DOUBLE)``.  One row per sampled volume point across all
+        eligible plants, ordered by plant then by volume.
+    """
+    _N_POINTS = 100
+
+    hydro_ids: list[int] = []
+    volumes: list[float] = []
+    heights: list[float] = []
+    areas: list[float] = []
+
+    for newave_code in id_map.all_hydro_codes:
+        if newave_code not in cadastro.index:
+            _LOG.warning(
+                "Plant code %d in id_map is not present in cadastro; skipping.",
+                newave_code,
+            )
+            continue
+
+        hreg = cadastro.loc[newave_code]
+        vol_min = float(hreg["volume_minimo"])
+        vol_max = float(hreg["volume_maximo"])
+
+        if vol_min == vol_max:
+            # Run-of-river: no reservoir geometry to generate.
+            continue
+
+        # Polynomial coefficients for volume -> height (hm3 -> m).
+        vc_coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+        if all(c == 0.0 for c in vc_coeffs):
+            _LOG.warning(
+                "All a0..a4_volume_cota coefficients are zero for plant %d;"
+                " skipping geometry generation.",
+                newave_code,
+            )
+            continue
+
+        # Polynomial coefficients for height -> area (m -> km2).
+        ca_coeffs = [float(hreg[f"a{i}_cota_area"]) for i in range(5)]
+
+        def _eval_poly(coeffs: list[float], x: np.ndarray) -> np.ndarray:
+            """Evaluate a 4th-degree polynomial: c0 + c1*x + ... + c4*x^4."""
+            return (
+                coeffs[0]
+                + coeffs[1] * x
+                + coeffs[2] * x**2
+                + coeffs[3] * x**3
+                + coeffs[4] * x**4
+            )
+
+        vol_grid: np.ndarray = np.linspace(vol_min, vol_max, _N_POINTS)
+        height_arr: np.ndarray = _eval_poly(vc_coeffs, vol_grid)
+        height_arr = np.maximum(height_arr, 0.0)
+
+        area_arr: np.ndarray = _eval_poly(ca_coeffs, height_arr)
+        area_arr = np.maximum(area_arr, 0.0)
+
+        cobre_id = id_map.hydro_id(newave_code)
+        hydro_ids.extend([cobre_id] * _N_POINTS)
+        volumes.extend(vol_grid.tolist())
+        heights.extend(height_arr.tolist())
+        areas.extend(area_arr.tolist())
+
+    schema = pa.schema(
+        [
+            pa.field("hydro_id", pa.int32()),
+            pa.field("volume_hm3", pa.float64()),
+            pa.field("height_m", pa.float64()),
+            pa.field("area_km2", pa.float64()),
+        ]
+    )
+
+    return pa.table(
+        {
+            "hydro_id": pa.array(hydro_ids, type=pa.int32()),
+            "volume_hm3": pa.array(volumes, type=pa.float64()),
+            "height_m": pa.array(heights, type=pa.float64()),
+            "area_km2": pa.array(areas, type=pa.float64()),
+        },
+        schema=schema,
+    )
 
 
 def _is_na(value: object) -> bool:

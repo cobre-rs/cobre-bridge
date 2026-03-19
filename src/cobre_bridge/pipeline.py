@@ -11,6 +11,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from cobre_bridge.converters import hydro as hydro_conv
@@ -67,10 +68,20 @@ def _build_id_map(src: Path) -> NewaveIdMap:
     sistema = Sistema.read(str(src / "sistema.dat"))
     ree_file = Ree.read(str(src / "ree.dat"))
 
-    # Hydro codes from confhd — existing plants only.
+    # Hydro codes from confhd — existing, non-fictitious plants only.
     confhd_df = confhd.usinas
     existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    hydro_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
+    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+    fict_names = existing.loc[
+        existing["nome_usina"].str.strip().str.startswith("FICT."), "nome_usina"
+    ].tolist()
+    if fict_names:
+        logger.warning(
+            "Excluding %d fictitious plant(s) from id_map: %s",
+            len(fict_names),
+            fict_names,
+        )
+    hydro_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
 
     # Thermal codes from conft.
     conft_df = conft.usinas
@@ -97,6 +108,38 @@ def _build_id_map(src: Path) -> NewaveIdMap:
         subsystem_ids=subsystem_ids,
         hydro_codes=hydro_codes,
         thermal_codes=thermal_codes,
+    )
+
+
+def _convert_past_inflows_if_present(
+    src: Path,
+    id_map: NewaveIdMap,
+    stages_dict: dict,  # noqa: ARG001 — accepted for API consistency
+) -> pa.Table | None:
+    """Call convert_past_inflows when Dger.num_anos_pre_estudo > 0.
+
+    Extracts the study start date and pre-study month count from ``dger.dat``
+    and delegates to ``stochastic_conv.convert_past_inflows``.  Returns
+    ``None`` when the pre-study period is zero or ``vazpast.dat`` is absent.
+    """
+    from datetime import date as _date
+
+    from inewave.newave import Dger as _Dger
+
+    dger_path = src / "dger.dat"
+    if not dger_path.exists():
+        return None
+
+    dger = _Dger.read(dger_path)
+    num_anos_pre = dger.num_anos_pre_estudo or 0
+    if num_anos_pre == 0:
+        return None
+
+    num_pre_months = num_anos_pre * 12
+    study_start = _date(dger.ano_inicio_estudo, dger.mes_inicio_estudo, 1)
+
+    return stochastic_conv.convert_past_inflows(
+        src, id_map, study_start, num_pre_months
     )
 
 
@@ -146,6 +189,10 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     logger.debug("Converting hydros")
     hydros_dict = hydro_conv.convert_hydros(src, id_map)
 
+    logger.debug("Generating hydro geometry")
+    cadastro = hydro_conv.read_cadastro(src)
+    geometry_table = hydro_conv.generate_hydro_geometry(cadastro, id_map)
+
     logger.debug("Converting thermals")
     thermals_dict = thermal_conv.convert_thermals(src, id_map)
 
@@ -173,6 +220,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     logger.debug("Converting load stats")
     load_table = stochastic_conv.convert_load_stats(src, id_map)
 
+    logger.debug("Converting past inflows")
+    past_inflow_table = _convert_past_inflows_if_present(src, id_map, stages_dict)
+
     # ------------------------------------------------------------------
     # 4. Create the output directory structure.
     # ------------------------------------------------------------------
@@ -199,6 +249,10 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     # ------------------------------------------------------------------
     # 6. Write Parquet files.
     # ------------------------------------------------------------------
+    geometry_path = dst / "system" / "hydro_geometry.parquet"
+    pq.write_table(geometry_table, geometry_path)
+    logger.debug("Wrote %s", geometry_path)
+
     inflow_path = dst / "scenarios" / "inflow_seasonal_stats.parquet"
     pq.write_table(inflow_table, inflow_path)
     logger.debug("Wrote %s", inflow_path)
@@ -206,6 +260,11 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     load_path = dst / "scenarios" / "load_seasonal_stats.parquet"
     pq.write_table(load_table, load_path)
     logger.debug("Wrote %s", load_path)
+
+    if past_inflow_table is not None:
+        history_path = dst / "scenarios" / "inflow_history.parquet"
+        pq.write_table(past_inflow_table, history_path)
+        logger.debug("Wrote %s", history_path)
 
     # ------------------------------------------------------------------
     # 7. Populate the report.

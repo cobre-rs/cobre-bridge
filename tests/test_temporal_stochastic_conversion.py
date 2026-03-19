@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import calendar
 import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -869,3 +870,310 @@ class TestConvertLoadStats:
         bus0_means = [m for bid, m in zip(df["bus_id"], df["mean_mw"]) if bid == 0]
         assert bus0_means[0] == pytest.approx(3000.0)
         assert bus0_means[1] == pytest.approx(2800.0)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for convert_past_inflows tests
+# ---------------------------------------------------------------------------
+
+
+def _make_vazpast_mock(
+    postos: list[int],
+    num_months: int = 12,
+    end_year: int = 2019,
+    end_month: int = 12,
+) -> MagicMock:
+    """Build a synthetic Vazpast mock with *num_months* of monthly data.
+
+    The DataFrame has a ``data`` column (datetime) and one column per
+    gauging station (posto), each containing random inflow values.
+    """
+    rows = []
+    rng = np.random.default_rng(99)
+    py, pm = end_year, end_month
+    # Build dates backwards then reverse so they are chronological.
+    dates_rev = []
+    for _ in range(num_months):
+        dates_rev.append(datetime.datetime(py, pm, 1))
+        pm -= 1
+        if pm < 1:
+            pm = 12
+            py -= 1
+    dates_rev.reverse()
+    for dt in dates_rev:
+        row: dict = {"data": dt}
+        for posto in postos:
+            row[posto] = float(rng.uniform(50.0, 500.0))
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    mock = MagicMock()
+    mock.vazoes = df
+    return mock
+
+
+def _make_confhd_posto_mock(posto_to_code: dict[int, int]) -> MagicMock:
+    """Build a Confhd mock mapping postos to hydro codes.
+
+    Uses ``posto`` and ``codigo_usina`` column names matching the real
+    confhd.dat layout.
+    """
+    rows = [{"posto": p, "codigo_usina": c} for p, c in posto_to_code.items()]
+    df = pd.DataFrame(rows)
+    mock = MagicMock()
+    mock.usinas = df
+    return mock
+
+
+# ---------------------------------------------------------------------------
+# Tests: convert_past_inflows
+# ---------------------------------------------------------------------------
+
+
+class TestConvertPastInflowsNoFile:
+    def test_returns_none_when_vazpast_absent(self, tmp_path: Path) -> None:
+        """No vazpast.dat -> return None without error."""
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        result = convert_past_inflows(
+            tmp_path,
+            id_map,
+            study_start=datetime.date(2020, 1, 1),
+            num_pre_study_months=12,
+        )
+        assert result is None
+
+    def test_returns_none_does_not_raise(self, tmp_path: Path) -> None:
+        """Verify no exception is raised when vazpast.dat is absent."""
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        # Should not raise even with zero hydro codes registered.
+        result = convert_past_inflows(
+            tmp_path,
+            id_map,
+            study_start=datetime.date(2020, 1, 1),
+            num_pre_study_months=12,
+        )
+        assert result is None
+
+
+class TestConvertPastInflowsWithFile:
+    @patch("cobre_bridge.converters.stochastic.Confhd")
+    def test_row_count_three_hydros_twelve_months(
+        self, mock_confhd_cls, tmp_path: Path
+    ) -> None:
+        """3 postos x 12 months = 36 rows."""
+        from unittest.mock import patch as _patch
+
+        (tmp_path / "vazpast.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+
+        postos = [10, 20, 30]
+        # posto -> hydro code -> id_map hydro IDs 0,1,2
+        mock_confhd_cls.read.return_value = _make_confhd_posto_mock(
+            {10: 1, 20: 2, 30: 3}
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2, 3], thermal_codes=[])
+
+        vazpast_mock = _make_vazpast_mock(postos=postos, num_months=12)
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        # Patch Vazpast inside the function's local import.
+        with _patch("inewave.newave.Vazpast", create=True) as mock_vazpast_cls:
+            mock_vazpast_cls.read.return_value = vazpast_mock
+
+            result = convert_past_inflows(
+                tmp_path,
+                id_map,
+                study_start=datetime.date(2020, 1, 1),
+                num_pre_study_months=12,
+            )
+
+        assert result is not None
+        assert result.num_rows == 36
+
+    @patch("cobre_bridge.converters.stochastic.Confhd")
+    def test_schema_columns(self, mock_confhd_cls, tmp_path: Path) -> None:
+        """Output table has exactly columns hydro_id, date, value_m3s."""
+        from unittest.mock import patch as _patch
+
+        (tmp_path / "vazpast.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+
+        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1})
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
+        vazpast_mock = _make_vazpast_mock(postos=[1], num_months=12)
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        with _patch("inewave.newave.Vazpast", create=True) as mock_vazpast_cls:
+            mock_vazpast_cls.read.return_value = vazpast_mock
+            result = convert_past_inflows(
+                tmp_path,
+                id_map,
+                study_start=datetime.date(2020, 1, 1),
+                num_pre_study_months=12,
+            )
+
+        assert result is not None
+        assert result.column_names == ["hydro_id", "date", "value_m3s"]
+
+    @patch("cobre_bridge.converters.stochastic.Confhd")
+    def test_column_types(self, mock_confhd_cls, tmp_path: Path) -> None:
+        """hydro_id=int32, date=date32, value_m3s=float64."""
+        from unittest.mock import patch as _patch
+
+        (tmp_path / "vazpast.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+
+        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1})
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
+        vazpast_mock = _make_vazpast_mock(postos=[1], num_months=12)
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        with _patch("inewave.newave.Vazpast", create=True) as mock_vazpast_cls:
+            mock_vazpast_cls.read.return_value = vazpast_mock
+            result = convert_past_inflows(
+                tmp_path,
+                id_map,
+                study_start=datetime.date(2020, 1, 1),
+                num_pre_study_months=12,
+            )
+
+        assert result is not None
+        assert result.schema.field("hydro_id").type == pa.int32()
+        assert result.schema.field("date").type == pa.date32()
+        assert result.schema.field("value_m3s").type == pa.float64()
+
+    @patch("cobre_bridge.converters.stochastic.Confhd")
+    def test_hydro_ids_correct(self, mock_confhd_cls, tmp_path: Path) -> None:
+        """hydro_id values must come from id_map, not raw hydro codes."""
+        from unittest.mock import patch as _patch
+
+        (tmp_path / "vazpast.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+
+        # postos 10,20,30 map to hydro codes 1,2,3 -> cobre IDs 0,1,2
+        mock_confhd_cls.read.return_value = _make_confhd_posto_mock(
+            {10: 1, 20: 2, 30: 3}
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2, 3], thermal_codes=[])
+        vazpast_mock = _make_vazpast_mock(postos=[10, 20, 30], num_months=12)
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        with _patch("inewave.newave.Vazpast", create=True) as mock_vazpast_cls:
+            mock_vazpast_cls.read.return_value = vazpast_mock
+            result = convert_past_inflows(
+                tmp_path,
+                id_map,
+                study_start=datetime.date(2020, 1, 1),
+                num_pre_study_months=12,
+            )
+
+        assert result is not None
+        hydro_ids = set(result.column("hydro_id").to_pylist())
+        assert hydro_ids == {0, 1, 2}
+
+    @patch("cobre_bridge.converters.stochastic.Confhd")
+    def test_dates_are_chronological_before_study_start(
+        self, mock_confhd_cls, tmp_path: Path
+    ) -> None:
+        """All dates must be before study_start and in chronological order."""
+        from unittest.mock import patch as _patch
+
+        (tmp_path / "vazpast.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+
+        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1})
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
+        vazpast_mock = _make_vazpast_mock(postos=[1], num_months=12)
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        study_start = datetime.date(2020, 1, 1)
+        with _patch("inewave.newave.Vazpast", create=True) as mock_vazpast_cls:
+            mock_vazpast_cls.read.return_value = vazpast_mock
+            result = convert_past_inflows(
+                tmp_path,
+                id_map,
+                study_start=study_start,
+                num_pre_study_months=12,
+            )
+
+        assert result is not None
+        dates = result.column("date").to_pylist()
+        # All dates must be strictly before study_start.
+        for d in dates:
+            assert d < study_start, f"Date {d} is not before study start {study_start}"
+        # Dates for a single hydro must be in ascending order.
+        hydro_dates = [
+            d
+            for hid, d in zip(result.column("hydro_id").to_pylist(), dates)
+            if hid == 0
+        ]
+        assert hydro_dates == sorted(hydro_dates)
+
+    @patch("cobre_bridge.converters.stochastic.Confhd")
+    def test_unknown_posto_skipped_with_warning(
+        self, mock_confhd_cls, tmp_path: Path
+    ) -> None:
+        """A posto in vazpast.dat with no confhd entry is silently skipped."""
+        from unittest.mock import patch as _patch
+
+        (tmp_path / "vazpast.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+
+        # confhd only knows posto 1; vazpast also has posto 99.
+        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1})
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
+        vazpast_mock = _make_vazpast_mock(postos=[1, 99], num_months=12)
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        with _patch("inewave.newave.Vazpast", create=True) as mock_vazpast_cls:
+            mock_vazpast_cls.read.return_value = vazpast_mock
+            result = convert_past_inflows(
+                tmp_path,
+                id_map,
+                study_start=datetime.date(2020, 1, 1),
+                num_pre_study_months=12,
+            )
+
+        assert result is not None
+        # Only posto 1 (hydro_id 0) should appear.
+        hydro_ids = set(result.column("hydro_id").to_pylist())
+        assert hydro_ids == {0}
+        assert result.num_rows == 12
+
+    @patch("cobre_bridge.converters.stochastic.Confhd")
+    def test_parse_failure_raises_file_not_found(
+        self, mock_confhd_cls, tmp_path: Path
+    ) -> None:
+        """If Vazpast.read() raises, FileNotFoundError is propagated."""
+        from unittest.mock import patch as _patch
+
+        (tmp_path / "vazpast.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+
+        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1})
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
+
+        from cobre_bridge.converters.stochastic import convert_past_inflows
+
+        with _patch("inewave.newave.Vazpast", create=True) as mock_vazpast_cls:
+            mock_vazpast_cls.read.side_effect = RuntimeError("bad file")
+            with pytest.raises(
+                FileNotFoundError, match="vazpast.dat could not be parsed"
+            ):
+                convert_past_inflows(
+                    tmp_path,
+                    id_map,
+                    study_start=datetime.date(2020, 1, 1),
+                    num_pre_study_months=12,
+                )

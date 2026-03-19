@@ -1955,3 +1955,663 @@ class TestCrossReferenceConsistency:
                 assert ds in valid_hydro_ids, (
                     f"Hydro '{h['name']}' has downstream_id={ds} not in hydros"
                 )
+
+
+# ---------------------------------------------------------------------------
+# _build_id_map fictitious plant filtering  (ticket-009)
+# ---------------------------------------------------------------------------
+
+
+def _make_confhd_df_with_fict() -> pd.DataFrame:
+    """Four plants: two real, two fictitious (names start with 'FICT.')."""
+    return pd.DataFrame(
+        {
+            "codigo_usina": [1, 2, 3, 4],
+            "nome_usina": ["USINA_A", "FICT.SERRA M", "USINA_B", "FICT.CAMPO G"],
+            "posto": [1, 2, 3, 4],
+            "codigo_usina_jusante": [pd.NA, pd.NA, 1, 2],
+            "ree": [1, 1, 1, 1],
+            "volume_inicial_percentual": [50.0, 60.0, 70.0, 80.0],
+            "usina_existente": ["EX", "EX", "EX", "EX"],
+            "usina_modificada": [0, 0, 0, 0],
+        }
+    )
+
+
+class TestBuildIdMap:
+    """Unit tests for ``pipeline._build_id_map`` fictitious-plant filtering."""
+
+    @patch("inewave.newave.Ree")
+    @patch("inewave.newave.Conft")
+    @patch("inewave.newave.Sistema")
+    @patch("inewave.newave.Confhd")
+    def test_excludes_fictitious_plants(
+        self,
+        mock_confhd_cls,
+        mock_sistema_cls,
+        mock_conft_cls,
+        mock_ree_cls,
+        tmp_path,
+    ) -> None:
+        """FICT. plants must be absent from id_map.all_hydro_codes."""
+        for fname in ("confhd.dat", "conft.dat", "sistema.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df_with_fict()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_conft = MagicMock()
+        mock_conft.usinas = pd.DataFrame({"codigo_usina": []})
+        mock_conft_cls.read.return_value = mock_conft
+
+        mock_sistema = MagicMock()
+        mock_sistema.custo_deficit = None
+        mock_sistema_cls.read.return_value = mock_sistema
+
+        mock_ree = MagicMock()
+        mock_ree.rees = None
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.pipeline import _build_id_map
+
+        id_map = _build_id_map(tmp_path)
+
+        # Only the two non-fictitious plants must appear.
+        assert 1 in id_map.all_hydro_codes
+        assert 3 in id_map.all_hydro_codes
+        assert 2 not in id_map.all_hydro_codes, "FICT.SERRA M must be excluded"
+        assert 4 not in id_map.all_hydro_codes, "FICT.CAMPO G must be excluded"
+        assert len(id_map.all_hydro_codes) == 2
+
+    @patch("inewave.newave.Ree")
+    @patch("inewave.newave.Conft")
+    @patch("inewave.newave.Sistema")
+    @patch("inewave.newave.Confhd")
+    def test_count_excludes_fict_plants(
+        self,
+        mock_confhd_cls,
+        mock_sistema_cls,
+        mock_conft_cls,
+        mock_ree_cls,
+        tmp_path,
+    ) -> None:
+        """15 FICT plants among 160 existing -> 145 hydro codes in id_map."""
+        for fname in ("confhd.dat", "conft.dat", "sistema.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        n_real, n_fict = 145, 15
+        rows = []
+        for i in range(1, n_real + n_fict + 1):
+            name = f"FICT.PLANT_{i}" if i > n_real else f"PLANT_{i}"
+            rows.append(
+                {
+                    "codigo_usina": i,
+                    "nome_usina": name,
+                    "posto": i,
+                    "codigo_usina_jusante": pd.NA,
+                    "ree": 1,
+                    "volume_inicial_percentual": 50.0,
+                    "usina_existente": "EX",
+                }
+            )
+        confhd_df = pd.DataFrame(rows)
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_conft = MagicMock()
+        mock_conft.usinas = pd.DataFrame({"codigo_usina": []})
+        mock_conft_cls.read.return_value = mock_conft
+
+        mock_sistema = MagicMock()
+        mock_sistema.custo_deficit = None
+        mock_sistema_cls.read.return_value = mock_sistema
+
+        mock_ree = MagicMock()
+        mock_ree.rees = None
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.pipeline import _build_id_map
+
+        id_map = _build_id_map(tmp_path)
+        assert len(id_map.all_hydro_codes) == n_real
+
+    @patch("inewave.newave.Ree")
+    @patch("inewave.newave.Conft")
+    @patch("inewave.newave.Sistema")
+    @patch("inewave.newave.Confhd")
+    def test_no_fictitious_plants_proceeds_normally(
+        self,
+        mock_confhd_cls,
+        mock_sistema_cls,
+        mock_conft_cls,
+        mock_ree_cls,
+        tmp_path,
+    ) -> None:
+        """When no FICT. plants exist, all existing plants are included."""
+        for fname in ("confhd.dat", "conft.dat", "sistema.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()  # standard two-plant fixture, no FICT.
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_conft = MagicMock()
+        mock_conft.usinas = pd.DataFrame({"codigo_usina": []})
+        mock_conft_cls.read.return_value = mock_conft
+
+        mock_sistema = MagicMock()
+        mock_sistema.custo_deficit = None
+        mock_sistema_cls.read.return_value = mock_sistema
+
+        mock_ree = MagicMock()
+        mock_ree.rees = None
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.pipeline import _build_id_map
+
+        id_map = _build_id_map(tmp_path)
+
+        assert 1 in id_map.all_hydro_codes
+        assert 2 in id_map.all_hydro_codes
+
+
+class TestConvertHydrosDownstreamFict:
+    """Downstream reference to a fictitious plant must produce downstream_id=None."""
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_downstream_to_fict_is_none(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """Plant with a fictitious downstream gets downstream_id=None.
+
+        USINA_A (code=1) has codigo_usina_jusante=2, which is FICT.SERRA M.
+        Because FICT.SERRA M is absent from id_map, the KeyError catch in
+        hydro.py must produce downstream_id=None for USINA_A.
+        """
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        # Build a confhd DataFrame where plant 1 points downstream to a
+        # fictitious plant (code=2) that is NOT present in the id_map.
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [1],
+                "nome_usina": ["USINA_A"],
+                "posto": [1],
+                "codigo_usina_jusante": [2],  # points to the absent fict. plant
+                "ree": [1],
+                "volume_inicial_percentual": [50.0],
+                "usina_existente": ["EX"],
+                "usina_modificada": [0],
+            }
+        )
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        # Hidr.cadastro for plant 1 only.
+        cadastro = _make_hidr_cadastro().iloc[:1].copy()
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_ree = MagicMock()
+        mock_ree.rees = _make_ree_df()
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        # id_map has only plant 1; plant 2 (fictitious) is absent.
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+        result = convert_hydros(tmp_path, id_map)
+
+        assert len(result["hydros"]) == 1
+        assert result["hydros"][0]["downstream_id"] is None
+
+
+def _make_geometry_cadastro() -> pd.DataFrame:
+    """Synthetic Hidr.cadastro for generate_hydro_geometry tests.
+
+    Two plants using real inewave column names (a0_volume_cota, a0_cota_area):
+    - Plant 1: reservoir plant with vol_min=100, vol_max=1000
+      volume_cota: h(v) = 300 + 0.1*v  (a0=300, a1=0.1, rest zero)
+      cota_area:   A(h) = 0.5*h         (a0=0, a1=0.5, rest zero)
+    - Plant 2: run-of-river with vol_min == vol_max == 50
+    """
+    return pd.DataFrame(
+        {
+            "volume_minimo": [100.0, 50.0],
+            "volume_maximo": [1000.0, 50.0],
+            "a0_volume_cota": [300.0, 300.0],
+            "a1_volume_cota": [0.1, 0.1],
+            "a2_volume_cota": [0.0, 0.0],
+            "a3_volume_cota": [0.0, 0.0],
+            "a4_volume_cota": [0.0, 0.0],
+            "a0_cota_area": [0.0, 0.0],
+            "a1_cota_area": [0.5, 0.5],
+            "a2_cota_area": [0.0, 0.0],
+            "a3_cota_area": [0.0, 0.0],
+            "a4_cota_area": [0.0, 0.0],
+        },
+        index=pd.Index([1, 2], name="codigo_usina"),
+    )
+
+
+class TestGenerateHydroGeometry:
+    """Tests for hydro.generate_hydro_geometry."""
+
+    def test_produces_100_rows_per_plant(self) -> None:
+        """A reservoir plant yields exactly 100 rows in the output table."""
+        import pyarrow as pa
+
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro()
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+        table = generate_hydro_geometry(cadastro, id_map)
+
+        # Plant 2 is run-of-river (vol_min == vol_max) so only plant 1 contributes.
+        assert isinstance(table, pa.Table)
+        assert len(table) == 100
+
+        ids = table.column("hydro_id").to_pylist()
+        cobre_id_1 = id_map.hydro_id(1)
+        assert all(v == cobre_id_1 for v in ids)
+
+    def test_skips_run_of_river(self) -> None:
+        """Plant with vol_min == vol_max produces zero rows."""
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro()
+        # id_map containing only the run-of-river plant (code 2).
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[2], thermal_codes=[])
+        table = generate_hydro_geometry(cadastro, id_map)
+
+        assert len(table) == 0
+
+    def test_correct_schema(self) -> None:
+        """Output table has the required schema with correct column types."""
+        import pyarrow as pa
+
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro()
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+        table = generate_hydro_geometry(cadastro, id_map)
+
+        assert table.schema.field("hydro_id").type == pa.int32()
+        assert table.schema.field("volume_hm3").type == pa.float64()
+        assert table.schema.field("height_m").type == pa.float64()
+        assert table.schema.field("area_km2").type == pa.float64()
+
+    def test_correct_schema_roundtrip_parquet(self, tmp_path) -> None:
+        """Schema is preserved when written and read back as Parquet."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro()
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+        table = generate_hydro_geometry(cadastro, id_map)
+
+        out = tmp_path / "hydro_geometry.parquet"
+        pq.write_table(table, out)
+        reloaded = pq.read_table(out)
+
+        assert reloaded.schema.field("hydro_id").type == pa.int32()
+        assert reloaded.schema.field("volume_hm3").type == pa.float64()
+        assert reloaded.schema.field("height_m").type == pa.float64()
+        assert reloaded.schema.field("area_km2").type == pa.float64()
+        assert len(reloaded) == 100
+
+    def test_volumes_are_uniformly_spaced(self) -> None:
+        """The 100 volume points are uniformly distributed on [vol_min, vol_max]."""
+        import numpy as np
+
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro()
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+        table = generate_hydro_geometry(cadastro, id_map)
+
+        vols = table.column("volume_hm3").to_pylist()
+        expected = np.linspace(100.0, 1000.0, 100).tolist()
+        assert vols == pytest.approx(expected, rel=1e-9)
+
+    def test_polynomial_evaluation_correctness(self) -> None:
+        """Heights and areas match the expected polynomial values."""
+        import numpy as np
+
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro()
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+        table = generate_hydro_geometry(cadastro, id_map)
+
+        vols = np.array(table.column("volume_hm3").to_pylist())
+        heights = np.array(table.column("height_m").to_pylist())
+        areas = np.array(table.column("area_km2").to_pylist())
+
+        # h(v) = 300 + 0.1*v
+        expected_heights = 300.0 + 0.1 * vols
+        np.testing.assert_allclose(heights, expected_heights, rtol=1e-9)
+
+        # A(h) = 0.5 * h
+        expected_areas = 0.5 * expected_heights
+        np.testing.assert_allclose(areas, expected_areas, rtol=1e-9)
+
+    def test_skips_all_zero_volume_cota(self) -> None:
+        """Plant with all-zero volume_cota coefficients is skipped (no rows emitted)."""
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        # Build a cadastro with all-zero volume_cota for plant 1.
+        cadastro = _make_geometry_cadastro().copy()
+        for i in range(5):
+            cadastro.loc[1, f"a{i}_volume_cota"] = 0.0
+
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+        # Should not raise; plant is silently skipped after logging a warning.
+        table = generate_hydro_geometry(cadastro, id_map)
+        assert len(table) == 0
+
+    def test_negative_values_clamped_to_zero(self) -> None:
+        """Negative polynomial outputs are clamped to 0.0."""
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        # volume_cota: h(v) = -1000 + v  (negative at low volumes)
+        # cota_area:   A(h) = -1000 + h  (negative at low heights)
+        cadastro = _make_geometry_cadastro().copy()
+        cadastro.loc[1, "a0_volume_cota"] = -1000.0
+        cadastro.loc[1, "a1_volume_cota"] = 1.0
+        cadastro.loc[1, "a2_volume_cota"] = 0.0
+        cadastro.loc[1, "a3_volume_cota"] = 0.0
+        cadastro.loc[1, "a4_volume_cota"] = 0.0
+        cadastro.loc[1, "a0_cota_area"] = -1000.0
+        cadastro.loc[1, "a1_cota_area"] = 1.0
+        cadastro.loc[1, "a2_cota_area"] = 0.0
+        cadastro.loc[1, "a3_cota_area"] = 0.0
+        cadastro.loc[1, "a4_cota_area"] = 0.0
+
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+        table = generate_hydro_geometry(cadastro, id_map)
+
+        heights = table.column("height_m").to_pylist()
+        areas = table.column("area_km2").to_pylist()
+        assert all(h >= 0.0 for h in heights), "Heights must be >= 0"
+        assert all(a >= 0.0 for a in areas), "Areas must be >= 0"
+
+
+# ---------------------------------------------------------------------------
+# _read_penalid unit tests  (ticket-007)
+# ---------------------------------------------------------------------------
+
+
+def _make_penalid_df() -> pd.DataFrame:
+    """Synthetic PENALID.DAT penalties for two REEs and several variables.
+
+    REE 1 has DESVIO=8300.0, VAZMIN=3179.35, GHMIN=4500.0 at patamar 1.
+    REE 2 has DESVIO=9100.0, VAZMIN=2800.0 at patamar 1.
+    Both REEs have patamar 2 rows with NaN values (unbounded tier).
+    TURBMX is included to verify the "no mapping" skip path.
+    """
+    import math
+
+    return pd.DataFrame(
+        {
+            "variavel": [
+                "DESVIO",
+                "DESVIO",
+                "VAZMIN",
+                "VAZMIN",
+                "GHMIN",
+                "GHMIN",
+                "TURBMX",
+                "TURBMX",
+                "DESVIO",
+                "DESVIO",
+                "VAZMIN",
+                "VAZMIN",
+            ],
+            "codigo_ree_submercado": [1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2],
+            "patamar_penalidade": [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2],
+            "patamar_carga": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            "valor_R$_MWh": [
+                8300.0,
+                math.nan,
+                3179.35,
+                math.nan,
+                4500.0,
+                math.nan,
+                999.0,  # TURBMX — should be skipped (no mapping)
+                math.nan,
+                9100.0,
+                math.nan,
+                2800.0,
+                math.nan,
+            ],
+            "valor_R$_hm3": [0.0] * 12,
+        }
+    )
+
+
+class TestReadPenalid:
+    """Unit tests for ``_read_penalid``."""
+
+    def test_reads_penalties_by_ree(self, tmp_path) -> None:
+        """Correct Cobre field names and values are returned per REE."""
+        from cobre_bridge.converters.hydro import _read_penalid
+
+        (tmp_path / "penalid.dat").touch()
+
+        mock_penalid = MagicMock()
+        mock_penalid.penalidades = _make_penalid_df()
+
+        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
+            mock_cls.read.return_value = mock_penalid
+            result = _read_penalid(tmp_path)
+
+        # REE 1 checks.
+        assert 1 in result
+        assert result[1]["spillage_cost"] == pytest.approx(8300.0)
+        assert result[1]["outflow_violation_below_cost"] == pytest.approx(3179.35)
+        assert result[1]["generation_violation_below_cost"] == pytest.approx(4500.0)
+        # TURBMX must not appear (no Cobre mapping).
+        assert "turbined_violation_below_cost" not in result[1]
+
+        # REE 2 checks.
+        assert 2 in result
+        assert result[2]["spillage_cost"] == pytest.approx(9100.0)
+        assert result[2]["outflow_violation_below_cost"] == pytest.approx(2800.0)
+
+    def test_missing_file_returns_empty(self, tmp_path) -> None:
+        """Absent PENALID.DAT returns an empty dict without raising."""
+        from cobre_bridge.converters.hydro import _read_penalid
+
+        # No penalid.dat file created in tmp_path.
+        result = _read_penalid(tmp_path)
+
+        assert result == {}
+
+    def test_nan_values_are_skipped(self, tmp_path) -> None:
+        """NaN cost values at patamar 1 do not appear in the output dict."""
+        import math
+
+        from cobre_bridge.converters.hydro import _read_penalid
+
+        (tmp_path / "penalid.dat").touch()
+
+        df = pd.DataFrame(
+            {
+                "variavel": ["DESVIO", "VAZMIN"],
+                "codigo_ree_submercado": [1, 1],
+                "patamar_penalidade": [1, 1],
+                "patamar_carga": [1, 1],
+                "valor_R$_MWh": [math.nan, 5000.0],
+                "valor_R$_hm3": [0.0, 0.0],
+            }
+        )
+
+        mock_penalid = MagicMock()
+        mock_penalid.penalidades = df
+
+        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
+            mock_cls.read.return_value = mock_penalid
+            result = _read_penalid(tmp_path)
+
+        assert 1 in result
+        # DESVIO had NaN — must be absent.
+        assert "spillage_cost" not in result[1]
+        # VAZMIN had 5000.0 — must be present.
+        assert result[1]["outflow_violation_below_cost"] == pytest.approx(5000.0)
+
+    def test_patamar2_rows_ignored(self, tmp_path) -> None:
+        """Tier-2 patamar rows are excluded even when they have numeric values."""
+        from cobre_bridge.converters.hydro import _read_penalid
+
+        (tmp_path / "penalid.dat").touch()
+
+        df = pd.DataFrame(
+            {
+                "variavel": ["DESVIO", "DESVIO"],
+                "codigo_ree_submercado": [1, 1],
+                "patamar_penalidade": [2, 2],  # only tier-2 rows — should be skipped
+                "patamar_carga": [1, 1],
+                "valor_R$_MWh": [8300.0, 8300.0],
+                "valor_R$_hm3": [0.0, 0.0],
+            }
+        )
+
+        mock_penalid = MagicMock()
+        mock_penalid.penalidades = df
+
+        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
+            mock_cls.read.return_value = mock_penalid
+            result = _read_penalid(tmp_path)
+
+        assert result == {}
+
+
+class TestConvertHydrosPenalid:
+    """Integration tests for PENALID.DAT -> hydro penalties in convert_hydros."""
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_penalties_from_penalid(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """Plants get penalties populated from PENALID.DAT via their REE code."""
+        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+        (tmp_path / "penalid.dat").touch()
+
+        mock_penalid = MagicMock()
+        mock_penalid.penalidades = _make_penalid_df()
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
+            mock_cls.read.return_value = mock_penalid
+            result = convert_hydros(tmp_path, id_map)
+
+        # Both plants are in REE 1 (see _make_confhd_df); all should share REE 1 penalties.
+        for hydro in result["hydros"]:
+            assert hydro["penalties"] is not None, (
+                f"Plant '{hydro['name']}' should have non-None penalties"
+            )
+            assert hydro["penalties"]["spillage_cost"] == pytest.approx(8300.0)
+            assert hydro["penalties"]["outflow_violation_below_cost"] == pytest.approx(
+                3179.35
+            )
+            assert hydro["penalties"][
+                "generation_violation_below_cost"
+            ] == pytest.approx(4500.0)
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_missing_penalid_leaves_penalties_none(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """When PENALID.DAT is absent, every hydro entry has penalties=None."""
+        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+        # Deliberately do NOT create penalid.dat.
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+        result = convert_hydros(tmp_path, id_map)
+
+        for hydro in result["hydros"]:
+            assert hydro["penalties"] is None, (
+                f"Plant '{hydro['name']}' should have penalties=None when PENALID.DAT is absent"
+            )
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_different_rees_get_different_penalties(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """Plants in different REEs receive penalty values for their own REE."""
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        # Two plants in different REEs: plant 1 in REE 1, plant 2 in REE 2.
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [1, 2],
+                "nome_usina": ["USINA_A", "USINA_B"],
+                "posto": [1, 2],
+                "codigo_usina_jusante": [pd.NA, pd.NA],
+                "ree": [1, 2],
+                "volume_inicial_percentual": [50.0, 75.0],
+                "usina_existente": ["EX", "EX"],
+                "usina_modificada": [0, 0],
+            }
+        )
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = _make_hidr_cadastro()
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        # REE table: REE 1 -> subsystem 1, REE 2 -> subsystem 1.
+        ree_df = pd.DataFrame(
+            {"codigo": [1, 2], "nome": ["SE", "S"], "submercado": [1, 1]}
+        )
+        mock_ree = MagicMock()
+        mock_ree.rees = ree_df
+        mock_ree_cls.read.return_value = mock_ree
+
+        (tmp_path / "penalid.dat").touch()
+        mock_penalid = MagicMock()
+        mock_penalid.penalidades = _make_penalid_df()
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
+            mock_cls.read.return_value = mock_penalid
+            result = convert_hydros(tmp_path, id_map)
+
+        hydros_by_name = {h["name"]: h for h in result["hydros"]}
+
+        # USINA_A is in REE 1.
+        pen_a = hydros_by_name["USINA_A"]["penalties"]
+        assert pen_a is not None
+        assert pen_a["spillage_cost"] == pytest.approx(8300.0)
+
+        # USINA_B is in REE 2.
+        pen_b = hydros_by_name["USINA_B"]["penalties"]
+        assert pen_b is not None
+        assert pen_b["spillage_cost"] == pytest.approx(9100.0)
+        assert pen_b["outflow_violation_below_cost"] == pytest.approx(2800.0)

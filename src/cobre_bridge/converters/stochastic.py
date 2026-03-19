@@ -1,13 +1,14 @@
 """Stochastic data converter: maps NEWAVE inflow and load data to Cobre Parquet.
 
-Converts ``vazoes.dat`` (historical inflow series) and ``sistema.dat``
-(load demand) into PyArrow Tables that are written as Parquet files in the
-``scenarios/`` directory of a Cobre case.
+Converts ``vazoes.dat`` (historical inflow series), ``vazpast.dat`` (recent
+past inflows), and ``sistema.dat`` (load demand) into PyArrow Tables that are
+written as Parquet files in the ``scenarios/`` directory of a Cobre case.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,169 @@ _LOAD_SCHEMA = pa.schema(
         pa.field("std_mw", pa.float64()),
     ]
 )
+
+# Parquet schema for past inflow history.
+_INFLOW_HISTORY_SCHEMA = pa.schema(
+    [
+        pa.field("hydro_id", pa.int32()),
+        pa.field("date", pa.date32()),
+        pa.field("value_m3s", pa.float64()),
+    ]
+)
+
+
+def convert_past_inflows(
+    newave_dir: Path,
+    id_map: NewaveIdMap,
+    study_start: date,
+    num_pre_study_months: int,
+) -> pa.Table | None:
+    """Convert NEWAVE recent past inflows to Cobre inflow history Parquet.
+
+    Reads ``vazpast.dat`` (recent past inflow observations) and extracts
+    the last *num_pre_study_months* months of inflow values per gauging
+    station, mapped to Cobre hydro IDs via ``confhd.dat``.  The result is
+    used by the Rust side to initialise PAR(p) autoregressive lag slots at
+    stage 0.
+
+    Parameters
+    ----------
+    newave_dir:
+        Path to the directory containing NEWAVE input files.
+    id_map:
+        Entity ID map produced during entity conversion.  Used to resolve
+        NEWAVE hydro codes to 0-based Cobre hydro IDs.
+    study_start:
+        First day of the study horizon (from ``Dger``).  Used to compute
+        the calendar dates for each past inflow row.
+    num_pre_study_months:
+        Number of past months to include.  Typically
+        ``Dger.num_anos_pre_estudo * 12``.
+
+    Returns
+    -------
+    pyarrow.Table or None
+        ``None`` if ``vazpast.dat`` does not exist in *newave_dir*.
+        Otherwise, a ``pyarrow.Table`` with columns
+        ``hydro_id`` (int32), ``date`` (date32), ``value_m3s`` (float64).
+        One row per (hydro, past-month) pair.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``vazpast.dat`` exists but cannot be parsed.
+    FileNotFoundError
+        If ``confhd.dat`` is absent.
+    """
+    from inewave.newave import (
+        Vazpast,
+    )  # local import to avoid hard dependency at module load
+
+    vazpast_path = newave_dir / "vazpast.dat"
+    confhd_path = newave_dir / "confhd.dat"
+
+    if not vazpast_path.exists():
+        logger.warning("vazpast.dat not found in %s; skipping past inflows", newave_dir)
+        return None
+
+    if not confhd_path.exists():
+        raise FileNotFoundError(f"confhd.dat not found in {newave_dir}")
+
+    try:
+        vazpast_obj = Vazpast.read(vazpast_path)
+    except Exception as exc:  # noqa: BLE001
+        raise FileNotFoundError("vazpast.dat could not be parsed") from exc
+
+    df_vazpast: pd.DataFrame | None = vazpast_obj.vazoes
+    if df_vazpast is None or df_vazpast.empty:
+        raise FileNotFoundError("vazpast.dat could not be parsed")
+
+    confhd_obj = Confhd.read(confhd_path)
+    df_confhd: pd.DataFrame = confhd_obj.usinas
+
+    # Build posto -> hydro_code mapping from confhd.
+    posto_to_hydro_code: dict[int, int] = {}
+    for _, row in df_confhd.iterrows():
+        code = int(row["codigo_usina"])
+        posto = int(row["posto"])
+        posto_to_hydro_code[posto] = code
+
+    # Compute the calendar dates for each past month, counting backwards from
+    # study_start.  Month -1 ends at study_start; month -N starts N months
+    # before study_start.
+    past_months: list[date] = []
+    py = study_start.year
+    pm = study_start.month
+    for _ in range(num_pre_study_months):
+        pm -= 1
+        if pm < 1:
+            pm = 12
+            py -= 1
+        past_months.append(date(py, pm, 1))
+    # past_months is in reverse order (most recent first); reverse to chronological.
+    past_months.reverse()
+
+    # The vazpast DataFrame has a ``data`` column (datetime, one row per month)
+    # and one column per gauging station (posto).  Extract the last
+    # num_pre_study_months rows sorted chronologically.
+    if "data" in df_vazpast.columns:
+        df_sorted = df_vazpast.sort_values("data").reset_index(drop=True)
+    else:
+        df_sorted = df_vazpast.reset_index(drop=True)
+
+    df_tail = df_sorted.tail(num_pre_study_months).reset_index(drop=True)
+
+    rows_hydro_id: list[int] = []
+    rows_date: list[date] = []
+    rows_value: list[float] = []
+
+    # Identify posto columns: all columns except ``data``.
+    posto_columns = [c for c in df_tail.columns if c != "data"]
+
+    for col in posto_columns:
+        try:
+            posto = int(col)
+        except (ValueError, TypeError):
+            logger.warning(
+                "Unexpected non-integer column '%s' in vazpast.dat; skipping",
+                col,
+            )
+            continue
+
+        hydro_code = posto_to_hydro_code.get(posto)
+        if hydro_code is None:
+            logger.warning(
+                "Gauging station (posto) %d in vazpast.dat has no matching hydro in "
+                "confhd.dat; skipping",
+                posto,
+            )
+            continue
+
+        try:
+            hydro_id = id_map.hydro_id(hydro_code)
+        except KeyError:
+            logger.warning(
+                "Hydro code %d (posto %d) is not registered in id_map; skipping",
+                hydro_code,
+                posto,
+            )
+            continue
+
+        for i, row in df_tail.iterrows():
+            row_date = past_months[i] if i < len(past_months) else None
+            if row_date is None:
+                continue
+            rows_hydro_id.append(hydro_id)
+            rows_date.append(row_date)
+            rows_value.append(float(row[col]))
+
+    return pa.table(
+        {
+            "hydro_id": pa.array(rows_hydro_id, type=pa.int32()),
+            "date": pa.array(rows_date, type=pa.date32()),
+            "value_m3s": pa.array(rows_value, type=pa.float64()),
+        }
+    )
 
 
 def convert_inflow_stats(newave_dir: Path, id_map: NewaveIdMap) -> pa.Table:

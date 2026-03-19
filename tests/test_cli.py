@@ -12,6 +12,7 @@ CLI integration tests use two strategies:
 
 from __future__ import annotations
 
+import datetime
 import json
 import subprocess
 import sys
@@ -164,6 +165,18 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
             "cobre_bridge.pipeline.stochastic_conv.convert_load_stats",
             return_value=_FAKE_LOAD_TABLE,
         ),
+        patch(
+            "cobre_bridge.pipeline._convert_past_inflows_if_present",
+            return_value=None,
+        ),
+        patch(
+            "cobre_bridge.pipeline.hydro_conv.read_cadastro",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "cobre_bridge.pipeline.hydro_conv.generate_hydro_geometry",
+            return_value=_FAKE_INFLOW_TABLE,  # reuse any small pa.Table
+        ),
     ]
 
 
@@ -202,6 +215,7 @@ class TestConvertNewaweCasePipeline:
             dst / "system" / "lines.json",
             dst / "scenarios" / "inflow_seasonal_stats.parquet",
             dst / "scenarios" / "load_seasonal_stats.parquet",
+            dst / "system" / "hydro_geometry.parquet",
         ]
         for f in expected:
             assert f.exists(), f"Expected output file not found: {f}"
@@ -386,3 +400,90 @@ class TestCliInProcess:
         assert "10 hydros" in stdout
         assert "5 thermals" in stdout
         assert "60 stages" in stdout
+
+
+# ---------------------------------------------------------------------------
+# Pipeline integration tests for inflow_history.parquet
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineInflowHistory:
+    """Tests verifying that convert_newave_case writes inflow_history.parquet."""
+
+    def test_inflow_history_written_when_past_inflows_present(
+        self, tmp_path: Path
+    ) -> None:
+        """When convert_past_inflows returns a table, the file must be written."""
+        import pyarrow.parquet as pq
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+
+        # Fake past inflow table matching the expected schema.
+        fake_history = pa.table(
+            {
+                "hydro_id": pa.array([0, 0, 1, 1], type=pa.int32()),
+                "date": pa.array(
+                    [
+                        datetime.date(2019, 11, 1),
+                        datetime.date(2019, 12, 1),
+                        datetime.date(2019, 11, 1),
+                        datetime.date(2019, 12, 1),
+                    ],
+                    type=pa.date32(),
+                ),
+                "value_m3s": pa.array([100.0, 110.0, 200.0, 210.0], type=pa.float64()),
+            }
+        )
+
+        fake_id_map = MagicMock()
+        patches = _all_converter_patches(fake_id_map)
+        # Replace the None return value from _convert_past_inflows_if_present
+        # with our fake history table.
+        patches[-1] = patch(
+            "cobre_bridge.pipeline._convert_past_inflows_if_present",
+            return_value=fake_history,
+        )
+
+        for p in patches:
+            p.__enter__()
+        try:
+            from cobre_bridge.pipeline import convert_newave_case
+
+            convert_newave_case(src, dst)
+        finally:
+            for p in patches:
+                p.__exit__(None, None, None)
+
+        history_path = dst / "scenarios" / "inflow_history.parquet"
+        assert history_path.exists(), "inflow_history.parquet was not written"
+
+        table = pq.read_table(history_path)
+        assert table.column_names == ["hydro_id", "date", "value_m3s"]
+        assert table.schema.field("hydro_id").type == pa.int32()
+        assert table.schema.field("date").type == pa.date32()
+        assert table.schema.field("value_m3s").type == pa.float64()
+        assert table.num_rows == 4
+
+    def test_inflow_history_not_written_when_no_vazpast(self, tmp_path: Path) -> None:
+        """When convert_past_inflows returns None, no file must be created."""
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+
+        # _all_converter_patches already patches _convert_past_inflows_if_present
+        # to return None — so no inflow_history.parquet should be written.
+        fake_id_map = MagicMock()
+        patches = _all_converter_patches(fake_id_map)
+
+        for p in patches:
+            p.__enter__()
+        try:
+            from cobre_bridge.pipeline import convert_newave_case
+
+            convert_newave_case(src, dst)
+        finally:
+            for p in patches:
+                p.__exit__(None, None, None)
+
+        history_path = dst / "scenarios" / "inflow_history.parquet"
+        assert not history_path.exists(), "inflow_history.parquet should not exist"
