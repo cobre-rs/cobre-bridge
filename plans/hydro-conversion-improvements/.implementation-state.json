@@ -1,0 +1,147 @@
+{
+  "plan": "hydro-conversion-improvements",
+  "last_updated": "2026-03-19T10:25:31Z",
+  "progressive": true,
+  "tickets": {
+    "ticket-001-implement-average-productivity.md": {
+      "status": "completed",
+      "detail_level": "detailed",
+      "scores": {
+        "readiness": 0.94,
+        "readiness_breakdown": {
+          "structure": 1.0,
+          "testability": 0.9,
+          "boundary": 0.85,
+          "dependency_clarity": 1.0,
+          "atomicity": 1.0
+        },
+        "quality": 1.0,
+        "quality_breakdown": {
+          "conformance": 1.0,
+          "scope_adherence": 1.0,
+          "lint_cleanliness": 1.0,
+          "type_safety": 1.0,
+          "test_delta": 1.0
+        }
+      },
+      "workflow_step": null,
+      "agent": "python-task-automation-developer"
+    },
+    "ticket-002-apply-teif-ip-derating.md": {
+      "status": "completed",
+      "detail_level": "detailed",
+      "scores": {
+        "readiness": 0.97,
+        "readiness_breakdown": {
+          "structure": 1.0,
+          "testability": 1.0,
+          "boundary": 0.85,
+          "dependency_clarity": 1.0,
+          "atomicity": 1.0
+        },
+        "quality": 1.0,
+        "quality_breakdown": {
+          "conformance": 1.0,
+          "scope_adherence": 1.0,
+          "lint_cleanliness": 1.0,
+          "type_safety": 1.0,
+          "test_delta": 1.0
+        }
+      },
+      "workflow_step": null,
+      "agent": "python-task-automation-developer"
+    },
+    "ticket-003-add-hydraulic-losses-field.md": {
+      "status": "completed",
+      "detail_level": "detailed",
+      "scores": {
+        "readiness": 0.97,
+        "readiness_breakdown": {
+          "structure": 1.0,
+          "testability": 1.0,
+          "boundary": 0.85,
+          "dependency_clarity": 1.0,
+          "atomicity": 1.0
+        },
+        "quality": 1.0,
+        "quality_breakdown": {
+          "conformance": 1.0,
+          "scope_adherence": 1.0,
+          "lint_cleanliness": 1.0,
+          "type_safety": 1.0,
+          "test_delta": 1.0
+        }
+      },
+      "workflow_step": null,
+      "agent": "python-task-automation-developer"
+    },
+    "ticket-004-modif-permanent-overrides.md": {
+      "status": "pending",
+      "detail_level": "detailed",
+      "scores": {
+        "readiness": 0.97,
+        "readiness_breakdown": {
+          "structure": 1.0,
+          "testability": 1.0,
+          "boundary": 0.85,
+          "dependency_clarity": 1.0,
+          "atomicity": 1.0
+        }
+      }
+    },
+    "ticket-005-modif-temporal-overrides.md": {
+      "status": "pending",
+      "detail_level": "detailed",
+      "scores": {
+        "readiness": 0.97,
+        "readiness_breakdown": {
+          "structure": 1.0,
+          "testability": 1.0,
+          "boundary": 0.85,
+          "dependency_clarity": 1.0,
+          "atomicity": 1.0
+        }
+      }
+    },
+    "ticket-006-parse-ghmin.md": {
+      "status": "pending",
+      "detail_level": "detailed",
+      "scores": {
+        "readiness": 0.97,
+        "readiness_breakdown": {
+          "structure": 1.0,
+          "testability": 1.0,
+          "boundary": 0.85,
+          "dependency_clarity": 1.0,
+          "atomicity": 1.0
+        }
+      }
+    },
+    "ticket-007-parse-penalid.md": {
+      "status": "pending",
+      "detail_level": "outline"
+    },
+    "ticket-008-generate-hydro-geometry.md": {
+      "status": "pending",
+      "detail_level": "outline"
+    },
+    "ticket-009-filter-fictitious-plants.md": {
+      "status": "pending",
+      "detail_level": "outline"
+    }
+  },
+  "epics": {
+    "epic-01-productivity-and-derating": {
+      "phase": "executing",
+      "learning_extracted": false
+    },
+    "epic-02-modif-and-ghmin": {
+      "phase": "executing",
+      "learning_extracted": false
+    },
+    "epic-03-penalties-geometry-filtering": {
+      "phase": "outline",
+      "learning_extracted": false
+    }
+  }
+}
