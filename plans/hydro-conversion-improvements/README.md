@@ -23,9 +23,9 @@ Python 3.12+, inewave, pyarrow, pandas
 | ticket-001 | Implement average productivity calculation  | epic-01 | completed | Detailed     | 0.94      | 1.00    | EXCELLENT |
 | ticket-002 | Apply TEIF/IP availability derating         | epic-01 | completed | Detailed     | 0.97      | 1.00    | EXCELLENT |
 | ticket-003 | Add hydraulic_losses field to hydro entries | epic-01 | completed | Detailed     | 0.97      | 1.00    | EXCELLENT |
-| ticket-004 | Apply MODIF.DAT permanent overrides         | epic-02 | pending   | Detailed     | 0.97      | --      | --        |
-| ticket-005 | Parse MODIF.DAT temporal overrides          | epic-02 | pending   | Detailed     | 0.97      | --      | --        |
-| ticket-006 | Parse GHMIN.DAT for minimum generation      | epic-02 | pending   | Detailed     | 0.97      | --      | --        |
+| ticket-004 | Apply MODIF.DAT permanent overrides         | epic-02 | completed | Detailed     | 0.97      | 0.97    | EXCELLENT |
+| ticket-005 | Parse MODIF.DAT temporal overrides          | epic-02 | completed | Detailed     | 0.97      | 1.00    | EXCELLENT |
+| ticket-006 | Parse GHMIN.DAT for minimum generation      | epic-02 | completed | Detailed     | 0.97      | 0.93    | EXCELLENT |
 | ticket-007 | Parse PENALID.DAT for penalties             | epic-03 | pending   | Outline      | --        | --      | --        |
 | ticket-008 | Generate hydro_geometry.parquet             | epic-03 | pending   | Outline      | --        | --      | --        |
 | ticket-009 | Filter fictitious plants                    | epic-03 | pending   | Outline      | --        | --      | --        |

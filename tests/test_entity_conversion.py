@@ -677,6 +677,554 @@ def _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path):
     mock_ree_cls.read.return_value = mock_ree
 
 
+# ---------------------------------------------------------------------------
+# _apply_permanent_overrides unit tests  (ticket-004)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyPermanentOverrides:
+    """Unit tests for ``_apply_permanent_overrides``."""
+
+    def _base_cadastro(self) -> pd.DataFrame:
+        return _make_hidr_cadastro()
+
+    def test_missing_modif_returns_unchanged(self, tmp_path) -> None:
+        """No MODIF.DAT -> cadastro returned unchanged."""
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        cadastro = self._base_cadastro()
+        result = _apply_permanent_overrides(cadastro, tmp_path)
+        pd.testing.assert_frame_equal(result, cadastro)
+
+    def test_volmax_override(self, tmp_path) -> None:
+        """VOLMAX record updates volume_maximo for the target plant."""
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        # Build MODIF mock: plant 1 gets VOLMAX=2000.
+        volmax_rec = MagicMock()
+        volmax_rec.__class__.__name__ = "VOLMAX"
+        type(volmax_rec).__name__ = "VOLMAX"
+        volmax_rec.volume = 2000.0
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [volmax_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+
+        assert float(result.loc[1, "volume_maximo"]) == pytest.approx(2000.0)
+        # Plant 2 must be unchanged.
+        assert float(result.loc[2, "volume_maximo"]) == pytest.approx(500.0)
+
+    def test_vazmin_override(self, tmp_path) -> None:
+        """VAZMIN record updates vazao_minima_historica for the target plant."""
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        vazmin_rec = MagicMock()
+        type(vazmin_rec).__name__ = "VAZMIN"
+        vazmin_rec.vazao = 75.5
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 2
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [vazmin_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+
+        assert float(result.loc[2, "vazao_minima_historica"]) == pytest.approx(75.5)
+        # Plant 1 must be unchanged (was 0).
+        assert float(result.loc[1, "vazao_minima_historica"]) == pytest.approx(0.0)
+
+    def test_numcnj_nummaq_override(self, tmp_path) -> None:
+        """NUMCNJ + NUMMAQ records update machine set counts."""
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        numcnj_rec = MagicMock()
+        type(numcnj_rec).__name__ = "NUMCNJ"
+        numcnj_rec.numero = 2
+
+        nummaq_rec = MagicMock()
+        type(nummaq_rec).__name__ = "NUMMAQ"
+        nummaq_rec.conjunto = 2
+        nummaq_rec.numero_maquinas = 3
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [numcnj_rec, nummaq_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+
+        assert int(result.loc[1, "numero_conjuntos_maquinas"]) == 2
+        assert int(result.loc[1, "maquinas_conjunto_2"]) == 3
+
+    def test_volcota_override_warns_and_skips(self, tmp_path, caplog) -> None:
+        """VOLCOTA records produce a warning and are skipped gracefully."""
+        import logging
+
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        volcota_rec = MagicMock()
+        type(volcota_rec).__name__ = "VOLCOTA"
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [volcota_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            with caplog.at_level(
+                logging.WARNING, logger="cobre_bridge.converters.hydro"
+            ):
+                result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+
+        # Values must be unchanged (dtype may differ due to float cast for safety).
+        pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
+        assert any("VOLCOTA" in msg for msg in caplog.messages)
+
+    def test_unknown_plant_code_skipped(self, tmp_path, caplog) -> None:
+        """Plant code not in cadastro: warning logged, no crash."""
+        import logging
+
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 999  # not in cadastro
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = []
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            with caplog.at_level(
+                logging.WARNING, logger="cobre_bridge.converters.hydro"
+            ):
+                result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+
+        pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
+        assert any("999" in msg for msg in caplog.messages)
+
+    def test_temporal_records_skipped_in_permanent_pass(self, tmp_path) -> None:
+        """Temporal override types are ignored in _apply_permanent_overrides."""
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        import datetime
+
+        vazmint_rec = MagicMock()
+        type(vazmint_rec).__name__ = "VAZMINT"
+        vazmint_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vazmint_rec.vazao = 999.0  # large value that should NOT be applied
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [vazmint_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+
+        # vazao_minima_historica must stay at the base value (0).
+        assert float(result.loc[1, "vazao_minima_historica"]) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# _extract_temporal_overrides unit tests  (ticket-005)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractTemporalOverrides:
+    """Unit tests for ``_extract_temporal_overrides``."""
+
+    def test_missing_modif_returns_empty(self, tmp_path) -> None:
+        """No MODIF.DAT -> empty dict returned, no error."""
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        result = _extract_temporal_overrides(tmp_path, [1, 2])
+        assert result == {}
+
+    def test_extracts_vazmint_records(self, tmp_path) -> None:
+        """VAZMINT record is extracted with correct month, year, value."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        vazmint_rec = MagicMock()
+        type(vazmint_rec).__name__ = "VAZMINT"
+        vazmint_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vazmint_rec.vazao = 50.0
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [vazmint_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _extract_temporal_overrides(tmp_path, [1, 2])
+
+        assert 1 in result
+        assert result[1] == [
+            {"type": "VAZMINT", "month": 1, "year": 2025, "value": 50.0}
+        ]
+
+    def test_filters_by_confhd_codes(self, tmp_path) -> None:
+        """Plants not in confhd_codes are excluded from the result."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        vazmint_rec = MagicMock()
+        type(vazmint_rec).__name__ = "VAZMINT"
+        vazmint_rec.data_inicio = datetime.datetime(2025, 3, 1)
+        vazmint_rec.vazao = 40.0
+
+        # Plant 99 is NOT in confhd_codes [1, 2].
+        usina_rec = MagicMock()
+        usina_rec.codigo = 99
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [vazmint_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _extract_temporal_overrides(tmp_path, [1, 2])
+
+        assert result == {}
+
+    def test_preserves_file_order(self, tmp_path) -> None:
+        """Multiple records for the same plant are returned in file order."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        def _vazmint(month: int, vazao: float) -> MagicMock:
+            r = MagicMock()
+            type(r).__name__ = "VAZMINT"
+            r.data_inicio = datetime.datetime(2025, month, 1)
+            r.vazao = vazao
+            return r
+
+        recs = [_vazmint(1, 50.0), _vazmint(6, 60.0), _vazmint(3, 55.0)]
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = recs
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _extract_temporal_overrides(tmp_path, [1])
+
+        assert len(result[1]) == 3
+        assert result[1][0]["value"] == pytest.approx(50.0)
+        assert result[1][1]["value"] == pytest.approx(60.0)
+        assert result[1][2]["value"] == pytest.approx(55.0)
+
+    def test_extracts_cfuga_records(self, tmp_path) -> None:
+        """CFUGA record extracted with correct level value."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        cfuga_rec = MagicMock()
+        type(cfuga_rec).__name__ = "CFUGA"
+        cfuga_rec.data_inicio = datetime.datetime(2025, 6, 1)
+        cfuga_rec.nivel = 75.4
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 2
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [cfuga_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _extract_temporal_overrides(tmp_path, [2])
+
+        assert result[2] == [
+            {"type": "CFUGA", "month": 6, "year": 2025, "value": pytest.approx(75.4)}
+        ]
+
+    def test_extracts_turbmint_turbmaxt_records(self, tmp_path) -> None:
+        """TURBMINT and TURBMAXT records use turbinamento field."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        (tmp_path / "modif.dat").touch()
+
+        turbmint_rec = MagicMock()
+        type(turbmint_rec).__name__ = "TURBMINT"
+        turbmint_rec.data_inicio = datetime.datetime(2025, 11, 1)
+        turbmint_rec.turbinamento = 330.0
+
+        turbmaxt_rec = MagicMock()
+        type(turbmaxt_rec).__name__ = "TURBMAXT"
+        turbmaxt_rec.data_inicio = datetime.datetime(2025, 3, 1)
+        turbmaxt_rec.turbinamento = 322.0
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [turbmint_rec, turbmaxt_rec]
+
+        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
+            mock_modif_cls.read.return_value = mock_modif
+            result = _extract_temporal_overrides(tmp_path, [1])
+
+        assert result[1][0] == {
+            "type": "TURBMINT",
+            "month": 11,
+            "year": 2025,
+            "value": pytest.approx(330.0),
+        }
+        assert result[1][1] == {
+            "type": "TURBMAXT",
+            "month": 3,
+            "year": 2025,
+            "value": pytest.approx(322.0),
+        }
+
+
+# ---------------------------------------------------------------------------
+# _read_ghmin unit tests  (ticket-006)
+# ---------------------------------------------------------------------------
+
+
+class TestReadGhmin:
+    """Unit tests for ``_read_ghmin``."""
+
+    def test_missing_ghmin_returns_empty(self, tmp_path) -> None:
+        """No GHMIN.DAT -> empty dict, no error."""
+        from cobre_bridge.converters.hydro import _read_ghmin
+
+        result = _read_ghmin(tmp_path)
+        assert result == {}
+
+    def test_reads_plant_min_generation(self, tmp_path) -> None:
+        """Single plant entry returned with correct MW value."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _read_ghmin
+
+        (tmp_path / "ghmin.dat").touch()
+
+        ghmin_df = pd.DataFrame(
+            {
+                "codigo_usina": [1],
+                "data": [datetime.datetime(2025, 1, 1)],
+                "patamar": [0],
+                "geracao": [50.0],
+            }
+        )
+        mock_ghmin = MagicMock()
+        mock_ghmin.geracoes = ghmin_df
+
+        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
+            mock_ghmin_cls.read.return_value = mock_ghmin
+            result = _read_ghmin(tmp_path)
+
+        assert result == {1: pytest.approx(50.0)}
+
+    def test_multiple_plants(self, tmp_path) -> None:
+        """Multiple plants returned with correct MW values."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _read_ghmin
+
+        (tmp_path / "ghmin.dat").touch()
+
+        ghmin_df = pd.DataFrame(
+            {
+                "codigo_usina": [1, 2],
+                "data": [
+                    datetime.datetime(2025, 1, 1),
+                    datetime.datetime(2025, 1, 1),
+                ],
+                "patamar": [0, 0],
+                "geracao": [50.0, 120.0],
+            }
+        )
+        mock_ghmin = MagicMock()
+        mock_ghmin.geracoes = ghmin_df
+
+        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
+            mock_ghmin_cls.read.return_value = mock_ghmin
+            result = _read_ghmin(tmp_path)
+
+        assert result[1] == pytest.approx(50.0)
+        assert result[2] == pytest.approx(120.0)
+
+    def test_multiple_periods_uses_earliest(self, tmp_path) -> None:
+        """When multiple time periods exist, earliest date is used."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _read_ghmin
+
+        (tmp_path / "ghmin.dat").touch()
+
+        ghmin_df = pd.DataFrame(
+            {
+                "codigo_usina": [1, 1],
+                "data": [
+                    datetime.datetime(2025, 3, 1),
+                    datetime.datetime(2025, 1, 1),
+                ],
+                "patamar": [0, 0],
+                "geracao": [999.0, 50.0],
+            }
+        )
+        mock_ghmin = MagicMock()
+        mock_ghmin.geracoes = ghmin_df
+
+        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
+            mock_ghmin_cls.read.return_value = mock_ghmin
+            result = _read_ghmin(tmp_path)
+
+        # Earliest date (Jan) has geracao=50.0.
+        assert result[1] == pytest.approx(50.0)
+
+    def test_patamar_nonzero_excluded(self, tmp_path) -> None:
+        """Rows with patamar != 0 are excluded."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _read_ghmin
+
+        (tmp_path / "ghmin.dat").touch()
+
+        ghmin_df = pd.DataFrame(
+            {
+                "codigo_usina": [1, 1],
+                "data": [
+                    datetime.datetime(2025, 1, 1),
+                    datetime.datetime(2025, 1, 1),
+                ],
+                "patamar": [1, 2],  # no patamar=0 rows
+                "geracao": [50.0, 60.0],
+            }
+        )
+        mock_ghmin = MagicMock()
+        mock_ghmin.geracoes = ghmin_df
+
+        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
+            mock_ghmin_cls.read.return_value = mock_ghmin
+            result = _read_ghmin(tmp_path)
+
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# convert_hydros integration tests for ticket-006
+# ---------------------------------------------------------------------------
+
+
+class TestConvertHydrosGhmin:
+    """Integration tests verifying GHMIN.DAT override in convert_hydros."""
+
+    def _make_id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(
+            subsystem_ids=[1],
+            hydro_codes=[1, 2],
+            thermal_codes=[],
+        )
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_ghmin_overrides_approximation(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """When GHMIN has an entry for a plant, min_generation_mw uses that value."""
+        import datetime
+
+        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+
+        ghmin_df = pd.DataFrame(
+            {
+                "codigo_usina": [1],
+                "data": [datetime.datetime(2025, 1, 1)],
+                "patamar": [0],
+                "geracao": [99.9],
+            }
+        )
+        mock_ghmin_obj = MagicMock()
+        mock_ghmin_obj.geracoes = ghmin_df
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
+            mock_ghmin_cls.read.return_value = mock_ghmin_obj
+            (tmp_path / "ghmin.dat").touch()
+            result = convert_hydros(tmp_path, self._make_id_map())
+
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(99.9)
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_no_ghmin_uses_fallback(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """When no GHMIN.DAT, min_generation_mw uses the approximation."""
+        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(tmp_path, self._make_id_map())
+        # USINA_A: vazao_minima_historica=0 -> min_outflow=0 -> min_generation=0
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
+
+
 def _make_hreg(overrides: dict) -> pd.Series:
     """Build a minimal plant cadastro row (pd.Series) for unit tests.
 
@@ -849,7 +1397,7 @@ class TestComputeProductivity:
         assert result == pytest.approx(expected)
 
     def test_equal_volumes_fallback(self) -> None:
-        """tipo_regulacao='M' with volume_minimo==volume_maximo: falls back to point eval."""
+        """tipo_regulacao='M' with equal volumes: falls back to point evaluation."""
         from cobre_bridge.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
