@@ -7,12 +7,52 @@ the logic exercised by each converter.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
 from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave_files import NewaveFiles
+
+
+def _make_nw_files(
+    tmp_path: Path,
+    *,
+    modif: Path | None = None,
+    ghmin: Path | None = None,
+    penalid: Path | None = None,
+    vazpast: Path | None = None,
+    dsvagua: Path | None = None,
+    curva: Path | None = None,
+) -> NewaveFiles:
+    """Construct a ``NewaveFiles`` with sentinel paths under *tmp_path*.
+
+    All required file paths point to ``tmp_path / "<name>.dat"`` regardless
+    of whether the files actually exist on disk — the inewave I/O is mocked
+    in the tests that use this helper.  Optional paths are passed through as-is
+    (default ``None``).
+    """
+    return NewaveFiles(
+        directory=tmp_path,
+        dger=tmp_path / "dger.dat",
+        confhd=tmp_path / "confhd.dat",
+        conft=tmp_path / "conft.dat",
+        sistema=tmp_path / "sistema.dat",
+        clast=tmp_path / "clast.dat",
+        term=tmp_path / "term.dat",
+        ree=tmp_path / "ree.dat",
+        patamar=tmp_path / "patamar.dat",
+        hidr=tmp_path / "hidr.dat",
+        vazoes=tmp_path / "vazoes.dat",
+        modif=modif,
+        ghmin=ghmin,
+        penalid=penalid,
+        vazpast=vazpast,
+        dsvagua=dsvagua,
+        curva=curva,
+    )
 
 
 class TestNewaveIdMap:
@@ -90,7 +130,7 @@ def _make_hidr_cadastro() -> pd.DataFrame:
     """Synthetic Hidr.cadastro for two plants.
 
     Both plants use ``tipo_regulacao="M"`` with a simple linear polynomial
-    ``h(v) = 300 + 0.1*v`` (volume_cota_0=300, volume_cota_1=0.1, rest
+    ``h(v) = 300 + 0.1*v`` (a0_volume_cota=300, a1_volume_cota=0.1, rest
     zero) and ``canal_fuga_medio=50.0``.  With ``tipo_perda=1`` and
     ``perdas=0.0`` the loss model leaves the net drop unchanged.
 
@@ -136,11 +176,11 @@ def _make_hidr_cadastro() -> pd.DataFrame:
         "tipo_regulacao": ["M", "M"],
         "tipo_perda": [1, 1],
         "perdas": [0.0, 0.0],
-        "volume_cota_0": [300.0, 300.0],
-        "volume_cota_1": [0.1, 0.1],
-        "volume_cota_2": [0.0, 0.0],
-        "volume_cota_3": [0.0, 0.0],
-        "volume_cota_4": [0.0, 0.0],
+        "a0_volume_cota": [300.0, 300.0],
+        "a1_volume_cota": [0.1, 0.1],
+        "a2_volume_cota": [0.0, 0.0],
+        "a3_volume_cota": [0.0, 0.0],
+        "a4_volume_cota": [0.0, 0.0],
         "produtibilidade_especifica": [0.9, 0.85],
         "numero_conjuntos_maquinas": [1, 2],
         "maquinas_conjunto_1": [4, 3],
@@ -308,7 +348,7 @@ class TestConvertHydros:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         assert "hydros" in result
 
     @patch("cobre_bridge.converters.hydro.Ree")
@@ -320,7 +360,7 @@ class TestConvertHydros:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         assert len(result["hydros"]) == 2
 
     @patch("cobre_bridge.converters.hydro.Ree")
@@ -332,7 +372,7 @@ class TestConvertHydros:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         ids = [h["id"] for h in result["hydros"]]
         assert ids == sorted(ids)
         assert ids[0] == 0
@@ -346,7 +386,7 @@ class TestConvertHydros:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         for h in result["hydros"]:
             assert "id" in h
             assert "name" in h
@@ -368,7 +408,7 @@ class TestConvertHydros:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         # USINA_A (code=1, cobre id=0) has no downstream.
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["downstream_id"] is None
@@ -385,7 +425,7 @@ class TestConvertHydros:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         for h in result["hydros"]:
             # Both plants are in REE 1 -> subsystem 1 -> bus 0.
             assert h["bus_id"] == 0
@@ -399,7 +439,7 @@ class TestConvertHydros:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         gen = hydro_a["generation"]
         # USINA_A: 1 set, 4 machines, 200 MW each, flow 222.2 each.
@@ -416,27 +456,13 @@ class TestConvertHydros:
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_missing_hidr_raises_file_not_found(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        # Create confhd.dat and ree.dat but NOT hidr.dat.
-        (tmp_path / "confhd.dat").touch()
-        (tmp_path / "ree.dat").touch()
-        from cobre_bridge.converters.hydro import convert_hydros
-
-        with pytest.raises(FileNotFoundError, match="hidr.dat"):
-            convert_hydros(tmp_path, self._make_id_map())
-
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
     def test_schema_key_present(
         self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
     ) -> None:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         assert "$schema" in result
         assert "hydros.schema.json" in result["$schema"]
 
@@ -466,7 +492,7 @@ class TestConvertHydros:
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         with pytest.raises(ValueError, match="not found in hidr.dat"):
-            convert_hydros(tmp_path, id_map)
+            convert_hydros(_make_nw_files(tmp_path), id_map)
 
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
@@ -496,7 +522,7 @@ class TestConvertHydros:
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         for h in result["hydros"]:
             assert h["hydraulic_losses"] == {
                 "type": "factor",
@@ -531,7 +557,7 @@ class TestConvertHydros:
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         for h in result["hydros"]:
             assert h["hydraulic_losses"] == {
                 "type": "constant",
@@ -566,7 +592,7 @@ class TestConvertHydros:
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         for h in result["hydros"]:
             assert h["hydraulic_losses"] is None
 
@@ -599,7 +625,7 @@ class TestConvertHydros:
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         # USINA_A nominal: 4 machines * 200 MW = 800 MW
         # Derating: 800 * 0.95 * 0.97 = 737.2
@@ -620,7 +646,7 @@ class TestConvertHydros:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         # teif=0, ip=0 -> factor = 1.0 -> no change from nominal 800 MW
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
@@ -653,17 +679,14 @@ class TestConvertHydros:
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         # NaN treated as 0 -> factor = 1.0 -> no change from nominal 800 MW
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
 
 
 def _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path):
-    """Create dummy files and wire mock read() returns."""
-    for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-        (tmp_path / fname).touch()
-
+    """Wire mock read() returns for the three hydro-required files."""
     mock_hidr = MagicMock()
     mock_hidr.cadastro = _make_hidr_cadastro()
     mock_hidr_cls.read.return_value = mock_hidr
@@ -693,7 +716,9 @@ class TestApplyPermanentOverrides:
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         cadastro = self._base_cadastro()
-        result = _apply_permanent_overrides(cadastro, tmp_path)
+        result = _apply_permanent_overrides(
+            cadastro, _make_nw_files(tmp_path, modif=None)
+        )
         pd.testing.assert_frame_equal(result, cadastro)
 
     def test_volmax_override(self, tmp_path) -> None:
@@ -717,7 +742,10 @@ class TestApplyPermanentOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+            result = _apply_permanent_overrides(
+                self._base_cadastro(),
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            )
 
         assert float(result.loc[1, "volume_maximo"]) == pytest.approx(2000.0)
         # Plant 2 must be unchanged.
@@ -742,7 +770,10 @@ class TestApplyPermanentOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+            result = _apply_permanent_overrides(
+                self._base_cadastro(),
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            )
 
         assert float(result.loc[2, "vazao_minima_historica"]) == pytest.approx(75.5)
         # Plant 1 must be unchanged (was 0).
@@ -772,7 +803,10 @@ class TestApplyPermanentOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+            result = _apply_permanent_overrides(
+                self._base_cadastro(),
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            )
 
         assert int(result.loc[1, "numero_conjuntos_maquinas"]) == 2
         assert int(result.loc[1, "maquinas_conjunto_2"]) == 3
@@ -800,7 +834,10 @@ class TestApplyPermanentOverrides:
             with caplog.at_level(
                 logging.WARNING, logger="cobre_bridge.converters.hydro"
             ):
-                result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+                result = _apply_permanent_overrides(
+                    self._base_cadastro(),
+                    _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+                )
 
         # Values must be unchanged (dtype may differ due to float cast for safety).
         pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
@@ -826,7 +863,10 @@ class TestApplyPermanentOverrides:
             with caplog.at_level(
                 logging.WARNING, logger="cobre_bridge.converters.hydro"
             ):
-                result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+                result = _apply_permanent_overrides(
+                    self._base_cadastro(),
+                    _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+                )
 
         pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
         assert any("999" in msg for msg in caplog.messages)
@@ -853,7 +893,10 @@ class TestApplyPermanentOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _apply_permanent_overrides(self._base_cadastro(), tmp_path)
+            result = _apply_permanent_overrides(
+                self._base_cadastro(),
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            )
 
         # vazao_minima_historica must stay at the base value (0).
         assert float(result.loc[1, "vazao_minima_historica"]) == pytest.approx(0.0)
@@ -871,7 +914,9 @@ class TestExtractTemporalOverrides:
         """No MODIF.DAT -> empty dict returned, no error."""
         from cobre_bridge.converters.hydro import _extract_temporal_overrides
 
-        result = _extract_temporal_overrides(tmp_path, [1, 2])
+        result = _extract_temporal_overrides(
+            _make_nw_files(tmp_path, modif=None), [1, 2]
+        )
         assert result == {}
 
     def test_extracts_vazmint_records(self, tmp_path) -> None:
@@ -896,7 +941,9 @@ class TestExtractTemporalOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(tmp_path, [1, 2])
+            result = _extract_temporal_overrides(
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [1, 2]
+            )
 
         assert 1 in result
         assert result[1] == [
@@ -926,7 +973,9 @@ class TestExtractTemporalOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(tmp_path, [1, 2])
+            result = _extract_temporal_overrides(
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [1, 2]
+            )
 
         assert result == {}
 
@@ -956,7 +1005,9 @@ class TestExtractTemporalOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(tmp_path, [1])
+            result = _extract_temporal_overrides(
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [1]
+            )
 
         assert len(result[1]) == 3
         assert result[1][0]["value"] == pytest.approx(50.0)
@@ -985,7 +1036,9 @@ class TestExtractTemporalOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(tmp_path, [2])
+            result = _extract_temporal_overrides(
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [2]
+            )
 
         assert result[2] == [
             {"type": "CFUGA", "month": 6, "year": 2025, "value": pytest.approx(75.4)}
@@ -1018,7 +1071,9 @@ class TestExtractTemporalOverrides:
 
         with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
             mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(tmp_path, [1])
+            result = _extract_temporal_overrides(
+                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [1]
+            )
 
         assert result[1][0] == {
             "type": "TURBMINT",
@@ -1046,7 +1101,7 @@ class TestReadGhmin:
         """No GHMIN.DAT -> empty dict, no error."""
         from cobre_bridge.converters.hydro import _read_ghmin
 
-        result = _read_ghmin(tmp_path)
+        result = _read_ghmin(_make_nw_files(tmp_path, ghmin=None))
         assert result == {}
 
     def test_reads_plant_min_generation(self, tmp_path) -> None:
@@ -1070,7 +1125,7 @@ class TestReadGhmin:
 
         with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
             mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin(tmp_path)
+            result = _read_ghmin(_make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"))
 
         assert result == {1: pytest.approx(50.0)}
 
@@ -1098,7 +1153,7 @@ class TestReadGhmin:
 
         with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
             mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin(tmp_path)
+            result = _read_ghmin(_make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"))
 
         assert result[1] == pytest.approx(50.0)
         assert result[2] == pytest.approx(120.0)
@@ -1127,7 +1182,7 @@ class TestReadGhmin:
 
         with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
             mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin(tmp_path)
+            result = _read_ghmin(_make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"))
 
         # Earliest date (Jan) has geracao=50.0.
         assert result[1] == pytest.approx(50.0)
@@ -1156,7 +1211,7 @@ class TestReadGhmin:
 
         with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
             mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin(tmp_path)
+            result = _read_ghmin(_make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"))
 
         assert result == {}
 
@@ -1202,8 +1257,10 @@ class TestConvertHydrosGhmin:
 
         with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
             mock_ghmin_cls.read.return_value = mock_ghmin_obj
-            (tmp_path / "ghmin.dat").touch()
-            result = convert_hydros(tmp_path, self._make_id_map())
+            result = convert_hydros(
+                _make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
+                self._make_id_map(),
+            )
 
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(99.9)
@@ -1219,7 +1276,7 @@ class TestConvertHydrosGhmin:
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(tmp_path, self._make_id_map())
+        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
         # USINA_A: vazao_minima_historica=0 -> min_outflow=0 -> min_generation=0
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
@@ -1242,11 +1299,11 @@ def _make_hreg(overrides: dict) -> pd.Series:
         "tipo_regulacao": "M",
         "tipo_perda": 1,
         "perdas": 0.05,
-        "volume_cota_0": 300.0,
-        "volume_cota_1": 0.1,
-        "volume_cota_2": 0.0,
-        "volume_cota_3": 0.0,
-        "volume_cota_4": 0.0,
+        "a0_volume_cota": 300.0,
+        "a1_volume_cota": 0.1,
+        "a2_volume_cota": 0.0,
+        "a3_volume_cota": 0.0,
+        "a4_volume_cota": 0.0,
     }
     defaults.update(overrides)
     return pd.Series(defaults)
@@ -1267,11 +1324,11 @@ class TestComputeProductivity:
         hreg = _make_hreg(
             {
                 "tipo_regulacao": "M",
-                "volume_cota_0": 300.0,
-                "volume_cota_1": 0.1,
-                "volume_cota_2": 0.0,
-                "volume_cota_3": 0.0,
-                "volume_cota_4": 0.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "a2_volume_cota": 0.0,
+                "a3_volume_cota": 0.0,
+                "a4_volume_cota": 0.0,
                 "volume_minimo": 100.0,
                 "volume_maximo": 1000.0,
                 "canal_fuga_medio": 250.0,
@@ -1302,11 +1359,11 @@ class TestComputeProductivity:
             {
                 "tipo_regulacao": "D",
                 "volume_referencia": 500.0,
-                "volume_cota_0": 300.0,
-                "volume_cota_1": 0.1,
-                "volume_cota_2": 0.0,
-                "volume_cota_3": 0.0,
-                "volume_cota_4": 0.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "a2_volume_cota": 0.0,
+                "a3_volume_cota": 0.0,
+                "a4_volume_cota": 0.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 1,
                 "perdas": 0.05,
@@ -1329,11 +1386,11 @@ class TestComputeProductivity:
             {
                 "tipo_regulacao": "D",
                 "volume_referencia": 500.0,
-                "volume_cota_0": 300.0,
-                "volume_cota_1": 0.1,
-                "volume_cota_2": 0.0,
-                "volume_cota_3": 0.0,
-                "volume_cota_4": 0.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "a2_volume_cota": 0.0,
+                "a3_volume_cota": 0.0,
+                "a4_volume_cota": 0.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 1,
                 "perdas": 0.10,
@@ -1354,11 +1411,11 @@ class TestComputeProductivity:
             {
                 "tipo_regulacao": "D",
                 "volume_referencia": 500.0,
-                "volume_cota_0": 300.0,
-                "volume_cota_1": 0.1,
-                "volume_cota_2": 0.0,
-                "volume_cota_3": 0.0,
-                "volume_cota_4": 0.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "a2_volume_cota": 0.0,
+                "a3_volume_cota": 0.0,
+                "a4_volume_cota": 0.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 2,
                 "perdas": 3.5,
@@ -1379,11 +1436,11 @@ class TestComputeProductivity:
             {
                 "tipo_regulacao": "D",
                 "volume_referencia": 500.0,
-                "volume_cota_0": 300.0,
-                "volume_cota_1": 0.1,
-                "volume_cota_2": 0.0,
-                "volume_cota_3": 0.0,
-                "volume_cota_4": 0.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "a2_volume_cota": 0.0,
+                "a3_volume_cota": 0.0,
+                "a4_volume_cota": 0.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 0,
                 "perdas": 99.0,
@@ -1405,11 +1462,11 @@ class TestComputeProductivity:
                 "tipo_regulacao": "M",
                 "volume_minimo": 500.0,
                 "volume_maximo": 500.0,
-                "volume_cota_0": 300.0,
-                "volume_cota_1": 0.1,
-                "volume_cota_2": 0.0,
-                "volume_cota_3": 0.0,
-                "volume_cota_4": 0.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "a2_volume_cota": 0.0,
+                "a3_volume_cota": 0.0,
+                "a4_volume_cota": 0.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 1,
                 "perdas": 0.0,
@@ -1422,6 +1479,476 @@ class TestComputeProductivity:
         expected = 0.009 * 100.0
         result = _compute_productivity(hreg)
         assert result == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# _compute_productivity with override parameters
+# ---------------------------------------------------------------------------
+
+
+class TestComputeProductivityOverrides:
+    """Unit tests for ``_compute_productivity`` with canal_fuga/cmont overrides."""
+
+    def test_canal_fuga_override_replaces_base(self) -> None:
+        """canal_fuga_override replaces canal_fuga_medio in the net drop calc."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "D",
+                "volume_referencia": 500.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 0,
+                "perdas": 0.0,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # poly(500) = 300 + 50 = 350
+        # With override canal_fuga=260: net_drop = 350 - 260 = 90
+        base = _compute_productivity(hreg)  # uses 250 -> drop 100
+        overridden = _compute_productivity(hreg, canal_fuga_override=260.0)
+        assert base == pytest.approx(0.009 * 100.0)
+        assert overridden == pytest.approx(0.009 * 90.0)
+
+    def test_cmont_override_replaces_polynomial_height(self) -> None:
+        """cmont_override bypasses the polynomial and uses the supplied height."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "D",
+                "volume_referencia": 500.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 0,
+                "perdas": 0.0,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # cmont=380 overrides polynomial; net_drop = 380 - 250 = 130
+        result = _compute_productivity(hreg, cmont_override=380.0)
+        assert result == pytest.approx(0.009 * 130.0)
+
+    def test_both_overrides_together(self) -> None:
+        """canal_fuga_override and cmont_override can both be active."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "D",
+                "volume_referencia": 500.0,
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 0,
+                "perdas": 0.0,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # cmont=400, canal_fuga=260 -> net_drop = 400 - 260 = 140
+        result = _compute_productivity(
+            hreg, canal_fuga_override=260.0, cmont_override=400.0
+        )
+        assert result == pytest.approx(0.009 * 140.0)
+
+    def test_no_overrides_matches_original_behaviour(self) -> None:
+        """With no overrides, refactored function gives same result as before."""
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        hreg = _make_hreg(
+            {
+                "tipo_regulacao": "M",
+                "a0_volume_cota": 300.0,
+                "a1_volume_cota": 0.1,
+                "volume_minimo": 100.0,
+                "volume_maximo": 1000.0,
+                "canal_fuga_medio": 250.0,
+                "tipo_perda": 1,
+                "perdas": 0.05,
+                "produtibilidade_especifica": 0.009,
+            }
+        )
+        # avg_height = 355.0 (see TestComputeProductivity)
+        expected = 0.009 * (1.0 - 0.05) * (355.0 - 250.0)
+        assert _compute_productivity(hreg) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# convert_production_models unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_prod_model_dger_mock(
+    *,
+    ano_inicio: int = 2025,
+    mes_inicio: int = 1,
+    num_anos: int = 5,
+    num_anos_pos: int = 0,
+) -> MagicMock:
+    """Return a mock Dger object for use in production model tests."""
+    m = MagicMock()
+    m.ano_inicio_estudo = ano_inicio
+    m.mes_inicio_estudo = mes_inicio
+    m.num_anos_estudo = num_anos
+    m.num_anos_pos_estudo = num_anos_pos
+    return m
+
+
+def _make_cfuga_rec(month: int, year: int, nivel: float) -> MagicMock:
+    import datetime
+
+    r = MagicMock()
+    type(r).__name__ = "CFUGA"
+    r.data_inicio = datetime.datetime(year, month, 1)
+    r.nivel = nivel
+    return r
+
+
+def _make_cmont_rec(month: int, year: int, nivel: float) -> MagicMock:
+    import datetime
+
+    r = MagicMock()
+    type(r).__name__ = "CMONT"
+    r.data_inicio = datetime.datetime(year, month, 1)
+    r.nivel = nivel
+    return r
+
+
+class TestConvertProductionModels:
+    """Unit tests for ``convert_production_models``."""
+
+    def _make_id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(
+            subsystem_ids=[1],
+            hydro_codes=[1, 2],
+            thermal_codes=[],
+        )
+
+    def _setup_base_mocks(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+        *,
+        ano_inicio: int = 2025,
+        mes_inicio: int = 1,
+        num_anos: int = 5,
+    ) -> None:
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = _make_hidr_cadastro()
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_dger_cls.read.return_value = _make_prod_model_dger_mock(
+            ano_inicio=ano_inicio,
+            mes_inicio=mes_inicio,
+            num_anos=num_anos,
+            num_anos_pos=0,
+        )
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_returns_none_when_no_modif(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """No MODIF.DAT -> None returned, no error."""
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = _make_hidr_cadastro()
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_dger_cls.read.return_value = _make_prod_model_dger_mock()
+
+        from cobre_bridge.converters.hydro import convert_production_models
+
+        result = convert_production_models(
+            _make_nw_files(tmp_path, modif=None), self._make_id_map()
+        )
+        assert result is None
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Modif")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_returns_none_when_no_cfuga_cmont(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_modif_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """MODIF.DAT present but only VAZMINT overrides -> None returned."""
+        import datetime
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = _make_hidr_cadastro()
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_dger_cls.read.return_value = _make_prod_model_dger_mock()
+
+        vazmint_rec = MagicMock()
+        type(vazmint_rec).__name__ = "VAZMINT"
+        vazmint_rec.data_inicio = datetime.datetime(2025, 3, 1)
+        vazmint_rec.vazao = 50.0
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [vazmint_rec]
+        mock_modif_cls.read.return_value = mock_modif
+
+        from cobre_bridge.converters.hydro import convert_production_models
+
+        result = convert_production_models(
+            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            self._make_id_map(),
+        )
+        assert result is None
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Modif")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_single_cfuga_override_two_ranges(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_modif_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """One CFUGA override at stage 3 -> two stage_ranges (base then overridden)."""
+        # Study: start Jan 2025, 5 years -> 60 stages total.
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=5,
+        )
+
+        cfuga_rec = _make_cfuga_rec(month=4, year=2025, nivel=60.0)
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [cfuga_rec]
+        mock_modif_cls.read.return_value = mock_modif
+
+        from cobre_bridge.converters.hydro import convert_production_models
+
+        result = convert_production_models(
+            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            self._make_id_map(),
+        )
+
+        assert result is not None
+        assert "production_models" in result
+        models = result["production_models"]
+        assert len(models) == 1
+
+        model = models[0]
+        assert model["hydro_id"] == 0  # code=1 -> sorted position 0
+        assert model["selection_mode"] == "stage_ranges"
+        ranges = model["stage_ranges"]
+
+        # CFUGA at April 2025 = stage (2025-2025)*12 + (4-1) = 3.
+        # So: [0..2] base, [3..None] overridden.
+        assert len(ranges) == 2
+        assert ranges[0]["start_stage_id"] == 0
+        assert ranges[0]["end_stage_id"] == 2
+        assert ranges[0]["model"] == "constant_productivity"
+        assert ranges[1]["start_stage_id"] == 3
+        assert ranges[1]["end_stage_id"] is None
+        assert ranges[1]["model"] == "constant_productivity"
+
+        # The overridden productivity uses canal_fuga=60 instead of 50.
+        # USINA_A: tipo_regulacao='M', avg_height=355, canal_fuga_base=50 -> drop=305
+        # With cfuga=60: drop = 355 - 60 = 295 -> prod = 0.9 * 295 = 265.5
+        base_prod = 0.9 * (355.0 - 50.0)
+        overridden_prod = 0.9 * (355.0 - 60.0)
+        assert ranges[0]["productivity_override"] == pytest.approx(base_prod)
+        assert ranges[1]["productivity_override"] == pytest.approx(overridden_prod)
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Modif")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_cmont_override_bypasses_polynomial(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_modif_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """CMONT override at stage 0 -> single stage_range using cmont as height."""
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=5,
+        )
+
+        cmont_rec = _make_cmont_rec(month=1, year=2025, nivel=400.0)
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [cmont_rec]
+        mock_modif_cls.read.return_value = mock_modif
+
+        from cobre_bridge.converters.hydro import convert_production_models
+
+        result = convert_production_models(
+            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            self._make_id_map(),
+        )
+
+        assert result is not None
+        models = result["production_models"]
+        assert len(models) == 1
+
+        ranges = models[0]["stage_ranges"]
+        # CMONT at Jan 2025 = stage 0, so no base range before it.
+        assert len(ranges) == 1
+        assert ranges[0]["start_stage_id"] == 0
+        assert ranges[0]["end_stage_id"] is None
+        # net_drop = 400 - 50 (canal_fuga_medio) = 350 -> prod = 0.9 * 350 = 315.0
+        assert ranges[0]["productivity_override"] == pytest.approx(0.9 * 350.0)
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Modif")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_multiple_overrides_three_ranges(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_modif_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Two CFUGA overrides -> three stage_ranges."""
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=5,
+        )
+
+        recs = [
+            _make_cfuga_rec(month=6, year=2025, nivel=55.0),  # stage 5
+            _make_cfuga_rec(month=1, year=2026, nivel=65.0),  # stage 12
+        ]
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = recs
+        mock_modif_cls.read.return_value = mock_modif
+
+        from cobre_bridge.converters.hydro import convert_production_models
+
+        result = convert_production_models(
+            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            self._make_id_map(),
+        )
+
+        assert result is not None
+        ranges = result["production_models"][0]["stage_ranges"]
+        # stage 5: June 2025 -> (2025-2025)*12 + (6-1) = 5
+        # stage 12: Jan 2026 -> (2026-2025)*12 + (1-1) = 12
+        assert len(ranges) == 3
+        assert ranges[0]["start_stage_id"] == 0
+        assert ranges[0]["end_stage_id"] == 4
+        assert ranges[1]["start_stage_id"] == 5
+        assert ranges[1]["end_stage_id"] == 11
+        assert ranges[2]["start_stage_id"] == 12
+        assert ranges[2]["end_stage_id"] is None
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Modif")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_output_sorted_by_hydro_id(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_modif_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """production_models list is sorted ascending by hydro_id."""
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=5,
+        )
+
+        # Both plants have CFUGA overrides; plant codes 1 and 2 -> ids 0 and 1.
+        usina_rec1 = MagicMock()
+        usina_rec1.codigo = 1
+        usina_rec2 = MagicMock()
+        usina_rec2.codigo = 2
+
+        def _mods(code: int) -> list:
+            if code == 1:
+                return [_make_cfuga_rec(month=3, year=2025, nivel=55.0)]
+            return [_make_cfuga_rec(month=6, year=2025, nivel=55.0)]
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec2, usina_rec1]  # reversed order
+        mock_modif.modificacoes_usina.side_effect = _mods
+        mock_modif_cls.read.return_value = mock_modif
+
+        from cobre_bridge.converters.hydro import convert_production_models
+
+        result = convert_production_models(
+            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            self._make_id_map(),
+        )
+
+        assert result is not None
+        ids = [m["hydro_id"] for m in result["production_models"]]
+        assert ids == sorted(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -1446,7 +1973,7 @@ class TestConvertThermals:
         _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(tmp_path, self._make_id_map())
+        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
         assert "thermals" in result
 
     @patch("cobre_bridge.converters.thermal.Term")
@@ -1458,7 +1985,7 @@ class TestConvertThermals:
         _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(tmp_path, self._make_id_map())
+        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
         assert len(result["thermals"]) == 3
 
     @patch("cobre_bridge.converters.thermal.Term")
@@ -1470,7 +1997,7 @@ class TestConvertThermals:
         _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(tmp_path, self._make_id_map())
+        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
         ids = [t["id"] for t in result["thermals"]]
         assert ids == sorted(ids)
         assert ids[0] == 0
@@ -1484,7 +2011,7 @@ class TestConvertThermals:
         _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(tmp_path, self._make_id_map())
+        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
         for t in result["thermals"]:
             assert "cost_segments" in t
             assert len(t["cost_segments"]) == 1
@@ -1504,7 +2031,7 @@ class TestConvertThermals:
         _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(tmp_path, self._make_id_map())
+        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
         # TERMO_A (code 10) and TERMO_B (code 20) are in submercado 1 -> bus 0.
         # TERMO_C (code 30) is in submercado 2 -> bus 1.
         termo_a = next(t for t in result["thermals"] if t["name"] == "TERMO_A")
@@ -1521,23 +2048,10 @@ class TestConvertThermals:
         _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(tmp_path, self._make_id_map())
+        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
         # TERMO_A: potencia=100, factor=0.9 -> max_mw=90.
         termo_a = next(t for t in result["thermals"] if t["name"] == "TERMO_A")
         assert termo_a["generation"]["max_mw"] == pytest.approx(90.0)
-
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_missing_conft_raises_file_not_found(
-        self, mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
-    ) -> None:
-        (tmp_path / "clast.dat").touch()
-        (tmp_path / "term.dat").touch()
-        from cobre_bridge.converters.thermal import convert_thermals
-
-        with pytest.raises(FileNotFoundError, match="conft.dat"):
-            convert_thermals(tmp_path, self._make_id_map())
 
 
 def _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path):
@@ -1576,7 +2090,7 @@ class TestConvertBuses:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(tmp_path, self._make_id_map())
+        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
         assert "buses" in result
 
     @patch("cobre_bridge.converters.network.Sistema")
@@ -1584,7 +2098,7 @@ class TestConvertBuses:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(tmp_path, self._make_id_map())
+        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
         # 3 subsystems total: 1, 2, 99.
         assert len(result["buses"]) == 3
 
@@ -1593,7 +2107,7 @@ class TestConvertBuses:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(tmp_path, self._make_id_map())
+        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
         ids = [b["id"] for b in result["buses"]]
         assert ids == sorted(ids)
         assert ids[0] == 0
@@ -1603,7 +2117,7 @@ class TestConvertBuses:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(tmp_path, self._make_id_map())
+        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
         for b in result["buses"]:
             assert "deficit_segments" in b
             assert isinstance(b["deficit_segments"], list)
@@ -1616,19 +2130,10 @@ class TestConvertBuses:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(tmp_path, self._make_id_map())
+        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
         for b in result["buses"]:
             last_seg = b["deficit_segments"][-1]
             assert last_seg["depth_mw"] is None
-
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_missing_sistema_raises_file_not_found(
-        self, mock_sistema_cls, tmp_path
-    ) -> None:
-        from cobre_bridge.converters.network import convert_buses
-
-        with pytest.raises(FileNotFoundError, match="sistema.dat"):
-            convert_buses(tmp_path, self._make_id_map())
 
 
 # ---------------------------------------------------------------------------
@@ -1644,29 +2149,42 @@ class TestConvertLines:
             thermal_codes=[],
         )
 
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_returns_lines_key(self, mock_sistema_cls, tmp_path) -> None:
+    def _setup(self, mock_sistema_cls, mock_dger_cls, tmp_path):
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2023
+        mock_dger_cls.read.return_value = dger
+
+    @patch("cobre_bridge.converters.network.Dger")
+    @patch("cobre_bridge.converters.network.Sistema")
+    def test_returns_lines_key(self, mock_sistema_cls, mock_dger_cls, tmp_path) -> None:
+        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(tmp_path, self._make_id_map())
+        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
         assert "lines" in result
 
+    @patch("cobre_bridge.converters.network.Dger")
     @patch("cobre_bridge.converters.network.Sistema")
-    def test_line_count_three_pairs(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_line_count_three_pairs(
+        self, mock_sistema_cls, mock_dger_cls, tmp_path
+    ) -> None:
+        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(tmp_path, self._make_id_map())
-        # 3 unique pairs: (1,2), (1,99), (2,99).
+        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
         assert len(result["lines"]) == 3
 
+    @patch("cobre_bridge.converters.network.Dger")
     @patch("cobre_bridge.converters.network.Sistema")
-    def test_line_capacity_structure(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_line_capacity_structure(
+        self, mock_sistema_cls, mock_dger_cls, tmp_path
+    ) -> None:
+        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(tmp_path, self._make_id_map())
+        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
         for line in result["lines"]:
             assert "capacity" in line
             assert "direct_mw" in line["capacity"]
@@ -1674,22 +2192,27 @@ class TestConvertLines:
             assert "source_bus_id" in line
             assert "target_bus_id" in line
 
+    @patch("cobre_bridge.converters.network.Dger")
     @patch("cobre_bridge.converters.network.Sistema")
-    def test_line_ids_sequential(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_line_ids_sequential(
+        self, mock_sistema_cls, mock_dger_cls, tmp_path
+    ) -> None:
+        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(tmp_path, self._make_id_map())
+        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
         ids = [ln["id"] for ln in result["lines"]]
         assert ids == list(range(len(ids)))
 
+    @patch("cobre_bridge.converters.network.Dger")
     @patch("cobre_bridge.converters.network.Sistema")
-    def test_first_month_used_for_capacity(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_first_month_used_for_capacity(
+        self, mock_sistema_cls, mock_dger_cls, tmp_path
+    ) -> None:
+        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(tmp_path, self._make_id_map())
-        # Find the (1, 2) pair — subsystems 1<2, bus_ids 0 and 1.
+        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
         line_12 = next(
             ln
             for ln in result["lines"]
@@ -1718,7 +2241,7 @@ class TestConvertPenalties:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_penalties
 
-        result = convert_penalties(tmp_path)
+        result = convert_penalties(_make_nw_files(tmp_path))
         for key in ("bus", "hydro", "line", "non_controllable_source"):
             assert key in result
 
@@ -1729,7 +2252,7 @@ class TestConvertPenalties:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_penalties
 
-        result = convert_penalties(tmp_path)
+        result = convert_penalties(_make_nw_files(tmp_path))
         # First subsystem=1, patamar=1: custo = 500.0*1 = 500.0
         seg = result["bus"]["deficit_segments"][0]
         assert seg["cost"] == pytest.approx(500.0)
@@ -1739,7 +2262,7 @@ class TestConvertPenalties:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_penalties
 
-        result = convert_penalties(tmp_path)
+        result = convert_penalties(_make_nw_files(tmp_path))
         required = {
             "spillage_cost",
             "fpha_turbined_cost",
@@ -1779,7 +2302,9 @@ class TestConvertInitialConditions:
             convert_initial_conditions,
         )
 
-        result = convert_initial_conditions(tmp_path, self._make_id_map())
+        result = convert_initial_conditions(
+            _make_nw_files(tmp_path), self._make_id_map()
+        )
         assert "storage" in result
         assert "filling_storage" in result
 
@@ -1793,12 +2318,17 @@ class TestConvertInitialConditions:
             convert_initial_conditions,
         )
 
-        result = convert_initial_conditions(tmp_path, self._make_id_map())
-        # USINA_A: pct=50%, vol_max=1000 -> 500 hm3.
-        # USINA_B: pct=75%, vol_max=500  -> 375 hm3.
+        result = convert_initial_conditions(
+            _make_nw_files(tmp_path), self._make_id_map()
+        )
+        # New formula: (pct / 100) * (vol_max - vol_min) + vol_min
+        # USINA_A: pct=50%, vol_min=100, vol_max=1000
+        #   -> (0.50) * (1000 - 100) + 100 = 450 + 100 = 550 hm3.
+        # USINA_B: pct=75%, vol_min=50, vol_max=500
+        #   -> (0.75) * (500 - 50) + 50 = 337.5 + 50 = 387.5 hm3.
         storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
-        assert storage[0] == pytest.approx(500.0)
-        assert storage[1] == pytest.approx(375.0)
+        assert storage[0] == pytest.approx(550.0)
+        assert storage[1] == pytest.approx(387.5)
 
     @patch("cobre_bridge.converters.initial_conditions.Confhd")
     @patch("cobre_bridge.converters.initial_conditions.Hidr")
@@ -1810,7 +2340,9 @@ class TestConvertInitialConditions:
             convert_initial_conditions,
         )
 
-        result = convert_initial_conditions(tmp_path, self._make_id_map())
+        result = convert_initial_conditions(
+            _make_nw_files(tmp_path), self._make_id_map()
+        )
         ids = [s["hydro_id"] for s in result["storage"]]
         assert ids == sorted(ids)
 
@@ -1825,23 +2357,12 @@ class TestConvertInitialConditions:
         )
 
         # Should not raise; pct is clamped to 100.
-        result = convert_initial_conditions(tmp_path, self._make_id_map())
+        result = convert_initial_conditions(
+            _make_nw_files(tmp_path), self._make_id_map()
+        )
         storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
         # pct clamped to 100 -> vol_max=500 -> 500.0 hm3.
         assert storage[1] == pytest.approx(500.0)
-
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
-    def test_missing_hidr_raises_file_not_found(
-        self, mock_hidr_cls, mock_confhd_cls, tmp_path
-    ) -> None:
-        (tmp_path / "confhd.dat").touch()
-        from cobre_bridge.converters.initial_conditions import (
-            convert_initial_conditions,
-        )
-
-        with pytest.raises(FileNotFoundError, match="hidr.dat"):
-            convert_initial_conditions(tmp_path, self._make_id_map())
 
     @patch("cobre_bridge.converters.initial_conditions.Confhd")
     @patch("cobre_bridge.converters.initial_conditions.Hidr")
@@ -1853,7 +2374,9 @@ class TestConvertInitialConditions:
             convert_initial_conditions,
         )
 
-        result = convert_initial_conditions(tmp_path, self._make_id_map())
+        result = convert_initial_conditions(
+            _make_nw_files(tmp_path), self._make_id_map()
+        )
         assert result["filling_storage"] == []
 
 
@@ -1920,9 +2443,9 @@ class TestCrossReferenceConsistency:
             thermal_codes=[10, 20, 30],
         )
 
-        buses_result = convert_buses(tmp_path, id_map)
-        hydros_result = convert_hydros(tmp_path, id_map)
-        thermals_result = convert_thermals(tmp_path, id_map)
+        buses_result = convert_buses(_make_nw_files(tmp_path), id_map)
+        hydros_result = convert_hydros(_make_nw_files(tmp_path), id_map)
+        thermals_result = convert_thermals(_make_nw_files(tmp_path), id_map)
 
         valid_bus_ids = {b["id"] for b in buses_result["buses"]}
 
@@ -1946,7 +2469,7 @@ class TestCrossReferenceConsistency:
         from cobre_bridge.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
-        result = convert_hydros(tmp_path, id_map)
+        result = convert_hydros(_make_nw_files(tmp_path), id_map)
         valid_hydro_ids = {h["id"] for h in result["hydros"]}
 
         for h in result["hydros"]:
@@ -2015,7 +2538,7 @@ class TestBuildIdMap:
 
         from cobre_bridge.pipeline import _build_id_map
 
-        id_map = _build_id_map(tmp_path)
+        id_map = _build_id_map(_make_nw_files(tmp_path))
 
         # Only the two non-fictitious plants must appear.
         assert 1 in id_map.all_hydro_codes
@@ -2075,7 +2598,7 @@ class TestBuildIdMap:
 
         from cobre_bridge.pipeline import _build_id_map
 
-        id_map = _build_id_map(tmp_path)
+        id_map = _build_id_map(_make_nw_files(tmp_path))
         assert len(id_map.all_hydro_codes) == n_real
 
     @patch("inewave.newave.Ree")
@@ -2112,7 +2635,7 @@ class TestBuildIdMap:
 
         from cobre_bridge.pipeline import _build_id_map
 
-        id_map = _build_id_map(tmp_path)
+        id_map = _build_id_map(_make_nw_files(tmp_path))
 
         assert 1 in id_map.all_hydro_codes
         assert 2 in id_map.all_hydro_codes
@@ -2168,7 +2691,7 @@ class TestConvertHydrosDownstreamFict:
 
         # id_map has only plant 1; plant 2 (fictitious) is absent.
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
-        result = convert_hydros(tmp_path, id_map)
+        result = convert_hydros(_make_nw_files(tmp_path), id_map)
 
         assert len(result["hydros"]) == 1
         assert result["hydros"][0]["downstream_id"] is None
@@ -2414,7 +2937,9 @@ class TestReadPenalid:
 
         with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
             mock_cls.read.return_value = mock_penalid
-            result = _read_penalid(tmp_path)
+            result = _read_penalid(
+                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat")
+            )
 
         # REE 1 checks.
         assert 1 in result
@@ -2433,8 +2958,8 @@ class TestReadPenalid:
         """Absent PENALID.DAT returns an empty dict without raising."""
         from cobre_bridge.converters.hydro import _read_penalid
 
-        # No penalid.dat file created in tmp_path.
-        result = _read_penalid(tmp_path)
+        # No penalid.dat — pass penalid=None.
+        result = _read_penalid(_make_nw_files(tmp_path, penalid=None))
 
         assert result == {}
 
@@ -2462,7 +2987,9 @@ class TestReadPenalid:
 
         with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
             mock_cls.read.return_value = mock_penalid
-            result = _read_penalid(tmp_path)
+            result = _read_penalid(
+                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat")
+            )
 
         assert 1 in result
         # DESVIO had NaN — must be absent.
@@ -2492,7 +3019,9 @@ class TestReadPenalid:
 
         with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
             mock_cls.read.return_value = mock_penalid
-            result = _read_penalid(tmp_path)
+            result = _read_penalid(
+                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat")
+            )
 
         assert result == {}
 
@@ -2518,9 +3047,12 @@ class TestConvertHydrosPenalid:
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
             mock_cls.read.return_value = mock_penalid
-            result = convert_hydros(tmp_path, id_map)
+            result = convert_hydros(
+                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat"), id_map
+            )
 
-        # Both plants are in REE 1 (see _make_confhd_df); all should share REE 1 penalties.
+        # Both plants are in REE 1 (see _make_confhd_df).
+        # All plants should share REE 1 penalties.
         for hydro in result["hydros"]:
             assert hydro["penalties"] is not None, (
                 f"Plant '{hydro['name']}' should have non-None penalties"
@@ -2546,11 +3078,12 @@ class TestConvertHydrosPenalid:
         from cobre_bridge.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
-        result = convert_hydros(tmp_path, id_map)
+        result = convert_hydros(_make_nw_files(tmp_path), id_map)
 
         for hydro in result["hydros"]:
             assert hydro["penalties"] is None, (
-                f"Plant '{hydro['name']}' should have penalties=None when PENALID.DAT is absent"
+                f"Plant '{hydro['name']}' should have penalties=None "
+                "when PENALID.DAT is absent"
             )
 
     @patch("cobre_bridge.converters.hydro.Ree")
@@ -2601,7 +3134,9 @@ class TestConvertHydrosPenalid:
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
             mock_cls.read.return_value = mock_penalid
-            result = convert_hydros(tmp_path, id_map)
+            result = convert_hydros(
+                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat"), id_map
+            )
 
         hydros_by_name = {h["name"]: h for h in result["hydros"]}
 
@@ -2615,3 +3150,317 @@ class TestConvertHydrosPenalid:
         assert pen_b is not None
         assert pen_b["spillage_cost"] == pytest.approx(9100.0)
         assert pen_b["outflow_violation_below_cost"] == pytest.approx(2800.0)
+
+
+# ---------------------------------------------------------------------------
+# Helper builders for water-withdrawal tests.
+# ---------------------------------------------------------------------------
+
+
+def _make_dsvagua_df(rows: list[dict]) -> pd.DataFrame:
+    """Build a synthetic dsvagua desvios DataFrame from explicit rows."""
+    return pd.DataFrame(rows)
+
+
+def _make_withdrawal_confhd_df(
+    postos: list[tuple[int, int, int]],
+) -> pd.DataFrame:
+    """Build a minimal confhd DataFrame mapping posto -> hydro code.
+
+    Parameters
+    ----------
+    postos:
+        List of ``(posto, codigo_usina, ree)`` tuples.
+    """
+    return pd.DataFrame(
+        {
+            "posto": [p[0] for p in postos],
+            "codigo_usina": [p[1] for p in postos],
+            "nome_usina": [f"USINA_{p[0]}" for p in postos],
+            "ree": [p[2] for p in postos],
+            "usina_existente": ["EX"] * len(postos),
+            "codigo_usina_jusante": [pd.NA] * len(postos),
+            "volume_inicial_percentual": [50.0] * len(postos),
+            "usina_modificada": [0] * len(postos),
+        }
+    )
+
+
+def _make_dger_mock(start_year: int, start_month: int, num_anos: int) -> MagicMock:
+    """Build a MagicMock mimicking the Dger object."""
+    mock = MagicMock()
+    mock.ano_inicio_estudo = start_year
+    mock.mes_inicio_estudo = start_month
+    mock.num_anos_estudo = num_anos
+    return mock
+
+
+class TestWaterWithdrawalConversion:
+    """Unit tests for ``convert_water_withdrawal`` in ``hydro.py``."""
+
+    def _make_id_map(self) -> NewaveIdMap:
+        """Two hydros: NEWAVE codes 10 and 20 -> Cobre IDs 0 and 1."""
+        return NewaveIdMap(
+            subsystem_ids=[1],
+            hydro_codes=[10, 20],
+            thermal_codes=[],
+        )
+
+    def test_basic_returns_correct_schema(self, tmp_path: Path) -> None:
+        """Two postos, three dates each: table has the three expected columns."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import convert_water_withdrawal
+
+        (tmp_path / "dsvagua.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+        (tmp_path / "dger.dat").touch()
+
+        rows = [
+            {
+                "codigo_usina": 1,
+                "data": datetime.datetime(2020, 1, 1),
+                "valor": -2.0,
+            },
+            {
+                "codigo_usina": 1,
+                "data": datetime.datetime(2020, 2, 1),
+                "valor": -3.0,
+            },
+            {
+                "codigo_usina": 2,
+                "data": datetime.datetime(2020, 1, 1),
+                "valor": -1.0,
+            },
+        ]
+        confhd_df = _make_withdrawal_confhd_df([(1, 10, 1), (2, 20, 1)])
+        dger_mock = _make_dger_mock(2020, 1, 5)
+
+        mock_dsvagua = MagicMock()
+        mock_dsvagua.desvios = _make_dsvagua_df(rows)
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = dger_mock.ano_inicio_estudo
+        mock_dger.mes_inicio_estudo = dger_mock.mes_inicio_estudo
+        mock_dger.num_anos_estudo = dger_mock.num_anos_estudo
+
+        with (
+            patch(
+                "inewave.newave.Dsvagua.read",
+                return_value=mock_dsvagua,
+            ),
+            patch(
+                "inewave.newave.Confhd.read",
+                return_value=mock_confhd,
+            ),
+            patch(
+                "inewave.newave.Dger.read",
+                return_value=mock_dger,
+            ),
+        ):
+            result = convert_water_withdrawal(
+                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"),
+                self._make_id_map(),
+            )
+
+        assert result is not None
+        assert result.schema.names == ["hydro_id", "stage_id", "water_withdrawal_m3s"]
+        import pyarrow as pa
+
+        assert result.schema.field("hydro_id").type == pa.int32()
+        assert result.schema.field("stage_id").type == pa.int32()
+        assert result.schema.field("water_withdrawal_m3s").type == pa.float64()
+
+    def test_sign_negation_and_stage_mapping(self, tmp_path: Path) -> None:
+        """valor=-5.0 at 2020-02 -> water_withdrawal_m3s=5.0, stage_id=1."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import convert_water_withdrawal
+
+        (tmp_path / "dsvagua.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+        (tmp_path / "dger.dat").touch()
+
+        rows = [
+            {"codigo_usina": 1, "data": datetime.datetime(2020, 2, 1), "valor": -5.0}
+        ]
+        confhd_df = _make_withdrawal_confhd_df([(1, 10, 1)])
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[10], thermal_codes=[])
+
+        mock_dsvagua = MagicMock()
+        mock_dsvagua.desvios = _make_dsvagua_df(rows)
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = 2020
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 5
+
+        with (
+            patch(
+                "inewave.newave.Dsvagua.read",
+                return_value=mock_dsvagua,
+            ),
+            patch(
+                "inewave.newave.Confhd.read",
+                return_value=mock_confhd,
+            ),
+            patch(
+                "inewave.newave.Dger.read",
+                return_value=mock_dger,
+            ),
+        ):
+            result = convert_water_withdrawal(
+                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"), id_map
+            )
+
+        assert result is not None
+        assert result.num_rows == 1
+        row = result.to_pydict()
+        assert row["hydro_id"][0] == id_map.hydro_id(10)
+        assert row["stage_id"][0] == 1
+        assert row["water_withdrawal_m3s"][0] == pytest.approx(5.0)
+
+    def test_groupby_sum_same_posto_same_date(self, tmp_path: Path) -> None:
+        """Two rows with the same posto/date are summed then negated."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import convert_water_withdrawal
+
+        (tmp_path / "dsvagua.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+        (tmp_path / "dger.dat").touch()
+
+        rows = [
+            {"codigo_usina": 1, "data": datetime.datetime(2020, 1, 1), "valor": -3.0},
+            {"codigo_usina": 1, "data": datetime.datetime(2020, 1, 1), "valor": -7.0},
+        ]
+        confhd_df = _make_withdrawal_confhd_df([(1, 10, 1)])
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[10], thermal_codes=[])
+
+        mock_dsvagua = MagicMock()
+        mock_dsvagua.desvios = _make_dsvagua_df(rows)
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = 2020
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 5
+
+        with (
+            patch(
+                "inewave.newave.Dsvagua.read",
+                return_value=mock_dsvagua,
+            ),
+            patch(
+                "inewave.newave.Confhd.read",
+                return_value=mock_confhd,
+            ),
+            patch(
+                "inewave.newave.Dger.read",
+                return_value=mock_dger,
+            ),
+        ):
+            result = convert_water_withdrawal(
+                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"), id_map
+            )
+
+        assert result is not None
+        assert result.num_rows == 1
+        row = result.to_pydict()
+        # -3.0 + -7.0 = -10.0; negated -> 10.0
+        assert row["water_withdrawal_m3s"][0] == pytest.approx(10.0)
+        assert row["stage_id"][0] == 0
+
+    def test_missing_dsvagua_file_returns_none(self, tmp_path: Path) -> None:
+        """When dsvagua.dat is absent the converter returns None without error."""
+        from cobre_bridge.converters.hydro import convert_water_withdrawal
+
+        # Do NOT create dsvagua.dat — only create the other required files.
+        (tmp_path / "confhd.dat").touch()
+        (tmp_path / "dger.dat").touch()
+
+        result = convert_water_withdrawal(
+            _make_nw_files(tmp_path, dsvagua=None), self._make_id_map()
+        )
+        assert result is None
+
+    def test_empty_desvios_returns_none(self, tmp_path: Path) -> None:
+        """When desvios is None the converter returns None."""
+        from cobre_bridge.converters.hydro import convert_water_withdrawal
+
+        (tmp_path / "dsvagua.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+        (tmp_path / "dger.dat").touch()
+
+        mock_dsvagua = MagicMock()
+        mock_dsvagua.desvios = None
+
+        with patch(
+            "inewave.newave.Dsvagua.read",
+            return_value=mock_dsvagua,
+        ):
+            result = convert_water_withdrawal(
+                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"),
+                self._make_id_map(),
+            )
+
+        assert result is None
+
+    def test_unknown_posto_skipped_with_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A posto not present in confhd.dat is skipped and a warning is logged."""
+        import datetime
+        import logging
+
+        from cobre_bridge.converters.hydro import convert_water_withdrawal
+
+        (tmp_path / "dsvagua.dat").touch()
+        (tmp_path / "confhd.dat").touch()
+        (tmp_path / "dger.dat").touch()
+
+        # posto 99 is not in confhd (which maps only posto 1 -> code 10).
+        rows = [
+            {"codigo_usina": 1, "data": datetime.datetime(2020, 1, 1), "valor": -4.0},
+            {"codigo_usina": 99, "data": datetime.datetime(2020, 1, 1), "valor": -2.0},
+        ]
+        confhd_df = _make_withdrawal_confhd_df([(1, 10, 1)])
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[10], thermal_codes=[])
+
+        mock_dsvagua = MagicMock()
+        mock_dsvagua.desvios = _make_dsvagua_df(rows)
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = 2020
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 5
+
+        with (
+            patch(
+                "inewave.newave.Dsvagua.read",
+                return_value=mock_dsvagua,
+            ),
+            patch(
+                "inewave.newave.Confhd.read",
+                return_value=mock_confhd,
+            ),
+            patch(
+                "inewave.newave.Dger.read",
+                return_value=mock_dger,
+            ),
+            caplog.at_level(logging.WARNING, logger="cobre_bridge.converters.hydro"),
+        ):
+            result = convert_water_withdrawal(
+                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"), id_map
+            )
+
+        # The known posto 1 produces one valid row; posto 99 is skipped.
+        assert result is not None
+        assert result.num_rows == 1
+        row = result.to_pydict()
+        assert row["water_withdrawal_m3s"][0] == pytest.approx(4.0)
+        # A warning must have been logged for the unknown posto.
+        assert any("99" in record.message for record in caplog.records)

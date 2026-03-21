@@ -1,6 +1,6 @@
 # cobre-bridge
 
-Convert NEWAVE case data to [Cobre](https://github.com/cobre-rs/cobre) input format.
+Convert power system data formats to [Cobre](https://github.com/cobre-rs/cobre) input format.
 
 ## Installation
 

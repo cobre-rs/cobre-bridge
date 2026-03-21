@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from inewave.newave import Clast, Conft, Term
 
 from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 
@@ -17,36 +17,23 @@ _SCHEMA_URL = (
 )
 
 
-def convert_thermals(newave_dir: Path, id_map: NewaveIdMap) -> dict:
+def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE thermal plant data to a Cobre ``thermals.json`` dict.
 
-    Reads ``conft.dat``, ``clast.dat``, and ``term.dat`` from
-    *newave_dir*.  Returns a dict with a ``"thermals"`` key containing a
-    list of thermal entries sorted by Cobre 0-based ID.
+    Reads ``conft.dat``, ``clast.dat``, and ``term.dat`` from *nw_files*.
+    Returns a dict with a ``"thermals"`` key containing a list of thermal
+    entries sorted by Cobre 0-based ID.
 
     Parameters
     ----------
-    newave_dir:
-        Path to the NEWAVE case directory containing the required files.
+    nw_files:
+        Resolved NEWAVE file paths for the case.
     id_map:
         Pre-built ID mapping for bus cross-references.
-
-    Raises
-    ------
-    FileNotFoundError
-        If ``conft.dat``, ``clast.dat``, or ``term.dat`` is absent.
     """
-    conft_path = newave_dir / "conft.dat"
-    clast_path = newave_dir / "clast.dat"
-    term_path = newave_dir / "term.dat"
-
-    for p in (conft_path, clast_path, term_path):
-        if not p.exists():
-            raise FileNotFoundError(f"Required NEWAVE file not found: {p}")
-
-    conft = Conft.read(str(conft_path))
-    clast = Clast.read(str(clast_path))
-    term = Term.read(str(term_path))
+    conft = Conft.read(str(nw_files.conft))
+    clast = Clast.read(str(nw_files.clast))
+    term = Term.read(str(nw_files.term))
 
     conft_df = conft.usinas
     clast_df = clast.usinas

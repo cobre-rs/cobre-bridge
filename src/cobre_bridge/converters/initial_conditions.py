@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from inewave.newave import Confhd, Hidr
 
 from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 
@@ -17,10 +17,10 @@ _SCHEMA_URL = (
 )
 
 
-def convert_initial_conditions(newave_dir: Path, id_map: NewaveIdMap) -> dict:
+def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE initial reservoir storage to a Cobre initial_conditions dict.
 
-    Reads ``hidr.dat`` and ``confhd.dat`` from *newave_dir*.  Initial
+    Reads ``hidr.dat`` and ``confhd.dat`` from *nw_files*.  Initial
     storage is derived from ``Confhd.usinas.volume_inicial_percentual``
     (a percentage of ``volume_maximo`` from Hidr).
 
@@ -28,34 +28,28 @@ def convert_initial_conditions(newave_dir: Path, id_map: NewaveIdMap) -> dict:
 
     Parameters
     ----------
-    newave_dir:
-        Path to the NEWAVE case directory.
+    nw_files:
+        Resolved NEWAVE file paths for the case.
     id_map:
         Pre-built ID mapping for hydro IDs.
 
     Raises
     ------
-    FileNotFoundError
-        If ``hidr.dat`` or ``confhd.dat`` is absent.
     ValueError
         If a hydro in ``confhd.dat`` references a code absent in
         ``hidr.dat``.
     """
-    hidr_path = newave_dir / "hidr.dat"
-    confhd_path = newave_dir / "confhd.dat"
-
-    for p in (hidr_path, confhd_path):
-        if not p.exists():
-            raise FileNotFoundError(f"Required NEWAVE file not found: {p}")
-
-    hidr = Hidr.read(str(hidr_path))
-    confhd = Confhd.read(str(confhd_path))
+    hidr = Hidr.read(str(nw_files.hidr))
+    confhd = Confhd.read(str(nw_files.confhd))
 
     cadastro = hidr.cadastro
     confhd_df = confhd.usinas
 
-    # Filter to existing plants only — same criterion as hydro.py.
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    # Filter to existing, non-fictitious plants — same criterion as hydro.py.
+    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    existing = all_existing[
+        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
+    ]
 
     storage: list[dict] = []
     for _, row in existing.iterrows():
@@ -69,6 +63,7 @@ def convert_initial_conditions(newave_dir: Path, id_map: NewaveIdMap) -> dict:
             )
 
         hreg = cadastro.loc[newave_code]
+        vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
         pct = float(row["volume_inicial_percentual"])
@@ -82,7 +77,8 @@ def convert_initial_conditions(newave_dir: Path, id_map: NewaveIdMap) -> dict:
             )
             pct = max(0.0, min(100.0, pct))
 
-        value_hm3 = (pct / 100.0) * vol_max
+        # Percentage is of useful volume (max - min), not of max.
+        value_hm3 = (pct / 100.0) * (vol_max - vol_min) + vol_min
 
         storage.append(
             {

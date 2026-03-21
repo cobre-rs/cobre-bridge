@@ -9,11 +9,11 @@ from __future__ import annotations
 import calendar
 import logging
 from datetime import date
-from pathlib import Path
 
 from inewave.newave import Dger, Patamar
 
 from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave_files import NewaveFiles
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +55,16 @@ def _month_hours(year: int, month: int) -> float:
     return float(days_in_month * 24)
 
 
-def convert_stages(newave_dir: Path, id_map: NewaveIdMap) -> dict:  # noqa: ARG001
+def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa: ARG001
     """Convert NEWAVE temporal configuration to a Cobre ``stages.json`` dict.
 
-    Reads ``dger.dat`` and ``patamar.dat`` from *newave_dir* and produces a
+    Reads ``dger.dat`` and ``patamar.dat`` from *nw_files* and produces a
     dict that conforms to ``stages.schema.json``.
 
     Parameters
     ----------
-    newave_dir:
-        Path to the directory containing NEWAVE input files.
+    nw_files:
+        Resolved NEWAVE file paths for the case.
     id_map:
         Entity ID map (not used for temporal conversion, accepted for API
         consistency with the other converters).
@@ -76,21 +76,11 @@ def convert_stages(newave_dir: Path, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
 
     Raises
     ------
-    FileNotFoundError
-        If ``dger.dat`` or ``patamar.dat`` are absent.
     ValueError
         If ``num_anos_estudo`` is 0 or None.
     """
-    dger_path = newave_dir / "dger.dat"
-    patamar_path = newave_dir / "patamar.dat"
-
-    if not dger_path.exists():
-        raise FileNotFoundError(f"dger.dat not found in {newave_dir}")
-    if not patamar_path.exists():
-        raise FileNotFoundError(f"patamar.dat not found in {newave_dir}")
-
-    dger = Dger.read(dger_path)
-    patamar = Patamar.read(patamar_path)
+    dger = Dger.read(nw_files.dger)
+    patamar = Patamar.read(nw_files.patamar)
 
     num_anos = dger.num_anos_estudo
     if not num_anos:
@@ -127,9 +117,16 @@ def convert_stages(newave_dir: Path, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
     stages: list[dict] = []
     transitions: list[dict] = []
 
+    num_anos_pos = dger.num_anos_pos_estudo or 0
+    # Study runs from mes_inicio to December of (ano_inicio + num_anos - 1).
+    study_months = (13 - start_month) + (num_anos - 1) * 12
+    # Post-study adds num_anos_pos full calendar years after that.
+    pos_months = num_anos_pos * 12
+    total_months = study_months + pos_months
+
     year = start_year
     month = start_month
-    for stage_id in range(num_anos * 12):
+    for stage_id in range(total_months):
         start_date = _month_start_date(year, month)
         end_date = _month_end_date(year, month)
         total_hours = _month_hours(year, month)
@@ -138,7 +135,6 @@ def convert_stages(newave_dir: Path, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
         for pat_idx in range(1, num_patamares + 1):
             fraction = pat_lookup.get((month, pat_idx))
             if fraction is None:
-                # Fall back: distribute evenly across blocks.
                 fraction = 1.0 / num_patamares
                 logger.warning(
                     "No patamar duration for calendar month %d, patamar %d; "
@@ -167,8 +163,7 @@ def convert_stages(newave_dir: Path, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
             }
         )
 
-        # Linear transition from this stage to the next.
-        if stage_id < num_anos * 12 - 1:
+        if stage_id < total_months - 1:
             transitions.append(
                 {
                     "source_id": stage_id,
@@ -177,7 +172,6 @@ def convert_stages(newave_dir: Path, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
                 }
             )
 
-        # Advance calendar month.
         month += 1
         if month > 12:
             month = 1
@@ -235,32 +229,23 @@ def convert_stages(newave_dir: Path, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
     return result
 
 
-def convert_config(newave_dir: Path) -> dict:
+def convert_config(nw_files: NewaveFiles) -> dict:
     """Convert NEWAVE training parameters to a Cobre ``config.json`` dict.
 
-    Reads ``dger.dat`` from *newave_dir* and produces a dict that conforms
+    Reads ``dger.dat`` from *nw_files* and produces a dict that conforms
     to ``config.schema.json``.
 
     Parameters
     ----------
-    newave_dir:
-        Path to the directory containing NEWAVE input files.
+    nw_files:
+        Resolved NEWAVE file paths for the case.
 
     Returns
     -------
     dict
         JSON-serializable dict conforming to ``config.schema.json``.
-
-    Raises
-    ------
-    FileNotFoundError
-        If ``dger.dat`` is absent.
     """
-    dger_path = newave_dir / "dger.dat"
-    if not dger_path.exists():
-        raise FileNotFoundError(f"dger.dat not found in {newave_dir}")
-
-    dger = Dger.read(dger_path)
+    dger = Dger.read(nw_files.dger)
 
     forward_passes: int = dger.num_forwards or 1
     max_iterations: int = dger.num_max_iteracoes or 200
@@ -276,6 +261,12 @@ def convert_config(newave_dir: Path) -> dict:
             "stopping_rules": [
                 {"type": "iteration_limit", "limit": max_iterations},
             ],
+        },
+        "modeling": {
+            "inflow_non_negativity": {
+                "method": "penalty",
+                "penalty_cost": 1000.0,
+            },
         },
         "simulation": {
             "enabled": True,

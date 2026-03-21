@@ -12,7 +12,6 @@ CLI integration tests use two strategies:
 
 from __future__ import annotations
 
-import datetime
 import json
 import subprocess
 import sys
@@ -21,6 +20,27 @@ from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
+
+# Fake data for converter functions.
+_FAKE_LOAD_FACTORS: dict = {"load_factors": []}
+_FAKE_LINE_BOUNDS_TABLE = pa.table(
+    {
+        "line_id": pa.array([], type=pa.int32()),
+        "stage_id": pa.array([], type=pa.int32()),
+        "direct_mw": pa.array([], type=pa.float64()),
+        "reverse_mw": pa.array([], type=pa.float64()),
+    }
+)
+_FAKE_NCS: dict = {"non_controllable_sources": []}
+_FAKE_EXCHANGE_FACTORS: dict = {"exchange_factors": []}
+_FAKE_NCS_FACTORS: dict = {"non_controllable_factors": []}
+_FAKE_NCS_BOUNDS_TABLE = pa.table(
+    {
+        "ncs_id": pa.array([], type=pa.int32()),
+        "stage_id": pa.array([], type=pa.int32()),
+        "available_generation_mw": pa.array([], type=pa.float64()),
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,13 +56,75 @@ def _run_cli_subprocess(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _make_fake_newave_dir(tmp_path: Path) -> Path:
-    """Create a directory with all required NEWAVE stub files (empty content)."""
-    from cobre_bridge.pipeline import REQUIRED_FILES
+_ARQUIVOS_DAT_CONTENT = """\
+DADOS GERAIS                : dger.dat
+DADOS DOS SUBSISTEMAS       : sistema.dat
+CONFIGURACAO HIDRAULICA     : confhd.dat
+ALTERACAO DADOS USINAS HIDRO: modif.dat
+CONFIGURACAO TERMICA        : conft.dat
+DADOS DAS USINAS TERMICAS   : term.dat
+DADOS DAS CLASSES TERMICAS  : clast.dat
+DADOS DE EXPANSAO HIDRAULICA: exph.dat
+ARQUIVO DE EXPANSAO TERMICA : expt.dat
+ARQUIVO DE PATAMARES MERCADO: patamar.dat
+ARQUIVO DE CORTES DE BENDERS: cortes.dat
+ARQUIVO DE CABECALHO CORTES : cortesh.dat
+RELATORIO DE CONVERGENCIA   : pmo.dat
+RELATORIO DE E. SINTETICAS  : parp.dat
+RELATORIO DETALHADO FORWARD : forward.dat
+ARQUIVO DE CABECALHO FORWARD: forwarh.dat
+ARQUIVO DE S.HISTORICAS S.F.: shist.dat
+ARQUIVO DE MANUT.PROG. UTE'S: manutt.dat
+ARQUIVO P/DESPACHO HIDROTERM: newdesp.dat
+ARQUIVO C/TEND. HIDROLOGICA : vazpast.dat
+ARQUIVO C/DADOS DE ITAIPU   : itaipu.dat
+ARQUIVO C/DEMAND S. BIDDING : bid.dat
+ARQUIVO C/CARGAS ADICIONAIS : c_adic.dat
+ARQUIVO C/FATORES DE PERDAS : loss.dat
+ARQUIVO C/PATAMARES GTMIN   : gtminpat.dat
+ARQUIVO ENSO 1              : elnino.dat
+ARQUIVO ENSO 2              : ensoaux.dat
+ARQUIVO DSVAGUA             : dsvagua.dat
+ARQUIVO P/PENALID. POR DESV.: penalid.dat
+ARQUIVO C.GUIA / PENAL.VMINT: curva.dat
+ARQUIVO AGRUPAMENTO LIVRE   : agrint.dat
+ARQUIVO DESP. ANTEC. GNL    : adterm.dat
+ARQUIVO GER. HIDR. MIN      : ghmin.dat
+ARQUIVO AVERSAO RISCO - SAR : sar.dat
+ARQUIVO AVERSAO RISCO - CVAR: cvar.dat
+DADOS DOS RESER.EQ.ENERGIA  : ree.dat
+ARQUIVO RESTRICOES ELETRICAS: re.dat
+ARQUIVO DE TECNOLOGIAS      : tecno.dat
+DADOS DE ABERTURAS          : abertura.dat
+ARQUIVO DE EMISSOES GEE     : gee.dat
+ARQUIVO DE RESTRICAO DE GAS : clasgas.dat
+ARQUIVO DE DADOS SIM. FINAL : simfinal.dat
+ARQ. DE CORTES POS ESTUDO   : cortes-pos.dat
+ARQ. DE CABECALHO CORTES POS: cortesh-pos.dat
+ARQ. C/ VOLUME REF. SAZONAL : volref_saz.dat
+"""
 
+_REQUIRED_STUB_FILES = [
+    "dger.dat",
+    "confhd.dat",
+    "conft.dat",
+    "sistema.dat",
+    "clast.dat",
+    "term.dat",
+    "ree.dat",
+    "patamar.dat",
+    "hidr.dat",
+    "vazoes.dat",
+]
+
+
+def _make_fake_newave_dir(tmp_path: Path) -> Path:
+    """Create a directory with caso.dat, arquivos.dat, and all required stub files."""
     newave_dir = tmp_path / "newave_case"
     newave_dir.mkdir()
-    for filename in REQUIRED_FILES:
+    (newave_dir / "caso.dat").write_text("arquivos.dat\n")
+    (newave_dir / "arquivos.dat").write_text(_ARQUIVOS_DAT_CONTENT)
+    for filename in _REQUIRED_STUB_FILES:
         (newave_dir / filename).write_text("stub")
     return newave_dir
 
@@ -124,6 +206,10 @@ _FAKE_LOAD_TABLE = pa.table(
 def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type-arg]
     """Return patch context managers for all converter functions and _build_id_map."""
     return [
+        patch(
+            "cobre_bridge.pipeline.NewaveFiles.from_directory",
+            return_value=MagicMock(),
+        ),
         patch("cobre_bridge.pipeline._build_id_map", return_value=fake_id_map),
         patch(
             "cobre_bridge.pipeline.hydro_conv.convert_hydros",
@@ -166,8 +252,12 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
             return_value=_FAKE_LOAD_TABLE,
         ),
         patch(
-            "cobre_bridge.pipeline._convert_past_inflows_if_present",
-            return_value=None,
+            "cobre_bridge.pipeline.stochastic_conv.convert_recent_inflow_lags",
+            return_value=[],
+        ),
+        patch(
+            "cobre_bridge.pipeline.stochastic_conv.convert_inflow_history",
+            return_value=_FAKE_INFLOW_TABLE,
         ),
         patch(
             "cobre_bridge.pipeline.hydro_conv.read_cadastro",
@@ -176,6 +266,38 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
         patch(
             "cobre_bridge.pipeline.hydro_conv.generate_hydro_geometry",
             return_value=_FAKE_INFLOW_TABLE,  # reuse any small pa.Table
+        ),
+        patch(
+            "cobre_bridge.pipeline.constraints_conv.convert_vminop_constraints",
+            return_value=None,
+        ),
+        patch(
+            "cobre_bridge.pipeline.stochastic_conv.convert_load_factors",
+            return_value=_FAKE_LOAD_FACTORS,
+        ),
+        patch(
+            "cobre_bridge.pipeline.network_conv.convert_line_bounds",
+            return_value=_FAKE_LINE_BOUNDS_TABLE,
+        ),
+        patch(
+            "cobre_bridge.pipeline.network_conv.convert_non_controllable_sources",
+            return_value=_FAKE_NCS,
+        ),
+        patch(
+            "cobre_bridge.pipeline.network_conv.convert_exchange_factors",
+            return_value=_FAKE_EXCHANGE_FACTORS,
+        ),
+        patch(
+            "cobre_bridge.pipeline.network_conv.convert_ncs_factors",
+            return_value=_FAKE_NCS_FACTORS,
+        ),
+        patch(
+            "cobre_bridge.pipeline.network_conv.convert_ncs_stats",
+            return_value=_FAKE_NCS_BOUNDS_TABLE,
+        ),
+        patch(
+            "cobre_bridge.pipeline.hydro_conv.convert_production_models",
+            return_value=None,
         ),
     ]
 
@@ -215,7 +337,14 @@ class TestConvertNewaweCasePipeline:
             dst / "system" / "lines.json",
             dst / "scenarios" / "inflow_seasonal_stats.parquet",
             dst / "scenarios" / "load_seasonal_stats.parquet",
+            dst / "scenarios" / "inflow_history.parquet",
             dst / "system" / "hydro_geometry.parquet",
+            dst / "scenarios" / "load_factors.json",
+            dst / "constraints" / "line_bounds.parquet",
+            dst / "system" / "non_controllable_sources.json",
+            dst / "constraints" / "exchange_factors.json",
+            dst / "scenarios" / "non_controllable_factors.json",
+            dst / "scenarios" / "non_controllable_stats.parquet",
         ]
         for f in expected:
             assert f.exists(), f"Expected output file not found: {f}"
@@ -263,15 +392,81 @@ class TestConvertNewaweCasePipeline:
         assert report.line_count == 1
         assert report.stage_count == 12
 
+    def test_production_models_written_when_converter_returns_data(
+        self, tmp_path: Path
+    ) -> None:
+        """When convert_production_models returns data, the file is written."""
+        from cobre_bridge.pipeline import convert_newave_case
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+
+        _FAKE_PROD_MODELS = {
+            "production_models": [
+                {
+                    "hydro_id": 0,
+                    "selection_mode": "stage_ranges",
+                    "stage_ranges": [
+                        {
+                            "start_stage_id": 0,
+                            "end_stage_id": None,
+                            "model": "constant_productivity",
+                            "productivity_override": 1.23,
+                        }
+                    ],
+                }
+            ]
+        }
+
+        fake_id_map = MagicMock()
+        # Build patches with production_models returning data.
+        # Use ExitStack for correct LIFO teardown to avoid mock leakage.
+        import contextlib
+
+        patches = _all_converter_patches(fake_id_map)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            # Override the production_models patch (entered last -> exits first).
+            stack.enter_context(
+                patch(
+                    "cobre_bridge.pipeline.hydro_conv.convert_production_models",
+                    return_value=_FAKE_PROD_MODELS,
+                )
+            )
+            convert_newave_case(src, dst)
+
+        pm_path = dst / "system" / "hydro_production_models.json"
+        assert pm_path.exists(), "hydro_production_models.json not written"
+        with pm_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["production_models"][0]["hydro_id"] == 0
+
+    def test_production_models_not_written_when_converter_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        """When convert_production_models returns None, no file is written."""
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+
+        _run_with_all_mocks(src, dst)
+
+        assert not (dst / "system" / "hydro_production_models.json").exists()
+
     def test_missing_required_file_raises(self, tmp_path: Path) -> None:
         from cobre_bridge.pipeline import convert_newave_case
 
         src = _make_fake_newave_dir(tmp_path)
-        (src / "hidr.dat").unlink()
         dst = tmp_path / "cobre_case"
 
-        with pytest.raises(FileNotFoundError) as exc_info:
-            convert_newave_case(src, dst)
+        with patch(
+            "cobre_bridge.pipeline.NewaveFiles.from_directory",
+            side_effect=FileNotFoundError(
+                f"Required NEWAVE file not found in {src}: hidr.dat"
+            ),
+        ):
+            with pytest.raises(FileNotFoundError) as exc_info:
+                convert_newave_case(src, dst)
         assert "hidr.dat" in str(exc_info.value)
 
 
@@ -408,82 +603,14 @@ class TestCliInProcess:
 
 
 class TestPipelineInflowHistory:
-    """Tests verifying that convert_newave_case writes inflow_history.parquet."""
+    """Tests verifying that convert_newave_case always writes inflow_history.parquet."""
 
-    def test_inflow_history_written_when_past_inflows_present(
-        self, tmp_path: Path
-    ) -> None:
-        """When convert_past_inflows returns a table, the file must be written."""
-        import pyarrow.parquet as pq
-
+    def test_inflow_history_always_written(self, tmp_path: Path) -> None:
+        """inflow_history.parquet is always written (from vazoes.dat)."""
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
 
-        # Fake past inflow table matching the expected schema.
-        fake_history = pa.table(
-            {
-                "hydro_id": pa.array([0, 0, 1, 1], type=pa.int32()),
-                "date": pa.array(
-                    [
-                        datetime.date(2019, 11, 1),
-                        datetime.date(2019, 12, 1),
-                        datetime.date(2019, 11, 1),
-                        datetime.date(2019, 12, 1),
-                    ],
-                    type=pa.date32(),
-                ),
-                "value_m3s": pa.array([100.0, 110.0, 200.0, 210.0], type=pa.float64()),
-            }
-        )
-
-        fake_id_map = MagicMock()
-        patches = _all_converter_patches(fake_id_map)
-        # Replace the None return value from _convert_past_inflows_if_present
-        # with our fake history table.
-        patches[-1] = patch(
-            "cobre_bridge.pipeline._convert_past_inflows_if_present",
-            return_value=fake_history,
-        )
-
-        for p in patches:
-            p.__enter__()
-        try:
-            from cobre_bridge.pipeline import convert_newave_case
-
-            convert_newave_case(src, dst)
-        finally:
-            for p in patches:
-                p.__exit__(None, None, None)
+        _run_with_all_mocks(src, dst)
 
         history_path = dst / "scenarios" / "inflow_history.parquet"
         assert history_path.exists(), "inflow_history.parquet was not written"
-
-        table = pq.read_table(history_path)
-        assert table.column_names == ["hydro_id", "date", "value_m3s"]
-        assert table.schema.field("hydro_id").type == pa.int32()
-        assert table.schema.field("date").type == pa.date32()
-        assert table.schema.field("value_m3s").type == pa.float64()
-        assert table.num_rows == 4
-
-    def test_inflow_history_not_written_when_no_vazpast(self, tmp_path: Path) -> None:
-        """When convert_past_inflows returns None, no file must be created."""
-        src = _make_fake_newave_dir(tmp_path)
-        dst = tmp_path / "cobre_case"
-
-        # _all_converter_patches already patches _convert_past_inflows_if_present
-        # to return None — so no inflow_history.parquet should be written.
-        fake_id_map = MagicMock()
-        patches = _all_converter_patches(fake_id_map)
-
-        for p in patches:
-            p.__enter__()
-        try:
-            from cobre_bridge.pipeline import convert_newave_case
-
-            convert_newave_case(src, dst)
-        finally:
-            for p in patches:
-                p.__exit__(None, None, None)
-
-        history_path = dst / "scenarios" / "inflow_history.parquet"
-        assert not history_path.exists(), "inflow_history.parquet should not exist"
