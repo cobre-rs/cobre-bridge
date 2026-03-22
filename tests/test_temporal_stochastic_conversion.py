@@ -677,13 +677,18 @@ def _make_confhd_mock(hydro_to_posto: dict[int, int]) -> MagicMock:
 
 
 def _make_dger_inflow_mock(
-    mes_inicio_estudo: int = 1, num_anos_estudo: int = 10
+    mes_inicio_estudo: int = 1,
+    num_anos_estudo: int = 10,
+    ano_inicio_estudo: int = 1941,
+    ano_inicial_historico: int = 1931,
 ) -> MagicMock:
     """Build a minimal Dger mock for inflow stats tests."""
     mock = MagicMock()
     mock.mes_inicio_estudo = mes_inicio_estudo
     mock.num_anos_estudo = num_anos_estudo
     mock.num_anos_pos_estudo = 0
+    mock.ano_inicio_estudo = ano_inicio_estudo
+    mock.ano_inicial_historico = ano_inicial_historico
     return mock
 
 

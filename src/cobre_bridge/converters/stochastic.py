@@ -182,6 +182,14 @@ def convert_inflow_history(
 
     dger = Dger.read(nw_files.dger)
     hist_start_year: int = dger.ano_inicial_historico
+    study_start_year: int = dger.ano_inicio_estudo
+    study_start_month: int = dger.mes_inicio_estudo
+
+    # History is truncated at the month BEFORE the study start.
+    # e.g., study starts March 2026 → history ends February 2026.
+    n_total_rows = len(df_vazoes)
+    cutoff_months = (study_start_year - hist_start_year) * 12 + (study_start_month - 1)
+    n_rows = min(cutoff_months, n_total_rows)
 
     confhd_obj = Confhd.read(nw_files.confhd)
     confhd_df = confhd_obj.usinas
@@ -195,8 +203,7 @@ def convert_inflow_history(
         except KeyError:
             pass
 
-    # Read natural inflow arrays by posto.
-    n_rows = len(df_vazoes)
+    # Read natural inflow arrays by posto (truncated to history window).
     natural_by_posto: dict[int, np.ndarray] = {}
     for col in df_vazoes.columns:
         if col == "data":
@@ -206,7 +213,7 @@ def convert_inflow_history(
         except (ValueError, TypeError):
             continue
         if posto in posto_to_hydro:
-            natural_by_posto[posto] = df_vazoes[col].to_numpy(dtype=float)
+            natural_by_posto[posto] = df_vazoes[col].to_numpy(dtype=float)[:n_rows]
 
     # Convert natural → incremental: subtract upstream postos' series.
     upstream_map = _build_upstream_postos(confhd_df)
@@ -281,9 +288,16 @@ def convert_inflow_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table
 
     dger = Dger.read(nw_files.dger)
 
-    n_rows = len(df_vazoes)
+    # Truncate to months before the study start (same window as inflow_history).
+    hist_start_year: int = dger.ano_inicial_historico
+    study_start_year: int = dger.ano_inicio_estudo
+    study_start_month: int = dger.mes_inicio_estudo
+    n_total_rows = len(df_vazoes)
+    cutoff_months = (study_start_year - hist_start_year) * 12 + (study_start_month - 1)
+    n_rows = min(cutoff_months, n_total_rows)
+
     if "data" in df_vazoes.columns:
-        cal_months: np.ndarray = df_vazoes["data"].dt.month.to_numpy()
+        cal_months: np.ndarray = df_vazoes["data"].dt.month.to_numpy()[:n_rows]
     else:
         cal_months = np.array([(i % 12) + 1 for i in range(n_rows)])
 
@@ -302,7 +316,7 @@ def convert_inflow_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table
             posto = int(col)
         except (ValueError, TypeError):
             continue
-        natural_by_posto[posto] = df_vazoes[col].to_numpy(dtype=float)
+        natural_by_posto[posto] = df_vazoes[col].to_numpy(dtype=float)[:n_rows]
 
     # Convert natural → incremental.
     upstream_map = _build_upstream_postos(confhd_df)
