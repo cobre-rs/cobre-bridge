@@ -1,15 +1,18 @@
 """Stochastic data converter: maps NEWAVE inflow and load data to Cobre Parquet.
 
 Converts ``vazoes.dat`` (historical inflow series), ``vazpast.dat`` (recent
-past inflows), ``sistema.dat`` (load demand), and ``patamar.dat`` (load block
-factors) into PyArrow Tables and dicts that are written as Parquet files and
-JSON files in the ``scenarios/`` directory of a Cobre case.
+past inflows), ``sistema.dat`` (load demand), ``patamar.dat`` (load block
+factors), and ``c_adic.dat`` (additional generation added to load) into
+PyArrow Tables and dicts that are written as Parquet files and JSON files in
+the ``scenarios/`` directory of a Cobre case.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -502,16 +505,99 @@ def _derive_study_stage_months(dger: object) -> list[int]:
     return [((start_month - 1 + i) % 12) + 1 for i in range(total_stages)]
 
 
+def _parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
+    """Parse a C_ADIC.DAT file into a lookup of added load values.
+
+    C_ADIC.DAT contains must-take energy (in average MW) that NEWAVE adds to
+    the bus load.  All entries for the same (subsystem_code, year, cal_month)
+    are summed so the caller receives a single additive contribution.
+
+    The file format uses a fixed-width column layout:
+    - Column 0-3: year (4 digits) or "POS" for post-study template
+    - Columns 7, 15, 23, 31, 39, 47, 55, 63, 71, 79, 87, 95: monthly values
+      (8-char fields, one per calendar month Jan-Dec)
+    - A new block begins with a header line starting with spaces then an
+      integer subsystem code.
+    - The file ends with a line containing "999".
+
+    Parameters
+    ----------
+    path:
+        Path to the C_ADIC.DAT file.
+
+    Returns
+    -------
+    dict[tuple[int, int, int], float]
+        Mapping of (subsystem_code, year, cal_month_1_based) -> total_mw.
+        For post-study rows the sentinel year ``9999`` is used, consistent
+        with the convention in ``convert_load_stats``.
+    """
+    # Fixed column start positions for the 12 monthly values (Jan=0, Dec=11).
+    _MONTH_COLS = [7, 15, 23, 31, 39, 47, 55, 63, 71, 79, 87, 95]
+
+    result: dict[tuple[int, int, int], float] = {}
+
+    with path.open(encoding="latin-1") as f:
+        lines = [line.rstrip("\r\n") for line in f]
+
+    current_sub: int | None = None
+    # Skip line 0 (XXX format marker) and line 1 (month-name header).
+    i = 2
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # File terminator.
+        if stripped == "999":
+            break
+
+        # Block header: leading whitespace followed by an integer subsystem code.
+        m_hdr = re.match(r"^\s+(\d+)\s+", line)
+        if m_hdr:
+            current_sub = int(m_hdr.group(1))
+            i += 1
+            continue
+
+        if current_sub is None:
+            i += 1
+            continue
+
+        # Determine year token and parse monthly values.
+        is_pos = stripped.startswith("POS")
+        m_yr = re.match(r"^(\d{4})\s", line)
+        if not is_pos and not m_yr:
+            i += 1
+            continue
+
+        year_key = 9999 if is_pos else int(m_yr.group(1))  # type: ignore[union-attr]
+
+        for cal_month, col_start in enumerate(_MONTH_COLS, start=1):
+            cell = line[col_start : col_start + 8].strip()
+            if not cell:
+                continue
+            try:
+                value = float(cell)
+            except ValueError:
+                continue
+            key = (current_sub, year_key, cal_month)
+            result[key] = result.get(key, 0.0) + value
+
+        i += 1
+
+    return result
+
+
 def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
     """Convert NEWAVE subsystem load data to Cobre load seasonal statistics.
 
     Reads ``sistema.dat`` and converts the ``mercado_energia`` DataFrame
-    (load demand per subsystem per month) into a PyArrow Table.  NEWAVE
-    load is deterministic; all ``std_mw`` values are 0.0.
+    (load demand per subsystem per month) into a PyArrow Table.  When a
+    ``c_adic.dat`` file is present its must-take energy values are added to
+    the load on a per-(subsystem, stage) basis.
 
     The ``mercado_energia`` values from inewave are in average MW (the
     inewave library already converts from MWmonth to average MW), so no
-    unit conversion is applied.
+    unit conversion is applied.  C_ADIC values are likewise in average MW.
 
     Parameters
     ----------
@@ -539,20 +625,40 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
     study_months = (13 - start_month) + (num_anos - 1) * 12
     total_stages = study_months + num_anos_pos * 12
 
+    # Load optional C_ADIC additions: {(sub_code, year_or_9999, cal_month) -> mw}.
+    cadical_lookup: dict[tuple[int, int, int], float] = {}
+    if nw_files.c_adic is not None:
+        try:
+            cadical_lookup = _parse_cadical(nw_files.c_adic)
+            logger.debug(
+                "Loaded %d C_ADIC entries from %s",
+                len(cadical_lookup),
+                nw_files.c_adic,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "c_adic.dat could not be parsed; no additional load will be added.",
+                exc_info=True,
+            )
+
     rows_bus_id: list[int] = []
     rows_stage_id: list[int] = []
     rows_mean: list[float] = []
     rows_std: list[float] = []
 
+    subsystem_codes_processed: set[int] = set()
+
     for subsystem_code, group in df_load.groupby("codigo_submercado", sort=True):
+        sub_int = int(subsystem_code)
         try:
-            bus_id = id_map.bus_id(int(subsystem_code))
+            bus_id = id_map.bus_id(sub_int)
         except KeyError:
             logger.warning(
                 "Subsystem code %d from mercado_energia not in id_map; skipping",
                 subsystem_code,
             )
             continue
+        subsystem_codes_processed.add(sub_int)
 
         # Build a month-keyed lookup: study-period months by (year, month),
         # post-study months (year=9999) by calendar month for seasonal repeat.
@@ -571,19 +677,17 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
 
         # Emit one row per stage.
         y, m = start_year, start_month
-        study_end_year = start_year + num_anos
-        study_end_month = start_month  # first month after study
         for stage_id in range(total_stages):
-            is_post_study = (y > study_end_year) or (
-                y == study_end_year and m >= study_end_month
-            )
+            is_post_study = stage_id >= study_months
             if is_post_study:
                 val = pos_values.get(m)
                 if val is None:
-                    # Fall back to same calendar month from last study year
-                    val = study_values.get((study_end_year - 1, m), 0.0)
+                    val = study_values.get((start_year + num_anos - 1, m), 0.0)
+                # C_ADIC post-study: use sentinel year 9999
+                val = (val or 0.0) + cadical_lookup.get((sub_int, 9999, m), 0.0)
             else:
                 val = study_values.get((y, m), 0.0)
+                val += cadical_lookup.get((sub_int, y, m), 0.0)
 
             rows_bus_id.append(bus_id)
             rows_stage_id.append(stage_id)

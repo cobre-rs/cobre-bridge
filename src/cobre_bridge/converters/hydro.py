@@ -533,7 +533,6 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             )
         bus_id = id_map.bus_id(subsystem_code)
 
-        # Evaporation coefficients — 12 monthly values in mm/month.
         evap_coeffs = [float(hreg[f"evaporacao_{m}"]) for m in _EVAP_MONTHS]
         has_evaporation = any(v != 0.0 for v in evap_coeffs)
 
@@ -939,10 +938,6 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
-        if vol_min == vol_max:
-            # Run-of-river: no reservoir geometry to generate.
-            continue
-
         # Polynomial coefficients for volume -> height (hm3 -> m).
         vc_coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
         if all(c == 0.0 for c in vc_coeffs):
@@ -966,6 +961,22 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
                 + coeffs[4] * x**4
             )
 
+        cobre_id = id_map.hydro_id(newave_code)
+
+        if vol_min == vol_max:
+            # Run-of-river or fixed-level: emit a single geometry point
+            # so evaporation can still use the surface area.
+            v = np.array([vol_min])
+            h = _eval_poly(vc_coeffs, v)
+            h = np.maximum(h, 0.0)
+            a = _eval_poly(ca_coeffs, h)
+            a = np.maximum(a, 0.0)
+            hydro_ids.append(cobre_id)
+            volumes.append(float(v[0]))
+            heights.append(float(h[0]))
+            areas.append(float(a[0]))
+            continue
+
         vol_grid: np.ndarray = np.linspace(vol_min, vol_max, _N_POINTS)
         height_arr: np.ndarray = _eval_poly(vc_coeffs, vol_grid)
         height_arr = np.maximum(height_arr, 0.0)
@@ -973,7 +984,6 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
         area_arr: np.ndarray = _eval_poly(ca_coeffs, height_arr)
         area_arr = np.maximum(area_arr, 0.0)
 
-        cobre_id = id_map.hydro_id(newave_code)
         hydro_ids.extend([cobre_id] * _N_POINTS)
         volumes.extend(vol_grid.tolist())
         heights.extend(height_arr.tolist())

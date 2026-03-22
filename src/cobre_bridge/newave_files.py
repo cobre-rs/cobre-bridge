@@ -6,7 +6,8 @@ entry points — ``caso.dat`` (case-insensitive) and the ``Arquivos`` file it
 references.  Binary files that are not listed in Arquivos (``hidr.dat`` and
 ``vazoes.dat``) are discovered via a case-insensitive directory scan.
 Optional files (``modif.dat``, ``ghmin.dat``, ``penalid.dat``,
-``vazpast.dat``, ``dsvagua.dat``) are returned as ``Path | None``.
+``vazpast.dat``, ``dsvagua.dat``, ``expt.dat``, ``manutt.dat``,
+``c_adic.dat``, ``cvar.dat``, ``agrint.dat``) are returned as ``Path | None``.
 """
 
 from __future__ import annotations
@@ -93,6 +94,11 @@ class NewaveFiles:
     vazpast: Path | None
     dsvagua: Path | None
     curva: Path | None
+    expt: Path | None
+    manutt: Path | None
+    c_adic: Path | None
+    cvar: Path | None
+    agrint: Path | None
 
     @classmethod
     def from_directory(cls, directory: Path) -> NewaveFiles:
@@ -172,6 +178,11 @@ class NewaveFiles:
         vazpast = _opt("vazpast")
         dsvagua = _opt("dsvagua")
         curva = _opt("curva")
+        expt = _opt("expt")
+        manutt = _opt("manutt")
+        c_adic = _opt("c_adic")
+        cvar = _opt("cvar")
+        agrint = _opt("agrint")
 
         return cls(
             directory=directory,
@@ -191,4 +202,9 @@ class NewaveFiles:
             vazpast=vazpast,
             dsvagua=dsvagua,
             curva=curva,
+            expt=expt,
+            manutt=manutt,
+            c_adic=c_adic,
+            cvar=cvar,
+            agrint=agrint,
         )

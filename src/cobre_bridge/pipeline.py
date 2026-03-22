@@ -157,7 +157,7 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     lines_dict = network_conv.convert_lines(nw_files, id_map)
 
     logger.debug("Converting penalties")
-    penalties_dict = network_conv.convert_penalties(nw_files)
+    penalties_dict = network_conv.convert_penalties(nw_files, hydros_dict)
 
     logger.debug("Converting stages")
     stages_dict = temporal_conv.convert_stages(nw_files, id_map)
@@ -196,6 +196,12 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         nw_files, id_map, start_id=vminop_count
     )
 
+    logger.debug("Converting AGRINT group constraints")
+    electric_count = len(electric_result[0]) if electric_result is not None else 0
+    agrint_result = constraints_conv.convert_agrint_constraints(
+        nw_files, id_map, start_id=vminop_count + electric_count
+    )
+
     logger.debug("Converting load factors")
     load_factors_dict = stochastic_conv.convert_load_factors(nw_files, id_map)
 
@@ -216,6 +222,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
 
     logger.debug("Converting production models")
     production_models_dict = hydro_conv.convert_production_models(nw_files, id_map)
+
+    logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
+    thermal_bounds_table = thermal_conv.convert_thermal_bounds(nw_files, id_map)
 
     # ------------------------------------------------------------------
     # 4. Create the output directory structure.
@@ -284,6 +293,11 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         pq.write_table(withdrawal_table, hydro_bounds_path, compression="zstd")
         logger.debug("Wrote %s", hydro_bounds_path)
 
+    if thermal_bounds_table is not None:
+        thermal_bounds_path = constraints_dir / "thermal_bounds.parquet"
+        pq.write_table(thermal_bounds_table, thermal_bounds_path, compression="zstd")
+        logger.debug("Wrote %s", thermal_bounds_path)
+
     # Merge VminOP and electric constraints into a single output.
     import pyarrow as pa
 
@@ -309,6 +323,11 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         elec_constraints, elec_bounds = electric_result
         all_constraints.extend(elec_constraints)
         bounds_tables.append(elec_bounds)
+
+    if agrint_result is not None:
+        agrint_constraints, agrint_bounds = agrint_result
+        all_constraints.extend(agrint_constraints)
+        bounds_tables.append(agrint_bounds)
 
     if all_constraints:
         merged_dict = {

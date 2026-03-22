@@ -10,7 +10,7 @@ import calendar
 import logging
 from datetime import date
 
-from inewave.newave import Dger, Patamar
+from inewave.newave import Cvar, Dger, Patamar
 
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
@@ -92,6 +92,60 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     taxa = dger.taxa_de_desconto or 0.0
     annual_discount_rate = float(taxa) / 100.0
 
+    # ------------------------------------------------------------------
+    # Read CVaR configuration from dger.dat and cvar.dat.
+    # dger.cvar == 0 (or None): expectation
+    # dger.cvar == 1: constant CVaR from cvar.dat::valores_constantes
+    # dger.cvar == 2: temporal CVaR from cvar.dat::alfa_variavel / lambda_variavel
+    # ------------------------------------------------------------------
+    _raw_cvar = getattr(dger, "cvar", None)
+    dger_cvar: int = int(_raw_cvar) if isinstance(_raw_cvar, int) else 0
+
+    # Default: each stage uses "expectation"
+    _cvar_by_stage: dict[int, dict] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
+
+    if dger_cvar in (1, 2) and nw_files.cvar is not None:
+        cvar_file = Cvar.read(str(nw_files.cvar))
+        const_values: list[float] = cvar_file.valores_constantes or [0.0, 0.0]
+        const_alpha = const_values[0] / 100.0
+        const_lambda = const_values[1] / 100.0
+
+        if dger_cvar == 1:
+            # Same constant CVaR for ALL stages — populate lazily in loop below.
+            _cvar_constant: dict | None = {
+                "cvar": {"alpha": const_alpha, "lambda": const_lambda}
+            }
+        else:
+            # dger_cvar == 2: build per-stage override maps from DataFrames.
+            _cvar_constant = None
+            df_alpha = cvar_file.alfa_variavel
+            df_lambda = cvar_file.lambda_variavel
+
+            # Build {(year, month): alpha_value_fraction} for study rows only.
+            alpha_override: dict[tuple[int, int], float] = {}
+            if df_alpha is not None and not df_alpha.empty:
+                for _, row in df_alpha.iterrows():
+                    y = int(row["data"].year)
+                    m = int(row["data"].month)
+                    if y < 9000:  # skip post-study sentinel rows (year 9999)
+                        val = float(row["valor"])
+                        alpha_override[(y, m)] = (
+                            val / 100.0 if val != 0.0 else const_alpha
+                        )
+
+            lambda_override: dict[tuple[int, int], float] = {}
+            if df_lambda is not None and not df_lambda.empty:
+                for _, row in df_lambda.iterrows():
+                    y = int(row["data"].year)
+                    m = int(row["data"].month)
+                    if y < 9000:
+                        val = float(row["valor"])
+                        lambda_override[(y, m)] = (
+                            val / 100.0 if val != 0.0 else const_lambda
+                        )
+    else:
+        _cvar_constant = None
+
     # Build block duration lookup: {(month, patamar) -> fraction}
     # Patamar.duracao_mensal_patamares columns: data (datetime), patamar (int),
     # valor (float, fraction of month).
@@ -152,14 +206,26 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                 }
             )
 
+        # Determine risk_measure for this stage.
+        if dger_cvar == 0 or _cvar_constant is None and dger_cvar != 2:
+            risk_measure: str | dict = "expectation"
+        elif dger_cvar == 1 and _cvar_constant is not None:
+            risk_measure = _cvar_constant
+        else:
+            # dger_cvar == 2: use per-stage alpha/lambda, falling back to constant.
+            a = alpha_override.get((year, month), const_alpha)
+            lbd = lambda_override.get((year, month), const_lambda)
+            risk_measure = {"cvar": {"alpha": a, "lambda": lbd}}
+
         stages.append(
             {
                 "id": stage_id,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
+                "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
                 "blocks": blocks,
                 "num_scenarios": num_scenarios,
-                "risk_measure": "expectation",
+                "risk_measure": risk_measure,
             }
         )
 
@@ -215,11 +281,35 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
         "transitions": transitions,
     }
 
+    _MONTH_LABELS = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+
+    season_definitions: dict = {
+        "cycle_type": "monthly",
+        "seasons": [
+            {"id": i, "month_start": i + 1, "label": _MONTH_LABELS[i]}
+            for i in range(12)
+        ],
+    }
+
     result: dict = {
         "$schema": (
             "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
             "/book/src/schemas/stages.schema.json"
         ),
+        "season_definitions": season_definitions,
         "policy_graph": policy_graph,
         "stages": stages,
     }

@@ -38,6 +38,8 @@ def _make_nw_files(
     *,
     vazpast: Path | None = None,
     dsvagua: Path | None = None,
+    c_adic: Path | None = None,
+    cvar: Path | None = None,
 ) -> NewaveFiles:
     """Construct a NewaveFiles instance pointing into tmp_path.
 
@@ -61,6 +63,11 @@ def _make_nw_files(
         vazpast=vazpast,
         dsvagua=dsvagua,
         curva=None,
+        expt=None,
+        manutt=None,
+        c_adic=c_adic,
+        cvar=cvar,
+        agrint=None,
     )
 
 
@@ -76,6 +83,7 @@ def _make_dger_mock(
     num_series: int = 500,
     taxa_de_desconto: float = 12.0,
     num_aberturas: int = 10,
+    cvar: int = 0,
 ) -> MagicMock:
     dger = MagicMock()
     dger.mes_inicio_estudo = mes_inicio
@@ -88,6 +96,7 @@ def _make_dger_mock(
     dger.num_series_sinteticas = num_series
     dger.taxa_de_desconto = taxa_de_desconto
     dger.num_aberturas = num_aberturas
+    dger.cvar = cvar
     return dger
 
 
@@ -311,7 +320,7 @@ class TestConvertStagesSingleBlock:
     def test_risk_measure_is_expectation(
         self, mock_dger_cls, mock_patamar_cls, tmp_path
     ) -> None:
-        dger = _make_dger_mock()
+        dger = _make_dger_mock(cvar=0)
         patamar = _make_patamar_mock_single()
         _setup_dger_and_patamar(
             mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
@@ -320,6 +329,106 @@ class TestConvertStagesSingleBlock:
         from cobre_bridge.converters.temporal import convert_stages
 
         result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        for stage in result["stages"]:
+            assert stage["risk_measure"] == "expectation"
+
+    @patch("cobre_bridge.converters.temporal.Cvar")
+    @patch("cobre_bridge.converters.temporal.Patamar")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_risk_measure_constant_cvar(
+        self, mock_dger_cls, mock_patamar_cls, mock_cvar_cls, tmp_path
+    ) -> None:
+        """dger.cvar == 1 produces constant CVaR risk_measure for all stages."""
+        dger = _make_dger_mock(num_anos=1, cvar=1)
+        patamar = _make_patamar_mock_single()
+        _setup_dger_and_patamar(
+            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
+        )
+        cvar_mock = MagicMock()
+        cvar_mock.valores_constantes = [15.0, 40.0]
+        mock_cvar_cls.read.return_value = cvar_mock
+        cvar_path = tmp_path / "cvar.dat"
+        cvar_path.touch()
+
+        from cobre_bridge.converters.temporal import convert_stages
+
+        result = convert_stages(
+            _make_nw_files(tmp_path, cvar=cvar_path), _make_id_map_hydros([])
+        )
+        for stage in result["stages"]:
+            rm = stage["risk_measure"]
+            assert isinstance(rm, dict), f"Expected dict, got {rm!r}"
+            assert "cvar" in rm
+            assert rm["cvar"]["alpha"] == pytest.approx(0.15)
+            assert rm["cvar"]["lambda"] == pytest.approx(0.40)
+
+    @patch("cobre_bridge.converters.temporal.Cvar")
+    @patch("cobre_bridge.converters.temporal.Patamar")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_risk_measure_temporal_cvar_uses_override(
+        self, mock_dger_cls, mock_patamar_cls, mock_cvar_cls, tmp_path
+    ) -> None:
+        """dger.cvar==2: temporal alpha/lambda; zero rows fall back to constant."""
+        dger = _make_dger_mock(mes_inicio=1, ano_inicio=2020, num_anos=1, cvar=2)
+        patamar = _make_patamar_mock_single()
+        _setup_dger_and_patamar(
+            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
+        )
+
+        # Month 1 (Jan 2020): alpha=0 => use constant 0.15; lambda=20% override
+        # Month 2 (Feb 2020): alpha=10% override; lambda=0 => use constant 0.40
+        alpha_rows = []
+        lambda_rows = []
+        for m in range(1, 13):
+            a_val = 0.0 if m == 1 else (10.0 if m == 2 else 0.0)
+            l_val = 20.0 if m == 1 else (0.0 if m == 2 else 0.0)
+            alpha_rows.append({"data": datetime.datetime(2020, m, 1), "valor": a_val})
+            lambda_rows.append({"data": datetime.datetime(2020, m, 1), "valor": l_val})
+
+        cvar_mock = MagicMock()
+        cvar_mock.valores_constantes = [15.0, 40.0]
+        cvar_mock.alfa_variavel = pd.DataFrame(alpha_rows)
+        cvar_mock.lambda_variavel = pd.DataFrame(lambda_rows)
+        mock_cvar_cls.read.return_value = cvar_mock
+        cvar_path = tmp_path / "cvar.dat"
+        cvar_path.touch()
+
+        from cobre_bridge.converters.temporal import convert_stages
+
+        result = convert_stages(
+            _make_nw_files(tmp_path, cvar=cvar_path), _make_id_map_hydros([])
+        )
+        stages = result["stages"]
+        # Stage 0 (Jan 2020): alpha=0.0 => fallback 0.15; lambda=20.0 => 0.20
+        rm0 = stages[0]["risk_measure"]
+        assert isinstance(rm0, dict)
+        assert rm0["cvar"]["alpha"] == pytest.approx(0.15)
+        assert rm0["cvar"]["lambda"] == pytest.approx(0.20)
+
+        # Stage 1 (Feb 2020): alpha=10.0 => 0.10; lambda=0.0 => fallback 0.40
+        rm1 = stages[1]["risk_measure"]
+        assert isinstance(rm1, dict)
+        assert rm1["cvar"]["alpha"] == pytest.approx(0.10)
+        assert rm1["cvar"]["lambda"] == pytest.approx(0.40)
+
+    @patch("cobre_bridge.converters.temporal.Patamar")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_risk_measure_cvar0_without_file_uses_expectation(
+        self, mock_dger_cls, mock_patamar_cls, tmp_path
+    ) -> None:
+        """When cvar.dat is absent, risk_measure defaults to 'expectation'."""
+        dger = _make_dger_mock(num_anos=1, cvar=1)
+        patamar = _make_patamar_mock_single()
+        _setup_dger_and_patamar(
+            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
+        )
+
+        from cobre_bridge.converters.temporal import convert_stages
+
+        # cvar=None => file absent => fallback expectation
+        result = convert_stages(
+            _make_nw_files(tmp_path, cvar=None), _make_id_map_hydros([])
+        )
         for stage in result["stages"]:
             assert stage["risk_measure"] == "expectation"
 

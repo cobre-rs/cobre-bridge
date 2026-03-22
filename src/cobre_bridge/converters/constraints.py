@@ -740,3 +740,293 @@ def convert_electric_constraints(
     )
 
     return constraints, bounds_table
+
+
+# ---------------------------------------------------------------------------
+# AGRINT.DAT — Exchange group constraints
+# ---------------------------------------------------------------------------
+
+_AGRINT_DEFAULT_PENALTY = 1000.0
+
+
+def _parse_agrint(
+    path: Path,
+) -> tuple[
+    dict[int, list[tuple[int, int, float]]],  # group_id -> [(A, B, coeff)]
+    list[tuple[int, int, int, int | None, int | None, list[float]]],
+    # (group_id, mi, anoi, mf|None, anof|None, [lim_p1, lim_p2, lim_p3])
+]:
+    """Parse AGRINT.DAT into group definitions and limit rows.
+
+    Returns
+    -------
+    groups : dict[int, list[tuple[int, int, float]]]
+        Mapping from group ID to a list of (A, B, coefficient) tuples.
+    limits : list of 6-tuples
+        Each element is
+        (group_id, start_month, start_year, end_month|None, end_year|None,
+         [lim_p1, lim_p2, lim_p3]).
+    """
+    groups: dict[int, list[tuple[int, int, float]]] = {}
+    limits: list[tuple[int, int, int, int | None, int | None, list[float]]] = []
+
+    in_groups_section = False
+    in_limits_section = False
+
+    with path.open(encoding="latin-1") as fh:
+        for raw_line in fh:
+            line = raw_line.rstrip("\r\n")
+
+            stripped = line.strip()
+            if not stripped or stripped.startswith("&"):
+                continue
+
+            upper = stripped.upper()
+
+            # Section headers
+            if (
+                "AGRUPAMENTOS" in upper
+                and "INTERCÂMBIO" not in upper
+                or ("AGRUPAMENTOS" in upper)
+            ):
+                if "LIMITES" not in upper:
+                    in_groups_section = True
+                    in_limits_section = False
+                    continue
+
+            if "LIMITES POR GRUPO" in upper:
+                in_groups_section = False
+                in_limits_section = True
+                continue
+
+            # Skip format/header comment lines
+            if stripped.startswith("#") or stripped.startswith("X"):
+                continue
+
+            if in_groups_section:
+                # Terminator
+                if stripped.startswith("999"):
+                    in_groups_section = False
+                    continue
+                # Data line: right-aligned fixed-width columns
+                # Format: XXX XXX XXX XX.XXXX
+                # columns: group(1-3), A(5-7), B(9-11), coeff(13-20)
+                try:
+                    parts = stripped.split()
+                    if len(parts) < 4:
+                        continue
+                    group_id = int(parts[0])
+                    a = int(parts[1])
+                    b = int(parts[2])
+                    coeff = float(parts[3])
+                    groups.setdefault(group_id, []).append((a, b, coeff))
+                except (ValueError, IndexError):
+                    continue
+
+            elif in_limits_section:
+                if stripped.startswith("999"):
+                    break
+                # Format: #AG MI ANOI MF ANOF LIM_P1 LIM_P2 LIM_P3 [description]
+                # MF/ANOF are optional (open-ended if blank)
+                try:
+                    parts = stripped.split()
+                    if len(parts) < 4:
+                        continue
+                    group_id = int(parts[0])
+                    mi = int(parts[1])
+                    anoi = int(parts[2])
+
+                    # Detect whether MF/ANOF are present by trying to parse
+                    # parts[3] and parts[4] as int before float limits.
+                    # Limits always end with '.' in the file, so they parse as float.
+                    # MF/ANOF are small integers (1-12 / 4-digit year).
+                    mf: int | None = None
+                    anof: int | None = None
+                    lim_start = 3
+
+                    # parts[3]: could be MF (int 1-12) or first limit (float w/ '.')
+                    if "." not in parts[3] and len(parts) > 5:
+                        # Could still be a year — check parts[4] too
+                        try:
+                            candidate_mf = int(parts[3])
+                            candidate_anof = int(parts[4])
+                            # Sanity: MF in [1,12], ANOF is a 4-digit year
+                            if (
+                                1 <= candidate_mf <= 12
+                                and 1900 <= candidate_anof <= 9999
+                            ):
+                                mf = candidate_mf
+                                anof = candidate_anof
+                                lim_start = 5
+                        except (ValueError, IndexError):
+                            pass
+
+                    lim_parts = parts[lim_start : lim_start + 3]
+                    if len(lim_parts) < 1:
+                        continue
+                    lims = [float(lp.rstrip(".")) for lp in lim_parts]
+                    # Pad to 3 if fewer patamars declared
+                    while len(lims) < 3:
+                        lims.append(lims[-1])
+                    limits.append((group_id, mi, anoi, mf, anof, lims))
+                except (ValueError, IndexError):
+                    continue
+
+    return groups, limits
+
+
+def convert_agrint_constraints(
+    nw_files: NewaveFiles,
+    id_map: NewaveIdMap,
+    start_id: int = 0,
+) -> tuple[list[dict], pa.Table] | None:
+    """Convert AGRINT.DAT exchange group constraints to Cobre generic constraints.
+
+    Each group in AGRINT.DAT defines a weighted sum of directional interchange
+    flows.  Each group becomes one ``<=`` generic constraint with a high-default
+    slack penalty.  Bounds are stored per (constraint_id, stage_id, block_id).
+
+    Parameters
+    ----------
+    nw_files:
+        Resolved NEWAVE file paths.
+    id_map:
+        Entity ID mapping (used indirectly via ``_build_line_id_map``).
+    start_id:
+        First constraint ID to assign (must not collide with other constraints).
+
+    Returns
+    -------
+    tuple[list[dict], pa.Table] | None
+        A ``(constraints_list, bounds_table)`` pair, or ``None`` if
+        ``agrint.dat`` is absent or contains no valid constraints.
+        ``bounds_table`` has schema
+        ``(constraint_id: INT32, stage_id: INT32, block_id: INT32,
+        bound: DOUBLE)``.
+    """
+    if nw_files.agrint is None:
+        _LOG.debug("agrint.dat not found; skipping AGRINT constraints.")
+        return None
+
+    groups, limits = _parse_agrint(nw_files.agrint)
+    if not groups or not limits:
+        return None
+
+    # Study horizon
+    dger = Dger.read(str(nw_files.dger))
+    start_month: int = dger.mes_inicio_estudo
+    start_year: int = dger.ano_inicio_estudo
+    num_anos: int = dger.num_anos_estudo or 1
+    num_anos_pos: int = dger.num_anos_pos_estudo or 0
+    study_months = (13 - start_month) + (num_anos - 1) * 12
+    num_stages = study_months + num_anos_pos * 12
+
+    line_id_map = _build_line_id_map(nw_files)
+
+    constraints: list[dict] = []
+    bound_constraint_ids: list[int] = []
+    bound_stage_ids: list[int] = []
+    bound_block_ids: list[int] = []
+    bound_values: list[float] = []
+
+    for group_id in sorted(groups.keys()):
+        terms_raw = groups[group_id]
+
+        # Build expression: each (A, B, coeff) -> directional line_exchange term
+        parsed_terms: list[tuple[float, str]] = []
+        for a, b, coeff in terms_raw:
+            src, tgt = (a, b) if a < b else (b, a)
+            line_id = line_id_map.get((src, tgt))
+            if line_id is None:
+                _LOG.warning(
+                    "AGRINT group %d: no line found for interchange (%d,%d); "
+                    "skipping term.",
+                    group_id,
+                    a,
+                    b,
+                )
+                continue
+            # Canonical direction is src->tgt (src < tgt).
+            # If flow is A->B and A < B: positive coeff.
+            # If flow is A->B and A > B: reversed direction => negate.
+            effective_coeff = coeff if a < b else -coeff
+            parsed_terms.append((effective_coeff, f"line_exchange({line_id})"))
+
+        if not parsed_terms:
+            _LOG.warning(
+                "AGRINT group %d: no valid terms after line lookup; skipping.",
+                group_id,
+            )
+            continue
+
+        # Render expression string
+        parts: list[str] = []
+        for i, (eff_coeff, var) in enumerate(parsed_terms):
+            abs_coeff = abs(eff_coeff)
+            is_neg = eff_coeff < 0.0
+            term_body = var if abs_coeff == 1.0 else f"{abs_coeff} * {var}"
+            if i == 0:
+                parts.append(f"- {term_body}" if is_neg else term_body)
+            else:
+                parts.append(f"- {term_body}" if is_neg else f"+ {term_body}")
+        expression = " ".join(parts)
+
+        constraint_id = start_id + len(constraints)
+        constraints.append(
+            {
+                "id": constraint_id,
+                "name": f"AGRINT_{group_id}",
+                "description": f"Exchange group constraint {group_id}",
+                "expression": expression,
+                "sense": "<=",
+                "slack": {"enabled": False},
+            }
+        )
+
+        # Collect limit rows for this group
+        for grp, mi, anoi, mf, anof, lims in limits:
+            if grp != group_id:
+                continue
+
+            # Determine effective end (open-ended => last study stage)
+            if mf is None or anof is None:
+                # Open-ended: run to the end of the study horizon
+                end_y = start_year + (num_stages - 1 + start_month - 1) // 12
+                end_m = (start_month - 1 + num_stages - 1) % 12 + 1
+            else:
+                end_y, end_m = anof, mf
+
+            # Iterate month by month within [mi/anoi .. end_m/end_y]
+            y, m = anoi, mi
+            while (y, m) <= (end_y, end_m):
+                stage_id = (y - start_year) * 12 + (m - start_month)
+                if 0 <= stage_id < num_stages:
+                    for block_idx, lim_val in enumerate(lims):
+                        bound_constraint_ids.append(constraint_id)
+                        bound_stage_ids.append(stage_id)
+                        bound_block_ids.append(block_idx)
+                        bound_values.append(lim_val)
+                m += 1
+                if m > 12:
+                    m = 1
+                    y += 1
+
+    if not constraints:
+        return None
+
+    bounds_table = pa.table(
+        {
+            "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
+            "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
+            "block_id": pa.array(bound_block_ids, type=pa.int32()),
+            "bound": pa.array(bound_values, type=pa.float64()),
+        }
+    )
+
+    _LOG.info(
+        "Generated %d AGRINT group constraints with %d bounds.",
+        len(constraints),
+        len(bound_values),
+    )
+
+    return constraints, bounds_table

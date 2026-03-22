@@ -272,6 +272,14 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
             return_value=None,
         ),
         patch(
+            "cobre_bridge.pipeline.constraints_conv.convert_electric_constraints",
+            return_value=None,
+        ),
+        patch(
+            "cobre_bridge.pipeline.constraints_conv.convert_agrint_constraints",
+            return_value=None,
+        ),
+        patch(
             "cobre_bridge.pipeline.stochastic_conv.convert_load_factors",
             return_value=_FAKE_LOAD_FACTORS,
         ),
@@ -297,6 +305,10 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
         ),
         patch(
             "cobre_bridge.pipeline.hydro_conv.convert_production_models",
+            return_value=None,
+        ),
+        patch(
+            "cobre_bridge.pipeline.thermal_conv.convert_thermal_bounds",
             return_value=None,
         ),
     ]

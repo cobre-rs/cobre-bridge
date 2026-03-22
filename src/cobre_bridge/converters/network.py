@@ -26,10 +26,20 @@ _PENALTIES_SCHEMA_URL = (
     "/book/src/schemas/penalties.schema.json"
 )
 
-# Cobre standard defaults for hydro and line penalties.
-_DEFAULT_SPILLAGE_COST = 0.01
-_DEFAULT_FPHA_TURBINED_COST = 0.001
-_DEFAULT_DIVERSION_COST = 0.001
+# Penalty reference value and multipliers.
+# The spillage cost ($/m3s) is the reference. Other penalties are expressed
+# as multipliers of the spillage cost, converted to the energy domain ($/MW)
+# using the average hydro productivity.
+#
+# Ordering: exchange < spillage < fpha_turbined < curtailment < excess
+# This ensures the optimizer prefers interchange over spilling or curtailing.
+_SPILLAGE_REF = 0.1  # R$/(m3/s) — base reference in flow domain
+_EXCHANGE_MULT = 0.9  # exchange < spillage
+_FPHA_TURBINED_MULT = 1.1
+_NCS_CURTAILMENT_MULT = 1.15
+_EXCESS_MULT = 1.20
+
+# Hard constraint violation penalties (high values, not affected by scaling).
 _DEFAULT_STORAGE_VIOLATION_BELOW_COST = 1000.0
 _DEFAULT_FILLING_TARGET_VIOLATION_COST = 1000.0
 _DEFAULT_TURBINED_VIOLATION_BELOW_COST = 1000.0
@@ -38,9 +48,7 @@ _DEFAULT_OUTFLOW_VIOLATION_ABOVE_COST = 1000.0
 _DEFAULT_GENERATION_VIOLATION_BELOW_COST = 1000.0
 _DEFAULT_EVAPORATION_VIOLATION_COST = 0.1
 _DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST = 1000.0
-_DEFAULT_EXCESS_COST = 0.01
-_DEFAULT_LINE_EXCHANGE_COST = 0.1
-_DEFAULT_NCS_CURTAILMENT_COST = 0.001
+_DEFAULT_DIVERSION_COST = 0.001
 
 
 def convert_buses(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
@@ -232,28 +240,54 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     }
 
 
-def convert_penalties(nw_files: NewaveFiles) -> dict:
+def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
     """Generate a Cobre ``penalties.json`` dict from NEWAVE deficit data.
 
     Uses the first subsystem's first deficit tier cost as the primary
-    deficit cost.  All other hydro and line penalty values use Cobre
-    standard defaults.
+    deficit cost.  Operational penalties (spillage, exchange, curtailment,
+    excess) are derived from a base spillage reference value with
+    multipliers, converted to the energy domain using the average hydro
+    productivity.
 
     Parameters
     ----------
     nw_files:
         Resolved NEWAVE file paths for the case.
+    hydros_dict:
+        The already-converted ``hydros.json`` dict, used to compute the
+        average productivity for flow-to-energy penalty conversion.
     """
     sistema = Sistema.read(str(nw_files.sistema))
     deficit_df = sistema.custo_deficit
 
     # Primary deficit cost: first subsystem, first patamar.
     primary_deficit_cost = 0.0
-
     if deficit_df is not None and not deficit_df.empty:
         first_sub = deficit_df.sort_values(["codigo_submercado", "patamar_deficit"])
         first_row = first_sub.iloc[0]
         primary_deficit_cost = float(first_row["custo"])
+
+    # Compute average productivity across all hydros for unit conversion.
+    # Spillage is in m3/s, energy-domain penalties are in $/MW.
+    # avg_prod converts: cost_per_MW = cost_per_m3s / avg_prod
+    hydros = hydros_dict.get("hydros", [])
+    productivities = [
+        h["generation"]["productivity_mw_per_m3s"]
+        for h in hydros
+        if h["generation"].get("productivity_mw_per_m3s", 0) > 0
+    ]
+    avg_prod = sum(productivities) / len(productivities) if productivities else 1.0
+
+    # Spillage cost is the reference (in flow domain: $/m3s).
+    spillage_cost = _SPILLAGE_REF
+
+    # Energy-domain penalties: convert the reference from flow to energy,
+    # then apply multipliers.
+    ref_energy = _SPILLAGE_REF / avg_prod
+    exchange_cost = ref_energy * _EXCHANGE_MULT
+    fpha_turbined_cost = _SPILLAGE_REF * _FPHA_TURBINED_MULT
+    curtailment_cost = ref_energy * _NCS_CURTAILMENT_MULT
+    excess_cost = ref_energy * _EXCESS_MULT
 
     return {
         "$schema": _PENALTIES_SCHEMA_URL,
@@ -264,11 +298,11 @@ def convert_penalties(nw_files: NewaveFiles) -> dict:
                     "depth_mw": None,
                 }
             ],
-            "excess_cost": _DEFAULT_EXCESS_COST,
+            "excess_cost": excess_cost,
         },
         "hydro": {
-            "spillage_cost": _DEFAULT_SPILLAGE_COST,
-            "fpha_turbined_cost": _DEFAULT_FPHA_TURBINED_COST,
+            "spillage_cost": spillage_cost,
+            "fpha_turbined_cost": fpha_turbined_cost,
             "diversion_cost": _DEFAULT_DIVERSION_COST,
             "storage_violation_below_cost": _DEFAULT_STORAGE_VIOLATION_BELOW_COST,
             "filling_target_violation_cost": _DEFAULT_FILLING_TARGET_VIOLATION_COST,
@@ -280,10 +314,10 @@ def convert_penalties(nw_files: NewaveFiles) -> dict:
             "water_withdrawal_violation_cost": _DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST,
         },
         "line": {
-            "exchange_cost": _DEFAULT_LINE_EXCHANGE_COST,
+            "exchange_cost": exchange_cost,
         },
         "non_controllable_source": {
-            "curtailment_cost": _DEFAULT_NCS_CURTAILMENT_COST,
+            "curtailment_cost": curtailment_cost,
         },
     }
 

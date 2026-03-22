@@ -26,6 +26,11 @@ def _make_nw_files(
     vazpast: Path | None = None,
     dsvagua: Path | None = None,
     curva: Path | None = None,
+    expt: Path | None = None,
+    manutt: Path | None = None,
+    c_adic: Path | None = None,
+    cvar: Path | None = None,
+    agrint: Path | None = None,
 ) -> NewaveFiles:
     """Construct a ``NewaveFiles`` with sentinel paths under *tmp_path*.
 
@@ -52,6 +57,11 @@ def _make_nw_files(
         vazpast=vazpast,
         dsvagua=dsvagua,
         curva=curva,
+        expt=expt,
+        manutt=manutt,
+        c_adic=c_adic,
+        cvar=cvar,
+        agrint=agrint,
     )
 
 
@@ -246,7 +256,7 @@ def _make_term_df() -> pd.DataFrame:
             "codigo_usina": [10, 20, 30],
             "nome_usina": ["TERMO_A", "TERMO_B", "TERMO_C"],
             "potencia_instalada": [100.0, 200.0, 50.0],
-            "fator_capacidade_maximo": [0.9, 1.0, 0.8],
+            "fator_capacidade_maximo": [90.0, 100.0, 80.0],
             "teif": [0.05, 0.02, 0.10],
             "indisponibilidade_programada": [0.0, 0.0, 0.0],
             "mes": [1, 1, 1],
@@ -2241,7 +2251,10 @@ class TestConvertPenalties:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_penalties
 
-        result = convert_penalties(_make_nw_files(tmp_path))
+        result = convert_penalties(
+            _make_nw_files(tmp_path),
+            {"hydros": [{"generation": {"productivity_mw_per_m3s": 1.0}}]},
+        )
         for key in ("bus", "hydro", "line", "non_controllable_source"):
             assert key in result
 
@@ -2252,7 +2265,10 @@ class TestConvertPenalties:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_penalties
 
-        result = convert_penalties(_make_nw_files(tmp_path))
+        result = convert_penalties(
+            _make_nw_files(tmp_path),
+            {"hydros": [{"generation": {"productivity_mw_per_m3s": 1.0}}]},
+        )
         # First subsystem=1, patamar=1: custo = 500.0*1 = 500.0
         seg = result["bus"]["deficit_segments"][0]
         assert seg["cost"] == pytest.approx(500.0)
@@ -2262,7 +2278,10 @@ class TestConvertPenalties:
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
         from cobre_bridge.converters.network import convert_penalties
 
-        result = convert_penalties(_make_nw_files(tmp_path))
+        result = convert_penalties(
+            _make_nw_files(tmp_path),
+            {"hydros": [{"generation": {"productivity_mw_per_m3s": 1.0}}]},
+        )
         required = {
             "spillage_cost",
             "fpha_turbined_cost",
@@ -2738,24 +2757,25 @@ class TestGenerateHydroGeometry:
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         table = generate_hydro_geometry(cadastro, id_map)
 
-        # Plant 2 is run-of-river (vol_min == vol_max) so only plant 1 contributes.
+        # Plant 1 has vol range → 100 rows. Plant 2 is run-of-river → 1 row.
         assert isinstance(table, pa.Table)
-        assert len(table) == 100
+        assert len(table) == 101
 
-        ids = table.column("hydro_id").to_pylist()
         cobre_id_1 = id_map.hydro_id(1)
-        assert all(v == cobre_id_1 for v in ids)
+        cobre_id_2 = id_map.hydro_id(2)
+        ids = table.column("hydro_id").to_pylist()
+        assert ids.count(cobre_id_1) == 100
+        assert ids.count(cobre_id_2) == 1
 
-    def test_skips_run_of_river(self) -> None:
-        """Plant with vol_min == vol_max produces zero rows."""
+    def test_run_of_river_emits_single_point(self) -> None:
+        """Plant with vol_min == vol_max produces one geometry row."""
         from cobre_bridge.converters.hydro import generate_hydro_geometry
 
         cadastro = _make_geometry_cadastro()
-        # id_map containing only the run-of-river plant (code 2).
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[2], thermal_codes=[])
         table = generate_hydro_geometry(cadastro, id_map)
 
-        assert len(table) == 0
+        assert len(table) == 1
 
     def test_correct_schema(self) -> None:
         """Output table has the required schema with correct column types."""

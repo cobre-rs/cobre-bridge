@@ -1,8 +1,9 @@
-"""Unit tests for the VminOP and electric generic constraints converters."""
+"""Unit tests for the VminOP, electric, and AGRINT generic constraints converters."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pyarrow as pa
@@ -11,6 +12,7 @@ import pytest
 from cobre_bridge.converters.constraints import (
     _parse_formula,
     compute_accumulated_productivities,
+    convert_agrint_constraints,
     convert_electric_constraints,
     convert_vminop_constraints,
 )
@@ -127,6 +129,11 @@ class TestConvertVminopConstraints:
             vazpast=None,
             dsvagua=None,
             curva=None,
+            expt=None,
+            manutt=None,
+            c_adic=None,
+            cvar=None,
+            agrint=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_vminop_constraints(nw, id_map) is None
@@ -321,6 +328,11 @@ class TestConvertElectricConstraints:
             vazpast=None,
             dsvagua=None,
             curva=None,
+            expt=None,
+            manutt=None,
+            c_adic=None,
+            cvar=None,
+            agrint=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_electric_constraints(nw, id_map) is None
@@ -352,6 +364,11 @@ class TestConvertElectricConstraints:
             vazpast=None,
             dsvagua=None,
             curva=None,
+            expt=None,
+            manutt=None,
+            c_adic=None,
+            cvar=None,
+            agrint=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_electric_constraints(nw, id_map) is None
@@ -446,3 +463,243 @@ class TestConvertElectricConstraints:
         assert all(b >= 0 for b in block_ids)
         # Example has 3 patamars; max block_id should be 2
         assert max(block_ids) == 2
+
+
+# ---------------------------------------------------------------------------
+# convert_agrint_constraints tests
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_nw_files(tmp_path: Path, *, agrint: Path | None = None) -> object:
+    """Return a NewaveFiles-like object with minimal fields set for AGRINT tests."""
+    from cobre_bridge.newave_files import NewaveFiles
+
+    return NewaveFiles(
+        directory=tmp_path,
+        dger=tmp_path / "dger.dat",
+        confhd=tmp_path / "c",
+        conft=tmp_path / "t",
+        sistema=tmp_path / "s",
+        clast=tmp_path / "cl",
+        term=tmp_path / "te",
+        ree=tmp_path / "r",
+        patamar=tmp_path / "p",
+        hidr=tmp_path / "h",
+        vazoes=tmp_path / "v",
+        modif=None,
+        ghmin=None,
+        penalid=None,
+        vazpast=None,
+        dsvagua=None,
+        curva=None,
+        expt=None,
+        manutt=None,
+        c_adic=None,
+        cvar=None,
+        agrint=agrint,
+    )
+
+
+_AGRINT_CONTENT = """\
+AGRUPAMENTOS DE INTERCAMBIO
+ #AG A   B   COEF
+ XXX XXX XXX XX.XXXX
+   1   1   3  1.0000
+   2   3   1  1.0000
+ 999
+LIMITES POR GRUPO
+  #AG MI ANOI MF ANOF LIM_P1  LIM_P2  LIM_P3
+ XXX  XX XXXX XX XXXX XXXXXX. XXXXXX. XXXXXX.
+   1   1 2020  2 2020  10000.  10000.  10000.
+   2   1 2020  1 2020   5000.   5000.   5000.
+ 999
+"""
+
+
+def _make_dger_mock_for_agrint():
+    """Dger mock for study starting Jan 2020, 1 year."""
+    from unittest.mock import MagicMock
+
+    dger = MagicMock()
+    dger.mes_inicio_estudo = 1
+    dger.ano_inicio_estudo = 2020
+    dger.num_anos_estudo = 1
+    dger.num_anos_pos_estudo = 0
+    return dger
+
+
+class TestConvertAgrintConstraints:
+    def test_returns_none_when_agrint_absent(self, tmp_path: Path) -> None:
+        """Returns None when agrint path is None."""
+        nw = _make_minimal_nw_files(tmp_path, agrint=None)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+        assert convert_agrint_constraints(nw, id_map) is None  # type: ignore[arg-type]
+
+    def test_produces_constraints_from_agrint_dat(self, tmp_path: Path) -> None:
+        """Parses a minimal AGRINT file and produces one constraint per group."""
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
+        (tmp_path / "dger.dat").touch()
+
+        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        dger_mock = _make_dger_mock_for_agrint()
+
+        # Line map: canonical (1,3) -> line_id=0
+        fake_line_map = {(1, 3): 0}
+
+        with (
+            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
+            patch(
+                "cobre_bridge.converters.constraints._build_line_id_map",
+                return_value=fake_line_map,
+            ),
+        ):
+            mock_dger_cls.read.return_value = dger_mock
+            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+
+        assert result is not None
+        constraints, bounds_table = result
+        assert len(constraints) == 2
+
+    def test_constraint_sense_is_lte(self, tmp_path: Path) -> None:
+        """All AGRINT constraints have sense '<='."""
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
+        (tmp_path / "dger.dat").touch()
+
+        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        with (
+            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
+            patch(
+                "cobre_bridge.converters.constraints._build_line_id_map",
+                return_value={(1, 3): 0},
+            ),
+        ):
+            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
+            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+
+        assert result is not None
+        for c in result[0]:
+            assert c["sense"] == "<="
+            assert c["slack"]["enabled"] is False
+
+    def test_start_id_offset_applied(self, tmp_path: Path) -> None:
+        """start_id is added to all constraint IDs."""
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
+        (tmp_path / "dger.dat").touch()
+
+        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        with (
+            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
+            patch(
+                "cobre_bridge.converters.constraints._build_line_id_map",
+                return_value={(1, 3): 0},
+            ),
+        ):
+            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
+            result_0 = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
+            result_5 = convert_agrint_constraints(nw, id_map, start_id=5)  # type: ignore[arg-type]
+
+        assert result_0 is not None and result_5 is not None
+        ids_0 = [c["id"] for c in result_0[0]]
+        ids_5 = [c["id"] for c in result_5[0]]
+        assert ids_5 == [i + 5 for i in ids_0]
+
+    def test_bounds_table_schema(self, tmp_path: Path) -> None:
+        """Bounds table has correct schema with block_id column."""
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
+        (tmp_path / "dger.dat").touch()
+
+        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        with (
+            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
+            patch(
+                "cobre_bridge.converters.constraints._build_line_id_map",
+                return_value={(1, 3): 0},
+            ),
+        ):
+            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
+            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+
+        assert result is not None
+        _, bounds_table = result
+        assert isinstance(bounds_table, pa.Table)
+        assert set(bounds_table.schema.names) == {
+            "constraint_id",
+            "stage_id",
+            "block_id",
+            "bound",
+        }
+
+    def test_reversed_direction_negates_coefficient(self, tmp_path: Path) -> None:
+        """Flow A->B where A>B should produce a negative coefficient in expression."""
+        # Group 2: flow(3->1), canonical pair is (1,3). A=3 > B=1 => reversed => negate.
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
+        (tmp_path / "dger.dat").touch()
+
+        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        with (
+            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
+            patch(
+                "cobre_bridge.converters.constraints._build_line_id_map",
+                return_value={(1, 3): 0},
+            ),
+        ):
+            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
+            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+
+        assert result is not None
+        # Group 1: flow(1->3), canonical (1,3) => positive, no leading '-'
+        c1 = result[0][0]
+        assert c1["expression"].startswith("line_exchange(0)")
+
+        # Group 2: flow(3->1), reversed => expression should start with '- '
+        c2 = result[0][1]
+        assert c2["expression"].startswith("- line_exchange(0)")
+
+    def test_example_agrint_produces_constraints(self) -> None:
+        """Integration test against the example AGRINT.DAT file."""
+        pair = _example_nw_files_and_id_map()
+        if pair is None:
+            pytest.skip("example/newave not available")
+        nw_files, id_map = pair
+        if nw_files.agrint is None:
+            pytest.skip("AGRINT.DAT not present in example")
+
+        result = convert_agrint_constraints(nw_files, id_map, start_id=0)
+        assert result is not None
+        constraints, bounds_table = result
+        assert len(constraints) > 0
+        for c in constraints:
+            assert c["sense"] == "<="
+            assert "line_exchange(" in c["expression"]
+            assert c["slack"]["enabled"] is False
+
+    def test_example_agrint_bounds_are_positive(self) -> None:
+        """All bounds emitted by the example AGRINT file must be non-negative."""
+        pair = _example_nw_files_and_id_map()
+        if pair is None:
+            pytest.skip("example/newave not available")
+        nw_files, id_map = pair
+        if nw_files.agrint is None:
+            pytest.skip("AGRINT.DAT not present in example")
+
+        result = convert_agrint_constraints(nw_files, id_map, start_id=0)
+        assert result is not None
+        _, bounds_table = result
+        bounds = bounds_table.column("bound").to_pylist()
+        assert all(b >= 0 for b in bounds)
