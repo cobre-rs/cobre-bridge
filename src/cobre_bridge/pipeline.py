@@ -11,6 +11,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from cobre_bridge.converters import constraints as constraints_conv
@@ -299,8 +300,6 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         logger.debug("Wrote %s", thermal_bounds_path)
 
     # Merge VminOP and electric constraints into a single output.
-    import pyarrow as pa
-
     all_constraints: list[dict] = []
     bounds_tables: list[pa.Table] = []
 

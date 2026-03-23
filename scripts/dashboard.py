@@ -23,20 +23,20 @@ from plotly.subplots import make_subplots
 # ---------------------------------------------------------------------------
 
 COLORS = {
-    "hydro": "#2196F3",
-    "thermal": "#FF9800",
-    "ncs": "#4CAF50",
-    "load": "#333333",
-    "deficit": "#F44336",
-    "spillage": "#9C27B0",
-    "curtailment": "#795548",
-    "exchange": "#00BCD4",
-    "lower_bound": "#1565C0",
-    "upper_bound": "#E53935",
-    "future_cost": "#546E7A",
+    "hydro": "#4A90B8",
+    "thermal": "#F5A623",
+    "ncs": "#4A8B6F",
+    "load": "#374151",
+    "deficit": "#DC4C4C",
+    "spillage": "#B87333",
+    "curtailment": "#8B5E3C",
+    "exchange": "#4A90B8",
+    "lower_bound": "#4A8B6F",
+    "upper_bound": "#DC4C4C",
+    "future_cost": "#8B9298",
 }
 
-BUS_COLORS = ["#2196F3", "#FF9800", "#4CAF50", "#F44336", "#9C27B0"]
+BUS_COLORS = ["#4A90B8", "#F5A623", "#4A8B6F", "#DC4C4C", "#B87333"]
 
 # Shared legend style: horizontal, positioned above the chart area.
 _LEGEND = dict(
@@ -156,6 +156,30 @@ def load_ncs_bus_map(case_dir: Path) -> dict[int, int]:
     return {n["id"]: n["bus_id"] for n in d["non_controllable_sources"]}
 
 
+def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
+    """Return hydro_id -> {bus_id, name, vol_max, vol_min, max_gen_mw, max_turbined}."""
+    path = case_dir / "system" / "hydros.json"
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        d = json.load(f)
+    result = {}
+    for h in d["hydros"]:
+        gen = h.get("generation", {})
+        res = h.get("reservoir", {})
+        result[h["id"]] = {
+            "bus_id": h["bus_id"],
+            "name": h.get("name", str(h["id"])),
+            "vol_max": res.get("max_storage_hm3", 0),
+            "vol_min": res.get("min_storage_hm3", 0),
+            "max_gen_mw": gen.get("max_generation_mw", 0),
+            "max_gen_physical": gen.get("productivity_mw_per_m3s", 0)
+            * gen.get("max_turbined_m3s", 0),
+            "max_turbined": gen.get("max_turbined_m3s", 0),
+        }
+    return result
+
+
 def stage_x_labels(
     stage_ids: "pd.Index | list[int]", labels: dict[int, str]
 ) -> list[str]:
@@ -177,8 +201,14 @@ def scenario_percentiles(
     return result
 
 
-def fig_to_html(fig: go.Figure) -> str:
-    return fig.to_html(full_html=False, include_plotlyjs=False)
+def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
+    if unified_hover:
+        fig.update_layout(hovermode="x unified")
+    return fig.to_html(
+        full_html=False,
+        include_plotlyjs=False,
+        config={"responsive": True},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -257,23 +287,27 @@ def chart_cost_breakdown(costs: pd.DataFrame) -> str:
         "Excess": "#FF5722",
         "Inflow Penalty": "#607D8B",
     }
-    colors = [color_map.get(l, "#90A4AE") for l in labels]
-    fig = go.Figure(
-        go.Bar(
-            x=values,
-            y=labels,
-            orientation="h",
-            marker_color=colors,
-            text=[f"{v:.2e}" for v in values],
-            textposition="outside",
+    fig = go.Figure()
+    for label, value in zip(labels, values):
+        fig.add_trace(
+            go.Bar(
+                x=["Total"],
+                y=[value],
+                name=label,
+                marker_color=color_map.get(label, "#90A4AE"),
+                text=[f"{value:.2e}"],
+                textposition="inside",
+                insidetextanchor="middle",
+            )
         )
-    )
     fig.update_layout(
         title="Average Cost Breakdown (sum over all stages)",
-        xaxis_title="Cost (R$)",
+        yaxis_title="Cost (R$)",
+        barmode="stack",
         height=420,
-        margin=dict(l=120, r=30, t=60, b=50),
-        showlegend=False,
+        legend=_LEGEND,
+        margin=_MARGIN,
+        showlegend=True,
     )
     return fig_to_html(fig)
 
@@ -484,9 +518,9 @@ def chart_generation_by_bus(
     fig = make_subplots(
         rows=n_buses,
         cols=1,
-        shared_xaxes=True,
+        shared_xaxes=False,
         subplot_titles=[bus_names.get(b, str(b)) for b in bus_ids],
-        vertical_spacing=0.06,
+        vertical_spacing=0.12,
     )
 
     hydros_c = hydros.copy()
@@ -619,7 +653,7 @@ def chart_generation_by_bus(
 
     fig.update_layout(
         title="Generation + Net Import vs LP Load by Bus (stage-avg MW)",
-        height=280 * n_buses,
+        height=350 * n_buses,
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -666,7 +700,7 @@ def chart_generation_share_pie(
     fig.update_layout(
         title="Average Generation Share (GWh)", height=440, margin=_MARGIN
     )
-    return fig_to_html(fig)
+    return fig_to_html(fig, unified_hover=False)
 
 
 # ---------------------------------------------------------------------------
@@ -843,8 +877,8 @@ def chart_spillage_by_stage(
         title=f"Spillage by Stage (total + top {top_n} hydros, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="Spillage (m³/s)",
-        legend=_LEGEND,
-        margin=_MARGIN,
+        legend={**_LEGEND, "y": 1.08},
+        margin={**_MARGIN, "t": 90},
         height=440,
     )
     return fig_to_html(fig)
@@ -914,8 +948,8 @@ def chart_inflow_slack(
         title=f"Inflow Nonnegativity Slack (total + top {top_n} hydros, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="Slack (m³/s)",
-        legend=_LEGEND,
-        margin=_MARGIN,
+        legend={**_LEGEND, "y": 1.08},
+        margin={**_MARGIN, "t": 90},
         height=440,
     )
     return fig_to_html(fig)
@@ -958,7 +992,7 @@ def chart_water_value_distribution(
         legend=_LEGEND,
         margin=_MARGIN,
     )
-    return fig_to_html(fig)
+    return fig_to_html(fig, unified_hover=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1084,7 +1118,7 @@ def chart_capacity_utilization_heatmap(
         height=max(300, len(line_ids) * 60 + 120),
         margin=_MARGIN,
     )
-    return fig_to_html(fig)
+    return fig_to_html(fig, unified_hover=False)
 
 
 def chart_flow_direction_summary(
@@ -1133,7 +1167,127 @@ def chart_flow_direction_summary(
         height=max(300, len(line_ids) * 50 + 100),
         margin=dict(l=80, r=30, t=60, b=50),
     )
-    return fig_to_html(fig)
+    return fig_to_html(fig, unified_hover=False)
+
+
+def build_interactive_exchange_detail(
+    exchanges: pd.DataFrame,
+    names: dict[tuple[str, int], str],
+    stage_labels: dict[int, str],
+) -> str:
+    """Build HTML with embedded per-line p10/p50/p90 data and JS dropdown."""
+    ex0 = exchanges[exchanges["block_id"] == 0]
+    stages = sorted(ex0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+    line_ids = sorted(ex0["line_id"].unique())
+
+    line_data: dict[str, dict] = {}
+    for lid in line_ids:
+        lname = entity_name(names, "lines", lid)
+        ldf = ex0[ex0["line_id"] == lid]
+        entry: dict = {"name": lname}
+        for col, prefix in [
+            ("net_flow_mw", "net"),
+            ("direct_flow_mw", "direct"),
+            ("reverse_flow_mw", "reverse"),
+        ]:
+            if col not in ldf.columns:
+                for sfx in ["p10", "p50", "p90"]:
+                    entry[f"{prefix}_{sfx}"] = [0.0] * len(stages)
+                continue
+            grp = ldf.groupby(["scenario_id", "stage_id"])[col].mean()
+            pcts = (
+                grp.groupby("stage_id")
+                .quantile([0.1, 0.5, 0.9])
+                .unstack(level=-1)
+                .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+            )
+            for sfx in ["p10", "p50", "p90"]:
+                entry[f"{prefix}_{sfx}"] = [
+                    round(float(pcts[sfx].get(s, 0)), 2) for s in stages
+                ]
+        line_data[str(lid)] = entry
+
+    options_html = "\n".join(
+        f'<option value="{lid}">{d["name"]} (id={lid})</option>'
+        for lid, d in sorted(line_data.items(), key=lambda x: x[1]["name"])
+    )
+    data_json = json.dumps(line_data, separators=(",", ":"))
+    labels_json = json.dumps(xlabels)
+
+    chart_rows = (
+        '<div class="chart-grid-single">'
+        '<div class="chart-card"><div id="ex-net" style="width:100%;height:350px;"></div></div>'
+        "</div>"
+        '<div class="chart-grid-single">'
+        '<div class="chart-card"><div id="ex-dir" style="width:100%;height:350px;"></div></div>'
+        "</div>"
+    )
+
+    return (
+        '<div style="margin-bottom:16px;">'
+        '<label for="ex-select" style="font-weight:600;margin-right:8px;">Select Line:</label>'
+        '<select id="ex-select" onchange="updateExchangeDetail()" '
+        'style="padding:8px 12px;font-size:0.9rem;border-radius:4px;border:1px solid #ccc;min-width:280px;">'
+        + options_html
+        + "</select>"
+        + "</div>"
+        + chart_rows
+        + "<script>\n"
+        + "const EX_DATA = "
+        + data_json
+        + ";\n"
+        + "const EX_LABELS = "
+        + labels_json
+        + ";\n"
+        + r"""
+function _ex_band(lbl, p10, p90, color) {
+  return {x: EX_LABELS.concat(EX_LABELS.slice().reverse()),
+          y: p90.concat(p10.slice().reverse()),
+          fill:'toself', fillcolor:color, line:{color:'rgba(0,0,0,0)'},
+          name:lbl, showlegend:true, hoverinfo:'skip'};
+}
+function _ex_line(nm, y, c, w, dash) {
+  return {x:EX_LABELS, y:y, name:nm, line:{color:c, width:w||2, dash:dash||'solid'}};
+}
+var _EX_L = {hovermode:'x unified', margin:{l:60,r:20,t:50,b:60},
+             legend:{orientation:'h',y:1.12,x:0,font:{size:11}}};
+var _EX_C = {responsive:true};
+function _ex_lo(extra){return Object.assign({},_EX_L,extra);}
+
+function updateExchangeDetail() {
+  var lid = document.getElementById('ex-select').value;
+  var d = EX_DATA[lid]; if(!d) return;
+
+  var zeroLine = Array(EX_LABELS.length).fill(0);
+
+  Plotly.react('ex-net', [
+    _ex_band('P10\u2013P90', d.net_p10, d.net_p90, 'rgba(74,144,184,0.15)'),
+    _ex_line('P50', d.net_p50, '#4A90B8'),
+    _ex_line('P10', d.net_p10, '#4A90B8', 1, 'dot'),
+    _ex_line('P90', d.net_p90, '#4A90B8', 1, 'dot'),
+    {x:EX_LABELS, y:zeroLine, name:'Zero', line:{color:'gray',width:1,dash:'dot'}, showlegend:false},
+  ], _ex_lo({title:d.name+' \u2014 Net Flow (MW)', yaxis:{title:'Net Flow (MW)'}}), _EX_C);
+
+  var rev_p10_neg = d.reverse_p10.map(function(v){return -v;});
+  var rev_p50_neg = d.reverse_p50.map(function(v){return -v;});
+  var rev_p90_neg = d.reverse_p90.map(function(v){return -v;});
+  Plotly.react('ex-dir', [
+    _ex_band('Direct P10\u2013P90', d.direct_p10, d.direct_p90, 'rgba(74,139,111,0.18)'),
+    _ex_line('Direct P50', d.direct_p50, '#4A8B6F'),
+    _ex_line('Direct P10', d.direct_p10, '#4A8B6F', 1, 'dot'),
+    _ex_line('Direct P90', d.direct_p90, '#4A8B6F', 1, 'dot'),
+    _ex_band('Reverse P10\u2013P90 (neg)', rev_p10_neg, rev_p90_neg, 'rgba(220,76,76,0.15)'),
+    _ex_line('Reverse P50 (neg)', rev_p50_neg, '#DC4C4C'),
+    _ex_line('Reverse P10 (neg)', rev_p10_neg, '#DC4C4C', 1, 'dot'),
+    _ex_line('Reverse P90 (neg)', rev_p90_neg, '#DC4C4C', 1, 'dot'),
+    {x:EX_LABELS, y:zeroLine, name:'Zero', line:{color:'gray',width:1,dash:'dot'}, showlegend:false},
+  ], _ex_lo({title:d.name+' \u2014 Direct / Reverse Flow (MW)', yaxis:{title:'Flow (MW)'}}), _EX_C);
+}
+document.addEventListener('DOMContentLoaded', function(){setTimeout(updateExchangeDetail,100);});
+"""
+        + "</script>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1231,6 +1385,136 @@ def chart_spot_price_by_bus(
     return fig_to_html(fig)
 
 
+def chart_spot_price_by_bus_subplots(
+    buses: pd.DataFrame,
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+    stage_hours: dict[int, float],
+    block_hours: dict[tuple[int, int], float],
+) -> str:
+    """2x2 subplots of weighted-average spot price (by block hours) per bus."""
+    real_bus_ids = [bid for bid in sorted(buses["bus_id"].unique()) if bid <= 3]
+
+    # Attach block hours as a column for vectorised weighting
+    buses_w = buses.copy()
+    buses_w["_bh"] = buses_w.apply(
+        lambda r: block_hours.get((int(r["stage_id"]), int(r["block_id"])), 0.0),
+        axis=1,
+    )
+    buses_w["_sp_x_bh"] = buses_w["spot_price"] * buses_w["_bh"]
+
+    # Weighted average per (scenario, stage, bus)
+    grp = (
+        buses_w.groupby(["scenario_id", "stage_id", "bus_id"])
+        .apply(
+            lambda g: (
+                g["_sp_x_bh"].sum() / g["_bh"].sum() if g["_bh"].sum() > 0 else 0.0
+            ),
+            include_groups=False,
+        )
+        .rename("w_spot")
+        .reset_index()
+    )
+
+    n_buses = len(real_bus_ids)
+    n_cols = 2
+    n_rows = (n_buses + n_cols - 1) // n_cols
+    subplot_titles = [bus_names.get(bid, str(bid)) for bid in real_bus_ids]
+
+    fig = make_subplots(
+        rows=n_rows,
+        cols=n_cols,
+        subplot_titles=subplot_titles,
+        shared_xaxes=True,
+        vertical_spacing=0.12,
+        horizontal_spacing=0.10,
+    )
+
+    stages = sorted(grp["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    for idx, bus_id in enumerate(real_bus_ids):
+        row = idx // n_cols + 1
+        col = idx % n_cols + 1
+        color = BUS_COLORS[idx % len(BUS_COLORS)]
+
+        b_grp = grp[grp["bus_id"] == bus_id]
+        pcts = (
+            b_grp.groupby(["scenario_id", "stage_id"])["w_spot"]
+            .mean()
+            .groupby("stage_id")
+            .quantile([0.1, 0.5, 0.9])
+            .unstack(level=-1)
+            .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+        )
+        p10 = [float(pcts["p10"].get(s, 0)) for s in stages]
+        p50 = [float(pcts["p50"].get(s, 0)) for s in stages]
+        p90 = [float(pcts["p90"].get(s, 0)) for s in stages]
+
+        # Shaded band
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels + xlabels[::-1],
+                y=p90 + p10[::-1],
+                fill="toself",
+                fillcolor=f"rgba({int(color[1:3], 16)},{int(color[3:5], 16)},{int(color[5:7], 16)},0.15)"
+                if color.startswith("#")
+                else color,
+                line={"color": "rgba(0,0,0,0)"},
+                name=f"P10\u2013P90 {bus_names.get(bus_id, str(bus_id))}",
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=p50,
+                name=f"P50 {bus_names.get(bus_id, str(bus_id))}",
+                line={"color": color, "width": 2},
+                showlegend=True,
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=p10,
+                name=f"P10 {bus_names.get(bus_id, str(bus_id))}",
+                line={"color": color, "width": 1, "dash": "dot"},
+                showlegend=False,
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=p90,
+                name=f"P90 {bus_names.get(bus_id, str(bus_id))}",
+                line={"color": color, "width": 1, "dash": "dot"},
+                showlegend=False,
+            ),
+            row=row,
+            col=col,
+        )
+
+    fig.update_layout(
+        title="Weighted-Average Spot Price by Bus (block-hours weighted, p10/p50/p90)",
+        height=350 * n_rows + 60,
+        legend={**_LEGEND, "y": 1.02, "yanchor": "bottom"},
+        margin=dict(l=60, r=30, t=80, b=50),
+        hovermode="x unified",
+    )
+    for ax in fig.layout:
+        if ax.startswith("yaxis"):
+            fig.layout[ax].title = "R$/MWh"  # type: ignore[index]
+    return fig_to_html(fig, unified_hover=False)
+
+
 def chart_thermal_merit_order(
     thermals: pd.DataFrame,
     thermal_meta: dict[int, dict],
@@ -1284,11 +1568,11 @@ def chart_thermal_merit_order(
         title=f"Thermal Merit Order (top {top_n} by cost, sorted low→high)",
         xaxis_title="GWh",
         barmode="overlay",
-        legend=_LEGEND,
+        legend={**_LEGEND, "y": 1.08},
         height=max(440, len(names_list) * 22 + 100),
-        margin=dict(l=120, r=30, t=60, b=50),
+        margin=dict(l=120, r=30, t=90, b=50),
     )
-    return fig_to_html(fig)
+    return fig_to_html(fig, unified_hover=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1399,7 +1683,7 @@ def chart_ncs_curtailment_by_source(
         margin=dict(l=100, r=30, t=60, b=50),
         showlegend=False,
     )
-    return fig_to_html(fig)
+    return fig_to_html(fig, unified_hover=False)
 
 
 def chart_thermal_by_cost_bracket(
@@ -1475,15 +1759,2057 @@ def chart_thermal_by_cost_bracket(
 
 
 # ---------------------------------------------------------------------------
+# Tab 7: Plant Details charts
+# ---------------------------------------------------------------------------
+
+
+def chart_storage_by_bus(
+    hydros: pd.DataFrame,
+    hydro_bus_map: dict[int, int],
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+) -> str:
+    """Storage by bus with p50 line and p10-p90 band in subplots."""
+    h0 = hydros[hydros["block_id"] == 0].copy()
+    h0["bus_id"] = h0["hydro_id"].map(hydro_bus_map)
+    bus_ids = sorted([bid for bid in bus_names if bid <= 3])
+    n = len(bus_ids)
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = make_subplots(
+        rows=n,
+        cols=1,
+        shared_xaxes=False,
+        subplot_titles=[bus_names.get(b, str(b)) for b in bus_ids],
+        vertical_spacing=0.12,
+    )
+
+    for row, bus_id in enumerate(bus_ids, 1):
+        bus_data = h0[h0["bus_id"] == bus_id]
+        total = (
+            bus_data.groupby(["scenario_id", "stage_id"])["storage_final_hm3"]
+            .sum()
+            .reset_index()
+        )
+        pcts = (
+            total.groupby("stage_id")["storage_final_hm3"]
+            .quantile([0.1, 0.5, 0.9])
+            .unstack(level=-1)
+            .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+        )
+        show_legend = row == 1
+        p90 = [pcts["p90"].get(s, 0) for s in stages]
+        p10 = [pcts["p10"].get(s, 0) for s in stages]
+        p50 = [pcts["p50"].get(s, 0) for s in stages]
+
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels + xlabels[::-1],
+                y=p90 + p10[::-1],
+                fill="toself",
+                fillcolor="rgba(33,150,243,0.15)",
+                line={"color": "rgba(255,255,255,0)"},
+                name="P10-P90",
+                legendgroup="band",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=p50,
+                name="Median",
+                line={"color": COLORS["hydro"], "width": 2},
+                legendgroup="median",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="hm³", row=row, col=1)
+
+    fig.update_layout(
+        title="Reservoir Storage by Bus (p10/p50/p90 across scenarios)",
+        height=320 * n + 60,
+        legend={**_LEGEND, "y": 1.02, "yanchor": "bottom"},
+        margin=dict(l=60, r=30, t=80, b=50),
+    )
+    return fig_to_html(fig)
+
+
+def chart_spillage_by_bus(
+    hydros: pd.DataFrame,
+    hydro_bus_map: dict[int, int],
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+) -> str:
+    """Total spillage by bus by stage."""
+    h0 = hydros[hydros["block_id"] == 0].copy()
+    h0["bus_id"] = h0["hydro_id"].map(hydro_bus_map)
+    bus_ids = sorted([bid for bid in bus_names if bid <= 3])
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = go.Figure()
+    for i, bus_id in enumerate(bus_ids):
+        spill = (
+            h0[h0["bus_id"] == bus_id]
+            .groupby(["scenario_id", "stage_id"])["spillage_m3s"]
+            .sum()
+            .groupby("stage_id")
+            .mean()
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[spill.get(s, 0) for s in stages],
+                name=bus_names.get(bus_id, str(bus_id)),
+                line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
+            )
+        )
+    fig.update_layout(
+        title="Total Spillage by Bus (avg across scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="Spillage (m³/s)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_water_value_by_bus(
+    hydros: pd.DataFrame,
+    hydro_bus_map: dict[int, int],
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+) -> str:
+    """Average water value by bus by stage."""
+    h0 = hydros[hydros["block_id"] == 0].copy()
+    h0["bus_id"] = h0["hydro_id"].map(hydro_bus_map)
+    bus_ids = sorted([bid for bid in bus_names if bid <= 3])
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = go.Figure()
+    for i, bus_id in enumerate(bus_ids):
+        wv = (
+            h0[h0["bus_id"] == bus_id]
+            .groupby(["scenario_id", "stage_id"])["water_value_per_hm3"]
+            .mean()
+            .groupby("stage_id")
+            .mean()
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[wv.get(s, 0) for s in stages],
+                name=bus_names.get(bus_id, str(bus_id)),
+                line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
+            )
+        )
+    fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+    fig.update_layout(
+        title="Average Water Value by Bus (avg across scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="Water Value (R$/hm³)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_deficit_by_bus(
+    buses: pd.DataFrame,
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+    stage_hours: dict[int, float],
+) -> str:
+    """Deficit by bus by stage (stage-avg MW)."""
+    real_buses = sorted([bid for bid in bus_names if bid <= 3])
+    stages = sorted(buses["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = go.Figure()
+    for i, bus_id in enumerate(real_buses):
+        bdata = buses[buses["bus_id"] == bus_id]
+        def_mw = _stage_avg_mw(bdata, "deficit_mwh", stage_hours, [])
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[def_mw.get(s, 0) for s in stages],
+                name=bus_names.get(bus_id, str(bus_id)),
+                line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
+            )
+        )
+    fig.update_layout(
+        title="Deficit by Bus (stage-avg MW, avg across scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="Deficit (MW)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_excess_by_bus(
+    buses: pd.DataFrame,
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+    stage_hours: dict[int, float],
+) -> str:
+    """Excess by bus by stage (stage-avg MW)."""
+    real_buses = sorted([bid for bid in bus_names if bid <= 3])
+    stages = sorted(buses["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = go.Figure()
+    for i, bus_id in enumerate(real_buses):
+        bdata = buses[buses["bus_id"] == bus_id]
+        exc_mw = _stage_avg_mw(bdata, "excess_mwh", stage_hours, [])
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[exc_mw.get(s, 0) for s in stages],
+                name=bus_names.get(bus_id, str(bus_id)),
+                line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
+            )
+        )
+    fig.update_layout(
+        title="Excess by Bus (stage-avg MW)",
+        xaxis_title="Stage",
+        yaxis_title="Excess (MW)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_top_hydros_detail(
+    hydros: pd.DataFrame,
+    hydro_meta: dict[int, dict],
+    stage_labels: dict[int, str],
+    top_n: int = 8,
+) -> str:
+    """Generation, storage, and spillage timeseries for top hydro plants."""
+    ranked = sorted(hydro_meta.items(), key=lambda x: x[1]["max_gen_mw"], reverse=True)[
+        :top_n
+    ]
+    hids = [hid for hid, _ in ranked]
+
+    h0 = hydros[hydros["block_id"] == 0]
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=["Generation (MW)", "Storage (hm³)", "Spillage (m³/s)"],
+        vertical_spacing=0.10,
+    )
+
+    palette = [
+        "#2196F3",
+        "#FF9800",
+        "#4CAF50",
+        "#F44336",
+        "#9C27B0",
+        "#00BCD4",
+        "#FF5722",
+        "#607D8B",
+    ]
+
+    for i, hid in enumerate(hids):
+        meta = hydro_meta[hid]
+        name = meta["name"]
+        color = palette[i % len(palette)]
+        hdata = h0[h0["hydro_id"] == hid]
+
+        gen = (
+            hdata.groupby(["scenario_id", "stage_id"])["generation_mw"]
+            .mean()
+            .groupby("stage_id")
+            .mean()
+        )
+        stor = (
+            hdata.groupby(["scenario_id", "stage_id"])["storage_final_hm3"]
+            .mean()
+            .groupby("stage_id")
+            .mean()
+        )
+        spill = (
+            hdata.groupby(["scenario_id", "stage_id"])["spillage_m3s"]
+            .mean()
+            .groupby("stage_id")
+            .mean()
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[gen.get(s, 0) for s in stages],
+                name=name,
+                legendgroup=name,
+                line={"color": color, "width": 1.5},
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[stor.get(s, 0) for s in stages],
+                name=name,
+                legendgroup=name,
+                line={"color": color, "width": 1.5},
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[spill.get(s, 0) for s in stages],
+                name=name,
+                legendgroup=name,
+                line={"color": color, "width": 1.5},
+                showlegend=False,
+            ),
+            row=3,
+            col=1,
+        )
+
+    fig.update_layout(
+        title=f"Top {top_n} Hydro Plants by Installed Capacity",
+        height=900,
+        legend={**_LEGEND, "y": 1.04},
+        margin=dict(l=60, r=30, t=100, b=50),
+    )
+    return fig_to_html(fig)
+
+
+def build_top_hydros_table(
+    hydros: pd.DataFrame,
+    hydro_meta: dict[int, dict],
+    bus_names: dict[int, str],
+    top_n: int = 20,
+) -> str:
+    """HTML table of top hydro plants with key simulation metrics."""
+    ranked = sorted(hydro_meta.items(), key=lambda x: x[1]["max_gen_mw"], reverse=True)[
+        :top_n
+    ]
+    h0 = hydros[hydros["block_id"] == 0]
+
+    rows_html = []
+    for hid, meta in ranked:
+        hdata = h0[h0["hydro_id"] == hid]
+        avg_gen = (
+            hdata.groupby("scenario_id")["generation_mw"].mean().mean()
+            if not hdata.empty
+            else 0
+        )
+        avg_spill = (
+            hdata.groupby("scenario_id")["spillage_m3s"].mean().mean()
+            if not hdata.empty
+            else 0
+        )
+        avg_wv = hdata["water_value_per_hm3"].mean() if not hdata.empty else 0
+        avg_stor = hdata["storage_final_hm3"].mean() if not hdata.empty else 0
+        bus = bus_names.get(meta["bus_id"], str(meta["bus_id"]))
+
+        rows_html.append(
+            f"<tr><td>{meta['name']}</td><td>{bus}</td>"
+            f"<td>{meta['max_gen_mw']:.0f}</td>"
+            f"<td>{meta['vol_max']:.0f}</td>"
+            f"<td>{avg_gen:.0f}</td>"
+            f"<td>{avg_stor:.0f}</td>"
+            f"<td>{avg_spill:.0f}</td>"
+            f"<td>{avg_wv:,.0f}</td></tr>"
+        )
+
+    return (
+        '<table class="data-table">'
+        "<thead><tr>"
+        "<th>Plant</th><th>Bus</th><th>Max Gen (MW)</th><th>Vol Max (hm³)</th>"
+        "<th>Avg Gen (MW)</th><th>Avg Storage (hm³)</th>"
+        "<th>Avg Spillage (m³/s)</th><th>Avg Water Value (R$/hm³)</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody>"
+        "</table>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tab 8: Investigation charts
+# ---------------------------------------------------------------------------
+
+M3S_TO_HM3_PER_HOUR = 3600 / 1e6
+
+
+def chart_per_block_balance(
+    hydros: pd.DataFrame,
+    thermals: pd.DataFrame,
+    ncs: pd.DataFrame,
+    buses: pd.DataFrame,
+    stage_labels: dict[int, str],
+    block_hours: dict[tuple[int, int], float],
+) -> str:
+    """Generation vs Load per block across stages (avg across scenarios)."""
+    blocks = sorted({b for _, b in block_hours.keys()})
+    block_names = {0: "Heavy", 1: "Medium", 2: "Light"}
+
+    fig = make_subplots(
+        rows=len(blocks),
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=[block_names.get(b, f"Block {b}") for b in blocks],
+        vertical_spacing=0.10,
+    )
+
+    stages = sorted({s for s, _ in block_hours.keys()})
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    for row, blk in enumerate(blocks, 1):
+        show_legend = row == 1
+
+        hb = hydros[hydros["block_id"] == blk]
+        h_gen = (
+            hb.groupby(["scenario_id", "stage_id"])["generation_mw"]
+            .sum()
+            .groupby("stage_id")
+            .mean()
+        )
+        tb = thermals[thermals["block_id"] == blk]
+        t_gen = (
+            tb.groupby(["scenario_id", "stage_id"])["generation_mw"]
+            .sum()
+            .groupby("stage_id")
+            .mean()
+        )
+        nb = ncs[ncs["block_id"] == blk]
+        n_gen = (
+            nb.groupby(["scenario_id", "stage_id"])["generation_mw"]
+            .sum()
+            .groupby("stage_id")
+            .mean()
+        )
+        bb = buses[(buses["block_id"] == blk) & (buses["bus_id"].isin([0, 1, 2, 3]))]
+        load = (
+            bb.groupby(["scenario_id", "stage_id"])["load_mw"]
+            .sum()
+            .groupby("stage_id")
+            .mean()
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[h_gen.get(s, 0) for s in stages],
+                name="Hydro",
+                stackgroup=f"g{blk}",
+                fillcolor="rgba(33,150,243,0.6)",
+                line={"color": COLORS["hydro"]},
+                legendgroup="hydro",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[t_gen.get(s, 0) for s in stages],
+                name="Thermal",
+                stackgroup=f"g{blk}",
+                fillcolor="rgba(255,152,0,0.6)",
+                line={"color": COLORS["thermal"]},
+                legendgroup="thermal",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[n_gen.get(s, 0) for s in stages],
+                name="NCS",
+                stackgroup=f"g{blk}",
+                fillcolor="rgba(76,175,80,0.6)",
+                line={"color": COLORS["ncs"]},
+                legendgroup="ncs",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[load.get(s, 0) for s in stages],
+                name="Load",
+                mode="lines",
+                line={"color": COLORS["load"], "width": 2, "dash": "dash"},
+                legendgroup="load",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="MW", row=row, col=1)
+
+    fig.update_layout(
+        title="Generation vs Load by Block (avg across scenarios)",
+        height=300 * len(blocks),
+        legend={**_LEGEND, "y": 1.05},
+        margin=dict(l=60, r=30, t=80, b=50),
+    )
+    return fig_to_html(fig)
+
+
+def chart_inflow_comparison(
+    hydros: pd.DataFrame,
+    inflow_stats: pd.DataFrame,
+    hydro_meta: dict[int, dict],
+    stage_labels: dict[int, str],
+    top_n: int = 6,
+) -> str:
+    """Compare realized inflow (p10/p50/p90) with historical mean +/- std."""
+    ranked = sorted(hydro_meta.items(), key=lambda x: x[1]["max_gen_mw"], reverse=True)[
+        :top_n
+    ]
+
+    h0 = hydros[hydros["block_id"] == 0]
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = make_subplots(
+        rows=top_n,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=[meta["name"] for _, meta in ranked],
+        vertical_spacing=0.10,
+    )
+
+    for row, (hid, meta) in enumerate(ranked, 1):
+        show_legend = row == 1
+        hdata = h0[h0["hydro_id"] == hid]
+
+        realized = hdata.groupby(["scenario_id", "stage_id"])["inflow_m3s"].mean()
+        pcts = (
+            realized.groupby("stage_id")
+            .quantile([0.1, 0.5, 0.9])
+            .unstack(level=-1)
+            .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+        )
+
+        hist = inflow_stats[inflow_stats["hydro_id"] == hid].set_index("stage_id")
+
+        p90 = [pcts["p90"].get(s, 0) for s in stages]
+        p10 = [pcts["p10"].get(s, 0) for s in stages]
+        p50 = [pcts["p50"].get(s, 0) for s in stages]
+        hist_mean = [
+            hist["mean_m3s"].get(s, 0) if s in hist.index else 0 for s in stages
+        ]
+        hist_upper = [
+            (hist["mean_m3s"].get(s, 0) + hist["std_m3s"].get(s, 0))
+            if s in hist.index
+            else 0
+            for s in stages
+        ]
+        hist_lower = [
+            max(0, hist["mean_m3s"].get(s, 0) - hist["std_m3s"].get(s, 0))
+            if s in hist.index
+            else 0
+            for s in stages
+        ]
+
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels + xlabels[::-1],
+                y=hist_upper + hist_lower[::-1],
+                fill="toself",
+                fillcolor="rgba(255,152,0,0.12)",
+                line={"color": "rgba(255,255,255,0)"},
+                name="Historical ±1\u03c3",
+                legendgroup="hist_band",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=hist_mean,
+                name="Historical Mean",
+                mode="lines",
+                line={"color": COLORS["thermal"], "width": 1.5, "dash": "dash"},
+                legendgroup="hist_mean",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels + xlabels[::-1],
+                y=p90 + p10[::-1],
+                fill="toself",
+                fillcolor="rgba(33,150,243,0.12)",
+                line={"color": "rgba(255,255,255,0)"},
+                name="Realized P10-P90",
+                legendgroup="real_band",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=p50,
+                name="Realized Median",
+                mode="lines",
+                line={"color": COLORS["hydro"], "width": 2},
+                legendgroup="real_med",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="m³/s", row=row, col=1)
+
+    fig.update_layout(
+        title=f"Realized Inflow vs Historical Statistics (top {top_n} hydros)",
+        height=220 * top_n,
+        legend={**_LEGEND, "y": 1.04},
+        margin=dict(l=60, r=30, t=100, b=50),
+    )
+    return fig_to_html(fig)
+
+
+def chart_plant_water_balance(
+    hydros: pd.DataFrame,
+    hydro_meta: dict[int, dict],
+    stage_labels: dict[int, str],
+    stage_hours: dict[int, float],
+    block_hours: dict[tuple[int, int], float],
+    top_n: int = 6,
+) -> str:
+    """Water balance components for top hydro plants.
+
+    Shows storage trajectory, flow rates, and balance residual.
+    """
+    # Pick plants with most spillage as they are the most suspicious
+    h0 = hydros[hydros["block_id"] == 0]
+    avg_spill = (
+        h0.groupby(["scenario_id", "hydro_id"])["spillage_m3s"]
+        .mean()
+        .groupby("hydro_id")
+        .mean()
+    )
+    # Also pick top by capacity, merge both lists
+    by_cap = sorted(hydro_meta.items(), key=lambda x: x[1]["max_gen_mw"], reverse=True)[
+        :top_n
+    ]
+    by_spill = avg_spill.nlargest(top_n).index.tolist()
+    hids = list(dict.fromkeys([h for h, _ in by_cap] + by_spill))[:top_n]
+
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=[
+            "Storage (hm³)",
+            "Inflow / Outflow (m³/s)",
+            "Water Balance Residual (hm³)",
+        ],
+        vertical_spacing=0.10,
+    )
+
+    palette = [
+        "#2196F3",
+        "#FF9800",
+        "#4CAF50",
+        "#F44336",
+        "#9C27B0",
+        "#00BCD4",
+        "#FF5722",
+        "#607D8B",
+    ]
+
+    for i, hid in enumerate(hids):
+        name = hydro_meta.get(hid, {}).get("name", str(hid))
+        color = palette[i % len(palette)]
+        hdata = hydros[hydros["hydro_id"] == hid]
+
+        # Storage: from block 0
+        hb0 = hdata[hdata["block_id"] == 0]
+        stor = (
+            hb0.groupby(["scenario_id", "stage_id"])["storage_final_hm3"]
+            .mean()
+            .groupby("stage_id")
+            .mean()
+        )
+
+        # Inflow (stage-level, same for all blocks)
+        inflow = (
+            hb0.groupby(["scenario_id", "stage_id"])["inflow_m3s"]
+            .mean()
+            .groupby("stage_id")
+            .mean()
+        )
+
+        # Total outflow: sum across blocks of (turbined + spillage) weighted by tau
+        outflow_vals: dict[int, float] = {}
+        residual_vals: dict[int, float] = {}
+        for s in stages:
+            s_data = hdata[hdata["stage_id"] == s]
+            if s_data.empty:
+                outflow_vals[s] = 0
+                residual_vals[s] = 0
+                continue
+
+            # Average across scenarios
+            scen_out = []
+            scen_res = []
+            for scen_id in s_data["scenario_id"].unique():
+                ss = s_data[s_data["scenario_id"] == scen_id]
+                v_in = ss["storage_initial_hm3"].iloc[0]
+                v_out = ss["storage_final_hm3"].iloc[0]
+                zeta = stage_hours.get(s, 744) * M3S_TO_HM3_PER_HOUR
+                inf = ss["inflow_m3s"].iloc[0]
+                evap = ss["evaporation_m3s"].iloc[0]
+
+                total_out_vol = 0.0
+                for _, row in ss.iterrows():
+                    blk = int(row["block_id"])
+                    tau = block_hours.get((s, blk), 0) * M3S_TO_HM3_PER_HOUR
+                    total_out_vol += tau * (row["turbined_m3s"] + row["spillage_m3s"])
+
+                out_m3s = total_out_vol / max(zeta, 1e-9)
+                scen_out.append(out_m3s)
+                res = (v_out - v_in) - zeta * (inf - evap) + total_out_vol
+                scen_res.append(res)
+
+            outflow_vals[s] = float(np.mean(scen_out))
+            residual_vals[s] = float(np.mean(scen_res))
+
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[stor.get(s, 0) for s in stages],
+                name=name,
+                legendgroup=name,
+                line={"color": color, "width": 1.5},
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[inflow.get(s, 0) for s in stages],
+                name=f"{name} (inflow)",
+                legendgroup=name,
+                line={"color": color, "width": 1.5},
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[outflow_vals.get(s, 0) for s in stages],
+                name=f"{name} (outflow)",
+                legendgroup=name,
+                line={"color": color, "width": 1.5, "dash": "dash"},
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[residual_vals.get(s, 0) for s in stages],
+                name=f"{name} (res)",
+                legendgroup=name,
+                line={"color": color, "width": 1.5},
+                showlegend=False,
+            ),
+            row=3,
+            col=1,
+        )
+
+    fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=3, col=1)
+    fig.update_yaxes(title_text="hm³", row=1, col=1)
+    fig.update_yaxes(title_text="m³/s", row=2, col=1)
+    fig.update_yaxes(title_text="hm³", row=3, col=1)
+
+    fig.update_layout(
+        title=f"Water Balance Detail (top {top_n} plants, avg across scenarios)",
+        height=900,
+        legend={**_LEGEND, "y": 1.04},
+        margin=dict(l=60, r=30, t=100, b=50),
+    )
+    return fig_to_html(fig)
+
+
+def chart_violation_summary(
+    hydros: pd.DataFrame,
+    stage_labels: dict[int, str],
+) -> str:
+    """Aggregate constraint violations across all hydros by stage."""
+    violation_cols = {
+        "storage_violation_below_hm3": ("Storage Violation", "#F44336"),
+        "filling_target_violation_hm3": ("Filling Target", "#E91E63"),
+        "evaporation_violation_m3s": ("Evaporation Violation", "#9C27B0"),
+        "inflow_nonnegativity_slack_m3s": ("Inflow Slack", "#607D8B"),
+        "water_withdrawal_violation_m3s": ("Water Withdrawal", "#795548"),
+        "turbined_slack_m3s": ("Turbined Slack", "#FF9800"),
+        "outflow_slack_below_m3s": ("Outflow Slack Below", "#2196F3"),
+        "outflow_slack_above_m3s": ("Outflow Slack Above", "#00BCD4"),
+        "generation_slack_mw": ("Generation Slack", "#4CAF50"),
+    }
+
+    h0 = hydros[hydros["block_id"] == 0]
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = go.Figure()
+    for col, (label, color) in violation_cols.items():
+        if col not in h0.columns:
+            continue
+        total = (
+            h0.groupby(["scenario_id", "stage_id"])[col]
+            .sum()
+            .groupby("stage_id")
+            .mean()
+        )
+        if total.sum() < 1e-6:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[total.get(s, 0) for s in stages],
+                name=label,
+                line={"color": color, "width": 2},
+            )
+        )
+
+    fig.update_layout(
+        title="Aggregate Constraint Violations & Slacks by Stage (all hydros, avg scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="Total violation / slack",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=440,
+    )
+    return fig_to_html(fig)
+
+
+def chart_violation_heatmap(
+    hydros: pd.DataFrame,
+    names: dict[tuple[str, int], str],
+    stage_labels: dict[int, str],
+    top_n: int = 20,
+) -> str:
+    """Heatmap of violations by plant and stage for plants with most violations."""
+    violation_cols = [
+        "storage_violation_below_hm3",
+        "filling_target_violation_hm3",
+        "evaporation_violation_m3s",
+        "inflow_nonnegativity_slack_m3s",
+        "water_withdrawal_violation_m3s",
+    ]
+    existing = [c for c in violation_cols if c in hydros.columns]
+    if not existing:
+        return "<p>No violation data available.</p>"
+
+    h0 = hydros[hydros["block_id"] == 0].copy()
+    h0["_total_viol"] = h0[existing].abs().sum(axis=1)
+
+    # Top plants by total violations
+    top_hydros = (
+        h0.groupby("hydro_id")["_total_viol"].sum().nlargest(top_n).index.tolist()
+    )
+    top_hydros = [
+        h for h in top_hydros if h0[h0["hydro_id"] == h]["_total_viol"].sum() > 1e-6
+    ]
+    if not top_hydros:
+        return "<p>No significant violations detected.</p>"
+
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+    ynames = [entity_name(names, "hydros", hid) for hid in top_hydros]
+
+    z = []
+    for hid in top_hydros:
+        hdata = h0[h0["hydro_id"] == hid]
+        row = []
+        for s in stages:
+            sdata = hdata[hdata["stage_id"] == s]
+            val = sdata["_total_viol"].mean() if not sdata.empty else 0
+            row.append(val)
+        z.append(row)
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=xlabels,
+            y=ynames,
+            colorscale="YlOrRd",
+            colorbar={"title": "Violation"},
+        )
+    )
+    fig.update_layout(
+        title=f"Constraint Violations Heatmap (top {len(top_hydros)} plants)",
+        height=max(350, len(top_hydros) * 25 + 120),
+        margin=dict(l=120, r=30, t=60, b=50),
+    )
+    return fig_to_html(fig, unified_hover=False)
+
+
+# ---------------------------------------------------------------------------
+# Tab 9: Performance charts
+# ---------------------------------------------------------------------------
+
+
+def chart_iteration_timing_breakdown(timing: pd.DataFrame) -> str:
+    """Stacked bar per iteration: forward_solve, backward_solve, overhead."""
+    if timing.empty:
+        return "<p>No timing data available.</p>"
+
+    overhead_cols = [
+        c
+        for c in timing.columns
+        if c
+        not in {
+            "iteration",
+            "forward_solve_ms",
+            "backward_solve_ms",
+        }
+        and c.endswith("_ms")
+    ]
+    timing = timing.copy()
+    timing["overhead_ms"] = timing[overhead_cols].sum(axis=1)
+
+    iters = timing["iteration"].tolist()
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=iters,
+            y=timing["forward_solve_ms"].tolist(),
+            name="Forward Solve",
+            marker_color=COLORS["hydro"],
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=iters,
+            y=timing["backward_solve_ms"].tolist(),
+            name="Backward Solve",
+            marker_color=COLORS["thermal"],
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=iters,
+            y=timing["overhead_ms"].tolist(),
+            name="Overhead (other)",
+            marker_color=COLORS["future_cost"],
+        )
+    )
+    fig.update_layout(
+        title="Iteration Timing Breakdown (ms per iteration)",
+        xaxis_title="Iteration",
+        yaxis_title="Time (ms)",
+        barmode="stack",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_backward_stage_heatmap(solver_train: pd.DataFrame) -> str:
+    """Heatmap of solve_time_ms: x=stage, y=iteration (backward phase only)."""
+    if solver_train.empty:
+        return "<p>No solver data available.</p>"
+
+    bwd = solver_train[solver_train["phase"] == "backward"]
+    if bwd.empty:
+        return "<p>No backward solver data available.</p>"
+
+    pivot = bwd.pivot_table(
+        index="iteration", columns="stage", values="solve_time_ms", aggfunc="sum"
+    )
+    stages = sorted(pivot.columns.tolist())
+    iters = sorted(pivot.index.tolist())
+    z = [
+        [
+            float(pivot.loc[it, s]) if s in pivot.columns and it in pivot.index else 0.0
+            for s in stages
+        ]
+        for it in iters
+    ]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=[str(s) for s in stages],
+            y=[str(i) for i in iters],
+            colorscale="YlOrRd",
+            colorbar={"title": "ms"},
+        )
+    )
+    fig.update_layout(
+        title="Backward LP Solve Time Heatmap (ms) — Stages vs Iterations",
+        xaxis_title="Stage",
+        yaxis_title="Iteration",
+        height=max(400, len(iters) * 6 + 120),
+        margin=dict(l=60, r=30, t=60, b=50),
+    )
+    return fig_to_html(fig, unified_hover=False)
+
+
+def chart_simplex_by_stage(solver_train: pd.DataFrame) -> str:
+    """Bar chart of average simplex iterations per stage (backward phase)."""
+    if solver_train.empty:
+        return "<p>No solver data available.</p>"
+
+    bwd = solver_train[solver_train["phase"] == "backward"]
+    if bwd.empty:
+        return "<p>No backward solver data available.</p>"
+
+    avg = bwd.groupby("stage")["simplex_iterations"].mean().sort_index()
+    stages = [str(s) for s in avg.index.tolist()]
+    values = avg.values.tolist()
+
+    fig = go.Figure(
+        go.Bar(
+            x=stages,
+            y=values,
+            marker_color=COLORS["thermal"],
+            name="Avg Simplex Iterations",
+        )
+    )
+    fig.update_layout(
+        title="Average Simplex Iterations per Stage (backward phase)",
+        xaxis_title="Stage",
+        yaxis_title="Simplex Iterations",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=400,
+        showlegend=False,
+    )
+    return fig_to_html(fig)
+
+
+def chart_lp_dimensions(scaling_report: dict) -> str:
+    """Dual-axis bar chart: num_cols, num_rows, num_nz per stage."""
+    stages_data = scaling_report.get("stages", [])
+    if not stages_data:
+        return "<p>No scaling report data available.</p>"
+
+    stage_ids = [str(s["stage_id"]) for s in stages_data]
+    num_cols = [s["dimensions"]["num_cols"] for s in stages_data]
+    num_rows = [s["dimensions"]["num_rows"] for s in stages_data]
+    num_nz = [s["dimensions"]["num_nz"] for s in stages_data]
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Bar(
+            x=stage_ids,
+            y=num_cols,
+            name="Columns",
+            marker_color=COLORS["hydro"],
+            opacity=0.8,
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=stage_ids,
+            y=num_rows,
+            name="Rows",
+            marker_color=COLORS["thermal"],
+            opacity=0.8,
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=stage_ids,
+            y=num_nz,
+            name="Non-zeros",
+            line={"color": COLORS["deficit"], "width": 2},
+            mode="lines+markers",
+        ),
+        secondary_y=True,
+    )
+    fig.update_yaxes(title_text="Columns / Rows", secondary_y=False)
+    fig.update_yaxes(title_text="Non-zeros", secondary_y=True)
+    fig.update_layout(
+        title="LP Dimensions by Stage",
+        xaxis_title="Stage",
+        barmode="group",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_scaling_quality(scaling_report: dict) -> str:
+    """Line chart of coefficient ratio (pre/post scaling) per stage. Log y-axis."""
+    stages_data = scaling_report.get("stages", [])
+    if not stages_data:
+        return "<p>No scaling report data available.</p>"
+
+    stage_ids = []
+    pre_ratios = []
+    post_ratios = []
+    for s in stages_data:
+        pre = s.get("pre_scaling", {})
+        post = s.get("post_scaling", {})
+        pre_ratio = pre.get("matrix_coeff_ratio")
+        post_ratio = post.get("matrix_coeff_ratio")
+        if pre_ratio is not None and post_ratio is not None:
+            stage_ids.append(str(s["stage_id"]))
+            pre_ratios.append(float(pre_ratio))
+            post_ratios.append(float(post_ratio))
+
+    if not stage_ids:
+        return "<p>No coefficient ratio data in scaling report.</p>"
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=stage_ids,
+            y=pre_ratios,
+            name="Pre-scaling ratio",
+            line={"color": COLORS["deficit"], "width": 2},
+            mode="lines+markers",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=stage_ids,
+            y=post_ratios,
+            name="Post-scaling ratio",
+            line={"color": COLORS["lower_bound"], "width": 2},
+            mode="lines+markers",
+        )
+    )
+    fig.update_layout(
+        title="Matrix Coefficient Ratio by Stage (log scale — lower is better)",
+        xaxis_title="Stage",
+        yaxis_title="Coefficient Ratio",
+        yaxis_type="log",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_simulation_scenario_times(solver_sim: pd.DataFrame) -> str:
+    """Bar chart of solve_time_ms per simulation scenario."""
+    if solver_sim.empty:
+        return "<p>No simulation solver data available.</p>"
+
+    agg = (
+        solver_sim.groupby("iteration")["solve_time_ms"]
+        .sum()
+        .reset_index()
+        .sort_values("iteration")
+    )
+    fig = go.Figure(
+        go.Bar(
+            x=agg["iteration"].astype(str).tolist(),
+            y=agg["solve_time_ms"].tolist(),
+            marker_color=COLORS["ncs"],
+            name="Solve Time",
+        )
+    )
+    fig.update_layout(
+        title="Simulation Solve Time per Scenario (ms)",
+        xaxis_title="Scenario",
+        yaxis_title="Solve Time (ms)",
+        margin=_MARGIN,
+        height=400,
+        showlegend=False,
+    )
+    return fig_to_html(fig)
+
+
+def chart_basis_reuse(solver_train: pd.DataFrame) -> str:
+    """Line chart of basis reuse rate per stage (backward phase, averaged over iterations)."""
+    if solver_train.empty:
+        return "<p>No solver data available.</p>"
+
+    bwd = solver_train[solver_train["phase"] == "backward"].copy()
+    if bwd.empty:
+        return "<p>No backward solver data available.</p>"
+
+    # Only use rows where basis was offered at least once
+    offered = bwd[bwd["basis_offered"] > 0].copy()
+    if offered.empty:
+        return "<p>No basis warm-start data available (basis_offered=0 everywhere).</p>"
+
+    offered["reuse_rate"] = 1.0 - offered["basis_rejections"] / offered["basis_offered"]
+    avg_reuse = offered.groupby("stage")["reuse_rate"].mean().sort_index()
+    stages = [str(s) for s in avg_reuse.index.tolist()]
+    values = avg_reuse.values.tolist()
+
+    fig = go.Figure(
+        go.Scatter(
+            x=stages,
+            y=values,
+            mode="lines+markers",
+            line={"color": COLORS["hydro"], "width": 2},
+            name="Basis Reuse Rate",
+        )
+    )
+    fig.update_layout(
+        title="Basis Warm-start Reuse Rate per Stage (backward phase, avg over iterations)",
+        xaxis_title="Stage",
+        yaxis_title="Reuse Rate (0-1)",
+        yaxis={"range": [0, 1]},
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=400,
+    )
+    return fig_to_html(fig)
+
+
+def chart_solver_time_breakdown_by_phase(solver_train: pd.DataFrame) -> str:
+    """Stacked bar: solve, load_model, add_rows, set_bounds per phase."""
+    if solver_train.empty:
+        return "<p>No solver data.</p>"
+    components = [
+        ("solve_time_ms", "LP Solve", COLORS["hydro"]),
+        ("set_bounds_time_ms", "Set Bounds", COLORS["thermal"]),
+        ("add_rows_time_ms", "Add Rows (cuts)", COLORS["ncs"]),
+        ("load_model_time_ms", "Load Model", COLORS["future_cost"]),
+    ]
+    fig = go.Figure()
+    for col, label, color in components:
+        if col not in solver_train.columns:
+            continue
+        vals = solver_train.groupby("phase")[col].sum() / 1000.0  # seconds
+        fig.add_trace(
+            go.Bar(
+                x=[p.title() for p in vals.index],
+                y=vals.values,
+                name=label,
+                marker_color=color,
+            )
+        )
+    fig.update_layout(
+        title="Time Breakdown by Phase (seconds)",
+        yaxis_title="Time (s)",
+        barmode="stack",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=400,
+    )
+    return fig_to_html(fig)
+
+
+def chart_solver_time_per_stage(solver_train: pd.DataFrame) -> str:
+    """Stacked bar per stage: solve vs overhead (set_bounds+add_rows+load_model)."""
+    if solver_train.empty:
+        return "<p>No solver data.</p>"
+    bw = solver_train[solver_train["phase"] == "backward"].copy()
+    if bw.empty:
+        return "<p>No backward phase data.</p>"
+    overhead_cols = [
+        c
+        for c in ["load_model_time_ms", "add_rows_time_ms", "set_bounds_time_ms"]
+        if c in bw.columns
+    ]
+    bw["overhead_ms"] = bw[overhead_cols].sum(axis=1) if overhead_cols else 0
+    grouped = bw.groupby("stage")[["solve_time_ms", "overhead_ms"]].mean()
+    stages = sorted(grouped.index)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=stages,
+            y=[grouped["solve_time_ms"].get(s, 0) for s in stages],
+            name="LP Solve",
+            marker_color=COLORS["hydro"],
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=stages,
+            y=[grouped["overhead_ms"].get(s, 0) for s in stages],
+            name="Overhead (bounds+rows+model)",
+            marker_color=COLORS["thermal"],
+        )
+    )
+    fig.update_layout(
+        title="Backward Pass: Avg Solve vs Overhead per Stage (ms)",
+        xaxis_title="Stage",
+        yaxis_title="Time (ms)",
+        barmode="stack",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=400,
+    )
+    return fig_to_html(fig)
+
+
+def chart_forward_vs_backward_per_iter(solver_train: pd.DataFrame) -> str:
+    """Per-iteration: forward total solve time vs backward total solve time."""
+    if solver_train.empty:
+        return "<p>No solver data.</p>"
+    by_iter_phase = (
+        solver_train.groupby(["iteration", "phase"])["solve_time_ms"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+    iters = sorted(by_iter_phase.index)
+    fig = go.Figure()
+    if "forward" in by_iter_phase.columns:
+        fig.add_trace(
+            go.Bar(
+                x=iters,
+                y=[by_iter_phase["forward"].get(i, 0) / 1000 for i in iters],
+                name="Forward",
+                marker_color=COLORS["hydro"],
+            )
+        )
+    if "backward" in by_iter_phase.columns:
+        fig.add_trace(
+            go.Bar(
+                x=iters,
+                y=[by_iter_phase["backward"].get(i, 0) / 1000 for i in iters],
+                name="Backward",
+                marker_color=COLORS["thermal"],
+            )
+        )
+    fig.update_layout(
+        title="LP Solve Time per Iteration (seconds)",
+        xaxis_title="Iteration",
+        yaxis_title="Time (s)",
+        barmode="group",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=400,
+    )
+    return fig_to_html(fig)
+
+
+def chart_set_bounds_by_stage(solver_train: pd.DataFrame) -> str:
+    """Per-stage avg set_bounds_time_ms for backward phase — often a hidden bottleneck."""
+    if solver_train.empty or "set_bounds_time_ms" not in solver_train.columns:
+        return "<p>No set_bounds data.</p>"
+    bw = solver_train[solver_train["phase"] == "backward"]
+    avg = bw.groupby("stage")["set_bounds_time_ms"].mean()
+    stages = sorted(avg.index)
+    fig = go.Figure(
+        go.Bar(
+            x=stages,
+            y=[avg.get(s, 0) for s in stages],
+            marker_color=COLORS["spillage"],
+        )
+    )
+    fig.update_layout(
+        title="Backward Pass: Avg set_bounds Time per Stage (ms)",
+        xaxis_title="Stage",
+        yaxis_title="Time (ms)",
+        showlegend=False,
+        margin=_MARGIN,
+        height=350,
+    )
+    return fig_to_html(fig)
+
+
+def build_performance_metrics_html(
+    conv: pd.DataFrame,
+    timing: pd.DataFrame,
+    solver_train: pd.DataFrame,
+    solver_sim: pd.DataFrame,
+    scaling_report: dict,
+    metadata: dict,
+) -> str:
+    """Summary metric cards for the Performance tab."""
+    # Total training time
+    # Prefer wall-clock from metadata.json; fall back to summing iteration times.
+    meta_duration = metadata.get("run_info", {}).get("duration_seconds")
+    if meta_duration and meta_duration > 0:
+        total_train_s = float(meta_duration)
+    else:
+        total_train_ms = (
+            conv["time_total_ms"].sum() if "time_total_ms" in conv.columns else 0.0
+        )
+        if total_train_ms == 0 and not timing.empty:
+            time_cols = [
+                c for c in timing.columns if c.endswith("_ms") and c != "iteration"
+            ]
+            total_train_ms = timing[time_cols].sum().sum()
+        total_train_s = total_train_ms / 1000.0
+
+    # Total simulation time — prefer wall-clock from manifest, fall back to CPU sum.
+    sim_manifest_duration = metadata.get("_sim_manifest", {}).get("duration_seconds")
+    if sim_manifest_duration and sim_manifest_duration > 0:
+        total_sim_s = float(sim_manifest_duration)
+        total_sim_ms = total_sim_s * 1000.0
+        sim_is_wallclock = True
+    else:
+        total_sim_ms = (
+            solver_sim["solve_time_ms"].sum() if not solver_sim.empty else 0.0
+        )
+        total_sim_s = total_sim_ms / 1000.0
+        sim_is_wallclock = False
+
+    # Avg LP solve time — training
+    if not solver_train.empty:
+        total_lp_solves = solver_train["lp_solves"].sum()
+        total_lp_time = solver_train["solve_time_ms"].sum()
+        avg_lp_train_ms = (
+            total_lp_time / total_lp_solves if total_lp_solves > 0 else 0.0
+        )
+    else:
+        total_lp_solves = 0
+        avg_lp_train_ms = 0.0
+
+    # Avg LP solve time — simulation
+    if not solver_sim.empty:
+        sim_lp_solves = solver_sim["lp_solves"].sum()
+        sim_lp_time = solver_sim["solve_time_ms"].sum()
+        avg_lp_sim_ms = sim_lp_time / sim_lp_solves if sim_lp_solves > 0 else 0.0
+    else:
+        avg_lp_sim_ms = 0.0
+
+    # Total simplex iterations (training + simulation)
+    train_simplex = (
+        int(solver_train["simplex_iterations"].sum()) if not solver_train.empty else 0
+    )
+    sim_simplex = (
+        int(solver_sim["simplex_iterations"].sum()) if not solver_sim.empty else 0
+    )
+    total_simplex = train_simplex + sim_simplex
+
+    # Overall basis reuse rate
+    offered_total = (
+        int(solver_train["basis_offered"].sum()) if not solver_train.empty else 0
+    )
+    rejected_total = (
+        int(solver_train["basis_rejections"].sum()) if not solver_train.empty else 0
+    )
+    reuse_rate = (
+        (1.0 - rejected_total / offered_total) * 100 if offered_total > 0 else 0.0
+    )
+
+    # LP dimensions from scaling report
+    stages_sr = scaling_report.get("stages", [])
+    max_nz = max((s["dimensions"]["num_nz"] for s in stages_sr), default=0)
+
+    # Format training time
+    if total_train_s >= 3600:
+        train_str = f"{total_train_s / 3600:.2f} h"
+    elif total_train_s >= 60:
+        train_str = f"{total_train_s / 60:.1f} min"
+    else:
+        train_str = f"{total_train_s:.1f} s"
+
+    if total_sim_s >= 3600:
+        sim_str = f"{total_sim_s / 3600:.2f} h"
+    elif total_sim_s >= 60:
+        sim_str = f"{total_sim_s / 60:.1f} min"
+    else:
+        sim_str = f"{total_sim_s:.1f} s"
+    sim_label = "Total Simulation Time" if sim_is_wallclock else "Simulation CPU Time"
+
+    # Total LP solves across everything
+    all_lp_solves = (
+        int(solver_train["lp_solves"].sum()) if not solver_train.empty else 0
+    ) + (int(solver_sim["lp_solves"].sum()) if not solver_sim.empty else 0)
+
+    metrics = [
+        ("Total Training Time", train_str, COLORS["lower_bound"]),
+        (sim_label, sim_str, COLORS["ncs"]),
+        ("Avg LP Solve (training)", f"{avg_lp_train_ms:.2f} ms", COLORS["hydro"]),
+        ("Avg LP Solve (simulation)", f"{avg_lp_sim_ms:.2f} ms", COLORS["spillage"]),
+        ("Total LP Solves", f"{all_lp_solves:,}", COLORS["thermal"]),
+        ("Total Simplex Iterations", f"{total_simplex:,}", COLORS["spillage"]),
+        ("Basis Reuse Rate", f"{reuse_rate:.1f}%", COLORS["future_cost"]),
+    ]
+    cards = []
+    for label, value, color in metrics:
+        cards.append(
+            f'<div class="metric-card" style="border-top: 4px solid {color};">'
+            f'<div class="metric-value">{value}</div>'
+            f'<div class="metric-label">{label}</div>'
+            f"</div>"
+        )
+    return '<div class="metrics-grid">' + "".join(cards) + "</div>"
+
+
+# ---------------------------------------------------------------------------
+# Tab 10: Generic Constraints — expression parser + charts
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+# Matches terms like: [+/-] [coeff *] variable_type(id)
+# Examples: "5.68 * hydro_storage(78)", "hydro_generation(145)", "- line_exchange(4)"
+_TERM_RE = _re.compile(
+    r"([+-]?\s*\d*\.?\d*)\s*\*?\s*(hydro_storage|hydro_generation|line_exchange)\((\d+)\)"
+)
+
+
+def _parse_expression(expr: str) -> list[tuple[float, str, int]]:
+    """Parse a constraint LHS expression into (coefficient, variable_type, entity_id) terms.
+
+    Handles:
+    - Leading ``-`` with no explicit coefficient → -1.0
+    - No coefficient → 1.0
+    - ``0.5 * hydro_generation(47)`` → 0.5
+    """
+    terms: list[tuple[float, str, int]] = []
+    for m in _TERM_RE.finditer(expr):
+        raw_coeff = m.group(1).replace(" ", "")
+        var_type = m.group(2)
+        entity_id = int(m.group(3))
+        if raw_coeff in ("", "+"):
+            coeff = 1.0
+        elif raw_coeff == "-":
+            coeff = -1.0
+        else:
+            coeff = float(raw_coeff)
+        terms.append((coeff, var_type, entity_id))
+    return terms
+
+
+def evaluate_constraint_expressions(
+    constraints: list[dict],
+    hydros_df: pd.DataFrame,
+    exchanges_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Evaluate LHS of all generic constraints from simulation output.
+
+    Variable lookups:
+    - ``hydro_storage(id)``    → ``storage_final_hm3`` where hydro_id=id, block_id=0
+    - ``hydro_generation(id)`` → ``generation_mw``     where hydro_id=id  (per block)
+    - ``line_exchange(id)``    → ``net_flow_mw``        where line_id=id   (per block)
+
+    Storage-only constraints produce one row per (scenario, stage) with block_id=0.
+    Mixed / generation / exchange constraints produce one row per (scenario, stage, block).
+
+    Returns DataFrame with columns:
+        constraint_id, scenario_id, stage_id, block_id, lhs_value
+    """
+    # Convert to polars for fast grouped operations
+    try:
+        import polars as pl
+    except ImportError:
+        pl = None  # fall through to pandas path
+
+    h0_pd = hydros_df[hydros_df["block_id"] == 0][
+        ["scenario_id", "stage_id", "hydro_id", "storage_final_hm3"]
+    ].copy()
+    hg_pd = hydros_df[
+        ["scenario_id", "stage_id", "block_id", "hydro_id", "generation_mw"]
+    ].copy()
+    ex_pd = exchanges_df[
+        ["scenario_id", "stage_id", "block_id", "line_id", "net_flow_mw"]
+    ].copy()
+
+    all_results: list[pd.DataFrame] = []
+
+    for c in constraints:
+        cid = c["id"]
+        expr = c["expression"]
+        terms = _parse_expression(expr)
+        if not terms:
+            continue
+
+        var_types = {t[1] for t in terms}
+        storage_only = var_types == {"hydro_storage"}
+
+        if storage_only:
+            # One LHS value per (scenario, stage) — use block_id 0
+            # Start with a base frame of all (scenario, stage) combos from h0
+            base = h0_pd[["scenario_id", "stage_id"]].drop_duplicates().copy()
+            base["_lhs"] = 0.0
+            for coeff, vtype, eid in terms:
+                sub = h0_pd[h0_pd["hydro_id"] == eid][
+                    ["scenario_id", "stage_id", "storage_final_hm3"]
+                ].rename(columns={"storage_final_hm3": "_val"})
+                merged = base.merge(sub, on=["scenario_id", "stage_id"], how="left")
+                merged["_val"] = merged["_val"].fillna(0.0)
+                base["_lhs"] = base["_lhs"].values + coeff * merged["_val"].values
+            base["constraint_id"] = cid
+            base["block_id"] = 0
+            base = base.rename(columns={"_lhs": "lhs_value"})
+            all_results.append(
+                base[
+                    [
+                        "constraint_id",
+                        "scenario_id",
+                        "stage_id",
+                        "block_id",
+                        "lhs_value",
+                    ]
+                ]
+            )
+        else:
+            # Per (scenario, stage, block) — need consistent block grid
+            # Build base from hydro_generation block grid (always present)
+            base = (
+                hg_pd[["scenario_id", "stage_id", "block_id"]].drop_duplicates().copy()
+            )
+            base["_lhs"] = 0.0
+
+            for coeff, vtype, eid in terms:
+                if vtype == "hydro_storage":
+                    # Storage is stage-level: broadcast across all blocks
+                    sub = h0_pd[h0_pd["hydro_id"] == eid][
+                        ["scenario_id", "stage_id", "storage_final_hm3"]
+                    ].rename(columns={"storage_final_hm3": "_val"})
+                    merged = base.merge(sub, on=["scenario_id", "stage_id"], how="left")
+                elif vtype == "hydro_generation":
+                    sub = hg_pd[hg_pd["hydro_id"] == eid][
+                        ["scenario_id", "stage_id", "block_id", "generation_mw"]
+                    ].rename(columns={"generation_mw": "_val"})
+                    merged = base.merge(
+                        sub, on=["scenario_id", "stage_id", "block_id"], how="left"
+                    )
+                else:  # line_exchange
+                    sub = ex_pd[ex_pd["line_id"] == eid][
+                        ["scenario_id", "stage_id", "block_id", "net_flow_mw"]
+                    ].rename(columns={"net_flow_mw": "_val"})
+                    merged = base.merge(
+                        sub, on=["scenario_id", "stage_id", "block_id"], how="left"
+                    )
+                merged["_val"] = merged["_val"].fillna(0.0)
+                base["_lhs"] = base["_lhs"].values + coeff * merged["_val"].values
+
+            base["constraint_id"] = cid
+            base = base.rename(columns={"_lhs": "lhs_value"})
+            all_results.append(
+                base[
+                    [
+                        "constraint_id",
+                        "scenario_id",
+                        "stage_id",
+                        "block_id",
+                        "lhs_value",
+                    ]
+                ]
+            )
+
+    if not all_results:
+        return pd.DataFrame(
+            columns=[
+                "constraint_id",
+                "scenario_id",
+                "stage_id",
+                "block_id",
+                "lhs_value",
+            ]
+        )
+    return pd.concat(all_results, ignore_index=True)
+
+
+def build_constraints_summary_table(
+    constraints: list[dict],
+    gc_bounds: pd.DataFrame,
+    violations_df: pd.DataFrame,
+) -> str:
+    """HTML summary table of all generic constraints.
+
+    Columns: Name, Type, Sense, Active Stages, Bound Range, Slack, Penalty, Has Violations
+    Rows are colour-coded by constraint type.
+    """
+    type_colors = {
+        "VminOP": "#EEF4FB",
+        "RE": "#F0FAF4",
+        "AGRINT": "#FFF8EE",
+    }
+    rows_html: list[str] = []
+    for c in constraints:
+        cid = c["id"]
+        name = c["name"]
+        ctype = name.split("_")[0]
+        sense = c["sense"]
+        slack = c["slack"]
+        slack_enabled = "Yes" if slack.get("enabled") else "No"
+        penalty = (
+            f"{slack['penalty']:,.0f}"
+            if slack.get("enabled") and "penalty" in slack
+            else "—"
+        )
+        bounds_rows = gc_bounds[gc_bounds["constraint_id"] == cid]
+        active_stages = (
+            int(bounds_rows["stage_id"].nunique()) if not bounds_rows.empty else 0
+        )
+        bmin = bounds_rows["bound"].min() if not bounds_rows.empty else 0.0
+        bmax = bounds_rows["bound"].max() if not bounds_rows.empty else 0.0
+        if abs(bmax - bmin) < 1e-6:
+            bound_range = f"{bmin:,.1f}"
+        else:
+            bound_range = f"{bmin:,.1f} – {bmax:,.1f}"
+        has_viol = "No"
+        if not violations_df.empty and "constraint_id" in violations_df.columns:
+            viol_sub = violations_df[violations_df["constraint_id"] == cid]
+            if not viol_sub.empty and viol_sub["slack_value"].abs().sum() > 1e-6:
+                has_viol = "Yes"
+        bg = type_colors.get(ctype, "#FFFFFF")
+        viol_style = (
+            ' style="color:#DC4C4C;font-weight:600;"' if has_viol == "Yes" else ""
+        )
+        rows_html.append(
+            f'<tr style="background:{bg};">'
+            f"<td>{name}</td>"
+            f"<td>{ctype}</td>"
+            f"<td><code>{sense}</code></td>"
+            f"<td style='text-align:center;'>{active_stages}</td>"
+            f"<td style='text-align:right;'>{bound_range}</td>"
+            f"<td style='text-align:center;'>{slack_enabled}</td>"
+            f"<td style='text-align:right;'>{penalty}</td>"
+            f"<td style='text-align:center;'{viol_style}>{has_viol}</td>"
+            "</tr>"
+        )
+
+    legend_html = (
+        '<div style="margin-top:8px;font-size:0.8rem;color:#666;">'
+        '<span style="background:#EEF4FB;padding:2px 8px;margin-right:8px;">VminOP — Minimum stored energy</span>'
+        '<span style="background:#F0FAF4;padding:2px 8px;margin-right:8px;">RE — Electric constraint</span>'
+        '<span style="background:#FFF8EE;padding:2px 8px;">AGRINT — Exchange group constraint</span>'
+        "</div>"
+    )
+
+    return (
+        '<table class="data-table">'
+        "<thead><tr>"
+        "<th>Name</th><th>Type</th><th>Sense</th>"
+        "<th>Active Stages</th><th>Bound Range</th>"
+        "<th>Slack</th><th>Penalty (R$/unit)</th><th>Has Violations</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody>"
+        "</table>" + legend_html
+    )
+
+
+def chart_constraint_lhs_vs_bound(
+    constraints: list[dict],
+    lhs_df: pd.DataFrame,
+    gc_bounds: pd.DataFrame,
+    stage_labels: dict[int, str],
+    ctype_filter: str = "VminOP",
+) -> str:
+    """Subplots — one per constraint of given type.
+
+    Shows LHS p50 median across scenarios with p10-p90 band vs RHS bound.
+    For VminOP (storage energy): y-axis label is MWh equivalent.
+    For RE (generation): MW.
+    """
+    target = [c for c in constraints if c["name"].startswith(ctype_filter + "_")]
+    if not target or lhs_df.empty:
+        return f"<p>No {ctype_filter} constraints or no LHS data available.</p>"
+
+    n = len(target)
+    cols = min(n, 2)
+    rows_count = (n + cols - 1) // cols
+
+    subtitles = [c["name"] for c in target]
+    fig = make_subplots(
+        rows=rows_count,
+        cols=cols,
+        subplot_titles=subtitles,
+        vertical_spacing=0.12,
+        horizontal_spacing=0.1,
+    )
+
+    palette_lhs = "#4A90B8"
+    palette_bound = "#DC4C4C"
+
+    for idx, c in enumerate(target):
+        row = idx // cols + 1
+        col = idx % cols + 1
+        show_legend = idx == 0
+        cid = c["id"]
+
+        sub = lhs_df[lhs_df["constraint_id"] == cid].copy()
+        if sub.empty:
+            continue
+
+        # For storage constraints, LHS is stage-level (block_id=0). For others average
+        # over blocks to get a single stage value for the chart.
+        pcts = (
+            sub.groupby(["scenario_id", "stage_id"])["lhs_value"]
+            .mean()
+            .reset_index()
+            .groupby("stage_id")["lhs_value"]
+            .quantile([0.1, 0.5, 0.9])
+            .unstack(level=-1)
+            .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+        )
+        stages = sorted(pcts.index)
+        xlabels = stage_x_labels(stages, stage_labels)
+
+        p10 = [pcts["p10"].get(s, 0) for s in stages]
+        p50 = [pcts["p50"].get(s, 0) for s in stages]
+        p90 = [pcts["p90"].get(s, 0) for s in stages]
+
+        # Bound: for storage it is stage-level (no block). For RE/AGRINT take block 0.
+        bounds_c = gc_bounds[gc_bounds["constraint_id"] == cid]
+        if not bounds_c.empty:
+            if bounds_c["block_id"].isna().all():
+                b_by_stage = bounds_c.set_index("stage_id")["bound"]
+            else:
+                b_by_stage = bounds_c[bounds_c["block_id"] == 0.0].set_index(
+                    "stage_id"
+                )["bound"]
+            bound_vals = [float(b_by_stage.get(s, float("nan"))) for s in stages]
+        else:
+            bound_vals = [float("nan")] * len(stages)
+
+        # P10-P90 band
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels + xlabels[::-1],
+                y=p90 + p10[::-1],
+                fill="toself",
+                fillcolor="rgba(74,144,184,0.15)",
+                line={"color": "rgba(255,255,255,0)"},
+                name="P10–P90",
+                legendgroup="band",
+                showlegend=show_legend,
+                hoverinfo="skip",
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=p50,
+                name="LHS Median (P50)",
+                line={"color": palette_lhs, "width": 2},
+                legendgroup="lhs",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=bound_vals,
+                name="Bound (RHS)",
+                line={"color": palette_bound, "width": 1.5, "dash": "dash"},
+                legendgroup="bound",
+                showlegend=show_legend,
+            ),
+            row=row,
+            col=col,
+        )
+
+    type_labels = {
+        "VminOP": "Energy Equivalent (MWh)",
+        "RE": "Generation (MW)",
+        "AGRINT": "Flow (MW)",
+    }
+    yaxis_title = type_labels.get(ctype_filter, "Value")
+    sense_desc = {
+        "VminOP": "LHS ≥ Bound (minimum energy)",
+        "RE": "LHS ≤ Bound (upper limit)",
+        "AGRINT": "LHS ≤ Bound (exchange limit)",
+    }
+    title = (
+        f"{ctype_filter} Constraints — {sense_desc.get(ctype_filter, 'LHS vs Bound')}"
+    )
+
+    fig.update_layout(
+        title=title,
+        height=max(360, rows_count * 320),
+        legend={**_LEGEND, "y": 1.02},
+        margin=dict(l=60, r=30, t=80, b=50),
+    )
+    return fig_to_html(fig)
+
+
+def chart_constraint_bounds_timeline(
+    constraints: list[dict],
+    gc_bounds: pd.DataFrame,
+    stage_labels: dict[int, str],
+) -> str:
+    """Line chart of RHS bound evolution over stages for constraints with varying bounds.
+
+    Only plots constraints where the bound varies across stages or blocks.
+    """
+    varying = []
+    for c in constraints:
+        cid = c["id"]
+        rows = gc_bounds[gc_bounds["constraint_id"] == cid]
+        if rows.empty:
+            continue
+        if rows["bound"].std() > 0.01:
+            varying.append(c)
+
+    if not varying:
+        return "<p>All constraint bounds are constant across stages.</p>"
+
+    fig = go.Figure()
+    palette = [
+        "#4A90B8",
+        "#F5A623",
+        "#4A8B6F",
+        "#DC4C4C",
+        "#B87333",
+        "#9C27B0",
+        "#00BCD4",
+        "#FF5722",
+        "#607D8B",
+        "#795548",
+    ]
+
+    # Use a common x-axis covering ALL stages so lines don't jump across gaps
+    all_stages = sorted(gc_bounds["stage_id"].unique())
+    all_xlabels = stage_x_labels(all_stages, stage_labels)
+
+    for i, c in enumerate(varying):
+        cid = c["id"]
+        color = palette[i % len(palette)]
+        rows = gc_bounds[gc_bounds["constraint_id"] == cid]
+
+        # Use block 0 bounds if multiple blocks present; otherwise stage-level
+        if not rows["block_id"].isna().all():
+            rows = rows[rows["block_id"] == 0.0]
+        b_by_stage = rows.groupby("stage_id")["bound"].mean()
+        # Map to the common x-axis, using None for missing stages
+        xlabels = all_xlabels
+
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[float(b_by_stage.get(s, float("nan"))) for s in all_stages],
+                name=c["name"],
+                line={"color": color, "width": 2},
+                connectgaps=False,
+            )
+        )
+
+    fig.update_layout(
+        title="Constraint Bounds Timeline (constraints with varying bounds, block 0)",
+        xaxis_title="Stage",
+        yaxis_title="Bound Value",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_violation_cost_timeline(
+    costs: pd.DataFrame,
+    stage_labels: dict[int, str],
+) -> str:
+    """Total generic_violation_cost from simulation costs, aggregated by stage.
+
+    Shows p10/p50/p90 across scenarios. If all zeros, still renders the chart
+    with a zero line as infrastructure for future cases.
+    """
+    if "generic_violation_cost" not in costs.columns:
+        return "<p>generic_violation_cost column not present in costs output.</p>"
+
+    # costs is stage-level (block_id is NaN)
+    pcts = (
+        costs.groupby(["scenario_id", "stage_id"])["generic_violation_cost"]
+        .sum()
+        .reset_index()
+        .groupby("stage_id")["generic_violation_cost"]
+        .quantile([0.1, 0.5, 0.9])
+        .unstack(level=-1)
+        .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+    )
+    stages = sorted(pcts.index)
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    all_zero = pcts["p50"].abs().max() < 1e-6
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels + xlabels[::-1],
+            y=list(pcts["p90"].values) + list(pcts["p10"].values[::-1]),
+            fill="toself",
+            fillcolor="rgba(220,76,76,0.12)",
+            line={"color": "rgba(255,255,255,0)"},
+            name="P10–P90",
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=pcts["p50"].values,
+            name="Median (P50)",
+            line={"color": COLORS["deficit"], "width": 2.5},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=pcts["p10"].values,
+            name="P10",
+            line={"color": COLORS["deficit"], "width": 1, "dash": "dot"},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=pcts["p90"].values,
+            name="P90",
+            line={"color": COLORS["deficit"], "width": 1, "dash": "dot"},
+        )
+    )
+    suffix = " — No violations in this run" if all_zero else ""
+    fig.update_layout(
+        title=f"Generic Constraint Violation Cost by Stage (p10/p50/p90){suffix}",
+        xaxis_title="Stage",
+        yaxis_title="Violation Cost (R$)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+# ---------------------------------------------------------------------------
 # HTML assembly
 # ---------------------------------------------------------------------------
 
 CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Segoe UI', Arial, sans-serif; background: #f0f2f5; color: #212121; }
+body { font-family: 'IBM Plex Sans', 'Inter', 'Segoe UI', system-ui, sans-serif; background: #F0EDE8; color: #374151; }
 
 header {
-    background: linear-gradient(135deg, #1a237e 0%, #283593 100%);
+    background: linear-gradient(135deg, #0F1419 0%, #1A2028 100%);
+    border-top: 3px solid #B87333;
     color: white;
     padding: 16px 32px;
     font-size: 1.3rem;
@@ -1493,7 +3819,7 @@ header {
 }
 
 nav {
-    background: #1e2a3a;
+    background: #1A2028;
     padding: 0 24px;
     display: flex;
     gap: 4px;
@@ -1504,7 +3830,7 @@ nav {
 nav button {
     background: none;
     border: none;
-    color: #90A4AE;
+    color: #8B9298;
     padding: 14px 20px;
     font-size: 0.88rem;
     font-weight: 500;
@@ -1515,8 +3841,8 @@ nav button {
     letter-spacing: 0.3px;
 }
 
-nav button:hover { color: #E3F2FD; border-bottom-color: #42A5F5; }
-nav button.active { color: #90CAF9; border-bottom-color: #2196F3; }
+nav button:hover { color: #E8E6E3; border-bottom-color: #B87333; }
+nav button.active { color: #B87333; border-bottom-color: #B87333; }
 
 main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
 
@@ -1538,14 +3864,17 @@ main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
 }
 
 .chart-card {
-    background: white;
+    background: #FAFAF8;
     border-radius: 8px;
     padding: 16px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.1);
     overflow: hidden;
+    min-width: 0;
 }
 
 .chart-card .plotly-graph-div { width: 100% !important; }
+.chart-card .js-plotly-plot { width: 100% !important; }
+.chart-card .plot-container { width: 100% !important; }
 
 .metrics-grid {
     display: grid;
@@ -1555,7 +3884,7 @@ main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
 }
 
 .metric-card {
-    background: white;
+    background: #FAFAF8;
     border-radius: 8px;
     padding: 20px 16px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.1);
@@ -1565,13 +3894,13 @@ main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
 .metric-value {
     font-size: 1.5rem;
     font-weight: 700;
-    color: #212121;
+    color: #374151;
     margin-bottom: 6px;
 }
 
 .metric-label {
     font-size: 0.8rem;
-    color: #757575;
+    color: #8B9298;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
@@ -1579,13 +3908,40 @@ main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
 .section-title {
     font-size: 0.95rem;
     font-weight: 600;
-    color: #37474F;
+    color: #374151;
     margin: 24px 0 12px;
-    padding-bottom: 6px;
-    border-bottom: 2px solid #E0E0E0;
+    padding-left: 10px;
+    border-left: 4px solid #B87333;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    background: #FAFAF8;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+    margin-bottom: 20px;
+}
+.data-table th, .data-table td {
+    padding: 10px 12px;
+    text-align: right;
+    border-bottom: 1px solid #E0E0E0;
+}
+.data-table th {
+    background: #374151;
+    color: white;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.5px;
+}
+.data-table td:first-child, .data-table th:first-child { text-align: left; }
+.data-table td:nth-child(2), .data-table th:nth-child(2) { text-align: left; }
+.data-table tr:hover td { background: #F0EDE8; }
 """
 
 JS = """
@@ -1594,18 +3950,24 @@ function showTab(tabId, btn) {
     document.querySelectorAll('nav button').forEach(el => el.classList.remove('active'));
     document.getElementById(tabId).classList.add('active');
     btn.classList.add('active');
-    // Trigger Plotly resize for charts in newly visible tab
     window.dispatchEvent(new Event('resize'));
 }
+// Plotly charts in the initial active tab render before layout settles.
+// Fire a deferred resize so they recalculate to the correct container width.
+window.addEventListener('load', function() { setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 50); });
 """
 
 TAB_DEFS = [
     ("tab-overview", "Overview"),
     ("tab-energy", "Energy Balance"),
     ("tab-hydro", "Hydro Operations"),
+    ("tab-plants", "Plant Details"),
     ("tab-exchanges", "Exchanges"),
     ("tab-costs", "Costs"),
     ("tab-ncs-thermal", "NCS & Thermals"),
+    ("tab-investigation", "Investigation"),
+    ("tab-constraints", "Constraints"),
+    ("tab-perf", "Performance"),
 ]
 
 
@@ -1663,6 +4025,227 @@ def section_title(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Plant Details Interactive Component
+# ---------------------------------------------------------------------------
+
+
+def build_interactive_plant_details(
+    hydros: pd.DataFrame,
+    hydro_meta: dict[int, dict],
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+    lp_bounds: pd.DataFrame | None = None,
+) -> str:
+    """Build HTML with embedded per-hydro p10/p50/p90 data, LP bounds, and JS dropdown."""
+    h0 = hydros[hydros["block_id"] == 0]
+    stages = sorted(h0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    metrics = [
+        "generation_mw",
+        "storage_final_hm3",
+        "spillage_m3s",
+        "inflow_m3s",
+        "turbined_m3s",
+        "water_value_per_hm3",
+        "evaporation_m3s",
+        "outflow_m3s",
+    ]
+    short = {
+        "generation_mw": "gen",
+        "storage_final_hm3": "stor",
+        "spillage_m3s": "spill",
+        "inflow_m3s": "inflow",
+        "turbined_m3s": "turb",
+        "water_value_per_hm3": "wv",
+        "evaporation_m3s": "evap",
+        "outflow_m3s": "outflow",
+    }
+
+    hydro_data: dict[str, dict] = {}
+    for hid, meta in sorted(hydro_meta.items()):
+        hdata = h0[h0["hydro_id"] == hid]
+        if hdata.empty:
+            continue
+        entry: dict = {
+            "name": meta["name"],
+            "bus": bus_names.get(meta["bus_id"], str(meta["bus_id"])),
+            "vol_max": round(meta["vol_max"], 1),
+            "vol_min": round(meta["vol_min"], 1),
+            "max_gen": round(meta["max_gen_mw"], 1),
+            "max_gen_phys": round(meta.get("max_gen_physical", meta["max_gen_mw"]), 1),
+            "max_turb": round(meta["max_turbined"], 1),
+        }
+        for col in metrics:
+            k = short[col]
+            if col not in hdata.columns:
+                for sfx in ["p10", "p50", "p90"]:
+                    entry[f"{k}_{sfx}"] = [0.0] * len(stages)
+                continue
+            grp = hdata.groupby(["scenario_id", "stage_id"])[col].mean()
+            pcts = (
+                grp.groupby("stage_id")
+                .quantile([0.1, 0.5, 0.9])
+                .unstack(level=-1)
+                .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+            )
+            for sfx in ["p10", "p50", "p90"]:
+                entry[f"{k}_{sfx}"] = [
+                    round(float(pcts[sfx].get(s, 0)), 2) for s in stages
+                ]
+        hydro_data[str(hid)] = entry
+
+    # Embed per-hydro per-stage LP bounds (from solver output)
+    # bound_type: 0=storage_min, 1=storage_max, 2=turbined_min, 3=turbined_max,
+    #             4=outflow_min, 6=generation_min, 7=generation_max
+    if lp_bounds is not None and not lp_bounds.empty:
+        hb = lp_bounds[lp_bounds["entity_type_code"] == 0]  # hydro
+        bound_keys = {
+            0: "stor_min",
+            1: "stor_max",
+            2: "turb_min",
+            3: "turb_max",
+            4: "outflow_min",
+            6: "gen_min",
+            7: "gen_max",
+        }
+        for hid_str, entry in hydro_data.items():
+            hid_int = int(hid_str)
+            hb_plant = hb[hb["entity_id"] == hid_int]
+            for bt_code, key in bound_keys.items():
+                bt_rows = hb_plant[hb_plant["bound_type_code"] == bt_code]
+                if bt_rows.empty:
+                    entry[key] = [0.0] * len(stages)
+                else:
+                    by_stage = bt_rows.set_index("stage_id")["bound_value"]
+                    entry[key] = [round(float(by_stage.get(s, 0)), 2) for s in stages]
+
+    options = sorted(hydro_data.items(), key=lambda x: x[1]["name"])
+    options_html = "\n".join(
+        f'<option value="{hid}">{d["name"]} (id={hid})</option>' for hid, d in options
+    )
+    data_json = json.dumps(hydro_data, separators=(",", ":"))
+    labels_json = json.dumps(xlabels)
+
+    chart_rows = (
+        '<div class="chart-grid-single">'
+        '<div class="chart-card"><div id="hd-gen" style="width:100%;height:350px;"></div></div>'
+        "</div>"
+        '<div class="chart-grid">'
+        '<div class="chart-card"><div id="hd-stor" style="width:100%;height:350px;"></div></div>'
+        '<div class="chart-card"><div id="hd-inflow" style="width:100%;height:350px;"></div></div>'
+        "</div>"
+        '<div class="chart-grid">'
+        '<div class="chart-card"><div id="hd-turb" style="width:100%;height:350px;"></div></div>'
+        '<div class="chart-card"><div id="hd-spill" style="width:100%;height:350px;"></div></div>'
+        "</div>"
+        '<div class="chart-grid">'
+        '<div class="chart-card"><div id="hd-wv" style="width:100%;height:350px;"></div></div>'
+        '<div class="chart-card"><div id="hd-misc" style="width:100%;height:350px;"></div></div>'
+        "</div>"
+    )
+
+    return (
+        '<div style="margin-bottom:16px;">'
+        '<label for="hydro-select" style="font-weight:600;margin-right:8px;">Select Hydro Plant:</label>'
+        '<select id="hydro-select" onchange="updateHydroDetail()" '
+        'style="padding:8px 12px;font-size:0.9rem;border-radius:4px;border:1px solid #ccc;min-width:300px;">'
+        + options_html
+        + "</select>"
+        + '<span id="hydro-info" style="margin-left:16px;color:#666;font-size:0.85rem;"></span>'
+        + "</div>"
+        + chart_rows
+        + "<script>\n"
+        + "const HD = "
+        + data_json
+        + ";\n"
+        + "const HD_LABELS = "
+        + labels_json
+        + ";\n"
+        + r"""
+function _band(lbl, p10, p90, color) {
+  return {x: HD_LABELS.concat(HD_LABELS.slice().reverse()),
+          y: p90.concat(p10.slice().reverse()),
+          fill:'toself', fillcolor:color, line:{color:'rgba(0,0,0,0)'},
+          name:lbl, showlegend:true, hoverinfo:'skip'};
+}
+function _line(nm, y, c, w, dash) {
+  return {x:HD_LABELS, y:y, name:nm, line:{color:c, width:w||2, dash:dash||'solid'}};
+}
+function _ref(nm, val, c) {
+  return {x:HD_LABELS, y:Array(HD_LABELS.length).fill(val), name:nm,
+          line:{color:c, width:1, dash:'dot'}};
+}
+var _L = {hovermode:'x unified', margin:{l:60,r:20,t:50,b:60},
+           legend:{orientation:'h',y:1.12,x:0,font:{size:11}}};
+var _C = {responsive:true};
+function _lo(extra){return Object.assign({},_L,extra);}
+
+function updateHydroDetail() {
+  var hid = document.getElementById('hydro-select').value;
+  var d = HD[hid]; if(!d) return;
+  document.getElementById('hydro-info').textContent =
+    d.bus+' | Gen: '+d.max_gen_phys.toFixed(0)+' MW | Turb: '+d.max_turb.toFixed(0)+
+    ' m\u00b3/s | Vol: '+d.vol_min.toFixed(0)+'\u2013'+d.vol_max.toFixed(0)+' hm\u00b3';
+
+  Plotly.react('hd-gen', [
+    _band('P10-P90', d.gen_p10, d.gen_p90, 'rgba(74,144,184,0.15)'),
+    _line('P50', d.gen_p50, '#4A90B8'),
+    _line('P10', d.gen_p10, '#4A90B8', 1, 'dot'),
+    _line('P90', d.gen_p90, '#4A90B8', 1, 'dot'),
+    _line('Effective Capacity', d.gen_max || Array(HD_LABELS.length).fill(d.max_gen_phys), '#DC4C4C', 1, 'dash'),
+  ], _lo({title:d.name+' \u2014 Generation (MW)', yaxis:{title:'MW'}}), _C);
+
+  Plotly.react('hd-stor', [
+    _band('P10-P90', d.stor_p10, d.stor_p90, 'rgba(74,144,184,0.15)'),
+    _line('P50', d.stor_p50, '#4A90B8'),
+    _line('P10', d.stor_p10, '#4A90B8', 1, 'dot'),
+    _line('P90', d.stor_p90, '#4A90B8', 1, 'dot'),
+    _ref('Vol Max', d.vol_max, '#DC4C4C'),
+    _ref('Vol Min', d.vol_min, '#4A8B6F'),
+  ], _lo({title:'Storage (hm\u00b3)', yaxis:{title:'hm\u00b3'}}), _C);
+
+  Plotly.react('hd-inflow', [
+    _band('P10-P90', d.inflow_p10, d.inflow_p90, 'rgba(74,139,111,0.15)'),
+    _line('P50', d.inflow_p50, '#4A8B6F'),
+    _line('P10', d.inflow_p10, '#4A8B6F', 1, 'dot'),
+    _line('P90', d.inflow_p90, '#4A8B6F', 1, 'dot'),
+  ], _lo({title:'Inflow (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+
+  Plotly.react('hd-turb', [
+    _band('P10-P90', d.turb_p10, d.turb_p90, 'rgba(245,166,35,0.15)'),
+    _line('P50', d.turb_p50, '#F5A623'),
+    _line('P10', d.turb_p10, '#F5A623', 1, 'dot'),
+    _line('P90', d.turb_p90, '#F5A623', 1, 'dot'),
+    _line('Turb Max (LP)', d.turb_max || Array(HD_LABELS.length).fill(d.max_turb), '#DC4C4C', 1, 'dash'),
+  ], _lo({title:'Turbined (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+
+  Plotly.react('hd-spill', [
+    _band('P10-P90', d.spill_p10, d.spill_p90, 'rgba(184,115,51,0.15)'),
+    _line('P50', d.spill_p50, '#B87333'),
+    _line('P10', d.spill_p10, '#B87333', 1, 'dot'),
+    _line('P90', d.spill_p90, '#B87333', 1, 'dot'),
+  ], _lo({title:'Spillage (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+
+  Plotly.react('hd-wv', [
+    _band('P10-P90', d.wv_p10, d.wv_p90, 'rgba(139,146,152,0.15)'),
+    _line('P50', d.wv_p50, '#8B9298'),
+    _line('P10', d.wv_p10, '#8B9298', 1, 'dot'),
+    _line('P90', d.wv_p90, '#8B9298', 1, 'dot'),
+  ], _lo({title:'Water Value (R$/hm\u00b3)', yaxis:{title:'R$/hm\u00b3'}}), _C);
+
+  Plotly.react('hd-misc', [
+    _line('Evaporation P50', d.evap_p50, '#8B5E3C'),
+    _line('Outflow P50', d.outflow_p50, '#4A90B8'),
+  ], _lo({title:'Evaporation & Outflow (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+}
+document.addEventListener('DOMContentLoaded', function(){setTimeout(updateHydroDetail,100);});
+"""
+        + "</script>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1691,6 +4274,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     hydro_bus_map = load_hydro_bus_map(case_dir)
     thermal_meta = load_thermal_metadata(case_dir)
     ncs_bus_map = load_ncs_bus_map(case_dir)
+    hydro_meta = load_hydro_metadata(case_dir)
 
     # Build bus_names dict: id -> name from names dict
     bus_names = {eid: nm for (entity, eid), nm in names.items() if entity == "buses"}
@@ -1720,6 +4304,63 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         for b in s["blocks"]:
             block_hours[(s["id"], b["id"])] = b["hours"]
 
+    # Performance / solver data (optional — graceful fallback to empty frames)
+    timing_path = case_dir / "output" / "training" / "timing" / "iterations.parquet"
+    timing = (
+        pq.read_table(timing_path).to_pandas()
+        if timing_path.exists()
+        else pd.DataFrame()
+    )
+    solver_train_path = (
+        case_dir / "output" / "training" / "solver" / "iterations.parquet"
+    )
+    solver_train = (
+        pq.read_table(solver_train_path).to_pandas()
+        if solver_train_path.exists()
+        else pd.DataFrame()
+    )
+    sim_solver_path = (
+        case_dir / "output" / "simulation" / "solver" / "iterations.parquet"
+    )
+    solver_sim = (
+        pq.read_table(sim_solver_path).to_pandas()
+        if sim_solver_path.exists()
+        else pd.DataFrame()
+    )
+    scaling_path = case_dir / "output" / "training" / "scaling_report.json"
+    scaling_report: dict = (
+        json.load(scaling_path.open()) if scaling_path.exists() else {}
+    )
+    metadata_path = case_dir / "output" / "training" / "metadata.json"
+    metadata: dict = json.load(metadata_path.open()) if metadata_path.exists() else {}
+
+    # Load resolved LP bounds dictionary (actual bounds used by the solver)
+    bounds_path = case_dir / "output" / "training" / "dictionaries" / "bounds.parquet"
+    lp_bounds = (
+        pq.read_table(bounds_path).to_pandas()
+        if bounds_path.exists()
+        else pd.DataFrame()
+    )
+    codes_path = case_dir / "output" / "training" / "dictionaries" / "codes.json"
+    bounds_codes: dict = json.load(codes_path.open()) if codes_path.exists() else {}
+
+    # Generic constraints data (optional — graceful fallback when absent)
+    gc_path = case_dir / "constraints" / "generic_constraints.json"
+    gc_constraints: list[dict] = []
+    if gc_path.exists():
+        with gc_path.open() as _f:
+            _gc_data = json.load(_f)
+        gc_constraints = _gc_data.get("constraints", [])
+
+    gc_bounds_path = case_dir / "constraints" / "generic_constraint_bounds.parquet"
+    gc_bounds = (
+        pq.read_table(gc_bounds_path).to_pandas()
+        if gc_bounds_path.exists()
+        else pd.DataFrame()
+    )
+
+    gc_violations = load_all_scenarios(case_dir, "violations/generic")
+
     case_name = case_dir.resolve().name
     n_scenarios = costs["scenario_id"].nunique()
     n_stages = costs["stage_id"].nunique()
@@ -1737,10 +4378,14 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-overview"] = (
         section_title("Key Metrics")
         + metrics_html
-        + section_title("Training Convergence & Cost Breakdown")
-        + '<div class="chart-grid">'
+        + section_title("Training Convergence")
+        + '<div class="chart-grid-single">'
         + wrap_chart(chart_convergence(conv))
+        + "</div>"
+        + section_title("Cost Breakdown & Composition")
+        + '<div class="chart-grid">'
         + wrap_chart(chart_cost_breakdown(costs))
+        + wrap_chart(chart_cost_by_stage(costs, stage_labels))
         + "</div>"
     )
 
@@ -1790,6 +4435,11 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
             )
         )
         + "</div>"
+        + section_title("Deficit & Excess by Bus")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_deficit_by_bus(buses, bus_names, stage_labels, stage_hours))
+        + wrap_chart(chart_excess_by_bus(buses, bus_names, stage_labels, stage_hours))
+        + "</div>"
     )
 
     # ------------------------------------------------------------------
@@ -1801,29 +4451,47 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + '<div class="chart-grid-single">'
         + wrap_chart(chart_hydro_storage(hydros, stage_labels))
         + "</div>"
-        + section_title("Hydro Generation & Spillage")
+        + section_title("Storage by Bus")
+        + '<div class="chart-grid-single">'
+        + wrap_chart(
+            chart_storage_by_bus(hydros, hydro_bus_map, bus_names, stage_labels)
+        )
+        + "</div>"
+        + section_title("Hydro Generation & Spillage by Bus")
         + '<div class="chart-grid">'
         + wrap_chart(
             chart_hydro_gen_by_bus(hydros, hydro_bus_map, bus_names, stage_labels)
         )
-        + wrap_chart(chart_spillage_by_stage(hydros, names, stage_labels))
+        + wrap_chart(
+            chart_spillage_by_bus(hydros, hydro_bus_map, bus_names, stage_labels)
+        )
         + "</div>"
-        + section_title("Inflow Slack & Water Values")
+        + section_title("Water Values & Inflow Slack")
         + '<div class="chart-grid">'
-        + wrap_chart(chart_inflow_slack(hydros, names, stage_labels))
+        + wrap_chart(
+            chart_water_value_by_bus(hydros, hydro_bus_map, bus_names, stage_labels)
+        )
         + wrap_chart(chart_water_value_distribution(hydros, stage_labels))
         + "</div>"
     )
 
     # ------------------------------------------------------------------
-    # Tab 4: Exchanges
+    # Tab 4: Plant Details
     # ------------------------------------------------------------------
-    print("Building Tab 4: Exchanges ...")
+    print("Building Tab 4: Plant Details ...")
+    tab_contents["tab-plants"] = section_title(
+        "Plant Explorer"
+    ) + build_interactive_plant_details(
+        hydros, hydro_meta, bus_names, stage_labels, lp_bounds
+    )
+
+    # ------------------------------------------------------------------
+    # Tab 5: Exchanges
+    # ------------------------------------------------------------------
+    print("Building Tab 5: Exchanges ...")
     tab_contents["tab-exchanges"] = (
-        section_title("Net Flow by Line")
-        + '<div class="chart-grid-single">'
-        + wrap_chart(chart_net_flow_by_line(exchanges, names, stage_labels))
-        + "</div>"
+        section_title("Line Explorer")
+        + build_interactive_exchange_detail(exchanges, names, stage_labels)
         + section_title("Capacity Utilization")
         + '<div class="chart-grid-single">'
         + (
@@ -1845,34 +4513,161 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     # ------------------------------------------------------------------
     # Tab 5: Costs
     # ------------------------------------------------------------------
-    print("Building Tab 5: Costs ...")
+    print("Building Tab 6: Costs ...")
     tab_contents["tab-costs"] = (
         section_title("Cost Composition by Stage")
         + '<div class="chart-grid-single">'
         + wrap_chart(chart_cost_by_stage(costs, stage_labels))
         + "</div>"
-        + section_title("Spot Price & Merit Order")
-        + '<div class="chart-grid">'
-        + wrap_chart(chart_spot_price_by_bus(buses, bus_names, stage_labels))
-        + wrap_chart(chart_thermal_merit_order(thermals, thermal_meta))
+        + section_title("Spot Price by Bus (weighted avg across blocks)")
+        + '<div class="chart-grid-single">'
+        + wrap_chart(
+            chart_spot_price_by_bus_subplots(
+                buses, bus_names, stage_labels, stage_hours, block_hours
+            )
+        )
         + "</div>"
     )
 
     # ------------------------------------------------------------------
     # Tab 6: NCS & Thermals
     # ------------------------------------------------------------------
-    print("Building Tab 6: NCS & Thermals ...")
+    print("Building Tab 7: NCS & Thermals ...")
     tab_contents["tab-ncs-thermal"] = (
         section_title("NCS Available vs Generated")
         + '<div class="chart-grid-single">'
         + wrap_chart(chart_ncs_available_vs_generated(ncs, stage_labels))
         + "</div>"
-        + section_title("NCS Curtailment & Thermal by Cost Bracket")
-        + '<div class="chart-grid">'
-        + wrap_chart(chart_ncs_curtailment_by_source(ncs, names))
+        + section_title("Thermal Generation by Cost Bracket")
+        + '<div class="chart-grid-single">'
         + wrap_chart(
             chart_thermal_by_cost_bracket(thermals, thermal_meta, stage_labels)
         )
+        + "</div>"
+    )
+
+    # ------------------------------------------------------------------
+    # Tab 8: Investigation
+    # ------------------------------------------------------------------
+    print("Building Tab 8: Investigation ...")
+    inflow_stats = pq.read_table(
+        case_dir / "scenarios" / "inflow_seasonal_stats.parquet"
+    ).to_pandas()
+
+    tab_contents["tab-investigation"] = (
+        section_title("Realized Inflow vs Historical Statistics")
+        + '<div class="chart-grid-single">'
+        + wrap_chart(
+            chart_inflow_comparison(hydros, inflow_stats, hydro_meta, stage_labels)
+        )
+        + "</div>"
+        + section_title("Hydro Violations & Slacks (excl. evaporation)")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_violation_summary(hydros, stage_labels))
+        + wrap_chart(chart_violation_heatmap(hydros, names, stage_labels))
+        + "</div>"
+    )
+
+    # ------------------------------------------------------------------
+    # Tab 10: Constraints
+    # ------------------------------------------------------------------
+    print("Building Tab 10: Constraints ...")
+    if gc_constraints:
+        _lhs_df = evaluate_constraint_expressions(gc_constraints, hydros, exchanges)
+        _summary_table = build_constraints_summary_table(
+            gc_constraints, gc_bounds, gc_violations
+        )
+        _vminop_chart = chart_constraint_lhs_vs_bound(
+            gc_constraints, _lhs_df, gc_bounds, stage_labels, ctype_filter="VminOP"
+        )
+        _re_chart = chart_constraint_lhs_vs_bound(
+            gc_constraints, _lhs_df, gc_bounds, stage_labels, ctype_filter="RE"
+        )
+        _agrint_chart = chart_constraint_lhs_vs_bound(
+            gc_constraints, _lhs_df, gc_bounds, stage_labels, ctype_filter="AGRINT"
+        )
+        _bounds_timeline = chart_constraint_bounds_timeline(
+            gc_constraints, gc_bounds, stage_labels
+        )
+        _viol_cost_chart = chart_violation_cost_timeline(costs, stage_labels)
+
+        tab_contents["tab-constraints"] = (
+            section_title("Constraint Summary")
+            + _summary_table
+            + section_title("VminOP: Stored Energy vs Minimum")
+            + '<div class="chart-grid-single">'
+            + wrap_chart(_vminop_chart)
+            + "</div>"
+            + section_title("Electric Constraints (RE)")
+            + '<div class="chart-grid-single">'
+            + wrap_chart(_re_chart)
+            + "</div>"
+            + section_title("Exchange Group Constraints (AGRINT)")
+            + '<div class="chart-grid-single">'
+            + wrap_chart(_agrint_chart)
+            + "</div>"
+            + section_title("Bounds & Violations")
+            + '<div class="chart-grid">'
+            + wrap_chart(_bounds_timeline)
+            + wrap_chart(_viol_cost_chart)
+            + "</div>"
+        )
+    else:
+        tab_contents["tab-constraints"] = (
+            f"<p>No generic constraint definitions found in {gc_path}.</p>"
+        )
+
+    # ------------------------------------------------------------------
+    # Tab 9: Performance
+    # ------------------------------------------------------------------
+    print("Building Tab 9: Performance ...")
+    # Filter simulation solver to actual scenario count from manifest.
+    sim_manifest_path = case_dir / "output" / "simulation" / "_manifest.json"
+    if sim_manifest_path.exists():
+        sim_manifest = json.load(sim_manifest_path.open())
+        actual_sim_scenarios = sim_manifest.get("scenarios", {}).get(
+            "completed", n_scenarios
+        )
+        # Pass sim wall-clock to metrics via metadata
+        metadata["_sim_manifest"] = sim_manifest
+    else:
+        actual_sim_scenarios = n_scenarios
+    if not solver_sim.empty:
+        solver_sim = solver_sim.head(actual_sim_scenarios)
+    perf_metrics_html = build_performance_metrics_html(
+        conv, timing, solver_train, solver_sim, scaling_report, metadata
+    )
+    tab_contents["tab-perf"] = (
+        section_title("Run Summary")
+        + perf_metrics_html
+        + section_title("Training Iteration Breakdown")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_iteration_timing_breakdown(timing))
+        + wrap_chart(chart_forward_vs_backward_per_iter(solver_train))
+        + "</div>"
+        + section_title("Solver Time Breakdown")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_solver_time_breakdown_by_phase(solver_train))
+        + wrap_chart(chart_solver_time_per_stage(solver_train))
+        + "</div>"
+        + section_title("LP Solver Detail")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_backward_stage_heatmap(solver_train))
+        + wrap_chart(chart_simplex_by_stage(solver_train))
+        + "</div>"
+        + section_title("Solver Overhead Detail")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_set_bounds_by_stage(solver_train))
+        + wrap_chart(chart_basis_reuse(solver_train))
+        + "</div>"
+        + section_title("LP Dimensions & Scaling")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_lp_dimensions(scaling_report))
+        + wrap_chart(chart_scaling_quality(scaling_report))
+        + "</div>"
+        + section_title("Simulation")
+        + '<div class="chart-grid-single">'
+        + wrap_chart(chart_simulation_scenario_times(solver_sim))
         + "</div>"
     )
 

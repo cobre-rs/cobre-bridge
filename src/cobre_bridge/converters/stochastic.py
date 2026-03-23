@@ -31,18 +31,22 @@ def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
     A plant's upstream plants are those whose ``codigo_usina_jusante``
     equals this plant's ``codigo_usina``.  The mapping is in posto space
     since inflow data (vazoes/vazpast) is indexed by posto.
+
+    FICT (fictitious) plants are INCLUDED in the cascade because they
+    represent aggregated inflow contributions at their gauging stations.
+    Excluding them causes downstream plants' incremental inflows to be
+    overstated (the FICT plant's natural inflow is not subtracted).
     """
     from collections import defaultdict
 
     existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
 
     code_to_posto: dict[int, int] = {}
-    for _, row in non_fict.iterrows():
+    for _, row in existing.iterrows():
         code_to_posto[int(row["codigo_usina"])] = int(row["posto"])
 
     upstream: dict[int, list[int]] = defaultdict(list)
-    for _, row in non_fict.iterrows():
+    for _, row in existing.iterrows():
         code = int(row["codigo_usina"])
         ds_raw = row.get("codigo_usina_jusante")
         if ds_raw is not None and not pd.isna(ds_raw) and int(ds_raw) != 0:

@@ -117,10 +117,17 @@ def _apply_permanent_overrides(
                 result.loc[code, "numero_conjuntos_maquinas"] = int(rec.numero)
 
             elif type_name == "NUMMAQ":
-                set_num = int(rec.conjunto)
-                result.loc[code, f"maquinas_conjunto_{set_num}"] = int(
-                    rec.numero_maquinas
-                )
+                # Workaround for inewave NUMMAQ parsing bug: the library
+                # swaps/truncates the two fields (numero_maquinas, conjunto).
+                # Read from rec.data (raw parsed integers) instead.
+                raw = getattr(rec, "data", None)
+                if raw and len(raw) >= 2:
+                    n_maq = int(raw[0])
+                    set_num = int(raw[1])
+                else:
+                    set_num = int(rec.conjunto)
+                    n_maq = int(rec.numero_maquinas)
+                result.loc[code, f"maquinas_conjunto_{set_num}"] = n_maq
 
             elif type_name in ("VOLCOTA", "COTARE"):
                 # VOLCOTA/COTARE are not present in the example case.
@@ -458,7 +465,7 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             max_turbined += q_nominal * n_machines
             max_generation += p_nominal * n_machines
 
-        # Apply TEIF/IP availability derating to max_generation only.
+        # Apply TEIF/IP availability derating to max_generation.
         teif = float(hreg.get("teif", 0.0) or 0.0)
         ip = float(hreg.get("ip", 0.0) or 0.0)
         if math.isnan(teif):
@@ -575,7 +582,7 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
                 {"coefficients_mm": evap_coeffs} if has_evaporation else None
             ),
             "tailrace": None,
-            "diversion": None,
+            "diversion": _make_diversion(newave_code, id_map),
             "filling": None,
             "efficiency": None,
             "hydraulic_losses": hydraulic_losses,
@@ -1131,6 +1138,35 @@ def convert_water_withdrawal(
     )
     # Sort by (hydro_id, stage_id) for deterministic output.
     return table.sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
+
+
+# ---------------------------------------------------------------------------
+# Hardcoded diversion: PIMENTAL → BELO MONTE
+# ---------------------------------------------------------------------------
+# The Belo Monte complex has two powerhouses sharing a reservoir. PIMENTAL
+# (NEWAVE code 314) is the complementary powerhouse at the dam site; BELO
+# MONTE (code 288) is the main powerhouse connected by a diversion canal.
+# NEWAVE splits the Xingu river inflow between the two postos (302 / 292)
+# but does not model an explicit diversion. We add it here so that cobre
+# can route excess water from PIMENTAL to BELO MONTE instead of spilling.
+
+_PIMENTAL_NEWAVE_CODE = 314
+_BELO_MONTE_NEWAVE_CODE = 288
+_PIMENTAL_DIVERSION_MAX_M3S = 13_900.0
+
+
+def _make_diversion(newave_code: int, id_map: "NewaveIdMap") -> dict | None:
+    """Return a diversion dict for PIMENTAL, ``None`` for all other plants."""
+    if newave_code != _PIMENTAL_NEWAVE_CODE:
+        return None
+    try:
+        bm_id = id_map.hydro_id(_BELO_MONTE_NEWAVE_CODE)
+    except KeyError:
+        return None
+    return {
+        "downstream_id": bm_id,
+        "max_flow_m3s": _PIMENTAL_DIVERSION_MAX_M3S,
+    }
 
 
 def _is_na(value: object) -> bool:

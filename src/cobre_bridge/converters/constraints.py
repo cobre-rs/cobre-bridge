@@ -222,7 +222,8 @@ def convert_vminop_constraints(
 
         # Build expression: sum of acc_prod * hydro_storage(cobre_id)
         terms: list[str] = []
-        max_energy = 0.0
+        useful_energy = 0.0
+        dead_energy = 0.0
 
         for plant_code in sorted(hydros_in_ree):
             ap = acc_prod.get(plant_code, 0.0)
@@ -234,10 +235,13 @@ def convert_vminop_constraints(
             except KeyError:
                 continue
 
+            vol_min = float(cadastro.loc[plant_code, "volume_minimo"])
             vol_max = float(cadastro.loc[plant_code, "volume_maximo"])
-            max_energy += ap * vol_max
+            useful_energy += ap * (vol_max - vol_min)
+            dead_energy += ap * vol_min
             terms.append(f"{ap} * hydro_storage({cobre_id})")
 
+        max_energy = useful_energy + dead_energy
         if not terms or max_energy <= 0.0:
             _LOG.warning(
                 "REE %d (%s): no valid terms for VminOP expression; skipping.",
@@ -263,9 +267,14 @@ def convert_vminop_constraints(
             }
         )
 
-        # Build per-stage bounds from curva_df
+        # Build per-stage bounds from curva_df.
+        # curva.dat only covers the study period.  For post-study stages we
+        # extrapolate seasonally using the last year's percentages (the same
+        # approach used for RE constraints).
         ree_curva = curva_df[curva_df["codigo_ree"] == ree_code].sort_values("data")
 
+        # First pass: collect bounds and build seasonal map for extrapolation
+        seasonal_pct: dict[int, float] = {}  # calendar_month -> last percentage
         for _, crow in ree_curva.iterrows():
             dt: datetime = crow["data"]
             stage_id = (dt.year - start_year) * 12 + (dt.month - start_month)
@@ -273,11 +282,34 @@ def convert_vminop_constraints(
                 continue
 
             percentage = float(crow["valor"])
-            rhs = (percentage / 100.0) * max_energy
+            rhs = (percentage / 100.0) * useful_energy + dead_energy
 
             bound_constraint_ids.append(constraint_id)
             bound_stage_ids.append(stage_id)
             bound_values.append(rhs)
+
+            # Track the percentage per calendar month (last value wins)
+            seasonal_pct[dt.month] = percentage
+
+        # Second pass: extrapolate to post-study stages using seasonal pattern
+        if seasonal_pct:
+            covered = {
+                (dt.year - start_year) * 12 + (dt.month - start_month)
+                for _, dt in ree_curva["data"].items()
+                if 0
+                <= (dt.year - start_year) * 12 + (dt.month - start_month)
+                < num_stages
+            }
+            for stage_id in range(num_stages):
+                if stage_id in covered:
+                    continue
+                cal_month = ((start_month - 1 + stage_id) % 12) + 1
+                pct = seasonal_pct.get(cal_month)
+                if pct is not None:
+                    rhs = (pct / 100.0) * useful_energy + dead_energy
+                    bound_constraint_ids.append(constraint_id)
+                    bound_stage_ids.append(stage_id)
+                    bound_values.append(rhs)
 
     if not constraints:
         return None
@@ -685,12 +717,20 @@ def convert_electric_constraints(
             inf_id = start_id + len(constraints)
             _add_constraint(">=", inf_id)
 
-        # Emit bound rows for each (stage, block) in valid range
+        # Build a seasonal bound map from the original (first-year) data.
+        # Key: (calendar_month, block_id) -> (lim_sup, lim_inf)
+        # NEWAVE restricts restricao-eletrica.csv to the first 12 stages
+        # (individual plant modeling horizon).  We extrapolate seasonally
+        # across the full study horizon: each calendar month in every year
+        # reuses the bound from the same month in the first year.
+        seasonal_sup: dict[tuple[int, int], float] = {}
+        seasonal_inf: dict[tuple[int, int], float] = {}
+
         for per_ini, per_fin, pat, lim_inf, lim_sup in entries_for_code:
             ini_year, ini_month = _parse_yyyymm(per_ini)
             fin_year, fin_month = _parse_yyyymm(per_fin)
 
-            # Restrict to horizon window
+            # Restrict to horizon window (for the initial data extraction)
             ini_year, ini_month = max(
                 (ini_year, ini_month), horiz_ini, key=lambda t: t[0] * 12 + t[1]
             )
@@ -700,26 +740,33 @@ def convert_electric_constraints(
 
             block_id = pat - 1  # 1-based Pat -> 0-based block_id
 
-            # Iterate month by month within [ini, fin]
             y, m = ini_year, ini_month
             while (y, m) <= (fin_year, fin_month):
-                stage_id = (y - start_year) * 12 + (m - start_month)
-                if 0 <= stage_id < num_stages:
-                    if sup_id is not None and lim_sup > _UNBOUNDED_THRESHOLD:
-                        bound_constraint_ids.append(sup_id)
-                        bound_stage_ids.append(stage_id)
-                        bound_block_ids.append(block_id)
-                        bound_values.append(lim_sup)
-                    if inf_id is not None and lim_inf > _UNBOUNDED_THRESHOLD:
-                        bound_constraint_ids.append(inf_id)
-                        bound_stage_ids.append(stage_id)
-                        bound_block_ids.append(block_id)
-                        bound_values.append(lim_inf)
-
+                key = (m, block_id)
+                if lim_sup > _UNBOUNDED_THRESHOLD:
+                    seasonal_sup[key] = lim_sup
+                if lim_inf > _UNBOUNDED_THRESHOLD:
+                    seasonal_inf[key] = lim_inf
                 m += 1
                 if m > 12:
                     m = 1
                     y += 1
+
+        # Emit bound rows for the FULL study horizon using the seasonal map.
+        for stage_id in range(num_stages):
+            cal_month = ((start_month - 1 + stage_id) % 12) + 1
+            for block_id in range(3):  # 3 patamares
+                key = (cal_month, block_id)
+                if sup_id is not None and key in seasonal_sup:
+                    bound_constraint_ids.append(sup_id)
+                    bound_stage_ids.append(stage_id)
+                    bound_block_ids.append(block_id)
+                    bound_values.append(seasonal_sup[key])
+                if inf_id is not None and key in seasonal_inf:
+                    bound_constraint_ids.append(inf_id)
+                    bound_stage_ids.append(stage_id)
+                    bound_block_ids.append(block_id)
+                    bound_values.append(seasonal_inf[key])
 
     if not constraints:
         return None
