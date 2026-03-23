@@ -45,7 +45,7 @@ def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
     for _, row in existing.iterrows():
         code_to_posto[int(row["codigo_usina"])] = int(row["posto"])
 
-    upstream: dict[int, list[int]] = defaultdict(list)
+    upstream: dict[int, set[int]] = defaultdict(set)
     for _, row in existing.iterrows():
         code = int(row["codigo_usina"])
         ds_raw = row.get("codigo_usina_jusante")
@@ -53,8 +53,10 @@ def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
             ds_code = int(ds_raw)
             ds_posto = code_to_posto.get(ds_code)
             if ds_posto is not None:
-                upstream[ds_posto].append(code_to_posto[code])
-    return dict(upstream)
+                upstream[ds_posto].add(code_to_posto[code])
+    # Convert sets to lists for the callers that iterate them.
+    upstream_lists: dict[int, list[int]] = {k: list(v) for k, v in upstream.items()}
+    return upstream_lists
 
 
 # Parquet schema for inflow seasonal statistics.
