@@ -288,7 +288,7 @@ def _read_ghmin(nw_files: NewaveFiles) -> dict[int, float]:
 
 # Mapping from PENALID.DAT variable names to Cobre penalty field names.
 _PENALID_VAR_MAP: dict[str, str] = {
-    "DESVIO": "spillage_cost",
+    "DESVIO": "water_withdrawal_violation_cost",
     "VAZMIN": "outflow_violation_below_cost",
     "VAZMAX": "outflow_violation_above_cost",
     "GHMIN": "generation_violation_below_cost",
