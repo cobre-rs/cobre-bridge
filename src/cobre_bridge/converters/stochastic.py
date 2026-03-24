@@ -26,26 +26,36 @@ logger = logging.getLogger(__name__)
 
 
 def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
-    """Return {posto: [upstream_posto, ...]} for the hydro cascade.
+    """Return ``{posto: [upstream_posto, ...]}`` for the hydro cascade.
 
-    A plant's upstream plants are those whose ``codigo_usina_jusante``
-    equals this plant's ``codigo_usina``.  The mapping is in posto space
-    since inflow data (vazoes/vazpast) is indexed by posto.
+    Builds a DAG in **posto space** from the full confhd cascade (all EX
+    plants, including FICT).  Multiple plants that share the same posto
+    collapse into a single DAG node, which naturally deduplicates upstream
+    contributions.
 
-    FICT (fictitious) plants are INCLUDED in the cascade because they
-    represent aggregated inflow contributions at their gauging stations.
-    Excluding them causes downstream plants' incremental inflows to be
-    overstated (the FICT plant's natural inflow is not subtracted).
+    The algorithm:
+
+    1. Map every plant code → posto and every code → downstream_code from
+       confhd (all EX plants, real and FICT).
+    2. Translate each ``code → downstream_code`` edge into a ``posto →
+       downstream_posto`` edge.  Collect all edges as a set so that
+       duplicate edges from real + FICT plant pairs sharing a posto are
+       ignored.
+    3. Invert the edge direction: for each ``src_posto → dst_posto`` edge,
+       record ``dst_posto ← src_posto`` (upstream).
+
+    Because FICT plants share postos with real plants, and their cascade
+    edges resolve to the same posto-level edges, no duplicates arise.
     """
-    from collections import defaultdict
-
     existing = confhd_df[confhd_df["usina_existente"] == "EX"]
 
+    # Step 1: code → posto
     code_to_posto: dict[int, int] = {}
     for _, row in existing.iterrows():
         code_to_posto[int(row["codigo_usina"])] = int(row["posto"])
 
-    upstream: dict[int, set[int]] = defaultdict(set)
+    # Step 2: collect directed edges (src_posto → dst_posto) as a set
+    edges: set[tuple[int, int]] = set()
     for _, row in existing.iterrows():
         code = int(row["codigo_usina"])
         ds_raw = row.get("codigo_usina_jusante")
@@ -53,10 +63,16 @@ def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
             ds_code = int(ds_raw)
             ds_posto = code_to_posto.get(ds_code)
             if ds_posto is not None:
-                upstream[ds_posto].add(code_to_posto[code])
-    # Convert sets to lists for the callers that iterate them.
-    upstream_lists: dict[int, list[int]] = {k: list(v) for k, v in upstream.items()}
-    return upstream_lists
+                src_posto = code_to_posto[code]
+                if src_posto != ds_posto:  # skip self-loops
+                    edges.add((src_posto, ds_posto))
+
+    # Step 3: invert edges → upstream map
+    upstream: dict[int, list[int]] = {}
+    for src, dst in edges:
+        upstream.setdefault(dst, []).append(src)
+
+    return upstream
 
 
 # Parquet schema for inflow seasonal statistics.
