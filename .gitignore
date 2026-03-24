@@ -25,3 +25,6 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# examples
+example/
