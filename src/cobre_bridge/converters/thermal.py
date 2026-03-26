@@ -235,38 +235,19 @@ def convert_thermal_bounds(
 ) -> pa.Table | None:
     """Build per-stage thermal generation bounds from EXPT.DAT and MANUTT.DAT.
 
-    For each thermal plant and each study stage, computes:
+    Follows the sintetizador-newave processing order:
 
-    ``max_generation_mw = potencia_instalada * (fcmax/100)
-                          * ((100 - ip) / 100) * ((100 - teif) / 100)``
-
-    Base values come from ``term.dat``.  Temporal overrides from ``expt.dat``
-    update ``potencia_instalada`` (POTEF), ``fator_capacidade_maximo`` (FCMAX),
-    ``teif`` (TEIFT), ``geracao_minima`` (GTMIN), and
-    ``indisponibilidade_programada`` (IPTER) for specific date ranges.
-
-    ``manutt.dat`` maintenance events further reduce ``potencia_instalada`` on
-    a daily basis (averaged to monthly) for the maintenance window.  Following
-    the NEWAVE convention, the ``indisponibilidade_programada`` is zeroed for
-    stages that fall within the maintenance window of any unit for a plant,
-    because the scheduled unavailability is already captured by the maintenance
-    power reduction.
+    1. Zero IP for ALL plants in stages before ``maintenance_end_date``
+       (= ``ano_inicio_estudo + num_anos_manutencao_utes``).
+    2. For plants with EXPT POTEF: zero ``potencia`` for stages >=
+       ``maintenance_end_date`` (to be restored by EXPT in step 3).
+    3. For plants with EXPT GTMIN: zero ``gen_min`` for stages >=
+       ``maintenance_end_date`` (to be restored by EXPT in step 3).
+    4. Apply ALL EXPT overrides (POTEF, FCMAX, TEIFT, GTMIN, IPTER).
+    5. Apply MANUTT capacity reductions (only stages < maintenance_end).
+    6. Evaluate: ``pot * (fcmax/100) * ((100-ip)/100) * ((100-teif)/100)``
 
     Returns ``None`` if neither ``expt.dat`` nor ``manutt.dat`` is present.
-
-    Parameters
-    ----------
-    nw_files:
-        Resolved NEWAVE file paths.
-    id_map:
-        Entity ID map for resolving NEWAVE thermal codes to 0-based Cobre IDs.
-
-    Returns
-    -------
-    pa.Table | None
-        Parquet table with columns ``thermal_id``, ``stage_id``,
-        ``min_generation_mw``, ``max_generation_mw``; or ``None`` if no
-        per-stage override data is available.
     """
     if nw_files.expt is None and nw_files.manutt is None:
         _LOG.debug("Neither expt.dat nor manutt.dat present; skipping thermal bounds.")
@@ -279,21 +260,23 @@ def convert_thermal_bounds(
     start_year: int = dger.ano_inicio_estudo
     num_anos: int = dger.num_anos_estudo or 1
     num_anos_pos: int = dger.num_anos_pos_estudo or 0
+    num_maint_years: int = dger.num_anos_manutencao_utes or 0
     study_months = (13 - start_month) + (num_anos - 1) * 12
     total_stages = study_months + num_anos_pos * 12
+
+    # Maintenance end: stages before this index have IP=0 globally.
+    maint_end_stage = (start_year + num_maint_years - start_year) * 12 + (
+        1 - start_month
+    )
 
     stage_dates = _build_stage_dates(start_year, start_month, total_stages)
 
     # ------------------------------------------------------------------
-    # 1. Build base values per (thermal_code, calendar_month) from term.dat.
-    #    term.dat has 12 or 13 rows per plant (one per calendar month,
-    #    month 13 = annual average used as default).
+    # 1. Build base values per (thermal_code, calendar_month) from term.
     # ------------------------------------------------------------------
     term = Term.read(str(nw_files.term))
     term_df = term.usinas
 
-    # Base per-(code, month): potencia, fcmax, teif, ip, gen_min.
-    # Use month=1..12; fall back to any row if specific month missing.
     BaseRow = dict[str, float]
     base_by_code_month: dict[tuple[int, int], BaseRow] = {}
     if term_df is not None:
@@ -310,7 +293,6 @@ def convert_thermal_bounds(
                 "gen_min": float(row["geracao_minima"]),
             }
 
-    # Also collect default base row per code (first available month).
     base_default: dict[int, BaseRow] = {}
     if term_df is not None:
         for _, row in term_df.iterrows():
@@ -320,7 +302,12 @@ def convert_thermal_bounds(
                     "potencia": float(row["potencia_instalada"]),
                     "fcmax": float(row["fator_capacidade_maximo"]),
                     "teif": float(row.get("teif", 0.0)),
-                    "ip": float(row.get("indisponibilidade_programada", 0.0)),
+                    "ip": float(
+                        row.get(
+                            "indisponibilidade_programada",
+                            0.0,
+                        )
+                    ),
                     "gen_min": float(row["geracao_minima"]),
                 }
 
@@ -331,10 +318,16 @@ def convert_thermal_bounds(
         default = base_default.get(code)
         if default is not None:
             return dict(default)
-        return {"potencia": 0.0, "fcmax": 100.0, "teif": 0.0, "ip": 0.0, "gen_min": 0.0}
+        return {
+            "potencia": 0.0,
+            "fcmax": 100.0,
+            "teif": 0.0,
+            "ip": 0.0,
+            "gen_min": 0.0,
+        }
 
     # ------------------------------------------------------------------
-    # 2. Load EXPT overrides: {thermal_code: list of override dicts}.
+    # 2. Load EXPT overrides.
     # ------------------------------------------------------------------
     expt_by_code: dict[int, list[dict]] = {}
     if nw_files.expt is not None:
@@ -354,8 +347,26 @@ def convert_thermal_bounds(
         except Exception:  # noqa: BLE001
             _LOG.warning("expt.dat could not be parsed; EXPT overrides skipped.")
 
+    # Pre-compute which codes have POTEF / GTMIN in EXPT.
+    codes_with_potef: set[int] = set()
+    codes_with_gtmin: set[int] = set()
+    # Plants whose POTEF has a finite end date — they are only
+    # available during the POTEF window (zero capacity outside).
+    potef_finite_end: dict[int, date] = {}
+    for code, overrides in expt_by_code.items():
+        for o in overrides:
+            if o["tipo"] == "POTEF":
+                codes_with_potef.add(code)
+                if not pd.isna(o["data_fim"]):
+                    end = pd.Timestamp(o["data_fim"]).date()
+                    prev = potef_finite_end.get(code)
+                    if prev is None or end > prev:
+                        potef_finite_end[code] = end
+            elif o["tipo"] == "GTMIN":
+                codes_with_gtmin.add(code)
+
     # ------------------------------------------------------------------
-    # 3. Load MANUTT maintenance events: {thermal_code: DataFrame slice}.
+    # 3. Load MANUTT maintenance events.
     # ------------------------------------------------------------------
     manutt_by_code: dict[int, pd.DataFrame] = {}
     if nw_files.manutt is not None:
@@ -367,7 +378,6 @@ def convert_thermal_bounds(
         except Exception:  # noqa: BLE001
             _LOG.warning("manutt.dat could not be parsed; maintenance skipped.")
 
-    # Determine the set of thermal codes that have any per-stage override data.
     all_codes = (
         set(expt_by_code.keys()) | set(manutt_by_code.keys()) | set(base_default.keys())
     )
@@ -381,44 +391,23 @@ def convert_thermal_bounds(
         try:
             thermal_id = id_map.thermal_id(newave_code)
         except KeyError:
-            _LOG.debug("Thermal code %d not in id_map; skipping bounds.", newave_code)
             continue
 
         overrides = expt_by_code.get(newave_code, [])
         maint_rows = manutt_by_code.get(newave_code)
-
-        # Determine if any maintenance exists for this plant to zero out IP.
         has_maint = maint_rows is not None and not maint_rows.empty
-        maint_stage_flags: set[int] = set()
-        if has_maint:
-            for _, mrow in maint_rows.iterrows():
-                start_dt = pd.Timestamp(mrow["data_inicio"]).date()
-                end_dt = (
-                    pd.Timestamp(mrow["data_inicio"])
-                    + timedelta(days=int(mrow["duracao"]))
-                ).date()
-                for idx, sd in enumerate(stage_dates):
-                    # First day of the following month (exclusive upper bound).
-                    if sd.month == 12:
-                        stage_end = date(sd.year + 1, 1, 1)
-                    else:
-                        stage_end = date(sd.year, sd.month + 1, 1)
-                    if start_dt < stage_end and end_dt > sd:
-                        maint_stage_flags.add(idx)
 
-        # Build per-stage capacity array from MANUTT (starts from base potencia).
-        base_cap_for_maint = base_default.get(newave_code, {}).get("potencia", 0.0)
+        # Build per-stage MANUTT reduction (delta from base).
+        # Applied to EXPT-modified potencia, matching sintetizador
+        # which applies EXPT before MANUTT.
+        base_cap = base_default.get(newave_code, {}).get("potencia", 0.0)
+        maint_reduction: np.ndarray | None = None
         if has_maint:
-            maint_effective_cap = _apply_maint_to_capacity(
-                base_cap_for_maint, maint_rows, stage_dates
-            )
-        else:
-            maint_effective_cap = None
+            effective = _apply_maint_to_capacity(base_cap, maint_rows, stage_dates)
+            maint_reduction = np.maximum(0.0, base_cap - effective)
 
         for stage_idx, stage_date in enumerate(stage_dates):
             cal_month = stage_date.month
-
-            # Start with base values for this calendar month.
             vals = _base(newave_code, cal_month)
             potencia = vals["potencia"]
             fcmax = vals["fcmax"]
@@ -426,16 +415,25 @@ def convert_thermal_bounds(
             ip = vals["ip"]
             gen_min = vals["gen_min"]
 
-            # Zero out IP for stages with active maintenance (NEWAVE convention).
-            if stage_idx in maint_stage_flags:
+            # Step 1: global IP zeroing before maintenance_end.
+            if stage_idx < maint_end_stage:
                 ip = 0.0
 
-            # Apply EXPT overrides in file order for this stage.
+            # Step 2: null potencia for stages >= maint_end
+            # if this plant has POTEF overrides (EXPT will restore).
+            if stage_idx >= maint_end_stage and newave_code in codes_with_potef:
+                potencia = 0.0
+
+            # Step 3: null gen_min for stages >= maint_end
+            # if this plant has GTMIN overrides (EXPT will restore).
+            if stage_idx >= maint_end_stage and newave_code in codes_with_gtmin:
+                gen_min = 0.0
+
+            # Step 4: apply EXPT overrides in file order.
             for override in overrides:
                 ov_start = pd.Timestamp(override["data_inicio"]).date()
                 ov_end_raw = override["data_fim"]
                 if pd.isna(ov_end_raw):
-                    # NaT means open-ended: override applies to end of horizon.
                     ov_end = stage_dates[-1]
                 else:
                     ov_end = pd.Timestamp(ov_end_raw).date()
@@ -454,18 +452,22 @@ def convert_thermal_bounds(
                 elif tipo == "GTMIN":
                     gen_min = value
                 elif tipo == "IPTER":
-                    # Only apply IPTER if no active maintenance zeroed it out.
-                    if stage_idx not in maint_stage_flags:
-                        ip = value
+                    ip = value
 
-            # Apply MANUTT: replace potencia with daily-averaged effective capacity.
-            if maint_effective_cap is not None:
-                potencia = float(maint_effective_cap[stage_idx])
+            # Step 4b: POTEF with finite end defines availability window.
+            # After the POTEF range expires the plant has zero capacity.
+            potef_end = potef_finite_end.get(newave_code)
+            if potef_end is not None and stage_date > potef_end:
+                potencia = 0.0
+                gen_min = 0.0
 
-            # Clamp to zero (maintenance or overrides can push below 0).
+            # Step 5: MANUTT subtracts from potencia (only before maint_end).
+            if maint_reduction is not None and stage_idx < maint_end_stage:
+                potencia -= float(maint_reduction[stage_idx])
+
             potencia = max(0.0, potencia)
 
-            # Compute final bounds.
+            # Step 6: evaluate formula.
             max_mw = (
                 potencia
                 * (fcmax / 100.0)

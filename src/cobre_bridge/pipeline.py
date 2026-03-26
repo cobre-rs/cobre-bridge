@@ -100,6 +100,32 @@ def _build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
     )
 
 
+def _merge_hydro_bounds(
+    withdrawal: pa.Table | None,
+    storage: pa.Table | None,
+) -> pa.Table | None:
+    """Merge water withdrawal and storage bounds into one table.
+
+    Both inputs are optional.  When both are present, they are outer-joined
+    on ``(hydro_id, stage_id)`` so that rows from either source appear in the
+    result with nulls for missing columns.
+    """
+    if withdrawal is None and storage is None:
+        return None
+    if withdrawal is None:
+        return storage
+    if storage is None:
+        return withdrawal
+
+    import polars as pl
+
+    w = pl.from_arrow(withdrawal)
+    s = pl.from_arrow(storage)
+    merged = w.join(s, on=["hydro_id", "stage_id"], how="full", coalesce=True)
+    merged = merged.sort("hydro_id", "stage_id")
+    return merged.to_arrow()
+
+
 def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     """Convert a NEWAVE case directory to a Cobre case directory.
 
@@ -185,6 +211,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
 
     logger.debug("Converting water withdrawal")
     withdrawal_table = hydro_conv.convert_water_withdrawal(nw_files, id_map)
+
+    logger.debug("Converting storage bounds from VMAXT/VMINT")
+    storage_bounds_table = hydro_conv.convert_storage_bounds(nw_files, id_map)
 
     logger.debug("Converting VminOP constraints")
     vminop_result = constraints_conv.convert_vminop_constraints(nw_files, id_map)
@@ -289,9 +318,10 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     pq.write_table(ncs_stats_table, ncs_stats_path, compression="zstd")
     logger.debug("Wrote %s", ncs_stats_path)
 
-    if withdrawal_table is not None:
+    hydro_bounds_table = _merge_hydro_bounds(withdrawal_table, storage_bounds_table)
+    if hydro_bounds_table is not None:
         hydro_bounds_path = constraints_dir / "hydro_bounds.parquet"
-        pq.write_table(withdrawal_table, hydro_bounds_path, compression="zstd")
+        pq.write_table(hydro_bounds_table, hydro_bounds_path, compression="zstd")
         logger.debug("Wrote %s", hydro_bounds_path)
 
     if thermal_bounds_table is not None:

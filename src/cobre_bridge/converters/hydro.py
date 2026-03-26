@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -117,16 +118,8 @@ def _apply_permanent_overrides(
                 result.loc[code, "numero_conjuntos_maquinas"] = int(rec.numero)
 
             elif type_name == "NUMMAQ":
-                # Workaround for inewave NUMMAQ parsing bug: the library
-                # swaps/truncates the two fields (numero_maquinas, conjunto).
-                # Read from rec.data (raw parsed integers) instead.
-                raw = getattr(rec, "data", None)
-                if raw and len(raw) >= 2:
-                    n_maq = int(raw[0])
-                    set_num = int(raw[1])
-                else:
-                    set_num = int(rec.conjunto)
-                    n_maq = int(rec.numero_maquinas)
+                set_num = int(rec.conjunto)
+                n_maq = int(rec.numero_maquinas)
                 result.loc[code, f"maquinas_conjunto_{set_num}"] = n_maq
 
             elif type_name in ("VOLCOTA", "COTARE"):
@@ -418,11 +411,6 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     existing = all_existing[
         ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
     ]
-    confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
-
-    # Extract temporal overrides (for reference / future use).
-    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
-
     # Read GHMIN.DAT minimum generation map.
     ghmin_map = _read_ghmin(nw_files)
 
@@ -497,15 +485,10 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             else 0.0
         )
 
-        # Apply VAZMINT temporal override: use the latest effective value at or
-        # before study start (file order matters; last wins for the same date).
-        plant_temps = temporal_overrides.get(newave_code, [])
-        vazmint_overrides = [o for o in plant_temps if o["type"] == "VAZMINT"]
-        if vazmint_overrides:
-            # Use the value from the last VAZMINT record (highest effective date
-            # at or before study start — we use last in file order as a proxy
-            # since we cannot determine study start without additional context).
-            min_outflow = vazmint_overrides[-1]["value"]
+        # VAZMINT temporal overrides are now emitted as per-stage bounds in
+        # hydro_bounds.parquet via convert_storage_bounds().  The static
+        # min_outflow in hydros.json keeps the hidr.dat / VAZMIN base value
+        # so that stages before the first VAZMINT record use the correct default.
 
         # CFUGA/CMONT temporal overrides are handled by convert_production_models;
         # no warning needed here as per-stage productivity is now supported.
@@ -1138,6 +1121,195 @@ def convert_water_withdrawal(
     )
     # Sort by (hydro_id, stage_id) for deterministic output.
     return table.sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
+
+
+def convert_storage_bounds(
+    nw_files: NewaveFiles,
+    id_map: NewaveIdMap,
+) -> pa.Table | None:
+    """Build per-stage hydro bounds from MODIF.DAT temporal overrides.
+
+    Handles four override types:
+
+    - **VMAXT / VMINT**: storage volume overrides as percentage of useful
+      volume (vol_max - vol_min).  Flood control and operational minimums.
+    - **TURBMAXT / TURBMINT**: turbined flow overrides in absolute m³/s.
+      Values of 99999 mean "no limit" (restore default).
+    - **VAZMINT**: minimum outflow overrides in absolute m³/s.
+
+    Each override acts as a step function: the value persists from its
+    effective date until the next override for the same plant.
+
+    For post-study stages, the last study year's seasonal pattern is repeated.
+
+    Returns ``None`` if MODIF.DAT is absent or contains no relevant records.
+    """
+    from inewave.newave import Confhd as _Confhd
+    from inewave.newave import Dger as _Dger
+
+    modif_path = nw_files.modif
+    if modif_path is None:
+        return None
+
+    dger = _Dger.read(str(nw_files.dger))
+    start_year: int = int(dger.ano_inicio_estudo)
+    start_month: int = int(dger.mes_inicio_estudo)
+    num_anos: int = int(dger.num_anos_estudo or 1)
+    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
+    study_months = (13 - start_month) + (num_anos - 1) * 12
+    total_stages = study_months + num_anos_pos * 12
+
+    # Read hidr.dat with permanent overrides for vol_min/vol_max.
+    cadastro = read_cadastro(nw_files)
+
+    # Read confhd for the list of active plant codes.
+    confhd = _Confhd.read(str(nw_files.confhd))
+    confhd_df = confhd.usinas
+    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+    confhd_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
+
+    # Extract temporal overrides.
+    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+
+    # NEWAVE big-M sentinel: 99999 means "no limit" (restore default).
+    _BIG_M = 99990.0
+
+    def _build_step_function(
+        recs: list[dict],
+        transform: Callable[[float], float],
+    ) -> dict[int, float]:
+        """Build a step-function from override records.
+
+        Each record sets the value from its stage onward until the next
+        record overrides it.  Raw values >= 99990 (big-M) mean "restore
+        default" and clear the forward-fill.
+        """
+        changepoints: list[tuple[int, float]] = []
+        for rec in recs:
+            sid = (rec["year"] - start_year) * 12 + (rec["month"] - start_month)
+            if sid < 0:
+                sid = 0
+            changepoints.append((sid, rec["value"]))
+        changepoints.sort()
+
+        if not changepoints:
+            return {}
+
+        result: dict[int, float] = {}
+        cp_idx = 0
+        current: float | None = None
+        first_stage = changepoints[0][0]
+
+        for stage_id in range(first_stage, study_months):
+            while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
+                raw = changepoints[cp_idx][1]
+                current = None if raw >= _BIG_M else transform(raw)
+                cp_idx += 1
+            if current is not None:
+                result[stage_id] = current
+
+        seasonal: dict[int, float] = {}
+        for stage_id in range(max(0, study_months - 12), study_months):
+            if stage_id in result:
+                cal = ((start_month - 1 + stage_id) % 12) + 1
+                seasonal[cal] = result[stage_id]
+
+        for stage_id in range(study_months, total_stages):
+            cal = ((start_month - 1 + stage_id) % 12) + 1
+            if cal in seasonal:
+                current = seasonal[cal]
+            if current is not None:
+                result[stage_id] = current
+
+        return result
+
+    hydro_ids: list[int] = []
+    stage_ids: list[int] = []
+    min_storage_vals: list[float | None] = []
+    max_storage_vals: list[float | None] = []
+    min_turbined_vals: list[float | None] = []
+    max_turbined_vals: list[float | None] = []
+    min_outflow_vals: list[float | None] = []
+
+    for newave_code in sorted(temporal_overrides):
+        overrides = temporal_overrides[newave_code]
+        vmaxt = [o for o in overrides if o["type"] == "VMAXT"]
+        vmint = [o for o in overrides if o["type"] == "VMINT"]
+        turbmaxt = [o for o in overrides if o["type"] == "TURBMAXT"]
+        turbmint = [o for o in overrides if o["type"] == "TURBMINT"]
+        vazmint = [o for o in overrides if o["type"] == "VAZMINT"]
+
+        if not any((vmaxt, vmint, turbmaxt, turbmint, vazmint)):
+            continue
+
+        try:
+            hydro_id = id_map.hydro_id(newave_code)
+        except KeyError:
+            continue
+
+        if newave_code not in cadastro.index:
+            continue
+
+        hreg = cadastro.loc[newave_code]
+        vol_min = float(hreg["volume_minimo"])
+        vol_max = float(hreg["volume_maximo"])
+        useful = vol_max - vol_min
+
+        def _pct_to_hm3(
+            pct: float,
+            _u: float = useful,
+            _vm: float = vol_min,
+        ) -> float:
+            return _vm + (pct / 100.0) * _u
+
+        def _identity(val: float) -> float:
+            return val
+
+        # Storage bounds (percentage -> hm³).
+        vmaxt_by_stage: dict[int, float] = {}
+        vmint_by_stage: dict[int, float] = {}
+        if useful > 0:
+            vmaxt_by_stage = _build_step_function(vmaxt, _pct_to_hm3)
+            vmint_by_stage = _build_step_function(vmint, _pct_to_hm3)
+
+        # Turbined bounds (absolute m³/s).
+        turbmaxt_by_stage = _build_step_function(turbmaxt, _identity)
+        turbmint_by_stage = _build_step_function(turbmint, _identity)
+
+        # Outflow bounds (absolute m³/s).
+        vazmint_by_stage = _build_step_function(vazmint, _identity)
+
+        all_stages = sorted(
+            set(vmaxt_by_stage)
+            | set(vmint_by_stage)
+            | set(turbmaxt_by_stage)
+            | set(turbmint_by_stage)
+            | set(vazmint_by_stage)
+        )
+        for stage_id in all_stages:
+            hydro_ids.append(hydro_id)
+            stage_ids.append(stage_id)
+            max_storage_vals.append(vmaxt_by_stage.get(stage_id))
+            min_storage_vals.append(vmint_by_stage.get(stage_id))
+            max_turbined_vals.append(turbmaxt_by_stage.get(stage_id))
+            min_turbined_vals.append(turbmint_by_stage.get(stage_id))
+            min_outflow_vals.append(vazmint_by_stage.get(stage_id))
+
+    if not hydro_ids:
+        return None
+
+    return pa.table(
+        {
+            "hydro_id": pa.array(hydro_ids, type=pa.int32()),
+            "stage_id": pa.array(stage_ids, type=pa.int32()),
+            "min_storage_hm3": pa.array(min_storage_vals, type=pa.float64()),
+            "max_storage_hm3": pa.array(max_storage_vals, type=pa.float64()),
+            "min_turbined_m3s": pa.array(min_turbined_vals, type=pa.float64()),
+            "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
+            "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
+        }
+    ).sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
 
 
 # ---------------------------------------------------------------------------
