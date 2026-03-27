@@ -33,21 +33,21 @@ _PENALTIES_SCHEMA_URL = (
 #
 # Ordering: exchange < spillage < fpha_turbined < curtailment < excess
 # This ensures the optimizer prefers interchange over spilling or curtailing.
-_SPILLAGE_REF = 0.1  # R$/(m3/s) — base reference in flow domain
+_SPILLAGE_REF = 0.001  # R$/(m3/s) — base reference in flow domain
 _EXCHANGE_MULT = 0.9  # exchange < spillage
 _FPHA_TURBINED_MULT = 1.1
 _NCS_CURTAILMENT_MULT = 1.15
 _EXCESS_MULT = 1.20
 
 # Hard constraint violation penalties (high values, not affected by scaling).
-_DEFAULT_STORAGE_VIOLATION_BELOW_COST = 1000.0
-_DEFAULT_FILLING_TARGET_VIOLATION_COST = 1000.0
-_DEFAULT_TURBINED_VIOLATION_BELOW_COST = 1000.0
-_DEFAULT_OUTFLOW_VIOLATION_BELOW_COST = 1000.0
-_DEFAULT_OUTFLOW_VIOLATION_ABOVE_COST = 1000.0
-_DEFAULT_GENERATION_VIOLATION_BELOW_COST = 1000.0
-_DEFAULT_EVAPORATION_VIOLATION_COST = 100.0  # Must be >> spillage_cost (0.1) to prevent LP from using evaporation violation as free spillage
-_DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST = 1000.0
+_DEFAULT_STORAGE_VIOLATION_BELOW_COST = 10000.0
+_DEFAULT_FILLING_TARGET_VIOLATION_COST = 10000.0
+_DEFAULT_TURBINED_VIOLATION_BELOW_COST = 10000.0
+_DEFAULT_OUTFLOW_VIOLATION_BELOW_COST = 10000.0
+_DEFAULT_OUTFLOW_VIOLATION_ABOVE_COST = 10000.0
+_DEFAULT_GENERATION_VIOLATION_BELOW_COST = 10000.0
+_DEFAULT_EVAPORATION_VIOLATION_COST = 10000.0  # Must be >> spillage_cost (0.1) to prevent LP from using evaporation violation as free spillage
+_DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST = 10000.0
 _DEFAULT_DIVERSION_COST = 0.001
 
 

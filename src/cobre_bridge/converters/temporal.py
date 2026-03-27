@@ -355,7 +355,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "modeling": {
             "inflow_non_negativity": {
                 "method": "penalty",
-                "penalty_cost": 1000.0,
+                "penalty_cost": 10000.0,
             },
         },
         "simulation": {
