@@ -2687,6 +2687,406 @@ def chart_violation_heatmap(
 
 
 # ---------------------------------------------------------------------------
+# Tab: Training Insights charts
+# ---------------------------------------------------------------------------
+
+
+def chart_gap_evolution(conv: pd.DataFrame) -> str:
+    """Line chart of gap_percent by iteration with a zero reference line."""
+    if conv.empty:
+        return "<p>No convergence data available.</p>"
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=conv["iteration"],
+            y=conv["gap_percent"],
+            name="Gap %",
+            line={"color": "#DC4C4C", "width": 2},
+            mode="lines+markers",
+            marker={"size": 5},
+        )
+    )
+    fig.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color="#8B9298",
+        annotation_text="0%",
+        annotation_position="right",
+    )
+    fig.update_layout(
+        title="Convergence Gap (%) per Iteration",
+        xaxis_title="Iteration",
+        yaxis_title="Gap (%)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_cut_state_evolution(conv: pd.DataFrame) -> str:
+    """Stacked area for cuts_active + bars for cuts_added per iteration."""
+    if conv.empty:
+        return "<p>No convergence data available.</p>"
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(
+            x=conv["iteration"],
+            y=conv["cuts_active"],
+            name="Cuts Active",
+            fill="tozeroy",
+            fillcolor="rgba(74,144,184,0.25)",
+            line={"color": COLORS["hydro"], "width": 2},
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=conv["iteration"],
+            y=conv["cuts_added"],
+            name="Cuts Added",
+            marker_color="rgba(245,166,35,0.7)",
+            opacity=0.8,
+        ),
+        secondary_y=True,
+    )
+    fig.update_layout(
+        title="Cut Pool Evolution",
+        xaxis_title="Iteration",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+        barmode="overlay",
+    )
+    fig.update_yaxes(title_text="Cuts Active", secondary_y=False)
+    fig.update_yaxes(title_text="Cuts Added (per iter)", secondary_y=True)
+    return fig_to_html(fig)
+
+
+def chart_cut_activity_heatmap(
+    cut_selection: pd.DataFrame, stage_labels: dict[int, str]
+) -> str:
+    """Heatmap x=iteration, y=stage, z=cuts_active_after. YlOrRd colorscale."""
+    if cut_selection.empty:
+        return "<p>No cut selection data available.</p>"
+
+    pivot = cut_selection.pivot_table(
+        index="stage", columns="iteration", values="cuts_active_after", aggfunc="sum"
+    )
+    stages = sorted(pivot.index.tolist())
+    iters = sorted(pivot.columns.tolist())
+    z = [
+        [
+            float(pivot.loc[s, it]) if s in pivot.index and it in pivot.columns else 0.0
+            for it in iters
+        ]
+        for s in stages
+    ]
+    ytick_vals = [i for i, s in enumerate(stages) if s % 12 == 0]
+    ytick_text = [stage_labels.get(stages[i], str(stages[i])) for i in ytick_vals]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=[str(it) for it in iters],
+            y=[stage_labels.get(s, str(s)) for s in stages],
+            colorscale="YlOrRd",
+            colorbar={"title": "Cuts Active"},
+            hovertemplate="Iteration: %{x}<br>Stage: %{y}<br>Cuts Active: %{z}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Active Cuts per Stage after Cut Selection",
+        xaxis_title="SDDP Iteration",
+        yaxis_title="Stage",
+        yaxis={
+            "autorange": "reversed",
+            "dtick": 12,
+            "tickvals": ytick_vals,
+            "ticktext": ytick_text,
+        },
+        height=500,
+        margin=dict(l=80, r=30, t=60, b=50),
+    )
+    return fig_to_html(fig, unified_hover=False)
+
+
+def chart_cut_deactivation_heatmap(
+    cut_selection: pd.DataFrame, stage_labels: dict[int, str]
+) -> str:
+    """Heatmap x=iteration, y=stage, z=cuts_deactivated. Blues colorscale."""
+    if cut_selection.empty:
+        return "<p>No cut selection data available.</p>"
+
+    pivot = cut_selection.pivot_table(
+        index="stage", columns="iteration", values="cuts_deactivated", aggfunc="sum"
+    )
+    stages = sorted(pivot.index.tolist())
+    iters = sorted(pivot.columns.tolist())
+    z = [
+        [
+            float(pivot.loc[s, it]) if s in pivot.index and it in pivot.columns else 0.0
+            for it in iters
+        ]
+        for s in stages
+    ]
+    ytick_vals = [i for i, s in enumerate(stages) if s % 12 == 0]
+    ytick_text = [stage_labels.get(stages[i], str(stages[i])) for i in ytick_vals]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=[str(it) for it in iters],
+            y=[stage_labels.get(s, str(s)) for s in stages],
+            colorscale="Blues",
+            colorbar={"title": "Cuts Deactivated"},
+            hovertemplate="Iteration: %{x}<br>Stage: %{y}<br>Cuts Deactivated: %{z}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Cuts Deactivated per Stage (Cut Selection)",
+        xaxis_title="SDDP Iteration",
+        yaxis_title="Stage",
+        yaxis={
+            "autorange": "reversed",
+            "dtick": 12,
+            "tickvals": ytick_vals,
+            "ticktext": ytick_text,
+        },
+        height=500,
+        margin=dict(l=80, r=30, t=60, b=50),
+    )
+    return fig_to_html(fig, unified_hover=False)
+
+
+def chart_simplex_heatmap(
+    solver_train: pd.DataFrame, stage_labels: dict[int, str]
+) -> str:
+    """Heatmap x=SDDP iteration, y=stage, z=simplex_iterations (backward phase)."""
+    if solver_train.empty:
+        return "<p>No solver data available.</p>"
+
+    bwd = solver_train[
+        (solver_train["phase"] == "backward") & (solver_train["stage"] >= 0)
+    ]
+    if bwd.empty:
+        return "<p>No backward solver data available.</p>"
+
+    pivot = bwd.pivot_table(
+        index="stage", columns="iteration", values="simplex_iterations", aggfunc="sum"
+    )
+    stages = sorted(pivot.index.tolist())
+    iters = sorted(pivot.columns.tolist())
+    z = [
+        [
+            float(pivot.loc[s, it]) if s in pivot.index and it in pivot.columns else 0.0
+            for it in iters
+        ]
+        for s in stages
+    ]
+    ytick_vals = [i for i, s in enumerate(stages) if s % 12 == 0]
+    ytick_text = [stage_labels.get(stages[i], str(stages[i])) for i in ytick_vals]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=[str(it) for it in iters],
+            y=[stage_labels.get(s, str(s)) for s in stages],
+            colorscale="Viridis",
+            colorbar={"title": "Simplex Iters"},
+            hovertemplate="Iteration: %{x}<br>Stage: %{y}<br>Simplex Iterations: %{z}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Simplex Iterations per Stage (Backward Pass)",
+        xaxis_title="SDDP Iteration",
+        yaxis_title="Stage",
+        yaxis={
+            "autorange": "reversed",
+            "dtick": 12,
+            "tickvals": ytick_vals,
+            "ticktext": ytick_text,
+        },
+        height=500,
+        margin=dict(l=80, r=30, t=60, b=50),
+    )
+    return fig_to_html(fig, unified_hover=False)
+
+
+def chart_solve_time_heatmap(
+    solver_train: pd.DataFrame, stage_labels: dict[int, str]
+) -> str:
+    """Heatmap x=SDDP iteration, y=stage, z=solve_time_ms (backward phase). Hot reversed."""
+    if solver_train.empty:
+        return "<p>No solver data available.</p>"
+
+    bwd = solver_train[
+        (solver_train["phase"] == "backward") & (solver_train["stage"] >= 0)
+    ]
+    if bwd.empty:
+        return "<p>No backward solver data available.</p>"
+
+    pivot = bwd.pivot_table(
+        index="stage", columns="iteration", values="solve_time_ms", aggfunc="sum"
+    )
+    stages = sorted(pivot.index.tolist())
+    iters = sorted(pivot.columns.tolist())
+    z = [
+        [
+            float(pivot.loc[s, it]) if s in pivot.index and it in pivot.columns else 0.0
+            for it in iters
+        ]
+        for s in stages
+    ]
+    ytick_vals = [i for i, s in enumerate(stages) if s % 12 == 0]
+    ytick_text = [stage_labels.get(stages[i], str(stages[i])) for i in ytick_vals]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=[str(it) for it in iters],
+            y=[stage_labels.get(s, str(s)) for s in stages],
+            colorscale="Hot",
+            reversescale=True,
+            colorbar={"title": "ms"},
+            hovertemplate="Iteration: %{x}<br>Stage: %{y}<br>Solve Time: %{z:.1f} ms<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="LP Solve Time per Stage (Backward Pass, ms)",
+        xaxis_title="SDDP Iteration",
+        yaxis_title="Stage",
+        yaxis={
+            "autorange": "reversed",
+            "dtick": 12,
+            "tickvals": ytick_vals,
+            "ticktext": ytick_text,
+        },
+        height=500,
+        margin=dict(l=80, r=30, t=60, b=50),
+    )
+    return fig_to_html(fig, unified_hover=False)
+
+
+def chart_cost_per_simplex_iter(solver_train: pd.DataFrame) -> str:
+    """Line chart: average microseconds per simplex iteration by stage (backward pass)."""
+    if solver_train.empty:
+        return "<p>No solver data available.</p>"
+
+    bwd = solver_train[
+        (solver_train["phase"] == "backward")
+        & (solver_train["stage"] >= 0)
+        & (solver_train["simplex_iterations"] > 0)
+    ]
+    if bwd.empty:
+        return "<p>No backward solver data with simplex iterations available.</p>"
+
+    avg = (
+        bwd.assign(
+            us_per_iter=bwd["solve_time_ms"] * 1000.0 / bwd["simplex_iterations"]
+        )
+        .groupby("stage")["us_per_iter"]
+        .mean()
+        .sort_index()
+    )
+
+    fig = go.Figure(
+        go.Scatter(
+            x=avg.index.tolist(),
+            y=avg.values.tolist(),
+            mode="lines+markers",
+            line={"color": COLORS["thermal"], "width": 2},
+            marker={"size": 4},
+            name="us / simplex iter",
+            hovertemplate="Stage: %{x}<br>Cost: %{y:.2f} us/iter<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Solver Cost per Simplex Iteration by Stage (Backward, averaged over SDDP iters)",
+        xaxis_title="Stage",
+        yaxis_title="Microseconds per Simplex Iteration",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+        showlegend=False,
+    )
+    return fig_to_html(fig)
+
+
+# Component display name mapping for the waterfall chart.
+_TIMING_COMPONENT_LABELS: dict[str, str] = {
+    "forward_solve_ms": "Forward Solve",
+    "forward_sample_ms": "Forward Sample",
+    "backward_solve_ms": "Backward Solve",
+    "backward_cut_ms": "Backward Cut Add",
+    "cut_selection_ms": "Cut Selection",
+    "mpi_allreduce_ms": "MPI AllReduce",
+    "mpi_broadcast_ms": "MPI Broadcast",
+    "state_exchange_ms": "State Exchange",
+    "cut_batch_build_ms": "Cut Batch Build",
+    "rayon_overhead_ms": "Rayon Overhead",
+    "overhead_ms": "Other Overhead",
+    "io_write_ms": "IO Write",
+}
+
+_TIMING_COMPONENT_COLORS: list[str] = [
+    "#4A90B8",
+    "#A8D4F0",
+    "#F5A623",
+    "#F0D080",
+    "#4A8B6F",
+    "#8BC4A8",
+    "#DC4C4C",
+    "#F4A0A0",
+    "#B87333",
+    "#8B9298",
+    "#607D8B",
+    "#90A4AE",
+]
+
+
+def chart_timing_waterfall(timing: pd.DataFrame) -> str:
+    """Stacked bar per iteration showing all non-zero timing components."""
+    if timing.empty:
+        return "<p>No timing data available.</p>"
+
+    component_cols = [
+        c for c in _TIMING_COMPONENT_LABELS if c in timing.columns and c != "iteration"
+    ]
+    # Drop components that are entirely zero or missing
+    active_cols = [c for c in component_cols if timing[c].sum() > 0]
+    if not active_cols:
+        return "<p>No non-zero timing components found.</p>"
+
+    iters = timing["iteration"].tolist()
+    fig = go.Figure()
+    for i, col in enumerate(active_cols):
+        label = _TIMING_COMPONENT_LABELS.get(col, col)
+        color = _TIMING_COMPONENT_COLORS[i % len(_TIMING_COMPONENT_COLORS)]
+        fig.add_trace(
+            go.Bar(
+                x=iters,
+                y=timing[col].tolist(),
+                name=label,
+                marker_color=color,
+                hovertemplate=f"{label}: %{{y:.0f}} ms<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        title="Full Timing Breakdown per Iteration",
+        xaxis_title="Iteration",
+        yaxis_title="Time (ms)",
+        barmode="stack",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=440,
+    )
+    return fig_to_html(fig)
+
+
+# ---------------------------------------------------------------------------
 # Tab 9: Performance charts
 # ---------------------------------------------------------------------------
 
@@ -3959,13 +4359,15 @@ window.addEventListener('load', function() { setTimeout(function() { window.disp
 
 TAB_DEFS = [
     ("tab-overview", "Overview"),
+    ("tab-training", "Training Insights"),
     ("tab-energy", "Energy Balance"),
     ("tab-hydro", "Hydro Operations"),
     ("tab-plants", "Plant Details"),
+    ("tab-thermal", "Thermal Operations"),
+    ("tab-thermal-plants", "Thermal Plant Details"),
     ("tab-exchanges", "Exchanges"),
     ("tab-costs", "Costs"),
-    ("tab-ncs-thermal", "NCS & Thermals"),
-    ("tab-investigation", "Investigation"),
+    ("tab-ncs-thermal", "NCS"),
     ("tab-constraints", "Constraints"),
     ("tab-perf", "Performance"),
 ]
@@ -4246,6 +4648,353 @@ document.addEventListener('DOMContentLoaded', function(){setTimeout(updateHydroD
 
 
 # ---------------------------------------------------------------------------
+# Tab: Thermal Operations charts
+# ---------------------------------------------------------------------------
+
+
+def chart_thermal_generation_total(
+    thermals: pd.DataFrame,
+    stage_labels: dict[int, str],
+) -> str:
+    """Total thermal generation with p10/p50/p90 bands across all plants."""
+    t0 = thermals[thermals["block_id"] == 0]
+    total_gen = (
+        t0.groupby(["scenario_id", "stage_id"])["generation_mw"].sum().reset_index()
+    )
+    pcts = (
+        total_gen.groupby("stage_id")["generation_mw"]
+        .quantile([0.1, 0.5, 0.9])
+        .unstack(level=-1)
+        .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+    )
+    stages = sorted(pcts.index)
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels + xlabels[::-1],
+            y=list(pcts["p90"].values) + list(pcts["p10"].values[::-1]),
+            fill="toself",
+            fillcolor="rgba(245,166,35,0.15)",
+            line={"color": "rgba(255,255,255,0)"},
+            name="P10\u2013P90 range",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=pcts["p50"].values,
+            name="Median (P50)",
+            line={"color": COLORS["thermal"], "width": 2.5},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=pcts["p10"].values,
+            name="P10",
+            line={"color": COLORS["thermal"], "width": 1, "dash": "dot"},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=pcts["p90"].values,
+            name="P90",
+            line={"color": COLORS["thermal"], "width": 1, "dash": "dot"},
+        )
+    )
+    fig.update_layout(
+        title="Total Thermal Generation (all plants, p10/p50/p90 across scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="MW",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=440,
+    )
+    return fig_to_html(fig)
+
+
+def chart_thermal_gen_by_bus(
+    thermals: pd.DataFrame,
+    thermal_meta: dict[int, dict],
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+) -> str:
+    """Stacked area of thermal generation by bus (avg across scenarios)."""
+    t0 = thermals[thermals["block_id"] == 0].copy()
+    t0["bus_id"] = t0["thermal_id"].map(
+        {k: v["bus_id"] for k, v in thermal_meta.items()}
+    )
+    bus_ids = sorted(t0["bus_id"].dropna().unique())
+    stages = sorted(t0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = go.Figure()
+    for i, bus_id in enumerate(bus_ids):
+        bus_id_int = int(bus_id)
+        b_gen = (
+            t0[t0["bus_id"] == bus_id_int]
+            .groupby(["scenario_id", "stage_id"])["generation_mw"]
+            .sum()
+            .groupby("stage_id")
+            .mean()
+        )
+        color = BUS_COLORS[i % len(BUS_COLORS)]
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[b_gen.get(s, 0) for s in stages],
+                name=bus_names.get(bus_id_int, str(bus_id_int)),
+                stackgroup="buses",
+                line={"color": color},
+            )
+        )
+    fig.update_layout(
+        title="Thermal Generation by Bus (Block 0, avg across scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="MW",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=440,
+    )
+    return fig_to_html(fig)
+
+
+def chart_thermal_cost_vs_gen(
+    thermals: pd.DataFrame,
+    thermal_meta: dict[int, dict],
+    bus_names: dict[int, str],
+) -> str:
+    """Scatter: avg generation vs cost_per_mwh, sized by max_mw, colored by bus."""
+    avg_gen = (
+        thermals[thermals["block_id"] == 0]
+        .groupby(["scenario_id", "thermal_id"])["generation_mw"]
+        .mean()
+        .groupby("thermal_id")
+        .mean()
+    )
+
+    # Group traces by bus so legend entries are per-bus
+    bus_to_plants: dict[int, list[dict]] = {}
+    for tid, meta in thermal_meta.items():
+        bus_id = meta["bus_id"]
+        bus_to_plants.setdefault(bus_id, []).append(
+            {
+                "tid": tid,
+                "name": meta["name"],
+                "avg_gen": float(avg_gen.get(tid, 0)),
+                "cost": meta["cost_per_mwh"],
+                "max_mw": meta["max_mw"],
+            }
+        )
+
+    fig = go.Figure()
+    for i, (bus_id, plants) in enumerate(sorted(bus_to_plants.items())):
+        color = BUS_COLORS[i % len(BUS_COLORS)]
+        fig.add_trace(
+            go.Scatter(
+                x=[p["avg_gen"] for p in plants],
+                y=[p["cost"] for p in plants],
+                mode="markers+text",
+                marker={
+                    "size": [max(6, min(40, p["max_mw"] / 20)) for p in plants],
+                    "color": color,
+                    "opacity": 0.75,
+                    "line": {"color": "white", "width": 1},
+                },
+                text=[p["name"] for p in plants],
+                textposition="top center",
+                textfont={"size": 9},
+                name=bus_names.get(bus_id, str(bus_id)),
+                customdata=[[p["max_mw"], p["tid"]] for p in plants],
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "Avg gen: %{x:.1f} MW<br>"
+                    "Cost: %{y:.1f} R$/MWh<br>"
+                    "Capacity: %{customdata[0]:.1f} MW<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        title="Thermal Plants: Avg Generation vs Cost (size = installed capacity)",
+        xaxis_title="Avg Generation (MW)",
+        yaxis_title="Cost (R$/MWh)",
+        legend={**_LEGEND, "y": 1.08},
+        margin=dict(l=60, r=30, t=90, b=60),
+        height=480,
+    )
+    return fig_to_html(fig, unified_hover=False)
+
+
+# ---------------------------------------------------------------------------
+# Tab: Thermal Plant Details
+# ---------------------------------------------------------------------------
+
+
+def build_interactive_thermal_details(
+    thermals: pd.DataFrame,
+    thermal_meta: dict[int, dict],
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+    lp_bounds: pd.DataFrame | None = None,
+) -> str:
+    """Build HTML with embedded per-thermal p10/p50/p90 data, LP bounds, and JS dropdown."""
+    t0 = thermals[thermals["block_id"] == 0]
+    stages = sorted(t0["stage_id"].unique())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    metrics = [
+        "generation_mw",
+        "generation_cost",
+        "generation_mwh",
+    ]
+    short = {
+        "generation_mw": "gen",
+        "generation_cost": "cost",
+        "generation_mwh": "energy",
+    }
+
+    thermal_data: dict[str, dict] = {}
+    for tid, meta in sorted(thermal_meta.items()):
+        tdata = t0[t0["thermal_id"] == tid]
+        if tdata.empty:
+            continue
+        entry: dict = {
+            "name": meta["name"],
+            "bus": bus_names.get(meta["bus_id"], str(meta["bus_id"])),
+            "max_mw": round(meta["max_mw"], 1),
+            "cost_per_mwh": round(meta["cost_per_mwh"], 2),
+        }
+        for col in metrics:
+            k = short[col]
+            if col not in tdata.columns:
+                for sfx in ["p10", "p50", "p90"]:
+                    entry[f"{k}_{sfx}"] = [0.0] * len(stages)
+                continue
+            grp = tdata.groupby(["scenario_id", "stage_id"])[col].mean()
+            pcts = (
+                grp.groupby("stage_id")
+                .quantile([0.1, 0.5, 0.9])
+                .unstack(level=-1)
+                .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+            )
+            for sfx in ["p10", "p50", "p90"]:
+                entry[f"{k}_{sfx}"] = [
+                    round(float(pcts[sfx].get(s, 0)), 2) for s in stages
+                ]
+        thermal_data[str(tid)] = entry
+
+    # Embed per-thermal LP bounds (entity_type_code=1): 6=gen_min, 7=gen_max
+    if lp_bounds is not None and not lp_bounds.empty:
+        tb = lp_bounds[lp_bounds["entity_type_code"] == 1]
+        bound_keys = {6: "gen_min", 7: "gen_max"}
+        for tid_str, entry in thermal_data.items():
+            tid_int = int(tid_str)
+            tb_plant = tb[tb["entity_id"] == tid_int]
+            for bt_code, key in bound_keys.items():
+                bt_rows = tb_plant[tb_plant["bound_type_code"] == bt_code]
+                if bt_rows.empty:
+                    entry[key] = [0.0] * len(stages)
+                else:
+                    by_stage = bt_rows.set_index("stage_id")["bound_value"]
+                    entry[key] = [round(float(by_stage.get(s, 0)), 2) for s in stages]
+
+    options = sorted(thermal_data.items(), key=lambda x: x[1]["name"])
+    options_html = "\n".join(
+        f'<option value="{tid}">{d["name"]} (id={tid})</option>' for tid, d in options
+    )
+    data_json = json.dumps(thermal_data, separators=(",", ":"))
+    labels_json = json.dumps(xlabels)
+
+    chart_rows = (
+        '<div class="chart-grid-single">'
+        '<div class="chart-card"><div id="td-gen" style="width:100%;height:380px;"></div></div>'
+        "</div>"
+        '<div class="chart-grid">'
+        '<div class="chart-card"><div id="td-cost" style="width:100%;height:320px;"></div></div>'
+        '<div class="chart-card"><div id="td-energy" style="width:100%;height:320px;"></div></div>'
+        "</div>"
+    )
+
+    return (
+        '<div style="margin-bottom:16px;">'
+        '<label for="thermal-select" style="font-weight:600;margin-right:8px;">Select Thermal Plant:</label>'
+        '<select id="thermal-select" onchange="updateThermalDetail()" '
+        'style="padding:8px 12px;font-size:0.9rem;border-radius:4px;border:1px solid #ccc;min-width:300px;">'
+        + options_html
+        + "</select>"
+        + '<span id="thermal-info" style="margin-left:16px;color:#666;font-size:0.85rem;"></span>'
+        + "</div>"
+        + chart_rows
+        + "<script>\n"
+        + "const TD = "
+        + data_json
+        + ";\n"
+        + "const TD_LABELS = "
+        + labels_json
+        + ";\n"
+        + r"""
+function _td_band(lbl, p10, p90, color) {
+  return {x: TD_LABELS.concat(TD_LABELS.slice().reverse()),
+          y: p90.concat(p10.slice().reverse()),
+          fill:'toself', fillcolor:color, line:{color:'rgba(0,0,0,0)'},
+          name:lbl, showlegend:true, hoverinfo:'skip'};
+}
+function _td_line(nm, y, c, w, dash) {
+  return {x:TD_LABELS, y:y, name:nm, line:{color:c, width:w||2, dash:dash||'solid'}};
+}
+function _td_ref(nm, vals, c) {
+  return {x:TD_LABELS, y:vals, name:nm, line:{color:c, width:1, dash:'dash'}};
+}
+var _TL = {hovermode:'x unified', margin:{l:60,r:20,t:50,b:60},
+            legend:{orientation:'h',y:1.12,x:0,font:{size:11}}};
+var _TC = {responsive:true};
+function _tlo(extra){return Object.assign({},_TL,extra);}
+
+function updateThermalDetail() {
+  var tid = document.getElementById('thermal-select').value;
+  var d = TD[tid]; if(!d) return;
+  document.getElementById('thermal-info').textContent =
+    d.bus+' | Capacity: '+d.max_mw.toFixed(0)+' MW | Cost: '+d.cost_per_mwh.toFixed(2)+' R$/MWh';
+
+  var genTraces = [
+    _td_band('P10\u2013P90', d.gen_p10, d.gen_p90, 'rgba(245,166,35,0.15)'),
+    _td_line('P50', d.gen_p50, '#F5A623'),
+    _td_line('P10', d.gen_p10, '#F5A623', 1, 'dot'),
+    _td_line('P90', d.gen_p90, '#F5A623', 1, 'dot'),
+  ];
+  if(d.gen_max && d.gen_max.some(function(v){return v>0;})) {
+    genTraces.push(_td_ref('Gen Max (LP)', d.gen_max, '#DC4C4C'));
+  }
+  if(d.gen_min && d.gen_min.some(function(v){return v>0;})) {
+    genTraces.push(_td_ref('Gen Min (LP)', d.gen_min, '#4A8B6F'));
+  }
+  Plotly.react('td-gen', genTraces,
+    _tlo({title:d.name+' \u2014 Generation (MW)', yaxis:{title:'MW'}}), _TC);
+
+  Plotly.react('td-cost', [
+    _td_band('P10\u2013P90', d.cost_p10, d.cost_p90, 'rgba(220,76,76,0.12)'),
+    _td_line('P50', d.cost_p50, '#DC4C4C'),
+    _td_line('P10', d.cost_p10, '#DC4C4C', 1, 'dot'),
+    _td_line('P90', d.cost_p90, '#DC4C4C', 1, 'dot'),
+  ], _tlo({title:'Generation Cost (R$)', yaxis:{title:'R$'}}), _TC);
+
+  Plotly.react('td-energy', [
+    _td_band('P10\u2013P90', d.energy_p10, d.energy_p90, 'rgba(74,139,111,0.15)'),
+    _td_line('P50', d.energy_p50, '#4A8B6F'),
+    _td_line('P10', d.energy_p10, '#4A8B6F', 1, 'dot'),
+    _td_line('P90', d.energy_p90, '#4A8B6F', 1, 'dot'),
+  ], _tlo({title:'Generation Energy (MWh)', yaxis:{title:'MWh'}}), _TC);
+}
+document.addEventListener('DOMContentLoaded', function(){setTimeout(updateThermalDetail,100);});
+"""
+        + "</script>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -4331,6 +5080,10 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     scaling_report: dict = (
         json.load(scaling_path.open()) if scaling_path.exists() else {}
     )
+    cs_path = case_dir / "output" / "training" / "cut_selection" / "iterations.parquet"
+    cut_selection = (
+        pq.read_table(cs_path).to_pandas() if cs_path.exists() else pd.DataFrame()
+    )
     metadata_path = case_dir / "output" / "training" / "metadata.json"
     metadata: dict = json.load(metadata_path.open()) if metadata_path.exists() else {}
 
@@ -4386,6 +5139,36 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + '<div class="chart-grid">'
         + wrap_chart(chart_cost_breakdown(costs))
         + wrap_chart(chart_cost_by_stage(costs, stage_labels))
+        + "</div>"
+    )
+
+    # ------------------------------------------------------------------
+    # Tab: Training Insights
+    # ------------------------------------------------------------------
+    print("Building Tab: Training Insights ...")
+    tab_contents["tab-training"] = (
+        section_title("Convergence")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_convergence(conv))
+        + wrap_chart(chart_gap_evolution(conv))
+        + "</div>"
+        + section_title("Cut Management")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_cut_state_evolution(conv))
+        + wrap_chart(chart_cut_activity_heatmap(cut_selection, stage_labels))
+        + "</div>"
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_cut_deactivation_heatmap(cut_selection, stage_labels))
+        + "</div>"
+        + section_title("LP Solver Heatmaps")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_simplex_heatmap(solver_train, stage_labels))
+        + wrap_chart(chart_solve_time_heatmap(solver_train, stage_labels))
+        + "</div>"
+        + section_title("Solver Efficiency")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_cost_per_simplex_iter(solver_train))
+        + wrap_chart(chart_timing_waterfall(timing))
         + "</div>"
     )
 
@@ -4530,13 +5313,38 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     )
 
     # ------------------------------------------------------------------
-    # Tab 6: NCS & Thermals
+    # Tab 6: NCS
     # ------------------------------------------------------------------
-    print("Building Tab 7: NCS & Thermals ...")
+    print("Building Tab 7: NCS ...")
     tab_contents["tab-ncs-thermal"] = (
         section_title("NCS Available vs Generated")
         + '<div class="chart-grid-single">'
         + wrap_chart(chart_ncs_available_vs_generated(ncs, stage_labels))
+        + "</div>"
+        + section_title("NCS Curtailment by Source")
+        + '<div class="chart-grid-single">'
+        + wrap_chart(chart_ncs_curtailment_by_source(ncs, names))
+        + "</div>"
+    )
+
+    # ------------------------------------------------------------------
+    # Tab 8: Thermal Operations
+    # ------------------------------------------------------------------
+    print("Building Tab 8: Thermal Operations ...")
+    tab_contents["tab-thermal"] = (
+        section_title("Total Thermal Generation")
+        + '<div class="chart-grid-single">'
+        + wrap_chart(chart_thermal_generation_total(thermals, stage_labels))
+        + "</div>"
+        + section_title("Thermal Generation by Bus")
+        + '<div class="chart-grid-single">'
+        + wrap_chart(
+            chart_thermal_gen_by_bus(thermals, thermal_meta, bus_names, stage_labels)
+        )
+        + "</div>"
+        + section_title("Thermal Cost vs Dispatch")
+        + '<div class="chart-grid-single">'
+        + wrap_chart(chart_thermal_cost_vs_gen(thermals, thermal_meta, bus_names))
         + "</div>"
         + section_title("Thermal Generation by Cost Bracket")
         + '<div class="chart-grid-single">'
@@ -4547,25 +5355,13 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     )
 
     # ------------------------------------------------------------------
-    # Tab 8: Investigation
+    # Tab 9: Thermal Plant Details
     # ------------------------------------------------------------------
-    print("Building Tab 8: Investigation ...")
-    inflow_stats = pq.read_table(
-        case_dir / "scenarios" / "inflow_seasonal_stats.parquet"
-    ).to_pandas()
-
-    tab_contents["tab-investigation"] = (
-        section_title("Realized Inflow vs Historical Statistics")
-        + '<div class="chart-grid-single">'
-        + wrap_chart(
-            chart_inflow_comparison(hydros, inflow_stats, hydro_meta, stage_labels)
-        )
-        + "</div>"
-        + section_title("Hydro Violations & Slacks (excl. evaporation)")
-        + '<div class="chart-grid">'
-        + wrap_chart(chart_violation_summary(hydros, stage_labels))
-        + wrap_chart(chart_violation_heatmap(hydros, names, stage_labels))
-        + "</div>"
+    print("Building Tab 9: Thermal Plant Details ...")
+    tab_contents["tab-thermal-plants"] = section_title(
+        "Thermal Plant Explorer"
+    ) + build_interactive_thermal_details(
+        thermals, thermal_meta, bus_names, stage_labels, lp_bounds
     )
 
     # ------------------------------------------------------------------
@@ -4620,7 +5416,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     # ------------------------------------------------------------------
     # Tab 9: Performance
     # ------------------------------------------------------------------
-    print("Building Tab 9: Performance ...")
+    print("Building Tab 11: Performance ...")
     # Filter simulation solver to actual scenario count from manifest.
     sim_manifest_path = case_dir / "output" / "simulation" / "_manifest.json"
     if sim_manifest_path.exists():
