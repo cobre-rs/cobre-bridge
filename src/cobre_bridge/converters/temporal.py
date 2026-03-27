@@ -351,6 +351,13 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             "stopping_rules": [
                 {"type": "iteration_limit", "limit": max_iterations},
             ],
+            "cut_selection": {
+                "check_frequency": 1,
+                "cut_activity_tolerance": 1e-6,
+                "enabled": True,
+                "method": "lml1",
+                "threshold": 0
+            }
         },
         "modeling": {
             "inflow_non_negativity": {
