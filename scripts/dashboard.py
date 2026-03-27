@@ -1338,8 +1338,15 @@ def chart_cost_by_stage(
         title="Cost Composition by Stage (avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="Cost (R$)",
-        legend=_LEGEND,
-        margin=_MARGIN,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.15,
+            xanchor="left",
+            x=0,
+            font=dict(size=11),
+        ),
+        margin=dict(l=60, r=30, t=80, b=50),
         height=420,
     )
     return fig_to_html(fig)
@@ -2772,7 +2779,8 @@ def chart_cut_activity_heatmap(
     if cut_selection.empty:
         return "<p>No cut selection data available.</p>"
 
-    pivot = cut_selection.pivot_table(
+    cs = cut_selection[cut_selection["stage"] > 0]
+    pivot = cs.pivot_table(
         index="stage", columns="iteration", values="cuts_active_after", aggfunc="sum"
     )
     stages = sorted(pivot.index.tolist())
@@ -3610,17 +3618,6 @@ def build_performance_metrics_html(
     )
     total_simplex = train_simplex + sim_simplex
 
-    # Overall basis reuse rate
-    offered_total = (
-        int(solver_train["basis_offered"].sum()) if not solver_train.empty else 0
-    )
-    rejected_total = (
-        int(solver_train["basis_rejections"].sum()) if not solver_train.empty else 0
-    )
-    reuse_rate = (
-        (1.0 - rejected_total / offered_total) * 100 if offered_total > 0 else 0.0
-    )
-
     # LP dimensions from scaling report
     stages_sr = scaling_report.get("stages", [])
     max_nz = max((s["dimensions"]["num_nz"] for s in stages_sr), default=0)
@@ -3653,7 +3650,6 @@ def build_performance_metrics_html(
         ("Avg LP Solve (simulation)", f"{avg_lp_sim_ms:.2f} ms", COLORS["spillage"]),
         ("Total LP Solves", f"{all_lp_solves:,}", COLORS["thermal"]),
         ("Total Simplex Iterations", f"{total_simplex:,}", COLORS["spillage"]),
-        ("Basis Reuse Rate", f"{reuse_rate:.1f}%", COLORS["future_cost"]),
     ]
     cards = []
     for label, value, color in metrics:
@@ -5165,11 +5161,6 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + wrap_chart(chart_simplex_heatmap(solver_train, stage_labels))
         + wrap_chart(chart_solve_time_heatmap(solver_train, stage_labels))
         + "</div>"
-        + section_title("Solver Efficiency")
-        + '<div class="chart-grid">'
-        + wrap_chart(chart_cost_per_simplex_iter(solver_train))
-        + wrap_chart(chart_timing_waterfall(timing))
-        + "</div>"
     )
 
     # ------------------------------------------------------------------
@@ -5192,6 +5183,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
             )
         )
         + "</div>"
+        + '<p style="color:#888;font-size:0.82rem;margin:-8px 0 16px 12px;">Note: Generation sum may exceed load due to exchange losses, NCS curtailment, and excess energy.</p>'
         + section_title("Generation Share")
         + '<div class="chart-grid">'
         + wrap_chart(chart_generation_share_pie(hydros, thermals, ncs, buses))
@@ -5342,16 +5334,6 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
             chart_thermal_gen_by_bus(thermals, thermal_meta, bus_names, stage_labels)
         )
         + "</div>"
-        + section_title("Thermal Cost vs Dispatch")
-        + '<div class="chart-grid-single">'
-        + wrap_chart(chart_thermal_cost_vs_gen(thermals, thermal_meta, bus_names))
-        + "</div>"
-        + section_title("Thermal Generation by Cost Bracket")
-        + '<div class="chart-grid-single">'
-        + wrap_chart(
-            chart_thermal_by_cost_bracket(thermals, thermal_meta, stage_labels)
-        )
-        + "</div>"
     )
 
     # ------------------------------------------------------------------
@@ -5382,11 +5364,6 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         _agrint_chart = chart_constraint_lhs_vs_bound(
             gc_constraints, _lhs_df, gc_bounds, stage_labels, ctype_filter="AGRINT"
         )
-        _bounds_timeline = chart_constraint_bounds_timeline(
-            gc_constraints, gc_bounds, stage_labels
-        )
-        _viol_cost_chart = chart_violation_cost_timeline(costs, stage_labels)
-
         tab_contents["tab-constraints"] = (
             section_title("Constraint Summary")
             + _summary_table
@@ -5401,11 +5378,6 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
             + section_title("Exchange Group Constraints (AGRINT)")
             + '<div class="chart-grid-single">'
             + wrap_chart(_agrint_chart)
-            + "</div>"
-            + section_title("Bounds & Violations")
-            + '<div class="chart-grid">'
-            + wrap_chart(_bounds_timeline)
-            + wrap_chart(_viol_cost_chart)
             + "</div>"
         )
     else:
@@ -5460,6 +5432,11 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + '<div class="chart-grid">'
         + wrap_chart(chart_lp_dimensions(scaling_report))
         + wrap_chart(chart_scaling_quality(scaling_report))
+        + "</div>"
+        + section_title("Solver Efficiency")
+        + '<div class="chart-grid">'
+        + wrap_chart(chart_cost_per_simplex_iter(solver_train))
+        + wrap_chart(chart_timing_waterfall(timing))
         + "</div>"
         + section_title("Simulation")
         + '<div class="chart-grid-single">'
