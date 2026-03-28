@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import polars as pl
 import pyarrow.parquet as pq
 from plotly.subplots import make_subplots
 
@@ -57,15 +59,10 @@ _MARGIN = dict(l=60, r=30, t=60, b=50)
 # ---------------------------------------------------------------------------
 
 
-def load_all_scenarios(case_dir: Path, entity: str) -> pd.DataFrame:
-    """Load all scenario parquet files for an entity, concatenated."""
+def scan_entity(case_dir: Path, entity: str) -> pl.LazyFrame:
+    """Return a LazyFrame scanning all hive-partitioned parquet files for entity."""
     sim_dir = case_dir / "output" / "simulation" / entity
-    frames = []
-    for scenario_dir in sorted(sim_dir.iterdir()):
-        if scenario_dir.is_dir() and scenario_dir.name.startswith("scenario_id="):
-            t = pq.read_table(scenario_dir / "data.parquet")
-            frames.append(t.to_pandas())
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return pl.scan_parquet(str(sim_dir / "**" / "*.parquet"), hive_partitioning=True)
 
 
 def load_names(case_dir: Path) -> dict[tuple[str, int], str]:
@@ -180,25 +177,9 @@ def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
     return result
 
 
-def stage_x_labels(
-    stage_ids: "pd.Index | list[int]", labels: dict[int, str]
-) -> list[str]:
+def stage_x_labels(stage_ids: Sequence[int], labels: dict[int, str]) -> list[str]:
     """Map stage ids to human-readable labels."""
     return [labels.get(int(s), str(s)) for s in stage_ids]
-
-
-def scenario_percentiles(
-    df: pd.DataFrame, group_col: str, value_col: str
-) -> pd.DataFrame:
-    """Compute p10/p50/p90 of value_col grouped by group_col across scenarios."""
-    grp = df.groupby(["scenario_id", group_col])[value_col].sum().reset_index()
-    result = (
-        grp.groupby(group_col)[value_col]
-        .quantile([0.1, 0.5, 0.9])
-        .unstack(level=-1)
-        .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
-    )
-    return result
 
 
 def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
@@ -209,6 +190,85 @@ def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
         include_plotlyjs=False,
         config={"responsive": True},
     )
+
+
+# ---------------------------------------------------------------------------
+# Polars helpers
+# ---------------------------------------------------------------------------
+
+
+def _stage_avg_mw(
+    lf: pl.LazyFrame,
+    mwh_col: str,
+    stage_hours: dict[int, float],
+    group_cols: list[str],
+) -> dict[int, float] | pl.DataFrame:
+    """Compute stage-average MW from MWh summed across all blocks via LazyFrame.
+
+    Scans all blocks (no block_id filter), sums mwh_col per (scenario, stage [+ group_cols]),
+    divides by total stage hours, then averages across scenarios.
+
+    Returns dict[int, float] mapping stage_id -> avg_mw when group_cols is empty,
+    or a Polars DataFrame with columns [stage_id, *group_cols, _avg_mw] otherwise.
+    """
+    hours_df = pl.DataFrame(
+        {"stage_id": list(stage_hours.keys()), "_hours": list(stage_hours.values())}
+    )
+    result = (
+        lf.group_by(["scenario_id", "stage_id"] + group_cols)
+        .agg(pl.col(mwh_col).sum())
+        .join(hours_df.lazy(), on="stage_id")
+        .with_columns((pl.col(mwh_col) / pl.col("_hours")).alias("_avg_mw"))
+        .group_by(["stage_id"] + group_cols)
+        .agg(pl.col("_avg_mw").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    if group_cols:
+        return result
+    return dict(zip(result["stage_id"].to_list(), result["_avg_mw"].to_list()))
+
+
+def _compute_lp_load(
+    load_stats: pd.DataFrame,
+    load_factors: list[dict],
+    stage_hours: dict[int, float],
+    block_hours: dict[tuple[int, int], float],
+    bus_filter: list[int] | None = None,
+) -> dict[int, float]:
+    """Compute LP load balance RHS from input files as stage-average MW."""
+    factor_lk: dict[tuple[int, int, int], float] = {}
+    for entry in load_factors:
+        bid, sid = entry["bus_id"], entry["stage_id"]
+        for bf in entry["block_factors"]:
+            factor_lk[(bid, sid, bf["block_id"])] = bf["factor"]
+
+    rows: list[dict] = []
+    for _, r in load_stats.iterrows():
+        bid, sid = int(r["bus_id"]), int(r["stage_id"])
+        if bus_filter is not None and bid not in bus_filter:
+            continue
+        mean = float(r["mean_mw"])
+        for blk_id in range(20):
+            bh = block_hours.get((sid, blk_id))
+            if bh is None:
+                break
+            factor = factor_lk.get((bid, sid, blk_id), 1.0)
+            rows.append(
+                {"scenario_id": 0, "stage_id": sid, "_lp_mwh": mean * factor * bh}
+            )
+
+    if not rows:
+        return {}
+    df = pd.DataFrame(rows)
+    hours_map = {
+        sid: stage_hours[sid] for sid in df["stage_id"].unique() if sid in stage_hours
+    }
+    scen_stage = df.groupby(["scenario_id", "stage_id"])["_lp_mwh"].sum().reset_index()
+    scen_stage["_hours"] = scen_stage["stage_id"].map(hours_map)
+    scen_stage["_avg_mw"] = scen_stage["_lp_mwh"] / scen_stage["_hours"]
+    ser = scen_stage.groupby("stage_id")["_avg_mw"].mean()
+    return dict(zip(ser.index.tolist(), ser.values.tolist()))
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +294,6 @@ def chart_convergence(conv: pd.DataFrame) -> str:
             line={"color": COLORS["upper_bound"], "width": 2},
         )
     )
-    # Shaded band for upper_bound_std
     ub_upper = conv["upper_bound_mean"] + conv["upper_bound_std"]
     ub_lower = conv["upper_bound_mean"] - conv["upper_bound_std"]
     fig.add_trace(
@@ -313,21 +372,55 @@ def chart_cost_breakdown(costs: pd.DataFrame) -> str:
 
 
 def build_key_metrics_html(
-    hydros: pd.DataFrame,
-    thermals: pd.DataFrame,
-    ncs: pd.DataFrame,
-    buses: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
+    thermals_lf: pl.LazyFrame,
+    ncs_lf: pl.LazyFrame,
+    buses_lf: pl.LazyFrame,
     costs: pd.DataFrame,
 ) -> str:
-    total_hydro_gwh = hydros.groupby("scenario_id")["generation_mwh"].sum().mean() / 1e3
-    total_thermal_gwh = (
-        thermals.groupby("scenario_id")["generation_mwh"].sum().mean() / 1e3
+    total_hydro_gwh = (
+        hydros_lf.group_by("scenario_id")
+        .agg(pl.col("generation_mwh").sum())
+        .select(pl.col("generation_mwh").mean())
+        .collect(engine="streaming")["generation_mwh"][0]
+        / 1e3
     )
-    total_ncs_gwh = ncs.groupby("scenario_id")["generation_mwh"].sum().mean() / 1e3
-    avg_spot = buses[buses["bus_id"].isin([0, 1, 2, 3])]["spot_price"].mean()
-    total_spillage = hydros.groupby("scenario_id")["spillage_m3s"].sum().mean()
-    ncs_gen = ncs.groupby("scenario_id")["generation_mwh"].sum().mean()
-    ncs_curt = ncs.groupby("scenario_id")["curtailment_mwh"].sum().mean()
+    total_thermal_gwh = (
+        thermals_lf.group_by("scenario_id")
+        .agg(pl.col("generation_mwh").sum())
+        .select(pl.col("generation_mwh").mean())
+        .collect(engine="streaming")["generation_mwh"][0]
+        / 1e3
+    )
+    total_ncs_gwh = (
+        ncs_lf.group_by("scenario_id")
+        .agg(pl.col("generation_mwh").sum())
+        .select(pl.col("generation_mwh").mean())
+        .collect(engine="streaming")["generation_mwh"][0]
+        / 1e3
+    )
+    avg_spot = (
+        buses_lf.filter(pl.col("bus_id").is_in([0, 1, 2, 3]))
+        .select(pl.col("spot_price").mean())
+        .collect(engine="streaming")["spot_price"][0]
+    )
+    total_spillage = (
+        hydros_lf.group_by("scenario_id")
+        .agg(pl.col("spillage_m3s").sum())
+        .select(pl.col("spillage_m3s").mean())
+        .collect(engine="streaming")["spillage_m3s"][0]
+    )
+    ncs_stats = (
+        ncs_lf.group_by("scenario_id")
+        .agg(
+            pl.col("generation_mwh").sum().alias("gen"),
+            pl.col("curtailment_mwh").sum().alias("curt"),
+        )
+        .select(pl.col("gen").mean(), pl.col("curt").mean())
+        .collect(engine="streaming")
+    )
+    ncs_gen = ncs_stats["gen"][0]
+    ncs_curt = ncs_stats["curt"][0]
     curt_rate = ncs_curt / max(ncs_gen + ncs_curt, 1) * 100
 
     metrics = [
@@ -358,70 +451,10 @@ def build_key_metrics_html(
 # ---------------------------------------------------------------------------
 
 
-def _stage_avg_mw(
-    df: pd.DataFrame,
-    mwh_col: str,
-    stage_hours: dict[int, float],
-    group_cols: list[str],
-) -> pd.Series:
-    """Compute stage-average MW from MWh summed across all blocks.
-
-    Groups by ``["scenario_id", "stage_id"] + group_cols``, sums
-    ``mwh_col`` over all blocks, divides by total stage hours, then
-    averages across scenarios.
-    """
-    scen_stage = (
-        df.groupby(["scenario_id", "stage_id"] + group_cols)[mwh_col]
-        .sum()
-        .reset_index()
-    )
-    scen_stage["_hours"] = scen_stage["stage_id"].map(stage_hours)
-    scen_stage["_avg_mw"] = scen_stage[mwh_col] / scen_stage["_hours"]
-    return scen_stage.groupby(["stage_id"] + group_cols)["_avg_mw"].mean()
-
-
-def _compute_lp_load(
-    load_stats: pd.DataFrame,
-    load_factors: list[dict],
-    stage_hours: dict[int, float],
-    block_hours: dict[tuple[int, int], float],
-    bus_filter: list[int] | None = None,
-) -> pd.Series:
-    """Compute LP load balance RHS from input files as stage-average MW.
-
-    The LP RHS is ``mean_mw * load_factor`` per (bus, stage, block).
-    Computed directly from input data to avoid ambiguity in simulation output.
-    """
-    factor_lk: dict[tuple[int, int, int], float] = {}
-    for entry in load_factors:
-        bid, sid = entry["bus_id"], entry["stage_id"]
-        for bf in entry["block_factors"]:
-            factor_lk[(bid, sid, bf["block_id"])] = bf["factor"]
-
-    rows: list[dict] = []
-    for _, r in load_stats.iterrows():
-        bid, sid = int(r["bus_id"]), int(r["stage_id"])
-        if bus_filter is not None and bid not in bus_filter:
-            continue
-        mean = float(r["mean_mw"])
-        for blk_id in range(20):
-            bh = block_hours.get((sid, blk_id))
-            if bh is None:
-                break
-            factor = factor_lk.get((bid, sid, blk_id), 1.0)
-            rows.append(
-                {"scenario_id": 0, "stage_id": sid, "_lp_mwh": mean * factor * bh}
-            )
-
-    if not rows:
-        return pd.Series(dtype=float)
-    return _stage_avg_mw(pd.DataFrame(rows), "_lp_mwh", stage_hours, [])
-
-
 def chart_generation_mix(
-    hydros: pd.DataFrame,
-    thermals: pd.DataFrame,
-    ncs: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
+    thermals_lf: pl.LazyFrame,
+    ncs_lf: pl.LazyFrame,
     load_stats: pd.DataFrame,
     load_factors_list: list[dict],
     stage_labels: dict[int, str],
@@ -429,9 +462,12 @@ def chart_generation_mix(
     block_hours: dict[tuple[int, int], float],
 ) -> str:
     """Stacked area: hydro/thermal/NCS vs LP load per stage (stage-avg MW)."""
-    h_gen = _stage_avg_mw(hydros, "generation_mwh", stage_hours, [])
-    t_gen = _stage_avg_mw(thermals, "generation_mwh", stage_hours, [])
-    n_gen = _stage_avg_mw(ncs, "generation_mwh", stage_hours, [])
+    h_gen = _stage_avg_mw(hydros_lf, "generation_mwh", stage_hours, [])
+    t_gen = _stage_avg_mw(thermals_lf, "generation_mwh", stage_hours, [])
+    n_gen = _stage_avg_mw(ncs_lf, "generation_mwh", stage_hours, [])
+    assert isinstance(h_gen, dict)
+    assert isinstance(t_gen, dict)
+    assert isinstance(n_gen, dict)
 
     load_ser = _compute_lp_load(
         load_stats,
@@ -441,7 +477,7 @@ def chart_generation_mix(
         bus_filter=[0, 1, 2, 3],
     )
 
-    stages = sorted(h_gen.index)
+    stages = sorted(h_gen.keys())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
@@ -496,11 +532,11 @@ def chart_generation_mix(
 
 
 def chart_generation_by_bus(
-    hydros: pd.DataFrame,
-    thermals: pd.DataFrame,
-    ncs: pd.DataFrame,
-    buses: pd.DataFrame,
-    exchanges: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
+    thermals_lf: pl.LazyFrame,
+    ncs_lf: pl.LazyFrame,
+    buses_lf: pl.LazyFrame,
+    exchanges_lf: pl.LazyFrame,
     hydro_bus_map: dict[int, int],
     thermal_meta: dict[int, dict],
     ncs_bus_map: dict[int, int],
@@ -515,6 +551,84 @@ def chart_generation_by_bus(
     """Subplots per bus: hydro+thermal+NCS+net_import vs LP load (stage-avg MW)."""
     bus_ids = sorted([bid for bid in bus_names if bid <= 3])
     n_buses = len(bus_ids)
+
+    # Build mapping DataFrames for joins
+    hbus_df = pl.DataFrame(
+        {"hydro_id": list(hydro_bus_map.keys()), "bus_id": list(hydro_bus_map.values())}
+    )
+    tbus_map = {k: v["bus_id"] for k, v in thermal_meta.items()}
+    tbus_df = pl.DataFrame(
+        {"thermal_id": list(tbus_map.keys()), "bus_id": list(tbus_map.values())}
+    )
+    nbus_df = pl.DataFrame(
+        {
+            "non_controllable_id": list(ncs_bus_map.keys()),
+            "bus_id": list(ncs_bus_map.values()),
+        }
+    )
+
+    hours_df = pl.DataFrame(
+        {"stage_id": list(stage_hours.keys()), "_hours": list(stage_hours.values())}
+    )
+
+    # Compute stage-average MW per bus for each entity type
+    def _bus_stage_avg(
+        lf: pl.LazyFrame, mwh_col: str, id_col: str, mapping_df: pl.DataFrame
+    ) -> pl.DataFrame:
+        return (
+            lf.join(mapping_df.lazy(), on=id_col)
+            .group_by(["scenario_id", "stage_id", "bus_id"])
+            .agg(pl.col(mwh_col).sum())
+            .join(hours_df.lazy(), on="stage_id")
+            .with_columns((pl.col(mwh_col) / pl.col("_hours")).alias("_avg_mw"))
+            .group_by(["stage_id", "bus_id"])
+            .agg(pl.col("_avg_mw").mean())
+            .sort("stage_id")
+            .collect(engine="streaming")
+        )
+
+    h_by_bus = _bus_stage_avg(hydros_lf, "generation_mwh", "hydro_id", hbus_df)
+    t_by_bus = _bus_stage_avg(thermals_lf, "generation_mwh", "thermal_id", tbus_df)
+    n_by_bus = _bus_stage_avg(ncs_lf, "generation_mwh", "non_controllable_id", nbus_df)
+
+    stages_all = sorted(h_by_bus["stage_id"].unique().to_list())
+    xlabels = stage_x_labels(stages_all, stage_labels)
+
+    def _to_map(df: pl.DataFrame, bus_id: int) -> dict[int, float]:
+        sub = df.filter(pl.col("bus_id") == bus_id)
+        return dict(zip(sub["stage_id"].to_list(), sub["_avg_mw"].to_list()))
+
+    # Net exchange import per bus
+    ex_import: dict[int, dict[int, float]] = {}
+    for bus_id in bus_ids:
+        parts: list[pl.DataFrame] = []
+        for ln in line_meta:
+            lid, src, tgt = ln["id"], ln["source_bus_id"], ln["target_bus_id"]
+            if src != bus_id and tgt != bus_id:
+                continue
+            sign = 1.0 if tgt == bus_id else -1.0
+            part = (
+                exchanges_lf.filter(pl.col("line_id") == lid)
+                .group_by(["scenario_id", "stage_id"])
+                .agg((pl.col("net_flow_mwh") * sign).sum().alias("_imp_mwh"))
+                .join(hours_df.lazy(), on="stage_id")
+                .with_columns((pl.col("_imp_mwh") / pl.col("_hours")).alias("_mw"))
+                .group_by("stage_id")
+                .agg(pl.col("_mw").mean())
+                .collect(engine="streaming")
+            )
+            parts.append(part)
+        if parts:
+            combined = pl.concat(parts)
+            agg = (
+                combined.group_by("stage_id").agg(pl.col("_mw").sum()).sort("stage_id")
+            )
+            ex_import[bus_id] = dict(
+                zip(agg["stage_id"].to_list(), agg["_mw"].to_list())
+            )
+        else:
+            ex_import[bus_id] = {}
+
     fig = make_subplots(
         rows=n_buses,
         cols=1,
@@ -523,55 +637,11 @@ def chart_generation_by_bus(
         vertical_spacing=0.12,
     )
 
-    hydros_c = hydros.copy()
-    hydros_c["bus_id"] = hydros_c["hydro_id"].map(hydro_bus_map)
-    thermals_c = thermals.copy()
-    thermals_c["bus_id"] = thermals_c["thermal_id"].map(
-        {k: v["bus_id"] for k, v in thermal_meta.items()}
-    )
-    ncs_c = ncs.copy()
-    ncs_c["bus_id"] = ncs_c["non_controllable_id"].map(ncs_bus_map)
-
-    # Net exchange import per bus (stage-average MW)
-    ex_import: dict[int, pd.Series] = {}
-    for bus_id in bus_ids:
-        parts = []
-        for ln in line_meta:
-            lid, src, tgt = ln["id"], ln["source_bus_id"], ln["target_bus_id"]
-            if src != bus_id and tgt != bus_id:
-                continue
-            le = exchanges[exchanges["line_id"] == lid].copy()
-            if tgt == bus_id:
-                le["_imp_mwh"] = le["net_flow_mwh"]
-            else:
-                le["_imp_mwh"] = -le["net_flow_mwh"]
-            parts.append(le.groupby(["scenario_id", "stage_id"])["_imp_mwh"].sum())
-        if parts:
-            c = pd.concat(parts, axis=1).sum(axis=1).reset_index()
-            c.columns = ["scenario_id", "stage_id", "_imp_mwh"]
-            c["_h"] = c["stage_id"].map(stage_hours)
-            c["_mw"] = c["_imp_mwh"] / c["_h"]
-            ex_import[bus_id] = c.groupby("stage_id")["_mw"].mean()
-        else:
-            ex_import[bus_id] = pd.Series(dtype=float)
-
-    stages_all = sorted(hydros_c["stage_id"].unique())
-    xlabels = stage_x_labels(stages_all, stage_labels)
-
     for row_idx, bus_id in enumerate(bus_ids, start=1):
         show_legend = row_idx == 1
-        h_gen = _stage_avg_mw(
-            hydros_c[hydros_c["bus_id"] == bus_id], "generation_mwh", stage_hours, []
-        )
-        t_gen = _stage_avg_mw(
-            thermals_c[thermals_c["bus_id"] == bus_id],
-            "generation_mwh",
-            stage_hours,
-            [],
-        )
-        n_gen = _stage_avg_mw(
-            ncs_c[ncs_c["bus_id"] == bus_id], "generation_mwh", stage_hours, []
-        )
+        h_gen = _to_map(h_by_bus, bus_id)
+        t_gen = _to_map(t_by_bus, bus_id)
+        n_gen = _to_map(n_by_bus, bus_id)
         load_s = _compute_lp_load(
             load_stats,
             load_factors_list,
@@ -579,7 +649,7 @@ def chart_generation_by_bus(
             block_hours,
             bus_filter=[bus_id],
         )
-        net_imp = ex_import.get(bus_id, pd.Series(dtype=float))
+        net_imp = ex_import.get(bus_id, {})
 
         fig.add_trace(
             go.Scatter(
@@ -668,20 +738,36 @@ def chart_generation_by_bus(
 
 
 def chart_generation_share_pie(
-    hydros: pd.DataFrame,
-    thermals: pd.DataFrame,
-    ncs: pd.DataFrame,
-    buses: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
+    thermals_lf: pl.LazyFrame,
+    ncs_lf: pl.LazyFrame,
+    buses_lf: pl.LazyFrame,
 ) -> str:
     """Pie chart of average generation shares including deficit."""
-    h_total = hydros.groupby("scenario_id")["generation_mwh"].sum().mean()
-    t_total = thermals.groupby("scenario_id")["generation_mwh"].sum().mean()
-    n_total = ncs.groupby("scenario_id")["generation_mwh"].sum().mean()
+    h_total = (
+        hydros_lf.group_by("scenario_id")
+        .agg(pl.col("generation_mwh").sum())
+        .select(pl.col("generation_mwh").mean())
+        .collect(engine="streaming")["generation_mwh"][0]
+    )
+    t_total = (
+        thermals_lf.group_by("scenario_id")
+        .agg(pl.col("generation_mwh").sum())
+        .select(pl.col("generation_mwh").mean())
+        .collect(engine="streaming")["generation_mwh"][0]
+    )
+    n_total = (
+        ncs_lf.group_by("scenario_id")
+        .agg(pl.col("generation_mwh").sum())
+        .select(pl.col("generation_mwh").mean())
+        .collect(engine="streaming")["generation_mwh"][0]
+    )
     d_total = (
-        buses[buses["bus_id"].isin([0, 1, 2, 3])]
-        .groupby("scenario_id")["deficit_mwh"]
-        .sum()
-        .mean()
+        buses_lf.filter(pl.col("bus_id").is_in([0, 1, 2, 3]))
+        .group_by("scenario_id")
+        .agg(pl.col("deficit_mwh").sum())
+        .select(pl.col("deficit_mwh").mean())
+        .collect(engine="streaming")["deficit_mwh"][0]
     )
 
     labels = ["Hydro", "Thermal", "NCS", "Deficit"]
@@ -708,29 +794,38 @@ def chart_generation_share_pie(
 # ---------------------------------------------------------------------------
 
 
-def chart_hydro_storage(hydros: pd.DataFrame, stage_labels: dict[int, str]) -> str:
+def chart_hydro_storage(hydros_lf: pl.LazyFrame, stage_labels: dict[int, str]) -> str:
     """Total storage with p10/p50/p90 bands."""
-    # storage_final_hm3: sum across all hydros per stage per scenario
-    # Use block_id=0 since storage is per stage, not block
-    h0 = hydros[hydros["block_id"] == 0]
-    total_stor = (
-        h0.groupby(["scenario_id", "stage_id"])["storage_final_hm3"].sum().reset_index()
-    )
     pcts = (
-        total_stor.groupby("stage_id")["storage_final_hm3"]
-        .quantile([0.1, 0.5, 0.9])
-        .unstack(level=-1)
-        .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id"])
+        .agg(pl.col("storage_final_hm3").sum())
+        .group_by("stage_id")
+        .agg(
+            pl.col("storage_final_hm3")
+            .quantile(0.1, interpolation="linear")
+            .alias("p10"),
+            pl.col("storage_final_hm3")
+            .quantile(0.5, interpolation="linear")
+            .alias("p50"),
+            pl.col("storage_final_hm3")
+            .quantile(0.9, interpolation="linear")
+            .alias("p90"),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
     )
-    stages = sorted(pcts.index)
+    stages = pcts["stage_id"].to_list()
     xlabels = stage_x_labels(stages, stage_labels)
+    p10 = pcts["p10"].to_list()
+    p50 = pcts["p50"].to_list()
+    p90 = pcts["p90"].to_list()
 
     fig = go.Figure()
-    # P10-P90 band
     fig.add_trace(
         go.Scatter(
             x=xlabels + xlabels[::-1],
-            y=list(pcts["p90"].values) + list(pcts["p10"].values[::-1]),
+            y=p90 + p10[::-1],
             fill="toself",
             fillcolor="rgba(33,150,243,0.15)",
             line={"color": "rgba(255,255,255,0)"},
@@ -740,7 +835,7 @@ def chart_hydro_storage(hydros: pd.DataFrame, stage_labels: dict[int, str]) -> s
     fig.add_trace(
         go.Scatter(
             x=xlabels,
-            y=pcts["p50"].values,
+            y=p50,
             name="Median (P50)",
             line={"color": COLORS["hydro"], "width": 2.5},
         )
@@ -748,7 +843,7 @@ def chart_hydro_storage(hydros: pd.DataFrame, stage_labels: dict[int, str]) -> s
     fig.add_trace(
         go.Scatter(
             x=xlabels,
-            y=pcts["p10"].values,
+            y=p10,
             name="P10",
             line={"color": COLORS["hydro"], "width": 1, "dash": "dot"},
         )
@@ -756,7 +851,7 @@ def chart_hydro_storage(hydros: pd.DataFrame, stage_labels: dict[int, str]) -> s
     fig.add_trace(
         go.Scatter(
             x=xlabels,
-            y=pcts["p90"].values,
+            y=p90,
             name="P90",
             line={"color": COLORS["hydro"], "width": 1, "dash": "dot"},
         )
@@ -773,34 +868,39 @@ def chart_hydro_storage(hydros: pd.DataFrame, stage_labels: dict[int, str]) -> s
 
 
 def chart_hydro_gen_by_bus(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     hydro_bus_map: dict[int, int],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
 ) -> str:
     """Stacked area of hydro generation by bus."""
-    h0 = hydros[hydros["block_id"] == 0].copy()
-    h0["bus_id"] = h0["hydro_id"].map(hydro_bus_map)
-    bus_ids = sorted(h0["bus_id"].dropna().unique())
-    stages = sorted(h0["stage_id"].unique())
+    hbus_df = pl.DataFrame(
+        {"hydro_id": list(hydro_bus_map.keys()), "bus_id": list(hydro_bus_map.values())}
+    )
+    gen_by_bus = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .join(hbus_df.lazy(), on="hydro_id")
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("generation_mw").sum())
+        .group_by(["stage_id", "bus_id"])
+        .agg(pl.col("generation_mw").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    bus_ids = sorted(gen_by_bus["bus_id"].unique().to_list())
+    stages = sorted(gen_by_bus["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
     for i, bus_id in enumerate(bus_ids):
-        bus_id_int = int(bus_id)
-        b_gen = (
-            h0[h0["bus_id"] == bus_id_int]
-            .groupby(["scenario_id", "stage_id"])["generation_mw"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
-        )
+        sub = gen_by_bus.filter(pl.col("bus_id") == bus_id)
+        b_map = dict(zip(sub["stage_id"].to_list(), sub["generation_mw"].to_list()))
         color = BUS_COLORS[i % len(BUS_COLORS)]
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[b_gen.get(s, 0) for s in stages],
-                name=bus_names.get(bus_id_int, str(bus_id_int)),
+                y=[b_map.get(s, 0) for s in stages],
+                name=bus_names.get(int(bus_id), str(bus_id)),
                 stackgroup="buses",
                 line={"color": color},
             )
@@ -817,37 +917,42 @@ def chart_hydro_gen_by_bus(
 
 
 def chart_spillage_by_stage(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
     top_n: int = 5,
 ) -> str:
     """Total spillage with top contributing hydros highlighted."""
-    h0 = hydros[hydros["block_id"] == 0]
-    # Top hydros by average spillage
     top_hydros = (
-        h0.groupby(["scenario_id", "hydro_id"])["spillage_m3s"]
-        .sum()
-        .groupby("hydro_id")
-        .mean()
-        .nlargest(top_n)
-        .index.tolist()
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "hydro_id"])
+        .agg(pl.col("spillage_m3s").sum())
+        .group_by("hydro_id")
+        .agg(pl.col("spillage_m3s").mean())
+        .sort("spillage_m3s", descending=True)
+        .head(top_n)
+        .collect(engine="streaming")["hydro_id"]
+        .to_list()
     )
-    stages = sorted(h0["stage_id"].unique())
-    xlabels = stage_x_labels(stages, stage_labels)
 
     total_spill = (
-        h0.groupby(["scenario_id", "stage_id"])["spillage_m3s"]
-        .sum()
-        .groupby("stage_id")
-        .mean()
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id"])
+        .agg(pl.col("spillage_m3s").sum())
+        .group_by("stage_id")
+        .agg(pl.col("spillage_m3s").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
     )
+    stages = total_spill["stage_id"].to_list()
+    xlabels = stage_x_labels(stages, stage_labels)
+    total_map = dict(zip(stages, total_spill["spillage_m3s"].to_list()))
 
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
             x=xlabels,
-            y=[total_spill.get(s, 0) for s in stages],
+            y=[total_map.get(s, 0) for s in stages],
             name="Total Spillage",
             line={"color": COLORS["spillage"], "width": 2.5},
             fill="tozeroy",
@@ -858,16 +963,21 @@ def chart_spillage_by_stage(
     for i, hid in enumerate(top_hydros):
         hname = entity_name(names, "hydros", hid)
         spill = (
-            h0[h0["hydro_id"] == hid]
-            .groupby(["scenario_id", "stage_id"])["spillage_m3s"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
+            hydros_lf.filter((pl.col("block_id") == 0) & (pl.col("hydro_id") == hid))
+            .group_by(["scenario_id", "stage_id"])
+            .agg(pl.col("spillage_m3s").sum())
+            .group_by("stage_id")
+            .agg(pl.col("spillage_m3s").mean())
+            .sort("stage_id")
+            .collect(engine="streaming")
+        )
+        spill_map = dict(
+            zip(spill["stage_id"].to_list(), spill["spillage_m3s"].to_list())
         )
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[spill.get(s, 0) for s in stages],
+                y=[spill_map.get(s, 0) for s in stages],
                 name=hname,
                 line={"color": palette[i % len(palette)], "width": 1.5, "dash": "dash"},
                 mode="lines",
@@ -885,35 +995,44 @@ def chart_spillage_by_stage(
 
 
 def chart_inflow_slack(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
     top_n: int = 5,
 ) -> str:
     """Inflow nonnegativity slack by stage."""
-    h0 = hydros[hydros["block_id"] == 0]
     top_hydros = (
-        h0.groupby(["scenario_id", "hydro_id"])["inflow_nonnegativity_slack_m3s"]
-        .sum()
-        .groupby("hydro_id")
-        .mean()
-        .nlargest(top_n)
-        .index.tolist()
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "hydro_id"])
+        .agg(pl.col("inflow_nonnegativity_slack_m3s").sum())
+        .group_by("hydro_id")
+        .agg(pl.col("inflow_nonnegativity_slack_m3s").mean())
+        .sort("inflow_nonnegativity_slack_m3s", descending=True)
+        .head(top_n)
+        .collect(engine="streaming")["hydro_id"]
+        .to_list()
     )
-    stages = sorted(h0["stage_id"].unique())
-    xlabels = stage_x_labels(stages, stage_labels)
+
     total_slack = (
-        h0.groupby(["scenario_id", "stage_id"])["inflow_nonnegativity_slack_m3s"]
-        .sum()
-        .groupby("stage_id")
-        .mean()
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id"])
+        .agg(pl.col("inflow_nonnegativity_slack_m3s").sum())
+        .group_by("stage_id")
+        .agg(pl.col("inflow_nonnegativity_slack_m3s").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = total_slack["stage_id"].to_list()
+    xlabels = stage_x_labels(stages, stage_labels)
+    total_map = dict(
+        zip(stages, total_slack["inflow_nonnegativity_slack_m3s"].to_list())
     )
 
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
             x=xlabels,
-            y=[total_slack.get(s, 0) for s in stages],
+            y=[total_map.get(s, 0) for s in stages],
             name="Total Slack",
             line={"color": "#607D8B", "width": 2.5},
             fill="tozeroy",
@@ -924,17 +1043,25 @@ def chart_inflow_slack(
     for i, hid in enumerate(top_hydros):
         hname = entity_name(names, "hydros", hid)
         slack = (
-            h0[h0["hydro_id"] == hid]
-            .groupby(["scenario_id", "stage_id"])["inflow_nonnegativity_slack_m3s"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
+            hydros_lf.filter((pl.col("block_id") == 0) & (pl.col("hydro_id") == hid))
+            .group_by(["scenario_id", "stage_id"])
+            .agg(pl.col("inflow_nonnegativity_slack_m3s").sum())
+            .group_by("stage_id")
+            .agg(pl.col("inflow_nonnegativity_slack_m3s").mean())
+            .sort("stage_id")
+            .collect(engine="streaming")
         )
-        if slack.sum() > 0:
+        slack_map = dict(
+            zip(
+                slack["stage_id"].to_list(),
+                slack["inflow_nonnegativity_slack_m3s"].to_list(),
+            )
+        )
+        if sum(slack_map.values()) > 0:
             fig.add_trace(
                 go.Scatter(
                     x=xlabels,
-                    y=[slack.get(s, 0) for s in stages],
+                    y=[slack_map.get(s, 0) for s in stages],
                     name=hname,
                     line={
                         "color": palette[i % len(palette)],
@@ -956,25 +1083,24 @@ def chart_inflow_slack(
 
 
 def chart_water_value_distribution(
-    hydros: pd.DataFrame, stage_labels: dict[int, str]
+    hydros_lf: pl.LazyFrame, stage_labels: dict[int, str]
 ) -> str:
     """Box plot of water values across hydros by stage (sample stages for readability)."""
-    h0 = hydros[hydros["block_id"] == 0]
-    # Average across scenarios first, then keep per-hydro variation
-    avg_by_stage_hydro = (
-        h0.groupby(["stage_id", "hydro_id"])["water_value_per_hm3"].mean().reset_index()
+    avg_by = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["stage_id", "hydro_id"])
+        .agg(pl.col("water_value_per_hm3").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
     )
-    stages = sorted(avg_by_stage_hydro["stage_id"].unique())
-    # Sample at most 24 stages for readability
+    stages = sorted(avg_by["stage_id"].unique().to_list())
     step = max(1, len(stages) // 24)
     sampled_stages = stages[::step]
     xlabels = stage_x_labels(sampled_stages, stage_labels)
 
     fig = go.Figure()
     for s, lbl in zip(sampled_stages, xlabels):
-        vals = avg_by_stage_hydro[avg_by_stage_hydro["stage_id"] == s][
-            "water_value_per_hm3"
-        ].values
+        vals = avg_by.filter(pl.col("stage_id") == s)["water_value_per_hm3"].to_list()
         fig.add_trace(
             go.Box(
                 y=vals,
@@ -1001,15 +1127,23 @@ def chart_water_value_distribution(
 
 
 def chart_net_flow_by_line(
-    exchanges: pd.DataFrame,
+    exchanges_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
 ) -> str:
     """Net flow by line by stage."""
-    ex0 = exchanges[exchanges["block_id"] == 0]
-    stages = sorted(ex0["stage_id"].unique())
+    flow_data = (
+        exchanges_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id", "line_id"])
+        .agg(pl.col("net_flow_mw").mean())
+        .group_by(["stage_id", "line_id"])
+        .agg(pl.col("net_flow_mw").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    line_ids = sorted(flow_data["line_id"].unique().to_list())
+    stages = sorted(flow_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
-    line_ids = sorted(ex0["line_id"].unique())
 
     fig = go.Figure()
     palette = [
@@ -1023,17 +1157,12 @@ def chart_net_flow_by_line(
     ]
     for i, lid in enumerate(line_ids):
         lname = entity_name(names, "lines", lid)
-        flow = (
-            ex0[ex0["line_id"] == lid]
-            .groupby(["scenario_id", "stage_id"])["net_flow_mw"]
-            .mean()
-            .groupby("stage_id")
-            .mean()
-        )
+        sub = flow_data.filter(pl.col("line_id") == lid)
+        flow_map = dict(zip(sub["stage_id"].to_list(), sub["net_flow_mw"].to_list()))
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[flow.get(s, 0) for s in stages],
+                y=[flow_map.get(s, 0) for s in stages],
                 name=lname,
                 line={"color": palette[i % len(palette)], "width": 2},
             )
@@ -1051,39 +1180,44 @@ def chart_net_flow_by_line(
 
 
 def chart_capacity_utilization_heatmap(
-    exchanges: pd.DataFrame,
+    exchanges_lf: pl.LazyFrame,
     line_bounds: pd.DataFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
 ) -> str:
     """Heatmap of capacity utilization: lines vs stages."""
-    ex0 = exchanges[exchanges["block_id"] == 0]
-    line_ids = sorted(ex0["line_id"].unique())
-    stages = sorted(ex0["stage_id"].unique())
+    flow_data = (
+        exchanges_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id", "line_id"])
+        .agg(
+            pl.col("direct_flow_mw").mean().alias("direct"),
+            pl.col("reverse_flow_mw").mean().alias("reverse"),
+        )
+        .group_by(["stage_id", "line_id"])
+        .agg(
+            pl.col("direct").mean(),
+            pl.col("reverse").mean(),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    line_ids = sorted(flow_data["line_id"].unique().to_list())
+    stages = sorted(flow_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
     ynames = [entity_name(names, "lines", lid) for lid in line_ids]
 
-    # Direct utilization
     z_direct = []
     z_reverse = []
     for lid in line_ids:
-        ex_line = (
-            ex0[ex0["line_id"] == lid]
-            .groupby(["scenario_id", "stage_id"])
-            .agg(
-                direct=("direct_flow_mw", "mean"),
-                reverse=("reverse_flow_mw", "mean"),
-            )
-            .groupby("stage_id")
-            .mean()
-        )
-
+        sub = flow_data.filter(pl.col("line_id") == lid)
+        d_map = dict(zip(sub["stage_id"].to_list(), sub["direct"].to_list()))
+        r_map = dict(zip(sub["stage_id"].to_list(), sub["reverse"].to_list()))
         lb_line = line_bounds[line_bounds["line_id"] == lid].set_index("stage_id")
         row_d = []
         row_r = []
         for s in stages:
-            d_flow = ex_line["direct"].get(s, 0) if s in ex_line.index else 0
-            r_flow = ex_line["reverse"].get(s, 0) if s in ex_line.index else 0
+            d_flow = d_map.get(s, 0)
+            r_flow = r_map.get(s, 0)
             d_cap = lb_line["direct_mw"].get(s, 1) if s in lb_line.index else 1
             r_cap = lb_line["reverse_mw"].get(s, 1) if s in lb_line.index else 1
             row_d.append(min(d_flow / max(d_cap, 0.1) * 100, 100))
@@ -1122,23 +1256,29 @@ def chart_capacity_utilization_heatmap(
 
 
 def chart_flow_direction_summary(
-    exchanges: pd.DataFrame,
+    exchanges_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
 ) -> str:
     """Average direct and reverse flow per line (horizontal grouped bar)."""
-    ex0 = exchanges[exchanges["block_id"] == 0]
-    line_ids = sorted(ex0["line_id"].unique())
+    flow_data = (
+        exchanges_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "line_id"])
+        .agg(
+            pl.col("direct_flow_mw").mean().alias("direct"),
+            pl.col("reverse_flow_mw").mean().alias("reverse"),
+        )
+        .group_by("line_id")
+        .agg(
+            pl.col("direct").mean(),
+            pl.col("reverse").mean(),
+        )
+        .sort("line_id")
+        .collect(engine="streaming")
+    )
+    line_ids = flow_data["line_id"].to_list()
     ynames = [entity_name(names, "lines", lid) for lid in line_ids]
-    avg_direct = []
-    avg_reverse = []
-    for lid in line_ids:
-        ex_line = ex0[ex0["line_id"] == lid]
-        avg_direct.append(
-            ex_line.groupby("scenario_id")["direct_flow_mw"].mean().mean()
-        )
-        avg_reverse.append(
-            ex_line.groupby("scenario_id")["reverse_flow_mw"].mean().mean()
-        )
+    avg_direct = flow_data["direct"].to_list()
+    avg_reverse = flow_data["reverse"].to_list()
 
     fig = go.Figure()
     fig.add_trace(
@@ -1171,20 +1311,32 @@ def chart_flow_direction_summary(
 
 
 def build_interactive_exchange_detail(
-    exchanges: pd.DataFrame,
+    exchanges_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
 ) -> str:
     """Build HTML with embedded per-line p10/p50/p90 data and JS dropdown."""
-    ex0 = exchanges[exchanges["block_id"] == 0]
-    stages = sorted(ex0["stage_id"].unique())
+    # Collect all exchange block_id==0 data once
+    ex0 = (
+        exchanges_lf.filter(pl.col("block_id") == 0)
+        .select(
+            "scenario_id",
+            "stage_id",
+            "line_id",
+            "net_flow_mw",
+            "direct_flow_mw",
+            "reverse_flow_mw",
+        )
+        .collect(engine="streaming")
+    )
+    stages = sorted(ex0["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
-    line_ids = sorted(ex0["line_id"].unique())
+    line_ids = sorted(ex0["line_id"].unique().to_list())
 
     line_data: dict[str, dict] = {}
     for lid in line_ids:
         lname = entity_name(names, "lines", lid)
-        ldf = ex0[ex0["line_id"] == lid]
+        ldf = ex0.filter(pl.col("line_id") == lid)
         entry: dict = {"name": lname}
         for col, prefix in [
             ("net_flow_mw", "net"),
@@ -1195,16 +1347,27 @@ def build_interactive_exchange_detail(
                 for sfx in ["p10", "p50", "p90"]:
                     entry[f"{prefix}_{sfx}"] = [0.0] * len(stages)
                 continue
-            grp = ldf.groupby(["scenario_id", "stage_id"])[col].mean()
             pcts = (
-                grp.groupby("stage_id")
-                .quantile([0.1, 0.5, 0.9])
-                .unstack(level=-1)
-                .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+                ldf.group_by(["scenario_id", "stage_id"])
+                .agg(pl.col(col).mean())
+                .group_by("stage_id")
+                .agg(
+                    pl.col(col).quantile(0.1, interpolation="linear").alias("p10"),
+                    pl.col(col).quantile(0.5, interpolation="linear").alias("p50"),
+                    pl.col(col).quantile(0.9, interpolation="linear").alias("p90"),
+                )
+                .sort("stage_id")
             )
+            pcts_map: dict[int, dict[str, float]] = {}
+            for row in pcts.iter_rows(named=True):
+                pcts_map[row["stage_id"]] = {
+                    "p10": row["p10"],
+                    "p50": row["p50"],
+                    "p90": row["p90"],
+                }
             for sfx in ["p10", "p50", "p90"]:
                 entry[f"{prefix}_{sfx}"] = [
-                    round(float(pcts[sfx].get(s, 0)), 2) for s in stages
+                    round(pcts_map.get(s, {}).get(sfx, 0.0), 2) for s in stages
                 ]
         line_data[str(lid)] = entry
 
@@ -1353,30 +1516,33 @@ def chart_cost_by_stage(
 
 
 def chart_spot_price_by_bus(
-    buses: pd.DataFrame,
+    buses_lf: pl.LazyFrame,
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
 ) -> str:
     """Spot price by bus by stage."""
-    b0 = buses[buses["block_id"] == 0]
-    real_buses = [bid for bid in sorted(b0["bus_id"].unique()) if bid <= 3]
-    stages = sorted(b0["stage_id"].unique())
+    sp_data = (
+        buses_lf.filter((pl.col("block_id") == 0) & (pl.col("bus_id") <= 3))
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("spot_price").mean())
+        .group_by(["stage_id", "bus_id"])
+        .agg(pl.col("spot_price").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    real_buses = sorted(sp_data["bus_id"].unique().to_list())
+    stages = sorted(sp_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
     for i, bus_id in enumerate(real_buses):
+        sub = sp_data.filter(pl.col("bus_id") == bus_id)
+        sp_map = dict(zip(sub["stage_id"].to_list(), sub["spot_price"].to_list()))
         bname = bus_names.get(bus_id, str(bus_id))
-        sp = (
-            b0[b0["bus_id"] == bus_id]
-            .groupby(["scenario_id", "stage_id"])["spot_price"]
-            .mean()
-            .groupby("stage_id")
-            .mean()
-        )
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[sp.get(s, 0) for s in stages],
+                y=[sp_map.get(s, 0) for s in stages],
                 name=bname,
                 line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
             )
@@ -1393,36 +1559,32 @@ def chart_spot_price_by_bus(
 
 
 def chart_spot_price_by_bus_subplots(
-    buses: pd.DataFrame,
+    buses_lf: pl.LazyFrame,
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
     stage_hours: dict[int, float],
     block_hours: dict[tuple[int, int], float],
 ) -> str:
     """2x2 subplots of weighted-average spot price (by block hours) per bus."""
-    real_bus_ids = [bid for bid in sorted(buses["bus_id"].unique()) if bid <= 3]
-
-    # Attach block hours as a column for vectorised weighting
-    buses_w = buses.copy()
-    buses_w["_bh"] = buses_w.apply(
-        lambda r: block_hours.get((int(r["stage_id"]), int(r["block_id"])), 0.0),
-        axis=1,
+    # Build block_hours as a Polars DataFrame for join
+    bh_df = pl.DataFrame(
+        {
+            "stage_id": [k[0] for k in block_hours.keys()],
+            "block_id": [k[1] for k in block_hours.keys()],
+            "_bh": list(block_hours.values()),
+        }
     )
-    buses_w["_sp_x_bh"] = buses_w["spot_price"] * buses_w["_bh"]
 
-    # Weighted average per (scenario, stage, bus)
     grp = (
-        buses_w.groupby(["scenario_id", "stage_id", "bus_id"])
-        .apply(
-            lambda g: (
-                g["_sp_x_bh"].sum() / g["_bh"].sum() if g["_bh"].sum() > 0 else 0.0
-            ),
-            include_groups=False,
-        )
-        .rename("w_spot")
-        .reset_index()
+        buses_lf.filter(pl.col("bus_id") <= 3)
+        .join(bh_df.lazy(), on=["stage_id", "block_id"])
+        .with_columns((pl.col("spot_price") * pl.col("_bh")).alias("_sp_x_bh"))
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg((pl.col("_sp_x_bh").sum() / pl.col("_bh").sum()).alias("w_spot"))
+        .collect(engine="streaming")
     )
 
+    real_bus_ids = sorted(grp["bus_id"].unique().to_list())
     n_buses = len(real_bus_ids)
     n_cols = 2
     n_rows = (n_buses + n_cols - 1) // n_cols
@@ -1437,7 +1599,7 @@ def chart_spot_price_by_bus_subplots(
         horizontal_spacing=0.10,
     )
 
-    stages = sorted(grp["stage_id"].unique())
+    stages = sorted(grp["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     for idx, bus_id in enumerate(real_bus_ids):
@@ -1445,20 +1607,30 @@ def chart_spot_price_by_bus_subplots(
         col = idx % n_cols + 1
         color = BUS_COLORS[idx % len(BUS_COLORS)]
 
-        b_grp = grp[grp["bus_id"] == bus_id]
         pcts = (
-            b_grp.groupby(["scenario_id", "stage_id"])["w_spot"]
-            .mean()
-            .groupby("stage_id")
-            .quantile([0.1, 0.5, 0.9])
-            .unstack(level=-1)
-            .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+            grp.filter(pl.col("bus_id") == bus_id)
+            .group_by(["scenario_id", "stage_id"])
+            .agg(pl.col("w_spot").mean())
+            .group_by("stage_id")
+            .agg(
+                pl.col("w_spot").quantile(0.1, interpolation="linear").alias("p10"),
+                pl.col("w_spot").quantile(0.5, interpolation="linear").alias("p50"),
+                pl.col("w_spot").quantile(0.9, interpolation="linear").alias("p90"),
+            )
+            .sort("stage_id")
         )
-        p10 = [float(pcts["p10"].get(s, 0)) for s in stages]
-        p50 = [float(pcts["p50"].get(s, 0)) for s in stages]
-        p90 = [float(pcts["p90"].get(s, 0)) for s in stages]
+        pcts_map: dict[int, dict[str, float]] = {
+            row_["stage_id"]: {
+                "p10": row_["p10"],
+                "p50": row_["p50"],
+                "p90": row_["p90"],
+            }
+            for row_ in pcts.iter_rows(named=True)
+        }
+        p10 = [pcts_map.get(s, {}).get("p10", 0.0) for s in stages]
+        p50 = [pcts_map.get(s, {}).get("p50", 0.0) for s in stages]
+        p90 = [pcts_map.get(s, {}).get("p90", 0.0) for s in stages]
 
-        # Shaded band
         fig.add_trace(
             go.Scatter(
                 x=xlabels + xlabels[::-1],
@@ -1523,18 +1695,22 @@ def chart_spot_price_by_bus_subplots(
 
 
 def chart_thermal_merit_order(
-    thermals: pd.DataFrame,
+    thermals_lf: pl.LazyFrame,
     thermal_meta: dict[int, dict],
     top_n: int = 30,
 ) -> str:
     """Horizontal bar: thermals sorted by cost, showing avg generation vs capacity."""
-    avg_gen = (
-        thermals.groupby(["scenario_id", "thermal_id"])["generation_mwh"]
-        .sum()
-        .groupby("thermal_id")
-        .mean()
+    avg_gen_df = (
+        thermals_lf.group_by(["scenario_id", "thermal_id"])
+        .agg(pl.col("generation_mwh").sum())
+        .group_by("thermal_id")
+        .agg(pl.col("generation_mwh").mean())
+        .collect(engine="streaming")
     )
-    # Sort by cost
+    avg_gen = dict(
+        zip(avg_gen_df["thermal_id"].to_list(), avg_gen_df["generation_mwh"].to_list())
+    )
+
     sorted_thermals = sorted(
         thermal_meta.items(),
         key=lambda x: x[1]["cost_per_mwh"],
@@ -1543,12 +1719,10 @@ def chart_thermal_merit_order(
     names_list = []
     gen_vals = []
     cap_vals = []
-    cost_vals = []
     for tid, meta in sorted_thermals:
         names_list.append(meta["name"])
-        gen_vals.append(avg_gen.get(tid, 0) / 1e3)  # GWh
-        cap_vals.append(meta["max_mw"] * 8760 / 1e3)  # theoretical max GWh/year
-        cost_vals.append(meta["cost_per_mwh"])
+        gen_vals.append(avg_gen.get(tid, 0) / 1e3)
+        cap_vals.append(meta["max_mw"] * 8760 / 1e3)
 
     fig = go.Figure()
     fig.add_trace(
@@ -1588,38 +1762,35 @@ def chart_thermal_merit_order(
 
 
 def chart_ncs_available_vs_generated(
-    ncs: pd.DataFrame,
+    ncs_lf: pl.LazyFrame,
     stage_labels: dict[int, str],
 ) -> str:
     """Stacked area of NCS available vs generated with curtailment gap."""
-    n0 = ncs[ncs["block_id"] == 0]
-    stages = sorted(n0["stage_id"].unique())
+    data = (
+        ncs_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id"])
+        .agg(
+            pl.col("available_mw").sum(),
+            pl.col("generation_mw").sum(),
+            pl.col("curtailment_mw").sum(),
+        )
+        .group_by("stage_id")
+        .agg(
+            pl.col("available_mw").mean(),
+            pl.col("generation_mw").mean(),
+            pl.col("curtailment_mw").mean(),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = data["stage_id"].to_list()
     xlabels = stage_x_labels(stages, stage_labels)
-
-    avail = (
-        n0.groupby(["scenario_id", "stage_id"])["available_mw"]
-        .sum()
-        .groupby("stage_id")
-        .mean()
-    )
-    gen = (
-        n0.groupby(["scenario_id", "stage_id"])["generation_mw"]
-        .sum()
-        .groupby("stage_id")
-        .mean()
-    )
-    curtail = (
-        n0.groupby(["scenario_id", "stage_id"])["curtailment_mw"]
-        .sum()
-        .groupby("stage_id")
-        .mean()
-    )
 
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
             x=xlabels,
-            y=[avail.get(s, 0) for s in stages],
+            y=data["available_mw"].to_list(),
             name="Available",
             line={"color": "#A5D6A7", "width": 2, "dash": "dash"},
             mode="lines",
@@ -1628,7 +1799,7 @@ def chart_ncs_available_vs_generated(
     fig.add_trace(
         go.Scatter(
             x=xlabels,
-            y=[gen.get(s, 0) for s in stages],
+            y=data["generation_mw"].to_list(),
             name="Generated",
             stackgroup="ncs",
             fillcolor="rgba(76,175,80,0.7)",
@@ -1638,7 +1809,7 @@ def chart_ncs_available_vs_generated(
     fig.add_trace(
         go.Scatter(
             x=xlabels,
-            y=[curtail.get(s, 0) for s in stages],
+            y=data["curtailment_mw"].to_list(),
             name="Curtailment",
             stackgroup="ncs",
             fillcolor="rgba(121,85,72,0.6)",
@@ -1657,23 +1828,23 @@ def chart_ncs_available_vs_generated(
 
 
 def chart_ncs_curtailment_by_source(
-    ncs: pd.DataFrame,
+    ncs_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     top_n: int = 20,
 ) -> str:
     """Bar chart of top curtailed NCS sources."""
-    curt_by_ncs = (
-        ncs.groupby(["scenario_id", "non_controllable_id"])["curtailment_mwh"]
-        .sum()
-        .groupby("non_controllable_id")
-        .mean()
-        .nlargest(top_n)
+    curt_by = (
+        ncs_lf.group_by(["scenario_id", "non_controllable_id"])
+        .agg(pl.col("curtailment_mwh").sum())
+        .group_by("non_controllable_id")
+        .agg(pl.col("curtailment_mwh").mean())
+        .sort("curtailment_mwh", descending=True)
+        .head(top_n)
+        .collect(engine="streaming")
     )
-    ynames = [
-        entity_name(names, "non_controllable_sources", int(nid))
-        for nid in curt_by_ncs.index
-    ]
-    values = [v / 1e3 for v in curt_by_ncs.values]
+    nids = curt_by["non_controllable_id"].to_list()
+    ynames = [entity_name(names, "non_controllable_sources", int(nid)) for nid in nids]
+    values = [v / 1e3 for v in curt_by["curtailment_mwh"].to_list()]
 
     fig = go.Figure(
         go.Bar(
@@ -1694,29 +1865,17 @@ def chart_ncs_curtailment_by_source(
 
 
 def chart_thermal_by_cost_bracket(
-    thermals: pd.DataFrame,
+    thermals_lf: pl.LazyFrame,
     thermal_meta: dict[int, dict],
     stage_labels: dict[int, str],
 ) -> str:
     """Stacked area of thermal generation grouped by cost bracket."""
-    # Assign cost bracket to each thermal
-    brackets = {
-        "Zero cost": (0, 0),
-        "0–100 R$/MWh": (0, 100),
-        "100–500 R$/MWh": (100, 500),
-        "500+ R$/MWh": (500, float("inf")),
-    }
     bracket_colors = {
         "Zero cost": "#FFF9C4",
         "0–100 R$/MWh": "#FFE082",
         "100–500 R$/MWh": COLORS["thermal"],
         "500+ R$/MWh": "#E65100",
     }
-
-    t0 = thermals[thermals["block_id"] == 0].copy()
-    t0["cost_per_mwh"] = t0["thermal_id"].map(
-        {k: v["cost_per_mwh"] for k, v in thermal_meta.items()}
-    )
 
     def assign_bracket(cost: float) -> str:
         if cost == 0:
@@ -1728,27 +1887,45 @@ def chart_thermal_by_cost_bracket(
         else:
             return "500+ R$/MWh"
 
-    t0["bracket"] = t0["cost_per_mwh"].map(assign_bracket)
-    stages = sorted(t0["stage_id"].unique())
+    cost_map = {tid: meta["cost_per_mwh"] for tid, meta in thermal_meta.items()}
+    bracket_map = {tid: assign_bracket(c) for tid, c in cost_map.items()}
+
+    t0 = (
+        thermals_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id", "thermal_id"])
+        .agg(pl.col("generation_mw").sum())
+        .group_by(["stage_id", "thermal_id"])
+        .agg(pl.col("generation_mw").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = sorted(t0["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
     for bracket_name, color in bracket_colors.items():
-        bt = t0[t0["bracket"] == bracket_name]
-        if bt.empty:
+        tids = [tid for tid, b in bracket_map.items() if b == bracket_name]
+        if not tids:
             continue
-        gen = (
-            bt.groupby(["scenario_id", "stage_id"])["generation_mw"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
+        sub = t0.filter(pl.col("thermal_id").is_in(tids))
+        if sub.is_empty():
+            continue
+        gen_by_stage = (
+            sub.group_by("stage_id").agg(pl.col("generation_mw").sum()).sort("stage_id")
         )
-        if gen.sum() == 0:
+        gen_map = dict(
+            zip(
+                gen_by_stage["stage_id"].to_list(),
+                gen_by_stage["generation_mw"].to_list(),
+            )
+        )
+        vals = [gen_map.get(s, 0) for s in stages]
+        if sum(vals) == 0:
             continue
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[gen.get(s, 0) for s in stages],
+                y=vals,
                 name=bracket_name,
                 stackgroup="brackets",
                 line={"color": color},
@@ -1771,18 +1948,39 @@ def chart_thermal_by_cost_bracket(
 
 
 def chart_storage_by_bus(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     hydro_bus_map: dict[int, int],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
 ) -> str:
     """Storage by bus with p50 line and p10-p90 band in subplots."""
-    h0 = hydros[hydros["block_id"] == 0].copy()
-    h0["bus_id"] = h0["hydro_id"].map(hydro_bus_map)
+    hbus_df = pl.DataFrame(
+        {"hydro_id": list(hydro_bus_map.keys()), "bus_id": list(hydro_bus_map.values())}
+    )
+    stor_data = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .join(hbus_df.lazy(), on="hydro_id")
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("storage_final_hm3").sum())
+        .group_by(["stage_id", "bus_id"])
+        .agg(
+            pl.col("storage_final_hm3")
+            .quantile(0.1, interpolation="linear")
+            .alias("p10"),
+            pl.col("storage_final_hm3")
+            .quantile(0.5, interpolation="linear")
+            .alias("p50"),
+            pl.col("storage_final_hm3")
+            .quantile(0.9, interpolation="linear")
+            .alias("p90"),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
     bus_ids = sorted([bid for bid in bus_names if bid <= 3])
-    n = len(bus_ids)
-    stages = sorted(h0["stage_id"].unique())
+    stages = sorted(stor_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
+    n = len(bus_ids)
 
     fig = make_subplots(
         rows=n,
@@ -1793,22 +1991,15 @@ def chart_storage_by_bus(
     )
 
     for row, bus_id in enumerate(bus_ids, 1):
-        bus_data = h0[h0["bus_id"] == bus_id]
-        total = (
-            bus_data.groupby(["scenario_id", "stage_id"])["storage_final_hm3"]
-            .sum()
-            .reset_index()
-        )
-        pcts = (
-            total.groupby("stage_id")["storage_final_hm3"]
-            .quantile([0.1, 0.5, 0.9])
-            .unstack(level=-1)
-            .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
-        )
+        sub = stor_data.filter(pl.col("bus_id") == bus_id)
+        pmap: dict[int, dict] = {
+            r["stage_id"]: {"p10": r["p10"], "p50": r["p50"], "p90": r["p90"]}
+            for r in sub.iter_rows(named=True)
+        }
         show_legend = row == 1
-        p90 = [pcts["p90"].get(s, 0) for s in stages]
-        p10 = [pcts["p10"].get(s, 0) for s in stages]
-        p50 = [pcts["p50"].get(s, 0) for s in stages]
+        p90 = [pmap.get(s, {}).get("p90", 0) for s in stages]
+        p10 = [pmap.get(s, {}).get("p10", 0) for s in stages]
+        p50 = [pmap.get(s, {}).get("p50", 0) for s in stages]
 
         fig.add_trace(
             go.Scatter(
@@ -1848,31 +2039,37 @@ def chart_storage_by_bus(
 
 
 def chart_spillage_by_bus(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     hydro_bus_map: dict[int, int],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
 ) -> str:
     """Total spillage by bus by stage."""
-    h0 = hydros[hydros["block_id"] == 0].copy()
-    h0["bus_id"] = h0["hydro_id"].map(hydro_bus_map)
+    hbus_df = pl.DataFrame(
+        {"hydro_id": list(hydro_bus_map.keys()), "bus_id": list(hydro_bus_map.values())}
+    )
+    spill_data = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .join(hbus_df.lazy(), on="hydro_id")
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("spillage_m3s").sum())
+        .group_by(["stage_id", "bus_id"])
+        .agg(pl.col("spillage_m3s").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
     bus_ids = sorted([bid for bid in bus_names if bid <= 3])
-    stages = sorted(h0["stage_id"].unique())
+    stages = sorted(spill_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
     for i, bus_id in enumerate(bus_ids):
-        spill = (
-            h0[h0["bus_id"] == bus_id]
-            .groupby(["scenario_id", "stage_id"])["spillage_m3s"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
-        )
+        sub = spill_data.filter(pl.col("bus_id") == bus_id)
+        spill_map = dict(zip(sub["stage_id"].to_list(), sub["spillage_m3s"].to_list()))
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[spill.get(s, 0) for s in stages],
+                y=[spill_map.get(s, 0) for s in stages],
                 name=bus_names.get(bus_id, str(bus_id)),
                 line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
             )
@@ -1889,31 +2086,39 @@ def chart_spillage_by_bus(
 
 
 def chart_water_value_by_bus(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     hydro_bus_map: dict[int, int],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
 ) -> str:
     """Average water value by bus by stage."""
-    h0 = hydros[hydros["block_id"] == 0].copy()
-    h0["bus_id"] = h0["hydro_id"].map(hydro_bus_map)
+    hbus_df = pl.DataFrame(
+        {"hydro_id": list(hydro_bus_map.keys()), "bus_id": list(hydro_bus_map.values())}
+    )
+    wv_data = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .join(hbus_df.lazy(), on="hydro_id")
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("water_value_per_hm3").mean())
+        .group_by(["stage_id", "bus_id"])
+        .agg(pl.col("water_value_per_hm3").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
     bus_ids = sorted([bid for bid in bus_names if bid <= 3])
-    stages = sorted(h0["stage_id"].unique())
+    stages = sorted(wv_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
     for i, bus_id in enumerate(bus_ids):
-        wv = (
-            h0[h0["bus_id"] == bus_id]
-            .groupby(["scenario_id", "stage_id"])["water_value_per_hm3"]
-            .mean()
-            .groupby("stage_id")
-            .mean()
+        sub = wv_data.filter(pl.col("bus_id") == bus_id)
+        wv_map = dict(
+            zip(sub["stage_id"].to_list(), sub["water_value_per_hm3"].to_list())
         )
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[wv.get(s, 0) for s in stages],
+                y=[wv_map.get(s, 0) for s in stages],
                 name=bus_names.get(bus_id, str(bus_id)),
                 line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
             )
@@ -1931,24 +2136,38 @@ def chart_water_value_by_bus(
 
 
 def chart_deficit_by_bus(
-    buses: pd.DataFrame,
+    buses_lf: pl.LazyFrame,
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
     stage_hours: dict[int, float],
 ) -> str:
     """Deficit by bus by stage (stage-avg MW)."""
     real_buses = sorted([bid for bid in bus_names if bid <= 3])
-    stages = sorted(buses["stage_id"].unique())
+    hours_df = pl.DataFrame(
+        {"stage_id": list(stage_hours.keys()), "_hours": list(stage_hours.values())}
+    )
+    def_data = (
+        buses_lf.filter(pl.col("bus_id").is_in(real_buses))
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("deficit_mwh").sum())
+        .join(hours_df.lazy(), on="stage_id")
+        .with_columns((pl.col("deficit_mwh") / pl.col("_hours")).alias("_avg_mw"))
+        .group_by(["stage_id", "bus_id"])
+        .agg(pl.col("_avg_mw").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = sorted(def_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
     for i, bus_id in enumerate(real_buses):
-        bdata = buses[buses["bus_id"] == bus_id]
-        def_mw = _stage_avg_mw(bdata, "deficit_mwh", stage_hours, [])
+        sub = def_data.filter(pl.col("bus_id") == bus_id)
+        dm = dict(zip(sub["stage_id"].to_list(), sub["_avg_mw"].to_list()))
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[def_mw.get(s, 0) for s in stages],
+                y=[dm.get(s, 0) for s in stages],
                 name=bus_names.get(bus_id, str(bus_id)),
                 line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
             )
@@ -1965,24 +2184,38 @@ def chart_deficit_by_bus(
 
 
 def chart_excess_by_bus(
-    buses: pd.DataFrame,
+    buses_lf: pl.LazyFrame,
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
     stage_hours: dict[int, float],
 ) -> str:
     """Excess by bus by stage (stage-avg MW)."""
     real_buses = sorted([bid for bid in bus_names if bid <= 3])
-    stages = sorted(buses["stage_id"].unique())
+    hours_df = pl.DataFrame(
+        {"stage_id": list(stage_hours.keys()), "_hours": list(stage_hours.values())}
+    )
+    exc_data = (
+        buses_lf.filter(pl.col("bus_id").is_in(real_buses))
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("excess_mwh").sum())
+        .join(hours_df.lazy(), on="stage_id")
+        .with_columns((pl.col("excess_mwh") / pl.col("_hours")).alias("_avg_mw"))
+        .group_by(["stage_id", "bus_id"])
+        .agg(pl.col("_avg_mw").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = sorted(exc_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
     for i, bus_id in enumerate(real_buses):
-        bdata = buses[buses["bus_id"] == bus_id]
-        exc_mw = _stage_avg_mw(bdata, "excess_mwh", stage_hours, [])
+        sub = exc_data.filter(pl.col("bus_id") == bus_id)
+        em = dict(zip(sub["stage_id"].to_list(), sub["_avg_mw"].to_list()))
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[exc_mw.get(s, 0) for s in stages],
+                y=[em.get(s, 0) for s in stages],
                 name=bus_names.get(bus_id, str(bus_id)),
                 line={"color": BUS_COLORS[i % len(BUS_COLORS)], "width": 2},
             )
@@ -1999,7 +2232,7 @@ def chart_excess_by_bus(
 
 
 def chart_top_hydros_detail(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     hydro_meta: dict[int, dict],
     stage_labels: dict[int, str],
     top_n: int = 8,
@@ -2010,8 +2243,24 @@ def chart_top_hydros_detail(
     ]
     hids = [hid for hid, _ in ranked]
 
-    h0 = hydros[hydros["block_id"] == 0]
-    stages = sorted(h0["stage_id"].unique())
+    data = (
+        hydros_lf.filter((pl.col("block_id") == 0) & pl.col("hydro_id").is_in(hids))
+        .group_by(["scenario_id", "stage_id", "hydro_id"])
+        .agg(
+            pl.col("generation_mw").mean(),
+            pl.col("storage_final_hm3").mean(),
+            pl.col("spillage_m3s").mean(),
+        )
+        .group_by(["stage_id", "hydro_id"])
+        .agg(
+            pl.col("generation_mw").mean(),
+            pl.col("storage_final_hm3").mean(),
+            pl.col("spillage_m3s").mean(),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = sorted(data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = make_subplots(
@@ -2021,7 +2270,6 @@ def chart_top_hydros_detail(
         subplot_titles=["Generation (MW)", "Storage (hm³)", "Spillage (m³/s)"],
         vertical_spacing=0.10,
     )
-
     palette = [
         "#2196F3",
         "#FF9800",
@@ -2037,31 +2285,17 @@ def chart_top_hydros_detail(
         meta = hydro_meta[hid]
         name = meta["name"]
         color = palette[i % len(palette)]
-        hdata = h0[h0["hydro_id"] == hid]
-
-        gen = (
-            hdata.groupby(["scenario_id", "stage_id"])["generation_mw"]
-            .mean()
-            .groupby("stage_id")
-            .mean()
+        sub = data.filter(pl.col("hydro_id") == hid)
+        gen_map = dict(zip(sub["stage_id"].to_list(), sub["generation_mw"].to_list()))
+        stor_map = dict(
+            zip(sub["stage_id"].to_list(), sub["storage_final_hm3"].to_list())
         )
-        stor = (
-            hdata.groupby(["scenario_id", "stage_id"])["storage_final_hm3"]
-            .mean()
-            .groupby("stage_id")
-            .mean()
-        )
-        spill = (
-            hdata.groupby(["scenario_id", "stage_id"])["spillage_m3s"]
-            .mean()
-            .groupby("stage_id")
-            .mean()
-        )
+        spill_map = dict(zip(sub["stage_id"].to_list(), sub["spillage_m3s"].to_list()))
 
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[gen.get(s, 0) for s in stages],
+                y=[gen_map.get(s, 0) for s in stages],
                 name=name,
                 legendgroup=name,
                 line={"color": color, "width": 1.5},
@@ -2073,7 +2307,7 @@ def chart_top_hydros_detail(
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[stor.get(s, 0) for s in stages],
+                y=[stor_map.get(s, 0) for s in stages],
                 name=name,
                 legendgroup=name,
                 line={"color": color, "width": 1.5},
@@ -2085,7 +2319,7 @@ def chart_top_hydros_detail(
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[spill.get(s, 0) for s in stages],
+                y=[spill_map.get(s, 0) for s in stages],
                 name=name,
                 legendgroup=name,
                 line={"color": color, "width": 1.5},
@@ -2105,7 +2339,7 @@ def chart_top_hydros_detail(
 
 
 def build_top_hydros_table(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     hydro_meta: dict[int, dict],
     bus_names: dict[int, str],
     top_n: int = 20,
@@ -2114,25 +2348,36 @@ def build_top_hydros_table(
     ranked = sorted(hydro_meta.items(), key=lambda x: x[1]["max_gen_mw"], reverse=True)[
         :top_n
     ]
-    h0 = hydros[hydros["block_id"] == 0]
+    hids = [hid for hid, _ in ranked]
+
+    stats = (
+        hydros_lf.filter((pl.col("block_id") == 0) & pl.col("hydro_id").is_in(hids))
+        .group_by(["scenario_id", "hydro_id"])
+        .agg(
+            pl.col("generation_mw").mean(),
+            pl.col("spillage_m3s").mean(),
+            pl.col("water_value_per_hm3").mean(),
+            pl.col("storage_final_hm3").mean(),
+        )
+        .group_by("hydro_id")
+        .agg(
+            pl.col("generation_mw").mean(),
+            pl.col("spillage_m3s").mean(),
+            pl.col("water_value_per_hm3").mean(),
+            pl.col("storage_final_hm3").mean(),
+        )
+        .collect(engine="streaming")
+    )
+    stats_map = {r["hydro_id"]: r for r in stats.iter_rows(named=True)}
 
     rows_html = []
     for hid, meta in ranked:
-        hdata = h0[h0["hydro_id"] == hid]
-        avg_gen = (
-            hdata.groupby("scenario_id")["generation_mw"].mean().mean()
-            if not hdata.empty
-            else 0
-        )
-        avg_spill = (
-            hdata.groupby("scenario_id")["spillage_m3s"].mean().mean()
-            if not hdata.empty
-            else 0
-        )
-        avg_wv = hdata["water_value_per_hm3"].mean() if not hdata.empty else 0
-        avg_stor = hdata["storage_final_hm3"].mean() if not hdata.empty else 0
+        r = stats_map.get(hid, {})
+        avg_gen = r.get("generation_mw", 0)
+        avg_spill = r.get("spillage_m3s", 0)
+        avg_wv = r.get("water_value_per_hm3", 0)
+        avg_stor = r.get("storage_final_hm3", 0)
         bus = bus_names.get(meta["bus_id"], str(meta["bus_id"]))
-
         rows_html.append(
             f"<tr><td>{meta['name']}</td><td>{bus}</td>"
             f"<td>{meta['max_gen_mw']:.0f}</td>"
@@ -2163,10 +2408,10 @@ M3S_TO_HM3_PER_HOUR = 3600 / 1e6
 
 
 def chart_per_block_balance(
-    hydros: pd.DataFrame,
-    thermals: pd.DataFrame,
-    ncs: pd.DataFrame,
-    buses: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
+    thermals_lf: pl.LazyFrame,
+    ncs_lf: pl.LazyFrame,
+    buses_lf: pl.LazyFrame,
     stage_labels: dict[int, str],
     block_hours: dict[tuple[int, int], float],
 ) -> str:
@@ -2188,39 +2433,60 @@ def chart_per_block_balance(
     for row, blk in enumerate(blocks, 1):
         show_legend = row == 1
 
-        hb = hydros[hydros["block_id"] == blk]
-        h_gen = (
-            hb.groupby(["scenario_id", "stage_id"])["generation_mw"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
+        h_gen_df = (
+            hydros_lf.filter(pl.col("block_id") == blk)
+            .group_by(["scenario_id", "stage_id"])
+            .agg(pl.col("generation_mw").sum())
+            .group_by("stage_id")
+            .agg(pl.col("generation_mw").mean())
+            .sort("stage_id")
+            .collect(engine="streaming")
         )
-        tb = thermals[thermals["block_id"] == blk]
-        t_gen = (
-            tb.groupby(["scenario_id", "stage_id"])["generation_mw"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
+        t_gen_df = (
+            thermals_lf.filter(pl.col("block_id") == blk)
+            .group_by(["scenario_id", "stage_id"])
+            .agg(pl.col("generation_mw").sum())
+            .group_by("stage_id")
+            .agg(pl.col("generation_mw").mean())
+            .sort("stage_id")
+            .collect(engine="streaming")
         )
-        nb = ncs[ncs["block_id"] == blk]
-        n_gen = (
-            nb.groupby(["scenario_id", "stage_id"])["generation_mw"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
+        n_gen_df = (
+            ncs_lf.filter(pl.col("block_id") == blk)
+            .group_by(["scenario_id", "stage_id"])
+            .agg(pl.col("generation_mw").sum())
+            .group_by("stage_id")
+            .agg(pl.col("generation_mw").mean())
+            .sort("stage_id")
+            .collect(engine="streaming")
         )
-        bb = buses[(buses["block_id"] == blk) & (buses["bus_id"].isin([0, 1, 2, 3]))]
-        load = (
-            bb.groupby(["scenario_id", "stage_id"])["load_mw"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
+        load_df = (
+            buses_lf.filter(
+                (pl.col("block_id") == blk) & pl.col("bus_id").is_in([0, 1, 2, 3])
+            )
+            .group_by(["scenario_id", "stage_id"])
+            .agg(pl.col("load_mw").sum())
+            .group_by("stage_id")
+            .agg(pl.col("load_mw").mean())
+            .sort("stage_id")
+            .collect(engine="streaming")
         )
+
+        h_map = dict(
+            zip(h_gen_df["stage_id"].to_list(), h_gen_df["generation_mw"].to_list())
+        )
+        t_map = dict(
+            zip(t_gen_df["stage_id"].to_list(), t_gen_df["generation_mw"].to_list())
+        )
+        n_map = dict(
+            zip(n_gen_df["stage_id"].to_list(), n_gen_df["generation_mw"].to_list())
+        )
+        l_map = dict(zip(load_df["stage_id"].to_list(), load_df["load_mw"].to_list()))
 
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[h_gen.get(s, 0) for s in stages],
+                y=[h_map.get(s, 0) for s in stages],
                 name="Hydro",
                 stackgroup=f"g{blk}",
                 fillcolor="rgba(33,150,243,0.6)",
@@ -2234,7 +2500,7 @@ def chart_per_block_balance(
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[t_gen.get(s, 0) for s in stages],
+                y=[t_map.get(s, 0) for s in stages],
                 name="Thermal",
                 stackgroup=f"g{blk}",
                 fillcolor="rgba(255,152,0,0.6)",
@@ -2248,7 +2514,7 @@ def chart_per_block_balance(
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[n_gen.get(s, 0) for s in stages],
+                y=[n_map.get(s, 0) for s in stages],
                 name="NCS",
                 stackgroup=f"g{blk}",
                 fillcolor="rgba(76,175,80,0.6)",
@@ -2262,7 +2528,7 @@ def chart_per_block_balance(
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
-                y=[load.get(s, 0) for s in stages],
+                y=[l_map.get(s, 0) for s in stages],
                 name="Load",
                 mode="lines",
                 line={"color": COLORS["load"], "width": 2, "dash": "dash"},
@@ -2284,7 +2550,7 @@ def chart_per_block_balance(
 
 
 def chart_inflow_comparison(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     inflow_stats: pd.DataFrame,
     hydro_meta: dict[int, dict],
     stage_labels: dict[int, str],
@@ -2294,10 +2560,23 @@ def chart_inflow_comparison(
     ranked = sorted(hydro_meta.items(), key=lambda x: x[1]["max_gen_mw"], reverse=True)[
         :top_n
     ]
+    hids = [hid for hid, _ in ranked]
 
-    h0 = hydros[hydros["block_id"] == 0]
-    stages = sorted(h0["stage_id"].unique())
-    xlabels = stage_x_labels(stages, stage_labels)
+    inflow_data = (
+        hydros_lf.filter((pl.col("block_id") == 0) & pl.col("hydro_id").is_in(hids))
+        .group_by(["scenario_id", "stage_id", "hydro_id"])
+        .agg(pl.col("inflow_m3s").mean())
+        .group_by(["stage_id", "hydro_id"])
+        .agg(
+            pl.col("inflow_m3s").quantile(0.1, interpolation="linear").alias("p10"),
+            pl.col("inflow_m3s").quantile(0.5, interpolation="linear").alias("p50"),
+            pl.col("inflow_m3s").quantile(0.9, interpolation="linear").alias("p90"),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages_all = sorted(inflow_data["stage_id"].unique().to_list())
+    xlabels = stage_x_labels(stages_all, stage_labels)
 
     fig = make_subplots(
         rows=top_n,
@@ -2309,35 +2588,27 @@ def chart_inflow_comparison(
 
     for row, (hid, meta) in enumerate(ranked, 1):
         show_legend = row == 1
-        hdata = h0[h0["hydro_id"] == hid]
-
-        realized = hdata.groupby(["scenario_id", "stage_id"])["inflow_m3s"].mean()
-        pcts = (
-            realized.groupby("stage_id")
-            .quantile([0.1, 0.5, 0.9])
-            .unstack(level=-1)
-            .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
-        )
-
+        sub = inflow_data.filter(pl.col("hydro_id") == hid)
+        pmap = {r["stage_id"]: r for r in sub.iter_rows(named=True)}
         hist = inflow_stats[inflow_stats["hydro_id"] == hid].set_index("stage_id")
 
-        p90 = [pcts["p90"].get(s, 0) for s in stages]
-        p10 = [pcts["p10"].get(s, 0) for s in stages]
-        p50 = [pcts["p50"].get(s, 0) for s in stages]
+        p90 = [pmap.get(s, {}).get("p90", 0) for s in stages_all]
+        p10 = [pmap.get(s, {}).get("p10", 0) for s in stages_all]
+        p50 = [pmap.get(s, {}).get("p50", 0) for s in stages_all]
         hist_mean = [
-            hist["mean_m3s"].get(s, 0) if s in hist.index else 0 for s in stages
+            hist["mean_m3s"].get(s, 0) if s in hist.index else 0 for s in stages_all
         ]
         hist_upper = [
             (hist["mean_m3s"].get(s, 0) + hist["std_m3s"].get(s, 0))
             if s in hist.index
             else 0
-            for s in stages
+            for s in stages_all
         ]
         hist_lower = [
             max(0, hist["mean_m3s"].get(s, 0) - hist["std_m3s"].get(s, 0))
             if s in hist.index
             else 0
-            for s in stages
+            for s in stages_all
         ]
 
         fig.add_trace(
@@ -2406,33 +2677,55 @@ def chart_inflow_comparison(
 
 
 def chart_plant_water_balance(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     hydro_meta: dict[int, dict],
     stage_labels: dict[int, str],
     stage_hours: dict[int, float],
     block_hours: dict[tuple[int, int], float],
     top_n: int = 6,
 ) -> str:
-    """Water balance components for top hydro plants.
-
-    Shows storage trajectory, flow rates, and balance residual.
-    """
-    # Pick plants with most spillage as they are the most suspicious
-    h0 = hydros[hydros["block_id"] == 0]
-    avg_spill = (
-        h0.groupby(["scenario_id", "hydro_id"])["spillage_m3s"]
-        .mean()
-        .groupby("hydro_id")
-        .mean()
+    """Water balance components for top hydro plants."""
+    # Pick top by spillage and capacity
+    avg_spill_df = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "hydro_id"])
+        .agg(pl.col("spillage_m3s").mean())
+        .group_by("hydro_id")
+        .agg(pl.col("spillage_m3s").mean())
+        .sort("spillage_m3s", descending=True)
+        .head(top_n)
+        .collect(engine="streaming")
     )
-    # Also pick top by capacity, merge both lists
-    by_cap = sorted(hydro_meta.items(), key=lambda x: x[1]["max_gen_mw"], reverse=True)[
-        :top_n
+    by_cap = [
+        hid
+        for hid, _ in sorted(
+            hydro_meta.items(), key=lambda x: x[1]["max_gen_mw"], reverse=True
+        )[:top_n]
     ]
-    by_spill = avg_spill.nlargest(top_n).index.tolist()
-    hids = list(dict.fromkeys([h for h, _ in by_cap] + by_spill))[:top_n]
+    by_spill = avg_spill_df["hydro_id"].to_list()
+    hids = list(dict.fromkeys(by_cap + by_spill))[:top_n]
 
-    stages = sorted(h0["stage_id"].unique())
+    # Collect all data for these plants (all blocks needed for outflow calc)
+    plant_data = (
+        hydros_lf.filter(pl.col("hydro_id").is_in(hids))
+        .select(
+            "scenario_id",
+            "stage_id",
+            "block_id",
+            "hydro_id",
+            "storage_initial_hm3",
+            "storage_final_hm3",
+            "inflow_m3s",
+            "evaporation_m3s",
+            "turbined_m3s",
+            "spillage_m3s",
+        )
+        .collect(engine="streaming")
+    )
+    plant_pd = plant_data.to_pandas()
+
+    h0_pd = plant_pd[plant_pd["block_id"] == 0]
+    stages = sorted(plant_pd["stage_id"].unique().tolist())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = make_subplots(
@@ -2446,7 +2739,6 @@ def chart_plant_water_balance(
         ],
         vertical_spacing=0.10,
     )
-
     palette = [
         "#2196F3",
         "#FF9800",
@@ -2461,18 +2753,15 @@ def chart_plant_water_balance(
     for i, hid in enumerate(hids):
         name = hydro_meta.get(hid, {}).get("name", str(hid))
         color = palette[i % len(palette)]
-        hdata = hydros[hydros["hydro_id"] == hid]
-
-        # Storage: from block 0
+        hdata = plant_pd[plant_pd["hydro_id"] == hid]
         hb0 = hdata[hdata["block_id"] == 0]
+
         stor = (
             hb0.groupby(["scenario_id", "stage_id"])["storage_final_hm3"]
             .mean()
             .groupby("stage_id")
             .mean()
         )
-
-        # Inflow (stage-level, same for all blocks)
         inflow = (
             hb0.groupby(["scenario_id", "stage_id"])["inflow_m3s"]
             .mean()
@@ -2480,7 +2769,6 @@ def chart_plant_water_balance(
             .mean()
         )
 
-        # Total outflow: sum across blocks of (turbined + spillage) weighted by tau
         outflow_vals: dict[int, float] = {}
         residual_vals: dict[int, float] = {}
         for s in stages:
@@ -2489,8 +2777,6 @@ def chart_plant_water_balance(
                 outflow_vals[s] = 0
                 residual_vals[s] = 0
                 continue
-
-            # Average across scenarios
             scen_out = []
             scen_res = []
             for scen_id in s_data["scenario_id"].unique():
@@ -2500,18 +2786,15 @@ def chart_plant_water_balance(
                 zeta = stage_hours.get(s, 744) * M3S_TO_HM3_PER_HOUR
                 inf = ss["inflow_m3s"].iloc[0]
                 evap = ss["evaporation_m3s"].iloc[0]
-
                 total_out_vol = 0.0
-                for _, row in ss.iterrows():
-                    blk = int(row["block_id"])
+                for _, row_ in ss.iterrows():
+                    blk = int(row_["block_id"])
                     tau = block_hours.get((s, blk), 0) * M3S_TO_HM3_PER_HOUR
-                    total_out_vol += tau * (row["turbined_m3s"] + row["spillage_m3s"])
-
+                    total_out_vol += tau * (row_["turbined_m3s"] + row_["spillage_m3s"])
                 out_m3s = total_out_vol / max(zeta, 1e-9)
                 scen_out.append(out_m3s)
                 res = (v_out - v_in) - zeta * (inf - evap) + total_out_vol
                 scen_res.append(res)
-
             outflow_vals[s] = float(np.mean(scen_out))
             residual_vals[s] = float(np.mean(scen_res))
 
@@ -2568,7 +2851,6 @@ def chart_plant_water_balance(
     fig.update_yaxes(title_text="hm³", row=1, col=1)
     fig.update_yaxes(title_text="m³/s", row=2, col=1)
     fig.update_yaxes(title_text="hm³", row=3, col=1)
-
     fig.update_layout(
         title=f"Water Balance Detail (top {top_n} plants, avg across scenarios)",
         height=900,
@@ -2579,8 +2861,7 @@ def chart_plant_water_balance(
 
 
 def chart_violation_summary(
-    hydros: pd.DataFrame,
-    stage_labels: dict[int, str],
+    hydros_lf: pl.LazyFrame, stage_labels: dict[int, str]
 ) -> str:
     """Aggregate constraint violations across all hydros by stage."""
     violation_cols = {
@@ -2595,29 +2876,32 @@ def chart_violation_summary(
         "generation_slack_mw": ("Generation Slack", "#4CAF50"),
     }
 
-    h0 = hydros[hydros["block_id"] == 0]
-    stages = sorted(h0["stage_id"].unique())
+    schema = hydros_lf.collect_schema()
+    existing_cols = {c: v for c, v in violation_cols.items() if c in schema}
+    if not existing_cols:
+        return "<p>No violation data available.</p>"
+
+    viol_data = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id"])
+        .agg([pl.col(c).sum() for c in existing_cols])
+        .group_by("stage_id")
+        .agg([pl.col(c).mean() for c in existing_cols])
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = viol_data["stage_id"].to_list()
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = go.Figure()
-    for col, (label, color) in violation_cols.items():
-        if col not in h0.columns:
+    for col, (label, color) in existing_cols.items():
+        if col not in viol_data.columns:
             continue
-        total = (
-            h0.groupby(["scenario_id", "stage_id"])[col]
-            .sum()
-            .groupby("stage_id")
-            .mean()
-        )
-        if total.sum() < 1e-6:
+        vals = viol_data[col].to_list()
+        if sum(abs(v) for v in vals) < 1e-6:
             continue
         fig.add_trace(
-            go.Scatter(
-                x=xlabels,
-                y=[total.get(s, 0) for s in stages],
-                name=label,
-                line={"color": color, "width": 2},
-            )
+            go.Scatter(x=xlabels, y=vals, name=label, line={"color": color, "width": 2})
         )
 
     fig.update_layout(
@@ -2632,7 +2916,7 @@ def chart_violation_summary(
 
 
 def chart_violation_heatmap(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
     top_n: int = 20,
@@ -2645,36 +2929,45 @@ def chart_violation_heatmap(
         "inflow_nonnegativity_slack_m3s",
         "water_withdrawal_violation_m3s",
     ]
-    existing = [c for c in violation_cols if c in hydros.columns]
+    schema = hydros_lf.collect_schema()
+    existing = [c for c in violation_cols if c in schema]
     if not existing:
         return "<p>No violation data available.</p>"
 
-    h0 = hydros[hydros["block_id"] == 0].copy()
-    h0["_total_viol"] = h0[existing].abs().sum(axis=1)
-
-    # Top plants by total violations
-    top_hydros = (
-        h0.groupby("hydro_id")["_total_viol"].sum().nlargest(top_n).index.tolist()
+    viol_data = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .with_columns(
+            pl.sum_horizontal([pl.col(c).abs() for c in existing]).alias("_total_viol")
+        )
+        .group_by(["scenario_id", "stage_id", "hydro_id"])
+        .agg(pl.col("_total_viol").sum())
+        .group_by(["stage_id", "hydro_id"])
+        .agg(pl.col("_total_viol").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
     )
-    top_hydros = [
-        h for h in top_hydros if h0[h0["hydro_id"] == h]["_total_viol"].sum() > 1e-6
-    ]
-    if not top_hydros:
+
+    # Top plants
+    top_plants = (
+        viol_data.group_by("hydro_id")
+        .agg(pl.col("_total_viol").sum())
+        .sort("_total_viol", descending=True)
+        .head(top_n)
+        .filter(pl.col("_total_viol") > 1e-6)["hydro_id"]
+        .to_list()
+    )
+    if not top_plants:
         return "<p>No significant violations detected.</p>"
 
-    stages = sorted(h0["stage_id"].unique())
+    stages = sorted(viol_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
-    ynames = [entity_name(names, "hydros", hid) for hid in top_hydros]
+    ynames = [entity_name(names, "hydros", hid) for hid in top_plants]
 
     z = []
-    for hid in top_hydros:
-        hdata = h0[h0["hydro_id"] == hid]
-        row = []
-        for s in stages:
-            sdata = hdata[hdata["stage_id"] == s]
-            val = sdata["_total_viol"].mean() if not sdata.empty else 0
-            row.append(val)
-        z.append(row)
+    for hid in top_plants:
+        sub = viol_data.filter(pl.col("hydro_id") == hid)
+        vmap = dict(zip(sub["stage_id"].to_list(), sub["_total_viol"].to_list()))
+        z.append([vmap.get(s, 0) for s in stages])
 
     fig = go.Figure(
         go.Heatmap(
@@ -2686,8 +2979,8 @@ def chart_violation_heatmap(
         )
     )
     fig.update_layout(
-        title=f"Constraint Violations Heatmap (top {len(top_hydros)} plants)",
-        height=max(350, len(top_hydros) * 25 + 120),
+        title=f"Constraint Violations Heatmap (top {len(top_plants)} plants)",
+        height=max(350, len(top_plants) * 25 + 120),
         margin=dict(l=120, r=30, t=60, b=50),
     )
     return fig_to_html(fig, unified_hover=False)
@@ -4043,8 +4336,8 @@ def _parse_expression(expr: str) -> list[tuple[float, str, int]]:
 
 def evaluate_constraint_expressions(
     constraints: list[dict],
-    hydros_df: pd.DataFrame,
-    exchanges_df: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
+    exchanges_lf: pl.LazyFrame,
 ) -> pd.DataFrame:
     """Evaluate LHS of all generic constraints from simulation output.
 
@@ -4056,24 +4349,49 @@ def evaluate_constraint_expressions(
     Storage-only constraints produce one row per (scenario, stage) with block_id=0.
     Mixed / generation / exchange constraints produce one row per (scenario, stage, block).
 
+    Accepts LazyFrames and only collects the specific entity IDs referenced
+    in constraint expressions, keeping memory usage minimal.
+
     Returns DataFrame with columns:
         constraint_id, scenario_id, stage_id, block_id, lhs_value
     """
-    # Convert to polars for fast grouped operations
-    try:
-        import polars as pl
-    except ImportError:
-        pl = None  # fall through to pandas path
+    # Parse ALL constraints to find which entity IDs are referenced
+    hydro_ids_needed: set[int] = set()
+    line_ids_needed: set[int] = set()
+    for c in constraints:
+        for _coeff, vtype, eid in _parse_expression(c["expression"]):
+            if vtype.startswith("hydro"):
+                hydro_ids_needed.add(eid)
+            elif vtype == "line_exchange":
+                line_ids_needed.add(eid)
 
-    h0_pd = hydros_df[hydros_df["block_id"] == 0][
-        ["scenario_id", "stage_id", "hydro_id", "storage_final_hm3"]
-    ].copy()
-    hg_pd = hydros_df[
-        ["scenario_id", "stage_id", "block_id", "hydro_id", "generation_mw"]
-    ].copy()
-    ex_pd = exchanges_df[
-        ["scenario_id", "stage_id", "block_id", "line_id", "net_flow_mw"]
-    ].copy()
+    # Collect only the referenced entities (tiny subset of full data)
+    h0_pd = (
+        hydros_lf.filter(
+            (pl.col("block_id") == 0) & pl.col("hydro_id").is_in(list(hydro_ids_needed))
+        )
+        .select(["scenario_id", "stage_id", "hydro_id", "storage_final_hm3"])
+        .collect(engine="streaming")
+        .to_pandas()
+    )
+    hg_pd = (
+        hydros_lf.filter(pl.col("hydro_id").is_in(list(hydro_ids_needed)))
+        .select(["scenario_id", "stage_id", "block_id", "hydro_id", "generation_mw"])
+        .collect(engine="streaming")
+        .to_pandas()
+    )
+    ex_pd = (
+        (
+            exchanges_lf.filter(pl.col("line_id").is_in(list(line_ids_needed)))
+            .select(["scenario_id", "stage_id", "block_id", "line_id", "net_flow_mw"])
+            .collect(engine="streaming")
+            .to_pandas()
+        )
+        if line_ids_needed
+        else pd.DataFrame(
+            columns=["scenario_id", "stage_id", "block_id", "line_id", "net_flow_mw"]
+        )
+    )
 
     all_results: list[pd.DataFrame] = []
 
@@ -4766,23 +5084,207 @@ def section_title(text: str) -> str:
     return f'<h2 class="section-title">{text}</h2>'
 
 
+def chart_thermal_generation_total(
+    thermals_lf: pl.LazyFrame,
+    stage_labels: dict[int, str],
+) -> str:
+    """Total thermal generation with p10/p50/p90 bands across all plants."""
+    pcts = (
+        thermals_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id"])
+        .agg(pl.col("generation_mw").sum())
+        .group_by("stage_id")
+        .agg(
+            pl.col("generation_mw").quantile(0.1, interpolation="linear").alias("p10"),
+            pl.col("generation_mw").quantile(0.5, interpolation="linear").alias("p50"),
+            pl.col("generation_mw").quantile(0.9, interpolation="linear").alias("p90"),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = pcts["stage_id"].to_list()
+    xlabels = stage_x_labels(stages, stage_labels)
+    p10 = pcts["p10"].to_list()
+    p50 = pcts["p50"].to_list()
+    p90 = pcts["p90"].to_list()
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels + xlabels[::-1],
+            y=p90 + p10[::-1],
+            fill="toself",
+            fillcolor="rgba(245,166,35,0.15)",
+            line={"color": "rgba(255,255,255,0)"},
+            name="P10\u2013P90 range",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=p50,
+            name="Median (P50)",
+            line={"color": COLORS["thermal"], "width": 2.5},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=p10,
+            name="P10",
+            line={"color": COLORS["thermal"], "width": 1, "dash": "dot"},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=p90,
+            name="P90",
+            line={"color": COLORS["thermal"], "width": 1, "dash": "dot"},
+        )
+    )
+    fig.update_layout(
+        title="Total Thermal Generation (all plants, p10/p50/p90 across scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="MW",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=440,
+    )
+    return fig_to_html(fig)
+
+
+def chart_thermal_gen_by_bus(
+    thermals_lf: pl.LazyFrame,
+    thermal_meta: dict[int, dict],
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+) -> str:
+    """Stacked area of thermal generation by bus (avg across scenarios)."""
+    tbus_map = {k: v["bus_id"] for k, v in thermal_meta.items()}
+    tbus_df = pl.DataFrame(
+        {"thermal_id": list(tbus_map.keys()), "bus_id": list(tbus_map.values())}
+    )
+    gen_by_bus = (
+        thermals_lf.filter(pl.col("block_id") == 0)
+        .join(tbus_df.lazy(), on="thermal_id")
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("generation_mw").sum())
+        .group_by(["stage_id", "bus_id"])
+        .agg(pl.col("generation_mw").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    bus_ids = sorted(gen_by_bus["bus_id"].unique().to_list())
+    stages = sorted(gen_by_bus["stage_id"].unique().to_list())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = go.Figure()
+    for i, bus_id in enumerate(bus_ids):
+        sub = gen_by_bus.filter(pl.col("bus_id") == bus_id)
+        gm = dict(zip(sub["stage_id"].to_list(), sub["generation_mw"].to_list()))
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[gm.get(s, 0) for s in stages],
+                name=bus_names.get(int(bus_id), str(bus_id)),
+                stackgroup="buses",
+                line={"color": BUS_COLORS[i % len(BUS_COLORS)]},
+            )
+        )
+    fig.update_layout(
+        title="Thermal Generation by Bus (Block 0, avg across scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="MW",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=440,
+    )
+    return fig_to_html(fig)
+
+
+def chart_thermal_cost_vs_gen(
+    thermals_lf: pl.LazyFrame,
+    thermal_meta: dict[int, dict],
+    bus_names: dict[int, str],
+) -> str:
+    """Scatter: avg generation vs cost_per_mwh, sized by max_mw, colored by bus."""
+    avg_gen_df = (
+        thermals_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "thermal_id"])
+        .agg(pl.col("generation_mw").mean())
+        .group_by("thermal_id")
+        .agg(pl.col("generation_mw").mean())
+        .collect(engine="streaming")
+    )
+    avg_gen = dict(
+        zip(avg_gen_df["thermal_id"].to_list(), avg_gen_df["generation_mw"].to_list())
+    )
+
+    bus_to_plants: dict[int, list[dict]] = {}
+    for tid, meta in thermal_meta.items():
+        bus_id = meta["bus_id"]
+        bus_to_plants.setdefault(bus_id, []).append(
+            {
+                "tid": tid,
+                "name": meta["name"],
+                "avg_gen": float(avg_gen.get(tid, 0)),
+                "cost": meta["cost_per_mwh"],
+                "max_mw": meta["max_mw"],
+            }
+        )
+
+    fig = go.Figure()
+    for i, (bus_id, plants) in enumerate(sorted(bus_to_plants.items())):
+        color = BUS_COLORS[i % len(BUS_COLORS)]
+        fig.add_trace(
+            go.Scatter(
+                x=[p["avg_gen"] for p in plants],
+                y=[p["cost"] for p in plants],
+                mode="markers+text",
+                marker={
+                    "size": [max(6, min(40, p["max_mw"] / 20)) for p in plants],
+                    "color": color,
+                    "opacity": 0.75,
+                    "line": {"color": "white", "width": 1},
+                },
+                text=[p["name"] for p in plants],
+                textposition="top center",
+                textfont={"size": 9},
+                name=bus_names.get(bus_id, str(bus_id)),
+                customdata=[[p["max_mw"], p["tid"]] for p in plants],
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "Avg gen: %{x:.1f} MW<br>"
+                    "Cost: %{y:.1f} R$/MWh<br>"
+                    "Capacity: %{customdata[0]:.1f} MW<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        title="Thermal Plants: Avg Generation vs Cost (size = installed capacity)",
+        xaxis_title="Avg Generation (MW)",
+        yaxis_title="Cost (R$/MWh)",
+        legend={**_LEGEND, "y": 1.08},
+        margin=dict(l=60, r=30, t=90, b=60),
+        height=480,
+    )
+    return fig_to_html(fig, unified_hover=False)
+
+
 # ---------------------------------------------------------------------------
-# Plant Details Interactive Component
+# Interactive Plant Details (Polars streaming versions)
 # ---------------------------------------------------------------------------
 
 
 def build_interactive_plant_details(
-    hydros: pd.DataFrame,
+    hydros_lf: pl.LazyFrame,
     hydro_meta: dict[int, dict],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
     lp_bounds: pd.DataFrame | None = None,
 ) -> str:
     """Build HTML with embedded per-hydro p10/p50/p90 data, LP bounds, and JS dropdown."""
-    h0 = hydros[hydros["block_id"] == 0]
-    stages = sorted(h0["stage_id"].unique())
-    xlabels = stage_x_labels(stages, stage_labels)
-
     metrics = [
         "generation_mw",
         "storage_final_hm3",
@@ -4804,10 +5306,37 @@ def build_interactive_plant_details(
         "outflow_m3s": "outflow",
     }
 
+    schema = hydros_lf.collect_schema()
+    available_metrics = [m for m in metrics if m in schema]
+
+    # Single streaming scan for all hydros, all metrics
+    all_pcts = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id", "hydro_id"])
+        .agg([pl.col(m).mean() for m in available_metrics])
+        .group_by(["stage_id", "hydro_id"])
+        .agg(
+            [
+                expr
+                for m in available_metrics
+                for expr in [
+                    pl.col(m).quantile(0.1, interpolation="linear").alias(f"{m}_p10"),
+                    pl.col(m).quantile(0.5, interpolation="linear").alias(f"{m}_p50"),
+                    pl.col(m).quantile(0.9, interpolation="linear").alias(f"{m}_p90"),
+                ]
+            ]
+        )
+        .sort(["hydro_id", "stage_id"])
+        .collect(engine="streaming")
+    )
+
+    stages = sorted(all_pcts["stage_id"].unique().to_list())
+    xlabels = stage_x_labels(stages, stage_labels)
+
     hydro_data: dict[str, dict] = {}
     for hid, meta in sorted(hydro_meta.items()):
-        hdata = h0[h0["hydro_id"] == hid]
-        if hdata.empty:
+        sub = all_pcts.filter(pl.col("hydro_id") == hid)
+        if sub.is_empty():
             continue
         entry: dict = {
             "name": meta["name"],
@@ -4818,30 +5347,23 @@ def build_interactive_plant_details(
             "max_gen_phys": round(meta.get("max_gen_physical", meta["max_gen_mw"]), 1),
             "max_turb": round(meta["max_turbined"], 1),
         }
-        for col in metrics:
-            k = short[col]
-            if col not in hdata.columns:
+        sub_map: dict[int, dict] = {r["stage_id"]: r for r in sub.iter_rows(named=True)}
+        for m in metrics:
+            k = short[m]
+            if m not in available_metrics:
                 for sfx in ["p10", "p50", "p90"]:
                     entry[f"{k}_{sfx}"] = [0.0] * len(stages)
                 continue
-            grp = hdata.groupby(["scenario_id", "stage_id"])[col].mean()
-            pcts = (
-                grp.groupby("stage_id")
-                .quantile([0.1, 0.5, 0.9])
-                .unstack(level=-1)
-                .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
-            )
             for sfx in ["p10", "p50", "p90"]:
                 entry[f"{k}_{sfx}"] = [
-                    round(float(pcts[sfx].get(s, 0)), 2) for s in stages
+                    round(float(sub_map.get(s, {}).get(f"{m}_{sfx}", 0) or 0), 2)
+                    for s in stages
                 ]
         hydro_data[str(hid)] = entry
 
-    # Embed per-hydro per-stage LP bounds (from solver output)
-    # bound_type: 0=storage_min, 1=storage_max, 2=turbined_min, 3=turbined_max,
-    #             4=outflow_min, 6=generation_min, 7=generation_max
+    # LP bounds
     if lp_bounds is not None and not lp_bounds.empty:
-        hb = lp_bounds[lp_bounds["entity_type_code"] == 0]  # hydro
+        hb = lp_bounds[lp_bounds["entity_type_code"] == 0]
         bound_keys = {
             0: "stor_min",
             1: "stor_max",
@@ -4987,219 +5509,51 @@ document.addEventListener('DOMContentLoaded', function(){setTimeout(updateHydroD
     )
 
 
-# ---------------------------------------------------------------------------
-# Tab: Thermal Operations charts
-# ---------------------------------------------------------------------------
-
-
-def chart_thermal_generation_total(
-    thermals: pd.DataFrame,
-    stage_labels: dict[int, str],
-) -> str:
-    """Total thermal generation with p10/p50/p90 bands across all plants."""
-    t0 = thermals[thermals["block_id"] == 0]
-    total_gen = (
-        t0.groupby(["scenario_id", "stage_id"])["generation_mw"].sum().reset_index()
-    )
-    pcts = (
-        total_gen.groupby("stage_id")["generation_mw"]
-        .quantile([0.1, 0.5, 0.9])
-        .unstack(level=-1)
-        .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
-    )
-    stages = sorted(pcts.index)
-    xlabels = stage_x_labels(stages, stage_labels)
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=xlabels + xlabels[::-1],
-            y=list(pcts["p90"].values) + list(pcts["p10"].values[::-1]),
-            fill="toself",
-            fillcolor="rgba(245,166,35,0.15)",
-            line={"color": "rgba(255,255,255,0)"},
-            name="P10\u2013P90 range",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=xlabels,
-            y=pcts["p50"].values,
-            name="Median (P50)",
-            line={"color": COLORS["thermal"], "width": 2.5},
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=xlabels,
-            y=pcts["p10"].values,
-            name="P10",
-            line={"color": COLORS["thermal"], "width": 1, "dash": "dot"},
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=xlabels,
-            y=pcts["p90"].values,
-            name="P90",
-            line={"color": COLORS["thermal"], "width": 1, "dash": "dot"},
-        )
-    )
-    fig.update_layout(
-        title="Total Thermal Generation (all plants, p10/p50/p90 across scenarios)",
-        xaxis_title="Stage",
-        yaxis_title="MW",
-        legend=_LEGEND,
-        margin=_MARGIN,
-        height=440,
-    )
-    return fig_to_html(fig)
-
-
-def chart_thermal_gen_by_bus(
-    thermals: pd.DataFrame,
-    thermal_meta: dict[int, dict],
-    bus_names: dict[int, str],
-    stage_labels: dict[int, str],
-) -> str:
-    """Stacked area of thermal generation by bus (avg across scenarios)."""
-    t0 = thermals[thermals["block_id"] == 0].copy()
-    t0["bus_id"] = t0["thermal_id"].map(
-        {k: v["bus_id"] for k, v in thermal_meta.items()}
-    )
-    bus_ids = sorted(t0["bus_id"].dropna().unique())
-    stages = sorted(t0["stage_id"].unique())
-    xlabels = stage_x_labels(stages, stage_labels)
-
-    fig = go.Figure()
-    for i, bus_id in enumerate(bus_ids):
-        bus_id_int = int(bus_id)
-        b_gen = (
-            t0[t0["bus_id"] == bus_id_int]
-            .groupby(["scenario_id", "stage_id"])["generation_mw"]
-            .sum()
-            .groupby("stage_id")
-            .mean()
-        )
-        color = BUS_COLORS[i % len(BUS_COLORS)]
-        fig.add_trace(
-            go.Scatter(
-                x=xlabels,
-                y=[b_gen.get(s, 0) for s in stages],
-                name=bus_names.get(bus_id_int, str(bus_id_int)),
-                stackgroup="buses",
-                line={"color": color},
-            )
-        )
-    fig.update_layout(
-        title="Thermal Generation by Bus (Block 0, avg across scenarios)",
-        xaxis_title="Stage",
-        yaxis_title="MW",
-        legend=_LEGEND,
-        margin=_MARGIN,
-        height=440,
-    )
-    return fig_to_html(fig)
-
-
-def chart_thermal_cost_vs_gen(
-    thermals: pd.DataFrame,
-    thermal_meta: dict[int, dict],
-    bus_names: dict[int, str],
-) -> str:
-    """Scatter: avg generation vs cost_per_mwh, sized by max_mw, colored by bus."""
-    avg_gen = (
-        thermals[thermals["block_id"] == 0]
-        .groupby(["scenario_id", "thermal_id"])["generation_mw"]
-        .mean()
-        .groupby("thermal_id")
-        .mean()
-    )
-
-    # Group traces by bus so legend entries are per-bus
-    bus_to_plants: dict[int, list[dict]] = {}
-    for tid, meta in thermal_meta.items():
-        bus_id = meta["bus_id"]
-        bus_to_plants.setdefault(bus_id, []).append(
-            {
-                "tid": tid,
-                "name": meta["name"],
-                "avg_gen": float(avg_gen.get(tid, 0)),
-                "cost": meta["cost_per_mwh"],
-                "max_mw": meta["max_mw"],
-            }
-        )
-
-    fig = go.Figure()
-    for i, (bus_id, plants) in enumerate(sorted(bus_to_plants.items())):
-        color = BUS_COLORS[i % len(BUS_COLORS)]
-        fig.add_trace(
-            go.Scatter(
-                x=[p["avg_gen"] for p in plants],
-                y=[p["cost"] for p in plants],
-                mode="markers+text",
-                marker={
-                    "size": [max(6, min(40, p["max_mw"] / 20)) for p in plants],
-                    "color": color,
-                    "opacity": 0.75,
-                    "line": {"color": "white", "width": 1},
-                },
-                text=[p["name"] for p in plants],
-                textposition="top center",
-                textfont={"size": 9},
-                name=bus_names.get(bus_id, str(bus_id)),
-                customdata=[[p["max_mw"], p["tid"]] for p in plants],
-                hovertemplate=(
-                    "<b>%{text}</b><br>"
-                    "Avg gen: %{x:.1f} MW<br>"
-                    "Cost: %{y:.1f} R$/MWh<br>"
-                    "Capacity: %{customdata[0]:.1f} MW<extra></extra>"
-                ),
-            )
-        )
-    fig.update_layout(
-        title="Thermal Plants: Avg Generation vs Cost (size = installed capacity)",
-        xaxis_title="Avg Generation (MW)",
-        yaxis_title="Cost (R$/MWh)",
-        legend={**_LEGEND, "y": 1.08},
-        margin=dict(l=60, r=30, t=90, b=60),
-        height=480,
-    )
-    return fig_to_html(fig, unified_hover=False)
-
-
-# ---------------------------------------------------------------------------
-# Tab: Thermal Plant Details
-# ---------------------------------------------------------------------------
-
-
 def build_interactive_thermal_details(
-    thermals: pd.DataFrame,
+    thermals_lf: pl.LazyFrame,
     thermal_meta: dict[int, dict],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
     lp_bounds: pd.DataFrame | None = None,
 ) -> str:
     """Build HTML with embedded per-thermal p10/p50/p90 data, LP bounds, and JS dropdown."""
-    t0 = thermals[thermals["block_id"] == 0]
-    stages = sorted(t0["stage_id"].unique())
-    xlabels = stage_x_labels(stages, stage_labels)
-
-    metrics = [
-        "generation_mw",
-        "generation_cost",
-        "generation_mwh",
-    ]
+    metrics = ["generation_mw", "generation_cost", "generation_mwh"]
     short = {
         "generation_mw": "gen",
         "generation_cost": "cost",
         "generation_mwh": "energy",
     }
 
+    schema = thermals_lf.collect_schema()
+    available_metrics = [m for m in metrics if m in schema]
+
+    all_pcts = (
+        thermals_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id", "thermal_id"])
+        .agg([pl.col(m).mean() for m in available_metrics])
+        .group_by(["stage_id", "thermal_id"])
+        .agg(
+            [
+                expr
+                for m in available_metrics
+                for expr in [
+                    pl.col(m).quantile(0.1, interpolation="linear").alias(f"{m}_p10"),
+                    pl.col(m).quantile(0.5, interpolation="linear").alias(f"{m}_p50"),
+                    pl.col(m).quantile(0.9, interpolation="linear").alias(f"{m}_p90"),
+                ]
+            ]
+        )
+        .sort(["thermal_id", "stage_id"])
+        .collect(engine="streaming")
+    )
+
+    stages = sorted(all_pcts["stage_id"].unique().to_list())
+    xlabels = stage_x_labels(stages, stage_labels)
+
     thermal_data: dict[str, dict] = {}
     for tid, meta in sorted(thermal_meta.items()):
-        tdata = t0[t0["thermal_id"] == tid]
-        if tdata.empty:
+        sub = all_pcts.filter(pl.col("thermal_id") == tid)
+        if sub.is_empty():
             continue
         entry: dict = {
             "name": meta["name"],
@@ -5207,26 +5561,20 @@ def build_interactive_thermal_details(
             "max_mw": round(meta["max_mw"], 1),
             "cost_per_mwh": round(meta["cost_per_mwh"], 2),
         }
-        for col in metrics:
-            k = short[col]
-            if col not in tdata.columns:
+        sub_map: dict[int, dict] = {r["stage_id"]: r for r in sub.iter_rows(named=True)}
+        for m in metrics:
+            k = short[m]
+            if m not in available_metrics:
                 for sfx in ["p10", "p50", "p90"]:
                     entry[f"{k}_{sfx}"] = [0.0] * len(stages)
                 continue
-            grp = tdata.groupby(["scenario_id", "stage_id"])[col].mean()
-            pcts = (
-                grp.groupby("stage_id")
-                .quantile([0.1, 0.5, 0.9])
-                .unstack(level=-1)
-                .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
-            )
             for sfx in ["p10", "p50", "p90"]:
                 entry[f"{k}_{sfx}"] = [
-                    round(float(pcts[sfx].get(s, 0)), 2) for s in stages
+                    round(float(sub_map.get(s, {}).get(f"{m}_{sfx}", 0) or 0), 2)
+                    for s in stages
                 ]
         thermal_data[str(tid)] = entry
 
-    # Embed per-thermal LP bounds (entity_type_code=1): 6=gen_min, 7=gen_max
     if lp_bounds is not None and not lp_bounds.empty:
         tb = lp_bounds[lp_bounds["entity_type_code"] == 1]
         bound_keys = {6: "gen_min", 7: "gen_max"}
@@ -5335,23 +5683,38 @@ document.addEventListener('DOMContentLoaded', function(){setTimeout(updateTherma
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Dashboard builder
 # ---------------------------------------------------------------------------
 
 
 def build_dashboard(case_dir: Path, output_path: Path) -> None:
     print(f"Loading data from {case_dir} ...")
 
-    # Load all data
+    # ------------------------------------------------------------------
+    # Training data — small single-file parquets, load as pandas
+    # ------------------------------------------------------------------
     conv = pq.read_table(
         case_dir / "output" / "training" / "convergence.parquet"
     ).to_pandas()
-    hydros = load_all_scenarios(case_dir, "hydros")
-    thermals = load_all_scenarios(case_dir, "thermals")
-    ncs = load_all_scenarios(case_dir, "non_controllables")
-    buses = load_all_scenarios(case_dir, "buses")
-    costs = load_all_scenarios(case_dir, "costs")
-    exchanges = load_all_scenarios(case_dir, "exchanges")
+
+    # ------------------------------------------------------------------
+    # Simulation entity data — large hive-partitioned parquets, LazyFrames
+    # ------------------------------------------------------------------
+    hydros_lf = scan_entity(case_dir, "hydros")
+    thermals_lf = scan_entity(case_dir, "thermals")
+    ncs_lf = scan_entity(case_dir, "non_controllables")
+    buses_lf = scan_entity(case_dir, "buses")
+    exchanges_lf = scan_entity(case_dir, "exchanges")
+
+    # Costs is stage-level only (~236 K rows total), collect to pandas for chart_cost_* functions
+    costs = (
+        pl.scan_parquet(
+            str(case_dir / "output" / "simulation" / "costs" / "**" / "*.parquet"),
+            hive_partitioning=True,
+        )
+        .collect(engine="streaming")
+        .to_pandas()
+    )
 
     lb_path = case_dir / "constraints" / "line_bounds.parquet"
     line_bounds = (
@@ -5472,7 +5835,20 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         else pd.DataFrame()
     )
 
-    gc_violations = load_all_scenarios(case_dir, "violations/generic")
+    # violations/generic: collect to pandas once (needed by build_constraints_summary_table)
+    gc_violations: pd.DataFrame
+    gc_viol_dir = case_dir / "output" / "simulation" / "violations" / "generic"
+    if gc_viol_dir.exists():
+        gc_violations = (
+            pl.scan_parquet(
+                str(gc_viol_dir / "**" / "*.parquet"),
+                hive_partitioning=True,
+            )
+            .collect(engine="streaming")
+            .to_pandas()
+        )
+    else:
+        gc_violations = pd.DataFrame()
 
     case_name = case_dir.resolve().name
     n_scenarios = costs["scenario_id"].nunique()
@@ -5481,13 +5857,23 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         f"  {n_scenarios} scenarios, {n_stages} stages, {len(stage_labels)} stage labels"
     )
 
+    # Load inflow stats for chart_inflow_comparison (small seasonal stats file)
+    inflow_stats_path = case_dir / "scenarios" / "inflow_seasonal_stats.parquet"
+    inflow_stats = (
+        pq.read_table(inflow_stats_path).to_pandas()
+        if inflow_stats_path.exists()
+        else pd.DataFrame()
+    )
+
     tab_contents: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Tab 1: Overview
     # ------------------------------------------------------------------
     print("Building Tab 1: Overview ...")
-    metrics_html = build_key_metrics_html(hydros, thermals, ncs, buses, costs)
+    metrics_html = build_key_metrics_html(
+        hydros_lf, thermals_lf, ncs_lf, buses_lf, costs
+    )
     tab_contents["tab-overview"] = (
         section_title("Key Metrics")
         + metrics_html
@@ -5536,9 +5922,9 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + '<div class="chart-grid-single">'
         + wrap_chart(
             chart_generation_mix(
-                hydros,
-                thermals,
-                ncs,
+                hydros_lf,
+                thermals_lf,
+                ncs_lf,
                 load_stats,
                 load_factors_list,
                 stage_labels,
@@ -5550,17 +5936,19 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + '<p style="color:#888;font-size:0.82rem;margin:-8px 0 16px 12px;">Note: Generation sum may exceed load due to exchange losses, NCS curtailment, and excess energy.</p>'
         + section_title("Generation Share")
         + '<div class="chart-grid">'
-        + wrap_chart(chart_generation_share_pie(hydros, thermals, ncs, buses))
+        + wrap_chart(
+            chart_generation_share_pie(hydros_lf, thermals_lf, ncs_lf, buses_lf)
+        )
         + "</div>"
         + section_title("Generation by Bus")
         + '<div class="chart-grid-single">'
         + wrap_chart(
             chart_generation_by_bus(
-                hydros,
-                thermals,
-                ncs,
-                buses,
-                exchanges,
+                hydros_lf,
+                thermals_lf,
+                ncs_lf,
+                buses_lf,
+                exchanges_lf,
                 hydro_bus_map,
                 thermal_meta,
                 ncs_bus_map,
@@ -5576,8 +5964,12 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + "</div>"
         + section_title("Deficit & Excess by Bus")
         + '<div class="chart-grid">'
-        + wrap_chart(chart_deficit_by_bus(buses, bus_names, stage_labels, stage_hours))
-        + wrap_chart(chart_excess_by_bus(buses, bus_names, stage_labels, stage_hours))
+        + wrap_chart(
+            chart_deficit_by_bus(buses_lf, bus_names, stage_labels, stage_hours)
+        )
+        + wrap_chart(
+            chart_excess_by_bus(buses_lf, bus_names, stage_labels, stage_hours)
+        )
         + "</div>"
     )
 
@@ -5588,29 +5980,29 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-hydro"] = (
         section_title("Aggregate Reservoir Storage")
         + '<div class="chart-grid-single">'
-        + wrap_chart(chart_hydro_storage(hydros, stage_labels))
+        + wrap_chart(chart_hydro_storage(hydros_lf, stage_labels))
         + "</div>"
         + section_title("Storage by Bus")
         + '<div class="chart-grid-single">'
         + wrap_chart(
-            chart_storage_by_bus(hydros, hydro_bus_map, bus_names, stage_labels)
+            chart_storage_by_bus(hydros_lf, hydro_bus_map, bus_names, stage_labels)
         )
         + "</div>"
         + section_title("Hydro Generation & Spillage by Bus")
         + '<div class="chart-grid">'
         + wrap_chart(
-            chart_hydro_gen_by_bus(hydros, hydro_bus_map, bus_names, stage_labels)
+            chart_hydro_gen_by_bus(hydros_lf, hydro_bus_map, bus_names, stage_labels)
         )
         + wrap_chart(
-            chart_spillage_by_bus(hydros, hydro_bus_map, bus_names, stage_labels)
+            chart_spillage_by_bus(hydros_lf, hydro_bus_map, bus_names, stage_labels)
         )
         + "</div>"
         + section_title("Water Values & Inflow Slack")
         + '<div class="chart-grid">'
         + wrap_chart(
-            chart_water_value_by_bus(hydros, hydro_bus_map, bus_names, stage_labels)
+            chart_water_value_by_bus(hydros_lf, hydro_bus_map, bus_names, stage_labels)
         )
-        + wrap_chart(chart_water_value_distribution(hydros, stage_labels))
+        + wrap_chart(chart_water_value_distribution(hydros_lf, stage_labels))
         + "</div>"
     )
 
@@ -5621,7 +6013,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-plants"] = section_title(
         "Plant Explorer"
     ) + build_interactive_plant_details(
-        hydros, hydro_meta, bus_names, stage_labels, lp_bounds
+        hydros_lf, hydro_meta, bus_names, stage_labels, lp_bounds
     )
 
     # ------------------------------------------------------------------
@@ -5630,13 +6022,13 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     print("Building Tab 5: Exchanges ...")
     tab_contents["tab-exchanges"] = (
         section_title("Line Explorer")
-        + build_interactive_exchange_detail(exchanges, names, stage_labels)
+        + build_interactive_exchange_detail(exchanges_lf, names, stage_labels)
         + section_title("Capacity Utilization")
         + '<div class="chart-grid-single">'
         + (
             wrap_chart(
                 chart_capacity_utilization_heatmap(
-                    exchanges, line_bounds, names, stage_labels
+                    exchanges_lf, line_bounds, names, stage_labels
                 )
             )
             if not line_bounds.empty
@@ -5645,12 +6037,12 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + "</div>"
         + section_title("Flow Direction Summary")
         + '<div class="chart-grid">'
-        + wrap_chart(chart_flow_direction_summary(exchanges, names))
+        + wrap_chart(chart_flow_direction_summary(exchanges_lf, names))
         + "</div>"
     )
 
     # ------------------------------------------------------------------
-    # Tab 5: Costs
+    # Tab 6: Costs
     # ------------------------------------------------------------------
     print("Building Tab 6: Costs ...")
     tab_contents["tab-costs"] = (
@@ -5662,24 +6054,24 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + '<div class="chart-grid-single">'
         + wrap_chart(
             chart_spot_price_by_bus_subplots(
-                buses, bus_names, stage_labels, stage_hours, block_hours
+                buses_lf, bus_names, stage_labels, stage_hours, block_hours
             )
         )
         + "</div>"
     )
 
     # ------------------------------------------------------------------
-    # Tab 6: NCS
+    # Tab 7: NCS
     # ------------------------------------------------------------------
     print("Building Tab 7: NCS ...")
     tab_contents["tab-ncs-thermal"] = (
         section_title("NCS Available vs Generated")
         + '<div class="chart-grid-single">'
-        + wrap_chart(chart_ncs_available_vs_generated(ncs, stage_labels))
+        + wrap_chart(chart_ncs_available_vs_generated(ncs_lf, stage_labels))
         + "</div>"
         + section_title("NCS Curtailment by Source")
         + '<div class="chart-grid-single">'
-        + wrap_chart(chart_ncs_curtailment_by_source(ncs, names))
+        + wrap_chart(chart_ncs_curtailment_by_source(ncs_lf, names))
         + "</div>"
     )
 
@@ -5690,12 +6082,12 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-thermal"] = (
         section_title("Total Thermal Generation")
         + '<div class="chart-grid-single">'
-        + wrap_chart(chart_thermal_generation_total(thermals, stage_labels))
+        + wrap_chart(chart_thermal_generation_total(thermals_lf, stage_labels))
         + "</div>"
         + section_title("Thermal Generation by Bus")
         + '<div class="chart-grid-single">'
         + wrap_chart(
-            chart_thermal_gen_by_bus(thermals, thermal_meta, bus_names, stage_labels)
+            chart_thermal_gen_by_bus(thermals_lf, thermal_meta, bus_names, stage_labels)
         )
         + "</div>"
     )
@@ -5707,7 +6099,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-thermal-plants"] = section_title(
         "Thermal Plant Explorer"
     ) + build_interactive_thermal_details(
-        thermals, thermal_meta, bus_names, stage_labels, lp_bounds
+        thermals_lf, thermal_meta, bus_names, stage_labels, lp_bounds
     )
 
     # ------------------------------------------------------------------
@@ -5715,7 +6107,9 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     # ------------------------------------------------------------------
     print("Building Tab 10: Constraints ...")
     if gc_constraints:
-        _lhs_df = evaluate_constraint_expressions(gc_constraints, hydros, exchanges)
+        _lhs_df = evaluate_constraint_expressions(
+            gc_constraints, hydros_lf, exchanges_lf
+        )
         _summary_table = build_constraints_summary_table(
             gc_constraints, gc_bounds, gc_violations
         )
@@ -5786,17 +6180,16 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         )
 
     # ------------------------------------------------------------------
-    # Tab 9: Performance
+    # Tab 11: Performance
     # ------------------------------------------------------------------
     print("Building Tab 11: Performance ...")
-    # Filter simulation solver to actual scenario count from manifest.
+    # Filter simulation solver to actual scenario count from manifest
     sim_manifest_path = case_dir / "output" / "simulation" / "_manifest.json"
     if sim_manifest_path.exists():
         sim_manifest = json.load(sim_manifest_path.open())
         actual_sim_scenarios = sim_manifest.get("scenarios", {}).get(
             "completed", n_scenarios
         )
-        # Pass sim wall-clock to metrics via metadata
         metadata["_sim_manifest"] = sim_manifest
     else:
         actual_sim_scenarios = n_scenarios
@@ -5853,6 +6246,11 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     output_path.write_text(html, encoding="utf-8")
     size_kb = output_path.stat().st_size / 1024
     print(f"Done. File size: {size_kb:.0f} KB")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
