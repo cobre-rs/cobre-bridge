@@ -11,8 +11,8 @@ from pathlib import Path
 from cobre_bridge import __version__
 
 
-def _run_newave_comparison(args: argparse.Namespace) -> None:
-    """Execute the compare newave subcommand."""
+def _run_bounds_comparison(args: argparse.Namespace) -> None:
+    """Execute the compare bounds subcommand."""
     from cobre_bridge.comparators.alignment import build_entity_alignment
     from cobre_bridge.comparators.bounds import compare_bounds
     from cobre_bridge.comparators.report import (
@@ -29,15 +29,6 @@ def _run_newave_comparison(args: argparse.Namespace) -> None:
     tolerance: float = args.tolerance
 
     # Validate paths.
-    sintese_dir = newave_dir / "sintese"
-    if not sintese_dir.is_dir():
-        print(
-            f"Error: sintese/ directory not found in {newave_dir}. "
-            "Run sintetizador-newave first.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
     bounds_path = cobre_output_dir / "training" / "dictionaries" / "bounds.parquet"
     if not bounds_path.exists():
         print(
@@ -73,12 +64,13 @@ def _run_newave_comparison(args: argparse.Namespace) -> None:
     if args.variables:
         variables = {v.strip() for v in args.variables.split(",")}
 
-    alignment = build_entity_alignment(id_map, sintese_dir, lines_json)
+    alignment = build_entity_alignment(id_map, nw_files, lines_json)
 
     # Run comparison.
     results = compare_bounds(
         alignment=alignment,
-        sintese_dir=sintese_dir,
+        nw_files=nw_files,
+        id_map=id_map,
         cobre_output_dir=cobre_output_dir,
         tolerance=tolerance,
         variables=variables,
@@ -251,15 +243,15 @@ def main() -> None:
         metavar="SOURCE",
     )
 
-    # compare newave sub-subcommand
+    # compare bounds sub-subcommand
     compare_nw = compare_subparsers.add_parser(
-        "newave",
-        help="Compare NEWAVE sintetizador bounds against Cobre bounds.",
+        "bounds",
+        help="Compare LP bounds computed from NEWAVE inputs against Cobre bounds.",
     )
     compare_nw.add_argument(
         "newave_dir",
         type=Path,
-        help="Path to the NEWAVE case directory (must contain sintese/).",
+        help="Path to the NEWAVE case directory.",
     )
     compare_nw.add_argument(
         "cobre_output_dir",
@@ -310,8 +302,8 @@ def main() -> None:
         _run_newave_conversion(args)
         return
 
-    if args.command == "compare" and args.compare_source == "newave":
-        _run_newave_comparison(args)
+    if args.command == "compare" and args.compare_source == "bounds":
+        _run_bounds_comparison(args)
         return
 
     parser.print_help()
