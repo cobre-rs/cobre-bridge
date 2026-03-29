@@ -132,13 +132,17 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     summary = build_results_summary(results)
     print_results_summary(summary, newave_dir, cobre_output_dir)
 
-    # HTML report placeholder (Epic 3).
+    # HTML report.
     if args.output:
-        print(
-            f"HTML report will be written to {args.output} "
-            "(not yet implemented — coming in a future version).",
-            file=sys.stderr,
+        from cobre_bridge.comparators.report_builder import (
+            build_comparison_report,
         )
+
+        html = build_comparison_report(results)
+        output_path: Path = args.output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(html, encoding="utf-8")
+        print(f"HTML report written to {output_path}")
 
     sys.exit(0)
 
