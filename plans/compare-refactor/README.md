@@ -19,8 +19,8 @@ Refactor the `cobre-bridge compare` CLI to compute bounds from NEWAVE input file
 | T-009  | HTML template + CSS           | Epic 3 | completed | 0.88      | 20min  |
 | T-010  | Chart implementations         | Epic 3 | completed | 0.85      | 30min  |
 | T-011  | Report assembly               | Epic 3 | completed | 0.85      | 15min  |
-| T-012  | Integration tests             | Epic 4 | pending   | --        | 25min  |
-| T-013  | Edge cases                    | Epic 4 | pending   | --        | 20min  |
+| T-012  | Integration tests             | Epic 4 | completed | 0.85      | 25min  |
+| T-013  | Edge cases                    | Epic 4 | completed | 0.85      | 20min  |
 
 **Total estimated effort**: ~285min (~4.75 hours)
 

@@ -14,11 +14,11 @@
       "learning_extracted": false
     },
     "epic-03-html-report": {
-      "phase": "executing",
+      "phase": "completed",
       "learning_extracted": false
     },
     "epic-04-testing-polish": {
-      "phase": "outline",
+      "phase": "executing",
       "learning_extracted": false
     }
   },
@@ -360,29 +360,55 @@
       "id": "T-012",
       "title": "Integration tests with fixture data",
       "epic": "epic-04-testing-polish",
-      "status": "pending",
-      "detail_level": "outline",
+      "status": "completed",
+      "detail_level": "refined",
       "dependencies": [
         "T-004",
         "T-008",
         "T-011"
       ],
       "estimated_effort": "25min",
-      "effort_confidence": "Low"
+      "effort_confidence": "Low",
+      "workflow_step": null,
+      "agent": "python-task-automation-developer",
+      "scores": {
+        "readiness": 0.85,
+        "quality": 0.88,
+        "quality_breakdown": {
+          "criteria_met": 0.90,
+          "code_quality": 0.88,
+          "test_coverage": 0.85,
+          "no_scope_creep": 0.90,
+          "no_regressions": 0.90
+        }
+      }
     },
     "T-013": {
       "id": "T-013",
       "title": "Edge cases and error handling",
       "epic": "epic-04-testing-polish",
-      "status": "pending",
-      "detail_level": "outline",
+      "status": "completed",
+      "detail_level": "refined",
       "dependencies": [
         "T-004",
         "T-008"
       ],
       "estimated_effort": "20min",
-      "effort_confidence": "Low"
+      "effort_confidence": "Low",
+      "workflow_step": null,
+      "agent": "python-task-automation-developer",
+      "scores": {
+        "readiness": 0.85,
+        "quality": 0.88,
+        "quality_breakdown": {
+          "criteria_met": 0.90,
+          "code_quality": 0.88,
+          "test_coverage": 0.85,
+          "no_scope_creep": 0.90,
+          "no_regressions": 0.90
+        }
+      }
     }
   },
-  "last_updated": "2026-03-29T20:28:25Z"
+  "last_updated": "2026-03-29T20:31:22Z"
 }
