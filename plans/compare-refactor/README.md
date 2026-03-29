@@ -12,10 +12,10 @@ Refactor the `cobre-bridge compare` CLI to compute bounds from NEWAVE input file
 | T-002  | Extract bounds computation    | Epic 1 | completed | 0.88      | 30min  |
 | T-003  | Rewrite bounds comparison     | Epic 1 | completed | 0.92      | 20min  |
 | T-004  | Update CLI + tests            | Epic 1 | completed | 0.94      | 15min  |
-| T-005  | NEWAVE output readers         | Epic 2 | pending   | 0.90      | 25min  |
-| T-006  | Cobre simulation readers      | Epic 2 | pending   | 0.90      | 20min  |
-| T-007  | Results comparison engine     | Epic 2 | pending   | 0.88      | 25min  |
-| T-008  | CLI integration + text report | Epic 2 | pending   | 0.90      | 20min  |
+| T-005  | NEWAVE output readers         | Epic 2 | completed | 0.90      | 25min  |
+| T-006  | Cobre simulation readers      | Epic 2 | completed | 0.90      | 20min  |
+| T-007  | Results comparison engine     | Epic 2 | completed | 0.88      | 25min  |
+| T-008  | CLI integration + text report | Epic 2 | completed | 0.90      | 20min  |
 | T-009  | HTML template + CSS           | Epic 3 | pending   | --        | 20min  |
 | T-010  | Chart implementations         | Epic 3 | pending   | --        | 30min  |
 | T-011  | Report assembly               | Epic 3 | pending   | --        | 15min  |

@@ -11,6 +11,29 @@ from pathlib import Path
 from cobre_bridge import __version__
 
 
+def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
+    """Load lines.json from the Cobre case directory.
+
+    Searches for ``system/lines.json`` near the output directory.
+    Returns an empty list if not found.
+    """
+    cobre_case_dir = cobre_output_dir.parent
+    lines_path = cobre_case_dir / "system" / "lines.json"
+    if not lines_path.exists():
+        for candidate in [cobre_output_dir, cobre_output_dir.parent]:
+            p = candidate / "system" / "lines.json"
+            if p.exists():
+                lines_path = p
+                break
+
+    if not lines_path.exists():
+        return []
+
+    with lines_path.open() as f:
+        lines_data = json.load(f)
+    return lines_data.get("lines", [])
+
+
 def _run_bounds_comparison(args: argparse.Namespace) -> None:
     """Execute the compare bounds subcommand."""
     from cobre_bridge.comparators.alignment import build_entity_alignment
@@ -38,23 +61,7 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    # Find the converted Cobre case directory (parent of output dir).
-    # lines.json lives in the case dir, not the output dir.
-    cobre_case_dir = cobre_output_dir.parent
-    lines_path = cobre_case_dir / "system" / "lines.json"
-    if not lines_path.exists():
-        # Try output dir's parent's parent (in case output is nested).
-        for candidate in [cobre_output_dir, cobre_output_dir.parent]:
-            p = candidate / "system" / "lines.json"
-            if p.exists():
-                lines_path = p
-                break
-
-    lines_json: list[dict] = []
-    if lines_path.exists():
-        with lines_path.open() as f:
-            lines_data = json.load(f)
-        lines_json = lines_data.get("lines", [])
+    lines_json = _load_lines_json(cobre_output_dir)
 
     # Build alignment.
     nw_files = NewaveFiles.from_directory(newave_dir)
@@ -87,6 +94,53 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
         write_report_parquet(results, args.output)
 
     sys.exit(0 if summary.mismatches == 0 else 1)
+
+
+def _run_results_comparison(args: argparse.Namespace) -> None:
+    """Execute the compare results subcommand."""
+    from cobre_bridge.comparators.alignment import build_entity_alignment
+    from cobre_bridge.comparators.report import print_results_summary
+    from cobre_bridge.comparators.results import build_results_summary, compare_results
+    from cobre_bridge.newave_files import NewaveFiles
+    from cobre_bridge.pipeline import _build_id_map
+
+    newave_dir: Path = args.newave_dir
+    cobre_output_dir: Path = args.cobre_output_dir
+    tolerance: float = args.tolerance
+
+    # Build alignment.
+    try:
+        nw_files = NewaveFiles.from_directory(newave_dir)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    id_map = _build_id_map(nw_files)
+    lines_json = _load_lines_json(cobre_output_dir)
+    alignment = build_entity_alignment(id_map, nw_files, lines_json)
+
+    # Run comparison.
+    results = compare_results(
+        nw_files=nw_files,
+        id_map=id_map,
+        alignment=alignment,
+        cobre_output_dir=cobre_output_dir,
+        tolerance=tolerance,
+    )
+
+    # Print text summary.
+    summary = build_results_summary(results)
+    print_results_summary(summary, newave_dir, cobre_output_dir)
+
+    # HTML report placeholder (Epic 3).
+    if args.output:
+        print(
+            f"HTML report will be written to {args.output} "
+            "(not yet implemented — coming in a future version).",
+            file=sys.stderr,
+        )
+
+    sys.exit(0)
 
 
 def _run_newave_conversion(args: argparse.Namespace) -> None:
@@ -287,6 +341,40 @@ def main() -> None:
         help="Enable detailed logging output.",
     )
 
+    # compare results sub-subcommand
+    compare_res = compare_subparsers.add_parser(
+        "results",
+        help="Compare NEWAVE published results against Cobre simulation output.",
+    )
+    compare_res.add_argument(
+        "newave_dir",
+        type=Path,
+        help="Path to the NEWAVE case directory (must contain saidas/).",
+    )
+    compare_res.add_argument(
+        "cobre_output_dir",
+        type=Path,
+        help="Path to the Cobre output directory.",
+    )
+    compare_res.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Path for HTML comparison report.",
+    )
+    compare_res.add_argument(
+        "--tolerance",
+        type=float,
+        default=1e-2,
+        help="Relative tolerance for results comparison (default: 1e-2).",
+    )
+    compare_res.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable detailed logging output.",
+    )
+
     args = parser.parse_args()
 
     # Configure logging based on --verbose.
@@ -304,6 +392,10 @@ def main() -> None:
 
     if args.command == "compare" and args.compare_source == "bounds":
         _run_bounds_comparison(args)
+        return
+
+    if args.command == "compare" and args.compare_source == "results":
+        _run_results_comparison(args)
         return
 
     parser.print_help()
