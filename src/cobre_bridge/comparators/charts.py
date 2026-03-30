@@ -345,3 +345,294 @@ def overview_metrics(summary: ResultsSummary) -> str:
         )
 
     return metrics_grid(cards)
+
+
+# -------------------------------------------------------------------
+# Per-bus system charts
+# -------------------------------------------------------------------
+
+
+def system_per_bus_chart(
+    results: list[ResultComparison],
+    variable: str,
+    title: str,
+) -> str:
+    """Subplot per bus for a system variable (one row per bus)."""
+    bus_data = [r for r in results if r.entity_type == "bus" and r.variable == variable]
+    if not bus_data:
+        return f"<p>No {variable} data available.</p>"
+
+    buses: dict[str, list[ResultComparison]] = {}
+    for r in bus_data:
+        buses.setdefault(r.entity_name, []).append(r)
+
+    n = len(buses)
+    if n == 0:
+        return f"<p>No {variable} data available.</p>"
+
+    traces: list[dict] = []
+    annotations: list[dict] = []
+    y_domains = _subplot_domains(n)
+
+    for idx, (bus_name, rows) in enumerate(sorted(buses.items())):
+        rows_sorted = sorted(rows, key=lambda r: r.stage)
+        stages = [r.stage for r in rows_sorted]
+        nw = [r.newave_value for r in rows_sorted]
+        cb = [r.cobre_value for r in rows_sorted]
+        ya = f"y{idx + 1}" if idx > 0 else "y"
+        show = idx == 0
+        traces.append(
+            {
+                "x": stages,
+                "y": nw,
+                "name": "NEWAVE",
+                "type": "scatter",
+                "mode": "lines",
+                "line": {"color": COLOR_NEWAVE},
+                "yaxis": ya,
+                "showlegend": show,
+                "legendgroup": "nw",
+            }
+        )
+        traces.append(
+            {
+                "x": stages,
+                "y": cb,
+                "name": "Cobre",
+                "type": "scatter",
+                "mode": "lines",
+                "line": {"color": COLOR_COBRE},
+                "yaxis": ya,
+                "showlegend": show,
+                "legendgroup": "cb",
+            }
+        )
+        annotations.append(
+            {
+                "text": bus_name,
+                "xref": "paper",
+                "yref": "paper",
+                "x": 0,
+                "y": y_domains[idx][1],
+                "xanchor": "left",
+                "yanchor": "bottom",
+                "showarrow": False,
+                "font": {"size": 11, "color": "#374151"},
+            }
+        )
+
+    layout: dict = {
+        "title": title,
+        "xaxis": {"title": "Stage"},
+        "annotations": annotations,
+    }
+    for idx in range(n):
+        key = f"yaxis{idx + 1}" if idx > 0 else "yaxis"
+        layout[key] = {"domain": y_domains[idx]}
+        if idx > 0:
+            layout[f"xaxis{idx + 1}"] = {"anchor": f"y{idx + 1}"}
+            for t in traces:
+                if t.get("yaxis") == f"y{idx + 1}":
+                    t["xaxis"] = f"x{idx + 1}"
+
+    return _plotly_div(traces, layout, height=200 * n + 100)
+
+
+def _subplot_domains(n: int) -> list[tuple[float, float]]:
+    """Compute non-overlapping y-axis domains for n subplots."""
+    gap = 0.05
+    h = (1.0 - gap * (n - 1)) / n
+    domains = []
+    for i in range(n):
+        bottom = i * (h + gap)
+        domains.append((round(bottom, 4), round(bottom + h, 4)))
+    domains.reverse()
+    return domains
+
+
+# -------------------------------------------------------------------
+# Interactive plant details
+# -------------------------------------------------------------------
+
+_HYDRO_VARIABLES = [
+    ("storage_final_hm3", "Storage (hm³)"),
+    ("generation_mw", "Generation (MW)"),
+    ("turbined_m3s", "Turbined (m³/s)"),
+    ("spillage_m3s", "Spillage (m³/s)"),
+    ("inflow_m3s", "Inflow (m³/s)"),
+    ("water_value_per_hm3", "Water Value (R$/hm³)"),
+]
+
+
+def build_hydro_detail_tab(
+    results: list[ResultComparison],
+) -> str:
+    """Build interactive per-plant hydro detail with JS dropdown.
+
+    Embeds all plant data as JSON and uses JavaScript to update
+    plotly charts when the user selects a different plant.
+    """
+    hydro_data = [r for r in results if r.entity_type == "hydro"]
+    if not hydro_data:
+        return "<p>No hydro data available.</p>"
+
+    # Group: {(entity_name, newave_code): {variable: {stage: (nw, cb)}}}
+    plants: dict[tuple[str, int], dict[str, dict[int, tuple[float, float]]]] = {}
+    for r in hydro_data:
+        key = (r.entity_name, r.newave_code)
+        plants.setdefault(key, {}).setdefault(r.variable, {})[r.stage] = (
+            r.newave_value,
+            r.cobre_value,
+        )
+
+    if not plants:
+        return "<p>No hydro data available.</p>"
+
+    # Build JSON data structure for JS.
+    js_plants: dict[str, dict] = {}
+    for (name, nw_code), var_data in sorted(plants.items()):
+        pid = f"{nw_code}_{name}"
+        entry: dict = {"name": name, "code": nw_code}
+        for var_key, _var_label in _HYDRO_VARIABLES:
+            stage_data = var_data.get(var_key, {})
+            stages = sorted(stage_data.keys())
+            entry[f"{var_key}_stages"] = stages
+            entry[f"{var_key}_nw"] = [stage_data[s][0] for s in stages]
+            entry[f"{var_key}_cb"] = [stage_data[s][1] for s in stages]
+        js_plants[pid] = entry
+
+    return _build_interactive_detail_html(
+        js_plants,
+        _HYDRO_VARIABLES,
+        "hydro",
+        "Hydro Plant",
+    )
+
+
+def build_thermal_detail_tab(
+    results: list[ResultComparison],
+) -> str:
+    """Build interactive per-plant thermal detail with JS dropdown."""
+    thermal_data = [r for r in results if r.entity_type == "thermal"]
+    if not thermal_data:
+        return "<p>No thermal data available.</p>"
+
+    plants: dict[tuple[str, int], dict[str, dict[int, tuple[float, float]]]] = {}
+    for r in thermal_data:
+        key = (r.entity_name, r.newave_code)
+        plants.setdefault(key, {}).setdefault(r.variable, {})[r.stage] = (
+            r.newave_value,
+            r.cobre_value,
+        )
+
+    if not plants:
+        return "<p>No thermal data available.</p>"
+
+    thermal_vars = [("generation_mw", "Generation (MW)")]
+
+    js_plants: dict[str, dict] = {}
+    for (name, nw_code), var_data in sorted(plants.items()):
+        pid = f"{nw_code}_{name}"
+        entry: dict = {"name": name, "code": nw_code}
+        for var_key, _var_label in thermal_vars:
+            stage_data = var_data.get(var_key, {})
+            stages = sorted(stage_data.keys())
+            entry[f"{var_key}_stages"] = stages
+            entry[f"{var_key}_nw"] = [stage_data[s][0] for s in stages]
+            entry[f"{var_key}_cb"] = [stage_data[s][1] for s in stages]
+        js_plants[pid] = entry
+
+    return _build_interactive_detail_html(
+        js_plants,
+        thermal_vars,
+        "thermal",
+        "Thermal Plant",
+    )
+
+
+def _build_interactive_detail_html(
+    js_plants: dict[str, dict],
+    variables: list[tuple[str, str]],
+    prefix: str,
+    label: str,
+) -> str:
+    """Build the HTML/JS for interactive per-plant detail charts."""
+    import json as _json
+
+    data_json = _json.dumps(js_plants)
+
+    # Build chart divs.
+    chart_divs: list[str] = []
+    for var_key, var_label in variables:
+        div_id = f"{prefix}-chart-{var_key.replace('_', '-')}"
+        chart_divs.append(
+            f'<div class="chart-card">'
+            f'<div id="{div_id}" style="width:100%;height:350px;"></div>'
+            f"</div>"
+        )
+
+    n_vars = len(variables)
+    grid_class = "chart-grid" if n_vars > 1 else "chart-grid-single"
+    charts_html = f'<div class="{grid_class}">{"".join(chart_divs)}</div>'
+
+    # Build option list sorted by name.
+    options: list[str] = []
+    for pid, entry in sorted(js_plants.items(), key=lambda x: x[1]["name"]):
+        name = entry["name"]
+        code = entry["code"]
+        options.append(f'<option value="{pid}">{name} ({code})</option>')
+
+    # JS to update charts on selection.
+    update_calls: list[str] = []
+    for var_key, var_label in variables:
+        div_id = f"{prefix}-chart-{var_key.replace('_', '-')}"
+        update_calls.append(f"""
+        var s = d['{var_key}_stages'] || [];
+        var nw = d['{var_key}_nw'] || [];
+        var cb = d['{var_key}_cb'] || [];
+        Plotly.react('{div_id}', [
+            {{x: s, y: nw, name: 'NEWAVE', type: 'scatter', mode: 'lines',
+              line: {{color: '{COLOR_NEWAVE}'}}}},
+            {{x: s, y: cb, name: 'Cobre', type: 'scatter', mode: 'lines',
+              line: {{color: '{COLOR_COBRE}'}}}}
+        ], {{
+            title: d.name + ' — {var_label}',
+            xaxis: {{title: 'Stage'}},
+            yaxis: {{title: '{var_label}'}},
+            legend: {_json.dumps(_LEGEND)},
+            margin: {_json.dumps(_MARGIN)},
+            template: 'plotly_white',
+            height: 350
+        }}, {{responsive: true}});""")
+
+    js = f"""
+    var {prefix}Data = {data_json};
+    function update{prefix.title()}Charts() {{
+        var sel = document.getElementById('{prefix}-select');
+        var pid = sel.value;
+        var d = {prefix}Data[pid];
+        if (!d) return;
+        document.getElementById('{prefix}-info').innerHTML =
+            '<span>Code: ' + d.code + '</span>';
+        {"".join(update_calls)}
+    }}
+    document.addEventListener('DOMContentLoaded', function() {{
+        var sel = document.getElementById('{prefix}-select');
+        if (sel && sel.options.length > 0) {{
+            update{prefix.title()}Charts();
+        }}
+    }});
+    """
+
+    return f"""
+    <div class="plant-selector">
+        <label for="{prefix}-select">{label}:</label>
+        <select id="{prefix}-select"
+                onchange="update{prefix.title()}Charts()">
+            {"".join(options)}
+        </select>
+        <div class="plant-info" id="{prefix}-info"></div>
+    </div>
+    {charts_html}
+    <script>{js}</script>
+    """

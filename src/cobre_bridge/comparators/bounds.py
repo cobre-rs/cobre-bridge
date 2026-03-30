@@ -239,14 +239,46 @@ def _compare_thermals(
     return results
 
 
+def _read_converter_line_bounds(
+    cobre_output_dir: Path,
+) -> dict[tuple[int, int, str], float]:
+    """Read line bounds from the converter's ``line_bounds.parquet``.
+
+    Returns ``{(line_id, stage_id, bound_name): value}`` where
+    ``bound_name`` is ``direct_flow_max`` or ``reverse_flow_max``.
+
+    The converter output lives one level above the Cobre output directory
+    (``cobre_output_dir.parent``).
+    """
+    case_dir = cobre_output_dir.parent
+    path = case_dir / "constraints" / "line_bounds.parquet"
+    if not path.exists():
+        _LOG.warning("line_bounds.parquet not found at %s", path)
+        return {}
+
+    df = pl.read_parquet(path)
+    result: dict[tuple[int, int, str], float] = {}
+    for row in df.iter_rows(named=True):
+        lid = int(row["line_id"])
+        sid = int(row["stage_id"])
+        result[(lid, sid, "direct_flow_max")] = float(row["direct_mw"])
+        result[(lid, sid, "reverse_flow_max")] = float(row["reverse_mw"])
+    return result
+
+
 def _compare_lines(
     computed: dict[tuple[int, int, str], float],
-    cobre_bounds: dict[tuple[int, int, int, int], float],
+    converter_line_bounds: dict[tuple[int, int, str], float],
     line_lookup: dict[int, LineEntity],
     tolerance: float,
     variables: set[str] | None,
 ) -> list[BoundComparison]:
-    """Compare line flow bounds using computed NEWAVE bounds."""
+    """Compare line flow bounds using computed NEWAVE bounds.
+
+    Compares against the converter's ``line_bounds.parquet`` directly
+    (not the Cobre solver's ``bounds.parquet``, which may represent
+    reverse flow limits differently).
+    """
     results: list[BoundComparison] = []
 
     for (line_id, stage_id, bound_name), nw_value in sorted(computed.items()):
@@ -255,12 +287,7 @@ def _compare_lines(
         if _is_effectively_infinite(nw_value):
             continue
 
-        cobre_bt = _BOUND_NAME_TO_CODE.get(bound_name)
-        if cobre_bt is None:
-            continue
-
-        cobre_key = (_ENTITY_TYPE_LINE, line_id, stage_id, cobre_bt)
-        cobre_value = cobre_bounds.get(cobre_key)
+        cobre_value = converter_line_bounds.get((line_id, stage_id, bound_name))
         if cobre_value is None:
             continue
 
@@ -375,9 +402,15 @@ def compare_bounds(
         )
     )
 
+    _LOG.info("Reading converter line bounds...")
+    converter_line_bounds = _read_converter_line_bounds(cobre_output_dir)
+    _LOG.info("Converter line bounds: %d entries", len(converter_line_bounds))
+
     _LOG.info("Comparing line bounds...")
     results.extend(
-        _compare_lines(computed_line, cobre_bounds, line_lookup, tolerance, variables)
+        _compare_lines(
+            computed_line, converter_line_bounds, line_lookup, tolerance, variables
+        )
     )
 
     return results

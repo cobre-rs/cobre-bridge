@@ -99,7 +99,7 @@ _HYDRO_VAR_MAP: dict[str, str] = {
     "GHIDUH": "generation_mw",
     "QTURUH": "turbined_m3s",
     "QVERTUH": "spillage_m3s",
-    "QAFLUH": "inflow_m3s",
+    "QINCRUH": "inflow_m3s",
     "PIVARM": "water_value_per_hm3",
 }
 
@@ -109,35 +109,65 @@ _SYSTEM_VAR_MAP: dict[str, str] = {
 }
 
 
+def _nw_stage_offset(nw_df: pl.DataFrame) -> int:
+    """Return the minimum stage number in a NEWAVE MEDIAS DataFrame.
+
+    NEWAVE v29+ MEDIAS columns are numbered from the study start month
+    (e.g. 3 for March).  We subtract this offset to convert to 0-based
+    stage indices matching Cobre convention.
+    """
+    stages = nw_df["stage"].drop_nulls()
+    if stages.is_empty():
+        return 1
+    return int(stages.min())
+
+
 def _compare_hydros(
-    alignment: EntityAlignment,
     nw_hydro: pl.DataFrame,
     cobre_hydro: pl.DataFrame,
+    nw_names: dict[int, str],
+    cobre_meta: dict[int, dict],
 ) -> list[ResultComparison]:
-    """Compare hydro results."""
+    """Compare hydro results by matching plant names."""
     results: list[ResultComparison] = []
 
-    # Build lookup: (newave_code, stage_0based, variable) -> nw_value
+    offset = _nw_stage_offset(nw_hydro)
+
+    # Build Cobre name→(id, min_storage) lookup.
+    cobre_by_name: dict[str, tuple[int, float]] = {}
+    for eid, meta in cobre_meta.items():
+        name_upper = meta["name"].strip().upper()
+        min_stor = meta.get("min_storage_hm3", 0.0)
+        cobre_by_name[name_upper] = (eid, min_stor)
+
+    # Match NEWAVE codes to Cobre IDs by name.
+    matched: dict[
+        int, tuple[int, str, float]
+    ] = {}  # nw_code→(cobre_id, name, min_stor)
+    for nw_code, nw_name in nw_names.items():
+        name_upper = nw_name.strip().upper()
+        hit = cobre_by_name.get(name_upper)
+        if hit is not None:
+            matched[nw_code] = (hit[0], nw_name.strip(), hit[1])
+
+    # Build NEWAVE lookup: (nw_code, stage, variable) -> value
     nw_lookup: dict[tuple[int, int, str], float] = {}
     for row in nw_hydro.iter_rows(named=True):
         if row["value"] is None:
             continue
         code = int(row["newave_code"])
-        stage = int(row["stage"]) - 1  # Convert 1-indexed to 0-indexed.
+        if code not in matched:
+            continue
+        stage = int(row["stage"]) - offset
         var = str(row["variable"]).strip().upper()
-        mapped = _HYDRO_VAR_MAP.get(var, var.lower())
+        mapped = _HYDRO_VAR_MAP.get(var)
+        if mapped is None:
+            continue
         nw_lookup[(code, stage, mapped)] = float(row["value"])
 
-    # Build lookup: (entity_id, stage_id, variable) -> cobre_value
+    # Build Cobre lookup: (entity_id, stage, variable) -> value
     cobre_lookup: dict[tuple[int, int, str], float] = {}
-    hydro_value_cols = [
-        "storage_final_hm3",
-        "generation_mw",
-        "turbined_m3s",
-        "spillage_m3s",
-        "inflow_m3s",
-        "water_value_per_hm3",
-    ]
+    hydro_value_cols = list(_HYDRO_VAR_MAP.values())
     for row in cobre_hydro.iter_rows(named=True):
         eid = int(row["entity_id"])
         sid = int(row["stage_id"])
@@ -146,21 +176,26 @@ def _compare_hydros(
             if val is not None and not (isinstance(val, float) and math.isnan(val)):
                 cobre_lookup[(eid, sid, col)] = round(float(val), 2)
 
-    # Compare.
-    for hydro in alignment.hydros:
+    # Compare matched pairs.
+    for nw_code, (cobre_id, name, min_stor) in sorted(matched.items()):
         for (code, stage, var), nw_val in sorted(nw_lookup.items()):
-            if code != hydro.newave_code:
+            if code != nw_code:
                 continue
-            cobre_key = (hydro.cobre_id, stage, var)
-            cobre_val = cobre_lookup.get(cobre_key)
+            cobre_val = cobre_lookup.get((cobre_id, stage, var))
             if cobre_val is None:
                 continue
+
+            # NEWAVE reports useful storage (storage - vol_min).
+            # Add min_storage to align with Cobre absolute storage.
+            if var == "storage_final_hm3":
+                nw_val = nw_val + min_stor
+
             results.append(
                 _make_result(
                     "hydro",
-                    hydro.name,
-                    hydro.newave_code,
-                    hydro.cobre_id,
+                    name,
+                    nw_code,
+                    cobre_id,
                     stage,
                     var,
                     nw_val,
@@ -172,19 +207,35 @@ def _compare_hydros(
 
 
 def _compare_thermals(
-    alignment: EntityAlignment,
     nw_thermal: pl.DataFrame,
     cobre_thermal: pl.DataFrame,
+    nw_names: dict[int, str],
+    cobre_meta: dict[int, dict],
 ) -> list[ResultComparison]:
-    """Compare thermal results."""
+    """Compare thermal results by matching plant names."""
     results: list[ResultComparison] = []
+
+    offset = _nw_stage_offset(nw_thermal)
+
+    # Name-based matching.
+    cobre_by_name: dict[str, int] = {}
+    for eid, meta in cobre_meta.items():
+        cobre_by_name[meta["name"].strip().upper()] = eid
+
+    matched: dict[int, tuple[int, str]] = {}  # nw_code→(cobre_id, name)
+    for nw_code, nw_name in nw_names.items():
+        hit = cobre_by_name.get(nw_name.strip().upper())
+        if hit is not None:
+            matched[nw_code] = (hit, nw_name.strip())
 
     nw_lookup: dict[tuple[int, int], float] = {}
     for row in nw_thermal.iter_rows(named=True):
         if row["value"] is None:
             continue
         code = int(row["newave_code"])
-        stage = int(row["stage"]) - 1
+        if code not in matched:
+            continue
+        stage = int(row["stage"]) - offset
         nw_lookup[(code, stage)] = float(row["value"])
 
     cobre_lookup: dict[tuple[int, int], float] = {}
@@ -195,19 +246,19 @@ def _compare_thermals(
         if val is not None:
             cobre_lookup[(eid, sid)] = round(float(val), 2)
 
-    for thermal in alignment.thermals:
+    for nw_code, (cobre_id, name) in sorted(matched.items()):
         for (code, stage), nw_val in sorted(nw_lookup.items()):
-            if code != thermal.newave_code:
+            if code != nw_code:
                 continue
-            cobre_val = cobre_lookup.get((thermal.cobre_id, stage))
+            cobre_val = cobre_lookup.get((cobre_id, stage))
             if cobre_val is None:
                 continue
             results.append(
                 _make_result(
                     "thermal",
-                    thermal.name,
-                    thermal.newave_code,
-                    thermal.cobre_id,
+                    name,
+                    nw_code,
+                    cobre_id,
                     stage,
                     "generation_mw",
                     nw_val,
@@ -219,21 +270,35 @@ def _compare_thermals(
 
 
 def _compare_buses(
-    alignment: EntityAlignment,
     nw_system: pl.DataFrame,
     cobre_bus: pl.DataFrame,
-    id_map: NewaveIdMap,
+    nw_names: dict[int, str],
+    cobre_meta: dict[int, dict],
 ) -> list[ResultComparison]:
-    """Compare bus/subsystem results."""
+    """Compare bus/subsystem results by matching names."""
     results: list[ResultComparison] = []
 
-    # Build lookup: (newave_code, stage, variable) -> value
+    offset = _nw_stage_offset(nw_system)
+
+    # Name-based matching.
+    cobre_by_name: dict[str, int] = {}
+    for eid, meta in cobre_meta.items():
+        cobre_by_name[meta["name"].strip().upper()] = eid
+
+    matched: dict[int, tuple[int, str]] = {}  # nw_code→(cobre_id, name)
+    for nw_code, nw_name in nw_names.items():
+        hit = cobre_by_name.get(nw_name.strip().upper())
+        if hit is not None:
+            matched[nw_code] = (hit, nw_name.strip())
+
     nw_lookup: dict[tuple[int, int, str], float] = {}
     for row in nw_system.iter_rows(named=True):
         if row["value"] is None:
             continue
         code = int(row["newave_code"])
-        stage = int(row["stage"]) - 1
+        if code not in matched:
+            continue
+        stage = int(row["stage"]) - offset
         var = str(row["variable"]).strip().upper()
         mapped = _SYSTEM_VAR_MAP.get(var, var.lower())
         nw_lookup[(code, stage, mapped)] = float(row["value"])
@@ -247,23 +312,19 @@ def _compare_buses(
             if val is not None and not (isinstance(val, float) and math.isnan(val)):
                 cobre_lookup[(eid, sid, col)] = round(float(val), 2)
 
-    # Build subsystem code -> bus_id mapping.
-    for nw_code in id_map.all_bus_ids:
-        bus_id = id_map.bus_id(nw_code)
-        bus_name = f"bus_{bus_id}"
-
+    for nw_code, (cobre_id, name) in sorted(matched.items()):
         for (code, stage, var), nw_val in sorted(nw_lookup.items()):
             if code != nw_code:
                 continue
-            cobre_val = cobre_lookup.get((bus_id, stage, var))
+            cobre_val = cobre_lookup.get((cobre_id, stage, var))
             if cobre_val is None:
                 continue
             results.append(
                 _make_result(
                     "bus",
-                    bus_name,
+                    name,
                     nw_code,
-                    bus_id,
+                    cobre_id,
                     stage,
                     var,
                     nw_val,
@@ -368,14 +429,18 @@ def compare_results(
 ) -> list[ResultComparison]:
     """Compare NEWAVE output results against Cobre simulation means.
 
+    Entities are matched by **name** (case-insensitive) rather than by
+    converter-assigned IDs, so the comparison works even when the Cobre
+    case was built by a different tool.
+
     Parameters
     ----------
     nw_files:
         Resolved NEWAVE input file paths (for locating pmo.dat).
     id_map:
-        Entity ID mapping.
+        Entity ID mapping (used only for productivity fallback).
     alignment:
-        Pre-built entity alignment.
+        Pre-built entity alignment (used only for productivity).
     cobre_output_dir:
         Path to Cobre output directory.
     tolerance:
@@ -387,12 +452,15 @@ def compare_results(
         All comparison results across hydro, thermal, bus, convergence,
         and productivity dimensions.
     """
+    from cobre_bridge.comparators.alignment import _read_reference_names
     from cobre_bridge.comparators.cobre_readers import (
         read_cobre_bus_means,
+        read_cobre_bus_metadata,
         read_cobre_convergence,
         read_cobre_hydro_means,
         read_cobre_hydro_metadata,
         read_cobre_thermal_means,
+        read_cobre_thermal_metadata,
     )
     from cobre_bridge.comparators.newave_readers import (
         _find_saidas_dir,
@@ -405,6 +473,12 @@ def compare_results(
 
     results: list[ResultComparison] = []
 
+    # Read entity names from both sides.
+    nw_hydro_names, nw_thermal_names, nw_bus_names = _read_reference_names(nw_files)
+    cobre_hydro_meta = read_cobre_hydro_metadata(cobre_output_dir)
+    cobre_thermal_meta = read_cobre_thermal_metadata(cobre_output_dir)
+    cobre_bus_meta = read_cobre_bus_metadata(cobre_output_dir)
+
     # Locate NEWAVE saidas directory.
     saidas_dir = _find_saidas_dir(nw_files.directory)
 
@@ -414,21 +488,29 @@ def compare_results(
         cobre_hydro = read_cobre_hydro_means(cobre_output_dir)
         if not nw_hydro.is_empty() and not cobre_hydro.is_empty():
             _LOG.info("Comparing hydro results...")
-            results.extend(_compare_hydros(alignment, nw_hydro, cobre_hydro))
+            results.extend(
+                _compare_hydros(nw_hydro, cobre_hydro, nw_hydro_names, cobre_hydro_meta)
+            )
 
         # --- Thermal comparison ---
         nw_thermal = read_medias_thermal(saidas_dir)
         cobre_thermal = read_cobre_thermal_means(cobre_output_dir)
         if not nw_thermal.is_empty() and not cobre_thermal.is_empty():
             _LOG.info("Comparing thermal results...")
-            results.extend(_compare_thermals(alignment, nw_thermal, cobre_thermal))
+            results.extend(
+                _compare_thermals(
+                    nw_thermal, cobre_thermal, nw_thermal_names, cobre_thermal_meta
+                )
+            )
 
         # --- Bus/system comparison ---
         nw_system = read_medias_system(saidas_dir)
         cobre_bus = read_cobre_bus_means(cobre_output_dir)
         if not nw_system.is_empty() and not cobre_bus.is_empty():
             _LOG.info("Comparing bus results...")
-            results.extend(_compare_buses(alignment, nw_system, cobre_bus, id_map))
+            results.extend(
+                _compare_buses(nw_system, cobre_bus, nw_bus_names, cobre_bus_meta)
+            )
     else:
         _LOG.warning("NEWAVE saidas/ directory not found; skipping MEDIAS comparison.")
 

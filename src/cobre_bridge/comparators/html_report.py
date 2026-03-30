@@ -125,6 +125,39 @@ main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
+
+.plant-selector {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.plant-selector label {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #374151;
+}
+
+.plant-selector select {
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 0.88rem;
+    min-width: 280px;
+    background: #FAFAF8;
+}
+
+.plant-info {
+    display: flex;
+    gap: 20px;
+    font-size: 0.82rem;
+    color: #8B9298;
+    flex-wrap: wrap;
+}
+
+.plant-info span { white-space: nowrap; }
 """
 )
 
@@ -153,8 +186,10 @@ COLOR_MATCH = "#4A8B6F"
 COMPARISON_TABS = [
     ("tab-overview", "Overview"),
     ("tab-system", "System"),
-    ("tab-hydro", "Hydro"),
-    ("tab-thermal", "Thermal"),
+    ("tab-hydro", "Hydro Operation"),
+    ("tab-hydro-detail", "Plant Details"),
+    ("tab-thermal", "Thermal Operation"),
+    ("tab-thermal-detail", "Thermal Details"),
     ("tab-productivity", "Productivity"),
 ]
 

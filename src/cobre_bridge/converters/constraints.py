@@ -570,12 +570,148 @@ def _parse_yyyymm(period_str: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
+def _get_individualizado_cutoff(
+    nw_files: NewaveFiles,
+    start_year: int,
+    start_month: int,
+) -> int:
+    """Return the first post-individualizado stage index.
+
+    Reads REE.DAT for ``mes_fim_individualizado``/``ano_fim_individualizado``
+    and converts to a 0-based stage index.  All REEs share the same cutoff
+    date in production cases; we take the first REE's value.
+
+    Returns *num_stages* (i.e. no cutoff) if the information is unavailable.
+    """
+    try:
+        ree_file = Ree.read(str(nw_files.ree))
+        ree_df = ree_file.rees
+        if ree_df is None or ree_df.empty:
+            return 9999
+        row = ree_df.iloc[0]
+        end_month = int(row["mes_fim_individualizado"])
+        end_year = int(row["ano_fim_individualizado"])
+        return (end_year - start_year) * 12 + (end_month - start_month)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Could not read individualizado cutoff from REE.DAT.")
+        return 9999
+
+
+def _parse_re_dat(
+    nw_files: NewaveFiles,
+    start_year: int,
+    start_month: int,
+    num_stages: int,
+) -> tuple[
+    dict[int, list[int]],
+    dict[int, dict[tuple[int, int], float]],
+]:
+    """Parse RE.DAT into plant sets and per-stage upper bound maps.
+
+    Returns
+    -------
+    conjuntos : dict[int, list[int]]
+        Mapping from constraint code to list of NEWAVE plant codes.
+    re_dat_bounds : dict[int, dict[tuple[int, int], float]]
+        ``{constraint_code: {(stage_id, block_id): upper_bound}}``.
+        ``patamar=0`` in RE.DAT is expanded to all 3 blocks.
+        Bounds are forward-filled through the study horizon.
+    """
+    conjuntos: dict[int, list[int]] = {}
+    re_dat_bounds: dict[int, dict[tuple[int, int], float]] = {}
+
+    if nw_files.re_dat is None:
+        return conjuntos, re_dat_bounds
+
+    try:
+        from inewave.newave import Re
+
+        re_file = Re.read(str(nw_files.re_dat))
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Could not parse RE.DAT; skipping RE constraints.")
+        return conjuntos, re_dat_bounds
+
+    # Plant sets per constraint code.
+    uc_df = re_file.usinas_conjuntos
+    if uc_df is not None and not uc_df.empty:
+        for _, row in uc_df.iterrows():
+            code = int(row["conjunto"])
+            plant = int(row["codigo_usina"])
+            conjuntos.setdefault(code, []).append(plant)
+
+    # Build per-constraint step-function bounds from restricoes.
+    rest_df = re_file.restricoes
+    if rest_df is None or rest_df.empty:
+        return conjuntos, re_dat_bounds
+
+    # Group rows by constraint code.
+    for code, grp in rest_df.groupby("conjunto"):
+        code = int(code)
+        # Collect changepoints: [(stage_id, patamar, value)]
+        changepoints: list[tuple[int, int, float]] = []
+        for _, row in grp.iterrows():
+            mi = int(row["mes_inicio"])
+            ai = int(row["ano_inicio"])
+            mf = int(row["mes_fim"])
+            af = int(row["ano_fim"])
+            pat = int(row["patamar"])  # 0 = all blocks
+            value = float(row["restricao"])
+
+            # Expand date range into individual stages.
+            y, m = ai, mi
+            while (y, m) <= (af, mf):
+                sid = (y - start_year) * 12 + (m - start_month)
+                if 0 <= sid < num_stages:
+                    changepoints.append((sid, pat, value))
+                m += 1
+                if m > 12:
+                    m = 1
+                    y += 1
+
+        if not changepoints:
+            continue
+
+        # Build the full stage→bound map with forward-fill.
+        # Sort by stage, then by patamar for deterministic processing.
+        changepoints.sort()
+        first_stage = changepoints[0][0]
+
+        # Current value per block (forward-filled).
+        current: dict[int, float] = {}  # block_id -> value
+        cp_idx = 0
+        stage_bounds: dict[tuple[int, int], float] = {}
+
+        for sid in range(first_stage, num_stages):
+            # Apply all changepoints at this stage.
+            while cp_idx < len(changepoints) and changepoints[cp_idx][0] == sid:
+                _, pat, val = changepoints[cp_idx]
+                if pat == 0:
+                    for b in range(3):
+                        current[b] = val
+                else:
+                    current[pat - 1] = val
+                cp_idx += 1
+
+            # Emit current values for all active blocks.
+            for block_id, val in current.items():
+                stage_bounds[(sid, block_id)] = val
+
+        re_dat_bounds[code] = stage_bounds
+
+    return conjuntos, re_dat_bounds
+
+
 def convert_electric_constraints(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
     start_id: int = 0,
 ) -> tuple[list[dict], pa.Table] | None:
-    """Convert ``restricao-eletrica.csv`` electric constraints to Cobre format.
+    """Convert electric constraints from restricao-eletrica.csv and RE.DAT.
+
+    ``restricao-eletrica.csv`` provides constraints for the individualised
+    period (first ~12 stages).  ``RE.DAT`` provides post-individualised
+    bounds.  For constraints only in restricao-eletrica.csv, bounds are
+    seasonally extrapolated beyond the individualised period.
 
     Parameters
     ----------
@@ -590,22 +726,28 @@ def convert_electric_constraints(
     Returns
     -------
     tuple[list[dict], pa.Table] | None
-        A ``(constraints_list, bounds_table)`` pair, or ``None`` if the
-        file is absent or contains no valid constraints.
-        ``bounds_table`` has schema
+        A ``(constraints_list, bounds_table)`` pair, or ``None`` if no
+        constraints are found.  ``bounds_table`` has schema
         ``(constraint_id: INT32, stage_id: INT32, block_id: INT32,
         bound: DOUBLE)``.
     """
+    # Check for data sources before reading DGER.
     re_path = _find_restricao_eletrica(nw_files.directory)
-    if re_path is None:
-        _LOG.debug("restricao-eletrica.csv not found; skipping electric constraints.")
+    has_re_dat = nw_files.re_dat is not None
+
+    if re_path is None and not has_re_dat:
+        _LOG.debug("No electric constraints found; skipping.")
         return None
 
-    expressions, horizons, bounds_rows = _parse_restricao_eletrica(re_path)
-    if not expressions:
-        return None
+    # Parse restricao-eletrica.csv (individualised period data).
+    expressions: dict[int, str] = {}
+    horizons: dict[int, tuple[str, str]] = {}
+    bounds_rows: list[tuple[int, str, str, int, float, float]] = []
 
-    # Study horizon
+    if re_path is not None:
+        expressions, horizons, bounds_rows = _parse_restricao_eletrica(re_path)
+
+    # Study horizon.
     dger = Dger.read(str(nw_files.dger))
     start_month: int = dger.mes_inicio_estudo
     start_year: int = dger.ano_inicio_estudo
@@ -613,6 +755,18 @@ def convert_electric_constraints(
     num_anos_pos: int = dger.num_anos_pos_estudo or 0
     study_months = (13 - start_month) + (num_anos - 1) * 12
     num_stages = study_months + num_anos_pos * 12
+
+    # Individualised period cutoff.
+    cutoff = _get_individualizado_cutoff(nw_files, start_year, start_month)
+
+    # Parse RE.DAT (post-individualised bounds + plant sets).
+    re_conjuntos, re_dat_bounds = _parse_re_dat(
+        nw_files, start_year, start_month, num_stages
+    )
+
+    if not expressions and not re_conjuntos:
+        _LOG.debug("No electric constraints found; skipping.")
+        return None
 
     line_id_map = _build_line_id_map(nw_files)
 
@@ -633,104 +787,78 @@ def convert_electric_constraints(
         except Exception:  # noqa: BLE001
             _LOG.warning("Could not read ELETRI penalty from PENALID.DAT.")
 
+    slack_config: dict = (
+        {"enabled": True, "penalty": eletri_penalty}
+        if eletri_penalty is not None
+        else {"enabled": False}
+    )
+
     constraints: list[dict] = []
     bound_constraint_ids: list[int] = []
     bound_stage_ids: list[int] = []
     bound_block_ids: list[int | None] = []
     bound_values: list[float] = []
 
-    # Index bounds by constraint code for quick lookup
-    bounds_by_code: dict[int, list[tuple[str, str, int, float, float]]] = defaultdict(
-        list
+    # Index restricao-eletrica.csv bounds by constraint code.
+    csv_bounds_by_code: dict[int, list[tuple[str, str, int, float, float]]] = (
+        defaultdict(list)
     )
     for cod, per_ini, per_fin, pat, lim_inf, lim_sup in bounds_rows:
-        bounds_by_code[cod].append((per_ini, per_fin, pat, lim_inf, lim_sup))
+        csv_bounds_by_code[cod].append((per_ini, per_fin, pat, lim_inf, lim_sup))
 
-    # Index horizons for validity check
-    # Only emit bounds within the horizon window
-    for code_idx, (cod, formula) in enumerate(sorted(expressions.items())):
-        horizon = horizons.get(cod)
-        if horizon is None:
-            _LOG.warning(
-                "Electric constraint %d has no RE-HORIZ-PER entry; skipping.", cod
-            )
+    # All constraint codes from both sources.
+    all_codes = sorted(set(expressions.keys()) | set(re_conjuntos.keys()))
+
+    for cod in all_codes:
+        # --- Build expression ---
+        has_csv = cod in expressions
+        has_re_dat = cod in re_conjuntos
+
+        if has_csv:
+            cobre_expr = _parse_formula(expressions[cod], id_map, line_id_map)
+        elif has_re_dat:
+            # RE.DAT-only: expression is sum of hydro_generation for plants.
+            terms: list[str] = []
+            for plant_code in sorted(re_conjuntos[cod]):
+                try:
+                    cobre_id = id_map.hydro_id(plant_code)
+                except KeyError:
+                    _LOG.warning(
+                        "RE.DAT constraint %d: unknown hydro code %d; skipping term.",
+                        cod,
+                        plant_code,
+                    )
+                    continue
+                terms.append(f"hydro_generation({cobre_id})")
+            cobre_expr = " + ".join(terms) if terms else None
+        else:
             continue
 
-        cobre_expr = _parse_formula(formula, id_map, line_id_map)
         if cobre_expr is None:
             _LOG.warning(
-                "Electric constraint %d: formula yielded no valid terms; skipping.",
-                cod,
+                "Electric constraint %d: no valid terms in expression; skipping.", cod
             )
             continue
 
-        horiz_ini = _parse_yyyymm(horizon[0])
-        horiz_fin = _parse_yyyymm(horizon[1])
-
-        # Collect all (sense, bound_value) pairs for each (stage, block)
-        # from the RE-LIM-FORM-PER-PAT rows
-        entries_for_code = bounds_by_code.get(cod, [])
-        if not entries_for_code:
-            _LOG.warning(
-                "Electric constraint %d has no RE-LIM-FORM-PER-PAT rows; skipping.",
-                cod,
-            )
-            continue
-
-        # Determine which senses are needed: scan all bound rows for this code
-        # to decide whether we need a <= constraint, a >= constraint, or both.
-        # entries_for_code elements: (per_ini, per_fin, pat, lim_inf, lim_sup)
-        has_sup = any(
-            lim_sup > _UNBOUNDED_THRESHOLD
-            for _per_ini, _per_fin, _pat, _lim_inf, lim_sup in entries_for_code
-        )
-        has_inf = any(
-            lim_inf > _UNBOUNDED_THRESHOLD
-            for _per_ini, _per_fin, _pat, lim_inf, _lim_sup in entries_for_code
-        )
-
-        slack_config: dict = (
-            {"enabled": True, "penalty": eletri_penalty}
-            if eletri_penalty is not None
-            else {"enabled": False}
-        )
-
-        def _add_constraint(sense: str, constraint_id: int) -> None:
-            constraints.append(
-                {
-                    "id": constraint_id,
-                    "name": f"RE_{cod}",
-                    "description": f"Electric constraint {cod}",
-                    "expression": cobre_expr,
-                    "sense": sense,
-                    "slack": slack_config,
-                }
-            )
-
-        sup_id: int | None = None
-        inf_id: int | None = None
-
-        if has_sup:
-            sup_id = start_id + len(constraints)
-            _add_constraint("<=", sup_id)
-        if has_inf:
-            inf_id = start_id + len(constraints)
-            _add_constraint(">=", inf_id)
-
-        # Build a seasonal bound map from the original (first-year) data.
-        # Key: (calendar_month, block_id) -> (lim_sup, lim_inf)
-        # NEWAVE restricts restricao-eletrica.csv to the first 12 stages
-        # (individual plant modeling horizon).  We extrapolate seasonally
-        # across the full study horizon: each calendar month in every year
-        # reuses the bound from the same month in the first year.
+        # --- Build bound maps for this constraint ---
+        # csv_sup/csv_inf: restricao-eletrica.csv bounds by (stage, block)
+        csv_sup: dict[tuple[int, int], float] = {}
+        csv_inf: dict[tuple[int, int], float] = {}
+        # seasonal fallback: (calendar_month, block_id) -> value
         seasonal_sup: dict[tuple[int, int], float] = {}
         seasonal_inf: dict[tuple[int, int], float] = {}
+
+        entries_for_code = csv_bounds_by_code.get(cod, [])
+        horizon = horizons.get(cod)
+        horiz_ini = _parse_yyyymm(horizon[0]) if horizon else (start_year, start_month)
+        horiz_fin = (
+            _parse_yyyymm(horizon[1]) if horizon else (start_year + num_anos - 1, 12)
+        )
 
         for per_ini, per_fin, pat, lim_inf, lim_sup in entries_for_code:
             ini_year, ini_month = _parse_yyyymm(per_ini)
             fin_year, fin_month = _parse_yyyymm(per_fin)
 
-            # Restrict to horizon window (for the initial data extraction)
             ini_year, ini_month = max(
                 (ini_year, ini_month), horiz_ini, key=lambda t: t[0] * 12 + t[1]
             )
@@ -738,35 +866,96 @@ def convert_electric_constraints(
                 (fin_year, fin_month), horiz_fin, key=lambda t: t[0] * 12 + t[1]
             )
 
-            block_id = pat - 1  # 1-based Pat -> 0-based block_id
+            block_id = pat - 1  # 1-based -> 0-based
 
             y, m = ini_year, ini_month
             while (y, m) <= (fin_year, fin_month):
-                key = (m, block_id)
-                if lim_sup > _UNBOUNDED_THRESHOLD:
-                    seasonal_sup[key] = lim_sup
-                if lim_inf > _UNBOUNDED_THRESHOLD:
-                    seasonal_inf[key] = lim_inf
+                sid = (y - start_year) * 12 + (m - start_month)
+                if 0 <= sid < num_stages:
+                    if lim_sup > _UNBOUNDED_THRESHOLD:
+                        csv_sup[(sid, block_id)] = lim_sup
+                        seasonal_sup[(m, block_id)] = lim_sup
+                    if lim_inf > _UNBOUNDED_THRESHOLD:
+                        csv_inf[(sid, block_id)] = lim_inf
+                        seasonal_inf[(m, block_id)] = lim_inf
                 m += 1
                 if m > 12:
                     m = 1
                     y += 1
 
-        # Emit bound rows for the FULL study horizon using the seasonal map.
+        # RE.DAT upper bounds for post-individualised stages.
+        re_sup = re_dat_bounds.get(cod, {})
+
+        # --- Determine senses ---
+        has_sup = bool(csv_sup) or bool(re_sup)
+        has_inf = bool(csv_inf)
+
+        if not has_sup and not has_inf:
+            _LOG.warning("Electric constraint %d has no bound data; skipping.", cod)
+            continue
+
+        sup_id: int | None = None
+        inf_id: int | None = None
+
+        if has_sup:
+            sup_id = start_id + len(constraints)
+            constraints.append(
+                {
+                    "id": sup_id,
+                    "name": f"RE_{cod}",
+                    "description": f"Electric constraint {cod}",
+                    "expression": cobre_expr,
+                    "sense": "<=",
+                    "slack": slack_config,
+                }
+            )
+        if has_inf:
+            inf_id = start_id + len(constraints)
+            constraints.append(
+                {
+                    "id": inf_id,
+                    "name": f"RE_{cod}",
+                    "description": f"Electric constraint {cod}",
+                    "expression": cobre_expr,
+                    "sense": ">=",
+                    "slack": slack_config,
+                }
+            )
+
+        # --- Emit bounds for the full horizon ---
         for stage_id in range(num_stages):
             cal_month = ((start_month - 1 + stage_id) % 12) + 1
-            for block_id in range(3):  # 3 patamares
-                key = (cal_month, block_id)
-                if sup_id is not None and key in seasonal_sup:
-                    bound_constraint_ids.append(sup_id)
-                    bound_stage_ids.append(stage_id)
-                    bound_block_ids.append(block_id)
-                    bound_values.append(seasonal_sup[key])
-                if inf_id is not None and key in seasonal_inf:
-                    bound_constraint_ids.append(inf_id)
-                    bound_stage_ids.append(stage_id)
-                    bound_block_ids.append(block_id)
-                    bound_values.append(seasonal_inf[key])
+            is_post_indiv = stage_id >= cutoff
+
+            for block_id in range(3):
+                # Upper bound.
+                if sup_id is not None:
+                    sup_val: float | None = None
+                    if is_post_indiv and (stage_id, block_id) in re_sup:
+                        sup_val = re_sup[(stage_id, block_id)]
+                    elif (stage_id, block_id) in csv_sup:
+                        sup_val = csv_sup[(stage_id, block_id)]
+                    elif is_post_indiv and not re_sup:
+                        # No RE.DAT data: seasonal extrapolation fallback.
+                        sup_val = seasonal_sup.get((cal_month, block_id))
+                    if sup_val is not None:
+                        bound_constraint_ids.append(sup_id)
+                        bound_stage_ids.append(stage_id)
+                        bound_block_ids.append(block_id)
+                        bound_values.append(sup_val)
+
+                # Lower bound.
+                if inf_id is not None:
+                    inf_val: float | None = None
+                    if (stage_id, block_id) in csv_inf:
+                        inf_val = csv_inf[(stage_id, block_id)]
+                    elif is_post_indiv:
+                        inf_val = seasonal_inf.get((cal_month, block_id))
+                    if inf_val is not None:
+                        bound_constraint_ids.append(inf_id)
+                        bound_stage_ids.append(stage_id)
+                        bound_block_ids.append(block_id)
+                        bound_values.append(inf_val)
 
     if not constraints:
         return None
@@ -781,9 +970,11 @@ def convert_electric_constraints(
     )
 
     _LOG.info(
-        "Generated %d electric constraints with %d bounds.",
+        "Generated %d electric constraints with %d bounds "
+        "(individualizado cutoff at stage %d).",
         len(constraints),
         len(bound_values),
+        cutoff,
     )
 
     return constraints, bounds_table

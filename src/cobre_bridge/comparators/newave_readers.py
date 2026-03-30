@@ -370,6 +370,13 @@ def read_pmo_convergence(newave_dir: Path) -> pl.DataFrame:
         }
     )
 
+    # NEWAVE pmo.dat exports convergence values in 10^6 R$.
+    # Multiply by 1e6 to convert to R$ (matching Cobre convention).
+    result = result.with_columns(
+        pl.col("lower_bound") * 1e6,
+        pl.col("upper_bound_mean") * 1e6,
+    )
+
     return result
 
 

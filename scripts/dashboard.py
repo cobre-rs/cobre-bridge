@@ -173,6 +173,8 @@ def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
             "max_gen_physical": gen.get("productivity_mw_per_m3s", 0)
             * gen.get("max_turbined_m3s", 0),
             "max_turbined": gen.get("max_turbined_m3s", 0),
+            "productivity": gen.get("productivity_mw_per_m3s", 0),
+            "downstream_id": h.get("downstream_id"),
         }
     return result
 
@@ -867,19 +869,252 @@ def chart_hydro_storage(hydros_lf: pl.LazyFrame, stage_labels: dict[int, str]) -
     return fig_to_html(fig)
 
 
+def _build_accumulated_productivity(
+    hydro_meta: dict[int, dict],
+) -> dict[int, float]:
+    """Compute accumulated cascade productivity for each hydro plant.
+
+    Uses memoized DAG traversal: each plant's accumulated productivity is
+    its own productivity plus the accumulated productivity of its downstream
+    plant.  Each node is visited exactly once (O(n) total).
+    """
+    acc: dict[int, float] = {}
+
+    def _accumulate(hid: int) -> float:
+        if hid in acc:
+            return acc[hid]
+        meta = hydro_meta.get(hid)
+        if meta is None:
+            return 0.0
+        ds = meta.get("downstream_id")
+        ds_acc = _accumulate(ds) if ds is not None else 0.0
+        acc[hid] = meta.get("productivity", 0.0) + ds_acc
+        return acc[hid]
+
+    for hid in hydro_meta:
+        _accumulate(hid)
+    return acc
+
+
+def _add_stored_energy_column(
+    lf: pl.LazyFrame,
+    hydro_meta: dict[int, dict],
+) -> pl.LazyFrame:
+    """Add ``stored_energy_mwmonth`` column to a hydro LazyFrame.
+
+    Formula: (storage_final_hm3 - vol_min) × accumulated_productivity / 2.628
+    The divisor converts hm³ to the m³/s-equivalent over one month
+    (1 hm³ = 10⁶ m³; 1 month ≈ 2.628 × 10⁶ s).
+    """
+    acc_prod = _build_accumulated_productivity(hydro_meta)
+
+    # Build a small DataFrame: hydro_id -> (vol_min, acc_prod)
+    rows = []
+    for hid, meta in hydro_meta.items():
+        rows.append(
+            {
+                "hydro_id": hid,
+                "_vol_min": meta.get("vol_min", 0.0),
+                "_acc_prod": acc_prod.get(hid, 0.0),
+            }
+        )
+    param_df = pl.DataFrame(rows).cast(
+        {"hydro_id": pl.Int32, "_vol_min": pl.Float64, "_acc_prod": pl.Float64}
+    )
+
+    return (
+        lf.join(param_df.lazy(), on="hydro_id")
+        .with_columns(
+            (
+                (pl.col("storage_final_hm3") - pl.col("_vol_min")).clip(lower_bound=0.0)
+                * pl.col("_acc_prod")
+                / 2.628
+            ).alias("stored_energy_mwmonth")
+        )
+        .drop("_vol_min", "_acc_prod")
+    )
+
+
+def chart_stored_energy(
+    hydros_lf: pl.LazyFrame,
+    hydro_meta: dict[int, dict],
+    stage_labels: dict[int, str],
+) -> str:
+    """System-total stored energy with p10/p50/p90 bands."""
+    lf = _add_stored_energy_column(
+        hydros_lf.filter(pl.col("block_id") == 0), hydro_meta
+    )
+    pcts = (
+        lf.group_by(["scenario_id", "stage_id"])
+        .agg(pl.col("stored_energy_mwmonth").sum())
+        .group_by("stage_id")
+        .agg(
+            pl.col("stored_energy_mwmonth")
+            .quantile(0.1, interpolation="linear")
+            .alias("p10"),
+            pl.col("stored_energy_mwmonth")
+            .quantile(0.5, interpolation="linear")
+            .alias("p50"),
+            pl.col("stored_energy_mwmonth")
+            .quantile(0.9, interpolation="linear")
+            .alias("p90"),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = pcts["stage_id"].to_list()
+    xlabels = stage_x_labels(stages, stage_labels)
+    p10, p50, p90 = pcts["p10"].to_list(), pcts["p50"].to_list(), pcts["p90"].to_list()
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels + xlabels[::-1],
+            y=p90 + p10[::-1],
+            fill="toself",
+            fillcolor="rgba(76,175,80,0.15)",
+            line={"color": "rgba(255,255,255,0)"},
+            name="P10–P90 range",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=p50,
+            name="Median (P50)",
+            line={"color": "#4CAF50", "width": 2.5},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=p10,
+            name="P10",
+            line={"color": "#4CAF50", "width": 1, "dash": "dot"},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xlabels,
+            y=p90,
+            name="P90",
+            line={"color": "#4CAF50", "width": 1, "dash": "dot"},
+        )
+    )
+    fig.update_layout(
+        title="Aggregate Stored Energy (all hydros, p10/p50/p90 across scenarios)",
+        xaxis_title="Stage",
+        yaxis_title="Stored Energy (MWmonth)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=440,
+    )
+    return fig_to_html(fig)
+
+
+def chart_stored_energy_by_bus(
+    hydros_lf: pl.LazyFrame,
+    hydro_meta: dict[int, dict],
+    hydro_bus_map: dict[int, int],
+    bus_names: dict[int, str],
+    stage_labels: dict[int, str],
+) -> str:
+    """Stored energy by bus with p50 line and p10-p90 band in subplots."""
+    lf = _add_stored_energy_column(
+        hydros_lf.filter(pl.col("block_id") == 0), hydro_meta
+    )
+    hbus_df = pl.DataFrame(
+        {"hydro_id": list(hydro_bus_map.keys()), "bus_id": list(hydro_bus_map.values())}
+    )
+    data = (
+        lf.join(hbus_df.lazy(), on="hydro_id")
+        .group_by(["scenario_id", "stage_id", "bus_id"])
+        .agg(pl.col("stored_energy_mwmonth").sum())
+        .group_by(["stage_id", "bus_id"])
+        .agg(
+            pl.col("stored_energy_mwmonth")
+            .quantile(0.1, interpolation="linear")
+            .alias("p10"),
+            pl.col("stored_energy_mwmonth")
+            .quantile(0.5, interpolation="linear")
+            .alias("p50"),
+            pl.col("stored_energy_mwmonth")
+            .quantile(0.9, interpolation="linear")
+            .alias("p90"),
+        )
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    bus_ids = sorted([bid for bid in bus_names if bid <= 3])
+    stages = sorted(data["stage_id"].unique().to_list())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    fig = make_subplots(
+        rows=len(bus_ids),
+        cols=1,
+        shared_xaxes=False,
+        subplot_titles=[bus_names.get(b, str(b)) for b in bus_ids],
+        vertical_spacing=0.12,
+    )
+    for row, bus_id in enumerate(bus_ids, 1):
+        sub = data.filter(pl.col("bus_id") == bus_id)
+        pmap = {r["stage_id"]: r for r in sub.iter_rows(named=True)}
+        show = row == 1
+        p90 = [pmap.get(s, {}).get("p90", 0) for s in stages]
+        p10 = [pmap.get(s, {}).get("p10", 0) for s in stages]
+        p50 = [pmap.get(s, {}).get("p50", 0) for s in stages]
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels + xlabels[::-1],
+                y=p90 + p10[::-1],
+                fill="toself",
+                fillcolor="rgba(76,175,80,0.15)",
+                line={"color": "rgba(255,255,255,0)"},
+                name="P10-P90",
+                legendgroup="band",
+                showlegend=show,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=p50,
+                name="Median",
+                line={"color": "#4CAF50", "width": 2},
+                legendgroup="median",
+                showlegend=show,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="MWmonth", row=row, col=1)
+    fig.update_layout(
+        title="Stored Energy by Bus (p10/p50/p90)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=300 * len(bus_ids),
+    )
+    return fig_to_html(fig)
+
+
 def chart_hydro_gen_by_bus(
     hydros_lf: pl.LazyFrame,
     hydro_bus_map: dict[int, int],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Stacked area of hydro generation by bus."""
     hbus_df = pl.DataFrame(
         {"hydro_id": list(hydro_bus_map.keys()), "bus_id": list(hydro_bus_map.values())}
     )
     gen_by_bus = (
-        hydros_lf.filter(pl.col("block_id") == 0)
+        hydros_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .join(hbus_df.lazy(), on="hydro_id")
+        .group_by(["scenario_id", "stage_id", "bus_id", "hydro_id"])
+        .agg((pl.col("generation_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by(["scenario_id", "stage_id", "bus_id"])
         .agg(pl.col("generation_mw").sum())
         .group_by(["stage_id", "bus_id"])
@@ -906,7 +1141,7 @@ def chart_hydro_gen_by_bus(
             )
         )
     fig.update_layout(
-        title="Hydro Generation by Bus (Block 0, avg across scenarios)",
+        title="Hydro Generation by Bus (block-hours weighted avg, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="MW",
         legend=_LEGEND,
@@ -920,13 +1155,14 @@ def chart_spillage_by_stage(
     hydros_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
     top_n: int = 5,
 ) -> str:
     """Total spillage with top contributing hydros highlighted."""
     top_hydros = (
-        hydros_lf.filter(pl.col("block_id") == 0)
+        hydros_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "hydro_id"])
-        .agg(pl.col("spillage_m3s").sum())
+        .agg((pl.col("spillage_m3s") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by("hydro_id")
         .agg(pl.col("spillage_m3s").mean())
         .sort("spillage_m3s", descending=True)
@@ -936,7 +1172,9 @@ def chart_spillage_by_stage(
     )
 
     total_spill = (
-        hydros_lf.filter(pl.col("block_id") == 0)
+        hydros_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
+        .group_by(["scenario_id", "stage_id", "hydro_id"])
+        .agg((pl.col("spillage_m3s") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by(["scenario_id", "stage_id"])
         .agg(pl.col("spillage_m3s").sum())
         .group_by("stage_id")
@@ -963,9 +1201,10 @@ def chart_spillage_by_stage(
     for i, hid in enumerate(top_hydros):
         hname = entity_name(names, "hydros", hid)
         spill = (
-            hydros_lf.filter((pl.col("block_id") == 0) & (pl.col("hydro_id") == hid))
+            hydros_lf.filter(pl.col("hydro_id") == hid)
+            .join(bh_df.lazy(), on=["stage_id", "block_id"])
             .group_by(["scenario_id", "stage_id"])
-            .agg(pl.col("spillage_m3s").sum())
+            .agg((pl.col("spillage_m3s") * pl.col("_bh")).sum() / pl.col("_bh").sum())
             .group_by("stage_id")
             .agg(pl.col("spillage_m3s").mean())
             .sort("stage_id")
@@ -998,13 +1237,17 @@ def chart_inflow_slack(
     hydros_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
     top_n: int = 5,
 ) -> str:
     """Inflow nonnegativity slack by stage."""
     top_hydros = (
-        hydros_lf.filter(pl.col("block_id") == 0)
+        hydros_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "hydro_id"])
-        .agg(pl.col("inflow_nonnegativity_slack_m3s").sum())
+        .agg(
+            (pl.col("inflow_nonnegativity_slack_m3s") * pl.col("_bh")).sum()
+            / pl.col("_bh").sum()
+        )
         .group_by("hydro_id")
         .agg(pl.col("inflow_nonnegativity_slack_m3s").mean())
         .sort("inflow_nonnegativity_slack_m3s", descending=True)
@@ -1014,9 +1257,12 @@ def chart_inflow_slack(
     )
 
     total_slack = (
-        hydros_lf.filter(pl.col("block_id") == 0)
+        hydros_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id"])
-        .agg(pl.col("inflow_nonnegativity_slack_m3s").sum())
+        .agg(
+            (pl.col("inflow_nonnegativity_slack_m3s") * pl.col("_bh")).sum()
+            / pl.col("_bh").sum()
+        )
         .group_by("stage_id")
         .agg(pl.col("inflow_nonnegativity_slack_m3s").mean())
         .sort("stage_id")
@@ -1043,9 +1289,13 @@ def chart_inflow_slack(
     for i, hid in enumerate(top_hydros):
         hname = entity_name(names, "hydros", hid)
         slack = (
-            hydros_lf.filter((pl.col("block_id") == 0) & (pl.col("hydro_id") == hid))
+            hydros_lf.filter(pl.col("hydro_id") == hid)
+            .join(bh_df.lazy(), on=["stage_id", "block_id"])
             .group_by(["scenario_id", "stage_id"])
-            .agg(pl.col("inflow_nonnegativity_slack_m3s").sum())
+            .agg(
+                (pl.col("inflow_nonnegativity_slack_m3s") * pl.col("_bh")).sum()
+                / pl.col("_bh").sum()
+            )
             .group_by("stage_id")
             .agg(pl.col("inflow_nonnegativity_slack_m3s").mean())
             .sort("stage_id")
@@ -1130,12 +1380,13 @@ def chart_net_flow_by_line(
     exchanges_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Net flow by line by stage."""
     flow_data = (
-        exchanges_lf.filter(pl.col("block_id") == 0)
+        exchanges_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "line_id"])
-        .agg(pl.col("net_flow_mw").mean())
+        .agg((pl.col("net_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by(["stage_id", "line_id"])
         .agg(pl.col("net_flow_mw").mean())
         .sort("stage_id")
@@ -1184,14 +1435,19 @@ def chart_capacity_utilization_heatmap(
     line_bounds: pd.DataFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Heatmap of capacity utilization: lines vs stages."""
     flow_data = (
-        exchanges_lf.filter(pl.col("block_id") == 0)
+        exchanges_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "line_id"])
         .agg(
-            pl.col("direct_flow_mw").mean().alias("direct"),
-            pl.col("reverse_flow_mw").mean().alias("reverse"),
+            (
+                (pl.col("direct_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
+            ).alias("direct"),
+            (
+                (pl.col("reverse_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
+            ).alias("reverse"),
         )
         .group_by(["stage_id", "line_id"])
         .agg(
@@ -1258,14 +1514,24 @@ def chart_capacity_utilization_heatmap(
 def chart_flow_direction_summary(
     exchanges_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Average direct and reverse flow per line (horizontal grouped bar)."""
     flow_data = (
-        exchanges_lf.filter(pl.col("block_id") == 0)
+        exchanges_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
+        .group_by(["scenario_id", "stage_id", "line_id"])
+        .agg(
+            (
+                (pl.col("direct_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
+            ).alias("direct"),
+            (
+                (pl.col("reverse_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
+            ).alias("reverse"),
+        )
         .group_by(["scenario_id", "line_id"])
         .agg(
-            pl.col("direct_flow_mw").mean().alias("direct"),
-            pl.col("reverse_flow_mw").mean().alias("reverse"),
+            pl.col("direct").mean(),
+            pl.col("reverse").mean(),
         )
         .group_by("line_id")
         .agg(
@@ -1314,18 +1580,21 @@ def build_interactive_exchange_detail(
     exchanges_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Build HTML with embedded per-line p10/p50/p90 data and JS dropdown."""
-    # Collect all exchange block_id==0 data once
+    # Collect block-hours-weighted average per scenario/stage/line
+    flow_cols = ["net_flow_mw", "direct_flow_mw", "reverse_flow_mw"]
+    schema = exchanges_lf.collect_schema()
+    avail_flow_cols = [c for c in flow_cols if c in schema]
     ex0 = (
-        exchanges_lf.filter(pl.col("block_id") == 0)
-        .select(
-            "scenario_id",
-            "stage_id",
-            "line_id",
-            "net_flow_mw",
-            "direct_flow_mw",
-            "reverse_flow_mw",
+        exchanges_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
+        .group_by(["scenario_id", "stage_id", "line_id"])
+        .agg(
+            *[
+                ((pl.col(c) * pl.col("_bh")).sum() / pl.col("_bh").sum()).alias(c)
+                for c in avail_flow_cols
+            ]
         )
         .collect(engine="streaming")
     )
@@ -1348,9 +1617,7 @@ def build_interactive_exchange_detail(
                     entry[f"{prefix}_{sfx}"] = [0.0] * len(stages)
                 continue
             pcts = (
-                ldf.group_by(["scenario_id", "stage_id"])
-                .agg(pl.col(col).mean())
-                .group_by("stage_id")
+                ldf.group_by("stage_id")
                 .agg(
                     pl.col(col).quantile(0.1, interpolation="linear").alias("p10"),
                     pl.col(col).quantile(0.5, interpolation="linear").alias("p50"),
@@ -1519,12 +1786,14 @@ def chart_spot_price_by_bus(
     buses_lf: pl.LazyFrame,
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
-    """Spot price by bus by stage."""
+    """Spot price by bus by stage (block-hours weighted average)."""
     sp_data = (
-        buses_lf.filter((pl.col("block_id") == 0) & (pl.col("bus_id") <= 3))
+        buses_lf.filter(pl.col("bus_id") <= 3)
+        .join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "bus_id"])
-        .agg(pl.col("spot_price").mean())
+        .agg((pl.col("spot_price") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by(["stage_id", "bus_id"])
         .agg(pl.col("spot_price").mean())
         .sort("stage_id")
@@ -1548,7 +1817,7 @@ def chart_spot_price_by_bus(
             )
         )
     fig.update_layout(
-        title="Spot Price by Bus by Stage (Block 0, avg across scenarios)",
+        title="Spot Price by Bus by Stage (block-hours weighted avg, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="Spot Price (R$/MWh)",
         legend=_LEGEND,
@@ -1764,10 +2033,17 @@ def chart_thermal_merit_order(
 def chart_ncs_available_vs_generated(
     ncs_lf: pl.LazyFrame,
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Stacked area of NCS available vs generated with curtailment gap."""
     data = (
-        ncs_lf.filter(pl.col("block_id") == 0)
+        ncs_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
+        .group_by(["scenario_id", "stage_id", "non_controllable_id"])
+        .agg(
+            (pl.col("available_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum(),
+            (pl.col("generation_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum(),
+            (pl.col("curtailment_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum(),
+        )
         .group_by(["scenario_id", "stage_id"])
         .agg(
             pl.col("available_mw").sum(),
@@ -1817,7 +2093,7 @@ def chart_ncs_available_vs_generated(
         )
     )
     fig.update_layout(
-        title="NCS Available vs Generated (Block 0, avg across scenarios)",
+        title="NCS Available vs Generated (block-hours weighted avg, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="MW",
         legend=_LEGEND,
@@ -1868,6 +2144,7 @@ def chart_thermal_by_cost_bracket(
     thermals_lf: pl.LazyFrame,
     thermal_meta: dict[int, dict],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Stacked area of thermal generation grouped by cost bracket."""
     bracket_colors = {
@@ -1891,9 +2168,9 @@ def chart_thermal_by_cost_bracket(
     bracket_map = {tid: assign_bracket(c) for tid, c in cost_map.items()}
 
     t0 = (
-        thermals_lf.filter(pl.col("block_id") == 0)
+        thermals_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "thermal_id"])
-        .agg(pl.col("generation_mw").sum())
+        .agg((pl.col("generation_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by(["stage_id", "thermal_id"])
         .agg(pl.col("generation_mw").mean())
         .sort("stage_id")
@@ -1932,7 +2209,7 @@ def chart_thermal_by_cost_bracket(
             )
         )
     fig.update_layout(
-        title="Thermal Generation by Cost Bracket (Block 0, avg across scenarios)",
+        title="Thermal Generation by Cost Bracket (block-hours weighted avg, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="MW",
         legend=_LEGEND,
@@ -2043,14 +2320,17 @@ def chart_spillage_by_bus(
     hydro_bus_map: dict[int, int],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Total spillage by bus by stage."""
     hbus_df = pl.DataFrame(
         {"hydro_id": list(hydro_bus_map.keys()), "bus_id": list(hydro_bus_map.values())}
     )
     spill_data = (
-        hydros_lf.filter(pl.col("block_id") == 0)
+        hydros_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .join(hbus_df.lazy(), on="hydro_id")
+        .group_by(["scenario_id", "stage_id", "bus_id", "hydro_id"])
+        .agg((pl.col("spillage_m3s") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by(["scenario_id", "stage_id", "bus_id"])
         .agg(pl.col("spillage_m3s").sum())
         .group_by(["stage_id", "bus_id"])
@@ -2235,6 +2515,7 @@ def chart_top_hydros_detail(
     hydros_lf: pl.LazyFrame,
     hydro_meta: dict[int, dict],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
     top_n: int = 8,
 ) -> str:
     """Generation, storage, and spillage timeseries for top hydro plants."""
@@ -2243,24 +2524,34 @@ def chart_top_hydros_detail(
     ]
     hids = [hid for hid, _ in ranked]
 
-    data = (
-        hydros_lf.filter((pl.col("block_id") == 0) & pl.col("hydro_id").is_in(hids))
+    # Flow variables (generation, spillage): block-hours weighted average
+    flow_data = (
+        hydros_lf.filter(pl.col("hydro_id").is_in(hids))
+        .join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "hydro_id"])
         .agg(
-            pl.col("generation_mw").mean(),
-            pl.col("storage_final_hm3").mean(),
-            pl.col("spillage_m3s").mean(),
+            (pl.col("generation_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum(),
+            (pl.col("spillage_m3s") * pl.col("_bh")).sum() / pl.col("_bh").sum(),
         )
         .group_by(["stage_id", "hydro_id"])
         .agg(
             pl.col("generation_mw").mean(),
-            pl.col("storage_final_hm3").mean(),
             pl.col("spillage_m3s").mean(),
         )
         .sort("stage_id")
         .collect(engine="streaming")
     )
-    stages = sorted(data["stage_id"].unique().to_list())
+    # Stage-level variable (storage): block_id==0 only
+    stor_data = (
+        hydros_lf.filter((pl.col("block_id") == 0) & pl.col("hydro_id").is_in(hids))
+        .group_by(["scenario_id", "stage_id", "hydro_id"])
+        .agg(pl.col("storage_final_hm3").mean())
+        .group_by(["stage_id", "hydro_id"])
+        .agg(pl.col("storage_final_hm3").mean())
+        .sort("stage_id")
+        .collect(engine="streaming")
+    )
+    stages = sorted(flow_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
 
     fig = make_subplots(
@@ -2285,12 +2576,17 @@ def chart_top_hydros_detail(
         meta = hydro_meta[hid]
         name = meta["name"]
         color = palette[i % len(palette)]
-        sub = data.filter(pl.col("hydro_id") == hid)
-        gen_map = dict(zip(sub["stage_id"].to_list(), sub["generation_mw"].to_list()))
-        stor_map = dict(
-            zip(sub["stage_id"].to_list(), sub["storage_final_hm3"].to_list())
+        sub_f = flow_data.filter(pl.col("hydro_id") == hid)
+        sub_s = stor_data.filter(pl.col("hydro_id") == hid)
+        gen_map = dict(
+            zip(sub_f["stage_id"].to_list(), sub_f["generation_mw"].to_list())
         )
-        spill_map = dict(zip(sub["stage_id"].to_list(), sub["spillage_m3s"].to_list()))
+        stor_map = dict(
+            zip(sub_s["stage_id"].to_list(), sub_s["storage_final_hm3"].to_list())
+        )
+        spill_map = dict(
+            zip(sub_f["stage_id"].to_list(), sub_f["spillage_m3s"].to_list())
+        )
 
         fig.add_trace(
             go.Scatter(
@@ -2342,6 +2638,7 @@ def build_top_hydros_table(
     hydros_lf: pl.LazyFrame,
     hydro_meta: dict[int, dict],
     bus_names: dict[int, str],
+    bh_df: pl.DataFrame,
     top_n: int = 20,
 ) -> str:
     """HTML table of top hydro plants with key simulation metrics."""
@@ -2350,25 +2647,43 @@ def build_top_hydros_table(
     ]
     hids = [hid for hid, _ in ranked]
 
-    stats = (
+    # Flow variables (generation, spillage): block-hours weighted average
+    flow_stats = (
+        hydros_lf.filter(pl.col("hydro_id").is_in(hids))
+        .join(bh_df.lazy(), on=["stage_id", "block_id"])
+        .group_by(["scenario_id", "stage_id", "hydro_id"])
+        .agg(
+            (pl.col("generation_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum(),
+            (pl.col("spillage_m3s") * pl.col("_bh")).sum() / pl.col("_bh").sum(),
+        )
+        .group_by(["scenario_id", "hydro_id"])
+        .agg(pl.col("generation_mw").mean(), pl.col("spillage_m3s").mean())
+        .group_by("hydro_id")
+        .agg(pl.col("generation_mw").mean(), pl.col("spillage_m3s").mean())
+        .collect(engine="streaming")
+    )
+    # Stage-level variables (water_value, storage): block_id==0 only
+    stage_stats = (
         hydros_lf.filter((pl.col("block_id") == 0) & pl.col("hydro_id").is_in(hids))
         .group_by(["scenario_id", "hydro_id"])
         .agg(
-            pl.col("generation_mw").mean(),
-            pl.col("spillage_m3s").mean(),
             pl.col("water_value_per_hm3").mean(),
             pl.col("storage_final_hm3").mean(),
         )
         .group_by("hydro_id")
-        .agg(
-            pl.col("generation_mw").mean(),
-            pl.col("spillage_m3s").mean(),
-            pl.col("water_value_per_hm3").mean(),
-            pl.col("storage_final_hm3").mean(),
-        )
+        .agg(pl.col("water_value_per_hm3").mean(), pl.col("storage_final_hm3").mean())
         .collect(engine="streaming")
     )
-    stats_map = {r["hydro_id"]: r for r in stats.iter_rows(named=True)}
+    flow_map = {r["hydro_id"]: r for r in flow_stats.iter_rows(named=True)}
+    stage_map = {r["hydro_id"]: r for r in stage_stats.iter_rows(named=True)}
+
+    # Merge into unified stats_map
+    stats_map: dict[int, dict] = {}
+    for hid in hids:
+        entry: dict = {}
+        entry.update(flow_map.get(hid, {}))
+        entry.update(stage_map.get(hid, {}))
+        stats_map[hid] = entry
 
     rows_html = []
     for hid, meta in ranked:
@@ -5087,10 +5402,13 @@ def section_title(text: str) -> str:
 def chart_thermal_generation_total(
     thermals_lf: pl.LazyFrame,
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Total thermal generation with p10/p50/p90 bands across all plants."""
     pcts = (
-        thermals_lf.filter(pl.col("block_id") == 0)
+        thermals_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
+        .group_by(["scenario_id", "stage_id", "thermal_id"])
+        .agg((pl.col("generation_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by(["scenario_id", "stage_id"])
         .agg(pl.col("generation_mw").sum())
         .group_by("stage_id")
@@ -5159,6 +5477,7 @@ def chart_thermal_gen_by_bus(
     thermal_meta: dict[int, dict],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
 ) -> str:
     """Stacked area of thermal generation by bus (avg across scenarios)."""
     tbus_map = {k: v["bus_id"] for k, v in thermal_meta.items()}
@@ -5166,8 +5485,10 @@ def chart_thermal_gen_by_bus(
         {"thermal_id": list(tbus_map.keys()), "bus_id": list(tbus_map.values())}
     )
     gen_by_bus = (
-        thermals_lf.filter(pl.col("block_id") == 0)
+        thermals_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .join(tbus_df.lazy(), on="thermal_id")
+        .group_by(["scenario_id", "stage_id", "bus_id", "thermal_id"])
+        .agg((pl.col("generation_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum())
         .group_by(["scenario_id", "stage_id", "bus_id"])
         .agg(pl.col("generation_mw").sum())
         .group_by(["stage_id", "bus_id"])
@@ -5193,7 +5514,7 @@ def chart_thermal_gen_by_bus(
             )
         )
     fig.update_layout(
-        title="Thermal Generation by Bus (Block 0, avg across scenarios)",
+        title="Thermal Generation by Bus (block-hours weighted avg, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="MW",
         legend=_LEGEND,
@@ -5207,16 +5528,27 @@ def chart_thermal_cost_vs_gen(
     thermals_lf: pl.LazyFrame,
     thermal_meta: dict[int, dict],
     bus_names: dict[int, str],
+    bh_df: pl.DataFrame | None = None,
 ) -> str:
     """Scatter: avg generation vs cost_per_mwh, sized by max_mw, colored by bus."""
-    avg_gen_df = (
-        thermals_lf.filter(pl.col("block_id") == 0)
-        .group_by(["scenario_id", "thermal_id"])
-        .agg(pl.col("generation_mw").mean())
-        .group_by("thermal_id")
-        .agg(pl.col("generation_mw").mean())
-        .collect(engine="streaming")
-    )
+    if bh_df is not None:
+        avg_gen_df = (
+            thermals_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
+            .group_by(["scenario_id", "thermal_id"])
+            .agg((pl.col("generation_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum())
+            .group_by("thermal_id")
+            .agg(pl.col("generation_mw").mean())
+            .collect(engine="streaming")
+        )
+    else:
+        avg_gen_df = (
+            thermals_lf.filter(pl.col("block_id") == 0)
+            .group_by(["scenario_id", "thermal_id"])
+            .agg(pl.col("generation_mw").mean())
+            .group_by("thermal_id")
+            .agg(pl.col("generation_mw").mean())
+            .collect(engine="streaming")
+        )
     avg_gen = dict(
         zip(avg_gen_df["thermal_id"].to_list(), avg_gen_df["generation_mw"].to_list())
     )
@@ -5282,20 +5614,26 @@ def build_interactive_plant_details(
     hydro_meta: dict[int, dict],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
+    bh_df: pl.DataFrame,
     lp_bounds: pd.DataFrame | None = None,
 ) -> str:
     """Build HTML with embedded per-hydro p10/p50/p90 data, LP bounds, and JS dropdown."""
-    metrics = [
+    # Flow variables: block-hours weighted average across blocks
+    flow_metrics = [
         "generation_mw",
-        "storage_final_hm3",
         "spillage_m3s",
-        "inflow_m3s",
         "turbined_m3s",
+        "outflow_m3s",
+    ]
+    # Stage-level variables: constant across blocks, use block_id==0
+    stage_metrics = [
+        "storage_final_hm3",
+        "inflow_m3s",
         "water_value_per_hm3",
         "evaporation_m3s",
-        "outflow_m3s",
         "water_withdrawal_violation_m3s",
     ]
+    all_metrics = flow_metrics + stage_metrics
     short = {
         "generation_mw": "gen",
         "storage_final_hm3": "stor",
@@ -5309,18 +5647,25 @@ def build_interactive_plant_details(
     }
 
     schema = hydros_lf.collect_schema()
-    available_metrics = [m for m in metrics if m in schema]
+    avail_flow = [m for m in flow_metrics if m in schema]
+    avail_stage = [m for m in stage_metrics if m in schema]
+    available_metrics = avail_flow + avail_stage
 
-    # Single streaming scan for all hydros, all metrics
-    all_pcts = (
-        hydros_lf.filter(pl.col("block_id") == 0)
+    # Weighted average for flow metrics
+    flow_pcts = (
+        hydros_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "hydro_id"])
-        .agg([pl.col(m).mean() for m in available_metrics])
+        .agg(
+            *[
+                ((pl.col(m) * pl.col("_bh")).sum() / pl.col("_bh").sum()).alias(m)
+                for m in avail_flow
+            ]
+        )
         .group_by(["stage_id", "hydro_id"])
         .agg(
             [
                 expr
-                for m in available_metrics
+                for m in avail_flow
                 for expr in [
                     pl.col(m).quantile(0.1, interpolation="linear").alias(f"{m}_p10"),
                     pl.col(m).quantile(0.5, interpolation="linear").alias(f"{m}_p50"),
@@ -5330,7 +5675,42 @@ def build_interactive_plant_details(
         )
         .sort(["hydro_id", "stage_id"])
         .collect(engine="streaming")
+        if avail_flow
+        else pl.DataFrame()
     )
+
+    # Simple mean for stage-level metrics (block_id==0)
+    stage_pcts = (
+        hydros_lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", "stage_id", "hydro_id"])
+        .agg([pl.col(m).mean() for m in avail_stage])
+        .group_by(["stage_id", "hydro_id"])
+        .agg(
+            [
+                expr
+                for m in avail_stage
+                for expr in [
+                    pl.col(m).quantile(0.1, interpolation="linear").alias(f"{m}_p10"),
+                    pl.col(m).quantile(0.5, interpolation="linear").alias(f"{m}_p50"),
+                    pl.col(m).quantile(0.9, interpolation="linear").alias(f"{m}_p90"),
+                ]
+            ]
+        )
+        .sort(["hydro_id", "stage_id"])
+        .collect(engine="streaming")
+        if avail_stage
+        else pl.DataFrame()
+    )
+
+    # Join flow and stage percentile frames on [stage_id, hydro_id]
+    if not flow_pcts.is_empty() and not stage_pcts.is_empty():
+        all_pcts = flow_pcts.join(
+            stage_pcts, on=["stage_id", "hydro_id"], how="full", coalesce=True
+        )
+    elif not flow_pcts.is_empty():
+        all_pcts = flow_pcts
+    else:
+        all_pcts = stage_pcts
 
     stages = sorted(all_pcts["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
@@ -5350,7 +5730,7 @@ def build_interactive_plant_details(
             "max_turb": round(meta["max_turbined"], 1),
         }
         sub_map: dict[int, dict] = {r["stage_id"]: r for r in sub.iter_rows(named=True)}
-        for m in metrics:
+        for m in all_metrics:
             k = short[m]
             if m not in available_metrics:
                 for sfx in ["p10", "p50", "p90"]:
@@ -5543,6 +5923,7 @@ def build_interactive_thermal_details(
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
     lp_bounds: pd.DataFrame | None = None,
+    bh_df: pl.DataFrame | None = None,
 ) -> str:
     """Build HTML with embedded per-thermal p10/p50/p90 data, LP bounds, and JS dropdown."""
     metrics = ["generation_mw", "generation_cost", "generation_mwh"]
@@ -5555,25 +5936,65 @@ def build_interactive_thermal_details(
     schema = thermals_lf.collect_schema()
     available_metrics = [m for m in metrics if m in schema]
 
-    all_pcts = (
-        thermals_lf.filter(pl.col("block_id") == 0)
-        .group_by(["scenario_id", "stage_id", "thermal_id"])
-        .agg([pl.col(m).mean() for m in available_metrics])
-        .group_by(["stage_id", "thermal_id"])
-        .agg(
-            [
-                expr
-                for m in available_metrics
-                for expr in [
-                    pl.col(m).quantile(0.1, interpolation="linear").alias(f"{m}_p10"),
-                    pl.col(m).quantile(0.5, interpolation="linear").alias(f"{m}_p50"),
-                    pl.col(m).quantile(0.9, interpolation="linear").alias(f"{m}_p90"),
+    # All thermal metrics are flow variables (generation_mw, generation_cost,
+    # generation_mwh) — use block-hours weighted average.
+    if bh_df is not None:
+        all_pcts = (
+            thermals_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
+            .group_by(["scenario_id", "stage_id", "thermal_id"])
+            .agg(
+                [
+                    (pl.col(m) * pl.col("_bh")).sum() / pl.col("_bh").sum()
+                    for m in available_metrics
                 ]
-            ]
+            )
+            .group_by(["stage_id", "thermal_id"])
+            .agg(
+                [
+                    expr
+                    for m in available_metrics
+                    for expr in [
+                        pl.col(m)
+                        .quantile(0.1, interpolation="linear")
+                        .alias(f"{m}_p10"),
+                        pl.col(m)
+                        .quantile(0.5, interpolation="linear")
+                        .alias(f"{m}_p50"),
+                        pl.col(m)
+                        .quantile(0.9, interpolation="linear")
+                        .alias(f"{m}_p90"),
+                    ]
+                ]
+            )
+            .sort(["thermal_id", "stage_id"])
+            .collect(engine="streaming")
         )
-        .sort(["thermal_id", "stage_id"])
-        .collect(engine="streaming")
-    )
+    else:
+        all_pcts = (
+            thermals_lf.filter(pl.col("block_id") == 0)
+            .group_by(["scenario_id", "stage_id", "thermal_id"])
+            .agg([pl.col(m).mean() for m in available_metrics])
+            .group_by(["stage_id", "thermal_id"])
+            .agg(
+                [
+                    expr
+                    for m in available_metrics
+                    for expr in [
+                        pl.col(m)
+                        .quantile(0.1, interpolation="linear")
+                        .alias(f"{m}_p10"),
+                        pl.col(m)
+                        .quantile(0.5, interpolation="linear")
+                        .alias(f"{m}_p50"),
+                        pl.col(m)
+                        .quantile(0.9, interpolation="linear")
+                        .alias(f"{m}_p90"),
+                    ]
+                ]
+            )
+            .sort(["thermal_id", "stage_id"])
+            .collect(engine="streaming")
+        )
 
     stages = sorted(all_pcts["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
@@ -5783,6 +6204,15 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     for s in stages_data["stages"]:
         for b in s["blocks"]:
             block_hours[(s["id"], b["id"])] = b["hours"]
+
+    # Build block-hours DataFrame once for weighted-average joins across all chart functions
+    bh_df = pl.DataFrame(
+        {
+            "stage_id": [k[0] for k in block_hours.keys()],
+            "block_id": [k[1] for k in block_hours.keys()],
+            "_bh": list(block_hours.values()),
+        }
+    )
 
     # Performance / solver data (optional — graceful fallback to empty frames)
     timing_path = case_dir / "output" / "training" / "timing" / "iterations.parquet"
@@ -6007,22 +6437,32 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     print("Building Tab 3: Hydro Operations ...")
     tab_contents["tab-hydro"] = (
         section_title("Aggregate Reservoir Storage")
-        + '<div class="chart-grid-single">'
+        + '<div class="chart-grid">'
         + wrap_chart(chart_hydro_storage(hydros_lf, stage_labels))
+        + wrap_chart(chart_stored_energy(hydros_lf, hydro_meta, stage_labels))
         + "</div>"
-        + section_title("Storage by Bus")
-        + '<div class="chart-grid-single">'
+        + section_title("Storage & Stored Energy by Bus")
+        + '<div class="chart-grid">'
         + wrap_chart(
             chart_storage_by_bus(hydros_lf, hydro_bus_map, bus_names, stage_labels)
+        )
+        + wrap_chart(
+            chart_stored_energy_by_bus(
+                hydros_lf, hydro_meta, hydro_bus_map, bus_names, stage_labels
+            )
         )
         + "</div>"
         + section_title("Hydro Generation & Spillage by Bus")
         + '<div class="chart-grid">'
         + wrap_chart(
-            chart_hydro_gen_by_bus(hydros_lf, hydro_bus_map, bus_names, stage_labels)
+            chart_hydro_gen_by_bus(
+                hydros_lf, hydro_bus_map, bus_names, stage_labels, bh_df
+            )
         )
         + wrap_chart(
-            chart_spillage_by_bus(hydros_lf, hydro_bus_map, bus_names, stage_labels)
+            chart_spillage_by_bus(
+                hydros_lf, hydro_bus_map, bus_names, stage_labels, bh_df
+            )
         )
         + "</div>"
         + section_title("Water Values & Inflow Slack")
@@ -6041,7 +6481,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-plants"] = section_title(
         "Plant Explorer"
     ) + build_interactive_plant_details(
-        hydros_lf, hydro_meta, bus_names, stage_labels, lp_bounds
+        hydros_lf, hydro_meta, bus_names, stage_labels, bh_df, lp_bounds
     )
 
     # ------------------------------------------------------------------
@@ -6050,13 +6490,13 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     print("Building Tab 5: Exchanges ...")
     tab_contents["tab-exchanges"] = (
         section_title("Line Explorer")
-        + build_interactive_exchange_detail(exchanges_lf, names, stage_labels)
+        + build_interactive_exchange_detail(exchanges_lf, names, stage_labels, bh_df)
         + section_title("Capacity Utilization")
         + '<div class="chart-grid-single">'
         + (
             wrap_chart(
                 chart_capacity_utilization_heatmap(
-                    exchanges_lf, line_bounds, names, stage_labels
+                    exchanges_lf, line_bounds, names, stage_labels, bh_df
                 )
             )
             if not line_bounds.empty
@@ -6065,7 +6505,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         + "</div>"
         + section_title("Flow Direction Summary")
         + '<div class="chart-grid">'
-        + wrap_chart(chart_flow_direction_summary(exchanges_lf, names))
+        + wrap_chart(chart_flow_direction_summary(exchanges_lf, names, bh_df))
         + "</div>"
     )
 
@@ -6095,7 +6535,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-ncs-thermal"] = (
         section_title("NCS Available vs Generated")
         + '<div class="chart-grid-single">'
-        + wrap_chart(chart_ncs_available_vs_generated(ncs_lf, stage_labels))
+        + wrap_chart(chart_ncs_available_vs_generated(ncs_lf, stage_labels, bh_df))
         + "</div>"
         + section_title("NCS Curtailment by Source")
         + '<div class="chart-grid-single">'
@@ -6110,12 +6550,14 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-thermal"] = (
         section_title("Total Thermal Generation")
         + '<div class="chart-grid-single">'
-        + wrap_chart(chart_thermal_generation_total(thermals_lf, stage_labels))
+        + wrap_chart(chart_thermal_generation_total(thermals_lf, stage_labels, bh_df))
         + "</div>"
         + section_title("Thermal Generation by Bus")
         + '<div class="chart-grid-single">'
         + wrap_chart(
-            chart_thermal_gen_by_bus(thermals_lf, thermal_meta, bus_names, stage_labels)
+            chart_thermal_gen_by_bus(
+                thermals_lf, thermal_meta, bus_names, stage_labels, bh_df
+            )
         )
         + "</div>"
     )
@@ -6127,7 +6569,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
     tab_contents["tab-thermal-plants"] = section_title(
         "Thermal Plant Explorer"
     ) + build_interactive_thermal_details(
-        thermals_lf, thermal_meta, bus_names, stage_labels, lp_bounds
+        thermals_lf, thermal_meta, bus_names, stage_labels, lp_bounds, bh_df
     )
 
     # ------------------------------------------------------------------

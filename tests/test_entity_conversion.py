@@ -62,6 +62,7 @@ def _make_nw_files(
         c_adic=c_adic,
         cvar=cvar,
         agrint=agrint,
+        re_dat=None,
     )
 
 

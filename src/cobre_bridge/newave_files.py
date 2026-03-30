@@ -99,6 +99,7 @@ class NewaveFiles:
     c_adic: Path | None
     cvar: Path | None
     agrint: Path | None
+    re_dat: Path | None
 
     @classmethod
     def from_directory(cls, directory: Path) -> NewaveFiles:
@@ -183,6 +184,7 @@ class NewaveFiles:
         c_adic = _opt("c_adic")
         cvar = _opt("cvar")
         agrint = _opt("agrint")
+        re_dat = _opt("re")
 
         return cls(
             directory=directory,
@@ -207,4 +209,5 @@ class NewaveFiles:
             c_adic=c_adic,
             cvar=cvar,
             agrint=agrint,
+            re_dat=re_dat,
         )
