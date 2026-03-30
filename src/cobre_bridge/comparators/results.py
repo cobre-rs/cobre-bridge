@@ -120,6 +120,8 @@ def _compare_hydros(
     # Build lookup: (newave_code, stage_0based, variable) -> nw_value
     nw_lookup: dict[tuple[int, int, str], float] = {}
     for row in nw_hydro.iter_rows(named=True):
+        if row["value"] is None:
+            continue
         code = int(row["newave_code"])
         stage = int(row["stage"]) - 1  # Convert 1-indexed to 0-indexed.
         var = str(row["variable"]).strip().upper()
@@ -179,6 +181,8 @@ def _compare_thermals(
 
     nw_lookup: dict[tuple[int, int], float] = {}
     for row in nw_thermal.iter_rows(named=True):
+        if row["value"] is None:
+            continue
         code = int(row["newave_code"])
         stage = int(row["stage"]) - 1
         nw_lookup[(code, stage)] = float(row["value"])
@@ -226,6 +230,8 @@ def _compare_buses(
     # Build lookup: (newave_code, stage, variable) -> value
     nw_lookup: dict[tuple[int, int, str], float] = {}
     for row in nw_system.iter_rows(named=True):
+        if row["value"] is None:
+            continue
         code = int(row["newave_code"])
         stage = int(row["stage"]) - 1
         var = str(row["variable"]).strip().upper()
@@ -319,12 +325,16 @@ def _compare_productivity(
     """Compare hydro productivity values."""
     results: list[ResultComparison] = []
 
-    nw_lookup: dict[int, float] = {}
+    # nw_prod has plant_name (str) and productivity (float).
+    # Build lookup by uppercased name for fuzzy matching.
+    nw_lookup: dict[str, float] = {}
     for row in nw_prod.iter_rows(named=True):
-        nw_lookup[int(row["newave_code"])] = float(row["productivity"])
+        name = str(row["plant_name"]).strip().upper()
+        nw_lookup[name] = float(row["productivity"])
 
     for hydro in alignment.hydros:
-        nw_val = nw_lookup.get(hydro.newave_code)
+        # Try matching by name (uppercased).
+        nw_val = nw_lookup.get(hydro.name.strip().upper())
         if nw_val is None:
             continue
         meta = cobre_meta.get(hydro.cobre_id)

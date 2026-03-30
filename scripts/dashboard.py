@@ -5294,6 +5294,7 @@ def build_interactive_plant_details(
         "water_value_per_hm3",
         "evaporation_m3s",
         "outflow_m3s",
+        "water_withdrawal_violation_m3s",
     ]
     short = {
         "generation_mw": "gen",
@@ -5304,6 +5305,7 @@ def build_interactive_plant_details(
         "water_value_per_hm3": "wv",
         "evaporation_m3s": "evap",
         "outflow_m3s": "outflow",
+        "water_withdrawal_violation_m3s": "ww",
     }
 
     schema = hydros_lf.collect_schema()
@@ -5405,7 +5407,11 @@ def build_interactive_plant_details(
         "</div>"
         '<div class="chart-grid">'
         '<div class="chart-card"><div id="hd-wv" style="width:100%;height:350px;"></div></div>'
-        '<div class="chart-card"><div id="hd-misc" style="width:100%;height:350px;"></div></div>'
+        '<div class="chart-card"><div id="hd-outflow" style="width:100%;height:350px;"></div></div>'
+        "</div>"
+        '<div class="chart-grid">'
+        '<div class="chart-card"><div id="hd-evap" style="width:100%;height:350px;"></div></div>'
+        '<div class="chart-card"><div id="hd-ww" style="width:100%;height:350px;"></div></div>'
         "</div>"
     )
 
@@ -5476,13 +5482,16 @@ function updateHydroDetail() {
     _line('P90', d.inflow_p90, '#4A8B6F', 1, 'dot'),
   ], _lo({title:'Inflow (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
 
-  Plotly.react('hd-turb', [
+  var turbTraces = [
     _band('P10-P90', d.turb_p10, d.turb_p90, 'rgba(245,166,35,0.15)'),
     _line('P50', d.turb_p50, '#F5A623'),
     _line('P10', d.turb_p10, '#F5A623', 1, 'dot'),
     _line('P90', d.turb_p90, '#F5A623', 1, 'dot'),
     _line('Turb Max (LP)', d.turb_max || Array(HD_LABELS.length).fill(d.max_turb), '#DC4C4C', 1, 'dash'),
-  ], _lo({title:'Turbined (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+  ];
+  if(d.turb_min && d.turb_min.some(function(v){return v>0;}))
+    turbTraces.push(_line('Turb Min (LP)', d.turb_min, '#4A8B6F', 1, 'dash'));
+  Plotly.react('hd-turb', turbTraces, _lo({title:'Turbined (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
 
   Plotly.react('hd-spill', [
     _band('P10-P90', d.spill_p10, d.spill_p90, 'rgba(184,115,51,0.15)'),
@@ -5498,10 +5507,29 @@ function updateHydroDetail() {
     _line('P90', d.wv_p90, '#8B9298', 1, 'dot'),
   ], _lo({title:'Water Value (R$/hm\u00b3)', yaxis:{title:'R$/hm\u00b3'}}), _C);
 
-  Plotly.react('hd-misc', [
-    _line('Evaporation P50', d.evap_p50, '#8B5E3C'),
-    _line('Outflow P50', d.outflow_p50, '#4A90B8'),
-  ], _lo({title:'Evaporation & Outflow (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+  var outflowTraces = [
+    _band('P10-P90', d.outflow_p10, d.outflow_p90, 'rgba(74,144,184,0.15)'),
+    _line('P50', d.outflow_p50, '#4A90B8'),
+    _line('P10', d.outflow_p10, '#4A90B8', 1, 'dot'),
+    _line('P90', d.outflow_p90, '#4A90B8', 1, 'dot'),
+  ];
+  if(d.outflow_min && d.outflow_min.some(function(v){return v>0;}))
+    outflowTraces.push(_line('Outflow Min (LP)', d.outflow_min, '#4A8B6F', 1, 'dash'));
+  Plotly.react('hd-outflow', outflowTraces, _lo({title:'Outflow (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+
+  Plotly.react('hd-evap', [
+    _band('P10-P90', d.evap_p10, d.evap_p90, 'rgba(139,94,60,0.15)'),
+    _line('P50', d.evap_p50, '#8B5E3C'),
+    _line('P10', d.evap_p10, '#8B5E3C', 1, 'dot'),
+    _line('P90', d.evap_p90, '#8B5E3C', 1, 'dot'),
+  ], _lo({title:'Evaporation (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+
+  Plotly.react('hd-ww', [
+    _band('P10-P90', d.ww_p10, d.ww_p90, 'rgba(121,85,72,0.15)'),
+    _line('P50', d.ww_p50, '#795548'),
+    _line('P10', d.ww_p10, '#795548', 1, 'dot'),
+    _line('P90', d.ww_p90, '#795548', 1, 'dot'),
+  ], _lo({title:'Water Withdrawal Violation (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
 }
 document.addEventListener('DOMContentLoaded', function(){setTimeout(updateHydroDetail,100);});
 """

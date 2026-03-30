@@ -1059,11 +1059,16 @@ def convert_water_withdrawal(
     for _, row in confhd_df.iterrows():
         posto_to_code[int(row["posto"])] = int(row["codigo_usina"])
 
-    # Read dger for study start date and duration.
+    # Read dger for study start date, duration, and post-study period.
     dger = _Dger.read(str(nw_files.dger))
     start_year: int = int(dger.ano_inicio_estudo)
     start_month: int = int(dger.mes_inicio_estudo)
-    num_stages: int = int(dger.num_anos_estudo or 0) * 12
+    num_study_stages: int = int(dger.num_anos_estudo or 0) * 12
+    _pos = dger.num_anos_pos_estudo
+    num_post_study_stages: int = (
+        int(_pos) * 12 if isinstance(_pos, (int, float)) and _pos else 0
+    )
+    num_total_stages: int = num_study_stages + num_post_study_stages
 
     # Group by (codigo_usina, data) and sum valor.
     grouped = df.groupby(["codigo_usina", "data"], as_index=False)["valor"].sum()
@@ -1094,13 +1099,7 @@ def convert_water_withdrawal(
 
         dt = row["data"]
         stage_id = (dt.year - start_year) * 12 + (dt.month - start_month)
-        if stage_id < 0 or stage_id >= num_stages:
-            _LOG.warning(
-                "Stage %d for posto %d out of range [0, %d); skipping.",
-                stage_id,
-                posto,
-                num_stages,
-            )
+        if stage_id < 0 or stage_id >= num_study_stages:
             continue
 
         # Negate: NEWAVE negative valor = withdrawal; Cobre positive = withdrawal.
@@ -1111,6 +1110,56 @@ def convert_water_withdrawal(
 
     if not hydro_ids:
         return None
+
+    # Extrapolate to post-study period by cycling the last calendar year's
+    # Jan–Dec pattern from dsvagua.  The last year of dsvagua always contains
+    # a full Jan–Dec cycle.  We build a template keyed by calendar month
+    # (1–12) and map each post-study stage to its calendar month.
+    if num_post_study_stages > 0:
+        # Build per-plant template: hydro_id -> {calendar_month: value}
+        # using the last calendar year present in dsvagua per plant.
+        plant_by_date: dict[int, dict[tuple[int, int], float]] = {}
+        for hid, sid, val in zip(hydro_ids, stage_ids, values):
+            # Recover calendar (year, month) from stage_id.
+            total_month = start_month + sid  # 1-based month offset from year start
+            cal_year = start_year + (total_month - 1) // 12
+            cal_month = (total_month - 1) % 12 + 1
+            plant_by_date.setdefault(hid, {})[(cal_year, cal_month)] = val
+
+        # Build per-plant set of stages that already have data.
+        existing_stages: dict[int, set[int]] = {}
+        for hid, sid in zip(hydro_ids, stage_ids):
+            existing_stages.setdefault(hid, set()).add(sid)
+
+        for hid, date_map in plant_by_date.items():
+            last_year = max(y for y, _m in date_map)
+            template: dict[int, float] = {}
+            for m in range(1, 13):
+                if (last_year, m) in date_map:
+                    template[m] = date_map[(last_year, m)]
+
+            if not template:
+                continue
+
+            have = existing_stages.get(hid, set())
+            for s in range(0, num_total_stages):
+                if s in have:
+                    continue
+                total_month = start_month + s
+                cal_month = (total_month - 1) % 12 + 1
+                val = template.get(cal_month)
+                if val is not None:
+                    hydro_ids.append(hid)
+                    stage_ids.append(s)
+                    values.append(val)
+
+        _LOG.info(
+            "Extrapolated water withdrawal to %d post-study stages "
+            "(%d -> %d total stages).",
+            num_post_study_stages,
+            num_study_stages,
+            num_total_stages,
+        )
 
     table = pa.table(
         {

@@ -84,8 +84,11 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
         "water_value_per_hm3",
     ]
 
-    # Filter for available columns only.
     available = set(lf.collect_schema().names())
+
+    # Resolve the entity ID column: prefer "hydro_id", fall back to "entity_id".
+    id_col = "hydro_id" if "hydro_id" in available else "entity_id"
+
     agg_cols = [c for c in value_cols if c in available]
 
     if not agg_cols:
@@ -95,8 +98,9 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
     try:
         result = (
             lf.filter(pl.col("block_id") == 0)
-            .group_by("entity_id", "stage_id")
+            .group_by(id_col, "stage_id")
             .agg([pl.col(c).mean() for c in agg_cols])
+            .rename({id_col: "entity_id"})
             .sort("entity_id", "stage_id")
             .collect(engine="streaming")
         )
@@ -135,11 +139,14 @@ def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
         _LOG.warning("generation_mw column not found in thermals simulation")
         return empty
 
+    id_col = "thermal_id" if "thermal_id" in available else "entity_id"
+
     try:
         result = (
             lf.filter(pl.col("block_id") == 0)
-            .group_by("entity_id", "stage_id")
+            .group_by(id_col, "stage_id")
             .agg(pl.col("generation_mw").mean())
+            .rename({id_col: "entity_id"})
             .sort("entity_id", "stage_id")
             .collect(engine="streaming")
         )
@@ -176,11 +183,14 @@ def read_cobre_bus_means(cobre_output_dir: Path) -> pl.DataFrame:
         _LOG.warning("No recognized value columns in buses simulation")
         return empty
 
+    id_col = "bus_id" if "bus_id" in available else "entity_id"
+
     try:
         result = (
             lf.filter(pl.col("block_id") == 0)
-            .group_by("entity_id", "stage_id")
+            .group_by(id_col, "stage_id")
             .agg([pl.col(c).mean() for c in value_cols])
+            .rename({id_col: "entity_id"})
             .sort("entity_id", "stage_id")
             .collect(engine="streaming")
         )
