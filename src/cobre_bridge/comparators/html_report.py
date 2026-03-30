@@ -186,6 +186,7 @@ COLOR_MATCH = "#4A8B6F"
 COMPARISON_TABS = [
     ("tab-overview", "Overview"),
     ("tab-system", "System"),
+    ("tab-balance", "Energy Balance"),
     ("tab-hydro", "Hydro Operation"),
     ("tab-hydro-detail", "Plant Details"),
     ("tab-thermal", "Thermal Operation"),

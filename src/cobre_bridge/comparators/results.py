@@ -21,6 +21,27 @@ from cobre_bridge.newave_files import NewaveFiles
 _LOG = logging.getLogger(__name__)
 
 
+@dataclass
+class PercentileData:
+    """Cobre simulation percentile statistics for the report.
+
+    Each DataFrame has columns: entity_id, stage_id, and for each
+    variable: ``{var}_p10``, ``{var}_p50``, ``{var}_p90``.
+    """
+
+    hydro: pl.DataFrame = field(default_factory=pl.DataFrame)
+    thermal: pl.DataFrame = field(default_factory=pl.DataFrame)
+    bus: pl.DataFrame = field(default_factory=pl.DataFrame)
+    bus_aggregates: pl.DataFrame = field(default_factory=pl.DataFrame)
+    nw_market: pl.DataFrame = field(default_factory=pl.DataFrame)
+    cobre_bus_meta: dict[int, dict] = field(default_factory=dict)
+    nw_bus_names: dict[int, str] = field(default_factory=dict)
+    nw_convergence: pl.DataFrame = field(default_factory=pl.DataFrame)
+    cobre_convergence: pl.DataFrame = field(default_factory=pl.DataFrame)
+    nw_costs: dict[str, float] = field(default_factory=dict)
+    cobre_costs: dict[str, float] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class ResultComparison:
     """Single variable comparison result for results comparison."""
@@ -426,12 +447,17 @@ def compare_results(
     alignment: EntityAlignment,
     cobre_output_dir: Path,
     tolerance: float = 1e-2,
-) -> list[ResultComparison]:
+) -> tuple[list[ResultComparison], PercentileData]:
     """Compare NEWAVE output results against Cobre simulation means.
 
     Entities are matched by **name** (case-insensitive) rather than by
     converter-assigned IDs, so the comparison works even when the Cobre
     case was built by a different tool.
+
+    Returns
+    -------
+    tuple[list[ResultComparison], PercentileData]
+        Comparison results and Cobre simulation percentile statistics.
 
     Parameters
     ----------
@@ -446,28 +472,30 @@ def compare_results(
     tolerance:
         Relative tolerance for results comparison (informational).
 
-    Returns
-    -------
-    list[ResultComparison]
-        All comparison results across hydro, thermal, bus, convergence,
-        and productivity dimensions.
     """
     from cobre_bridge.comparators.alignment import _read_reference_names
     from cobre_bridge.comparators.cobre_readers import (
+        read_cobre_bus_aggregates,
         read_cobre_bus_means,
         read_cobre_bus_metadata,
+        read_cobre_bus_percentiles,
         read_cobre_convergence,
+        read_cobre_cost_breakdown,
         read_cobre_hydro_means,
         read_cobre_hydro_metadata,
+        read_cobre_hydro_percentiles,
         read_cobre_thermal_means,
         read_cobre_thermal_metadata,
+        read_cobre_thermal_percentiles,
     )
     from cobre_bridge.comparators.newave_readers import (
         _find_saidas_dir,
         read_medias_hydro,
+        read_medias_market,
         read_medias_system,
         read_medias_thermal,
         read_pmo_convergence,
+        read_pmo_cost_breakdown,
         read_pmo_productivity,
     )
 
@@ -528,8 +556,36 @@ def compare_results(
         _LOG.info("Comparing productivity data...")
         results.extend(_compare_productivity(alignment, nw_prod, cobre_meta))
 
+    # --- Cost breakdown ---
+    _LOG.info("Reading cost breakdowns...")
+    nw_costs = read_pmo_cost_breakdown(nw_files.directory)
+    cobre_costs = read_cobre_cost_breakdown(cobre_output_dir)
+
+    # --- Bus-level energy balance ---
+    _LOG.info("Computing bus-level aggregates...")
+    bus_aggregates = read_cobre_bus_aggregates(cobre_output_dir)
+    nw_market = pl.DataFrame()
+    if saidas_dir is not None:
+        nw_market = read_medias_market(saidas_dir)
+
+    # --- Percentile statistics ---
+    _LOG.info("Computing Cobre percentile statistics...")
+    pctiles = PercentileData(
+        hydro=read_cobre_hydro_percentiles(cobre_output_dir),
+        thermal=read_cobre_thermal_percentiles(cobre_output_dir),
+        bus=read_cobre_bus_percentiles(cobre_output_dir),
+        bus_aggregates=bus_aggregates,
+        nw_convergence=nw_conv,
+        cobre_convergence=cobre_conv,
+        nw_market=nw_market,
+        cobre_bus_meta=cobre_bus_meta,
+        nw_bus_names=nw_bus_names,
+        nw_costs=nw_costs,
+        cobre_costs=cobre_costs,
+    )
+
     _LOG.info("Results comparison: %d total comparisons", len(results))
-    return results
+    return results, pctiles
 
 
 def build_results_summary(results: list[ResultComparison]) -> ResultsSummary:

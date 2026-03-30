@@ -120,7 +120,7 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     alignment = build_entity_alignment(id_map, nw_files, lines_json)
 
     # Run comparison.
-    results = compare_results(
+    results, pctiles = compare_results(
         nw_files=nw_files,
         id_map=id_map,
         alignment=alignment,
@@ -138,12 +138,29 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
             build_comparison_report,
         )
 
-        html = build_comparison_report(results)
+        html = build_comparison_report(results, pctiles)
         output_path: Path = args.output
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(html, encoding="utf-8")
         print(f"HTML report written to {output_path}")
 
+    sys.exit(0)
+
+
+def _run_dashboard(args: argparse.Namespace) -> None:
+    """Execute the dashboard subcommand."""
+    from cobre_bridge.dashboard import build_dashboard
+
+    case_dir: Path = args.case_dir.resolve()
+    if not (case_dir / "output" / "simulation").exists():
+        print(
+            f"Error: no simulation output found in {case_dir}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    output_path: Path = args.output or (case_dir / "dashboard.html")
+    build_dashboard(case_dir, output_path)
     sys.exit(0)
 
 
@@ -379,6 +396,29 @@ def main() -> None:
         help="Enable detailed logging output.",
     )
 
+    # dashboard subcommand
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="Generate an interactive HTML dashboard from Cobre simulation results.",
+    )
+    dashboard_parser.add_argument(
+        "case_dir",
+        type=Path,
+        help="Path to the Cobre case directory.",
+    )
+    dashboard_parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Output HTML file path (default: <case_dir>/dashboard.html).",
+    )
+    dashboard_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable detailed logging output.",
+    )
+
     args = parser.parse_args()
 
     # Configure logging based on --verbose.
@@ -400,6 +440,10 @@ def main() -> None:
 
     if args.command == "compare" and args.compare_source == "results":
         _run_results_comparison(args)
+        return
+
+    if args.command == "dashboard":
+        _run_dashboard(args)
         return
 
     parser.print_help()

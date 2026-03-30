@@ -313,6 +313,398 @@ def read_cobre_bus_means(cobre_output_dir: Path) -> pl.DataFrame:
     return result
 
 
+def _weighted_scenario_values(
+    lf: pl.LazyFrame,
+    id_col: str,
+    flow_cols: list[str],
+    stage_cols: list[str],
+    block_hours: pl.DataFrame | None,
+) -> pl.LazyFrame:
+    """Compute per-scenario weighted-mean values (one row per scenario+entity+stage).
+
+    Returns LazyFrame with columns: scenario_id, entity_id, stage_id, and
+    one column per variable in *flow_cols* + *stage_cols*.
+    """
+    if block_hours is not None and flow_cols:
+        bh = block_hours.lazy()
+        w_aggs = [
+            (pl.col(c) * pl.col("hours")).sum().alias(f"_{c}_w") for c in flow_cols
+        ]
+        h_sum = pl.col("hours").sum().alias("_h")
+        s_aggs = [pl.col(c).first().alias(c) for c in stage_cols]
+
+        per_sc = (
+            lf.join(bh, on=["stage_id", "block_id"])
+            .group_by(["scenario_id", id_col, "stage_id"])
+            .agg(w_aggs + [h_sum] + s_aggs)
+        )
+        for c in flow_cols:
+            per_sc = per_sc.with_columns((pl.col(f"_{c}_w") / pl.col("_h")).alias(c))
+        return per_sc.drop([f"_{c}_w" for c in flow_cols] + ["_h"]).rename(
+            {id_col: "entity_id"}
+        )
+
+    all_cols = flow_cols + stage_cols
+    return (
+        lf.filter(pl.col("block_id") == 0)
+        .group_by(["scenario_id", id_col, "stage_id"])
+        .agg([pl.col(c).mean() for c in all_cols])
+        .rename({id_col: "entity_id"})
+    )
+
+
+def _compute_percentiles(
+    per_scenario: pl.LazyFrame,
+    value_cols: list[str],
+) -> pl.DataFrame:
+    """Aggregate per-scenario values into p10/p50/p90 per (entity, stage).
+
+    Returns DataFrame with columns: entity_id, stage_id, and for each var
+    in *value_cols*: ``{var}_p10``, ``{var}_p50``, ``{var}_p90``.
+    """
+    aggs: list[pl.Expr] = []
+    for c in value_cols:
+        aggs.extend(
+            [
+                pl.col(c).quantile(0.1, interpolation="linear").alias(f"{c}_p10"),
+                pl.col(c).quantile(0.5, interpolation="linear").alias(f"{c}_p50"),
+                pl.col(c).quantile(0.9, interpolation="linear").alias(f"{c}_p90"),
+            ]
+        )
+    return (
+        per_scenario.group_by("entity_id", "stage_id")
+        .agg(aggs)
+        .sort("entity_id", "stage_id")
+        .collect(engine="streaming")
+    )
+
+
+def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read Cobre hydro p10/p50/p90 per (entity_id, stage_id).
+
+    Returns DataFrame with columns: entity_id, stage_id, and for each
+    hydro variable: ``{var}_p10``, ``{var}_p50``, ``{var}_p90``.
+    """
+    lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    if lf is None:
+        return pl.DataFrame()
+
+    flow_cols = ["generation_mw", "turbined_m3s", "spillage_m3s"]
+    stage_cols = ["storage_final_hm3", "inflow_m3s", "water_value_per_hm3"]
+    available = set(lf.collect_schema().names())
+    id_col = "hydro_id" if "hydro_id" in available else "entity_id"
+    avail_flow = [c for c in flow_cols if c in available]
+    avail_stage = [c for c in stage_cols if c in available]
+    all_vars = avail_flow + avail_stage
+    if not all_vars:
+        return pl.DataFrame()
+
+    block_hours = _load_block_hours(cobre_output_dir)
+    try:
+        per_sc = _weighted_scenario_values(
+            lf, id_col, avail_flow, avail_stage, block_hours
+        )
+        return _compute_percentiles(per_sc, all_vars)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to compute hydro percentiles")
+        return pl.DataFrame()
+
+
+def read_cobre_thermal_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read Cobre thermal p10/p50/p90 per (entity_id, stage_id)."""
+    lf = _scan_simulation_entity(cobre_output_dir, "thermals")
+    if lf is None:
+        return pl.DataFrame()
+
+    available = set(lf.collect_schema().names())
+    if "generation_mw" not in available:
+        return pl.DataFrame()
+
+    id_col = "thermal_id" if "thermal_id" in available else "entity_id"
+    block_hours = _load_block_hours(cobre_output_dir)
+    try:
+        per_sc = _weighted_scenario_values(
+            lf, id_col, ["generation_mw"], [], block_hours
+        )
+        return _compute_percentiles(per_sc, ["generation_mw"])
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to compute thermal percentiles")
+        return pl.DataFrame()
+
+
+def read_cobre_bus_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read Cobre bus p10/p50/p90 per (entity_id, stage_id)."""
+    lf = _scan_simulation_entity(cobre_output_dir, "buses")
+    if lf is None:
+        return pl.DataFrame()
+
+    available = set(lf.collect_schema().names())
+    id_col = "bus_id" if "bus_id" in available else "entity_id"
+    flow_cols = [c for c in ["spot_price", "deficit_mw"] if c in available]
+    if not flow_cols:
+        return pl.DataFrame()
+
+    block_hours = _load_block_hours(cobre_output_dir)
+    try:
+        per_sc = _weighted_scenario_values(lf, id_col, flow_cols, [], block_hours)
+        return _compute_percentiles(per_sc, flow_cols)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to compute bus percentiles")
+        return pl.DataFrame()
+
+
+def _load_entity_bus_map(
+    cobre_output_dir: Path,
+    entity: str,
+    id_field: str,
+) -> dict[int, int]:
+    """Load entity_id → bus_id mapping from system JSON."""
+    path = _find_system_json(cobre_output_dir, f"{entity}.json")
+    if path is None:
+        return {}
+    try:
+        with path.open() as f:
+            data = json.load(f)
+        return {
+            int(e["id"]): int(e["bus_id"])
+            for e in data.get(entity, [])
+            if "bus_id" in e
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def read_cobre_bus_aggregates(
+    cobre_output_dir: Path,
+) -> pl.DataFrame:
+    """Compute per-bus aggregated simulation percentiles.
+
+    Aggregates hydro generation, thermal generation, NCS generation,
+    load, deficit, and excess by bus, then computes p10/p50/p90 across
+    scenarios.
+
+    Returns DataFrame with columns: bus_id, stage_id, and for each
+    variable: ``{var}_p10``, ``{var}_p50``, ``{var}_p90``.
+    """
+    block_hours = _load_block_hours(cobre_output_dir)
+
+    # --- Bus-level variables (load, deficit, excess) ---
+    bus_lf = _scan_simulation_entity(cobre_output_dir, "buses")
+    bus_vars = ["load_mw", "deficit_mw", "excess_mw"]
+
+    # --- Hydro generation aggregated by bus ---
+    hydro_bus_map = _load_entity_bus_map(cobre_output_dir, "hydros", "hydro_id")
+    hydro_lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+
+    # --- Thermal generation aggregated by bus ---
+    thermal_bus_map = _load_entity_bus_map(cobre_output_dir, "thermals", "thermal_id")
+    thermal_lf = _scan_simulation_entity(cobre_output_dir, "thermals")
+
+    # --- NCS generation aggregated by bus ---
+    ncs_bus_map = _load_entity_bus_map(
+        cobre_output_dir, "non_controllable_sources", "non_controllable_id"
+    )
+    ncs_lf = _scan_simulation_entity(cobre_output_dir, "non_controllables")
+
+    def _agg_entity_by_bus(
+        lf: pl.LazyFrame | None,
+        id_col: str,
+        value_col: str,
+        bus_map: dict[int, int],
+        out_col: str,
+    ) -> pl.DataFrame | None:
+        """Aggregate an entity variable by bus with block-hours weighting."""
+        if lf is None or not bus_map:
+            return None
+
+        available = set(lf.collect_schema().names())
+        if value_col not in available:
+            return None
+
+        # Map entity to bus.
+        mapping = pl.DataFrame(
+            {id_col: list(bus_map.keys()), "bus_id": list(bus_map.values())}
+        )
+        joined = lf.join(mapping.lazy(), on=id_col)
+
+        # Block-hours weighted per scenario+bus+stage.
+        if block_hours is not None:
+            bh = block_hours.lazy()
+            per_sc = (
+                joined.join(bh, on=["stage_id", "block_id"])
+                .group_by(["scenario_id", "bus_id", "stage_id"])
+                .agg(
+                    (pl.col(value_col) * pl.col("hours")).sum().alias("_w"),
+                    pl.col("hours").sum().alias("_h"),
+                )
+                .with_columns((pl.col("_w") / pl.col("_h")).alias(out_col))
+                .drop("_w", "_h")
+            )
+        else:
+            per_sc = (
+                joined.filter(pl.col("block_id") == 0)
+                .group_by(["scenario_id", "bus_id", "stage_id"])
+                .agg(pl.col(value_col).sum().alias(out_col))
+            )
+        return per_sc.collect(engine="streaming")
+
+    # Collect per-scenario frames.
+    frames: list[pl.DataFrame] = []
+    all_vars: list[str] = []
+
+    # Bus-level variables.
+    if bus_lf is not None:
+        avail = set(bus_lf.collect_schema().names())
+        bus_avail = [c for c in bus_vars if c in avail]
+        bid_col = "bus_id" if "bus_id" in avail else "entity_id"
+        if bus_avail and block_hours is not None:
+            bh = block_hours.lazy()
+            bus_sc = (
+                bus_lf.join(bh, on=["stage_id", "block_id"])
+                .group_by(["scenario_id", bid_col, "stage_id"])
+                .agg(
+                    [
+                        (
+                            (pl.col(c) * pl.col("hours")).sum() / pl.col("hours").sum()
+                        ).alias(c)
+                        for c in bus_avail
+                    ]
+                )
+                .rename({bid_col: "bus_id"})
+                .collect(engine="streaming")
+            )
+        elif bus_avail:
+            bus_sc = (
+                bus_lf.filter(pl.col("block_id") == 0)
+                .group_by(["scenario_id", bid_col, "stage_id"])
+                .agg([pl.col(c).mean() for c in bus_avail])
+                .rename({bid_col: "bus_id"})
+                .collect(engine="streaming")
+            )
+        else:
+            bus_sc = None
+        if bus_sc is not None:
+            frames.append(bus_sc)
+            all_vars.extend(bus_avail)
+
+    # Entity aggregations.
+    for lf, id_col, val_col, bmap, out in [
+        (hydro_lf, "hydro_id", "generation_mw", hydro_bus_map, "hydro_gen_mw"),
+        (
+            thermal_lf,
+            "thermal_id",
+            "generation_mw",
+            thermal_bus_map,
+            "thermal_gen_mw",
+        ),
+        (
+            ncs_lf,
+            "non_controllable_id",
+            "generation_mw",
+            ncs_bus_map,
+            "ncs_gen_mw",
+        ),
+    ]:
+        result = _agg_entity_by_bus(lf, id_col, val_col, bmap, out)
+        if result is not None:
+            frames.append(result)
+            all_vars.append(out)
+
+    if not frames:
+        return pl.DataFrame()
+
+    # Join all frames on (scenario_id, bus_id, stage_id).
+    merged = frames[0]
+    for f in frames[1:]:
+        merged = merged.join(
+            f,
+            on=["scenario_id", "bus_id", "stage_id"],
+            how="full",
+            coalesce=True,
+        )
+
+    # Compute percentiles across scenarios.
+    aggs: list[pl.Expr] = []
+    for c in all_vars:
+        if c not in merged.columns:
+            continue
+        aggs.extend(
+            [
+                pl.col(c).quantile(0.1, interpolation="linear").alias(f"{c}_p10"),
+                pl.col(c).quantile(0.5, interpolation="linear").alias(f"{c}_p50"),
+                pl.col(c).quantile(0.9, interpolation="linear").alias(f"{c}_p90"),
+            ]
+        )
+
+    if not aggs:
+        return pl.DataFrame()
+
+    return merged.group_by("bus_id", "stage_id").agg(aggs).sort("bus_id", "stage_id")
+
+
+def read_cobre_cost_breakdown(cobre_output_dir: Path) -> dict[str, float]:
+    """Read cost breakdown from Cobre simulation costs entity.
+
+    Returns ``{category: mean_total_R$}`` averaged across scenarios,
+    summed across all stages and blocks.  Zero-cost categories are excluded.
+    """
+    lf = _scan_simulation_entity(cobre_output_dir, "costs")
+    if lf is None:
+        return {}
+
+    cost_cols = [
+        "thermal_cost",
+        "deficit_cost",
+        "excess_cost",
+        "storage_violation_cost",
+        "filling_target_cost",
+        "hydro_violation_cost",
+        "outflow_violation_below_cost",
+        "outflow_violation_above_cost",
+        "turbined_violation_cost",
+        "generation_violation_cost",
+        "evaporation_violation_cost",
+        "withdrawal_violation_cost",
+        "inflow_penalty_cost",
+        "generic_violation_cost",
+        "spillage_cost",
+        "fpha_turbined_cost",
+        "curtailment_cost",
+        "exchange_cost",
+        "pumping_cost",
+    ]
+
+    available = set(lf.collect_schema().names())
+    cols = [c for c in cost_cols if c in available]
+    if not cols:
+        return {}
+
+    has_discount = "discount_factor" in available
+
+    try:
+        # Discount costs to present value, then sum per scenario.
+        if has_discount:
+            disc_exprs = [
+                (pl.col(c) * pl.col("discount_factor")).sum().alias(c) for c in cols
+            ]
+        else:
+            disc_exprs = [pl.col(c).sum() for c in cols]
+
+        per_sc = lf.group_by("scenario_id").agg(disc_exprs)
+        means = per_sc.select([pl.col(c).mean() for c in cols]).collect()
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read Cobre cost breakdown")
+        return {}
+
+    result: dict[str, float] = {}
+    for c in cols:
+        v = float(means[c][0] or 0)
+        if abs(v) > 0.01:
+            result[c] = v
+
+    return result
+
+
 def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre convergence data from training output.
 

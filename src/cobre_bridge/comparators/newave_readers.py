@@ -451,3 +451,46 @@ def read_pmo_productivity(newave_dir: Path) -> pl.DataFrame:
     ).drop_nulls(subset=["plant_name", "productivity"])
 
     return result
+
+
+def read_medias_market(saidas_dir: Path) -> pl.DataFrame:
+    """Read MEDIAS-MERC.CSV with all variables in long format.
+
+    Returns DataFrame with columns: ``newave_code``, ``stage``,
+    ``variable``, ``value``.  Unlike ``read_medias_system`` which only
+    returns CMO/DEFT, this returns all market variables for energy
+    balance analysis.
+    """
+    return _read_medias_csv(saidas_dir, "MEDIAS-MERC.CSV")
+
+
+def read_pmo_cost_breakdown(newave_dir: Path) -> dict[str, float]:
+    """Read cost breakdown from pmo.dat ``custo_operacao_series_simuladas``.
+
+    Returns ``{category: expected_value_in_R$}`` where values are
+    converted from 10^6 R$ to R$.  Zero-cost categories are excluded.
+    """
+    pmo_path = _find_pmo(newave_dir)
+    if pmo_path is None:
+        return {}
+
+    try:
+        from inewave.newave import Pmo
+
+        pmo = Pmo.read(str(pmo_path))
+        df = pmo.custo_operacao_series_simuladas
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read cost breakdown from pmo.dat")
+        return {}
+
+    if df is None or df.empty:
+        return {}
+
+    result: dict[str, float] = {}
+    for _, row in df.iterrows():
+        name = str(row["parcela"]).strip()
+        value = float(row["valor_esperado"]) * 1e6  # Convert 10^6 R$ to R$
+        if abs(value) > 0.01:
+            result[name] = value
+
+    return result

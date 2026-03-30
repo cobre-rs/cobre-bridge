@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-"""Generate a self-contained interactive HTML dashboard from cobre simulation results.
+"""Generate a self-contained interactive HTML dashboard from Cobre simulation results.
 
-Usage:
-    uv run python scripts/dashboard.py example/convertido/ -o example/convertido/dashboard.html
+Usage via CLI:
+    cobre-bridge dashboard example/convertido/ -o example/convertido/dashboard.html
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from collections.abc import Sequence
@@ -40,18 +38,18 @@ COLORS = {
 
 BUS_COLORS = ["#4A90B8", "#F5A623", "#4A8B6F", "#DC4C4C", "#B87333"]
 
-# Shared legend style: horizontal, positioned above the chart area.
+# Shared legend style: horizontal, positioned below the chart area.
 _LEGEND = dict(
     orientation="h",
-    yanchor="bottom",
-    y=1.02,
-    xanchor="left",
-    x=0,
+    yanchor="top",
+    y=-0.15,
+    xanchor="center",
+    x=0.5,
     font=dict(size=11),
 )
 
-# Standard bottom margin to leave room for x-axis labels without legend overlap.
-_MARGIN = dict(l=60, r=30, t=60, b=50)
+# Standard margin — small bottom since legend sits below via negative y.
+_MARGIN = dict(l=60, r=30, t=60, b=10)
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +634,7 @@ def chart_generation_by_bus(
         cols=1,
         shared_xaxes=False,
         subplot_titles=[bus_names.get(b, str(b)) for b in bus_ids],
-        vertical_spacing=0.12,
+        vertical_spacing=0.18,
     )
 
     for row_idx, bus_id in enumerate(bus_ids, start=1):
@@ -1054,7 +1052,7 @@ def chart_stored_energy_by_bus(
         cols=1,
         shared_xaxes=False,
         subplot_titles=[bus_names.get(b, str(b)) for b in bus_ids],
-        vertical_spacing=0.12,
+        vertical_spacing=0.18,
     )
     for row, bus_id in enumerate(bus_ids, 1):
         sub = data.filter(pl.col("bus_id") == bus_id)
@@ -1226,7 +1224,7 @@ def chart_spillage_by_stage(
         title=f"Spillage by Stage (total + top {top_n} hydros, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="Spillage (m³/s)",
-        legend={**_LEGEND, "y": 1.08},
+        legend=_LEGEND,
         margin={**_MARGIN, "t": 90},
         height=440,
     )
@@ -1325,7 +1323,7 @@ def chart_inflow_slack(
         title=f"Inflow Nonnegativity Slack (total + top {top_n} hydros, avg across scenarios)",
         xaxis_title="Stage",
         yaxis_title="Slack (m³/s)",
-        legend={**_LEGEND, "y": 1.08},
+        legend=_LEGEND,
         margin={**_MARGIN, "t": 90},
         height=440,
     )
@@ -1864,7 +1862,7 @@ def chart_spot_price_by_bus_subplots(
         cols=n_cols,
         subplot_titles=subplot_titles,
         shared_xaxes=True,
-        vertical_spacing=0.12,
+        vertical_spacing=0.18,
         horizontal_spacing=0.10,
     )
 
@@ -1953,7 +1951,7 @@ def chart_spot_price_by_bus_subplots(
     fig.update_layout(
         title="Weighted-Average Spot Price by Bus (block-hours weighted, p10/p50/p90)",
         height=350 * n_rows + 60,
-        legend={**_LEGEND, "y": 1.02, "yanchor": "bottom"},
+        legend=_LEGEND,
         margin=dict(l=60, r=30, t=80, b=50),
         hovermode="x unified",
     )
@@ -2018,7 +2016,7 @@ def chart_thermal_merit_order(
         title=f"Thermal Merit Order (top {top_n} by cost, sorted low→high)",
         xaxis_title="GWh",
         barmode="overlay",
-        legend={**_LEGEND, "y": 1.08},
+        legend=_LEGEND,
         height=max(440, len(names_list) * 22 + 100),
         margin=dict(l=120, r=30, t=90, b=50),
     )
@@ -2264,7 +2262,7 @@ def chart_storage_by_bus(
         cols=1,
         shared_xaxes=False,
         subplot_titles=[bus_names.get(b, str(b)) for b in bus_ids],
-        vertical_spacing=0.12,
+        vertical_spacing=0.18,
     )
 
     for row, bus_id in enumerate(bus_ids, 1):
@@ -2309,7 +2307,7 @@ def chart_storage_by_bus(
     fig.update_layout(
         title="Reservoir Storage by Bus (p10/p50/p90 across scenarios)",
         height=320 * n + 60,
-        legend={**_LEGEND, "y": 1.02, "yanchor": "bottom"},
+        legend=_LEGEND,
         margin=dict(l=60, r=30, t=80, b=50),
     )
     return fig_to_html(fig)
@@ -2559,7 +2557,7 @@ def chart_top_hydros_detail(
         cols=1,
         shared_xaxes=True,
         subplot_titles=["Generation (MW)", "Storage (hm³)", "Spillage (m³/s)"],
-        vertical_spacing=0.10,
+        vertical_spacing=0.18,
     )
     palette = [
         "#2196F3",
@@ -2628,7 +2626,7 @@ def chart_top_hydros_detail(
     fig.update_layout(
         title=f"Top {top_n} Hydro Plants by Installed Capacity",
         height=900,
-        legend={**_LEGEND, "y": 1.04},
+        legend=_LEGEND,
         margin=dict(l=60, r=30, t=100, b=50),
     )
     return fig_to_html(fig)
@@ -2739,7 +2737,7 @@ def chart_per_block_balance(
         cols=1,
         shared_xaxes=True,
         subplot_titles=[block_names.get(b, f"Block {b}") for b in blocks],
-        vertical_spacing=0.10,
+        vertical_spacing=0.18,
     )
 
     stages = sorted({s for s, _ in block_hours.keys()})
@@ -2858,7 +2856,7 @@ def chart_per_block_balance(
     fig.update_layout(
         title="Generation vs Load by Block (avg across scenarios)",
         height=300 * len(blocks),
-        legend={**_LEGEND, "y": 1.05},
+        legend=_LEGEND,
         margin=dict(l=60, r=30, t=80, b=50),
     )
     return fig_to_html(fig)
@@ -2898,7 +2896,7 @@ def chart_inflow_comparison(
         cols=1,
         shared_xaxes=True,
         subplot_titles=[meta["name"] for _, meta in ranked],
-        vertical_spacing=0.10,
+        vertical_spacing=0.18,
     )
 
     for row, (hid, meta) in enumerate(ranked, 1):
@@ -2985,7 +2983,7 @@ def chart_inflow_comparison(
     fig.update_layout(
         title=f"Realized Inflow vs Historical Statistics (top {top_n} hydros)",
         height=220 * top_n,
-        legend={**_LEGEND, "y": 1.04},
+        legend=_LEGEND,
         margin=dict(l=60, r=30, t=100, b=50),
     )
     return fig_to_html(fig)
@@ -3052,7 +3050,7 @@ def chart_plant_water_balance(
             "Inflow / Outflow (m³/s)",
             "Water Balance Residual (hm³)",
         ],
-        vertical_spacing=0.10,
+        vertical_spacing=0.18,
     )
     palette = [
         "#2196F3",
@@ -3169,7 +3167,7 @@ def chart_plant_water_balance(
     fig.update_layout(
         title=f"Water Balance Detail (top {top_n} plants, avg across scenarios)",
         height=900,
-        legend={**_LEGEND, "y": 1.04},
+        legend=_LEGEND,
         margin=dict(l=60, r=30, t=100, b=50),
     )
     return fig_to_html(fig)
@@ -4911,7 +4909,7 @@ def chart_constraint_lhs_vs_bound(
         rows=rows_count,
         cols=cols,
         subplot_titles=subtitles,
-        vertical_spacing=0.12,
+        vertical_spacing=0.18,
         horizontal_spacing=0.1,
     )
 
@@ -5018,7 +5016,7 @@ def chart_constraint_lhs_vs_bound(
     fig.update_layout(
         title=title,
         height=max(360, rows_count * 320),
-        legend={**_LEGEND, "y": 1.02},
+        legend=_LEGEND,
         margin=dict(l=60, r=30, t=80, b=50),
     )
     return fig_to_html(fig)
@@ -5597,7 +5595,7 @@ def chart_thermal_cost_vs_gen(
         title="Thermal Plants: Avg Generation vs Cost (size = installed capacity)",
         xaxis_title="Avg Generation (MW)",
         yaxis_title="Cost (R$/MWh)",
-        legend={**_LEGEND, "y": 1.08},
+        legend=_LEGEND,
         margin=dict(l=60, r=30, t=90, b=60),
         height=480,
     )
@@ -6723,28 +6721,25 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
+if __name__ == "__main__":
+    import argparse as _ap
+
+    _parser = _ap.ArgumentParser(
         description="Generate an interactive HTML dashboard from cobre simulation results.",
     )
-    parser.add_argument("case_dir", type=Path, help="Path to the cobre case directory.")
-    parser.add_argument(
+    _parser.add_argument(
+        "case_dir", type=Path, help="Path to the cobre case directory."
+    )
+    _parser.add_argument(
         "--output",
         "-o",
         type=Path,
         default=None,
         help="Output HTML file path (default: <case_dir>/dashboard.html).",
     )
-    args = parser.parse_args()
-
-    case_dir = args.case_dir.resolve()
-    if not (case_dir / "output" / "simulation").exists():
-        print(f"Error: no simulation output found in {case_dir}", file=sys.stderr)
+    _args = _parser.parse_args()
+    _case = _args.case_dir.resolve()
+    if not (_case / "output" / "simulation").exists():
+        print(f"Error: no simulation output found in {_case}", file=sys.stderr)
         sys.exit(1)
-
-    output_path = args.output or (case_dir / "dashboard.html")
-    build_dashboard(case_dir, output_path)
-
-
-if __name__ == "__main__":
-    main()
+    build_dashboard(_case, _args.output or (_case / "dashboard.html"))
