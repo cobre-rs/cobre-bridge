@@ -1376,7 +1376,7 @@ _BELO_MONTE_NEWAVE_CODE = 288
 _PIMENTAL_DIVERSION_MAX_M3S = 13_900.0
 
 
-def _make_diversion(newave_code: int, id_map: "NewaveIdMap") -> dict | None:
+def _make_diversion(newave_code: int, id_map: NewaveIdMap) -> dict | None:
     """Return a diversion dict for PIMENTAL, ``None`` for all other plants."""
     if newave_code != _PIMENTAL_NEWAVE_CODE:
         return None

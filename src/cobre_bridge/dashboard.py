@@ -7,6 +7,7 @@ Usage via CLI:
 from __future__ import annotations
 
 import json
+import re as _re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -3037,7 +3038,7 @@ def chart_plant_water_balance(
     )
     plant_pd = plant_data.to_pandas()
 
-    h0_pd = plant_pd[plant_pd["block_id"] == 0]
+    plant_pd[plant_pd["block_id"] == 0]
     stages = sorted(plant_pd["stage_id"].unique().tolist())
     xlabels = stage_x_labels(stages, stage_labels)
 
@@ -4569,7 +4570,7 @@ def build_performance_metrics_html(
 
     # LP dimensions from scaling report
     stages_sr = scaling_report.get("stages", [])
-    max_nz = max((s["dimensions"]["num_nz"] for s in stages_sr), default=0)
+    max((s["dimensions"]["num_nz"] for s in stages_sr), default=0)
 
     # Format training time
     if total_train_s >= 3600:
@@ -4615,7 +4616,6 @@ def build_performance_metrics_html(
 # Tab 10: Generic Constraints — expression parser + charts
 # ---------------------------------------------------------------------------
 
-import re as _re
 
 # Matches terms like: [+/-] [coeff *] variable_type(id)
 # Examples: "5.68 * hydro_storage(78)", "hydro_generation(145)", "- line_exchange(4)"
@@ -5003,7 +5003,7 @@ def chart_constraint_lhs_vs_bound(
         "RE": "Generation (MW)",
         "AGRINT": "Flow (MW)",
     }
-    yaxis_title = type_labels.get(ctype_filter, "Value")
+    type_labels.get(ctype_filter, "Value")
     sense_desc = {
         "VminOP": "LHS ≥ Bound (minimum energy)",
         "RE": "LHS ≤ Bound (upper limit)",
@@ -6274,7 +6274,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         else pd.DataFrame()
     )
     codes_path = case_dir / "output" / "training" / "dictionaries" / "codes.json"
-    bounds_codes: dict = json.load(codes_path.open()) if codes_path.exists() else {}
+    json.load(codes_path.open()) if codes_path.exists() else {}
 
     # Generic constraints data (optional — graceful fallback when absent)
     gc_path = case_dir / "constraints" / "generic_constraints.json"
@@ -6315,7 +6315,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
 
     # Load inflow stats for chart_inflow_comparison (small seasonal stats file)
     inflow_stats_path = case_dir / "scenarios" / "inflow_seasonal_stats.parquet"
-    inflow_stats = (
+    (
         pq.read_table(inflow_stats_path).to_pandas()
         if inflow_stats_path.exists()
         else pd.DataFrame()
