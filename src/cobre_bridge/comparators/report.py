@@ -1,6 +1,7 @@
-"""Output formatting for bounds comparison results.
+"""Output formatting for bounds and results comparison.
 
-Provides terminal summary, mismatch detail listing, and Parquet report export.
+Provides terminal summary, mismatch detail listing, Parquet report export,
+and results comparison summary formatting.
 """
 
 from __future__ import annotations
@@ -9,10 +10,14 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polars as pl
 
 from cobre_bridge.comparators.bounds import BoundComparison
+
+if TYPE_CHECKING:
+    from cobre_bridge.comparators.results import ResultsSummary
 
 
 @dataclass
@@ -167,3 +172,67 @@ def write_report_parquet(
     path.parent.mkdir(parents=True, exist_ok=True)
     df.write_parquet(path)
     sys.stdout.write(f"Report written to {path} ({len(results)} rows)\n")
+
+
+# -------------------------------------------------------------------
+# Results comparison formatting
+# -------------------------------------------------------------------
+
+
+def print_results_summary(
+    summary: ResultsSummary,
+    newave_dir: Path,
+    cobre_output_dir: Path,
+) -> None:
+    """Print the results comparison text summary.
+
+    Parameters
+    ----------
+    summary:
+        Aggregate results comparison statistics.
+    newave_dir:
+        Path to the NEWAVE case directory.
+    cobre_output_dir:
+        Path to the Cobre output directory.
+    """
+    out = sys.stdout
+
+    out.write("\nCobre vs NEWAVE Results Comparison\n")
+    out.write("=" * 76 + "\n")
+    out.write(f"NEWAVE case:  {newave_dir}\n")
+    out.write(f"Cobre output: {cobre_output_dir}\n\n")
+
+    # Per-variable table.
+    _W = 76
+    out.write(
+        f"{'Variable':<22} {'Count':>6} "
+        f"{'Mean|D|':>10} {'Max|D|':>10} "
+        f"{'Mean|D%|':>10} {'Max|D%|':>10} "
+        f"{'r':>6}\n"
+    )
+    out.write("-" * _W + "\n")
+
+    for var in sorted(summary.by_variable):
+        stats = summary.by_variable[var]
+        mean_pct = f"{stats.mean_rel_diff * 100:.2f}%" if stats.mean_rel_diff else "N/A"
+        max_pct = f"{stats.max_rel_diff * 100:.2f}%" if stats.max_rel_diff else "N/A"
+        corr = f"{stats.correlation:.4f}" if stats.correlation else "N/A"
+        out.write(
+            f"{var:<22} {stats.count:>6} "
+            f"{stats.mean_abs_diff:>10.4f} {stats.max_abs_diff:>10.4f} "
+            f"{mean_pct:>10} {max_pct:>10} "
+            f"{corr:>6}\n"
+        )
+
+    out.write("-" * _W + "\n")
+
+    # Entity type totals.
+    entity_parts = []
+    for etype, count in sorted(summary.by_entity_type.items()):
+        entity_parts.append(f"{count} {etype}")
+    entity_str = ", ".join(entity_parts) if entity_parts else "none"
+
+    out.write(
+        f"\nSummary: {summary.total} comparisons across "
+        f"{len(summary.by_entity_type)} entity types ({entity_str})\n\n"
+    )

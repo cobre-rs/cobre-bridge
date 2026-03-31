@@ -1,19 +1,18 @@
 """Entity alignment between NEWAVE codes and Cobre IDs.
 
 Builds aligned entity pairs for hydros, thermals, and exchange lines
-using the same NewaveIdMap that the converter produces, plus the
-sintetizador reference Parquets for human-readable names.
+using the same NewaveIdMap that the converter produces, plus NEWAVE
+input files (via ``NewaveFiles`` + inewave readers) for human-readable
+names and reservoir detection.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-
-import polars as pl
 
 from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 
@@ -76,87 +75,102 @@ class EntityAlignment:
 
 
 def _read_reference_names(
-    sintese_dir: Path,
+    nw_files: NewaveFiles,
 ) -> tuple[dict[int, str], dict[int, str], dict[int, str]]:
-    """Read entity names from sintetizador reference Parquets.
+    """Read entity names from NEWAVE input files via inewave.
 
     Returns (hydro_names, thermal_names, subsystem_names) dicts
     mapping NEWAVE codes to human-readable names.
     """
+    from inewave.newave import Confhd, Conft, Sistema
+
     hydro_names: dict[int, str] = {}
     thermal_names: dict[int, str] = {}
     subsystem_names: dict[int, str] = {}
 
-    uhe_path = sintese_dir / "UHE.parquet"
-    if uhe_path.exists():
-        uhe = pl.read_parquet(uhe_path)
-        for row in uhe.iter_rows(named=True):
-            hydro_names[int(row["codigo_usina"])] = str(row["usina"]).strip()
+    # Hydro names from confhd.dat
+    confhd = Confhd.read(str(nw_files.confhd))
+    for _, row in confhd.usinas.iterrows():
+        hydro_names[int(row["codigo_usina"])] = str(row["nome_usina"]).strip()
 
-    ute_path = sintese_dir / "UTE.parquet"
-    if ute_path.exists():
-        ute = pl.read_parquet(ute_path)
-        for row in ute.iter_rows(named=True):
-            thermal_names[int(row["codigo_usina"])] = str(row["usina"]).strip()
+    # Thermal names from conft.dat
+    conft = Conft.read(str(nw_files.conft))
+    for _, row in conft.usinas.iterrows():
+        thermal_names[int(row["codigo_usina"])] = str(row["nome_usina"]).strip()
 
-    sbm_path = sintese_dir / "SBM.parquet"
-    if sbm_path.exists():
-        sbm = pl.read_parquet(sbm_path)
-        for row in sbm.iter_rows(named=True):
-            subsystem_names[int(row["codigo_submercado"])] = str(
-                row["submercado"]
-            ).strip()
+    # Subsystem names from sistema.dat (deduplicate from custo_deficit rows)
+    sistema = Sistema.read(str(nw_files.sistema))
+    deficit_df = sistema.custo_deficit
+    if deficit_df is not None:
+        seen: set[int] = set()
+        for _, row in deficit_df.iterrows():
+            code = int(row["codigo_submercado"])
+            if code not in seen:
+                subsystem_names[code] = str(row["nome_submercado"]).strip()
+                seen.add(code)
 
     return hydro_names, thermal_names, subsystem_names
 
 
-def _detect_reservoir_plants(sintese_dir: Path) -> set[int]:
-    """Return the set of NEWAVE hydro codes that have VARMF data (reservoirs)."""
-    uhe_path = sintese_dir / "ESTATISTICAS_OPERACAO_UHE.parquet"
-    if not uhe_path.exists():
-        return set()
+def _detect_reservoir_plants(nw_files: NewaveFiles) -> set[int]:
+    """Return the set of NEWAVE hydro codes that have reservoirs.
 
-    uhe = pl.scan_parquet(uhe_path)
-    varmf = (
-        uhe.filter(pl.col("variavel") == "VARMF")
-        .select("codigo_usina")
-        .unique()
-        .collect()
-    )
-    return set(varmf["codigo_usina"].to_list())
+    A plant has a reservoir when its ``volume_minimo != volume_maximo``
+    in the HIDR cadastro (with permanent MODIF overrides applied).
+    """
+    from cobre_bridge.converters.hydro import read_cadastro
+
+    cadastro = read_cadastro(nw_files)
+    reservoir_codes: set[int] = set()
+    for code, row in cadastro.iterrows():
+        vol_min = float(row["volume_minimo"])
+        vol_max = float(row["volume_maximo"])
+        if vol_min != vol_max:
+            reservoir_codes.add(int(code))  # type: ignore[arg-type]
+    return reservoir_codes
 
 
-def _detect_newave_stages(sintese_dir: Path) -> int:
-    """Return the number of stages reported by the sintetizador."""
-    uhe_path = sintese_dir / "ESTATISTICAS_OPERACAO_UHE.parquet"
-    if not uhe_path.exists():
+def _detect_newave_stages(nw_files: NewaveFiles) -> int:
+    """Compute total number of NEWAVE stages from DGER parameters.
+
+    ``study_months = (13 - start_month) + (num_anos - 1) * 12``
+    ``total_stages = study_months + num_anos_pos * 12``
+    """
+    from inewave.newave import Dger
+
+    dger = Dger.read(str(nw_files.dger))
+    start_month: int = dger.mes_inicio_estudo
+    num_anos: int = dger.num_anos_estudo
+    num_anos_pos: int = dger.num_anos_pos_estudo or 0
+
+    if not num_anos:
         return 0
 
-    uhe = pl.scan_parquet(uhe_path)
-    max_stage = uhe.select(pl.col("estagio").max()).collect().item()
-    return int(max_stage) if max_stage is not None else 0
+    study_months = (13 - start_month) + (num_anos - 1) * 12
+    total_stages = study_months + num_anos_pos * 12
+    return total_stages
 
 
 def build_entity_alignment(
     id_map: NewaveIdMap,
-    sintese_dir: Path,
+    nw_files: NewaveFiles,
     lines_json: list[dict],
 ) -> EntityAlignment:
-    """Build entity alignment from the ID map and sintetizador data.
+    """Build entity alignment from the ID map and NEWAVE input files.
 
     Parameters
     ----------
     id_map:
         The same NewaveIdMap used by the converter.
-    sintese_dir:
-        Path to the sintetizador output directory containing reference
-        Parquets (UHE.parquet, UTE.parquet, SBM.parquet).
+    nw_files:
+        Resolved NEWAVE input file paths (replaces the former
+        ``sintese_dir`` parameter).
     lines_json:
         The ``lines`` list from the converted Cobre ``lines.json``.
     """
-    hydro_names, thermal_names, subsystem_names = _read_reference_names(sintese_dir)
-    reservoir_codes = _detect_reservoir_plants(sintese_dir)
-    num_stages = _detect_newave_stages(sintese_dir)
+    hydro_names, thermal_names, subsystem_names = _read_reference_names(nw_files)
+    reservoir_codes = _detect_reservoir_plants(nw_files)
+    num_stages = _detect_newave_stages(nw_files)
 
     alignment = EntityAlignment(num_newave_stages=num_stages)
 

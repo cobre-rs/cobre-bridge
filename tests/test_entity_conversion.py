@@ -62,6 +62,7 @@ def _make_nw_files(
         c_adic=c_adic,
         cvar=cvar,
         agrint=agrint,
+        re_dat=None,
     )
 
 
@@ -2963,7 +2964,7 @@ class TestReadPenalid:
 
         # REE 1 checks.
         assert 1 in result
-        assert result[1]["spillage_cost"] == pytest.approx(8300.0)
+        assert result[1]["water_withdrawal_violation_cost"] == pytest.approx(8300.0)
         assert result[1]["outflow_violation_below_cost"] == pytest.approx(3179.35)
         assert result[1]["generation_violation_below_cost"] == pytest.approx(4500.0)
         # TURBMX must not appear (no Cobre mapping).
@@ -2971,7 +2972,7 @@ class TestReadPenalid:
 
         # REE 2 checks.
         assert 2 in result
-        assert result[2]["spillage_cost"] == pytest.approx(9100.0)
+        assert result[2]["water_withdrawal_violation_cost"] == pytest.approx(9100.0)
         assert result[2]["outflow_violation_below_cost"] == pytest.approx(2800.0)
 
     def test_missing_file_returns_empty(self, tmp_path) -> None:
@@ -3013,7 +3014,7 @@ class TestReadPenalid:
 
         assert 1 in result
         # DESVIO had NaN — must be absent.
-        assert "spillage_cost" not in result[1]
+        assert "water_withdrawal_violation_cost" not in result[1]
         # VAZMIN had 5000.0 — must be present.
         assert result[1]["outflow_violation_below_cost"] == pytest.approx(5000.0)
 
@@ -3077,7 +3078,9 @@ class TestConvertHydrosPenalid:
             assert hydro["penalties"] is not None, (
                 f"Plant '{hydro['name']}' should have non-None penalties"
             )
-            assert hydro["penalties"]["spillage_cost"] == pytest.approx(8300.0)
+            assert hydro["penalties"][
+                "water_withdrawal_violation_cost"
+            ] == pytest.approx(8300.0)
             assert hydro["penalties"]["outflow_violation_below_cost"] == pytest.approx(
                 3179.35
             )
@@ -3163,12 +3166,12 @@ class TestConvertHydrosPenalid:
         # USINA_A is in REE 1.
         pen_a = hydros_by_name["USINA_A"]["penalties"]
         assert pen_a is not None
-        assert pen_a["spillage_cost"] == pytest.approx(8300.0)
+        assert pen_a["water_withdrawal_violation_cost"] == pytest.approx(8300.0)
 
         # USINA_B is in REE 2.
         pen_b = hydros_by_name["USINA_B"]["penalties"]
         assert pen_b is not None
-        assert pen_b["spillage_cost"] == pytest.approx(9100.0)
+        assert pen_b["water_withdrawal_violation_cost"] == pytest.approx(9100.0)
         assert pen_b["outflow_violation_below_cost"] == pytest.approx(2800.0)
 
 

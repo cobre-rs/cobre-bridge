@@ -1,5 +1,8 @@
-target-version = "py311"
+target-version = "py312"
 line-length = 88
 
 [lint]
 select = ["E", "F", "I", "UP"]
+
+[lint.per-file-ignores]
+"**/dashboard.py" = ["E501"]
