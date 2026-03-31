@@ -311,6 +311,10 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
             "cobre_bridge.pipeline.thermal_conv.convert_thermal_bounds",
             return_value=None,
         ),
+        patch(
+            "cobre_bridge.pipeline.hydro_conv.convert_storage_bounds",
+            return_value=None,
+        ),
     ]
 
 
