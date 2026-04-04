@@ -13,6 +13,7 @@ from cobre_bridge.ui.css import comparison_css, dashboard_css
 from cobre_bridge.ui.html import (
     build_html,
     chart_grid,
+    collapsible_section,
     metric_card,
     metrics_grid,
     section_title,
@@ -224,9 +225,11 @@ def test_tab_switch_js_is_non_empty_string() -> None:
 
 
 def test_wrap_chart_produces_chart_card() -> None:
-    """wrap_chart must wrap content in a chart-card div."""
+    """wrap_chart must wrap content in a chart-card div (now includes expand button)."""
     result = wrap_chart("<p>Chart</p>")
-    assert result == '<div class="chart-card"><p>Chart</p></div>'
+    assert result.startswith('<div class="chart-card">')
+    assert result.endswith("</div>")
+    assert "<p>Chart</p>" in result
 
 
 def test_section_title_produces_section_title_div() -> None:
@@ -334,6 +337,39 @@ def test_build_html_title_in_header(
     assert "<header>My Report</header>" in result
 
 
+def test_dashboard_css_contains_transitions() -> None:
+    """dashboard_css() must include .chart-card:hover with translateY lift."""
+    output = dashboard_css()
+    assert ".chart-card:hover" in output
+    assert "translateY" in output
+
+
+def test_dashboard_css_contains_responsive_breakpoints() -> None:
+    """dashboard_css() must include mobile and tablet media query breakpoints."""
+    output = dashboard_css()
+    assert "@media (max-width: 767px)" in output
+    assert "@media (min-width: 768px)" in output
+
+
+def test_dashboard_css_contains_tab_fade() -> None:
+    """dashboard_css() must include .tab-content-fade for opacity transitions."""
+    output = dashboard_css()
+    assert ".tab-content-fade" in output
+
+
+def test_dashboard_css_contains_collapsible() -> None:
+    """dashboard_css() must include .collapsible-content for collapsible sections."""
+    output = dashboard_css()
+    assert ".collapsible-content" in output
+
+
+def test_comparison_css_excludes_transitions() -> None:
+    """comparison_css() must not include dashboard-only transition or responsive CSS."""
+    output = comparison_css()
+    assert "translateY" not in output
+    assert "@media (max-width" not in output
+
+
 def test_comparators_backward_compat() -> None:
     """All symbols re-exported from comparators.html_report must be importable."""
     from cobre_bridge.comparators.html_report import (  # noqa: PLC0415
@@ -363,3 +399,157 @@ def test_comparators_backward_compat() -> None:
     assert callable(metrics_grid)
     assert callable(metric_card)
     assert callable(build_comparison_html)
+
+
+# ---------------------------------------------------------------------------
+# ticket-019: animated tab underline + expand-to-full-width
+# ---------------------------------------------------------------------------
+
+
+def test_tab_switch_js_contains_underline_logic() -> None:
+    """TAB_SWITCH_JS must reference the tab-underline element."""
+    assert "tab-underline" in TAB_SWITCH_JS
+
+
+def test_tab_switch_js_contains_expand_toggle() -> None:
+    """TAB_SWITCH_JS must toggle the chart-card-expanded class."""
+    assert "chart-card-expanded" in TAB_SWITCH_JS
+
+
+def test_tab_switch_js_preserves_show_tab_signature() -> None:
+    """showTab must keep its original (tabId, btn) signature unchanged."""
+    assert "function showTab(tabId, btn)" in TAB_SWITCH_JS
+
+
+def test_wrap_chart_contains_expand_button() -> None:
+    """wrap_chart output must include a button with class expand-btn and an SVG."""
+    result = wrap_chart("<p>X</p>")
+    assert 'class="expand-btn"' in result
+    assert "<svg" in result
+
+
+def test_dashboard_css_contains_underline_styles() -> None:
+    """dashboard_css() must include the .tab-underline selector."""
+    assert ".tab-underline" in dashboard_css()
+
+
+def test_dashboard_css_contains_expand_btn_styles() -> None:
+    """dashboard_css() must include the .expand-btn selector."""
+    assert ".expand-btn" in dashboard_css()
+
+
+# ---------------------------------------------------------------------------
+# ticket-020: Stripe-style metric cards with sparklines
+# ---------------------------------------------------------------------------
+
+
+def test_metric_card_backward_compatible() -> None:
+    """metric_card positional-only call must match the original structure."""
+    result = metric_card("42", "Test")
+    assert 'class="metric-value"' in result
+    assert 'class="metric-label"' in result
+    assert "42" in result
+    assert "Test" in result
+    assert "metric-delta" not in result
+    assert "metric-sparkline" not in result
+    assert "border-top" not in result
+
+
+def test_metric_card_with_color() -> None:
+    """metric_card with color= must add a border-top inline style."""
+    result = metric_card("42", "Test", color="#B87333")
+    assert "border-top: 4px solid #B87333" in result
+
+
+def test_metric_card_with_delta_up() -> None:
+    """delta_direction='up' must render metric-delta-up class and the delta text."""
+    result = metric_card("42", "Test", delta="+5%", delta_direction="up")
+    assert 'class="metric-delta metric-delta-up"' in result
+    assert "+5%" in result
+
+
+def test_metric_card_with_delta_down() -> None:
+    """metric_card with delta_direction='down' must render metric-delta-down class."""
+    result = metric_card("42", "Test", delta="-3%", delta_direction="down")
+    assert 'class="metric-delta metric-delta-down"' in result
+    assert "-3%" in result
+
+
+def test_metric_card_with_sparkline() -> None:
+    """metric_card with sparkline_values must include an <svg> and a <polyline>."""
+    result = metric_card("42", "Test", sparkline_values=[1.0, 2.0, 3.0, 2.5])
+    assert "<svg" in result
+    assert "<polyline" in result
+
+
+def test_metric_card_sparkline_omitted_for_empty_values() -> None:
+    """metric_card with sparkline_values=[] must not render any SVG."""
+    result = metric_card("42", "Test", sparkline_values=[])
+    assert "<svg" not in result
+
+
+def test_metric_card_delta_without_direction() -> None:
+    """delta alone (no direction) must render the text without a directional class."""
+    result = metric_card("42", "Test", delta="+5%")
+    assert "+5%" in result
+    assert "metric-delta-up" not in result
+    assert "metric-delta-down" not in result
+    assert 'class="metric-delta"' in result
+
+
+def test_dashboard_css_contains_metric_delta_styles() -> None:
+    """dashboard_css() must include all four new metric-delta CSS selectors."""
+    output = dashboard_css()
+    assert ".metric-delta" in output
+    assert ".metric-delta-up" in output
+    assert ".metric-delta-down" in output
+    assert ".metric-sparkline" in output
+
+
+# ---------------------------------------------------------------------------
+# ticket-021: collapsible sections and staggered card entry animations
+# ---------------------------------------------------------------------------
+
+
+def test_collapsible_section_structure() -> None:
+    """Verify data-collapsible attr, collapsible-content wrapper, and chevron SVG."""
+    result = collapsible_section("Title", "<p>Body</p>")
+    assert 'data-collapsible="true"' in result
+    assert 'class="collapsible-content"' in result
+    assert 'class="chevron"' in result
+    assert "<svg" in result
+    assert "<polyline" in result
+
+
+def test_collapsible_section_contains_title_text() -> None:
+    """collapsible_section must render the title text inside the section-title div."""
+    result = collapsible_section("My Section", "<p>Body</p>")
+    assert "My Section" in result
+
+
+def test_collapsible_section_contains_content() -> None:
+    """collapsible_section must render the content string inside collapsible-content."""
+    result = collapsible_section("Title", "<p>Custom body content</p>")
+    assert "<p>Custom body content</p>" in result
+    # Content must appear after the section-title div (inside collapsible-content).
+    content_idx = result.index("collapsible-content")
+    body_idx = result.index("Custom body content")
+    assert body_idx > content_idx
+
+
+def test_section_title_unchanged() -> None:
+    """section_title must return exactly the pre-ticket-021 output, no regression."""
+    result = section_title("Test")
+    assert result == '<div class="section-title">Test</div>'
+
+
+def test_tab_switch_js_contains_collapsible_handler() -> None:
+    """TAB_SWITCH_JS must contain a delegated click handler for data-collapsible."""
+    assert "data-collapsible" in TAB_SWITCH_JS
+    assert "collapsed" in TAB_SWITCH_JS
+
+
+def test_tab_switch_js_contains_stagger_animation() -> None:
+    """TAB_SWITCH_JS must contain stagger animation logic with card-enter and delay."""
+    assert "card-enter" in TAB_SWITCH_JS
+    assert "animationDelay" in TAB_SWITCH_JS

@@ -11,7 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 
-from cobre_bridge.ui.html import section_title, wrap_chart
+from cobre_bridge.ui.html import metric_card, metrics_grid, section_title, wrap_chart
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
@@ -195,15 +195,8 @@ def build_key_metrics_html(
         ("Total Spillage", f"{total_spillage:,.0f} m³/s", COLORS["spillage"]),
         ("NCS Curtailment Rate", f"{curt_rate:.1f}%", COLORS["curtailment"]),
     ]
-    cards = []
-    for label, value, color in metrics:
-        cards.append(
-            f'<div class="metric-card" style="border-top: 4px solid {color};">'
-            f'<div class="metric-value">{value}</div>'
-            f'<div class="metric-label">{label}</div>'
-            f"</div>"
-        )
-    return '<div class="metrics-grid">' + "".join(cards) + "</div>"
+    cards = [metric_card(value, label, color=color) for label, value, color in metrics]
+    return metrics_grid(cards)
 
 
 def chart_cost_by_stage(

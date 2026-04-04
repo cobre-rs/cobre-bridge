@@ -185,9 +185,166 @@ PLANT_SELECTOR_CSS: str = """
 """
 
 
+TRANSITIONS_CSS: str = """
+.chart-card {
+    transition: transform 0.2s ease-out, box-shadow 0.2s ease-out;
+}
+
+.chart-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+}
+"""
+
+RESPONSIVE_CSS: str = """
+@media (max-width: 767px) {
+    .chart-grid {
+        grid-template-columns: 1fr;
+    }
+    .metrics-grid {
+        grid-template-columns: 1fr;
+    }
+    main {
+        padding: 12px;
+    }
+}
+
+@media (min-width: 768px) and (max-width: 1199px) {
+    .chart-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+"""
+
+TAB_FADE_CSS: str = """
+.tab-content-fade {
+    opacity: 0;
+    transition: opacity 0.15s ease-in;
+}
+
+.tab-content-fade.active {
+    opacity: 1;
+}
+
+.chart-card-expanded {
+    grid-column: 1 / -1;
+}
+"""
+
+COLLAPSIBLE_CSS: str = """
+.section-title[data-collapsible] {
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.chevron {
+    transition: transform 0.2s ease-out;
+    flex-shrink: 0;
+}
+
+.section-title[data-collapsible].collapsed-title .chevron {
+    transform: rotate(-90deg);
+}
+
+.collapsible-content {
+    max-height: 4000px;
+    overflow: hidden;
+    transition: max-height 0.25s ease-out;
+}
+
+.collapsible-content.collapsed {
+    max-height: 0;
+    overflow: hidden;
+}
+
+@keyframes cardEnter {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.card-enter {
+    animation: cardEnter 0.2s ease-out both;
+}
+"""
+
+METRIC_CARD_CSS: str = """
+.metric-delta {
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    margin-bottom: 4px;
+}
+
+.metric-delta-up {
+    color: #4A8B6F;
+}
+
+.metric-delta-down {
+    color: #DC4C4C;
+}
+
+.metric-sparkline {
+    display: flex;
+    justify-content: center;
+    margin-top: 8px;
+}
+"""
+
+UNDERLINE_EXPAND_CSS: str = """
+nav { position: relative; }
+
+.tab-underline {
+    position: absolute;
+    bottom: 0;
+    height: 3px;
+    background: #B87333;
+    transition: transform 0.3s ease-out, width 0.3s ease-out;
+    pointer-events: none;
+}
+
+.chart-card { position: relative; }
+
+.expand-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    opacity: 0;
+    transition: opacity 0.2s ease-out;
+    cursor: pointer;
+    background: none;
+    border: none;
+    color: #8B9298;
+    padding: 4px;
+    z-index: 10;
+    line-height: 0;
+}
+
+.chart-card:hover .expand-btn { opacity: 1; }
+"""
+
+
 def dashboard_css() -> str:
-    """Compose CSS for the dashboard (base + data-table styles)."""
-    return BASE_CSS + DATA_TABLE_CSS
+    """Compose CSS for the dashboard (base + data-table + transition + responsive styles)."""
+    return (
+        BASE_CSS
+        + DATA_TABLE_CSS
+        + TRANSITIONS_CSS
+        + RESPONSIVE_CSS
+        + TAB_FADE_CSS
+        + COLLAPSIBLE_CSS
+        + UNDERLINE_EXPAND_CSS
+        + METRIC_CARD_CSS
+    )
 
 
 def comparison_css() -> str:
