@@ -9,17 +9,18 @@ from __future__ import annotations
 import plotly.graph_objects as go
 import pytest
 
-from cobre_bridge.ui.css import comparison_css, dashboard_css
+from cobre_bridge.ui.css import PLANT_EXPLORER_CSS, comparison_css, dashboard_css
 from cobre_bridge.ui.html import (
     build_html,
     chart_grid,
     collapsible_section,
     metric_card,
     metrics_grid,
+    plant_explorer_table,
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.js import TAB_SWITCH_JS
+from cobre_bridge.ui.js import PLANT_EXPLORER_JS, TAB_SWITCH_JS
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
@@ -553,3 +554,78 @@ def test_tab_switch_js_contains_stagger_animation() -> None:
     """TAB_SWITCH_JS must contain stagger animation logic with card-enter and delay."""
     assert "card-enter" in TAB_SWITCH_JS
     assert "animationDelay" in TAB_SWITCH_JS
+
+
+# ---------------------------------------------------------------------------
+# ticket-022: plant explorer JS infrastructure
+# ---------------------------------------------------------------------------
+
+
+def test_plant_explorer_js_contains_all_functions() -> None:
+    """PLANT_EXPLORER_JS must define all 8 required function names."""
+    required = [
+        "initPlantExplorer",
+        "filterTable",
+        "sortTable",
+        "selectRow",
+        "plotlyBand",
+        "plotlyLine",
+        "plotlyRef",
+        "plotlyLayout",
+    ]
+    for name in required:
+        assert name in PLANT_EXPLORER_JS, f"Missing function: {name!r}"
+
+
+def test_plant_explorer_css_contains_expected_classes() -> None:
+    """PLANT_EXPLORER_CSS must define all required class selectors."""
+    required = [
+        ".explorer-container",
+        ".explorer-table-pane",
+        ".explorer-detail-pane",
+        ".explorer-search",
+        ".explorer-row-selected",
+    ]
+    for selector in required:
+        assert selector in PLANT_EXPLORER_CSS, f"Missing selector: {selector!r}"
+
+
+def test_plant_explorer_table_structure() -> None:
+    """plant_explorer_table returns HTML with expected structure."""
+    result = plant_explorer_table(
+        "tbody-hydro",
+        "search-hydro",
+        [("Name", "string"), ("MW", "number")],
+        "<tr><td>A</td><td>1</td></tr>",
+    )
+    assert "<input" in result
+    assert 'id="search-hydro"' in result
+    assert "<table" in result
+    assert "<thead>" in result or "<thead" in result
+    assert "<tbody" in result
+    assert 'id="tbody-hydro"' in result
+    assert "<th" in result
+    assert "<tr><td>A</td><td>1</td></tr>" in result
+
+
+def test_dashboard_css_includes_explorer_container() -> None:
+    """dashboard_css() must include .explorer-container from PLANT_EXPLORER_CSS."""
+    assert ".explorer-container" in dashboard_css()
+
+
+# ---------------------------------------------------------------------------
+# ticket-025: synchronized hover and comparison mode
+# ---------------------------------------------------------------------------
+
+
+def test_plant_explorer_js_contains_sync_hover_and_comparison_mode() -> None:
+    """PLANT_EXPLORER_JS must define syncHover and initComparisonMode functions."""
+    assert "syncHover" in PLANT_EXPLORER_JS
+    assert "initComparisonMode" in PLANT_EXPLORER_JS
+
+
+def test_plant_explorer_css_contains_comparison_active_classes() -> None:
+    """PLANT_EXPLORER_CSS must define compare-active-1, -2, and -3 selectors."""
+    assert "compare-active-1" in PLANT_EXPLORER_CSS
+    assert "compare-active-2" in PLANT_EXPLORER_CSS
+    assert "compare-active-3" in PLANT_EXPLORER_CSS

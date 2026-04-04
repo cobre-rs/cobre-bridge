@@ -157,6 +157,46 @@ def chart_grid(charts: list[str], single: bool = False) -> str:
     return f'<div class="{cls}">{"".join(charts)}</div>'
 
 
+def plant_explorer_table(
+    table_id: str,
+    search_id: str,
+    columns: list[tuple[str, str]],
+    rows_html: str,
+) -> str:
+    """Generate an HTML plant explorer table pane with search input and sortable header.
+
+    Args:
+        table_id: The ``id`` attribute applied to the ``<tbody>`` element.
+        search_id: The ``id`` attribute applied to the search ``<input>`` element.
+        columns: Ordered list of ``(header_text, sort_type)`` pairs. ``sort_type``
+            must be ``"string"``, ``"number"``, or ``"none"``.
+        rows_html: Pre-rendered ``<tr>`` elements to inject into the ``<tbody>``.
+
+    Returns:
+        An HTML fragment containing the search input, a ``<table>`` with a
+        sortable ``<thead>``, and a ``<tbody>`` populated with *rows_html*.
+    """
+    header_cells: list[str] = []
+    for col_index, (header_text, sort_type) in enumerate(columns):
+        if sort_type != "none":
+            header_cells.append(
+                f'<th class="sortable" data-sort-asc="false"'
+                f" onclick=\"sortTable('{table_id}', {col_index}, '{sort_type}')\">"
+                f'{header_text}<span class="sort-arrow"></span></th>'
+            )
+        else:
+            header_cells.append(f"<th>{header_text}</th>")
+
+    return (
+        f'<input type="search" id="{search_id}" class="explorer-search"'
+        f' placeholder="Search...">'
+        f'<table class="explorer-table">'
+        f"<thead><tr>{''.join(header_cells)}</tr></thead>"
+        f'<tbody id="{table_id}">{rows_html}</tbody>'
+        f"</table>"
+    )
+
+
 def build_html(
     title: str,
     tab_defs: list[tuple[str, str]],

@@ -275,6 +275,138 @@ COLLAPSIBLE_CSS: str = """
 }
 """
 
+PLANT_EXPLORER_CSS: str = """
+.explorer-container {
+    display: flex;
+    gap: 20px;
+}
+
+.explorer-table-pane {
+    width: 380px;
+    flex-shrink: 0;
+    max-height: 80vh;
+    overflow-y: auto;
+}
+
+.explorer-detail-pane {
+    flex: 1;
+    min-width: 0;
+}
+
+.explorer-search {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 0.88rem;
+    background: #FAFAF8;
+    margin-bottom: 8px;
+    box-sizing: border-box;
+}
+
+.explorer-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+    background: #FAFAF8;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+}
+
+.explorer-table th, .explorer-table td {
+    padding: 7px 10px;
+    text-align: right;
+    border-bottom: 1px solid #E0E0E0;
+}
+
+.explorer-table th {
+    background: #374151;
+    color: white;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.72rem;
+    letter-spacing: 0.5px;
+}
+
+.explorer-table td:first-child, .explorer-table th:first-child { text-align: left; }
+
+.explorer-table tbody tr {
+    cursor: pointer;
+}
+
+.explorer-table tbody tr:hover td { background: #F0EDE8; }
+
+.explorer-row-selected td {
+    background: rgba(184, 115, 51, 0.12) !important;
+}
+
+.explorer-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.explorer-table th .sort-arrow {
+    display: inline-block;
+    width: 1em;
+}
+
+@media (max-width: 1023px) {
+    .explorer-container {
+        flex-direction: column;
+    }
+    .explorer-table-pane {
+        width: 100%;
+        max-height: 40vh;
+    }
+}
+
+.compare-checkbox {
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    display: block;
+    margin: 0 auto;
+}
+
+.compare-active-1 {
+    border-left: 3px solid #2196F3;
+}
+
+.compare-active-2 {
+    border-left: 3px solid #FF9800;
+}
+
+.compare-active-3 {
+    border-left: 3px solid #4CAF50;
+}
+
+.compare-legend {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: 0.8rem;
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    background: #F0EDE8;
+    border-radius: 6px;
+}
+
+.compare-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.compare-legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+"""
+
 METRIC_CARD_CSS: str = """
 .metric-delta {
     font-size: 0.85rem;
@@ -344,6 +476,7 @@ def dashboard_css() -> str:
         + COLLAPSIBLE_CSS
         + UNDERLINE_EXPAND_CSS
         + METRIC_CARD_CSS
+        + PLANT_EXPLORER_CSS
     )
 
 

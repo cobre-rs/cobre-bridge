@@ -123,3 +123,296 @@ document.addEventListener('click', function(e) {
 // Fire a deferred resize so they recalculate to the correct container width.
 window.addEventListener('load', function() { setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 50); });
 """
+
+PLANT_EXPLORER_JS: str = """
+// ---------------------------------------------------------------------------
+// Plant Explorer: shared infrastructure for master-detail split-pane tables.
+// All functions use ES5 var declarations for inline-script compatibility.
+// ---------------------------------------------------------------------------
+
+function initPlantExplorer(config) {
+    // config: { tableId, searchInputId, detailContainerId, dataVar, labelsVar,
+    //           renderDetail, columns }
+    var searchInput = document.getElementById(config.searchInputId);
+    if (searchInput) {
+        searchInput.addEventListener('input', function() {
+            filterTable(config.tableId, config.searchInputId);
+        });
+    }
+
+    var tbody = document.getElementById(config.tableId);
+    if (tbody) {
+        var rows = tbody.querySelectorAll('tr');
+        rows.forEach(function(row) {
+            row.addEventListener('click', function() {
+                selectRow(config.tableId, config.detailContainerId, row,
+                          config.dataVar, config.renderDetail);
+            });
+        });
+        if (rows.length > 0) {
+            selectRow(config.tableId, config.detailContainerId, rows[0],
+                      config.dataVar, config.renderDetail);
+        }
+    }
+}
+
+function filterTable(tableId, searchInputId) {
+    var input = document.getElementById(searchInputId);
+    var query = input ? input.value.toLowerCase() : '';
+    var tbody = document.getElementById(tableId);
+    if (!tbody) { return; }
+    var rows = tbody.querySelectorAll('tr');
+    rows.forEach(function(row) {
+        var name = (row.getAttribute('data-name') || '').toLowerCase();
+        row.style.display = (query === '' || name.indexOf(query) !== -1) ? '' : 'none';
+    });
+}
+
+function sortTable(tableId, colIndex, type) {
+    if (type === 'none') { return; }
+    var tbody = document.getElementById(tableId);
+    if (!tbody) { return; }
+
+    var table = tbody.closest('table');
+    var th = table ? table.querySelectorAll('th')[colIndex] : null;
+    var asc = th ? th.getAttribute('data-sort-asc') !== 'true' : true;
+
+    var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+    rows.sort(function(a, b) {
+        var cellA = a.querySelectorAll('td')[colIndex];
+        var cellB = b.querySelectorAll('td')[colIndex];
+        var valA = cellA ? cellA.getAttribute('data-sort-value') || cellA.textContent || '' : '';
+        var valB = cellB ? cellB.getAttribute('data-sort-value') || cellB.textContent || '' : '';
+        if (type === 'number') {
+            valA = parseFloat(valA) || 0;
+            valB = parseFloat(valB) || 0;
+            return asc ? valA - valB : valB - valA;
+        }
+        valA = valA.toLowerCase();
+        valB = valB.toLowerCase();
+        if (valA < valB) { return asc ? -1 : 1; }
+        if (valA > valB) { return asc ? 1 : -1; }
+        return 0;
+    });
+
+    rows.forEach(function(row) { tbody.appendChild(row); });
+
+    if (th) {
+        th.setAttribute('data-sort-asc', asc ? 'true' : 'false');
+        if (table) {
+            table.querySelectorAll('th').forEach(function(el) {
+                var arrow = el.querySelector('.sort-arrow');
+                if (arrow) { arrow.textContent = ''; }
+            });
+        }
+        var arrow = th.querySelector('.sort-arrow');
+        if (arrow) { arrow.textContent = asc ? ' \u25b2' : ' \u25bc'; }
+    }
+}
+
+function selectRow(tableId, detailContainerId, rowElement, dataVar, renderDetail) {
+    if (!rowElement) { return; }
+    var tbody = document.getElementById(tableId);
+    if (tbody) {
+        tbody.querySelectorAll('tr').forEach(function(r) {
+            r.classList.remove('explorer-row-selected');
+        });
+    }
+    rowElement.classList.add('explorer-row-selected');
+
+    var idx = rowElement.getAttribute('data-index');
+    if (idx !== null && dataVar && renderDetail) {
+        var data = window[dataVar];
+        if (data && data[idx] !== undefined) {
+            renderDetail(detailContainerId, data[idx]);
+        }
+    }
+}
+
+function plotlyBand(labels, p10, p90, color, name) {
+    return {
+        x: labels.concat(labels.slice().reverse()),
+        y: p90.concat(p10.slice().reverse()),
+        fill: 'toself',
+        fillcolor: color,
+        line: { color: 'transparent' },
+        name: name,
+        showlegend: true,
+        type: 'scatter',
+        mode: 'none',
+        hoverinfo: 'skip'
+    };
+}
+
+function plotlyLine(labels, y, color, name, width, dash) {
+    return {
+        x: labels,
+        y: y,
+        mode: 'lines',
+        line: {
+            color: color,
+            width: width !== undefined ? width : 2,
+            dash: dash || 'solid'
+        },
+        name: name,
+        type: 'scatter'
+    };
+}
+
+function plotlyRef(labels, values, color, name) {
+    var yArr;
+    if (Array.isArray(values)) {
+        yArr = values;
+    } else {
+        yArr = labels.map(function() { return values; });
+    }
+    return {
+        x: labels,
+        y: yArr,
+        mode: 'lines',
+        line: { color: color, width: 1, dash: 'dot' },
+        name: name,
+        type: 'scatter'
+    };
+}
+
+function plotlyLayout(overrides) {
+    var defaults = {
+        hovermode: 'x unified',
+        margin: { l: 50, r: 20, t: 40, b: 50 },
+        legend: { orientation: 'h', x: 0, y: -0.2 },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)'
+    };
+    var result = {};
+    for (var k in defaults) {
+        if (defaults.hasOwnProperty(k)) { result[k] = defaults[k]; }
+    }
+    if (overrides) {
+        for (var key in overrides) {
+            if (overrides.hasOwnProperty(key)) { result[key] = overrides[key]; }
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// syncHover: cross-chart hover synchronization.
+// Attaches plotly_hover / plotly_unhover listeners to each chart div.
+// A _syncLock guard prevents re-entrant cascades.
+// ---------------------------------------------------------------------------
+
+var _syncLock = false;
+
+function syncHover(chartIds) {
+    chartIds.forEach(function(sourceId) {
+        var sourceDiv = document.getElementById(sourceId);
+        if (!sourceDiv) { return; }
+
+        sourceDiv.on('plotly_hover', function(eventData) {
+            if (_syncLock) { return; }
+            var pts = eventData && eventData.points;
+            if (!pts || pts.length === 0) { return; }
+            var pointIndex = pts[0].pointIndex;
+            _syncLock = true;
+            chartIds.forEach(function(targetId) {
+                if (targetId === sourceId) { return; }
+                var targetDiv = document.getElementById(targetId);
+                if (!targetDiv) { return; }
+                try {
+                    Plotly.Fx.hover(targetDiv, [{ curveNumber: 0, pointNumber: pointIndex }]);
+                } catch (e) { /* chart not yet rendered */ }
+            });
+            _syncLock = false;
+        });
+
+        sourceDiv.on('plotly_unhover', function() {
+            if (_syncLock) { return; }
+            _syncLock = true;
+            chartIds.forEach(function(targetId) {
+                if (targetId === sourceId) { return; }
+                var targetDiv = document.getElementById(targetId);
+                if (!targetDiv) { return; }
+                try {
+                    Plotly.Fx.hover(targetDiv, []);
+                } catch (e) { /* chart not yet rendered */ }
+            });
+            _syncLock = false;
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// initComparisonMode: checkbox-driven plant comparison overlay.
+// config keys: tableId, dataVar, labelsVar, chartIds, renderComparison,
+//              renderDetail (optional, for reverting to single-plant mode),
+//              maxCompare (default 3).
+// ---------------------------------------------------------------------------
+
+var _compareSelected = [];
+var _comparePalette = ['#2196F3', '#FF9800', '#4CAF50'];
+
+function initComparisonMode(config) {
+    var maxCompare = config.maxCompare !== undefined ? config.maxCompare : 3;
+    var tbody = document.getElementById(config.tableId);
+    if (!tbody) { return; }
+
+    tbody.addEventListener('change', function(e) {
+        var cb = e.target;
+        if (!cb || cb.type !== 'checkbox' || !cb.classList.contains('compare-checkbox')) {
+            return;
+        }
+        var plantId = cb.getAttribute('data-id');
+        if (!plantId) { return; }
+
+        if (cb.checked) {
+            if (_compareSelected.indexOf(plantId) === -1) {
+                if (_compareSelected.length >= maxCompare) {
+                    // Uncheck the oldest selection.
+                    var oldest = _compareSelected.shift();
+                    var oldCb = tbody.querySelector(
+                        '.compare-checkbox[data-id="' + oldest + '"]'
+                    );
+                    if (oldCb) { oldCb.checked = false; }
+                }
+                _compareSelected.push(plantId);
+            }
+        } else {
+            var idx = _compareSelected.indexOf(plantId);
+            if (idx !== -1) { _compareSelected.splice(idx, 1); }
+        }
+
+        // Update row border classes.
+        tbody.querySelectorAll('tr').forEach(function(row) {
+            row.classList.remove('compare-active-1', 'compare-active-2', 'compare-active-3');
+        });
+        _compareSelected.forEach(function(pid, i) {
+            var rowCb = tbody.querySelector('.compare-checkbox[data-id="' + pid + '"]');
+            var row = rowCb ? rowCb.closest('tr') : null;
+            if (row) { row.classList.add('compare-active-' + (i + 1)); }
+        });
+
+        // Render comparison or revert to single-plant.
+        var data = window[config.dataVar];
+        var labels = window[config.labelsVar];
+        if (_compareSelected.length === 0) {
+            // Revert to the currently selected row.
+            var selectedRow = tbody.querySelector('.explorer-row-selected');
+            if (selectedRow && config.renderDetail && data) {
+                var selIdx = selectedRow.getAttribute('data-index');
+                if (selIdx !== null && data[selIdx] !== undefined) {
+                    config.renderDetail(null, data[selIdx]);
+                }
+            }
+        } else {
+            var entries = [];
+            _compareSelected.forEach(function(pid) {
+                if (data && data[pid] !== undefined) {
+                    entries.push(data[pid]);
+                }
+            });
+            config.renderComparison(entries, labels);
+        }
+    }, false);
+}
+"""

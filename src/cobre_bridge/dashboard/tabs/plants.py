@@ -1,7 +1,8 @@
 """Plant Details tab module for the Cobre dashboard.
 
 Displays the interactive hydro plant explorer with per-plant p10/p50/p90
-statistics, LP bounds, and a JavaScript dropdown powered by Plotly.react().
+statistics, LP bounds, and a JavaScript master-detail layout powered by
+Plotly.react().
 """
 
 from __future__ import annotations
@@ -15,7 +16,15 @@ import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
-from cobre_bridge.ui.html import section_title
+from cobre_bridge.ui.html import (
+    _sparkline_svg,
+    chart_grid,
+    collapsible_section,
+    plant_explorer_table,
+    section_title,
+    wrap_chart,
+)
+from cobre_bridge.ui.js import PLANT_EXPLORER_JS
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS as _LEGEND,
 )
@@ -858,154 +867,276 @@ def build_interactive_plant_details(
                     entry[key] = [round(float(by_stage.get(s, 0)), 2) for s in stages]
 
     options = sorted(hydro_data.items(), key=lambda x: x[1]["name"])
-    options_html = "\n".join(
-        f'<option value="{hid}">{d["name"]} (id={hid})</option>' for hid, d in options
+
+    if not options:
+        return "<p>No hydro plant data available.</p>"
+
+    # Build table rows (sorted alphabetically by name, each row has data-index for
+    # selectRow() lookup in HD, and data-name for filterTable() search).
+    table_rows: list[str] = []
+    for hid, d in options:
+        stor_p50: list[float] = d.get("stor_p50", [])
+        gen_p50: list[float] = d.get("gen_p50", [])
+        stor_spark = (
+            _sparkline_svg(stor_p50, "#4A90B8")
+            if len(stor_p50) >= 2 and any(v != 0 for v in stor_p50)
+            else ""
+        )
+        gen_spark = (
+            _sparkline_svg(gen_p50, "#4A8B6F")
+            if len(gen_p50) >= 2 and any(v != 0 for v in gen_p50)
+            else ""
+        )
+        max_gen = d.get("max_gen", 0)
+        vol_max = d.get("vol_max", 0)
+        bus = d.get("bus", "")
+        name = d.get("name", "")
+        table_rows.append(
+            f'<tr data-name="{name.lower()}" data-index="{hid}">'
+            f'<td><input type="checkbox" class="compare-checkbox" data-id="{hid}"></td>'
+            f"<td>{name}</td>"
+            f"<td>{bus}</td>"
+            f'<td data-sort-value="{max_gen:.0f}">{max_gen:.0f}</td>'
+            f'<td data-sort-value="{vol_max:.0f}">{vol_max:.0f}</td>'
+            f"<td>{stor_spark}</td>"
+            f"<td>{gen_spark}</td>"
+            f"</tr>"
+        )
+
+    rows_html = "".join(table_rows)
+    columns: list[tuple[str, str]] = [
+        ("Cmp", "none"),
+        ("Name", "string"),
+        ("Bus", "string"),
+        ("MW", "number"),
+        ("Vol", "number"),
+        ("Storage", "none"),
+        ("Gen", "none"),
+    ]
+    table_pane = (
+        '<div class="explorer-table-pane">'
+        + plant_explorer_table(
+            "hd-tbody",
+            "hd-search",
+            columns,
+            rows_html,
+        )
+        + "</div>"
     )
+
+    # Detail pane: 3 collapsible sections with chart divs
+    def _chart_div(div_id: str) -> str:
+        return f'<div id="{div_id}" style="width:100%;height:350px;"></div>'
+
+    water_balance_section = collapsible_section(
+        "Water Balance",
+        chart_grid(
+            [
+                wrap_chart(_chart_div("hd-stor")),
+                wrap_chart(_chart_div("hd-inflow")),
+                wrap_chart(_chart_div("hd-spill")),
+                wrap_chart(_chart_div("hd-evap")),
+            ]
+        ),
+    )
+    generation_section = collapsible_section(
+        "Generation",
+        chart_grid([wrap_chart(_chart_div("hd-gen"))], single=True)
+        + chart_grid(
+            [
+                wrap_chart(_chart_div("hd-turb")),
+                wrap_chart(_chart_div("hd-outflow")),
+            ]
+        ),
+    )
+    economics_section = collapsible_section(
+        "Economics",
+        chart_grid(
+            [
+                wrap_chart(_chart_div("hd-wv")),
+                wrap_chart(_chart_div("hd-ww")),
+            ]
+        ),
+    )
+
+    detail_pane = (
+        '<div class="explorer-detail-pane">'
+        + water_balance_section
+        + generation_section
+        + economics_section
+        + "</div>"
+    )
+
+    explorer_html = (
+        '<div class="explorer-container">' + table_pane + detail_pane + "</div>"
+    )
+
     data_json = json.dumps(hydro_data, separators=(",", ":"))
     labels_json = json.dumps(xlabels)
 
-    chart_rows = (
-        '<div class="chart-grid-single">'
-        '<div class="chart-card"><div id="hd-gen" style="width:100%;height:350px;"></div></div>'
-        "</div>"
-        '<div class="chart-grid">'
-        '<div class="chart-card"><div id="hd-stor" style="width:100%;height:350px;"></div></div>'
-        '<div class="chart-card"><div id="hd-inflow" style="width:100%;height:350px;"></div></div>'
-        "</div>"
-        '<div class="chart-grid">'
-        '<div class="chart-card"><div id="hd-turb" style="width:100%;height:350px;"></div></div>'
-        '<div class="chart-card"><div id="hd-spill" style="width:100%;height:350px;"></div></div>'
-        "</div>"
-        '<div class="chart-grid">'
-        '<div class="chart-card"><div id="hd-wv" style="width:100%;height:350px;"></div></div>'
-        '<div class="chart-card"><div id="hd-outflow" style="width:100%;height:350px;"></div></div>'
-        "</div>"
-        '<div class="chart-grid">'
-        '<div class="chart-card"><div id="hd-evap" style="width:100%;height:350px;"></div></div>'
-        '<div class="chart-card"><div id="hd-ww" style="width:100%;height:350px;"></div></div>'
-        "</div>"
-    )
-
-    return (
-        '<div style="margin-bottom:16px;">'
-        '<label for="hydro-select" style="font-weight:600;margin-right:8px;">Select Hydro Plant:</label>'
-        '<select id="hydro-select" onchange="updateHydroDetail()" '
-        'style="padding:8px 12px;font-size:0.9rem;border-radius:4px;border:1px solid #ccc;min-width:300px;">'
-        + options_html
-        + "</select>"
-        + '<span id="hydro-info" style="margin-left:16px;color:#666;font-size:0.85rem;"></span>'
-        + "</div>"
-        + chart_rows
-        + "<script>\n"
-        + "const HD = "
+    inline_js = (
+        PLANT_EXPLORER_JS
+        + "\nconst HD = "
         + data_json
         + ";\n"
         + "const HD_LABELS = "
         + labels_json
         + ";\n"
-        + r"""
-function _band(lbl, p10, p90, color) {
-  return {x: HD_LABELS.concat(HD_LABELS.slice().reverse()),
-          y: p90.concat(p10.slice().reverse()),
-          fill:'toself', fillcolor:color, line:{color:'rgba(0,0,0,0)'},
-          name:lbl, showlegend:true, hoverinfo:'skip'};
-}
-function _line(nm, y, c, w, dash) {
-  return {x:HD_LABELS, y:y, name:nm, line:{color:c, width:w||2, dash:dash||'solid'}};
-}
-function _ref(nm, val, c) {
-  return {x:HD_LABELS, y:Array(HD_LABELS.length).fill(val), name:nm,
-          line:{color:c, width:1, dash:'dot'}};
-}
-var _L = {hovermode:'x unified', margin:{l:60,r:20,t:50,b:60},
-           legend:{orientation:'h',y:1.12,x:0,font:{size:11}}};
-var _C = {responsive:true};
-function _lo(extra){return Object.assign({},_L,extra);}
+        + """
+var _C = {responsive: true};
 
-function updateHydroDetail() {
-  var hid = document.getElementById('hydro-select').value;
-  var d = HD[hid]; if(!d) return;
-  document.getElementById('hydro-info').textContent =
-    d.bus+' | Gen: '+d.max_gen_phys.toFixed(0)+' MW | Turb: '+d.max_turb.toFixed(0)+
-    ' m\u00b3/s | Vol: '+d.vol_min.toFixed(0)+'\u2013'+d.vol_max.toFixed(0)+' hm\u00b3';
+function renderHydroDetail(containerId, d) {
+  if (!d) { return; }
+  var lbl = HD_LABELS;
 
   Plotly.react('hd-gen', [
-    _band('P10-P90', d.gen_p10, d.gen_p90, 'rgba(74,144,184,0.15)'),
-    _line('P50', d.gen_p50, '#4A90B8'),
-    _line('P10', d.gen_p10, '#4A90B8', 1, 'dot'),
-    _line('P90', d.gen_p90, '#4A90B8', 1, 'dot'),
-    _line('Effective Capacity', d.gen_max || Array(HD_LABELS.length).fill(d.max_gen_phys), '#DC4C4C', 1, 'dash'),
-  ], _lo({title:d.name+' \u2014 Generation (MW)', yaxis:{title:'MW'}}), _C);
+    plotlyBand(lbl, d.gen_p10, d.gen_p90, 'rgba(74,144,184,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.gen_p50, '#4A90B8', 'P50'),
+    plotlyLine(lbl, d.gen_p10, '#4A90B8', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.gen_p90, '#4A90B8', 'P90', 1, 'dot'),
+    plotlyLine(lbl, d.gen_max || lbl.map(function() { return d.max_gen_phys; }),
+               '#DC4C4C', 'Effective Capacity', 1, 'dash'),
+  ], plotlyLayout({title: d.name + ' \u2014 Generation (MW)', yaxis: {title: 'MW'}}), _C);
 
   Plotly.react('hd-stor', [
-    _band('P10-P90', d.stor_p10, d.stor_p90, 'rgba(74,144,184,0.15)'),
-    _line('P50', d.stor_p50, '#4A90B8'),
-    _line('P10', d.stor_p10, '#4A90B8', 1, 'dot'),
-    _line('P90', d.stor_p90, '#4A90B8', 1, 'dot'),
-    _ref('Vol Max', d.vol_max, '#DC4C4C'),
-    _ref('Vol Min', d.vol_min, '#4A8B6F'),
-  ], _lo({title:'Storage (hm\u00b3)', yaxis:{title:'hm\u00b3'}}), _C);
+    plotlyBand(lbl, d.stor_p10, d.stor_p90, 'rgba(74,144,184,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.stor_p50, '#4A90B8', 'P50'),
+    plotlyLine(lbl, d.stor_p10, '#4A90B8', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.stor_p90, '#4A90B8', 'P90', 1, 'dot'),
+    plotlyRef(lbl, d.vol_max, '#DC4C4C', 'Vol Max'),
+    plotlyRef(lbl, d.vol_min, '#4A8B6F', 'Vol Min'),
+  ], plotlyLayout({title: 'Storage (hm\u00b3)', yaxis: {title: 'hm\u00b3'}}), _C);
 
   Plotly.react('hd-inflow', [
-    _band('P10-P90', d.inflow_p10, d.inflow_p90, 'rgba(74,139,111,0.15)'),
-    _line('P50', d.inflow_p50, '#4A8B6F'),
-    _line('P10', d.inflow_p10, '#4A8B6F', 1, 'dot'),
-    _line('P90', d.inflow_p90, '#4A8B6F', 1, 'dot'),
-  ], _lo({title:'Inflow (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+    plotlyBand(lbl, d.inflow_p10, d.inflow_p90, 'rgba(74,139,111,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.inflow_p50, '#4A8B6F', 'P50'),
+    plotlyLine(lbl, d.inflow_p10, '#4A8B6F', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.inflow_p90, '#4A8B6F', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Inflow (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _C);
 
   var turbTraces = [
-    _band('P10-P90', d.turb_p10, d.turb_p90, 'rgba(245,166,35,0.15)'),
-    _line('P50', d.turb_p50, '#F5A623'),
-    _line('P10', d.turb_p10, '#F5A623', 1, 'dot'),
-    _line('P90', d.turb_p90, '#F5A623', 1, 'dot'),
-    _line('Turb Max (LP)', d.turb_max || Array(HD_LABELS.length).fill(d.max_turb), '#DC4C4C', 1, 'dash'),
+    plotlyBand(lbl, d.turb_p10, d.turb_p90, 'rgba(245,166,35,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.turb_p50, '#F5A623', 'P50'),
+    plotlyLine(lbl, d.turb_p10, '#F5A623', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.turb_p90, '#F5A623', 'P90', 1, 'dot'),
+    plotlyLine(lbl, d.turb_max || lbl.map(function() { return d.max_turb; }),
+               '#DC4C4C', 'Turb Max (LP)', 1, 'dash'),
   ];
-  if(d.turb_min && d.turb_min.some(function(v){return v>0;}))
-    turbTraces.push(_line('Turb Min (LP)', d.turb_min, '#4A8B6F', 1, 'dash'));
-  Plotly.react('hd-turb', turbTraces, _lo({title:'Turbined (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+  if (d.turb_min && d.turb_min.some(function(v) { return v > 0; })) {
+    turbTraces.push(plotlyLine(lbl, d.turb_min, '#4A8B6F', 'Turb Min (LP)', 1, 'dash'));
+  }
+  Plotly.react('hd-turb', turbTraces,
+               plotlyLayout({title: 'Turbined (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _C);
 
   Plotly.react('hd-spill', [
-    _band('P10-P90', d.spill_p10, d.spill_p90, 'rgba(184,115,51,0.15)'),
-    _line('P50', d.spill_p50, '#B87333'),
-    _line('P10', d.spill_p10, '#B87333', 1, 'dot'),
-    _line('P90', d.spill_p90, '#B87333', 1, 'dot'),
-  ], _lo({title:'Spillage (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+    plotlyBand(lbl, d.spill_p10, d.spill_p90, 'rgba(184,115,51,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.spill_p50, '#B87333', 'P50'),
+    plotlyLine(lbl, d.spill_p10, '#B87333', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.spill_p90, '#B87333', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Spillage (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _C);
 
   Plotly.react('hd-wv', [
-    _band('P10-P90', d.wv_p10, d.wv_p90, 'rgba(139,146,152,0.15)'),
-    _line('P50', d.wv_p50, '#8B9298'),
-    _line('P10', d.wv_p10, '#8B9298', 1, 'dot'),
-    _line('P90', d.wv_p90, '#8B9298', 1, 'dot'),
-  ], _lo({title:'Water Value (R$/hm\u00b3)', yaxis:{title:'R$/hm\u00b3'}}), _C);
+    plotlyBand(lbl, d.wv_p10, d.wv_p90, 'rgba(139,146,152,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.wv_p50, '#8B9298', 'P50'),
+    plotlyLine(lbl, d.wv_p10, '#8B9298', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.wv_p90, '#8B9298', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Water Value (R$/hm\u00b3)', yaxis: {title: 'R$/hm\u00b3'}}), _C);
 
   var outflowTraces = [
-    _band('P10-P90', d.outflow_p10, d.outflow_p90, 'rgba(74,144,184,0.15)'),
-    _line('P50', d.outflow_p50, '#4A90B8'),
-    _line('P10', d.outflow_p10, '#4A90B8', 1, 'dot'),
-    _line('P90', d.outflow_p90, '#4A90B8', 1, 'dot'),
+    plotlyBand(lbl, d.outflow_p10, d.outflow_p90, 'rgba(74,144,184,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.outflow_p50, '#4A90B8', 'P50'),
+    plotlyLine(lbl, d.outflow_p10, '#4A90B8', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.outflow_p90, '#4A90B8', 'P90', 1, 'dot'),
   ];
-  if(d.outflow_min && d.outflow_min.some(function(v){return v>0;}))
-    outflowTraces.push(_line('Outflow Min (LP)', d.outflow_min, '#4A8B6F', 1, 'dash'));
-  Plotly.react('hd-outflow', outflowTraces, _lo({title:'Outflow (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+  if (d.outflow_min && d.outflow_min.some(function(v) { return v > 0; })) {
+    outflowTraces.push(
+      plotlyLine(lbl, d.outflow_min, '#4A8B6F', 'Outflow Min (LP)', 1, 'dash')
+    );
+  }
+  Plotly.react('hd-outflow', outflowTraces,
+               plotlyLayout({title: 'Outflow (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _C);
 
   Plotly.react('hd-evap', [
-    _band('P10-P90', d.evap_p10, d.evap_p90, 'rgba(139,94,60,0.15)'),
-    _line('P50', d.evap_p50, '#8B5E3C'),
-    _line('P10', d.evap_p10, '#8B5E3C', 1, 'dot'),
-    _line('P90', d.evap_p90, '#8B5E3C', 1, 'dot'),
-  ], _lo({title:'Evaporation (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+    plotlyBand(lbl, d.evap_p10, d.evap_p90, 'rgba(139,94,60,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.evap_p50, '#8B5E3C', 'P50'),
+    plotlyLine(lbl, d.evap_p10, '#8B5E3C', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.evap_p90, '#8B5E3C', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Evaporation (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _C);
 
   Plotly.react('hd-ww', [
-    _band('P10-P90', d.ww_p10, d.ww_p90, 'rgba(121,85,72,0.15)'),
-    _line('P50', d.ww_p50, '#795548'),
-    _line('P10', d.ww_p10, '#795548', 1, 'dot'),
-    _line('P90', d.ww_p90, '#795548', 1, 'dot'),
-  ], _lo({title:'Water Withdrawal Violation (m\u00b3/s)', yaxis:{title:'m\u00b3/s'}}), _C);
+    plotlyBand(lbl, d.ww_p10, d.ww_p90, 'rgba(121,85,72,0.15)', 'P10-P90'),
+    plotlyLine(lbl, d.ww_p50, '#795548', 'P50'),
+    plotlyLine(lbl, d.ww_p10, '#795548', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.ww_p90, '#795548', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Water Withdrawal Violation (m\u00b3/s)',
+                   yaxis: {title: 'm\u00b3/s'}}), _C);
 }
-document.addEventListener('DOMContentLoaded', function(){setTimeout(updateHydroDetail,100);});
+
+var _HD_PALETTE = ['#2196F3', '#FF9800', '#4CAF50'];
+
+function renderHydroComparison(entries, labels) {
+  if (!entries || entries.length === 0) { return; }
+  var lbl = labels || HD_LABELS;
+
+  function _compTraces(metric_p50, colorIdx) {
+    var color = _HD_PALETTE[colorIdx % _HD_PALETTE.length];
+    return entries.map(function(d, i) {
+      var c = _HD_PALETTE[i % _HD_PALETTE.length];
+      return plotlyLine(lbl, d[metric_p50] || [], c, d.name || ('Plant ' + i));
+    });
+  }
+
+  function _buildTraces(p50key) {
+    return entries.map(function(d, i) {
+      var c = _HD_PALETTE[i % _HD_PALETTE.length];
+      return plotlyLine(lbl, d[p50key] || [], c, d.name || ('Plant ' + i));
+    });
+  }
+
+  Plotly.react('hd-gen', _buildTraces('gen_p50'),
+    plotlyLayout({title: 'Generation (MW) \u2014 Comparison', yaxis: {title: 'MW'}}), _C);
+  Plotly.react('hd-stor', _buildTraces('stor_p50'),
+    plotlyLayout({title: 'Storage (hm\u00b3) \u2014 Comparison', yaxis: {title: 'hm\u00b3'}}), _C);
+  Plotly.react('hd-inflow', _buildTraces('inflow_p50'),
+    plotlyLayout({title: 'Inflow (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _C);
+  Plotly.react('hd-turb', _buildTraces('turb_p50'),
+    plotlyLayout({title: 'Turbined (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _C);
+  Plotly.react('hd-spill', _buildTraces('spill_p50'),
+    plotlyLayout({title: 'Spillage (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _C);
+  Plotly.react('hd-wv', _buildTraces('wv_p50'),
+    plotlyLayout({title: 'Water Value (R$/hm\u00b3) \u2014 Comparison', yaxis: {title: 'R$/hm\u00b3'}}), _C);
+  Plotly.react('hd-outflow', _buildTraces('outflow_p50'),
+    plotlyLayout({title: 'Outflow (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _C);
+  Plotly.react('hd-evap', _buildTraces('evap_p50'),
+    plotlyLayout({title: 'Evaporation (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _C);
+  Plotly.react('hd-ww', _buildTraces('ww_p50'),
+    plotlyLayout({title: 'Water Withdrawal Violation (m\u00b3/s) \u2014 Comparison',
+                  yaxis: {title: 'm\u00b3/s'}}), _C);
+}
+
+initPlantExplorer({
+  tableId: 'hd-tbody',
+  searchInputId: 'hd-search',
+  detailContainerId: 'hd-detail',
+  dataVar: 'HD',
+  renderDetail: renderHydroDetail
+});
+
+initComparisonMode({
+  tableId: 'hd-tbody',
+  dataVar: 'HD',
+  labelsVar: 'HD_LABELS',
+  chartIds: ['hd-gen','hd-stor','hd-inflow','hd-turb','hd-spill','hd-wv','hd-outflow','hd-evap','hd-ww'],
+  renderComparison: renderHydroComparison,
+  renderDetail: renderHydroDetail,
+  maxCompare: 3
+});
+
+syncHover(['hd-gen','hd-stor','hd-inflow','hd-turb','hd-spill','hd-wv','hd-outflow','hd-evap','hd-ww']);
 """
-        + "</script>"
     )
+
+    return explorer_html + "<script>\n" + inline_js + "\n</script>"
 
 
 # ---------------------------------------------------------------------------

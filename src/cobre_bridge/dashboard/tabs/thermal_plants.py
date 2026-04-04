@@ -1,7 +1,7 @@
 """Thermal Plant Details tab module for the Cobre dashboard.
 
 Displays an interactive per-plant explorer with p10/p50/p90 generation,
-cost, and energy charts driven by an embedded JavaScript dropdown.
+cost, and energy charts driven by a JavaScript master-detail split-pane layout.
 """
 
 from __future__ import annotations
@@ -12,7 +12,15 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import polars as pl
 
-from cobre_bridge.ui.html import section_title
+from cobre_bridge.ui.html import (
+    _sparkline_svg,
+    chart_grid,
+    collapsible_section,
+    plant_explorer_table,
+    section_title,
+    wrap_chart,
+)
+from cobre_bridge.ui.js import PLANT_EXPLORER_JS
 from cobre_bridge.ui.plotly_helpers import stage_x_labels
 
 if TYPE_CHECKING:
@@ -27,7 +35,7 @@ TAB_LABEL = "Thermal Plant Details"
 TAB_ORDER = 60
 
 # ---------------------------------------------------------------------------
-# Interactive plant details (copied verbatim from dashboard.py, imports updated)
+# Interactive plant details
 # ---------------------------------------------------------------------------
 
 
@@ -39,7 +47,7 @@ def build_interactive_thermal_details(
     lp_bounds: pd.DataFrame | None = None,
     bh_df: pl.DataFrame | None = None,
 ) -> str:
-    """Build HTML with embedded per-thermal p10/p50/p90 data, LP bounds, and JS dropdown."""
+    """Build HTML with embedded per-thermal p10/p50/p90 data, LP bounds, and JS master-detail layout."""
     metrics = ["generation_mw", "generation_cost", "generation_mwh"]
     short = {
         "generation_mw": "gen",
@@ -153,96 +161,176 @@ def build_interactive_thermal_details(
                     entry[key] = [round(float(by_stage.get(s, 0)), 2) for s in stages]
 
     options = sorted(thermal_data.items(), key=lambda x: x[1]["name"])
-    options_html = "\n".join(
-        f'<option value="{tid}">{d["name"]} (id={tid})</option>' for tid, d in options
+
+    if not options:
+        return "<p>No thermal plant data available.</p>"
+
+    # Build table rows (sorted alphabetically by name, each row has data-index for
+    # selectRow() lookup in TD, and data-name for filterTable() search).
+    table_rows: list[str] = []
+    for tid, d in options:
+        name: str = d.get("name", "")
+        bus: str = d.get("bus", "")
+        max_mw: float = d.get("max_mw", 0)
+        cost_per_mwh: float = d.get("cost_per_mwh", 0)
+        gen_p50: list[float] = d.get("gen_p50", [])
+        gen_spark = (
+            _sparkline_svg(gen_p50, "#F5A623")
+            if len(gen_p50) >= 2 and any(v != 0 for v in gen_p50)
+            else ""
+        )
+        table_rows.append(
+            f'<tr data-name="{name.lower()}" data-index="{tid}">'
+            f'<td><input type="checkbox" class="compare-checkbox" data-id="{tid}"></td>'
+            f"<td>{name}</td>"
+            f"<td>{bus}</td>"
+            f'<td data-sort-value="{max_mw:.0f}">{max_mw:.0f}</td>'
+            f'<td data-sort-value="{cost_per_mwh:.2f}">{cost_per_mwh:.2f} R$/MWh</td>'
+            f"<td>{gen_spark}</td>"
+            f"</tr>"
+        )
+
+    rows_html = "".join(table_rows)
+    columns: list[tuple[str, str]] = [
+        ("Cmp", "none"),
+        ("Name", "string"),
+        ("Bus", "string"),
+        ("MW", "number"),
+        ("Cost", "number"),
+        ("Gen", "none"),
+    ]
+    table_pane = (
+        '<div class="explorer-table-pane">'
+        + plant_explorer_table(
+            "td-tbody",
+            "td-search",
+            columns,
+            rows_html,
+        )
+        + "</div>"
     )
+
+    # Detail pane: 2 collapsible sections with chart divs
+    def _chart_div(div_id: str) -> str:
+        return f'<div id="{div_id}" style="width:100%;height:350px;"></div>'
+
+    generation_section = collapsible_section(
+        "Generation",
+        chart_grid([wrap_chart(_chart_div("td-gen"))], single=True),
+    )
+    economics_section = collapsible_section(
+        "Economics",
+        chart_grid(
+            [
+                wrap_chart(_chart_div("td-cost")),
+                wrap_chart(_chart_div("td-energy")),
+            ]
+        ),
+    )
+
+    detail_pane = (
+        '<div class="explorer-detail-pane">'
+        + generation_section
+        + economics_section
+        + "</div>"
+    )
+
+    explorer_html = (
+        '<div class="explorer-container">' + table_pane + detail_pane + "</div>"
+    )
+
     data_json = json.dumps(thermal_data, separators=(",", ":"))
     labels_json = json.dumps(xlabels)
 
-    chart_rows = (
-        '<div class="chart-grid-single">'
-        '<div class="chart-card"><div id="td-gen" style="width:100%;height:380px;"></div></div>'
-        "</div>"
-        '<div class="chart-grid">'
-        '<div class="chart-card"><div id="td-cost" style="width:100%;height:320px;"></div></div>'
-        '<div class="chart-card"><div id="td-energy" style="width:100%;height:320px;"></div></div>'
-        "</div>"
-    )
-
-    return (
-        '<div style="margin-bottom:16px;">'
-        '<label for="thermal-select" style="font-weight:600;margin-right:8px;">Select Thermal Plant:</label>'
-        '<select id="thermal-select" onchange="updateThermalDetail()" '
-        'style="padding:8px 12px;font-size:0.9rem;border-radius:4px;border:1px solid #ccc;min-width:300px;">'
-        + options_html
-        + "</select>"
-        + '<span id="thermal-info" style="margin-left:16px;color:#666;font-size:0.85rem;"></span>'
-        + "</div>"
-        + chart_rows
-        + "<script>\n"
-        + "const TD = "
+    inline_js = (
+        PLANT_EXPLORER_JS
+        + "\nconst TD = "
         + data_json
         + ";\n"
         + "const TD_LABELS = "
         + labels_json
         + ";\n"
-        + r"""
-function _td_band(lbl, p10, p90, color) {
-  return {x: TD_LABELS.concat(TD_LABELS.slice().reverse()),
-          y: p90.concat(p10.slice().reverse()),
-          fill:'toself', fillcolor:color, line:{color:'rgba(0,0,0,0)'},
-          name:lbl, showlegend:true, hoverinfo:'skip'};
-}
-function _td_line(nm, y, c, w, dash) {
-  return {x:TD_LABELS, y:y, name:nm, line:{color:c, width:w||2, dash:dash||'solid'}};
-}
-function _td_ref(nm, vals, c) {
-  return {x:TD_LABELS, y:vals, name:nm, line:{color:c, width:1, dash:'dash'}};
-}
-var _TL = {hovermode:'x unified', margin:{l:60,r:20,t:50,b:60},
-            legend:{orientation:'h',y:1.12,x:0,font:{size:11}}};
-var _TC = {responsive:true};
-function _tlo(extra){return Object.assign({},_TL,extra);}
+        + """
+var _TC = {responsive: true};
 
-function updateThermalDetail() {
-  var tid = document.getElementById('thermal-select').value;
-  var d = TD[tid]; if(!d) return;
-  document.getElementById('thermal-info').textContent =
-    d.bus+' | Capacity: '+d.max_mw.toFixed(0)+' MW | Cost: '+d.cost_per_mwh.toFixed(2)+' R$/MWh';
+function renderThermalDetail(containerId, d) {
+  if (!d) { return; }
+  var lbl = TD_LABELS;
 
   var genTraces = [
-    _td_band('P10\u2013P90', d.gen_p10, d.gen_p90, 'rgba(245,166,35,0.15)'),
-    _td_line('P50', d.gen_p50, '#F5A623'),
-    _td_line('P10', d.gen_p10, '#F5A623', 1, 'dot'),
-    _td_line('P90', d.gen_p90, '#F5A623', 1, 'dot'),
+    plotlyBand(lbl, d.gen_p10, d.gen_p90, 'rgba(245,166,35,0.15)', 'P10\u2013P90'),
+    plotlyLine(lbl, d.gen_p50, '#F5A623', 'P50'),
+    plotlyLine(lbl, d.gen_p10, '#F5A623', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.gen_p90, '#F5A623', 'P90', 1, 'dot'),
   ];
-  if(d.gen_max && d.gen_max.some(function(v){return v>0;})) {
-    genTraces.push(_td_ref('Gen Max (LP)', d.gen_max, '#DC4C4C'));
+  if (d.gen_max && d.gen_max.some(function(v) { return v > 0; })) {
+    genTraces.push(plotlyRef(lbl, d.gen_max, '#DC4C4C', 'Gen Max (LP)'));
   }
-  if(d.gen_min && d.gen_min.some(function(v){return v>0;})) {
-    genTraces.push(_td_ref('Gen Min (LP)', d.gen_min, '#4A8B6F'));
+  if (d.gen_min && d.gen_min.some(function(v) { return v > 0; })) {
+    genTraces.push(plotlyRef(lbl, d.gen_min, '#4A8B6F', 'Gen Min (LP)'));
   }
   Plotly.react('td-gen', genTraces,
-    _tlo({title:d.name+' \u2014 Generation (MW)', yaxis:{title:'MW'}}), _TC);
+    plotlyLayout({title: d.name + ' \u2014 Generation (MW)', yaxis: {title: 'MW'}}), _TC);
 
   Plotly.react('td-cost', [
-    _td_band('P10\u2013P90', d.cost_p10, d.cost_p90, 'rgba(220,76,76,0.12)'),
-    _td_line('P50', d.cost_p50, '#DC4C4C'),
-    _td_line('P10', d.cost_p10, '#DC4C4C', 1, 'dot'),
-    _td_line('P90', d.cost_p90, '#DC4C4C', 1, 'dot'),
-  ], _tlo({title:'Generation Cost (R$)', yaxis:{title:'R$'}}), _TC);
+    plotlyBand(lbl, d.cost_p10, d.cost_p90, 'rgba(220,76,76,0.12)', 'P10\u2013P90'),
+    plotlyLine(lbl, d.cost_p50, '#DC4C4C', 'P50'),
+    plotlyLine(lbl, d.cost_p10, '#DC4C4C', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.cost_p90, '#DC4C4C', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Generation Cost (R$)', yaxis: {title: 'R$'}}), _TC);
 
   Plotly.react('td-energy', [
-    _td_band('P10\u2013P90', d.energy_p10, d.energy_p90, 'rgba(74,139,111,0.15)'),
-    _td_line('P50', d.energy_p50, '#4A8B6F'),
-    _td_line('P10', d.energy_p10, '#4A8B6F', 1, 'dot'),
-    _td_line('P90', d.energy_p90, '#4A8B6F', 1, 'dot'),
-  ], _tlo({title:'Generation Energy (MWh)', yaxis:{title:'MWh'}}), _TC);
+    plotlyBand(lbl, d.energy_p10, d.energy_p90, 'rgba(74,139,111,0.15)', 'P10\u2013P90'),
+    plotlyLine(lbl, d.energy_p50, '#4A8B6F', 'P50'),
+    plotlyLine(lbl, d.energy_p10, '#4A8B6F', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.energy_p90, '#4A8B6F', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Generation Energy (MWh)', yaxis: {title: 'MWh'}}), _TC);
 }
-document.addEventListener('DOMContentLoaded', function(){setTimeout(updateThermalDetail,100);});
+
+var _TD_PALETTE = ['#2196F3', '#FF9800', '#4CAF50'];
+
+function renderThermalComparison(entries, labels) {
+  if (!entries || entries.length === 0) { return; }
+  var lbl = labels || TD_LABELS;
+
+  function _buildTraces(p50key) {
+    return entries.map(function(d, i) {
+      var c = _TD_PALETTE[i % _TD_PALETTE.length];
+      return plotlyLine(lbl, d[p50key] || [], c, d.name || ('Plant ' + i));
+    });
+  }
+
+  Plotly.react('td-gen', _buildTraces('gen_p50'),
+    plotlyLayout({title: 'Generation (MW) \u2014 Comparison', yaxis: {title: 'MW'}}), _TC);
+  Plotly.react('td-cost', _buildTraces('cost_p50'),
+    plotlyLayout({title: 'Generation Cost (R$) \u2014 Comparison', yaxis: {title: 'R$'}}), _TC);
+  Plotly.react('td-energy', _buildTraces('energy_p50'),
+    plotlyLayout({title: 'Generation Energy (MWh) \u2014 Comparison', yaxis: {title: 'MWh'}}), _TC);
+}
+
+initPlantExplorer({
+  tableId: 'td-tbody',
+  searchInputId: 'td-search',
+  detailContainerId: 'td-detail',
+  dataVar: 'TD',
+  renderDetail: renderThermalDetail
+});
+
+initComparisonMode({
+  tableId: 'td-tbody',
+  dataVar: 'TD',
+  labelsVar: 'TD_LABELS',
+  chartIds: ['td-gen','td-cost','td-energy'],
+  renderComparison: renderThermalComparison,
+  renderDetail: renderThermalDetail,
+  maxCompare: 3
+});
+
+syncHover(['td-gen','td-cost','td-energy']);
 """
-        + "</script>"
     )
+
+    return explorer_html + "<script>\n" + inline_js + "\n</script>"
 
 
 # ---------------------------------------------------------------------------
