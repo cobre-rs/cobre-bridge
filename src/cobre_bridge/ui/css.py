@@ -481,5 +481,13 @@ def dashboard_css() -> str:
 
 
 def comparison_css() -> str:
-    """Compose CSS for comparison reports (base + plant-selector styles)."""
-    return BASE_CSS + PLANT_SELECTOR_CSS
+    """Compose CSS for comparison reports (base + plant-selector + enhanced styles)."""
+    return (
+        BASE_CSS
+        + PLANT_SELECTOR_CSS
+        + TRANSITIONS_CSS
+        + RESPONSIVE_CSS
+        + TAB_FADE_CSS
+        + UNDERLINE_EXPAND_CSS
+        + METRIC_CARD_CSS
+    )

@@ -364,11 +364,15 @@ def test_dashboard_css_contains_collapsible() -> None:
     assert ".collapsible-content" in output
 
 
-def test_comparison_css_excludes_transitions() -> None:
-    """comparison_css() must not include dashboard-only transition or responsive CSS."""
+def test_comparison_css_includes_enhanced_styles() -> None:
+    """comparison_css() must include enhanced UX styles (ticket-026)."""
     output = comparison_css()
-    assert "translateY" not in output
-    assert "@media (max-width" not in output
+    assert "translateY" in output
+    assert "@media (max-width" in output
+    assert ".tab-underline" in output
+    # Must NOT include dashboard-only styles
+    assert ".collapsible-content" not in output
+    assert ".explorer-container" not in output
 
 
 def test_comparators_backward_compat() -> None:
