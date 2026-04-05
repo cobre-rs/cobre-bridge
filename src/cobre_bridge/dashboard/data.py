@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from pathlib import Path
 
 import pandas as pd
 import polars as pl
 import pyarrow.parquet as pq
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Data loading helpers
@@ -63,8 +66,7 @@ def load_stage_labels(case_dir: Path) -> dict[int, str]:
         start = stage.get("start_date", "")
         if start:
             try:
-                dt = pd.to_datetime(start)
-                labels[sid] = dt.strftime("%b %Y")
+                labels[sid] = pd.to_datetime(start).strftime("%b %Y")
             except Exception:
                 labels[sid] = str(sid)
         else:
@@ -221,6 +223,28 @@ def _compute_lp_load(
     return dict(zip(ser.index.tolist(), ser.values.tolist()))
 
 
+def compute_non_fictitious_bus_ids(load_stats: pd.DataFrame) -> list[int]:
+    """Return sorted bus IDs that have mean_mw > 0 in at least one stage.
+
+    A fictitious bus is defined as one whose mean load is zero across all
+    stages in the input load seasonal stats.  Tabs that show per-bus facets
+    should filter to this list so that accounting-only buses (e.g. NOFICT1)
+    are excluded.
+
+    Args:
+        load_stats: DataFrame with columns ``bus_id``, ``stage_id``, ``mean_mw``.
+
+    Returns:
+        Sorted list of integer bus IDs with at least one stage where
+        ``mean_mw > 0``.  Returns an empty list when ``load_stats`` is empty
+        or the ``mean_mw`` column is absent.
+    """
+    if load_stats.empty or "mean_mw" not in load_stats.columns:
+        return []
+    positive = load_stats[load_stats["mean_mw"] > 0]
+    return sorted(positive["bus_id"].unique().tolist())
+
+
 # ---------------------------------------------------------------------------
 # DashboardData dataclass
 # ---------------------------------------------------------------------------
@@ -261,6 +285,7 @@ class DashboardData:
     ncs_bus_map: dict[int, int]
     hydro_meta: dict[int, dict]
     bus_names: dict[int, str]
+    non_fictitious_bus_ids: list[int]
 
     # Temporal resolution
     stage_hours: dict[int, float]
@@ -290,9 +315,20 @@ class DashboardData:
     ar_coefficients: pd.DataFrame
     noise_openings: pd.DataFrame
     fitting_report: dict
+    inflow_history: pd.DataFrame
+    correlation: dict
+    inflow_lags_lf: pl.LazyFrame
 
     # Optional training metadata
     metadata: dict
+
+    # New v2 fields: config, manifests, policy metadata
+    config: dict
+    training_manifest: dict
+    simulation_manifest: dict
+    policy_metadata: dict
+    discount_rate: float
+    stages_data: dict
 
     # Resolved LP bounds (optional)
     lp_bounds: pd.DataFrame
@@ -301,6 +337,13 @@ class DashboardData:
     gc_constraints: list[dict]
     gc_bounds: pd.DataFrame
     gc_violations: pd.DataFrame
+
+    # Input constraint bounds (optional — ticket-002)
+    hydro_bounds: pd.DataFrame
+    thermal_bounds: pd.DataFrame
+    ncs_stats: pd.DataFrame
+    exchange_factors: list[dict]
+    retry_histogram: pd.DataFrame
 
     # Summary counts
     n_scenarios: int
@@ -339,6 +382,14 @@ class DashboardData:
         buses_lf = scan_entity(case_dir, "buses")
         exchanges_lf = scan_entity(case_dir, "exchanges")
 
+        inflow_lags_dir = case_dir / "output" / "simulation" / "inflow_lags"
+        if inflow_lags_dir.exists():
+            inflow_lags_lf = pl.scan_parquet(
+                str(inflow_lags_dir / "**" / "*.parquet"), hive_partitioning=True
+            )
+        else:
+            inflow_lags_lf = pl.LazyFrame()
+
         # Costs is stage-level only (~236 K rows total), collect to pandas
         # for chart_cost_* functions
         costs = (
@@ -355,6 +406,16 @@ class DashboardData:
             pq.read_table(lb_path).to_pandas() if lb_path.exists() else pd.DataFrame()
         )
 
+        hb_path = case_dir / "constraints" / "hydro_bounds.parquet"
+        hydro_bounds = (
+            pq.read_table(hb_path).to_pandas() if hb_path.exists() else pd.DataFrame()
+        )
+
+        tb_path = case_dir / "constraints" / "thermal_bounds.parquet"
+        thermal_bounds = (
+            pq.read_table(tb_path).to_pandas() if tb_path.exists() else pd.DataFrame()
+        )
+
         names = load_names(case_dir)
         stage_labels = load_stage_labels(case_dir)
         hydro_bus_map = load_hydro_bus_map(case_dir)
@@ -366,6 +427,17 @@ class DashboardData:
         bus_names = {
             eid: nm for (entity, eid), nm in names.items() if entity == "buses"
         }
+
+        # Config (optional — v2 tabs need run configuration)
+        config_path = case_dir / "config.json"
+        config: dict = {}
+        if config_path.exists():
+            try:
+                with config_path.open() as f:
+                    config = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse config.json; using empty dict")
+        discount_rate = float(config.get("discount_rate", 0.0))
 
         # Stage hours: total hours per stage (sum of block hours)
         stages_json_path = case_dir / "stages.json"
@@ -387,6 +459,27 @@ class DashboardData:
         lf_path = case_dir / "scenarios" / "load_factors.json"
         with lf_path.open() as f:
             load_factors_list: list[dict] = json.load(f)["load_factors"]
+
+        non_fictitious_bus_ids = compute_non_fictitious_bus_ids(load_stats)
+
+        ncs_stats_path = case_dir / "scenarios" / "non_controllable_stats.parquet"
+        ncs_stats = (
+            pq.read_table(ncs_stats_path).to_pandas()
+            if ncs_stats_path.exists()
+            else pd.DataFrame()
+        )
+
+        ih_path = case_dir / "scenarios" / "inflow_history.parquet"
+        inflow_history = (
+            pq.read_table(ih_path).to_pandas() if ih_path.exists() else pd.DataFrame()
+        )
+
+        ef_path = case_dir / "constraints" / "exchange_factors.json"
+        exchange_factors: list[dict] = []
+        if ef_path.exists():
+            with ef_path.open() as f:
+                exchange_factors = json.load(f).get("exchange_factors", [])
+
         block_hours: dict[tuple[int, int], float] = {}
         for s in stages_data["stages"]:
             for b in s["blocks"]:
@@ -394,11 +487,12 @@ class DashboardData:
 
         # Build block-hours DataFrame once for weighted-average joins
         # across all chart functions
+        bh_keys = list(block_hours.keys())
         bh_df = pl.DataFrame(
             {
-                "stage_id": [k[0] for k in block_hours.keys()],
-                "block_id": [k[1] for k in block_hours.keys()],
-                "_bh": list(block_hours.values()),
+                "stage_id": [k[0] for k in bh_keys],
+                "block_id": [k[1] for k in bh_keys],
+                "_bh": [block_hours[k] for k in bh_keys],
             }
         )
 
@@ -426,14 +520,24 @@ class DashboardData:
             else pd.DataFrame()
         )
         scaling_path = case_dir / "output" / "training" / "scaling_report.json"
-        scaling_report: dict = (
-            json.load(scaling_path.open()) if scaling_path.exists() else {}
-        )
+        if scaling_path.exists():
+            with scaling_path.open() as f:
+                scaling_report: dict = json.load(f)
+        else:
+            scaling_report = {}
         cs_path = (
             case_dir / "output" / "training" / "cut_selection" / "iterations.parquet"
         )
         cut_selection = (
             pq.read_table(cs_path).to_pandas() if cs_path.exists() else pd.DataFrame()
+        )
+        retry_path = (
+            case_dir / "output" / "training" / "solver" / "retry_histogram.parquet"
+        )
+        retry_histogram = (
+            pq.read_table(retry_path).to_pandas()
+            if retry_path.exists()
+            else pd.DataFrame()
         )
         stochastic_dir = case_dir / "output" / "stochastic"
         stochastic_available = stochastic_dir.exists()
@@ -450,15 +554,46 @@ class DashboardData:
             fitting_report: dict = json.load(
                 (stochastic_dir / "fitting_report.json").open()
             )
+            corr_path = stochastic_dir / "correlation.json"
+            if corr_path.exists():
+                correlation: dict = json.load(corr_path.open())
+            else:
+                logger.warning(
+                    "output/stochastic/correlation.json missing; using empty dict"
+                )
+                correlation = {}
         else:
             inflow_stats_stoch = pd.DataFrame()
             ar_coefficients = pd.DataFrame()
             noise_openings = pd.DataFrame()
             fitting_report = {}
+            correlation = {}
         metadata_path = case_dir / "output" / "training" / "metadata.json"
-        metadata: dict = (
-            json.load(metadata_path.open()) if metadata_path.exists() else {}
-        )
+        if metadata_path.exists():
+            with metadata_path.open() as f:
+                metadata: dict = json.load(f)
+        else:
+            metadata = {}
+
+        # Training manifest (optional)
+        training_manifest_path = case_dir / "output" / "training" / "_manifest.json"
+        training_manifest: dict = {}
+        if training_manifest_path.exists():
+            try:
+                with training_manifest_path.open() as f:
+                    training_manifest = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse output/training/_manifest.json")
+
+        # Policy metadata (optional)
+        policy_meta_path = case_dir / "output" / "policy" / "metadata.json"
+        policy_metadata: dict = {}
+        if policy_meta_path.exists():
+            try:
+                with policy_meta_path.open() as f:
+                    policy_metadata = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse output/policy/metadata.json")
 
         # Load resolved LP bounds dictionary (actual bounds used by the solver)
         bounds_path = (
@@ -474,9 +609,9 @@ class DashboardData:
         gc_path = case_dir / "constraints" / "generic_constraints.json"
         gc_constraints: list[dict] = []
         if gc_path.exists():
-            with gc_path.open() as _f:
-                _gc_data = json.load(_f)
-            gc_constraints = _gc_data.get("constraints", [])
+            with gc_path.open() as f:
+                gc_data = json.load(f)
+            gc_constraints = gc_data.get("constraints", [])
 
         gc_bounds_path = case_dir / "constraints" / "generic_constraint_bounds.parquet"
         gc_bounds = (
@@ -487,7 +622,6 @@ class DashboardData:
 
         # violations/generic: collect to pandas once (needed by
         # build_constraints_summary_table)
-        gc_violations: pd.DataFrame
         gc_viol_dir = case_dir / "output" / "simulation" / "violations" / "generic"
         if gc_viol_dir.exists():
             gc_violations = (
@@ -511,14 +645,18 @@ class DashboardData:
 
         # Filter simulation solver to actual scenario count from manifest
         sim_manifest_path = case_dir / "output" / "simulation" / "_manifest.json"
+        simulation_manifest: dict = {}
         if sim_manifest_path.exists():
-            sim_manifest = json.load(sim_manifest_path.open())
-            actual_sim_scenarios = sim_manifest.get("scenarios", {}).get(
-                "completed", n_scenarios
-            )
-            metadata["_sim_manifest"] = sim_manifest
-        else:
-            actual_sim_scenarios = n_scenarios
+            try:
+                with sim_manifest_path.open() as f:
+                    simulation_manifest = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Failed to parse output/simulation/_manifest.json; using empty dict"
+                )
+        actual_sim_scenarios = simulation_manifest.get("scenarios", {}).get(
+            "completed", n_scenarios
+        )
         if not solver_sim.empty:
             solver_sim = solver_sim.head(actual_sim_scenarios)
 
@@ -540,6 +678,7 @@ class DashboardData:
             ncs_bus_map=ncs_bus_map,
             hydro_meta=hydro_meta,
             bus_names=bus_names,
+            non_fictitious_bus_ids=non_fictitious_bus_ids,
             stage_hours=stage_hours,
             block_hours=block_hours,
             bh_df=bh_df,
@@ -556,11 +695,25 @@ class DashboardData:
             ar_coefficients=ar_coefficients,
             noise_openings=noise_openings,
             fitting_report=fitting_report,
+            inflow_history=inflow_history,
+            correlation=correlation,
+            inflow_lags_lf=inflow_lags_lf,
             metadata=metadata,
+            config=config,
+            training_manifest=training_manifest,
+            simulation_manifest=simulation_manifest,
+            policy_metadata=policy_metadata,
+            discount_rate=discount_rate,
+            stages_data=stages_data,
             lp_bounds=lp_bounds,
             gc_constraints=gc_constraints,
             gc_bounds=gc_bounds,
             gc_violations=gc_violations,
+            hydro_bounds=hydro_bounds,
+            thermal_bounds=thermal_bounds,
+            ncs_stats=ncs_stats,
+            exchange_factors=exchange_factors,
+            retry_histogram=retry_histogram,
             n_scenarios=n_scenarios,
             n_stages=n_stages,
         )
