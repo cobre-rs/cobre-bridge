@@ -862,3 +862,567 @@ class TestDashboardIntegration:
         )
 
         assert case_dir.resolve().name in html
+
+
+# ---------------------------------------------------------------------------
+# DashboardData.load() — new v2 fields (ticket-001)
+#
+# These tests reuse the full minimal case directory from
+# TestDashboardIntegration via the module-level ``_v2_case`` fixture.
+# Each test writes one optional file, calls DashboardData.load(), and
+# asserts the corresponding new field.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _v2_case(tmp_path: Path) -> Path:
+    """Build the same minimal Cobre case used by TestDashboardIntegration.
+
+    Returns the ``case`` Path so individual tests can write optional files
+    before calling ``DashboardData.load()``.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    case = tmp_path / "v2_case"
+    case.mkdir()
+
+    _write_json(
+        case / "stages.json",
+        {
+            "stages": [
+                {
+                    "id": 0,
+                    "start_date": "2026-01-01",
+                    "blocks": [
+                        {"id": 0, "hours": 120.0},
+                        {"id": 1, "hours": 300.0},
+                    ],
+                },
+                {
+                    "id": 1,
+                    "start_date": "2026-02-01",
+                    "blocks": [
+                        {"id": 0, "hours": 112.0},
+                        {"id": 1, "hours": 280.0},
+                    ],
+                },
+            ]
+        },
+    )
+    _write_json(case / "system" / "hydros.json", {"hydros": []})
+    _write_json(case / "system" / "buses.json", {"buses": []})
+    _write_json(case / "system" / "thermals.json", {"thermals": []})
+    _write_json(case / "system" / "lines.json", {"lines": []})
+    _write_json(
+        case / "system" / "non_controllable_sources.json",
+        {"non_controllable_sources": []},
+    )
+
+    (case / "scenarios").mkdir(parents=True, exist_ok=True)
+    load_stats_table = pa.table(
+        {
+            "bus_id": pa.array([], type=pa.int32()),
+            "stage_id": pa.array([], type=pa.int32()),
+            "mean_mw": pa.array([], type=pa.float64()),
+            "std_mw": pa.array([], type=pa.float64()),
+        }
+    )
+    pq.write_table(load_stats_table, case / "scenarios" / "load_seasonal_stats.parquet")
+    _write_json(case / "scenarios" / "load_factors.json", {"load_factors": []})
+
+    conv_dir = case / "output" / "training"
+    conv_dir.mkdir(parents=True)
+    conv_table = pa.table(
+        {
+            "iteration": pa.array([1, 2], type=pa.int32()),
+            "lower_bound": pa.array([1.0e9, 1.1e9], type=pa.float64()),
+            "upper_bound_mean": pa.array([1.5e9, 1.4e9], type=pa.float64()),
+            "upper_bound_std": pa.array([1.0e7, 9.0e6], type=pa.float64()),
+            "gap_percent": pa.array([33.3, 21.4], type=pa.float64()),
+            "cuts_added": pa.array([10, 8], type=pa.int32()),
+            "cuts_removed": pa.array([0, 0], type=pa.int32()),
+            "cuts_active": pa.array([10, 18], type=pa.int64()),
+            "time_forward_ms": pa.array([100, 90], type=pa.int64()),
+            "time_backward_ms": pa.array([200, 180], type=pa.int64()),
+            "time_total_ms": pa.array([300, 270], type=pa.int64()),
+            "forward_passes": pa.array([5, 5], type=pa.int32()),
+            "lp_solves": pa.array([100, 90], type=pa.int64()),
+        }
+    )
+    pq.write_table(conv_table, conv_dir / "convergence.parquet")
+
+    sim_base = case / "output" / "simulation"
+
+    def _write_sim_parquet(entity: str, scenario_id: int, table: pa.Table) -> None:
+        d = sim_base / entity / f"scenario_id={scenario_id:04d}"
+        d.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, d / "data.parquet")
+
+    empty_entity = pa.table(
+        {
+            "stage_id": pa.array([], type=pa.int32()),
+            "block_id": pa.array([], type=pa.int32()),
+        }
+    )
+    for entity in ("hydros", "thermals", "non_controllables", "buses", "exchanges"):
+        for sid in (0, 1):
+            _write_sim_parquet(entity, sid, empty_entity)
+
+    costs_table = pa.table(
+        {
+            "stage_id": pa.array([0, 1], type=pa.int32()),
+            "block_id": pa.array([None, None], type=pa.int32()),
+            "total_cost": pa.array([5.0e9, 4.8e9], type=pa.float64()),
+            "immediate_cost": pa.array([5.0e8, 4.8e8], type=pa.float64()),
+            "future_cost": pa.array([4.5e9, 4.32e9], type=pa.float64()),
+            "discount_factor": pa.array([1.0, 0.99], type=pa.float64()),
+            "thermal_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "contract_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "deficit_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "excess_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "storage_violation_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "filling_target_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "hydro_violation_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "outflow_violation_below_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "outflow_violation_above_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "turbined_violation_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "generation_violation_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "evaporation_violation_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "withdrawal_violation_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "inflow_penalty_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "generic_violation_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "spillage_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "fpha_turbined_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "curtailment_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "exchange_cost": pa.array([0.0, 0.0], type=pa.float64()),
+            "pumping_cost": pa.array([0.0, 0.0], type=pa.float64()),
+        }
+    )
+    for sid in (0, 1):
+        _write_sim_parquet("costs", sid, costs_table)
+
+    return case
+
+
+def test_load_config_present(_v2_case: Path) -> None:
+    """config and discount_rate are populated from config.json when it exists."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    _write_json(
+        _v2_case / "config.json",
+        {"discount_rate": 0.12, "iterations": 500},
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.config["iterations"] == 500
+    assert data.discount_rate == pytest.approx(0.12)
+
+
+def test_load_config_absent(_v2_case: Path) -> None:
+    """config defaults to {} and discount_rate to 0.0 when config.json is absent."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    # Ensure no config.json is present
+    config_path = _v2_case / "config.json"
+    config_path.unlink(missing_ok=True)
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.config == {}
+    assert data.discount_rate == pytest.approx(0.0)
+
+
+def test_load_training_manifest_present(_v2_case: Path) -> None:
+    """training_manifest is populated from output/training/_manifest.json."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    _write_json(
+        _v2_case / "output" / "training" / "_manifest.json",
+        {"status": "converged", "total_cuts": 936},
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.training_manifest["status"] == "converged"
+    assert data.training_manifest["total_cuts"] == 936
+
+
+def test_load_policy_metadata_present(_v2_case: Path) -> None:
+    """policy_metadata is populated from output/policy/metadata.json."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    _write_json(
+        _v2_case / "output" / "policy" / "metadata.json",
+        {"state_dimension": 1106},
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.policy_metadata["state_dimension"] == 1106
+
+
+def test_load_stages_data_preserved(_v2_case: Path) -> None:
+    """stages_data contains the raw stages list from stages.json."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    data = DashboardData.load(_v2_case)
+
+    assert "stages" in data.stages_data
+    assert isinstance(data.stages_data["stages"], list)
+    assert len(data.stages_data["stages"]) > 0
+
+
+def test_simulation_manifest_field(_v2_case: Path) -> None:
+    """simulation_manifest is populated from the manifest file and metadata
+    no longer carries a _sim_manifest side-effect key."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    _write_json(
+        _v2_case / "output" / "simulation" / "_manifest.json",
+        {"scenarios": {"completed": 2, "total": 2}, "status": "done"},
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.simulation_manifest["status"] == "done"
+    assert data.simulation_manifest["scenarios"]["completed"] == 2
+    assert "_sim_manifest" not in data.metadata
+
+
+# ---------------------------------------------------------------------------
+# DashboardData.load() — ticket-002: constraint bounds and scenario stats
+# ---------------------------------------------------------------------------
+
+
+def test_load_hydro_bounds_present(_v2_case: Path) -> None:
+    """hydro_bounds is a non-empty DataFrame with expected columns when file exists."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cobre_bridge.dashboard.data import DashboardData
+
+    bounds_dir = _v2_case / "constraints"
+    bounds_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "hydro_id": pa.array([0, 0], type=pa.int32()),
+                "stage_id": pa.array([0, 1], type=pa.int32()),
+                "min_storage_hm3": pa.array([100.0, 100.0], type=pa.float64()),
+                "max_storage_hm3": pa.array([5000.0, 5000.0], type=pa.float64()),
+            }
+        ),
+        bounds_dir / "hydro_bounds.parquet",
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert not data.hydro_bounds.empty
+    assert list(data.hydro_bounds.columns) == [
+        "hydro_id",
+        "stage_id",
+        "min_storage_hm3",
+        "max_storage_hm3",
+    ]
+
+
+def test_load_hydro_bounds_absent(_v2_case: Path) -> None:
+    """hydro_bounds is an empty DataFrame when hydro_bounds.parquet is absent."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    # Ensure the file is not present
+    hb_path = _v2_case / "constraints" / "hydro_bounds.parquet"
+    hb_path.unlink(missing_ok=True)
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.hydro_bounds.empty
+
+
+def test_load_thermal_bounds_present(_v2_case: Path) -> None:
+    """thermal_bounds is a non-empty DataFrame with expected columns."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cobre_bridge.dashboard.data import DashboardData
+
+    bounds_dir = _v2_case / "constraints"
+    bounds_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "thermal_id": pa.array([0, 0], type=pa.int32()),
+                "stage_id": pa.array([0, 1], type=pa.int32()),
+                "min_generation_mw": pa.array([0.0, 0.0], type=pa.float64()),
+                "max_generation_mw": pa.array([300.0, 300.0], type=pa.float64()),
+            }
+        ),
+        bounds_dir / "thermal_bounds.parquet",
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert not data.thermal_bounds.empty
+    assert list(data.thermal_bounds.columns) == [
+        "thermal_id",
+        "stage_id",
+        "min_generation_mw",
+        "max_generation_mw",
+    ]
+
+
+def test_load_ncs_stats_present(_v2_case: Path) -> None:
+    """ncs_stats is a non-empty DataFrame when non_controllable_stats.parquet exists."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cobre_bridge.dashboard.data import DashboardData
+
+    scenarios_dir = _v2_case / "scenarios"
+    scenarios_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "non_controllable_id": pa.array([0, 0], type=pa.int32()),
+                "stage_id": pa.array([0, 1], type=pa.int32()),
+                "mean_mw": pa.array([80.0, 75.0], type=pa.float64()),
+                "std_mw": pa.array([5.0, 4.0], type=pa.float64()),
+            }
+        ),
+        scenarios_dir / "non_controllable_stats.parquet",
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert not data.ncs_stats.empty
+    assert "non_controllable_id" in data.ncs_stats.columns
+    assert "mean_mw" in data.ncs_stats.columns
+
+
+def test_load_exchange_factors_present(_v2_case: Path) -> None:
+    """exchange_factors is a list with the correct element when file exists."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    constraints_dir = _v2_case / "constraints"
+    constraints_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        constraints_dir / "exchange_factors.json",
+        {"exchange_factors": [{"line_id": 0, "stage_id": 0, "factor": 1.05}]},
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert len(data.exchange_factors) == 1
+    assert data.exchange_factors[0]["line_id"] == 0
+    assert data.exchange_factors[0]["factor"] == pytest.approx(1.05)
+
+
+# ---------------------------------------------------------------------------
+# ticket-003: stochastic data fields
+# ---------------------------------------------------------------------------
+
+
+def test_load_inflow_history_present(_v2_case: Path) -> None:
+    """inflow_history is a non-empty DataFrame when inflow_history.parquet exists."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cobre_bridge.dashboard.data import DashboardData
+
+    scenarios_dir = _v2_case / "scenarios"
+    scenarios_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "hydro_id": pa.array([0, 0, 1, 1], type=pa.int32()),
+                "year": pa.array([2000, 2001, 2000, 2001], type=pa.int32()),
+                "month": pa.array([1, 1, 1, 1], type=pa.int32()),
+                "inflow_m3s": pa.array([100.0, 110.0, 50.0, 55.0], type=pa.float64()),
+            }
+        ),
+        scenarios_dir / "inflow_history.parquet",
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert not data.inflow_history.empty
+    assert "hydro_id" in data.inflow_history.columns
+
+
+def test_load_inflow_history_absent(_v2_case: Path) -> None:
+    """inflow_history is an empty DataFrame when the file is missing."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    ih_path = _v2_case / "scenarios" / "inflow_history.parquet"
+    assert not ih_path.exists()
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.inflow_history.empty
+
+
+def test_load_correlation_present(_v2_case: Path) -> None:
+    """correlation contains the expected key when correlation.json exists."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cobre_bridge.dashboard.data import DashboardData
+
+    stochastic_dir = _v2_case / "output" / "stochastic"
+    stochastic_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write the required stochastic parquet files so stochastic_available is True
+    for filename in (
+        "inflow_seasonal_stats.parquet",
+        "inflow_ar_coefficients.parquet",
+        "noise_openings.parquet",
+    ):
+        pq.write_table(
+            pa.table({"dummy": pa.array([], type=pa.int32())}),
+            stochastic_dir / filename,
+        )
+    _write_json(stochastic_dir / "fitting_report.json", {})
+    _write_json(
+        stochastic_dir / "correlation.json",
+        {"correlations": [[1.0, 0.3], [0.3, 1.0]]},
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert "correlations" in data.correlation
+    assert data.correlation["correlations"] == [[1.0, 0.3], [0.3, 1.0]]
+
+
+def test_load_correlation_absent_no_stochastic(_v2_case: Path) -> None:
+    """correlation is an empty dict when the stochastic output directory is missing."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    stochastic_dir = _v2_case / "output" / "stochastic"
+    assert not stochastic_dir.exists()
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.correlation == {}
+
+
+def test_load_inflow_lags_lf_present(_v2_case: Path) -> None:
+    """inflow_lags_lf is a LazyFrame that collects when the directory exists."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cobre_bridge.dashboard.data import DashboardData
+
+    lags_dir = _v2_case / "output" / "simulation" / "inflow_lags" / "scenario_id=0"
+    lags_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "hydro_id": pa.array([0, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                "lag_value": pa.array([1.5, 2.3], type=pa.float64()),
+            }
+        ),
+        lags_dir / "data.parquet",
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    collected = data.inflow_lags_lf.collect()
+    assert len(collected) > 0
+
+
+# ---------------------------------------------------------------------------
+# compute_non_fictitious_bus_ids — ticket-004
+# ---------------------------------------------------------------------------
+
+
+def test_compute_non_fictitious_bus_ids_filters_zero_load() -> None:
+    """Bus with zero mean_mw in all stages is excluded; nonzero bus is included."""
+    import pandas as pd
+
+    from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
+
+    load_stats = pd.DataFrame(
+        {
+            "bus_id": [0, 0, 1, 1],
+            "stage_id": [0, 1, 0, 1],
+            "mean_mw": [100.0, 80.0, 0.0, 0.0],
+        }
+    )
+
+    result = compute_non_fictitious_bus_ids(load_stats)
+
+    assert result == [0]
+
+
+def test_compute_non_fictitious_bus_ids_all_nonzero() -> None:
+    """All buses with nonzero load in at least one stage are returned sorted."""
+    import pandas as pd
+
+    from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
+
+    load_stats = pd.DataFrame(
+        {
+            "bus_id": [0, 1, 0, 1],
+            "stage_id": [0, 0, 1, 1],
+            "mean_mw": [50.0, 10.0, 48.0, 9.0],
+        }
+    )
+
+    result = compute_non_fictitious_bus_ids(load_stats)
+
+    assert result == [0, 1]
+
+
+def test_compute_non_fictitious_bus_ids_empty_df() -> None:
+    """Empty DataFrame returns an empty list."""
+    import pandas as pd
+
+    from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
+
+    result = compute_non_fictitious_bus_ids(pd.DataFrame())
+
+    assert result == []
+
+
+def test_compute_non_fictitious_bus_ids_missing_column() -> None:
+    """DataFrame missing mean_mw column returns an empty list (defensive)."""
+    import pandas as pd
+
+    from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
+
+    load_stats = pd.DataFrame({"bus_id": [0, 1], "stage_id": [0, 0]})
+
+    result = compute_non_fictitious_bus_ids(load_stats)
+
+    assert result == []
+
+
+def test_non_fictitious_bus_ids_field_on_data(_v2_case: Path) -> None:
+    """non_fictitious_bus_ids is populated as a sorted list of int on DashboardData."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cobre_bridge.dashboard.data import DashboardData
+
+    # Overwrite the load_stats with two buses: 0 has load, 1 is fictitious
+    load_stats_table = pa.table(
+        {
+            "bus_id": pa.array([0, 0, 1, 1], type=pa.int32()),
+            "stage_id": pa.array([0, 1, 0, 1], type=pa.int32()),
+            "mean_mw": pa.array([50000.0, 48000.0, 0.0, 0.0], type=pa.float64()),
+            "std_mw": pa.array([0.0, 0.0, 0.0, 0.0], type=pa.float64()),
+        }
+    )
+    pq.write_table(
+        load_stats_table,
+        _v2_case / "scenarios" / "load_seasonal_stats.parquet",
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert isinstance(data.non_fictitious_bus_ids, list)
+    assert data.non_fictitious_bus_ids == [0]
+    assert all(isinstance(bid, int) for bid in data.non_fictitious_bus_ids)
