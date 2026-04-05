@@ -34,3 +34,20 @@ COPPER_ACCENT: str = "#B87333"
 CHART_PALETTES: dict[str, list[str]] = {
     "default": BUS_COLORS,
 }
+
+GENERATION_COLORS: dict[str, str] = {
+    "hydro": "#3B82F6",
+    "thermal": "#F59E0B",
+    "ncs": "#10B981",
+}
+
+PERFORMANCE_PHASE_COLORS: dict[str, str] = {
+    "forward": "#3B82F6",
+    "backward": "#14B8A6",
+    "lp_solve": "#B87333",
+    "overhead": "#6B7280",
+}
+
+BOUND_LINE_COLOR: str = "#6B7280"
+
+BAND_OPACITY: float = 0.15

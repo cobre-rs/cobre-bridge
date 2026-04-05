@@ -33,9 +33,11 @@ def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
     """
     if unified_hover:
         fig.update_layout(hovermode="x unified")
+    fig.update_layout(autosize=True, width=None)
     return fig.to_html(
         full_html=False,
         include_plotlyjs=False,
+        default_width="100%",
         config={"responsive": True},
     )
 

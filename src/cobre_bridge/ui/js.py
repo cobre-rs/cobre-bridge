@@ -96,6 +96,10 @@ function showTab(tabId, btn) {
     }
 
     window.dispatchEvent(new Event('resize'));
+    setTimeout(function() {
+        var plots = activeTab.querySelectorAll('.js-plotly-plot');
+        plots.forEach(function(p) { try { Plotly.Plots.resize(p); } catch(e) {} });
+    }, 100);
 }
 
 document.addEventListener('click', function(e) {
@@ -120,8 +124,15 @@ document.addEventListener('click', function(e) {
 }, false);
 
 // Plotly charts in the initial active tab render before layout settles.
-// Fire a deferred resize so they recalculate to the correct container width.
-window.addEventListener('load', function() { setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 50); });
+// Fire deferred resizes so they recalculate to the correct container width.
+window.addEventListener('load', function() {
+    setTimeout(function() {
+        window.dispatchEvent(new Event('resize'));
+        document.querySelectorAll('.tab-content.active .js-plotly-plot').forEach(function(p) {
+            try { Plotly.Plots.resize(p); } catch(e) {}
+        });
+    }, 100);
+});
 """
 
 PLANT_EXPLORER_JS: str = """
@@ -279,8 +290,8 @@ function plotlyRef(labels, values, color, name) {
 function plotlyLayout(overrides) {
     var defaults = {
         hovermode: 'x unified',
-        margin: { l: 50, r: 20, t: 40, b: 50 },
-        legend: { orientation: 'h', x: 0, y: -0.2 },
+        margin: { l: 60, r: 30, t: 60, b: 10 },
+        legend: { orientation: 'h', yanchor: 'top', y: -0.15, xanchor: 'center', x: 0.5, font: { size: 11 } },
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)'
     };
@@ -414,5 +425,25 @@ function initComparisonMode(config) {
             config.renderComparison(entries, labels);
         }
     }, false);
+}
+"""
+
+SUB_TAB_JS: str = """
+// ---------------------------------------------------------------------------
+// Sub-tab switching: shows/hides panels within a data-subtab-group container.
+// The click handler must be on the button element itself so event.target
+// correctly identifies the clicked button for active-state styling.
+// ---------------------------------------------------------------------------
+
+function switchSubTab(tabId, groupId) {
+    var group = document.querySelector('[data-subtab-group="' + groupId + '"]');
+    if (!group) { return; }
+    var panels = group.querySelectorAll('.sub-tab-panel');
+    var buttons = group.querySelectorAll('.sub-tab-btn');
+    panels.forEach(function(p) { p.style.display = 'none'; });
+    buttons.forEach(function(b) { b.classList.remove('active'); });
+    var panel = document.getElementById(tabId);
+    if (panel) { panel.style.display = 'block'; }
+    event.target.classList.add('active');
 }
 """

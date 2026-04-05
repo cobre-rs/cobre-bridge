@@ -21,7 +21,12 @@ def section_title(text: str) -> str:
     return f'<div class="section-title">{text}</div>'
 
 
-def collapsible_section(title: str, content: str) -> str:
+def collapsible_section(
+    title: str,
+    content: str,
+    section_id: str = "",
+    default_collapsed: bool = False,
+) -> str:
     """Wrap a section title and content in a collapsible container.
 
     The section title receives a ``data-collapsible="true"`` attribute and an
@@ -32,19 +37,32 @@ def collapsible_section(title: str, content: str) -> str:
     Args:
         title: Section heading text.
         content: HTML string for the section body.
+        section_id: Optional ``id`` attribute for the outer section div.
+        default_collapsed: When ``True``, the section starts collapsed.
+            Adds the ``default-collapsed`` CSS class to the section div and
+            renders the chevron pointing right (``>``) instead of down
+            (``v``).  The existing JS toggle handles both initial states
+            correctly without modification.
 
     Returns:
         A ``<div class="collapsible-section">`` fragment containing a
         clickable title bar and the content wrapped in
         ``<div class="collapsible-content">``.
     """
-    chevron = (
-        '<svg class="chevron" width="10" height="10" viewBox="0 0 10 10">'
-        '<polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" stroke-width="1.5"/>'
-        "</svg>"
-    )
+    if default_collapsed:
+        chevron = '<span class="chevron">></span>'
+        section_class = "collapsible-section default-collapsed"
+    else:
+        chevron = (
+            '<svg class="chevron" width="10" height="10" viewBox="0 0 10 10">'
+            '<polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" stroke-width="1.5"/>'
+            "</svg>"
+        )
+        section_class = "collapsible-section"
+
+    id_attr = f' id="{section_id}"' if section_id else ""
     return (
-        '<div class="collapsible-section">'
+        f'<div class="{section_class}"{id_attr}>'
         f'<div class="section-title" data-collapsible="true">'
         f"{title}"
         f"{chevron}"

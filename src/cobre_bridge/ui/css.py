@@ -47,7 +47,7 @@ nav button {
 nav button:hover { color: #E8E6E3; border-bottom-color: #B87333; }
 nav button.active { color: #B87333; border-bottom-color: #B87333; }
 
-main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+main { padding: 24px 32px; max-width: 1800px; margin: 0 auto; }
 
 .tab-content { display: none; }
 .tab-content.active { display: block; }
@@ -69,7 +69,7 @@ main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
 .chart-card {
     background: #FAFAF8;
     border-radius: 8px;
-    padding: 16px;
+    padding: 0;
     box-shadow: 0 1px 4px rgba(0,0,0,0.1);
     overflow: hidden;
     min-width: 0;
@@ -282,7 +282,7 @@ PLANT_EXPLORER_CSS: str = """
 }
 
 .explorer-table-pane {
-    width: 380px;
+    width: 480px;
     flex-shrink: 0;
     max-height: 80vh;
     overflow-y: auto;
@@ -465,6 +465,42 @@ nav { position: relative; }
 """
 
 
+SUB_TAB_CSS: str = """
+.sub-tab-bar {
+    display: flex;
+    gap: 0;
+    margin-bottom: 16px;
+    border-bottom: 1px solid #2D3748;
+}
+
+.sub-tab-btn {
+    background: none;
+    border: none;
+    color: #8B9298;
+    padding: 8px 16px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    transition: color 0.2s, border-color 0.2s;
+    letter-spacing: 0.3px;
+}
+
+.sub-tab-btn:hover { color: #E8E6E3; border-bottom-color: #B87333; }
+.sub-tab-btn.active { color: #B87333; border-bottom-color: #B87333; }
+
+.sub-tab-panel { display: none; }
+.sub-tab-panel:first-of-type { display: block; }
+
+.collapsible-section.default-collapsed .collapsible-content {
+    max-height: 0;
+    overflow: hidden;
+    padding: 0;
+}
+"""
+
+
 def dashboard_css() -> str:
     """Compose CSS for the dashboard (base + data-table + transition + responsive styles)."""
     return (
@@ -477,6 +513,7 @@ def dashboard_css() -> str:
         + UNDERLINE_EXPAND_CSS
         + METRIC_CARD_CSS
         + PLANT_EXPLORER_CSS
+        + SUB_TAB_CSS
     )
 
 
@@ -491,3 +528,8 @@ def comparison_css() -> str:
         + UNDERLINE_EXPAND_CSS
         + METRIC_CARD_CSS
     )
+
+
+# Module-level alias for the full dashboard CSS bundle.
+# Convenience import: ``from cobre_bridge.ui.css import DASHBOARD_CSS``.
+DASHBOARD_CSS: str = dashboard_css()
