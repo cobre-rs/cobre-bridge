@@ -211,8 +211,11 @@ def _chart_retry_histogram(retry_histogram: pd.DataFrame) -> str:
     if retry_histogram.empty:
         return "<p>No retry data available.</p>"
 
-    retry_counts = retry_histogram["retry_count"].tolist()
-    frequencies = retry_histogram["frequency"].tolist()
+    # Aggregate raw per-solve retry data into a histogram.
+    # Actual schema: iteration, phase, stage, retry_level, count.
+    agg = retry_histogram.groupby("retry_level", as_index=False)["count"].sum()
+    retry_counts = agg["retry_level"].tolist()
+    frequencies = agg["count"].tolist()
 
     colors = []
     for rc in retry_counts:

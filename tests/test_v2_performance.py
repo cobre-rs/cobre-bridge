@@ -93,15 +93,28 @@ def _make_solver_train(n_stages: int = 4, n_iters: int = 3) -> pd.DataFrame:
 
 
 def _make_retry_histogram(
-    retry_counts: list[int] | None = None,
-    frequencies: list[int] | None = None,
+    retry_levels: list[int] | None = None,
+    counts: list[int] | None = None,
 ) -> pd.DataFrame:
-    """Synthetic retry_histogram DataFrame."""
-    if retry_counts is None:
-        retry_counts = [0, 1, 3]
-    if frequencies is None:
-        frequencies = [100, 20, 5]
-    return pd.DataFrame({"retry_count": retry_counts, "frequency": frequencies})
+    """Synthetic retry_histogram DataFrame matching actual parquet schema.
+
+    Actual schema: iteration, phase, stage, retry_level, count.
+    The chart function aggregates by retry_level, summing count.
+    """
+    if retry_levels is None:
+        retry_levels = [0, 0, 1, 1, 3]
+    if counts is None:
+        counts = [50, 50, 10, 10, 5]
+    n = len(retry_levels)
+    return pd.DataFrame(
+        {
+            "iteration": list(range(n)),
+            "phase": ["forward"] * n,
+            "stage": [0] * n,
+            "retry_level": retry_levels,
+            "count": counts,
+        }
+    )
 
 
 def _make_mock_data(
@@ -360,8 +373,8 @@ def test_chart_retry_histogram_empty() -> None:
 def test_chart_retry_histogram_color_coding() -> None:
     """_chart_retry_histogram() with mixed retry counts (0, 1, 2, 5) does not raise."""
     df = _make_retry_histogram(
-        retry_counts=[0, 1, 2, 5],
-        frequencies=[80, 15, 10, 3],
+        retry_levels=[0, 1, 2, 5],
+        counts=[80, 15, 10, 3],
     )
     html = _chart_retry_histogram(df)
     assert "plotly" in html.lower()
