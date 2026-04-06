@@ -22,6 +22,7 @@ from cobre_bridge.dashboard.tabs.v2_costs import (
     _build_cost_table,
     _build_metrics_row,
     _chart_cost_bar,
+    _chart_violation_timeline,
     _compute_npv_metric,
     _render_category_evolution,
     _render_cost_composition,
@@ -247,6 +248,58 @@ def test_chart_cost_bar_has_horizontal_bar_traces() -> None:
     assert len(bar_traces) >= 1
     for trace in bar_traces:
         assert trace.orientation == "h"
+
+
+def test_chart_cost_bar_error_bars_p10_p90() -> None:
+    """_chart_cost_bar must set error_x with p10–p90 range on each bar trace.
+
+    Acceptance criterion from ticket-007: given p10=850, mean=1000, p90=1150,
+    the trace must have error_x.array=[150] and error_x.arrayminus=[150].
+    """
+    summary = pd.DataFrame(
+        {
+            "group": ["Thermal"],
+            "mean": [1000.0],
+            "std": [100.0],
+            "p5": [800.0],
+            "p10": [850.0],
+            "p90": [1150.0],
+            "p95": [1200.0],
+            "pct": [100.0],
+        }
+    )
+    fig = _chart_cost_bar(summary)
+
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) == 1
+    trace = bar_traces[0]
+    assert trace.error_x is not None
+    assert trace.error_x.visible is True
+    assert trace.error_x.array == (150.0,)
+    assert trace.error_x.arrayminus == (150.0,)
+
+
+def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
+    """_chart_cost_bar must omit error_x when p10 or p90 is NaN."""
+    import math
+
+    summary = pd.DataFrame(
+        {
+            "group": ["Thermal"],
+            "mean": [1000.0],
+            "std": [0.0],
+            "p5": [math.nan],
+            "p10": [math.nan],
+            "p90": [math.nan],
+            "p95": [math.nan],
+            "pct": [100.0],
+        }
+    )
+    fig = _chart_cost_bar(summary)
+
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) == 1
+    assert bar_traces[0].error_x is None or bar_traces[0].error_x.visible is not True
 
 
 # ---------------------------------------------------------------------------
@@ -660,3 +713,138 @@ def test_render_includes_all_four_temporal_sections() -> None:
     assert "Cost Category Trends" in html
     assert "Spot Price by Bus" in html
     assert "Violation Costs" in html
+
+
+# ---------------------------------------------------------------------------
+# test__chart_violation_timeline (ticket-009)
+# ---------------------------------------------------------------------------
+
+
+def _make_costs_df_with_storage_violation(
+    n_scenarios: int = 2,
+    n_stages: int = 3,
+    storage_violation_cost: float = 10.0,
+) -> pd.DataFrame:
+    """Return a costs DataFrame with a storage_violation_cost column.
+
+    Values are set to *storage_violation_cost* for all rows so that per-stage
+    sums are always positive when the argument is nonzero.
+    """
+    rows = []
+    for scenario_id in range(n_scenarios):
+        for stage_id in range(n_stages):
+            rows.append(
+                {
+                    "scenario_id": scenario_id,
+                    "stage_id": stage_id,
+                    "block_id": 0,
+                    "thermal_cost": 1000.0,
+                    "storage_violation_cost": storage_violation_cost,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_chart_violation_timeline_returns_figure_with_nonzero_data() -> None:
+    """_chart_violation_timeline must return a Figure when violation data is present."""
+    costs = _make_costs_df_with_storage_violation(storage_violation_cost=10.0)
+    data = _make_mock_data_full(costs=costs)
+    fig = _chart_violation_timeline(data)
+    assert fig is not None
+    assert isinstance(fig, go.Figure)
+
+
+def test_chart_violation_timeline_has_scatter_trace_for_storage_violation() -> None:
+    """_chart_violation_timeline must include a Scatter trace for storage_violation.
+
+    Acceptance criterion: trace name contains 'Storage Violation' (cleaned label).
+    """
+    costs = _make_costs_df_with_storage_violation(storage_violation_cost=10.0)
+    data = _make_mock_data_full(costs=costs)
+    fig = _chart_violation_timeline(data)
+    assert fig is not None
+    scatter_traces = [t for t in fig.data if isinstance(t, go.Scatter)]
+    assert len(scatter_traces) >= 1
+    trace_names = [t.name for t in scatter_traces]
+    # Cleaned label: "_cost" removed, "_" -> " ", then title-cased
+    assert any("Storage Violation" in name for name in trace_names)
+
+
+def test_chart_violation_timeline_x_values_use_stage_labels() -> None:
+    """_chart_violation_timeline x-axis values must use stage labels, not raw integers.
+
+    Acceptance criterion from ticket-009: trace x-values are strings from
+    stage_labels mapping, not bare stage_id integers.
+    """
+    costs = _make_costs_df_with_storage_violation(
+        n_scenarios=2, n_stages=3, storage_violation_cost=20.0
+    )
+    data = _make_mock_data_full(costs=costs, n_stages=3)
+    # stage_labels maps 0->"Stage 0", 1->"Stage 1", 2->"Stage 2"
+    fig = _chart_violation_timeline(data)
+    assert fig is not None
+    scatter_traces = [t for t in fig.data if isinstance(t, go.Scatter)]
+    assert len(scatter_traces) >= 1
+    x_vals = list(scatter_traces[0].x)
+    # Must contain at least one string label, not raw integers
+    assert any(isinstance(v, str) for v in x_vals)
+    assert "Stage 0" in x_vals or "Stage 1" in x_vals or "Stage 2" in x_vals
+
+
+def test_chart_violation_timeline_returns_none_when_all_zero() -> None:
+    """_chart_violation_timeline must return None when all violation costs are zero.
+
+    Acceptance criterion from ticket-009.
+    """
+    costs = _make_costs_df_with_storage_violation(storage_violation_cost=0.0)
+    data = _make_mock_data_full(costs=costs)
+    fig = _chart_violation_timeline(data)
+    assert fig is None
+
+
+def test_chart_violation_timeline_returns_none_for_empty_costs() -> None:
+    """_chart_violation_timeline must return None when costs DataFrame is empty."""
+    data = _make_mock_data_full(costs=pd.DataFrame())
+    fig = _chart_violation_timeline(data)
+    assert fig is None
+
+
+def test_chart_violation_timeline_returns_none_when_no_violation_columns() -> None:
+    """_chart_violation_timeline must return None when no violation columns exist."""
+    # costs only has thermal_cost (no violation column)
+    costs = _make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
+    data = _make_mock_data_full(costs=costs)
+    fig = _chart_violation_timeline(data)
+    assert fig is None
+
+
+# ---------------------------------------------------------------------------
+# test__render_violations extended (ticket-009)
+# ---------------------------------------------------------------------------
+
+
+def test_render_violations_with_nonzero_data_contains_two_chart_cards() -> None:
+    """_render_violations with nonzero violation data must contain two chart-card divs.
+
+    Acceptance criterion from ticket-009: the Violations section now contains a
+    2-column grid with bar chart (left) + timeline (right).
+    """
+    costs = _make_costs_df_with_storage_violation(
+        n_scenarios=2, n_stages=3, storage_violation_cost=10.0
+    )
+    data = _make_mock_data_full(costs=costs)
+    html = _render_violations(data)
+    assert html.count("chart-card") >= 2
+
+
+def test_render_violations_timeline_absent_when_all_violation_zero() -> None:
+    """_render_violations with all-zero violations must render only the bar fallback.
+
+    When all violations are zero, _render_violations returns the 'No violation costs'
+    message — the timeline chart is not rendered.
+    """
+    costs = _make_costs_df_with_storage_violation(storage_violation_cost=0.0)
+    data = _make_mock_data_full(costs=costs)
+    html = _render_violations(data)
+    assert "No violation costs" in html
+    assert "chart-card" not in html

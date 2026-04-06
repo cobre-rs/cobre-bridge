@@ -12,7 +12,7 @@ Implements six sections of the Energy Balance tab (Tab 4):
   E. Reservoir Storage — system aggregate trajectory with vol_min/vol_max
      reference lines, plus per-bus storage as % useful volume.
   F. NCS & Curtailment — NCS generation vs available capacity (left),
-     curtailment by stage bar chart (right).
+     curtailment by source horizontal bar chart (right).
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from cobre_bridge.dashboard.chart_helpers import (
     compute_percentiles,
     make_chart_card,
 )
-from cobre_bridge.dashboard.data import _compute_lp_load, _stage_avg_mw
+from cobre_bridge.dashboard.data import _compute_lp_load, _stage_avg_mw, entity_name
 from cobre_bridge.ui.html import (
     chart_grid,
     collapsible_section,
@@ -794,14 +794,83 @@ def _render_reservoir_storage(data: DashboardData) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _chart_curtailment_by_source(data: DashboardData) -> go.Figure | None:
+    """Build a horizontal bar chart of total curtailment GWh per NCS source.
+
+    Aggregates ``curtailment_mwh`` by summing over stages and blocks per
+    scenario, then takes the mean across scenarios.  Converts MWh to GWh.
+    Bars are sorted descending by curtailment volume.  Hover text shows
+    source name, GWh value, and percentage of total curtailment.
+
+    Returns ``None`` when ``curtailment_mwh`` is missing, all values are
+    zero, or the result DataFrame is empty.
+
+    Args:
+        data: Full :class:`~cobre_bridge.dashboard.data.DashboardData`
+            instance.  Uses ``data.ncs_lf`` and ``data.names``.
+
+    Returns:
+        A :class:`plotly.graph_objects.Figure` with horizontal bars, or
+        ``None`` when no curtailment data is available.
+    """
+    try:
+        curt_df = (
+            data.ncs_lf.group_by(["scenario_id", "non_controllable_id"])
+            .agg(pl.col("curtailment_mwh").sum())
+            .group_by("non_controllable_id")
+            .agg(pl.col("curtailment_mwh").mean())
+            .sort("curtailment_mwh", descending=True)
+            .collect(engine="streaming")
+        )
+    except (pl.exceptions.ColumnNotFoundError, KeyError):
+        return None
+
+    if curt_df.is_empty() or curt_df["curtailment_mwh"].sum() == 0:
+        return None
+
+    ncs_ids = curt_df["non_controllable_id"].to_list()
+    gwh_values = [v / 1_000.0 for v in curt_df["curtailment_mwh"].to_list()]
+    total_gwh = sum(gwh_values)
+    names_list = [
+        entity_name(data.names, "non_controllable_sources", nid) for nid in ncs_ids
+    ]
+
+    # Filter out zero-curtailment sources
+    filtered = [(n, g) for n, g in zip(names_list, gwh_values) if g > 0]
+    if not filtered:
+        return None
+    names_f, gwh_f = zip(*filtered)
+
+    fig = go.Figure(
+        go.Bar(
+            x=list(gwh_f),
+            y=list(names_f),
+            orientation="h",
+            marker_color=COLORS["curtailment"],
+            text=[f"{g:.1f} GWh ({g / total_gwh * 100:.1f}%)" for g in gwh_f],
+            textposition="auto",
+        )
+    )
+    fig.update_layout(
+        xaxis_title="Curtailment (GWh)",
+        yaxis=dict(autorange="reversed"),
+        legend=_LEGEND,
+        margin=_MARGIN,
+    )
+    return fig
+
+
 def _render_ncs_curtailment(data: DashboardData) -> str:
-    """Build NCS generation vs available capacity and curtailment bar charts.
+    """Build NCS generation vs available capacity and curtailment by source charts.
 
     Left chart: stacked area of NCS generation (mean per stage, stage-avg MW)
     with an overlay line for available capacity (block-hours-weighted mean
     ``available_mw`` per stage).
 
-    Right chart: mean curtailment MWh per stage as a bar chart.
+    Right chart: horizontal bar chart of total curtailment GWh per NCS source,
+    sorted descending by volume (via :func:`_chart_curtailment_by_source`).
+    Falls back to a "No curtailment recorded" annotation when all values are
+    zero or the ``curtailment_mwh`` column is absent.
 
     Args:
         data: Full :class:`~cobre_bridge.dashboard.data.DashboardData` instance.
@@ -859,20 +928,8 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
     except (pl.exceptions.ColumnNotFoundError, KeyError):
         ncs_avail_raw = pl.DataFrame()
 
-    # ------------------------------------------------------------------
-    # NCS curtailment (mean MWh per stage, across scenarios)
-    # ------------------------------------------------------------------
-    try:
-        ncs_curtail_raw = (
-            data.ncs_lf.group_by(["scenario_id", "stage_id"])
-            .agg(pl.col("curtailment_mwh").sum())
-            .group_by("stage_id")
-            .agg(pl.col("curtailment_mwh").mean())
-            .sort("stage_id")
-            .collect(engine="streaming")
-        )
-    except (pl.exceptions.ColumnNotFoundError, KeyError):
-        ncs_curtail_raw = pl.DataFrame()
+    # ncs_curtail_raw removed — right chart now delegates to
+    # _chart_curtailment_by_source() which aggregates by source, not stage.
 
     # ------------------------------------------------------------------
     # Build left chart: generation stacked area + available capacity overlay
@@ -923,36 +980,20 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
     )
 
     # ------------------------------------------------------------------
-    # Build right chart: curtailment bar chart
+    # Build right chart: curtailment by source (horizontal bar)
     # ------------------------------------------------------------------
-    curtail_fig = go.Figure()
+    curtail_by_source_fig = _chart_curtailment_by_source(data)
 
-    if not ncs_curtail_raw.is_empty():
-        stages_c = sorted(ncs_curtail_raw["stage_id"].to_list())
-        xlabels_c = stage_x_labels(stages_c, data.stage_labels)
-        curtail_map = dict(
-            zip(
-                ncs_curtail_raw["stage_id"].to_list(),
-                ncs_curtail_raw["curtailment_mwh"].to_list(),
-            )
+    if curtail_by_source_fig is None:
+        curtail_by_source_fig = go.Figure()
+        curtail_by_source_fig.add_annotation(
+            text="No curtailment recorded.",
+            showarrow=False,
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
         )
-
-        curtail_fig.add_trace(
-            go.Bar(
-                x=xlabels_c,
-                y=[curtail_map.get(s, 0) for s in stages_c],
-                name="Curtailment",
-                marker_color=COLORS["curtailment"],
-            )
-        )
-    else:
-        curtail_fig.add_annotation(
-            text="No data.", showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5
-        )
-
-    curtail_fig.update_layout(
-        xaxis_title="Stage", yaxis_title="MWh", legend=_LEGEND, margin=_MARGIN
-    )
 
     gen_card = make_chart_card(
         gen_fig,
@@ -961,8 +1002,8 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
         height=420,
     )
     curtail_card = make_chart_card(
-        curtail_fig,
-        "NCS Curtailment by Stage (mean MWh)",
+        curtail_by_source_fig,
+        "Curtailment by Source (mean GWh, sorted by volume)",
         "v2-energy-ncs-curtailment",
         height=420,
     )

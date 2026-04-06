@@ -505,7 +505,16 @@ def test_cost_summary_shape() -> None:
     df = _make_costs_df()
     result = compute_cost_summary(df, 0.12)
 
-    assert list(result.columns) == ["group", "mean", "std", "p10", "p90", "pct"]
+    assert list(result.columns) == [
+        "group",
+        "mean",
+        "std",
+        "p5",
+        "p10",
+        "p90",
+        "p95",
+        "pct",
+    ]
     # Groups present: Thermal, Deficit, Spillage, NCS, Violations, Other
     assert len(result) == len(COST_GROUPS)
 
@@ -533,7 +542,44 @@ def test_cost_summary_empty() -> None:
     result = compute_cost_summary(empty, 0.12)
 
     assert result.empty
-    assert list(result.columns) == ["group", "mean", "std", "p10", "p90", "pct"]
+    assert list(result.columns) == [
+        "group",
+        "mean",
+        "std",
+        "p5",
+        "p10",
+        "p90",
+        "p95",
+        "pct",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# compute_cost_summary — ticket-007: p5 and p95 columns
+# ---------------------------------------------------------------------------
+
+
+def test_cost_summary_has_p5_and_p95_columns() -> None:
+    """compute_cost_summary must return columns 'p5' and 'p95'."""
+    df = _make_costs_df()
+    result = compute_cost_summary(df, 0.12)
+
+    assert "p5" in result.columns
+    assert "p95" in result.columns
+
+
+def test_cost_summary_p5_le_p10_le_mean_le_p90_le_p95() -> None:
+    """For every row: p5 <= p10 <= mean <= p90 <= p95."""
+    df = _make_costs_df()
+    result = compute_cost_summary(df, 0.12)
+
+    # Only check rows with positive mean (zero-cost groups have equal percentiles)
+    non_zero = result[result["mean"] > 0]
+    for _, row in non_zero.iterrows():
+        assert row["p5"] <= row["p10"] + 1e-9, f"p5 > p10 for group {row['group']}"
+        assert row["p10"] <= row["mean"] + 1e-9, f"p10 > mean for group {row['group']}"
+        assert row["mean"] <= row["p90"] + 1e-9, f"mean > p90 for group {row['group']}"
+        assert row["p90"] <= row["p95"] + 1e-9, f"p90 > p95 for group {row['group']}"
 
 
 # ---------------------------------------------------------------------------

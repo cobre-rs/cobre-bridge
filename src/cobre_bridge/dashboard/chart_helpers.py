@@ -446,7 +446,7 @@ def compute_cost_summary(
     1. Apply NPV discount factors via :func:`compute_npv_costs`.
     2. Sum discounted costs across all stages per scenario.
     3. Group columns via :func:`group_costs`.
-    4. Aggregate across scenarios: mean, std, p10, p90.
+    4. Aggregate across scenarios: mean, std, p5, p10, p90, p95.
     5. Add a ``pct`` column (percentage of total mean cost).
 
     Args:
@@ -456,11 +456,11 @@ def compute_cost_summary(
 
     Returns:
         A :class:`pandas.DataFrame` with columns
-        ``["group", "mean", "std", "p10", "p90", "pct"]``, one row per cost
-        group, sorted descending by ``mean``.  Returns an empty DataFrame with
-        those columns when *costs_df* is empty.
+        ``["group", "mean", "std", "p5", "p10", "p90", "p95", "pct"]``, one
+        row per cost group, sorted descending by ``mean``.  Returns an empty
+        DataFrame with those columns when *costs_df* is empty.
     """
-    summary_cols = ["group", "mean", "std", "p10", "p90", "pct"]
+    summary_cols = ["group", "mean", "std", "p5", "p10", "p90", "p95", "pct"]
 
     if costs_df.empty:
         return pd.DataFrame(columns=summary_cols)
@@ -482,9 +482,16 @@ def compute_cost_summary(
     ]
 
     agg = grouped[group_cols].agg(
-        ["mean", "std", lambda q: q.quantile(0.1), lambda q: q.quantile(0.9)]
+        [
+            "mean",
+            "std",
+            lambda q: q.quantile(0.05),
+            lambda q: q.quantile(0.1),
+            lambda q: q.quantile(0.9),
+            lambda q: q.quantile(0.95),
+        ]
     )
-    agg.index = ["mean", "std", "p10", "p90"]  # type: ignore[assignment]
+    agg.index = ["mean", "std", "p5", "p10", "p90", "p95"]  # type: ignore[assignment]
     agg = agg.T.reset_index().rename(columns={"index": "group"})
 
     total_mean = agg["mean"].sum()

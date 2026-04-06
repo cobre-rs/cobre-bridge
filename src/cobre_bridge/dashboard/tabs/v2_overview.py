@@ -204,27 +204,46 @@ def _build_cost_table(summary_df: pd.DataFrame) -> str:
 def _chart_cost_bar(summary_df: pd.DataFrame) -> go.Figure:
     """Build a horizontal stacked bar figure from a cost summary DataFrame.
 
-    One trace per cost group, stacked horizontally.
+    One trace per cost group, stacked horizontally.  Each bar includes
+    asymmetric error bars showing the p5–p95 range across scenarios.  Error
+    bars are omitted for a group when either p5 or p95 is NaN.
 
     Args:
         summary_df: DataFrame with columns
-            ``["group", "mean", ...]`` as returned by
+            ``["group", "mean", "p5", "p95", ...]`` as returned by
             :func:`~cobre_bridge.dashboard.chart_helpers.compute_cost_summary`.
 
     Returns:
         A :class:`plotly.graph_objects.Figure`.
     """
+    import math
+
     fig = go.Figure()
     for _, row in summary_df.iterrows():
         group = str(row["group"])
         color = COST_GROUP_COLORS.get(group, "#6B7280")
+        mean_val = float(row["mean"])
+
+        error_x: dict | None = None
+        if "p5" in row.index and "p95" in row.index:
+            p5 = float(row["p5"])
+            p95 = float(row["p95"])
+            if not (math.isnan(p5) or math.isnan(p95)):
+                error_x = dict(
+                    type="data",
+                    array=[p95 - mean_val],
+                    arrayminus=[mean_val - p5],
+                    visible=True,
+                )
+
         fig.add_trace(
             go.Bar(
-                x=[float(row["mean"])],
+                x=[mean_val],
                 y=["NPV Cost"],
                 name=group,
                 orientation="h",
                 marker_color=color,
+                error_x=error_x,
             )
         )
     fig.update_layout(barmode="stack")

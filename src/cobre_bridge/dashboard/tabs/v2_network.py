@@ -408,14 +408,18 @@ def build_bus_balance(
     Returns:
         HTML string containing the Plotly bar chart.
     """
+    import math
+
     schema = exchanges_lf.collect_schema()
     schema_names = list(schema.names())
     if "net_flow_mw" not in schema_names or not line_meta:
         return "<p>No bus balance data available.</p>"
 
     # Compute block-hours weighted avg per (scenario, stage, line), then
-    # average across scenarios and stages to get a single mean flow per line.
-    mean_flow_df = (
+    # average across stages to get a per-(scenario, line) mean flow.
+    # Keeping scenario_id allows p10/p90 computation across the scenario
+    # distribution for bus balance error bars.
+    per_scen_flow_df = (
         exchanges_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "line_id"])
         .agg(
@@ -423,43 +427,110 @@ def build_bus_balance(
                 "net_flow_mw"
             )
         )
-        .group_by("line_id")
+        .group_by(["scenario_id", "line_id"])
         .agg(pl.col("net_flow_mw").mean())
         .collect(engine="streaming")
     )
 
-    if mean_flow_df.height == 0:
+    if per_scen_flow_df.height == 0:
         return "<p>No bus balance data available.</p>"
 
-    mean_by_line: dict[int, float] = dict(
-        zip(
-            mean_flow_df["line_id"].to_list(),
-            mean_flow_df["net_flow_mw"].to_list(),
+    # Build per-(scenario, bus) balance by accumulating line flows.
+    # target buses receive positive flow, source buses receive negative flow.
+    scenario_ids = per_scen_flow_df["scenario_id"].unique().to_list()
+    line_ids_in_data = set(per_scen_flow_df["line_id"].unique().to_list())
+
+    # Build lookup: (scenario_id, line_id) -> mean_flow
+    flow_lookup: dict[tuple[int, int], float] = {}
+    for row in per_scen_flow_df.iter_rows(named=True):
+        flow_lookup[(int(row["scenario_id"]), int(row["line_id"]))] = float(
+            row["net_flow_mw"]
         )
-    )
 
-    # Accumulate net flow per bus: target buses receive positive flow,
-    # source buses receive negative flow.
-    bus_balance: dict[int, float] = {}
+    # For each scenario compute per-bus balance
+    bus_ids_in_meta: set[int] = set()
     for lm in line_meta:
-        lid = lm["id"]
-        src_bus = lm.get("source_bus_id")
-        tgt_bus = lm.get("target_bus_id")
-        mean_flow = mean_by_line.get(lid, 0.0)
+        src = lm.get("source_bus_id")
+        tgt = lm.get("target_bus_id")
+        if src is not None:
+            bus_ids_in_meta.add(int(src))
+        if tgt is not None:
+            bus_ids_in_meta.add(int(tgt))
 
-        if tgt_bus is not None:
-            bus_balance[tgt_bus] = bus_balance.get(tgt_bus, 0.0) + mean_flow
-        if src_bus is not None:
-            bus_balance[src_bus] = bus_balance.get(src_bus, 0.0) - mean_flow
-
-    if not bus_balance:
+    if not bus_ids_in_meta:
         return "<p>No bus balance data available.</p>"
 
-    sorted_bus_ids = sorted(bus_balance.keys())
+    # per_scenario_bus_balance[bus_id] = [balance_scen0, balance_scen1, ...]
+    per_scenario_bus_balance: dict[int, list[float]] = {
+        bid: [] for bid in bus_ids_in_meta
+    }
+    for scen in sorted(scenario_ids):
+        bus_bal_scen: dict[int, float] = {bid: 0.0 for bid in bus_ids_in_meta}
+        for lm in line_meta:
+            lid = int(lm["id"])
+            if lid not in line_ids_in_data:
+                continue
+            src_bus = lm.get("source_bus_id")
+            tgt_bus = lm.get("target_bus_id")
+            flow = flow_lookup.get((int(scen), lid), 0.0)
+            if tgt_bus is not None:
+                bus_bal_scen[int(tgt_bus)] = bus_bal_scen.get(int(tgt_bus), 0.0) + flow
+            if src_bus is not None:
+                bus_bal_scen[int(src_bus)] = bus_bal_scen.get(int(src_bus), 0.0) - flow
+        for bid in bus_ids_in_meta:
+            per_scenario_bus_balance[bid].append(bus_bal_scen[bid])
+
+    # Derive mean, p10, p90 per bus from scenario distribution
+    bus_stats: dict[int, tuple[float, float, float]] = {}
+    for bid, values in per_scenario_bus_balance.items():
+        if not values:
+            continue
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        mean_val = sum(sorted_vals) / n
+
+        # Linear interpolation quantile
+        def _quantile(vs: list[float], q: float) -> float:
+            if len(vs) == 1:
+                return vs[0]
+            idx = q * (len(vs) - 1)
+            lo = int(idx)
+            hi = min(lo + 1, len(vs) - 1)
+            frac = idx - lo
+            return vs[lo] * (1.0 - frac) + vs[hi] * frac
+
+        p10_val = _quantile(sorted_vals, 0.1)
+        p90_val = _quantile(sorted_vals, 0.9)
+        bus_stats[bid] = (mean_val, p10_val, p90_val)
+
+    if not bus_stats:
+        return "<p>No bus balance data available.</p>"
+
+    sorted_bus_ids = sorted(bus_stats.keys())
     ynames = [bus_names.get(bid, str(bid)) for bid in sorted_bus_ids]
-    x_values = [bus_balance[bid] for bid in sorted_bus_ids]
+    x_values = [bus_stats[bid][0] for bid in sorted_bus_ids]
+    p10_values = [bus_stats[bid][1] for bid in sorted_bus_ids]
+    p90_values = [bus_stats[bid][2] for bid in sorted_bus_ids]
 
     bar_colors = ["#4A90B8" if v >= 0 else "#DC4C4C" for v in x_values]
+
+    # Build error_x arrays: upper = p90 - mean, lower = mean - p10
+    error_array = [p90_values[i] - x_values[i] for i in range(len(x_values))]
+    error_arrayminus = [x_values[i] - p10_values[i] for i in range(len(x_values))]
+
+    # Only emit error_x when at least one non-NaN, non-zero pair exists
+    has_valid_errors = any(
+        not (math.isnan(error_array[i]) or math.isnan(error_arrayminus[i]))
+        for i in range(len(error_array))
+    )
+    error_x: dict | None = None
+    if has_valid_errors:
+        error_x = dict(
+            type="data",
+            array=error_array,
+            arrayminus=error_arrayminus,
+            visible=True,
+        )
 
     fig = go.Figure()
     fig.add_trace(
@@ -471,6 +542,7 @@ def build_bus_balance(
             name="Net Balance",
             text=[f"{v:+.1f} MW" for v in x_values],
             textposition="auto",
+            error_x=error_x,
         )
     )
     fig.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)

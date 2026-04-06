@@ -121,30 +121,70 @@ def test_can_render_returns_true() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_build_metrics_row
+# test_build_metrics_row  (ticket-005: wireframe-aligned cards)
 # ---------------------------------------------------------------------------
 
 
-def test_build_metrics_row() -> None:
-    """_build_metrics_row() must include key labels and manifest termination reason."""
+def test_build_metrics_row_contains_new_labels() -> None:
+    """_build_metrics_row() must include the 5 wireframe labels."""
     data = _make_mock_data(
         conv=_make_conv(10),
-        training_manifest={"termination_reason": "max_iterations"},
+        training_manifest={"elapsed_seconds": 15120},
     )
     html = _build_metrics_row(data)
-    assert "Lower Bound" in html
-    assert "Gap" in html
-    assert "max_iterations" in html
-    assert "Upper Bound" in html
-    assert "Total Iterations" in html
-    assert "Termination" in html
+    assert "Iterations" in html
+    assert "Training Time" in html
+    assert "Final Lower Bound" in html
+    assert "Total Cuts" in html
+    assert "Active Cuts" in html
 
 
-def test_build_metrics_row_missing_manifest_shows_na() -> None:
-    """When training_manifest is empty, termination shows 'N/A'."""
+def test_build_metrics_row_omits_removed_labels() -> None:
+    """_build_metrics_row() must NOT contain Upper Bound, Gap, or Termination."""
+    data = _make_mock_data(
+        conv=_make_conv(10),
+        training_manifest={"elapsed_seconds": 15120},
+    )
+    html = _build_metrics_row(data)
+    assert "Upper Bound" not in html
+    assert "Final Gap" not in html
+    assert "Termination" not in html
+
+
+def test_build_metrics_row_elapsed_seconds_formatted() -> None:
+    """15120 seconds must render as '4h 12min'."""
+    data = _make_mock_data(
+        conv=_make_conv(5),
+        training_manifest={"elapsed_seconds": 15120},
+    )
+    html = _build_metrics_row(data)
+    assert "4h 12min" in html
+
+
+def test_build_metrics_row_missing_elapsed_shows_na() -> None:
+    """When training_manifest has no 'elapsed_seconds', Training Time shows 'N/A'."""
     data = _make_mock_data(training_manifest={})
     html = _build_metrics_row(data)
     assert "N/A" in html
+
+
+def test_build_metrics_row_cut_totals() -> None:
+    """cuts_added=[100,150,200] total=450; last cuts_active=350 must appear."""
+    conv = pd.DataFrame(
+        {
+            "iteration": [1, 2, 3],
+            "lower_bound": [100.0, 110.0, 120.0],
+            "upper_bound_mean": [200.0, 190.0, 180.0],
+            "upper_bound_std": [5.0, 5.0, 5.0],
+            "gap_percent": [50.0, 42.1, 33.3],
+            "cuts_active": [300, 320, 350],
+            "cuts_added": [100, 150, 200],
+        }
+    )
+    data = _make_mock_data(conv=conv, training_manifest={})
+    html = _build_metrics_row(data)
+    assert "450" in html
+    assert "350" in html
 
 
 # ---------------------------------------------------------------------------
@@ -219,12 +259,10 @@ def test_chart_cut_activity_heatmap_empty() -> None:
 
 
 def test_render_contains_required_sections() -> None:
-    """render() HTML must contain the substrings required by acceptance criteria."""
+    """render() HTML must contain the structural sections required by the spec."""
     data = _make_mock_data(conv=_make_conv(15))
     html = render(data)
     assert "Lower Bound" in html
-    assert "Upper Bound" in html
-    assert "Gap" in html
     assert "Convergence" in html
     assert "Cut Pool" in html
 
@@ -248,23 +286,11 @@ def test_render_full_data_no_exception() -> None:
     assert len(html) > 0
 
 
-def test_render_gap_color_high() -> None:
-    """When gap > 1.0, the gap metric card must use the red color."""
-    conv = _make_conv(5)
-    # Ensure gap is high
-    conv["gap_percent"] = 10.0
-    data = _make_mock_data(conv=conv)
+def test_build_metrics_row_none_training_manifest_shows_na() -> None:
+    """When training_manifest is None, Training Time shows 'N/A'."""
+    data = _make_mock_data(training_manifest=None)
     html = _build_metrics_row(data)
-    assert "#DC4C4C" in html
-
-
-def test_render_gap_color_low() -> None:
-    """When gap <= 1.0, the gap metric card must use the green color."""
-    conv = _make_conv(5)
-    conv["gap_percent"] = 0.5
-    data = _make_mock_data(conv=conv)
-    html = _build_metrics_row(data)
-    assert "#4A8B6F" in html
+    assert "N/A" in html
 
 
 @pytest.mark.parametrize("n_iters", [50, 201, 400])
@@ -275,3 +301,63 @@ def test_chart_cut_activity_heatmap_sampling(n_iters: int) -> None:
     # Should produce plotly HTML, not the placeholder
     assert "No cut selection data" not in html
     assert len(html) > 0
+
+
+# ---------------------------------------------------------------------------
+# ticket-006: Gap % dual-axis on convergence hero
+# ---------------------------------------------------------------------------
+
+
+def test_chart_convergence_hero_has_gap_trace_on_secondary_y() -> None:
+    """Hero chart must include a 'Gap %' trace on secondary_y.
+
+    Condition: gap_percent column is present and has real values.
+    """
+    conv = _make_conv(10)
+    fig = _chart_convergence_hero(conv)
+    gap_traces = [t for t in fig.data if t.name == "Gap %"]
+    assert len(gap_traces) == 1, "Expected exactly one 'Gap %' trace"
+    # make_subplots assigns secondary traces to yaxis2
+    assert gap_traces[0].yaxis == "y2"
+
+
+def test_chart_convergence_hero_gap_trace_style() -> None:
+    """The 'Gap %' trace must be a dashed copper line."""
+    conv = _make_conv(10)
+    fig = _chart_convergence_hero(conv)
+    gap_trace = next(t for t in fig.data if t.name == "Gap %")
+    assert gap_trace.line.dash == "dash"
+    assert "#B87333" in gap_trace.line.color
+
+
+def test_chart_convergence_hero_yaxis2_title() -> None:
+    """The secondary y-axis (yaxis2) title must be 'Gap (%)'."""
+    conv = _make_conv(10)
+    fig = _chart_convergence_hero(conv)
+    assert fig.layout.yaxis2.title.text == "Gap (%)"
+
+
+def test_chart_convergence_hero_no_gap_trace_when_column_missing() -> None:
+    """Hero chart must NOT add a 'Gap %' trace when gap_percent column is absent."""
+    conv = _make_conv(10).drop(columns=["gap_percent"])
+    fig = _chart_convergence_hero(conv)
+    gap_traces = [t for t in fig.data if t.name == "Gap %"]
+    assert len(gap_traces) == 0
+
+
+def test_chart_convergence_hero_no_gap_trace_when_all_nan() -> None:
+    """Hero chart must NOT add a 'Gap %' trace when all gap_percent values are NaN."""
+    import numpy as np
+
+    conv = _make_conv(10)
+    conv["gap_percent"] = np.nan
+    fig = _chart_convergence_hero(conv)
+    gap_traces = [t for t in fig.data if t.name == "Gap %"]
+    assert len(gap_traces) == 0
+
+
+def test_render_does_not_contain_standalone_gap_chart_title() -> None:
+    """render() output must not contain the old standalone gap chart title."""
+    data = _make_mock_data(conv=_make_conv(10))
+    html = render(data)
+    assert "Convergence Gap (%) per Iteration" not in html

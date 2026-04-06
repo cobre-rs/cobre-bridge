@@ -416,6 +416,59 @@ def test_chart_cost_bar_produces_horizontal_bar_traces() -> None:
         assert trace.orientation == "h"
 
 
+def test_chart_cost_bar_error_bars_p5_p95() -> None:
+    """_chart_cost_bar must set error_x with p5–p95 range on each bar trace.
+
+    Acceptance criterion from ticket-007: given p5=800, mean=1000, p95=1200,
+    the trace must have error_x.array=[200] and error_x.arrayminus=[200].
+    """
+    summary = pd.DataFrame(
+        {
+            "group": ["Thermal"],
+            "mean": [1000.0],
+            "std": [100.0],
+            "p5": [800.0],
+            "p10": [850.0],
+            "p90": [1150.0],
+            "p95": [1200.0],
+            "pct": [100.0],
+        }
+    )
+    fig = _chart_cost_bar(summary)
+
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) == 1
+    trace = bar_traces[0]
+    assert trace.error_x is not None
+    assert trace.error_x.visible is True
+    assert trace.error_x.array == (200.0,)
+    assert trace.error_x.arrayminus == (200.0,)
+
+
+def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
+    """_chart_cost_bar must omit error_x when p5 or p95 is NaN."""
+    import math
+
+    summary = pd.DataFrame(
+        {
+            "group": ["Thermal"],
+            "mean": [1000.0],
+            "std": [0.0],
+            "p5": [math.nan],
+            "p10": [math.nan],
+            "p90": [math.nan],
+            "p95": [math.nan],
+            "pct": [100.0],
+        }
+    )
+    fig = _chart_cost_bar(summary)
+
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) == 1
+    # error_x must be None when percentiles are NaN
+    assert bar_traces[0].error_x is None or bar_traces[0].error_x.visible is not True
+
+
 # ---------------------------------------------------------------------------
 # test_chart_training_mini
 # ---------------------------------------------------------------------------

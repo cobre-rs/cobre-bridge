@@ -180,27 +180,46 @@ def _build_metrics_row(data: DashboardData) -> str:
 def _chart_cost_bar(summary_df: pd.DataFrame) -> go.Figure:
     """Build a horizontal stacked bar figure from a cost summary DataFrame.
 
-    One trace per cost group, stacked horizontally.
+    One trace per cost group, stacked horizontally.  Each bar includes
+    asymmetric error bars showing the p10–p90 range across scenarios.  Error
+    bars are omitted for a group when either p10 or p90 is NaN.
 
     Args:
         summary_df: DataFrame with columns
-            ``["group", "mean", ...]`` as returned by
+            ``["group", "mean", "p10", "p90", ...]`` as returned by
             :func:`~cobre_bridge.dashboard.chart_helpers.compute_cost_summary`.
 
     Returns:
         A :class:`plotly.graph_objects.Figure`.
     """
+    import math
+
     fig = go.Figure()
     for _, row in summary_df.iterrows():
         group = str(row["group"])
         color = COST_GROUP_COLORS.get(group, "#6B7280")
+        mean_val = float(row["mean"])
+
+        error_x: dict | None = None
+        if "p10" in row.index and "p90" in row.index:
+            p10 = float(row["p10"])
+            p90 = float(row["p90"])
+            if not (math.isnan(p10) or math.isnan(p90)):
+                error_x = dict(
+                    type="data",
+                    array=[p90 - mean_val],
+                    arrayminus=[mean_val - p10],
+                    visible=True,
+                )
+
         fig.add_trace(
             go.Bar(
-                x=[float(row["mean"])],
+                x=[mean_val],
                 y=["NPV Cost"],
                 name=group,
                 orientation="h",
                 marker_color=color,
+                error_x=error_x,
             )
         )
     fig.update_layout(barmode="stack")
@@ -579,6 +598,79 @@ def _render_spot_price(data: DashboardData) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _chart_violation_timeline(data: DashboardData) -> go.Figure | None:
+    """Line chart of violation cost per stage, one line per nonzero category.
+
+    Computes the mean undiscounted violation cost per stage across scenarios
+    (summing blocks within each scenario/stage first), then plots one
+    :class:`~plotly.graph_objects.Scatter` trace per violation category that
+    has a nonzero total.
+
+    Args:
+        data: Dashboard data instance.
+
+    Returns:
+        A :class:`~plotly.graph_objects.Figure` with one trace per nonzero
+        violation category, or ``None`` when no data is available or all
+        violation values are zero.
+    """
+    if data.costs.empty:
+        return None
+
+    if "stage_id" not in data.costs.columns:
+        return None
+
+    viol_cols = [
+        c
+        for c in data.costs.columns
+        if c in _VIOLATION_COLS or c.endswith("_violation_cost")
+    ]
+    if not viol_cols:
+        return None
+
+    # Sum blocks per (scenario_id, stage_id), then mean across scenarios
+    group_keys = [k for k in ("scenario_id", "stage_id") if k in data.costs.columns]
+    by_stage = (
+        data.costs.groupby(group_keys)[viol_cols]
+        .sum()
+        .reset_index()
+        .groupby("stage_id")[viol_cols]
+        .mean()
+        .reset_index()
+    )
+
+    stages = sorted(by_stage["stage_id"].tolist())
+    xlabels = stage_x_labels(stages, data.stage_labels)
+
+    fig = go.Figure()
+    has_trace = False
+    for col in viol_cols:
+        total = by_stage[col].sum()
+        if total <= 0:
+            continue
+        label = col.replace("_cost", "").replace("_", " ").title()
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=by_stage[col].tolist(),
+                name=label,
+                mode="lines",
+            )
+        )
+        has_trace = True
+
+    if not has_trace:
+        return None
+
+    fig.update_layout(
+        xaxis_title="Stage",
+        yaxis_title="Violation Cost (R$)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+    )
+    return fig
+
+
 def _render_violations(data: DashboardData) -> str:
     """Render a horizontal bar chart of violation costs per category.
 
@@ -675,9 +767,22 @@ def _render_violations(data: DashboardData) -> str:
         "v2-costs-violations-chart",
         height=max(300, 40 * len(categories) + 120),
     )
+
+    timeline_fig = _chart_violation_timeline(data)
+    if timeline_fig is not None:
+        timeline_html = make_chart_card(
+            timeline_fig,
+            "Violation Cost Timeline",
+            "v2-costs-violations-timeline",
+            height=max(300, 40 * len(categories) + 120),
+        )
+        content = chart_grid([chart_html, timeline_html])
+    else:
+        content = chart_grid([chart_html], single=True)
+
     return collapsible_section(
         "Violation Costs",
-        chart_grid([chart_html], single=True),
+        content,
         section_id="v2-costs-violations-section",
         default_collapsed=True,
     )

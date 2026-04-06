@@ -41,19 +41,43 @@ _EXTRA_COLORS: list[str] = [
 
 
 def _build_metrics_row(data: DashboardData) -> str:
-    """Build the 5-card metrics row from convergence and manifest data."""
+    """Build the 5-card metrics row from convergence and manifest data.
+
+    Cards (in order): Iterations, Training Time, Final Lower Bound,
+    Total Cuts, Active Cuts.
+    """
     conv = data.conv
     last = conv.iloc[-1]
 
-    lb_val = float(last["lower_bound"])
-    ub_val = float(last["upper_bound_mean"])
-    gap_val = float(last["gap_percent"])
     total_iters = len(conv)
-    termination = data.training_manifest.get("termination_reason", "N/A")
 
-    gap_color = "#DC4C4C" if gap_val > 1.0 else "#4A8B6F"
+    elapsed = (
+        data.training_manifest.get("elapsed_seconds")
+        if data.training_manifest
+        else None
+    )
+    if elapsed is not None:
+        hours = int(elapsed) // 3600
+        mins = (int(elapsed) % 3600) // 60
+        time_str = f"{hours}h {mins}min"
+    else:
+        time_str = "N/A"
+
+    lb_val = float(last["lower_bound"])
+    total_cuts = int(conv["cuts_added"].sum())
+    active_cuts = int(last["cuts_active"])
 
     cards = [
+        metric_card(
+            value=str(total_iters),
+            label="Iterations",
+            color=COPPER_ACCENT,
+        ),
+        metric_card(
+            value=time_str,
+            label="Training Time",
+            color=COPPER_ACCENT,
+        ),
         metric_card(
             value=f"{lb_val:,.2f}",
             label="Final Lower Bound",
@@ -61,24 +85,14 @@ def _build_metrics_row(data: DashboardData) -> str:
             sparkline_values=conv["lower_bound"].tolist(),
         ),
         metric_card(
-            value=f"{ub_val:,.2f}",
-            label="Final Upper Bound",
-            color=COLORS["upper_bound"],
+            value=f"{total_cuts:,}",
+            label="Total Cuts",
+            color=COLORS["hydro"],
         ),
         metric_card(
-            value=f"{gap_val:.2f}%",
-            label="Final Gap",
-            color=gap_color,
-        ),
-        metric_card(
-            value=str(total_iters),
-            label="Total Iterations",
-            color=COPPER_ACCENT,
-        ),
-        metric_card(
-            value=str(termination),
-            label="Termination",
-            color="#374151",
+            value=f"{active_cuts:,}",
+            label="Active Cuts",
+            color=COLORS["hydro"],
         ),
     ]
     return metrics_grid(cards)
@@ -94,11 +108,15 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 
 
 def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
-    """Full convergence chart: lower bound, upper bound mean, +/- std band, zoom dropdown."""  # noqa: E501
+    """Full convergence chart: lower bound, upper bound mean, +/- std band, zoom.
+
+    When *conv* contains a ``gap_percent`` column with at least one non-NaN
+    value, a dashed copper line is added on the secondary (right) y-axis.
+    """
     n = len(conv)
     iters = conv["iteration"].tolist()
 
-    fig = go.Figure()
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     # Upper bound std band (drawn first so it appears under lines)
     ub_upper = conv["upper_bound_mean"] + conv["upper_bound_std"]
@@ -113,7 +131,8 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
             line={"width": 0},
             showlegend=False,
             hoverinfo="skip",
-        )
+        ),
+        secondary_y=False,
     )
     fig.add_trace(
         go.Scatter(
@@ -126,7 +145,8 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
             fillcolor=_hex_to_rgba(COLORS["upper_bound"], 0.15),
             showlegend=True,
             hoverinfo="skip",
-        )
+        ),
+        secondary_y=False,
     )
 
     # Upper bound mean
@@ -137,7 +157,8 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
             name="Upper Bound",
             mode="lines",
             line={"color": COLORS["upper_bound"], "width": 2},
-        )
+        ),
+        secondary_y=False,
     )
 
     # Lower bound
@@ -148,8 +169,23 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
             name="Lower Bound",
             mode="lines",
             line={"color": COLORS["lower_bound"], "width": 2},
-        )
+        ),
+        secondary_y=False,
     )
+
+    # Gap % on secondary axis (only when column present and has real values)
+    has_gap = "gap_percent" in conv.columns and conv["gap_percent"].notna().any()
+    if has_gap:
+        fig.add_trace(
+            go.Scatter(
+                x=iters,
+                y=conv["gap_percent"].tolist(),
+                name="Gap %",
+                mode="lines",
+                line={"color": COPPER_ACCENT, "width": 1.5, "dash": "dash"},
+            ),
+            secondary_y=True,
+        )
 
     # Zoom dropdown buttons
     buttons = [
@@ -173,7 +209,6 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
 
     fig.update_layout(
         xaxis_title="Iteration",
-        yaxis_title="Objective Value",
         legend=LEGEND_DEFAULTS,
         margin=MARGIN_DEFAULTS,
         updatemenus=[
@@ -188,6 +223,8 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
             }
         ],
     )
+    fig.update_yaxes(title_text="Objective Value", secondary_y=False)
+    fig.update_yaxes(title_text="Gap (%)", secondary_y=True)
     return fig
 
 
@@ -606,27 +643,16 @@ def render(data: DashboardData) -> str:
     section_b = section_title("Convergence") + chart_grid([hero_html], single=True)
 
     lb_delta_fig = _chart_lb_delta(conv)
-    gap_fig = _chart_gap_evolution(conv)
-    c_charts: list[str] = []
-    if lb_delta_fig is not None:
-        c_charts.append(
-            make_chart_card(
-                lb_delta_fig,
-                title="Lower Bound Progress (delta per iteration)",
-                chart_id="v2-training-lb-delta",
-            )
-        )
-    if gap_fig is not None:
-        c_charts.append(
-            make_chart_card(
-                gap_fig,
-                title="Convergence Gap (%) per Iteration",
-                chart_id="v2-training-gap",
-            )
-        )
     section_c = ""
-    if c_charts:
-        section_c = section_title("Lower Bound Progress & Gap") + chart_grid(c_charts)
+    if lb_delta_fig is not None:
+        lb_delta_html = make_chart_card(
+            lb_delta_fig,
+            title="Lower Bound Progress (delta per iteration)",
+            chart_id="v2-training-lb-delta",
+        )
+        section_c = section_title("Lower Bound Progress") + chart_grid(
+            [lb_delta_html], single=True
+        )
 
     cut_pool_fig = _chart_cut_pool(conv)
     cut_pool_html = make_chart_card(
