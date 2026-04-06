@@ -59,14 +59,26 @@ TAB_LABEL = "Costs"
 TAB_ORDER = 40
 
 # Non-cost metadata columns that are excluded from cost aggregations.
-_NON_COST_COLS: frozenset[str] = frozenset({"scenario_id", "stage_id", "block_id"})
+# Must match chart_helpers._NON_COST_COLS to avoid double-counting.
+_NON_COST_COLS: frozenset[str] = frozenset(
+    {
+        "scenario_id",
+        "stage_id",
+        "block_id",
+        "total_cost",
+        "immediate_cost",
+        "future_cost",
+        "discount_factor",
+        "hydro_violation_cost",  # aggregate of 6 individual hydro violations
+    }
+)
 
 # All known violation cost column names from the costs DataFrame spec.
+# NOTE: hydro_violation_cost is excluded — it's an aggregate of the 6 below.
 _VIOLATION_COLS: frozenset[str] = frozenset(
     {
         "storage_violation_cost",
         "filling_target_cost",
-        "hydro_violation_cost",
         "outflow_violation_below_cost",
         "outflow_violation_above_cost",
         "turbined_violation_cost",

@@ -20,13 +20,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
 from cobre_bridge.dashboard.chart_helpers import (
-    add_bounds_overlay,
     add_mean_p50_band,
     compute_percentiles,
     make_chart_card,
@@ -278,7 +276,15 @@ def _chart_gen_mix_hero(data: DashboardData) -> go.Figure:
     fig.update_layout(
         xaxis_title="Stage",
         yaxis_title="MW",
-        legend=_LEGEND,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
         margin=_MARGIN,
     )
     return fig
@@ -412,16 +418,28 @@ def _chart_gen_by_bus(data: DashboardData) -> go.Figure:
         else:
             ex_import[bus_id] = {}
 
+    import math
+
+    n_cols = 2
+    n_rows = math.ceil(n_buses / n_cols)
+    subplot_titles = [data.bus_names.get(b, str(b)) for b in bus_ids]
+    # Pad to fill the grid
+    while len(subplot_titles) < n_rows * n_cols:
+        subplot_titles.append("")
+
     fig = make_subplots(
-        rows=n_buses,
-        cols=1,
+        rows=n_rows,
+        cols=n_cols,
         shared_xaxes=False,
-        subplot_titles=[data.bus_names.get(b, str(b)) for b in bus_ids],
-        vertical_spacing=max(0.06, 0.35 / max(n_buses, 1)),
+        subplot_titles=subplot_titles,
+        vertical_spacing=0.18,
+        horizontal_spacing=0.08,
     )
 
-    for row_idx, bus_id in enumerate(bus_ids, start=1):
-        show_legend = row_idx == 1
+    for idx, bus_id in enumerate(bus_ids):
+        row = idx // n_cols + 1
+        col = idx % n_cols + 1
+        show_legend = idx == 0
         h_gen = _to_map(h_by_bus, bus_id)
         t_gen = _to_map(t_by_bus, bus_id)
         n_gen = _to_map(n_by_bus, bus_id)
@@ -434,62 +452,26 @@ def _chart_gen_by_bus(data: DashboardData) -> go.Figure:
         )
         net_imp = ex_import.get(bus_id, {})
 
-        fig.add_trace(
-            go.Scatter(
-                x=xlabels,
-                y=[h_gen.get(s, 0) for s in stages_all],
-                name="Hydro",
-                stackgroup=f"g{bus_id}",
-                mode="lines",
-                line={"color": GENERATION_COLORS["hydro"]},
-                legendgroup="hydro",
-                showlegend=show_legend,
-            ),
-            row=row_idx,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=xlabels,
-                y=[t_gen.get(s, 0) for s in stages_all],
-                name="Thermal",
-                stackgroup=f"g{bus_id}",
-                mode="lines",
-                line={"color": GENERATION_COLORS["thermal"]},
-                legendgroup="thermal",
-                showlegend=show_legend,
-            ),
-            row=row_idx,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=xlabels,
-                y=[n_gen.get(s, 0) for s in stages_all],
-                name="NCS",
-                stackgroup=f"g{bus_id}",
-                mode="lines",
-                line={"color": GENERATION_COLORS["ncs"]},
-                legendgroup="ncs",
-                showlegend=show_legend,
-            ),
-            row=row_idx,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=xlabels,
-                y=[net_imp.get(s, 0) for s in stages_all],
-                name="Net Import",
-                stackgroup=f"g{bus_id}",
-                mode="lines",
-                line={"color": COLORS["exchange"]},
-                legendgroup="import",
-                showlegend=show_legend,
-            ),
-            row=row_idx,
-            col=1,
-        )
+        for name, vals, color, lgroup in [
+            ("Hydro", h_gen, GENERATION_COLORS["hydro"], "hydro"),
+            ("Thermal", t_gen, GENERATION_COLORS["thermal"], "thermal"),
+            ("NCS", n_gen, GENERATION_COLORS["ncs"], "ncs"),
+            ("Net Import", net_imp, COLORS["exchange"], "import"),
+        ]:
+            fig.add_trace(
+                go.Scatter(
+                    x=xlabels,
+                    y=[vals.get(s, 0) for s in stages_all],
+                    name=name,
+                    stackgroup=f"g{bus_id}",
+                    mode="lines",
+                    line={"color": color},
+                    legendgroup=lgroup,
+                    showlegend=show_legend,
+                ),
+                row=row,
+                col=col,
+            )
         fig.add_trace(
             go.Scatter(
                 x=xlabels,
@@ -500,13 +482,20 @@ def _chart_gen_by_bus(data: DashboardData) -> go.Figure:
                 legendgroup="load",
                 showlegend=show_legend,
             ),
-            row=row_idx,
-            col=1,
+            row=row,
+            col=col,
         )
 
     fig.update_layout(
-        height=350 * n_buses,
-        legend=_LEGEND,
+        height=350 * n_rows,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
         margin=dict(l=60, r=30, t=80, b=50),
     )
     return fig
@@ -646,8 +635,12 @@ def _render_reservoir_storage(data: DashboardData) -> str:
     bus_ids = sorted(data.non_fictitious_bus_ids)
 
     # ------------------------------------------------------------------
-    # System aggregate storage
+    # System aggregate storage as % of total useful volume
     # ------------------------------------------------------------------
+    total_vol_max = sum(float(m.get("vol_max", 0)) for m in data.hydro_meta.values())
+    total_vol_min = sum(float(m.get("vol_min", 0)) for m in data.hydro_meta.values())
+    total_useful = total_vol_max - total_vol_min
+
     try:
         sys_stor = (
             data.hydros_lf.filter(pl.col("block_id") == 0)
@@ -660,51 +653,77 @@ def _render_reservoir_storage(data: DashboardData) -> str:
         sys_stor = pl.DataFrame()
 
     sys_fig = go.Figure()
-    if not sys_stor.is_empty():
-        pct = compute_percentiles(
-            sys_stor.to_pandas(), ["stage_id"], "storage_final_hm3"
+    if not sys_stor.is_empty() and total_useful > 0:
+        df_sys = sys_stor.to_pandas()
+        # Convert to % of useful volume
+        df_sys["_pct"] = (
+            (df_sys["storage_final_hm3"] - total_vol_min) / total_useful * 100.0
         )
+        pct = compute_percentiles(df_sys, ["stage_id"], "_pct")
         stages = sorted(pct["stage_id"].tolist())
-        xlabels = stage_x_labels(stages, data.stage_labels)
-        pct["_x"] = pct["stage_id"].map(dict(zip(stages, xlabels)))
-        add_mean_p50_band(sys_fig, pct, "_x", "System Storage", COLORS["hydro"])
+        xlabels_sys = stage_x_labels(stages, data.stage_labels)
 
-        # Reference lines for total vol_min / vol_max
-        total_vol_max = sum(m.get("vol_max", 0) for m in data.hydro_meta.values())
-        total_vol_min = sum(m.get("vol_min", 0) for m in data.hydro_meta.values())
+        for q_col, q_name, dash in [
+            ("p10", "P10", "dot"),
+            ("p50", "P50", "solid"),
+            ("p90", "P90", "dot"),
+        ]:
+            sys_fig.add_trace(
+                go.Scatter(
+                    x=xlabels_sys,
+                    y=pct[q_col].tolist(),
+                    name=q_name,
+                    mode="lines",
+                    line={
+                        "color": COLORS["hydro"],
+                        "width": 2 if q_col == "p50" else 1.5,
+                        "dash": dash,
+                    },
+                )
+            )
 
-        bounds_df = pd.DataFrame(
-            {
-                "_x": xlabels,
-                "vol_min": [total_vol_min] * len(xlabels),
-                "vol_max": [total_vol_max] * len(xlabels),
-            }
-        )
-        add_bounds_overlay(
-            sys_fig, bounds_df, "_x", min_col="vol_min", max_col="vol_max"
-        )
     else:
         sys_fig.add_annotation(
-            text="No data.", showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5
+            text="No data.",
+            showarrow=False,
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
         )
 
     sys_fig.update_layout(
-        xaxis_title="Stage", yaxis_title="Storage (hm³)", legend=_LEGEND, margin=_MARGIN
+        xaxis_title="Stage",
+        yaxis_title="% Useful Volume",
+        yaxis=dict(range=[0, 105]),
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
+        margin=_MARGIN,
     )
 
     # ------------------------------------------------------------------
     # By-bus storage as % of useful volume
     # ------------------------------------------------------------------
-    # Build hydro-to-bus mapping and per-bus useful volume
+    # Build hydro-to-bus mapping and per-bus useful volume / vol_min
     hydro_to_bus: dict[int, int] = data.hydro_bus_map
     bus_useful_vol: dict[int, float] = {}
+    bus_vol_min: dict[int, float] = {}
     for hid, bus_id in hydro_to_bus.items():
         if bus_id not in bus_useful_vol:
             bus_useful_vol[bus_id] = 0.0
+            bus_vol_min[bus_id] = 0.0
         meta = data.hydro_meta.get(hid, {})
         vol_max = float(meta.get("vol_max", 0))
         vol_min = float(meta.get("vol_min", 0))
         bus_useful_vol[bus_id] += vol_max - vol_min
+        bus_vol_min[bus_id] += vol_min
 
     # Filter to buses that have hydros and are non-fictitious
     active_bus_ids = [b for b in bus_ids if b in bus_useful_vol]
@@ -728,38 +747,56 @@ def _render_reservoir_storage(data: DashboardData) -> str:
     except (pl.exceptions.ColumnNotFoundError, KeyError):
         bus_stor = pl.DataFrame()
 
+    import math as _math
+
     n_buses = len(active_bus_ids)
     if n_buses > 0 and not bus_stor.is_empty():
+        n_cols_bus = 2
+        n_rows_bus = _math.ceil(n_buses / n_cols_bus)
+        bus_titles = [data.bus_names.get(b, str(b)) for b in active_bus_ids]
+        while len(bus_titles) < n_rows_bus * n_cols_bus:
+            bus_titles.append("")
+
         bus_fig = make_subplots(
-            rows=n_buses,
-            cols=1,
+            rows=n_rows_bus,
+            cols=n_cols_bus,
             shared_xaxes=False,
-            subplot_titles=[data.bus_names.get(b, str(b)) for b in active_bus_ids],
-            vertical_spacing=max(0.06, 0.35 / max(n_buses, 1)),
+            subplot_titles=bus_titles,
+            vertical_spacing=0.18,
+            horizontal_spacing=0.08,
         )
         all_stages = sorted(bus_stor["stage_id"].unique().to_list())
         xlabels = stage_x_labels(all_stages, data.stage_labels)
 
-        for row_idx, bus_id in enumerate(active_bus_ids, start=1):
+        for idx, bus_id in enumerate(active_bus_ids):
+            row = idx // n_cols_bus + 1
+            col = idx % n_cols_bus + 1
             sub = bus_stor.filter(pl.col("bus_id") == bus_id).to_pandas()
             useful_vol = bus_useful_vol.get(bus_id, 0.0)
+            vmin = bus_vol_min.get(bus_id, 0.0)
+            sub = sub.copy()
             if useful_vol > 0.0:
-                sub = sub.copy()
-                sub["_pct"] = sub["storage_final_hm3"] / useful_vol * 100.0
+                sub["_pct"] = (sub["storage_final_hm3"] - vmin) / useful_vol * 100.0
             else:
-                sub = sub.copy()
                 sub["_pct"] = 0.0
 
             pct = compute_percentiles(sub, ["stage_id"], "_pct")
             pct["_x"] = pct["stage_id"].map(dict(zip(all_stages, xlabels)))
-            color = BUS_COLORS[row_idx - 1 % len(BUS_COLORS)]
+            color = BUS_COLORS[idx % len(BUS_COLORS)]
             bus_name = data.bus_names.get(bus_id, str(bus_id))
-            add_mean_p50_band(bus_fig, pct, "_x", bus_name, color, row=row_idx, col=1)
-            bus_fig.update_yaxes(title_text="%", row=row_idx, col=1)
+            add_mean_p50_band(bus_fig, pct, "_x", bus_name, color, row=row, col=col)
+            bus_fig.update_yaxes(title_text="%", row=row, col=col)
 
         bus_fig.update_layout(
-            height=320 * n_buses + 60,
-            legend=_LEGEND,
+            height=320 * n_rows_bus + 60,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=11),
+            ),
             margin=dict(l=60, r=30, t=80, b=50),
         )
     else:
@@ -771,20 +808,22 @@ def _render_reservoir_storage(data: DashboardData) -> str:
 
     sys_card = make_chart_card(
         sys_fig,
-        "System Aggregate Reservoir Storage (hm³)",
+        "Aggregate Storage Trajectory (% useful volume)",
         "v2-energy-storage-system",
         height=420,
     )
+    n_rows_bus_h = _math.ceil(n_buses / 2) if n_buses > 0 else 1
     bus_card = make_chart_card(
         bus_fig,
-        "Reservoir Storage by Bus (% useful volume)",
+        "Storage by Bus (% useful volume)",
         "v2-energy-storage-by-bus",
-        height=max(320 * n_buses + 60, 420),
+        height=max(320 * n_rows_bus_h + 60, 420),
     )
 
+    content = chart_grid([sys_card], single=True) + chart_grid([bus_card], single=True)
     return collapsible_section(
         "Reservoir Storage",
-        chart_grid([sys_card, bus_card]),
+        content,
         section_id="v2-energy-storage-section",
         default_collapsed=False,
     )
@@ -913,8 +952,12 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
     # then mean across scenarios)
     # ------------------------------------------------------------------
     try:
+        # Sum available_mw across entities per (scenario, stage, block),
+        # then weight by block hours for stage-average MW.
         ncs_avail_raw = (
-            data.ncs_lf.join(bh_lazy, on=["stage_id", "block_id"])
+            data.ncs_lf.group_by(["scenario_id", "stage_id", "block_id"])
+            .agg(pl.col("available_mw").sum())
+            .join(bh_lazy, on=["stage_id", "block_id"])
             .group_by(["scenario_id", "stage_id"])
             .agg(
                 (pl.col("available_mw") * pl.col("_bh")).sum().alias("_wmw"),
@@ -944,17 +987,7 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
             zip(ncs_gen_raw["stage_id"].to_list(), ncs_gen_raw["_gen_mw"].to_list())
         )
 
-        gen_fig.add_trace(
-            go.Scatter(
-                x=xlabels,
-                y=[gen_map.get(s, 0) for s in stages],
-                name="NCS Generation",
-                stackgroup="ncs_gen",
-                mode="lines",
-                line={"color": GENERATION_COLORS["ncs"]},
-            )
-        )
-
+        # Available capacity area (blue, behind generation)
         if not ncs_avail_raw.is_empty():
             avail_map = dict(
                 zip(
@@ -967,17 +1000,43 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
                     x=xlabels,
                     y=[avail_map.get(s, 0) for s in stages],
                     name="Available Capacity",
+                    fill="tozeroy",
+                    fillcolor="rgba(59,130,246,0.2)",
                     mode="lines",
-                    line={"color": COLORS["curtailment"], "width": 2, "dash": "dash"},
+                    line={"color": "#3B82F6", "width": 1.5},
                 )
             )
+
+        # Generation area (green, on top)
+        gen_fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=[gen_map.get(s, 0) for s in stages],
+                name="NCS Generation",
+                fill="tozeroy",
+                fillcolor="rgba(16,185,129,0.4)",
+                mode="lines",
+                line={"color": GENERATION_COLORS["ncs"], "width": 2},
+            )
+        )
     else:
         gen_fig.add_annotation(
             text="No data.", showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5
         )
 
     gen_fig.update_layout(
-        xaxis_title="Stage", yaxis_title="MW", legend=_LEGEND, margin=_MARGIN
+        xaxis_title="Stage",
+        yaxis_title="MW",
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
+        margin=_MARGIN,
     )
 
     # ------------------------------------------------------------------
@@ -1152,21 +1211,23 @@ def _build_hero_data(
             p50[key].append(_quantiles(df, sid, 0.5))
             p90[key].append(_quantiles(df, sid, 0.9))
 
-    # Build "All" view: one dict per scenario
+    # Build "All" view: total generation per scenario (hydro + thermal + NCS)
     scenario_ids: set[int] = set()
     for df in (h_df, t_df, n_df):
         if df.height > 0:
             scenario_ids.update(df["scenario_id"].to_list())
     all_scenarios = sorted(scenario_ids)
 
-    all_view: list[dict] = []
+    all_view: list[list[float]] = []
     for scen in all_scenarios:
-        entry: dict[str, list[float]] = {"hydro": [], "thermal": [], "ncs": []}
+        total: list[float] = []
         for sid in stages:
-            for key, df in [("hydro", h_df), ("thermal", t_df), ("ncs", n_df)]:
+            s = 0.0
+            for df in (h_df, t_df, n_df):
                 vals = _scenario_vals(df, sid)
-                entry[key].append(vals.get(scen, 0.0))
-        all_view.append(entry)
+                s += vals.get(scen, 0.0)
+            total.append(round(s, 2))
+        all_view.append(total)
 
     result: dict = {
         "stages": stages,
@@ -1263,7 +1324,7 @@ var _EB_L = {hovermode:'x unified',
              xaxis:{title:'Stage'},
              yaxis:{title:'MW'},
              margin:{l:60,r:20,t:60,b:10},
-             legend:{orientation:'h',yanchor:'top',y:-0.15,
+             legend:{orientation:'h',yanchor:'bottom',y:1.02,
                      xanchor:'center',x:0.5,font:{size:11}}};
 var _EB_C = {responsive:true};
 
@@ -1291,10 +1352,12 @@ function updateEBHero() {
 
   if(sel === 'all') {
     for(var i = 0; i < d.all.length; i++) {
-      traces.push(_eb_thin_line('Hydro s'+i, d.all[i].hydro, _EB_HYDRO_COLOR));
-      traces.push(_eb_thin_line('Thermal s'+i, d.all[i].thermal, _EB_THERMAL_COLOR));
-      traces.push(_eb_thin_line('NCS s'+i, d.all[i].ncs, _EB_NCS_COLOR));
+      traces.push(_eb_thin_line('Scenario '+i, d.all[i], '#3B82F6'));
     }
+    // Add p50 stacked area as reference
+    traces.push(_eb_area('Hydro (p50)', d.p50.hydro, _EB_HYDRO_COLOR, true));
+    traces.push(_eb_area('Thermal (p50)', d.p50.thermal, _EB_THERMAL_COLOR, true));
+    traces.push(_eb_area('NCS (p50)', d.p50.ncs, _EB_NCS_COLOR, true));
     traces.push(loadTrace);
   } else {
     var view = d[sel];
@@ -1348,8 +1411,19 @@ def render(data: DashboardData) -> str:
     # Section A — metrics row
     metrics_html = _build_metrics_row(data)
 
-    # Section B — interactive hero section (scenario selector + JS)
-    hero_html = _build_hero_section(data)
+    # Section B — static hero chart (mean stacked area + load)
+    hero_fig = _chart_gen_mix_hero(data)
+    hero_html = chart_grid(
+        [
+            make_chart_card(
+                hero_fig,
+                "System Generation Mix vs Load (mean, stage-avg MW)",
+                "v2-energy-gen-mix-hero",
+                height=420,
+            )
+        ],
+        single=True,
+    )
 
     # Section C — generation by bus (collapsible, default expanded)
     by_bus_fig = _chart_gen_by_bus(data)
@@ -1362,7 +1436,7 @@ def render(data: DashboardData) -> str:
                     by_bus_fig,
                     "Generation + Net Import vs LP Load by Bus (stage-avg MW)",
                     "v2-energy-gen-by-bus",
-                    height=max(350 * n_buses, 400),
+                    height=max(350 * ((n_buses + 1) // 2), 400),
                 )
             ],
             single=True,
