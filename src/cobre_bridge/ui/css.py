@@ -489,11 +489,6 @@ SUB_TAB_CSS: str = """
 .sub-tab-panel { display: none; }
 .sub-tab-panel:first-of-type { display: block; }
 
-.collapsible-section.default-collapsed .collapsible-content {
-    max-height: 0;
-    overflow: hidden;
-    padding: 0;
-}
 """
 
 

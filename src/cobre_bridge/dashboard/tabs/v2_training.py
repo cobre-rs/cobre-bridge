@@ -78,7 +78,6 @@ def _build_metrics_row(data: DashboardData) -> str:
             value=f"{lb_val:,.2f}",
             label="Final Lower Bound",
             color=COLORS["lower_bound"],
-            sparkline_values=conv["lower_bound"].tolist(),
         ),
         metric_card(
             value=f"{total_cuts:,}",
@@ -225,23 +224,43 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
 
 
 def _chart_lb_delta(conv: pd.DataFrame) -> go.Figure | None:
-    """Line chart of lower bound improvement per iteration."""
+    """Dual-axis chart: LB delta % (left) + Gap % (right) per iteration.
+
+    LB delta % = (LB[i] - LB[i-1]) / (LB[i-1] + eps) * 100
+    """
     if conv.empty or len(conv) < 2:
         return None
 
-    delta = conv["lower_bound"].diff().iloc[1:]
+    lb = conv["lower_bound"]
+    eps = 1e-12
+    delta_pct = ((lb.diff() / (lb.shift(1) + eps)) * 100.0).iloc[1:]
     iters = conv["iteration"].iloc[1:].tolist()
 
-    fig = go.Figure()
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
         go.Scatter(
             x=iters,
-            y=delta.tolist(),
-            name="LB Delta",
+            y=delta_pct.tolist(),
+            name="LB Delta %",
             mode="lines",
             line={"color": COLORS["lower_bound"], "width": 1.5},
-        )
+        ),
+        secondary_y=False,
     )
+
+    has_gap = "gap_percent" in conv.columns and conv["gap_percent"].notna().any()
+    if has_gap:
+        fig.add_trace(
+            go.Scatter(
+                x=conv["iteration"].iloc[1:].tolist(),
+                y=conv["gap_percent"].iloc[1:].tolist(),
+                name="Gap %",
+                mode="lines",
+                line={"color": COPPER_ACCENT, "width": 1.5, "dash": "dash"},
+            ),
+            secondary_y=True,
+        )
+
     fig.add_hline(
         y=0,
         line_dash="dash",
@@ -251,10 +270,11 @@ def _chart_lb_delta(conv: pd.DataFrame) -> go.Figure | None:
     )
     fig.update_layout(
         xaxis_title="Iteration",
-        yaxis_title="\u0394 Lower Bound",
         legend=LEGEND_DEFAULTS,
         margin=MARGIN_DEFAULTS,
     )
+    fig.update_yaxes(title_text="LB Improvement (%)", secondary_y=False)
+    fig.update_yaxes(title_text="Gap (%)", secondary_y=True)
     return fig
 
 
@@ -506,7 +526,7 @@ def _timing_color(col: str, idx: int) -> str:
 
 
 def _chart_timing_stacked(timing: pd.DataFrame) -> go.Figure | None:
-    """Stacked area chart of timing components per iteration."""
+    """Stacked bar chart of timing components per iteration."""
     if timing.empty:
         return None
 
@@ -528,18 +548,16 @@ def _chart_timing_stacked(timing: pd.DataFrame) -> go.Figure | None:
             extra_idx += 1
         label = col.replace("_ms", "").replace("_", " ").title()
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=iters,
                 y=timing[col].tolist(),
                 name=label,
-                mode="lines",
-                stackgroup="one",
-                line={"width": 0.5, "color": color},
-                fillcolor=color,
+                marker_color=color,
             )
         )
 
     fig.update_layout(
+        barmode="stack",
         xaxis_title="Iteration",
         yaxis_title="Time (ms)",
         legend=LEGEND_DEFAULTS,
@@ -632,39 +650,32 @@ def render(data: DashboardData) -> str:
     hero_fig = _chart_convergence_hero(conv)
     hero_html = make_chart_card(
         hero_fig,
-        title="Convergence Bounds",
+        title="Training Bounds",
         chart_id="v2-training-convergence-hero",
         height=500,
     )
-    section_b = section_title("Convergence") + chart_grid([hero_html], single=True)
+    section_b = section_title("Training Bounds") + chart_grid([hero_html], single=True)
 
+    # Row 2: LB Progress & Gap + Cut Pool side by side
+    row2_parts: list[str] = []
     lb_delta_fig = _chart_lb_delta(conv)
-    section_c = ""
     if lb_delta_fig is not None:
-        lb_delta_html = make_chart_card(
-            lb_delta_fig,
-            title="Lower Bound Progress (delta per iteration)",
-            chart_id="v2-training-lb-delta",
+        row2_parts.append(
+            make_chart_card(
+                lb_delta_fig,
+                title="Lower Bound Progress & Gap",
+                chart_id="v2-training-lb-delta",
+            )
         )
-        section_c = section_title("Lower Bound Progress") + chart_grid(
-            [lb_delta_html], single=True
-        )
-
     cut_pool_fig = _chart_cut_pool(conv)
-    cut_pool_html = make_chart_card(
-        cut_pool_fig,
-        title="Cut Pool Evolution",
-        chart_id="v2-training-cut-pool",
+    row2_parts.append(
+        make_chart_card(
+            cut_pool_fig,
+            title="Cut Pool Evolution",
+            chart_id="v2-training-cut-pool",
+        )
     )
-    summary_html = (
-        f'<div class="chart-card">'
-        f'<div style="padding: 1rem;">'
-        f'<div class="metrics-grid">{_cut_pool_summary(conv)}</div>'
-        f"</div></div>"
-    )
-    section_d = section_title("Cut Pool Evolution") + chart_grid(
-        [cut_pool_html, summary_html]
-    )
+    section_c = chart_grid(row2_parts)
 
     if data.cut_selection.empty:
         heatmap_content = "<p>No cut selection data available.</p>"
@@ -720,4 +731,4 @@ def render(data: DashboardData) -> str:
         default_collapsed=False,
     )
 
-    return section_a + section_b + section_c + section_d + section_e + section_f
+    return section_a + section_b + section_c + section_e + section_f

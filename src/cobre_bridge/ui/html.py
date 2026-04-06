@@ -40,25 +40,29 @@ def collapsible_section(
         A ``<div class="collapsible-section">`` fragment with clickable title
         and content wrapped in ``<div class="collapsible-content">``.
     """
+    chevron = (
+        '<svg class="chevron" width="10" height="10" viewBox="0 0 10 10">'
+        '<polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" stroke-width="1.5"/>'
+        "</svg>"
+    )
+
     if default_collapsed:
-        chevron = '<span class="chevron">></span>'
-        section_class = "collapsible-section default-collapsed"
-    else:
-        chevron = (
-            '<svg class="chevron" width="10" height="10" viewBox="0 0 10 10">'
-            '<polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" stroke-width="1.5"/>'
-            "</svg>"
-        )
         section_class = "collapsible-section"
+        title_class = "section-title collapsed-title"
+        content_class = "collapsible-content collapsed"
+    else:
+        section_class = "collapsible-section"
+        title_class = "section-title"
+        content_class = "collapsible-content"
 
     id_attr = f' id="{section_id}"' if section_id else ""
     return (
         f'<div class="{section_class}"{id_attr}>'
-        f'<div class="section-title" data-collapsible="true">'
+        f'<div class="{title_class}" data-collapsible="true">'
         f"{title}"
         f"{chevron}"
         "</div>"
-        f'<div class="collapsible-content">{content}</div>'
+        f'<div class="{content_class}">{content}</div>'
         "</div>"
     )
 

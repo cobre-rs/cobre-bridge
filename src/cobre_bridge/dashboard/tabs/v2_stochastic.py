@@ -870,33 +870,74 @@ def _chart_noise_boxplot_by_stage(
     noise_openings: pd.DataFrame,
     stage_labels: dict[int, str],
 ) -> go.Figure:
-    """Build a box plot of noise values grouped by stage (first 12 stages).
+    """Build a box plot of noise values grouped by stage (all stages).
+
+    One box per stage along the x-axis.  Each box aggregates across all hydros
+    and opening indices for that stage.  Whiskers show the 5th–95th percentile.
 
     Args:
         noise_openings: DataFrame with columns ``stage_id`` and ``value``.
         stage_labels: Mapping ``stage_id -> label string``.
 
     Returns:
-        A :class:`plotly.graph_objects.Figure` with one :class:`~plotly.graph_objects.Box`
-        trace per stage (max 12).
+        A :class:`plotly.graph_objects.Figure`.
     """
-    all_stage_ids = sorted(noise_openings["stage_id"].unique().tolist())
-    stage_ids = all_stage_ids[:12]
+    stage_ids = sorted(noise_openings["stage_id"].unique().tolist())
+
+    # Pre-compute percentiles per stage for efficiency instead of
+    # sending all 448K samples to Plotly
+    rows: list[dict] = []
+    for sid in stage_ids:
+        vals = noise_openings.loc[noise_openings["stage_id"] == sid, "value"].dropna()
+        if vals.empty:
+            continue
+        rows.append(
+            {
+                "stage_id": sid,
+                "median": float(vals.median()),
+                "q1": float(vals.quantile(0.25)),
+                "q3": float(vals.quantile(0.75)),
+                "lowerfence": float(vals.quantile(0.05)),
+                "upperfence": float(vals.quantile(0.95)),
+            }
+        )
+
+    if not rows:
+        return go.Figure()
+
+    stats = pd.DataFrame(rows)
+    xlabels = [stage_labels.get(int(s), str(s)) for s in stats["stage_id"]]
 
     fig = go.Figure()
-    for sid in stage_ids:
-        sub = noise_openings[noise_openings["stage_id"] == sid]["value"].dropna()
-        label = stage_labels.get(int(sid), str(sid))
-        fig.add_trace(
-            go.Box(
-                y=sub.values,
-                name=label,
-                marker_color=COLORS["hydro"],
-                boxmean=False,
-                showlegend=False,
-                hovertemplate=f"Stage: {label}<br>Value: %{{y:.3f}}<extra></extra>",
-            )
+    fig.add_trace(
+        go.Box(
+            x=xlabels,
+            median=stats["median"],
+            q1=stats["q1"],
+            q3=stats["q3"],
+            lowerfence=stats["lowerfence"],
+            upperfence=stats["upperfence"],
+            marker_color=COLORS["hydro"],
+            fillcolor="rgba(74,144,184,0.3)",
+            showlegend=False,
+            hovertemplate=(
+                "Stage: %{x}<br>"
+                "Median: %{median:.3f}<br>"
+                "Q1: %{q1:.3f}  Q3: %{q3:.3f}<br>"
+                "P5: %{lowerfence:.3f}  P95: %{upperfence:.3f}"
+                "<extra></extra>"
+            ),
         )
+    )
+    # Zero reference line
+    fig.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color="#94A3B8",
+        line_width=1,
+        annotation_text="0",
+        annotation_position="bottom left",
+    )
     fig.update_layout(
         xaxis_title="Stage",
         yaxis_title="Noise Value",
@@ -906,26 +947,53 @@ def _chart_noise_boxplot_by_stage(
     return fig
 
 
-def _chart_ar_order_distribution(fitting_report: dict) -> go.Figure:
+def _chart_ar_order_distribution(
+    fitting_report: dict,
+    hydro_meta: dict[int, dict],
+) -> go.Figure:
     """Build a bar chart of selected AR order distribution across hydros.
+
+    Hover text includes the count and list of hydro names for each order.
 
     Args:
         fitting_report: The loaded ``fitting_report.json`` dict with a
             ``"hydros"`` key mapping hydro IDs to per-hydro fitting data.
+        hydro_meta: Mapping ``hydro_id -> {"name": str, ...}``.
 
     Returns:
         A :class:`plotly.graph_objects.Figure` with one :class:`~plotly.graph_objects.Bar`
         trace.
     """
     hydros_data: dict = fitting_report.get("hydros", {})
-    order_counts: dict[int, int] = {}
-    for hydro_info in hydros_data.values():
+    order_names: dict[int, list[str]] = {}
+    for hid_str, hydro_info in hydros_data.items():
         order = int(hydro_info.get("selected_order", 0))
-        order_counts[order] = order_counts.get(order, 0) + 1
+        hid = int(hid_str)
+        name = hydro_meta.get(hid, {}).get("name", str(hid))
+        order_names.setdefault(order, []).append(name)
 
-    max_order = max(order_counts) if order_counts else 0
-    orders = list(range(max_order + 1))
-    counts = [order_counts.get(o, 0) for o in orders]
+    if not order_names:
+        return go.Figure()
+
+    max_order = max(order_names)
+    orders = list(range(1, max_order + 1))
+    counts = [len(order_names.get(o, [])) for o in orders]
+
+    # Build hover text with hydro names (truncate long lists)
+    hover_texts: list[str] = []
+    for o in orders:
+        names = sorted(order_names.get(o, []))
+        n = len(names)
+        if n == 0:
+            hover_texts.append(f"Order {o}: 0 hydros")
+        elif n <= 8:
+            names_str = ", ".join(names)
+            hover_texts.append(f"Order {o}: {n} hydros<br>{names_str}")
+        else:
+            shown = ", ".join(names[:8])
+            hover_texts.append(
+                f"Order {o}: {n} hydros<br>{shown}<br>... and {n - 8} more"
+            )
 
     fig = go.Figure()
     fig.add_trace(
@@ -933,12 +1001,14 @@ def _chart_ar_order_distribution(fitting_report: dict) -> go.Figure:
             x=orders,
             y=counts,
             marker_color=COLORS["hydro"],
-            hovertemplate="Order %{x}: %{y} hydros<extra></extra>",
+            customdata=hover_texts,
+            hovertemplate="%{customdata}<extra></extra>",
         )
     )
     fig.update_layout(
         xaxis_title="Selected AR Order",
         yaxis_title="Number of Hydros",
+        xaxis=dict(dtick=1),
         margin=MARGIN_DEFAULTS,
         template="plotly_white",
     )
@@ -1238,7 +1308,7 @@ def _render_section_d(data: DashboardData) -> str:
 
 
 def _render_section_e(data: DashboardData) -> str:
-    """Render Section E — Noise Diagnostics (histogram and stage box plot)."""
+    """Render Section E — Noise Diagnostics (box plot across all stages)."""
     if data.noise_openings.empty:
         return collapsible_section(
             "Noise Diagnostics",
@@ -1246,21 +1316,14 @@ def _render_section_e(data: DashboardData) -> str:
             section_id="v2-stoch-section-e",
         )
 
-    hist_fig = _chart_noise_histogram(data.noise_openings)
-    hist_html = make_chart_card(
-        hist_fig,
-        "Noise Sample Distribution vs N(0,1)",
-        "v2-stoch-noise-histogram",
-    )
-
     box_fig = _chart_noise_boxplot_by_stage(data.noise_openings, data.stage_labels)
     box_html = make_chart_card(
         box_fig,
-        "Noise Distribution by Stage (first 12)",
+        "Noise Distribution by Stage",
         "v2-stoch-noise-boxplot",
     )
 
-    content = chart_grid([hist_html, box_html])
+    content = chart_grid([box_html], single=True)
     return collapsible_section(
         "Noise Diagnostics",
         content,
@@ -1269,33 +1332,28 @@ def _render_section_e(data: DashboardData) -> str:
 
 
 def _render_section_f(data: DashboardData) -> str:
-    """Render Section F — AR Model Summary (order distribution and reduction reasons)."""
+    """Render Section F — AR Model Summary (order distribution histogram)."""
     if not data.fitting_report:
         return collapsible_section(
             "AR Model Summary",
             "<p>No fitting report available.</p>",
             section_id="v2-stoch-section-f",
+            default_collapsed=True,
         )
 
-    order_fig = _chart_ar_order_distribution(data.fitting_report)
+    order_fig = _chart_ar_order_distribution(data.fitting_report, data.hydro_meta)
     order_html = make_chart_card(
         order_fig,
         "AR Order Distribution",
         "v2-stoch-ar-order",
     )
 
-    reasons_fig = _chart_order_reduction_reasons(data.fitting_report)
-    reasons_html = make_chart_card(
-        reasons_fig,
-        "AR Order Reduction Reasons by Season",
-        "v2-stoch-ar-reasons",
-    )
-
-    content = chart_grid([order_html, reasons_html])
+    content = chart_grid([order_html], single=True)
     return collapsible_section(
         "AR Model Summary",
         content,
         section_id="v2-stoch-section-f",
+        default_collapsed=True,
     )
 
 
