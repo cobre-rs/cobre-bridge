@@ -1,8 +1,4 @@
-"""Shared CSS stylesheets for dashboard and comparator HTML reports.
-
-The copper accent color (#B87333) is defined in theme.py but appears as
-a literal hex value in the CSS strings to preserve byte-identical output.
-"""
+"""Shared CSS stylesheets for dashboard and comparator HTML reports."""
 
 from __future__ import annotations
 
@@ -502,7 +498,7 @@ SUB_TAB_CSS: str = """
 
 
 def dashboard_css() -> str:
-    """Compose CSS for the dashboard (base + data-table + transition + responsive styles)."""
+    """Compose CSS for the dashboard."""
     return (
         BASE_CSS
         + DATA_TABLE_CSS
@@ -518,7 +514,7 @@ def dashboard_css() -> str:
 
 
 def comparison_css() -> str:
-    """Compose CSS for comparison reports (base + plant-selector + enhanced styles)."""
+    """Compose CSS for comparison reports."""
     return (
         BASE_CSS
         + PLANT_SELECTOR_CSS
@@ -530,6 +526,4 @@ def comparison_css() -> str:
     )
 
 
-# Module-level alias for the full dashboard CSS bundle.
-# Convenience import: ``from cobre_bridge.ui.css import DASHBOARD_CSS``.
 DASHBOARD_CSS: str = dashboard_css()

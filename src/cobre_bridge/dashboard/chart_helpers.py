@@ -208,7 +208,7 @@ def add_mean_p50_band(
             ),
             **subplot_kwargs,
         )
-        # Upper bound (p90) — fills down to the p10 trace
+        # Upper bound (fills to p10)
         fig.add_trace(
             go.Scatter(
                 x=x,
@@ -344,10 +344,6 @@ def make_chart_card(
     return wrap_chart(inner_html)
 
 
-# ---------------------------------------------------------------------------
-# NPV and cost grouping helpers
-# ---------------------------------------------------------------------------
-
 #: Non-cost metadata columns that are never treated as cost components.
 _NON_COST_COLS: frozenset[str] = frozenset({"scenario_id", "stage_id", "block_id"})
 
@@ -384,12 +380,14 @@ def compute_npv_costs(
     result = costs_df.copy()
     cost_cols = [c for c in result.columns if c not in _NON_COST_COLS]
 
-    if discount_rate > 0.0 and cost_cols:
-        factors: pd.Series = 1.0 / (1.0 + discount_rate) ** (
-            result["stage_id"] - stage_start
-        )
-        for col in cost_cols:
-            result[col] = result[col] * factors
+    if not (discount_rate > 0.0 and cost_cols):
+        return result
+
+    factors: pd.Series = 1.0 / (1.0 + discount_rate) ** (
+        result["stage_id"] - stage_start
+    )
+    for col in cost_cols:
+        result[col] = result[col] * factors
 
     return result
 
@@ -430,15 +428,11 @@ def group_costs(
         assigned.update(present)
         result[group_name] = result[present].sum(axis=1) if present else 0.0
 
-    # Columns not claimed by any named group -> "Other"
     other_cols = [c for c in cost_columns if c not in assigned]
     result["Other"] = result[other_cols].sum(axis=1) if other_cols else 0.0
 
-    # Drop the original component columns
     cols_to_drop = [c for c in cost_columns if c in result.columns]
-    result = result.drop(columns=cols_to_drop)
-
-    return result
+    return result.drop(columns=cols_to_drop)
 
 
 def compute_cost_summary(
@@ -473,41 +467,31 @@ def compute_cost_summary(
 
     cost_columns = [c for c in costs_df.columns if c not in _NON_COST_COLS]
 
-    # 1. Discount
     discounted = compute_npv_costs(costs_df, discount_rate)
 
-    # 2. Sum across stages per scenario
     meta_cols_present = [c for c in ("scenario_id",) if c in discounted.columns]
-    if meta_cols_present:
-        per_scenario = discounted.groupby(meta_cols_present)[cost_columns].sum()
-    else:
-        per_scenario = discounted[cost_columns]
+    per_scenario = (
+        discounted.groupby(meta_cols_present)[cost_columns].sum()
+        if meta_cols_present
+        else discounted[cost_columns]
+    )
 
-    # 3. Group columns
     grouped = group_costs(per_scenario.reset_index(), cost_columns)
     group_cols = [
         c for c in grouped.columns if c not in _NON_COST_COLS and c != "scenario_id"
     ]
 
-    # 4. Aggregate across scenarios
     agg = grouped[group_cols].agg(
         ["mean", "std", lambda q: q.quantile(0.1), lambda q: q.quantile(0.9)]
     )
     agg.index = ["mean", "std", "p10", "p90"]  # type: ignore[assignment]
     agg = agg.T.reset_index().rename(columns={"index": "group"})
 
-    # 5. Percentage of total mean
     total_mean = agg["mean"].sum()
     agg["pct"] = (agg["mean"] / total_mean * 100.0) if total_mean != 0.0 else 0.0
 
-    # Sort descending by mean and return only the expected columns
     agg = agg.sort_values("mean", ascending=False).reset_index(drop=True)
     return agg[summary_cols]
-
-
-# ---------------------------------------------------------------------------
-# Private utilities
-# ---------------------------------------------------------------------------
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:

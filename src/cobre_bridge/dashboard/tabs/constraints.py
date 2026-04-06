@@ -339,7 +339,7 @@ def chart_constraint_lhs_vs_bound(
         rows=rows_count,
         cols=cols,
         subplot_titles=subtitles,
-        vertical_spacing=0.18,
+        vertical_spacing=max(0.06, 0.35 / max(rows_count, 1)),
         horizontal_spacing=0.1,
     )
 

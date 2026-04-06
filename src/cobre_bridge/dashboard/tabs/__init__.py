@@ -1,8 +1,8 @@
 """Tab registry for the dashboard.
 
 Defines the ``TabModule`` Protocol, the ``TAB_MODULES`` registry, and the
-``get_renderable_tabs`` orchestration function.  Tab modules added in tickets
-010-014 append themselves to ``TAB_MODULES`` at import time.
+``get_renderable_tabs`` orchestration function.  The registry exclusively
+uses v2 lifecycle-driven tab modules (epic-03 through epic-07).
 """
 
 from __future__ import annotations
@@ -41,55 +41,43 @@ class TabModule(Protocol):
 # ---------------------------------------------------------------------------
 
 DEFAULT_TAB_ORDER: dict[str, int] = {
-    "tab-overview": 0,
-    "tab-training": 10,
-    "tab-energy": 20,
-    "tab-hydro": 30,
-    "tab-plants": 40,
-    "tab-thermal": 50,
-    "tab-thermal-plants": 60,
-    "tab-exchanges": 70,
-    "tab-costs": 80,
-    "tab-ncs-thermal": 90,
-    "tab-constraints": 100,
-    "tab-stochastic": 110,
-    "tab-perf": 120,
+    "tab-v2-overview": 0,
+    "tab-v2-training": 10,
+    "tab-v2-stochastic": 20,
+    "tab-v2-energy-balance": 30,
+    "tab-v2-costs": 40,
+    "tab-v2-plants": 50,
+    "tab-v2-network": 60,
+    "tab-v2-constraints": 80,
+    "tab-v2-performance": 90,
 }
 
 # ---------------------------------------------------------------------------
-# Registry — populated by tickets 010-014
+# Registry — v2 lifecycle-driven tab modules (epic-03 through epic-07)
 # ---------------------------------------------------------------------------
 
 from cobre_bridge.dashboard.tabs import (  # noqa: E402
-    constraints,
-    costs,
-    energy,
-    exchanges,
-    hydro,
-    ncs,
-    overview,
-    performance,
-    plants,
-    stochastic,
-    thermal,
-    thermal_plants,
-    training,
+    v2_constraints,
+    v2_costs,
+    v2_energy_balance,
+    v2_network,
+    v2_overview,
+    v2_performance,
+    v2_plants,
+    v2_stochastic,
+    v2_training,
 )
 
 TAB_MODULES: list[TabModule] = [
-    overview,
-    training,
-    energy,
-    hydro,
-    plants,
-    thermal,
-    thermal_plants,
-    exchanges,
-    costs,
-    ncs,
-    constraints,
-    stochastic,
-    performance,
+    v2_overview,
+    v2_training,
+    v2_stochastic,
+    v2_energy_balance,
+    v2_costs,
+    v2_plants,
+    v2_network,
+    v2_constraints,
+    v2_performance,
 ]
 
 # ---------------------------------------------------------------------------

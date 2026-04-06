@@ -100,7 +100,7 @@ def _compute_gen_gwh(lf: pl.LazyFrame) -> float:
             return 0.0
         value = result["generation_mwh"][0]
         return float(value) / 1e3 if value is not None else 0.0
-    except Exception:  # noqa: BLE001
+    except (ValueError, TypeError, KeyError):
         return 0.0
 
 
@@ -118,20 +118,19 @@ def _build_cost_table(summary_df: pd.DataFrame) -> str:
     if summary_df.empty:
         return "<p>No cost data available.</p>"
 
-    header_cells = "".join(
-        f"<th>{h}</th>" for h in ("Group", "Mean", "Std", "P10", "P90", "% of Total")
-    )
-    rows: list[str] = []
-    for _, row in summary_df.iterrows():
-        cells = (
-            f"<td>{row['group']}</td>"
-            f"<td>{row['mean']:,.0f}</td>"
-            f"<td>{row['std']:,.0f}</td>"
-            f"<td>{row['p10']:,.0f}</td>"
-            f"<td>{row['p90']:,.0f}</td>"
-            f"<td>{row['pct']:.1f}%</td>"
-        )
-        rows.append(f"<tr>{cells}</tr>")
+    headers = ("Group", "Mean", "Std", "P10", "P90", "% of Total")
+    header_cells = "".join(f"<th>{h}</th>" for h in headers)
+    rows = [
+        f"<tr>"
+        f"<td>{row['group']}</td>"
+        f"<td>{row['mean']:,.0f}</td>"
+        f"<td>{row['std']:,.0f}</td>"
+        f"<td>{row['p10']:,.0f}</td>"
+        f"<td>{row['p90']:,.0f}</td>"
+        f"<td>{row['pct']:.1f}%</td>"
+        f"</tr>"
+        for _, row in summary_df.iterrows()
+    ]
 
     return (
         '<table class="data-table" style="width:100%;border-collapse:collapse;">'
@@ -245,7 +244,7 @@ def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
             stage_mw: dict[int, float] | object = _stage_avg_mw(
                 lf, "generation_mwh", data.stage_hours, []
             )
-        except Exception:  # noqa: BLE001
+        except (ValueError, TypeError, KeyError):
             continue
         if not isinstance(stage_mw, dict) or not stage_mw:
             continue
@@ -277,11 +276,6 @@ def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
     return fig
 
 
-# ---------------------------------------------------------------------------
-# Section renderers
-# ---------------------------------------------------------------------------
-
-
 def _render_section_c(data: DashboardData) -> str:
     """Render Section C — four metric cards."""
     # Expected cost (NPV)
@@ -305,7 +299,7 @@ def _render_section_c(data: DashboardData) -> str:
                     .sort_index()
                     .tolist()
                 )
-            except Exception:  # noqa: BLE001
+            except (ValueError, TypeError, KeyError):
                 sparkline = None
 
     hydro_gwh = _compute_gen_gwh(data.hydros_lf)
@@ -388,11 +382,6 @@ def _render_section_e(data: DashboardData) -> str:
         )
 
     return section_title("Quick Look") + chart_grid([training_html, gen_html])
-
-
-# ---------------------------------------------------------------------------
-# Tab interface
-# ---------------------------------------------------------------------------
 
 
 def can_render(data: DashboardData) -> bool:  # noqa: ARG001

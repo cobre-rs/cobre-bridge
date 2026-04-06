@@ -26,15 +26,10 @@ from cobre_bridge.ui.theme import COLORS, COPPER_ACCENT, PERFORMANCE_PHASE_COLOR
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
 
-# ---------------------------------------------------------------------------
-# Module constants
-# ---------------------------------------------------------------------------
-
 TAB_ID = "tab-v2-training"
 TAB_LABEL = "Training"
 TAB_ORDER = 10
 
-# Fallback palette for timing components not in PERFORMANCE_PHASE_COLORS
 _EXTRA_COLORS: list[str] = [
     "#8B5CF6",
     "#F59E0B",
@@ -43,10 +38,6 @@ _EXTRA_COLORS: list[str] = [
     "#06B6D4",
     "#F97316",
 ]
-
-# ---------------------------------------------------------------------------
-# Section A — Metrics Row
-# ---------------------------------------------------------------------------
 
 
 def _build_metrics_row(data: DashboardData) -> str:
@@ -91,11 +82,6 @@ def _build_metrics_row(data: DashboardData) -> str:
         ),
     ]
     return metrics_grid(cards)
-
-
-# ---------------------------------------------------------------------------
-# Section B — Convergence Hero Chart
-# ---------------------------------------------------------------------------
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -205,11 +191,6 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
     return fig
 
 
-# ---------------------------------------------------------------------------
-# Section C — Lower Bound Progress & Gap
-# ---------------------------------------------------------------------------
-
-
 def _chart_lb_delta(conv: pd.DataFrame) -> go.Figure | None:
     """Line chart of lower bound improvement per iteration."""
     if conv.empty or len(conv) < 2:
@@ -276,11 +257,6 @@ def _chart_gap_evolution(conv: pd.DataFrame) -> go.Figure | None:
     return fig
 
 
-# ---------------------------------------------------------------------------
-# Section D — Cut Pool Evolution
-# ---------------------------------------------------------------------------
-
-
 def _chart_cut_pool(conv: pd.DataFrame) -> go.Figure:
     """Dual-axis chart: cuts_active area + cuts_added bars."""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -332,11 +308,6 @@ def _cut_pool_summary(conv: pd.DataFrame) -> str:
         f'<div class="metric-label">Total Cuts Added</div>'
         f"</div>"
     )
-
-
-# ---------------------------------------------------------------------------
-# Section E — Cut Management Heatmaps
-# ---------------------------------------------------------------------------
 
 
 def _sample_pivot_columns(pivot: pd.DataFrame, step: int) -> pd.DataFrame:
@@ -457,12 +428,6 @@ def _chart_cut_deactivation_heatmap(
     return fig_to_html(fig, unified_hover=False)
 
 
-# ---------------------------------------------------------------------------
-# Section F — Iteration Timing
-# ---------------------------------------------------------------------------
-
-# Ordered list of primary timing components; the phase color map uses these
-# names as keys where applicable.
 _TIMING_COMPONENT_ORDER: list[str] = [
     "forward_solve_ms",
     "forward_sample_ms",
@@ -618,11 +583,6 @@ def _chart_phase_distribution(timing: pd.DataFrame) -> go.Figure | None:
     return fig
 
 
-# ---------------------------------------------------------------------------
-# Tab interface
-# ---------------------------------------------------------------------------
-
-
 def can_render(data: DashboardData) -> bool:  # noqa: ARG001
     """Training tab always renders (convergence.parquet is always present)."""
     return True
@@ -634,14 +594,8 @@ def render(data: DashboardData) -> str:
     if conv.empty:
         return "<p>No convergence data.</p>"
 
-    # ------------------------------------------------------------------
-    # Section A — Metrics Row
-    # ------------------------------------------------------------------
     section_a = _build_metrics_row(data)
 
-    # ------------------------------------------------------------------
-    # Section B — Convergence Hero Chart
-    # ------------------------------------------------------------------
     hero_fig = _chart_convergence_hero(conv)
     hero_html = make_chart_card(
         hero_fig,
@@ -651,9 +605,6 @@ def render(data: DashboardData) -> str:
     )
     section_b = section_title("Convergence") + chart_grid([hero_html], single=True)
 
-    # ------------------------------------------------------------------
-    # Section C — Lower Bound Progress & Gap
-    # ------------------------------------------------------------------
     lb_delta_fig = _chart_lb_delta(conv)
     gap_fig = _chart_gap_evolution(conv)
     c_charts: list[str] = []
@@ -677,9 +628,6 @@ def render(data: DashboardData) -> str:
     if c_charts:
         section_c = section_title("Lower Bound Progress & Gap") + chart_grid(c_charts)
 
-    # ------------------------------------------------------------------
-    # Section D — Cut Pool Evolution
-    # ------------------------------------------------------------------
     cut_pool_fig = _chart_cut_pool(conv)
     cut_pool_html = make_chart_card(
         cut_pool_fig,
@@ -696,9 +644,6 @@ def render(data: DashboardData) -> str:
         [cut_pool_html, summary_html]
     )
 
-    # ------------------------------------------------------------------
-    # Section E — Cut Management Heatmaps (collapsible, default collapsed)
-    # ------------------------------------------------------------------
     if data.cut_selection.empty:
         heatmap_content = "<p>No cut selection data available.</p>"
     else:
@@ -720,9 +665,6 @@ def render(data: DashboardData) -> str:
         default_collapsed=True,
     )
 
-    # ------------------------------------------------------------------
-    # Section F — Iteration Timing (collapsible, default collapsed)
-    # ------------------------------------------------------------------
     if data.timing.empty:
         timing_content = "<p>No timing data available.</p>"
     else:

@@ -29,25 +29,16 @@ def collapsible_section(
 ) -> str:
     """Wrap a section title and content in a collapsible container.
 
-    The section title receives a ``data-collapsible="true"`` attribute and an
-    inline SVG chevron icon.  JavaScript in ``TAB_SWITCH_JS`` handles the
-    click-to-collapse behaviour by toggling ``.collapsed`` on the sibling
-    ``.collapsible-content`` div.
-
     Args:
         title: Section heading text.
         content: HTML string for the section body.
         section_id: Optional ``id`` attribute for the outer section div.
-        default_collapsed: When ``True``, the section starts collapsed.
-            Adds the ``default-collapsed`` CSS class to the section div and
-            renders the chevron pointing right (``>``) instead of down
-            (``v``).  The existing JS toggle handles both initial states
-            correctly without modification.
+        default_collapsed: When ``True``, starts collapsed with right-pointing
+            chevron; when ``False``, starts expanded with down-pointing chevron.
 
     Returns:
-        A ``<div class="collapsible-section">`` fragment containing a
-        clickable title bar and the content wrapped in
-        ``<div class="collapsible-content">``.
+        A ``<div class="collapsible-section">`` fragment with clickable title
+        and content wrapped in ``<div class="collapsible-content">``.
     """
     if default_collapsed:
         chevron = '<span class="chevron">></span>'
@@ -78,11 +69,7 @@ def _sparkline_svg(
     width: int = 60,
     height: int = 20,
 ) -> str:
-    """Render a tiny inline SVG sparkline polyline from a list of float values.
-
-    Normalizes values to the 0..height range and spaces x-coordinates evenly
-    across width. Returns an SVG element with class ``metric-sparkline``.
-    """
+    """Render an inline SVG sparkline from a list of float values."""
     n = len(values)
     min_v = min(values)
     max_v = max(values)
@@ -112,18 +99,7 @@ def metric_card(
     delta_direction: str | None = None,
     sparkline_values: list[float] | None = None,
 ) -> str:
-    """Create a metric card with a prominent value and a descriptive label.
-
-    Args:
-        value: The metric value to display (e.g. "1,234 GWh").
-        label: The metric label (e.g. "Total Hydro Generation").
-        color: Optional accent hex color — adds a ``border-top: 4px solid`` style.
-        delta: Optional delta text (e.g. "+5.2%") shown between value and label.
-        delta_direction: ``"up"`` or ``"down"`` controls triangle color; ignored
-            when ``delta`` is ``None``.
-        sparkline_values: Optional list of floats rendered as an inline SVG
-            sparkline. Omitted when the list has fewer than 2 elements.
-    """
+    """Create a metric card with value, label, optional delta, and sparkline."""
     style = f' style="border-top: 4px solid {color};"' if color is not None else ""
 
     delta_html = ""
@@ -181,18 +157,14 @@ def plant_explorer_table(
     columns: list[tuple[str, str]],
     rows_html: str,
 ) -> str:
-    """Generate an HTML plant explorer table pane with search input and sortable header.
+    """Generate a plant explorer table with search and sortable columns.
 
     Args:
-        table_id: The ``id`` attribute applied to the ``<tbody>`` element.
-        search_id: The ``id`` attribute applied to the search ``<input>`` element.
-        columns: Ordered list of ``(header_text, sort_type)`` pairs. ``sort_type``
-            must be ``"string"``, ``"number"``, or ``"none"``.
-        rows_html: Pre-rendered ``<tr>`` elements to inject into the ``<tbody>``.
-
-    Returns:
-        An HTML fragment containing the search input, a ``<table>`` with a
-        sortable ``<thead>``, and a ``<tbody>`` populated with *rows_html*.
+        table_id: ``id`` for the ``<tbody>`` element.
+        search_id: ``id`` for the search ``<input>`` element.
+        columns: List of ``(header_text, sort_type)`` pairs.
+            ``sort_type`` must be ``"string"``, ``"number"``, or ``"none"``.
+        rows_html: Pre-rendered ``<tr>`` elements for the ``<tbody>``.
     """
     header_cells: list[str] = []
     for col_index, (header_text, sort_type) in enumerate(columns):
@@ -225,17 +197,15 @@ def build_html(
     """Assemble a complete HTML document with tabbed navigation.
 
     Args:
-        title: Page title shown in <title> and <header>.
-        tab_defs: Ordered list of (tab_id, tab_label) pairs defining the nav.
-        tab_contents: Mapping from tab_id to the HTML content for that tab.
-            If a tab_id from tab_defs is missing here, the section renders
-            "<p>No data</p>".
-        css: CSS string injected into a <style> block in <head>.
-        js: JavaScript string injected into a <script> block at the end of
-            <body>.
+        title: Page title for ``<title>`` and ``<header>``.
+        tab_defs: Ordered list of ``(tab_id, tab_label)`` pairs.
+        tab_contents: Mapping from tab_id to HTML content; missing tabs
+            render as ``"<p>No data</p>"``.
+        css: CSS string injected into ``<style>`` in ``<head>``.
+        js: JavaScript string injected into ``<script>`` at end of ``<body>``.
 
     Returns:
-        A complete <!DOCTYPE html> document string.
+        A complete ``<!DOCTYPE html>`` document string.
     """
     nav_buttons: list[str] = []
     for i, (tab_id, tab_label) in enumerate(tab_defs):

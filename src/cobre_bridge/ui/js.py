@@ -1,7 +1,7 @@
-"""Tab-switching JavaScript for dashboard and comparator HTML reports.
+"""Tab-switching and plant explorer JavaScript for dashboard and reports.
 
-The showTab function signature is referenced in HTML onclick attributes —
-do not rename tabId or btn parameters.
+Note: showTab(tabId, btn), filterTable, sortTable, etc. are called from HTML
+onclick attributes — do not rename function parameters.
 """
 
 from __future__ import annotations
@@ -29,10 +29,8 @@ function showTab(tabId, btn) {
     var nav = document.querySelector('nav');
     var underline = nav ? nav.querySelector('.tab-underline') : null;
 
-    // Collapse expanded cards in the currently active tab before switching.
     var prevTab = document.querySelector('.tab-content.active');
     if (prevTab) {
-        // Remove stagger animation from cards in the outgoing tab.
         prevTab.querySelectorAll('.chart-card').forEach(function(card) {
             card.classList.remove('card-enter');
             card.style.animationDelay = '';
@@ -40,7 +38,6 @@ function showTab(tabId, btn) {
         prevTab.querySelectorAll('.chart-card-expanded').forEach(function(card) {
             card.classList.remove('chart-card-expanded');
         });
-        // Reset all collapsible sections in the outgoing tab to expanded.
         prevTab.querySelectorAll('.collapsible-content').forEach(function(el) {
             el.classList.remove('collapsed');
         });
@@ -61,24 +58,20 @@ function showTab(tabId, btn) {
     var activeTab = document.getElementById(tabId);
     if (activeTab) {
         activeTab.classList.add('active');
-        // Trigger fade animation by forcing a reflow then re-adding the class.
-        void activeTab.offsetWidth;
+        void activeTab.offsetWidth;  // Force reflow for fade animation
         activeTab.classList.add('tab-content-fade');
 
-        // Staggered card entry animation: remove existing, force reflow, re-apply.
         var cards = activeTab.querySelectorAll('.chart-card');
         cards.forEach(function(card) {
             card.classList.remove('card-enter');
             card.style.animationDelay = '';
         });
-        // Force reflow so removing the class takes effect before re-adding.
-        void activeTab.offsetWidth;
+        void activeTab.offsetWidth;  // Reflow before re-adding classes
         cards.forEach(function(card, i) {
             card.style.animationDelay = (i * 50) + 'ms';
             card.classList.add('card-enter');
         });
 
-        // Reset collapsible sections in the incoming tab to expanded state.
         activeTab.querySelectorAll('.collapsible-content').forEach(function(el) {
             el.classList.remove('collapsed');
         });
@@ -98,7 +91,9 @@ function showTab(tabId, btn) {
     window.dispatchEvent(new Event('resize'));
     setTimeout(function() {
         var plots = activeTab.querySelectorAll('.js-plotly-plot');
-        plots.forEach(function(p) { try { Plotly.Plots.resize(p); } catch(e) {} });
+        plots.forEach(function(p) {
+            try { Plotly.Plots.resize(p); } catch(e) {}
+        });
     }, 100);
 }
 
@@ -123,8 +118,6 @@ document.addEventListener('click', function(e) {
     if (chevron) { chevron.classList.toggle('rotated'); }
 }, false);
 
-// Plotly charts in the initial active tab render before layout settles.
-// Fire deferred resizes so they recalculate to the correct container width.
 window.addEventListener('load', function() {
     setTimeout(function() {
         window.dispatchEvent(new Event('resize'));
@@ -136,14 +129,12 @@ window.addEventListener('load', function() {
 """
 
 PLANT_EXPLORER_JS: str = """
-// ---------------------------------------------------------------------------
-// Plant Explorer: shared infrastructure for master-detail split-pane tables.
-// All functions use ES5 var declarations for inline-script compatibility.
-// ---------------------------------------------------------------------------
+// Plant Explorer: master-detail split-pane tables with search and sorting.
+// ES5 syntax for inline-script compatibility.
 
 function initPlantExplorer(config) {
-    // config: { tableId, searchInputId, detailContainerId, dataVar, labelsVar,
-    //           renderDetail, columns }
+    // config: {tableId, searchInputId, detailContainerId, dataVar, labelsVar,
+    //          renderDetail, columns}
     var searchInput = document.getElementById(config.searchInputId);
     if (searchInput) {
         searchInput.addEventListener('input', function() {
@@ -307,12 +298,7 @@ function plotlyLayout(overrides) {
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// syncHover: cross-chart hover synchronization.
-// Attaches plotly_hover / plotly_unhover listeners to each chart div.
-// A _syncLock guard prevents re-entrant cascades.
-// ---------------------------------------------------------------------------
-
+// Cross-chart hover synchronization with re-entrancy guard.
 var _syncLock = false;
 
 function syncHover(chartIds) {
@@ -331,8 +317,8 @@ function syncHover(chartIds) {
                 var targetDiv = document.getElementById(targetId);
                 if (!targetDiv) { return; }
                 try {
-                    Plotly.Fx.hover(targetDiv, [{ curveNumber: 0, pointNumber: pointIndex }]);
-                } catch (e) { /* chart not yet rendered */ }
+                    Plotly.Fx.hover(targetDiv, [{curveNumber: 0, pointNumber: pointIndex}]);
+                } catch (e) {}
             });
             _syncLock = false;
         });
@@ -346,20 +332,14 @@ function syncHover(chartIds) {
                 if (!targetDiv) { return; }
                 try {
                     Plotly.Fx.hover(targetDiv, []);
-                } catch (e) { /* chart not yet rendered */ }
+                } catch (e) {}
             });
             _syncLock = false;
         });
     });
 }
 
-// ---------------------------------------------------------------------------
-// initComparisonMode: checkbox-driven plant comparison overlay.
-// config keys: tableId, dataVar, labelsVar, chartIds, renderComparison,
-//              renderDetail (optional, for reverting to single-plant mode),
-//              maxCompare (default 3).
-// ---------------------------------------------------------------------------
-
+// Checkbox-driven multi-plant comparison with palette coloring.
 var _compareSelected = [];
 var _comparePalette = ['#2196F3', '#FF9800', '#4CAF50'];
 
@@ -379,7 +359,6 @@ function initComparisonMode(config) {
         if (cb.checked) {
             if (_compareSelected.indexOf(plantId) === -1) {
                 if (_compareSelected.length >= maxCompare) {
-                    // Uncheck the oldest selection.
                     var oldest = _compareSelected.shift();
                     var oldCb = tbody.querySelector(
                         '.compare-checkbox[data-id="' + oldest + '"]'
@@ -393,7 +372,6 @@ function initComparisonMode(config) {
             if (idx !== -1) { _compareSelected.splice(idx, 1); }
         }
 
-        // Update row border classes.
         tbody.querySelectorAll('tr').forEach(function(row) {
             row.classList.remove('compare-active-1', 'compare-active-2', 'compare-active-3');
         });
@@ -403,11 +381,9 @@ function initComparisonMode(config) {
             if (row) { row.classList.add('compare-active-' + (i + 1)); }
         });
 
-        // Render comparison or revert to single-plant.
         var data = window[config.dataVar];
         var labels = window[config.labelsVar];
         if (_compareSelected.length === 0) {
-            // Revert to the currently selected row.
             var selectedRow = tbody.querySelector('.explorer-row-selected');
             if (selectedRow && config.renderDetail && data) {
                 var selIdx = selectedRow.getAttribute('data-index');
@@ -429,12 +405,7 @@ function initComparisonMode(config) {
 """
 
 SUB_TAB_JS: str = """
-// ---------------------------------------------------------------------------
 // Sub-tab switching: shows/hides panels within a data-subtab-group container.
-// The click handler must be on the button element itself so event.target
-// correctly identifies the clicked button for active-state styling.
-// ---------------------------------------------------------------------------
-
 function switchSubTab(tabId, groupId) {
     var group = document.querySelector('[data-subtab-group="' + groupId + '"]');
     if (!group) { return; }

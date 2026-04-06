@@ -356,8 +356,8 @@ def convert_config(nw_files: NewaveFiles) -> dict:
                 "cut_activity_tolerance": 1e-6,
                 "enabled": True,
                 "method": "lml1",
-                "threshold": 0
-            }
+                "threshold": 0,
+            },
         },
         "modeling": {
             "inflow_non_negativity": {

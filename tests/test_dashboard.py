@@ -28,8 +28,6 @@ from cobre_bridge.dashboard.data import (
     scan_entity,
 )
 from cobre_bridge.dashboard.tabs import TAB_MODULES, get_renderable_tabs
-from cobre_bridge.dashboard.tabs import constraints as constraints_tab
-from cobre_bridge.dashboard.tabs import stochastic as stochastic_tab
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -440,46 +438,6 @@ def test_get_renderable_tabs_returns_correct_tuple_structure() -> None:
     assert tab_id == "tab-x"
     assert label == "X Tab"
     assert html == "<section>content</section>"
-
-
-# ---------------------------------------------------------------------------
-# constraints.can_render
-# ---------------------------------------------------------------------------
-
-
-def test_constraints_can_render_returns_false_when_gc_constraints_empty() -> None:
-    data = MagicMock()
-    data.gc_constraints = []
-
-    assert constraints_tab.can_render(data) is False
-
-
-def test_constraints_can_render_returns_true_when_gc_constraints_non_empty() -> None:
-    data = MagicMock()
-    data.gc_constraints = [
-        {"id": 0, "name": "VminOP_test", "expression": "hydro_storage(0)"}
-    ]
-
-    assert constraints_tab.can_render(data) is True
-
-
-# ---------------------------------------------------------------------------
-# stochastic.can_render
-# ---------------------------------------------------------------------------
-
-
-def test_stochastic_can_render_returns_false_when_stochastic_unavailable() -> None:
-    data = MagicMock()
-    data.stochastic_available = False
-
-    assert stochastic_tab.can_render(data) is False
-
-
-def test_stochastic_can_render_returns_true_when_stochastic_available() -> None:
-    data = MagicMock()
-    data.stochastic_available = True
-
-    assert stochastic_tab.can_render(data) is True
 
 
 # ---------------------------------------------------------------------------
@@ -1426,3 +1384,16 @@ def test_non_fictitious_bus_ids_field_on_data(_v2_case: Path) -> None:
     assert isinstance(data.non_fictitious_bus_ids, list)
     assert data.non_fictitious_bus_ids == [0]
     assert all(isinstance(bid, int) for bid in data.non_fictitious_bus_ids)
+
+
+# ---------------------------------------------------------------------------
+# Tab registry smoke test — regression guard (ticket-023)
+# ---------------------------------------------------------------------------
+
+
+def test_tab_registry_contains_only_v2_modules() -> None:
+    assert len(TAB_MODULES) == 9
+    for module in TAB_MODULES:
+        assert module.TAB_ID.startswith("tab-v2-"), (
+            f"{module}.TAB_ID = {module.TAB_ID!r} does not start with 'tab-v2-'"
+        )
