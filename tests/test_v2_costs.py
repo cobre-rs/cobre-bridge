@@ -1,0 +1,662 @@
+"""Unit tests for cobre_bridge.dashboard.tabs.v2_costs.
+
+Covers module constants, can_render, _compute_npv_metric, _build_metrics_row,
+_build_cost_table, _chart_cost_bar, and the full render() path including the
+empty-costs degradation branch.
+
+Ticket-015 additions cover: _render_cost_composition, _render_category_evolution,
+_render_spot_price, _render_violations, and the extended render() output.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import pandas as pd
+import plotly.graph_objects as go
+import polars as pl
+
+import cobre_bridge.dashboard.tabs.v2_costs as v2_costs
+from cobre_bridge.dashboard.chart_helpers import compute_cost_summary
+from cobre_bridge.dashboard.tabs.v2_costs import (
+    _build_cost_table,
+    _build_metrics_row,
+    _chart_cost_bar,
+    _compute_npv_metric,
+    _render_category_evolution,
+    _render_cost_composition,
+    _render_spot_price,
+    _render_violations,
+    can_render,
+    render,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers / data factories
+# ---------------------------------------------------------------------------
+
+
+def _make_costs_df(
+    n_scenarios: int = 2,
+    n_stages: int = 3,
+    thermal_cost: float = 1000.0,
+    deficit_cost: float = 50.0,
+) -> pd.DataFrame:
+    """Return a minimal costs DataFrame with ``n_scenarios`` and ``n_stages``.
+
+    The ``discount_factor`` column is set to 1.0 for all rows so that tests
+    with ``discount_rate=0.0`` can be verified without additional arithmetic.
+    """
+    rows = []
+    for scenario_id in range(n_scenarios):
+        for stage_id in range(n_stages):
+            rows.append(
+                {
+                    "scenario_id": scenario_id,
+                    "stage_id": stage_id,
+                    "thermal_cost": thermal_cost,
+                    "deficit_cost": deficit_cost,
+                    "immediate_cost": thermal_cost + deficit_cost,
+                    "total_cost": thermal_cost + deficit_cost,
+                    "future_cost": 0.0,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _make_mock_data(
+    *,
+    costs: pd.DataFrame | None = None,
+    discount_rate: float = 0.0,
+    n_scenarios: int = 2,
+    n_stages: int = 3,
+) -> MagicMock:
+    """Build a minimal MagicMock that satisfies the DashboardData interface.
+
+    Sets proper defaults for all fields accessed by ``render()`` (including
+    ticket-015 sections) to avoid MagicMock auto-chaining on polars
+    LazyFrames, which causes OOM.
+    """
+    data = MagicMock()
+    data.costs = costs if costs is not None else _make_costs_df(n_scenarios, n_stages)
+    data.discount_rate = discount_rate
+    data.n_scenarios = n_scenarios
+    data.n_stages = n_stages
+    data.stage_labels = {i: f"Stage {i}" for i in range(n_stages)}
+    data.non_fictitious_bus_ids = [0, 1]
+    data.bus_names = {0: "Bus A", 1: "Bus B"}
+    # Provide real empty polars objects to prevent MagicMock auto-chaining OOM
+    data.buses_lf = pl.LazyFrame()
+    data.bh_df = pl.DataFrame(
+        [{"stage_id": s, "block_id": 0, "_bh": 730.0} for s in range(n_stages)]
+    )
+    return data
+
+
+# ---------------------------------------------------------------------------
+# test_tab_constants
+# ---------------------------------------------------------------------------
+
+
+def test_tab_constants() -> None:
+    """Module-level constants must match the ticket specification exactly."""
+    assert v2_costs.TAB_ID == "tab-v2-costs"
+    assert v2_costs.TAB_LABEL == "Costs"
+    assert v2_costs.TAB_ORDER == 40
+
+
+# ---------------------------------------------------------------------------
+# test_can_render
+# ---------------------------------------------------------------------------
+
+
+def test_can_render_returns_true() -> None:
+    """can_render must return True unconditionally."""
+    data = _make_mock_data()
+    assert can_render(data) is True
+
+
+# ---------------------------------------------------------------------------
+# test__compute_npv_metric
+# ---------------------------------------------------------------------------
+
+
+def test_compute_npv_metric_undiscounted_returns_mean_per_scenario() -> None:
+    """With discount_rate=0.0 and thermal_cost summing to 6000 across 2 scenarios,
+    _compute_npv_metric must return 3000.0 (mean across scenarios).
+
+    Each scenario has 3 stages, each with thermal_cost=1000.0, so the per-scenario
+    sum is 3000.0. With 2 scenarios the mean is also 3000.0.
+    """
+    costs = _make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
+    data = _make_mock_data(costs=costs, discount_rate=0.0)
+    result = _compute_npv_metric(data, "thermal_cost")
+    assert abs(result - 3000.0) < 1e-6
+
+
+def test_compute_npv_metric_discounted_less_than_undiscounted() -> None:
+    """With discount_rate=0.12 the discounted NPV must be lower than the
+    undiscounted sum, because later-stage costs are reduced by discount factors."""
+    costs = _make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
+    undiscounted = _compute_npv_metric(
+        _make_mock_data(costs=costs, discount_rate=0.0), "thermal_cost"
+    )
+    discounted = _compute_npv_metric(
+        _make_mock_data(costs=costs, discount_rate=0.12), "thermal_cost"
+    )
+    assert discounted < undiscounted
+
+
+def test_compute_npv_metric_missing_column_returns_zero() -> None:
+    """When the requested column is absent, _compute_npv_metric must return 0.0."""
+    costs = _make_costs_df()
+    data = _make_mock_data(costs=costs)
+    result = _compute_npv_metric(data, "nonexistent_column")
+    assert result == 0.0
+
+
+def test_compute_npv_metric_empty_dataframe_returns_zero() -> None:
+    """When costs is empty, _compute_npv_metric must return 0.0."""
+    data = _make_mock_data(costs=pd.DataFrame())
+    result = _compute_npv_metric(data, "thermal_cost")
+    assert result == 0.0
+
+
+# ---------------------------------------------------------------------------
+# test__build_metrics_row
+# ---------------------------------------------------------------------------
+
+
+def test_build_metrics_row_produces_four_metric_cards() -> None:
+    """_build_metrics_row must produce HTML with 'metric-card' at least 4 times."""
+    data = _make_mock_data()
+    html = _build_metrics_row(data)
+    assert html.count("metric-card") >= 4
+
+
+def test_build_metrics_row_empty_costs_still_four_cards() -> None:
+    """_build_metrics_row with empty costs must still produce 4 metric-card elements."""
+    data = _make_mock_data(costs=pd.DataFrame())
+    html = _build_metrics_row(data)
+    assert html.count("metric-card") >= 4
+
+
+def test_build_metrics_row_contains_expected_cost_label() -> None:
+    """_build_metrics_row must include the 'Expected Cost (NPV)' label."""
+    data = _make_mock_data()
+    html = _build_metrics_row(data)
+    assert "Expected Cost (NPV)" in html
+
+
+def test_build_metrics_row_contains_thermal_and_deficit_labels() -> None:
+    """_build_metrics_row must include Thermal Cost and Deficit Cost labels."""
+    data = _make_mock_data()
+    html = _build_metrics_row(data)
+    assert "Thermal Cost (NPV)" in html
+    assert "Deficit Cost (NPV)" in html
+
+
+# ---------------------------------------------------------------------------
+# test__build_cost_table
+# ---------------------------------------------------------------------------
+
+
+def test_build_cost_table_contains_data_table_class() -> None:
+    """_build_cost_table must return HTML with class 'data-table'."""
+    costs = _make_costs_df()
+    summary = compute_cost_summary(costs, 0.0)
+    html = _build_cost_table(summary)
+    assert 'class="data-table"' in html
+
+
+def test_build_cost_table_has_tbody_with_rows() -> None:
+    """_build_cost_table must include a <tbody> with at least one <tr>."""
+    costs = _make_costs_df()
+    summary = compute_cost_summary(costs, 0.0)
+    html = _build_cost_table(summary)
+    assert "<tbody>" in html
+    assert "<tr>" in html
+
+
+def test_build_cost_table_empty_df_returns_placeholder() -> None:
+    """_build_cost_table on an empty DataFrame must return a fallback <p>."""
+    html = _build_cost_table(pd.DataFrame())
+    assert "<table" not in html
+    assert "No cost data" in html
+
+
+# ---------------------------------------------------------------------------
+# test__chart_cost_bar
+# ---------------------------------------------------------------------------
+
+
+def test_chart_cost_bar_returns_figure() -> None:
+    """_chart_cost_bar must return a plotly Figure."""
+    costs = _make_costs_df()
+    summary = compute_cost_summary(costs, 0.0)
+    fig = _chart_cost_bar(summary)
+    assert isinstance(fig, go.Figure)
+
+
+def test_chart_cost_bar_has_horizontal_bar_traces() -> None:
+    """_chart_cost_bar must produce at least one horizontal Bar trace."""
+    costs = _make_costs_df()
+    summary = compute_cost_summary(costs, 0.0)
+    fig = _chart_cost_bar(summary)
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) >= 1
+    for trace in bar_traces:
+        assert trace.orientation == "h"
+
+
+# ---------------------------------------------------------------------------
+# test_render
+# ---------------------------------------------------------------------------
+
+
+def test_render_with_valid_costs_contains_metric_card_four_times() -> None:
+    """render() with valid costs must contain 'metric-card' at least 4 times."""
+    data = _make_mock_data()
+    html = render(data)
+    assert html.count("metric-card") >= 4
+
+
+def test_render_with_valid_costs_contains_data_table() -> None:
+    """render() with valid costs must produce HTML with a data-table."""
+    data = _make_mock_data()
+    html = render(data)
+    assert 'class="data-table"' in html
+
+
+def test_render_with_valid_costs_has_table_and_tbody() -> None:
+    """render() HTML must contain a <table with a <tbody> and at least one <tr>."""
+    data = _make_mock_data()
+    html = render(data)
+    assert "<table" in html
+    assert "<tbody>" in html
+    assert "<tr>" in html
+
+
+def test_render_with_empty_costs_contains_no_cost_data() -> None:
+    """render() with empty costs must produce 'No cost data' fallback text."""
+    data = _make_mock_data(costs=pd.DataFrame())
+    html = render(data)
+    assert "No cost data" in html
+
+
+def test_render_contains_section_title() -> None:
+    """render() must include the 'NPV Cost Analysis' section title."""
+    data = _make_mock_data()
+    html = render(data)
+    assert "NPV Cost Analysis" in html
+
+
+# ---------------------------------------------------------------------------
+# Helpers for ticket-015 tests
+# ---------------------------------------------------------------------------
+
+
+def _make_costs_df_with_violations(
+    n_scenarios: int = 2,
+    n_stages: int = 3,
+    thermal_cost: float = 1000.0,
+    generic_violation_cost: float = 0.0,
+) -> pd.DataFrame:
+    """Return a costs DataFrame that includes a violation cost column."""
+    rows = []
+    for scenario_id in range(n_scenarios):
+        for stage_id in range(n_stages):
+            rows.append(
+                {
+                    "scenario_id": scenario_id,
+                    "stage_id": stage_id,
+                    "block_id": 0,
+                    "thermal_cost": thermal_cost,
+                    "deficit_cost": 50.0,
+                    "immediate_cost": thermal_cost + 50.0,
+                    "total_cost": thermal_cost + 50.0,
+                    "future_cost": 0.0,
+                    "generic_violation_cost": generic_violation_cost,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _make_mock_data_full(
+    *,
+    costs: pd.DataFrame | None = None,
+    non_fictitious_bus_ids: list[int] | None = None,
+    bus_names: dict[int, str] | None = None,
+    buses_lf: pl.LazyFrame | None = None,
+    bh_df: pl.DataFrame | None = None,
+    discount_rate: float = 0.0,
+    n_scenarios: int = 2,
+    n_stages: int = 3,
+) -> MagicMock:
+    """Build a MagicMock satisfying the full DashboardData interface for ticket-015."""
+    data = MagicMock()
+    data.costs = costs if costs is not None else _make_costs_df(n_scenarios, n_stages)
+    data.discount_rate = discount_rate
+    data.n_scenarios = n_scenarios
+    data.n_stages = n_stages
+    data.stage_labels = {i: f"Stage {i}" for i in range(n_stages)}
+    data.non_fictitious_bus_ids = (
+        non_fictitious_bus_ids if non_fictitious_bus_ids is not None else [0, 1]
+    )
+    data.bus_names = bus_names if bus_names is not None else {0: "Bus A", 1: "Bus B"}
+
+    if buses_lf is not None:
+        data.buses_lf = buses_lf
+    else:
+        # Build a minimal buses_lf with spot_price
+        rows_list = []
+        for scen in range(n_scenarios):
+            for stage in range(n_stages):
+                for bus_id in data.non_fictitious_bus_ids or [0, 1]:
+                    rows_list.append(
+                        {
+                            "scenario_id": scen,
+                            "stage_id": stage,
+                            "block_id": 0,
+                            "bus_id": bus_id,
+                            "spot_price": 100.0 + scen * 10 + stage * 5,
+                        }
+                    )
+        data.buses_lf = pl.DataFrame(rows_list).lazy()
+
+    if bh_df is not None:
+        data.bh_df = bh_df
+    else:
+        # Build a minimal bh_df with one block per stage
+        bh_rows = [
+            {"stage_id": s, "block_id": 0, "_bh": 730.0} for s in range(n_stages)
+        ]
+        data.bh_df = pl.DataFrame(bh_rows)
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# test__render_cost_composition (Section D)
+# ---------------------------------------------------------------------------
+
+
+def test_render_cost_composition_contains_collapsible_section() -> None:
+    """_render_cost_composition must return HTML with collapsible-section class."""
+    data = _make_mock_data_full()
+    html = _render_cost_composition(data)
+    assert "collapsible-section" in html
+
+
+def test_render_cost_composition_contains_section_title() -> None:
+    """_render_cost_composition must include the 'Cost Composition by Stage' title."""
+    data = _make_mock_data_full()
+    html = _render_cost_composition(data)
+    assert "Cost Composition by Stage" in html
+
+
+def test_render_cost_composition_with_empty_costs_returns_fallback() -> None:
+    """_render_cost_composition with empty costs must return fallback text."""
+    data = _make_mock_data_full(costs=pd.DataFrame())
+    html = _render_cost_composition(data)
+    assert "No cost data" in html
+
+
+def test_render_cost_composition_is_not_default_collapsed() -> None:
+    """_render_cost_composition must start expanded (no 'default-collapsed' class)."""
+    data = _make_mock_data_full()
+    html = _render_cost_composition(data)
+    # default_collapsed=False means the section_class is 'collapsible-section'
+    # (not 'collapsible-section default-collapsed')
+    assert "default-collapsed" not in html
+
+
+def test_render_cost_composition_contains_chart_card() -> None:
+    """_render_cost_composition must wrap the chart in a chart-card."""
+    data = _make_mock_data_full()
+    html = _render_cost_composition(data)
+    assert "chart-card" in html
+
+
+# ---------------------------------------------------------------------------
+# test__render_category_evolution (Section E)
+# ---------------------------------------------------------------------------
+
+
+def test_render_category_evolution_contains_collapsible_section() -> None:
+    """_render_category_evolution must return HTML with collapsible-section class."""
+    data = _make_mock_data_full()
+    html = _render_category_evolution(data)
+    assert "collapsible-section" in html
+
+
+def test_render_category_evolution_contains_section_title() -> None:
+    """_render_category_evolution must include the 'Cost Category Trends' title."""
+    data = _make_mock_data_full()
+    html = _render_category_evolution(data)
+    assert "Cost Category Trends" in html
+
+
+def test_render_category_evolution_with_empty_costs_returns_fallback() -> None:
+    """_render_category_evolution with empty costs must return fallback text."""
+    data = _make_mock_data_full(costs=pd.DataFrame())
+    html = _render_category_evolution(data)
+    assert "No cost data" in html
+
+
+def test_render_category_evolution_is_default_collapsed() -> None:
+    """_render_category_evolution must start collapsed."""
+    data = _make_mock_data_full()
+    html = _render_category_evolution(data)
+    assert "default-collapsed" in html
+
+
+def test_render_category_evolution_contains_chart_card() -> None:
+    """_render_category_evolution must wrap the chart in a chart-card."""
+    data = _make_mock_data_full()
+    html = _render_category_evolution(data)
+    assert "chart-card" in html
+
+
+# ---------------------------------------------------------------------------
+# test__render_spot_price (Section F)
+# ---------------------------------------------------------------------------
+
+
+def test_render_spot_price_contains_collapsible_section() -> None:
+    """_render_spot_price must return HTML with collapsible-section class."""
+    data = _make_mock_data_full(non_fictitious_bus_ids=[0, 1, 2, 3])
+    data.bus_names = {0: "Bus A", 1: "Bus B", 2: "Bus C", 3: "Bus D"}
+    # Rebuild buses_lf for 4 buses
+    rows_list = []
+    for scen in range(2):
+        for stage in range(3):
+            for bus_id in [0, 1, 2, 3]:
+                rows_list.append(
+                    {
+                        "scenario_id": scen,
+                        "stage_id": stage,
+                        "block_id": 0,
+                        "bus_id": bus_id,
+                        "spot_price": 100.0 + scen * 10,
+                    }
+                )
+    data.buses_lf = pl.DataFrame(rows_list).lazy()
+    data.stage_labels = {0: "Stage 0", 1: "Stage 1", 2: "Stage 2"}
+    html = _render_spot_price(data)
+    assert "collapsible-section" in html
+
+
+def test_render_spot_price_subplot_titles_match_bus_count() -> None:
+    """_render_spot_price with 4 non-fictitious buses must produce 4 subplot titles.
+
+    Acceptance criterion from ticket-015: the number of subplot titles in the
+    figure equals the number of non-fictitious buses.
+    """
+    bus_ids = [0, 1, 2, 3]
+    bus_names = {0: "Alpha", 1: "Beta", 2: "Gamma", 3: "Delta"}
+    rows_list = []
+    for scen in range(2):
+        for stage in range(3):
+            for bus_id in bus_ids:
+                rows_list.append(
+                    {
+                        "scenario_id": scen,
+                        "stage_id": stage,
+                        "block_id": 0,
+                        "bus_id": bus_id,
+                        "spot_price": 80.0 + scen * 5 + stage * 2,
+                    }
+                )
+    buses_lf = pl.DataFrame(rows_list).lazy()
+    bh_df = pl.DataFrame(
+        [{"stage_id": s, "block_id": 0, "_bh": 730.0} for s in range(3)]
+    )
+
+    data = _make_mock_data_full(
+        non_fictitious_bus_ids=bus_ids,
+        bus_names=bus_names,
+        buses_lf=buses_lf,
+        bh_df=bh_df,
+    )
+    data.stage_labels = {0: "S0", 1: "S1", 2: "S2"}
+
+    html = _render_spot_price(data)
+    # Each bus name should appear in the HTML as a subplot title annotation
+    for name in bus_names.values():
+        assert name in html
+
+
+def test_render_spot_price_with_empty_buses_lf_returns_fallback() -> None:
+    """_render_spot_price with empty buses_lf must return 'No spot price data.'."""
+    data = _make_mock_data_full(
+        non_fictitious_bus_ids=[0, 1],
+        buses_lf=pl.LazyFrame(),
+    )
+    html = _render_spot_price(data)
+    assert "No spot price data" in html
+
+
+def test_render_spot_price_with_no_bus_ids_returns_fallback() -> None:
+    """_render_spot_price with empty non_fictitious_bus_ids returns fallback."""
+    data = _make_mock_data_full(non_fictitious_bus_ids=[])
+    html = _render_spot_price(data)
+    assert "No spot price data" in html
+
+
+def test_render_spot_price_is_default_collapsed() -> None:
+    """_render_spot_price must start collapsed."""
+    data = _make_mock_data_full()
+    html = _render_spot_price(data)
+    assert "default-collapsed" in html
+
+
+# ---------------------------------------------------------------------------
+# test__render_violations (Section G)
+# ---------------------------------------------------------------------------
+
+
+def test_render_violations_zero_costs_returns_no_violation_text() -> None:
+    """_render_violations with all-zero violation costs must return 'No violation costs'.
+
+    Acceptance criterion from ticket-015.
+    """
+    costs = _make_costs_df_with_violations(generic_violation_cost=0.0)
+    data = _make_mock_data_full(costs=costs)
+    html = _render_violations(data)
+    assert "No violation costs" in html
+
+
+def test_render_violations_nonzero_costs_returns_collapsible_section() -> None:
+    """_render_violations with non-zero generic_violation_cost returns collapsible-section.
+
+    Acceptance criterion from ticket-015: the result contains 'collapsible-section'
+    and a bar chart.
+    """
+    costs = _make_costs_df_with_violations(generic_violation_cost=500.0)
+    data = _make_mock_data_full(costs=costs)
+    html = _render_violations(data)
+    assert "collapsible-section" in html
+    # Bar chart is embedded in the chart-card
+    assert "chart-card" in html
+
+
+def test_render_violations_nonzero_contains_section_title() -> None:
+    """_render_violations with violations must include the 'Violation Costs' title."""
+    costs = _make_costs_df_with_violations(generic_violation_cost=200.0)
+    data = _make_mock_data_full(costs=costs)
+    html = _render_violations(data)
+    assert "Violation Costs" in html
+
+
+def test_render_violations_empty_costs_returns_fallback() -> None:
+    """_render_violations with empty costs DataFrame must return fallback text."""
+    data = _make_mock_data_full(costs=pd.DataFrame())
+    html = _render_violations(data)
+    assert "No violation costs" in html
+
+
+def test_render_violations_no_violation_columns_returns_fallback() -> None:
+    """_render_violations when costs has no violation columns must return fallback."""
+    # costs has only thermal_cost and deficit_cost — no violation columns
+    costs = _make_costs_df(n_scenarios=2, n_stages=3)
+    data = _make_mock_data_full(costs=costs)
+    html = _render_violations(data)
+    assert "No violation costs" in html
+
+
+def test_render_violations_is_default_collapsed() -> None:
+    """_render_violations must start collapsed regardless of content."""
+    costs = _make_costs_df_with_violations(generic_violation_cost=100.0)
+    data = _make_mock_data_full(costs=costs)
+    html = _render_violations(data)
+    assert "default-collapsed" in html
+
+
+# ---------------------------------------------------------------------------
+# test_render — extended (ticket-015)
+# ---------------------------------------------------------------------------
+
+
+def test_render_contains_cost_composition_section() -> None:
+    """render() with non-zero thermal_cost across 3 stages must include
+    'Cost Composition by Stage'.
+
+    Acceptance criterion from ticket-015.
+    """
+    costs = _make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
+    data = _make_mock_data_full(costs=costs)
+    html = render(data)
+    assert "Cost Composition by Stage" in html
+
+
+def test_render_contains_at_least_three_collapsible_sections() -> None:
+    """render() must contain at least 3 collapsible-section elements.
+
+    Acceptance criterion from ticket-015: composition, category trends, spot
+    price sections are always present (violation section may be absent).
+    """
+    costs = _make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
+    data = _make_mock_data_full(costs=costs)
+    html = render(data)
+    assert html.count("collapsible-section") >= 3
+
+
+def test_render_includes_npv_section() -> None:
+    """render() must still include the NPV Cost Analysis section from ticket-014."""
+    data = _make_mock_data_full()
+    html = render(data)
+    assert "NPV Cost Analysis" in html
+
+
+def test_render_includes_all_four_temporal_sections() -> None:
+    """render() with violation costs must include all four temporal sections."""
+    costs = _make_costs_df_with_violations(
+        n_scenarios=2, n_stages=3, thermal_cost=1000.0, generic_violation_cost=50.0
+    )
+    data = _make_mock_data_full(costs=costs)
+    html = render(data)
+    assert "Cost Composition by Stage" in html
+    assert "Cost Category Trends" in html
+    assert "Spot Price by Bus" in html
+    assert "Violation Costs" in html
