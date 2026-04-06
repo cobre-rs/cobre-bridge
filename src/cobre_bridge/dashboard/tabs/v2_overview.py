@@ -270,11 +270,13 @@ def _chart_cost_bar(summary_df: pd.DataFrame) -> go.Figure:
 
 
 def _chart_training_mini(conv: pd.DataFrame) -> go.Figure | None:
-    """Build a simplified convergence mini-chart with lower and upper bound lines.
+    """Build a compact convergence mini-chart with lower bound, upper bound,
+    and a ±1 std confidence band around the upper bound.
 
     Args:
         conv: Convergence DataFrame with columns ``iteration``,
-            ``lower_bound``, ``upper_bound_mean``.
+            ``lower_bound``, ``upper_bound_mean``, and optionally
+            ``upper_bound_std``.
 
     Returns:
         A :class:`plotly.graph_objects.Figure`, or ``None`` when *conv* is
@@ -284,10 +286,47 @@ def _chart_training_mini(conv: pd.DataFrame) -> go.Figure | None:
     if conv.empty or not required.issubset(conv.columns):
         return None
 
+    iters = conv["iteration"]
+    ub_mean = conv["upper_bound_mean"]
+    ub_color = COLORS["upper_bound"]
+
     fig = go.Figure()
+
+    ub_legend_group = "upper_bound"
+
+    # Upper bound confidence band (±1 std), toggles with the UB line
+    if "upper_bound_std" in conv.columns:
+        ub_std = conv["upper_bound_std"]
+        ub_upper = ub_mean + ub_std
+        ub_lower = ub_mean - ub_std
+        fig.add_trace(
+            go.Scatter(
+                x=iters,
+                y=ub_upper,
+                mode="lines",
+                line={"width": 0},
+                legendgroup=ub_legend_group,
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=iters,
+                y=ub_lower,
+                mode="lines",
+                line={"width": 0},
+                fill="tonexty",
+                fillcolor=f"rgba({_hex_rgb(ub_color)},0.15)",
+                legendgroup=ub_legend_group,
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+
     fig.add_trace(
         go.Scatter(
-            x=conv["iteration"],
+            x=iters,
             y=conv["lower_bound"],
             name="Lower Bound",
             mode="lines",
@@ -296,20 +335,26 @@ def _chart_training_mini(conv: pd.DataFrame) -> go.Figure | None:
     )
     fig.add_trace(
         go.Scatter(
-            x=conv["iteration"],
-            y=conv["upper_bound_mean"],
+            x=iters,
+            y=ub_mean,
             name="Upper Bound",
             mode="lines",
-            line={"color": COLORS["upper_bound"], "width": 2},
+            line={"color": ub_color, "width": 2},
+            legendgroup=ub_legend_group,
         )
     )
     fig.update_layout(
-        xaxis_title="Iteration",
         yaxis_title="Cost",
         legend=LEGEND_DEFAULTS,
         margin=MARGIN_DEFAULTS,
     )
     return fig
+
+
+def _hex_rgb(hex_color: str) -> str:
+    """Convert ``#RRGGBB`` to ``R,G,B`` for use in rgba() strings."""
+    h = hex_color.lstrip("#")
+    return f"{int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)}"
 
 
 def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
@@ -369,7 +414,14 @@ def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
     fig.update_layout(
         xaxis_title="Stage",
         yaxis_title="Average MW",
-        legend=LEGEND_DEFAULTS,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
         margin=MARGIN_DEFAULTS,
     )
     return fig
@@ -433,49 +485,56 @@ def _render_section_d(data: DashboardData) -> str:
     return section_title("Cost Breakdown") + chart_grid([bar_html, table_html])
 
 
+def _quick_look_cell(chart_html: str, deep_link_html: str) -> str:
+    """Wrap a chart card and its deep-link in a single grid cell."""
+    return f"<div>{chart_html}{deep_link_html}</div>"
+
+
 def _render_section_e(data: DashboardData) -> str:
     """Render Section E — quick-look mini charts."""
+    link_style = 'style="font-size:0.8rem;margin-top:0.25rem;"'
+
     # Training Bounds mini
     training_fig = _chart_training_mini(data.conv)
     if training_fig is None:
-        training_html = wrap_chart("<p>No convergence data.</p>")
+        training_cell = wrap_chart("<p>No convergence data.</p>")
     else:
-        training_html = make_chart_card(
+        chart = make_chart_card(
             training_fig,
             "Training Convergence",
             "v2-training-mini-chart",
-            height=300,
+            height=280,
         )
-        deep_link = (
-            '<p style="font-size:0.8rem;margin-top:0.25rem;">'
+        link = (
+            f"<p {link_style}>"
             '<a href="#" onclick="showTab(\'tab-v2-training\','
             " document.querySelector('nav button:nth-child(2)'));"
             'return false;">Full training analysis \u2192</a>'
             "</p>"
         )
-        training_html = training_html + deep_link
+        training_cell = _quick_look_cell(chart, link)
 
     # Generation Mix mini
     gen_fig = _chart_gen_mix(data)
     if gen_fig is None:
-        gen_html = wrap_chart("<p>No generation data.</p>")
+        gen_cell = wrap_chart("<p>No generation data.</p>")
     else:
-        gen_html = make_chart_card(
+        chart = make_chart_card(
             gen_fig,
             "Generation Mix",
             "v2-gen-mix-chart",
-            height=300,
+            height=280,
         )
-        gen_deep_link = (
-            '<p style="font-size:0.8rem;margin-top:0.25rem;">'
+        link = (
+            f"<p {link_style}>"
             '<a href="#" onclick="showTab(\'tab-v2-energy-balance\','
             " document.querySelector('nav button:nth-child(4)'));"
             'return false;">Energy balance details \u2192</a>'
             "</p>"
         )
-        gen_html = gen_html + gen_deep_link
+        gen_cell = _quick_look_cell(chart, link)
 
-    return section_title("Quick Look") + chart_grid([training_html, gen_html])
+    return section_title("Quick Look") + chart_grid([training_cell, gen_cell])
 
 
 def can_render(data: DashboardData) -> bool:  # noqa: ARG001

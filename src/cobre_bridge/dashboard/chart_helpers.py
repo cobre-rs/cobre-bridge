@@ -360,13 +360,16 @@ def make_chart_card(
     if fig is None:
         raise ValueError("make_chart_card: fig must not be None")
 
-    fig.update_layout(
+    defaults: dict = dict(
         title=dict(text=title, font=dict(size=13), x=0.02, xanchor="left"),
         height=height,
         margin=_MARGIN,
-        legend=_LEGEND,
         template="plotly_white",
     )
+    # Only apply default legend if the figure hasn't set a custom one
+    if fig.layout.legend is None or fig.layout.legend.y is None:
+        defaults["legend"] = _LEGEND
+    fig.update_layout(**defaults)
 
     inner_html = f'<div id="{chart_id}">{fig_to_html(fig)}</div>'
     return wrap_chart(inner_html)

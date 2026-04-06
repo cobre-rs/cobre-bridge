@@ -13,15 +13,22 @@ Only rendered when stochastic output is available (data.stochastic_available).
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.subplots as ps
+import polars as pl
 
 from cobre_bridge.dashboard.chart_helpers import make_chart_card
-from cobre_bridge.ui.html import chart_grid, collapsible_section
+from cobre_bridge.ui.html import (
+    chart_grid,
+    collapsible_section,
+    plant_explorer_table,
+    wrap_chart,
+)
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
@@ -69,9 +76,11 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 def _compute_historical_stats(data: DashboardData) -> pd.DataFrame:
     """Compute per-hydro per-stage mean and std from inflow_history.
 
-    Maps each ``date`` in ``inflow_history`` to a stage_id using the stage
-    start_date ranges from ``stages_data["stages"]``, then groups by
-    ``(hydro_id, stage_id)`` to compute mean and std.
+    Historical inflow records predate the study horizon, so they cannot be
+    mapped by absolute date.  Instead, each stage's calendar month is used
+    to select matching historical records (e.g. stage 0 = March → all
+    historical March values across all years).  This produces the seasonal
+    mean and std that can be compared against the fitted synthetic stats.
 
     Args:
         data: Full DashboardData instance.
@@ -91,38 +100,78 @@ def _compute_historical_stats(data: DashboardData) -> pd.DataFrame:
     if not stages:
         return empty
 
-    # Sort stages by start_date
-    stage_rows = sorted(
-        [
-            {"id": s["id"], "start_date": pd.to_datetime(s["start_date"])}
-            for s in stages
-            if "start_date" in s
-        ],
-        key=lambda x: x["start_date"],  # type: ignore[return-value]
-    )
-    if not stage_rows:
+    # Build month -> list of stage_ids mapping
+    month_to_stages: dict[int, list[int]] = {}
+    for s in stages:
+        sd = s.get("start_date")
+        if sd is None:
+            continue
+        month = pd.to_datetime(sd).month
+        month_to_stages.setdefault(month, []).append(s["id"])
+
+    if not month_to_stages:
         return empty
 
-    stage_ids = [r["id"] for r in stage_rows]
-    stage_starts = [r["start_date"] for r in stage_rows]
-
-    # Ensure date column is datetime
     df = hist.copy()
     df["date"] = pd.to_datetime(df["date"])
+    df["month"] = df["date"].dt.month
 
-    # Assign stage_id via searchsorted: finds the rightmost position where
-    # stage_starts[pos-1] <= date, so date belongs to stage at pos-1.
-    starts_arr = np.array([ts.value for ts in stage_starts], dtype=np.int64)
-    dates_arr = df["date"].values.astype("datetime64[ns]").astype(np.int64)
-    idx = np.searchsorted(starts_arr, dates_arr, side="right") - 1
-    # Clamp negatives (dates before first stage) to 0
-    idx = np.clip(idx, 0, len(stage_ids) - 1)
-    df["stage_id"] = [stage_ids[i] for i in idx]
+    # Compute historical mean/std per hydro per calendar month
+    grp = df.groupby(["hydro_id", "month"])["value_m3s"]
+    monthly = grp.mean().rename("mean_m3s").to_frame()
+    monthly["std_m3s"] = grp.std()
+    monthly = monthly.reset_index()
 
-    grp = df.groupby(["hydro_id", "stage_id"])["value_m3s"]
-    result = grp.mean().rename("mean_m3s").to_frame()
-    result["std_m3s"] = grp.std()
-    result = result.reset_index()
+    # Expand each monthly stat to all stages that share that month
+    rows: list[dict] = []
+    for _, r in monthly.iterrows():
+        for sid in month_to_stages.get(int(r["month"]), []):
+            rows.append(
+                {
+                    "hydro_id": r["hydro_id"],
+                    "stage_id": sid,
+                    "mean_m3s": r["mean_m3s"],
+                    "std_m3s": r["std_m3s"],
+                }
+            )
+
+    if not rows:
+        return empty
+
+    result = pd.DataFrame(rows)
+    return result[["hydro_id", "stage_id", "mean_m3s", "std_m3s"]]
+
+
+def _compute_synthetic_stats(data: DashboardData) -> pd.DataFrame:
+    """Compute per-hydro per-stage mean and std from simulation inflows.
+
+    Uses ``incremental_inflow_m3s`` from the simulation hydro output, which
+    contains the actual PAR-generated inflow realizations.  Mean and std are
+    computed across scenarios for each ``(hydro_id, stage_id)`` pair.
+
+    Returns:
+        DataFrame with columns ``hydro_id``, ``stage_id``, ``mean_m3s``,
+        ``std_m3s``.  Returns an empty DataFrame when the LazyFrame has
+        no data or the column is absent.
+    """
+    empty = pd.DataFrame(columns=["hydro_id", "stage_id", "mean_m3s", "std_m3s"])
+    try:
+        result = (
+            data.hydros_lf.group_by(["hydro_id", "stage_id"])
+            .agg(
+                [
+                    pl.col("incremental_inflow_m3s").mean().alias("mean_m3s"),
+                    pl.col("incremental_inflow_m3s").std().alias("std_m3s"),
+                ]
+            )
+            .sort(["hydro_id", "stage_id"])
+            .collect(engine="streaming")
+            .to_pandas()
+        )
+    except (ValueError, KeyError):
+        return empty
+    if result.empty:
+        return empty
     return result[["hydro_id", "stage_id", "mean_m3s", "std_m3s"]]
 
 
@@ -338,7 +387,14 @@ def _chart_system_inflow(
     fig.update_layout(
         xaxis_title="Stage",
         yaxis_title="Total Inflow (m³/s)",
-        legend=LEGEND_DEFAULTS,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
         margin=MARGIN_DEFAULTS,
         template="plotly_white",
     )
@@ -375,7 +431,7 @@ def _chart_bus_facet(
         cols=2,
         subplot_titles=subplot_titles,
         shared_xaxes=False,
-        vertical_spacing=0.15,
+        vertical_spacing=0.22,
         horizontal_spacing=0.1,
     )
 
@@ -942,7 +998,12 @@ def _chart_order_reduction_reasons(fitting_report: dict) -> go.Figure:
 
 
 def _render_section_d(data: DashboardData) -> str:
-    """Render Section D — Spatial Correlation heatmaps (fitted vs empirical)."""
+    """Render Section D — Spatial Correlation: Historical vs Synthetic.
+
+    Side-by-side heatmaps with a season dropdown.  Historical correlation is
+    computed per calendar month from ``inflow_history``.  Synthetic correlation
+    comes from the seasonal profiles in ``correlation.json``.
+    """
     if not data.correlation:
         return collapsible_section(
             "Spatial Correlation",
@@ -950,6 +1011,7 @@ def _render_section_d(data: DashboardData) -> str:
             section_id="v2-stoch-section-d",
         )
 
+    # Extract entity IDs from the default profile
     extracted = _extract_fitted_correlation(data.correlation)
     if extracted is None:
         return collapsible_section(
@@ -958,40 +1020,218 @@ def _render_section_d(data: DashboardData) -> str:
             section_id="v2-stoch-section-d",
         )
 
-    hydro_ids, fitted_matrix = extracted
+    hydro_ids_orig, _ = extracted
 
-    # Fitted heatmap
-    fitted_fig, fitted_title = _chart_correlation_heatmap(
-        fitted_matrix, hydro_ids, data.hydro_meta, "Fitted Correlation"
-    )
-    fitted_html = make_chart_card(
-        fitted_fig,
-        fitted_title,
-        "v2-stoch-corr-fitted",
-        height=500,
-    )
+    # Sort hydros by bus for block structure visibility
+    bus_map = data.hydro_bus_map
+    sorted_ids = sorted(hydro_ids_orig, key=lambda h: (bus_map.get(h, 999), h))
+    n = len(sorted_ids)
 
-    # Empirical heatmap
-    if data.inflow_history.empty:
-        empirical_html = '<div class="chart-card"><p>No historical data for empirical correlation.</p></div>'
-    else:
-        emp_matrix = _compute_empirical_correlation(data.inflow_history, hydro_ids)
-        if emp_matrix is None:
-            empirical_html = '<div class="chart-card"><p>No historical data for empirical correlation.</p></div>'
-        else:
-            emp_fig, emp_title = _chart_correlation_heatmap(
-                emp_matrix, hydro_ids, data.hydro_meta, "Empirical Correlation"
+    # Build reorder index: original position -> sorted position
+    orig_index = {h: i for i, h in enumerate(hydro_ids_orig)}
+    reorder = [orig_index[h] for h in sorted_ids]
+
+    # Hover labels (name) — no tick labels on axes
+    hover_labels = [
+        data.hydro_meta[h]["name"] if h in data.hydro_meta else str(h)
+        for h in sorted_ids
+    ]
+
+    # Compute bus separator positions and bus labels for annotation
+    bus_boundaries: list[dict] = []
+    prev_bus: int | None = None
+    bus_start = 0
+    for i, hid in enumerate(sorted_ids):
+        bid = bus_map.get(hid, -1)
+        if bid != prev_bus:
+            if prev_bus is not None:
+                bus_name = data.bus_names.get(prev_bus, str(prev_bus))
+                bus_boundaries.append({"pos": i, "label": bus_name, "start": bus_start})
+            bus_start = i
+            prev_bus = bid
+    # Last bus
+    if prev_bus is not None:
+        bus_name = data.bus_names.get(prev_bus, str(prev_bus))
+        bus_boundaries.append({"pos": n, "label": bus_name, "start": bus_start})
+
+    month_names = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
+
+    def _reorder_matrix(
+        mat: np.ndarray,
+        idx: list[int],
+    ) -> list[list[float]]:
+        """Reorder a matrix by the given index permutation."""
+        return mat[np.ix_(idx, idx)].tolist()
+
+    # Build per-season synthetic matrices from correlation.json profiles
+    synthetic_by_season: dict[str, list[list[float]]] = {}
+    profiles = data.correlation.get("profiles", {})
+    for month_idx in range(12):
+        profile_key = f"season_{month_idx:02d}"
+        profile = profiles.get(profile_key)
+        if profile is None:
+            continue
+        try:
+            mat = np.array(profile["correlation_groups"][0]["matrix"], dtype=np.float64)
+            synthetic_by_season[month_names[month_idx]] = _reorder_matrix(mat, reorder)
+        except (KeyError, IndexError, TypeError):
+            continue
+
+    if not synthetic_by_season:
+        _, default_mat = extracted
+        synthetic_by_season["All"] = _reorder_matrix(default_mat, reorder)
+
+    # Build per-month historical correlation matrices
+    historical_by_season: dict[str, list[list[float]]] = {}
+    if not data.inflow_history.empty and len(sorted_ids) >= 2:
+        df = data.inflow_history[
+            data.inflow_history["hydro_id"].isin(sorted_ids)
+        ].copy()
+        df["date"] = pd.to_datetime(df["date"])
+        df["month"] = df["date"].dt.month
+
+        for month_idx in range(12):
+            month_num = month_idx + 1
+            sub = df[df["month"] == month_num]
+            if sub.empty:
+                continue
+            pivot = sub.pivot_table(
+                index="date",
+                columns="hydro_id",
+                values="value_m3s",
+                aggfunc="mean",
             )
-            empirical_html = make_chart_card(
-                emp_fig,
-                emp_title,
-                "v2-stoch-corr-empirical",
-                height=500,
-            )
+            pivot = pivot.reindex(columns=sorted_ids)
+            if pivot.shape[0] < 2:
+                continue
+            corr_m = pivot.corr(min_periods=10)
+            corr_arr = corr_m.reindex(
+                index=sorted_ids, columns=sorted_ids
+            ).values.copy()
+            np.fill_diagonal(corr_arr, 1.0)
+            historical_by_season[month_names[month_idx]] = np.nan_to_num(
+                corr_arr, nan=0.0
+            ).tolist()
 
-    content = chart_grid([fitted_html, empirical_html])
+    # Determine available seasons
+    available = [
+        m for m in month_names if m in synthetic_by_season and m in historical_by_season
+    ]
+    if not available:
+        available = list(synthetic_by_season.keys())
+
+    # Serialize data for JS
+    corr_data = {
+        "labels": hover_labels,
+        "seasons": available,
+        "synthetic": synthetic_by_season,
+        "historical": historical_by_season,
+        "busBoundaries": bus_boundaries,
+        "n": n,
+    }
+
+    # Build HTML
+    options_html = "".join(f'<option value="{s}">{s}</option>' for s in available)
+    dropdown = (
+        '<select id="stoch-corr-season" style="'
+        "padding:4px 8px;border-radius:4px;border:1px solid #ccc;"
+        'font-size:0.875rem;margin-bottom:12px;">' + options_html + "</select>"
+    )
+    selector_row = (
+        '<div style="display:flex;align-items:center;gap:8px;'
+        'margin-bottom:8px;">'
+        "<span><strong>Season:</strong></span>" + dropdown + "</div>"
+    )
+
+    hist_card = wrap_chart('<div id="stoch-corr-hist" style="width:100%;"></div>')
+    synth_card = wrap_chart('<div id="stoch-corr-synth" style="width:100%;"></div>')
+    charts = chart_grid([hist_card, synth_card])
+
+    js = f"""
+<script>
+(function() {{
+    var _cd = {json.dumps(corr_data)};
+    // Build bus separator shapes and annotations
+    var _shapes = [], _annotations = [];
+    _cd.busBoundaries.forEach(function(b) {{
+        // Vertical line
+        _shapes.push({{
+            type:'line', x0:b.pos-0.5, x1:b.pos-0.5,
+            y0:-0.5, y1:_cd.n-0.5,
+            line:{{color:'#334155',width:1.5}}
+        }});
+        // Horizontal line
+        _shapes.push({{
+            type:'line', x0:-0.5, x1:_cd.n-0.5,
+            y0:b.pos-0.5, y1:b.pos-0.5,
+            line:{{color:'#334155',width:1.5}}
+        }});
+        // Bus label (on x-axis side, rotated)
+        var mid = (b.start + b.pos) / 2;
+        _annotations.push({{
+            x: mid, y: _cd.n + 2, text: b.label,
+            showarrow: false, font:{{size:10,color:'#334155'}},
+            xref:'x', yref:'y'
+        }});
+    }});
+    // Numeric tick positions (no labels — hover provides names)
+    var _tickvals = [];
+    for (var i = 0; i < _cd.n; i += 10) _tickvals.push(i);
+    function _makeHeatmap(divId, matrix, title) {{
+        var el = document.getElementById(divId);
+        if (!matrix) {{
+            el.innerHTML = '<p style="padding:1rem;">No data for this season.</p>';
+            return;
+        }}
+        var trace = {{
+            z: matrix, type:'heatmap', colorscale:'RdBu',
+            zmid:0, zmin:-1, zmax:1,
+            x: _cd.labels, y: _cd.labels,
+            hovertemplate: '%{{y}} vs %{{x}}: %{{z:.3f}}<extra></extra>',
+            colorbar:{{title:'Corr',len:0.8}},
+            showscale: (divId === 'stoch-corr-synth')
+        }};
+        var layout = {{
+            title:{{text:title, font:{{size:13}}, x:0.02, xanchor:'left'}},
+            xaxis:{{showticklabels:false, showgrid:false}},
+            yaxis:{{showticklabels:false, showgrid:false, autorange:'reversed'}},
+            shapes: _shapes.slice(),
+            annotations: _annotations.slice(),
+            margin:{{l:20, r:40, t:40, b:40}},
+            template:'plotly_white',
+            height: Math.max(500, _cd.n * 4 + 80)
+        }};
+        Plotly.newPlot(divId, [trace], layout, {{responsive:true}});
+    }}
+    function _updateCorr() {{
+        var s = document.getElementById('stoch-corr-season').value;
+        _makeHeatmap('stoch-corr-hist', _cd.historical[s], 'Historical — '+s);
+        _makeHeatmap('stoch-corr-synth', _cd.synthetic[s], 'Synthetic — '+s);
+    }}
+    document.addEventListener('DOMContentLoaded', function() {{
+        var sel = document.getElementById('stoch-corr-season');
+        if (sel) {{ sel.addEventListener('change', _updateCorr); _updateCorr(); }}
+    }});
+}})();
+</script>
+"""
+
+    content = selector_row + charts + js
     return collapsible_section(
-        "Spatial Correlation",
+        "Spatial Correlation — Historical vs Synthetic",
         content,
         section_id="v2-stoch-section-d",
     )
@@ -1076,13 +1316,9 @@ def _render_section_a(data: DashboardData) -> str:
     hist_stats = _compute_historical_stats(data)
     hist_system = _aggregate_system(hist_stats)
 
-    # Synthetic system-level aggregation
-    if data.inflow_stats_stoch.empty:
-        synth_system: pd.DataFrame = pd.DataFrame(
-            columns=["stage_id", "mean_m3s", "std_m3s"]
-        )
-    else:
-        synth_system = _aggregate_system(data.inflow_stats_stoch)
+    # Synthetic system-level aggregation from simulation inflows
+    synth_stats = _compute_synthetic_stats(data)
+    synth_system = _aggregate_system(synth_stats)
 
     fig = _chart_system_inflow(hist_system, synth_system, data.stage_labels)
     content = make_chart_card(
@@ -1122,10 +1358,8 @@ def _render_section_b(data: DashboardData) -> str:
             section_id="v2-stoch-section-b",
         )
 
-    if data.inflow_stats_stoch.empty:
-        synth_by_bus: dict[int, pd.DataFrame] = {}
-    else:
-        synth_by_bus = _aggregate_by_bus(data.inflow_stats_stoch, data.hydro_bus_map)
+    synth_stats = _compute_synthetic_stats(data)
+    synth_by_bus = _aggregate_by_bus(synth_stats, data.hydro_bus_map)
 
     # Use non_fictitious_bus_ids intersected with buses that have hydros
     hydro_bus_ids = set(data.hydro_bus_map.values())
@@ -1161,7 +1395,7 @@ def _render_section_b(data: DashboardData) -> str:
 
 
 def _render_section_c(data: DashboardData) -> str:
-    """Render Section C — Per-Hydro Inflow Explorer with dropdown."""
+    """Render Section C — Per-Hydro Inflow Explorer with plant explorer table."""
     if not data.hydro_meta:
         return collapsible_section(
             "Per-Hydro Inflow Explorer",
@@ -1180,21 +1414,146 @@ def _render_section_c(data: DashboardData) -> str:
     hydro_ids = sorted(data.hydro_meta.keys())
     hist_per_hydro = _per_hydro_stats(hist_stats, hydro_ids)
 
-    if data.inflow_stats_stoch.empty:
-        synth_per_hydro: dict[int, pd.DataFrame] = {}
-    else:
-        synth_per_hydro = _per_hydro_stats(data.inflow_stats_stoch, hydro_ids)
+    synth_stats = _compute_synthetic_stats(data)
+    synth_per_hydro = _per_hydro_stats(synth_stats, hydro_ids)
 
-    fig = _chart_hydro_explorer(
-        hist_per_hydro,
-        synth_per_hydro,
-        data.hydro_meta,
-        data.stage_labels,
-    )
-    content = make_chart_card(
-        fig, "Per-Hydro Inflow Explorer", "v2-stoch-hydro-explorer", height=460
+    # Serialize per-hydro data for JS-driven rendering
+    hydro_json: dict[str, dict] = {}
+    for hid in hydro_ids:
+        meta = data.hydro_meta[hid]
+        entry: dict = {"name": meta.get("name", str(hid))}
+
+        h = hist_per_hydro.get(hid, pd.DataFrame())
+        if not h.empty:
+            h = h.sort_values("stage_id")
+            entry["hist_stages"] = h["stage_id"].tolist()
+            entry["hist_labels"] = stage_x_labels(
+                h["stage_id"].tolist(), data.stage_labels
+            )
+            entry["hist_mean"] = h["mean_m3s"].tolist()
+            entry["hist_std"] = h["std_m3s"].fillna(0.0).tolist()
+
+        s = synth_per_hydro.get(hid, pd.DataFrame())
+        if not s.empty:
+            s = s.sort_values("stage_id")
+            entry["synth_stages"] = s["stage_id"].tolist()
+            entry["synth_labels"] = stage_x_labels(
+                s["stage_id"].tolist(), data.stage_labels
+            )
+            entry["synth_mean"] = s["mean_m3s"].tolist()
+            entry["synth_std"] = s["std_m3s"].fillna(0.0).tolist()
+
+        hydro_json[str(hid)] = entry
+
+    # Build table rows
+    table_rows: list[str] = []
+    for hid in hydro_ids:
+        meta = data.hydro_meta[hid]
+        name = meta.get("name", str(hid))
+        bus_id = meta.get("bus_id", "")
+        bus_name = data.bus_names.get(bus_id, str(bus_id)) if bus_id != "" else ""
+        table_rows.append(
+            f'<tr data-name="{name.lower()}" data-index="{hid}">'
+            f"<td>{name}</td>"
+            f"<td>{bus_name}</td>"
+            f"</tr>"
+        )
+
+    columns: list[tuple[str, str]] = [
+        ("Name", "string"),
+        ("Bus", "string"),
+    ]
+    table_pane = (
+        '<div class="explorer-table-pane"'
+        ' style="width:300px;min-width:200px;flex-shrink:0;'
+        'overflow-y:auto;max-height:500px;">'
+        + plant_explorer_table(
+            "stoch-hydro-tbody",
+            "stoch-hydro-search",
+            columns,
+            "".join(table_rows),
+        )
+        + "</div>"
     )
 
+    chart_div = wrap_chart('<div id="stoch-hydro-chart" style="width:100%;"></div>')
+    detail_pane = (
+        '<div class="explorer-detail-pane"'
+        ' style="flex:1;min-width:0;"'
+        ' id="stoch-hydro-detail">' + chart_div + "</div>"
+    )
+
+    explorer_html = (
+        '<div class="explorer-layout"'
+        ' style="display:flex;gap:16px;">' + table_pane + detail_pane + "</div>"
+    )
+
+    # JS: data + render function + init call
+    hist_color = _HIST_COLOR
+    synth_color = _SYNTH_COLOR
+    js = f"""
+<script>
+window._stochHydroData = {json.dumps(hydro_json)};
+function _renderStochHydro(containerId, entry) {{
+    var chartDiv = document.getElementById('stoch-hydro-chart');
+    if (!chartDiv) return;
+    var chartHeight = 500;
+    var traces = [];
+    if (entry.hist_mean) {{
+        var hUpper = entry.hist_mean.map(function(m,i){{ return m + entry.hist_std[i]; }});
+        var hLower = entry.hist_mean.map(function(m,i){{ return m - entry.hist_std[i]; }});
+        traces.push({{x:entry.hist_labels, y:hUpper, mode:'lines',
+            line:{{width:0}}, showlegend:false, hoverinfo:'skip',
+            legendgroup:'hist'}});
+        traces.push({{x:entry.hist_labels, y:hLower, mode:'lines',
+            line:{{width:0}}, fill:'tonexty',
+            fillcolor:'rgba(74,144,184,0.15)', showlegend:false,
+            hoverinfo:'skip', legendgroup:'hist'}});
+        traces.push({{x:entry.hist_labels, y:entry.hist_mean, mode:'lines',
+            name:'Historical', line:{{color:'{hist_color}',width:2}},
+            legendgroup:'hist'}});
+    }}
+    if (entry.synth_mean) {{
+        var sUpper = entry.synth_mean.map(function(m,i){{ return m + entry.synth_std[i]; }});
+        var sLower = entry.synth_mean.map(function(m,i){{ return m - entry.synth_std[i]; }});
+        traces.push({{x:entry.synth_labels, y:sUpper, mode:'lines',
+            line:{{width:0}}, showlegend:false, hoverinfo:'skip',
+            legendgroup:'synth'}});
+        traces.push({{x:entry.synth_labels, y:sLower, mode:'lines',
+            line:{{width:0}}, fill:'tonexty',
+            fillcolor:'rgba(245,158,11,0.15)', showlegend:false,
+            hoverinfo:'skip', legendgroup:'synth'}});
+        traces.push({{x:entry.synth_labels, y:entry.synth_mean, mode:'lines',
+            name:'Synthetic', line:{{color:'{synth_color}',width:2}},
+            legendgroup:'synth'}});
+    }}
+    var layout = {{
+        height: chartHeight,
+        title: {{text: 'Inflow — ' + entry.name, font:{{size:13}},
+                 x:0.02, xanchor:'left'}},
+        xaxis: {{title:'Stage'}},
+        yaxis: {{title:'Inflow (m³/s)'}},
+        legend: {{orientation:'h', yanchor:'bottom', y:1.02,
+                  xanchor:'center', x:0.5, font:{{size:11}}}},
+        hovermode: 'x unified',
+        margin: {{l:60, r:30, t:60, b:60}},
+        template: 'plotly_white'
+    }};
+    Plotly.newPlot(chartDiv, traces, layout, {{responsive:true}});
+}}
+document.addEventListener('DOMContentLoaded', function() {{
+    initPlantExplorer({{
+        tableId: 'stoch-hydro-tbody',
+        searchInputId: 'stoch-hydro-search',
+        detailContainerId: 'stoch-hydro-detail',
+        dataVar: '_stochHydroData',
+        renderDetail: _renderStochHydro
+    }});
+}});
+</script>
+"""
+
+    content = explorer_html + js
     return collapsible_section(
         "Per-Hydro Inflow Explorer",
         content,
