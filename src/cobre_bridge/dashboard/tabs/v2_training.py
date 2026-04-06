@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 TAB_ID = "tab-v2-training"
 TAB_LABEL = "Training"
-TAB_ORDER = 10
+TAB_ORDER = 20
 
 _EXTRA_COLORS: list[str] = [
     "#8B5CF6",
@@ -662,7 +662,7 @@ def render(data: DashboardData) -> str:
     section_e = collapsible_section(
         title="Cut Management Heatmaps",
         content=heatmap_content,
-        default_collapsed=True,
+        default_collapsed=False,
     )
 
     if data.timing.empty:
@@ -695,7 +695,7 @@ def render(data: DashboardData) -> str:
     section_f = collapsible_section(
         title="Iteration Timing",
         content=timing_content,
-        default_collapsed=True,
+        default_collapsed=False,
     )
 
     return section_a + section_b + section_c + section_d + section_e + section_f

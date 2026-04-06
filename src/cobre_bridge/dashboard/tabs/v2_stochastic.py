@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 TAB_ID = "tab-v2-stochastic"
 TAB_LABEL = "Stochastic Model"
-TAB_ORDER = 20
+TAB_ORDER = 10
 
 _HIST_COLOR: str = COLORS["hydro"]  # #4A90B8 — historical traces
 _SYNTH_COLOR: str = COLORS["thermal"]  # #F5A623 — synthetic traces

@@ -19,6 +19,7 @@ from cobre_bridge.dashboard.tabs.v2_overview import (
     _chart_cost_bar,
     _chart_training_mini,
     _compute_gen_gwh,
+    _format_duration,
     _run_identity_strip,
     _run_status_strip,
     can_render,
@@ -55,6 +56,8 @@ def _make_conv_df(n: int = 50) -> pd.DataFrame:
             "upper_bound_mean": [float(i * 110) for i in range(n)],
             "upper_bound_std": [float(5) for _ in range(n)],
             "gap_percent": [float(10 - i * 0.2) for i in range(n)],
+            "cuts_active": [int(i * 10) for i in range(n)],
+            "cuts_added": [5 for _ in range(n)],
         }
     )
 
@@ -80,6 +83,10 @@ def _make_mock_data(
     n_scenarios: int = 100,
     n_stages: int = 60,
     discount_rate: float = 0.12,
+    hydro_meta: dict | None = None,
+    thermal_meta: dict | None = None,
+    non_fictitious_bus_ids: list | None = None,
+    line_meta: list | None = None,
 ) -> MagicMock:
     """Build a minimal MagicMock that satisfies the DashboardData interface."""
     data = MagicMock()
@@ -96,6 +103,12 @@ def _make_mock_data(
     data.hydros_lf = _make_mock_lf(12_000.0)
     data.thermals_lf = _make_mock_lf(8_000.0)
     data.ncs_lf = _make_mock_lf(3_000.0)
+    data.hydro_meta = hydro_meta if hydro_meta is not None else {0: {}, 1: {}, 2: {}}
+    data.thermal_meta = thermal_meta if thermal_meta is not None else {0: {}, 1: {}}
+    data.non_fictitious_bus_ids = (
+        non_fictitious_bus_ids if non_fictitious_bus_ids is not None else [0, 1, 2, 3]
+    )
+    data.line_meta = line_meta if line_meta is not None else [{}, {}]
     return data
 
 
@@ -178,6 +191,162 @@ def test_run_status_strip_empty_manifest() -> None:
     data = _make_mock_data(training_manifest={})
     html = _run_status_strip(data)
     assert "No training manifest available" in html
+
+
+# ---------------------------------------------------------------------------
+# test_format_duration
+# ---------------------------------------------------------------------------
+
+
+def test_format_duration_full_hours_and_minutes() -> None:
+    """_format_duration must format seconds as hours and minutes."""
+    assert _format_duration(15120) == "4h 12min"
+
+
+def test_format_duration_zero_seconds() -> None:
+    """_format_duration(0) must return '0h 0min'."""
+    assert _format_duration(0) == "0h 0min"
+
+
+def test_format_duration_none_returns_na() -> None:
+    """_format_duration(None) must return 'N/A'."""
+    assert _format_duration(None) == "N/A"
+
+
+def test_format_duration_non_numeric_returns_na() -> None:
+    """_format_duration with a non-numeric value must return 'N/A'."""
+    assert _format_duration("not-a-number") == "N/A"
+
+
+# ---------------------------------------------------------------------------
+# test_run_identity_strip — new fields
+# ---------------------------------------------------------------------------
+
+
+def test_run_identity_strip_hydros_count() -> None:
+    """_run_identity_strip must include the hydro count from hydro_meta."""
+    data = _make_mock_data(hydro_meta={0: {}, 1: {}, 2: {}})
+    html = _run_identity_strip(data)
+    assert "Hydros:</strong> 3" in html
+
+
+def test_run_identity_strip_thermals_count() -> None:
+    """_run_identity_strip must include the thermal count from thermal_meta."""
+    data = _make_mock_data(thermal_meta={0: {}, 1: {}})
+    html = _run_identity_strip(data)
+    assert "Thermals:</strong> 2" in html
+
+
+def test_run_identity_strip_buses_count() -> None:
+    """_run_identity_strip must include the bus count from non_fictitious_bus_ids."""
+    data = _make_mock_data(non_fictitious_bus_ids=[10, 20, 30, 40, 50])
+    html = _run_identity_strip(data)
+    assert "Buses:</strong> 5" in html
+
+
+def test_run_identity_strip_lines_count() -> None:
+    """_run_identity_strip must include the line count from line_meta."""
+    data = _make_mock_data(line_meta=[{}, {}, {}])
+    html = _run_identity_strip(data)
+    assert "Lines:</strong> 3" in html
+
+
+def test_run_identity_strip_duration_formatted() -> None:
+    """_run_identity_strip must show a formatted duration when elapsed_seconds is set.
+
+    15120 seconds == 4h 12min.
+    """
+    data = _make_mock_data(
+        training_manifest={"elapsed_seconds": 15120, "termination_reason": "converged"}
+    )
+    html = _run_identity_strip(data)
+    assert "4h 12min" in html
+
+
+def test_run_identity_strip_duration_na_when_missing() -> None:
+    """_run_identity_strip must show 'N/A' for duration when elapsed_seconds absent."""
+    data = _make_mock_data(training_manifest={"termination_reason": "converged"})
+    html = _run_identity_strip(data)
+    assert "Duration:</strong> N/A" in html
+
+
+def test_run_identity_strip_run_date_shown() -> None:
+    """_run_identity_strip must include the run date from training_manifest."""
+    data = _make_mock_data(training_manifest={"start_time": "2024-06-01T08:00:00"})
+    html = _run_identity_strip(data)
+    assert "2024-06-01T08:00:00" in html
+
+
+def test_run_identity_strip_run_date_na_when_manifest_empty() -> None:
+    """_run_identity_strip must show 'N/A' for run date when manifest is empty."""
+    data = _make_mock_data(training_manifest={})
+    html = _run_identity_strip(data)
+    assert "Run Date:</strong> N/A" in html
+
+
+# ---------------------------------------------------------------------------
+# test_run_status_strip — new fields
+# ---------------------------------------------------------------------------
+
+
+def test_run_status_strip_lower_bound_and_cuts() -> None:
+    """_run_status_strip must show lower bound and active cuts from conv."""
+    conv = pd.DataFrame(
+        {
+            "iteration": [1, 2],
+            "lower_bound": [5000.0, 5430.0],
+            "upper_bound_mean": [6000.0, 5800.0],
+            "cuts_active": [600, 702],
+            "cuts_added": [50, 52],
+        }
+    )
+    data = _make_mock_data(
+        training_manifest={"termination_reason": "gap_tolerance"},
+        conv=conv,
+    )
+    html = _run_status_strip(data)
+
+    assert "Lower bound:" in html
+    assert "Active cuts:" in html
+    assert "702" in html
+
+
+def test_run_status_strip_policy_states_shown() -> None:
+    """_run_status_strip must include policy_states from training_manifest."""
+    conv = _make_conv_df(5)
+    data = _make_mock_data(
+        training_manifest={
+            "termination_reason": "gap_tolerance",
+            "policy_states": 12345,
+        },
+        conv=conv,
+    )
+    html = _run_status_strip(data)
+    assert "Policy states:" in html
+    assert "12345" in html
+
+
+def test_run_status_strip_policy_states_na_when_missing() -> None:
+    """_run_status_strip must show 'N/A' for policy_states when key is absent."""
+    conv = _make_conv_df(5)
+    data = _make_mock_data(
+        training_manifest={"termination_reason": "converged"},
+        conv=conv,
+    )
+    html = _run_status_strip(data)
+    assert "Policy states:</strong> N/A" in html
+
+
+def test_run_status_strip_no_cuts_fields_when_conv_empty() -> None:
+    """_run_status_strip must omit lower bound / cuts fields when conv is empty."""
+    data = _make_mock_data(
+        training_manifest={"termination_reason": "converged"},
+        conv=pd.DataFrame(),
+    )
+    html = _run_status_strip(data)
+    assert "Lower bound:" not in html
+    assert "Active cuts:" not in html
+    assert "Total cuts:" not in html
 
 
 # ---------------------------------------------------------------------------

@@ -819,11 +819,11 @@ def test_render_reservoir_storage_is_collapsible_section() -> None:
     assert "collapsible-section" in html
 
 
-def test_render_reservoir_storage_default_collapsed() -> None:
-    """_render_reservoir_storage must be collapsed by default."""
+def test_render_reservoir_storage_default_expanded() -> None:
+    """_render_reservoir_storage must be expanded by default (wireframe spec)."""
     data = _make_mock_data_full()
     html = _render_reservoir_storage(data)
-    assert "default-collapsed" in html
+    assert "default-collapsed" not in html
 
 
 def test_render_reservoir_storage_section_title_present() -> None:
@@ -915,11 +915,11 @@ def test_render_ncs_curtailment_is_collapsible_section() -> None:
     assert "collapsible-section" in html
 
 
-def test_render_ncs_curtailment_default_collapsed() -> None:
-    """_render_ncs_curtailment must be collapsed by default."""
+def test_render_ncs_curtailment_default_expanded() -> None:
+    """_render_ncs_curtailment must be expanded by default (wireframe spec)."""
     data = _make_mock_data_full()
     html = _render_ncs_curtailment(data)
-    assert "default-collapsed" in html
+    assert "default-collapsed" not in html
 
 
 def test_render_ncs_curtailment_section_title_present() -> None:

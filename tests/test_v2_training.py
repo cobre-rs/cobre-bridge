@@ -106,7 +106,7 @@ def test_tab_constants() -> None:
     """TAB_ID, TAB_LABEL, and TAB_ORDER must match the spec."""
     assert TAB_ID == "tab-v2-training"
     assert TAB_LABEL == "Training"
-    assert TAB_ORDER == 10
+    assert TAB_ORDER == 20
 
 
 # ---------------------------------------------------------------------------

@@ -42,8 +42,8 @@ class TabModule(Protocol):
 
 DEFAULT_TAB_ORDER: dict[str, int] = {
     "tab-v2-overview": 0,
-    "tab-v2-training": 10,
-    "tab-v2-stochastic": 20,
+    "tab-v2-stochastic": 10,
+    "tab-v2-training": 20,
     "tab-v2-energy-balance": 30,
     "tab-v2-costs": 40,
     "tab-v2-plants": 50,

@@ -785,7 +785,7 @@ def _render_reservoir_storage(data: DashboardData) -> str:
         "Reservoir Storage",
         chart_grid([sys_card, bus_card]),
         section_id="v2-energy-storage-section",
-        default_collapsed=True,
+        default_collapsed=False,
     )
 
 
@@ -971,7 +971,7 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
         "NCS & Curtailment",
         chart_grid([gen_card, curtail_card]),
         section_id="v2-energy-ncs-section",
-        default_collapsed=True,
+        default_collapsed=False,
     )
 
 

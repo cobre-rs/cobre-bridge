@@ -41,10 +41,49 @@ TAB_LABEL = "Overview"
 TAB_ORDER = 0
 
 
+def _format_duration(elapsed_seconds: object) -> str:
+    """Format elapsed seconds as a human-readable duration string.
+
+    Args:
+        elapsed_seconds: Numeric seconds value, or ``None``.
+
+    Returns:
+        A string like ``"4h 12min"``, or ``"N/A"`` when *elapsed_seconds* is
+        ``None`` or cannot be converted to an integer.
+    """
+    if elapsed_seconds is None:
+        return "N/A"
+    try:
+        total = int(elapsed_seconds)
+    except (ValueError, TypeError):
+        return "N/A"
+    hours = total // 3600
+    mins = (total % 3600) // 60
+    return f"{hours}h {mins}min"
+
+
 def _run_identity_strip(data: DashboardData) -> str:
     """Build the run identity row HTML."""
     version = data.metadata.get("version", "N/A")
     discount_pct = data.discount_rate * 100.0
+
+    run_date = (
+        data.training_manifest.get("start_time", "N/A")
+        if data.training_manifest
+        else "N/A"
+    )
+    elapsed = (
+        data.training_manifest.get("elapsed_seconds")
+        if data.training_manifest
+        else None
+    )
+    duration_str = _format_duration(elapsed)
+
+    n_hydros = len(data.hydro_meta)
+    n_thermals = len(data.thermal_meta)
+    n_buses = len(data.non_fictitious_bus_ids)
+    n_lines = len(data.line_meta)
+
     return (
         '<div class="run-identity-strip" style="'
         "display:flex;gap:2rem;flex-wrap:wrap;padding:0.75rem 1rem;"
@@ -55,6 +94,12 @@ def _run_identity_strip(data: DashboardData) -> str:
         f"<span><strong>Stages:</strong> {data.n_stages}</span>"
         f"<span><strong>Discount Rate:</strong> {discount_pct:.1f}%</span>"
         f"<span><strong>Solver Version:</strong> {version}</span>"
+        f"<span><strong>Run Date:</strong> {run_date}</span>"
+        f"<span><strong>Duration:</strong> {duration_str}</span>"
+        f"<span><strong>Hydros:</strong> {n_hydros}</span>"
+        f"<span><strong>Thermals:</strong> {n_thermals}</span>"
+        f"<span><strong>Buses:</strong> {n_buses}</span>"
+        f"<span><strong>Lines:</strong> {n_lines}</span>"
         "</div>"
     )
 
@@ -71,6 +116,20 @@ def _run_status_strip(data: DashboardData) -> str:
         )
     termination = data.training_manifest.get("termination_reason", "N/A")
     n_iterations = len(data.conv)
+    policy_states = data.training_manifest.get("policy_states", "N/A")
+
+    if not data.conv.empty:
+        lb_str = f"{float(data.conv.iloc[-1]['lower_bound']):,.2f}"
+        active_cuts = int(data.conv.iloc[-1]["cuts_active"])
+        total_cuts = int(data.conv["cuts_added"].sum())
+        cuts_fields = (
+            f"<span><strong>Lower bound:</strong> {lb_str}</span>"
+            f"<span><strong>Total cuts:</strong> {total_cuts}</span>"
+            f"<span><strong>Active cuts:</strong> {active_cuts}</span>"
+        )
+    else:
+        cuts_fields = ""
+
     return (
         '<div class="run-status-strip" style="'
         "display:flex;gap:2rem;flex-wrap:wrap;padding:0.5rem 1rem;"
@@ -78,6 +137,8 @@ def _run_status_strip(data: DashboardData) -> str:
         'margin-bottom:1rem;font-size:0.875rem;">'
         f"<span><strong>Termination:</strong> {termination}</span>"
         f"<span><strong>Training Iterations:</strong> {n_iterations}</span>"
+        + cuts_fields
+        + f"<span><strong>Policy states:</strong> {policy_states}</span>"
         "</div>"
     )
 
@@ -380,6 +441,14 @@ def _render_section_e(data: DashboardData) -> str:
             "v2-gen-mix-chart",
             height=300,
         )
+        gen_deep_link = (
+            '<p style="font-size:0.8rem;margin-top:0.25rem;">'
+            '<a href="#" onclick="showTab(\'tab-v2-energy-balance\','
+            " document.querySelector('nav button:nth-child(4)'));"
+            'return false;">Energy balance details \u2192</a>'
+            "</p>"
+        )
+        gen_html = gen_html + gen_deep_link
 
     return section_title("Quick Look") + chart_grid([training_html, gen_html])
 
