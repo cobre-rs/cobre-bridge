@@ -51,11 +51,7 @@ def _build_metrics_row(data: DashboardData) -> str:
 
     total_iters = len(conv)
 
-    elapsed = (
-        data.training_manifest.get("elapsed_seconds")
-        if data.training_manifest
-        else None
-    )
+    elapsed = data.training_metadata.get("duration_seconds")
     if elapsed is not None:
         hours = int(elapsed) // 3600
         mins = (int(elapsed) % 3600) // 60

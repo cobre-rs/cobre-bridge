@@ -41,28 +41,56 @@ _BOUNDS_COLOR: str = "#6B7280"
 #: The ``"Other"`` key is intentionally absent — it is computed dynamically in
 #: :func:`group_costs` as all columns not claimed by the explicit groups.
 COST_GROUPS: dict[str, list[str]] = {
-    "Thermal": [
-        "thermal_generation_cost",
-        "thermal_startup_cost",
-        "thermal_minimum_cost",
-    ],
-    "Deficit": [
-        "deficit_cost_depth_1",
-        "deficit_cost_depth_2",
-        "deficit_cost_depth_3",
-    ],
+    # Generation costs
+    "Thermal": ["thermal_cost"],
+    "Deficit": ["deficit_cost"],
     "Spillage": ["spillage_cost"],
-    "NCS": ["ncs_curtailment_cost", "ncs_generation_cost"],
-    "Violations": ["generic_constraint_violation_cost"],
+    "NCS Curtailment": ["curtailment_cost"],
+    # Operational costs
+    "Exchange": ["exchange_cost"],
+    "Contract": ["contract_cost"],
+    "Pumping": ["pumping_cost"],
+    "Inflow Penalty": ["inflow_penalty_cost"],
+    # Hydro violation costs (each broken out for visibility)
+    # NOTE: hydro_violation_cost is an aggregate of the 6 costs below — excluded
+    # via _NON_COST_COLS to avoid double-counting.
+    "Outflow Min": ["outflow_violation_below_cost"],
+    "Outflow Max": ["outflow_violation_above_cost"],
+    "Turbining Bounds": ["turbined_violation_cost"],
+    "Generation Bounds": ["generation_violation_cost"],
+    "Storage Bounds": ["storage_violation_cost"],
+    "Filling Target": ["filling_target_cost"],
+    "Evaporation": ["evaporation_violation_cost"],
+    "Water Withdrawal": ["withdrawal_violation_cost"],
+    # Generic constraints
+    "Generic Constraints": ["generic_violation_cost"],
+    # Catch-all
     "Other": [],  # filled dynamically by group_costs
 }
 
 COST_GROUP_COLORS: dict[str, str] = {
-    "Thermal": "#F59E0B",
-    "Deficit": "#EF4444",
-    "Spillage": "#3B82F6",
-    "NCS": "#10B981",
-    "Violations": "#8B5CF6",
+    # Generation — warm palette
+    "Thermal": "#D97706",
+    "Deficit": "#DC2626",
+    "Spillage": "#2563EB",
+    "NCS Curtailment": "#059669",
+    # Operational — cool/neutral tones
+    "Exchange": "#7C3AED",
+    "Contract": "#DB2777",
+    "Pumping": "#0891B2",
+    "Inflow Penalty": "#EA580C",
+    # Hydro violations — red-orange gradient (penalty costs)
+    "Outflow Min": "#E11D48",
+    "Outflow Max": "#F43F5E",
+    "Turbining Bounds": "#FB923C",
+    "Generation Bounds": "#F97316",
+    "Storage Bounds": "#C2410C",
+    "Filling Target": "#A16207",
+    "Evaporation": "#9333EA",
+    "Water Withdrawal": "#0284C7",
+    # Generic constraints
+    "Generic Constraints": "#6D28D9",
+    # Catch-all
     "Other": "#6B7280",
 }
 
@@ -345,7 +373,22 @@ def make_chart_card(
 
 
 #: Non-cost metadata columns that are never treated as cost components.
-_NON_COST_COLS: frozenset[str] = frozenset({"scenario_id", "stage_id", "block_id"})
+#: Includes aggregate/derived columns that would cause double-counting.
+_NON_COST_COLS: frozenset[str] = frozenset(
+    {
+        "scenario_id",
+        "stage_id",
+        "block_id",
+        "total_cost",
+        "immediate_cost",
+        "future_cost",
+        "discount_factor",
+        # hydro_violation_cost is the sum of the 6 individual hydro violation
+        # costs (evaporation, withdrawal, outflow min/max, turbining, generation)
+        # which are each tracked as separate groups — exclude to avoid double-counting.
+        "hydro_violation_cost",
+    }
+)
 
 
 def compute_npv_costs(

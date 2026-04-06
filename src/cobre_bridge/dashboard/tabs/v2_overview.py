@@ -64,19 +64,11 @@ def _format_duration(elapsed_seconds: object) -> str:
 
 def _run_identity_strip(data: DashboardData) -> str:
     """Build the run identity row HTML."""
-    version = data.metadata.get("version", "N/A")
+    version = data.training_metadata.get("cobre_version", "N/A")
     discount_pct = data.discount_rate * 100.0
 
-    run_date = (
-        data.training_manifest.get("start_time", "N/A")
-        if data.training_manifest
-        else "N/A"
-    )
-    elapsed = (
-        data.training_manifest.get("elapsed_seconds")
-        if data.training_manifest
-        else None
-    )
+    run_date = data.training_metadata.get("started_at", "N/A")
+    elapsed = data.training_metadata.get("duration_seconds")
     duration_str = _format_duration(elapsed)
 
     n_hydros = len(data.hydro_meta)
@@ -106,17 +98,19 @@ def _run_identity_strip(data: DashboardData) -> str:
 
 def _run_status_strip(data: DashboardData) -> str:
     """Build the run status row HTML."""
-    if not data.training_manifest:
+    if not data.training_metadata:
         return (
             '<div class="run-status-strip" style="'
             "padding:0.5rem 1rem;background:#FEF3C7;border-radius:6px;"
             'margin-bottom:1rem;font-size:0.875rem;">'
-            "No training manifest available"
+            "No training metadata available"
             "</div>"
         )
-    termination = data.training_manifest.get("termination_reason", "N/A")
+    termination = data.training_metadata.get("convergence", {}).get(
+        "termination_reason", "N/A"
+    )
     n_iterations = len(data.conv)
-    policy_states = data.training_manifest.get("policy_states", "N/A")
+    policy_states = data.policy_metadata.get("state_dimension", "N/A")
 
     if not data.conv.empty:
         lb_str = f"{float(data.conv.iloc[-1]['lower_bound']):,.2f}"
@@ -202,11 +196,11 @@ def _build_cost_table(summary_df: pd.DataFrame) -> str:
 
 
 def _chart_cost_bar(summary_df: pd.DataFrame) -> go.Figure:
-    """Build a horizontal stacked bar figure from a cost summary DataFrame.
+    """Build a vertical bar chart of NPV cost by group with p5–p95 error bars.
 
-    One trace per cost group, stacked horizontally.  Each bar includes
-    asymmetric error bars showing the p5–p95 range across scenarios.  Error
-    bars are omitted for a group when either p5 or p95 is NaN.
+    One bar per cost group, sorted descending by mean value.  Each bar has
+    asymmetric error bars showing the p5–p95 range across scenarios.  Groups
+    with zero mean are excluded.
 
     Args:
         summary_df: DataFrame with columns
@@ -218,35 +212,60 @@ def _chart_cost_bar(summary_df: pd.DataFrame) -> go.Figure:
     """
     import math
 
-    fig = go.Figure()
-    for _, row in summary_df.iterrows():
-        group = str(row["group"])
-        color = COST_GROUP_COLORS.get(group, "#6B7280")
-        mean_val = float(row["mean"])
+    # Filter to non-zero groups for a cleaner chart
+    nz = summary_df[summary_df["mean"] > 0].copy()
+    if nz.empty:
+        nz = summary_df.head(1)
 
-        error_x: dict | None = None
+    groups: list[str] = []
+    means: list[float] = []
+    colors: list[str] = []
+    err_plus: list[float] = []
+    err_minus: list[float] = []
+    has_errors = False
+
+    for _, row in nz.iterrows():
+        group = str(row["group"])
+        mean_val = float(row["mean"])
+        groups.append(group)
+        means.append(mean_val)
+        colors.append(COST_GROUP_COLORS.get(group, "#6B7280"))
+
+        ep, em = 0.0, 0.0
         if "p5" in row.index and "p95" in row.index:
             p5 = float(row["p5"])
             p95 = float(row["p95"])
             if not (math.isnan(p5) or math.isnan(p95)):
-                error_x = dict(
-                    type="data",
-                    array=[p95 - mean_val],
-                    arrayminus=[mean_val - p5],
-                    visible=True,
-                )
+                ep = p95 - mean_val
+                em = mean_val - p5
+                has_errors = True
+        err_plus.append(ep)
+        err_minus.append(em)
 
-        fig.add_trace(
-            go.Bar(
-                x=[mean_val],
-                y=["NPV Cost"],
-                name=group,
-                orientation="h",
-                marker_color=color,
-                error_x=error_x,
-            )
+    error_y: dict | None = None
+    if has_errors:
+        error_y = dict(
+            type="data",
+            array=err_plus,
+            arrayminus=err_minus,
+            visible=True,
         )
-    fig.update_layout(barmode="stack")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=groups,
+            y=means,
+            marker_color=colors,
+            error_y=error_y,
+            showlegend=False,
+        )
+    )
+    fig.update_layout(
+        yaxis_title="NPV Cost",
+        xaxis_tickangle=-35,
+        margin=MARGIN_DEFAULTS,
+    )
     return fig
 
 
@@ -361,26 +380,13 @@ def _render_section_c(data: DashboardData) -> str:
     # Expected cost (NPV)
     if data.costs.empty:
         cost_value_str = "N/A"
-        sparkline: list[float] | None = None
     else:
         summary = compute_cost_summary(data.costs, data.discount_rate)
         if summary.empty:
             cost_value_str = "N/A"
-            sparkline = None
         else:
             total_npv = float(summary["mean"].sum())
             cost_value_str = f"{total_npv:,.0f}"
-            # Per-stage mean total cost as sparkline data
-            try:
-                sparkline = (
-                    data.costs.groupby("stage_id")
-                    .sum(numeric_only=True)
-                    .sum(axis=1)
-                    .sort_index()
-                    .tolist()
-                )
-            except (ValueError, TypeError, KeyError):
-                sparkline = None
 
     hydro_gwh = _compute_gen_gwh(data.hydros_lf)
     thermal_gwh = _compute_gen_gwh(data.thermals_lf)
@@ -391,7 +397,6 @@ def _render_section_c(data: DashboardData) -> str:
             cost_value_str,
             "Expected Cost (NPV)",
             color=COST_GROUP_COLORS["Thermal"],
-            sparkline_values=sparkline,
         ),
         metric_card(
             f"{hydro_gwh:,.0f} GWh",
@@ -418,6 +423,7 @@ def _render_section_d(data: DashboardData) -> str:
         return section_title("Cost Breakdown") + "<p>No cost data available.</p>"
 
     summary = compute_cost_summary(data.costs, data.discount_rate)
+    summary = summary[summary["mean"] > 0]
     if summary.empty:
         return section_title("Cost Breakdown") + "<p>No cost data available.</p>"
 

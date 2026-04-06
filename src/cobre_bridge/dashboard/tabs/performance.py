@@ -6,7 +6,6 @@ LP dimensions, scaling quality, and simulation scenario times.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -87,7 +86,7 @@ def build_performance_metrics_html(
     """Summary metric cards for the Performance tab."""
     # Total training time
     # Prefer wall-clock from metadata.json; fall back to summing iteration times.
-    meta_duration = metadata.get("run_info", {}).get("duration_seconds")
+    meta_duration = metadata.get("duration_seconds")
     if meta_duration and meta_duration > 0:
         total_train_s = float(meta_duration)
     else:
@@ -741,18 +740,14 @@ def render(data: DashboardData) -> str:
     scenarios as reported by the manifest, keeping this tab-specific
     orchestration out of DashboardData.load().
     """
-    # Filter simulation solver to actual scenario count from manifest
-    sim_manifest_path = data.case_dir / "output" / "simulation" / "_manifest.json"
+    # Filter simulation solver to actual scenario count from metadata
     solver_sim = data.solver_sim
-    metadata = dict(data.metadata)
-    if sim_manifest_path.exists():
-        sim_manifest = json.load(sim_manifest_path.open())
-        actual_sim_scenarios = sim_manifest.get("scenarios", {}).get(
-            "completed", data.n_scenarios
-        )
-        metadata["_sim_manifest"] = sim_manifest
-    else:
-        actual_sim_scenarios = data.n_scenarios
+    metadata = dict(data.training_metadata)
+    actual_sim_scenarios = data.simulation_metadata.get("scenarios", {}).get(
+        "completed", data.n_scenarios
+    )
+    if data.simulation_metadata:
+        metadata["_sim_manifest"] = data.simulation_metadata
     if not solver_sim.empty:
         solver_sim = solver_sim.head(actual_sim_scenarios)
 

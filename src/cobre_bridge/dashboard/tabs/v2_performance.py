@@ -82,7 +82,7 @@ def _build_metrics_row(data: DashboardData) -> str:
     # ------------------------------------------------------------------
     # Training time: prefer wall-clock from metadata, fall back to timing
     # ------------------------------------------------------------------
-    meta_duration = data.metadata.get("run_info", {}).get("duration_seconds")
+    meta_duration = data.training_metadata.get("duration_seconds")
     if meta_duration and float(meta_duration) > 0:
         total_train_s = float(meta_duration)
     else:
@@ -99,9 +99,9 @@ def _build_metrics_row(data: DashboardData) -> str:
     train_str = _format_time(total_train_s)
 
     # ------------------------------------------------------------------
-    # Simulation time: prefer wall-clock from simulation_manifest
+    # Simulation time: prefer wall-clock from simulation metadata
     # ------------------------------------------------------------------
-    sim_manifest_duration = data.simulation_manifest.get("duration_seconds")
+    sim_manifest_duration = data.simulation_metadata.get("duration_seconds")
     if sim_manifest_duration and float(sim_manifest_duration) > 0:
         total_sim_s = float(sim_manifest_duration)
         sim_is_wallclock = True

@@ -179,15 +179,15 @@ def _build_metrics_row(data: DashboardData) -> str:
 
 
 def _chart_cost_bar(summary_df: pd.DataFrame) -> go.Figure:
-    """Build a horizontal stacked bar figure from a cost summary DataFrame.
+    """Build a vertical bar chart of NPV cost by group with p5–p95 error bars.
 
-    One trace per cost group, stacked horizontally.  Each bar includes
-    asymmetric error bars showing the p10–p90 range across scenarios.  Error
-    bars are omitted for a group when either p10 or p90 is NaN.
+    One bar per cost group, sorted descending by mean value.  Each bar has
+    asymmetric error bars showing the p5–p95 range across scenarios.  Groups
+    with zero mean are excluded.
 
     Args:
         summary_df: DataFrame with columns
-            ``["group", "mean", "p10", "p90", ...]`` as returned by
+            ``["group", "mean", "p5", "p95", ...]`` as returned by
             :func:`~cobre_bridge.dashboard.chart_helpers.compute_cost_summary`.
 
     Returns:
@@ -195,35 +195,59 @@ def _chart_cost_bar(summary_df: pd.DataFrame) -> go.Figure:
     """
     import math
 
-    fig = go.Figure()
-    for _, row in summary_df.iterrows():
+    nz = summary_df[summary_df["mean"] > 0].copy()
+    if nz.empty:
+        nz = summary_df.head(1)
+
+    groups: list[str] = []
+    means: list[float] = []
+    colors: list[str] = []
+    err_plus: list[float] = []
+    err_minus: list[float] = []
+    has_errors = False
+
+    for _, row in nz.iterrows():
         group = str(row["group"])
-        color = COST_GROUP_COLORS.get(group, "#6B7280")
         mean_val = float(row["mean"])
+        groups.append(group)
+        means.append(mean_val)
+        colors.append(COST_GROUP_COLORS.get(group, "#6B7280"))
 
-        error_x: dict | None = None
-        if "p10" in row.index and "p90" in row.index:
-            p10 = float(row["p10"])
-            p90 = float(row["p90"])
-            if not (math.isnan(p10) or math.isnan(p90)):
-                error_x = dict(
-                    type="data",
-                    array=[p90 - mean_val],
-                    arrayminus=[mean_val - p10],
-                    visible=True,
-                )
+        ep, em = 0.0, 0.0
+        if "p5" in row.index and "p95" in row.index:
+            p5 = float(row["p5"])
+            p95 = float(row["p95"])
+            if not (math.isnan(p5) or math.isnan(p95)):
+                ep = p95 - mean_val
+                em = mean_val - p5
+                has_errors = True
+        err_plus.append(ep)
+        err_minus.append(em)
 
-        fig.add_trace(
-            go.Bar(
-                x=[mean_val],
-                y=["NPV Cost"],
-                name=group,
-                orientation="h",
-                marker_color=color,
-                error_x=error_x,
-            )
+    error_y: dict | None = None
+    if has_errors:
+        error_y = dict(
+            type="data",
+            array=err_plus,
+            arrayminus=err_minus,
+            visible=True,
         )
-    fig.update_layout(barmode="stack")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=groups,
+            y=means,
+            marker_color=colors,
+            error_y=error_y,
+            showlegend=False,
+        )
+    )
+    fig.update_layout(
+        yaxis_title="NPV Cost",
+        xaxis_tickangle=-35,
+        margin=_MARGIN,
+    )
     return fig
 
 
@@ -286,6 +310,7 @@ def _render_npv_section(data: DashboardData) -> str:
         return metrics_html + chart_grid([chart_html, table_html])
 
     summary = compute_cost_summary(data.costs, data.discount_rate)
+    summary = summary[summary["mean"] > 0]
     if summary.empty:
         chart_html = wrap_chart("<p>No cost data available.</p>")
         table_html = wrap_chart("<p>No cost data available.</p>")
@@ -992,15 +1017,26 @@ def _render_violations(data: DashboardData) -> str:
 
     # Sort descending
     sorted_items = sorted(total_per_scen.items(), key=lambda kv: kv[1], reverse=True)
-    categories = [k for k, _ in sorted_items]
+
+    # Map column names to group labels and colors
+    _col_to_group: dict[str, str] = {}
+    for group_name, cols in COST_GROUPS.items():
+        for col in cols:
+            _col_to_group[col] = group_name
+
+    categories = [
+        _col_to_group.get(k, k.replace("_cost", "").replace("_", " ").title())
+        for k, _ in sorted_items
+    ]
     values = [v for _, v in sorted_items]
+    colors = [COST_GROUP_COLORS.get(cat, "#6B7280") for cat in categories]
 
     fig = go.Figure(
         go.Bar(
             x=values,
             y=categories,
             orientation="h",
-            marker_color=COST_GROUP_COLORS["Violations"],
+            marker_color=colors,
         )
     )
     fig.update_layout(

@@ -992,19 +992,31 @@ def test_load_config_absent(_v2_case: Path) -> None:
     assert data.discount_rate == pytest.approx(0.0)
 
 
-def test_load_training_manifest_present(_v2_case: Path) -> None:
-    """training_manifest is populated from output/training/_manifest.json."""
+def test_load_training_metadata_present(_v2_case: Path) -> None:
+    """training_metadata is populated from output/training/metadata.json."""
     from cobre_bridge.dashboard.data import DashboardData
 
     _write_json(
-        _v2_case / "output" / "training" / "_manifest.json",
-        {"status": "converged", "total_cuts": 936},
+        _v2_case / "output" / "training" / "metadata.json",
+        {
+            "cobre_version": "0.3.2",
+            "hostname": "test",
+            "solver": "highs",
+            "started_at": "2026-04-06T04:27:06Z",
+            "completed_at": "2026-04-06T04:29:22Z",
+            "duration_seconds": 136.135,
+            "status": "complete",
+            "convergence": {"termination_reason": "iteration_limit"},
+        },
     )
 
     data = DashboardData.load(_v2_case)
 
-    assert data.training_manifest["status"] == "converged"
-    assert data.training_manifest["total_cuts"] == 936
+    assert data.training_metadata["cobre_version"] == "0.3.2"
+    assert data.training_metadata["duration_seconds"] == 136.135
+    assert (
+        data.training_metadata["convergence"]["termination_reason"] == "iteration_limit"
+    )
 
 
 def test_load_policy_metadata_present(_v2_case: Path) -> None:
@@ -1032,21 +1044,24 @@ def test_load_stages_data_preserved(_v2_case: Path) -> None:
     assert len(data.stages_data["stages"]) > 0
 
 
-def test_simulation_manifest_field(_v2_case: Path) -> None:
-    """simulation_manifest is populated from the manifest file and metadata
-    no longer carries a _sim_manifest side-effect key."""
+def test_simulation_metadata_field(_v2_case: Path) -> None:
+    """simulation_metadata is populated from output/simulation/metadata.json."""
     from cobre_bridge.dashboard.data import DashboardData
 
     _write_json(
-        _v2_case / "output" / "simulation" / "_manifest.json",
-        {"scenarios": {"completed": 2, "total": 2}, "status": "done"},
+        _v2_case / "output" / "simulation" / "metadata.json",
+        {
+            "cobre_version": "0.3.2",
+            "duration_seconds": 48.837,
+            "status": "complete",
+            "scenarios": {"total": 100, "completed": 100, "failed": 0},
+        },
     )
 
     data = DashboardData.load(_v2_case)
 
-    assert data.simulation_manifest["status"] == "done"
-    assert data.simulation_manifest["scenarios"]["completed"] == 2
-    assert "_sim_manifest" not in data.metadata
+    assert data.simulation_metadata["status"] == "complete"
+    assert data.simulation_metadata["scenarios"]["completed"] == 100
 
 
 # ---------------------------------------------------------------------------

@@ -319,14 +319,13 @@ class DashboardData:
     correlation: dict
     inflow_lags_lf: pl.LazyFrame
 
-    # Optional training metadata
-    metadata: dict
-
-    # New v2 fields: config, manifests, policy metadata
-    config: dict
-    training_manifest: dict
-    simulation_manifest: dict
+    # Output metadata (from metadata.json in each output subdirectory)
+    training_metadata: dict
+    simulation_metadata: dict
     policy_metadata: dict
+
+    # New v2 fields: config
+    config: dict
     discount_rate: float
     stages_data: dict
 
@@ -568,32 +567,22 @@ class DashboardData:
             noise_openings = pd.DataFrame()
             fitting_report = {}
             correlation = {}
-        metadata_path = case_dir / "output" / "training" / "metadata.json"
-        if metadata_path.exists():
-            with metadata_path.open() as f:
-                metadata: dict = json.load(f)
-        else:
-            metadata = {}
 
-        # Training manifest (optional)
-        training_manifest_path = case_dir / "output" / "training" / "_manifest.json"
-        training_manifest: dict = {}
-        if training_manifest_path.exists():
+        # Output metadata (from metadata.json in each output subdirectory)
+        def _load_metadata(subdir: str) -> dict:
+            meta_path = case_dir / "output" / subdir / "metadata.json"
+            if not meta_path.exists():
+                return {}
             try:
-                with training_manifest_path.open() as f:
-                    training_manifest = json.load(f)
+                with meta_path.open() as f:
+                    return json.load(f)
             except json.JSONDecodeError:
-                logger.warning("Failed to parse output/training/_manifest.json")
+                logger.warning("Failed to parse output/%s/metadata.json", subdir)
+                return {}
 
-        # Policy metadata (optional)
-        policy_meta_path = case_dir / "output" / "policy" / "metadata.json"
-        policy_metadata: dict = {}
-        if policy_meta_path.exists():
-            try:
-                with policy_meta_path.open() as f:
-                    policy_metadata = json.load(f)
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse output/policy/metadata.json")
+        training_metadata = _load_metadata("training")
+        simulation_metadata = _load_metadata("simulation")
+        policy_metadata = _load_metadata("policy")
 
         # Load resolved LP bounds dictionary (actual bounds used by the solver)
         bounds_path = (
@@ -643,18 +632,8 @@ class DashboardData:
             f" {len(stage_labels)} stage labels"
         )
 
-        # Filter simulation solver to actual scenario count from manifest
-        sim_manifest_path = case_dir / "output" / "simulation" / "_manifest.json"
-        simulation_manifest: dict = {}
-        if sim_manifest_path.exists():
-            try:
-                with sim_manifest_path.open() as f:
-                    simulation_manifest = json.load(f)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "Failed to parse output/simulation/_manifest.json; using empty dict"
-                )
-        actual_sim_scenarios = simulation_manifest.get("scenarios", {}).get(
+        # Filter simulation solver to actual scenario count from metadata
+        actual_sim_scenarios = simulation_metadata.get("scenarios", {}).get(
             "completed", n_scenarios
         )
         if not solver_sim.empty:
@@ -698,11 +677,10 @@ class DashboardData:
             inflow_history=inflow_history,
             correlation=correlation,
             inflow_lags_lf=inflow_lags_lf,
-            metadata=metadata,
-            config=config,
-            training_manifest=training_manifest,
-            simulation_manifest=simulation_manifest,
+            training_metadata=training_metadata,
+            simulation_metadata=simulation_metadata,
             policy_metadata=policy_metadata,
+            config=config,
             discount_rate=discount_rate,
             stages_data=stages_data,
             lp_bounds=lp_bounds,
