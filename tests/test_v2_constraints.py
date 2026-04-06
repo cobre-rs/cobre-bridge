@@ -1,12 +1,15 @@
 """Unit tests for cobre_bridge.dashboard.tabs.v2_constraints.
 
-Covers module constants, can_render, _build_metrics_row, and the full
-render() path using MagicMock data with real polars/pandas objects for
-fields that get accessed as LazyFrames/DataFrames.
+Covers module constants, can_render, _build_metrics_row, the new
+_compute_violation_zones, _build_constraint_lhs_data, _build_lhs_section,
+_add_type_filter_and_row_attrs helpers, and the full render() path using
+MagicMock data with real polars/pandas objects for fields that get accessed
+as LazyFrames/DataFrames.
 """
 
 from __future__ import annotations
 
+import math
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -14,7 +17,10 @@ import polars as pl
 
 import cobre_bridge.dashboard.tabs.v2_constraints as v2_constraints
 from cobre_bridge.dashboard.tabs.v2_constraints import (
+    _build_constraint_lhs_data,
+    _build_lhs_section,
     _build_metrics_row,
+    _compute_violation_zones,
     can_render,
     render,
 )
@@ -88,6 +94,29 @@ def _make_costs(
             if include_violation_cost:
                 row["generic_violation_cost"] = violation_cost
             rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _make_lhs_df(
+    constraint_ids: list[int],
+    n_scenarios: int = 2,
+    n_stages: int = 3,
+    lhs_value: float = 120.0,
+) -> pd.DataFrame:
+    """Return a small LHS DataFrame with uniform lhs_value across all rows."""
+    rows = []
+    for cid in constraint_ids:
+        for sid in range(n_scenarios):
+            for stg in range(n_stages):
+                rows.append(
+                    {
+                        "constraint_id": cid,
+                        "scenario_id": sid,
+                        "stage_id": stg,
+                        "block_id": 0,
+                        "lhs_value": lhs_value,
+                    }
+                )
     return pd.DataFrame(rows)
 
 
@@ -259,16 +288,252 @@ def test_build_metrics_row_empty_violations_shows_zero_violated() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_render
-#
-# render() calls evaluate_constraint_expressions, chart_violation_summary,
-# and chart_violation_heatmap — all of which operate on polars LazyFrames.
-# The reused chart functions are already tested in constraints.py coverage, so
-# we patch them here to return lightweight stub HTML, keeping these tests
-# focused on the v2 wrapper structure rather than re-testing chart logic.
-#
-# The patch targets are in the v2_constraints module's namespace (where the
-# names were imported into) to intercept the calls made by render().
+# test__compute_violation_zones
+# ---------------------------------------------------------------------------
+
+
+def test_compute_violation_zones_ge_single_dip() -> None:
+    """>=: violation at stage index 1 where p10=80 < bound=85."""
+    p10 = [100.0, 80.0, 90.0]
+    p90 = [110.0, 95.0, 105.0]
+    bound = [85.0, 85.0, 85.0]
+    result = _compute_violation_zones(p10, p90, bound, ">=")
+    assert result == [{"start": 1, "end": 1}]
+
+
+def test_compute_violation_zones_le_single_spike() -> None:
+    """<=: violation at stage index 1 where p90=120 > bound=110."""
+    p10 = [90.0, 90.0, 90.0]
+    p90 = [100.0, 120.0, 90.0]
+    bound = [110.0, 110.0, 110.0]
+    result = _compute_violation_zones(p10, p90, bound, "<=")
+    assert result == [{"start": 1, "end": 1}]
+
+
+def test_compute_violation_zones_no_violations() -> None:
+    """No violations when band never crosses bound."""
+    p10 = [100.0, 100.0, 100.0]
+    p90 = [110.0, 110.0, 110.0]
+    bound = [85.0, 85.0, 85.0]
+    result = _compute_violation_zones(p10, p90, bound, ">=")
+    assert result == []
+
+
+def test_compute_violation_zones_nan_bound_skipped() -> None:
+    """Stages with NaN bound must not be counted as violations."""
+    p10 = [80.0, 80.0, 80.0]
+    p90 = [90.0, 90.0, 90.0]
+    bound = [85.0, float("nan"), 85.0]
+    result = _compute_violation_zones(p10, p90, bound, ">=")
+    # Stage 0 violated, NaN at 1 breaks the zone, stage 2 violated → two zones
+    assert result == [{"start": 0, "end": 0}, {"start": 2, "end": 2}]
+
+
+def test_compute_violation_zones_contiguous_range() -> None:
+    """>=: contiguous violation across stages 0–2 produces a single interval."""
+    p10 = [70.0, 70.0, 70.0]
+    p90 = [80.0, 80.0, 80.0]
+    bound = [85.0, 85.0, 85.0]
+    result = _compute_violation_zones(p10, p90, bound, ">=")
+    assert result == [{"start": 0, "end": 2}]
+
+
+def test_compute_violation_zones_empty_inputs() -> None:
+    """Empty input lists must return empty result without error."""
+    result = _compute_violation_zones([], [], [], ">=")
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
+# test__build_constraint_lhs_data
+# ---------------------------------------------------------------------------
+
+
+def test_build_constraint_lhs_data_structure() -> None:
+    """Returned dict must have stages, xlabels, and constraints with expected keys."""
+    constraints = [
+        {"id": 0, "name": "VminOP_c0", "sense": ">="},
+        {"id": 1, "name": "RE_c1", "sense": "<="},
+    ]
+    lhs_df = _make_lhs_df([0, 1], n_scenarios=2, n_stages=3, lhs_value=120.0)
+    gc_bounds = _make_gc_bounds([0, 1], n_stages=3)
+    stage_labels = {0: "Jan", 1: "Feb", 2: "Mar"}
+
+    result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
+
+    assert "stages" in result
+    assert "xlabels" in result
+    assert "constraints" in result
+    assert result["stages"] == [0, 1, 2]
+    assert result["xlabels"] == ["Jan", "Feb", "Mar"]
+
+    for cid_str in ("0", "1"):
+        entry = result["constraints"][cid_str]
+        for key in (
+            "name",
+            "sense",
+            "lhs_p10",
+            "lhs_p50",
+            "lhs_p90",
+            "bound",
+            "violations",
+        ):
+            assert key in entry, f"Missing key '{key}' in constraint {cid_str}"
+        assert len(entry["lhs_p10"]) == 3
+        assert len(entry["lhs_p50"]) == 3
+        assert len(entry["lhs_p90"]) == 3
+        assert len(entry["bound"]) == 3
+
+
+def test_build_constraint_lhs_data_uniform_lhs_gives_equal_percentiles() -> None:
+    """Uniform LHS across scenarios must yield p10 == p50 == p90 at every stage."""
+    constraints = [{"id": 0, "name": "VminOP_c0", "sense": ">="}]
+    lhs_df = _make_lhs_df([0], n_scenarios=3, n_stages=3, lhs_value=50.0)
+    gc_bounds = _make_gc_bounds([0], n_stages=3)
+    stage_labels = {0: "S0", 1: "S1", 2: "S2"}
+
+    result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
+    entry = result["constraints"]["0"]
+
+    for i in range(3):
+        assert math.isclose(entry["lhs_p10"][i], 50.0, abs_tol=1e-3)
+        assert math.isclose(entry["lhs_p50"][i], 50.0, abs_tol=1e-3)
+        assert math.isclose(entry["lhs_p90"][i], 50.0, abs_tol=1e-3)
+
+
+def test_build_constraint_lhs_data_violations_populated_for_ge() -> None:
+    """>=: violations list is non-empty when p10 < bound at some stages."""
+    constraints = [{"id": 0, "name": "VminOP_c0", "sense": ">="}]
+    # lhs_value=80 < bound=100 → p10 will be 80, bound is 100 → violation everywhere
+    lhs_df = _make_lhs_df([0], n_scenarios=2, n_stages=3, lhs_value=80.0)
+    gc_bounds = _make_gc_bounds([0], n_stages=3)  # bound=100.0
+    stage_labels = {0: "S0", 1: "S1", 2: "S2"}
+
+    result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
+    violations = result["constraints"]["0"]["violations"]
+
+    assert len(violations) > 0
+    assert violations[0]["start"] == 0
+
+
+def test_build_constraint_lhs_data_empty_lhs_gives_zeros() -> None:
+    """Empty lhs_df must produce zero arrays for p10/p50/p90."""
+    constraints = [{"id": 0, "name": "VminOP_c0", "sense": ">="}]
+    lhs_df = pd.DataFrame(
+        columns=["constraint_id", "scenario_id", "stage_id", "block_id", "lhs_value"]
+    )
+    gc_bounds = _make_gc_bounds([0], n_stages=3)
+    stage_labels = {0: "S0", 1: "S1", 2: "S2"}
+
+    result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
+    entry = result["constraints"]["0"]
+
+    assert entry["lhs_p10"] == [0.0, 0.0, 0.0]
+    assert entry["lhs_p50"] == [0.0, 0.0, 0.0]
+    assert entry["lhs_p90"] == [0.0, 0.0, 0.0]
+
+
+def test_build_constraint_lhs_data_missing_bounds_gives_none_bound() -> None:
+    """No gc_bounds rows for a constraint → bound array is all None."""
+    constraints = [{"id": 99, "name": "VminOP_c99", "sense": ">="}]
+    lhs_df = _make_lhs_df([99], n_scenarios=2, n_stages=3)
+    gc_bounds = pd.DataFrame(columns=["constraint_id", "stage_id", "block_id", "bound"])
+    stage_labels = {0: "S0", 1: "S1", 2: "S2"}
+
+    result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
+    entry = result["constraints"]["99"]
+
+    assert all(v is None for v in entry["bound"])
+    assert entry["violations"] == []
+
+
+# ---------------------------------------------------------------------------
+# test__build_lhs_section
+# ---------------------------------------------------------------------------
+
+
+def test_build_lhs_section_html_contains_required_elements() -> None:
+    """_build_lhs_section must contain gc-constraint-sel, gc-lhs-chart, GC_LHS_DATA."""
+    constraints = _make_constraints(n=2)
+    gc_bounds = _make_gc_bounds([0, 1], n_stages=3)
+    lhs_df = _make_lhs_df([0, 1], n_scenarios=2, n_stages=3)
+    data = _make_mock_data(constraints=constraints, gc_bounds=gc_bounds, n_stages=3)
+    data.gc_bounds = gc_bounds
+
+    html = _build_lhs_section(data, lhs_df)
+
+    assert "gc-constraint-sel" in html
+    assert "gc-lhs-chart" in html
+    assert "GC_LHS_DATA" in html
+
+
+def test_build_lhs_section_html_has_one_option_per_constraint() -> None:
+    """_build_lhs_section must emit one <option> per constraint."""
+    constraints = _make_constraints(n=3)
+    lhs_df = _make_lhs_df([0, 1, 2], n_scenarios=2, n_stages=2)
+    data = _make_mock_data(constraints=constraints, n_stages=2)
+
+    html = _build_lhs_section(data, lhs_df)
+
+    assert html.count("<option") == 3
+
+
+def test_build_lhs_section_json_blob_has_violations_key() -> None:
+    """GC_LHS_DATA JSON embedded in the section must include 'violations' key."""
+    constraints = _make_constraints(n=1)
+    lhs_df = _make_lhs_df([0], n_scenarios=2, n_stages=2)
+    data = _make_mock_data(constraints=constraints, n_stages=2)
+
+    html = _build_lhs_section(data, lhs_df)
+
+    assert '"violations"' in html
+
+
+# ---------------------------------------------------------------------------
+# test_type_filter_dropdown
+# ---------------------------------------------------------------------------
+
+
+def test_type_filter_dropdown_present_in_render() -> None:
+    """render() HTML must contain gc-type-filter with 4 options."""
+    data = _make_mock_data()
+
+    with _render_with_stubs_ctx(data) as html:
+        assert "gc-type-filter" in html
+        assert (
+            html.count("<option") >= 4
+        )  # All, VminOP, RE, AGRINT + constraint options
+
+
+def test_type_filter_has_all_four_options() -> None:
+    """gc-type-filter must have options: All, VminOP, RE, AGRINT."""
+    data = _make_mock_data()
+
+    with _render_with_stubs_ctx(data) as html:
+        # Find the filter select block
+        assert 'value="All"' in html
+        assert 'value="VminOP"' in html
+        assert 'value="RE"' in html
+        assert 'value="AGRINT"' in html
+
+
+# ---------------------------------------------------------------------------
+# test_no_three_separate_sections
+# ---------------------------------------------------------------------------
+
+
+def test_no_three_separate_old_section_titles() -> None:
+    """render() must NOT contain the old three-section titles from Section C."""
+    data = _make_mock_data()
+
+    with _render_with_stubs_ctx(data) as html:
+        assert "VminOP: Stored Energy vs Minimum" not in html
+        assert "Electric Constraints (RE)" not in html
+        assert "Exchange Group Constraints (AGRINT)" not in html
+
+
+# ---------------------------------------------------------------------------
+# test_render (existing + updated)
 # ---------------------------------------------------------------------------
 
 _PATCH_EVAL = (
@@ -280,6 +545,28 @@ _PATCH_HEATMAP = "cobre_bridge.dashboard.tabs.v2_constraints.chart_violation_hea
 _STUB_LHS_DF = pd.DataFrame(
     columns=["constraint_id", "scenario_id", "stage_id", "block_id", "lhs_value"]
 )
+
+
+class _render_with_stubs_ctx:
+    """Context manager that calls render() with LazyFrame-dependent functions patched."""
+
+    def __init__(self, data: MagicMock) -> None:
+        self._data = data
+        self._html: str = ""
+
+    def __enter__(self) -> str:
+        from unittest.mock import patch
+
+        with (
+            patch(_PATCH_EVAL, return_value=_STUB_LHS_DF),
+            patch(_PATCH_SUMMARY, return_value="<p>violation summary stub</p>"),
+            patch(_PATCH_HEATMAP, return_value="<p>violation heatmap stub</p>"),
+        ):
+            self._html = render(self._data)
+        return self._html
+
+    def __exit__(self, *_: object) -> None:
+        pass
 
 
 def _render_with_stubs(data: MagicMock) -> str:
@@ -295,11 +582,7 @@ def _render_with_stubs(data: MagicMock) -> str:
 
 
 def test_render_produces_expected_sections() -> None:
-    """render() with minimal data must contain expected HTML substrings.
-
-    Acceptance criterion from ticket-019: the returned HTML contains
-    'Constraint Summary', 'VminOP', 'Violation', and 'metrics-grid'.
-    """
+    """render() with minimal data must contain expected HTML substrings."""
     constraints = _make_constraints(n=2, ctype="VminOP")
     gc_bounds = _make_gc_bounds([c["id"] for c in constraints])
     gc_violations = _make_gc_violations(constraint_ids=None)
@@ -338,7 +621,6 @@ def test_render_bounds_timeline_is_collapsed() -> None:
     """render() must start the Bounds Timeline section collapsed."""
     data = _make_mock_data()
     html = _render_with_stubs(data)
-    # The bounds timeline section title appears inside a default-collapsed section
     assert "default-collapsed" in html
 
 
@@ -349,29 +631,18 @@ def test_render_contains_chart_grid() -> None:
     assert "chart-grid" in html
 
 
-def test_render_with_re_and_agrint_constraints() -> None:
-    """render() with RE and AGRINT constraints must include those section titles."""
-    constraints = [
-        {
-            "id": 0,
-            "name": "RE_electric_1",
-            "expression": "hydro_storage(0)",
-            "sense": "<=",
-            "slack": {},
-        },
-        {
-            "id": 1,
-            "name": "AGRINT_group_1",
-            "expression": "hydro_storage(1)",
-            "sense": "<=",
-            "slack": {},
-        },
-    ]
-    gc_bounds = _make_gc_bounds([0, 1])
-    data = _make_mock_data(constraints=constraints, gc_bounds=gc_bounds)
+def test_render_contains_lhs_vs_bound_section() -> None:
+    """render() must contain the new unified 'LHS vs Bound' section title."""
+    data = _make_mock_data()
     html = _render_with_stubs(data)
-    assert "Electric Constraints (RE)" in html
-    assert "Exchange Group Constraints (AGRINT)" in html
+    assert "LHS vs Bound" in html
+
+
+def test_render_contains_gc_lhs_chart_div() -> None:
+    """render() must contain the gc-lhs-chart div for the JS chart."""
+    data = _make_mock_data()
+    html = _render_with_stubs(data)
+    assert "gc-lhs-chart" in html
 
 
 def test_render_returns_string() -> None:

@@ -548,8 +548,15 @@ def build_thermal_explorer(
         ),
     )
 
+    band_toggle = (
+        '<div class="explorer-band-toggle" style="padding:4px 8px;">'
+        '<label><input type="checkbox" id="pe-band-toggle" checked> Show p10-p90</label>'
+        "</div>"
+    )
+
     detail_pane = (
         '<div id="tt-detail" class="explorer-detail-pane">'
+        + band_toggle
         + generation_section
         + economics_section
         + "</div>"
@@ -578,8 +585,10 @@ function renderThermalDetail(containerId, d) {
   if (!d) { return; }
   var lbl = TT_LABELS;
 
+  var ttGenBand = plotlyBand(lbl, d.gen_p10, d.gen_p90, 'rgba(245,166,35,0.15)', 'P10\u2013P90');
+  ttGenBand.visible = _peBandVisible;
   var genTraces = [
-    plotlyBand(lbl, d.gen_p10, d.gen_p90, 'rgba(245,166,35,0.15)', 'P10\u2013P90'),
+    ttGenBand,
     plotlyLine(lbl, d.gen_p50, '#F5A623', 'P50'),
     plotlyLine(lbl, d.gen_p10, '#F5A623', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.gen_p90, '#F5A623', 'P90', 1, 'dot'),
@@ -593,15 +602,19 @@ function renderThermalDetail(containerId, d) {
   Plotly.react('tt-gen', genTraces,
     plotlyLayout({title: d.name + ' \u2014 Generation (MW)', yaxis: {title: 'MW'}}), _TC);
 
+  var ttCostBand = plotlyBand(lbl, d.cost_p10, d.cost_p90, 'rgba(220,76,76,0.12)', 'P10\u2013P90');
+  ttCostBand.visible = _peBandVisible;
   Plotly.react('tt-cost', [
-    plotlyBand(lbl, d.cost_p10, d.cost_p90, 'rgba(220,76,76,0.12)', 'P10\u2013P90'),
+    ttCostBand,
     plotlyLine(lbl, d.cost_p50, '#DC4C4C', 'P50'),
     plotlyLine(lbl, d.cost_p10, '#DC4C4C', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.cost_p90, '#DC4C4C', 'P90', 1, 'dot'),
   ], plotlyLayout({title: 'Dispatch Cost (R$)', yaxis: {title: 'R$'}}), _TC);
 
+  var ttEnergyBand = plotlyBand(lbl, d.energy_p10, d.energy_p90, 'rgba(74,139,111,0.15)', 'P10\u2013P90');
+  ttEnergyBand.visible = _peBandVisible;
   Plotly.react('tt-energy', [
-    plotlyBand(lbl, d.energy_p10, d.energy_p90, 'rgba(74,139,111,0.15)', 'P10\u2013P90'),
+    ttEnergyBand,
     plotlyLine(lbl, d.energy_p50, '#4A8B6F', 'P50'),
     plotlyLine(lbl, d.energy_p10, '#4A8B6F', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.energy_p90, '#4A8B6F', 'P90', 1, 'dot'),
@@ -768,8 +781,15 @@ def build_hydro_explorer(
         ),
     )
 
+    band_toggle = (
+        '<div class="explorer-band-toggle" style="padding:4px 8px;">'
+        '<label><input type="checkbox" id="pe-band-toggle" checked> Show p10-p90</label>'
+        "</div>"
+    )
+
     detail_pane = (
         '<div id="hp-detail" class="explorer-detail-pane">'
+        + band_toggle
         + water_balance_section
         + generation_section
         + "</div>"
@@ -793,14 +813,24 @@ def build_hydro_explorer(
         + ";\n"
         + """
 var _HC = {responsive: true};
+var _peBandVisible = true;
+
+document.addEventListener('change', function(e) {
+  if (e.target.id !== 'pe-band-toggle') return;
+  _peBandVisible = e.target.checked;
+  var activeRow = document.querySelector('.explorer-row-selected');
+  if (activeRow) activeRow.click();
+});
 
 function renderHydroDetail(containerId, d) {
   if (!d) { return; }
   var lbl = HP_LABELS;
 
   // Storage (hm3) — stage-level
+  var storBand = plotlyBand(lbl, d.stor_p10, d.stor_p90, 'rgba(33,150,243,0.15)', 'P10\u2013P90');
+  storBand.visible = _peBandVisible;
   var storTraces = [
-    plotlyBand(lbl, d.stor_p10, d.stor_p90, 'rgba(33,150,243,0.15)', 'P10\u2013P90'),
+    storBand,
     plotlyLine(lbl, d.stor_p50, '#2196F3', 'P50'),
     plotlyLine(lbl, d.stor_p10, '#2196F3', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.stor_p90, '#2196F3', 'P90', 1, 'dot'),
@@ -815,16 +845,20 @@ function renderHydroDetail(containerId, d) {
     plotlyLayout({title: d.name + ' \u2014 Storage (hm\u00b3)', yaxis: {title: 'hm\u00b3'}}), _HC);
 
   // Inflow (m3/s)
+  var inflowBand = plotlyBand(lbl, d.inflow_p10, d.inflow_p90, 'rgba(76,175,80,0.15)', 'P10\u2013P90');
+  inflowBand.visible = _peBandVisible;
   Plotly.react('hp-inflow', [
-    plotlyBand(lbl, d.inflow_p10, d.inflow_p90, 'rgba(76,175,80,0.15)', 'P10\u2013P90'),
+    inflowBand,
     plotlyLine(lbl, d.inflow_p50, '#4CAF50', 'P50'),
     plotlyLine(lbl, d.inflow_p10, '#4CAF50', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.inflow_p90, '#4CAF50', 'P90', 1, 'dot'),
   ], plotlyLayout({title: 'Inflow (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _HC);
 
   // Spillage (m3/s)
+  var spillBand = plotlyBand(lbl, d.spill_p10, d.spill_p90, 'rgba(255,152,0,0.15)', 'P10\u2013P90');
+  spillBand.visible = _peBandVisible;
   var spillTraces = [
-    plotlyBand(lbl, d.spill_p10, d.spill_p90, 'rgba(255,152,0,0.15)', 'P10\u2013P90'),
+    spillBand,
     plotlyLine(lbl, d.spill_p50, '#FF9800', 'P50'),
     plotlyLine(lbl, d.spill_p10, '#FF9800', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.spill_p90, '#FF9800', 'P90', 1, 'dot'),
@@ -839,16 +873,20 @@ function renderHydroDetail(containerId, d) {
     plotlyLayout({title: 'Spillage (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _HC);
 
   // Evaporation (m3/s)
+  var evapBand = plotlyBand(lbl, d.evap_p10, d.evap_p90, 'rgba(156,39,176,0.12)', 'P10\u2013P90');
+  evapBand.visible = _peBandVisible;
   Plotly.react('hp-evap', [
-    plotlyBand(lbl, d.evap_p10, d.evap_p90, 'rgba(156,39,176,0.12)', 'P10\u2013P90'),
+    evapBand,
     plotlyLine(lbl, d.evap_p50, '#9C27B0', 'P50'),
     plotlyLine(lbl, d.evap_p10, '#9C27B0', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.evap_p90, '#9C27B0', 'P90', 1, 'dot'),
   ], plotlyLayout({title: 'Evaporation (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _HC);
 
   // Generation (MW) — flow variable
+  var genBand = plotlyBand(lbl, d.gen_p10, d.gen_p90, 'rgba(245,166,35,0.15)', 'P10\u2013P90');
+  genBand.visible = _peBandVisible;
   var genTraces = [
-    plotlyBand(lbl, d.gen_p10, d.gen_p90, 'rgba(245,166,35,0.15)', 'P10\u2013P90'),
+    genBand,
     plotlyLine(lbl, d.gen_p50, '#F5A623', 'P50'),
     plotlyLine(lbl, d.gen_p10, '#F5A623', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.gen_p90, '#F5A623', 'P90', 1, 'dot'),
@@ -863,8 +901,10 @@ function renderHydroDetail(containerId, d) {
     plotlyLayout({title: d.name + ' \u2014 Generation (MW)', yaxis: {title: 'MW'}}), _HC);
 
   // Turbined (m3/s)
+  var turbBand = plotlyBand(lbl, d.turb_p10, d.turb_p90, 'rgba(3,169,244,0.15)', 'P10\u2013P90');
+  turbBand.visible = _peBandVisible;
   var turbTraces = [
-    plotlyBand(lbl, d.turb_p10, d.turb_p90, 'rgba(3,169,244,0.15)', 'P10\u2013P90'),
+    turbBand,
     plotlyLine(lbl, d.turb_p50, '#03A9F4', 'P50'),
     plotlyLine(lbl, d.turb_p10, '#03A9F4', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.turb_p90, '#03A9F4', 'P90', 1, 'dot'),
@@ -879,8 +919,10 @@ function renderHydroDetail(containerId, d) {
     plotlyLayout({title: 'Turbined (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _HC);
 
   // Outflow (m3/s) — derived turbined + spillage
+  var outflowBand = plotlyBand(lbl, d.outflow_p10, d.outflow_p90, 'rgba(0,188,212,0.15)', 'P10\u2013P90');
+  outflowBand.visible = _peBandVisible;
   var outflowTraces = [
-    plotlyBand(lbl, d.outflow_p10, d.outflow_p90, 'rgba(0,188,212,0.15)', 'P10\u2013P90'),
+    outflowBand,
     plotlyLine(lbl, d.outflow_p50, '#00BCD4', 'P50'),
     plotlyLine(lbl, d.outflow_p10, '#00BCD4', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.outflow_p90, '#00BCD4', 'P90', 1, 'dot'),
@@ -895,8 +937,10 @@ function renderHydroDetail(containerId, d) {
     plotlyLayout({title: 'Outflow (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _HC);
 
   // Water Value (R$/hm3) — stage-level
+  var wvBand = plotlyBand(lbl, d.wv_p10, d.wv_p90, 'rgba(233,30,99,0.12)', 'P10\u2013P90');
+  wvBand.visible = _peBandVisible;
   Plotly.react('hp-wv', [
-    plotlyBand(lbl, d.wv_p10, d.wv_p90, 'rgba(233,30,99,0.12)', 'P10\u2013P90'),
+    wvBand,
     plotlyLine(lbl, d.wv_p50, '#E91E63', 'P50'),
     plotlyLine(lbl, d.wv_p10, '#E91E63', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.wv_p90, '#E91E63', 'P90', 1, 'dot'),

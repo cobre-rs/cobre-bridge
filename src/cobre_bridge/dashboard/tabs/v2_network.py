@@ -3,8 +3,9 @@
 Implements three sections of the Network tab (Tab 7):
   A. Line Explorer -- split-pane dropdown + per-line net/direct/reverse flow
      charts with p10/p50/p90 bands, following the exchanges.py JSON+JS pattern.
-  B. Capacity Utilisation Heatmap -- side-by-side direct/reverse heatmaps using
-     make_subplots, with RdYlGn_r colorscale.
+     Includes a third per-line capacity utilisation chart (|net flow| / capacity %).
+  B. Capacity Utilisation Heatmap -- single net utilisation heatmap using
+     go.Figure, with RdYlGn_r colorscale.
   C. Bus Balance -- horizontal grouped bar chart showing mean net import/export
      per bus across all stages (all buses included, no fictitious filtering).
 """
@@ -17,7 +18,6 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-from plotly.subplots import make_subplots
 
 from cobre_bridge.dashboard.chart_helpers import make_chart_card
 from cobre_bridge.dashboard.data import entity_name
@@ -51,13 +51,15 @@ def build_line_explorer(
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
     bh_df: pl.DataFrame,
+    line_bounds: pd.DataFrame | None = None,
+    line_meta: list[dict] | None = None,
 ) -> str:
     """Build HTML with embedded per-line p10/p50/p90 data and JS dropdown.
 
     Follows the same JSON-embed + Plotly.react() pattern as
     ``exchanges.py`` ``build_interactive_exchange_detail()``.  Renders
-    two charts per line: net flow (id: ``nw-net``) and direct/reverse
-    flow (id: ``nw-dir``).
+    three charts per line: net flow (id: ``nw-net``), direct/reverse
+    flow (id: ``nw-dir``), and capacity utilisation (id: ``nw-util``).
 
     Args:
         exchanges_lf: LazyFrame with columns ``scenario_id``, ``stage_id``,
@@ -67,10 +69,15 @@ def build_line_explorer(
         stage_labels: Stage id to human-readable label mapping.
         bh_df: Block-hours DataFrame with columns ``stage_id``, ``block_id``,
             ``_bh``.
+        line_bounds: pandas DataFrame with columns ``line_id``, ``stage_id``,
+            ``direct_mw``, ``reverse_mw``.  May be None or empty.
+        line_meta: List of line metadata dicts, each with keys ``id``,
+            ``direct_capacity_mw``, ``reverse_capacity_mw``.  May be None.
 
     Returns:
         HTML string with ``<select id="nw-select">``, chart divs
-        ``<div id="nw-net">`` and ``<div id="nw-dir">``, and inline JS.
+        ``<div id="nw-net">``, ``<div id="nw-dir">``, ``<div id="nw-util">``,
+        and inline JS.
     """
     flow_cols = ["net_flow_mw", "direct_flow_mw", "reverse_flow_mw"]
     schema = exchanges_lf.collect_schema()
@@ -100,11 +107,30 @@ def build_line_explorer(
     xlabels = stage_x_labels(stages, stage_labels)
     line_ids = sorted(ex0["line_id"].unique().to_list())
 
+    # Build capacity lookups for utilisation computation
+    static_direct_cap: dict[int, float] = {}
+    static_reverse_cap: dict[int, float] = {}
+    if line_meta:
+        for lm in line_meta:
+            lid_m = lm["id"]
+            static_direct_cap[lid_m] = float(lm.get("direct_capacity_mw", 1.0))
+            static_reverse_cap[lid_m] = float(lm.get("reverse_capacity_mw", 1.0))
+
+    bounds_lookup_le: dict[tuple[int, int], tuple[float, float]] = {}
+    if line_bounds is not None and not line_bounds.empty:
+        lb_indexed = line_bounds.set_index(["line_id", "stage_id"])
+        for (lid_b, sid_b), row_b in lb_indexed.iterrows():
+            bounds_lookup_le[(int(lid_b), int(sid_b))] = (
+                float(row_b.get("direct_mw", 1.0)),
+                float(row_b.get("reverse_mw", 1.0)),
+            )
+
     line_data: dict[str, dict] = {}
     for lid in line_ids:
         lname = entity_name(names, "lines", lid)
         ldf = ex0.filter(pl.col("line_id") == lid)
         entry: dict = {"name": lname}
+        net_pcts_map: dict[int, dict[str, float]] = {}
         for col, prefix in [
             ("net_flow_mw", "net"),
             ("direct_flow_mw", "direct"),
@@ -134,6 +160,30 @@ def build_line_explorer(
                 entry[f"{prefix}_{sfx}"] = [
                     round(pcts_map.get(s, {}).get(sfx, 0.0), 2) for s in stages
                 ]
+            if prefix == "net":
+                net_pcts_map = pcts_map
+
+        # Compute capacity utilisation: |net_flow| / max(d_cap, r_cap) * 100
+        for sfx in ["p10", "p50", "p90"]:
+            util_vals: list[float] = []
+            for s in stages:
+                if bounds_lookup_le:
+                    d_cap, r_cap = bounds_lookup_le.get(
+                        (lid, s),
+                        (
+                            static_direct_cap.get(lid, 1.0),
+                            static_reverse_cap.get(lid, 1.0),
+                        ),
+                    )
+                else:
+                    d_cap = static_direct_cap.get(lid, 1.0)
+                    r_cap = static_reverse_cap.get(lid, 1.0)
+                cap = max(d_cap, r_cap, 0.1)
+                net_val = net_pcts_map.get(s, {}).get(sfx, 0.0)
+                util = min(abs(net_val) / cap * 100.0, 100.0)
+                util_vals.append(round(util, 2))
+            entry[f"util_{sfx}"] = util_vals
+
         line_data[str(lid)] = entry
 
     options_html = "\n".join(
@@ -149,6 +199,9 @@ def build_line_explorer(
         "</div>"
         '<div class="chart-grid-single">'
         '<div class="chart-card"><div id="nw-dir" style="width:100%;height:350px;"></div></div>'
+        "</div>"
+        '<div class="chart-grid-single">'
+        '<div class="chart-card"><div id="nw-util" style="width:100%;height:350px;"></div></div>'
         "</div>"
     )
 
@@ -211,6 +264,13 @@ function updateNetworkDetail() {
     _nw_line('Reverse P90 (neg)', rev_p90_neg, '#DC4C4C', 1, 'dot'),
     {x:NW_LABELS, y:zeroLine, name:'Zero', line:{color:'gray',width:1,dash:'dot'}, showlegend:false},
   ], _nw_lo({title:d.name+' \u2014 Direct / Reverse Flow (MW)', yaxis:{title:'Flow (MW)'}}), _NW_C);
+
+  var ref100 = Array(NW_LABELS.length).fill(100);
+  Plotly.react('nw-util', [
+    _nw_band('Util P10\u2013P90', d.util_p10, d.util_p90, 'rgba(245,166,35,0.18)'),
+    _nw_line('Util P50', d.util_p50, '#F5A623'),
+    {x:NW_LABELS, y:ref100, name:'100%', line:{color:'#DC4C4C',width:1.5,dash:'dash'}, showlegend:true},
+  ], _nw_lo({title:d.name+' \u2014 Capacity Utilisation (%)', yaxis:{title:'% Capacity', range:[0, 110]}}), _NW_C);
 }
 document.addEventListener('DOMContentLoaded', function(){setTimeout(updateNetworkDetail,100);});
 """
@@ -231,12 +291,13 @@ def build_heatmap(
     stage_labels: dict[int, str],
     bh_df: pl.DataFrame,
 ) -> str:
-    """Build a side-by-side direct/reverse capacity utilisation heatmap.
+    """Build a single net capacity utilisation heatmap.
 
-    Computes block-hours weighted average flows per (scenario, stage, line),
+    Computes block-hours weighted average net flow per (scenario, stage, line),
     then averages across scenarios.  Capacity is taken from ``line_bounds``
     per stage when available, falling back to the static capacities in
-    ``line_meta``.
+    ``line_meta``.  Heatmap value = ``|mean_net_flow| / max(d_cap, r_cap) * 100``,
+    clamped to [0, 100].
 
     Args:
         exchanges_lf: Line flow LazyFrame.
@@ -253,38 +314,40 @@ def build_heatmap(
     """
     schema = exchanges_lf.collect_schema()
     schema_names = list(schema.names())
+    net_col_present = "net_flow_mw" in schema_names
     direct_col_present = "direct_flow_mw" in schema_names
     reverse_col_present = "reverse_flow_mw" in schema_names
 
-    if not direct_col_present and not reverse_col_present:
+    if not net_col_present and not (direct_col_present or reverse_col_present):
         return "<p>No capacity data available.</p>"
 
-    agg_exprs = []
-    if direct_col_present:
-        agg_exprs.append(
+    # Build net flow agg expression: prefer net_flow_mw; else compute direct - reverse
+    if net_col_present:
+        net_agg = (
+            (pl.col("net_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
+        ).alias("net")
+    elif direct_col_present and reverse_col_present:
+        net_agg = (
             (
-                (pl.col("direct_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
-            ).alias("direct")
-        )
-    if reverse_col_present:
-        agg_exprs.append(
-            (
-                (pl.col("reverse_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
-            ).alias("reverse")
-        )
+                (pl.col("direct_flow_mw") - pl.col("reverse_flow_mw")) * pl.col("_bh")
+            ).sum()
+            / pl.col("_bh").sum()
+        ).alias("net")
+    elif direct_col_present:
+        net_agg = (
+            (pl.col("direct_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
+        ).alias("net")
+    else:
+        net_agg = (
+            (pl.col("reverse_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()
+        ).alias("net")
 
     flow_data = (
         exchanges_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "line_id"])
-        .agg(*agg_exprs)
+        .agg(net_agg)
         .group_by(["stage_id", "line_id"])
-        .agg(
-            *[
-                pl.col(c).mean()
-                for c in (["direct"] if direct_col_present else [])
-                + (["reverse"] if reverse_col_present else [])
-            ]
-        )
+        .agg(pl.col("net").mean())
         .sort("stage_id")
         .collect(engine="streaming")
     )
@@ -315,19 +378,13 @@ def build_heatmap(
     xlabels = stage_x_labels(stages, stage_labels)
     ynames = [entity_name(names, "lines", lid) for lid in line_ids]
 
-    z_direct: list[list[float]] = []
-    z_reverse: list[list[float]] = []
+    z_net: list[list[float]] = []
     for lid in line_ids:
         sub = flow_data.filter(pl.col("line_id") == lid)
-        d_map: dict[int, float] = {}
-        r_map: dict[int, float] = {}
-        if direct_col_present and "direct" in sub.columns:
-            d_map = dict(zip(sub["stage_id"].to_list(), sub["direct"].to_list()))
-        if reverse_col_present and "reverse" in sub.columns:
-            r_map = dict(zip(sub["stage_id"].to_list(), sub["reverse"].to_list()))
-
-        row_d: list[float] = []
-        row_r: list[float] = []
+        net_map: dict[int, float] = dict(
+            zip(sub["stage_id"].to_list(), sub["net"].to_list())
+        )
+        row_net: list[float] = []
         for s in stages:
             if bounds_lookup:
                 d_cap, r_cap = bounds_lookup.get(
@@ -337,42 +394,27 @@ def build_heatmap(
             else:
                 d_cap = static_direct.get(lid, 1.0)
                 r_cap = static_reverse.get(lid, 1.0)
+            cap = max(d_cap, r_cap, 0.1)
+            net_flow = net_map.get(s, 0.0)
+            row_net.append(min(abs(net_flow) / cap * 100.0, 100.0))
+        z_net.append(row_net)
 
-            d_flow = d_map.get(s, 0.0)
-            r_flow = r_map.get(s, 0.0)
-            row_d.append(min(d_flow / max(d_cap, 0.1) * 100.0, 100.0))
-            row_r.append(min(r_flow / max(r_cap, 0.1) * 100.0, 100.0))
-        z_direct.append(row_d)
-        z_reverse.append(row_r)
-
-    fig = make_subplots(
-        rows=1,
-        cols=2,
-        subplot_titles=["Direct Utilization (%)", "Reverse Utilization (%)"],
-        horizontal_spacing=0.12,
-    )
-    for col_idx, z, title in [(1, z_direct, "Direct"), (2, z_reverse, "Reverse")]:
-        fig.add_trace(
-            go.Heatmap(
-                z=z,
-                x=xlabels,
-                y=ynames,
-                colorscale="RdYlGn_r",
-                zmin=0,
-                zmax=100,
-                colorbar={
-                    "x": 0.45 if col_idx == 1 else 1.0,
-                    "len": 0.9,
-                    "title": "%",
-                },
-                showscale=True,
-                name=title,
-            ),
-            row=1,
-            col=col_idx,
+    fig = go.Figure()
+    fig.add_trace(
+        go.Heatmap(
+            z=z_net,
+            x=xlabels,
+            y=ynames,
+            colorscale="RdYlGn_r",
+            zmin=0,
+            zmax=100,
+            colorbar={"title": "%", "len": 0.9},
+            showscale=True,
+            name="Net Utilisation",
         )
+    )
     fig.update_layout(
-        title="Capacity Utilization Heatmap (avg across scenarios)",
+        title="Net Capacity Utilisation Heatmap (%)",
         height=max(300, len(line_ids) * 60 + 120),
         margin=_MARGIN,
     )
@@ -598,6 +640,8 @@ def render(data: DashboardData) -> str:
             data.names,
             data.stage_labels,
             data.bh_df,
+            data.line_bounds,
+            data.line_meta,
         )
         + section_title("Capacity Utilisation")
         + chart_grid(

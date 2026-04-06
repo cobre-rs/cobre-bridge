@@ -19,6 +19,8 @@ import polars as pl
 import cobre_bridge.dashboard.tabs.v2_costs as v2_costs
 from cobre_bridge.dashboard.chart_helpers import compute_cost_summary
 from cobre_bridge.dashboard.tabs.v2_costs import (
+    _build_composition_data,
+    _build_composition_section,
     _build_cost_table,
     _build_metrics_row,
     _chart_cost_bar,
@@ -848,3 +850,108 @@ def test_render_violations_timeline_absent_when_all_violation_zero() -> None:
     html = _render_violations(data)
     assert "No violation costs" in html
     assert "chart-card" not in html
+
+
+# ---------------------------------------------------------------------------
+# test__build_composition_data (ticket-011)
+# ---------------------------------------------------------------------------
+
+
+def _make_composition_costs_df(
+    n_scenarios: int = 2,
+    n_stages: int = 3,
+) -> pd.DataFrame:
+    """Return a small costs DataFrame with 3 cost columns for composition tests.
+
+    Columns: thermal_generation_cost (non-zero), spillage_cost (non-zero),
+    ncs_generation_cost (all zero).
+    """
+    rows = []
+    for scenario_id in range(n_scenarios):
+        for stage_id in range(n_stages):
+            rows.append(
+                {
+                    "scenario_id": scenario_id,
+                    "stage_id": stage_id,
+                    "block_id": 0,
+                    "thermal_generation_cost": 1000.0
+                    + scenario_id * 100
+                    + stage_id * 50,
+                    "spillage_cost": 200.0 + scenario_id * 20 + stage_id * 10,
+                    "ncs_generation_cost": 0.0,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_build_composition_data_keys() -> None:
+    """_build_composition_data must return a dict with required top-level keys.
+
+    Acceptance criterion from ticket-011: keys are category, component, total,
+    stages, colors.
+    """
+    costs = _make_composition_costs_df()
+    data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
+    result = _build_composition_data(data)
+    assert result is not None
+    assert set(result.keys()) == {"category", "component", "total", "stages", "colors"}
+
+
+def test_build_composition_data_total_stats() -> None:
+    """total.mean, total.p10, total.p90 must all have length == number of stages
+    and satisfy p10 <= mean <= p90 for each stage.
+
+    Acceptance criterion from ticket-011.
+    """
+    costs = _make_composition_costs_df(n_scenarios=2, n_stages=3)
+    data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
+    result = _build_composition_data(data)
+    assert result is not None
+    total = result["total"]
+    n = len(result["stages"])
+    assert len(total["mean"]) == n
+    assert len(total["p10"]) == n
+    assert len(total["p90"]) == n
+    for i in range(n):
+        assert total["p10"][i] <= total["mean"][i] + 1e-6
+        assert total["mean"][i] <= total["p90"][i] + 1e-6
+
+
+def test_build_composition_data_empty() -> None:
+    """_build_composition_data must return None for an empty costs DataFrame.
+
+    Acceptance criterion from ticket-011.
+    """
+    data = _make_mock_data_full(costs=pd.DataFrame())
+    result = _build_composition_data(data)
+    assert result is None
+
+
+def test_build_composition_data_zero_cols_excluded() -> None:
+    """Zero-valued columns must not appear in component.
+
+    Acceptance criterion from ticket-011: ncs_generation_cost is all-zero
+    and must be absent from component keys.
+    """
+    costs = _make_composition_costs_df()
+    data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
+    result = _build_composition_data(data)
+    assert result is not None
+    # The cleaned label for "ncs_generation_cost" -> "Ncs Generation"
+    assert "Ncs Generation" not in result["component"]
+    # Non-zero columns must be present
+    assert len(result["component"]) >= 1
+
+
+def test_build_composition_section_html() -> None:
+    """_build_composition_section must emit costs-group-sel, costs-comp,
+    and COSTS_COMP_DATA in the HTML output.
+
+    Acceptance criterion from ticket-011.
+    """
+    costs = _make_composition_costs_df()
+    data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
+    html = _build_composition_section(data)
+    assert "costs-group-sel" in html
+    assert "costs-comp" in html
+    assert "COSTS_COMP_DATA" in html

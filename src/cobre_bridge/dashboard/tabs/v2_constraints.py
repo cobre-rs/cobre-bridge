@@ -11,6 +11,8 @@ metrics_grid).
 
 from __future__ import annotations
 
+import json
+import math
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -18,7 +20,6 @@ import pandas as pd
 from cobre_bridge.dashboard.tabs.constraints import (
     build_constraints_summary_table,
     chart_constraint_bounds_timeline,
-    chart_constraint_lhs_vs_bound,
     chart_violation_cost_timeline,
     chart_violation_heatmap,
     chart_violation_summary,
@@ -32,6 +33,7 @@ from cobre_bridge.ui.html import (
     section_title,
     wrap_chart,
 )
+from cobre_bridge.ui.plotly_helpers import stage_x_labels
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -124,6 +126,355 @@ def _build_metrics_row(data: DashboardData) -> str:
     return metrics_grid(cards)
 
 
+def _compute_violation_zones(
+    p10: list[float],
+    p90: list[float],
+    bound: list[float],
+    sense: str,
+) -> list[dict[str, int]]:
+    """Compute contiguous stage index intervals where the band crosses the bound.
+
+    For ``>=`` sense (VminOP): violation where ``p10[i] < bound[i]``.
+    For ``<=`` sense (RE, AGRINT): violation where ``p90[i] > bound[i]``.
+    NaN bound values are skipped (no violation at those stages).
+
+    Args:
+        p10: List of p10 LHS values per stage.
+        p90: List of p90 LHS values per stage.
+        bound: List of RHS bound values per stage (may contain NaN).
+        sense: Constraint sense string; ``">="`` or ``"<="``.
+
+    Returns:
+        List of ``{"start": start_idx, "end": end_idx}`` dicts, one per
+        contiguous violated interval.  Empty list when no violations occur.
+    """
+    n = len(p10)
+    if n == 0:
+        return []
+
+    violations: list[dict[str, int]] = []
+    in_zone = False
+    zone_start = 0
+
+    for i in range(n):
+        b = bound[i] if i < len(bound) else float("nan")
+        if math.isnan(b):
+            # NaN bound: close any open zone before this gap
+            if in_zone:
+                violations.append({"start": zone_start, "end": i - 1})
+                in_zone = False
+            continue
+
+        if sense == ">=":
+            violated = p10[i] < b
+        else:
+            # "<=" and all other senses
+            violated = p90[i] > b
+
+        if violated and not in_zone:
+            in_zone = True
+            zone_start = i
+        elif not violated and in_zone:
+            violations.append({"start": zone_start, "end": i - 1})
+            in_zone = False
+
+    if in_zone:
+        violations.append({"start": zone_start, "end": n - 1})
+
+    return violations
+
+
+def _build_constraint_lhs_data(
+    constraints: list[dict],
+    lhs_df: pd.DataFrame,
+    gc_bounds: pd.DataFrame,
+    stage_labels: dict[int, str],
+) -> dict:
+    """Build the JSON-serialisable LHS percentile data for all constraints.
+
+    Precomputes p10/p50/p90 of LHS across scenarios per stage for every
+    constraint, extracts bound values per stage, and computes violation
+    zone intervals.
+
+    Args:
+        constraints: List of constraint dicts with keys ``id``, ``name``,
+            ``sense``.
+        lhs_df: DataFrame with columns ``constraint_id``, ``scenario_id``,
+            ``stage_id``, ``block_id``, ``lhs_value``.
+        gc_bounds: DataFrame with columns ``constraint_id``, ``stage_id``,
+            ``block_id``, ``bound``.
+        stage_labels: Stage id to human-readable label mapping.
+
+    Returns:
+        Dict with keys ``stages`` (list[int]), ``xlabels`` (list[str]), and
+        ``constraints`` (dict mapping str(constraint_id) to per-constraint
+        entry dicts).  Each entry contains ``name``, ``sense``, ``lhs_p10``,
+        ``lhs_p50``, ``lhs_p90``, ``bound``, ``violations``.
+    """
+    # Derive a common sorted stage list
+    if not lhs_df.empty:
+        all_stages: list[int] = sorted(int(s) for s in lhs_df["stage_id"].unique())
+    elif not gc_bounds.empty:
+        all_stages = sorted(int(s) for s in gc_bounds["stage_id"].unique())
+    else:
+        all_stages = []
+
+    xlabels = stage_x_labels(all_stages, stage_labels)
+    n_stages = len(all_stages)
+
+    constraints_data: dict[str, dict] = {}
+    for c in constraints:
+        cid = c["id"]
+        name = c["name"]
+        sense = c["sense"]
+
+        # --- LHS percentiles ---
+        sub = (
+            lhs_df[lhs_df["constraint_id"] == cid].copy()
+            if not lhs_df.empty
+            else pd.DataFrame()
+        )
+
+        if not sub.empty:
+            pcts = (
+                sub.groupby(["scenario_id", "stage_id"])["lhs_value"]
+                .mean()
+                .reset_index()
+                .groupby("stage_id")["lhs_value"]
+                .quantile([0.1, 0.5, 0.9])
+                .unstack(level=-1)
+                .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+            )
+            p10 = [round(float(pcts["p10"].get(s, 0.0)), 4) for s in all_stages]
+            p50 = [round(float(pcts["p50"].get(s, 0.0)), 4) for s in all_stages]
+            p90 = [round(float(pcts["p90"].get(s, 0.0)), 4) for s in all_stages]
+        else:
+            p10 = [0.0] * n_stages
+            p50 = [0.0] * n_stages
+            p90 = [0.0] * n_stages
+
+        # --- Bound values ---
+        bounds_c = (
+            gc_bounds[gc_bounds["constraint_id"] == cid]
+            if not gc_bounds.empty
+            else pd.DataFrame()
+        )
+        if not bounds_c.empty:
+            if bounds_c["block_id"].isna().all():
+                b_by_stage = bounds_c.set_index("stage_id")["bound"]
+            else:
+                b_by_stage = bounds_c[bounds_c["block_id"] == 0.0].set_index(
+                    "stage_id"
+                )["bound"]
+            bound_vals: list[float] = []
+            for s in all_stages:
+                raw = b_by_stage.get(s, float("nan"))
+                bound_vals.append(
+                    None if math.isnan(float(raw)) else round(float(raw), 4)
+                )  # type: ignore[arg-type]
+        else:
+            bound_vals = [None] * n_stages  # type: ignore[list-item]
+
+        # --- Violation zones ---
+        # Convert None to NaN for violation computation
+        bound_for_viol = [float("nan") if v is None else float(v) for v in bound_vals]
+        violations = _compute_violation_zones(p10, p90, bound_for_viol, sense)
+
+        constraints_data[str(cid)] = {
+            "name": name,
+            "sense": sense,
+            "lhs_p10": p10,
+            "lhs_p50": p50,
+            "lhs_p90": p90,
+            "bound": bound_vals,
+            "violations": violations,
+        }
+
+    return {
+        "stages": all_stages,
+        "xlabels": xlabels,
+        "constraints": constraints_data,
+    }
+
+
+def _build_lhs_section(data: DashboardData, lhs_df: pd.DataFrame) -> str:
+    """Build the interactive LHS vs Bound section HTML.
+
+    Embeds precomputed percentile data as a JSON blob and renders a
+    ``<select id="gc-constraint-sel">`` dropdown driving a single
+    ``<div id="gc-lhs-chart">`` chart via ``Plotly.react()``.
+
+    Args:
+        data: Dashboard data object.
+        lhs_df: Evaluated LHS DataFrame (may be empty).
+
+    Returns:
+        HTML string for the LHS section.
+    """
+    lhs_data = _build_constraint_lhs_data(
+        data.gc_constraints, lhs_df, data.gc_bounds, data.stage_labels
+    )
+    data_json = json.dumps(lhs_data, separators=(",", ":"))
+
+    options_html = "\n".join(
+        f'<option value="{c["id"]}">{c["name"]}</option>' for c in data.gc_constraints
+    )
+
+    return (
+        '<div style="margin-bottom:16px;">'
+        '<label for="gc-constraint-sel"'
+        ' style="font-weight:600;margin-right:8px;">Select Constraint:</label>'
+        '<select id="gc-constraint-sel" onchange="updateConstraintChart()"'
+        ' style="padding:8px 12px;font-size:0.9rem;border-radius:4px;'
+        'border:1px solid #ccc;min-width:320px;">'
+        + options_html
+        + "</select>"
+        + "</div>"
+        + '<div class="chart-grid-single">'
+        + '<div class="chart-card">'
+        + '<div id="gc-lhs-chart" style="width:100%;height:380px;"></div>'
+        + "</div>"
+        + "</div>"
+        + "<script>\n"
+        + "const GC_LHS_DATA = "
+        + data_json
+        + ";\n"
+        + r"""
+function updateConstraintChart() {
+  var cid = document.getElementById('gc-constraint-sel').value;
+  var cdata = GC_LHS_DATA.constraints[cid];
+  if (!cdata) return;
+  var xlabels = GC_LHS_DATA.xlabels;
+
+  var traces = [
+    {
+      x: xlabels.concat(xlabels.slice().reverse()),
+      y: cdata.lhs_p90.concat(cdata.lhs_p10.slice().reverse()),
+      fill: 'toself',
+      fillcolor: 'rgba(74,144,184,0.15)',
+      line: {color: 'rgba(0,0,0,0)'},
+      name: 'P10\u2013P90',
+      showlegend: true,
+      hoverinfo: 'skip'
+    },
+    {
+      x: xlabels,
+      y: cdata.lhs_p50,
+      name: 'LHS Median (P50)',
+      line: {color: '#4A90B8', width: 2}
+    },
+    {
+      x: xlabels,
+      y: cdata.bound,
+      name: 'Bound (RHS)',
+      line: {color: '#DC4C4C', width: 1.5, dash: 'dash'}
+    }
+  ];
+
+  var shapes = (cdata.violations || []).map(function(v) {
+    return {
+      type: 'rect',
+      xref: 'x',
+      yref: 'paper',
+      x0: xlabels[v.start],
+      x1: xlabels[v.end],
+      y0: 0,
+      y1: 1,
+      fillcolor: 'rgba(220,76,76,0.12)',
+      line: {width: 0}
+    };
+  });
+
+  var layout = {
+    title: cdata.name + ' \u2014 LHS vs Bound',
+    hovermode: 'x unified',
+    shapes: shapes,
+    margin: {l: 60, r: 20, t: 60, b: 10},
+    legend: {
+      orientation: 'h', yanchor: 'top', y: -0.15,
+      xanchor: 'center', x: 0.5, font: {size: 11}
+    }
+  };
+
+  Plotly.react('gc-lhs-chart', traces, layout, {responsive: true});
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  setTimeout(updateConstraintChart, 100);
+});
+"""
+        + "</script>"
+    )
+
+
+def _add_type_filter_and_row_attrs(
+    constraints: list[dict],
+    summary_html: str,
+) -> str:
+    """Wrap summary table with a type-filter dropdown and add data-type/data-cid attrs.
+
+    Post-processes the HTML string returned by ``build_constraints_summary_table()``
+    to add ``data-type`` and ``data-cid`` attributes to each ``<tr>`` in the
+    tbody, without modifying the legacy ``constraints.py`` module.
+
+    Args:
+        constraints: Constraint dicts in the same order as the table rows.
+        summary_html: Raw HTML from ``build_constraints_summary_table()``.
+
+    Returns:
+        HTML string with the type-filter dropdown prepended and ``<tr>``
+        tags in the tbody augmented with ``data-type`` and ``data-cid``
+        attributes.
+    """
+    # Augment each <tr style="background:…;"> in the tbody with data-cid, data-type,
+    # and onclick attributes.  We replace the first un-augmented occurrence per
+    # constraint so that sequential rows are handled correctly even when multiple
+    # constraints share the same type colour.
+    modified = summary_html
+    for c in constraints:
+        cid = c["id"]
+        ctype = c["name"].split("_")[0]
+        modified = modified.replace(
+            '<tr style="background:',
+            f'<tr data-cid="{cid}" data-type="{ctype}"'
+            f' onclick="selectConstraint({cid})" style="cursor:pointer;background:',
+            1,
+        )
+
+    type_filter_html = (
+        '<div style="margin-bottom:12px;">'
+        '<label for="gc-type-filter"'
+        ' style="font-weight:600;margin-right:8px;">Filter by Type:</label>'
+        '<select id="gc-type-filter" onchange="filterConstraintTable()"'
+        ' style="padding:6px 10px;font-size:0.9rem;border-radius:4px;'
+        'border:1px solid #ccc;">'
+        '<option value="All">All</option>'
+        '<option value="VminOP">VminOP</option>'
+        '<option value="RE">RE</option>'
+        '<option value="AGRINT">AGRINT</option>'
+        "</select>"
+        "</div>"
+        "<script>\n"
+        "function filterConstraintTable() {\n"
+        "  var val = document.getElementById('gc-type-filter').value;\n"
+        "  var rows = document.querySelectorAll('.data-table tbody tr[data-type]');\n"
+        "  rows.forEach(function(row) {\n"
+        "    var show = val === 'All' || row.dataset.type === val;\n"
+        "    row.style.display = show ? '' : 'none';\n"
+        "  });\n"
+        "}\n"
+        "function selectConstraint(cid) {\n"
+        "  var sel = document.getElementById('gc-constraint-sel');\n"
+        "  if (sel) { sel.value = String(cid); updateConstraintChart(); }\n"
+        "  var chart = document.getElementById('gc-lhs-chart');\n"
+        "  if (chart) { chart.scrollIntoView({behavior:'smooth', block:'start'}); }\n"
+        "}\n"
+        "</script>\n"
+    )
+
+    return type_filter_html + modified
+
+
 # ---------------------------------------------------------------------------
 # Tab interface
 # ---------------------------------------------------------------------------
@@ -136,7 +487,7 @@ def can_render(data: DashboardData) -> bool:
 
 def render(data: DashboardData) -> str:
     """Return the full HTML string for the v2 Constraints tab content area."""
-    # Evaluate LHS expressions once; passed to LHS vs Bound charts
+    # Evaluate LHS expressions once; passed to LHS vs Bound chart
     lhs_df = evaluate_constraint_expressions(
         data.gc_constraints, data.hydros_lf, data.exchanges_lf
     )
@@ -144,42 +495,17 @@ def render(data: DashboardData) -> str:
     # --- Section A: metrics row ---
     section_a = _build_metrics_row(data)
 
-    # --- Section B: Constraint Summary Table ---
+    # --- Section B: Constraint Summary Table with type filter ---
     summary_table = build_constraints_summary_table(
         data.gc_constraints, data.gc_bounds, data.gc_violations
     )
-    section_b = section_title("Constraint Summary") + summary_table
+    summary_with_filter = _add_type_filter_and_row_attrs(
+        data.gc_constraints, summary_table
+    )
+    section_b = section_title("Constraint Summary") + summary_with_filter
 
-    # --- Section C: LHS vs Bound charts (VminOP, RE, AGRINT) ---
-    vminop_html = chart_constraint_lhs_vs_bound(
-        data.gc_constraints,
-        lhs_df,
-        data.gc_bounds,
-        data.stage_labels,
-        ctype_filter="VminOP",
-    )
-    re_html = chart_constraint_lhs_vs_bound(
-        data.gc_constraints,
-        lhs_df,
-        data.gc_bounds,
-        data.stage_labels,
-        ctype_filter="RE",
-    )
-    agrint_html = chart_constraint_lhs_vs_bound(
-        data.gc_constraints,
-        lhs_df,
-        data.gc_bounds,
-        data.stage_labels,
-        ctype_filter="AGRINT",
-    )
-    section_c = (
-        section_title("VminOP: Stored Energy vs Minimum")
-        + chart_grid([wrap_chart(vminop_html)], single=True)
-        + section_title("Electric Constraints (RE)")
-        + chart_grid([wrap_chart(re_html)], single=True)
-        + section_title("Exchange Group Constraints (AGRINT)")
-        + chart_grid([wrap_chart(agrint_html)], single=True)
-    )
+    # --- Section C: Interactive LHS vs Bound chart (single, JS-driven) ---
+    section_c = section_title("LHS vs Bound") + _build_lhs_section(data, lhs_df)
 
     # --- Section D: Bounds Timeline (collapsible, default collapsed) ---
     bounds_html = chart_constraint_bounds_timeline(

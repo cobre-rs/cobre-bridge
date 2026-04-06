@@ -870,3 +870,99 @@ def test_render_contains_subtab_structure() -> None:
     # Button onclick calls
     assert "switchSubTab('plants-hydro', 'plants-explorer')" in html
     assert "switchSubTab('plants-thermal', 'plants-explorer')" in html
+
+
+# ---------------------------------------------------------------------------
+# 12. Band toggle — ticket-012
+# ---------------------------------------------------------------------------
+
+
+def test_render_band_toggle_checkbox() -> None:
+    """render() HTML must contain the pe-band-toggle checkbox and its label."""
+    hydros_lf = _make_hydros_lf(n_scenarios=2, n_stages=2, n_blocks=1, hydro_ids=[0])
+    bh_df = _make_bh_df(n_stages=2, n_blocks=1)
+    hydro_meta = _make_hydro_meta([0])
+
+    data = MagicMock()
+    data.hydros_lf = hydros_lf
+    data.thermals_lf = pl.LazyFrame()
+    data.bh_df = bh_df
+    data.hydro_meta = hydro_meta
+    data.thermal_meta = {}
+    data.bus_names = {0: "Bus-A"}
+    data.stage_labels = {0: "Jan 2024", 1: "Feb 2024"}
+    data.hydro_bounds = pd.DataFrame()
+    data.lp_bounds = pd.DataFrame()
+
+    html = render(data)
+
+    assert 'id="pe-band-toggle"' in html
+    assert "Show p10-p90" in html
+
+
+def test_render_band_toggle_js_variable() -> None:
+    """render() HTML must contain the _peBandVisible JS variable declaration."""
+    hydros_lf = _make_hydros_lf(n_scenarios=2, n_stages=2, n_blocks=1, hydro_ids=[0])
+    bh_df = _make_bh_df(n_stages=2, n_blocks=1)
+    hydro_meta = _make_hydro_meta([0])
+
+    data = MagicMock()
+    data.hydros_lf = hydros_lf
+    data.thermals_lf = pl.LazyFrame()
+    data.bh_df = bh_df
+    data.hydro_meta = hydro_meta
+    data.thermal_meta = {}
+    data.bus_names = {0: "Bus-A"}
+    data.stage_labels = {0: "Jan 2024", 1: "Feb 2024"}
+    data.hydro_bounds = pd.DataFrame()
+    data.lp_bounds = pd.DataFrame()
+
+    html = render(data)
+
+    assert "var _peBandVisible = true" in html
+
+
+def test_render_hydro_detail_respects_band_var() -> None:
+    """renderHydroDetail JS body must reference _peBandVisible for band traces."""
+    hydros_lf = _make_hydros_lf(n_scenarios=2, n_stages=2, n_blocks=1, hydro_ids=[0])
+    bh_df = _make_bh_df(n_stages=2, n_blocks=1)
+    hydro_meta = _make_hydro_meta([0])
+
+    html = build_hydro_explorer(
+        hydros_lf=hydros_lf,
+        hydro_meta=hydro_meta,
+        bus_names={0: "Bus-A"},
+        stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+        bh_df=bh_df,
+        hydro_bounds=pd.DataFrame(),
+        lp_bounds=pd.DataFrame(),
+    )
+
+    # The renderHydroDetail function must contain _peBandVisible references
+    render_start = html.find("function renderHydroDetail")
+    render_end = html.find("function renderHydroComparison", render_start)
+    render_body = html[render_start:render_end]
+    assert "_peBandVisible" in render_body
+
+
+def test_render_thermal_detail_respects_band_var() -> None:
+    """renderThermalDetail JS body must reference _peBandVisible for band traces."""
+    thermals_lf = _make_thermals_lf(
+        n_scenarios=2, n_stages=2, n_blocks=1, thermal_ids=[0]
+    )
+    bh_df = _make_bh_df(n_stages=2, n_blocks=1)
+    thermal_meta = _make_thermal_meta([0])
+
+    html = build_thermal_explorer(
+        thermals_lf=thermals_lf,
+        thermal_meta=thermal_meta,
+        bus_names={0: "Bus-A"},
+        stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+        lp_bounds=pd.DataFrame(),
+        bh_df=bh_df,
+    )
+
+    render_start = html.find("function renderThermalDetail")
+    render_end = html.find("function renderThermalComparison", render_start)
+    render_body = html[render_start:render_end]
+    assert "_peBandVisible" in render_body

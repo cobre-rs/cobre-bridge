@@ -255,6 +255,133 @@ def test_build_line_explorer_empty_exchanges_returns_no_data() -> None:
 
 
 # ---------------------------------------------------------------------------
+# test_build_line_explorer — capacity utilisation (ticket-013)
+# ---------------------------------------------------------------------------
+
+
+def test_build_line_explorer_util_div() -> None:
+    """build_line_explorer output contains the nw-util chart div."""
+    exchanges_lf = _make_exchanges_lf([0, 1], n_scenarios=2, n_stages=3)
+    bh_df = _make_bh_df(3)
+    names = _make_names([0, 1])
+    stage_labels = _make_stage_labels(3)
+    line_bounds = _make_line_bounds([0, 1], n_stages=3)
+    line_meta = _make_line_meta([0, 1])
+
+    html = build_line_explorer(
+        exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
+    )
+
+    assert 'id="nw-util"' in html
+
+
+def test_build_line_explorer_util_keys() -> None:
+    """Embedded NW_DATA JSON contains util_p10, util_p50, util_p90 for each line."""
+    import json
+    import re
+
+    exchanges_lf = _make_exchanges_lf([0, 1], n_scenarios=2, n_stages=3)
+    bh_df = _make_bh_df(3)
+    names = _make_names([0, 1])
+    stage_labels = _make_stage_labels(3)
+    line_bounds = _make_line_bounds([0, 1], n_stages=3)
+    line_meta = _make_line_meta([0, 1])
+
+    html = build_line_explorer(
+        exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
+    )
+
+    # Extract NW_DATA JSON from the embedded script
+    match = re.search(r"const NW_DATA = (\{.*?\});", html, re.DOTALL)
+    assert match is not None, "NW_DATA not found in HTML"
+    nw_data = json.loads(match.group(1))
+
+    n_stages = 3
+    for lid_str, entry in nw_data.items():
+        for key in ("util_p10", "util_p50", "util_p90"):
+            assert key in entry, f"Missing {key} for line {lid_str}"
+            assert len(entry[key]) == n_stages, (
+                f"{key} length mismatch for line {lid_str}: "
+                f"got {len(entry[key])}, expected {n_stages}"
+            )
+
+
+def test_build_line_explorer_util_values() -> None:
+    """Utilisation values are computed correctly: flow=50, capacity=100 => 50%."""
+    import json
+    import re
+
+    # Construct an exchange where net_flow_mw == 50 for all scenarios/stages/lines
+    rows: list[dict] = []
+    for scenario_id in range(2):
+        for stage_id in range(3):
+            for line_id in [0]:
+                rows.append(
+                    {
+                        "scenario_id": scenario_id,
+                        "stage_id": stage_id,
+                        "block_id": 0,
+                        "line_id": line_id,
+                        "net_flow_mw": 50.0,
+                        "direct_flow_mw": 50.0,
+                        "reverse_flow_mw": 0.0,
+                    }
+                )
+    exchanges_lf = pl.DataFrame(rows).lazy()
+    bh_df = _make_bh_df(3)
+    names = {("lines", 0): "Line 0"}
+    stage_labels = _make_stage_labels(3)
+
+    # line_meta: direct_capacity_mw=100, reverse_capacity_mw=80
+    # => max(100, 80) = 100 => util = |50| / 100 * 100 = 50.0
+    line_meta = [
+        {
+            "id": 0,
+            "name": "Line 0",
+            "source_bus_id": 0,
+            "target_bus_id": 1,
+            "direct_capacity_mw": 100.0,
+            "reverse_capacity_mw": 80.0,
+        }
+    ]
+    # Empty bounds so static capacity is used
+    line_bounds = pd.DataFrame(
+        columns=["line_id", "stage_id", "direct_mw", "reverse_mw"]
+    )
+
+    html = build_line_explorer(
+        exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
+    )
+
+    match = re.search(r"const NW_DATA = (\{.*?\});", html, re.DOTALL)
+    assert match is not None, "NW_DATA not found in HTML"
+    nw_data = json.loads(match.group(1))
+
+    entry = nw_data["0"]
+    # p50 should be 50.0% for all stages
+    for val in entry["util_p50"]:
+        assert abs(val - 50.0) < 0.1, f"Expected ~50.0% utilisation, got {val}"
+
+
+def test_build_line_explorer_util_js_function() -> None:
+    """build_line_explorer JS contains the nw-util Plotly.react call."""
+    exchanges_lf = _make_exchanges_lf([0, 1], n_scenarios=2, n_stages=3)
+    bh_df = _make_bh_df(3)
+    names = _make_names([0, 1])
+    stage_labels = _make_stage_labels(3)
+    line_bounds = _make_line_bounds([0, 1], n_stages=3)
+    line_meta = _make_line_meta([0, 1])
+
+    html = build_line_explorer(
+        exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
+    )
+
+    assert "nw-util" in html
+    assert "Capacity Utilisation" in html
+    assert "100%" in html  # 100% reference line label
+
+
+# ---------------------------------------------------------------------------
 # test_build_heatmap
 # ---------------------------------------------------------------------------
 
@@ -326,6 +453,71 @@ def test_build_heatmap_empty_exchanges_returns_no_data() -> None:
     )
 
     assert "<p>" in html
+
+
+# ---------------------------------------------------------------------------
+# test_build_heatmap — single net utilisation heatmap (ticket-013)
+# ---------------------------------------------------------------------------
+
+
+def test_build_heatmap_single_trace() -> None:
+    """build_heatmap returns HTML with exactly one heatmap trace (not two).
+
+    Plotly embeds the figure in a ``Plotly.newPlot(el, [traces], layout)``
+    call; the traces array appears before the layout dict.  We extract the
+    traces JSON array and count ``"type":"heatmap"`` occurrences inside it.
+    """
+    exchanges_lf = _make_exchanges_lf([0, 1])
+    bh_df = _make_bh_df()
+    line_bounds = _make_line_bounds([0, 1])
+    line_meta = _make_line_meta([0, 1])
+    names = _make_names([0, 1])
+    stage_labels = _make_stage_labels()
+
+    html = build_heatmap(
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+    )
+
+    # Plotly serialises as: Plotly.newPlot(el, [<traces>], <layout>, ...)
+    # The traces array is the first JSON array argument after the element.
+    # We count zmin/zmax pairs which appear once per Heatmap trace.
+    assert html.count('"zmin":0') == 1, "Expected exactly one Heatmap trace (zmin)"
+    assert html.count('"zmax":100') == 1, "Expected exactly one Heatmap trace (zmax)"
+    # Confirm subplot annotation strings are absent (old two-panel layout used xaxis2)
+    assert "xaxis2" not in html
+
+
+def test_build_heatmap_no_subplots() -> None:
+    """build_heatmap does not emit Direct Utilization or Reverse Utilization titles."""
+    exchanges_lf = _make_exchanges_lf([0, 1])
+    bh_df = _make_bh_df()
+    line_bounds = _make_line_bounds([0, 1])
+    line_meta = _make_line_meta([0, 1])
+    names = _make_names([0, 1])
+    stage_labels = _make_stage_labels()
+
+    html = build_heatmap(
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+    )
+
+    assert "Direct Utilization" not in html
+    assert "Reverse Utilization" not in html
+
+
+def test_build_heatmap_title_contains_net() -> None:
+    """build_heatmap title contains 'Net'."""
+    exchanges_lf = _make_exchanges_lf([0, 1])
+    bh_df = _make_bh_df()
+    line_bounds = _make_line_bounds([0, 1])
+    line_meta = _make_line_meta([0, 1])
+    names = _make_names([0, 1])
+    stage_labels = _make_stage_labels()
+
+    html = build_heatmap(
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+    )
+
+    assert "Net" in html
 
 
 # ---------------------------------------------------------------------------

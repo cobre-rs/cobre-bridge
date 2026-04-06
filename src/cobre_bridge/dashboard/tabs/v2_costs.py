@@ -14,6 +14,7 @@ Ticket-015 extends this module with four temporal evolution sections:
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -394,6 +395,254 @@ def _render_cost_composition(data: DashboardData) -> str:
     return collapsible_section(
         "Cost Composition by Stage",
         chart_grid([chart_html], single=True),
+        section_id="v2-costs-composition-section",
+        default_collapsed=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section D — interactive group-by composition section (ticket-011)
+# ---------------------------------------------------------------------------
+
+# 28-color sequential palette for individual cost components.
+_COMPONENT_PALETTE: list[str] = [
+    "#F59E0B",
+    "#EF4444",
+    "#3B82F6",
+    "#10B981",
+    "#8B5CF6",
+    "#6B7280",
+    "#F97316",
+    "#EC4899",
+    "#14B8A6",
+    "#84CC16",
+    "#A78BFA",
+    "#FB923C",
+    "#22D3EE",
+    "#4ADE80",
+    "#FBBF24",
+    "#60A5FA",
+    "#F472B6",
+    "#34D399",
+    "#C084FC",
+    "#FCA5A5",
+    "#93C5FD",
+    "#6EE7B7",
+    "#DDD6FE",
+    "#FDE68A",
+    "#BAE6FD",
+    "#BBF7D0",
+    "#E9D5FF",
+    "#FEF3C7",
+]
+
+
+def _build_composition_data(data: DashboardData) -> dict | None:
+    """Precompute both Category and Component views for the cost composition chart.
+
+    Computes:
+    - ``category``: mean per stage for each of the 6 logical groups.
+    - ``component``: mean per stage for each non-zero raw cost column (cleaned names).
+    - ``total``: ``mean``, ``p10``, ``p90`` of total cost across scenarios per stage.
+    - ``stages``: x-axis labels.
+    - ``colors``: hex color per group/component key.
+
+    Args:
+        data: Dashboard data instance.
+
+    Returns:
+        Dict with keys ``category``, ``component``, ``total``, ``stages``,
+        ``colors``, or ``None`` when the costs DataFrame is empty or has no
+        cost columns.
+    """
+    if data.costs.empty:
+        return None
+
+    cost_cols = [c for c in data.costs.columns if c not in _NON_COST_COLS]
+    if not cost_cols:
+        return None
+
+    # Sum blocks per (scenario_id, stage_id)
+    by_stage_scen: pd.DataFrame = (
+        data.costs.groupby(["scenario_id", "stage_id"])[cost_cols].sum().reset_index()
+    )
+
+    stages = sorted(by_stage_scen["stage_id"].unique().tolist())
+    xlabels = stage_x_labels(stages, data.stage_labels)
+
+    # --- Category view ---
+    grouped = group_costs(by_stage_scen, cost_cols)
+    group_col_names = [
+        c for c in grouped.columns if c not in _NON_COST_COLS and c != "scenario_id"
+    ]
+    mean_by_stage_cat = (
+        grouped.groupby("stage_id")[group_col_names].mean().reset_index()
+    )
+    mean_by_stage_cat = mean_by_stage_cat.sort_values("stage_id")
+
+    category: dict[str, list[float]] = {}
+    cat_colors: dict[str, str] = {}
+    for gname in group_col_names:
+        vals = mean_by_stage_cat[gname].tolist()
+        category[gname] = [round(float(v), 2) for v in vals]
+        cat_colors[gname] = COST_GROUP_COLORS.get(gname, "#6B7280")
+
+    # --- Component view (non-zero columns only, cleaned names) ---
+    mean_by_stage_comp = (
+        by_stage_scen.groupby("stage_id")[cost_cols].mean().reset_index()
+    )
+    mean_by_stage_comp = mean_by_stage_comp.sort_values("stage_id")
+
+    component: dict[str, list[float]] = {}
+    comp_colors: dict[str, str] = {}
+    palette_idx = 0
+    for raw_col in cost_cols:
+        vals = mean_by_stage_comp[raw_col].tolist()
+        if all(v == 0.0 for v in vals):
+            continue
+        label = raw_col.replace("_cost", "").replace("_", " ").title()
+        component[label] = [round(float(v), 2) for v in vals]
+        comp_colors[label] = _COMPONENT_PALETTE[palette_idx % len(_COMPONENT_PALETTE)]
+        palette_idx += 1
+
+    if not component and all(all(v == 0.0 for v in arr) for arr in category.values()):
+        return None
+
+    # --- Total cost: p10/mean/p90 across scenarios per stage ---
+    by_stage_scen["_total"] = by_stage_scen[cost_cols].sum(axis=1)
+    total_pct = (
+        by_stage_scen.groupby("stage_id")["_total"]
+        .agg(
+            mean="mean",
+            p10=lambda x: x.quantile(0.1),
+            p90=lambda x: x.quantile(0.9),
+        )
+        .reset_index()
+        .sort_values("stage_id")
+    )
+
+    total: dict[str, list[float]] = {
+        "mean": [round(float(v), 2) for v in total_pct["mean"].tolist()],
+        "p10": [round(float(v), 2) for v in total_pct["p10"].tolist()],
+        "p90": [round(float(v), 2) for v in total_pct["p90"].tolist()],
+    }
+
+    colors: dict[str, str] = {**cat_colors, **comp_colors}
+
+    return {
+        "category": category,
+        "component": component,
+        "total": total,
+        "stages": xlabels,
+        "colors": colors,
+    }
+
+
+def _build_composition_section(data: DashboardData) -> str:
+    """Build the interactive Cost Composition by Stage section with group-by dropdown.
+
+    Emits a ``<select id="costs-group-sel">`` dropdown, a
+    ``<div id="costs-comp">`` Plotly target, and an inline ``<script>`` that
+    embeds precomputed JSON and a ``updateCostsComposition()`` JS function.
+    Falls back to the static "No cost data" message when data is unavailable.
+
+    Args:
+        data: Dashboard data instance.
+
+    Returns:
+        HTML string: a ``collapsible_section`` wrapping the interactive chart.
+    """
+    comp_data = _build_composition_data(data)
+
+    if comp_data is None:
+        return collapsible_section(
+            "Cost Composition by Stage",
+            "<p>No cost data available.</p>",
+            section_id="v2-costs-composition-section",
+            default_collapsed=False,
+        )
+
+    data_json = json.dumps(comp_data, separators=(",", ":"))
+
+    content = (
+        '<div style="margin-bottom:16px;">'
+        '<label for="costs-group-sel" style="font-weight:600;margin-right:8px;">'
+        "Group by:</label>"
+        '<select id="costs-group-sel" onchange="updateCostsComposition()" '
+        'style="padding:6px 10px;font-size:0.9rem;border-radius:4px;'
+        'border:1px solid #ccc;">'
+        '<option value="category">Category</option>'
+        '<option value="component">Component</option>'
+        "</select>"
+        "</div>"
+        '<div class="chart-grid-single">'
+        '<div class="chart-card">'
+        '<div id="costs-comp" style="width:100%;height:420px;"></div>'
+        "</div>"
+        "</div>"
+        "<script>\n"
+        "const COSTS_COMP_DATA = " + data_json + ";\n"
+        r"""
+function updateCostsComposition() {
+  var sel = document.getElementById('costs-group-sel');
+  var view = sel ? sel.value : 'category';
+  var d = COSTS_COMP_DATA;
+  var groups = d[view];
+  var stages = d.stages;
+  var colors = d.colors;
+  var traces = [];
+
+  // Stacked area traces (one per group/component)
+  Object.keys(groups).forEach(function(name) {
+    traces.push({
+      x: stages, y: groups[name], name: name,
+      stackgroup: 'costs', mode: 'lines',
+      line: {color: colors[name] || '#6B7280', width: 0.5},
+      fillcolor: colors[name] || '#6B7280',
+      hovertemplate: '%{y:,.0f}<extra>' + name + '</extra>'
+    });
+  });
+
+  // p10-p90 band (lower bound, invisible reference)
+  traces.push({
+    x: stages, y: d.total.p10,
+    name: 'Total P10', showlegend: false, mode: 'lines',
+    line: {width: 0}, hoverinfo: 'skip'
+  });
+  // p10-p90 band (upper bound, fills to p10)
+  traces.push({
+    x: stages, y: d.total.p90,
+    name: 'Total P10\u2013P90', showlegend: true, mode: 'lines',
+    line: {width: 0}, fill: 'tonexty',
+    fillcolor: 'rgba(55,65,81,0.15)', hoverinfo: 'skip'
+  });
+  // Total mean line
+  traces.push({
+    x: stages, y: d.total.mean,
+    name: 'Total Mean', mode: 'lines',
+    line: {color: '#374151', width: 2, dash: 'dash'},
+    hovertemplate: '%{y:,.0f}<extra>Total Mean</extra>'
+  });
+
+  var layout = {
+    title: {text: 'Cost Composition by Stage (undiscounted mean)', font: {size: 13}, x: 0.02},
+    xaxis: {title: 'Stage'},
+    yaxis: {title: 'Cost (R$)'},
+    legend: {orientation: 'h', yanchor: 'top', y: -0.15, xanchor: 'center', x: 0.5, font: {size: 11}},
+    margin: {l: 60, r: 20, t: 60, b: 10},
+    template: 'plotly_white'
+  };
+  Plotly.react('costs-comp', traces, layout, {responsive: true});
+}
+document.addEventListener('DOMContentLoaded', function() {
+  setTimeout(updateCostsComposition, 100);
+});
+""" + "</script>"
+    )
+
+    return collapsible_section(
+        "Cost Composition by Stage",
+        content,
         section_id="v2-costs-composition-section",
         default_collapsed=False,
     )
@@ -812,7 +1061,7 @@ def render(data: DashboardData) -> str:
     return (
         section_title("NPV Cost Analysis")
         + _render_npv_section(data)
-        + _render_cost_composition(data)
+        + _build_composition_section(data)
         + _render_category_evolution(data)
         + _render_spot_price(data)
         + _render_violations(data)
