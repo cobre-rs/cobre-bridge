@@ -79,23 +79,17 @@ def build_line_explorer(
         ``<div id="nw-net">``, ``<div id="nw-dir">``, ``<div id="nw-util">``,
         and inline JS.
     """
-    flow_cols = ["net_flow_mw", "direct_flow_mw", "reverse_flow_mw"]
     schema = exchanges_lf.collect_schema()
-    avail_flow_cols = [c for c in flow_cols if c in schema]
-
-    # Check if there is any data at all
-    schema_names = list(schema.names())
-    if not avail_flow_cols or "line_id" not in schema_names:
+    if "net_flow_mw" not in schema.names() or "line_id" not in schema.names():
         return "<p>No line flow data available.</p>"
 
     ex0 = (
         exchanges_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "line_id"])
         .agg(
-            *[
-                ((pl.col(c) * pl.col("_bh")).sum() / pl.col("_bh").sum()).alias(c)
-                for c in avail_flow_cols
-            ]
+            ((pl.col("net_flow_mw") * pl.col("_bh")).sum() / pl.col("_bh").sum()).alias(
+                "net_flow_mw"
+            )
         )
         .collect(engine="streaming")
     )
@@ -107,82 +101,70 @@ def build_line_explorer(
     xlabels = stage_x_labels(stages, stage_labels)
     line_ids = sorted(ex0["line_id"].unique().to_list())
 
-    # Build capacity lookups for utilisation computation
+    # Build capacity bounds per (line, stage)
     static_direct_cap: dict[int, float] = {}
     static_reverse_cap: dict[int, float] = {}
     if line_meta:
         for lm in line_meta:
-            lid_m = lm["id"]
-            static_direct_cap[lid_m] = float(lm.get("direct_capacity_mw", 1.0))
-            static_reverse_cap[lid_m] = float(lm.get("reverse_capacity_mw", 1.0))
+            static_direct_cap[lm["id"]] = float(lm.get("direct_capacity_mw", 0.0))
+            static_reverse_cap[lm["id"]] = float(lm.get("reverse_capacity_mw", 0.0))
 
-    bounds_lookup_le: dict[tuple[int, int], tuple[float, float]] = {}
+    bounds_lk: dict[tuple[int, int], tuple[float, float]] = {}
     if line_bounds is not None and not line_bounds.empty:
-        lb_indexed = line_bounds.set_index(["line_id", "stage_id"])
-        for (lid_b, sid_b), row_b in lb_indexed.iterrows():
-            bounds_lookup_le[(int(lid_b), int(sid_b))] = (
-                float(row_b.get("direct_mw", 1.0)),
-                float(row_b.get("reverse_mw", 1.0)),
+        for _, row_b in line_bounds.iterrows():
+            bounds_lk[(int(row_b["line_id"]), int(row_b["stage_id"]))] = (
+                float(row_b.get("direct_mw", 0.0)),
+                float(row_b.get("reverse_mw", 0.0)),
             )
 
     line_data: dict[str, dict] = {}
     for lid in line_ids:
         lname = entity_name(names, "lines", lid)
         ldf = ex0.filter(pl.col("line_id") == lid)
-        entry: dict = {"name": lname}
-        net_pcts_map: dict[int, dict[str, float]] = {}
-        for col, prefix in [
-            ("net_flow_mw", "net"),
-            ("direct_flow_mw", "direct"),
-            ("reverse_flow_mw", "reverse"),
-        ]:
-            if col not in ldf.columns:
-                for sfx in ["p10", "p50", "p90"]:
-                    entry[f"{prefix}_{sfx}"] = [0.0] * len(stages)
-                continue
-            pcts = (
-                ldf.group_by("stage_id")
-                .agg(
-                    pl.col(col).quantile(0.1, interpolation="linear").alias("p10"),
-                    pl.col(col).quantile(0.5, interpolation="linear").alias("p50"),
-                    pl.col(col).quantile(0.9, interpolation="linear").alias("p90"),
-                )
-                .sort("stage_id")
+        pcts = (
+            ldf.group_by("stage_id")
+            .agg(
+                pl.col("net_flow_mw")
+                .quantile(0.1, interpolation="linear")
+                .alias("p10"),
+                pl.col("net_flow_mw")
+                .quantile(0.5, interpolation="linear")
+                .alias("p50"),
+                pl.col("net_flow_mw")
+                .quantile(0.9, interpolation="linear")
+                .alias("p90"),
             )
-            pcts_map: dict[int, dict[str, float]] = {}
-            for row in pcts.iter_rows(named=True):
-                pcts_map[row["stage_id"]] = {
-                    "p10": row["p10"],
-                    "p50": row["p50"],
-                    "p90": row["p90"],
-                }
-            for sfx in ["p10", "p50", "p90"]:
-                entry[f"{prefix}_{sfx}"] = [
-                    round(pcts_map.get(s, {}).get(sfx, 0.0), 2) for s in stages
-                ]
-            if prefix == "net":
-                net_pcts_map = pcts_map
+            .sort("stage_id")
+        )
+        pcts_map: dict[int, dict[str, float]] = {}
+        for row in pcts.iter_rows(named=True):
+            pcts_map[row["stage_id"]] = {
+                "p10": row["p10"],
+                "p50": row["p50"],
+                "p90": row["p90"],
+            }
 
-        # Compute capacity utilisation: |net_flow| / max(d_cap, r_cap) * 100
+        entry: dict = {"name": lname}
         for sfx in ["p10", "p50", "p90"]:
-            util_vals: list[float] = []
-            for s in stages:
-                if bounds_lookup_le:
-                    d_cap, r_cap = bounds_lookup_le.get(
-                        (lid, s),
-                        (
-                            static_direct_cap.get(lid, 1.0),
-                            static_reverse_cap.get(lid, 1.0),
-                        ),
-                    )
-                else:
-                    d_cap = static_direct_cap.get(lid, 1.0)
-                    r_cap = static_reverse_cap.get(lid, 1.0)
-                cap = max(d_cap, r_cap, 0.1)
-                net_val = net_pcts_map.get(s, {}).get(sfx, 0.0)
-                util = min(abs(net_val) / cap * 100.0, 100.0)
-                util_vals.append(round(util, 2))
-            entry[f"util_{sfx}"] = util_vals
+            entry[f"net_{sfx}"] = [
+                round(pcts_map.get(s, {}).get(sfx, 0.0), 2) for s in stages
+            ]
+
+        # Upper bound = +direct_cap, Lower bound = -reverse_cap per stage
+        upper: list[float] = []
+        lower: list[float] = []
+        for s in stages:
+            d_cap, r_cap = bounds_lk.get(
+                (lid, s),
+                (
+                    static_direct_cap.get(lid, 0.0),
+                    static_reverse_cap.get(lid, 0.0),
+                ),
+            )
+            upper.append(round(d_cap, 2))
+            lower.append(round(-r_cap, 2))
+        entry["upper_bound"] = upper
+        entry["lower_bound"] = lower
 
         line_data[str(lid)] = entry
 
@@ -193,32 +175,26 @@ def build_line_explorer(
     data_json = json.dumps(line_data, separators=(",", ":"))
     labels_json = json.dumps(xlabels)
 
-    chart_rows = (
+    chart_html = (
         '<div class="chart-grid-single">'
-        '<div class="chart-card"><div id="nw-net" style="width:100%;height:350px;"></div></div>'
-        "</div>"
-        '<div class="chart-grid-single">'
-        '<div class="chart-card"><div id="nw-dir" style="width:100%;height:350px;"></div></div>'
-        "</div>"
-        '<div class="chart-grid-single">'
-        '<div class="chart-card"><div id="nw-util" style="width:100%;height:350px;"></div></div>'
-        "</div>"
+        + wrap_chart('<div id="nw-net" style="width:100%;height:420px;"></div>')
+        + "</div>"
     )
 
     return (
         '<div style="margin-bottom:16px;">'
-        '<label for="nw-select" style="font-weight:600;margin-right:8px;">Select Line:</label>'
+        '<label for="nw-select" style="font-weight:600;margin-right:8px;">'
+        "Select Line:</label>"
         '<select id="nw-select" onchange="updateNetworkDetail()" '
-        'style="padding:8px 12px;font-size:0.9rem;border-radius:4px;border:1px solid #ccc;min-width:280px;">'
+        'style="padding:8px 12px;font-size:0.9rem;border-radius:4px;'
+        'border:1px solid #ccc;min-width:280px;">'
         + options_html
-        + "</select>"
-        + "</div>"
-        + chart_rows
+        + "</select></div>"
+        + chart_html
         + "<script>\n"
         + "const NW_DATA = "
         + data_json
-        + ";\n"
-        + "const NW_LABELS = "
+        + ";\nconst NW_LABELS = "
         + labels_json
         + ";\n"
         + r"""
@@ -229,50 +205,36 @@ function _nw_band(lbl, p10, p90, color) {
           name:lbl, showlegend:true, hoverinfo:'skip'};
 }
 function _nw_line(nm, y, c, w, dash) {
-  return {x:NW_LABELS, y:y, name:nm, line:{color:c, width:w||2, dash:dash||'solid'}};
+  return {x:NW_LABELS, y:y, name:nm, mode:'lines',
+          line:{color:c, width:w||2, dash:dash||'solid'}};
 }
-var _NW_L = {hovermode:'x unified', margin:{l:60,r:20,t:60,b:10},
-             legend:{orientation:'h',yanchor:'top',y:-0.15,xanchor:'center',x:0.5,font:{size:11}}};
+var _NW_L = {hovermode:'x unified', margin:{l:60,r:20,t:60,b:60},
+             legend:{orientation:'h',yanchor:'bottom',y:1.02,
+                     xanchor:'center',x:0.5,font:{size:11}}};
 var _NW_C = {responsive:true};
-function _nw_lo(extra){return Object.assign({},_NW_L,extra);}
 
 function updateNetworkDetail() {
   var lid = document.getElementById('nw-select').value;
   var d = NW_DATA[lid]; if(!d) return;
 
-  var zeroLine = Array(NW_LABELS.length).fill(0);
-
-  Plotly.react('nw-net', [
-    _nw_band('P10\u2013P90', d.net_p10, d.net_p90, 'rgba(74,144,184,0.15)'),
+  var traces = [
+    _nw_band('P10–P90', d.net_p10, d.net_p90, 'rgba(74,144,184,0.15)'),
     _nw_line('P50', d.net_p50, '#4A90B8'),
     _nw_line('P10', d.net_p10, '#4A90B8', 1, 'dot'),
     _nw_line('P90', d.net_p90, '#4A90B8', 1, 'dot'),
-    {x:NW_LABELS, y:zeroLine, name:'Zero', line:{color:'gray',width:1,dash:'dot'}, showlegend:false},
-  ], _nw_lo({title:d.name+' \u2014 Net Flow (MW)', yaxis:{title:'Net Flow (MW)'}}), _NW_C);
-
-  var rev_p10_neg = d.reverse_p10.map(function(v){return -v;});
-  var rev_p50_neg = d.reverse_p50.map(function(v){return -v;});
-  var rev_p90_neg = d.reverse_p90.map(function(v){return -v;});
-  Plotly.react('nw-dir', [
-    _nw_band('Direct P10\u2013P90', d.direct_p10, d.direct_p90, 'rgba(74,139,111,0.18)'),
-    _nw_line('Direct P50', d.direct_p50, '#4A8B6F'),
-    _nw_line('Direct P10', d.direct_p10, '#4A8B6F', 1, 'dot'),
-    _nw_line('Direct P90', d.direct_p90, '#4A8B6F', 1, 'dot'),
-    _nw_band('Reverse P10\u2013P90 (neg)', rev_p10_neg, rev_p90_neg, 'rgba(220,76,76,0.15)'),
-    _nw_line('Reverse P50 (neg)', rev_p50_neg, '#DC4C4C'),
-    _nw_line('Reverse P10 (neg)', rev_p10_neg, '#DC4C4C', 1, 'dot'),
-    _nw_line('Reverse P90 (neg)', rev_p90_neg, '#DC4C4C', 1, 'dot'),
-    {x:NW_LABELS, y:zeroLine, name:'Zero', line:{color:'gray',width:1,dash:'dot'}, showlegend:false},
-  ], _nw_lo({title:d.name+' \u2014 Direct / Reverse Flow (MW)', yaxis:{title:'Flow (MW)'}}), _NW_C);
-
-  var ref100 = Array(NW_LABELS.length).fill(100);
-  Plotly.react('nw-util', [
-    _nw_band('Util P10\u2013P90', d.util_p10, d.util_p90, 'rgba(245,166,35,0.18)'),
-    _nw_line('Util P50', d.util_p50, '#F5A623'),
-    {x:NW_LABELS, y:ref100, name:'100%', line:{color:'#DC4C4C',width:1.5,dash:'dash'}, showlegend:true},
-  ], _nw_lo({title:d.name+' \u2014 Capacity Utilisation (%)', yaxis:{title:'% Capacity', range:[0, 110]}}), _NW_C);
+    _nw_line('Upper Bound', d.upper_bound, '#DC4C4C', 1.5, 'dash'),
+    _nw_line('Lower Bound', d.lower_bound, '#DC4C4C', 1.5, 'dash'),
+    {x:NW_LABELS, y:Array(NW_LABELS.length).fill(0),
+     name:'Zero', line:{color:'gray',width:1,dash:'dot'}, showlegend:false}
+  ];
+  var layout = Object.assign({}, _NW_L, {
+    title:{text:d.name+' — Net Flow (MW)', font:{size:13}, x:0.02, xanchor:'left'},
+    yaxis:{title:'Net Flow (MW)'}
+  });
+  Plotly.react('nw-net', traces, layout, _NW_C);
 }
-document.addEventListener('DOMContentLoaded', function(){setTimeout(updateNetworkDetail,100);});
+document.addEventListener('DOMContentLoaded',
+  function(){setTimeout(updateNetworkDetail,100);});
 """
         + "</script>"
     )
@@ -642,20 +604,6 @@ def render(data: DashboardData) -> str:
             data.bh_df,
             data.line_bounds,
             data.line_meta,
-        )
-        + section_title("Capacity Utilisation")
-        + chart_grid(
-            [
-                build_heatmap(
-                    data.exchanges_lf,
-                    data.line_bounds,
-                    data.line_meta,
-                    data.names,
-                    data.stage_labels,
-                    data.bh_df,
-                )
-            ],
-            single=True,
         )
         + section_title("Bus Balance")
         + chart_grid(

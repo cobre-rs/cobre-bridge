@@ -10,14 +10,14 @@ import plotly.graph_objects as go
 
 LEGEND_DEFAULTS: dict = dict(
     orientation="h",
-    yanchor="top",
-    y=-0.15,
+    yanchor="bottom",
+    y=1.02,
     xanchor="center",
     x=0.5,
     font=dict(size=11),
 )
 
-MARGIN_DEFAULTS: dict = dict(l=60, r=30, t=60, b=10)
+MARGIN_DEFAULTS: dict = dict(l=60, r=30, t=60, b=50)
 
 
 def stage_x_labels(stage_ids: Sequence[int], labels: dict[int, str]) -> list[str]:

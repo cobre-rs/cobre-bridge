@@ -19,19 +19,12 @@ import pandas as pd
 
 from cobre_bridge.dashboard.tabs.constraints import (
     build_constraints_summary_table,
-    chart_constraint_bounds_timeline,
-    chart_violation_cost_timeline,
-    chart_violation_heatmap,
-    chart_violation_summary,
     evaluate_constraint_expressions,
 )
 from cobre_bridge.ui.html import (
-    chart_grid,
-    collapsible_section,
     metric_card,
     metrics_grid,
     section_title,
-    wrap_chart,
 )
 from cobre_bridge.ui.plotly_helpers import stage_x_labels
 
@@ -507,36 +500,4 @@ def render(data: DashboardData) -> str:
     # --- Section C: Interactive LHS vs Bound chart (single, JS-driven) ---
     section_c = section_title("LHS vs Bound") + _build_lhs_section(data, lhs_df)
 
-    # --- Section D: Bounds Timeline (collapsible, default collapsed) ---
-    bounds_html = chart_constraint_bounds_timeline(
-        data.gc_constraints, data.gc_bounds, data.stage_labels
-    )
-    section_d = collapsible_section(
-        title="Constraint Bounds Timeline",
-        content=chart_grid([wrap_chart(bounds_html)], single=True),
-        default_collapsed=True,
-    )
-
-    # --- Section E: Violation Cost Timeline ---
-    viol_cost_html = chart_violation_cost_timeline(data.costs, data.stage_labels)
-    section_e = collapsible_section(
-        title="Violation Cost Timeline",
-        content=chart_grid([wrap_chart(viol_cost_html)], single=True),
-        default_collapsed=False,
-    )
-
-    # --- Section F: Violation Summary & Heatmap (collapsible, default collapsed) ---
-    viol_summary_html = chart_violation_summary(data.hydros_lf, data.stage_labels)
-    viol_heatmap_html = chart_violation_heatmap(
-        data.hydros_lf, data.names, data.stage_labels
-    )
-    viol_content = chart_grid(
-        [wrap_chart(viol_summary_html), wrap_chart(viol_heatmap_html)]
-    )
-    section_f = collapsible_section(
-        title="Violation Summary & Heatmap",
-        content=viol_content,
-        default_collapsed=True,
-    )
-
-    return section_a + section_b + section_c + section_d + section_e + section_f
+    return section_a + section_b + section_c

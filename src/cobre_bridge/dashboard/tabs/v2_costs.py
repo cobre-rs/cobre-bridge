@@ -419,7 +419,14 @@ def _render_cost_composition(data: DashboardData) -> str:
     fig.update_layout(
         xaxis_title="Stage",
         yaxis_title="Cost (R$)",
-        legend=_LEGEND,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
         margin=_MARGIN,
     )
 
@@ -427,7 +434,7 @@ def _render_cost_composition(data: DashboardData) -> str:
         fig,
         "Cost Composition by Stage (undiscounted mean across scenarios)",
         "v2-costs-composition-chart",
-        height=420,
+        height=480,
     )
     return collapsible_section(
         "Cost Composition by Stage",
@@ -665,8 +672,8 @@ function updateCostsComposition() {
     title: {text: 'Cost Composition by Stage (undiscounted mean)', font: {size: 13}, x: 0.02},
     xaxis: {title: 'Stage'},
     yaxis: {title: 'Cost (R$)'},
-    legend: {orientation: 'h', yanchor: 'top', y: -0.15, xanchor: 'center', x: 0.5, font: {size: 11}},
-    margin: {l: 60, r: 20, t: 60, b: 10},
+    legend: {orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'center', x: 0.5, font: {size: 11}},
+    margin: {l: 60, r: 20, t: 60, b: 50},
     template: 'plotly_white'
   };
   Plotly.react('costs-comp', traces, layout, {responsive: true});
@@ -951,7 +958,14 @@ def _chart_violation_timeline(data: DashboardData) -> go.Figure | None:
     fig.update_layout(
         xaxis_title="Stage",
         yaxis_title="Violation Cost (R$)",
-        legend=_LEGEND,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
         margin=_MARGIN,
     )
     return fig
@@ -1110,7 +1124,6 @@ def render(data: DashboardData) -> str:
         section_title("NPV Cost Analysis")
         + _render_npv_section(data)
         + _build_composition_section(data)
-        + _render_category_evolution(data)
         + _render_spot_price(data)
         + _render_violations(data)
     )

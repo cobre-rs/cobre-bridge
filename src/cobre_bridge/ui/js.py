@@ -281,8 +281,8 @@ function plotlyRef(labels, values, color, name) {
 function plotlyLayout(overrides) {
     var defaults = {
         hovermode: 'x unified',
-        margin: { l: 60, r: 30, t: 60, b: 10 },
-        legend: { orientation: 'h', yanchor: 'top', y: -0.15, xanchor: 'center', x: 0.5, font: { size: 11 } },
+        margin: { l: 60, r: 30, t: 60, b: 50 },
+        legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'center', x: 0.5, font: { size: 11 } },
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)'
     };
