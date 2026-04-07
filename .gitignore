@@ -27,4 +27,6 @@ htmlcov/
 *.swp
 
 # examples
-example/
+example/plans/
+.claude/
+plans/

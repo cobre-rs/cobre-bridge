@@ -6,3 +6,8 @@ select = ["E", "F", "I", "UP"]
 
 [lint.per-file-ignores]
 "**/dashboard.py" = ["E501"]
+"**/dashboard/tabs/*.py" = ["E501"]
+"**/ui/css.py" = ["E501"]
+"**/ui/js.py" = ["E501"]
+"**/ui/html.py" = ["E501"]
+"tests/test_*.py" = ["E501"]

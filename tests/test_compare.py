@@ -22,6 +22,7 @@ from cobre_bridge.comparators.bounds import (
     _is_effectively_infinite,
 )
 from cobre_bridge.comparators.results import (
+    PercentileData,
     ResultComparison,
     ResultsSummary,
     build_results_summary,
@@ -356,3 +357,140 @@ class TestEdgeCases:
         assert "42" in html
         assert "Total" in html
         assert "metric-card" in html
+
+
+# -------------------------------------------------------------------
+# Integration tests — full report pipeline
+# -------------------------------------------------------------------
+
+
+class TestComparisonReportIntegration:
+    """Integration tests for build_comparison_report() with realistic data.
+
+    Exercises the full pipeline: ResultComparison entries across multiple
+    entity types, PercentileData with non-empty DataFrames, and the HTML
+    assembly that calls all 8 tab builders.
+    """
+
+    @staticmethod
+    def _make_results() -> list[ResultComparison]:
+        """Build a representative set of comparison results across entity types."""
+        return [
+            # Hydro entries — two stages
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="PLANT_A",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=1200.0,
+                cobre_value=1195.0,
+                abs_diff=5.0,
+                rel_diff=0.004,
+            ),
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="PLANT_A",
+                newave_code=1,
+                cobre_id=0,
+                stage=1,
+                variable="storage_final_hm3",
+                newave_value=4500.0,
+                cobre_value=4510.0,
+                abs_diff=10.0,
+                rel_diff=0.002,
+            ),
+            # Thermal entry
+            ResultComparison(
+                entity_type="thermal",
+                entity_name="GAS_A",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=300.0,
+                cobre_value=298.0,
+                abs_diff=2.0,
+                rel_diff=0.007,
+            ),
+            # Bus entry
+            ResultComparison(
+                entity_type="bus",
+                entity_name="SE",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="spot_price",
+                newave_value=150.0,
+                cobre_value=152.0,
+                abs_diff=2.0,
+                rel_diff=0.013,
+            ),
+            # Convergence entry
+            ResultComparison(
+                entity_type="convergence",
+                entity_name="iteration_1",
+                newave_code=1,
+                cobre_id=1,
+                stage=1,
+                variable="lower_bound",
+                newave_value=50000.0,
+                cobre_value=50100.0,
+                abs_diff=100.0,
+                rel_diff=0.002,
+            ),
+        ]
+
+    @staticmethod
+    def _make_percentile_data() -> PercentileData:
+        """Build a PercentileData with minimal non-empty polars DataFrames."""
+        import polars as pl
+
+        hydro_df = pl.DataFrame(
+            {
+                "entity_id": [0, 0, 0],
+                "stage_id": [0, 1, 2],
+                "generation_mw_p10": [1000.0, 1050.0, 1100.0],
+                "generation_mw_p50": [1200.0, 1250.0, 1300.0],
+                "generation_mw_p90": [1400.0, 1450.0, 1500.0],
+                "storage_final_hm3_p10": [4000.0, 4100.0, 4200.0],
+                "storage_final_hm3_p50": [4500.0, 4550.0, 4600.0],
+                "storage_final_hm3_p90": [5000.0, 5050.0, 5100.0],
+            }
+        )
+        thermal_df = pl.DataFrame(
+            {
+                "entity_id": [0, 0, 0],
+                "stage_id": [0, 1, 2],
+                "generation_mw_p10": [250.0, 260.0, 270.0],
+                "generation_mw_p50": [300.0, 310.0, 320.0],
+                "generation_mw_p90": [350.0, 360.0, 370.0],
+            }
+        )
+        return PercentileData(hydro=hydro_df, thermal=thermal_df)
+
+    def test_comparison_report_full_pipeline(self) -> None:
+        """Full pipeline: multi-entity data renders all 8 tab sections."""
+        from cobre_bridge.comparators.html_report import COMPARISON_TABS
+        from cobre_bridge.comparators.report_builder import build_comparison_report
+
+        results = self._make_results()
+        pctiles = self._make_percentile_data()
+
+        html = build_comparison_report(results, pctiles)
+
+        assert "<!DOCTYPE html>" in html
+        for tab_id, _label in COMPARISON_TABS:
+            assert tab_id in html, f"Tab section '{tab_id}' missing from HTML output"
+
+    def test_comparison_report_contains_plotly_chart(self) -> None:
+        """Full pipeline with real data produces at least one Plotly chart."""
+        from cobre_bridge.comparators.report_builder import build_comparison_report
+
+        results = self._make_results()
+        pctiles = self._make_percentile_data()
+
+        html = build_comparison_report(results, pctiles)
+
+        assert "Plotly.newPlot" in html

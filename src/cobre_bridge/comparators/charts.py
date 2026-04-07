@@ -1,15 +1,6 @@
-"""Chart implementations for the HTML comparison report.
-
-All functions return HTML strings (plotly chart divs) that can be
-embedded in the comparison report template.  Uses plotly.js via
-inline JSON config (no python plotly server needed at report viewing
-time).
-"""
+"""Chart implementations for the HTML comparison report."""
 
 from __future__ import annotations
-
-import json
-import uuid
 
 import polars as pl
 
@@ -21,52 +12,13 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     ResultsSummary,
 )
+from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS as _LEGEND
+from cobre_bridge.ui.plotly_helpers import MARGIN_DEFAULTS as _MARGIN
+from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
 
-# Cobre band fill color: blue at 15% opacity.
 _BAND_FILL = "rgba(74,144,184,0.15)"
 _BAND_LINE = "rgba(255,255,255,0)"
 
-_LEGEND = dict(
-    orientation="h",
-    yanchor="top",
-    y=-0.15,
-    xanchor="center",
-    x=0.5,
-    font=dict(size=11),
-)
-_MARGIN = dict(l=60, r=30, t=60, b=10)
-
-
-def _plotly_div(
-    traces: list[dict],
-    layout: dict,
-    height: int = 400,
-) -> str:
-    """Return a plotly div with inline data and layout."""
-    div_id = f"chart-{uuid.uuid4().hex[:8]}"
-    layout.setdefault("height", height)
-    layout.setdefault("margin", _MARGIN)
-    layout.setdefault("legend", _LEGEND)
-    layout.setdefault("template", "plotly_white")
-
-    data_json = json.dumps(traces)
-    layout_json = json.dumps(layout)
-
-    return (
-        f'<div id="{div_id}"></div>\n'
-        "<script>"
-        f"Plotly.newPlot('{div_id}', {data_json}, {layout_json}, "
-        "{responsive: true});"
-        "</script>"
-    )
-
-
-# -------------------------------------------------------------------
-# Overview tab charts
-# -------------------------------------------------------------------
-
-# Mapping from a unified display label to (NEWAVE categories, Cobre categories).
-# Each side is a list because one display row may aggregate multiple raw categories.
 _COST_MAP: list[tuple[str, list[str], list[str]]] = [
     ("Thermal Generation", ["GERACAO TERMICA"], ["thermal_cost"]),
     ("Deficit", ["DEFICIT"], ["deficit_cost"]),
