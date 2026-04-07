@@ -226,6 +226,10 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                 "blocks": blocks,
                 "num_scenarios": num_scenarios,
                 "risk_measure": risk_measure,
+                "state_variables": {
+                    "storage": True,
+                    "inflow_lags": True,
+                },
             }
         )
 
@@ -340,12 +344,26 @@ def convert_config(nw_files: NewaveFiles) -> dict:
     forward_passes: int = dger.num_forwards or 1
     max_iterations: int = dger.num_max_iteracoes or 200
     num_series: int = dger.num_series_sinteticas or 200
+    max_order: int = dger.ordem_maxima_parp or 6
+    ano_ini_hist: int | None = dger.ano_inicial_historico
 
-    return {
+    # Build scenario source with historical year range when available.
+    scenario_source: dict | None = None
+    if ano_ini_hist is not None:
+        start_year: int = dger.ano_inicio_estudo
+        # Historical record ends the year before the study starts.
+        scenario_source = {
+            "historical_years": {"from": ano_ini_hist, "to": start_year - 1},
+        }
+
+    config: dict = {
         "$schema": (
             "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
             "/book/src/schemas/config.schema.json"
         ),
+        "estimation": {
+            "max_order": max_order,
+        },
         "training": {
             "forward_passes": forward_passes,
             "stopping_rules": [
@@ -365,8 +383,17 @@ def convert_config(nw_files: NewaveFiles) -> dict:
                 "penalty_cost": 10000.0,
             },
         },
+        "exports": {
+            "stochastic": True,
+        },
         "simulation": {
             "enabled": True,
             "num_scenarios": num_series,
         },
     }
+
+    if scenario_source is not None:
+        config["training"]["scenario_source"] = scenario_source
+        config["simulation"]["scenario_source"] = scenario_source
+
+    return config
