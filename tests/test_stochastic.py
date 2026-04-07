@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cobre_bridge.dashboard.tabs.v2_stochastic import (
+from cobre_bridge.dashboard.tabs.stochastic import (
     _aggregate_by_bus,
     _aggregate_system,
     _chart_ar_order_distribution,

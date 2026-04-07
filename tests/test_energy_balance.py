@@ -1,4 +1,4 @@
-"""Unit tests for cobre_bridge.dashboard.tabs.v2_energy_balance.
+"""Unit tests for cobre_bridge.dashboard.tabs.energy_balance.
 
 Covers module constants, can_render, helper functions (_compute_total_gwh,
 _compute_total_avg, _build_metrics_row), chart builders, and the full
@@ -13,8 +13,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 
-import cobre_bridge.dashboard.tabs.v2_energy_balance as v2_energy_balance
-from cobre_bridge.dashboard.tabs.v2_energy_balance import (
+import cobre_bridge.dashboard.tabs.energy_balance as energy_balance_mod
+from cobre_bridge.dashboard.tabs.energy_balance import (
     _build_hero_data,
     _build_hero_section,
     _build_metrics_row,
@@ -243,9 +243,9 @@ def _make_mock_data(
 
 def test_tab_constants() -> None:
     """Module-level constants must match the ticket specification exactly."""
-    assert v2_energy_balance.TAB_ID == "tab-v2-energy-balance"
-    assert v2_energy_balance.TAB_LABEL == "Energy Balance"
-    assert v2_energy_balance.TAB_ORDER == 30
+    assert energy_balance_mod.TAB_ID == "tab-energy-balance"
+    assert energy_balance_mod.TAB_LABEL == "Energy Balance"
+    assert energy_balance_mod.TAB_ORDER == 30
 
 
 # ---------------------------------------------------------------------------
@@ -510,19 +510,19 @@ def test_chart_gen_by_bus_first_row_shows_legend() -> None:
 # ---------------------------------------------------------------------------
 
 _SECTION_PATCHES = {
-    "cobre_bridge.dashboard.tabs.v2_energy_balance._chart_gen_mix_hero": lambda d: (
+    "cobre_bridge.dashboard.tabs.energy_balance._chart_gen_mix_hero": lambda d: (
         go.Figure()
     ),
-    "cobre_bridge.dashboard.tabs.v2_energy_balance._chart_gen_by_bus": lambda d: (
+    "cobre_bridge.dashboard.tabs.energy_balance._chart_gen_by_bus": lambda d: (
         go.Figure()
     ),
-    "cobre_bridge.dashboard.tabs.v2_energy_balance._render_deficit_excess": lambda d: (
+    "cobre_bridge.dashboard.tabs.energy_balance._render_deficit_excess": lambda d: (
         '<div class="collapsible-section">Deficit stub</div>'
     ),
-    "cobre_bridge.dashboard.tabs.v2_energy_balance._render_reservoir_storage": lambda d: (
+    "cobre_bridge.dashboard.tabs.energy_balance._render_reservoir_storage": lambda d: (
         '<div class="collapsible-section">Storage stub</div>'
     ),
-    "cobre_bridge.dashboard.tabs.v2_energy_balance._render_ncs_curtailment": lambda d: (
+    "cobre_bridge.dashboard.tabs.energy_balance._render_ncs_curtailment": lambda d: (
         '<div class="collapsible-section">NCS stub</div>'
     ),
 }

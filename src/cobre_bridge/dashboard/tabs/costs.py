@@ -54,7 +54,7 @@ from cobre_bridge.ui.theme import BUS_COLORS, COLORS
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
 
-TAB_ID = "tab-v2-costs"
+TAB_ID = "tab-costs"
 TAB_LABEL = "Costs"
 TAB_ORDER = 40
 

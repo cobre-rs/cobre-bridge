@@ -1,4 +1,4 @@
-"""Unit tests for cobre_bridge.dashboard.tabs.v2_constraints.
+"""Unit tests for cobre_bridge.dashboard.tabs.constraints.
 
 Covers module constants, can_render, _build_metrics_row, the new
 _compute_violation_zones, _build_constraint_lhs_data, _build_lhs_section,
@@ -15,8 +15,8 @@ from unittest.mock import MagicMock
 import pandas as pd
 import polars as pl
 
-import cobre_bridge.dashboard.tabs.v2_constraints as v2_constraints
-from cobre_bridge.dashboard.tabs.v2_constraints import (
+import cobre_bridge.dashboard.tabs.constraints as tab_constraints
+from cobre_bridge.dashboard.tabs.constraints import (
     _build_constraint_lhs_data,
     _build_lhs_section,
     _build_metrics_row,
@@ -161,9 +161,9 @@ def _make_mock_data(
 
 def test_tab_constants() -> None:
     """Module-level constants must match the ticket specification exactly."""
-    assert v2_constraints.TAB_ID == "tab-v2-constraints"
-    assert v2_constraints.TAB_LABEL == "Constraints"
-    assert v2_constraints.TAB_ORDER == 80
+    assert tab_constraints.TAB_ID == "tab-constraints"
+    assert tab_constraints.TAB_LABEL == "Constraints"
+    assert tab_constraints.TAB_ORDER == 80
 
 
 # ---------------------------------------------------------------------------
@@ -537,10 +537,10 @@ def test_no_three_separate_old_section_titles() -> None:
 # ---------------------------------------------------------------------------
 
 _PATCH_EVAL = (
-    "cobre_bridge.dashboard.tabs.v2_constraints.evaluate_constraint_expressions"
+    "cobre_bridge.dashboard.tabs.constraints.evaluate_constraint_expressions"
 )
-_PATCH_SUMMARY = "cobre_bridge.dashboard.tabs.v2_constraints.chart_violation_summary"
-_PATCH_HEATMAP = "cobre_bridge.dashboard.tabs.v2_constraints.chart_violation_heatmap"
+_PATCH_SUMMARY = "cobre_bridge.dashboard.tabs.constraints.chart_violation_summary"
+_PATCH_HEATMAP = "cobre_bridge.dashboard.tabs.constraints.chart_violation_heatmap"
 
 _STUB_LHS_DF = pd.DataFrame(
     columns=["constraint_id", "scenario_id", "stage_id", "block_id", "lhs_value"]

@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 # Module constants
 # ---------------------------------------------------------------------------
 
-TAB_ID = "tab-v2-network"
+TAB_ID = "tab-network"
 TAB_LABEL = "Network"
 TAB_ORDER = 60
 

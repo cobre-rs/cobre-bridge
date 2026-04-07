@@ -1406,9 +1406,9 @@ def test_non_fictitious_bus_ids_field_on_data(_v2_case: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_tab_registry_contains_only_v2_modules() -> None:
+def test_tab_registry_contains_all_modules() -> None:
     assert len(TAB_MODULES) == 9
     for module in TAB_MODULES:
-        assert module.TAB_ID.startswith("tab-v2-"), (
-            f"{module}.TAB_ID = {module.TAB_ID!r} does not start with 'tab-v2-'"
+        assert module.TAB_ID.startswith("tab-"), (
+            f"{module}.TAB_ID = {module.TAB_ID!r} does not start with 'tab-'"
         )

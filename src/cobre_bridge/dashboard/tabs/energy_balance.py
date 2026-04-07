@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 # Module constants
 # ---------------------------------------------------------------------------
 
-TAB_ID = "tab-v2-energy-balance"
+TAB_ID = "tab-energy-balance"
 TAB_LABEL = "Energy Balance"
 TAB_ORDER = 30
 

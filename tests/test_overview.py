@@ -1,4 +1,4 @@
-"""Unit tests for cobre_bridge.dashboard.tabs.v2_overview.
+"""Unit tests for cobre_bridge.dashboard.tabs.overview.
 
 Covers module constants, can_render, helper functions, and the full
 render() path including the empty-costs degradation branch.
@@ -12,9 +12,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 
-import cobre_bridge.dashboard.tabs.v2_overview as v2_overview
+import cobre_bridge.dashboard.tabs.overview as overview_mod
 from cobre_bridge.dashboard.chart_helpers import compute_cost_summary
-from cobre_bridge.dashboard.tabs.v2_overview import (
+from cobre_bridge.dashboard.tabs.overview import (
     _build_cost_table,
     _chart_cost_bar,
     _chart_training_mini,
@@ -119,9 +119,9 @@ def _make_mock_data(
 
 def test_tab_constants() -> None:
     """Module-level constants must match the ticket specification exactly."""
-    assert v2_overview.TAB_ID == "tab-v2-overview"
-    assert v2_overview.TAB_LABEL == "Overview"
-    assert v2_overview.TAB_ORDER == 0
+    assert overview_mod.TAB_ID == "tab-overview"
+    assert overview_mod.TAB_LABEL == "Overview"
+    assert overview_mod.TAB_ORDER == 0
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +506,7 @@ def test_render_with_full_data_contains_required_substrings() -> None:
     # Patch _stage_avg_mw so it doesn't try to execute the LazyFrame
     stage_mw = {0: 100.0, 1: 110.0, 2: 105.0}
     with patch(
-        "cobre_bridge.dashboard.tabs.v2_overview._stage_avg_mw",
+        "cobre_bridge.dashboard.tabs.overview._stage_avg_mw",
         return_value=stage_mw,
     ):
         html = render(data)
@@ -525,7 +525,7 @@ def test_render_termination_reason_appears_in_output() -> None:
         training_manifest={"termination_reason": "gap_tolerance"},
     )
     with patch(
-        "cobre_bridge.dashboard.tabs.v2_overview._stage_avg_mw",
+        "cobre_bridge.dashboard.tabs.overview._stage_avg_mw",
         return_value={0: 100.0},
     ):
         html = render(data)
@@ -543,7 +543,7 @@ def test_render_with_empty_costs_does_not_raise_and_contains_placeholder() -> No
     data = _make_mock_data(costs=pd.DataFrame())
 
     with patch(
-        "cobre_bridge.dashboard.tabs.v2_overview._stage_avg_mw",
+        "cobre_bridge.dashboard.tabs.overview._stage_avg_mw",
         return_value={0: 100.0},
     ):
         html = render(data)
@@ -556,7 +556,7 @@ def test_render_with_empty_conv_shows_no_convergence_placeholder() -> None:
     data = _make_mock_data(conv=pd.DataFrame())
 
     with patch(
-        "cobre_bridge.dashboard.tabs.v2_overview._stage_avg_mw",
+        "cobre_bridge.dashboard.tabs.overview._stage_avg_mw",
         return_value={0: 100.0},
     ):
         html = render(data)

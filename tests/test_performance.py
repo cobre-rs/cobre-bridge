@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 
-from cobre_bridge.dashboard.tabs.v2_performance import (
+from cobre_bridge.dashboard.tabs.performance import (
     TAB_ID,
     TAB_LABEL,
     TAB_ORDER,
@@ -149,7 +149,7 @@ def _make_mock_data(
 
 def test_tab_constants() -> None:
     """TAB_ID, TAB_LABEL, and TAB_ORDER must match the spec."""
-    assert TAB_ID == "tab-v2-performance"
+    assert TAB_ID == "tab-performance"
     assert TAB_LABEL == "Performance"
     assert TAB_ORDER == 90
 

@@ -1,4 +1,4 @@
-"""Unit tests for cobre_bridge.dashboard.tabs.v2_plants.
+"""Unit tests for cobre_bridge.dashboard.tabs.plants.
 
 Covers module constants, can_render, _compute_hydro_percentiles,
 _build_hydro_json, build_hydro_explorer, _compute_thermal_percentiles,
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import polars as pl
 
-from cobre_bridge.dashboard.tabs.v2_plants import (
+from cobre_bridge.dashboard.tabs.plants import (
     TAB_ID,
     TAB_LABEL,
     TAB_ORDER,
@@ -167,7 +167,7 @@ def _make_lp_bounds(
 
 
 def test_module_constants() -> None:
-    assert TAB_ID == "tab-v2-plants"
+    assert TAB_ID == "tab-plants"
     assert TAB_LABEL == "Plant Explorer"
     assert TAB_ORDER == 50
 

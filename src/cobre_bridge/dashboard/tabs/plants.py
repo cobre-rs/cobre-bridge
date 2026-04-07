@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 # Module constants
 # ---------------------------------------------------------------------------
 
-TAB_ID = "tab-v2-plants"
+TAB_ID = "tab-plants"
 TAB_LABEL = "Plant Explorer"
 TAB_ORDER = 50
 

@@ -26,7 +26,7 @@ from cobre_bridge.ui.theme import COLORS, COPPER_ACCENT, PERFORMANCE_PHASE_COLOR
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
 
-TAB_ID = "tab-v2-training"
+TAB_ID = "tab-training"
 TAB_LABEL = "Training"
 TAB_ORDER = 20
 

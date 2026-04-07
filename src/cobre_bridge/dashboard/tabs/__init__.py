@@ -1,8 +1,7 @@
 """Tab registry for the dashboard.
 
 Defines the ``TabModule`` Protocol, the ``TAB_MODULES`` registry, and the
-``get_renderable_tabs`` orchestration function.  The registry exclusively
-uses v2 lifecycle-driven tab modules (epic-03 through epic-07).
+``get_renderable_tabs`` orchestration function.
 """
 
 from __future__ import annotations
@@ -41,43 +40,43 @@ class TabModule(Protocol):
 # ---------------------------------------------------------------------------
 
 DEFAULT_TAB_ORDER: dict[str, int] = {
-    "tab-v2-overview": 0,
-    "tab-v2-stochastic": 10,
-    "tab-v2-training": 20,
-    "tab-v2-energy-balance": 30,
-    "tab-v2-costs": 40,
-    "tab-v2-plants": 50,
-    "tab-v2-network": 60,
-    "tab-v2-constraints": 80,
-    "tab-v2-performance": 90,
+    "tab-overview": 0,
+    "tab-stochastic": 10,
+    "tab-training": 20,
+    "tab-energy-balance": 30,
+    "tab-costs": 40,
+    "tab-plants": 50,
+    "tab-network": 60,
+    "tab-constraints": 80,
+    "tab-performance": 90,
 }
 
 # ---------------------------------------------------------------------------
-# Registry — v2 lifecycle-driven tab modules (epic-03 through epic-07)
+# Registry
 # ---------------------------------------------------------------------------
 
 from cobre_bridge.dashboard.tabs import (  # noqa: E402
-    v2_constraints,
-    v2_costs,
-    v2_energy_balance,
-    v2_network,
-    v2_overview,
-    v2_performance,
-    v2_plants,
-    v2_stochastic,
-    v2_training,
+    constraints,
+    costs,
+    energy_balance,
+    network,
+    overview,
+    performance,
+    plants,
+    stochastic,
+    training,
 )
 
 TAB_MODULES: list[TabModule] = [
-    v2_overview,
-    v2_training,
-    v2_stochastic,
-    v2_energy_balance,
-    v2_costs,
-    v2_plants,
-    v2_network,
-    v2_constraints,
-    v2_performance,
+    overview,
+    training,
+    stochastic,
+    energy_balance,
+    costs,
+    plants,
+    network,
+    constraints,
+    performance,
 ]
 
 # ---------------------------------------------------------------------------

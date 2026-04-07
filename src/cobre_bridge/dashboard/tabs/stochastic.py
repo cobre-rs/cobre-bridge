@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 # Module constants
 # ---------------------------------------------------------------------------
 
-TAB_ID = "tab-v2-stochastic"
+TAB_ID = "tab-stochastic"
 TAB_LABEL = "Stochastic Model"
 TAB_ORDER = 10
 

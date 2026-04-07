@@ -1,4 +1,4 @@
-"""Unit tests for cobre_bridge.dashboard.tabs.v2_costs.
+"""Unit tests for cobre_bridge.dashboard.tabs.costs.
 
 Covers module constants, can_render, _compute_npv_metric, _build_metrics_row,
 _build_cost_table, _chart_cost_bar, and the full render() path including the
@@ -16,9 +16,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 
-import cobre_bridge.dashboard.tabs.v2_costs as v2_costs
+import cobre_bridge.dashboard.tabs.costs as costs_mod
 from cobre_bridge.dashboard.chart_helpers import compute_cost_summary
-from cobre_bridge.dashboard.tabs.v2_costs import (
+from cobre_bridge.dashboard.tabs.costs import (
     _build_composition_data,
     _build_composition_section,
     _build_cost_table,
@@ -103,9 +103,9 @@ def _make_mock_data(
 
 def test_tab_constants() -> None:
     """Module-level constants must match the ticket specification exactly."""
-    assert v2_costs.TAB_ID == "tab-v2-costs"
-    assert v2_costs.TAB_LABEL == "Costs"
-    assert v2_costs.TAB_ORDER == 40
+    assert costs_mod.TAB_ID == "tab-costs"
+    assert costs_mod.TAB_LABEL == "Costs"
+    assert costs_mod.TAB_ORDER == 40
 
 
 # ---------------------------------------------------------------------------

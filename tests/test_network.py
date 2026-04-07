@@ -1,4 +1,4 @@
-"""Unit tests for cobre_bridge.dashboard.tabs.v2_network.
+"""Unit tests for cobre_bridge.dashboard.tabs.network.
 
 Covers module constants, can_render, build_line_explorer, build_heatmap,
 build_bus_balance, and the render() guard path.
@@ -11,8 +11,8 @@ from unittest.mock import MagicMock
 import pandas as pd
 import polars as pl
 
-import cobre_bridge.dashboard.tabs.v2_network as v2_network
-from cobre_bridge.dashboard.tabs.v2_network import (
+import cobre_bridge.dashboard.tabs.network as network_mod
+from cobre_bridge.dashboard.tabs.network import (
     TAB_ID,
     TAB_LABEL,
     TAB_ORDER,
@@ -161,16 +161,16 @@ def _make_mock_data(
 
 def test_tab_constants() -> None:
     """Module-level constants must match the ticket specification exactly."""
-    assert TAB_ID == "tab-v2-network"
+    assert TAB_ID == "tab-network"
     assert TAB_LABEL == "Network"
     assert TAB_ORDER == 60
 
 
 def test_module_attributes() -> None:
     """Verify constants are accessible as module attributes."""
-    assert v2_network.TAB_ID == "tab-v2-network"
-    assert v2_network.TAB_LABEL == "Network"
-    assert v2_network.TAB_ORDER == 60
+    assert network_mod.TAB_ID == "tab-network"
+    assert network_mod.TAB_LABEL == "Network"
+    assert network_mod.TAB_ORDER == 60
 
 
 # ---------------------------------------------------------------------------

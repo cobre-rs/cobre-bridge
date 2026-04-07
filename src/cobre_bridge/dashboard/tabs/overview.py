@@ -36,7 +36,7 @@ from cobre_bridge.ui.theme import COLORS, GENERATION_COLORS
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
 
-TAB_ID = "tab-v2-overview"
+TAB_ID = "tab-overview"
 TAB_LABEL = "Overview"
 TAB_ORDER = 0
 
@@ -507,7 +507,7 @@ def _render_section_e(data: DashboardData) -> str:
         )
         link = (
             f"<p {link_style}>"
-            '<a href="#" onclick="showTab(\'tab-v2-training\','
+            '<a href="#" onclick="showTab(\'tab-training\','
             " document.querySelector('nav button:nth-child(2)'));"
             'return false;">Full training analysis \u2192</a>'
             "</p>"
@@ -527,7 +527,7 @@ def _render_section_e(data: DashboardData) -> str:
         )
         link = (
             f"<p {link_style}>"
-            '<a href="#" onclick="showTab(\'tab-v2-energy-balance\','
+            '<a href="#" onclick="showTab(\'tab-energy-balance\','
             " document.querySelector('nav button:nth-child(4)'));"
             'return false;">Energy balance details \u2192</a>'
             "</p>"
