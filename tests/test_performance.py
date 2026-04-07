@@ -126,15 +126,33 @@ def _make_mock_data(
     scaling_report: dict | None = None,
     retry_histogram: pd.DataFrame | None = None,
 ) -> MagicMock:
-    """Build a MagicMock that mimics DashboardData with real DataFrames."""
+    """Build a MagicMock that mimics DashboardData with real DataFrames.
+
+    Maps legacy parameter names to the attribute names used by the current
+    implementation:
+      - ``metadata`` (with nested ``run_info``) -> ``training_metadata``
+        (flat dict with ``duration_seconds``).
+      - ``simulation_manifest`` -> ``simulation_metadata``.
+    """
     data = MagicMock()
     data.solver_train = solver_train if solver_train is not None else _make_solver_df()
     data.solver_sim = solver_sim if solver_sim is not None else _make_solver_df()
     data.timing = timing if timing is not None else _make_timing()
-    data.metadata = metadata if metadata is not None else {}
-    data.simulation_manifest = (
+
+    # The implementation reads data.training_metadata.get("duration_seconds").
+    # The legacy test helper accepted metadata={"run_info": {"duration_seconds": X}};
+    # flatten that to the format the implementation expects.
+    if metadata is not None:
+        run_info = metadata.get("run_info", {})
+        data.training_metadata = run_info
+    else:
+        data.training_metadata = {}
+
+    # The implementation reads data.simulation_metadata.get("duration_seconds").
+    data.simulation_metadata = (
         simulation_manifest if simulation_manifest is not None else {}
     )
+
     data.scaling_report = scaling_report if scaling_report is not None else {}
     data.retry_histogram = (
         retry_histogram if retry_histogram is not None else pd.DataFrame()

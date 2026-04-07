@@ -85,14 +85,36 @@ def _make_mock_data(
     timing: pd.DataFrame | None = None,
     training_manifest: dict | None = None,
 ) -> MagicMock:
-    """Build a MagicMock that mimics DashboardData."""
+    """Build a MagicMock that mimics DashboardData.
+
+    The ``training_manifest`` parameter accepts a dict that may use either
+    ``"elapsed_seconds"`` or ``"duration_seconds"`` as the timing key.  The
+    implementation reads ``data.training_metadata.get("duration_seconds")``,
+    so both key names are normalised here.
+    """
     data = MagicMock()
     data.conv = conv if conv is not None else _make_conv()
     data.cut_selection = (
         cut_selection if cut_selection is not None else _make_cut_selection()
     )
     data.timing = timing if timing is not None else _make_timing()
-    data.training_manifest = training_manifest if training_manifest is not None else {}
+
+    # Normalise the training manifest: the implementation reads
+    # data.training_metadata.get("duration_seconds").  Map "elapsed_seconds"
+    # -> "duration_seconds" if present so legacy test data still works.
+    # When training_manifest is None, supply an empty dict so that
+    # .get("duration_seconds") returns None -> "N/A" display.
+    if training_manifest is None:
+        data.training_metadata = {}
+    else:
+        normalised: dict = {}
+        if "elapsed_seconds" in training_manifest:
+            normalised["duration_seconds"] = training_manifest["elapsed_seconds"]
+        normalised.update(
+            {k: v for k, v in training_manifest.items() if k != "elapsed_seconds"}
+        )
+        data.training_metadata = normalised
+
     data.stage_labels = {i: f"Stage {i}" for i in range(1, 20)}
     return data
 
@@ -259,11 +281,16 @@ def test_chart_cut_activity_heatmap_empty() -> None:
 
 
 def test_render_contains_required_sections() -> None:
-    """render() HTML must contain the structural sections required by the spec."""
+    """render() HTML must contain the structural sections required by the spec.
+
+    The hero chart is titled "Training Bounds" (the convergence hero); the cut
+    pool chart is titled "Cut Pool Evolution".  Both contribute visible text in
+    the rendered HTML.
+    """
     data = _make_mock_data(conv=_make_conv(15))
     html = render(data)
     assert "Lower Bound" in html
-    assert "Convergence" in html
+    assert "Training Bounds" in html
     assert "Cut Pool" in html
 
 

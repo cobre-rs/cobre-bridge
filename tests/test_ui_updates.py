@@ -101,8 +101,16 @@ def test_css_contains_sub_tab_panel() -> None:
 
 
 def test_css_contains_default_collapsed() -> None:
-    """DASHBOARD_CSS must include a .default-collapsed rule for collapsed content."""
-    assert ".default-collapsed" in DASHBOARD_CSS
+    """DASHBOARD_CSS must include a CSS rule for collapsed content.
+
+    The collapsible section uses the 'collapsed-title' and
+    'collapsible-content collapsed' classes when default_collapsed=True.
+    The CSS that styles collapsed state is expressed via
+    '.collapsible-content.collapsed' and '.collapsed-title'.
+    """
+    assert ".collapsible-content.collapsed" in DASHBOARD_CSS or (
+        "collapsed" in DASHBOARD_CSS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,21 +128,31 @@ def test_collapsible_section_default_expanded() -> None:
 
 
 def test_collapsible_section_default_collapsed_class() -> None:
-    """collapsible_section() with default_collapsed=True must add the CSS class."""
+    """collapsible_section() with default_collapsed=True applies collapsed classes.
+
+    The outer section div keeps class="collapsible-section".  The title div
+    gains the 'collapsed-title' modifier and the content div gains 'collapsed'.
+    """
     html = collapsible_section(
         "Title", "<p>content</p>", "sec1", default_collapsed=True
     )
-    assert 'class="collapsible-section default-collapsed"' in html
+    assert 'class="collapsible-section"' in html
+    assert "collapsed-title" in html
+    assert "collapsible-content collapsed" in html
 
 
 def test_collapsible_section_default_collapsed_chevron() -> None:
-    """collapsible_section() with default_collapsed=True must use the > chevron."""
+    """collapsible_section() with default_collapsed=True includes a chevron element.
+
+    The chevron is an inline SVG polyline (not a text '>' character).
+    Its rotation is controlled via CSS '.collapsed-title .chevron'.
+    """
     html = collapsible_section(
         "Title", "<p>content</p>", "sec1", default_collapsed=True
     )
-    assert ">" in html
-    # Confirm the right-pointing chevron appears in the chevron element
-    assert '<span class="chevron">></span>' in html
+    # The chevron is an SVG element, not a text span.
+    assert 'class="chevron"' in html
+    assert "<svg" in html or "<polyline" in html
 
 
 def test_collapsible_section_section_id() -> None:

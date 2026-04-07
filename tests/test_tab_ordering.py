@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from cobre_bridge.dashboard.tabs import DEFAULT_TAB_ORDER
-from cobre_bridge.dashboard.tabs import stochastic, training
+from cobre_bridge.dashboard.tabs import DEFAULT_TAB_ORDER, stochastic, training
 
 
 def test_stochastic_before_training() -> None:

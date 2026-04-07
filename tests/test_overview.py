@@ -73,6 +73,47 @@ def _make_mock_lf(gwh_value: float = 5000.0) -> pl.LazyFrame:
     ).lazy()
 
 
+def _make_training_metadata(
+    training_manifest: dict | None,
+    metadata: dict | None,
+) -> dict:
+    """Build a training_metadata dict from legacy test parameters.
+
+    The implementation reads from ``data.training_metadata`` using keys
+    ``cobre_version``, ``started_at``, ``duration_seconds``, and a nested
+    ``convergence`` sub-dict with ``termination_reason``.
+
+    Legacy test helpers passed ``training_manifest`` and ``metadata``
+    separately.  This function unifies them into the shape the
+    implementation now expects.
+    """
+    result: dict = {}
+    if metadata:
+        # metadata may carry {"version": "1.0"} -> map to cobre_version
+        if "version" in metadata:
+            result["cobre_version"] = metadata["version"]
+
+    if training_manifest:
+        if "elapsed_seconds" in training_manifest:
+            result["duration_seconds"] = training_manifest["elapsed_seconds"]
+        if "start_time" in training_manifest:
+            result["started_at"] = training_manifest["start_time"]
+        if "termination_reason" in training_manifest:
+            result.setdefault("convergence", {})["termination_reason"] = (
+                training_manifest["termination_reason"]
+            )
+
+    return result
+
+
+def _make_policy_metadata(training_manifest: dict | None) -> dict:
+    """Build a policy_metadata dict from the legacy training_manifest."""
+    result: dict = {}
+    if training_manifest and "policy_states" in training_manifest:
+        result["state_dimension"] = training_manifest["policy_states"]
+    return result
+
+
 def _make_mock_data(
     *,
     costs: pd.DataFrame | None = None,
@@ -94,8 +135,8 @@ def _make_mock_data(
     data.n_scenarios = n_scenarios
     data.n_stages = n_stages
     data.discount_rate = discount_rate
-    data.metadata = metadata if metadata is not None else {}
-    data.training_manifest = training_manifest if training_manifest is not None else {}
+    data.training_metadata = _make_training_metadata(training_manifest, metadata)
+    data.policy_metadata = _make_policy_metadata(training_manifest)
     data.conv = conv if conv is not None else _make_conv_df()
     data.costs = costs if costs is not None else _make_costs_df()
     data.stage_labels = {0: "Jan 2024", 1: "Feb 2024", 2: "Mar 2024"}
@@ -187,10 +228,10 @@ def test_run_status_strip_with_manifest() -> None:
 
 
 def test_run_status_strip_empty_manifest() -> None:
-    """When training_manifest is empty, the fallback message must appear."""
+    """When training_metadata is empty, the fallback message must appear."""
     data = _make_mock_data(training_manifest={})
     html = _run_status_strip(data)
-    assert "No training manifest available" in html
+    assert "No training metadata available" in html
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +443,8 @@ def test_build_cost_table_empty_df_returns_placeholder() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_chart_cost_bar_produces_horizontal_bar_traces() -> None:
-    """_chart_cost_bar must return a Figure with at least one horizontal bar."""
+def test_chart_cost_bar_produces_vertical_bar_traces() -> None:
+    """_chart_cost_bar must return a Figure with at least one vertical bar."""
     costs = _make_costs_df()
     summary = compute_cost_summary(costs, 0.10)
     fig = _chart_cost_bar(summary)
@@ -411,16 +452,16 @@ def test_chart_cost_bar_produces_horizontal_bar_traces() -> None:
     assert isinstance(fig, go.Figure)
     bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
     assert len(bar_traces) >= 1
-    # All bars must be horizontal
+    # Bars are vertical: orientation is None (default) or "v", never "h"
     for trace in bar_traces:
-        assert trace.orientation == "h"
+        assert trace.orientation != "h"
 
 
 def test_chart_cost_bar_error_bars_p5_p95() -> None:
-    """_chart_cost_bar must set error_x with p5–p95 range on each bar trace.
+    """_chart_cost_bar must set error_y with p5–p95 range on each bar trace.
 
     Acceptance criterion from ticket-007: given p5=800, mean=1000, p95=1200,
-    the trace must have error_x.array=[200] and error_x.arrayminus=[200].
+    the trace must have error_y.array=[200] and error_y.arrayminus=[200].
     """
     summary = pd.DataFrame(
         {
@@ -439,10 +480,10 @@ def test_chart_cost_bar_error_bars_p5_p95() -> None:
     bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
     assert len(bar_traces) == 1
     trace = bar_traces[0]
-    assert trace.error_x is not None
-    assert trace.error_x.visible is True
-    assert trace.error_x.array == (200.0,)
-    assert trace.error_x.arrayminus == (200.0,)
+    assert trace.error_y is not None
+    assert trace.error_y.visible is True
+    assert trace.error_y.array == (200.0,)
+    assert trace.error_y.arrayminus == (200.0,)
 
 
 def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
@@ -465,8 +506,8 @@ def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
 
     bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
     assert len(bar_traces) == 1
-    # error_x must be None when percentiles are NaN
-    assert bar_traces[0].error_x is None or bar_traces[0].error_x.visible is not True
+    # error_y must be None when percentiles are NaN
+    assert bar_traces[0].error_y is None or bar_traces[0].error_y.visible is not True
 
 
 # ---------------------------------------------------------------------------
@@ -475,11 +516,17 @@ def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
 
 
 def test_chart_training_mini_returns_figure_for_valid_conv() -> None:
-    """_chart_training_mini must return a Figure when conv has required columns."""
+    """_chart_training_mini must return a Figure when conv has required columns.
+
+    When upper_bound_std is present the implementation adds two invisible band
+    traces (fill=tonexty) in addition to the lower_bound and upper_bound_mean
+    lines, for a total of 4 traces.
+    """
     conv = _make_conv_df(10)
     fig = _chart_training_mini(conv)
     assert isinstance(fig, go.Figure)
-    assert len(fig.data) == 2  # lower_bound + upper_bound_mean
+    # 2 band traces (upper/lower of ±1-std confidence band) + lower_bound + upper_bound_mean
+    assert len(fig.data) == 4
 
 
 def test_chart_training_mini_returns_none_for_empty_conv() -> None:

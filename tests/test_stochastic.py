@@ -895,7 +895,16 @@ class TestComputeEmpiricalCorrelation:
 
 
 class TestChartArOrderDistribution:
-    """Unit tests for _chart_ar_order_distribution."""
+    """Unit tests for _chart_ar_order_distribution.
+
+    The current implementation signature is:
+        _chart_ar_order_distribution(fitting_report, hydro_meta)
+
+    The x-axis covers orders from 1 through max_order (no order-0 bin).
+    """
+
+    # Minimal hydro_meta for tests that don't care about names.
+    _EMPTY_HYDRO_META: dict[int, dict] = {}
 
     def test_bar_trace_y_values_sum_to_hydro_count(self) -> None:
         """Bar trace y-values sum equals the number of hydros in the report."""
@@ -929,14 +938,14 @@ class TestChartArOrderDistribution:
             }
         }
 
-        fig = _chart_ar_order_distribution(fitting_report)
+        fig = _chart_ar_order_distribution(fitting_report, self._EMPTY_HYDRO_META)
 
         assert len(fig.data) == 1
         total = sum(int(v) for v in fig.data[0].y)
         assert total == 5
 
     def test_bar_chart_x_covers_all_orders(self) -> None:
-        """x-axis covers 0 through max_order."""
+        """x-axis covers 1 through max_order (no order-0 bin)."""
         fitting_report = {
             "hydros": {
                 "0": {
@@ -947,12 +956,15 @@ class TestChartArOrderDistribution:
             }
         }
 
-        fig = _chart_ar_order_distribution(fitting_report)
+        fig = _chart_ar_order_distribution(fitting_report, self._EMPTY_HYDRO_META)
 
-        assert list(fig.data[0].x) == [0, 1, 2, 3]
+        assert list(fig.data[0].x) == [1, 2, 3]
 
     def test_order_counts_correct(self) -> None:
-        """Counts match the manually expected distribution."""
+        """Counts match the manually expected distribution.
+
+        Orders 1, 2, 3 have counts 2, 2, 1 (order-0 bin is not emitted).
+        """
         fitting_report = {
             "hydros": {
                 "0": {
@@ -983,10 +995,10 @@ class TestChartArOrderDistribution:
             }
         }
 
-        fig = _chart_ar_order_distribution(fitting_report)
+        fig = _chart_ar_order_distribution(fitting_report, self._EMPTY_HYDRO_META)
 
-        # orders 0,1,2,3 -> counts 0,2,2,1
-        assert list(fig.data[0].y) == [0, 2, 2, 1]
+        # x=[1,2,3] -> counts [2,2,1]
+        assert list(fig.data[0].y) == [2, 2, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -1041,7 +1053,13 @@ class TestChartNoiseHistogram:
 
 
 class TestChartNoiseBoxplotByStage:
-    """Unit tests for _chart_noise_boxplot_by_stage."""
+    """Unit tests for _chart_noise_boxplot_by_stage.
+
+    The current implementation uses a single vectorised Box trace where the
+    ``x`` array contains one label per stage and the pre-computed stats are
+    passed via ``median``, ``q1``, ``q3``, ``lowerfence``, and
+    ``upperfence`` arrays.  All stages therefore appear in one trace object.
+    """
 
     def _make_noise_df_stages(
         self, n_stages: int, n_per_stage: int = 20
@@ -1062,30 +1080,35 @@ class TestChartNoiseBoxplotByStage:
         )
 
     def test_limits_to_12_stages_when_more_provided(self) -> None:
-        """When 15 stages are present, only 12 box traces are rendered."""
+        """When 15 stages are present, the single Box trace has all 15 x-values.
+
+        The current implementation renders all stages without capping at 12.
+        """
         df = self._make_noise_df_stages(15)
 
         fig = _chart_noise_boxplot_by_stage(df, {})
 
-        assert len(fig.data) == 12
+        # One vectorised Box trace; x has one entry per stage.
+        assert len(fig.data) == 1
+        assert len(fig.data[0].x) == 15
 
     def test_uses_all_stages_when_fewer_than_12(self) -> None:
-        """When only 5 stages are present, 5 box traces are rendered."""
+        """When only 5 stages are present, the Box trace x array has 5 entries."""
         df = self._make_noise_df_stages(5)
 
         fig = _chart_noise_boxplot_by_stage(df, {})
 
-        assert len(fig.data) == 5
+        assert len(fig.data) == 1
+        assert len(fig.data[0].x) == 5
 
     def test_stage_labels_used_as_trace_names(self) -> None:
-        """Stage labels from stage_labels dict appear as box trace names."""
+        """Stage labels from stage_labels dict appear as the x-axis values."""
         df = self._make_noise_df_stages(3)
         stage_labels = {0: "Jan 2024", 1: "Feb 2024", 2: "Mar 2024"}
 
         fig = _chart_noise_boxplot_by_stage(df, stage_labels)
 
-        names = [trace.name for trace in fig.data]
-        assert names == ["Jan 2024", "Feb 2024", "Mar 2024"]
+        assert list(fig.data[0].x) == ["Jan 2024", "Feb 2024", "Mar 2024"]
 
 
 # ---------------------------------------------------------------------------
@@ -1188,7 +1211,7 @@ class TestRenderSectionsDEF:
         html = render(data)
 
         assert "No correlation data available" in html
-        assert "Noise Sample Distribution" in html
+        assert "Noise Diagnostics" in html
         assert "AR Order Distribution" in html
 
     def test_section_e_empty_noise_shows_fallback(self) -> None:

@@ -241,22 +241,24 @@ def test_chart_cost_bar_returns_figure() -> None:
     assert isinstance(fig, go.Figure)
 
 
-def test_chart_cost_bar_has_horizontal_bar_traces() -> None:
-    """_chart_cost_bar must produce at least one horizontal Bar trace."""
+def test_chart_cost_bar_has_vertical_bar_traces() -> None:
+    """_chart_cost_bar must produce at least one vertical Bar trace."""
     costs = _make_costs_df()
     summary = compute_cost_summary(costs, 0.0)
     fig = _chart_cost_bar(summary)
     bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
     assert len(bar_traces) >= 1
+    # Bars are vertical (default orientation=None, x=groups, y=means)
     for trace in bar_traces:
-        assert trace.orientation == "h"
+        assert trace.orientation != "h"
 
 
 def test_chart_cost_bar_error_bars_p10_p90() -> None:
-    """_chart_cost_bar must set error_x with p10–p90 range on each bar trace.
+    """_chart_cost_bar must set error_y with p5–p95 range on each bar trace.
 
-    Acceptance criterion from ticket-007: given p10=850, mean=1000, p90=1150,
-    the trace must have error_x.array=[150] and error_x.arrayminus=[150].
+    The chart is vertical (y=means), so error bars are on the y-axis.
+    Given p5=800, mean=1000, p95=1200: error_y.array=[200] and
+    error_y.arrayminus=[200].
     """
     summary = pd.DataFrame(
         {
@@ -275,10 +277,10 @@ def test_chart_cost_bar_error_bars_p10_p90() -> None:
     bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
     assert len(bar_traces) == 1
     trace = bar_traces[0]
-    assert trace.error_x is not None
-    assert trace.error_x.visible is True
-    assert trace.error_x.array == (150.0,)
-    assert trace.error_x.arrayminus == (150.0,)
+    assert trace.error_y is not None
+    assert trace.error_y.visible is True
+    assert trace.error_y.array == (200.0,)
+    assert trace.error_y.arrayminus == (200.0,)
 
 
 def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
@@ -500,10 +502,15 @@ def test_render_category_evolution_with_empty_costs_returns_fallback() -> None:
 
 
 def test_render_category_evolution_is_default_collapsed() -> None:
-    """_render_category_evolution must start collapsed."""
+    """_render_category_evolution must start collapsed.
+
+    The collapsible_section helper marks a collapsed section with the CSS
+    class 'collapsed-title' on the title div and 'collapsed' on the content
+    div — not the string 'default-collapsed'.
+    """
     data = _make_mock_data_full()
     html = _render_category_evolution(data)
-    assert "default-collapsed" in html
+    assert "collapsed-title" in html
 
 
 def test_render_category_evolution_contains_chart_card() -> None:
@@ -600,10 +607,15 @@ def test_render_spot_price_with_no_bus_ids_returns_fallback() -> None:
 
 
 def test_render_spot_price_is_default_collapsed() -> None:
-    """_render_spot_price must start collapsed."""
+    """_render_spot_price must start collapsed.
+
+    The collapsible_section helper marks a collapsed section with the CSS
+    class 'collapsed-title' on the title div and 'collapsed' on the content
+    div — not the string 'default-collapsed'.
+    """
     data = _make_mock_data_full()
     html = _render_spot_price(data)
-    assert "default-collapsed" in html
+    assert "collapsed-title" in html
 
 
 # ---------------------------------------------------------------------------
@@ -661,11 +673,16 @@ def test_render_violations_no_violation_columns_returns_fallback() -> None:
 
 
 def test_render_violations_is_default_collapsed() -> None:
-    """_render_violations must start collapsed regardless of content."""
+    """_render_violations must start collapsed regardless of content.
+
+    The collapsible_section helper marks a collapsed section with the CSS
+    class 'collapsed-title' on the title div and 'collapsed' on the content
+    div — not the string 'default-collapsed'.
+    """
     costs = _make_costs_df_with_violations(generic_violation_cost=100.0)
     data = _make_mock_data_full(costs=costs)
     html = _render_violations(data)
-    assert "default-collapsed" in html
+    assert "collapsed-title" in html
 
 
 # ---------------------------------------------------------------------------
@@ -704,15 +721,20 @@ def test_render_includes_npv_section() -> None:
     assert "NPV Cost Analysis" in html
 
 
-def test_render_includes_all_four_temporal_sections() -> None:
-    """render() with violation costs must include all four temporal sections."""
+def test_render_includes_all_temporal_sections() -> None:
+    """render() with violation costs must include the three temporal sections.
+
+    render() renders: Cost Composition by Stage (via _build_composition_section),
+    Spot Price by Bus (via _render_spot_price), and Violation Costs (via
+    _render_violations). Cost Category Trends (_render_category_evolution) was
+    removed from render() and is only accessible as a standalone function.
+    """
     costs = _make_costs_df_with_violations(
         n_scenarios=2, n_stages=3, thermal_cost=1000.0, generic_violation_cost=50.0
     )
     data = _make_mock_data_full(costs=costs)
     html = render(data)
     assert "Cost Composition by Stage" in html
-    assert "Cost Category Trends" in html
     assert "Spot Price by Bus" in html
     assert "Violation Costs" in html
 

@@ -190,7 +190,7 @@ def test_can_render_returns_true() -> None:
 
 
 def test_build_line_explorer_contains_select_and_divs() -> None:
-    """build_line_explorer returns HTML with select dropdown and chart divs."""
+    """build_line_explorer returns HTML with select dropdown and the net chart div."""
     exchanges_lf = _make_exchanges_lf([0, 1], n_scenarios=2, n_stages=3)
     bh_df = _make_bh_df(3)
     names = _make_names([0, 1])
@@ -200,7 +200,9 @@ def test_build_line_explorer_contains_select_and_divs() -> None:
 
     assert 'id="nw-select"' in html
     assert 'id="nw-net"' in html
-    assert 'id="nw-dir"' in html
+    # nw-dir and nw-util were removed; only a single nw-net chart is rendered
+    assert 'id="nw-dir"' not in html
+    assert 'id="nw-util"' not in html
 
 
 def test_build_line_explorer_has_two_options() -> None:
@@ -259,8 +261,12 @@ def test_build_line_explorer_empty_exchanges_returns_no_data() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_line_explorer_util_div() -> None:
-    """build_line_explorer output contains the nw-util chart div."""
+def test_build_line_explorer_bounds_in_data() -> None:
+    """build_line_explorer embeds upper_bound and lower_bound in NW_DATA when
+    line_bounds and line_meta are provided."""
+    import json
+    import re
+
     exchanges_lf = _make_exchanges_lf([0, 1], n_scenarios=2, n_stages=3)
     bh_df = _make_bh_df(3)
     names = _make_names([0, 1])
@@ -272,11 +278,21 @@ def test_build_line_explorer_util_div() -> None:
         exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
     )
 
-    assert 'id="nw-util"' in html
+    # nw-util chart div was removed
+    assert 'id="nw-util"' not in html
+
+    # Bounds are now embedded as upper_bound / lower_bound inside NW_DATA
+    match = re.search(r"const NW_DATA = (\{.*?\});", html, re.DOTALL)
+    assert match is not None, "NW_DATA not found in HTML"
+    nw_data = json.loads(match.group(1))
+    for _lid_str, entry in nw_data.items():
+        assert "upper_bound" in entry
+        assert "lower_bound" in entry
 
 
-def test_build_line_explorer_util_keys() -> None:
-    """Embedded NW_DATA JSON contains util_p10, util_p50, util_p90 for each line."""
+def test_build_line_explorer_net_and_bound_keys() -> None:
+    """Embedded NW_DATA JSON contains net_p10/p50/p90 and upper_bound/lower_bound
+    for each line.  The legacy util_p10/p50/p90 keys are no longer present."""
     import json
     import re
 
@@ -298,16 +314,23 @@ def test_build_line_explorer_util_keys() -> None:
 
     n_stages = 3
     for lid_str, entry in nw_data.items():
-        for key in ("util_p10", "util_p50", "util_p90"):
+        # New keys that must be present
+        for key in ("net_p10", "net_p50", "net_p90", "upper_bound", "lower_bound"):
             assert key in entry, f"Missing {key} for line {lid_str}"
             assert len(entry[key]) == n_stages, (
                 f"{key} length mismatch for line {lid_str}: "
                 f"got {len(entry[key])}, expected {n_stages}"
             )
+        # Legacy util keys must be absent
+        for key in ("util_p10", "util_p50", "util_p90"):
+            assert key not in entry, (
+                f"Legacy key {key} unexpectedly present for line {lid_str}"
+            )
 
 
-def test_build_line_explorer_util_values() -> None:
-    """Utilisation values are computed correctly: flow=50, capacity=100 => 50%."""
+def test_build_line_explorer_bound_values() -> None:
+    """upper_bound equals direct_capacity_mw and lower_bound equals -reverse_capacity_mw
+    when empty line_bounds are passed (falling back to static capacity from line_meta)."""
     import json
     import re
 
@@ -333,7 +356,7 @@ def test_build_line_explorer_util_values() -> None:
     stage_labels = _make_stage_labels(3)
 
     # line_meta: direct_capacity_mw=100, reverse_capacity_mw=80
-    # => max(100, 80) = 100 => util = |50| / 100 * 100 = 50.0
+    # => upper_bound = +100, lower_bound = -80 for every stage
     line_meta = [
         {
             "id": 0,
@@ -344,7 +367,7 @@ def test_build_line_explorer_util_values() -> None:
             "reverse_capacity_mw": 80.0,
         }
     ]
-    # Empty bounds so static capacity is used
+    # Empty bounds so static capacity from line_meta is used
     line_bounds = pd.DataFrame(
         columns=["line_id", "stage_id", "direct_mw", "reverse_mw"]
     )
@@ -358,13 +381,15 @@ def test_build_line_explorer_util_values() -> None:
     nw_data = json.loads(match.group(1))
 
     entry = nw_data["0"]
-    # p50 should be 50.0% for all stages
-    for val in entry["util_p50"]:
-        assert abs(val - 50.0) < 0.1, f"Expected ~50.0% utilisation, got {val}"
+    for val in entry["upper_bound"]:
+        assert abs(val - 100.0) < 0.1, f"Expected upper_bound=100.0, got {val}"
+    for val in entry["lower_bound"]:
+        assert abs(val - (-80.0)) < 0.1, f"Expected lower_bound=-80.0, got {val}"
 
 
-def test_build_line_explorer_util_js_function() -> None:
-    """build_line_explorer JS contains the nw-util Plotly.react call."""
+def test_build_line_explorer_bound_lines_in_js() -> None:
+    """build_line_explorer JS renders Upper Bound and Lower Bound traces on nw-net.
+    The legacy nw-util chart and Capacity Utilisation label are absent."""
     exchanges_lf = _make_exchanges_lf([0, 1], n_scenarios=2, n_stages=3)
     bh_df = _make_bh_df(3)
     names = _make_names([0, 1])
@@ -376,9 +401,12 @@ def test_build_line_explorer_util_js_function() -> None:
         exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
     )
 
-    assert "nw-util" in html
-    assert "Capacity Utilisation" in html
-    assert "100%" in html  # 100% reference line label
+    # Bound data is now rendered as traces on the single nw-net chart
+    assert "upper_bound" in html
+    assert "lower_bound" in html
+    # Legacy chart id and section label are gone
+    assert "nw-util" not in html
+    assert "Capacity Utilisation" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -728,22 +756,27 @@ def test_render_empty_line_meta_returns_no_data_paragraph() -> None:
 
 
 def test_render_normal_contains_all_section_titles() -> None:
-    """render() with valid data contains all 3 section titles."""
+    """render() with valid data contains the two section titles (Line Explorer,
+    Bus Balance). The Capacity Utilisation section was merged into the heatmap
+    and is no longer a standalone section header in render()."""
     data = _make_mock_data([0, 1])
 
     result = render(data)
 
     assert "Line Explorer" in result
-    assert "Capacity Utilisation" in result
     assert "Bus Balance" in result
+    # Capacity Utilisation is no longer a top-level section in render()
+    assert "Capacity Utilisation" not in result
 
 
 def test_render_normal_contains_line_explorer_elements() -> None:
-    """render() output contains the interactive line explorer elements."""
+    """render() output contains the interactive line explorer elements.
+    Only the single nw-net chart div is present; nw-dir and nw-util are gone."""
     data = _make_mock_data([0, 1])
 
     result = render(data)
 
     assert "nw-select" in result
     assert "nw-net" in result
-    assert "nw-dir" in result
+    assert "nw-dir" not in result
+    assert "nw-util" not in result

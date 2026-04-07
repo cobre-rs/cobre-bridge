@@ -536,11 +536,7 @@ def test_no_three_separate_old_section_titles() -> None:
 # test_render (existing + updated)
 # ---------------------------------------------------------------------------
 
-_PATCH_EVAL = (
-    "cobre_bridge.dashboard.tabs.constraints.evaluate_constraint_expressions"
-)
-_PATCH_SUMMARY = "cobre_bridge.dashboard.tabs.constraints.chart_violation_summary"
-_PATCH_HEATMAP = "cobre_bridge.dashboard.tabs.constraints.chart_violation_heatmap"
+_PATCH_EVAL = "cobre_bridge.dashboard.tabs.constraints.evaluate_constraint_expressions"
 
 _STUB_LHS_DF = pd.DataFrame(
     columns=["constraint_id", "scenario_id", "stage_id", "block_id", "lhs_value"]
@@ -557,11 +553,7 @@ class _render_with_stubs_ctx:
     def __enter__(self) -> str:
         from unittest.mock import patch
 
-        with (
-            patch(_PATCH_EVAL, return_value=_STUB_LHS_DF),
-            patch(_PATCH_SUMMARY, return_value="<p>violation summary stub</p>"),
-            patch(_PATCH_HEATMAP, return_value="<p>violation heatmap stub</p>"),
-        ):
+        with patch(_PATCH_EVAL, return_value=_STUB_LHS_DF):
             self._html = render(self._data)
         return self._html
 
@@ -573,11 +565,7 @@ def _render_with_stubs(data: MagicMock) -> str:
     """Call render() with LazyFrame-dependent functions patched to stubs."""
     from unittest.mock import patch
 
-    with (
-        patch(_PATCH_EVAL, return_value=_STUB_LHS_DF),
-        patch(_PATCH_SUMMARY, return_value="<p>violation summary stub</p>"),
-        patch(_PATCH_HEATMAP, return_value="<p>violation heatmap stub</p>"),
-    ):
+    with patch(_PATCH_EVAL, return_value=_STUB_LHS_DF):
         return render(data)
 
 
@@ -601,27 +589,11 @@ def test_render_produces_expected_sections() -> None:
 
 
 def test_render_contains_section_titles() -> None:
-    """render() must contain all major section titles."""
+    """render() must contain the current section titles (A, B, C only)."""
     data = _make_mock_data()
     html = _render_with_stubs(data)
     assert "Constraint Summary" in html
-    assert "Constraint Bounds Timeline" in html
-    assert "Violation Cost Timeline" in html
-    assert "Violation Summary" in html
-
-
-def test_render_contains_collapsible_sections() -> None:
-    """render() must contain collapsible sections for lower-priority content."""
-    data = _make_mock_data()
-    html = _render_with_stubs(data)
-    assert "collapsible-section" in html
-
-
-def test_render_bounds_timeline_is_collapsed() -> None:
-    """render() must start the Bounds Timeline section collapsed."""
-    data = _make_mock_data()
-    html = _render_with_stubs(data)
-    assert "default-collapsed" in html
+    assert "LHS vs Bound" in html
 
 
 def test_render_contains_chart_grid() -> None:

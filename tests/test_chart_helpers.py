@@ -394,29 +394,30 @@ def test_compute_npv_costs_metadata_cols_unchanged() -> None:
 
 
 def test_group_costs_known_groups() -> None:
-    """Thermal and Deficit columns are summed into their respective groups."""
+    """Thermal and Deficit columns (as named in COST_GROUPS) sum into their groups.
+
+    COST_GROUPS maps "Thermal" -> ["thermal_cost"] and "Deficit" ->
+    ["deficit_cost"].  The test therefore uses those exact column names.
+    """
     df = pd.DataFrame(
         {
             "stage_id": [0],
             "scenario_id": [0],
-            "thermal_generation_cost": [50.0],
-            "thermal_startup_cost": [10.0],
-            "deficit_cost_depth_1": [20.0],
+            "thermal_cost": [60.0],
+            "deficit_cost": [20.0],
         }
     )
     cost_cols = [
-        "thermal_generation_cost",
-        "thermal_startup_cost",
-        "deficit_cost_depth_1",
+        "thermal_cost",
+        "deficit_cost",
     ]
     result = group_costs(df, cost_cols)
 
     assert result["Thermal"].iloc[0] == pytest.approx(60.0)
     assert result["Deficit"].iloc[0] == pytest.approx(20.0)
     # Component columns should be gone
-    assert "thermal_generation_cost" not in result.columns
-    assert "thermal_startup_cost" not in result.columns
-    assert "deficit_cost_depth_1" not in result.columns
+    assert "thermal_cost" not in result.columns
+    assert "deficit_cost" not in result.columns
 
 
 def test_group_costs_other_column() -> None:
@@ -436,21 +437,25 @@ def test_group_costs_other_column() -> None:
 
 
 def test_group_costs_missing_columns() -> None:
-    """Missing columns in COST_GROUPS components do not raise an error."""
-    # Only thermal_generation_cost present; thermal_startup_cost is absent
+    """Missing columns in COST_GROUPS components do not raise an error.
+
+    COST_GROUPS["Thermal"] maps to ["thermal_cost"].  When only that column
+    is present the group is populated correctly.  No component of any other
+    group being absent must not raise an error.
+    """
     df = pd.DataFrame(
         {
             "stage_id": [0],
             "scenario_id": [0],
-            "thermal_generation_cost": [80.0],
+            "thermal_cost": [80.0],
         }
     )
-    cost_cols = ["thermal_generation_cost"]
+    cost_cols = ["thermal_cost"]
     result = group_costs(df, cost_cols)
 
-    # Thermal group contains only the present column
+    # Thermal group contains only the present column.
     assert result["Thermal"].iloc[0] == pytest.approx(80.0)
-    # Other should be 0.0 since nothing is unassigned
+    # Other should be 0.0 since nothing is unassigned.
     assert result["Other"].iloc[0] == pytest.approx(0.0)
 
 

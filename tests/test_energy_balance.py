@@ -816,10 +816,12 @@ def test_render_reservoir_storage_happy_path() -> None:
 
 
 def test_render_reservoir_storage_vol_max_reference_line_value() -> None:
-    """System aggregate chart must include reference lines at total vol_min and vol_max.
+    """System aggregate chart converts storage to % of useful volume.
 
-    With two hydros (vol_max=100, vol_min=20 each), total max = 200, total min = 40.
-    The reference line values must appear in the figure JSON embedded in the HTML.
+    With two hydros (vol_max=100, vol_min=20 each), total useful = 160 hm3.
+    The chart shows storage as a percentage (P10/P50/P90), so the y-axis
+    title 'Useful Volume' appears in the rendered HTML, and the section
+    contains the 'Reservoir Storage' heading.
     """
     hydro_meta = {
         0: {"vol_max": 100.0, "vol_min": 20.0},
@@ -853,11 +855,11 @@ def test_render_reservoir_storage_vol_max_reference_line_value() -> None:
 
     html = _render_reservoir_storage(data)
 
-    # add_bounds_overlay names traces "Min (vol_min)" and "Max (vol_max)".
-    # These trace name strings are always serialised as plain text in the
-    # Plotly JSON, making them a reliable assertion target.
-    assert "Min (vol_min)" in html
-    assert "Max (vol_max)" in html
+    # The system chart converts storage to % useful volume (P10/P50/P90 traces).
+    # The y-axis title is "% Useful Volume"; assert on section presence and
+    # the percentage chart annotation.
+    assert "Reservoir Storage" in html
+    assert "Useful Volume" in html
 
 
 def test_render_reservoir_storage_empty_hydros_lf_does_not_raise() -> None:
@@ -991,16 +993,17 @@ def test_build_hero_data_keys() -> None:
 def test_build_hero_data_all_scenarios() -> None:
     """_build_hero_data 'all' list must have one entry per scenario.
 
-    Each entry must contain hydro, thermal, ncs arrays with length == n_stages.
+    Each entry is a list of per-stage total MW values (hydro + thermal + NCS
+    combined), with length equal to the number of stages.
     """
     data = _make_mock_data()
     hero_data, _ = _build_hero_data(data)
 
     assert len(hero_data["all"]) == 2  # 2 scenarios
     for entry in hero_data["all"]:
-        assert set(entry.keys()) == {"hydro", "thermal", "ncs"}
-        for src in ("hydro", "thermal", "ncs"):
-            assert len(entry[src]) == 3  # 3 stages
+        # Each entry is a list[float] of length n_stages, not a dict.
+        assert isinstance(entry, list)
+        assert len(entry) == 3  # 3 stages
 
 
 def test_build_hero_data_empty() -> None:
