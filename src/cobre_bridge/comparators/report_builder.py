@@ -112,6 +112,7 @@ def build_comparison_report(
         pctiles.bus_aggregates if pctiles else pl.DataFrame(),
         pctiles.cobre_bus_meta if pctiles else {},
         pctiles.nw_bus_names if pctiles else {},
+        nw_net_load=pctiles.nw_net_load if pctiles else pl.DataFrame(),
     )
 
     # --- Hydro Operation tab ---

@@ -21,90 +21,60 @@ _BAND_LINE = "rgba(255,255,255,0)"
 
 _COST_MAP: list[tuple[str, list[str], list[str]]] = [
     ("Thermal Generation", ["GERACAO TERMICA"], ["thermal_cost"]),
-    ("Deficit", ["DEFICIT"], ["deficit_cost"]),
-    ("Excess Energy", ["EXCESSO ENERGIA"], ["excess_cost"]),
-    ("Spillage", ["VERTIMENTO", "VERTIMENTO UHE"], ["spillage_cost"]),
-    ("Exchange", ["INTERCAMBIO"], ["exchange_cost"]),
     (
-        "Min Outflow Violation",
-        ["VIOLACAO VZMIN"],
-        ["outflow_violation_below_cost"],
-    ),
-    (
-        "Max Outflow Violation",
-        ["VIOL. DEFL. MAXIMA"],
-        ["outflow_violation_above_cost"],
-    ),
-    (
-        "Turbined Violation",
+        "Other Costs & Penalties",
         [
+            "DEFICIT",
+            "EXCESSO ENERGIA",
+            "VERTIMENTO",
+            "VERTIMENTO UHE",
+            "INTERCAMBIO",
+            "VIOLACAO VZMIN",
+            "VIOL. DEFL. MAXIMA",
             "VIOL. TURB. MINIMO",
             "VIOL. TURB. MAXIMO",
             "TURBINAMENTO UHE",
+            "VIOLACAO GHMIN",
+            "VIOLACAO GHMINU",
+            "VIOLACAO CAR",
+            "VIOLACAO SAR",
+            "VIOLACAO EVMIN",
+            "VIOLACAO RETIRADA",
+            "VIOL. EVAP. UHE",
+            "VIOLACAO FPHA",
+            "CORTE GER. EOLICA",
+            "VERT. FIO N. TURB.",
+            "VIOL. RESTELETRICA",
+            "VIOL. INTERC. MIN.",
         ],
-        ["turbined_violation_cost"],
-    ),
-    (
-        "Generation Violation",
-        ["VIOLACAO GHMIN", "VIOLACAO GHMINU"],
-        ["generation_violation_cost"],
-    ),
-    (
-        "Storage Violation",
-        ["VIOLACAO CAR", "VIOLACAO SAR", "VIOLACAO EVMIN"],
-        ["storage_violation_cost", "filling_target_cost"],
-    ),
-    (
-        "Water Withdrawal Violation",
-        ["VIOLACAO RETIRADA"],
-        ["withdrawal_violation_cost"],
-    ),
-    (
-        "Evaporation Violation",
-        ["VIOL. EVAP. UHE"],
-        ["evaporation_violation_cost"],
-    ),
-    ("FPHA Violation", ["VIOLACAO FPHA"], ["fpha_turbined_cost"]),
-    (
-        "Curtailment",
-        ["CORTE GER. EOLICA", "VERT. FIO N. TURB."],
-        ["curtailment_cost"],
-    ),
-    (
-        "Electric Constraint Violation",
-        ["VIOL. RESTELETRICA", "VIOL. INTERC. MIN."],
-        ["generic_violation_cost"],
-    ),
-    (
-        "Inflow Penalty",
-        [],
-        ["inflow_penalty_cost"],
+        [
+            "deficit_cost",
+            "excess_cost",
+            "spillage_cost",
+            "exchange_cost",
+            "outflow_violation_below_cost",
+            "outflow_violation_above_cost",
+            "turbined_violation_cost",
+            "generation_violation_cost",
+            "storage_violation_cost",
+            "filling_target_cost",
+            "withdrawal_violation_cost",
+            "evaporation_violation_cost",
+            "fpha_turbined_cost",
+            "curtailment_cost",
+            "generic_violation_cost",
+            "inflow_penalty_cost",
+            "pumping_cost",
+        ],
     ),
 ]
 
 
-# Colors for each cost category — chosen to be visually distinct and
-# semantically representative (warm = generation/operational, red = deficit,
-# cool blues/grays = violations, green = exchange/hydro-related).
 _COST_COLORS: dict[str, str] = {
-    "Thermal Generation": "#E8913A",  # warm orange — thermal fuel
-    "Deficit": "#C0392B",  # strong red — deficit is critical
-    "Excess Energy": "#8E44AD",  # purple — surplus
-    "Spillage": "#5DADE2",  # light blue — water spilled
-    "Exchange": "#2ECC71",  # green — transmission exchange
-    "Min Outflow Violation": "#1A5276",  # dark teal
-    "Max Outflow Violation": "#1F618D",  # medium teal
-    "Turbined Violation": "#6C7A89",  # steel gray
-    "Generation Violation": "#7D6B57",  # brown-gray
-    "Storage Violation": "#D4AC0D",  # gold — reservoir storage
-    "Water Withdrawal Violation": "#A04000",  # burnt sienna
-    "Evaporation Violation": "#76D7C4",  # mint — evaporation
-    "FPHA Violation": "#AF7AC5",  # lavender
-    "Curtailment": "#45B39D",  # teal-green — renewables
-    "Electric Constraint Violation": "#5D6D7E",  # slate
-    "Inflow Penalty": "#85929E",  # cool gray
+    "Thermal Generation": "#E8913A",
+    "Other Costs & Penalties": "#5D6D7E",
 }
-_COST_COLOR_DEFAULT = "#95A5A6"  # fallback gray
+_COST_COLOR_DEFAULT = "#95A5A6"
 
 
 def cost_breakdown_chart(
@@ -612,8 +582,7 @@ _BALANCE_VARS: list[tuple[str, str, str, str]] = [
     # (display_label, newave_var, cobre_var, unit)
     ("Hydro Generation", "GHTOT", "hydro_gen_mw", "MW"),
     ("Thermal Generation", "GTERM", "thermal_gen_mw", "MW"),
-    ("NCS Generation", "GEOL", "ncs_gen_mw", "MW"),
-    ("Load", "", "load_mw", "MW"),
+    ("Net Load", "NET_LOAD", "net_load_mw", "MW"),
     ("Deficit", "DEFT", "deficit_mw", "MW"),
     ("Excess", "EXCESSO", "excess_mw", "MW"),
 ]
@@ -624,6 +593,8 @@ def build_energy_balance_tab(
     bus_agg: pl.DataFrame,
     bus_meta: dict[int, dict],
     nw_bus_names: dict[int, str],
+    *,
+    nw_net_load: pl.DataFrame | None = None,
 ) -> str:
     """Build per-bus energy balance charts with p10/p90 bands.
 
@@ -635,6 +606,12 @@ def build_energy_balance_tab(
     nw_offset = 0
     if not nw_market.is_empty():
         nw_offset = int(nw_market["stage"].min())
+
+    # Merge NEWAVE net load into nw_market if available.
+    if nw_net_load is not None and not nw_net_load.is_empty():
+        nw_market = pl.concat([nw_market, nw_net_load], how="diagonal_relaxed")
+        if nw_offset == 0:
+            nw_offset = int(nw_net_load["stage"].min())
 
     # Build Cobre bus_id → name and NEWAVE code → bus_id lookups.
     cobre_name_to_id: dict[str, int] = {

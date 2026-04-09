@@ -34,6 +34,7 @@ class PercentileData:
     bus: pl.DataFrame = field(default_factory=pl.DataFrame)
     bus_aggregates: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_market: pl.DataFrame = field(default_factory=pl.DataFrame)
+    nw_net_load: pl.DataFrame = field(default_factory=pl.DataFrame)
     cobre_bus_meta: dict[int, dict] = field(default_factory=dict)
     nw_bus_names: dict[int, str] = field(default_factory=dict)
     nw_convergence: pl.DataFrame = field(default_factory=pl.DataFrame)
@@ -494,6 +495,7 @@ def compare_results(
         read_medias_market,
         read_medias_system,
         read_medias_thermal,
+        read_newave_net_load,
         read_pmo_convergence,
         read_pmo_cost_breakdown,
         read_pmo_productivity,
@@ -568,6 +570,9 @@ def compare_results(
     if saidas_dir is not None:
         nw_market = read_medias_market(saidas_dir)
 
+    # --- NEWAVE deterministic net load (load - NCS from sistema.dat) ---
+    nw_net_load = read_newave_net_load(nw_files.directory)
+
     # --- Percentile statistics ---
     _LOG.info("Computing Cobre percentile statistics...")
     pctiles = PercentileData(
@@ -578,6 +583,7 @@ def compare_results(
         nw_convergence=nw_conv,
         cobre_convergence=cobre_conv,
         nw_market=nw_market,
+        nw_net_load=nw_net_load,
         cobre_bus_meta=cobre_bus_meta,
         nw_bus_names=nw_bus_names,
         nw_costs=nw_costs,

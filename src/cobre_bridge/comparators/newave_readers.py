@@ -320,32 +320,7 @@ def read_pmo_convergence(newave_dir: Path) -> pl.DataFrame:
     if "zinf" in exact:
         col_map["lower_bound"] = exact["zinf"]
     if "zsup" in exact:
-        col_map["upper_bound_mean"] = exact["zsup"]
-
-    # Fallback: substring matching (for other inewave versions).
-    if "iteration" not in col_map:
-        for col in cols:
-            lower = str(col).lower().strip()
-            if lower == "iteration" or lower == "iteracao":
-                col_map["iteration"] = col
-                break
-
-    if "lower_bound" not in col_map:
-        for col in cols:
-            if str(col).lower().strip() in ("zinf", "lower_bound"):
-                col_map["lower_bound"] = col
-                break
-
-    if "upper_bound_mean" not in col_map:
-        for col in cols:
-            if str(col).lower().strip() in ("zsup", "zsup_medio", "upper_bound_mean"):
-                col_map["upper_bound_mean"] = col
-                break
-
-    if "iteration" not in col_map:
-        conv_df = conv_df.reset_index()
-        conv_df.columns = [str(c) for c in conv_df.columns]
-        col_map["iteration"] = conv_df.columns[0]
+        col_map["upper_bound_mean"] = exact["zsup_iteracao"]
 
     if "lower_bound" not in col_map or "upper_bound_mean" not in col_map:
         _LOG.warning(
@@ -462,6 +437,95 @@ def read_medias_market(saidas_dir: Path) -> pl.DataFrame:
     balance analysis.
     """
     return _read_medias_csv(saidas_dir, "MEDIAS-MERC.CSV")
+
+
+def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
+    """Read deterministic net load from ``sistema.dat``.
+
+    Computes ``net_load = mercado_energia - sum(geracao_usinas_nao_simuladas)``
+    per submarket and date.  Returns a DataFrame compatible with the
+    ``nw_market`` schema used in the energy balance charts:
+
+    - ``newave_code`` (Int64): NEWAVE submarket code
+    - ``stage`` (Int64): stage number (aligned with MEDIAS column naming)
+    - ``variable`` (Utf8): always ``"NET_LOAD"``
+    - ``value`` (Float64): net load in MW·med
+    """
+    empty = pl.DataFrame(
+        schema={
+            "newave_code": pl.Int64,
+            "stage": pl.Int64,
+            "variable": pl.Utf8,
+            "value": pl.Float64,
+        }
+    )
+
+    sistema_path = _find_case_insensitive(newave_dir, "sistema.dat")
+    if sistema_path is None:
+        _LOG.warning("sistema.dat not found in %s", newave_dir)
+        return empty
+
+    try:
+        from inewave.newave import Sistema
+
+        sistema = Sistema.read(str(sistema_path))
+        load_df = sistema.mercado_energia
+        ncs_df = sistema.geracao_usinas_nao_simuladas
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read sistema.dat for net load")
+        return empty
+
+    if load_df is None or load_df.empty:
+        return empty
+
+    # Filter to valid study dates (drop NaN load values and sentinel years).
+    load_df = load_df.dropna(subset=["valor"])
+    load_df = load_df[load_df["data"].dt.year < 9000]
+
+    # NCS: sum across all source types per (submarket, date).
+    ncs_total = None
+    if ncs_df is not None and not ncs_df.empty:
+        ncs_df = ncs_df.dropna(subset=["valor"])
+        ncs_df = ncs_df[ncs_df["data"].dt.year < 9000]
+        ncs_total = (
+            ncs_df.groupby(["codigo_submercado", "data"])["valor"]
+            .sum()
+            .reset_index()
+            .rename(columns={"valor": "ncs"})
+        )
+
+    # Compute net load = load - NCS.
+    if ncs_total is not None:
+        merged = load_df.merge(
+            ncs_total,
+            on=["codigo_submercado", "data"],
+            how="left",
+        )
+        merged["ncs"] = merged["ncs"].fillna(0.0)
+        merged["net_load"] = merged["valor"] - merged["ncs"]
+    else:
+        merged = load_df.copy()
+        merged["net_load"] = merged["valor"]
+
+    # Assign stage numbers: sequential from the first study month's number
+    # (matching MEDIAS-MERC column naming convention).
+    merged = merged.sort_values(["codigo_submercado", "data"])
+    first_month = int(merged["data"].min().month)
+    stage_map = {
+        date: first_month + i
+        for i, date in enumerate(sorted(merged["data"].unique()))
+    }
+    merged["stage"] = merged["data"].map(stage_map)
+
+    result = pl.from_pandas(
+        merged[["codigo_submercado", "stage", "net_load"]]
+    ).rename({"codigo_submercado": "newave_code", "net_load": "value"})
+    result = result.with_columns(pl.lit("NET_LOAD").alias("variable"))
+    result = result.cast(
+        {"newave_code": pl.Int64, "stage": pl.Int64, "value": pl.Float64}
+    )
+
+    return result
 
 
 def read_pmo_cost_breakdown(newave_dir: Path) -> dict[str, float]:

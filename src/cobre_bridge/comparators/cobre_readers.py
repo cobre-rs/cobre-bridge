@@ -527,11 +527,16 @@ def read_cobre_bus_aggregates(
         )
         joined = lf.join(mapping.lazy(), on=id_col)
 
-        # Block-hours weighted per scenario+bus+stage.
+        # Sum generation across entities per bus within each
+        # (scenario, stage, block) first, then block-hours weight.
+        bus_totals = joined.group_by(
+            ["scenario_id", "bus_id", "stage_id", "block_id"]
+        ).agg(pl.col(value_col).sum())
+
         if block_hours is not None:
             bh = block_hours.lazy()
             per_sc = (
-                joined.join(bh, on=["stage_id", "block_id"])
+                bus_totals.join(bh, on=["stage_id", "block_id"])
                 .group_by(["scenario_id", "bus_id", "stage_id"])
                 .agg(
                     (pl.col(value_col) * pl.col("hours")).sum().alias("_w"),
@@ -542,7 +547,7 @@ def read_cobre_bus_aggregates(
             )
         else:
             per_sc = (
-                joined.filter(pl.col("block_id") == 0)
+                bus_totals.filter(pl.col("block_id") == 0)
                 .group_by(["scenario_id", "bus_id", "stage_id"])
                 .agg(pl.col(value_col).sum().alias(out_col))
             )
@@ -622,6 +627,16 @@ def read_cobre_bus_aggregates(
             how="full",
             coalesce=True,
         )
+
+    # Compute net load = load - NCS per scenario.
+    if "load_mw" in merged.columns and "ncs_gen_mw" in merged.columns:
+        merged = merged.with_columns(
+            (
+                pl.col("load_mw").fill_null(0.0)
+                - pl.col("ncs_gen_mw").fill_null(0.0)
+            ).alias("net_load_mw")
+        )
+        all_vars.append("net_load_mw")
 
     # Compute percentiles across scenarios.
     aggs: list[pl.Expr] = []
@@ -730,15 +745,35 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
         _LOG.warning("Failed to read convergence.parquet")
         return empty
 
-    # Map columns to standard names.
+    # Map columns to standard names.  Prefer exact matches first to avoid
+    # collisions (e.g. "upper_bound_std" overwriting "upper_bound_mean").
     col_map: dict[str, str] = {}
-    for col in df.columns:
-        lower = col.lower()
-        if "iteration" in lower or "iter" in lower:
+    cols_lower = {col: col.lower() for col in df.columns}
+
+    # Exact matches (highest priority).
+    for col, lower in cols_lower.items():
+        if lower == "iteration":
             col_map[col] = "iteration"
-        elif "lower" in lower or "zinf" in lower:
+        elif lower == "lower_bound":
             col_map[col] = "lower_bound"
-        elif "upper" in lower or "zsup" in lower:
+        elif lower == "upper_bound_mean":
+            col_map[col] = "upper_bound_mean"
+
+    # Fuzzy fallback for columns not yet mapped.
+    for col, lower in cols_lower.items():
+        if col in col_map:
+            continue
+        if "iteration" not in col_map.values() and (
+            "iter" in lower
+        ):
+            col_map[col] = "iteration"
+        elif "lower_bound" not in col_map.values() and (
+            "lower" in lower or "zinf" in lower
+        ):
+            col_map[col] = "lower_bound"
+        elif "upper_bound_mean" not in col_map.values() and (
+            "upper_mean" in lower or "zsup" in lower
+        ):
             col_map[col] = "upper_bound_mean"
 
     if "iteration" not in col_map.values():
