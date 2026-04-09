@@ -143,6 +143,14 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                         lambda_override[(y, m)] = (
                             val / 100.0 if val != 0.0 else const_lambda
                         )
+    elif dger_cvar in (1, 2) and nw_files.cvar is None:
+        logger.warning(
+            "dger.cvar=%d requires cvar.dat but file is missing; "
+            "falling back to expectation for all stages.",
+            dger_cvar,
+        )
+        dger_cvar = 0
+        _cvar_constant = None
     else:
         _cvar_constant = None
 

@@ -372,7 +372,9 @@ def convert_inflow_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table
             if inc_series is not None and mask.any():
                 vals = inc_series[mask]
                 seasonal_mean[cal_month] = float(np.nanmean(vals))
-                seasonal_std[cal_month] = float(np.nanstd(vals, ddof=0))
+                seasonal_std[cal_month] = float(
+                    np.nanstd(vals, ddof=1) if len(vals) > 1 else 0.0
+                )
             else:
                 seasonal_mean[cal_month] = 0.0
                 seasonal_std[cal_month] = 0.0
@@ -531,7 +533,8 @@ def _derive_study_stage_months(dger: object) -> list[int]:
     Returns
     -------
     list[int]
-        Calendar month (1-12) for each stage, length = num_anos_estudo * 12.
+        Calendar month (1-12) for each stage.  Length equals
+        ``(13 - start_month) + (num_anos - 1) * 12 + num_anos_pos * 12``.
     """
     start_month: int = dger.mes_inicio_estudo  # type: ignore[attr-defined]
     num_anos: int = dger.num_anos_estudo or 1  # type: ignore[attr-defined]

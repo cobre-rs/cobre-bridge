@@ -252,6 +252,13 @@ def convert_vminop_constraints(
 
         expression = " + ".join(terms)
         penalty = penalty_map.get(ree_code, 1000.0)
+        if penalty <= 0.0:
+            _LOG.warning(
+                "VminOP penalty for REE %d is %.4f (must be > 0); using 1000.0.",
+                ree_code,
+                penalty,
+            )
+            penalty = 1000.0
         ree_name = ree_names.get(ree_code, str(ree_code))
 
         constraints.append(
@@ -474,9 +481,11 @@ def _build_line_id_map(nw_files: NewaveFiles) -> dict[tuple[int, int], int]:
     return {pair: idx for idx, pair in enumerate(sorted(canonical_pairs))}
 
 
-# Term regex: optional float coefficient, then function name and parenthesised args.
+# Term regex: optional sign and float coefficient, then function name and args.
+# The sign group captures a leading '+' or '-' (possibly preceded by whitespace).
 _TERM_RE = re.compile(
-    r"(\d+\.?\d*)?(?P<fn>ger_usih|ener_interc)\((?P<args>\d+(?:,\s*\d+)*)\)"
+    r"(?P<sign>[+-])?\s*(?P<coeff>\d+\.?\d*)?\s*\*?\s*"
+    r"(?P<fn>ger_usih|ener_interc)\((?P<args>\d+(?:,\s*\d+)*)\)"
 )
 
 
@@ -502,8 +511,11 @@ def _parse_formula(
     parsed_terms: list[tuple[float, str]] = []
 
     for match in _TERM_RE.finditer(formula):
-        coeff_str = match.group(1)
+        sign = match.group("sign")
+        coeff_str = match.group("coeff")
         coeff = float(coeff_str) if coeff_str else 1.0
+        if sign == "-":
+            coeff = -coeff
         fn = match.group("fn")
         args_str = match.group("args")
         args = [int(a.strip()) for a in args_str.split(",")]
@@ -602,6 +614,7 @@ def _parse_re_dat(
     start_year: int,
     start_month: int,
     num_stages: int,
+    num_patamares: int = 3,
 ) -> tuple[
     dict[int, list[int]],
     dict[int, dict[tuple[int, int], float]],
@@ -686,7 +699,7 @@ def _parse_re_dat(
             while cp_idx < len(changepoints) and changepoints[cp_idx][0] == sid:
                 _, pat, val = changepoints[cp_idx]
                 if pat == 0:
-                    for b in range(3):
+                    for b in range(num_patamares):
                         current[b] = val
                 else:
                     current[pat - 1] = val
@@ -748,6 +761,8 @@ def convert_electric_constraints(
         expressions, horizons, bounds_rows = _parse_restricao_eletrica(re_path)
 
     # Study horizon.
+    from inewave.newave import Patamar as _Patamar
+
     dger = Dger.read(str(nw_files.dger))
     start_month: int = dger.mes_inicio_estudo
     start_year: int = dger.ano_inicio_estudo
@@ -756,12 +771,15 @@ def convert_electric_constraints(
     study_months = (13 - start_month) + (num_anos - 1) * 12
     num_stages = study_months + num_anos_pos * 12
 
+    patamar = _Patamar.read(str(nw_files.patamar))
+    num_patamares: int = patamar.numero_patamares or 1
+
     # Individualised period cutoff.
     cutoff = _get_individualizado_cutoff(nw_files, start_year, start_month)
 
     # Parse RE.DAT (post-individualised bounds + plant sets).
     re_conjuntos, re_dat_bounds = _parse_re_dat(
-        nw_files, start_year, start_month, num_stages
+        nw_files, start_year, start_month, num_stages, num_patamares
     )
 
     if not expressions and not re_conjuntos:
@@ -927,7 +945,7 @@ def convert_electric_constraints(
             cal_month = ((start_month - 1 + stage_id) % 12) + 1
             is_post_indiv = stage_id >= cutoff
 
-            for block_id in range(3):
+            for block_id in range(num_patamares):
                 # Upper bound.
                 if sup_id is not None:
                     sup_val: float | None = None
@@ -989,10 +1007,11 @@ _AGRINT_DEFAULT_PENALTY = 1000.0
 
 def _parse_agrint(
     path: Path,
+    num_patamares: int = 3,
 ) -> tuple[
     dict[int, list[tuple[int, int, float]]],  # group_id -> [(A, B, coeff)]
     list[tuple[int, int, int, int | None, int | None, list[float]]],
-    # (group_id, mi, anoi, mf|None, anof|None, [lim_p1, lim_p2, lim_p3])
+    # (group_id, mi, anoi, mf|None, anof|None, [lim per patamar])
 ]:
     """Parse AGRINT.DAT into group definitions and limit rows.
 
@@ -1022,11 +1041,7 @@ def _parse_agrint(
             upper = stripped.upper()
 
             # Section headers
-            if (
-                "AGRUPAMENTOS" in upper
-                and "INTERCÂMBIO" not in upper
-                or ("AGRUPAMENTOS" in upper)
-            ):
+            if "AGRUPAMENTOS" in upper:
                 if "LIMITES" not in upper:
                     in_groups_section = True
                     in_limits_section = False
@@ -1099,12 +1114,11 @@ def _parse_agrint(
                         except (ValueError, IndexError):
                             pass
 
-                    lim_parts = parts[lim_start : lim_start + 3]
+                    lim_parts = parts[lim_start : lim_start + num_patamares]
                     if len(lim_parts) < 1:
                         continue
                     lims = [float(lp.rstrip(".")) for lp in lim_parts]
-                    # Pad to 3 if fewer patamars declared
-                    while len(lims) < 3:
+                    while len(lims) < num_patamares:
                         lims.append(lims[-1])
                     limits.append((group_id, mi, anoi, mf, anof, lims))
                 except (ValueError, IndexError):
@@ -1146,7 +1160,12 @@ def convert_agrint_constraints(
         _LOG.debug("agrint.dat not found; skipping AGRINT constraints.")
         return None
 
-    groups, limits = _parse_agrint(nw_files.agrint)
+    from inewave.newave import Patamar as _Patamar_ag
+
+    patamar_ag = _Patamar_ag.read(str(nw_files.patamar))
+    num_patamares_ag: int = patamar_ag.numero_patamares or 1
+
+    groups, limits = _parse_agrint(nw_files.agrint, num_patamares_ag)
     if not groups or not limits:
         return None
 

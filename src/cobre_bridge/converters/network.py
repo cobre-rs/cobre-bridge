@@ -53,6 +53,31 @@ _DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST = 10000.0
 _DEFAULT_DIVERSION_COST = 0.001
 
 
+def _build_canonical_pair_to_line_id(
+    nw_files: NewaveFiles,
+) -> dict[tuple[int, int], int]:
+    """Build the canonical (src, tgt) -> line_id mapping from sistema.dat.
+
+    Scans ALL rows of ``sistema.limites_intercambio`` (all dates) to discover
+    the full set of interchange pairs.  This is the single authoritative source
+    used by ``convert_lines``, ``convert_line_bounds``, and
+    ``convert_exchange_factors`` to guarantee consistent line IDs.
+    """
+    sistema = Sistema.read(str(nw_files.sistema))
+    limites_df = sistema.limites_intercambio
+    if limites_df is None or limites_df.empty:
+        return {}
+
+    all_pairs: set[tuple[int, int]] = set()
+    for _, row in limites_df.iterrows():
+        de = int(row["submercado_de"])
+        para = int(row["submercado_para"])
+        src, tgt = (de, para) if de < para else (para, de)
+        all_pairs.add((src, tgt))
+
+    return {pair: lid for lid, pair in enumerate(sorted(all_pairs))}
+
+
 def convert_buses(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE subsystem data to a Cobre ``buses.json`` dict.
 
@@ -216,9 +241,12 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             else:
                 pair_map[key]["direct_mw"] = valor
 
+    # Use the shared canonical mapping for consistent line IDs.
+    canonical_map = _build_canonical_pair_to_line_id(nw_files)
+
     lines: list[dict] = []
-    line_id = 0
-    for (src, tgt), caps in sorted(pair_map.items()):
+    for (src, tgt), line_id in sorted(canonical_map.items(), key=lambda x: x[1]):
+        caps = pair_map.get((src, tgt), {"direct_mw": 0.0, "reverse_mw": 0.0})
         src_bus = id_map.bus_id(src)
         tgt_bus = id_map.bus_id(tgt)
         src_name = _subsystem_name_from_id(src)
@@ -234,7 +262,6 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             },
         }
         lines.append(line_entry)
-        line_id += 1
 
     return {
         "$schema": _LINES_SCHEMA_URL,
@@ -389,20 +416,7 @@ def convert_line_bounds(
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
 
-    # Build the canonical pair -> line_id mapping using the exact same logic
-    # as convert_lines: sorted(pair_map.items()) where pair_map keys are
-    # (src, tgt) with src < tgt.
-    # We need to scan all rows (all dates) to discover all unique pairs.
-    all_pairs: set[tuple[int, int]] = set()
-    for _, row in limites_df.iterrows():
-        de = int(row["submercado_de"])
-        para = int(row["submercado_para"])
-        src, tgt = (de, para) if de < para else (para, de)
-        all_pairs.add((src, tgt))
-
-    pair_to_line_id: dict[tuple[int, int], int] = {
-        pair: lid for lid, pair in enumerate(sorted(all_pairs))
-    }
+    pair_to_line_id = _build_canonical_pair_to_line_id(nw_files)
 
     # Build per-date lookup:
     # {(src, tgt, year, cal_month) -> {direct_mw, reverse_mw}}
@@ -491,6 +505,60 @@ def convert_line_bounds(
         },
         schema=_LINE_BOUNDS_SCHEMA,
     )
+
+
+def _build_ncs_group_to_id(
+    nw_files: NewaveFiles,
+    id_map: NewaveIdMap,
+) -> dict[tuple[int, int], int]:
+    """Build the canonical (codigo_submercado, indice_bloco) -> ncs_id mapping.
+
+    Applies the same horizon filtering and bus_id validation used by
+    ``convert_non_controllable_sources``.  This is the single authoritative
+    NCS group mapping shared by ``convert_ncs_factors`` and
+    ``convert_ncs_stats``.
+    """
+    sistema = Sistema.read(str(nw_files.sistema))
+    df_ncs: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
+    if df_ncs is None or df_ncs.empty:
+        return {}
+
+    dger = Dger.read(nw_files.dger)
+    start_month: int = dger.mes_inicio_estudo
+    start_year: int = dger.ano_inicio_estudo
+    num_anos: int = dger.num_anos_estudo or 1
+    num_anos_pos: int = dger.num_anos_pos_estudo or 0
+    study_months = (13 - start_month) + (num_anos - 1) * 12
+    total_stages = study_months + num_anos_pos * 12
+
+    def _in_horizon(dt: object) -> bool:
+        try:
+            yr = int(dt.year)  # type: ignore[union-attr]
+            mo = int(dt.month)  # type: ignore[union-attr]
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if yr == 9999:
+            return True
+        stage_id = (yr - start_year) * 12 + (mo - start_month)
+        return 0 <= stage_id < total_stages
+
+    df_filtered = df_ncs[df_ncs["data"].apply(_in_horizon)].copy()
+    groups = df_filtered.groupby(
+        ["codigo_submercado", "indice_bloco"], sort=True
+    )
+
+    result: dict[tuple[int, int], int] = {}
+    ncs_id = 0
+    for (sub_code, bloco), _group in groups:
+        sub_code_int = int(sub_code)
+        try:
+            id_map.bus_id(sub_code_int)
+        except KeyError:
+            continue
+        result[(sub_code_int, int(bloco))] = ncs_id
+        ncs_id += 1
+
+    return result
 
 
 def convert_non_controllable_sources(
@@ -638,22 +706,9 @@ def convert_exchange_factors(
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
 
-    # Columns: submercado_de, submercado_para, data, patamar, valor
-    # Discover all unique canonical pairs to assign line IDs (same as
-    # convert_lines / convert_line_bounds).
-    all_pairs: set[tuple[int, int]] = set()
-    for _, row in df.iterrows():
-        de = int(row["submercado_de"])
-        para = int(row["submercado_para"])
-        src, tgt = (de, para) if de < para else (para, de)
-        all_pairs.add((src, tgt))
-
-    if not all_pairs:
+    pair_to_line_id = _build_canonical_pair_to_line_id(nw_files)
+    if not pair_to_line_id:
         return {"exchange_factors": []}
-
-    pair_to_line_id: dict[tuple[int, int], int] = {
-        pair: lid for lid, pair in enumerate(sorted(all_pairs))
-    }
 
     # Build per-(src, tgt, year, cal_month, patamar) factor lookup.
     # Key: (src, tgt, year, cal_month, block_id) -> (direct_factor, reverse_factor)
@@ -851,17 +906,13 @@ def convert_ncs_factors(
         k: v for k, (_, v) in last_yr_map.items()
     }
 
-    # Assign NCS IDs using the same grouping as convert_non_controllable_sources:
-    # sort by (codigo_submercado, indice_bloco).
-    groups_sorted = sorted(
-        df.groupby(["codigo_submercado", "indice_bloco"], sort=True).groups.keys()
-    )
+    # Use the shared canonical NCS group -> ID mapping to guarantee consistency
+    # with convert_non_controllable_sources and convert_ncs_stats.
+    ncs_group_map = _build_ncs_group_to_id(nw_files, id_map)
 
     results: list[dict] = []
 
-    for ncs_id, (sub_code_raw, bloco_raw) in enumerate(groups_sorted):
-        sub_code = int(sub_code_raw)
-        bloco = int(bloco_raw)
+    for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
 
         y, m = start_year, start_month
         for stage_id in range(total_stages):
@@ -993,19 +1044,12 @@ def convert_ncs_stats(
         k: v for k, (_, v) in last_yr_bounds.items()
     }
 
-    # Assign NCS IDs using the same grouping as convert_non_controllable_sources.
-    df_filtered = df_raw.copy()
-    groups_sorted = sorted(
-        df_filtered.groupby(
-            ["codigo_submercado", "indice_bloco"], sort=True
-        ).groups.keys()
-    )
+    # Use the shared canonical NCS group -> ID mapping.
+    ncs_group_map = _build_ncs_group_to_id(nw_files, id_map)
 
     # Compute max_generation_mw per NCS entity.
     max_gen_per_ncs: dict[int, float] = {}
-    for ncs_id, (sub_code_raw, bloco_raw) in enumerate(groups_sorted):
-        sub_code = int(sub_code_raw)
-        bloco = int(bloco_raw)
+    for (sub_code, bloco), ncs_id in ncs_group_map.items():
         vals = [
             v
             for (sc, bl, _yr, _cm), v in bounds_map.items()
@@ -1018,9 +1062,9 @@ def convert_ncs_stats(
     rows_mean: list[float] = []
     rows_std: list[float] = []
 
-    for ncs_id, (sub_code_raw, bloco_raw) in enumerate(groups_sorted):
-        sub_code = int(sub_code_raw)
-        bloco = int(bloco_raw)
+    for (sub_code, bloco), ncs_id in sorted(
+        ncs_group_map.items(), key=lambda x: x[1]
+    ):
         max_gen = max_gen_per_ncs[ncs_id]
 
         y, m = start_year, start_month

@@ -511,13 +511,13 @@ class TestConvertHydros:
     def test_hydraulic_losses_factor(
         self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
     ) -> None:
-        """tipo_perda=1 and perdas=0.05 -> hydraulic_losses factor dict."""
+        """tipo_perda=1 and perdas=5.0 (%) -> hydraulic_losses factor dict."""
         for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
             (tmp_path / fname).touch()
 
         cadastro = _make_hidr_cadastro().copy()
         cadastro["tipo_perda"] = 1
-        cadastro["perdas"] = 0.05
+        cadastro["perdas"] = 5.0  # 5% — stored as percentage in hidr.dat
 
         mock_hidr = MagicMock()
         mock_hidr.cadastro = cadastro
@@ -537,7 +537,7 @@ class TestConvertHydros:
         for h in result["hydros"]:
             assert h["hydraulic_losses"] == {
                 "type": "factor",
-                "value": pytest.approx(0.05),
+                "value": pytest.approx(0.05),  # 5% / 100 = 0.05
             }
 
     @patch("cobre_bridge.converters.hydro.Ree")
@@ -1309,7 +1309,7 @@ def _make_hreg(overrides: dict) -> pd.Series:
         "canal_fuga_medio": 250.0,
         "tipo_regulacao": "M",
         "tipo_perda": 1,
-        "perdas": 0.05,
+        "perdas": 5.0,  # percentage — divided by 100 in _compute_productivity
         "a0_volume_cota": 300.0,
         "a1_volume_cota": 0.1,
         "a2_volume_cota": 0.0,
@@ -1344,21 +1344,17 @@ class TestComputeProductivity:
                 "volume_maximo": 1000.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 1,
-                "perdas": 0.05,
+                "perdas": 5.0,  # 5%
                 "produtibilidade_especifica": 0.009,
             }
         )
         # Integral average of (300 + 0.1*v) over [100, 1000]:
-        #   F(v) = 300*v + 0.1*v^2/2
-        #   avg = (F(1000) - F(100)) / (1000 - 100)
-        #       = (300*1000 + 0.05*1000^2 - 300*100 - 0.05*100^2) / 900
-        #       = (300000 + 50000 - 30000 - 500) / 900
-        #       = 319500 / 900 = 355.0
+        #   avg = 355.0
         # net_drop = 355.0 - 250.0 = 105.0
-        # adjusted_drop = 105.0 * (1 - 0.05) = 99.75
+        # adjusted_drop = 105.0 * (1 - 5.0/100) = 99.75
         # result = 0.009 * 99.75 = 0.89775
         avg_height = 355.0
-        expected = 0.009 * (1.0 - 0.05) * (avg_height - 250.0)
+        expected = 0.009 * (1.0 - 5.0 / 100.0) * (avg_height - 250.0)
         result = _compute_productivity(hreg)
         assert result == pytest.approx(expected)
 
@@ -1377,20 +1373,20 @@ class TestComputeProductivity:
                 "a4_volume_cota": 0.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 1,
-                "perdas": 0.05,
+                "perdas": 5.0,  # 5%
                 "produtibilidade_especifica": 0.009,
             }
         )
         # poly(500) = 300 + 0.1*500 = 350.0
         # net_drop = 350.0 - 250.0 = 100.0
-        # adjusted_drop = 100.0 * (1 - 0.05) = 95.0
+        # adjusted_drop = 100.0 * (1 - 5.0/100) = 95.0
         # result = 0.009 * 95.0 = 0.855
-        expected = 0.009 * (1.0 - 0.05) * (350.0 - 250.0)
+        expected = 0.009 * (1.0 - 5.0 / 100.0) * (350.0 - 250.0)
         result = _compute_productivity(hreg)
         assert result == pytest.approx(expected)
 
     def test_multiplicative_loss(self) -> None:
-        """tipo_perda=1: adjusted_drop = net_drop * (1 - perdas)."""
+        """tipo_perda=1: adjusted_drop = net_drop * (1 - perdas/100)."""
         from cobre_bridge.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
@@ -1404,12 +1400,12 @@ class TestComputeProductivity:
                 "a4_volume_cota": 0.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 1,
-                "perdas": 0.10,
+                "perdas": 10.0,  # 10%
                 "produtibilidade_especifica": 0.009,
             }
         )
         # net_drop = (300 + 50) - 250 = 100.0
-        # adjusted = 100.0 * (1 - 0.10) = 90.0
+        # adjusted = 100.0 * (1 - 10.0/100) = 90.0
         expected = 0.009 * 90.0
         result = _compute_productivity(hreg)
         assert result == pytest.approx(expected)
@@ -1578,12 +1574,12 @@ class TestComputeProductivityOverrides:
                 "volume_maximo": 1000.0,
                 "canal_fuga_medio": 250.0,
                 "tipo_perda": 1,
-                "perdas": 0.05,
+                "perdas": 5.0,  # 5%
                 "produtibilidade_especifica": 0.009,
             }
         )
         # avg_height = 355.0 (see TestComputeProductivity)
-        expected = 0.009 * (1.0 - 0.05) * (355.0 - 250.0)
+        expected = 0.009 * (1.0 - 5.0 / 100.0) * (355.0 - 250.0)
         assert _compute_productivity(hreg) == pytest.approx(expected)
 
 

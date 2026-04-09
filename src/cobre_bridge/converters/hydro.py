@@ -530,7 +530,10 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         tipo_perda = int(hreg.get("tipo_perda", 0) or 0)
         perdas_val = float(hreg.get("perdas", 0.0) or 0.0)
         if tipo_perda == 1 and perdas_val > 0 and not math.isnan(perdas_val):
-            hydraulic_losses: dict | None = {"type": "factor", "value": perdas_val}
+            hydraulic_losses: dict | None = {
+                "type": "factor",
+                "value": perdas_val / 100.0,
+            }
         elif tipo_perda == 2 and perdas_val > 0 and not math.isnan(perdas_val):
             hydraulic_losses = {"type": "constant", "value_m": perdas_val}
         else:
@@ -681,8 +684,8 @@ def _compute_productivity(
     tipo_perda = int(hreg["tipo_perda"])
     perdas = float(hreg["perdas"])
     if tipo_perda == 1:
-        # Multiplicative factor: adjusted_drop = net_drop * (1 - perdas)
-        adjusted_drop = net_drop * (1.0 - perdas)
+        # Multiplicative factor (perdas is a percentage, e.g. 2.35 = 2.35%).
+        adjusted_drop = net_drop * (1.0 - perdas / 100.0)
     elif tipo_perda == 2:
         # Additive meters: adjusted_drop = net_drop - perdas
         adjusted_drop = net_drop - perdas
@@ -1053,17 +1056,28 @@ def convert_water_withdrawal(
         return None
 
     # Read confhd for posto -> hydro_code mapping.
+    # Filter out FICT plants so they cannot overwrite real plant entries
+    # when sharing the same posto (gauging station).
     confhd = _Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
+    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
     posto_to_code: dict[int, int] = {}
-    for _, row in confhd_df.iterrows():
-        posto_to_code[int(row["posto"])] = int(row["codigo_usina"])
+    for _, row in non_fict.iterrows():
+        code = int(row["codigo_usina"])
+        posto = int(row["posto"])
+        try:
+            id_map.hydro_id(code)
+            posto_to_code[posto] = code
+        except KeyError:
+            pass
 
     # Read dger for study start date, duration, and post-study period.
     dger = _Dger.read(str(nw_files.dger))
     start_year: int = int(dger.ano_inicio_estudo)
     start_month: int = int(dger.mes_inicio_estudo)
-    num_study_stages: int = int(dger.num_anos_estudo or 0) * 12
+    num_anos: int = int(dger.num_anos_estudo or 1)
+    num_study_stages: int = (13 - start_month) + (num_anos - 1) * 12
     _pos = dger.num_anos_pos_estudo
     num_post_study_stages: int = (
         int(_pos) * 12 if isinstance(_pos, (int, float)) and _pos else 0
@@ -1267,9 +1281,7 @@ def convert_storage_bounds(
         for stage_id in range(study_months, total_stages):
             cal = ((start_month - 1 + stage_id) % 12) + 1
             if cal in seasonal:
-                current = seasonal[cal]
-            if current is not None:
-                result[stage_id] = current
+                result[stage_id] = seasonal[cal]
 
         return result
 

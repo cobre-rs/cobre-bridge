@@ -265,9 +265,9 @@ def convert_thermal_bounds(
     total_stages = study_months + num_anos_pos * 12
 
     # Maintenance end: stages before this index have IP=0 globally.
-    maint_end_stage = (start_year + num_maint_years - start_year) * 12 + (
-        1 - start_month
-    )
+    # Maintenance years are counted from the study start, regardless of
+    # which calendar month the study begins in.
+    maint_end_stage = num_maint_years * 12
 
     stage_dates = _build_stage_dates(start_year, start_month, total_stages)
 
