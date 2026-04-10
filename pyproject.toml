@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.4.1"
+version = "0.4.2"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 dependencies = [
-    "inewave>=1.13.1",
+    "inewave>=1.13.2",
     "pyarrow>=23.0.1",
     "pandas>=3.0.2",
     "plotly>=6.6.0",
@@ -25,7 +25,7 @@ dev = [
     "ruff",
 ]
 validation = [
-    "cobre-python>=0.4.1",
+    "cobre-python>=0.4.2",
 ]
 
 [project.scripts]
