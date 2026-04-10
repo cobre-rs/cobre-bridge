@@ -290,19 +290,19 @@ def _make_intercambio_df() -> pd.DataFrame:
 
     d = datetime.datetime(2023, 1, 1)
     rows = [
-        # 1 -> 2 direct
+        # 1 -> 2 direct (sentido=0 means de->para, i.e. 1->2)
         {
             "submercado_de": 1,
             "submercado_para": 2,
-            "sentido": 1,
+            "sentido": 0,
             "data": d,
             "valor": 3000.0,
         },
-        # 2 -> 1 reverse
+        # 2 -> 1 reverse (sentido=0 means de->para, i.e. 2->1)
         {
             "submercado_de": 2,
             "submercado_para": 1,
-            "sentido": 1,
+            "sentido": 0,
             "data": d,
             "valor": 2500.0,
         },
@@ -310,7 +310,7 @@ def _make_intercambio_df() -> pd.DataFrame:
         {
             "submercado_de": 1,
             "submercado_para": 99,
-            "sentido": 1,
+            "sentido": 0,
             "data": d,
             "valor": 4000.0,
         },
@@ -318,7 +318,7 @@ def _make_intercambio_df() -> pd.DataFrame:
         {
             "submercado_de": 99,
             "submercado_para": 1,
-            "sentido": 1,
+            "sentido": 0,
             "data": d,
             "valor": 2000.0,
         },
@@ -326,7 +326,7 @@ def _make_intercambio_df() -> pd.DataFrame:
         {
             "submercado_de": 2,
             "submercado_para": 99,
-            "sentido": 1,
+            "sentido": 0,
             "data": d,
             "valor": 1500.0,
         },
@@ -334,7 +334,7 @@ def _make_intercambio_df() -> pd.DataFrame:
         {
             "submercado_de": 99,
             "submercado_para": 2,
-            "sentido": 1,
+            "sentido": 0,
             "data": d,
             "valor": 1200.0,
         },
@@ -2250,7 +2250,17 @@ class TestConvertPenalties:
 
         result = convert_penalties(
             _make_nw_files(tmp_path),
-            {"hydros": [{"generation": {"productivity_mw_per_m3s": 1.0}}]},
+            {
+                "hydros": [
+                    {
+                        "generation": {"productivity_mw_per_m3s": 1.0},
+                        "reservoir": {
+                            "max_storage_hm3": 1000.0,
+                            "min_storage_hm3": 100.0,
+                        },
+                    }
+                ]
+            },
         )
         for key in ("bus", "hydro", "line", "non_controllable_source"):
             assert key in result
@@ -2264,7 +2274,17 @@ class TestConvertPenalties:
 
         result = convert_penalties(
             _make_nw_files(tmp_path),
-            {"hydros": [{"generation": {"productivity_mw_per_m3s": 1.0}}]},
+            {
+                "hydros": [
+                    {
+                        "generation": {"productivity_mw_per_m3s": 1.0},
+                        "reservoir": {
+                            "max_storage_hm3": 1000.0,
+                            "min_storage_hm3": 100.0,
+                        },
+                    }
+                ]
+            },
         )
         # First subsystem=1, patamar=1: custo = 500.0*1 = 500.0
         seg = result["bus"]["deficit_segments"][0]
@@ -2277,7 +2297,17 @@ class TestConvertPenalties:
 
         result = convert_penalties(
             _make_nw_files(tmp_path),
-            {"hydros": [{"generation": {"productivity_mw_per_m3s": 1.0}}]},
+            {
+                "hydros": [
+                    {
+                        "generation": {"productivity_mw_per_m3s": 1.0},
+                        "reservoir": {
+                            "max_storage_hm3": 1000.0,
+                            "min_storage_hm3": 100.0,
+                        },
+                    }
+                ]
+            },
         )
         required = {
             "spillage_cost",
@@ -3049,10 +3079,10 @@ class TestConvertHydrosPenalid:
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_penalties_from_penalid(
+    def test_penalid_present_still_leaves_penalties_none(
         self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
     ) -> None:
-        """Plants get penalties populated from PENALID.DAT via their REE code."""
+        """Per-plant penalties are always None; PENALID is handled globally."""
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
         (tmp_path / "penalid.dat").touch()
 
@@ -3068,21 +3098,13 @@ class TestConvertHydrosPenalid:
                 _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat"), id_map
             )
 
-        # Both plants are in REE 1 (see _make_confhd_df).
-        # All plants should share REE 1 penalties.
+        # Per-plant penalty overrides were removed: PENALID values are
+        # converted once via system-average productivity in penalties.json.
         for hydro in result["hydros"]:
-            assert hydro["penalties"] is not None, (
-                f"Plant '{hydro['name']}' should have non-None penalties"
+            assert hydro["penalties"] is None, (
+                f"Plant '{hydro['name']}' should have penalties=None "
+                "(per-plant overrides removed; handled globally)"
             )
-            assert hydro["penalties"][
-                "water_withdrawal_violation_cost"
-            ] == pytest.approx(8300.0)
-            assert hydro["penalties"]["outflow_violation_below_cost"] == pytest.approx(
-                3179.35
-            )
-            assert hydro["penalties"][
-                "generation_violation_below_cost"
-            ] == pytest.approx(4500.0)
 
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
@@ -3108,10 +3130,10 @@ class TestConvertHydrosPenalid:
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_different_rees_get_different_penalties(
+    def test_different_rees_still_get_none_penalties(
         self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
     ) -> None:
-        """Plants in different REEs receive penalty values for their own REE."""
+        """Plants in different REEs still get penalties=None (global handling)."""
         for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
             (tmp_path / fname).touch()
 
@@ -3157,18 +3179,8 @@ class TestConvertHydrosPenalid:
                 _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat"), id_map
             )
 
-        hydros_by_name = {h["name"]: h for h in result["hydros"]}
-
-        # USINA_A is in REE 1.
-        pen_a = hydros_by_name["USINA_A"]["penalties"]
-        assert pen_a is not None
-        assert pen_a["water_withdrawal_violation_cost"] == pytest.approx(8300.0)
-
-        # USINA_B is in REE 2.
-        pen_b = hydros_by_name["USINA_B"]["penalties"]
-        assert pen_b is not None
-        assert pen_b["water_withdrawal_violation_cost"] == pytest.approx(9100.0)
-        assert pen_b["outflow_violation_below_cost"] == pytest.approx(2800.0)
+        for hydro in result["hydros"]:
+            assert hydro["penalties"] is None
 
 
 # ---------------------------------------------------------------------------
