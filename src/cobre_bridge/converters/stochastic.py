@@ -176,7 +176,7 @@ def convert_recent_inflow_lags(
             for m in inc_vals:
                 inc_vals[m] -= up_nat.get(m, 0.0)
 
-        values_m3s = [max(0.0, inc_vals.get(m, 0.0)) for m in lag_cal_months]
+        values_m3s = [inc_vals.get(m, 0.0) for m in lag_cal_months]
         result.append({"hydro_id": posto_to_cobre_id[posto], "values_m3s": values_m3s})
 
     result.sort(key=lambda e: e["hydro_id"])

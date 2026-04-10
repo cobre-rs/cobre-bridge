@@ -211,7 +211,9 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             first_month = limites_df[limites_df["data"] == first_date]
 
     # Build a (source, target) -> {direct_mw, reverse_mw} structure.
-    # sentido == 1: direct (de -> para), sentido == 2: reverse (para -> de)
+    # In inewave's parsed SISTEMA.DAT, sentido == 0 is the first block
+    # (de -> para, i.e. A->B) and sentido == 1 is the second block
+    # (para -> de, i.e. B->A).
     # We normalise all pairs so source_code < target_code to deduplicate.
     pair_map: dict[tuple[int, int], dict[str, float]] = {}
 
@@ -230,13 +232,13 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
 
         if de < para:
             # de -> para is the "direct" direction.
-            if sentido == 1:
+            if sentido == 0:
                 pair_map[key]["direct_mw"] = valor
             else:
                 pair_map[key]["reverse_mw"] = valor
         else:
             # de -> para is the "reverse" direction.
-            if sentido == 1:
+            if sentido == 0:
                 pair_map[key]["reverse_mw"] = valor
             else:
                 pair_map[key]["direct_mw"] = valor
@@ -270,13 +272,13 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
 
 
 def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
-    """Generate a Cobre ``penalties.json`` dict from NEWAVE deficit data.
+    """Generate a Cobre ``penalties.json`` dict from NEWAVE deficit and penalty data.
 
-    Uses the first subsystem's first deficit tier cost as the primary
-    deficit cost.  Operational penalties (spillage, exchange, curtailment,
-    excess) are derived from a base spillage reference value with
-    multipliers, converted to the energy domain using the average hydro
-    productivity.
+    Reads deficit costs from ``sistema.dat`` and constraint violation
+    penalties from ``penalid.dat``.  Operational penalties (spillage,
+    exchange, curtailment, excess) are derived from a base spillage
+    reference value with multipliers, converted to the energy domain
+    using the average hydro productivity.
 
     Parameters
     ----------
@@ -286,6 +288,8 @@ def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
         The already-converted ``hydros.json`` dict, used to compute the
         average productivity for flow-to-energy penalty conversion.
     """
+    from inewave.newave import Penalid
+
     sistema = Sistema.read(str(nw_files.sistema))
     deficit_df = sistema.custo_deficit
 
@@ -296,16 +300,56 @@ def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
         first_row = first_sub.iloc[0]
         primary_deficit_cost = float(first_row["custo"])
 
-    # Compute average productivity across all hydros for unit conversion.
-    # Spillage is in m3/s, energy-domain penalties are in $/MW.
-    # avg_prod converts: cost_per_MW = cost_per_m3s / avg_prod
+    # Read violation penalties from penalid.dat.
+    # Each variable has a per-REE, per-patamar cost; we take the first
+    # non-NaN value for each variable as the global default.
+    penalid_costs: dict[str, float] = {}
+    if nw_files.penalid is not None:
+        try:
+            penalid = Penalid.read(str(nw_files.penalid))
+            pen_df = penalid.penalidades
+            if pen_df is not None and not pen_df.empty:
+                for var in pen_df["variavel"].unique():
+                    rows = pen_df[
+                        (pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()
+                    ]
+                    if not rows.empty:
+                        penalid_costs[var.strip()] = float(rows.iloc[0]["valor_R$_MWh"])
+        except Exception:  # noqa: BLE001
+            _LOG.warning("penalid.dat could not be parsed; using default penalties.")
+
+    # PENALID.DAT values are in R$/MWh. Cobre's flow-domain slacks
+    # (m³/s) use `cost * block_hours` in the objective, so the penalty
+    # must be in R$/(m³/s). The conversion is:
+    #   penalty_rate [R$/(m³/s)] = penalty_MWh [R$/MWh] × avg_prod [MW/(m³/s)]
+    # Newave converts once using a system-average own productivity
+    # (weighted by useful storage volume) and applies the same value
+    # to all plants.
     hydros = hydros_dict.get("hydros", [])
-    productivities = [
-        h["generation"]["productivity_mw_per_m3s"]
-        for h in hydros
-        if h["generation"].get("productivity_mw_per_m3s", 0) > 0
-    ]
-    avg_prod = sum(productivities) / len(productivities) if productivities else 1.0
+
+    # Useful-volume-weighted average own productivity.
+    weighted_sum = 0.0
+    vol_sum = 0.0
+    for h in hydros:
+        prod = h["generation"].get("productivity_mw_per_m3s", 0.0)
+        useful = h["reservoir"]["max_storage_hm3"] - h["reservoir"]["min_storage_hm3"]
+        if prod > 0 and useful > 0:
+            weighted_sum += prod * useful
+            vol_sum += useful
+    avg_prod = weighted_sum / vol_sum if vol_sum > 0 else 1.0
+
+    # Flow-domain penalties: convert R$/MWh to R$/(m³/s).
+    desvio_mwh = penalid_costs.get("DESVIO", _DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST)
+    vazmin_mwh = penalid_costs.get("VAZMIN", _DEFAULT_OUTFLOW_VIOLATION_BELOW_COST)
+    ghmin_mwh = penalid_costs.get("GHMIN", _DEFAULT_GENERATION_VIOLATION_BELOW_COST)
+    turbmn_mwh = penalid_costs.get("TURBMN", _DEFAULT_TURBINED_VIOLATION_BELOW_COST)
+    turbmx_mwh = penalid_costs.get("TURBMX", _DEFAULT_OUTFLOW_VIOLATION_ABOVE_COST)
+
+    desvio_cost = desvio_mwh * avg_prod  # flow slack
+    vazmin_cost = vazmin_mwh * avg_prod  # flow slack
+    ghmin_cost = ghmin_mwh  # MW slack — no conversion needed
+    turbmn_cost = turbmn_mwh * avg_prod  # flow slack
+    turbmx_cost = turbmx_mwh * avg_prod  # flow slack
 
     # Spillage cost is the reference (in flow domain: $/m3s).
     spillage_cost = _SPILLAGE_REF
@@ -333,14 +377,14 @@ def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
             "spillage_cost": spillage_cost,
             "fpha_turbined_cost": fpha_turbined_cost,
             "diversion_cost": _DEFAULT_DIVERSION_COST,
-            "storage_violation_below_cost": _DEFAULT_STORAGE_VIOLATION_BELOW_COST,
+            "storage_violation_below_cost": vazmin_cost,
             "filling_target_violation_cost": _DEFAULT_FILLING_TARGET_VIOLATION_COST,
-            "turbined_violation_below_cost": _DEFAULT_TURBINED_VIOLATION_BELOW_COST,
-            "outflow_violation_below_cost": _DEFAULT_OUTFLOW_VIOLATION_BELOW_COST,
-            "outflow_violation_above_cost": _DEFAULT_OUTFLOW_VIOLATION_ABOVE_COST,
-            "generation_violation_below_cost": _DEFAULT_GENERATION_VIOLATION_BELOW_COST,
-            "evaporation_violation_cost": _DEFAULT_EVAPORATION_VIOLATION_COST,
-            "water_withdrawal_violation_cost": _DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST,
+            "turbined_violation_below_cost": turbmn_cost,
+            "outflow_violation_below_cost": vazmin_cost,
+            "outflow_violation_above_cost": turbmx_cost,
+            "generation_violation_below_cost": ghmin_cost,
+            "evaporation_violation_cost": desvio_cost,
+            "water_withdrawal_violation_cost": desvio_cost,
         },
         "line": {
             "exchange_cost": exchange_cost,
@@ -439,13 +483,13 @@ def convert_line_bounds(
 
         if de < para:
             # de -> para is the "direct" direction.
-            if sentido == 1:
+            if sentido == 0:
                 date_lookup[key]["direct_mw"] = valor
             else:
                 date_lookup[key]["reverse_mw"] = valor
         else:
             # de -> para is the "reverse" direction.
-            if sentido == 1:
+            if sentido == 0:
                 date_lookup[key]["reverse_mw"] = valor
             else:
                 date_lookup[key]["direct_mw"] = valor
@@ -543,9 +587,7 @@ def _build_ncs_group_to_id(
         return 0 <= stage_id < total_stages
 
     df_filtered = df_ncs[df_ncs["data"].apply(_in_horizon)].copy()
-    groups = df_filtered.groupby(
-        ["codigo_submercado", "indice_bloco"], sort=True
-    )
+    groups = df_filtered.groupby(["codigo_submercado", "indice_bloco"], sort=True)
 
     result: dict[tuple[int, int], int] = {}
     ncs_id = 0
@@ -913,7 +955,6 @@ def convert_ncs_factors(
     results: list[dict] = []
 
     for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
-
         y, m = start_year, start_month
         for stage_id in range(total_stages):
             is_post_study = (y > study_end_year) or (
@@ -1062,9 +1103,7 @@ def convert_ncs_stats(
     rows_mean: list[float] = []
     rows_std: list[float] = []
 
-    for (sub_code, bloco), ncs_id in sorted(
-        ncs_group_map.items(), key=lambda x: x[1]
-    ):
+    for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
         max_gen = max_gen_per_ncs[ncs_id]
 
         y, m = start_year, start_month

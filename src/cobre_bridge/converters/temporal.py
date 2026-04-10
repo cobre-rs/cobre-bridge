@@ -160,16 +160,17 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     df_pat = patamar.duracao_mensal_patamares
     num_patamares: int = patamar.numero_patamares or 1
 
-    # Index the patamar DataFrame by (calendar month, patamar index).
-    # The ``data`` column is a datetime; we need the calendar month (1-12).
-    # Build a dict {(month_1_to_12, patamar_1_based) -> fraction}.
-    pat_lookup: dict[tuple[int, int], float] = {}
+    # Index the patamar DataFrame by (year, calendar month, patamar index).
+    # The ``data`` column is a datetime; we need year and calendar month.
+    # Build a dict {(year, month_1_to_12, patamar_1_based) -> fraction}.
+    pat_lookup: dict[tuple[int, int, int], float] = {}
     if df_pat is not None and not df_pat.empty:
         for _, row in df_pat.iterrows():
+            cal_year = int(row["data"].year)
             cal_month = int(row["data"].month)
             pat_idx = int(row["patamar"])
             fraction = float(row["valor"])
-            pat_lookup[(cal_month, pat_idx)] = fraction
+            pat_lookup[(cal_year, cal_month, pat_idx)] = fraction
 
     names = _block_names(num_patamares)
 
@@ -195,12 +196,13 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
 
         blocks: list[dict] = []
         for pat_idx in range(1, num_patamares + 1):
-            fraction = pat_lookup.get((month, pat_idx))
+            fraction = pat_lookup.get((year, month, pat_idx))
             if fraction is None:
                 fraction = 1.0 / num_patamares
                 logger.warning(
-                    "No patamar duration for calendar month %d, patamar %d; "
-                    "using equal fraction %.4f",
+                    "No patamar duration for year %d, calendar month %d, "
+                    "patamar %d; using equal fraction %.4f",
+                    year,
                     month,
                     pat_idx,
                     fraction,
@@ -353,17 +355,6 @@ def convert_config(nw_files: NewaveFiles) -> dict:
     max_iterations: int = dger.num_max_iteracoes or 200
     num_series: int = dger.num_series_sinteticas or 200
     max_order: int = dger.ordem_maxima_parp or 6
-    ano_ini_hist: int | None = dger.ano_inicial_historico
-
-    # Build scenario source with historical year range when available.
-    scenario_source: dict | None = None
-    if ano_ini_hist is not None:
-        start_year: int = dger.ano_inicio_estudo
-        # Historical record ends the year before the study starts.
-        scenario_source = {
-            "historical_years": {"from": ano_ini_hist, "to": start_year - 1},
-        }
-
     config: dict = {
         "$schema": (
             "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
@@ -399,9 +390,5 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             "num_scenarios": num_series,
         },
     }
-
-    if scenario_source is not None:
-        config["training"]["scenario_source"] = scenario_source
-        config["simulation"]["scenario_source"] = scenario_source
 
     return config

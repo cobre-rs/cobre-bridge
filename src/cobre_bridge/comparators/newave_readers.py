@@ -440,11 +440,15 @@ def read_medias_market(saidas_dir: Path) -> pl.DataFrame:
 
 
 def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
-    """Read deterministic net load from ``sistema.dat``.
+    """Read deterministic net load from ``sistema.dat`` and ``c_adic.dat``.
 
-    Computes ``net_load = mercado_energia - sum(geracao_usinas_nao_simuladas)``
-    per submarket and date.  Returns a DataFrame compatible with the
-    ``nw_market`` schema used in the energy balance charts:
+    Computes ``net_load = mercado_energia + c_adic - sum(geracao_usinas_nao_simuladas)``
+    per submarket and date.  The C_ADIC contribution (must-take energy from
+    Itaipu, ANDE, MMGD, etc.) is added so the newave load is comparable to
+    cobre's simulation output, which already includes C_ADIC.
+
+    Returns a DataFrame compatible with the ``nw_market`` schema used in
+    the energy balance charts:
 
     - ``newave_code`` (Int64): NEWAVE submarket code
     - ``stage`` (Int64): stage number (aligned with MEDIAS column naming)
@@ -482,6 +486,31 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     load_df = load_df.dropna(subset=["valor"])
     load_df = load_df[load_df["data"].dt.year < 9000]
 
+    # Add C_ADIC must-take energy (Itaipu, ANDE, MMGD, etc.) to load.
+    cadical_path = _find_case_insensitive(newave_dir, "c_adic.dat")
+    if cadical_path is not None:
+        try:
+            from cobre_bridge.converters.stochastic import _parse_cadical
+
+            cadical = _parse_cadical(cadical_path)
+            load_df = load_df.copy()
+            load_df["valor"] = load_df.apply(
+                lambda row: (
+                    row["valor"]
+                    + cadical.get(
+                        (
+                            int(row["codigo_submercado"]),
+                            int(row["data"].year),
+                            int(row["data"].month),
+                        ),
+                        0.0,
+                    )
+                ),
+                axis=1,
+            )
+        except Exception:  # noqa: BLE001
+            _LOG.warning("Failed to parse c_adic.dat for net load adjustment")
+
     # NCS: sum across all source types per (submarket, date).
     ncs_total = None
     if ncs_df is not None and not ncs_df.empty:
@@ -512,14 +541,13 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     merged = merged.sort_values(["codigo_submercado", "data"])
     first_month = int(merged["data"].min().month)
     stage_map = {
-        date: first_month + i
-        for i, date in enumerate(sorted(merged["data"].unique()))
+        date: first_month + i for i, date in enumerate(sorted(merged["data"].unique()))
     }
     merged["stage"] = merged["data"].map(stage_map)
 
-    result = pl.from_pandas(
-        merged[["codigo_submercado", "stage", "net_load"]]
-    ).rename({"codigo_submercado": "newave_code", "net_load": "value"})
+    result = pl.from_pandas(merged[["codigo_submercado", "stage", "net_load"]]).rename(
+        {"codigo_submercado": "newave_code", "net_load": "value"}
+    )
     result = result.with_columns(pl.lit("NET_LOAD").alias("variable"))
     result = result.cast(
         {"newave_code": pl.Int64, "stage": pl.Int64, "value": pl.Float64}

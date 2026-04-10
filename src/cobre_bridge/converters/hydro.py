@@ -286,7 +286,7 @@ _PENALID_VAR_MAP: dict[str, str] = {
     "VAZMAX": "outflow_violation_above_cost",
     "GHMIN": "generation_violation_below_cost",
     "TURBMN": "turbined_violation_below_cost",
-    # TURBMX has no direct Cobre mapping — intentionally excluded.
+    "TURBMX": "outflow_violation_above_cost",
 }
 
 
@@ -414,9 +414,6 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     # Read GHMIN.DAT minimum generation map.
     ghmin_map = _read_ghmin(nw_files)
 
-    # Read PENALID.DAT per-REE penalty overrides.
-    penalid_map = _read_penalid(nw_files)
-
     # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
     if ree_df is not None:
@@ -539,9 +536,11 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         else:
             hydraulic_losses = None
 
-        # Penalty overrides from PENALID.DAT — look up by the plant's REE code.
-        ree_penalties = penalid_map.get(ree_code)
-        penalties: dict | None = ree_penalties if ree_penalties else None
+        # Per-plant penalty overrides removed: newave converts PENALID R$/MWh
+        # to rate units once using a system-average productivity and applies the
+        # same value to all plants. The global defaults in penalties.json
+        # (set by convert_penalties) already carry the converted values.
+        penalties: dict | None = None
 
         hydro_entry: dict = {
             "id": id_map.hydro_id(newave_code),
