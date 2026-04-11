@@ -102,7 +102,9 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     dger_cvar: int = int(_raw_cvar) if isinstance(_raw_cvar, int) else 0
 
     # Default: each stage uses "expectation"
-    _cvar_by_stage: dict[int, dict] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
+    _cvar_by_stage: dict[
+        int, dict
+    ] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
 
     if dger_cvar in (1, 2) and nw_files.cvar is not None:
         cvar_file = Cvar.read(str(nw_files.cvar))
@@ -208,13 +210,11 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                     fraction,
                 )
             block_hours = fraction * total_hours
-            blocks.append(
-                {
-                    "id": pat_idx - 1,
-                    "name": names[pat_idx - 1],
-                    "hours": block_hours,
-                }
-            )
+            blocks.append({
+                "id": pat_idx - 1,
+                "name": names[pat_idx - 1],
+                "hours": block_hours,
+            })
 
         # Determine risk_measure for this stage.
         if dger_cvar == 0 or _cvar_constant is None and dger_cvar != 2:
@@ -227,30 +227,26 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
             lbd = lambda_override.get((year, month), const_lambda)
             risk_measure = {"cvar": {"alpha": a, "lambda": lbd}}
 
-        stages.append(
-            {
-                "id": stage_id,
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-                "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
-                "blocks": blocks,
-                "num_scenarios": num_scenarios,
-                "risk_measure": risk_measure,
-                "state_variables": {
-                    "storage": True,
-                    "inflow_lags": True,
-                },
-            }
-        )
+        stages.append({
+            "id": stage_id,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
+            "blocks": blocks,
+            "num_scenarios": num_scenarios,
+            "risk_measure": risk_measure,
+            "state_variables": {
+                "storage": True,
+                "inflow_lags": True,
+            },
+        })
 
         if stage_id < total_months - 1:
-            transitions.append(
-                {
-                    "source_id": stage_id,
-                    "target_id": stage_id + 1,
-                    "probability": 1.0,
-                }
-            )
+            transitions.append({
+                "source_id": stage_id,
+                "target_id": stage_id + 1,
+                "probability": 1.0,
+            })
 
         month += 1
         if month > 12:
@@ -280,14 +276,12 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
 
         for offset, (py, pm) in enumerate(pre_dates):
             pre_id = -(num_pre_months - offset)
-            pre_study_stages.append(
-                {
-                    "id": pre_id,
-                    "start_date": _month_start_date(py, pm).isoformat(),
-                    "end_date": _month_end_date(py, pm).isoformat(),
-                    "season_id": pm - 1,  # 0-based calendar month index
-                }
-            )
+            pre_study_stages.append({
+                "id": pre_id,
+                "start_date": _month_start_date(py, pm).isoformat(),
+                "end_date": _month_end_date(py, pm).isoformat(),
+                "season_id": pm - 1,  # 0-based calendar month index
+            })
 
     policy_graph: dict = {
         "type": "finite_horizon",
@@ -355,6 +349,76 @@ def convert_config(nw_files: NewaveFiles) -> dict:
     max_iterations: int = dger.num_max_iteracoes or 200
     num_series: int = dger.num_series_sinteticas or 200
     max_order: int = dger.ordem_maxima_parp or 6
+
+    tipo_execucao: int = (
+        dger.tipo_execucao if dger.tipo_execucao is not None else 1
+    )
+    tipo_simulacao_final: int = (
+        dger.tipo_simulacao_final
+        if dger.tipo_simulacao_final is not None
+        else 1
+    )
+    considera_reamostragem: int = (
+        dger.considera_reamostragem_cenarios
+        if dger.considera_reamostragem_cenarios is not None
+        else 0
+    )
+
+    # tipo_execucao: 0 = simulation only, 1 = training (+ simulation).
+    training_enabled: bool = tipo_execucao == 1
+
+    # tipo_simulacao_final: 0 = disabled, 1 = out_of_sample, 2 = historical.
+    # When tipo_execucao == 0 (simulation-only mode), simulation is always on.
+    if tipo_execucao == 0:
+        simulation_enabled = True
+    else:
+        simulation_enabled = tipo_simulacao_final != 0
+
+    # -- Training scenario source --
+    training_section: dict = {
+        "forward_passes": forward_passes,
+        "stopping_rules": [
+            {"type": "iteration_limit", "limit": max_iterations},
+        ],
+        "cut_selection": {
+            "check_frequency": 1,
+            "cut_activity_tolerance": 1e-6,
+            "enabled": True,
+            "method": "domination",
+            "threshold": 0,
+        },
+    }
+    if not training_enabled:
+        training_section["enabled"] = False
+    if training_enabled and considera_reamostragem == 1:
+        training_section["scenario_source"] = {
+            "inflow": {"scheme": "out_of_sample"},
+        }
+
+    # -- Simulation scenario source --
+    # Priority: tipo_simulacao_final=2 forces "historical"; otherwise
+    # considera_reamostragem determines the scheme (1=out_of_sample, 0=in_sample).
+    simulation_section: dict = {
+        "enabled": simulation_enabled,
+        "num_scenarios": num_series,
+    }
+    if simulation_enabled:
+        if tipo_simulacao_final == 2:
+            inflow_scheme = "historical"
+        elif considera_reamostragem == 1:
+            inflow_scheme = "out_of_sample"
+        else:
+            inflow_scheme = "in_sample"
+        sim_source: dict = {"inflow": {"scheme": inflow_scheme}}
+        if inflow_scheme == "historical":
+            ano_ini_hist: int = dger.ano_inicial_historico or 1931
+            ano_inicio: int = dger.ano_inicio_estudo or 2020
+            sim_source["historical_years"] = {
+                "from": ano_ini_hist + 1,
+                "to": ano_inicio - 1,
+            }
+        simulation_section["scenario_source"] = sim_source
+
     config: dict = {
         "$schema": (
             "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
@@ -363,19 +427,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "estimation": {
             "max_order": max_order,
         },
-        "training": {
-            "forward_passes": forward_passes,
-            "stopping_rules": [
-                {"type": "iteration_limit", "limit": max_iterations},
-            ],
-            "cut_selection": {
-                "check_frequency": 1,
-                "cut_activity_tolerance": 1e-6,
-                "enabled": True,
-                "method": "lml1",
-                "threshold": 0,
-            },
-        },
+        "training": training_section,
         "modeling": {
             "inflow_non_negativity": {
                 "method": "penalty",
@@ -385,10 +437,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "exports": {
             "stochastic": True,
         },
-        "simulation": {
-            "enabled": True,
-            "num_scenarios": num_series,
-        },
+        "simulation": simulation_section,
     }
 
     return config
