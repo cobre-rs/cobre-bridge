@@ -399,6 +399,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         training_section["enabled"] = False
     if training_enabled and considera_reamostragem == 1:
         training_section["scenario_source"] = {
+            "seed": 42,
             "inflow": {"scheme": "out_of_sample"},
         }
 
@@ -416,7 +417,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             inflow_scheme = "out_of_sample"
         else:
             inflow_scheme = "in_sample"
-        sim_source: dict = {"inflow": {"scheme": inflow_scheme}}
+        sim_source: dict = {"seed": 42, "inflow": {"scheme": inflow_scheme}}
         if inflow_scheme == "historical":
             ano_ini_hist: int = dger.ano_inicial_historico or 1931
             ano_inicio: int = dger.ano_inicio_estudo or 2020

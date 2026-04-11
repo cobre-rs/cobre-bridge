@@ -687,6 +687,7 @@ class TestConvertConfig:
         result = convert_config(_make_nw_files(tmp_path))
         assert result["simulation"]["enabled"] is True
         src = result["simulation"]["scenario_source"]
+        assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "out_of_sample"
         assert "historical_years" not in src
 
@@ -705,6 +706,7 @@ class TestConvertConfig:
         result = convert_config(_make_nw_files(tmp_path))
         assert result["simulation"]["enabled"] is True
         src = result["simulation"]["scenario_source"]
+        assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "in_sample"
 
     @patch("cobre_bridge.converters.temporal.Dger")
@@ -727,6 +729,7 @@ class TestConvertConfig:
         result = convert_config(_make_nw_files(tmp_path))
         assert result["simulation"]["enabled"] is True
         src = result["simulation"]["scenario_source"]
+        assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "historical"
         assert src["historical_years"] == {"from": 1932, "to": 2025}
 
@@ -748,6 +751,7 @@ class TestConvertConfig:
 
         result = convert_config(_make_nw_files(tmp_path))
         src = result["simulation"]["scenario_source"]
+        assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "historical"
         assert src["historical_years"] == {"from": 1932, "to": 2025}
 
@@ -765,6 +769,7 @@ class TestConvertConfig:
 
         result = convert_config(_make_nw_files(tmp_path))
         src = result["training"]["scenario_source"]
+        assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "out_of_sample"
 
     @patch("cobre_bridge.converters.temporal.Dger")
