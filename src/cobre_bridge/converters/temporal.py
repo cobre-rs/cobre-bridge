@@ -102,9 +102,7 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     dger_cvar: int = int(_raw_cvar) if isinstance(_raw_cvar, int) else 0
 
     # Default: each stage uses "expectation"
-    _cvar_by_stage: dict[
-        int, dict
-    ] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
+    _cvar_by_stage: dict[int, dict] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
 
     if dger_cvar in (1, 2) and nw_files.cvar is not None:
         cvar_file = Cvar.read(str(nw_files.cvar))
@@ -166,6 +164,7 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     # The ``data`` column is a datetime; we need year and calendar month.
     # Build a dict {(year, month_1_to_12, patamar_1_based) -> fraction}.
     pat_lookup: dict[tuple[int, int, int], float] = {}
+    pat_last_year: int | None = None
     if df_pat is not None and not df_pat.empty:
         for _, row in df_pat.iterrows():
             cal_year = int(row["data"].year)
@@ -173,6 +172,8 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
             pat_idx = int(row["patamar"])
             fraction = float(row["valor"])
             pat_lookup[(cal_year, cal_month, pat_idx)] = fraction
+            if pat_last_year is None or cal_year > pat_last_year:
+                pat_last_year = cal_year
 
     names = _block_names(num_patamares)
 
@@ -199,6 +200,8 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
         blocks: list[dict] = []
         for pat_idx in range(1, num_patamares + 1):
             fraction = pat_lookup.get((year, month, pat_idx))
+            if fraction is None and pat_last_year is not None:
+                fraction = pat_lookup.get((pat_last_year, month, pat_idx))
             if fraction is None:
                 fraction = 1.0 / num_patamares
                 logger.warning(
@@ -210,11 +213,13 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                     fraction,
                 )
             block_hours = fraction * total_hours
-            blocks.append({
-                "id": pat_idx - 1,
-                "name": names[pat_idx - 1],
-                "hours": block_hours,
-            })
+            blocks.append(
+                {
+                    "id": pat_idx - 1,
+                    "name": names[pat_idx - 1],
+                    "hours": block_hours,
+                }
+            )
 
         # Determine risk_measure for this stage.
         if dger_cvar == 0 or _cvar_constant is None and dger_cvar != 2:
@@ -227,26 +232,30 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
             lbd = lambda_override.get((year, month), const_lambda)
             risk_measure = {"cvar": {"alpha": a, "lambda": lbd}}
 
-        stages.append({
-            "id": stage_id,
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
-            "blocks": blocks,
-            "num_scenarios": num_scenarios,
-            "risk_measure": risk_measure,
-            "state_variables": {
-                "storage": True,
-                "inflow_lags": True,
-            },
-        })
+        stages.append(
+            {
+                "id": stage_id,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
+                "blocks": blocks,
+                "num_scenarios": num_scenarios,
+                "risk_measure": risk_measure,
+                "state_variables": {
+                    "storage": True,
+                    "inflow_lags": True,
+                },
+            }
+        )
 
         if stage_id < total_months - 1:
-            transitions.append({
-                "source_id": stage_id,
-                "target_id": stage_id + 1,
-                "probability": 1.0,
-            })
+            transitions.append(
+                {
+                    "source_id": stage_id,
+                    "target_id": stage_id + 1,
+                    "probability": 1.0,
+                }
+            )
 
         month += 1
         if month > 12:
@@ -276,12 +285,14 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
 
         for offset, (py, pm) in enumerate(pre_dates):
             pre_id = -(num_pre_months - offset)
-            pre_study_stages.append({
-                "id": pre_id,
-                "start_date": _month_start_date(py, pm).isoformat(),
-                "end_date": _month_end_date(py, pm).isoformat(),
-                "season_id": pm - 1,  # 0-based calendar month index
-            })
+            pre_study_stages.append(
+                {
+                    "id": pre_id,
+                    "start_date": _month_start_date(py, pm).isoformat(),
+                    "end_date": _month_end_date(py, pm).isoformat(),
+                    "season_id": pm - 1,  # 0-based calendar month index
+                }
+            )
 
     policy_graph: dict = {
         "type": "finite_horizon",
@@ -350,13 +361,9 @@ def convert_config(nw_files: NewaveFiles) -> dict:
     num_series: int = dger.num_series_sinteticas or 200
     max_order: int = dger.ordem_maxima_parp or 6
 
-    tipo_execucao: int = (
-        dger.tipo_execucao if dger.tipo_execucao is not None else 1
-    )
+    tipo_execucao: int = dger.tipo_execucao if dger.tipo_execucao is not None else 1
     tipo_simulacao_final: int = (
-        dger.tipo_simulacao_final
-        if dger.tipo_simulacao_final is not None
-        else 1
+        dger.tipo_simulacao_final if dger.tipo_simulacao_final is not None else 1
     )
     considera_reamostragem: int = (
         dger.considera_reamostragem_cenarios
