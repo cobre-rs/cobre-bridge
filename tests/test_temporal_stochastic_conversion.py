@@ -85,6 +85,10 @@ def _make_dger_mock(
     taxa_de_desconto: float = 12.0,
     num_aberturas: int = 10,
     cvar: int = 0,
+    tipo_execucao: int = 1,
+    tipo_simulacao_final: int = 1,
+    considera_reamostragem_cenarios: int = 0,
+    ano_inicial_historico: int = 1931,
 ) -> MagicMock:
     dger = MagicMock()
     dger.mes_inicio_estudo = mes_inicio
@@ -98,6 +102,10 @@ def _make_dger_mock(
     dger.taxa_de_desconto = taxa_de_desconto
     dger.num_aberturas = num_aberturas
     dger.cvar = cvar
+    dger.tipo_execucao = tipo_execucao
+    dger.tipo_simulacao_final = tipo_simulacao_final
+    dger.considera_reamostragem_cenarios = considera_reamostragem_cenarios
+    dger.ano_inicial_historico = ano_inicial_historico
     return dger
 
 
@@ -598,9 +606,9 @@ class TestConvertConfig:
         assert rules[0]["limit"] == 200
 
     @patch("cobre_bridge.converters.temporal.Dger")
-    def test_simulation_enabled(self, mock_dger_cls, tmp_path) -> None:
+    def test_simulation_enabled_default(self, mock_dger_cls, tmp_path) -> None:
         (tmp_path / "dger.dat").touch()
-        dger = _make_dger_mock()
+        dger = _make_dger_mock(tipo_execucao=1, tipo_simulacao_final=1)
         mock_dger_cls.read.return_value = dger
 
         from cobre_bridge.converters.temporal import convert_config
@@ -618,6 +626,177 @@ class TestConvertConfig:
 
         result = convert_config(_make_nw_files(tmp_path))
         assert result["simulation"]["num_scenarios"] == 500
+
+    # -- tipo_execucao / training.enabled --
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_tipo_execucao_1_enables_training(self, mock_dger_cls, tmp_path) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(tipo_execucao=1)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert (
+            "enabled" not in result["training"]
+            or result["training"].get("enabled") is not False
+        )
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_tipo_execucao_0_disables_training(self, mock_dger_cls, tmp_path) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(tipo_execucao=0, tipo_simulacao_final=1)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["training"]["enabled"] is False
+        assert result["simulation"]["enabled"] is True
+
+    # -- tipo_simulacao_final / simulation --
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_tipo_simulacao_final_0_disables_simulation(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(tipo_execucao=1, tipo_simulacao_final=0)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["simulation"]["enabled"] is False
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_simulation_reamostragem_1_out_of_sample(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=1,
+            considera_reamostragem_cenarios=1,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["simulation"]["enabled"] is True
+        src = result["simulation"]["scenario_source"]
+        assert src["inflow"]["scheme"] == "out_of_sample"
+        assert "historical_years" not in src
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_simulation_reamostragem_0_in_sample(self, mock_dger_cls, tmp_path) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=1,
+            considera_reamostragem_cenarios=0,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["simulation"]["enabled"] is True
+        src = result["simulation"]["scenario_source"]
+        assert src["inflow"]["scheme"] == "in_sample"
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_tipo_simulacao_final_2_overrides_reamostragem(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        """tipo_simulacao_final=2 forces historical even when reamostragem=1."""
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            considera_reamostragem_cenarios=1,
+            ano_inicial_historico=1931,
+            ano_inicio=2026,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["simulation"]["enabled"] is True
+        src = result["simulation"]["scenario_source"]
+        assert src["inflow"]["scheme"] == "historical"
+        assert src["historical_years"] == {"from": 1932, "to": 2025}
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_tipo_simulacao_final_2_without_reamostragem(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            considera_reamostragem_cenarios=0,
+            ano_inicial_historico=1931,
+            ano_inicio=2026,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        src = result["simulation"]["scenario_source"]
+        assert src["inflow"]["scheme"] == "historical"
+        assert src["historical_years"] == {"from": 1932, "to": 2025}
+
+    # -- considera_reamostragem_cenarios / training.scenario_source --
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_reamostragem_adds_training_scenario_source(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(tipo_execucao=1, considera_reamostragem_cenarios=1)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        src = result["training"]["scenario_source"]
+        assert src["inflow"]["scheme"] == "out_of_sample"
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_no_reamostragem_no_training_scenario_source(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(tipo_execucao=1, considera_reamostragem_cenarios=0)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert "scenario_source" not in result["training"]
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_reamostragem_ignored_when_training_disabled(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=0,
+            considera_reamostragem_cenarios=1,
+            tipo_simulacao_final=1,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["training"]["enabled"] is False
+        assert "scenario_source" not in result["training"]
 
 
 # ---------------------------------------------------------------------------
