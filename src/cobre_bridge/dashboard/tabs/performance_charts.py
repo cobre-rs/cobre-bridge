@@ -27,17 +27,25 @@ from cobre_bridge.ui.theme import COLORS
 
 # Component display name mapping for the waterfall chart.
 _TIMING_COMPONENT_LABELS: dict[str, str] = {
+    # v0.4.3+ column names.
+    "forward_wall_ms": "Forward Wall",
+    "fwd_rayon_overhead_ms": "Fwd Rayon Overhead",
+    "backward_wall_ms": "Backward Wall",
+    "lower_bound_ms": "Lower Bound",
+    "cut_selection_ms": "Cut Selection",
+    "mpi_allreduce_ms": "MPI AllReduce",
+    "cut_sync_ms": "Cut Sync",
+    "state_exchange_ms": "State Exchange",
+    "cut_batch_build_ms": "Cut Batch Build",
+    "bwd_rayon_overhead_ms": "Bwd Rayon Overhead",
+    "overhead_ms": "Other Overhead",
+    # Legacy names for pre-0.4.3 outputs.
     "forward_solve_ms": "Forward Solve",
     "forward_sample_ms": "Forward Sample",
     "backward_solve_ms": "Backward Solve",
     "backward_cut_ms": "Backward Cut Add",
-    "cut_selection_ms": "Cut Selection",
-    "mpi_allreduce_ms": "MPI AllReduce",
     "mpi_broadcast_ms": "MPI Broadcast",
-    "state_exchange_ms": "State Exchange",
-    "cut_batch_build_ms": "Cut Batch Build",
     "rayon_overhead_ms": "Rayon Overhead",
-    "overhead_ms": "Other Overhead",
     "io_write_ms": "IO Write",
 }
 
@@ -66,16 +74,20 @@ def chart_iteration_timing_breakdown(timing: pd.DataFrame) -> str:
     if timing.empty:
         return "<p>No timing data available.</p>"
 
+    # Detect v0.4.3+ or legacy column names.
+    fwd_col = (
+        "forward_wall_ms" if "forward_wall_ms" in timing.columns else "forward_solve_ms"
+    )
+    bwd_col = (
+        "backward_wall_ms"
+        if "backward_wall_ms" in timing.columns
+        else "backward_solve_ms"
+    )
+
     overhead_cols = [
         c
         for c in timing.columns
-        if c
-        not in {
-            "iteration",
-            "forward_solve_ms",
-            "backward_solve_ms",
-        }
-        and c.endswith("_ms")
+        if c not in {"iteration", fwd_col, bwd_col} and c.endswith("_ms")
     ]
     timing = timing.copy()
     timing["overhead_ms"] = timing[overhead_cols].sum(axis=1)
@@ -85,16 +97,16 @@ def chart_iteration_timing_breakdown(timing: pd.DataFrame) -> str:
     fig.add_trace(
         go.Bar(
             x=iters,
-            y=timing["forward_solve_ms"].tolist(),
-            name="Forward Solve",
+            y=timing[fwd_col].tolist(),
+            name="Forward",
             marker_color=COLORS["hydro"],
         )
     )
     fig.add_trace(
         go.Bar(
             x=iters,
-            y=timing["backward_solve_ms"].tolist(),
-            name="Backward Solve",
+            y=timing[bwd_col].tolist(),
+            name="Backward",
             marker_color=COLORS["thermal"],
         )
     )

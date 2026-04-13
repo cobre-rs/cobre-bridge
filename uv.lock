@@ -24,7 +24,7 @@ wheels = [
 
 [[package]]
 name = "cobre-bridge"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "inewave" },
@@ -47,8 +47,8 @@ validation = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cobre-python", marker = "extra == 'validation'", specifier = ">=0.4.1" },
-    { name = "inewave", specifier = ">=1.13.1" },
+    { name = "cobre-python", marker = "extra == 'validation'", specifier = ">=0.4.2" },
+    { name = "inewave", specifier = ">=1.13.2" },
     { name = "pandas", specifier = ">=3.0.2" },
     { name = "plotly", specifier = ">=6.6.0" },
     { name = "polars", specifier = ">=1.39.3" },
@@ -62,17 +62,15 @@ provides-extras = ["dev", "validation"]
 
 [[package]]
 name = "cobre-python"
-version = "0.4.1"
+version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/bb/4a3b471e293cabf0c79f69ecf733d3d22ba9ce8b5f67552c0f53a3e933d5/cobre_python-0.4.1-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:103a218b46420f6901bfce24b882e5cc494a65c52a16afa6d18bd1fa1cbb15eb", size = 6870596, upload-time = "2026-04-06T17:11:22.446Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/a2/385ce36df678d2720f95e50b121b4797a15c2a8a33c69222d01713904724/cobre_python-0.4.1-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:f1399484bda612f41064f5ef99bedc9a719280b08be678608f1fb85296273ed8", size = 6335642, upload-time = "2026-04-06T17:11:24.743Z" },
-    { url = "https://files.pythonhosted.org/packages/5d/29/92135ab7b7e75fa8af3b4ac751cae6e7229d7e0f9c56a5a67b0e74d0d0f2/cobre_python-0.4.1-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:266fa8fa8f575cd6a590fd8ee3ad4bc8e82b359668fd4bb96fd1b5db3e3fa71b", size = 7122005, upload-time = "2026-04-06T17:11:26.867Z" },
-    { url = "https://files.pythonhosted.org/packages/60/0b/bdd71ef666885a94dbfbe4d95bee3ae8652aa728f33db74001fe9e272d5e/cobre_python-0.4.1-cp312-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:aeea3918f30b901b30d97d405f0e385f0c33b666db7ab8680f577a2724e9e9f6", size = 7374301, upload-time = "2026-04-06T17:11:29.178Z" },
-    { url = "https://files.pythonhosted.org/packages/48/c1/175aedc17c8b6db19b4766a881a42866736a575708debd3c977b5c79e531/cobre_python-0.4.1-cp312-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:741712c4898d64a9656d6bc969d6ad4d83406a7e4c0c3f65389e0521027a0743", size = 13948306, upload-time = "2026-04-06T17:11:31.608Z" },
-    { url = "https://files.pythonhosted.org/packages/7c/4f/1c4aa9476200f406eb2a412e72d2045c81e372b080b89d53eb3525635d99/cobre_python-0.4.1-cp312-abi3-win_amd64.whl", hash = "sha256:1ab0c1b3e7bee2e49dfb504fb7f80b4dd78c0ecc047b6bbf09e9f4d305e4abb0", size = 6053492, upload-time = "2026-04-06T17:11:34.255Z" },
-    { url = "https://files.pythonhosted.org/packages/1f/97/6cb3b3abecae9674cf00fb75ce2d222a138c383e3866c6450ec0f66af539/cobre_python-0.4.1-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:b056b8046fe42b2bc4e2a6e27eeb96d2af6f00e972f05fb48450a1a13b1485c6", size = 13947127, upload-time = "2026-04-06T17:11:36.579Z" },
-    { url = "https://files.pythonhosted.org/packages/e2/d1/81297fae41d7806f6359b92806642492d6d9b5712c1307d6e8e7f519669c/cobre_python-0.4.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:0844dbe5726b43c291c6807e6bef3fd07293a4aedb34569d2ac244c8b82fb089", size = 13949019, upload-time = "2026-04-06T17:11:39.143Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/62/421076e37a04624118b605ea6fdb120e165951ec9c9301493bceb52ff86d/cobre_python-0.4.2-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:ee92e1bbf92394d937aa3e28ad9e6fd4203f59b6fdbb1b1554116b3173351caa", size = 6884208, upload-time = "2026-04-10T20:47:59.903Z" },
+    { url = "https://files.pythonhosted.org/packages/37/1d/ab8941e21b987c73e20b5ffc958af0024adf125f81d3557f9fdcd18197df/cobre_python-0.4.2-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:92e639d8b9cef673529a224fddef0e1c7053fedfd80c14cced34c11fc1ee73ab", size = 6342947, upload-time = "2026-04-10T20:48:01.905Z" },
+    { url = "https://files.pythonhosted.org/packages/99/f5/c6dbdca1f61ecb89cedfcee1b2f3d9165e1e9e78251b2fdb7ecd471db334/cobre_python-0.4.2-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:c7d9dc2e061c625e5017e53f76fde6df75d09897014ae79d95fcd326a9bd1ede", size = 7132179, upload-time = "2026-04-10T20:48:03.516Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/18/1111101365f016b9a1cf65b2fd1490aae45527ea0e6f10987e26b3986696/cobre_python-0.4.2-cp312-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:5c44a86dd196a29819a0dd09c44865649da21566f31d9eb346cb8727e83e6c5c", size = 7377394, upload-time = "2026-04-10T20:48:05.738Z" },
+    { url = "https://files.pythonhosted.org/packages/39/02/ea29df0c9035b89bc1754da8a97df956e85f20b816e719918193a910f9ec/cobre_python-0.4.2-cp312-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:fc86e3e467d94190a62cc03ef8f3afdfe9caa367d2da1b8ef0cd2635ff080fe3", size = 13967095, upload-time = "2026-04-10T20:48:07.616Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/6c/f03f0c8e5c4a6107632613ac0fa76ba623f9cb1eaf2a2d6278e50bc06f22/cobre_python-0.4.2-cp312-abi3-win_amd64.whl", hash = "sha256:150fd41b37004602a3ea81b2d56da2e428a2befbf63d63a182a0e83a8a7605e3", size = 6066828, upload-time = "2026-04-10T20:48:09.692Z" },
 ]
 
 [[package]]
@@ -170,16 +168,16 @@ wheels = [
 
 [[package]]
 name = "inewave"
-version = "1.13.1"
+version = "1.13.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cfinterface" },
     { name = "numpy" },
     { name = "pandas" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7f/bf/e463f9e698b46d1ddf4061e9977a75a2b38c772e43ecad7501d0366f8a75/inewave-1.13.1.tar.gz", hash = "sha256:7c23cc7389e3f2a328bd1cc2ba8bda761916d2931c8be40618162a236bdf3f61", size = 14236258, upload-time = "2026-03-09T01:00:28.962Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/96/337bbc49a886972bb4ba09a183c8e5f41cda464d2744f472f4c2ef13d02f/inewave-1.13.2.tar.gz", hash = "sha256:0d13b48c6e87164026b9707d98aae24a723ad6d94ddfdc2dbafd4db96d01c538", size = 14237044, upload-time = "2026-04-10T21:06:23.575Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/39/3c49dc98b5fb32b0c53f63fa8ad52210f313ab979fe2629306482c2f5783/inewave-1.13.1-py3-none-any.whl", hash = "sha256:f22f2b79257bd7e2a316ed088a71d9c17ab551cb048746b8cf0372cd16ee9a69", size = 440660, upload-time = "2026-03-09T01:00:26.596Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/de/0b066b1e806aec04a4cb5dcae28c48e5e80388ed841f72d145c2b3daacad/inewave-1.13.2-py3-none-any.whl", hash = "sha256:07a0bdc6cf79a91468117fd923ebbb154d055e58a688b73f2a782446e1c79d3a", size = 440715, upload-time = "2026-04-10T21:06:20.862Z" },
 ]
 
 [[package]]

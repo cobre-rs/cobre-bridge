@@ -442,6 +442,13 @@ class DashboardData:
         stages_json_path = case_dir / "stages.json"
         with stages_json_path.open() as f:
             stages_data = json.load(f)
+
+        # Override discount_rate from stages.json policy_graph if present
+        # (the authoritative location for Cobre cases).
+        pg_rate = stages_data.get("policy_graph", {}).get("annual_discount_rate")
+        if pg_rate is not None:
+            discount_rate = float(pg_rate)
+
         stage_hours: dict[int, float] = {}
         for s in stages_data["stages"]:
             stage_hours[s["id"]] = sum(b["hours"] for b in s["blocks"])

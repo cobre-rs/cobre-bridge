@@ -57,8 +57,8 @@ def _make_timing(n: int = 5) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "iteration": list(range(1, n + 1)),
-            "forward_solve_ms": [100.0 + i for i in range(n)],
-            "backward_solve_ms": [150.0 + i for i in range(n)],
+            "forward_wall_ms": [100.0 + i for i in range(n)],
+            "backward_wall_ms": [150.0 + i for i in range(n)],
             "overhead_ms": [10.0 + i for i in range(n)],
         }
     )

@@ -482,27 +482,40 @@ def _chart_cut_deactivation_heatmap(
 
 
 _TIMING_COMPONENT_ORDER: list[str] = [
-    "forward_solve_ms",
-    "forward_sample_ms",
-    "backward_solve_ms",
-    "backward_cut_ms",
+    "forward_wall_ms",
+    "fwd_rayon_overhead_ms",
+    "backward_wall_ms",
+    "lower_bound_ms",
     "cut_selection_ms",
     "mpi_allreduce_ms",
-    "mpi_broadcast_ms",
+    "cut_sync_ms",
     "state_exchange_ms",
     "cut_batch_build_ms",
-    "rayon_overhead_ms",
+    "bwd_rayon_overhead_ms",
     "overhead_ms",
+    # Legacy names kept for backward compatibility with pre-0.4.3 outputs.
+    "forward_solve_ms",
+    "backward_solve_ms",
+    "mpi_broadcast_ms",
+    "rayon_overhead_ms",
+    "forward_sample_ms",
+    "backward_cut_ms",
     "io_write_ms",
 ]
 
 _TIMING_PHASE_MAP: dict[str, str] = {
+    "forward_wall_ms": PERFORMANCE_PHASE_COLORS["forward"],
+    "fwd_rayon_overhead_ms": PERFORMANCE_PHASE_COLORS["forward"],
+    "backward_wall_ms": PERFORMANCE_PHASE_COLORS["backward"],
+    "lower_bound_ms": PERFORMANCE_PHASE_COLORS["backward"],
+    "cut_selection_ms": PERFORMANCE_PHASE_COLORS["lp_solve"],
+    "overhead_ms": PERFORMANCE_PHASE_COLORS["overhead"],
+    "bwd_rayon_overhead_ms": PERFORMANCE_PHASE_COLORS["overhead"],
+    # Legacy names for pre-0.4.3 outputs.
     "forward_solve_ms": PERFORMANCE_PHASE_COLORS["forward"],
     "forward_sample_ms": PERFORMANCE_PHASE_COLORS["forward"],
     "backward_solve_ms": PERFORMANCE_PHASE_COLORS["backward"],
     "backward_cut_ms": PERFORMANCE_PHASE_COLORS["backward"],
-    "cut_selection_ms": PERFORMANCE_PHASE_COLORS["lp_solve"],
-    "overhead_ms": PERFORMANCE_PHASE_COLORS["overhead"],
     "rayon_overhead_ms": PERFORMANCE_PHASE_COLORS["overhead"],
 }
 
@@ -580,25 +593,28 @@ def _chart_phase_distribution(timing: pd.DataFrame) -> go.Figure | None:
     if grand_total == 0.0:
         return None
 
-    # Group into major phases: forward, backward, cut_selection, other
+    # Group into major phases: forward, backward, cut_selection, other.
+    # Support both v0.4.3+ and legacy column names.
+    _forward_keys = {
+        "forward_wall_ms",
+        "fwd_rayon_overhead_ms",
+        "forward_solve_ms",
+        "forward_sample_ms",
+    }
+    _backward_keys = {
+        "backward_wall_ms",
+        "lower_bound_ms",
+        "backward_solve_ms",
+        "backward_cut_ms",
+    }
+    _cut_sel_keys = {"cut_selection_ms"}
+    _grouped_keys = _forward_keys | _backward_keys | _cut_sel_keys
+
     phase_groups: dict[str, float] = {
-        "Forward": totals.get("forward_solve_ms", 0.0)
-        + totals.get("forward_sample_ms", 0.0),
-        "Backward": totals.get("backward_solve_ms", 0.0)
-        + totals.get("backward_cut_ms", 0.0),
-        "Cut Selection": totals.get("cut_selection_ms", 0.0),
-        "Other": sum(
-            v
-            for k, v in totals.items()
-            if k
-            not in {
-                "forward_solve_ms",
-                "forward_sample_ms",
-                "backward_solve_ms",
-                "backward_cut_ms",
-                "cut_selection_ms",
-            }
-        ),
+        "Forward": sum(totals.get(k, 0.0) for k in _forward_keys),
+        "Backward": sum(totals.get(k, 0.0) for k in _backward_keys),
+        "Cut Selection": sum(totals.get(k, 0.0) for k in _cut_sel_keys),
+        "Other": sum(v for k, v in totals.items() if k not in _grouped_keys),
     }
 
     phase_colors = {
