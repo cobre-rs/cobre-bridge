@@ -92,13 +92,13 @@ def load_thermal_metadata(case_dir: Path) -> dict[int, dict]:
         d = json.load(f)
     result = {}
     for t in d["thermals"]:
-        segments = t.get("cost_segments", [])
-        cost = segments[0]["cost_per_mwh"] if segments else 0.0
-        cap = (
-            sum(s["capacity_mw"] for s in segments)
-            if segments
-            else t.get("generation", {}).get("max_mw", 0.0)
-        )
+        # v0.4.3+: scalar cost_per_mwh; legacy: cost_segments array.
+        if "cost_per_mwh" in t:
+            cost = float(t["cost_per_mwh"])
+        else:
+            segments = t.get("cost_segments", [])
+            cost = float(segments[0]["cost_per_mwh"]) if segments else 0.0
+        cap = t.get("generation", {}).get("max_mw", 0.0)
         result[t["id"]] = {
             "bus_id": t["bus_id"],
             "max_mw": cap,

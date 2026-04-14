@@ -27,6 +27,7 @@ _THERMAL_BOUNDS_SCHEMA = pa.schema(
         pa.field("stage_id", pa.int32()),
         pa.field("min_generation_mw", pa.float64()),
         pa.field("max_generation_mw", pa.float64()),
+        pa.field("cost_per_mwh", pa.float64()),
     ]
 )
 
@@ -115,12 +116,7 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             "id": id_map.thermal_id(newave_code),
             "name": name,
             "bus_id": bus_id,
-            "cost_segments": [
-                {
-                    "capacity_mw": max_mw,
-                    "cost_per_mwh": cost,
-                }
-            ],
+            "cost_per_mwh": cost,
             "generation": {
                 "min_mw": gen_min,
                 "max_mw": max_mw,
@@ -229,11 +225,31 @@ def _apply_maint_to_capacity(
     return effective
 
 
+def _stage_to_study_year(
+    stage_idx: int,
+    first_year_stages: int,
+    num_anos: int,
+) -> int:
+    """Map a 0-based stage index to a 1-based ``indice_ano_estudo``.
+
+    The first study year covers ``first_year_stages`` months (``13 -
+    start_month``).  Subsequent years cover 12 months each.  Post-study
+    stages are clamped to the last study year.
+    """
+    if stage_idx < first_year_stages:
+        return 1
+    year = (stage_idx - first_year_stages) // 12 + 2
+    return min(year, num_anos)
+
+
 def convert_thermal_bounds(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
 ) -> pa.Table | None:
     """Build per-stage thermal generation bounds from EXPT.DAT and MANUTT.DAT.
+
+    Also embeds per-stage ``cost_per_mwh`` overrides from ``clast.dat``
+    when thermal costs vary across study years.
 
     Follows the sintetizador-newave processing order:
 
@@ -247,12 +263,8 @@ def convert_thermal_bounds(
     5. Apply MANUTT capacity reductions (only stages < maintenance_end).
     6. Evaluate: ``pot * (fcmax/100) * ((100-ip)/100) * ((100-teif)/100)``
 
-    Returns ``None`` if neither ``expt.dat`` nor ``manutt.dat`` is present.
+    Returns ``None`` if no bounds or cost overrides are needed.
     """
-    if nw_files.expt is None and nw_files.manutt is None:
-        _LOG.debug("Neither expt.dat nor manutt.dat present; skipping thermal bounds.")
-        return None
-
     from inewave.newave import Dger, Expt, Manutt
 
     dger = Dger.read(str(nw_files.dger))
@@ -263,6 +275,40 @@ def convert_thermal_bounds(
     num_maint_years: int = dger.num_anos_manutencao_utes or 0
     study_months = (13 - start_month) + (num_anos - 1) * 12
     total_stages = study_months + num_anos_pos * 12
+    first_year_stages = 13 - start_month
+
+    # ------------------------------------------------------------------
+    # 0. Build per-stage cost lookup from CLAST.DAT.
+    # ------------------------------------------------------------------
+    clast = Clast.read(str(nw_files.clast))
+    clast_df = clast.usinas
+
+    # cost_by_code_year: (newave_code, indice_ano_estudo) -> cost
+    cost_by_code_year: dict[tuple[int, int], float] = {}
+    # Track which thermals have costs that vary across years.
+    cost_varies: set[int] = set()
+    if clast_df is not None:
+        for _, row in clast_df.iterrows():
+            code = int(row["codigo_usina"])
+            year_idx = int(row["indice_ano_estudo"])
+            cost_by_code_year[(code, year_idx)] = float(row["valor"])
+        # Detect thermals with non-uniform costs.
+        codes_in_clast = {c for c, _ in cost_by_code_year}
+        for code in codes_in_clast:
+            year_costs = [
+                cost_by_code_year[(code, y)]
+                for y in range(1, num_anos + 1)
+                if (code, y) in cost_by_code_year
+            ]
+            if len(set(year_costs)) > 1:
+                cost_varies.add(code)
+
+    has_capacity_sources = nw_files.expt is not None or nw_files.manutt is not None
+
+    # If no EXPT/MANUTT and no varying costs, nothing to emit.
+    if not has_capacity_sources and not cost_varies:
+        _LOG.debug("No EXPT/MANUTT/varying costs; skipping thermal bounds.")
+        return None
 
     # Maintenance end: stages before this index have IP=0 globally.
     # Maintenance years are counted as full calendar years from the study
@@ -380,13 +426,17 @@ def convert_thermal_bounds(
             _LOG.warning("manutt.dat could not be parsed; maintenance skipped.")
 
     all_codes = (
-        set(expt_by_code.keys()) | set(manutt_by_code.keys()) | set(base_default.keys())
+        set(expt_by_code.keys())
+        | set(manutt_by_code.keys())
+        | set(base_default.keys())
+        | cost_varies
     )
 
     rows_thermal_id: list[int] = []
     rows_stage_id: list[int] = []
     rows_min: list[float] = []
     rows_max: list[float] = []
+    rows_cost: list[float | None] = []
 
     for newave_code in sorted(all_codes):
         try:
@@ -478,10 +528,17 @@ def convert_thermal_bounds(
             max_mw = max(0.0, max_mw)
             min_mw = max(0.0, min(gen_min, max_mw))
 
+            # Per-stage cost override from CLAST (only for varying-cost thermals).
+            stage_cost: float | None = None
+            if newave_code in cost_varies:
+                year_idx = _stage_to_study_year(stage_idx, first_year_stages, num_anos)
+                stage_cost = cost_by_code_year.get((newave_code, year_idx))
+
             rows_thermal_id.append(thermal_id)
             rows_stage_id.append(stage_idx)
             rows_min.append(min_mw)
             rows_max.append(max_mw)
+            rows_cost.append(stage_cost)
 
     if not rows_thermal_id:
         return None
@@ -492,6 +549,7 @@ def convert_thermal_bounds(
             "stage_id": pa.array(rows_stage_id, type=pa.int32()),
             "min_generation_mw": pa.array(rows_min, type=pa.float64()),
             "max_generation_mw": pa.array(rows_max, type=pa.float64()),
+            "cost_per_mwh": pa.array(rows_cost, type=pa.float64()),
         },
         schema=_THERMAL_BOUNDS_SCHEMA,
     )

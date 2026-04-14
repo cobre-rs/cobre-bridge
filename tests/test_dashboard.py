@@ -176,17 +176,15 @@ def test_load_hydro_bus_map_missing_file_returns_empty(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_load_thermal_metadata_extracts_cost_segments(tmp_path: Path) -> None:
+def test_load_thermal_metadata_extracts_scalar_cost(tmp_path: Path) -> None:
     thermals_json = {
         "thermals": [
             {
                 "id": 0,
                 "bus_id": 5,
                 "name": "Gas Plant",
-                "cost_segments": [
-                    {"capacity_mw": 100.0, "cost_per_mwh": 150.0},
-                    {"capacity_mw": 50.0, "cost_per_mwh": 200.0},
-                ],
+                "cost_per_mwh": 150.0,
+                "generation": {"min_mw": 0.0, "max_mw": 100.0},
             }
         ]
     }
@@ -196,18 +194,18 @@ def test_load_thermal_metadata_extracts_cost_segments(tmp_path: Path) -> None:
 
     assert result[0]["bus_id"] == 5
     assert result[0]["name"] == "Gas Plant"
-    assert result[0]["max_mw"] == pytest.approx(150.0)
+    assert result[0]["max_mw"] == pytest.approx(100.0)
     assert result[0]["cost_per_mwh"] == pytest.approx(150.0)
 
 
-def test_load_thermal_metadata_falls_back_to_generation_max_mw(tmp_path: Path) -> None:
+def test_load_thermal_metadata_legacy_cost_segments(tmp_path: Path) -> None:
     thermals_json = {
         "thermals": [
             {
                 "id": 2,
                 "bus_id": 3,
                 "name": "Coal",
-                "cost_segments": [],
+                "cost_segments": [{"capacity_mw": 300.0, "cost_per_mwh": 80.0}],
                 "generation": {"max_mw": 300.0},
             }
         ]
@@ -217,7 +215,7 @@ def test_load_thermal_metadata_falls_back_to_generation_max_mw(tmp_path: Path) -
     result = load_thermal_metadata(tmp_path)
 
     assert result[2]["max_mw"] == pytest.approx(300.0)
-    assert result[2]["cost_per_mwh"] == pytest.approx(0.0)
+    assert result[2]["cost_per_mwh"] == pytest.approx(80.0)
 
 
 def test_load_thermal_metadata_missing_file_returns_empty(tmp_path: Path) -> None:
@@ -558,9 +556,8 @@ class TestDashboardIntegration:
                         "id": 0,
                         "name": "GAS_A",
                         "bus_id": 0,
-                        "cost_segments": [
-                            {"capacity_mw": 300.0, "cost_per_mwh": 200.0}
-                        ],
+                        "cost_per_mwh": 200.0,
+                        "generation": {"min_mw": 0.0, "max_mw": 300.0},
                     }
                 ]
             },

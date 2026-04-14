@@ -2012,7 +2012,7 @@ class TestConvertThermals:
     @patch("cobre_bridge.converters.thermal.Term")
     @patch("cobre_bridge.converters.thermal.Clast")
     @patch("cobre_bridge.converters.thermal.Conft")
-    def test_cost_segments_structure(
+    def test_cost_per_mwh_scalar(
         self, mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
     ) -> None:
         _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
@@ -2020,11 +2020,9 @@ class TestConvertThermals:
 
         result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
         for t in result["thermals"]:
-            assert "cost_segments" in t
-            assert len(t["cost_segments"]) == 1
-            seg = t["cost_segments"][0]
-            assert "capacity_mw" in seg
-            assert "cost_per_mwh" in seg
+            assert "cost_per_mwh" in t
+            assert isinstance(t["cost_per_mwh"], float)
+            assert "cost_segments" not in t
             assert "generation" in t
             assert "min_mw" in t["generation"]
             assert "max_mw" in t["generation"]
