@@ -25,6 +25,18 @@ _PENALTIES_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
     "/book/src/schemas/penalties.schema.json"
 )
+_NCS_SCHEMA_URL = (
+    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
+    "/book/src/schemas/non_controllable_sources.schema.json"
+)
+_EXCHANGE_FACTORS_SCHEMA_URL = (
+    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
+    "/book/src/schemas/exchange_factors.schema.json"
+)
+_NCS_FACTORS_SCHEMA_URL = (
+    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
+    "/book/src/schemas/non_controllable_factors.schema.json"
+)
 
 # Penalty reference value and multipliers.
 # The spillage cost ($/m3s) is the reference. Other penalties are expressed
@@ -630,7 +642,7 @@ def convert_non_controllable_sources(
     df_ncs: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
 
     if df_ncs is None or df_ncs.empty:
-        return {"non_controllable_sources": []}
+        return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": []}
 
     dger = Dger.read(nw_files.dger)
     start_month: int = dger.mes_inicio_estudo
@@ -694,7 +706,7 @@ def convert_non_controllable_sources(
         )
         ncs_id += 1
 
-    return {"non_controllable_sources": ncs_list}
+    return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": ncs_list}
 
 
 def convert_exchange_factors(
@@ -735,7 +747,7 @@ def convert_exchange_factors(
     df: pd.DataFrame | None = patamar.intercambio_patamares
 
     if df is None or df.empty:
-        return {"exchange_factors": []}
+        return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": []}
 
     dger = Dger.read(nw_files.dger)
     start_month: int = dger.mes_inicio_estudo
@@ -750,7 +762,7 @@ def convert_exchange_factors(
 
     pair_to_line_id = _build_canonical_pair_to_line_id(nw_files)
     if not pair_to_line_id:
-        return {"exchange_factors": []}
+        return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": []}
 
     # Build per-(src, tgt, year, cal_month, patamar) factor lookup.
     # Key: (src, tgt, year, cal_month, block_id) -> (direct_factor, reverse_factor)
@@ -854,7 +866,7 @@ def convert_exchange_factors(
                 m = 1
                 y += 1
 
-    return {"exchange_factors": results}
+    return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": results}
 
 
 def convert_ncs_factors(
@@ -885,7 +897,7 @@ def convert_ncs_factors(
     df: pd.DataFrame | None = patamar_file.usinas_nao_simuladas
 
     if df is None or df.empty:
-        return {"non_controllable_factors": []}
+        return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": []}
 
     dger = Dger.read(nw_files.dger)
     start_month: int = dger.mes_inicio_estudo
@@ -913,7 +925,7 @@ def convert_ncs_factors(
     df = df[df["data"].apply(_in_horizon)].copy()
 
     if df.empty:
-        return {"non_controllable_factors": []}
+        return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": []}
 
     # Columns: codigo_submercado, indice_bloco, data, patamar, valor
     # Determine number of blocks from source.
@@ -987,7 +999,7 @@ def convert_ncs_factors(
                 m = 1
                 y += 1
 
-    return {"non_controllable_factors": results}
+    return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": results}
 
 
 def convert_ncs_stats(

@@ -392,7 +392,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             "cut_activity_tolerance": 1e-6,
             "enabled": True,
             "method": "domination",
-            "threshold": 0,
+            "domination_epsilon": 0.0,
         },
     }
     if not training_enabled:

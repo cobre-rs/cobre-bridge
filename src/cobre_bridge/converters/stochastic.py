@@ -24,6 +24,11 @@ from cobre_bridge.newave_files import NewaveFiles
 
 logger = logging.getLogger(__name__)
 
+_LOAD_FACTORS_SCHEMA_URL = (
+    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
+    "/book/src/schemas/load_factors.schema.json"
+)
+
 
 def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
     """Return ``{posto: [upstream_posto, ...]}`` for the hydro cascade.
@@ -442,7 +447,7 @@ def convert_load_factors(
         logger.warning(
             "patamar.dat has no carga_patamares data; load_factors.json will be empty."
         )
-        return {"load_factors": []}
+        return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": []}
 
     # Columns: codigo_submercado, data (datetime), patamar (1-based), valor (float)
     # Build lookup: {(subsystem_code, year, cal_month, patamar) -> factor}
@@ -518,7 +523,7 @@ def convert_load_factors(
                 m = 1
                 y += 1
 
-    return {"load_factors": load_factors}
+    return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": load_factors}
 
 
 def _derive_study_stage_months(dger: object) -> list[int]:

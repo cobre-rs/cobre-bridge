@@ -20,6 +20,10 @@ _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
     "/book/src/schemas/hydros.schema.json"
 )
+_PRODUCTION_MODELS_SCHEMA_URL = (
+    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
+    "/book/src/schemas/production_models.schema.json"
+)
 
 _EVAP_MONTHS = [
     "JAN",
@@ -877,7 +881,10 @@ def convert_production_models(
         return None
 
     production_models.sort(key=lambda m: m["hydro_id"])
-    return {"production_models": production_models}
+    return {
+        "$schema": _PRODUCTION_MODELS_SCHEMA_URL,
+        "production_models": production_models,
+    }
 
 
 def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.Table:
