@@ -30,15 +30,6 @@ TAB_ID = "tab-training"
 TAB_LABEL = "Training"
 TAB_ORDER = 20
 
-_EXTRA_COLORS: list[str] = [
-    "#8B5CF6",
-    "#F59E0B",
-    "#10B981",
-    "#EC4899",
-    "#06B6D4",
-    "#F97316",
-]
-
 
 def _build_metrics_row(data: DashboardData) -> str:
     """Build the 5-card metrics row from convergence and manifest data.
@@ -481,70 +472,52 @@ def _chart_cut_deactivation_heatmap(
     return fig_to_html(fig, unified_hover=False)
 
 
-_TIMING_COMPONENT_ORDER: list[str] = [
-    "forward_wall_ms",
-    "fwd_rayon_overhead_ms",
-    "backward_wall_ms",
-    "lower_bound_ms",
-    "cut_selection_ms",
-    "mpi_allreduce_ms",
-    "cut_sync_ms",
-    "state_exchange_ms",
-    "cut_batch_build_ms",
-    "bwd_rayon_overhead_ms",
-    "overhead_ms",
-    # Legacy names kept for backward compatibility with pre-0.4.3 outputs.
-    "forward_solve_ms",
-    "backward_solve_ms",
-    "mpi_broadcast_ms",
-    "rayon_overhead_ms",
-    "forward_sample_ms",
-    "backward_cut_ms",
-    "io_write_ms",
-]
+_TOP_LEVEL_PHASE_CONFIG: tuple[tuple[str, str, str], ...] = (
+    ("forward_wall_ms", "Forward", PERFORMANCE_PHASE_COLORS["forward"]),
+    ("backward_wall_ms", "Backward", PERFORMANCE_PHASE_COLORS["backward"]),
+    ("cut_selection_ms", "Cut Selection", PERFORMANCE_PHASE_COLORS["lp_solve"]),
+    ("lower_bound_ms", "Lower Bound Eval", "#14B8A6"),
+    ("mpi_allreduce_ms", "MPI AllReduce", "#8B5CF6"),
+    ("overhead_ms", "Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
+)
 
-_TIMING_PHASE_MAP: dict[str, str] = {
-    "forward_wall_ms": PERFORMANCE_PHASE_COLORS["forward"],
-    "fwd_rayon_overhead_ms": PERFORMANCE_PHASE_COLORS["forward"],
-    "backward_wall_ms": PERFORMANCE_PHASE_COLORS["backward"],
-    "lower_bound_ms": PERFORMANCE_PHASE_COLORS["backward"],
-    "cut_selection_ms": PERFORMANCE_PHASE_COLORS["lp_solve"],
-    "overhead_ms": PERFORMANCE_PHASE_COLORS["overhead"],
-    "bwd_rayon_overhead_ms": PERFORMANCE_PHASE_COLORS["overhead"],
-    # Legacy names for pre-0.4.3 outputs.
-    "forward_solve_ms": PERFORMANCE_PHASE_COLORS["forward"],
-    "forward_sample_ms": PERFORMANCE_PHASE_COLORS["forward"],
-    "backward_solve_ms": PERFORMANCE_PHASE_COLORS["backward"],
-    "backward_cut_ms": PERFORMANCE_PHASE_COLORS["backward"],
-    "rayon_overhead_ms": PERFORMANCE_PHASE_COLORS["overhead"],
-}
+_LEGACY_TOP_LEVEL_CONFIG: tuple[tuple[str, str, str], ...] = (
+    ("forward_solve_ms", "Forward (legacy)", PERFORMANCE_PHASE_COLORS["forward"]),
+    ("backward_solve_ms", "Backward (legacy)", PERFORMANCE_PHASE_COLORS["backward"]),
+    ("cut_selection_ms", "Cut Selection", PERFORMANCE_PHASE_COLORS["lp_solve"]),
+    ("lower_bound_ms", "Lower Bound Eval", "#14B8A6"),
+    ("mpi_broadcast_ms", "MPI Broadcast", "#8B5CF6"),
+    ("overhead_ms", "Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
+)
 
 
-def _timing_columns(timing: pd.DataFrame) -> list[str]:
-    """Return ordered list of *_ms columns present in *timing*."""
-    present_ordered = [c for c in _TIMING_COMPONENT_ORDER if c in timing.columns]
-    extra = [
-        c
-        for c in timing.columns
-        if c.endswith("_ms") and c not in _TIMING_COMPONENT_ORDER and c != "iteration"
+def _active_top_level_phases(
+    timing: pd.DataFrame,
+) -> list[tuple[str, str, str]]:
+    """Pick the top-level non-overlapping phase columns present in ``timing``."""
+    config = (
+        _TOP_LEVEL_PHASE_CONFIG
+        if "forward_wall_ms" in timing.columns
+        else _LEGACY_TOP_LEVEL_CONFIG
+    )
+    return [
+        (col, label, color) for col, label, color in config if col in timing.columns
     ]
-    return present_ordered + extra
-
-
-def _timing_color(col: str, idx: int) -> str:
-    """Return a colour for a timing column, falling back to the extra palette."""
-    if col in _TIMING_PHASE_MAP:
-        return _TIMING_PHASE_MAP[col]
-    return _EXTRA_COLORS[idx % len(_EXTRA_COLORS)]
 
 
 def _chart_timing_stacked(timing: pd.DataFrame) -> go.Figure | None:
-    """Stacked bar chart of timing components per iteration."""
+    """Stacked bar of top-level phases per iteration (sums to iteration total).
+
+    Uses ONLY non-overlapping top-level phases so the stack height equals the
+    iteration wall time. Sub-components of ``{forward,backward}_wall_ms`` are
+    intentionally excluded here — they are visualised separately (see the
+    Performance tab's *Backward Breakdown* section) so we do not double-count.
+    """
     if timing.empty:
         return None
 
-    cols = _timing_columns(timing)
-    if not cols:
+    phases = _active_top_level_phases(timing)
+    if not phases:
         return None
 
     iters = (
@@ -554,18 +527,14 @@ def _chart_timing_stacked(timing: pd.DataFrame) -> go.Figure | None:
     )
 
     fig = go.Figure()
-    extra_idx = 0
-    for col in cols:
-        color = _timing_color(col, extra_idx)
-        if col not in _TIMING_PHASE_MAP:
-            extra_idx += 1
-        label = col.replace("_ms", "").replace("_", " ").title()
+    for col, label, color in phases:
         fig.add_trace(
             go.Bar(
                 x=iters,
                 y=timing[col].tolist(),
                 name=label,
                 marker_color=color,
+                hovertemplate=f"{label}: %{{y:.0f}} ms<extra></extra>",
             )
         )
 
@@ -580,63 +549,32 @@ def _chart_timing_stacked(timing: pd.DataFrame) -> go.Figure | None:
 
 
 def _chart_phase_distribution(timing: pd.DataFrame) -> go.Figure | None:
-    """Single stacked horizontal bar showing percentage split of total time."""
+    """Horizontal 100%-stacked bar of total time per top-level phase."""
     if timing.empty:
         return None
 
-    cols = _timing_columns(timing)
-    if not cols:
+    phases = _active_top_level_phases(timing)
+    if not phases:
         return None
 
-    totals: dict[str, float] = {c: float(timing[c].sum()) for c in cols}
-    grand_total = sum(totals.values())
+    totals = [(label, color, float(timing[col].sum())) for col, label, color in phases]
+    grand_total = sum(v for _, _, v in totals)
     if grand_total == 0.0:
         return None
 
-    # Group into major phases: forward, backward, cut_selection, other.
-    # Support both v0.4.3+ and legacy column names.
-    _forward_keys = {
-        "forward_wall_ms",
-        "fwd_rayon_overhead_ms",
-        "forward_solve_ms",
-        "forward_sample_ms",
-    }
-    _backward_keys = {
-        "backward_wall_ms",
-        "lower_bound_ms",
-        "backward_solve_ms",
-        "backward_cut_ms",
-    }
-    _cut_sel_keys = {"cut_selection_ms"}
-    _grouped_keys = _forward_keys | _backward_keys | _cut_sel_keys
-
-    phase_groups: dict[str, float] = {
-        "Forward": sum(totals.get(k, 0.0) for k in _forward_keys),
-        "Backward": sum(totals.get(k, 0.0) for k in _backward_keys),
-        "Cut Selection": sum(totals.get(k, 0.0) for k in _cut_sel_keys),
-        "Other": sum(v for k, v in totals.items() if k not in _grouped_keys),
-    }
-
-    phase_colors = {
-        "Forward": PERFORMANCE_PHASE_COLORS["forward"],
-        "Backward": PERFORMANCE_PHASE_COLORS["backward"],
-        "Cut Selection": PERFORMANCE_PHASE_COLORS["lp_solve"],
-        "Other": PERFORMANCE_PHASE_COLORS["overhead"],
-    }
-
     fig = go.Figure()
-    for phase, total_ms in phase_groups.items():
+    for label, color, total_ms in totals:
         pct = total_ms / grand_total * 100.0
         fig.add_trace(
             go.Bar(
                 x=[pct],
                 y=["Time Split"],
-                name=phase,
+                name=label,
                 orientation="h",
-                marker_color=phase_colors[phase],
+                marker_color=color,
                 text=[f"{pct:.1f}%"],
                 textposition="inside",
-                hovertemplate=f"{phase}: {total_ms / 1000:.1f}s ({pct:.1f}%)<extra></extra>",  # noqa: E501
+                hovertemplate=f"{label}: {total_ms / 1000:.1f}s ({pct:.1f}%)<extra></extra>",
             )
         )
 

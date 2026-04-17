@@ -345,8 +345,8 @@ def test_render_with_data() -> None:
         timing=_make_timing(n=5),
     )
     html = render(data)
-    assert "Training Iteration Breakdown" in html
-    assert "Timing" in html
+    assert "Top-Level Iteration Timing" in html
+    assert "Forward / Backward Wall-Time Breakdown" in html
     assert "metrics-grid" in html
 
 
@@ -423,16 +423,20 @@ def test_render_full_sections() -> None:
         retry_histogram=_make_retry_histogram(),
     )
     html = render(data)
-    assert "Solver Time Breakdown" in html
-    assert "LP Solver Detail" in html
-    assert "Solver Overhead" in html
+    assert "Solver Time Breakdown by Phase" in html
+    assert "Per-Stage LP Solve Heatmaps" in html
+    assert "Per-Stage Solver Overhead" in html
     assert "LP Dimensions" in html
-    assert "Solver Efficiency" in html
+    assert "Per-Stage LP Detail" in html
     assert "Solver Retries" in html
     assert "Simulation" in html
-    # Sections from ticket-020 still present
-    assert "Training Iteration Breakdown" in html
-    assert "Timing Waterfall" in html
+    # Sections added in the post-epic-01 reorg.
+    assert "Top-Level Iteration Timing" in html
+    assert "Forward / Backward Wall-Time Breakdown" in html
+    assert "Parallel Overhead Decomposition" in html
+    assert "Solver Progression" in html
+    assert "Solver CPU Components per Iteration" in html
+    assert "Basis Warm-start" in html
     assert "Run Summary" in html
 
 
