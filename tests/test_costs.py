@@ -44,11 +44,14 @@ def _make_costs_df(
     n_stages: int = 3,
     thermal_cost: float = 1000.0,
     deficit_cost: float = 50.0,
+    *,
+    stage_discount: float = 1.0,
 ) -> pd.DataFrame:
     """Return a minimal costs DataFrame with ``n_scenarios`` and ``n_stages``.
 
-    The ``discount_factor`` column is set to 1.0 for all rows so that tests
-    with ``discount_rate=0.0`` can be verified without additional arithmetic.
+    ``stage_discount`` is the per-stage one-step factor used to populate the
+    ``discount_factor`` column (``stage_discount ** stage_id``). The default
+    of 1.0 produces undiscounted present values.
     """
     rows = []
     for scenario_id in range(n_scenarios):
@@ -57,6 +60,7 @@ def _make_costs_df(
                 {
                     "scenario_id": scenario_id,
                     "stage_id": stage_id,
+                    "discount_factor": stage_discount**stage_id,
                     "thermal_cost": thermal_cost,
                     "deficit_cost": deficit_cost,
                     "immediate_cost": thermal_cost + deficit_cost,
@@ -113,10 +117,18 @@ def test_tab_constants() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_can_render_returns_true() -> None:
-    """can_render must return True unconditionally."""
+def test_can_render_returns_true_when_simulation_available() -> None:
+    """can_render must return True when simulation data is present."""
     data = _make_mock_data()
+    data.simulation_available = True
     assert can_render(data) is True
+
+
+def test_can_render_returns_false_when_simulation_missing() -> None:
+    """can_render must return False on training-only cases."""
+    data = _make_mock_data()
+    data.simulation_available = False
+    assert can_render(data) is False
 
 
 # ---------------------------------------------------------------------------
@@ -138,14 +150,21 @@ def test_compute_npv_metric_undiscounted_returns_mean_per_scenario() -> None:
 
 
 def test_compute_npv_metric_discounted_less_than_undiscounted() -> None:
-    """With discount_rate=0.12 the discounted NPV must be lower than the
-    undiscounted sum, because later-stage costs are reduced by discount factors."""
-    costs = _make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
+    """When cobre's ``discount_factor`` column is <1 on later stages the NPV
+    is lower than the undiscounted per-scenario sum."""
     undiscounted = _compute_npv_metric(
-        _make_mock_data(costs=costs, discount_rate=0.0), "thermal_cost"
+        _make_mock_data(
+            costs=_make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
+        ),
+        "thermal_cost",
     )
     discounted = _compute_npv_metric(
-        _make_mock_data(costs=costs, discount_rate=0.12), "thermal_cost"
+        _make_mock_data(
+            costs=_make_costs_df(
+                n_scenarios=2, n_stages=3, thermal_cost=1000.0, stage_discount=0.9
+            )
+        ),
+        "thermal_cost",
     )
     assert discounted < undiscounted
 

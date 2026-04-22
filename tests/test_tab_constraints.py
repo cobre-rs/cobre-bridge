@@ -151,6 +151,7 @@ def _make_mock_data(
     # Real empty LazyFrames prevent MagicMock auto-chaining OOM
     data.hydros_lf = pl.LazyFrame()
     data.exchanges_lf = pl.LazyFrame()
+    data.simulation_available = True
     return data
 
 
@@ -187,6 +188,13 @@ def test_can_render_true_with_multiple_constraints() -> None:
     """can_render must return True when gc_constraints contains multiple dicts."""
     data = _make_mock_data(constraints=_make_constraints(n=3))
     assert can_render(data) is True
+
+
+def test_can_render_false_without_simulation() -> None:
+    """can_render must return False when simulation data is unavailable."""
+    data = _make_mock_data(constraints=_make_constraints(n=1))
+    data.simulation_available = False
+    assert can_render(data) is False
 
 
 # ---------------------------------------------------------------------------

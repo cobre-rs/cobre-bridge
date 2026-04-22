@@ -178,10 +178,18 @@ def test_module_attributes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_can_render_returns_true() -> None:
-    """can_render should return True for any DashboardData mock."""
+def test_can_render_true_when_simulation_available() -> None:
+    """can_render should return True when simulation data is present."""
     data = MagicMock()
+    data.simulation_available = True
     assert can_render(data) is True
+
+
+def test_can_render_false_when_simulation_missing() -> None:
+    """can_render must return False on training-only cases."""
+    data = MagicMock()
+    data.simulation_available = False
+    assert can_render(data) is False
 
 
 # ---------------------------------------------------------------------------

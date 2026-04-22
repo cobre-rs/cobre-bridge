@@ -317,15 +317,16 @@ def test_make_chart_card_no_plotlyjs() -> None:
 
 
 def test_compute_npv_costs_basic() -> None:
-    """Discount factors 1/(1.1)^stage are applied to cost columns per stage."""
+    """Cost columns are multiplied by the parquet's ``discount_factor`` column."""
     df = pd.DataFrame(
         {
             "stage_id": [0, 1, 2],
             "scenario_id": [0, 0, 0],
+            "discount_factor": [1.0, 1 / 1.1, 1 / 1.21],
             "thermal_generation_cost": [100.0, 100.0, 100.0],
         }
     )
-    result = compute_npv_costs(df, 0.10)
+    result = compute_npv_costs(df, discount_rate=0.10)
 
     assert result["thermal_generation_cost"].iloc[0] == pytest.approx(100.0)
     assert result["thermal_generation_cost"].iloc[1] == pytest.approx(
@@ -336,16 +337,17 @@ def test_compute_npv_costs_basic() -> None:
     )
 
 
-def test_compute_npv_costs_zero_rate() -> None:
-    """A discount rate of 0.0 leaves all cost values unchanged."""
+def test_compute_npv_costs_unit_discount_factor_leaves_values_unchanged() -> None:
+    """When ``discount_factor`` is 1.0 for every row costs are unchanged."""
     df = pd.DataFrame(
         {
             "stage_id": [0, 1, 2],
             "scenario_id": [0, 0, 0],
+            "discount_factor": [1.0, 1.0, 1.0],
             "thermal_generation_cost": [50.0, 75.0, 100.0],
         }
     )
-    result = compute_npv_costs(df, 0.0)
+    result = compute_npv_costs(df, discount_rate=0.0)
 
     pd.testing.assert_series_equal(
         result["thermal_generation_cost"],
@@ -353,10 +355,31 @@ def test_compute_npv_costs_zero_rate() -> None:
     )
 
 
+def test_compute_npv_costs_missing_discount_factor_returns_unmodified_copy() -> None:
+    """Without ``discount_factor`` the helper returns a copy, costs untouched."""
+    df = pd.DataFrame(
+        {
+            "stage_id": [0, 1, 2],
+            "scenario_id": [0, 0, 0],
+            "thermal_generation_cost": [100.0, 100.0, 100.0],
+        }
+    )
+    result = compute_npv_costs(df, discount_rate=0.10)
+
+    pd.testing.assert_frame_equal(result, df)
+
+
 def test_compute_npv_costs_empty() -> None:
     """Empty DataFrame input returns an empty DataFrame (no error)."""
-    empty = pd.DataFrame(columns=["stage_id", "scenario_id", "thermal_generation_cost"])
-    result = compute_npv_costs(empty, 0.10)
+    empty = pd.DataFrame(
+        columns=[
+            "stage_id",
+            "scenario_id",
+            "discount_factor",
+            "thermal_generation_cost",
+        ]
+    )
+    result = compute_npv_costs(empty, discount_rate=0.10)
 
     assert result.empty
     assert list(result.columns) == list(empty.columns)
@@ -364,28 +387,36 @@ def test_compute_npv_costs_empty() -> None:
 
 def test_compute_npv_costs_does_not_mutate() -> None:
     """Input DataFrame is not modified in place."""
-    df = pd.DataFrame({"stage_id": [0, 1], "thermal_generation_cost": [100.0, 100.0]})
+    df = pd.DataFrame(
+        {
+            "stage_id": [0, 1],
+            "discount_factor": [1.0, 0.9],
+            "thermal_generation_cost": [100.0, 100.0],
+        }
+    )
     original_values = df["thermal_generation_cost"].tolist()
-    compute_npv_costs(df, 0.10)
+    compute_npv_costs(df, discount_rate=0.10)
 
     assert df["thermal_generation_cost"].tolist() == original_values
 
 
 def test_compute_npv_costs_metadata_cols_unchanged() -> None:
-    """scenario_id, stage_id, and block_id columns are never discounted."""
+    """scenario_id, stage_id, block_id, and discount_factor are never discounted."""
     df = pd.DataFrame(
         {
             "stage_id": [0, 1, 2],
             "scenario_id": [7, 7, 7],
             "block_id": [1, 1, 1],
+            "discount_factor": [1.0, 0.9, 0.8],
             "thermal_generation_cost": [100.0, 100.0, 100.0],
         }
     )
-    result = compute_npv_costs(df, 0.10)
+    result = compute_npv_costs(df, discount_rate=0.10)
 
     assert result["scenario_id"].tolist() == [7, 7, 7]
     assert result["stage_id"].tolist() == [0, 1, 2]
     assert result["block_id"].tolist() == [1, 1, 1]
+    assert result["discount_factor"].tolist() == [1.0, 0.9, 0.8]
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +528,7 @@ def _make_costs_df(n_scenarios: int = 100, n_stages: int = 10) -> pd.DataFrame:
                 {
                     "scenario_id": sc,
                     "stage_id": st,
+                    "discount_factor": 1 / (1.12**st),
                     "thermal_generation_cost": 50.0 + sc * 0.1,
                     "deficit_cost_depth_1": 20.0 + sc * 0.05,
                     "spillage_cost": 5.0,

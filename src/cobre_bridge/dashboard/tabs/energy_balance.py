@@ -1382,9 +1382,9 @@ document.addEventListener('DOMContentLoaded',
 # ---------------------------------------------------------------------------
 
 
-def can_render(data: DashboardData) -> bool:  # noqa: ARG001
-    """Energy Balance v2 tab always renders."""
-    return True
+def can_render(data: DashboardData) -> bool:
+    """Energy Balance tab renders only when simulation data is available."""
+    return data.simulation_available
 
 
 def render(data: DashboardData) -> str:

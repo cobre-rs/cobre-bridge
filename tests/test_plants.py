@@ -177,9 +177,16 @@ def test_module_constants() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_can_render_returns_true() -> None:
+def test_can_render_true_when_simulation_available() -> None:
     data = MagicMock()
+    data.simulation_available = True
     assert can_render(data) is True
+
+
+def test_can_render_false_when_simulation_missing() -> None:
+    data = MagicMock()
+    data.simulation_available = False
+    assert can_render(data) is False
 
 
 # ---------------------------------------------------------------------------

@@ -537,9 +537,9 @@ def _render_section_e(data: DashboardData) -> str:
     return section_title("Quick Look") + chart_grid([training_cell, gen_cell])
 
 
-def can_render(data: DashboardData) -> bool:  # noqa: ARG001
-    """Overview tab always renders."""
-    return True
+def can_render(data: DashboardData) -> bool:
+    """Overview tab renders only when simulation data is available."""
+    return data.simulation_available
 
 
 def render(data: DashboardData) -> str:

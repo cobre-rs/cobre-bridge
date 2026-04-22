@@ -1009,9 +1009,9 @@ syncHover(['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-out
 # ---------------------------------------------------------------------------
 
 
-def can_render(data: DashboardData) -> bool:  # noqa: ARG001
-    """Plant Explorer tab always renders."""
-    return True
+def can_render(data: DashboardData) -> bool:
+    """Plant Explorer renders only when simulation data is available."""
+    return data.simulation_available
 
 
 def render(data: DashboardData) -> str:

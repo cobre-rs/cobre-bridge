@@ -74,18 +74,12 @@ AGGREGATE_CPU_COLUMNS: tuple[str, ...] = (
     "bwd_setup_ms",
 )
 
-# Legacy-schema rollups (v0.4.4 and earlier). When present, treat them as a
-# single opaque sub-component of their respective wall phase.
-LEGACY_FORWARD_OVERHEAD: str = "fwd_rayon_overhead_ms"
-LEGACY_BACKWARD_OVERHEAD: str = "bwd_rayon_overhead_ms"
-
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
 
 # Component display name mapping for the waterfall chart.
 _TIMING_COMPONENT_LABELS: dict[str, str] = {
-    # v0.4.3+ column names.
     "forward_wall_ms": "Forward Wall",
     "backward_wall_ms": "Backward Wall",
     "lower_bound_ms": "Lower Bound",
@@ -95,24 +89,12 @@ _TIMING_COMPONENT_LABELS: dict[str, str] = {
     "state_exchange_ms": "State Exchange",
     "cut_batch_build_ms": "Cut Batch Build",
     "overhead_ms": "Other Overhead",
-    # Post-v0.4.4 epic-01 parallel overhead decomposition.
     "fwd_setup_ms": "Fwd Worker Setup",
     "fwd_load_imbalance_ms": "Fwd Load Imbalance",
     "fwd_scheduling_overhead_ms": "Fwd Scheduling",
     "bwd_setup_ms": "Bwd Worker Setup",
     "bwd_load_imbalance_ms": "Bwd Load Imbalance",
     "bwd_scheduling_overhead_ms": "Bwd Scheduling",
-    # v0.4.4 parallel overhead rollups (superseded by decomposition above).
-    "fwd_rayon_overhead_ms": "Fwd Rayon Overhead",
-    "bwd_rayon_overhead_ms": "Bwd Rayon Overhead",
-    # Legacy names for pre-0.4.3 outputs.
-    "forward_solve_ms": "Forward Solve",
-    "forward_sample_ms": "Forward Sample",
-    "backward_solve_ms": "Backward Solve",
-    "backward_cut_ms": "Backward Cut Add",
-    "mpi_broadcast_ms": "MPI Broadcast",
-    "rayon_overhead_ms": "Rayon Overhead",
-    "io_write_ms": "IO Write",
 }
 
 # Colors for the parallel-overhead decomposition chart. Three-tone palette
@@ -153,36 +135,13 @@ _TOP_LEVEL_PHASE_LABELS: dict[str, tuple[str, str]] = {
     "overhead_ms": ("Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
 }
 
-_LEGACY_TOP_LEVEL_MAP: dict[str, tuple[str, str]] = {
-    "forward_solve_ms": ("Forward (legacy)", PERFORMANCE_PHASE_COLORS["forward"]),
-    "backward_solve_ms": ("Backward (legacy)", PERFORMANCE_PHASE_COLORS["backward"]),
-}
-
 
 def _detect_top_level_columns(timing: pd.DataFrame) -> list[tuple[str, str, str]]:
-    """Return [(column, label, color)] for present top-level phases.
-
-    Modern schema takes priority; falls back to pre-0.4.3 legacy columns
-    (``forward_solve_ms`` / ``backward_solve_ms``) when the new names are
-    absent. The returned list is emission-ordered for stacking.
-    """
-    if "forward_wall_ms" in timing.columns:
-        order = TOP_LEVEL_PHASE_COLUMNS
-        labels = _TOP_LEVEL_PHASE_LABELS
-    else:
-        order = (
-            "forward_solve_ms",
-            "backward_solve_ms",
-            "cut_selection_ms",
-            "mpi_broadcast_ms",
-            "lower_bound_ms",
-            "overhead_ms",
-        )
-        labels = {**_TOP_LEVEL_PHASE_LABELS, **_LEGACY_TOP_LEVEL_MAP}
+    """Return [(column, label, color)] for present top-level phases."""
     return [
-        (col, labels[col][0], labels[col][1])
-        for col in order
-        if col in timing.columns and col in labels
+        (col, _TOP_LEVEL_PHASE_LABELS[col][0], _TOP_LEVEL_PHASE_LABELS[col][1])
+        for col in TOP_LEVEL_PHASE_COLUMNS
+        if col in timing.columns and col in _TOP_LEVEL_PHASE_LABELS
     ]
 
 
@@ -469,7 +428,9 @@ def chart_basis_reuse(solver_train: pd.DataFrame) -> str:
     if offered.empty:
         return "<p>No basis warm-start data available (basis_offered=0 everywhere).</p>"
 
-    offered["reuse_rate"] = 1.0 - offered["basis_rejections"] / offered["basis_offered"]
+    offered["reuse_rate"] = (
+        1.0 - offered["basis_consistency_failures"] / offered["basis_offered"]
+    )
     avg_reuse = offered.groupby("stage")["reuse_rate"].mean().sort_index()
     stages = [str(s) for s in avg_reuse.index.tolist()]
     values = avg_reuse.values.tolist()
@@ -496,19 +457,17 @@ def chart_basis_reuse(solver_train: pd.DataFrame) -> str:
 
 
 def chart_solver_time_breakdown_by_phase(solver_train: pd.DataFrame) -> str:
-    """Stacked bar: solve, load_model, add_rows, set_bounds per phase."""
+    """Stacked bar: LP solve vs non-solve components per phase."""
     if solver_train.empty:
         return "<p>No solver data.</p>"
     components = [
         ("solve_time_ms", "LP Solve", COLORS["hydro"]),
         ("set_bounds_time_ms", "Set Bounds", COLORS["thermal"]),
-        ("add_rows_time_ms", "Add Rows (cuts)", COLORS["ncs"]),
+        ("basis_set_time_ms", "Basis Set", COLORS["spillage"]),
         ("load_model_time_ms", "Load Model", COLORS["future_cost"]),
     ]
     fig = go.Figure()
     for col, label, color in components:
-        if col not in solver_train.columns:
-            continue
         vals = solver_train.groupby("phase")[col].sum() / 1000.0  # seconds
         fig.add_trace(
             go.Bar(
@@ -530,18 +489,18 @@ def chart_solver_time_breakdown_by_phase(solver_train: pd.DataFrame) -> str:
 
 
 def chart_solver_time_per_stage(solver_train: pd.DataFrame) -> str:
-    """Stacked bar per stage: solve vs overhead (set_bounds+add_rows+load_model)."""
+    """Stacked bar per stage: solve vs non-solve overhead (backward phase)."""
     if solver_train.empty:
         return "<p>No solver data.</p>"
     bw = solver_train[solver_train["phase"] == "backward"].copy()
     if bw.empty:
         return "<p>No backward phase data.</p>"
     overhead_cols = [
-        c
-        for c in ["load_model_time_ms", "add_rows_time_ms", "set_bounds_time_ms"]
-        if c in bw.columns
+        "load_model_time_ms",
+        "set_bounds_time_ms",
+        "basis_set_time_ms",
     ]
-    bw["overhead_ms"] = bw[overhead_cols].sum(axis=1) if overhead_cols else 0
+    bw["overhead_ms"] = bw[overhead_cols].sum(axis=1)
     grouped = bw.groupby("stage")[["solve_time_ms", "overhead_ms"]].mean()
     stages = sorted(grouped.index)
     fig = go.Figure()
@@ -684,34 +643,15 @@ def chart_cost_per_simplex_iter(solver_train: pd.DataFrame) -> str:
     return fig_to_html(fig)
 
 
-def _has_decomposition_columns(timing: pd.DataFrame) -> bool:
-    """True when the per-iteration timing frame carries the epic-01 columns."""
-    required = {
-        "fwd_setup_ms",
-        "fwd_load_imbalance_ms",
-        "fwd_scheduling_overhead_ms",
-        "bwd_setup_ms",
-        "bwd_load_imbalance_ms",
-        "bwd_scheduling_overhead_ms",
-    }
-    return not timing.empty and required.issubset(timing.columns)
-
-
 def chart_parallel_overhead_decomposition(timing: pd.DataFrame) -> str:
     """Side-by-side stacked bars of forward vs backward parallel overhead.
 
     Decomposes the parallel overhead (time the root worker waits beyond LP
     solve) into three components per phase: per-worker setup, load imbalance,
-    and residual scheduling overhead. This surfaces the epic-01 instrumentation
-    added in the post-v0.4.4 cobre timing schema. Returns a fallback message
-    when the decomposition columns are absent.
+    and residual scheduling overhead.
     """
-    if not _has_decomposition_columns(timing):
-        return (
-            "<p>Parallel overhead decomposition requires cobre post-v0.4.4 "
-            "timing output (fwd/bwd_setup_ms, _load_imbalance_ms, "
-            "_scheduling_overhead_ms).</p>"
-        )
+    if timing.empty:
+        return "<p>No timing data available.</p>"
 
     iters = timing["iteration"].tolist()
     fig = make_subplots(
@@ -783,8 +723,8 @@ def chart_parallel_overhead_share(timing: pd.DataFrame) -> str:
     displays each component as a percentage of the summed overhead. Gives a
     one-shot view of which overhead category dominates in the run.
     """
-    if not _has_decomposition_columns(timing):
-        return "<p>Decomposition share requires cobre post-v0.4.4 timing output.</p>"
+    if timing.empty:
+        return "<p>No timing data available.</p>"
 
     totals: dict[str, float] = {
         "Fwd Worker Setup": float(timing["fwd_setup_ms"].sum()),
@@ -834,62 +774,6 @@ def chart_parallel_overhead_share(timing: pd.DataFrame) -> str:
     return fig_to_html(fig)
 
 
-def chart_basis_padding_usage(solver_train: pd.DataFrame) -> str:
-    """Stacked bar per iteration: tight vs slack basis padding counts.
-
-    Requires the post-v0.4.4 solver schema (``basis_padding_tight`` and
-    ``basis_padding_slack`` columns). Aggregates across (phase, stage) to a
-    single per-iteration bar pair so the reader can spot trends in warm-start
-    basis padding as training progresses.
-    """
-    tight_col = "basis_padding_tight"
-    slack_col = "basis_padding_slack"
-    if (
-        solver_train.empty
-        or tight_col not in solver_train.columns
-        or slack_col not in solver_train.columns
-    ):
-        return (
-            "<p>Basis padding columns not present (requires cobre post-v0.4.4 "
-            "solver schema).</p>"
-        )
-
-    agg = solver_train.groupby("iteration")[[tight_col, slack_col]].sum().reset_index()
-    if (agg[tight_col].sum() + agg[slack_col].sum()) == 0:
-        return "<p>Basis padding disabled for this run (all counts zero).</p>"
-
-    iters = agg["iteration"].tolist()
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=iters,
-            y=agg[tight_col].tolist(),
-            name="Tight (informed)",
-            marker_color=COLORS["lower_bound"],
-            hovertemplate="Tight: %{y}<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=iters,
-            y=agg[slack_col].tolist(),
-            name="Slack (default)",
-            marker_color=COLORS["future_cost"],
-            hovertemplate="Slack: %{y}<extra></extra>",
-        )
-    )
-    fig.update_layout(
-        title="Basis Padding Status per Iteration (summed across stages)",
-        xaxis_title="Iteration",
-        yaxis_title="Cut rows",
-        barmode="stack",
-        legend=_LEGEND,
-        margin=_MARGIN,
-        height=380,
-    )
-    return fig_to_html(fig)
-
-
 def chart_timing_waterfall(timing: pd.DataFrame) -> str:
     """Cumulative total-time donut over top-level phases.
 
@@ -930,37 +814,30 @@ def chart_timing_waterfall(timing: pd.DataFrame) -> str:
 
 
 def _backward_breakdown_columns(timing: pd.DataFrame) -> list[tuple[str, str, str]]:
-    """Pick the available backward sub-component columns (modern or legacy).
-
-    Returns (column, label, color) triples in stacking order.
-    """
+    """Return (column, label, color) triples for backward sub-components."""
     palette = {
         "state_exchange_ms": ("State Exchange", "#6366F1"),
         "cut_batch_build_ms": ("Cut Batch Build", "#0EA5E9"),
         "cut_sync_ms": ("Cut Sync (MPI)", "#8B5CF6"),
         "bwd_load_imbalance_ms": ("Load Imbalance", "#F59E0B"),
         "bwd_scheduling_overhead_ms": ("Scheduling Overhead", "#DC4C4C"),
-        LEGACY_BACKWARD_OVERHEAD: ("Rayon Overhead (legacy)", "#DC4C4C"),
     }
-    order = list(BACKWARD_SUBCOMPONENT_COLUMNS) + [LEGACY_BACKWARD_OVERHEAD]
     return [
         (col, palette[col][0], palette[col][1])
-        for col in order
+        for col in BACKWARD_SUBCOMPONENT_COLUMNS
         if col in timing.columns
     ]
 
 
 def _forward_breakdown_columns(timing: pd.DataFrame) -> list[tuple[str, str, str]]:
-    """Pick the available forward sub-component columns (modern or legacy)."""
+    """Return (column, label, color) triples for forward sub-components."""
     palette = {
         "fwd_load_imbalance_ms": ("Load Imbalance", "#F59E0B"),
         "fwd_scheduling_overhead_ms": ("Scheduling Overhead", "#DC4C4C"),
-        LEGACY_FORWARD_OVERHEAD: ("Rayon Overhead (legacy)", "#DC4C4C"),
     }
-    order = list(FORWARD_SUBCOMPONENT_COLUMNS) + [LEGACY_FORWARD_OVERHEAD]
     return [
         (col, palette[col][0], palette[col][1])
-        for col in order
+        for col in FORWARD_SUBCOMPONENT_COLUMNS
         if col in timing.columns
     ]
 
@@ -1026,8 +903,6 @@ def chart_backward_wall_breakdown(timing: pd.DataFrame) -> str:
     imbalance, scheduling overhead, cut sync MPI, cut batch build, state
     exchange. Sums exactly to ``backward_wall_ms`` each iteration.
     """
-    if "backward_wall_ms" not in timing.columns:
-        return "<p>Backward wall-time breakdown requires the v0.4.3+ schema.</p>"
     fig = _wall_breakdown_chart(
         timing,
         "backward_wall_ms",
@@ -1040,8 +915,6 @@ def chart_backward_wall_breakdown(timing: pd.DataFrame) -> str:
 
 def chart_forward_wall_breakdown(timing: pd.DataFrame) -> str:
     """Per-iteration stack decomposing ``forward_wall_ms`` into wall components."""
-    if "forward_wall_ms" not in timing.columns:
-        return "<p>Forward wall-time breakdown requires the v0.4.3+ schema.</p>"
     fig = _wall_breakdown_chart(
         timing,
         "forward_wall_ms",
@@ -1060,12 +933,8 @@ def chart_parallel_efficiency(timing: pd.DataFrame) -> str:
     much of the parallel region is non-solve overhead. A high ratio means
     workers spend disproportionate CPU on load_model/add_rows/set_bounds.
     """
-    required = {"bwd_setup_ms", "backward_wall_ms", "fwd_setup_ms", "forward_wall_ms"}
-    if timing.empty or not required.issubset(timing.columns):
-        return (
-            "<p>Parallel-efficiency chart requires post-v0.4.4 setup columns "
-            "(fwd_setup_ms, bwd_setup_ms).</p>"
-        )
+    if timing.empty:
+        return "<p>No timing data available.</p>"
 
     iters = timing["iteration"].tolist()
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -1208,22 +1077,20 @@ def chart_solver_progression(solver_train: pd.DataFrame) -> str:
 def chart_basis_reuse_over_iterations(solver_train: pd.DataFrame) -> str:
     """Rolling basis reuse rate per SDDP iteration, split by phase.
 
-    Reuse rate = 1 − basis_rejections / basis_offered. When warm-starting is
-    working well this trends upward as training stabilises. A persistent
+    Reuse rate = 1 − (consistency failures) / basis_offered. When warm-starting
+    is working well this trends upward as training stabilises. A persistent
     decline signals that newly-added cuts keep invalidating stored bases.
     """
     if solver_train.empty:
         return "<p>No solver data available.</p>"
 
-    required = {"basis_offered", "basis_rejections", "iteration", "phase"}
-    if not required.issubset(solver_train.columns):
-        return "<p>solver/iterations.parquet missing basis columns.</p>"
-
     offered = solver_train[solver_train["basis_offered"] > 0].copy()
     if offered.empty:
         return "<p>No basis warm-start offered during training.</p>"
 
-    offered["reuse_rate"] = 1.0 - offered["basis_rejections"] / offered["basis_offered"]
+    offered["reuse_rate"] = (
+        1.0 - offered["basis_consistency_failures"] / offered["basis_offered"]
+    )
 
     phase_style = {
         "forward": (COLORS["hydro"], "solid"),
@@ -1268,9 +1135,9 @@ def chart_solver_time_breakdown_over_iterations(solver_train: pd.DataFrame) -> s
     """Per-iteration stacked bar of solver CPU time components (backward phase).
 
     Stacks ``solve_time_ms`` alongside non-solve time (``load_model_time_ms``,
-    ``add_rows_time_ms``, ``set_bounds_time_ms``, ``basis_set_time_ms``). Shows
-    how much solver CPU each iteration consumed and how the split between
-    solve and setup changes over training.
+    ``set_bounds_time_ms``, ``basis_set_time_ms``). Shows how much solver CPU
+    each iteration consumed and how the split between solve and setup changes
+    over training.
     """
     if solver_train.empty:
         return "<p>No solver data available.</p>"
@@ -1282,19 +1149,15 @@ def chart_solver_time_breakdown_over_iterations(solver_train: pd.DataFrame) -> s
     components = [
         ("solve_time_ms", "LP Solve", COLORS["hydro"]),
         ("set_bounds_time_ms", "Set Bounds", COLORS["thermal"]),
-        ("add_rows_time_ms", "Add Rows (cuts)", COLORS["ncs"]),
         ("load_model_time_ms", "Load Model", COLORS["future_cost"]),
         ("basis_set_time_ms", "Basis Set", COLORS["spillage"]),
     ]
-    present = [(c, label, color) for c, label, color in components if c in bwd.columns]
-    if not present:
-        return "<p>Solver CPU component columns absent.</p>"
 
-    agg = bwd.groupby("iteration", as_index=False)[[c for c, _, _ in present]].sum()
+    agg = bwd.groupby("iteration", as_index=False)[[c for c, _, _ in components]].sum()
     iters = agg["iteration"].tolist()
 
     fig = go.Figure()
-    for col, label, color in present:
+    for col, label, color in components:
         fig.add_trace(
             go.Bar(
                 x=iters,
@@ -1812,5 +1675,443 @@ def chart_convergence_vs_wall_time(conv: pd.DataFrame, timing: pd.DataFrame) -> 
         legend=_LEGEND,
         margin=_MARGIN,
         height=420,
+    )
+    return fig_to_html(fig)
+
+
+# ---------------------------------------------------------------------------
+# Post-epic-04a backward-pass charts: per-opening & per-worker observability
+# ---------------------------------------------------------------------------
+
+
+def _backward_per_opening_frame(solver_train: pd.DataFrame) -> pd.DataFrame:
+    """Return backward rows that carry a non-null ``opening`` index."""
+    if solver_train.empty:
+        return solver_train.iloc[0:0]
+    bwd = solver_train[
+        (solver_train["phase"] == "backward") & solver_train["opening"].notna()
+    ]
+    return bwd.copy()
+
+
+def _backward_opening_0_split(solver_train: pd.DataFrame) -> pd.DataFrame:
+    """Tag backward per-opening rows as ``opening_0`` (cold) vs ``opening_rest`` (warm).
+
+    Opening 0 in each ``(iteration, stage, rank, worker)`` tuple inherits the
+    solver state from the prior stage and pays the cold-start cost on the
+    first backward solve.  Openings ``1..N-1`` reuse the warm solver state
+    left behind by the previous opening at the same stage.  Comparing the
+    two groups isolates the warm-start speedup.
+    """
+    bwd = _backward_per_opening_frame(solver_train)
+    if bwd.empty:
+        return bwd
+    opening_class = (
+        bwd["opening"].astype(int).where(bwd["opening"].astype(int) == 0, other=-1)
+    )
+    bwd = bwd.assign(
+        opening_class=opening_class.map({0: "opening_0", -1: "opening_rest"})
+    )
+    return bwd
+
+
+_OPENING_0_COLOR = COLORS["deficit"]
+_OPENING_REST_COLOR = COLORS["hydro"]
+
+
+def _opening_0_vs_rest_by_stage(
+    solver_train: pd.DataFrame,
+    metric: str,
+    title: str,
+    y_title: str,
+    hover_fmt: str,
+) -> str:
+    """Shared helper for per-stage ``opening 0`` vs ``openings 1+`` bar charts."""
+    split = _backward_opening_0_split(solver_train)
+    if split.empty:
+        return "<p>No backward per-opening data available.</p>"
+    if metric not in split.columns:
+        return f"<p>Column {metric!r} not in solver data.</p>"
+
+    agg = (
+        split.groupby(["stage", "opening_class"])[metric].mean().unstack(fill_value=0.0)
+    )
+    stages = sorted(agg.index.tolist())
+    fig = go.Figure()
+    if "opening_0" in agg.columns:
+        fig.add_trace(
+            go.Bar(
+                x=stages,
+                y=[float(agg["opening_0"].get(s, 0.0)) for s in stages],
+                name="Opening 0 (cold)",
+                marker_color=_OPENING_0_COLOR,
+                hovertemplate=("Stage %{x} — cold: " + hover_fmt + "<extra></extra>"),
+            )
+        )
+    if "opening_rest" in agg.columns:
+        fig.add_trace(
+            go.Bar(
+                x=stages,
+                y=[float(agg["opening_rest"].get(s, 0.0)) for s in stages],
+                name="Openings 1+ (warm, mean)",
+                marker_color=_OPENING_REST_COLOR,
+                hovertemplate=("Stage %{x} — warm: " + hover_fmt + "<extra></extra>"),
+            )
+        )
+    fig.update_layout(
+        title=title,
+        xaxis_title="Stage",
+        yaxis_title=y_title,
+        barmode="group",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    return fig_to_html(fig)
+
+
+def chart_backward_opening_0_solve_time(solver_train: pd.DataFrame) -> str:
+    """Per-stage mean backward LP solve time — opening 0 vs openings 1+.
+
+    Opening 0 is the first LP solved at a stage during the backward pass and
+    inherits a cold solver state (the basis/factorisation from the prior
+    stage's final solve).  Openings 1+ all benefit from the warm solver
+    state left by the previous opening at the same stage.  The gap between
+    the two bars at each stage is the empirical cold-start tax.
+    """
+    return _opening_0_vs_rest_by_stage(
+        solver_train,
+        metric="solve_time_ms",
+        title="Backward Solve Time — Opening 0 (cold) vs Openings 1+ (warm) per Stage",
+        y_title="Mean solve time (ms)",
+        hover_fmt="%{y:.1f} ms",
+    )
+
+
+def chart_backward_opening_0_simplex(solver_train: pd.DataFrame) -> str:
+    """Per-stage mean backward simplex iterations — opening 0 vs openings 1+.
+
+    Companion to :func:`chart_backward_opening_0_solve_time`. Iteration
+    counts reveal whether opening 0 is slower because of a harder LP or
+    because the starting basis is farther from optimal. A large simplex gap
+    with a smaller solve-time gap implies each iteration is cheap but more
+    of them are needed.
+    """
+    return _opening_0_vs_rest_by_stage(
+        solver_train,
+        metric="simplex_iterations",
+        title="Backward Simplex Iterations — Opening 0 (cold) vs Openings 1+ (warm) per Stage",
+        y_title="Mean simplex iterations per LP",
+        hover_fmt="%{y:,.0f} iters",
+    )
+
+
+def chart_backward_opening_0_share(solver_train: pd.DataFrame) -> str:
+    """Aggregate share of backward workload attributable to opening 0 (cold).
+
+    Summed across all iterations, stages, ranks, and workers: how much of
+    the backward solver workload — measured in solve time, simplex
+    iterations, and LP count — is the first (cold) opening versus the
+    remaining warm-started openings. Contrasts per-LP cost (covered by the
+    per-stage charts) with aggregate cost: opening 0 may be 2× slower per
+    LP but still a single-digit percentage of total cost because it is
+    1 / ``n_openings``.
+    """
+    split = _backward_opening_0_split(solver_train)
+    if split.empty:
+        return "<p>No backward per-opening data available.</p>"
+
+    totals = split.groupby("opening_class").agg(
+        solve_time_ms=("solve_time_ms", "sum"),
+        simplex_iterations=("simplex_iterations", "sum"),
+        n_lps=("opening", "size"),
+    )
+    if "opening_0" not in totals.index:
+        return "<p>No opening 0 rows available.</p>"
+
+    t0 = totals.loc["opening_0"]
+    tr = (
+        totals.loc["opening_rest"]
+        if "opening_rest" in totals.index
+        else pd.Series({"solve_time_ms": 0.0, "simplex_iterations": 0, "n_lps": 0})
+    )
+
+    openings_max = int(split["opening"].max()) + 1
+    rows: list[tuple[str, float, float, str]] = [
+        (
+            "LP solves",
+            float(t0["n_lps"]),
+            float(tr["n_lps"]),
+            "{value:,.0f}",
+        ),
+        (
+            "Simplex iters",
+            float(t0["simplex_iterations"]),
+            float(tr["simplex_iterations"]),
+            "{value:,.0f}",
+        ),
+        (
+            "Solve time (s)",
+            float(t0["solve_time_ms"]) / 1000.0,
+            float(tr["solve_time_ms"]) / 1000.0,
+            "{value:,.1f}",
+        ),
+    ]
+
+    fig = go.Figure()
+    for idx, (label, v0, vr, number_fmt) in enumerate(rows):
+        total = v0 + vr
+        if total <= 0:
+            continue
+        pct0 = v0 / total * 100.0
+        pctr = vr / total * 100.0
+        fig.add_trace(
+            go.Bar(
+                x=[pct0],
+                y=[label],
+                name="Opening 0 (cold)",
+                orientation="h",
+                marker_color=_OPENING_0_COLOR,
+                text=[f"{number_fmt.format(value=v0)} ({pct0:.1f}%)"],
+                textposition="inside",
+                showlegend=idx == 0,
+                legendgroup="opening_0",
+                hovertemplate=(
+                    f"{label} — Opening 0: "
+                    f"{number_fmt.format(value=v0)} ({pct0:.1f}%)<extra></extra>"
+                ),
+            )
+        )
+        fig.add_trace(
+            go.Bar(
+                x=[pctr],
+                y=[label],
+                name="Openings 1+ (warm)",
+                orientation="h",
+                marker_color=_OPENING_REST_COLOR,
+                text=[f"{number_fmt.format(value=vr)} ({pctr:.1f}%)"],
+                textposition="inside",
+                showlegend=idx == 0,
+                legendgroup="opening_rest",
+                hovertemplate=(
+                    f"{label} — Openings 1+: "
+                    f"{number_fmt.format(value=vr)} ({pctr:.1f}%)<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        title=(
+            f"Opening 0 (cold) share of backward workload — "
+            f"{openings_max} openings per (iter, stage, worker)"
+        ),
+        barmode="stack",
+        xaxis={"title": "% share", "range": [0, 100]},
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=300,
+    )
+    return fig_to_html(fig)
+
+
+def chart_backward_per_opening_solve_time(solver_train: pd.DataFrame) -> str:
+    """Box plot of per-opening backward solve time (ms), grouped by stage.
+
+    Post-epic-04a the backward pass emits one solver-stats row per
+    ``(iteration, stage, opening, rank, worker_id)``. Aggregating by stage
+    exposes how much variability exists across openings and iterations at
+    each stage — a fat tail signals LPs that swing wildly in difficulty.
+    """
+    bwd = _backward_per_opening_frame(solver_train)
+    if bwd.empty:
+        return "<p>No backward per-opening data available.</p>"
+
+    stages = sorted(bwd["stage"].unique().tolist())
+    fig = go.Figure()
+    for stage in stages:
+        sub = bwd[bwd["stage"] == stage]
+        fig.add_trace(
+            go.Box(
+                y=sub["solve_time_ms"].tolist(),
+                name=str(int(stage)),
+                boxpoints=False,
+                marker_color=COLORS["thermal"],
+                hovertemplate=f"Stage {int(stage)}: %{{y:.1f}} ms<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        title="Backward Solve Time per Opening — by stage (ms, log y)",
+        xaxis_title="Stage",
+        yaxis_title="Solve time (ms)",
+        yaxis_type="log",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+        showlegend=False,
+    )
+    return fig_to_html(fig)
+
+
+def chart_backward_per_opening_simplex(solver_train: pd.DataFrame) -> str:
+    """Box plot of simplex iterations per (iter, opening), grouped by stage.
+
+    Companion to :func:`chart_backward_per_opening_solve_time`. A high
+    median at a stage means the LP is simply big; a high spread means
+    opening-specific RHSs swing the warm-start basis in/out of optimality.
+    """
+    bwd = _backward_per_opening_frame(solver_train)
+    if bwd.empty:
+        return "<p>No backward per-opening data available.</p>"
+
+    stages = sorted(bwd["stage"].unique().tolist())
+    fig = go.Figure()
+    for stage in stages:
+        sub = bwd[bwd["stage"] == stage]
+        fig.add_trace(
+            go.Box(
+                y=sub["simplex_iterations"].tolist(),
+                name=str(int(stage)),
+                boxpoints=False,
+                marker_color=COLORS["hydro"],
+                hovertemplate=(
+                    f"Stage {int(stage)}: %{{y:,}} simplex iter<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        title="Backward Simplex Iterations per Opening — by stage",
+        xaxis_title="Stage",
+        yaxis_title="Simplex iterations (per LP)",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+        showlegend=False,
+    )
+    return fig_to_html(fig)
+
+
+def chart_backward_load_balance_per_worker(solver_train: pd.DataFrame) -> str:
+    """Per-(rank, worker) backward solve time summed across iterations.
+
+    Post-epic-04b backward rows carry the real ``(rank, worker_id)`` from
+    the MPI allgatherv. Summing solve time across iterations per worker
+    reveals static load imbalance — a worker that consistently picks up
+    more LPs than its peers stands out as a tall bar in this chart.
+    """
+    bwd = _backward_per_opening_frame(solver_train)
+    if bwd.empty:
+        return "<p>No backward per-opening data available.</p>"
+
+    with_worker = bwd[bwd["worker_id"].notna() & bwd["rank"].notna()]
+    if with_worker.empty:
+        return "<p>No backward rows carry rank/worker_id values.</p>"
+
+    agg = (
+        with_worker.assign(
+            worker_key=(
+                "rank="
+                + with_worker["rank"].astype(int).astype(str)
+                + " w="
+                + with_worker["worker_id"].astype(int).astype(str)
+            )
+        )
+        .groupby("worker_key", as_index=False)
+        .agg(
+            solve_time_ms=("solve_time_ms", "sum"),
+            lp_solves=("lp_solves", "sum"),
+            simplex_iterations=("simplex_iterations", "sum"),
+        )
+        .sort_values("worker_key")
+    )
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Bar(
+            x=agg["worker_key"].tolist(),
+            y=(agg["solve_time_ms"] / 1000.0).tolist(),
+            name="Solve Time (s)",
+            marker_color=COLORS["thermal"],
+            hovertemplate="%{x}: %{y:.1f} s<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=agg["worker_key"].tolist(),
+            y=agg["lp_solves"].tolist(),
+            name="LP Solves",
+            mode="lines+markers",
+            line={"color": COLORS["hydro"], "width": 2},
+            hovertemplate="%{x}: %{y:,} LPs<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+    fig.update_layout(
+        title="Backward Pass Load Balance per (Rank, Worker)",
+        xaxis_title="Worker",
+        barmode="group",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=420,
+    )
+    fig.update_yaxes(title_text="Solve time (s)", secondary_y=False)
+    fig.update_yaxes(title_text="LP solves", secondary_y=True, rangemode="tozero")
+    return fig_to_html(fig)
+
+
+def chart_worker_wall_time_distribution(timing_raw: pd.DataFrame) -> str:
+    """Per-(rank, worker) forward + backward wall time across iterations.
+
+    Consumes the raw post-epic-04b timing rows that carry a non-null
+    ``worker_id``. Each bar is one worker; the two series are the summed
+    forward/backward wall time observed by that worker. Large discrepancies
+    across workers at the same rank surface thread-pool imbalance.
+    """
+    if timing_raw.empty:
+        return "<p>No timing data available.</p>"
+
+    per_worker = timing_raw[timing_raw["worker_id"].notna()]
+    if per_worker.empty:
+        return "<p>No per-worker timing rows in output.</p>"
+
+    agg = (
+        per_worker.assign(
+            worker_key=(
+                "rank="
+                + per_worker["rank"].astype(int).astype(str)
+                + " w="
+                + per_worker["worker_id"].astype(int).astype(str)
+            )
+        )
+        .groupby("worker_key", as_index=False)[["forward_wall_ms", "backward_wall_ms"]]
+        .sum()
+        .sort_values("worker_key")
+    )
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=agg["worker_key"].tolist(),
+            y=(agg["forward_wall_ms"] / 1000.0).tolist(),
+            name="Forward wall",
+            marker_color=PERFORMANCE_PHASE_COLORS["forward"],
+            hovertemplate="%{x}: %{y:.1f} s forward<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=agg["worker_key"].tolist(),
+            y=(agg["backward_wall_ms"] / 1000.0).tolist(),
+            name="Backward wall",
+            marker_color=PERFORMANCE_PHASE_COLORS["backward"],
+            hovertemplate="%{x}: %{y:.1f} s backward<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Per-Worker Wall Time Across Training (fwd + bwd, summed)",
+        xaxis_title="Worker",
+        yaxis_title="Wall time (s)",
+        barmode="stack",
+        legend=_LEGEND,
+        margin=_MARGIN,
+        height=400,
     )
     return fig_to_html(fig)

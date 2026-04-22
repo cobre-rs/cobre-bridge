@@ -474,8 +474,8 @@ def _add_type_filter_and_row_attrs(
 
 
 def can_render(data: DashboardData) -> bool:
-    """Return True when generic constraint definitions are present."""
-    return len(data.gc_constraints) > 0
+    """Render when generic constraints exist and simulation data is available."""
+    return data.simulation_available and len(data.gc_constraints) > 0
 
 
 def render(data: DashboardData) -> str:

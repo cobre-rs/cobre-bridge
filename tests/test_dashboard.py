@@ -14,10 +14,13 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import polars as pl
 import pytest
 
 from cobre_bridge.dashboard.data import (
+    _aggregate_timing_by_iteration,
+    _correct_wall_times_from_convergence,
     entity_name,
     load_hydro_bus_map,
     load_hydro_metadata,
@@ -313,9 +316,12 @@ def test_entity_name_returns_str_id_when_key_absent() -> None:
 
 
 def test_scan_entity_calls_scan_parquet_with_correct_path(tmp_path: Path) -> None:
-    expected_path = str(
-        tmp_path / "output" / "simulation" / "hydros" / "**" / "*.parquet"
-    )
+    entity_dir = tmp_path / "output" / "simulation" / "hydros"
+    entity_dir.mkdir(parents=True)
+    (entity_dir / "scenario_id=0000").mkdir()
+    (entity_dir / "scenario_id=0000" / "data.parquet").write_bytes(b"")
+
+    expected_path = str(entity_dir / "**" / "*.parquet")
     mock_lf = MagicMock(spec=pl.LazyFrame)
 
     with patch(
@@ -325,6 +331,13 @@ def test_scan_entity_calls_scan_parquet_with_correct_path(tmp_path: Path) -> Non
 
     mock_scan.assert_called_once_with(expected_path, hive_partitioning=True)
     assert result is mock_lf
+
+
+def test_scan_entity_returns_empty_lazyframe_when_dir_missing(tmp_path: Path) -> None:
+    """scan_entity must return an empty LazyFrame when the simulation dir is absent."""
+    result = scan_entity(tmp_path, "hydros")
+    assert isinstance(result, pl.LazyFrame)
+    assert result.collect().is_empty()
 
 
 # ---------------------------------------------------------------------------
@@ -1396,6 +1409,134 @@ def test_non_fictitious_bus_ids_field_on_data(_v2_case: Path) -> None:
     assert isinstance(data.non_fictitious_bus_ids, list)
     assert data.non_fictitious_bus_ids == [0]
     assert all(isinstance(bid, int) for bid in data.non_fictitious_bus_ids)
+
+
+# ---------------------------------------------------------------------------
+# Wall-time correction — _correct_wall_times_from_convergence
+# ---------------------------------------------------------------------------
+
+
+def _make_timing_raw_multiworker(
+    n_iters: int = 2, n_workers: int = 3, fwd_per_worker: int = 100
+) -> pd.DataFrame:
+    """Simulate post-epic-04b timing shape: 1 rank row + N per-worker rows/iter."""
+    rows: list[dict[str, Any]] = []
+    for it in range(1, n_iters + 1):
+        rows.append(
+            {
+                "iteration": it,
+                "rank": 0,
+                "worker_id": None,
+                "forward_wall_ms": 0,
+                "backward_wall_ms": 0,
+                "lower_bound_ms": 7,
+                "overhead_ms": 3,
+                "fwd_setup_ms": 0,
+                "bwd_setup_ms": 0,
+            }
+        )
+        for w in range(n_workers):
+            rows.append(
+                {
+                    "iteration": it,
+                    "rank": 0,
+                    "worker_id": w,
+                    "forward_wall_ms": fwd_per_worker,
+                    "backward_wall_ms": fwd_per_worker * 4,
+                    "lower_bound_ms": 0,
+                    "overhead_ms": 0,
+                    "fwd_setup_ms": 5,
+                    "bwd_setup_ms": 10,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_correct_wall_times_overrides_forward_wall_ms() -> None:
+    """Correction replaces inflated sum with convergence's per-iter wall value."""
+    timing_raw = _make_timing_raw_multiworker(
+        n_iters=2, n_workers=4, fwd_per_worker=100
+    )
+    agg = _aggregate_timing_by_iteration(timing_raw)
+    # Aggregated forward_wall_ms is inflated: 4 workers × 100 = 400
+    assert agg.loc[agg["iteration"] == 1, "forward_wall_ms"].iloc[0] == 400
+
+    conv = pd.DataFrame(
+        {
+            "iteration": [1, 2],
+            "time_forward_ms": [110, 120],
+            "time_backward_ms": [440, 480],
+        }
+    )
+    corrected = _correct_wall_times_from_convergence(agg, conv)
+    assert corrected.loc[corrected["iteration"] == 1, "forward_wall_ms"].iloc[0] == 110
+    assert corrected.loc[corrected["iteration"] == 2, "forward_wall_ms"].iloc[0] == 120
+    assert corrected.loc[corrected["iteration"] == 1, "backward_wall_ms"].iloc[0] == 440
+    assert corrected.loc[corrected["iteration"] == 2, "backward_wall_ms"].iloc[0] == 480
+
+
+def test_correct_wall_times_preserves_other_columns() -> None:
+    """Only forward/backward wall cols are overridden; others unchanged."""
+    timing_raw = _make_timing_raw_multiworker(n_iters=2, n_workers=3, fwd_per_worker=50)
+    agg = _aggregate_timing_by_iteration(timing_raw)
+    # fwd_setup_ms (aggregate CPU) should stay summed: 3 workers × 5 = 15
+    assert agg.loc[agg["iteration"] == 1, "fwd_setup_ms"].iloc[0] == 15
+    # rank-only lower_bound_ms should equal the rank row's value (7)
+    assert agg.loc[agg["iteration"] == 1, "lower_bound_ms"].iloc[0] == 7
+
+    conv = pd.DataFrame(
+        {
+            "iteration": [1, 2],
+            "time_forward_ms": [55, 60],
+            "time_backward_ms": [220, 240],
+        }
+    )
+    corrected = _correct_wall_times_from_convergence(agg, conv)
+    # Unchanged columns:
+    assert corrected.loc[corrected["iteration"] == 1, "fwd_setup_ms"].iloc[0] == 15
+    assert corrected.loc[corrected["iteration"] == 1, "lower_bound_ms"].iloc[0] == 7
+    assert corrected.loc[corrected["iteration"] == 1, "bwd_setup_ms"].iloc[0] == 30
+
+
+def test_correct_wall_times_noop_when_conv_empty() -> None:
+    """Empty conv frame leaves timing unchanged."""
+    timing_raw = _make_timing_raw_multiworker(n_iters=1, n_workers=2)
+    agg = _aggregate_timing_by_iteration(timing_raw)
+    result = _correct_wall_times_from_convergence(agg, pd.DataFrame())
+    pd.testing.assert_frame_equal(result, agg)
+
+
+def test_correct_wall_times_noop_when_conv_missing_columns() -> None:
+    """Correction leaves timing untouched when required conv columns are absent."""
+    timing_raw = _make_timing_raw_multiworker(n_iters=1, n_workers=2)
+    agg = _aggregate_timing_by_iteration(timing_raw)
+    bad_conv = pd.DataFrame({"iteration": [1], "upper_bound": [10.0]})
+    result = _correct_wall_times_from_convergence(agg, bad_conv)
+    pd.testing.assert_frame_equal(result, agg)
+
+
+def test_correct_wall_times_noop_on_empty_timing() -> None:
+    """Empty timing frame passes through unchanged."""
+    conv = pd.DataFrame(
+        {"iteration": [1], "time_forward_ms": [50], "time_backward_ms": [200]}
+    )
+    result = _correct_wall_times_from_convergence(pd.DataFrame(), conv)
+    assert result.empty
+
+
+def test_correct_wall_times_partial_iteration_mapping() -> None:
+    """When conv covers only some iterations, unmatched rows keep their original value."""
+    timing_raw = _make_timing_raw_multiworker(n_iters=3, n_workers=2, fwd_per_worker=10)
+    agg = _aggregate_timing_by_iteration(timing_raw)
+    # Only provide conv for iteration 2.
+    conv = pd.DataFrame(
+        {"iteration": [2], "time_forward_ms": [17], "time_backward_ms": [67]}
+    )
+    corrected = _correct_wall_times_from_convergence(agg, conv)
+    # iter 1 and 3 keep their (inflated) sum (2 workers × 10 = 20); iter 2 overridden.
+    assert corrected.loc[corrected["iteration"] == 1, "forward_wall_ms"].iloc[0] == 20
+    assert corrected.loc[corrected["iteration"] == 2, "forward_wall_ms"].iloc[0] == 17
+    assert corrected.loc[corrected["iteration"] == 3, "forward_wall_ms"].iloc[0] == 20
 
 
 # ---------------------------------------------------------------------------

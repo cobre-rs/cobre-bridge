@@ -571,8 +571,8 @@ def build_bus_balance(
 
 
 def can_render(data: DashboardData) -> bool:
-    """Return True — network tab is always shown when line_meta is populated."""
-    return True
+    """Network tab renders only when simulation data is available."""
+    return data.simulation_available
 
 
 def render(data: DashboardData) -> str:

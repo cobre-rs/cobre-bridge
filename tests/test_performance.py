@@ -40,36 +40,57 @@ def _make_solver_df(
             "iteration": list(range(1, n_rows + 1)),
             "stage": list(range(0, n_rows)),
             "phase": [phase] * n_rows,
+            "opening": [
+                float("nan") if phase != "backward" else 0 for _ in range(n_rows)
+            ],
+            "rank": [0] * n_rows,
+            "worker_id": [
+                float("nan") if phase != "backward" else 0 for _ in range(n_rows)
+            ],
             "lp_solves": [lp_solves] * n_rows,
+            "lp_successes": [lp_solves] * n_rows,
+            "lp_failures": [0] * n_rows,
+            "retry_attempts": [0] * n_rows,
             "solve_time_ms": [solve_time_ms] * n_rows,
             "simplex_iterations": [simplex_iterations] * n_rows,
             "basis_offered": [8] * n_rows,
-            "basis_rejections": [2] * n_rows,
+            "basis_consistency_failures": [2] * n_rows,
+            "basis_reconstructions": [0] * n_rows,
             "set_bounds_time_ms": [5.0] * n_rows,
-            "add_rows_time_ms": [3.0] * n_rows,
+            "basis_set_time_ms": [1.0] * n_rows,
             "load_model_time_ms": [2.0] * n_rows,
         }
     )
 
 
 def _make_timing(n: int = 5) -> pd.DataFrame:
-    """Synthetic timing DataFrame."""
+    """Synthetic timing DataFrame mirroring the cobre iteration_timing schema."""
     return pd.DataFrame(
         {
             "iteration": list(range(1, n + 1)),
+            "rank": [0] * n,
+            "worker_id": [0] * n,
             "forward_wall_ms": [100.0 + i for i in range(n)],
             "backward_wall_ms": [150.0 + i for i in range(n)],
+            "cut_selection_ms": [0] * n,
+            "mpi_allreduce_ms": [0] * n,
+            "cut_sync_ms": [0] * n,
+            "lower_bound_ms": [0] * n,
+            "state_exchange_ms": [0] * n,
+            "cut_batch_build_ms": [0] * n,
+            "bwd_setup_ms": [10] * n,
+            "bwd_load_imbalance_ms": [0] * n,
+            "bwd_scheduling_overhead_ms": [0] * n,
+            "fwd_setup_ms": [5] * n,
+            "fwd_load_imbalance_ms": [0] * n,
+            "fwd_scheduling_overhead_ms": [0] * n,
             "overhead_ms": [10.0 + i for i in range(n)],
         }
     )
 
 
 def _make_solver_train(n_stages: int = 4, n_iters: int = 3) -> pd.DataFrame:
-    """Synthetic solver_train DataFrame with all columns required by ticket-021.
-
-    Includes both forward and backward rows so phase-filtered chart functions
-    can find backward data.
-    """
+    """Synthetic solver_train DataFrame matching the current cobre schema."""
     rows = []
     for it in range(1, n_iters + 1):
         for stage in range(0, n_stages):
@@ -79,13 +100,20 @@ def _make_solver_train(n_stages: int = 4, n_iters: int = 3) -> pd.DataFrame:
                         "iteration": it,
                         "stage": stage,
                         "phase": phase,
+                        "opening": 0 if phase == "backward" else None,
+                        "rank": 0,
+                        "worker_id": 0 if phase == "backward" else None,
                         "lp_solves": 10,
+                        "lp_successes": 10,
+                        "lp_failures": 0,
+                        "retry_attempts": 0,
                         "solve_time_ms": 50.0 + stage * 2.0,
                         "simplex_iterations": 200 + stage * 5,
                         "basis_offered": 8,
-                        "basis_rejections": 2,
+                        "basis_consistency_failures": 2,
+                        "basis_reconstructions": 0,
                         "set_bounds_time_ms": 5.0 + stage * 0.5,
-                        "add_rows_time_ms": 3.0,
+                        "basis_set_time_ms": 1.0,
                         "load_model_time_ms": 2.0,
                     }
                 )
@@ -138,6 +166,9 @@ def _make_mock_data(
     data.solver_train = solver_train if solver_train is not None else _make_solver_df()
     data.solver_sim = solver_sim if solver_sim is not None else _make_solver_df()
     data.timing = timing if timing is not None else _make_timing()
+    # timing_raw exists in DashboardData for the per-worker tiles. Tests treat
+    # the aggregated timing frame as both the summed view and the raw view.
+    data.timing_raw = data.timing
 
     # The implementation reads data.training_metadata.get("duration_seconds").
     # The legacy test helper accepted metadata={"run_info": {"duration_seconds": X}};
@@ -438,6 +469,163 @@ def test_render_full_sections() -> None:
     assert "Solver CPU Components per Iteration" in html
     assert "Basis Warm-start" in html
     assert "Run Summary" in html
+    # Opening 0 (cold) vs Openings 1+ (warm-start) section
+    assert "Opening 0 (cold) vs Openings 1+ (warm-start)" in html
+
+
+# ---------------------------------------------------------------------------
+# Opening 0 (cold) vs Openings 1+ (warm-start) charts
+# ---------------------------------------------------------------------------
+
+
+def _make_solver_train_with_openings(
+    n_stages: int = 3,
+    n_iters: int = 2,
+    n_openings: int = 4,
+    cold_multiplier: float = 2.0,
+) -> pd.DataFrame:
+    """Synthetic solver_train with per-opening backward rows.
+
+    Opening 0 is tagged with ``cold_multiplier × base`` solve_time to emulate
+    the cold-start cost; openings 1+ use the base value.
+    """
+    rows = []
+    for it in range(1, n_iters + 1):
+        for stage in range(n_stages):
+            # Forward row (single, opening=None)
+            rows.append(
+                {
+                    "iteration": it,
+                    "stage": stage,
+                    "phase": "forward",
+                    "opening": None,
+                    "rank": 0,
+                    "worker_id": None,
+                    "lp_solves": 1,
+                    "lp_successes": 1,
+                    "lp_failures": 0,
+                    "retry_attempts": 0,
+                    "solve_time_ms": 40.0,
+                    "simplex_iterations": 150,
+                    "basis_offered": 1,
+                    "basis_consistency_failures": 0,
+                    "basis_reconstructions": 0,
+                    "set_bounds_time_ms": 4.0,
+                    "basis_set_time_ms": 1.0,
+                    "load_model_time_ms": 2.0,
+                }
+            )
+            # Backward rows, one per opening
+            base_solve = 50.0 + stage * 2.0
+            base_simplex = 200 + stage * 5
+            for opening in range(n_openings):
+                is_cold = opening == 0
+                rows.append(
+                    {
+                        "iteration": it,
+                        "stage": stage,
+                        "phase": "backward",
+                        "opening": opening,
+                        "rank": 0,
+                        "worker_id": 0,
+                        "lp_solves": 1,
+                        "lp_successes": 1,
+                        "lp_failures": 0,
+                        "retry_attempts": 0,
+                        "solve_time_ms": base_solve
+                        * (cold_multiplier if is_cold else 1.0),
+                        "simplex_iterations": int(
+                            base_simplex * (cold_multiplier if is_cold else 1.0)
+                        ),
+                        "basis_offered": 1,
+                        "basis_consistency_failures": 0,
+                        "basis_reconstructions": 0,
+                        "set_bounds_time_ms": 5.0,
+                        "basis_set_time_ms": 1.0,
+                        "load_model_time_ms": 2.0,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_chart_backward_opening_0_solve_time_contains_both_series() -> None:
+    """The per-stage opening-0 solve chart includes both cold and warm bars."""
+    from cobre_bridge.dashboard.tabs.performance_charts import (
+        chart_backward_opening_0_solve_time,
+    )
+
+    solver_train = _make_solver_train_with_openings(
+        n_stages=3, n_iters=2, n_openings=5, cold_multiplier=3.0
+    )
+    html = chart_backward_opening_0_solve_time(solver_train)
+    assert "Opening 0 (cold)" in html
+    assert "Openings 1+ (warm, mean)" in html
+
+
+def test_chart_backward_opening_0_simplex_contains_both_series() -> None:
+    """The per-stage opening-0 simplex chart includes both cold and warm bars."""
+    from cobre_bridge.dashboard.tabs.performance_charts import (
+        chart_backward_opening_0_simplex,
+    )
+
+    solver_train = _make_solver_train_with_openings(
+        n_stages=3, n_iters=2, n_openings=5, cold_multiplier=3.0
+    )
+    html = chart_backward_opening_0_simplex(solver_train)
+    assert "Opening 0 (cold)" in html
+    assert "Openings 1+ (warm, mean)" in html
+
+
+def test_chart_backward_opening_0_share_reports_all_metrics() -> None:
+    """The share chart reports LP solves, simplex iters, and solve time shares."""
+    from cobre_bridge.dashboard.tabs.performance_charts import (
+        chart_backward_opening_0_share,
+    )
+
+    solver_train = _make_solver_train_with_openings(
+        n_stages=2, n_iters=2, n_openings=4, cold_multiplier=2.0
+    )
+    html = chart_backward_opening_0_share(solver_train)
+    # The three rows we plot:
+    assert "LP solves" in html
+    assert "Simplex iters" in html
+    assert "Solve time (s)" in html
+
+
+def test_chart_backward_opening_0_empty_solver_returns_fallback() -> None:
+    """All three opening-0 charts return a fallback <p> when no data is present."""
+    from cobre_bridge.dashboard.tabs.performance_charts import (
+        chart_backward_opening_0_share,
+        chart_backward_opening_0_simplex,
+        chart_backward_opening_0_solve_time,
+    )
+
+    empty = pd.DataFrame()
+    for fn in (
+        chart_backward_opening_0_solve_time,
+        chart_backward_opening_0_simplex,
+        chart_backward_opening_0_share,
+    ):
+        html = fn(empty)
+        assert "<p>" in html
+        assert "per-opening data" in html or "No opening" in html
+
+
+def test_opening_0_is_slower_than_rest_in_synthetic_data() -> None:
+    """Smoke check: cold multiplier >1 leaves Opening 0 with higher mean than rest."""
+    from cobre_bridge.dashboard.tabs.performance_charts import (
+        _backward_opening_0_split,
+    )
+
+    solver_train = _make_solver_train_with_openings(
+        n_stages=2, n_iters=3, n_openings=4, cold_multiplier=2.5
+    )
+    split = _backward_opening_0_split(solver_train)
+    mean_by_class = split.groupby("opening_class")["solve_time_ms"].mean()
+    assert mean_by_class["opening_0"] > mean_by_class["opening_rest"]
+    # With cold_multiplier=2.5, opening_0 should be ≈2.5× opening_rest mean.
+    ratio = mean_by_class["opening_0"] / mean_by_class["opening_rest"]
+    assert 2.4 < ratio < 2.6
 
 
 # ---------------------------------------------------------------------------

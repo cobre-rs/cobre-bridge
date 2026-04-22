@@ -93,9 +93,9 @@ _VIOLATION_COLS: frozenset[str] = frozenset(
 )
 
 
-def can_render(data: DashboardData) -> bool:  # noqa: ARG001
-    """Costs tab always renders."""
-    return True
+def can_render(data: DashboardData) -> bool:
+    """Costs tab renders only when simulation data is available."""
+    return data.simulation_available
 
 
 def _compute_npv_metric(data: DashboardData, column_name: str) -> float:

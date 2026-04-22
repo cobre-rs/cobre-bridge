@@ -15,9 +15,14 @@ import plotly.graph_objects as go
 from cobre_bridge.dashboard.tabs.performance_charts import (
     TOP_LEVEL_PHASE_COLUMNS,
     chart_active_cuts_growth_by_stage,
+    chart_backward_load_balance_per_worker,
+    chart_backward_opening_0_share,
+    chart_backward_opening_0_simplex,
+    chart_backward_opening_0_solve_time,
+    chart_backward_per_opening_simplex,
+    chart_backward_per_opening_solve_time,
     chart_backward_stage_heatmap,
     chart_backward_wall_breakdown,
-    chart_basis_padding_usage,
     chart_basis_reuse,
     chart_basis_reuse_over_iterations,
     chart_convergence_vs_wall_time,
@@ -45,6 +50,7 @@ from cobre_bridge.dashboard.tabs.performance_charts import (
     chart_solver_time_breakdown_over_iterations,
     chart_solver_time_per_stage,
     chart_timing_waterfall,
+    chart_worker_wall_time_distribution,
 )
 from cobre_bridge.ui.html import (
     chart_grid,
@@ -290,7 +296,7 @@ def render(data: DashboardData) -> str:
     5. Parallel Efficiency — aggregate worker setup CPU vs parallel wall.
     6. Solver Progression — LP solves, simplex, failures, retries per iter.
     7. Solver CPU Components — per-iteration breakdown of solve vs setup work.
-    8. Basis Warm-start — reuse rate evolution + basis padding (post-v0.4.4).
+    8. Basis Warm-start — reuse rate evolution.
     9. LP Solver Detail — per-stage heatmaps and averaged statistics.
     10. LP Dimensions & Scaling — stage-wise LP sizing and scaling quality.
     11. Solver Retries — retry histograms and heatmaps.
@@ -327,10 +333,28 @@ def render(data: DashboardData) -> str:
         ]
     )
 
-    basis_content = chart_grid(
+    basis_content = wrap_chart(chart_basis_reuse_over_iterations(data.solver_train))
+
+    per_opening_content = chart_grid(
         [
-            wrap_chart(chart_basis_reuse_over_iterations(data.solver_train)),
-            wrap_chart(chart_basis_padding_usage(data.solver_train)),
+            wrap_chart(chart_backward_per_opening_solve_time(data.solver_train)),
+            wrap_chart(chart_backward_per_opening_simplex(data.solver_train)),
+        ]
+    )
+
+    opening_0_content = wrap_chart(
+        chart_backward_opening_0_share(data.solver_train)
+    ) + chart_grid(
+        [
+            wrap_chart(chart_backward_opening_0_solve_time(data.solver_train)),
+            wrap_chart(chart_backward_opening_0_simplex(data.solver_train)),
+        ]
+    )
+
+    per_worker_content = chart_grid(
+        [
+            wrap_chart(chart_worker_wall_time_distribution(data.timing_raw)),
+            wrap_chart(chart_backward_load_balance_per_worker(data.solver_train)),
         ]
     )
 
@@ -446,8 +470,23 @@ def render(data: DashboardData) -> str:
             default_collapsed=False,
         )
         + collapsible_section(
-            title="Basis Warm-start (Reuse + Padding)",
+            title="Basis Warm-start Reuse",
             content=basis_content,
+            default_collapsed=False,
+        )
+        + collapsible_section(
+            title="Backward Pass — Per-Opening Distribution",
+            content=per_opening_content,
+            default_collapsed=False,
+        )
+        + collapsible_section(
+            title="Backward Pass — Opening 0 (cold) vs Openings 1+ (warm-start)",
+            content=opening_0_content,
+            default_collapsed=False,
+        )
+        + collapsible_section(
+            title="Backward Pass — Per-Worker Load Balance",
+            content=per_worker_content,
             default_collapsed=False,
         )
         + collapsible_section(

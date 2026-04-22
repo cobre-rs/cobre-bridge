@@ -155,6 +155,8 @@ def _compute_synthetic_stats(data: DashboardData) -> pd.DataFrame:
         no data or the column is absent.
     """
     empty = pd.DataFrame(columns=["hydro_id", "stage_id", "mean_m3s", "std_m3s"])
+    if not data.simulation_available:
+        return empty
     try:
         result = (
             data.hydros_lf.group_by(["hydro_id", "stage_id"])
@@ -168,7 +170,7 @@ def _compute_synthetic_stats(data: DashboardData) -> pd.DataFrame:
             .collect(engine="streaming")
             .to_pandas()
         )
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, pl.exceptions.PolarsError):
         return empty
     if result.empty:
         return empty

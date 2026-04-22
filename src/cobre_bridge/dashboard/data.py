@@ -25,8 +25,15 @@ logger = logging.getLogger(__name__)
 
 
 def scan_entity(case_dir: Path, entity: str) -> pl.LazyFrame:
-    """Return a LazyFrame scanning all hive-partitioned parquet files for entity."""
+    """Return a LazyFrame scanning all hive-partitioned parquet files for entity.
+
+    Returns an empty LazyFrame when the entity directory is missing or
+    contains no parquet files, so callers can consume simulation-less cases
+    without triggering polars' "expanded paths were empty" error.
+    """
     sim_dir = case_dir / "output" / "simulation" / entity
+    if not sim_dir.exists() or not any(sim_dir.rglob("*.parquet")):
+        return pl.LazyFrame()
     return pl.scan_parquet(str(sim_dir / "**" / "*.parquet"), hive_partitioning=True)
 
 
@@ -223,6 +230,79 @@ def _compute_lp_load(
     return dict(zip(ser.index.tolist(), ser.values.tolist()))
 
 
+def _aggregate_timing_by_iteration(timing_raw: pd.DataFrame) -> pd.DataFrame:
+    """Collapse the post-epic-04b multi-row-per-iteration timing shape.
+
+    Post-epic-04b cobre (``training/timing/iterations.parquet``) emits one
+    rank-aggregated row plus N per-worker rows per iteration — per-worker
+    rows only carry fwd/bwd wall + setup, rank rows carry everything else.
+    ``SUM(col) GROUP BY iteration`` reconstructs the single-row totals that
+    the pre-epic-04b chart code expects. Legacy frames (no ``rank``/
+    ``worker_id`` columns) pass through unchanged.
+
+    The sum semantics are correct for the rank-only columns (one contributing
+    row per iteration) and for the aggregate per-worker CPU columns
+    (``fwd_setup_ms``, ``bwd_setup_ms`` — meant to be summed).  It is
+    *incorrect* for ``forward_wall_ms`` / ``backward_wall_ms`` because the
+    per-worker rows each carry a per-worker clock, not a wall-clock.  Pair
+    this aggregation with :func:`_correct_wall_times_from_convergence` to
+    overwrite those two columns with true wall-clock values.
+    """
+    if timing_raw.empty:
+        return timing_raw
+    if "rank" not in timing_raw.columns and "worker_id" not in timing_raw.columns:
+        return timing_raw
+    numeric_cols = [c for c in timing_raw.columns if c.endswith("_ms")]
+    if not numeric_cols:
+        return timing_raw
+    return (
+        timing_raw.groupby("iteration", as_index=False)[numeric_cols]
+        .sum()
+        .sort_values("iteration")
+        .reset_index(drop=True)
+    )
+
+
+def _correct_wall_times_from_convergence(
+    timing: pd.DataFrame, conv: pd.DataFrame
+) -> pd.DataFrame:
+    """Overwrite per-iteration ``forward_wall_ms`` / ``backward_wall_ms`` with
+    true wall-clock values from ``convergence.parquet``.
+
+    The naive ``SUM`` in :func:`_aggregate_timing_by_iteration` turns
+    per-worker wall time into ``N × wall_clock`` for an N-thread run. The
+    authoritative per-iteration wall-clock lives in ``convergence.parquet``
+    as ``time_forward_ms`` / ``time_backward_ms`` (captured on rank 0 around
+    the forward / backward entry points in cobre ``training.rs``).
+
+    No-op when ``conv`` is empty, lacks the required columns, or ``timing``
+    is empty — the legacy single-row-per-iteration format reaches this path
+    with already-correct values, so overwriting with identical numbers is a
+    safe default.
+    """
+    if timing.empty or conv.empty:
+        return timing
+    if "iteration" not in timing.columns:
+        return timing
+    required_conv = {"iteration", "time_forward_ms", "time_backward_ms"}
+    if not required_conv.issubset(conv.columns):
+        return timing
+
+    corrected = timing.copy()
+    conv_wall = conv.set_index("iteration")[["time_forward_ms", "time_backward_ms"]]
+
+    for wall_col, conv_col in (
+        ("forward_wall_ms", "time_forward_ms"),
+        ("backward_wall_ms", "time_backward_ms"),
+    ):
+        if wall_col not in corrected.columns:
+            continue
+        mapped = corrected["iteration"].map(conv_wall[conv_col])
+        merged = mapped.fillna(corrected[wall_col])
+        corrected[wall_col] = merged.astype(corrected[wall_col].dtype)
+    return corrected
+
+
 def compute_non_fictitious_bus_ids(load_stats: pd.DataFrame) -> list[int]:
     """Return sorted bus IDs that have mean_mw > 0 in at least one stage.
 
@@ -302,12 +382,24 @@ class DashboardData:
     load_stats: pd.DataFrame
     load_factors_list: list[dict]
 
-    # Performance / solver data (optional — empty DataFrame when absent)
+    # Performance / solver data (optional — empty DataFrame when absent).
+    # ``timing`` is aggregated to one row per iteration for backward
+    # compatibility with v0.4.4-era chart code. ``timing_raw`` retains the
+    # multi-row-per-iteration view from post-epic-04b cobre outputs where
+    # each iteration has one rank-aggregated row (``worker_id`` NULL) and
+    # N per-worker rows (``worker_id`` populated) — see
+    # ``build_worker_timing_records`` in cobre-sddp training_output.rs.
     timing: pd.DataFrame
+    timing_raw: pd.DataFrame
     solver_train: pd.DataFrame
     solver_sim: pd.DataFrame
     scaling_report: dict
     cut_selection: pd.DataFrame
+
+    # True when ``output/simulation/costs/`` contains parquet files. When
+    # ``False`` the simulation-dependent tabs (overview, energy balance,
+    # costs, plants, network, constraints) are hidden.
+    simulation_available: bool
 
     # Stochastic model output (optional)
     stochastic_available: bool
@@ -390,15 +482,19 @@ class DashboardData:
             inflow_lags_lf = pl.LazyFrame()
 
         # Costs is stage-level only (~236 K rows total), collect to pandas
-        # for chart_cost_* functions
-        costs = (
-            pl.scan_parquet(
-                str(case_dir / "output" / "simulation" / "costs" / "**" / "*.parquet"),
-                hive_partitioning=True,
+        # for chart_cost_* functions. Empty when the case is training-only.
+        costs_dir = case_dir / "output" / "simulation" / "costs"
+        if costs_dir.exists() and any(costs_dir.rglob("*.parquet")):
+            costs = (
+                pl.scan_parquet(
+                    str(costs_dir / "**" / "*.parquet"),
+                    hive_partitioning=True,
+                )
+                .collect(engine="streaming")
+                .to_pandas()
             )
-            .collect(engine="streaming")
-            .to_pandas()
-        )
+        else:
+            costs = pd.DataFrame()
 
         lb_path = case_dir / "constraints" / "line_bounds.parquet"
         line_bounds = (
@@ -504,11 +600,13 @@ class DashboardData:
 
         # Performance / solver data (optional — graceful fallback to empty frames)
         timing_path = case_dir / "output" / "training" / "timing" / "iterations.parquet"
-        timing = (
+        timing_raw = (
             pq.read_table(timing_path).to_pandas()
             if timing_path.exists()
             else pd.DataFrame()
         )
+        timing = _aggregate_timing_by_iteration(timing_raw)
+        timing = _correct_wall_times_from_convergence(timing, conv)
         solver_train_path = (
             case_dir / "output" / "training" / "solver" / "iterations.parquet"
         )
@@ -632,11 +730,17 @@ class DashboardData:
             gc_violations = pd.DataFrame()
 
         case_name = case_dir.resolve().name
-        n_scenarios = costs["scenario_id"].nunique()
-        n_stages = costs["stage_id"].nunique()
+        simulation_available = not costs.empty
+        if simulation_available:
+            n_scenarios = int(costs["scenario_id"].nunique())
+            n_stages = int(costs["stage_id"].nunique())
+        else:
+            n_scenarios = 0
+            n_stages = len(stages_data.get("stages", []))
         print(
             f"  {n_scenarios} scenarios, {n_stages} stages,"
             f" {len(stage_labels)} stage labels"
+            f"{'' if simulation_available else ' (training-only; no simulation)'}"
         )
 
         # Filter simulation solver to actual scenario count from metadata
@@ -672,10 +776,12 @@ class DashboardData:
             load_stats=load_stats,
             load_factors_list=load_factors_list,
             timing=timing,
+            timing_raw=timing_raw,
             solver_train=solver_train,
             solver_sim=solver_sim,
             scaling_report=scaling_report,
             cut_selection=cut_selection,
+            simulation_available=simulation_available,
             stochastic_available=stochastic_available,
             inflow_stats_stoch=inflow_stats_stoch,
             ar_coefficients=ar_coefficients,

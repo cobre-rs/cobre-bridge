@@ -396,42 +396,45 @@ _NON_COST_COLS: frozenset[str] = frozenset(
 
 def compute_npv_costs(
     costs_df: pd.DataFrame,
-    discount_rate: float,
-    stage_start: int = 0,
+    discount_rate: float,  # noqa: ARG001 — retained for API compat; unused
+    stage_start: int = 0,  # noqa: ARG001 — retained for API compat; unused
 ) -> pd.DataFrame:
     """Apply per-stage NPV discount factors to cost component columns.
 
-    The discount factor for stage *t* is ``1 / (1 + discount_rate) ^ (t -
-    stage_start)``.  Stage ``stage_start`` (default 0) therefore has a factor
-    of 1.0 — i.e. costs at the reference stage are undiscounted.
-
-    Columns named ``"scenario_id"``, ``"stage_id"``, and ``"block_id"`` are
-    treated as metadata and are never discounted.
+    Uses the ``discount_factor`` column written by cobre in
+    ``simulation/costs/`` (the cumulative discount factor ``D_t`` that
+    maps undiscounted stage-*t* costs to present value at stage 0).
+    Cobre's simulation extraction stores raw per-stage component costs
+    (``thermal_cost``, ``deficit_cost``, …) in undiscounted units; this
+    helper multiplies each component by ``D_t`` to produce present-value
+    costs. The stage aggregates (``total_cost``, ``immediate_cost``,
+    ``future_cost``) carry LP-objective semantics and are left untouched.
 
     Args:
-        costs_df: DataFrame containing a ``stage_id`` column (0-based) plus
+        costs_df: DataFrame containing a ``discount_factor`` column plus
             one or more numeric cost component columns.
-        discount_rate: Annual (or per-stage) discount rate, e.g. ``0.10`` for
-            10%.  A value of ``0.0`` leaves all values unchanged.
-        stage_start: Reference stage index.  Defaults to ``0`` (first-stage
-            perspective).
+        discount_rate: Unused. Retained so existing call sites do not break
+            while the helper transitions off ad-hoc rate-based discounting.
+        stage_start: Unused. Cobre's ``discount_factor`` column is already
+            anchored at ``D_0 = 1.0``.
 
     Returns:
         A new :class:`pandas.DataFrame` with discounted cost values.  Input is
-        never mutated.  Returns a copy of *costs_df* when it is empty.
+        never mutated.  Returns a copy of *costs_df* when it is empty or
+        when ``discount_factor`` is missing (degrades to undiscounted).
     """
     if costs_df.empty:
         return costs_df.copy()
 
     result = costs_df.copy()
-    cost_cols = [c for c in result.columns if c not in _NON_COST_COLS]
-
-    if not (discount_rate > 0.0 and cost_cols):
+    if "discount_factor" not in result.columns:
         return result
 
-    factors: pd.Series = 1.0 / (1.0 + discount_rate) ** (
-        result["stage_id"] - stage_start
-    )
+    cost_cols = [c for c in result.columns if c not in _NON_COST_COLS]
+    if not cost_cols:
+        return result
+
+    factors = result["discount_factor"].astype(float)
     for col in cost_cols:
         result[col] = result[col] * factors
 
