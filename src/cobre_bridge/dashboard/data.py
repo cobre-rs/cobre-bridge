@@ -554,13 +554,20 @@ class DashboardData:
         with lines_path.open() as f:
             line_meta: list[dict] = json.load(f)["lines"]
 
-        # Load input data for LP load computation
-        load_stats = pq.read_table(
-            case_dir / "scenarios" / "load_seasonal_stats.parquet"
-        ).to_pandas()
+        # Load input data for LP load computation. Both files are optional
+        # Cobre inputs (see book/src/reference/case-format.md); fall back to
+        # empty structures so cases without an explicit load scenario still
+        # render — charts that consume these degrade to a zero-load series
+        # via ``_compute_lp_load``.
+        ls_path = case_dir / "scenarios" / "load_seasonal_stats.parquet"
+        load_stats = (
+            pq.read_table(ls_path).to_pandas() if ls_path.exists() else pd.DataFrame()
+        )
         lf_path = case_dir / "scenarios" / "load_factors.json"
-        with lf_path.open() as f:
-            load_factors_list: list[dict] = json.load(f)["load_factors"]
+        load_factors_list: list[dict] = []
+        if lf_path.exists():
+            with lf_path.open() as f:
+                load_factors_list = json.load(f)["load_factors"]
 
         non_fictitious_bus_ids = compute_non_fictitious_bus_ids(load_stats)
 
