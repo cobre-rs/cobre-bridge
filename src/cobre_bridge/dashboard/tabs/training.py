@@ -481,27 +481,14 @@ _TOP_LEVEL_PHASE_CONFIG: tuple[tuple[str, str, str], ...] = (
     ("overhead_ms", "Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
 )
 
-_LEGACY_TOP_LEVEL_CONFIG: tuple[tuple[str, str, str], ...] = (
-    ("forward_solve_ms", "Forward (legacy)", PERFORMANCE_PHASE_COLORS["forward"]),
-    ("backward_solve_ms", "Backward (legacy)", PERFORMANCE_PHASE_COLORS["backward"]),
-    ("cut_selection_ms", "Cut Selection", PERFORMANCE_PHASE_COLORS["lp_solve"]),
-    ("lower_bound_ms", "Lower Bound Eval", "#14B8A6"),
-    ("mpi_broadcast_ms", "MPI Broadcast", "#8B5CF6"),
-    ("overhead_ms", "Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
-)
-
-
 def _active_top_level_phases(
     timing: pd.DataFrame,
 ) -> list[tuple[str, str, str]]:
     """Pick the top-level non-overlapping phase columns present in ``timing``."""
-    config = (
-        _TOP_LEVEL_PHASE_CONFIG
-        if "forward_wall_ms" in timing.columns
-        else _LEGACY_TOP_LEVEL_CONFIG
-    )
     return [
-        (col, label, color) for col, label, color in config if col in timing.columns
+        (col, label, color)
+        for col, label, color in _TOP_LEVEL_PHASE_CONFIG
+        if col in timing.columns
     ]
 
 

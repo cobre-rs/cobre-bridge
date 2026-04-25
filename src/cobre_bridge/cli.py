@@ -229,7 +229,7 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     if args.validate:
         try:
-            import cobre.io  # type: ignore[import-untyped]  # noqa: F401
+            import cobre.io  # type: ignore[import-untyped]
         except ImportError:
             print(
                 "Warning: cobre package not installed, skipping validation",
@@ -238,14 +238,22 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
             sys.exit(0)
 
         try:
-            import cobre.io.validate as cobre_validate  # type: ignore[import-untyped]
-
-            result = cobre_validate.validate(dst)
-            if result is not None and not result:
-                print("Validation failed.", file=sys.stderr)
-                sys.exit(2)
+            # cobre v0.5.0: cobre.io.validate is a function returning a
+            # report dict; it never raises (errors are surfaced as data).
+            result = cobre.io.validate(str(dst))
         except Exception as exc:  # noqa: BLE001
             print(f"Validation error: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+        def _msg(item: object) -> object:
+            return item.get("message", item) if isinstance(item, dict) else item
+
+        for warning in result.get("warnings", []):
+            print(f"Validation warning: {_msg(warning)}", file=sys.stderr)
+        if not result.get("valid", False):
+            for err in result.get("errors", []):
+                print(f"Validation error: {_msg(err)}", file=sys.stderr)
+            print("Validation failed.", file=sys.stderr)
             sys.exit(2)
 
     sys.exit(0)
