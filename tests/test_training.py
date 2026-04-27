@@ -64,13 +64,13 @@ def _make_cut_selection(n_stages: int = 5, n_iters: int = 10) -> pd.DataFrame:
 
 
 def _make_timing(n: int = 10) -> pd.DataFrame:
-    """Synthetic timing DataFrame."""
+    """Synthetic timing DataFrame matching cobre v0.5.0 schema."""
     iterations = list(range(1, n + 1))
     return pd.DataFrame(
         {
             "iteration": iterations,
             "forward_wall_ms": [100.0 + i for i in range(n)],
-            "fwd_rayon_overhead_ms": [5.0 + i for i in range(n)],
+            "fwd_setup_ms": [5.0 + i for i in range(n)],
             "backward_wall_ms": [150.0 + i for i in range(n)],
             "lower_bound_ms": [10.0 + i for i in range(n)],
             "cut_selection_ms": [40.0 + i for i in range(n)],

@@ -118,9 +118,6 @@ def _build_metrics_row(data: DashboardData) -> str:
             # column would double-count sub-components (e.g. cut_sync_ms sits
             # inside backward_wall_ms).
             top_level = [c for c in TOP_LEVEL_PHASE_COLUMNS if c in timing.columns]
-            if not top_level:
-                legacy = ("forward_solve_ms", "backward_solve_ms", "overhead_ms")
-                top_level = [c for c in legacy if c in timing.columns]
             if top_level:
                 total_train_ms = float(timing[top_level].sum().sum())
         total_train_s = total_train_ms / 1000.0

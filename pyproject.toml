@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.4.4"
+version = "0.5.0"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -20,12 +20,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.3",
-    "ty>=0.0.29",
+    "ty>=0.0.32",
     "pytest-cov",
     "ruff",
 ]
 validation = [
-    "cobre-python>=0.4.4",
+    "cobre-python>=0.5.0",
 ]
 
 [project.scripts]
