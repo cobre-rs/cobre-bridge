@@ -481,6 +481,7 @@ _TOP_LEVEL_PHASE_CONFIG: tuple[tuple[str, str, str], ...] = (
     ("overhead_ms", "Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
 )
 
+
 def _active_top_level_phases(
     timing: pd.DataFrame,
 ) -> list[tuple[str, str, str]]:
