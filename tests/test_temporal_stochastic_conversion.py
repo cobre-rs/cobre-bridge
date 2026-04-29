@@ -89,6 +89,7 @@ def _make_dger_mock(
     tipo_simulacao_final: int = 1,
     considera_reamostragem_cenarios: int = 0,
     ano_inicial_historico: int = 1931,
+    consideracao_media_anual_afluencias: int | None = None,
 ) -> MagicMock:
     dger = MagicMock()
     dger.mes_inicio_estudo = mes_inicio
@@ -106,6 +107,7 @@ def _make_dger_mock(
     dger.tipo_simulacao_final = tipo_simulacao_final
     dger.considera_reamostragem_cenarios = considera_reamostragem_cenarios
     dger.ano_inicial_historico = ano_inicial_historico
+    dger.consideracao_media_anual_afluencias = consideracao_media_anual_afluencias
     return dger
 
 
@@ -802,6 +804,62 @@ class TestConvertConfig:
         result = convert_config(_make_nw_files(tmp_path))
         assert result["training"]["enabled"] is False
         assert "scenario_source" not in result["training"]
+
+    # -- consideracao_media_anual_afluencias / estimation.order_selection --
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_order_selection_omitted_when_field_absent(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        """Old NEWAVE files lacking the field → omit order_selection (cobre default)."""
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(consideracao_media_anual_afluencias=None)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert "order_selection" not in result["estimation"]
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_order_selection_pacf_when_zero(self, mock_dger_cls, tmp_path) -> None:
+        """consideracao_media_anual_afluencias=0 → classical PAR(p) → 'pacf'."""
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(consideracao_media_anual_afluencias=0)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["estimation"]["order_selection"] == "pacf"
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_order_selection_pacf_annual_when_three(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        """consideracao_media_anual_afluencias=3 (exact PAR(p)-A) → 'pacf_annual'."""
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(consideracao_media_anual_afluencias=3)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["estimation"]["order_selection"] == "pacf_annual"
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_order_selection_pacf_annual_when_one_or_two(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        """Approximate PAR(p)-A variants (1, 2) also map to 'pacf_annual'."""
+        from cobre_bridge.converters.temporal import convert_config
+
+        for value in (1, 2):
+            (tmp_path / "dger.dat").touch()
+            dger = _make_dger_mock(consideracao_media_anual_afluencias=value)
+            mock_dger_cls.read.return_value = dger
+            result = convert_config(_make_nw_files(tmp_path))
+            assert result["estimation"]["order_selection"] == "pacf_annual"
 
 
 # ---------------------------------------------------------------------------

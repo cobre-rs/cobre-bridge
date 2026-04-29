@@ -361,6 +361,31 @@ def convert_config(nw_files: NewaveFiles) -> dict:
     num_series: int = dger.num_series_sinteticas or 200
     max_order: int = dger.ordem_maxima_parp or 6
 
+    # consideracao_media_anual_afluencias (dger.dat line 83):
+    #   0 → classical PAR(p), maps to Cobre "pacf"
+    #   1, 2, 3 → PAR(p)-A variants; Cobre implements the exact PDDE form
+    #             (NEWAVE option 3) under "pacf_annual".
+    consideracao_anual: int | None = dger.consideracao_media_anual_afluencias
+    if consideracao_anual is None:
+        order_selection: str | None = None
+    elif consideracao_anual == 0:
+        order_selection = "pacf"
+    else:
+        if consideracao_anual not in (1, 2, 3):
+            logger.warning(
+                "Unexpected consideracao_media_anual_afluencias=%d; "
+                "treating as PAR(p)-A (pacf_annual).",
+                consideracao_anual,
+            )
+        elif consideracao_anual in (1, 2):
+            logger.warning(
+                "consideracao_media_anual_afluencias=%d (approximate PAR(p)-A) "
+                "mapped to Cobre 'pacf_annual', which implements only the exact "
+                "12-axis variant (NEWAVE option 3).",
+                consideracao_anual,
+            )
+        order_selection = "pacf_annual"
+
     tipo_execucao: int = dger.tipo_execucao if dger.tipo_execucao is not None else 1
     tipo_simulacao_final: int = (
         dger.tipo_simulacao_final if dger.tipo_simulacao_final is not None else 1
@@ -427,14 +452,16 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             }
         simulation_section["scenario_source"] = sim_source
 
+    estimation: dict = {"max_order": max_order}
+    if order_selection is not None:
+        estimation["order_selection"] = order_selection
+
     config: dict = {
         "$schema": (
             "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
             "/book/src/schemas/config.schema.json"
         ),
-        "estimation": {
-            "max_order": max_order,
-        },
+        "estimation": estimation,
         "training": training_section,
         "modeling": {
             "inflow_non_negativity": {
