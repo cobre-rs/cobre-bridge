@@ -11,10 +11,12 @@ from __future__ import annotations
 class NewaveIdMap:
     """Bidirectional ID map from NEWAVE 1-based codes to Cobre 0-based IDs.
 
-    The remapping is deterministic: sort the input NEWAVE IDs in ascending
-    order, assign Cobre IDs 0, 1, 2, … in that order.  This guarantees
-    declaration-order invariance — the output is the same regardless of
-    the order in which callers pass the ID lists.
+    Subsystems and thermals are remapped deterministically by sorting the
+    input NEWAVE IDs ascending and assigning Cobre IDs 0, 1, 2, … in that
+    order.  Hydros are remapped in the order the codes are passed in,
+    which the pipeline supplies as the ``confhd.dat`` declaration order;
+    this preserves the upstream-to-downstream layout authors typically
+    encode in that file.
 
     Parameters
     ----------
@@ -22,8 +24,8 @@ class NewaveIdMap:
         Iterable of NEWAVE subsystem (submercado) codes to register,
         including fictitious ones.  Each unique code maps to one bus ID.
     hydro_codes:
-        Iterable of NEWAVE hydro plant codes (``codigo_usina`` from
-        ``confhd.dat``).
+        NEWAVE hydro plant codes (``codigo_usina`` from ``confhd.dat``)
+        in declaration order.  Cobre hydro IDs are assigned in this order.
     thermal_codes:
         Iterable of NEWAVE thermal plant codes (``codigo_usina`` from
         ``conft.dat``).
@@ -41,7 +43,7 @@ class NewaveIdMap:
         }
         self._hydro: dict[int, int] = {
             newave_id: cobre_id
-            for cobre_id, newave_id in enumerate(sorted(hydro_codes))
+            for cobre_id, newave_id in enumerate(hydro_codes)
         }
         self._thermal: dict[int, int] = {
             newave_id: cobre_id
@@ -85,8 +87,8 @@ class NewaveIdMap:
 
     @property
     def all_hydro_codes(self) -> list[int]:
-        """Sorted list of registered NEWAVE hydro codes."""
-        return sorted(self._hydro)
+        """NEWAVE hydro codes in Cobre-ID order (confhd.dat declaration order)."""
+        return list(self._hydro)
 
     @property
     def all_thermal_codes(self) -> list[int]:

@@ -78,14 +78,14 @@ class TestNewaveIdMap:
         assert id_map.bus_id(3) == 2
         assert id_map.bus_id(4) == 3
 
-    def test_hydro_id_remapping(self) -> None:
+    def test_hydro_id_remapping_preserves_confhd_order(self) -> None:
         id_map = NewaveIdMap(
             subsystem_ids=[],
             hydro_codes=[10, 5, 20],
             thermal_codes=[],
         )
-        assert id_map.hydro_id(5) == 0
-        assert id_map.hydro_id(10) == 1
+        assert id_map.hydro_id(10) == 0
+        assert id_map.hydro_id(5) == 1
         assert id_map.hydro_id(20) == 2
 
     def test_thermal_id_remapping(self) -> None:
@@ -107,11 +107,11 @@ class TestNewaveIdMap:
         with pytest.raises(KeyError):
             id_map.thermal_id(99)
 
-    def test_all_hydro_codes_sorted(self) -> None:
+    def test_all_hydro_codes_in_cobre_id_order(self) -> None:
         id_map = NewaveIdMap(
             subsystem_ids=[], hydro_codes=[30, 10, 20], thermal_codes=[]
         )
-        assert id_map.all_hydro_codes == [10, 20, 30]
+        assert id_map.all_hydro_codes == [30, 10, 20]
 
     def test_deterministic_regardless_of_input_order(self) -> None:
         a = NewaveIdMap(subsystem_ids=[2, 1, 3], hydro_codes=[], thermal_codes=[])
