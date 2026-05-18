@@ -439,6 +439,17 @@ def read_medias_market(saidas_dir: Path) -> pl.DataFrame:
     return _read_medias_csv(saidas_dir, "MEDIAS-MERC.CSV")
 
 
+def read_medias_sin(saidas_dir: Path) -> pl.DataFrame:
+    """Read MEDIAS-SIN.CSV (system interconnected aggregate).
+
+    Returns DataFrame with columns ``newave_code`` (always 0 for SIN),
+    ``stage``, ``variable``, ``value``.  Useful variables include
+    ``EARMF`` (stored energy final, MWmes), ``ENA`` (natural energy
+    inflow, MWmes), ``EARMFP`` (percentage of max storage).
+    """
+    return _read_medias_csv(saidas_dir, "MEDIAS-SIN.CSV")
+
+
 def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     """Read deterministic net load from ``sistema.dat`` and ``c_adic.dat``.
 

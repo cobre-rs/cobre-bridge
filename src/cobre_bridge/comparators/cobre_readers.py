@@ -139,7 +139,9 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
 
     Returns DataFrame with columns: ``entity_id``, ``stage_id``,
     ``storage_final_hm3``, ``generation_mw``, ``turbined_m3s``,
-    ``spillage_m3s``, ``inflow_m3s``, ``water_value_per_hm3``.
+    ``spillage_m3s``, ``inflow_m3s``, ``water_value_per_hm3``,
+    ``stored_energy_initial_mwh``, ``stored_energy_final_mwh``,
+    ``incremental_inflow_energy_mw``.
     """
     empty = pl.DataFrame(
         schema={
@@ -151,6 +153,9 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
             "spillage_m3s": pl.Float64,
             "inflow_m3s": pl.Float64,
             "water_value_per_hm3": pl.Float64,
+            "stored_energy_initial_mwh": pl.Float64,
+            "stored_energy_final_mwh": pl.Float64,
+            "incremental_inflow_energy_mw": pl.Float64,
         }
     )
 
@@ -159,7 +164,14 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
         return empty
 
     flow_cols = ["generation_mw", "turbined_m3s", "spillage_m3s"]
-    stage_cols = ["storage_final_hm3", "inflow_m3s", "water_value_per_hm3"]
+    stage_cols = [
+        "storage_final_hm3",
+        "inflow_m3s",
+        "water_value_per_hm3",
+        "stored_energy_initial_mwh",
+        "stored_energy_final_mwh",
+        "incremental_inflow_energy_mw",
+    ]
 
     available = set(lf.collect_schema().names())
     id_col = "hydro_id" if "hydro_id" in available else "entity_id"
@@ -390,7 +402,14 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
         return pl.DataFrame()
 
     flow_cols = ["generation_mw", "turbined_m3s", "spillage_m3s"]
-    stage_cols = ["storage_final_hm3", "inflow_m3s", "water_value_per_hm3"]
+    stage_cols = [
+        "storage_final_hm3",
+        "inflow_m3s",
+        "water_value_per_hm3",
+        "stored_energy_initial_mwh",
+        "stored_energy_final_mwh",
+        "incremental_inflow_energy_mw",
+    ]
     available = set(lf.collect_schema().names())
     id_col = "hydro_id" if "hydro_id" in available else "entity_id"
     avail_flow = [c for c in flow_cols if c in available]
@@ -656,11 +675,23 @@ def read_cobre_bus_aggregates(
     return merged.group_by("bus_id", "stage_id").agg(aggs).sort("bus_id", "stage_id")
 
 
-def read_cobre_cost_breakdown(cobre_output_dir: Path) -> dict[str, float]:
+def read_cobre_cost_breakdown(
+    cobre_output_dir: Path,
+    max_stage_id: int | None = None,
+) -> dict[str, float]:
     """Read cost breakdown from Cobre simulation costs entity.
 
     Returns ``{category: mean_total_R$}`` averaged across scenarios,
     summed across all stages and blocks.  Zero-cost categories are excluded.
+
+    Parameters
+    ----------
+    cobre_output_dir:
+        Path to the Cobre ``output/`` directory.
+    max_stage_id:
+        If provided, only include stages with ``stage_id <= max_stage_id``.
+        Used to make the cost breakdown comparable to NEWAVE, which usually
+        reports a shorter horizon than Cobre.
     """
     lf = _scan_simulation_entity(cobre_output_dir, "costs")
     if lf is None:
@@ -694,6 +725,9 @@ def read_cobre_cost_breakdown(cobre_output_dir: Path) -> dict[str, float]:
         return {}
 
     has_discount = "discount_factor" in available
+
+    if max_stage_id is not None and "stage_id" in available:
+        lf = lf.filter(pl.col("stage_id") <= max_stage_id)
 
     try:
         # Discount costs to present value, then sum per scenario.

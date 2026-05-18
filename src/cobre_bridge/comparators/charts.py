@@ -357,6 +357,114 @@ def _aggregate_percentile_traces(
     ]
 
 
+def cobre_aggregate_chart(
+    cobre_hydro: pl.DataFrame,
+    variable: str,
+    title: str,
+    unit: str,
+    pct_df: pl.DataFrame | None = None,
+    *,
+    nw_sin: pl.DataFrame | None = None,
+    nw_variable: str | None = None,
+    nw_factor: float = 1.0,
+    nw_offset: int = 0,
+    matched_ids: set[int] | None = None,
+) -> str:
+    """System-aggregate chart for a Cobre per-hydro variable.
+
+    Sums *variable* across all (or matched) hydros per stage to produce a
+    system-total mean line.  Adds a p10-p90 band from ``pct_df`` and an
+    optional NEWAVE SIN-level line from ``nw_sin`` (multiplied by
+    ``nw_factor`` for unit conversion).
+
+    Parameters
+    ----------
+    cobre_hydro:
+        Per-hydro Cobre means with ``entity_id``, ``stage_id``, and
+        ``variable`` columns.
+    variable:
+        Column name in ``cobre_hydro`` and percentile prefix in ``pct_df``.
+    title, unit:
+        Chart title and y-axis unit label.
+    pct_df:
+        Per-hydro Cobre percentiles for the same variable.
+    nw_sin:
+        Long-format NEWAVE SIN DataFrame (``newave_code``, ``stage``,
+        ``variable``, ``value``) — typically read by ``read_medias_sin``.
+    nw_variable:
+        Variable name to filter in ``nw_sin`` (e.g. ``"EARMF"``).
+    nw_factor:
+        Multiplicative factor applied to NEWAVE values for unit alignment
+        (e.g. ``730`` to convert MWmes → MWh).
+    nw_offset:
+        Subtracted from NEWAVE ``stage`` to align with Cobre ``stage_id``
+        (NEWAVE columns are numbered from the study start month).
+    matched_ids:
+        Optional subset of Cobre hydro IDs to include — keeps the
+        aggregate consistent with comparisons that only cover matched
+        plants.
+    """
+    if cobre_hydro.is_empty() or variable not in cobre_hydro.columns:
+        return f"<p>No {variable} data available.</p>"
+
+    df = cobre_hydro
+    if matched_ids is not None:
+        df = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
+
+    cobre_agg = (
+        df.group_by("stage_id").agg(pl.col(variable).sum().alias("v")).sort("stage_id")
+    )
+    cobre_by_stage = {
+        int(r["stage_id"]): float(r["v"]) for r in cobre_agg.iter_rows(named=True)
+    }
+
+    nw_by_stage: dict[int, float] = {}
+    if nw_sin is not None and nw_variable is not None and not nw_sin.is_empty():
+        sin_df = nw_sin.filter(
+            pl.col("variable").str.strip_chars().str.to_uppercase() == nw_variable
+        )
+        for r in sin_df.iter_rows(named=True):
+            stage_raw = r.get("stage")
+            val = r.get("value")
+            if stage_raw is None or val is None:
+                continue
+            s = int(stage_raw) - nw_offset
+            nw_by_stage[s] = nw_by_stage.get(s, 0.0) + float(val) * nw_factor
+
+    stages = sorted(set(cobre_by_stage) | set(nw_by_stage))
+
+    traces = _aggregate_percentile_traces(pct_df, variable, stages, matched_ids)
+    if nw_by_stage:
+        traces.append(
+            {
+                "x": stages,
+                "y": [nw_by_stage.get(s, 0) for s in stages],
+                "name": "NEWAVE SIN",
+                "type": "scatter",
+                "mode": "lines",
+                "line": {"color": COLOR_NEWAVE, "width": 2},
+            }
+        )
+    traces.append(
+        {
+            "x": stages,
+            "y": [cobre_by_stage.get(s, 0) for s in stages],
+            "name": "Cobre Mean",
+            "type": "scatter",
+            "mode": "lines",
+            "line": {"color": COLOR_COBRE, "width": 2},
+        }
+    )
+
+    layout = {
+        "title": title,
+        "xaxis": {"title": "Stage"},
+        "yaxis": {"title": f"{title} ({unit})"},
+    }
+
+    return _plotly_div(traces, layout)
+
+
 def hydro_aggregate_chart(
     results: list[ResultComparison],
     variable: str,
@@ -956,6 +1064,14 @@ _HYDRO_VARIABLES = [
     ("water_value_per_hm3", "Water Value (R$/hm³)"),
 ]
 
+# Cobre-only per-plant variables (NEWAVE has no per-plant equivalent).
+# Appended to the dropdown after the comparison variables.
+_HYDRO_COBRE_ONLY_VARIABLES = [
+    ("stored_energy_initial_mwh", "Stored Energy Initial (MWh)"),
+    ("stored_energy_final_mwh", "Stored Energy Final (MWh)"),
+    ("incremental_inflow_energy_mw", "Natural Inflow Energy (MW)"),
+]
+
 
 def _enrich_with_percentiles(
     js_plants: dict[str, dict],
@@ -993,8 +1109,14 @@ def _enrich_with_percentiles(
 def build_hydro_detail_tab(
     results: list[ResultComparison],
     pct_df: pl.DataFrame | None = None,
+    cobre_hydro: pl.DataFrame | None = None,
 ) -> str:
-    """Build interactive per-plant hydro detail with JS dropdown."""
+    """Build interactive per-plant hydro detail with JS dropdown.
+
+    Comparison variables (NEWAVE + Cobre) are populated from ``results``.
+    Cobre-only variables (EARM, ENA) are populated from ``cobre_hydro``
+    if provided — these display only the Cobre line and band.
+    """
     hydro_data = [r for r in results if r.entity_type == "hydro"]
     if not hydro_data:
         return "<p>No hydro data available.</p>"
@@ -1012,13 +1134,31 @@ def build_hydro_detail_tab(
     if not plants:
         return "<p>No hydro data available.</p>"
 
+    # Build cobre_id -> {var: {stage: value}} for cobre-only variables.
+    cobre_only_lookup: dict[int, dict[str, dict[int, float]]] = {}
+    cobre_only_vars = [v for v, _ in _HYDRO_COBRE_ONLY_VARIABLES]
+    if cobre_hydro is not None and not cobre_hydro.is_empty():
+        avail_vars = [v for v in cobre_only_vars if v in cobre_hydro.columns]
+        for row in cobre_hydro.iter_rows(named=True):
+            eid = int(row["entity_id"])
+            sid = int(row["stage_id"])
+            entry = cobre_only_lookup.setdefault(eid, {})
+            for v in avail_vars:
+                val = row.get(v)
+                if val is None:
+                    continue
+                entry.setdefault(v, {})[sid] = float(val)
+
+    all_vars = _HYDRO_VARIABLES + _HYDRO_COBRE_ONLY_VARIABLES
+
     js_plants: dict[str, dict] = {}
     for (name, nw_code), var_data in sorted(plants.items()):
         pid = f"{nw_code}_{name}"
+        cid = cobre_ids.get((name, nw_code), -1)
         entry: dict = {
             "name": name,
             "code": nw_code,
-            "cobre_id": cobre_ids.get((name, nw_code), -1),
+            "cobre_id": cid,
         }
         for var_key, _var_label in _HYDRO_VARIABLES:
             stage_data = var_data.get(var_key, {})
@@ -1026,13 +1166,20 @@ def build_hydro_detail_tab(
             entry[f"{var_key}_stages"] = stages
             entry[f"{var_key}_nw"] = [stage_data[s][0] for s in stages]
             entry[f"{var_key}_cb"] = [stage_data[s][1] for s in stages]
+        cobre_only = cobre_only_lookup.get(cid, {})
+        for var_key, _var_label in _HYDRO_COBRE_ONLY_VARIABLES:
+            stage_data_co = cobre_only.get(var_key, {})
+            stages = sorted(stage_data_co.keys())
+            entry[f"{var_key}_stages"] = stages
+            entry[f"{var_key}_nw"] = []
+            entry[f"{var_key}_cb"] = [round(stage_data_co[s], 2) for s in stages]
         js_plants[pid] = entry
 
-    _enrich_with_percentiles(js_plants, _HYDRO_VARIABLES, pct_df)
+    _enrich_with_percentiles(js_plants, all_vars, pct_df)
 
     return _build_interactive_detail_html(
         js_plants,
-        _HYDRO_VARIABLES,
+        all_vars,
         "hydro",
         "Hydro Plant",
     )
@@ -1157,8 +1304,10 @@ def _build_interactive_detail_html(
                     legendgroup: 'band', showlegend: false
                 }});
             }}
-            traces.push({{x: s, y: nw, name: 'NEWAVE', type: 'scatter',
-                mode: 'lines', line: {{color: '{COLOR_NEWAVE}', width: 2}}}});
+            if (nw && nw.length > 0) {{
+                traces.push({{x: s, y: nw, name: 'NEWAVE', type: 'scatter',
+                    mode: 'lines', line: {{color: '{COLOR_NEWAVE}', width: 2}}}});
+            }}
             traces.push({{x: s, y: cb, name: 'Cobre Mean', type: 'scatter',
                 mode: 'lines', line: {{color: '{COLOR_COBRE}', width: 2}}}});
             Plotly.react('{div_id}', traces, {{

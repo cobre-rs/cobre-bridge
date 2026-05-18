@@ -35,12 +35,18 @@ class PercentileData:
     bus_aggregates: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_market: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_net_load: pl.DataFrame = field(default_factory=pl.DataFrame)
+    nw_sin: pl.DataFrame = field(default_factory=pl.DataFrame)
+    cobre_hydro_means: pl.DataFrame = field(default_factory=pl.DataFrame)
     cobre_bus_meta: dict[int, dict] = field(default_factory=dict)
+    cobre_hydro_meta: dict[int, dict] = field(default_factory=dict)
     nw_bus_names: dict[int, str] = field(default_factory=dict)
+    nw_hydro_names: dict[int, str] = field(default_factory=dict)
     nw_convergence: pl.DataFrame = field(default_factory=pl.DataFrame)
     cobre_convergence: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_costs: dict[str, float] = field(default_factory=dict)
     cobre_costs: dict[str, float] = field(default_factory=dict)
+    nw_offset: int = 0
+    nw_max_stage: int | None = None
 
 
 @dataclass(frozen=True)
@@ -493,6 +499,7 @@ def compare_results(
         _find_saidas_dir,
         read_medias_hydro,
         read_medias_market,
+        read_medias_sin,
         read_medias_system,
         read_medias_thermal,
         read_newave_net_load,
@@ -512,10 +519,21 @@ def compare_results(
     # Locate NEWAVE saidas directory.
     saidas_dir = _find_saidas_dir(nw_files.directory)
 
+    nw_offset = 0
+    nw_max_stage_1based: int | None = None
+    cobre_hydro = pl.DataFrame()
+
     # --- Hydro comparison ---
     if saidas_dir is not None:
         nw_hydro = read_medias_hydro(saidas_dir)
         cobre_hydro = read_cobre_hydro_means(cobre_output_dir)
+        if not nw_hydro.is_empty():
+            nw_offset = _nw_stage_offset(nw_hydro)
+            stages_col = nw_hydro["stage"].drop_nulls()
+            if not stages_col.is_empty():
+                max_val = stages_col.max()
+                if max_val is not None:
+                    nw_max_stage_1based = int(max_val)  # type: ignore[arg-type]
         if not nw_hydro.is_empty() and not cobre_hydro.is_empty():
             _LOG.info("Comparing hydro results...")
             results.extend(
@@ -559,16 +577,31 @@ def compare_results(
         results.extend(_compare_productivity(alignment, nw_prod, cobre_meta))
 
     # --- Cost breakdown ---
-    _LOG.info("Reading cost breakdowns...")
+    # NEWAVE typically runs a shorter horizon than Cobre.  Restrict
+    # Cobre's cost sum to NEWAVE's stage range so the totals compare like-
+    # for-like.  ``nw_max_stage_1based`` is the largest stage label
+    # appearing in MEDIAS files; convert to Cobre's 0-based stage_id by
+    # subtracting the NEWAVE start-month offset.
+    nw_max_stage_0based: int | None = None
+    if nw_max_stage_1based is not None:
+        nw_max_stage_0based = nw_max_stage_1based - nw_offset
+
+    _LOG.info(
+        "Reading cost breakdowns (NEWAVE max stage_0based=%s)...", nw_max_stage_0based
+    )
     nw_costs = read_pmo_cost_breakdown(nw_files.directory)
-    cobre_costs = read_cobre_cost_breakdown(cobre_output_dir)
+    cobre_costs = read_cobre_cost_breakdown(
+        cobre_output_dir, max_stage_id=nw_max_stage_0based
+    )
 
     # --- Bus-level energy balance ---
     _LOG.info("Computing bus-level aggregates...")
     bus_aggregates = read_cobre_bus_aggregates(cobre_output_dir)
     nw_market = pl.DataFrame()
+    nw_sin = pl.DataFrame()
     if saidas_dir is not None:
         nw_market = read_medias_market(saidas_dir)
+        nw_sin = read_medias_sin(saidas_dir)
 
     # --- NEWAVE deterministic net load (load - NCS from sistema.dat) ---
     nw_net_load = read_newave_net_load(nw_files.directory)
@@ -584,10 +617,16 @@ def compare_results(
         cobre_convergence=cobre_conv,
         nw_market=nw_market,
         nw_net_load=nw_net_load,
+        nw_sin=nw_sin,
+        cobre_hydro_means=cobre_hydro,
         cobre_bus_meta=cobre_bus_meta,
+        cobre_hydro_meta=cobre_hydro_meta,
         nw_bus_names=nw_bus_names,
+        nw_hydro_names=nw_hydro_names,
         nw_costs=nw_costs,
         cobre_costs=cobre_costs,
+        nw_offset=nw_offset,
+        nw_max_stage=nw_max_stage_0based,
     )
 
     _LOG.info("Results comparison: %d total comparisons", len(results))
