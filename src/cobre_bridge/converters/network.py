@@ -45,44 +45,58 @@ _NCS_FACTORS_SCHEMA_URL = (
 # Source: NEWAVE User Manual v29 (CEPEL/ONS, 2023), section 3.24 "Penalidades
 # (Ex.: Penalid.dat)" and the internal-default tables on pages 87–88.
 #
-# Time-aspect summary (re-derived carefully):
+# Time-aspect summary (re-derived from cobre/crates/cobre-sddp/src/lp_builder/
+# matrix.rs in current HEAD):
 #
-# NEWAVE's individualized LP integrates time into the slack variable: the
-# flow-domain slack is in hm³ (cumulative volume over the stage = month);
-# the penalty unit `(R$/hm³)(mês/h)` then charges over the block as
-#   cost = P_indiv × hm³_slack × block_hours
-# with `month_hours = 730` assumed throughout. The (mês/h) suffix means the
-# coefficient is read "per hour of slack", so multiplying by block_hours
-# gives the per-block charge.
+# Every cobre penalty coefficient in penalties.json is multiplied by some
+# hours quantity before entering the LP objective. The variable it sits on
+# (MW, m³/s, or hm³) and the time multiplier (block_hours, total_stage_hours,
+# or none) together determine the unit the user-facing value must be in.
+# The pattern is "(penalty × hours) × variable_value = R$":
 #
-# Cobre's LP keeps the slack as a RATE (m³/s) per block and multiplies the
-# stored coefficient by the actual `block_hours` from stages.json:
-#     bufs.objective[col] = hp.spillage_cost * block_hours;
+# Family A — Power columns (MW), per block. Variable carries MW for one block.
+#   Cobre: `objective[col] = penalty × block_hours`
+#   Cost  = (penalty × block_h) × MW = penalty × MWh → penalty unit R$/MWh.
+#   Affected: bus.deficit_segments[].cost, bus.excess_cost, line.exchange_cost,
+#   ncs.curtailment_cost, hydro.generation_violation_below_cost.
+#   → Conversion from NEWAVE R$/MWh: **direct** (no productivity factor).
 #
-# Dimensional equivalences for 1 m³/s slack over T hours:
-#   NEWAVE cost = P_R$_MWh × ρ × T   (because slack releases ρ × T MWh)
-#   Cobre cost  = cobre_coef × T × 1 = cobre_coef × T
-#   →  cobre_coef = P_R$_MWh × ρ      (flow-domain conversion)
+# Family B — Flow columns (m³/s), per block. Variable carries m³/s for one block.
+#   Cobre: `objective[col] = penalty × block_hours`
+#   Cost  = (penalty × block_h) × m³/s.  For this to equal R$ the penalty
+#   must be R$/(m³/s · h). NEWAVE supplies R$/MWh; the per-flow-per-hour
+#   form requires multiplying by ρ [MW/(m³/s)]:
+#     R$/MWh × MW/(m³/s) = R$/(m³/s · h).
+#   Affected: hydro.spillage_cost, hydro.fpha_turbined_cost, hydro.diversion_cost,
+#   hydro.outflow_violation_(below|above)_cost, hydro.turbined_violation_below_cost.
+#   → Conversion: **× ρ_avg** (`PROD_MEDIA_SIN`).
 #
-# This is independent of whether cobre's stages.json totals match NEWAVE's
-# 730h-per-month assumption — both sides use the same `block_hours`. Small
-# numerical drift (~2 %) appears only because cobre uses calendar hours
-# (720–744) while NEWAVE assumes a flat 730.
+# Family C — Flow columns (m³/s), per stage. Same as B but cobre uses
+# `total_stage_hours` instead of `block_hours`.
+#   Affected: hydro.water_withdrawal_violation_(pos|neg)_cost,
+#   hydro.evaporation_violation_(pos|neg)_cost,
+#   hydro.inflow_nonnegativity_cost.
+#   Cobre's docstring on evaporation_violation_cost says "$/mm" but the
+#   actual LP column (matrix.rs:346-347) reads f_evap_plus/minus as flow rates
+#   in m³/s — same unit as withdrawal. The "_m3s" suffix in the simulation
+#   output `evaporation_violation_pos_m3s` confirms this.
+#   → Conversion: **× ρ_max_acum** (`MAX_PRODTACUM_SIN`) for DESVIO and
+#     evaporation (per NEWAVE manual p.87); **× ρ_avg** for the others.
 #
-# For HM3-domain slacks (storage_violation_below_cost, filling_target_-
-# violation_cost): cobre charges `coef × hm³_slack` ONCE per stage (no
-# `× block_hours` step). 1 hm³ of stored water represents
-#   1e6 m³ × ρ × (1 / 3600 s/h) = (1e6 / 3600) × ρ MWh = 277.78 × ρ MWh
-# of energy. Therefore the conversion is
-#   cobre_coef [R$/hm³] = P_R$_MWh × ρ × (MONTH_HOURS / C_M3S2HM3)
-#                       = P_R$_MWh × ρ × HM3_TO_MWH_PER_RHO
-# where HM3_TO_MWH_PER_RHO = 1e6 / 3600 ≈ 277.78 [MWh / (hm³ · ρ_unit)].
-# The 730 cancels in this derivation — it's a pure volumetric/energy
-# conversion, NOT a per-hour ratio.
+# Family D — Volume columns (hm³), per stage. Variable carries hm³ once per stage.
+#   Cobre: `objective[col] = penalty` (no time multiplier).
+#   Cost  = penalty × hm³ = R$ → penalty unit R$/hm³.
+#   Affected: hydro.storage_violation_below_cost, hydro.filling_target_violation_cost
+#   (both currently NOT wired into the LP — slot is dormant).
+#   Conversion: 1 hm³ × ρ → MWh of energy-equivalent is `(1e6 m³ / 3600 s/h) × ρ`
+#   = 277.78 × ρ MWh (purely volumetric — 730h convention cancels). So
+#     cobre_coef [R$/hm³] = NEWAVE_R$/MWh × ρ × HM3_TO_MWH_PER_RHO
+#   with HM3_TO_MWH_PER_RHO = 1e6/3600 ≈ 277.78.
 #
-# For energy-domain slacks (R$/MWh: bus deficit, excess, line exchange, NCS
-# curtailment, GHMIN generation slack) cobre's coefficient is the value
-# directly — no productivity multiplier, no hm³ conversion.
+# NEWAVE's 730 h-per-month convention vs cobre's actual calendar block_hours
+# (672–744 h) introduces only a ±2% numerical drift in absolute LP cost. It
+# does not change merit order or LP decisions (all costs scale together).
+# The HM3 → MWh conversion is pure volumetric and the 730 cancels out.
 #
 # Merit order from NEWAVE micro-penalty values (current v29 defaults):
 #   p_INT (0.000273) < p_PFIO (0.000300) < p_EVERT (0.000327)
@@ -126,6 +140,13 @@ _DEFAULT_FILLING_TARGET_VIOLATION_COST = 1.0e7  # R$/hm³ (dormant in cobre LP)
 # the slack enabled with a high penalty (10 × MAX_DEFICIT, matching
 # NEWAVE's evaporation/FPHA default magnitude).
 _ELETRI_HIGH_MULT = 10.0
+
+# --- Margin above max flow-domain slack for inflow non-negativity ----------
+# inflow_nonnegativity_cost is set 1 % above the strictest other flow-domain
+# slack so the LP never picks it over a "fixable" constraint while still
+# allowing it to fire when no alternative exists. The margin is robust to
+# floating-point noise yet small enough not to inflate the objective.
+_INFLOW_NN_MARGIN = 1.01
 
 
 def _build_canonical_pair_to_line_id(
@@ -510,16 +531,16 @@ def convert_penalties(
         else _DEFAULT_STORAGE_VIOLATION_BELOW_COST
     )
 
-    # Evaporation violation: no PENALID variable. Cobre's slack variable
-    # is in `mm` (not hm³) and the LP coefficient is R$/mm; cobre multiplies
-    # by total_stage_hours (matrix.rs line ~310). Bridging mm ↔ hm³
-    # requires per-plant reservoir surface area which cobre's global
-    # `evaporation_violation_cost` slot can't express. We emit a flat
-    # high deterrent in `R$/(mm · h)` units (10 × MAX_DEFICIT) — enough to
-    # keep the slack at zero in any sane case while staying dimensionally
-    # honest. Earlier versions multiplied by ρ_max_acum which was a unit
-    # mismatch (mixing flow-domain ρ with cobre's mm-domain slot).
-    evaporation_cost = _EVAPORATION_MULT * max_deficit_cost
+    # Evaporation violation: no PENALID variable. NEWAVE manual p.87 uses
+    # `(10 × MAX_CUSTO_DEFICIT × MAX_PRODTACUM_SIN) / C_M3S2HM3` for its own
+    # individualized (R$/hm³)(mês/h) form. Cobre's `f_evap_plus / f_evap_minus`
+    # slack columns are in **m³/s per stage** — cobre's docstring `$/mm` is
+    # misleading; matrix.rs:346-347 multiplies the coefficient by
+    # `total_stage_hours` and applies it to columns whose values come out in
+    # the `evaporation_violation_pos_m3s` parquet field. So the unit is
+    # R$/(m³/s · h), exactly the same flow-domain shape as water-withdrawal.
+    # The /C_M3S2HM3 step is dropped (only needed for NEWAVE's per-hm³ slot).
+    evaporation_cost = _EVAPORATION_MULT * max_deficit_cost * rho_max_acum
 
     # --------------------------------------------------------------------
     # NEWAVE micro-penalty defaults (page 88, current v29).
@@ -532,6 +553,28 @@ def convert_penalties(
     spillage_cost = _PEVERT * rho_avg
     fpha_turbined_cost = _PTURB * rho_avg
     diversion_cost = _PCDESV * rho_avg
+
+    # Inflow non-negativity: NEWAVE has no PENALID variable for this. Cobre's
+    # default is 1000 R$/(m³/s · h), which is far below the operationally-
+    # significant flow-domain slacks above (turbined / outflow / evaporation /
+    # water-withdrawal). When the LP can choose between letting incremental
+    # natural inflow go negative (a non-physical phenomenon — implies upstream
+    # is somehow "absorbing water" the cascade can't account for) and
+    # violating another flow constraint, we want it to *always* prefer fixing
+    # the other constraint first. To enforce a strict preference, we set this
+    # cost ~1 % above the maximum of the operationally-related flow-domain
+    # costs — guarantees the LP never preferentially violates inflow non-
+    # negativity unless there is no other available slack. The 1 % margin is
+    # large enough to be numerically robust against floating-point noise yet
+    # small enough that it doesn't dominate when this slack is genuinely the
+    # only viable path.
+    inflow_nonnegativity_cost = _INFLOW_NN_MARGIN * max(
+        turbined_below_cost,
+        outflow_below_cost,
+        outflow_above_cost,
+        evaporation_cost,
+        water_withdrawal_cost,
+    )
 
     return {
         "$schema": _PENALTIES_SCHEMA_URL,
@@ -556,6 +599,7 @@ def convert_penalties(
             "generation_violation_below_cost": generation_below_cost,
             "evaporation_violation_cost": evaporation_cost,
             "water_withdrawal_violation_cost": water_withdrawal_cost,
+            "inflow_nonnegativity_cost": inflow_nonnegativity_cost,
         },
         "line": {
             "exchange_cost": exchange_cost,

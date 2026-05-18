@@ -2497,6 +2497,7 @@ class TestConvertPenalties:
             "generation_violation_below_cost",
             "evaporation_violation_cost",
             "water_withdrawal_violation_cost",
+            "inflow_nonnegativity_cost",
         }
         assert required == set(result["hydro"].keys())
 
