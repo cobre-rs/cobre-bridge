@@ -830,6 +830,273 @@ def _render_reservoir_storage(data: DashboardData) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Section G — Stored Energy (EARM) and Section H — Natural Inflow Energy (ENA)
+# ---------------------------------------------------------------------------
+
+
+def _aggregate_hydro_column(
+    data: DashboardData,
+    column: str,
+    *,
+    block_filter: int | None = 0,
+) -> pl.DataFrame:
+    """Sum *column* across hydros per (scenario_id, stage_id).
+
+    When *block_filter* is given (default 0), filters the LazyFrame to that
+    block — appropriate for stage-level columns like ``stored_energy_*_mwh``.
+    Returns an empty DataFrame when the column is absent (older simulation
+    outputs without the cobre HEAD energy columns).
+    """
+    try:
+        lf = data.hydros_lf
+        if block_filter is not None:
+            lf = lf.filter(pl.col("block_id") == block_filter)
+        return (
+            lf.group_by(["scenario_id", "stage_id"])
+            .agg(pl.col(column).sum())
+            .sort("stage_id")
+            .collect(engine="streaming")
+        )
+    except (pl.exceptions.ColumnNotFoundError, KeyError):
+        return pl.DataFrame()
+
+
+def _aggregate_hydro_column_by_bus(
+    data: DashboardData,
+    column: str,
+    *,
+    block_filter: int | None = 0,
+) -> pl.DataFrame:
+    """Sum *column* across hydros per (scenario_id, stage_id, bus_id)."""
+    try:
+        hbus_df = pl.DataFrame(
+            {
+                "hydro_id": list(data.hydro_bus_map.keys()),
+                "bus_id": list(data.hydro_bus_map.values()),
+            }
+        )
+        lf = data.hydros_lf
+        if block_filter is not None:
+            lf = lf.filter(pl.col("block_id") == block_filter)
+        return (
+            lf.join(hbus_df.lazy(), on="hydro_id")
+            .group_by(["scenario_id", "stage_id", "bus_id"])
+            .agg(pl.col(column).sum())
+            .sort("stage_id")
+            .collect(engine="streaming")
+        )
+    except (pl.exceptions.ColumnNotFoundError, KeyError):
+        return pl.DataFrame()
+
+
+def _energy_quantiles_fig(
+    df: pl.DataFrame,
+    value_col: str,
+    *,
+    stage_labels: dict[int, str],
+    y_title: str,
+    color: str,
+    scale: float = 1.0,
+) -> go.Figure:
+    """Build a stage-axis p10/p50/p90 figure from a (scenario, stage, value) frame.
+
+    *scale* is applied to the value (e.g. 1/1000 to convert MWh→GWh).
+    """
+    fig = go.Figure()
+    if df.is_empty():
+        fig.add_annotation(
+            text="No data.",
+            showarrow=False,
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+        )
+        fig.update_layout(margin=_MARGIN, legend=_LEGEND)
+        return fig
+
+    pdf = df.to_pandas().copy()
+    pdf["_scaled"] = pdf[value_col] * scale
+    pct = compute_percentiles(pdf, ["stage_id"], "_scaled")
+    stages = sorted(pct["stage_id"].tolist())
+    xlabels = stage_x_labels(stages, stage_labels)
+
+    for q_col, q_name, dash in [
+        ("p10", "P10", "dot"),
+        ("p50", "P50", "solid"),
+        ("p90", "P90", "dot"),
+    ]:
+        fig.add_trace(
+            go.Scatter(
+                x=xlabels,
+                y=pct[q_col].tolist(),
+                name=q_name,
+                mode="lines",
+                line={
+                    "color": color,
+                    "width": 2 if q_col == "p50" else 1.5,
+                    "dash": dash,
+                },
+            )
+        )
+
+    fig.update_layout(
+        xaxis_title="Stage",
+        yaxis_title=y_title,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
+        margin=_MARGIN,
+    )
+    return fig
+
+
+def _render_stored_energy(data: DashboardData) -> str:
+    """Stored energy (EARM) section.
+
+    Uses cobre HEAD's ``stored_energy_final_mwh`` column (per (stage, block,
+    hydro)). For each (scenario, stage) sums across all hydros at block_id=0,
+    converts MWh→GWh, and renders a p10/p50/p90 band. Optionally a per-bus
+    breakdown chart alongside.
+
+    Degrades gracefully when the column is absent in the simulation output.
+    """
+    sys_df = _aggregate_hydro_column(data, "stored_energy_final_mwh")
+    by_bus_df = _aggregate_hydro_column_by_bus(data, "stored_energy_final_mwh")
+
+    if sys_df.is_empty():
+        # Column absent — don't render the section at all to avoid an empty card.
+        return ""
+
+    sys_fig = _energy_quantiles_fig(
+        sys_df,
+        "stored_energy_final_mwh",
+        stage_labels=data.stage_labels,
+        y_title="System EARM (GWh)",
+        color=COLORS["hydro"],
+        scale=1.0 / 1000.0,
+    )
+
+    sys_card = make_chart_card(
+        sys_fig,
+        "Stored Energy (EARM) — System Aggregate (GWh)",
+        "v2-energy-earm-system",
+        height=420,
+    )
+
+    if not by_bus_df.is_empty():
+        import math as _math
+
+        bus_ids = sorted(by_bus_df["bus_id"].unique().to_list())
+        bus_ids = [b for b in bus_ids if b in data.non_fictitious_bus_ids]
+        n_cols = 2
+        n_rows = _math.ceil(max(len(bus_ids), 1) / n_cols)
+        titles = [data.bus_names.get(b, str(b)) for b in bus_ids]
+        while len(titles) < n_rows * n_cols:
+            titles.append("")
+
+        bus_fig = make_subplots(
+            rows=n_rows,
+            cols=n_cols,
+            shared_xaxes=False,
+            subplot_titles=titles,
+            vertical_spacing=0.18,
+            horizontal_spacing=0.08,
+        )
+        all_stages = sorted(by_bus_df["stage_id"].unique().to_list())
+        xlabels = stage_x_labels(all_stages, data.stage_labels)
+        for idx, bus_id in enumerate(bus_ids):
+            row = idx // n_cols + 1
+            col = idx % n_cols + 1
+            sub = by_bus_df.filter(pl.col("bus_id") == bus_id).to_pandas().copy()
+            sub["_gwh"] = sub["stored_energy_final_mwh"] / 1000.0
+            pct = compute_percentiles(sub, ["stage_id"], "_gwh")
+            pct["_x"] = pct["stage_id"].map(dict(zip(all_stages, xlabels)))
+            color = BUS_COLORS[idx % len(BUS_COLORS)]
+            add_mean_p50_band(
+                bus_fig,
+                pct,
+                "_x",
+                data.bus_names.get(bus_id, str(bus_id)),
+                color,
+                row=row,
+                col=col,
+            )
+            bus_fig.update_yaxes(title_text="GWh", row=row, col=col)
+
+        bus_fig.update_layout(
+            height=320 * n_rows + 60,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=11),
+            ),
+            margin=dict(l=60, r=30, t=80, b=50),
+        )
+        bus_card = make_chart_card(
+            bus_fig,
+            "EARM by Bus (GWh)",
+            "v2-energy-earm-by-bus",
+            height=max(320 * n_rows + 60, 420),
+        )
+        content = chart_grid([sys_card], single=True) + chart_grid(
+            [bus_card], single=True
+        )
+    else:
+        content = chart_grid([sys_card], single=True)
+
+    return collapsible_section(
+        "Stored Energy (EARM)",
+        content,
+        section_id="v2-energy-earm-section",
+        default_collapsed=False,
+    )
+
+
+def _render_inflow_energy(data: DashboardData) -> str:
+    """Natural inflow energy (ENA) section.
+
+    Uses ``incremental_inflow_energy_mw`` (a power, MW). System aggregate sums
+    across hydros per (scenario, stage) at block_id=0 and shows the
+    p10/p50/p90 band. Returns an empty string when the column is absent.
+    """
+    sys_df = _aggregate_hydro_column(data, "incremental_inflow_energy_mw")
+    if sys_df.is_empty():
+        return ""
+
+    sys_fig = _energy_quantiles_fig(
+        sys_df,
+        "incremental_inflow_energy_mw",
+        stage_labels=data.stage_labels,
+        y_title="System ENA (MW)",
+        color=GENERATION_COLORS.get("hydro", COLORS["hydro"]),
+    )
+
+    sys_card = make_chart_card(
+        sys_fig,
+        "Natural Inflow Energy (ENA) — System Aggregate (MW)",
+        "v2-energy-ena-system",
+        height=420,
+    )
+
+    return collapsible_section(
+        "Natural Inflow Energy (ENA)",
+        chart_grid([sys_card], single=True),
+        section_id="v2-energy-ena-section",
+        default_collapsed=False,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Section F — NCS & Curtailment (collapsible, collapsed by default)
 # ---------------------------------------------------------------------------
 
@@ -1451,6 +1718,13 @@ def render(data: DashboardData) -> str:
     # Section E — reservoir storage (collapsible, default collapsed)
     storage_html = _render_reservoir_storage(data)
 
+    # Section G — stored energy (EARM), new cobre HEAD columns; renders empty
+    # string when the simulation output lacks the energy columns.
+    earm_html = _render_stored_energy(data)
+
+    # Section H — natural inflow energy (ENA), new cobre HEAD column.
+    ena_html = _render_inflow_energy(data)
+
     # Section F — NCS & curtailment (collapsible, default collapsed)
     ncs_html = _render_ncs_curtailment(data)
 
@@ -1460,5 +1734,7 @@ def render(data: DashboardData) -> str:
         + by_bus_html
         + deficit_excess_html
         + storage_html
+        + earm_html
+        + ena_html
         + ncs_html
     )

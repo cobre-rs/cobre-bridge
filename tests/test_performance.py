@@ -650,3 +650,92 @@ def test_render_empty_solver() -> None:
         or "No scaling report" in html
         or "No retry data" in html
     )
+
+
+# ---------------------------------------------------------------------------
+# Lightweight payload tests — boxplots and scatters must not emit per-sample
+# raw arrays. The size-of-dashboard scaling work depends on this invariant.
+# ---------------------------------------------------------------------------
+
+
+class TestLightweightPayloads:
+    """Long-run dashboards used to grow to GB-scale because per-iteration box
+    plots and scatter charts dumped every raw sample into the HTML. These
+    tests pin the lighter payloads in place so future edits don't regress.
+    """
+
+    def _backward_synthetic_frame(
+        self, n_iter: int = 20, n_stages: int = 30, n_openings: int = 10
+    ) -> pd.DataFrame:
+        """Reasonably-large synthetic backward solver frame."""
+        rows: list[dict] = []
+        for i in range(n_iter):
+            for s in range(n_stages):
+                for o in range(n_openings):
+                    rows.append(
+                        {
+                            "iteration": i,
+                            "phase": "backward",
+                            "stage": s,
+                            "opening": o,
+                            "rank": 0,
+                            "worker_id": 0,
+                            "lp_solves": 1,
+                            "solve_time_ms": float((i + s + o) % 50 + 1),
+                            "simplex_iterations": (i + s * 2 + o) % 100 + 1,
+                        }
+                    )
+        return pd.DataFrame(rows)
+
+    def test_per_opening_solve_time_box_carries_no_raw_points(self) -> None:
+        from cobre_bridge.dashboard.tabs.performance_charts import (
+            chart_backward_per_opening_solve_time,
+        )
+
+        df = self._backward_synthetic_frame()
+        html = chart_backward_per_opening_solve_time(df)
+        # Box trace must use pre-aggregated stats, never a `"y":[`
+        # array longer than the number of stages.
+        assert '"type":"box"' in html
+        # The aggregated fields are present.
+        assert '"q1":[' in html
+        assert '"median":[' in html
+        assert '"q3":[' in html
+        assert '"lowerfence":[' in html
+        assert '"upperfence":[' in html
+        # No raw y array embedding per-sample solve times.
+        # (The pre-aggregated API never emits a top-level `"y":[...]`.)
+        assert '"y":[' not in html
+
+    def test_per_opening_simplex_box_carries_no_raw_points(self) -> None:
+        from cobre_bridge.dashboard.tabs.performance_charts import (
+            chart_backward_per_opening_simplex,
+        )
+
+        df = self._backward_synthetic_frame()
+        html = chart_backward_per_opening_simplex(df)
+        assert '"type":"box"' in html
+        assert '"q1":[' in html
+        assert '"median":[' in html
+        assert '"y":[' not in html
+
+    def test_cuts_vs_solve_time_uses_customdata_not_text(self) -> None:
+        from cobre_bridge.dashboard.tabs.performance_charts import (
+            chart_cuts_vs_solve_time_scatter,
+        )
+
+        solver = self._backward_synthetic_frame(n_iter=10, n_stages=20, n_openings=5)
+        cuts = pd.DataFrame(
+            [
+                {"iteration": i, "stage": s, "cuts_active_after": (i + s) % 50 + 1}
+                for i in range(10)
+                for s in range(20)
+            ]
+        )
+        html = chart_cuts_vs_solve_time_scatter(solver, cuts)
+        assert '"type":"scatter"' in html
+        # Hover-template references customdata + marker.color, not a `"text":[`
+        # per-point string array. The prior implementation emitted one
+        # ~50-char string per sample which dominated long-run file size.
+        assert "customdata" in html
+        assert '"text":[' not in html

@@ -14,33 +14,70 @@ import polars as pl
 # Expression parser (copied verbatim from dashboard.py, imports updated)
 # ---------------------------------------------------------------------------
 
-# Matches terms like: [+/-] [coeff *] variable_type(id)
-# Examples: "5.68 * hydro_storage(78)", "hydro_generation(145)", "- line_exchange(4)"
+# Matches terms like: [+/-] [coeff *] [@name *] variable_type(id)
+# Examples:
+#   "5.68 * hydro_storage(78)"             — literal coefficient
+#   "hydro_generation(145)"                — implicit 1.0
+#   "- line_exchange(4)"                   — implicit -1.0
+#   "@rho_acum_h78 * hydro_storage(78)"    — @name coefficient (cobre HEAD sigil)
+#   "0.5 * @rho_eq_h47 * hydro_generation(47)"  — literal × @name scale
 _TERM_RE = _re.compile(
-    r"([+-]?\s*\d*\.?\d*)\s*\*?\s*(hydro_storage|hydro_generation|line_exchange)\((\d+)\)"
+    r"([+-]?\s*\d*\.?\d*)\s*\*?\s*(?:@([A-Za-z_][A-Za-z0-9_]*)\s*\*\s*)?"
+    r"(hydro_storage|hydro_generation|line_exchange)\((\d+)\)"
 )
 
+# A scalar-parameter reference resolved against simulation columns:
+#   rho_eq_h{id}    → equivalent_productivity_mw_per_m3s for that hydro
+#   rho_acum_h{id}  → accumulated_productivity_mw_per_m3s for that hydro
+_RHO_EQ_RE = _re.compile(r"^rho_eq_h(\d+)$")
+_RHO_ACUM_RE = _re.compile(r"^rho_acum_h(\d+)$")
 
-def _parse_expression(expr: str) -> list[tuple[float, str, int]]:
-    """Parse a constraint LHS expression into (coefficient, variable_type, entity_id) terms.
+
+def _resolve_param_to_column(name: str) -> tuple[str, int] | None:
+    """Map a parameter ``name`` to the (column, hydro_id) used to look it up.
+
+    Returns ``(simulation_column, hydro_id)`` for the two computed parameters
+    cobre-bridge declares (``rho_eq_h{id}``, ``rho_acum_h{id}``), or ``None``
+    when the name is unrecognised. The dashboard treats unrecognised
+    parameters as if they had value 0 to avoid a hard error.
+    """
+    m = _RHO_ACUM_RE.match(name)
+    if m is not None:
+        return "accumulated_productivity_mw_per_m3s", int(m.group(1))
+    m = _RHO_EQ_RE.match(name)
+    if m is not None:
+        return "equivalent_productivity_mw_per_m3s", int(m.group(1))
+    return None
+
+
+def _parse_expression(expr: str) -> list[tuple[float, str | None, str, int]]:
+    """Parse a constraint LHS expression into term tuples.
+
+    Returns a list of ``(literal_coeff, param_name_or_None, variable_type,
+    entity_id)`` tuples. The effective coefficient on the variable is
+    ``literal_coeff × value_of(param_name)`` when a parameter is present,
+    or ``literal_coeff`` otherwise.
 
     Handles:
     - Leading ``-`` with no explicit coefficient → -1.0
     - No coefficient → 1.0
     - ``0.5 * hydro_generation(47)`` → 0.5
+    - ``@rho_acum_h78 * hydro_storage(78)`` → (1.0, "rho_acum_h78", "hydro_storage", 78)
+    - ``- @rho_eq_h12 * hydro_generation(12)`` → (-1.0, "rho_eq_h12", "hydro_generation", 12)
     """
-    terms: list[tuple[float, str, int]] = []
+    terms: list[tuple[float, str | None, str, int]] = []
     for m in _TERM_RE.finditer(expr):
         raw_coeff = m.group(1).replace(" ", "")
-        var_type = m.group(2)
-        entity_id = int(m.group(3))
+        param_name = m.group(2)
+        var_type = m.group(3)
+        entity_id = int(m.group(4))
         if raw_coeff in ("", "+"):
             coeff = 1.0
         elif raw_coeff == "-":
             coeff = -1.0
         else:
             coeff = float(raw_coeff)
-        terms.append((coeff, var_type, entity_id))
+        terms.append((coeff, param_name, var_type, entity_id))
     return terms
 
 
@@ -70,28 +107,58 @@ def evaluate_constraint_expressions(
     Returns DataFrame with columns:
         constraint_id, scenario_id, stage_id, block_id, lhs_value
     """
-    # Parse ALL constraints to find which entity IDs are referenced
+    # Parse ALL constraints to find which entity IDs / parameters are referenced.
     hydro_ids_needed: set[int] = set()
     line_ids_needed: set[int] = set()
+    needs_rho_eq = False
+    needs_rho_acum = False
     for c in constraints:
-        for _coeff, vtype, eid in _parse_expression(c["expression"]):
+        for _coeff, param_name, vtype, eid in _parse_expression(c["expression"]):
             if vtype.startswith("hydro"):
                 hydro_ids_needed.add(eid)
             elif vtype == "line_exchange":
                 line_ids_needed.add(eid)
+            if param_name is not None:
+                resolved = _resolve_param_to_column(param_name)
+                if resolved is not None:
+                    col, _ = resolved
+                    if col == "equivalent_productivity_mw_per_m3s":
+                        needs_rho_eq = True
+                    elif col == "accumulated_productivity_mw_per_m3s":
+                        needs_rho_acum = True
 
-    # Collect only the referenced entities (tiny subset of full data)
+    # Collect only the referenced entities (tiny subset of full data). We pull
+    # productivity columns when any @name reference depends on them so the
+    # LHS evaluator can multiply the literal coefficient by the resolved
+    # productivity at solve time (mirrors cobre's @name resolution).
+    schema = hydros_lf.collect_schema()
+    h0_cols = ["scenario_id", "stage_id", "hydro_id", "storage_final_hm3"]
+    if needs_rho_eq and "equivalent_productivity_mw_per_m3s" in schema:
+        h0_cols.append("equivalent_productivity_mw_per_m3s")
+    if needs_rho_acum and "accumulated_productivity_mw_per_m3s" in schema:
+        h0_cols.append("accumulated_productivity_mw_per_m3s")
     h0_pd = (
         hydros_lf.filter(
             (pl.col("block_id") == 0) & pl.col("hydro_id").is_in(list(hydro_ids_needed))
         )
-        .select(["scenario_id", "stage_id", "hydro_id", "storage_final_hm3"])
+        .select(h0_cols)
         .collect(engine="streaming")
         .to_pandas()
     )
+    hg_cols = [
+        "scenario_id",
+        "stage_id",
+        "block_id",
+        "hydro_id",
+        "generation_mw",
+    ]
+    if needs_rho_eq and "equivalent_productivity_mw_per_m3s" in schema:
+        hg_cols.append("equivalent_productivity_mw_per_m3s")
+    if needs_rho_acum and "accumulated_productivity_mw_per_m3s" in schema:
+        hg_cols.append("accumulated_productivity_mw_per_m3s")
     hg_pd = (
         hydros_lf.filter(pl.col("hydro_id").is_in(list(hydro_ids_needed)))
-        .select(["scenario_id", "stage_id", "block_id", "hydro_id", "generation_mw"])
+        .select(hg_cols)
         .collect(engine="streaming")
         .to_pandas()
     )
@@ -122,13 +189,22 @@ def evaluate_constraint_expressions(
 
         if storage_only:
             # One LHS value per (scenario, stage) — use block_id 0
-            # Start with a base frame of all (scenario, stage) combos from h0
             base = h0_pd[["scenario_id", "stage_id"]].drop_duplicates().copy()
             base["_lhs"] = 0.0
-            for coeff, vtype, eid in terms:
-                sub = h0_pd[h0_pd["hydro_id"] == eid][
-                    ["scenario_id", "stage_id", "storage_final_hm3"]
-                ].rename(columns={"storage_final_hm3": "_val"})
+            for coeff, param_name, _vtype, eid in terms:
+                sub = h0_pd[h0_pd["hydro_id"] == eid].copy()
+                if sub.empty:
+                    continue
+                sub["_val"] = sub["storage_final_hm3"]
+                if param_name is not None:
+                    resolved = _resolve_param_to_column(param_name)
+                    if resolved is not None and resolved[0] in sub.columns:
+                        sub["_val"] = sub["_val"] * sub[resolved[0]].fillna(0.0)
+                    else:
+                        # Unknown / unresolved parameter contributes zero so we
+                        # don't pollute LHS with stale storage values.
+                        sub["_val"] = 0.0
+                sub = sub[["scenario_id", "stage_id", "_val"]]
                 merged = base.merge(sub, on=["scenario_id", "stage_id"], how="left")
                 merged["_val"] = merged["_val"].fillna(0.0)
                 base["_lhs"] = base["_lhs"].values + coeff * merged["_val"].values
@@ -147,34 +223,41 @@ def evaluate_constraint_expressions(
                 ]
             )
         else:
-            # Per (scenario, stage, block) — need consistent block grid
-            # Build base from hydro_generation block grid (always present)
+            # Per (scenario, stage, block) — need consistent block grid.
             base = (
                 hg_pd[["scenario_id", "stage_id", "block_id"]].drop_duplicates().copy()
             )
             base["_lhs"] = 0.0
 
-            for coeff, vtype, eid in terms:
+            for coeff, param_name, vtype, eid in terms:
                 if vtype == "hydro_storage":
-                    # Storage is stage-level: broadcast across all blocks
-                    sub = h0_pd[h0_pd["hydro_id"] == eid][
-                        ["scenario_id", "stage_id", "storage_final_hm3"]
-                    ].rename(columns={"storage_final_hm3": "_val"})
-                    merged = base.merge(sub, on=["scenario_id", "stage_id"], how="left")
+                    sub = h0_pd[h0_pd["hydro_id"] == eid].copy()
+                    if sub.empty:
+                        continue
+                    sub["_val"] = sub["storage_final_hm3"]
+                    join_cols = ["scenario_id", "stage_id"]
                 elif vtype == "hydro_generation":
-                    sub = hg_pd[hg_pd["hydro_id"] == eid][
-                        ["scenario_id", "stage_id", "block_id", "generation_mw"]
-                    ].rename(columns={"generation_mw": "_val"})
-                    merged = base.merge(
-                        sub, on=["scenario_id", "stage_id", "block_id"], how="left"
-                    )
+                    sub = hg_pd[hg_pd["hydro_id"] == eid].copy()
+                    if sub.empty:
+                        continue
+                    sub["_val"] = sub["generation_mw"]
+                    join_cols = ["scenario_id", "stage_id", "block_id"]
                 else:  # line_exchange
-                    sub = ex_pd[ex_pd["line_id"] == eid][
-                        ["scenario_id", "stage_id", "block_id", "net_flow_mw"]
-                    ].rename(columns={"net_flow_mw": "_val"})
-                    merged = base.merge(
-                        sub, on=["scenario_id", "stage_id", "block_id"], how="left"
-                    )
+                    sub = ex_pd[ex_pd["line_id"] == eid].copy()
+                    if sub.empty:
+                        continue
+                    sub["_val"] = sub["net_flow_mw"]
+                    join_cols = ["scenario_id", "stage_id", "block_id"]
+
+                if param_name is not None:
+                    resolved = _resolve_param_to_column(param_name)
+                    if resolved is not None and resolved[0] in sub.columns:
+                        sub["_val"] = sub["_val"] * sub[resolved[0]].fillna(0.0)
+                    else:
+                        sub["_val"] = 0.0
+
+                sub = sub[join_cols + ["_val"]]
+                merged = base.merge(sub, on=join_cols, how="left")
                 merged["_val"] = merged["_val"].fillna(0.0)
                 base["_lhs"] = base["_lhs"].values + coeff * merged["_val"].values
 

@@ -1487,11 +1487,16 @@ def chart_cuts_vs_solve_time_scatter(
 ) -> str:
     """Scatter of active cuts (x) vs avg solve ms/LP (y), coloured by stage.
 
-    One point per (iteration, stage) pair, backward phase. Reveals the
-    empirical cost-of-cut curve: cuts → LP size → solve time. Stages with
-    many cuts that DON'T solve slowly (lower-left of their hue band) are
-    well-warm-started; stages where cuts translate directly into LP time
-    (steep positive slope) are the cut-management targets.
+    One point per (iteration, stage, opening, worker) backward sample.
+    Reveals the empirical cost-of-cut curve: cuts → LP size → solve time.
+    Stages with many cuts that DON'T solve slowly (lower-left of their hue
+    band) are well-warm-started; stages where cuts translate directly into
+    LP time (steep positive slope) are the cut-management targets.
+
+    The serialised payload uses ``customdata = [iteration]`` per point and
+    a static ``hovertemplate`` instead of per-point formatted strings —
+    cuts ~80% of the previous chart-data bytes for long runs by avoiding
+    one ~50-char string per sample.
     """
     if solver_train.empty or cut_selection.empty:
         return "<p>Requires both solver and cut selection data.</p>"
@@ -1510,29 +1515,32 @@ def chart_cuts_vs_solve_time_scatter(
     if merged.empty:
         return "<p>No overlapping (iteration, stage) data.</p>"
 
+    # Round y to 2 decimals: solve-time visualisation does not need
+    # sub-10-µs precision and rounding compresses the JSON payload further.
+    y_vals = merged["ms_per_lp"].round(2).tolist()
+    x_vals = merged["cuts_active_after"].astype(int).tolist()
+    stage_vals = merged["stage"].astype(int).tolist()
+    iter_vals = merged["iteration"].astype(int).tolist()
+
     fig = go.Figure(
         go.Scatter(
-            x=merged["cuts_active_after"].tolist(),
-            y=merged["ms_per_lp"].tolist(),
+            x=x_vals,
+            y=y_vals,
             mode="markers",
             marker={
                 "size": 5,
-                "color": merged["stage"].tolist(),
+                "color": stage_vals,
                 "colorscale": "Viridis",
                 "colorbar": {"title": "Stage"},
                 "opacity": 0.7,
                 "line": {"width": 0},
             },
-            text=[
-                f"iter {it}, stage {st}, {cuts} cuts, {ms:.1f} ms/LP"
-                for it, st, cuts, ms in zip(
-                    merged["iteration"].tolist(),
-                    merged["stage"].tolist(),
-                    merged["cuts_active_after"].tolist(),
-                    merged["ms_per_lp"].tolist(),
-                )
-            ],
-            hovertemplate="%{text}<extra></extra>",
+            customdata=iter_vals,
+            hovertemplate=(
+                "iter %{customdata}, stage %{marker.color}<br>"
+                "%{x} cuts → %{y:.2f} ms/LP"
+                "<extra></extra>"
+            ),
         )
     )
     fig.update_layout(
@@ -1913,6 +1921,34 @@ def chart_backward_opening_0_share(solver_train: pd.DataFrame) -> str:
     return fig_to_html(fig)
 
 
+def _box_stats_by_stage(bwd: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """Aggregate per-(iter, opening) values into Tukey box statistics by stage.
+
+    Replaces the prior "ship every raw point" approach (which scales as
+    O(iterations × stages × openings) — easily multi-GB for long runs) with
+    a fixed-size summary: one row per stage carrying min / Q1 / median /
+    Q3 / max. The resulting frame is what Plotly's `go.Box` consumes via
+    the pre-aggregated API.
+    """
+    if value_col not in bwd.columns:
+        return pd.DataFrame(
+            columns=["stage", "q1", "median", "q3", "lowerfence", "upperfence"]
+        )
+    grouped = (
+        bwd.groupby("stage")[value_col]
+        .agg(
+            q1=lambda s: float(s.quantile(0.25)),
+            median=lambda s: float(s.median()),
+            q3=lambda s: float(s.quantile(0.75)),
+            lowerfence="min",
+            upperfence="max",
+        )
+        .reset_index()
+        .sort_values("stage")
+    )
+    return grouped
+
+
 def chart_backward_per_opening_solve_time(solver_train: pd.DataFrame) -> str:
     """Box plot of per-opening backward solve time (ms), grouped by stage.
 
@@ -1920,24 +1956,41 @@ def chart_backward_per_opening_solve_time(solver_train: pd.DataFrame) -> str:
     ``(iteration, stage, opening, rank, worker_id)``. Aggregating by stage
     exposes how much variability exists across openings and iterations at
     each stage — a fat tail signals LPs that swing wildly in difficulty.
+
+    The chart sends pre-aggregated box statistics (min / Q1 / median / Q3 /
+    max per stage) to Plotly rather than the raw points, so the embedded
+    payload is O(stages × 5) regardless of how many iterations / openings
+    fed the simulation. The prior per-point payload scaled linearly with
+    iterations and was the dominant size driver in long training runs.
     """
     bwd = _backward_per_opening_frame(solver_train)
     if bwd.empty:
         return "<p>No backward per-opening data available.</p>"
 
-    stages = sorted(bwd["stage"].unique().tolist())
-    fig = go.Figure()
-    for stage in stages:
-        sub = bwd[bwd["stage"] == stage]
-        fig.add_trace(
-            go.Box(
-                y=sub["solve_time_ms"].tolist(),
-                name=str(int(stage)),
-                boxpoints=False,
-                marker_color=COLORS["thermal"],
-                hovertemplate=f"Stage {int(stage)}: %{{y:.1f}} ms<extra></extra>",
-            )
+    stats = _box_stats_by_stage(bwd, "solve_time_ms")
+    if stats.empty:
+        return "<p>No backward per-opening data available.</p>"
+
+    stage_labels = [str(int(s)) for s in stats["stage"]]
+    fig = go.Figure(
+        go.Box(
+            x=stage_labels,
+            q1=stats["q1"].tolist(),
+            median=stats["median"].tolist(),
+            q3=stats["q3"].tolist(),
+            lowerfence=stats["lowerfence"].tolist(),
+            upperfence=stats["upperfence"].tolist(),
+            marker_color=COLORS["thermal"],
+            showlegend=False,
+            hovertemplate=(
+                "Stage %{x}<br>"
+                "median: %{median:.1f} ms<br>"
+                "Q1: %{q1:.1f} ms  Q3: %{q3:.1f} ms<br>"
+                "min: %{lowerfence:.1f} ms  max: %{upperfence:.1f} ms"
+                "<extra></extra>"
+            ),
         )
+    )
     fig.update_layout(
         title="Backward Solve Time per Opening — by stage (ms, log y)",
         xaxis_title="Stage",
@@ -1946,7 +1999,6 @@ def chart_backward_per_opening_solve_time(solver_train: pd.DataFrame) -> str:
         legend=_LEGEND,
         margin=_MARGIN,
         height=420,
-        showlegend=False,
     )
     return fig_to_html(fig)
 
@@ -1957,26 +2009,39 @@ def chart_backward_per_opening_simplex(solver_train: pd.DataFrame) -> str:
     Companion to :func:`chart_backward_per_opening_solve_time`. A high
     median at a stage means the LP is simply big; a high spread means
     opening-specific RHSs swing the warm-start basis in/out of optimality.
+
+    Same pre-aggregated-payload pattern as the solve-time companion: only
+    the per-stage min / Q1 / median / Q3 / max are serialised, not the raw
+    LP samples.
     """
     bwd = _backward_per_opening_frame(solver_train)
     if bwd.empty:
         return "<p>No backward per-opening data available.</p>"
 
-    stages = sorted(bwd["stage"].unique().tolist())
-    fig = go.Figure()
-    for stage in stages:
-        sub = bwd[bwd["stage"] == stage]
-        fig.add_trace(
-            go.Box(
-                y=sub["simplex_iterations"].tolist(),
-                name=str(int(stage)),
-                boxpoints=False,
-                marker_color=COLORS["hydro"],
-                hovertemplate=(
-                    f"Stage {int(stage)}: %{{y:,}} simplex iter<extra></extra>"
-                ),
-            )
+    stats = _box_stats_by_stage(bwd, "simplex_iterations")
+    if stats.empty:
+        return "<p>No backward per-opening data available.</p>"
+
+    stage_labels = [str(int(s)) for s in stats["stage"]]
+    fig = go.Figure(
+        go.Box(
+            x=stage_labels,
+            q1=stats["q1"].tolist(),
+            median=stats["median"].tolist(),
+            q3=stats["q3"].tolist(),
+            lowerfence=stats["lowerfence"].tolist(),
+            upperfence=stats["upperfence"].tolist(),
+            marker_color=COLORS["hydro"],
+            showlegend=False,
+            hovertemplate=(
+                "Stage %{x}<br>"
+                "median: %{median:,.0f} simplex iter<br>"
+                "Q1: %{q1:,.0f}  Q3: %{q3:,.0f}<br>"
+                "min: %{lowerfence:,.0f}  max: %{upperfence:,.0f}"
+                "<extra></extra>"
+            ),
         )
+    )
     fig.update_layout(
         title="Backward Simplex Iterations per Opening — by stage",
         xaxis_title="Stage",
@@ -1984,7 +2049,6 @@ def chart_backward_per_opening_simplex(solver_train: pd.DataFrame) -> str:
         legend=_LEGEND,
         margin=_MARGIN,
         height=420,
-        showlegend=False,
     )
     return fig_to_html(fig)
 

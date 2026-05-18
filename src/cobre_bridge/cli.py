@@ -238,7 +238,7 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
             sys.exit(0)
 
         try:
-            # cobre v0.5.0: cobre.io.validate is a function returning a
+            # cobre v0.6.x: cobre.io.validate is a function returning a
             # report dict; it never raises (errors are surfaced as data).
             result = cobre.io.validate(str(dst))
         except Exception as exc:  # noqa: BLE001

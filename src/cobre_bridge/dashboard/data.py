@@ -124,27 +124,109 @@ def load_ncs_bus_map(case_dir: Path) -> dict[int, int]:
     return {n["id"]: n["bus_id"] for n in d["non_controllable_sources"]}
 
 
+def _productivity_from_energy_parquet(case_dir: Path) -> dict[int, float]:
+    """Return ``{hydro_id: ρ_eq}`` from ``hydro_energy_productivity.parquet``.
+
+    Cobre's productivity-resolution-rules contract puts per-(hydro, stage)
+    ρ_eq in the parquet override table. We prefer the per-hydro NULL-stage_id
+    "default" row and fall back to the smallest-stage_id row when no default
+    exists. Returns ``{}`` when the file is absent.
+    """
+    parquet_path = case_dir / "system" / "hydro_energy_productivity.parquet"
+    if not parquet_path.exists():
+        return {}
+    try:
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(parquet_path)
+    except (OSError, ImportError):
+        return {}
+    cols = table.column_names
+    if "hydro_id" not in cols or "equivalent_productivity_mw_per_m3s" not in cols:
+        return {}
+    hydro_ids = table["hydro_id"].to_pylist()
+    stage_ids = (
+        table["stage_id"].to_pylist() if "stage_id" in cols else [None] * len(hydro_ids)
+    )
+    values = table["equivalent_productivity_mw_per_m3s"].to_pylist()
+
+    result: dict[int, float] = {}
+    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
+        if sid is None and v is not None and hid not in result:
+            result[int(hid)] = float(v)
+
+    fallback: dict[int, tuple[int, float]] = {}
+    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
+        if sid is None or v is None:
+            continue
+        hid_i = int(hid)
+        if hid_i in result:
+            continue
+        cur = fallback.get(hid_i)
+        if cur is None or sid < cur[0]:
+            fallback[hid_i] = (sid, float(v))
+    for hid, (_sid, v) in fallback.items():
+        result[hid] = v
+    return result
+
+
+def _productivity_from_production_models(case_dir: Path) -> dict[int, float]:
+    """Legacy fallback: read ``productivity_mw_per_m3s`` from production-models JSON.
+
+    Pre-modernization cobre-bridge cases (before the parquet-only contract)
+    embed productivity in JSON stage_range entries. Returns ``{}`` when the
+    file is absent or carries only model selection.
+    """
+    pm_path = case_dir / "system" / "hydro_production_models.json"
+    if not pm_path.exists():
+        return {}
+    with open(pm_path) as f:
+        d = json.load(f)
+    result: dict[int, float] = {}
+    for m in d.get("production_models", []):
+        hydro_id = int(m.get("hydro_id"))
+        for entry in m.get("stage_ranges") or []:
+            prod = entry.get("productivity_mw_per_m3s")
+            if prod is not None:
+                result[hydro_id] = float(prod)
+                break
+    return result
+
+
 def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
-    """Return hydro_id -> {bus_id, name, vol_max, vol_min, max_gen_mw, max_turbined}."""
+    """Return hydro_id -> {bus_id, name, vol_max, vol_min, max_gen_mw, max_turbined}.
+
+    Productivity is read from ``hydro_energy_productivity.parquet`` (the
+    cobre productivity-resolution-rules contract). Falls back through
+    ``hydro_production_models.json`` and then the deprecated
+    ``hydros.json:generation.productivity_mw_per_m3s`` field so older
+    converted cases still render.
+    """
     path = case_dir / "system" / "hydros.json"
     if not path.exists():
         return {}
     with open(path) as f:
         d = json.load(f)
+    productivities = _productivity_from_energy_parquet(case_dir)
+    if not productivities:
+        productivities = _productivity_from_production_models(case_dir)
     result = {}
     for h in d["hydros"]:
         gen = h.get("generation", {})
         res = h.get("reservoir", {})
+        prod = productivities.get(h["id"])
+        if prod is None:
+            prod = gen.get("productivity_mw_per_m3s", 0) or 0
+        max_turbined = gen.get("max_turbined_m3s", 0)
         result[h["id"]] = {
             "bus_id": h["bus_id"],
             "name": h.get("name", str(h["id"])),
             "vol_max": res.get("max_storage_hm3", 0),
             "vol_min": res.get("min_storage_hm3", 0),
             "max_gen_mw": gen.get("max_generation_mw", 0),
-            "max_gen_physical": gen.get("productivity_mw_per_m3s", 0)
-            * gen.get("max_turbined_m3s", 0),
-            "max_turbined": gen.get("max_turbined_m3s", 0),
-            "productivity": gen.get("productivity_mw_per_m3s", 0),
+            "max_gen_physical": prod * max_turbined,
+            "max_turbined": max_turbined,
+            "productivity": prod,
             "downstream_id": h.get("downstream_id"),
         }
     return result

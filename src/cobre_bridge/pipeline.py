@@ -18,6 +18,7 @@ from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
 from cobre_bridge.converters import initial_conditions as ic_conv
 from cobre_bridge.converters import network as network_conv
+from cobre_bridge.converters import scalar_parameters as scalar_params_conv
 from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
@@ -170,6 +171,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     logger.debug("Converting hydros")
     hydros_dict = hydro_conv.convert_hydros(nw_files, id_map)
 
+    logger.debug("Computing base hydro productivities")
+    base_productivities = hydro_conv.compute_base_productivities(nw_files, id_map)
+
     logger.debug("Generating hydro geometry")
     cadastro = hydro_conv.read_cadastro(nw_files)
     geometry_table = hydro_conv.generate_hydro_geometry(cadastro, id_map)
@@ -184,7 +188,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     lines_dict = network_conv.convert_lines(nw_files, id_map)
 
     logger.debug("Converting penalties")
-    penalties_dict = network_conv.convert_penalties(nw_files, hydros_dict)
+    penalties_dict = network_conv.convert_penalties(
+        nw_files, hydros_dict, productivities=base_productivities
+    )
 
     logger.debug("Converting stages")
     stages_dict = temporal_conv.convert_stages(nw_files, id_map)
@@ -217,6 +223,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
 
     logger.debug("Converting VminOP constraints")
     vminop_result = constraints_conv.convert_vminop_constraints(nw_files, id_map)
+    vminop_referenced_ids: list[int] = (
+        list(vminop_result[2]) if vminop_result is not None else []
+    )
 
     logger.debug("Converting electric constraints")
     vminop_count = (
@@ -253,6 +262,11 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     logger.debug("Converting production models")
     production_models_dict = hydro_conv.convert_production_models(nw_files, id_map)
 
+    logger.debug("Converting hydro energy productivity overrides")
+    hydro_energy_productivity_table = hydro_conv.convert_hydro_energy_productivity(
+        nw_files, id_map
+    )
+
     logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(nw_files, id_map)
 
@@ -284,10 +298,24 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     _write_json(dst / "constraints" / "exchange_factors.json", exchange_factors_dict)
     _write_json(dst / "scenarios" / "non_controllable_factors.json", ncs_factors_dict)
 
-    if production_models_dict is not None:
-        _write_json(
-            dst / "system" / "hydro_production_models.json", production_models_dict
-        )
+    _write_json(dst / "system" / "hydro_production_models.json", production_models_dict)
+
+    # Declare per-hydro @rho_eq_h{id} / @rho_acum_h{id} computed parameters for
+    # every hydro in the case. cobre rejects any @name token that has not been
+    # declared, so we always emit the file so handwritten or generated
+    # constraint expressions can reference any per-hydro productivity. The
+    # ids set is the union of the VminOP-referenced ids (covers the values we
+    # currently emit) and every hydro that has a production-model entry
+    # (covers future references).
+    all_hydro_ids = sorted(
+        set(vminop_referenced_ids)
+        | {
+            int(m["hydro_id"])
+            for m in production_models_dict.get("production_models", [])
+        }
+    )
+    scalar_parameters_dict = scalar_params_conv.build_scalar_parameters(all_hydro_ids)
+    _write_json(dst / "system" / "scalar_parameters.json", scalar_parameters_dict)
 
     # ------------------------------------------------------------------
     # 6. Write Parquet files.
@@ -295,6 +323,11 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     geometry_path = dst / "system" / "hydro_geometry.parquet"
     pq.write_table(geometry_table, geometry_path, compression="zstd")
     logger.debug("Wrote %s", geometry_path)
+
+    if hydro_energy_productivity_table.num_rows > 0:
+        hep_path = dst / "system" / "hydro_energy_productivity.parquet"
+        pq.write_table(hydro_energy_productivity_table, hep_path, compression="zstd")
+        logger.debug("Wrote %s", hep_path)
 
     inflow_path = dst / "scenarios" / "inflow_seasonal_stats.parquet"
     pq.write_table(inflow_table, inflow_path, compression="zstd")
@@ -337,7 +370,7 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     _BOUNDS_COLUMNS = ["constraint_id", "stage_id", "block_id", "bound"]
 
     if vminop_result is not None:
-        vminop_dict, vminop_bounds = vminop_result
+        vminop_dict, vminop_bounds, _ = vminop_result
         all_constraints.extend(vminop_dict.get("constraints", []))
         # VminOP bounds table has no block_id column; add a null column and
         # reorder to match the canonical schema.

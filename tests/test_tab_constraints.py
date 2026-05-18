@@ -630,3 +630,186 @@ def test_render_returns_string() -> None:
     data = _make_mock_data()
     result = _render_with_stubs(data)
     assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# Parser tests — @name sigil + literal coefficient handling
+# ---------------------------------------------------------------------------
+
+
+class TestParseExpression:
+    """``_parse_expression`` recognises both legacy literal coefficients and the cobre HEAD ``@name`` sigil."""
+
+    def _parse(self, expr: str) -> list[tuple]:
+        from cobre_bridge.dashboard.tabs.constraints_utils import _parse_expression
+
+        return _parse_expression(expr)
+
+    def test_legacy_literal_coefficient(self) -> None:
+        terms = self._parse("5.68 * hydro_storage(78)")
+        assert terms == [(5.68, None, "hydro_storage", 78)]
+
+    def test_implicit_unit_coefficient(self) -> None:
+        terms = self._parse("hydro_generation(145)")
+        assert terms == [(1.0, None, "hydro_generation", 145)]
+
+    def test_unary_minus_implicit(self) -> None:
+        terms = self._parse("- line_exchange(4)")
+        assert terms == [(-1.0, None, "line_exchange", 4)]
+
+    def test_at_name_implicit_unit(self) -> None:
+        """``@rho_acum_h78 * hydro_storage(78)`` carries an implicit 1.0 literal."""
+        terms = self._parse("@rho_acum_h78 * hydro_storage(78)")
+        assert terms == [(1.0, "rho_acum_h78", "hydro_storage", 78)]
+
+    def test_at_name_with_literal_scale(self) -> None:
+        """``0.5 * @rho_eq_h12 * hydro_generation(12)`` keeps both."""
+        terms = self._parse("0.5 * @rho_eq_h12 * hydro_generation(12)")
+        assert terms == [(0.5, "rho_eq_h12", "hydro_generation", 12)]
+
+    def test_at_name_with_unary_minus(self) -> None:
+        terms = self._parse("- @rho_eq_h12 * hydro_generation(12)")
+        assert terms == [(-1.0, "rho_eq_h12", "hydro_generation", 12)]
+
+    def test_mixed_terms_in_one_expression(self) -> None:
+        """Sum of @name and literal terms parse together."""
+        terms = self._parse(
+            "@rho_acum_h0 * hydro_storage(0) + 2.5 * hydro_storage(1) - hydro_storage(2)"
+        )
+        assert terms == [
+            (1.0, "rho_acum_h0", "hydro_storage", 0),
+            (2.5, None, "hydro_storage", 1),
+            (-1.0, None, "hydro_storage", 2),
+        ]
+
+    def test_unknown_param_name_still_parses(self) -> None:
+        """Unrecognised ``@name`` parses; evaluator decides how to handle it."""
+        terms = self._parse("@some_other_thing * hydro_generation(5)")
+        assert terms == [(1.0, "some_other_thing", "hydro_generation", 5)]
+
+
+class TestResolveParamToColumn:
+    """``_resolve_param_to_column`` maps cobre-bridge's per-hydro names to simulation columns."""
+
+    def _resolve(self, name: str):
+        from cobre_bridge.dashboard.tabs.constraints_utils import (
+            _resolve_param_to_column,
+        )
+
+        return _resolve_param_to_column(name)
+
+    def test_rho_acum(self) -> None:
+        assert self._resolve("rho_acum_h78") == (
+            "accumulated_productivity_mw_per_m3s",
+            78,
+        )
+
+    def test_rho_eq(self) -> None:
+        assert self._resolve("rho_eq_h12") == ("equivalent_productivity_mw_per_m3s", 12)
+
+    def test_unknown(self) -> None:
+        assert self._resolve("rho_something_else_h0") is None
+
+    def test_no_hydro_suffix(self) -> None:
+        assert self._resolve("rho_acum") is None
+
+
+# ---------------------------------------------------------------------------
+# evaluate_constraint_expressions — @name resolves against simulation column
+# ---------------------------------------------------------------------------
+
+
+def _make_hydros_lf(
+    *,
+    with_productivity: bool = True,
+) -> pl.LazyFrame:
+    """Tiny 2-stage 1-scenario synthetic hydros parquet shape."""
+    cols = {
+        "scenario_id": pl.Series([0, 0, 0, 0], dtype=pl.Int64),
+        "stage_id": pl.Series([0, 0, 1, 1], dtype=pl.Int32),
+        "block_id": pl.Series([0, 0, 0, 0], dtype=pl.Int32),
+        "hydro_id": pl.Series([0, 1, 0, 1], dtype=pl.Int32),
+        "storage_final_hm3": pl.Series([100.0, 200.0, 150.0, 250.0], dtype=pl.Float64),
+        "generation_mw": pl.Series([10.0, 20.0, 30.0, 40.0], dtype=pl.Float64),
+    }
+    if with_productivity:
+        cols["accumulated_productivity_mw_per_m3s"] = pl.Series(
+            [2.0, 3.0, 2.0, 3.0], dtype=pl.Float64
+        )
+        cols["equivalent_productivity_mw_per_m3s"] = pl.Series(
+            [0.5, 0.7, 0.5, 0.7], dtype=pl.Float64
+        )
+    return pl.DataFrame(cols).lazy()
+
+
+def _empty_exchanges_lf() -> pl.LazyFrame:
+    return pl.DataFrame(
+        {
+            "scenario_id": pl.Series([], dtype=pl.Int64),
+            "stage_id": pl.Series([], dtype=pl.Int32),
+            "block_id": pl.Series([], dtype=pl.Int32),
+            "line_id": pl.Series([], dtype=pl.Int32),
+            "net_flow_mw": pl.Series([], dtype=pl.Float64),
+        }
+    ).lazy()
+
+
+class TestEvaluateAtName:
+    """``evaluate_constraint_expressions`` resolves ``@name`` against simulation columns."""
+
+    def _evaluate(self, expression: str, *, with_productivity: bool = True):
+        from cobre_bridge.dashboard.tabs.constraints_utils import (
+            evaluate_constraint_expressions,
+        )
+
+        constraints = [
+            {
+                "id": 0,
+                "name": "test",
+                "expression": expression,
+                "sense": ">=",
+                "slack": {"enabled": False},
+            }
+        ]
+        return evaluate_constraint_expressions(
+            constraints,
+            _make_hydros_lf(with_productivity=with_productivity),
+            _empty_exchanges_lf(),
+        )
+
+    def test_at_rho_acum_multiplies_by_column(self) -> None:
+        """``@rho_acum_h0 * hydro_storage(0)`` at stage 0 = 2.0 * 100.0 = 200.0."""
+        df = self._evaluate("@rho_acum_h0 * hydro_storage(0)")
+        # storage-only constraint -> block_id = 0
+        s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
+        assert len(s0) == 1
+        assert s0["lhs_value"].iloc[0] == 200.0
+
+        s1 = df[(df["stage_id"] == 1) & (df["scenario_id"] == 0)]
+        assert s1["lhs_value"].iloc[0] == 300.0  # 2.0 * 150.0
+
+    def test_at_rho_eq_with_generation(self) -> None:
+        """``@rho_eq_h1 * hydro_generation(1)`` at stage 0 = 0.7 * 20.0 = 14.0."""
+        df = self._evaluate("@rho_eq_h1 * hydro_generation(1)")
+        s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
+        assert s0["lhs_value"].iloc[0] == 14.0
+
+    def test_literal_only_still_works(self) -> None:
+        """Backward-compat: ``5.0 * hydro_storage(0)`` evaluates to 5.0 * storage."""
+        df = self._evaluate("5.0 * hydro_storage(0)")
+        s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
+        assert s0["lhs_value"].iloc[0] == 500.0
+
+    def test_literal_times_at_name(self) -> None:
+        """``0.5 * @rho_acum_h0 * hydro_storage(0)`` = 0.5 * 2.0 * 100.0 = 100.0."""
+        df = self._evaluate("0.5 * @rho_acum_h0 * hydro_storage(0)")
+        s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
+        assert s0["lhs_value"].iloc[0] == 100.0
+
+    def test_at_name_falls_back_to_zero_when_column_missing(self) -> None:
+        """If the productivity column isn't in the parquet, contribution is 0."""
+        df = self._evaluate(
+            "@rho_acum_h0 * hydro_storage(0)", with_productivity=False
+        )
+        s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
+        assert s0["lhs_value"].iloc[0] == 0.0

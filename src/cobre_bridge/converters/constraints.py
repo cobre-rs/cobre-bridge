@@ -27,6 +27,7 @@ from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
     _compute_productivity,
 )
+from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -130,8 +131,15 @@ def compute_accumulated_productivities(
 def convert_vminop_constraints(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
-) -> tuple[dict, pa.Table] | None:
+) -> tuple[dict, pa.Table, list[int]] | None:
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
+
+    Expressions are emitted using the cobre HEAD ``@name`` sigil, with one
+    ``@rho_acum_h{hydro_id}`` per hydro term so that the constraint
+    coefficient is resolved to cobre's own accumulated productivity at
+    solve time. The third element of the return tuple is the sorted list of
+    hydro_ids referenced via ``@name`` — used by the caller to populate
+    ``scalar_parameters.json``.
 
     Parameters
     ----------
@@ -142,11 +150,9 @@ def convert_vminop_constraints(
 
     Returns
     -------
-    tuple[dict, pa.Table] | None
-        A ``(constraints_dict, bounds_table)`` pair, or ``None`` if
-        ``curva.dat`` is absent.  ``constraints_dict`` conforms to
-        ``generic_constraints.schema.json``; ``bounds_table`` has schema
-        ``(constraint_id: INT32, stage_id: INT32, bound: DOUBLE)``.
+    tuple[dict, pa.Table, list[int]] | None
+        ``(constraints_dict, bounds_table, referenced_hydro_ids)`` or
+        ``None`` if ``curva.dat`` is absent.
     """
     if nw_files.curva is None:
         _LOG.debug("curva.dat not found; skipping VminOP constraints.")
@@ -208,6 +214,7 @@ def convert_vminop_constraints(
     bound_constraint_ids: list[int] = []
     bound_stage_ids: list[int] = []
     bound_values: list[float] = []
+    all_referenced_ids: set[int] = set()
 
     for constraint_id, ree_code in enumerate(constraint_rees):
         ree_code = int(ree_code)
@@ -220,10 +227,15 @@ def convert_vminop_constraints(
             )
             continue
 
-        # Build expression: sum of acc_prod * hydro_storage(cobre_id)
+        # Build expression: sum of @rho_acum_h{cobre_id} * hydro_storage(cobre_id).
+        # The coefficient is resolved by cobre to its own ρ_acum at solve time;
+        # we still use the NEWAVE-derived value to size the RHS bound (kept
+        # consistent because we also feed cobre VHA geometry + ρ_esp +
+        # tailrace, which makes its ρ_acum agree numerically with NEWAVE's).
         terms: list[str] = []
         useful_energy = 0.0
         dead_energy = 0.0
+        referenced_ids: list[int] = []
 
         for plant_code in sorted(hydros_in_ree):
             ap = acc_prod.get(plant_code, 0.0)
@@ -239,7 +251,8 @@ def convert_vminop_constraints(
             vol_max = float(cadastro.loc[plant_code, "volume_maximo"])
             useful_energy += ap * (vol_max - vol_min)
             dead_energy += ap * vol_min
-            terms.append(f"{ap} * hydro_storage({cobre_id})")
+            terms.append(f"@{rho_acum_name(cobre_id)} * hydro_storage({cobre_id})")
+            referenced_ids.append(cobre_id)
 
         max_energy = useful_energy + dead_energy
         if not terms or max_energy <= 0.0:
@@ -260,6 +273,8 @@ def convert_vminop_constraints(
             )
             penalty = 1000.0
         ree_name = ree_names.get(ree_code, str(ree_code))
+
+        all_referenced_ids.update(referenced_ids)
 
         constraints.append(
             {
@@ -340,7 +355,7 @@ def convert_vminop_constraints(
         len(bound_values),
     )
 
-    return constraints_dict, bounds_table
+    return constraints_dict, bounds_table, sorted(all_referenced_ids)
 
 
 # ---------------------------------------------------------------------------

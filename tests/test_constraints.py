@@ -152,6 +152,9 @@ class TestConvertVminopConstraints:
 
         for c in constraints:
             assert "hydro_storage(" in c["expression"]
+            # Coefficients are now @rho_acum_h{id} @name references (cobre HEAD
+            # @name sigil), not literal floats.
+            assert "@rho_acum_h" in c["expression"]
             assert c["sense"] == ">="
             assert c["slack"]["enabled"] is True
             assert c["slack"]["penalty"] > 0
@@ -178,7 +181,11 @@ class TestConvertVminopConstraints:
 
 
 def _run_example_conversion():
-    """Run VminOP conversion on the example case if it exists."""
+    """Run VminOP conversion on the example case if it exists.
+
+    Returns ``(constraints_dict, bounds_table)`` for the legacy 2-tuple
+    callers; the new third element (referenced hydro_ids) is ignored here.
+    """
     example_dir = Path("example/newave")
     caso_path = example_dir / "CASO.DAT"
     if not caso_path.exists():
@@ -192,11 +199,14 @@ def _run_example_conversion():
     if nw_files.curva is None:
         return None
 
-    # Build id_map (reuse pipeline logic)
     from cobre_bridge.pipeline import _build_id_map
 
     id_map = _build_id_map(nw_files)
-    return convert_vminop_constraints(nw_files, id_map)
+    result = convert_vminop_constraints(nw_files, id_map)
+    if result is None:
+        return None
+    constraints_dict, bounds_table, _referenced = result
+    return constraints_dict, bounds_table
 
 
 def _example_nw_files_and_id_map():

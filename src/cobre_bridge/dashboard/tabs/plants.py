@@ -53,6 +53,10 @@ _STAGE_VARS: list[str] = [
     "storage_final_hm3",
     "inflow_m3s",
     "water_value_per_hm3",
+    # cobre HEAD energy columns: stage-level at block_id=0
+    "stored_energy_final_mwh",
+    "incremental_inflow_energy_mw",
+    "equivalent_productivity_mw_per_m3s",
 ]
 
 
@@ -304,6 +308,9 @@ def _var_short(var: str) -> str:
         "storage_final_hm3": "stor",
         "inflow_m3s": "inflow",
         "water_value_per_hm3": "wv",
+        "stored_energy_final_mwh": "earm",
+        "incremental_inflow_energy_mw": "ena",
+        "equivalent_productivity_mw_per_m3s": "rhoeq",
     }
     return _MAP.get(var, var)
 
@@ -780,6 +787,16 @@ def build_hydro_explorer(
             ]
         ),
     )
+    energy_section = collapsible_section(
+        "Energy",
+        chart_grid(
+            [
+                wrap_chart(_chart_div("hp-earm")),
+                wrap_chart(_chart_div("hp-ena")),
+                wrap_chart(_chart_div("hp-rhoeq")),
+            ]
+        ),
+    )
 
     band_toggle = (
         '<div class="explorer-band-toggle" style="padding:4px 8px;">'
@@ -792,6 +809,7 @@ def build_hydro_explorer(
         + band_toggle
         + water_balance_section
         + generation_section
+        + energy_section
         + "</div>"
     )
 
@@ -945,6 +963,42 @@ function renderHydroDetail(containerId, d) {
     plotlyLine(lbl, d.wv_p10, '#E91E63', 'P10', 1, 'dot'),
     plotlyLine(lbl, d.wv_p90, '#E91E63', 'P90', 1, 'dot'),
   ], plotlyLayout({title: 'Water Value (R$/hm\u00b3)', yaxis: {title: 'R$/hm\u00b3'}}), _HC);
+
+  // Stored Energy (MWh) \u2014 EARM, stage-level. cobre HEAD column.
+  if (d.earm_p50 && d.earm_p50.length > 0) {
+    var earmBand = plotlyBand(lbl, d.earm_p10, d.earm_p90, 'rgba(63,81,181,0.15)', 'P10\u2013P90');
+    earmBand.visible = _peBandVisible;
+    Plotly.react('hp-earm', [
+      earmBand,
+      plotlyLine(lbl, d.earm_p50, '#3F51B5', 'P50'),
+      plotlyLine(lbl, d.earm_p10, '#3F51B5', 'P10', 1, 'dot'),
+      plotlyLine(lbl, d.earm_p90, '#3F51B5', 'P90', 1, 'dot'),
+    ], plotlyLayout({title: 'Stored Energy (MWh)', yaxis: {title: 'MWh'}}), _HC);
+  }
+
+  // Inflow Energy (MW) \u2014 ENA, stage-level. cobre HEAD column.
+  if (d.ena_p50 && d.ena_p50.length > 0) {
+    var enaBand = plotlyBand(lbl, d.ena_p10, d.ena_p90, 'rgba(0,150,136,0.15)', 'P10\u2013P90');
+    enaBand.visible = _peBandVisible;
+    Plotly.react('hp-ena', [
+      enaBand,
+      plotlyLine(lbl, d.ena_p50, '#009688', 'P50'),
+      plotlyLine(lbl, d.ena_p10, '#009688', 'P10', 1, 'dot'),
+      plotlyLine(lbl, d.ena_p90, '#009688', 'P90', 1, 'dot'),
+    ], plotlyLayout({title: 'Inflow Energy (MW)', yaxis: {title: 'MW'}}), _HC);
+  }
+
+  // Equivalent Productivity (MW/(m\u00b3/s)) \u2014 \u03c1_eq, stage-level. cobre HEAD column.
+  if (d.rhoeq_p50 && d.rhoeq_p50.length > 0) {
+    var rhoeqBand = plotlyBand(lbl, d.rhoeq_p10, d.rhoeq_p90, 'rgba(121,85,72,0.15)', 'P10\u2013P90');
+    rhoeqBand.visible = _peBandVisible;
+    Plotly.react('hp-rhoeq', [
+      rhoeqBand,
+      plotlyLine(lbl, d.rhoeq_p50, '#795548', 'P50'),
+      plotlyLine(lbl, d.rhoeq_p10, '#795548', 'P10', 1, 'dot'),
+      plotlyLine(lbl, d.rhoeq_p90, '#795548', 'P90', 1, 'dot'),
+    ], plotlyLayout({title: 'Equivalent Productivity (MW/(m\u00b3/s))', yaxis: {title: 'MW/(m\u00b3/s)'}}), _HC);
+  }
 }
 
 var _HP_PALETTE = ['#2196F3', '#FF9800', '#4CAF50'];
@@ -976,6 +1030,20 @@ function renderHydroComparison(entries, labels) {
     plotlyLayout({title: 'Outflow (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _HC);
   Plotly.react('hp-wv', _buildTraces('wv_p50'),
     plotlyLayout({title: 'Water Value (R$/hm\u00b3) \u2014 Comparison', yaxis: {title: 'R$/hm\u00b3'}}), _HC);
+
+  // Comparison mode for energy-domain charts; safe no-op if columns absent.
+  if (entries.every(function(d){return d && d.earm_p50;})) {
+    Plotly.react('hp-earm', _buildTraces('earm_p50'),
+      plotlyLayout({title: 'Stored Energy (MWh) \u2014 Comparison', yaxis: {title: 'MWh'}}), _HC);
+  }
+  if (entries.every(function(d){return d && d.ena_p50;})) {
+    Plotly.react('hp-ena', _buildTraces('ena_p50'),
+      plotlyLayout({title: 'Inflow Energy (MW) \u2014 Comparison', yaxis: {title: 'MW'}}), _HC);
+  }
+  if (entries.every(function(d){return d && d.rhoeq_p50;})) {
+    Plotly.react('hp-rhoeq', _buildTraces('rhoeq_p50'),
+      plotlyLayout({title: 'Equivalent Productivity \u2014 Comparison', yaxis: {title: 'MW/(m\u00b3/s)'}}), _HC);
+  }
 }
 
 initPlantExplorer({
@@ -991,13 +1059,13 @@ initComparisonMode({
   tableId: 'hp-tbody',
   dataVar: 'HP',
   labelsVar: 'HP_LABELS',
-  chartIds: ['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv'],
+  chartIds: ['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv','hp-earm','hp-ena','hp-rhoeq'],
   renderComparison: renderHydroComparison,
   renderDetail: renderHydroDetail,
   maxCompare: 3
 });
 
-syncHover(['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv']);
+syncHover(['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv','hp-earm','hp-ena','hp-rhoeq']);
 """
     )
 

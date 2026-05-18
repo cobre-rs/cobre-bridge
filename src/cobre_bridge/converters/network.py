@@ -283,7 +283,11 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     }
 
 
-def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
+def convert_penalties(
+    nw_files: NewaveFiles,
+    hydros_dict: dict,
+    productivities: dict[int, float] | None = None,
+) -> dict:
     """Generate a Cobre ``penalties.json`` dict from NEWAVE deficit and penalty data.
 
     Reads deficit costs from ``sistema.dat`` and constraint violation
@@ -297,8 +301,12 @@ def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
     nw_files:
         Resolved NEWAVE file paths for the case.
     hydros_dict:
-        The already-converted ``hydros.json`` dict, used to compute the
-        average productivity for flow-to-energy penalty conversion.
+        The already-converted ``hydros.json`` dict (used for reservoir
+        useful-volume weights).
+    productivities:
+        ``{hydro_id: productivity_mw_per_m3s}`` for each hydro. Required
+        because productivity is no longer stored in ``hydros.json:generation``
+        on cobre HEAD.
     """
     from inewave.newave import Penalid
 
@@ -338,12 +346,23 @@ def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
     # (weighted by useful storage volume) and applies the same value
     # to all plants.
     hydros = hydros_dict.get("hydros", [])
+    productivities = productivities or {}
 
     # Useful-volume-weighted average own productivity.
+    # Preferred source is the `productivities` map (new contract). For
+    # backward compatibility with callers / tests that still embed
+    # productivity in the legacy `generation.productivity_mw_per_m3s` field,
+    # we fall back to that when the map has nothing for this entry.
     weighted_sum = 0.0
     vol_sum = 0.0
     for h in hydros:
-        prod = h["generation"].get("productivity_mw_per_m3s", 0.0)
+        prod = 0.0
+        if "id" in h:
+            prod = productivities.get(int(h["id"]), 0.0)
+        if prod <= 0.0:
+            legacy_prod = h.get("generation", {}).get("productivity_mw_per_m3s")
+            if legacy_prod is not None:
+                prod = float(legacy_prod)
         useful = h["reservoir"]["max_storage_hm3"] - h["reservoir"]["min_storage_hm3"]
         if prod > 0 and useful > 0:
             weighted_sum += prod * useful
