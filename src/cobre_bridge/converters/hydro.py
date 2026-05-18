@@ -946,6 +946,62 @@ def convert_hydro_energy_productivity(
     )
 
 
+def compute_per_stage_own_productivities(
+    nw_files: NewaveFiles,
+) -> dict[int, list[float]]:
+    """Return ``{plant_code: [own ρ_eq per stage]}`` for every existing plant.
+
+    Per-stage own productivity reflects MODIF.DAT CFUGA / CMONT temporal
+    overrides — for stages before any override the value is the base
+    polynomial-integrated productivity; for later stages it picks up the
+    effective tailrace / forebay overrides as they take effect. Plants
+    without any temporal overrides return a flat list of length
+    ``total_stages``.
+
+    Used by the VminOP RHS calculation so that the absolute bound
+    ``(pct/100) × useful + dead`` is computed with the **same** per-stage
+    ρ_acum that cobre uses to evaluate the LHS at solve time — otherwise
+    the constraint silently drifts at every stage where overrides apply
+    or for any plant upstream of an overridden plant in the cascade.
+
+    Keys are NEWAVE plant codes (not Cobre ids) since cascade traversal in
+    ``compute_accumulated_productivities`` works in NEWAVE-code space.
+    """
+    total_stages = _total_study_stages(nw_files)
+    if total_stages <= 0:
+        return {}
+
+    hidr = Hidr.read(str(nw_files.hidr))
+    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+
+    confhd = Confhd.read(str(nw_files.confhd))
+    confhd_df = confhd.usinas
+    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    existing = all_existing[
+        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
+    ]
+    confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
+
+    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+    plants_with_drop_overrides = {
+        code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
+        for code, overrides in temporal_overrides.items()
+        if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
+    }
+
+    result: dict[int, list[float]] = {}
+    for plant_code in confhd_codes:
+        if plant_code not in cadastro.index:
+            continue
+        hreg = cadastro.loc[plant_code]
+        base = _compute_productivity(hreg)
+        overrides = plants_with_drop_overrides.get(plant_code, [])
+        result[plant_code] = _per_stage_productivities(
+            hreg, base, overrides, nw_files, total_stages
+        )
+    return result
+
+
 def compute_base_productivities(
     nw_files: NewaveFiles, id_map: NewaveIdMap
 ) -> dict[int, float]:

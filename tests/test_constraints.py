@@ -106,6 +106,131 @@ class TestAccumulatedProductivity:
         assert acc[3] == pytest.approx(own_3)
 
 
+class TestPerStageAccumulatedProductivities:
+    """Per-stage cascade-sum of own ρ_eq for the VminOP RHS bound."""
+
+    def test_no_overrides_yields_flat_lists(self) -> None:
+        """Without CFUGA/CMONT inputs every plant has a constant ρ_acum across stages."""
+        from cobre_bridge.converters.constraints import (
+            compute_per_stage_acc_productivities,
+        )
+
+        confhd_df = _make_confhd_df()
+        # Three plants, two stages, all own ρ_eq constant in time.
+        per_stage_own = {1: [0.5, 0.5], 2: [0.7, 0.7], 3: [0.9, 0.9]}
+        acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own)
+
+        # Plant 3 is the sink → ρ_acum(3) = own(3) at every stage.
+        assert acc[3] == pytest.approx([0.9, 0.9])
+        # Plant 2 → ρ_acum(2) = own(2) + ρ_acum(3) = 1.6
+        assert acc[2] == pytest.approx([1.6, 1.6])
+        # Plant 1 → ρ_acum(1) = own(1) + ρ_acum(2) = 2.1
+        assert acc[1] == pytest.approx([2.1, 2.1])
+
+    def test_override_on_downstream_propagates_upstream_only_after_stage(
+        self,
+    ) -> None:
+        """A CFUGA-style change in plant 3's own ρ_eq at stage 1 shifts every
+        upstream plant's ρ_acum from that stage on. Stage 0 stays unchanged.
+        """
+        from cobre_bridge.converters.constraints import (
+            compute_per_stage_acc_productivities,
+        )
+
+        confhd_df = _make_confhd_df()
+        # Plant 3 ρ_eq drops from 0.9 to 0.6 starting at stage 1.
+        per_stage_own = {1: [0.5, 0.5], 2: [0.7, 0.7], 3: [0.9, 0.6]}
+        acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own)
+
+        # Stage 0: unchanged baselines.
+        assert acc[3][0] == pytest.approx(0.9)
+        assert acc[2][0] == pytest.approx(1.6)
+        assert acc[1][0] == pytest.approx(2.1)
+        # Stage 1: ρ_acum shifts everywhere in plant 3's upstream cone.
+        assert acc[3][1] == pytest.approx(0.6)
+        assert acc[2][1] == pytest.approx(0.7 + 0.6)
+        assert acc[1][1] == pytest.approx(0.5 + 0.7 + 0.6)
+
+    def test_sibling_branch_unaffected_by_override(self) -> None:
+        """Sibling branches stay untouched when a leaf in another branch shifts."""
+        from cobre_bridge.converters.constraints import (
+            compute_per_stage_acc_productivities,
+        )
+
+        # Two independent branches: 1→2 (sink), 3→4 (sink). 1 and 3 are headwaters.
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [1, 2, 3, 4],
+                "nome_usina": ["A", "B", "C", "D"],
+                "usina_existente": ["EX", "EX", "EX", "EX"],
+                "codigo_usina_jusante": [2, 0, 4, 0],
+                "ree": [1, 1, 1, 1],
+                "posto": [1, 2, 3, 4],
+                "volume_inicial_percentual": [50.0, 50.0, 50.0, 50.0],
+            }
+        )
+        # Branch 1→2: constant. Branch 3→4: plant 4 ρ_eq drops at stage 1.
+        per_stage_own = {1: [0.5, 0.5], 2: [0.7, 0.7], 3: [0.4, 0.4], 4: [0.8, 0.5]}
+        acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own)
+
+        # Branch 1→2 unchanged across stages.
+        assert acc[1] == pytest.approx([1.2, 1.2])
+        assert acc[2] == pytest.approx([0.7, 0.7])
+        # Branch 3→4 shifts at stage 1.
+        assert acc[3][0] == pytest.approx(1.2)
+        assert acc[3][1] == pytest.approx(0.9)
+
+
+class TestVminopRhsSeasonality:
+    """Integration check that the VminOP RHS picks up per-stage ρ_acum.
+
+    Uses the example NEWAVE case (which has plants with CFUGA overrides) and
+    asserts at least one constraint produces stage-varying RHS values for the
+    same percentage.
+    """
+
+    def test_rhs_varies_across_stages_for_overridden_cascades(self) -> None:
+        result = _run_example_conversion()
+        if result is None:
+            pytest.skip("example/newave not available")
+
+        _, bounds_table = result
+        bounds = bounds_table.to_pandas()
+
+        # Group by (constraint_id) and look for any constraint whose RHS
+        # varies for stages that share the same calendar month. Per-stage
+        # ρ_acum shifts must produce that — a constant-ρ_acum implementation
+        # would yield identical RHS for every January in the horizon.
+        import math as _math
+
+        def _month_of_stage(stage_id: int) -> int:
+            # We don't know start_month here; checking adjacency suffices —
+            # if pct[0] == pct[12] (annual cycle) but RHS[0] != RHS[12], the
+            # per-stage cascade is varying.
+            return stage_id % 12
+
+        any_stage_dependent = False
+        for cid, sub in bounds.groupby("constraint_id"):
+            by_cycle: dict[int, list[float]] = {}
+            for _, row in sub.iterrows():
+                by_cycle.setdefault(_month_of_stage(int(row["stage_id"])), []).append(
+                    float(row["bound"])
+                )
+            for vals in by_cycle.values():
+                if len(vals) >= 2 and not _math.isclose(
+                    max(vals), min(vals), rel_tol=1e-9, abs_tol=1e-9
+                ):
+                    any_stage_dependent = True
+                    break
+            if any_stage_dependent:
+                break
+
+        assert any_stage_dependent, (
+            "No constraint exhibits stage-varying RHS for the same calendar "
+            "month — per-stage ρ_acum is not flowing into the bound."
+        )
+
+
 class TestConvertVminopConstraints:
     def test_returns_none_when_curva_absent(self, tmp_path) -> None:
 

@@ -26,6 +26,7 @@ from inewave.newave import Confhd, Curva, Dger, Hidr, Penalid, Ree, Sistema
 from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
     _compute_productivity,
+    compute_per_stage_own_productivities,
 )
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.id_map import NewaveIdMap
@@ -106,26 +107,80 @@ def compute_accumulated_productivities(
         else:
             own_prod[code] = 0.0
 
-    # Build children map (upstream plants for each plant)
-    children: dict[int | None, list[int]] = defaultdict(list)
-    for code, ds in downstream_map.items():
-        children[ds].append(code)
+    return _cascade_sum(downstream_map, own_prod)
 
-    # BFS from sinks (downstream=None) upward
-    acc_prod: dict[int, float] = {}
+
+def _cascade_sum(
+    downstream_map: dict[int, int | None],
+    own_value: dict[int, float],
+) -> dict[int, float]:
+    """Topological cascade sum: result[h] = own_value[h] + result[downstream(h)].
+
+    Plants with no downstream (sea sinks) keep their own value. Used by both
+    the single-scalar :func:`compute_accumulated_productivities` and the
+    per-stage :func:`compute_per_stage_acc_productivities`.
+    """
+    result: dict[int, float] = {}
 
     def _accumulate(code: int) -> float:
-        if code in acc_prod:
-            return acc_prod[code]
+        if code in result:
+            return result[code]
         ds = downstream_map.get(code)
         ds_acc = _accumulate(ds) if ds is not None else 0.0
-        acc_prod[code] = own_prod.get(code, 0.0) + ds_acc
-        return acc_prod[code]
+        result[code] = own_value.get(code, 0.0) + ds_acc
+        return result[code]
 
-    for code in plant_codes:
+    for code in downstream_map:
         _accumulate(code)
+    return result
 
-    return acc_prod
+
+def compute_per_stage_acc_productivities(
+    confhd_df: pd.DataFrame,
+    per_stage_own: dict[int, list[float]],
+) -> dict[int, list[float]]:
+    """Cascade-sum per-stage own productivities into per-stage ρ_acum lists.
+
+    For each plant ``h`` and stage ``s``:
+        ρ_acum(h, s) = ρ_eq_own(h, s) + ρ_acum(downstream(h), s)
+
+    The cascade topology is static; only the leaf values change per stage.
+    Stages are processed independently so a CFUGA override on plant ``A``
+    correctly shifts ρ_acum for every plant strictly upstream of ``A`` from
+    the override stage onwards, while leaving siblings unaffected.
+
+    Parameters
+    ----------
+    confhd_df:
+        ``Confhd.usinas`` — supplies the downstream-plant topology.
+    per_stage_own:
+        ``{plant_code: [own_ρ_eq per stage]}`` — output of
+        :func:`hydro.compute_per_stage_own_productivities`.
+
+    Returns
+    -------
+    dict[int, list[float]]
+        ``{plant_code: [ρ_acum per stage]}`` for every plant present in both
+        ``confhd_df`` (existing, non-fictitious) and ``per_stage_own``.
+    """
+    downstream_map = _build_hydro_downstream_map(confhd_df)
+    if not per_stage_own:
+        return {}
+
+    # All per-stage lists must share the same length — pick the first.
+    sample = next(iter(per_stage_own.values()))
+    n_stages = len(sample)
+
+    result: dict[int, list[float]] = {code: [0.0] * n_stages for code in downstream_map}
+    for s in range(n_stages):
+        own_at_s: dict[int, float] = {
+            code: (per_stage_own[code][s] if code in per_stage_own else 0.0)
+            for code in downstream_map
+        }
+        acc_at_s = _cascade_sum(downstream_map, own_at_s)
+        for code, v in acc_at_s.items():
+            result[code][s] = v
+    return result
 
 
 def convert_vminop_constraints(
@@ -183,8 +238,16 @@ def convert_vminop_constraints(
     study_months = (13 - start_month) + (num_anos - 1) * 12
     num_stages = study_months + num_anos_pos * 12
 
-    # Compute accumulated productivities
+    # Compute accumulated productivities — both the static base map (used
+    # only for the existence check that drops zero-productivity plants from
+    # the expression) and the per-stage list used to compute every RHS bound.
+    # The LHS at solve time uses cobre's stage-resolved ρ_acum via the
+    # `@rho_acum_h{id}` sigil, so the bound must be sized with matching
+    # per-stage values; otherwise CFUGA/CMONT temporal overrides would
+    # silently desync LHS and RHS on every affected stage.
     acc_prod = compute_accumulated_productivities(cadastro, confhd_df)
+    per_stage_own = compute_per_stage_own_productivities(nw_files)
+    per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own)
 
     # Map hydros to REEs
     hydro_to_ree = _build_hydro_to_ree(confhd_df)
@@ -228,40 +291,60 @@ def convert_vminop_constraints(
             continue
 
         # Build expression: sum of @rho_acum_h{cobre_id} * hydro_storage(cobre_id).
-        # The coefficient is resolved by cobre to its own ρ_acum at solve time;
-        # we still use the NEWAVE-derived value to size the RHS bound (kept
-        # consistent because we also feed cobre VHA geometry + ρ_esp +
-        # tailrace, which makes its ρ_acum agree numerically with NEWAVE's).
+        # The coefficient is resolved by cobre to its own ρ_acum at solve time.
+        # We collect the participating plants here; the RHS bound for each
+        # stage is computed below using the per-stage ρ_acum so LHS and RHS
+        # stay aligned through CFUGA/CMONT temporal overrides.
         terms: list[str] = []
-        useful_energy = 0.0
-        dead_energy = 0.0
+        active_plant_codes: list[int] = []
         referenced_ids: list[int] = []
 
         for plant_code in sorted(hydros_in_ree):
-            ap = acc_prod.get(plant_code, 0.0)
-            if ap <= 0.0:
+            if acc_prod.get(plant_code, 0.0) <= 0.0:
                 continue
-
             try:
                 cobre_id = id_map.hydro_id(plant_code)
             except KeyError:
                 continue
-
-            vol_min = float(cadastro.loc[plant_code, "volume_minimo"])
-            vol_max = float(cadastro.loc[plant_code, "volume_maximo"])
-            useful_energy += ap * (vol_max - vol_min)
-            dead_energy += ap * vol_min
             terms.append(f"@{rho_acum_name(cobre_id)} * hydro_storage({cobre_id})")
             referenced_ids.append(cobre_id)
+            active_plant_codes.append(plant_code)
 
-        max_energy = useful_energy + dead_energy
-        if not terms or max_energy <= 0.0:
+        # Pre-compute (vol_min, vol_max) per active plant once.
+        plant_volumes: dict[int, tuple[float, float]] = {
+            code: (
+                float(cadastro.loc[code, "volume_minimo"]),
+                float(cadastro.loc[code, "volume_maximo"]),
+            )
+            for code in active_plant_codes
+        }
+
+        # Existence check: at any stage there must be at least one plant
+        # contributing positive ρ_acum × usable volume. Use stage 0 as a
+        # representative; if everything is zero there, every later stage is
+        # too (cascade sum is monotone in own values).
+        max_energy_stage0 = sum(
+            per_stage_acc.get(code, [0.0])[0] * vmax
+            for code, (_vmin, vmax) in plant_volumes.items()
+        )
+        if not terms or max_energy_stage0 <= 0.0:
             _LOG.warning(
                 "REE %d (%s): no valid terms for VminOP expression; skipping.",
                 ree_code,
                 ree_names.get(ree_code, "?"),
             )
             continue
+
+        def _rhs_at(stage: int, pct: float) -> float:
+            """Compute (pct/100)·useful(stage) + dead(stage)."""
+            useful_s = 0.0
+            dead_s = 0.0
+            for code, (vmin, vmax) in plant_volumes.items():
+                ps = per_stage_acc.get(code)
+                ap_s = ps[stage] if ps is not None and 0 <= stage < len(ps) else 0.0
+                useful_s += ap_s * (vmax - vmin)
+                dead_s += ap_s * vmin
+            return (pct / 100.0) * useful_s + dead_s
 
         expression = " + ".join(terms)
         penalty = penalty_map.get(ree_code, 1000.0)
@@ -304,7 +387,7 @@ def convert_vminop_constraints(
                 continue
 
             percentage = float(crow["valor"])
-            rhs = (percentage / 100.0) * useful_energy + dead_energy
+            rhs = _rhs_at(stage_id, percentage)
 
             bound_constraint_ids.append(constraint_id)
             bound_stage_ids.append(stage_id)
@@ -328,7 +411,7 @@ def convert_vminop_constraints(
                 cal_month = ((start_month - 1 + stage_id) % 12) + 1
                 pct = seasonal_pct.get(cal_month)
                 if pct is not None:
-                    rhs = (pct / 100.0) * useful_energy + dead_energy
+                    rhs = _rhs_at(stage_id, pct)
                     bound_constraint_ids.append(constraint_id)
                     bound_stage_ids.append(stage_id)
                     bound_values.append(rhs)
