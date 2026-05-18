@@ -49,6 +49,34 @@ class ConversionReport:
         )
 
 
+def _compute_max_accumulated_productivity_safe(
+    nw_files: NewaveFiles,
+) -> float | None:
+    """Return ``MAX_PRODTACUM_SIN`` from the cascade DAG, or ``None`` on failure.
+
+    NEWAVE manual v29 §3.24 uses this value to convert DESVIO and
+    evaporation-folga penalties. We compute it from the cascade topology so
+    ``convert_penalties`` doesn't have to use the rougher ``max(own_prods)``
+    approximation. Falls back to ``None`` (caller approximates) when the
+    NEWAVE files cannot be read — e.g. in unit tests that mock the pipeline.
+    """
+    try:
+        from inewave.newave import Confhd
+
+        from cobre_bridge.converters.constraints import (
+            compute_accumulated_productivities,
+        )
+
+        cadastro = hydro_conv._apply_permanent_overrides(
+            hydro_conv.read_cadastro(nw_files), nw_files
+        )
+        confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+        acc = compute_accumulated_productivities(cadastro, confhd_df)
+        return max(acc.values()) if acc else None
+    except (OSError, ValueError, AttributeError, TypeError, KeyError):
+        return None
+
+
 def _build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
     """Read Confhd, Conft, Sistema, and Ree to build the NewaveIdMap."""
     from inewave.newave import Confhd, Conft, Ree, Sistema
@@ -188,8 +216,17 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     lines_dict = network_conv.convert_lines(nw_files, id_map)
 
     logger.debug("Converting penalties")
+    # NEWAVE's DESVIO and evaporation-folga conversions use MAX_PRODTACUM_SIN
+    # (max accumulated cascade productivity), not the per-plant own ρ. Compute
+    # it from the cascade DAG so convert_penalties doesn't fall back to its
+    # `max(own_prods)` approximation. We do this defensively because tests
+    # mock the converter pipeline and the real NEWAVE files may be absent.
+    max_prodtacum_sin = _compute_max_accumulated_productivity_safe(nw_files)
     penalties_dict = network_conv.convert_penalties(
-        nw_files, hydros_dict, productivities=base_productivities
+        nw_files,
+        hydros_dict,
+        productivities=base_productivities,
+        max_accumulated_productivity=max_prodtacum_sin,
     )
 
     logger.debug("Converting stages")

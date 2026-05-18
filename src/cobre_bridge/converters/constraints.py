@@ -887,6 +887,12 @@ def convert_electric_constraints(
     line_id_map = _build_line_id_map(nw_files)
 
     # Read ELETRI penalty from PENALID.DAT for slack costs.
+    # NEWAVE manual v29 §3.24: ELETRI is energy-domain (R$/MWh) and applies
+    # only in individualized periods. When absent in PENALID.DAT, NEWAVE
+    # considers the constraint only in the final simulation — cobre has no
+    # equivalent nuance, so we keep the slack enabled with a high default
+    # (10 × MAX_DEFICIT, matching NEWAVE's evaporation/FPHA-folga magnitude)
+    # so RE_* constraints stay soft but very expensive to violate.
     eletri_penalty: float | None = None
     if nw_files.penalid is not None:
         try:
@@ -900,12 +906,24 @@ def convert_electric_constraints(
                 vals = eletri["valor_R$_MWh"].dropna()
                 if not vals.empty:
                     eletri_penalty = float(vals.iloc[0])
-        except Exception:  # noqa: BLE001
-            _LOG.warning("Could not read ELETRI penalty from PENALID.DAT.")
+        except (OSError, ValueError, KeyError) as exc:
+            _LOG.warning("Could not read ELETRI penalty from PENALID.DAT (%s).", exc)
+
+    if eletri_penalty is None:
+        # Fall back to 10 × MAX_DEFICIT (NEWAVE evaporation-folga convention).
+        try:
+            from inewave.newave import Sistema as _Sistema
+
+            _sis = _Sistema.read(str(nw_files.sistema))
+            _def_df = _sis.custo_deficit
+            if _def_df is not None and not _def_df.empty:
+                eletri_penalty = 10.0 * float(_def_df["custo"].max())
+        except (OSError, ValueError, KeyError):
+            pass
 
     slack_config: dict = (
         {"enabled": True, "penalty": eletri_penalty}
-        if eletri_penalty is not None
+        if eletri_penalty is not None and eletri_penalty > 0.0
         else {"enabled": False}
     )
 
