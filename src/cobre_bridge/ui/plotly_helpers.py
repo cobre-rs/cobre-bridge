@@ -58,6 +58,7 @@ def plotly_div(
     layout.setdefault("margin", MARGIN_DEFAULTS)
     layout.setdefault("legend", LEGEND_DEFAULTS)
     layout.setdefault("template", "plotly_white")
+    layout.setdefault("hovermode", "x unified")
 
     data_json = json.dumps(traces)
     layout_json = json.dumps(layout)

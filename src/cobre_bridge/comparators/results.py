@@ -608,10 +608,32 @@ def compare_results(
 
     # --- Percentile statistics ---
     _LOG.info("Computing Cobre percentile statistics...")
+    hydro_pct = read_cobre_hydro_percentiles(cobre_output_dir)
+    thermal_pct = read_cobre_thermal_percentiles(cobre_output_dir)
+    bus_pct = read_cobre_bus_percentiles(cobre_output_dir)
+
+    # NEWAVE typically reports a shorter horizon than Cobre.  Truncate all
+    # Cobre-side per-stage DataFrames to NEWAVE's max stage so the report's
+    # charts compare like-for-like across tabs (energy balance, hydro
+    # operation, plant details, etc.).  Truncation is a no-op when NEWAVE
+    # stage data was unavailable.
+    if nw_max_stage_0based is not None:
+
+        def _truncate(df: pl.DataFrame) -> pl.DataFrame:
+            if df.is_empty() or "stage_id" not in df.columns:
+                return df
+            return df.filter(pl.col("stage_id") <= nw_max_stage_0based)
+
+        cobre_hydro = _truncate(cobre_hydro)
+        hydro_pct = _truncate(hydro_pct)
+        thermal_pct = _truncate(thermal_pct)
+        bus_pct = _truncate(bus_pct)
+        bus_aggregates = _truncate(bus_aggregates)
+
     pctiles = PercentileData(
-        hydro=read_cobre_hydro_percentiles(cobre_output_dir),
-        thermal=read_cobre_thermal_percentiles(cobre_output_dir),
-        bus=read_cobre_bus_percentiles(cobre_output_dir),
+        hydro=hydro_pct,
+        thermal=thermal_pct,
+        bus=bus_pct,
         bus_aggregates=bus_aggregates,
         nw_convergence=nw_conv,
         cobre_convergence=cobre_conv,

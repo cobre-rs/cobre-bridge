@@ -1317,6 +1317,7 @@ def _build_interactive_detail_html(
                 legend: {_json.dumps(_LEGEND)},
                 margin: {_json.dumps(_MARGIN)},
                 template: 'plotly_white',
+                hovermode: 'x unified',
                 height: 350
             }}, {{responsive: true}});
         }})();""")
