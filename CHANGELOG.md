@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `convert_non_controllable_sources` now emits
+  `"allow_curtailment": false` on every NCS entity derived from
+  `sistema.dat::geracao_usinas_nao_simuladas`. NEWAVE pre-nets these
+  aggregates (PCH, PCT, EOL, UFV, MMGD) from MERC before the dispatch LP
+  runs, which makes them effectively must-run; setting
+  `allow_curtailment=false` instructs Cobre's LP to pin dispatch to the
+  realized per-scenario availability instead of leaving curtailment as a
+  cheap LP slack. On the bundled deterministic 1983 case this restores
+  parity with NEWAVE — eliminates ≈ 18 % of total NCS supply being
+  artificially curtailed, a ≈ +15 % hydro-dispatch swing, and a ≈ −23 %
+  spillage divergence. Requires Cobre with the
+  `non_controllable_sources.allow_curtailment` field
+  (released alongside this bridge change). See
+  `docs/findings/ncs-must-run-treatment.md`.
+
+- Regenerated `example/convertido/system/non_controllable_sources.json`
+  to reflect the new emission. The 32 NCS aggregates in the bundled
+  NEWAVE-derived case now carry `"allow_curtailment": false`; all other
+  fields are unchanged.
+
 ## [0.6.1] - 2026-05-18
 
 First public release for the cobre v0.6.x line — bundles every change
