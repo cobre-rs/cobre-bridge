@@ -808,8 +808,6 @@ class TestEvaluateAtName:
 
     def test_at_name_falls_back_to_zero_when_column_missing(self) -> None:
         """If the productivity column isn't in the parquet, contribution is 0."""
-        df = self._evaluate(
-            "@rho_acum_h0 * hydro_storage(0)", with_productivity=False
-        )
+        df = self._evaluate("@rho_acum_h0 * hydro_storage(0)", with_productivity=False)
         s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
         assert s0["lhs_value"].iloc[0] == 0.0
