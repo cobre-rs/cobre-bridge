@@ -456,13 +456,11 @@ class TestConvertHydros:
         # USINA_A: 1 set, 4 machines, 200 MW each, flow 222.2 each.
         assert gen["max_generation_mw"] == pytest.approx(4 * 200.0)
         assert gen["max_turbined_m3s"] == pytest.approx(4 * 222.2)
-        # Productivity from new formula (see _make_hidr_cadastro docstring):
-        # avg_height = 300 + 0.1 * (100+1000)/2 = 355.0
-        # net_drop = 355.0 - 50.0 = 305.0; adjusted (no loss) = 305.0
-        # productivity_A = 0.9 * 305.0 = 274.5
-        assert gen["productivity_mw_per_m3s"] == pytest.approx(0.9 * 305.0)
-        # Verify it differs from raw produtibilidade_especifica (0.9).
-        assert gen["productivity_mw_per_m3s"] != pytest.approx(0.9)
+        # On cobre HEAD productivity lives in hydro_production_models.json,
+        # not in the hydros.json generation block. ρ_esp surfaces as a
+        # top-level optional field for cobre's energy-conversion pipeline.
+        assert "productivity_mw_per_m3s" not in gen
+        assert hydro_a["specific_productivity_mw_per_m3s_per_m"] == pytest.approx(0.9)
 
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
@@ -1663,14 +1661,19 @@ class TestConvertProductionModels:
     @patch("cobre_bridge.converters.hydro.Dger")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_returns_none_when_no_modif(
+    def test_returns_all_hydros_when_no_modif(
         self,
         mock_hidr_cls: MagicMock,
         mock_confhd_cls: MagicMock,
         mock_dger_cls: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """No MODIF.DAT -> None returned, no error."""
+        """No MODIF.DAT: every hydro still gets a single-range entry.
+
+        Cobre HEAD requires the productivity for every hydro to live in
+        ``hydro_production_models.json`` (it was removed from hydros.json
+        generation block), so we always emit an entry per plant.
+        """
         mock_hidr = MagicMock()
         mock_hidr.cadastro = _make_hidr_cadastro()
         mock_hidr_cls.read.return_value = mock_hidr
@@ -1686,13 +1689,24 @@ class TestConvertProductionModels:
         result = convert_production_models(
             _make_nw_files(tmp_path, modif=None), self._make_id_map()
         )
-        assert result is None
+        assert result is not None
+        models = result["production_models"]
+        assert len(models) == 2  # USINA_A and USINA_B
+        for model in models:
+            assert model["selection_mode"] == "stage_ranges"
+            ranges = model["stage_ranges"]
+            assert len(ranges) == 1
+            assert ranges[0]["start_stage_id"] == 0
+            assert ranges[0]["end_stage_id"] is None
+            # Productivity now lives in hydro_energy_productivity.parquet,
+            # not in the JSON stage_range entries.
+            assert "productivity_mw_per_m3s" not in ranges[0]
 
     @patch("cobre_bridge.converters.hydro.Dger")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Modif")
     @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_returns_none_when_no_cfuga_cmont(
+    def test_returns_all_hydros_when_no_cfuga_cmont(
         self,
         mock_hidr_cls: MagicMock,
         mock_modif_cls: MagicMock,
@@ -1700,7 +1714,7 @@ class TestConvertProductionModels:
         mock_dger_cls: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """MODIF.DAT present but only VAZMINT overrides -> None returned."""
+        """MODIF.DAT present but only VAZMINT overrides -> per-hydro entries with single range."""
         import datetime
 
         mock_hidr = MagicMock()
@@ -1732,7 +1746,15 @@ class TestConvertProductionModels:
             _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
             self._make_id_map(),
         )
-        assert result is None
+        assert result is not None
+        models = result["production_models"]
+        # Both hydros still get an entry, each with one stage range
+        # covering the whole horizon (no CFUGA/CMONT temporal overrides).
+        assert len(models) == 2
+        for model in models:
+            ranges = model["stage_ranges"]
+            assert len(ranges) == 1
+            assert ranges[0]["end_stage_id"] is None
 
     @patch("cobre_bridge.converters.hydro.Dger")
     @patch("cobre_bridge.converters.hydro.Confhd")
@@ -1777,30 +1799,20 @@ class TestConvertProductionModels:
         assert result is not None
         assert "production_models" in result
         models = result["production_models"]
-        assert len(models) == 1
+        # JSON now carries only model selection — productivity moved to
+        # hydro_energy_productivity.parquet. Both USINA_A and USINA_B emit
+        # one model-only stage_range entry; per-stage variation for USINA_A's
+        # CFUGA override is asserted via TestConvertHydroEnergyProductivity.
+        assert len(models) == 2
 
-        model = models[0]
-        assert model["hydro_id"] == 0  # code=1 -> sorted position 0
-        assert model["selection_mode"] == "stage_ranges"
-        ranges = model["stage_ranges"]
-
-        # CFUGA at April 2025 = stage (2025-2025)*12 + (4-1) = 3.
-        # So: [0..2] base, [3..None] overridden.
-        assert len(ranges) == 2
+        model_a = next(m for m in models if m["hydro_id"] == 0)
+        assert model_a["selection_mode"] == "stage_ranges"
+        ranges = model_a["stage_ranges"]
+        assert len(ranges) == 1
         assert ranges[0]["start_stage_id"] == 0
-        assert ranges[0]["end_stage_id"] == 2
+        assert ranges[0]["end_stage_id"] is None
         assert ranges[0]["model"] == "constant_productivity"
-        assert ranges[1]["start_stage_id"] == 3
-        assert ranges[1]["end_stage_id"] is None
-        assert ranges[1]["model"] == "constant_productivity"
-
-        # The overridden productivity uses canal_fuga=60 instead of 50.
-        # USINA_A: tipo_regulacao='M', avg_height=355, canal_fuga_base=50 -> drop=305
-        # With cfuga=60: drop = 355 - 60 = 295 -> prod = 0.9 * 295 = 265.5
-        base_prod = 0.9 * (355.0 - 50.0)
-        overridden_prod = 0.9 * (355.0 - 60.0)
-        assert ranges[0]["productivity_override"] == pytest.approx(base_prod)
-        assert ranges[1]["productivity_override"] == pytest.approx(overridden_prod)
+        assert "productivity_mw_per_m3s" not in ranges[0]
 
     @patch("cobre_bridge.converters.hydro.Dger")
     @patch("cobre_bridge.converters.hydro.Confhd")
@@ -1843,15 +1855,14 @@ class TestConvertProductionModels:
 
         assert result is not None
         models = result["production_models"]
-        assert len(models) == 1
-
-        ranges = models[0]["stage_ranges"]
-        # CMONT at Jan 2025 = stage 0, so no base range before it.
+        # JSON has model-only entries — productivity moved to the parquet.
+        assert len(models) == 2
+        model_a = next(m for m in models if m["hydro_id"] == 0)
+        ranges = model_a["stage_ranges"]
         assert len(ranges) == 1
         assert ranges[0]["start_stage_id"] == 0
         assert ranges[0]["end_stage_id"] is None
-        # net_drop = 400 - 50 (canal_fuga_medio) = 350 -> prod = 0.9 * 350 = 315.0
-        assert ranges[0]["productivity_override"] == pytest.approx(0.9 * 350.0)
+        assert "productivity_mw_per_m3s" not in ranges[0]
 
     @patch("cobre_bridge.converters.hydro.Dger")
     @patch("cobre_bridge.converters.hydro.Confhd")
@@ -1896,16 +1907,13 @@ class TestConvertProductionModels:
         )
 
         assert result is not None
+        # JSON now has a single model-only stage_range per hydro; the multiple
+        # CFUGA breakpoints surface in hydro_energy_productivity.parquet.
         ranges = result["production_models"][0]["stage_ranges"]
-        # stage 5: June 2025 -> (2025-2025)*12 + (6-1) = 5
-        # stage 12: Jan 2026 -> (2026-2025)*12 + (1-1) = 12
-        assert len(ranges) == 3
+        assert len(ranges) == 1
         assert ranges[0]["start_stage_id"] == 0
-        assert ranges[0]["end_stage_id"] == 4
-        assert ranges[1]["start_stage_id"] == 5
-        assert ranges[1]["end_stage_id"] == 11
-        assert ranges[2]["start_stage_id"] == 12
-        assert ranges[2]["end_stage_id"] is None
+        assert ranges[0]["end_stage_id"] is None
+        assert "productivity_mw_per_m3s" not in ranges[0]
 
     @patch("cobre_bridge.converters.hydro.Dger")
     @patch("cobre_bridge.converters.hydro.Confhd")
@@ -1956,6 +1964,176 @@ class TestConvertProductionModels:
         assert result is not None
         ids = [m["hydro_id"] for m in result["production_models"]]
         assert ids == sorted(ids)
+
+
+# ---------------------------------------------------------------------------
+# Hydro energy productivity (parquet) conversion
+# ---------------------------------------------------------------------------
+
+
+class TestConvertHydroEnergyProductivity:
+    """Per-(hydro, stage) ρ_eq override parquet for the cobre productivity-resolution contract."""
+
+    def _make_id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(
+            subsystem_ids=[1],
+            hydro_codes=[1, 2],
+            thermal_codes=[],
+        )
+
+    def _setup_base_mocks(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+        *,
+        ano_inicio: int = 2025,
+        mes_inicio: int = 1,
+        num_anos: int = 5,
+    ) -> None:
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = _make_hidr_cadastro()
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_dger_cls.read.return_value = _make_prod_model_dger_mock(
+            ano_inicio=ano_inicio,
+            mes_inicio=mes_inicio,
+            num_anos=num_anos,
+            num_anos_pos=0,
+        )
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_null_stage_row_per_hydro_when_no_overrides(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Without CFUGA/CMONT: one NULL-stage_id row per hydro with base productivity."""
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = _make_hidr_cadastro()
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_dger_cls.read.return_value = _make_prod_model_dger_mock()
+
+        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+
+        table = convert_hydro_energy_productivity(
+            _make_nw_files(tmp_path, modif=None),
+            self._make_id_map(),
+        )
+
+        assert table.num_rows == 2
+        assert table.column_names[:2] == ["hydro_id", "stage_id"]
+        stage_ids = table["stage_id"].to_pylist()
+        assert stage_ids == [None, None]
+        prods = table["equivalent_productivity_mw_per_m3s"].to_pylist()
+        # USINA_A: 0.9 * (355 - 50) = 274.5
+        assert prods[0] == pytest.approx(0.9 * 305.0)
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Modif")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_per_stage_rows_for_cfuga_override(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_modif_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """CFUGA at stage 3 → per-stage rows for the full horizon; stages [0..2] use base."""
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=5,
+        )
+
+        cfuga_rec = _make_cfuga_rec(month=4, year=2025, nivel=60.0)
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [cfuga_rec]
+        mock_modif_cls.read.return_value = mock_modif
+
+        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+
+        table = convert_hydro_energy_productivity(
+            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            self._make_id_map(),
+        )
+
+        # USINA_A (hydro_id=0): 60 per-stage rows. USINA_B (hydro_id=1): 1 NULL row.
+        rows = table.to_pylist()
+        a_rows = [r for r in rows if r["hydro_id"] == 0]
+        b_rows = [r for r in rows if r["hydro_id"] == 1]
+        assert len(a_rows) == 60  # 5 years * 12 months
+        assert len(b_rows) == 1
+        assert b_rows[0]["stage_id"] is None
+
+        base = 0.9 * (355.0 - 50.0)
+        override = 0.9 * (355.0 - 60.0)
+        # Stages 0..2 = base, stages 3..59 = override.
+        a_by_stage = {
+            r["stage_id"]: r["equivalent_productivity_mw_per_m3s"] for r in a_rows
+        }
+        assert a_by_stage[0] == pytest.approx(base)
+        assert a_by_stage[2] == pytest.approx(base)
+        assert a_by_stage[3] == pytest.approx(override)
+        assert a_by_stage[59] == pytest.approx(override)
+
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_other_override_columns_are_null(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """reference_volume_hm3 / reference_outflow_m3s / ρ_esp columns remain NULL."""
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = _make_hidr_cadastro()
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        mock_dger_cls.read.return_value = _make_prod_model_dger_mock()
+
+        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+
+        table = convert_hydro_energy_productivity(
+            _make_nw_files(tmp_path, modif=None),
+            self._make_id_map(),
+        )
+
+        for col in (
+            "reference_volume_hm3",
+            "reference_outflow_m3s",
+            "specific_productivity_mw_per_m3s_per_m",
+        ):
+            assert all(v is None for v in table[col].to_pylist())
 
 
 # ---------------------------------------------------------------------------
@@ -2319,6 +2497,7 @@ class TestConvertPenalties:
             "generation_violation_below_cost",
             "evaporation_violation_cost",
             "water_withdrawal_violation_cost",
+            "inflow_nonnegativity_cost",
         }
         assert required == set(result["hydro"].keys())
 
@@ -2739,6 +2918,80 @@ class TestConvertHydrosDownstreamFict:
 
         assert len(result["hydros"]) == 1
         assert result["hydros"][0]["downstream_id"] is None
+
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_terminal_plant_with_matching_fict_resolves_through_chain(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """A real plant with confhd jusante=0 and a name-matched FICT must
+        wire to the next real plant via the FICT chain.
+
+        Topology:
+            USINA_A (code=1, jusante=0)          ← physically terminal in confhd
+            FICT.USINA (code=2, jusante=3)       ← carries the energy cascade
+            USINA_B (code=3, jusante=0)          ← real downstream
+
+        After the FICT-cascade fix, USINA_A's downstream_id must point to
+        USINA_B (cobre id=1), not None as in the pre-fix behavior.  The
+        7-char name match is ``USINA A`` (after the FICT. prefix) matching
+        ``USINA_A``'s first-7-char key — pure prefix equality.
+        """
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [1, 2, 3],
+                "nome_usina": ["USINA_A", "FICT.USINA_A", "USINA_B"],
+                "posto": [1, 2, 3],
+                "codigo_usina_jusante": [0, 3, 0],
+                "ree": [1, 1, 1],
+                "volume_inicial_percentual": [50.0, 50.0, 50.0],
+                "usina_existente": ["EX", "EX", "EX"],
+                "usina_modificada": [0, 0, 0],
+            }
+        )
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        cadastro = _make_hidr_cadastro().copy()
+        # _make_hidr_cadastro has plants 1 and 2.  Promote plant 2 to a
+        # fictitious (zero-productivity placeholder) and add plant 3 as a
+        # second real plant cloned from plant 1.
+        plant3 = cadastro.iloc[0:1].copy()
+        plant3.index = [3]
+        cadastro = pd.concat([cadastro, plant3])
+        # Zero out FICT's specific productivity so it contributes 0 ρ_eq —
+        # cleanly isolates the topological fix from any ρ_eq fold-in.
+        cadastro.loc[2, "produtibilidade_especifica"] = 0.0
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_ree = MagicMock()
+        mock_ree.rees = _make_ree_df()
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 3], thermal_codes=[])
+        result = convert_hydros(_make_nw_files(tmp_path), id_map)
+
+        assert len(result["hydros"]) == 2
+        by_code = {h["name"]: h for h in result["hydros"]}
+        usina_a = by_code["USINA_A"]
+        usina_b = by_code["USINA_B"]
+        # USINA_A must wire to USINA_B via the FICT chain.
+        assert usina_a["downstream_id"] == usina_b["id"], (
+            f"Expected USINA_A.downstream_id == {usina_b['id']}, "
+            f"got {usina_a['downstream_id']}"
+        )
+        # USINA_B remains terminal.
+        assert usina_b["downstream_id"] is None
 
 
 def _make_geometry_cadastro() -> pd.DataFrame:

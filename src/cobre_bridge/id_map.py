@@ -42,8 +42,7 @@ class NewaveIdMap:
             for cobre_id, newave_id in enumerate(sorted(subsystem_ids))
         }
         self._hydro: dict[int, int] = {
-            newave_id: cobre_id
-            for cobre_id, newave_id in enumerate(hydro_codes)
+            newave_id: cobre_id for cobre_id, newave_id in enumerate(hydro_codes)
         }
         self._thermal: dict[int, int] = {
             newave_id: cobre_id

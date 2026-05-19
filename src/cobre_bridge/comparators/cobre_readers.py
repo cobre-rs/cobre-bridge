@@ -139,7 +139,9 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
 
     Returns DataFrame with columns: ``entity_id``, ``stage_id``,
     ``storage_final_hm3``, ``generation_mw``, ``turbined_m3s``,
-    ``spillage_m3s``, ``inflow_m3s``, ``water_value_per_hm3``.
+    ``spillage_m3s``, ``inflow_m3s``, ``water_value_per_hm3``,
+    ``stored_energy_initial_mwh``, ``stored_energy_final_mwh``,
+    ``incremental_inflow_energy_mw``.
     """
     empty = pl.DataFrame(
         schema={
@@ -151,6 +153,9 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
             "spillage_m3s": pl.Float64,
             "inflow_m3s": pl.Float64,
             "water_value_per_hm3": pl.Float64,
+            "stored_energy_initial_mwh": pl.Float64,
+            "stored_energy_final_mwh": pl.Float64,
+            "incremental_inflow_energy_mw": pl.Float64,
         }
     )
 
@@ -159,7 +164,14 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
         return empty
 
     flow_cols = ["generation_mw", "turbined_m3s", "spillage_m3s"]
-    stage_cols = ["storage_final_hm3", "inflow_m3s", "water_value_per_hm3"]
+    stage_cols = [
+        "storage_final_hm3",
+        "inflow_m3s",
+        "water_value_per_hm3",
+        "stored_energy_initial_mwh",
+        "stored_energy_final_mwh",
+        "incremental_inflow_energy_mw",
+    ]
 
     available = set(lf.collect_schema().names())
     id_col = "hydro_id" if "hydro_id" in available else "entity_id"
@@ -390,7 +402,14 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
         return pl.DataFrame()
 
     flow_cols = ["generation_mw", "turbined_m3s", "spillage_m3s"]
-    stage_cols = ["storage_final_hm3", "inflow_m3s", "water_value_per_hm3"]
+    stage_cols = [
+        "storage_final_hm3",
+        "inflow_m3s",
+        "water_value_per_hm3",
+        "stored_energy_initial_mwh",
+        "stored_energy_final_mwh",
+        "incremental_inflow_energy_mw",
+    ]
     available = set(lf.collect_schema().names())
     id_col = "hydro_id" if "hydro_id" in available else "entity_id"
     avail_flow = [c for c in flow_cols if c in available]
@@ -632,8 +651,7 @@ def read_cobre_bus_aggregates(
     if "load_mw" in merged.columns and "ncs_gen_mw" in merged.columns:
         merged = merged.with_columns(
             (
-                pl.col("load_mw").fill_null(0.0)
-                - pl.col("ncs_gen_mw").fill_null(0.0)
+                pl.col("load_mw").fill_null(0.0) - pl.col("ncs_gen_mw").fill_null(0.0)
             ).alias("net_load_mw")
         )
         all_vars.append("net_load_mw")
@@ -657,11 +675,23 @@ def read_cobre_bus_aggregates(
     return merged.group_by("bus_id", "stage_id").agg(aggs).sort("bus_id", "stage_id")
 
 
-def read_cobre_cost_breakdown(cobre_output_dir: Path) -> dict[str, float]:
+def read_cobre_cost_breakdown(
+    cobre_output_dir: Path,
+    max_stage_id: int | None = None,
+) -> dict[str, float]:
     """Read cost breakdown from Cobre simulation costs entity.
 
     Returns ``{category: mean_total_R$}`` averaged across scenarios,
     summed across all stages and blocks.  Zero-cost categories are excluded.
+
+    Parameters
+    ----------
+    cobre_output_dir:
+        Path to the Cobre ``output/`` directory.
+    max_stage_id:
+        If provided, only include stages with ``stage_id <= max_stage_id``.
+        Used to make the cost breakdown comparable to NEWAVE, which usually
+        reports a shorter horizon than Cobre.
     """
     lf = _scan_simulation_entity(cobre_output_dir, "costs")
     if lf is None:
@@ -695,6 +725,9 @@ def read_cobre_cost_breakdown(cobre_output_dir: Path) -> dict[str, float]:
         return {}
 
     has_discount = "discount_factor" in available
+
+    if max_stage_id is not None and "stage_id" in available:
+        lf = lf.filter(pl.col("stage_id") <= max_stage_id)
 
     try:
         # Discount costs to present value, then sum per scenario.
@@ -763,9 +796,7 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
     for col, lower in cols_lower.items():
         if col in col_map:
             continue
-        if "iteration" not in col_map.values() and (
-            "iter" in lower
-        ):
+        if "iteration" not in col_map.values() and ("iter" in lower):
             col_map[col] = "iteration"
         elif "lower_bound" not in col_map.values() and (
             "lower" in lower or "zinf" in lower
@@ -801,52 +832,142 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
     return result
 
 
-def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
-    """Read hydro metadata from Cobre hydros.json.
-
-    Looks for ``system/hydros.json`` in the Cobre case directory
-    (parent of output dir).
-
-    Returns ``{entity_id: {"name": str, "productivity_mw_per_m3s": float}}``.
-    """
-    # The case dir is the parent of the output dir.
+def _resolve_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
+    """Locate a `system/<filename>` JSON near the Cobre output directory."""
     case_dir = cobre_output_dir.parent
-    hydros_path = case_dir / "system" / "hydros.json"
+    for candidate in [case_dir, cobre_output_dir, case_dir.parent]:
+        p = candidate / "system" / filename
+        if p.exists():
+            return p
+    return None
 
-    if not hydros_path.exists():
-        # Try the output dir's parent's parent.
-        for candidate in [cobre_output_dir, case_dir.parent]:
-            p = candidate / "system" / "hydros.json"
-            if p.exists():
-                hydros_path = p
+
+def _productivity_from_energy_parquet(case_dir: Path) -> dict[int, float]:
+    """Return ``{hydro_id: ρ_eq}`` from ``hydro_energy_productivity.parquet``.
+
+    Prefers the per-hydro NULL-stage_id row as a "default" value; falls back to
+    the productivity at the smallest stage_id when no default row exists. This
+    is the new cobre productivity-resolution-rules contract: the parquet is the
+    authoritative source for non-FPHA ρ_eq.
+    """
+    parquet_path = case_dir / "system" / "hydro_energy_productivity.parquet"
+    if not parquet_path.exists():
+        return {}
+    try:
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(parquet_path)
+    except (OSError, ImportError):
+        _LOG.warning("Failed to read %s", parquet_path)
+        return {}
+
+    cols = table.column_names
+    if "hydro_id" not in cols or "equivalent_productivity_mw_per_m3s" not in cols:
+        return {}
+    hydro_ids = table["hydro_id"].to_pylist()
+    stage_ids = (
+        table["stage_id"].to_pylist() if "stage_id" in cols else [None] * len(hydro_ids)
+    )
+    values = table["equivalent_productivity_mw_per_m3s"].to_pylist()
+
+    # First pass: take NULL-stage_id rows (per-hydro defaults).
+    result: dict[int, float] = {}
+    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
+        if sid is None and v is not None and hid not in result:
+            result[int(hid)] = float(v)
+
+    # Second pass: for hydros without a default row, fall back to the smallest
+    # stage_id row's value (best-effort representative).
+    by_hydro_min_stage: dict[int, tuple[int, float]] = {}
+    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
+        if sid is None or v is None:
+            continue
+        hid_i = int(hid)
+        if hid_i in result:
+            continue
+        cur = by_hydro_min_stage.get(hid_i)
+        if cur is None or sid < cur[0]:
+            by_hydro_min_stage[hid_i] = (sid, float(v))
+    for hid, (_sid, v) in by_hydro_min_stage.items():
+        result[hid] = v
+    return result
+
+
+def _productivity_from_production_models(case_dir: Path) -> dict[int, float]:
+    """Legacy fallback: read productivity from ``hydro_production_models.json``.
+
+    Pre-modernization cobre-bridge cases emit ``productivity_mw_per_m3s`` in the
+    JSON stage_range entries; this helper preserves dashboard/compare support
+    for those older outputs. New cases use
+    :func:`_productivity_from_energy_parquet` instead.
+    """
+    pm_path = case_dir / "system" / "hydro_production_models.json"
+    if not pm_path.exists():
+        return {}
+    try:
+        with pm_path.open() as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        _LOG.warning("Failed to parse %s", pm_path)
+        return {}
+    result: dict[int, float] = {}
+    for model in data.get("production_models", []):
+        hydro_id = int(model.get("hydro_id"))
+        ranges = model.get("stage_ranges") or []
+        for entry in ranges:
+            prod = entry.get("productivity_mw_per_m3s")
+            if prod is not None:
+                result[hydro_id] = float(prod)
                 break
+    return result
 
-    if not hydros_path.exists():
+
+def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
+    """Read hydro metadata from Cobre system JSON files.
+
+    Reads ``hydros.json`` and ``hydro_production_models.json``.
+    Productivity now lives per-(hydro, stage) in
+    ``hydro_production_models.json`` on cobre HEAD. We surface the
+    first ``stage_ranges`` entry's value as ``productivity_mw_per_m3s`` for
+    backward compatibility with comparator/dashboard callers.
+
+    Returns ``{entity_id: {"name": str, "productivity_mw_per_m3s": float | None,
+    "min_storage_hm3": float}}``.
+    """
+    hydros_path = _resolve_system_json(cobre_output_dir, "hydros.json")
+    if hydros_path is None:
         _LOG.warning("hydros.json not found near %s", cobre_output_dir)
         return {}
 
     try:
         with hydros_path.open() as f:
             data = json.load(f)
-    except Exception:  # noqa: BLE001
+    except (OSError, json.JSONDecodeError):
         _LOG.warning("Failed to parse hydros.json")
         return {}
+
+    case_dir = hydros_path.parent.parent
+    energy_productivity = _productivity_from_energy_parquet(case_dir)
+    pm_productivity = _productivity_from_production_models(case_dir)
 
     result: dict[int, dict] = {}
     for hydro in data.get("hydros", []):
         entity_id = int(hydro["id"])
         name = str(hydro.get("name", f"hydro_{entity_id}"))
 
-        # Productivity may be in generation.productivity_mw_per_m3s or
-        # a top-level field. Check common locations.
-        prod = None
-        gen = hydro.get("generation", {})
-        if isinstance(gen, dict):
-            prod = gen.get("productivity_mw_per_m3s")
+        # Preferred source: hydro_energy_productivity.parquet (new contract).
+        # Fall back through hydro_production_models.json and the deprecated
+        # generation.productivity_mw_per_m3s embedded field for legacy outputs.
+        prod = energy_productivity.get(entity_id)
+        if prod is None:
+            prod = pm_productivity.get(entity_id)
+        if prod is None:
+            gen = hydro.get("generation", {})
+            if isinstance(gen, dict):
+                prod = gen.get("productivity_mw_per_m3s")
         if prod is None:
             prod = hydro.get("productivity_mw_per_m3s")
 
-        # Reservoir min/max storage for offset correction.
         reservoir = hydro.get("reservoir", {})
         min_storage = reservoir.get("min_storage_hm3", 0.0) if reservoir else 0.0
 

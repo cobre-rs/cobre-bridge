@@ -12,6 +12,7 @@ from cobre_bridge.comparators.charts import (
     build_energy_balance_tab,
     build_hydro_detail_tab,
     build_thermal_detail_tab,
+    cobre_aggregate_chart,
     convergence_chart,
     cost_breakdown_chart,
     hydro_aggregate_chart,
@@ -107,16 +108,57 @@ def build_comparison_report(
     tab_contents["tab-system"] = "\n".join(system_parts)
 
     # --- Energy Balance tab ---
-    tab_contents["tab-balance"] = build_energy_balance_tab(
+    balance_html = build_energy_balance_tab(
         pctiles.nw_market if pctiles else pl.DataFrame(),
         pctiles.bus_aggregates if pctiles else pl.DataFrame(),
         pctiles.cobre_bus_meta if pctiles else {},
         pctiles.nw_bus_names if pctiles else {},
         nw_net_load=pctiles.nw_net_load if pctiles else pl.DataFrame(),
     )
+    energy_balance_extra: list[str] = []
+    if pctiles is not None and not pctiles.cobre_hydro_means.is_empty():
+        energy_balance_extra.append(section_title("System Energy (EARM / ENA)"))
+        energy_balance_extra.append(
+            chart_grid(
+                [
+                    wrap_chart(
+                        cobre_aggregate_chart(
+                            pctiles.cobre_hydro_means,
+                            "stored_energy_final_mwh",
+                            "System Stored Energy (EARM)",
+                            "MWh",
+                            pctiles.hydro,
+                            nw_sin=pctiles.nw_sin,
+                            nw_variable="EARMF",
+                            nw_factor=730.0,
+                            nw_offset=pctiles.nw_offset,
+                        )
+                    ),
+                    wrap_chart(
+                        cobre_aggregate_chart(
+                            pctiles.cobre_hydro_means,
+                            "incremental_inflow_energy_mw",
+                            "System Natural Inflow Energy (ENA)",
+                            "MW",
+                            pctiles.hydro,
+                            nw_sin=pctiles.nw_sin,
+                            nw_variable="ENA",
+                            nw_factor=1.0,
+                            nw_offset=pctiles.nw_offset,
+                        )
+                    ),
+                ]
+            )
+        )
+    tab_contents["tab-balance"] = balance_html + "\n" + "\n".join(energy_balance_extra)
 
     # --- Hydro Operation tab ---
     hydro_pct = pctiles.hydro if pctiles else None
+    cobre_hydro_means = pctiles.cobre_hydro_means if pctiles else pl.DataFrame()
+    nw_sin = pctiles.nw_sin if pctiles else pl.DataFrame()
+    nw_offset = pctiles.nw_offset if pctiles else 0
+    matched_hydro_ids = {r.cobre_id for r in results if r.entity_type == "hydro"}
+
     hydro_parts: list[str] = []
     hydro_parts.append(section_title("Aggregate Hydro Comparison"))
     hydro_charts: list[str] = []
@@ -132,10 +174,51 @@ def build_comparison_report(
             wrap_chart(hydro_aggregate_chart(results, var, title, hydro_pct))
         )
     hydro_parts.append(chart_grid(hydro_charts))
+
+    # System-level EARM and ENA (Cobre per-hydro aggregate vs NEWAVE SIN).
+    # NEWAVE EARMF is in MWmes (mean MW over a month); convert to MWh via
+    # the canonical 730 h/month factor used by NEWAVE.  ENA is already in
+    # MW (mean power) on both sides.
+    hydro_parts.append(section_title("Aggregate Energy Variables"))
+    energy_charts = [
+        wrap_chart(
+            cobre_aggregate_chart(
+                cobre_hydro_means,
+                "stored_energy_final_mwh",
+                "Stored Energy (EARM)",
+                "MWh",
+                hydro_pct,
+                nw_sin=nw_sin,
+                nw_variable="EARMF",
+                nw_factor=730.0,
+                nw_offset=nw_offset,
+                matched_ids=matched_hydro_ids or None,
+            )
+        ),
+        wrap_chart(
+            cobre_aggregate_chart(
+                cobre_hydro_means,
+                "incremental_inflow_energy_mw",
+                "Natural Inflow Energy (ENA)",
+                "MW",
+                hydro_pct,
+                nw_sin=nw_sin,
+                nw_variable="ENA",
+                nw_factor=1.0,
+                nw_offset=nw_offset,
+                matched_ids=matched_hydro_ids or None,
+            )
+        ),
+    ]
+    hydro_parts.append(chart_grid(energy_charts))
     tab_contents["tab-hydro"] = "\n".join(hydro_parts)
 
     # --- Hydro Plant Details tab ---
-    tab_contents["tab-hydro-detail"] = build_hydro_detail_tab(results, hydro_pct)
+    tab_contents["tab-hydro-detail"] = build_hydro_detail_tab(
+        results,
+        hydro_pct,
+        cobre_hydro_means,
+    )
 
     # --- Thermal Operation tab ---
     thermal_pct = pctiles.thermal if pctiles else None

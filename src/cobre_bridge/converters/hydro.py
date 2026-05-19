@@ -410,6 +410,14 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     # Apply MODIF.DAT permanent overrides before the main conversion loop.
     cadastro = _apply_permanent_overrides(cadastro, nw_files)
 
+    # Resolve the FICT-cascade for every real plant.  Provides the effective
+    # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
+    # be folded back into the upstream real plant's effective ρ_eq.  See
+    # ``cobre_bridge.converters.fict_cascade`` for the resolution rules.
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
+
     # Collect study plant codes for temporal override extraction.
     all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
     existing = all_existing[
@@ -441,8 +449,9 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
-        # Generation parameters.
-        productivity = _compute_productivity(hreg)
+        # Generation parameters. Productivity lives in
+        # ``hydro_production_models.json`` on cobre HEAD; callers that need
+        # the per-hydro base value call ``compute_base_productivities``.
         n_sets = int(hreg["numero_conjuntos_maquinas"])
 
         max_turbined = 0.0
@@ -501,18 +510,30 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         else:
             min_generation = 0.0
 
-        # Downstream cascade linkage.
+        # Downstream cascade linkage.  Use the FICT-cascade resolver so that
+        # plants whose physical downstream is a fictitious plant (or whose
+        # confhd jusante is 0 but a name-matched FICT.<NAME> exists) end up
+        # wired to the next real plant in the cascade, not silently
+        # disconnected.  Fall back to the raw confhd link for plants the
+        # resolver did not classify (defensive).
         downstream_id: int | None = None
-        jusante_raw = row.get("codigo_usina_jusante")
-        if (
-            jusante_raw is not None
-            and not _is_na(jusante_raw)
-            and int(jusante_raw) != 0
-        ):
+        resolution = fict_cascade.get(newave_code)
+        if resolution is not None and resolution.downstream_code is not None:
             try:
-                downstream_id = id_map.hydro_id(int(jusante_raw))
+                downstream_id = id_map.hydro_id(resolution.downstream_code)
             except KeyError:
-                pass
+                downstream_id = None
+        elif resolution is None:
+            jusante_raw = row.get("codigo_usina_jusante")
+            if (
+                jusante_raw is not None
+                and not _is_na(jusante_raw)
+                and int(jusante_raw) != 0
+            ):
+                try:
+                    downstream_id = id_map.hydro_id(int(jusante_raw))
+                except KeyError:
+                    pass
 
         # Bus assignment via REE -> subsystem.
         ree_code = int(row["ree"])
@@ -546,6 +567,25 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         # (set by convert_penalties) already carry the converted values.
         penalties: dict | None = None
 
+        # Specific productivity ρ_esp [MW / ((m³/s)·m)] — feeds cobre's energy
+        # conversion pipeline (derives ρ_eq from VHA geometry).
+        rho_esp_raw = hreg.get("produtibilidade_especifica")
+        rho_esp: float | None = None
+        if rho_esp_raw is not None:
+            rho_esp_f = float(rho_esp_raw)
+            if not math.isnan(rho_esp_f) and rho_esp_f > 0.0:
+                rho_esp = rho_esp_f
+
+        # Tailrace as a zero-order polynomial = canal_fuga_medio (constant).
+        # Cobre subtracts the tailrace level from the upstream head when
+        # deriving ρ_eq; without this NEWAVE's productivity will not match.
+        cf_raw = hreg.get("canal_fuga_medio")
+        tailrace: dict | None = None
+        if cf_raw is not None:
+            cf_val = float(cf_raw)
+            if not math.isnan(cf_val) and cf_val > 0.0:
+                tailrace = {"type": "polynomial", "coefficients": [cf_val]}
+
         hydro_entry: dict = {
             "id": id_map.hydro_id(newave_code),
             "name": name,
@@ -561,16 +601,16 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             },
             "generation": {
                 "model": "constant_productivity",
-                "productivity_mw_per_m3s": productivity,
                 "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": max_turbined,
                 "min_generation_mw": min_generation,
                 "max_generation_mw": max_generation,
             },
+            "specific_productivity_mw_per_m3s_per_m": rho_esp,
             "evaporation": (
                 {"coefficients_mm": evap_coeffs} if has_evaporation else None
             ),
-            "tailrace": None,
+            "tailrace": tailrace,
             "diversion": _make_diversion(newave_code, id_map),
             "filling": None,
             "efficiency": None,
@@ -699,15 +739,19 @@ def _compute_productivity(
     return produtibilidade * adjusted_drop
 
 
-def convert_production_models(
-    nw_files: NewaveFiles, id_map: NewaveIdMap
-) -> dict | None:
-    """Build per-stage productivity overrides from MODIF.DAT CFUGA/CMONT records.
+def convert_production_models(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
+    """Build ``hydro_production_models.json`` with model selection only.
 
-    For each hydro plant that has CFUGA or CMONT temporal overrides in
-    ``MODIF.DAT``, computes the productivity at each change point and emits
-    a ``stage_ranges`` entry in the Cobre ``hydro_production_models.json``
-    format.
+    After the cobre productivity-resolution-rules plan, ``productivity_mw_per_m3s``
+    is **optional** in this file: the value is supplied per-(hydro, stage) in
+    ``hydro_energy_productivity.parquet`` (see
+    :func:`convert_hydro_energy_productivity`). We therefore emit only the model
+    selection here — one ``stage_ranges`` entry per hydro spanning the whole
+    horizon, carrying ``model: "constant_productivity"`` with no numeric value.
+
+    Cross-file validation in cobre rejects double-supply (JSON + parquet) and
+    coverage gaps; keeping productivity strictly in the parquet eliminates the
+    conflict surface.
 
     Parameters
     ----------
@@ -719,16 +763,146 @@ def convert_production_models(
 
     Returns
     -------
-    dict | None
+    dict
         A dict with a ``"production_models"`` key ready to serialise as
-        ``system/hydro_production_models.json``, or ``None`` when no plants
-        have CFUGA/CMONT overrides.
+        ``system/hydro_production_models.json``.
+    """
+    confhd = Confhd.read(str(nw_files.confhd))
+    confhd_df = confhd.usinas
+    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    existing = all_existing[
+        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
+    ]
+    confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
+
+    production_models: list[dict] = []
+    for newave_code in confhd_codes:
+        try:
+            hydro_id = id_map.hydro_id(newave_code)
+        except KeyError:
+            continue
+
+        production_models.append(
+            {
+                "hydro_id": hydro_id,
+                "selection_mode": "stage_ranges",
+                "stage_ranges": [
+                    {
+                        "start_stage_id": 0,
+                        "end_stage_id": None,
+                        "model": "constant_productivity",
+                    }
+                ],
+            }
+        )
+
+    production_models.sort(key=lambda m: m["hydro_id"])
+    return {
+        "$schema": _PRODUCTION_MODELS_SCHEMA_URL,
+        "production_models": production_models,
+    }
+
+
+def _total_study_stages(nw_files: NewaveFiles) -> int:
+    """Return the total number of stages in the study (including post-study)."""
+    dger = Dger.read(str(nw_files.dger))
+    start_month: int = int(dger.mes_inicio_estudo)
+    num_anos: int = int(dger.num_anos_estudo or 0)
+    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
+    study_months = (13 - start_month) + (num_anos - 1) * 12
+    return study_months + num_anos_pos * 12
+
+
+def _per_stage_productivities(
+    hreg: pd.Series,
+    base_productivity: float,
+    drop_overrides: list[dict],
+    nw_files: NewaveFiles,
+    total_stages: int,
+) -> list[float]:
+    """Replay CFUGA/CMONT events to produce per-stage productivity values.
+
+    Returns a list of length *total_stages*; each entry is the productivity for
+    that stage_id. Stages before the first override use *base_productivity*.
+    """
+    if not drop_overrides:
+        return [base_productivity] * total_stages
+
+    dger = Dger.read(str(nw_files.dger))
+    start_year = int(dger.ano_inicio_estudo)
+    start_month = int(dger.mes_inicio_estudo)
+
+    events: list[tuple[int, float | None, float | None]] = []
+    for override in drop_overrides:
+        stage_id = (override["year"] - start_year) * 12 + (
+            override["month"] - start_month
+        )
+        if override["type"] == "CFUGA":
+            events.append((stage_id, override["value"], None))
+        else:  # CMONT
+            events.append((stage_id, None, override["value"]))
+
+    events.sort(key=lambda e: (e[0], 0 if e[1] is not None else 1))
+
+    # Group events by stage_id, compute productivity at each change point.
+    breakpoints: list[tuple[int, float]] = []
+    effective_cfuga: float | None = None
+    effective_cmont: float | None = None
+    i = 0
+    while i < len(events):
+        cur_stage = events[i][0]
+        while i < len(events) and events[i][0] == cur_stage:
+            _, cfuga_val, cmont_val = events[i]
+            if cfuga_val is not None:
+                effective_cfuga = cfuga_val
+            if cmont_val is not None:
+                effective_cmont = cmont_val
+            i += 1
+        prod = _compute_productivity(
+            hreg,
+            canal_fuga_override=effective_cfuga,
+            cmont_override=effective_cmont,
+        )
+        breakpoints.append((cur_stage, prod))
+
+    # Expand breakpoints into per-stage values.
+    values: list[float] = [base_productivity] * total_stages
+    for idx, (bp_stage, bp_prod) in enumerate(breakpoints):
+        if bp_stage < 0:
+            continue
+        end_stage = (
+            breakpoints[idx + 1][0] if idx + 1 < len(breakpoints) else total_stages
+        )
+        for s in range(max(bp_stage, 0), min(end_stage, total_stages)):
+            values[s] = bp_prod
+    return values
+
+
+def convert_hydro_energy_productivity(
+    nw_files: NewaveFiles, id_map: NewaveIdMap
+) -> pa.Table:
+    """Build the per-(hydro, stage) ρ_eq override parquet table.
+
+    After cobre's productivity-resolution-rules plan, every non-FPHA
+    ``(hydro, stage)`` pair must be supplied by exactly one source. Since
+    `convert_production_models` no longer emits a numeric productivity, this
+    parquet must cover **every** (hydro, stage).
+
+    Layout:
+
+    - Plants without CFUGA/CMONT overrides emit a single row with
+      ``stage_id = NULL``: the per-hydro default. Resolution falls through to
+      that default for every stage.
+    - Plants with CFUGA/CMONT overrides emit one row per study stage so that
+      cobre's per-stage lookup always finds an exact match (no ambiguity from
+      mixing default + per-stage rows).
+
+    Other override columns (``reference_volume_hm3``, ``reference_outflow_m3s``,
+    ``specific_productivity_mw_per_m3s_per_m``) are left NULL — NEWAVE does not
+    provide per-stage values for them.
     """
     hidr = Hidr.read(str(nw_files.hidr))
-    cadastro = hidr.cadastro
-    # Apply permanent overrides so base productivity is consistent with
-    # what convert_hydros computes.
-    cadastro = _apply_permanent_overrides(cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
 
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
@@ -739,152 +913,182 @@ def convert_production_models(
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
-
-    # Filter to plants that actually have CFUGA or CMONT overrides.
     plants_with_drop_overrides = {
         code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
         for code, overrides in temporal_overrides.items()
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
 
-    if not plants_with_drop_overrides:
-        return None
+    total_stages = _total_study_stages(nw_files) if plants_with_drop_overrides else 0
 
-    # Read dger for study start date and total stage count.
-    dger = Dger.read(str(nw_files.dger))
-    start_year: int = int(dger.ano_inicio_estudo)
-    start_month: int = int(dger.mes_inicio_estudo)
-    num_anos: int = int(dger.num_anos_estudo or 0)
-    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    # FICT-cascade: when a real plant's energy-cascade traverses fictitious
+    # plants, fold those FICTs' ρ_eq into the upstream real plant's own ρ_eq
+    # so that cobre's per-plant cascade sum (computed at solve time from
+    # ``hydro_energy_productivity.parquet`` plus the rewired ``downstream_id``)
+    # reproduces NEWAVE's ``produtibilidade_acumulada_calculo_earm``.  In
+    # NEWAVE's bundled cases FICT plants have ρ_esp = 0 so this is a no-op
+    # numerically; the fix is purely structural.  The helper is robust to
+    # non-zero FICT productivities (uncommon but possible).
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
 
-    production_models: list[dict] = []
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
 
-    for newave_code, drop_overrides in plants_with_drop_overrides.items():
+    hydro_ids: list[int] = []
+    stage_ids: list[int | None] = []
+    equiv_prods: list[float] = []
+
+    for newave_code in sorted(confhd_codes):
         if newave_code not in cadastro.index:
-            _LOG.warning(
-                "Plant code %d has CFUGA/CMONT overrides but is not in hidr.dat;"
-                " skipping production model.",
-                newave_code,
-            )
             continue
-
         try:
             hydro_id = id_map.hydro_id(newave_code)
         except KeyError:
-            _LOG.warning(
-                "Plant code %d has CFUGA/CMONT overrides but is not in id_map;"
-                " skipping production model.",
-                newave_code,
-            )
             continue
-
         hreg = cadastro.loc[newave_code]
         base_productivity = _compute_productivity(hreg)
+        resolution = fict_cascade.get(newave_code)
+        if resolution is not None:
+            base_productivity += resolution.fict_rho_sum
+        overrides = plants_with_drop_overrides.get(newave_code, [])
 
-        # Build a sorted list of (stage_id, canal_fuga, cmont) change events.
-        # Each event holds the *effective* values from that stage onwards.
-        # Start with base values; events are processed in chronological order.
-        events: list[tuple[int, float | None, float | None]] = []
-        for override in drop_overrides:
-            stage_id = (override["year"] - start_year) * 12 + (
-                override["month"] - start_month
+        if not overrides:
+            hydro_ids.append(hydro_id)
+            stage_ids.append(None)
+            equiv_prods.append(base_productivity)
+        else:
+            per_stage = _per_stage_productivities(
+                hreg, base_productivity, overrides, nw_files, total_stages
             )
-            if override["type"] == "CFUGA":
-                events.append((stage_id, override["value"], None))
-            else:  # CMONT
-                events.append((stage_id, None, override["value"]))
+            for stage_id, value in enumerate(per_stage):
+                hydro_ids.append(hydro_id)
+                stage_ids.append(stage_id)
+                equiv_prods.append(value)
 
-        # Sort by stage_id, then by CFUGA before CMONT within the same stage
-        # so both can be applied when they coincide.
-        events.sort(key=lambda e: (e[0], 0 if e[1] is not None else 1))
+    nulls = [None] * len(hydro_ids)
+    return pa.table(
+        {
+            "hydro_id": pa.array(hydro_ids, type=pa.int32()),
+            "stage_id": pa.array(stage_ids, type=pa.int32()),
+            "equivalent_productivity_mw_per_m3s": pa.array(
+                equiv_prods, type=pa.float64()
+            ),
+            "reference_volume_hm3": pa.array(nulls, type=pa.float64()),
+            "reference_outflow_m3s": pa.array(nulls, type=pa.float64()),
+            "specific_productivity_mw_per_m3s_per_m": pa.array(
+                nulls, type=pa.float64()
+            ),
+        }
+    )
 
-        # Merge events at the same stage: accumulate effective canal_fuga and
-        # cmont by scanning in order.
-        # Use sentinel None to mean "use base value from hreg".
-        effective_cfuga: float | None = None
-        effective_cmont: float | None = None
 
-        # Build a sorted list of (stage_id, productivity) breakpoints by
-        # replaying the events against the running effective state.
-        breakpoints: list[tuple[int, float]] = []
+def compute_per_stage_own_productivities(
+    nw_files: NewaveFiles,
+) -> dict[int, list[float]]:
+    """Return ``{plant_code: [own ρ_eq per stage]}`` for every existing plant.
 
-        i = 0
-        while i < len(events):
-            stage_id = events[i][0]
-            # Apply all events at this stage_id.
-            while i < len(events) and events[i][0] == stage_id:
-                _, cfuga_val, cmont_val = events[i]
-                if cfuga_val is not None:
-                    effective_cfuga = cfuga_val
-                if cmont_val is not None:
-                    effective_cmont = cmont_val
-                i += 1
+    Per-stage own productivity reflects MODIF.DAT CFUGA / CMONT temporal
+    overrides — for stages before any override the value is the base
+    polynomial-integrated productivity; for later stages it picks up the
+    effective tailrace / forebay overrides as they take effect. Plants
+    without any temporal overrides return a flat list of length
+    ``total_stages``.
 
-            prod = _compute_productivity(
-                hreg,
-                canal_fuga_override=effective_cfuga,
-                cmont_override=effective_cmont,
-            )
-            breakpoints.append((stage_id, prod))
+    Used by the VminOP RHS calculation so that the absolute bound
+    ``(pct/100) × useful + dead`` is computed with the **same** per-stage
+    ρ_acum that cobre uses to evaluate the LHS at solve time — otherwise
+    the constraint silently drifts at every stage where overrides apply
+    or for any plant upstream of an overridden plant in the cascade.
 
-        # Build stage_ranges from breakpoints.
-        # The implicit range before the first breakpoint uses base_productivity.
-        stage_ranges: list[dict] = []
+    Keys are NEWAVE plant codes (not Cobre ids) since cascade traversal in
+    ``compute_accumulated_productivities`` works in NEWAVE-code space.
+    """
+    total_stages = _total_study_stages(nw_files)
+    if total_stages <= 0:
+        return {}
 
-        first_stage = breakpoints[0][0]
-        if first_stage > 0:
-            stage_ranges.append(
-                {
-                    "start_stage_id": 0,
-                    "end_stage_id": first_stage - 1,
-                    "model": "constant_productivity",
-                    "productivity_override": base_productivity,
-                }
-            )
+    hidr = Hidr.read(str(nw_files.hidr))
+    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
 
-        for idx, (bp_stage, bp_prod) in enumerate(breakpoints):
-            if idx + 1 < len(breakpoints):
-                next_stage = breakpoints[idx + 1][0]
-                end_stage: int | None = next_stage - 1
-            else:
-                end_stage = None  # until end of study
+    confhd = Confhd.read(str(nw_files.confhd))
+    confhd_df = confhd.usinas
+    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    existing = all_existing[
+        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
+    ]
+    confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
-            stage_ranges.append(
-                {
-                    "start_stage_id": bp_stage,
-                    "end_stage_id": end_stage,
-                    "model": "constant_productivity",
-                    "productivity_override": bp_prod,
-                }
-            )
-
-        _LOG.debug(
-            "Plant code %d (hydro_id=%d): %d stage range(s) in production model,"
-            " total_stages=%d",
-            newave_code,
-            hydro_id,
-            len(stage_ranges),
-            total_stages,
-        )
-
-        production_models.append(
-            {
-                "hydro_id": hydro_id,
-                "selection_mode": "stage_ranges",
-                "stage_ranges": stage_ranges,
-            }
-        )
-
-    if not production_models:
-        return None
-
-    production_models.sort(key=lambda m: m["hydro_id"])
-    return {
-        "$schema": _PRODUCTION_MODELS_SCHEMA_URL,
-        "production_models": production_models,
+    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+    plants_with_drop_overrides = {
+        code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
+        for code, overrides in temporal_overrides.items()
+        if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
+
+    # FICT-cascade fold-in: per-stage ρ_eq must already include any FICT
+    # contribution so that the per-stage ρ_acum used by VminOP and EARM
+    # accounting matches the topology rewired into ``hydros.json``.
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
+
+    result: dict[int, list[float]] = {}
+    for plant_code in confhd_codes:
+        if plant_code not in cadastro.index:
+            continue
+        hreg = cadastro.loc[plant_code]
+        base = _compute_productivity(hreg)
+        resolution = fict_cascade.get(plant_code)
+        if resolution is not None:
+            base += resolution.fict_rho_sum
+        overrides = plants_with_drop_overrides.get(plant_code, [])
+        result[plant_code] = _per_stage_productivities(
+            hreg, base, overrides, nw_files, total_stages
+        )
+    return result
+
+
+def compute_base_productivities(
+    nw_files: NewaveFiles, id_map: NewaveIdMap
+) -> dict[int, float]:
+    """Return ``{hydro_id: base_productivity_mw_per_m3s}`` for every hydro.
+
+    The base productivity is the value `_compute_productivity` returns with no
+    CFUGA/CMONT overrides applied — i.e. the productivity used when the case
+    has no temporal overrides for that plant. Consumers that previously read
+    ``hydros_dict[i]["generation"]["productivity_mw_per_m3s"]`` should call
+    this instead now that productivity has moved out of `hydros.json`.
+    """
+    hidr = Hidr.read(str(nw_files.hidr))
+    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+
+    confhd = Confhd.read(str(nw_files.confhd))
+    confhd_df = confhd.usinas
+    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    existing = all_existing[
+        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
+    ]
+
+    # FICT-cascade fold-in — keep this in lockstep with the other productivity
+    # helpers so every downstream consumer sees the same effective ρ_eq.
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
+
+    result: dict[int, float] = {}
+    for _, row in existing.iterrows():
+        newave_code = int(row["codigo_usina"])
+        if newave_code not in cadastro.index:
+            continue
+        try:
+            hydro_id = id_map.hydro_id(newave_code)
+        except KeyError:
+            continue
+        base = _compute_productivity(cadastro.loc[newave_code])
+        resolution = fict_cascade.get(newave_code)
+        if resolution is not None:
+            base += resolution.fict_rho_sum
+        result[hydro_id] = base
+    return result
 
 
 def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.Table:

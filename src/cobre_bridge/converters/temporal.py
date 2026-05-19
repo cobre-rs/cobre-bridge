@@ -464,9 +464,16 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "estimation": estimation,
         "training": training_section,
         "modeling": {
+            # `method: "penalty"` enables the inflow-non-negativity slack columns
+            # in the LP. The slack penalty itself comes from
+            # `penalties.json::hydro.inflow_nonnegativity_cost`, which the
+            # converter populates via `convert_penalties`. The legacy
+            # `penalty_cost` field in this block is *deprecated* (see cobre
+            # config schema docs) and ignored when penalties.json supplies
+            # the value, so we intentionally omit it here to avoid misleading
+            # readers about which number actually drives the LP.
             "inflow_non_negativity": {
                 "method": "penalty",
-                "penalty_cost": 10000.0,
             },
         },
         "exports": {

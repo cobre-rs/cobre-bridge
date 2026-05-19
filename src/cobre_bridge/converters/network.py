@@ -38,31 +38,163 @@ _NCS_FACTORS_SCHEMA_URL = (
     "/book/src/schemas/non_controllable_factors.schema.json"
 )
 
-# Penalty reference value and multipliers.
-# The spillage cost ($/m3s) is the reference. Other penalties are expressed
-# as multipliers of the spillage cost, converted to the energy domain ($/MW)
-# using the average hydro productivity.
+# --------------------------------------------------------------------------
+# Penalty conversion constants
+# --------------------------------------------------------------------------
 #
-# Ordering: exchange < spillage < fpha_turbined < curtailment < excess
-# This ensures the optimizer prefers interchange over spilling or curtailing.
-_SPILLAGE_REF = 0.001  # R$/(m3/s) — base reference in flow domain
-_EXCHANGE_MULT = 0.9  # exchange < spillage
-_FPHA_TURBINED_MULT = 1.1
-_NCS_CURTAILMENT_MULT = 1.15
-_EXCESS_MULT = 1.20
+# Source: NEWAVE User Manual v29 (CEPEL/ONS, 2023), section 3.24 "Penalidades
+# (Ex.: Penalid.dat)" and the internal-default tables on pages 87–88.
+#
+# Time-aspect summary (re-derived from cobre/crates/cobre-sddp/src/lp_builder/
+# matrix.rs in current HEAD):
+#
+# Every cobre penalty coefficient in penalties.json is multiplied by some
+# hours quantity before entering the LP objective. The variable it sits on
+# (MW, m³/s, or hm³) and the time multiplier (block_hours, total_stage_hours,
+# or none) together determine the unit the user-facing value must be in.
+# The pattern is "(penalty × hours) × variable_value = R$":
+#
+# Family A — Power columns (MW), per block. Variable carries MW for one block.
+#   Cobre: `objective[col] = penalty × block_hours`
+#   Cost  = (penalty × block_h) × MW = penalty × MWh → penalty unit R$/MWh.
+#   Affected: bus.deficit_segments[].cost, bus.excess_cost, line.exchange_cost,
+#   ncs.curtailment_cost, hydro.generation_violation_below_cost.
+#   → Conversion from NEWAVE R$/MWh: **direct** (no productivity factor).
+#
+# Family B — Flow columns (m³/s), per block. Variable carries m³/s for one block.
+#   Cobre: `objective[col] = penalty × block_hours`
+#   Cost  = (penalty × block_h) × m³/s.  For this to equal R$ the penalty
+#   must be R$/(m³/s · h). NEWAVE supplies R$/MWh; the per-flow-per-hour
+#   form requires multiplying by ρ [MW/(m³/s)]:
+#     R$/MWh × MW/(m³/s) = R$/(m³/s · h).
+#   Affected: hydro.spillage_cost, hydro.fpha_turbined_cost, hydro.diversion_cost,
+#   hydro.outflow_violation_(below|above)_cost, hydro.turbined_violation_below_cost.
+#   → Conversion: **× ρ_avg** (`PROD_MEDIA_SIN`).
+#
+# Family C — Flow columns (m³/s), per stage. Same as B but cobre uses
+# `total_stage_hours` instead of `block_hours`.
+#   Affected: hydro.water_withdrawal_violation_(pos|neg)_cost,
+#   hydro.evaporation_violation_(pos|neg)_cost,
+#   hydro.inflow_nonnegativity_cost.
+#   Cobre's docstring on evaporation_violation_cost says "$/mm" but the
+#   actual LP column (matrix.rs:346-347) reads f_evap_plus/minus as flow rates
+#   in m³/s — same unit as withdrawal. The "_m3s" suffix in the simulation
+#   output `evaporation_violation_pos_m3s` confirms this.
+#   → Conversion: **× ρ_max_acum** (`MAX_PRODTACUM_SIN`) for DESVIO and
+#     evaporation (per NEWAVE manual p.87); **× ρ_avg** for the others.
+#
+# Family D — Volume columns (hm³), per stage. Variable carries hm³ once per stage.
+#   Cobre: `objective[col] = penalty` (no time multiplier).
+#   Cost  = penalty × hm³ = R$ → penalty unit R$/hm³.
+#   Affected: hydro.storage_violation_below_cost, hydro.filling_target_violation_cost
+#   (both currently NOT wired into the LP — slot is dormant).
+#   Conversion: 1 hm³ × ρ → MWh of energy-equivalent is `(1e6 m³ / 3600 s/h) × ρ`
+#   = 277.78 × ρ MWh (purely volumetric — 730h convention cancels). So
+#     cobre_coef [R$/hm³] = NEWAVE_R$/MWh × ρ × HM3_TO_MWH_PER_RHO
+#   with HM3_TO_MWH_PER_RHO = 1e6/3600 ≈ 277.78.
+#
+# NEWAVE's 730 h-per-month convention vs cobre's actual calendar block_hours
+# (672–744 h) introduces only a ±2% numerical drift in absolute LP cost. It
+# does not change merit order or LP decisions (all costs scale together).
+# The HM3 → MWh conversion is pure volumetric and the 730 cancels out.
+#
+# Merit order from NEWAVE micro-penalty values (current v29 defaults):
+#   p_INT (0.000273) < p_PFIO (0.000300) < p_EVERT (0.000327)
+#   < p_TURB (0.000333) < p_CORTEOL (0.000344) < p_EXC (0.000355)
+# (manual page 88).
 
-# Hard constraint violation penalties (high values, not affected by scaling).
-_DEFAULT_STORAGE_VIOLATION_BELOW_COST = 10000.0
-_DEFAULT_FILLING_TARGET_VIOLATION_COST = 10000.0
-_DEFAULT_TURBINED_VIOLATION_BELOW_COST = 10000.0
-_DEFAULT_OUTFLOW_VIOLATION_BELOW_COST = 10000.0
-_DEFAULT_OUTFLOW_VIOLATION_ABOVE_COST = 10000.0
-_DEFAULT_GENERATION_VIOLATION_BELOW_COST = 10000.0
-_DEFAULT_EVAPORATION_VIOLATION_COST = (
-    10000.0  # >> spillage_cost; prevents free-spillage via evap
-)
-_DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST = 10000.0
-_DEFAULT_DIVERSION_COST = 0.001
+MONTH_HOURS: float = 730.0  # NEWAVE convention (manual §3.24, used in C_M3S2HM3)
+C_M3S2HM3: float = MONTH_HOURS * 3600.0 / 1e6  # = 2.628 hm³ / (m³/s · month)
+# HM3 × ρ_MW_per_m3s → MWh conversion (purely volumetric; 730 cancels here).
+HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
+
+# --- NEWAVE micro-penalties (page 88, current v29) -------------------------
+# Energy-domain (R$/MWh) — passed through to cobre without conversion.
+# Flow-domain (multiplied by ρ_avg before emission) — see `_PEVERT` group.
+#
+# Uniform 100× uplift over NEWAVE's v29 values. NEWAVE chose values around
+# 1e-4 R$/MWh for "absolute negligibility" in its own SPTcpp solver; with
+# HiGHS and cobre's typical case scale, that floor stretches the LP
+# coefficient range to ~1e9 against the operational/deterrent slacks at
+# ~5e4. Multiplying every micro-penalty by the same factor preserves the
+# internal ordering (exchange < spillage < ... < excess) and the merit
+# tier (regularization ≪ violation cost) while compressing the LP
+# coefficient range to ~1e7 — comfortably away from HiGHS's 1e10
+# warning. Economic impact: at 100× uplift, 1 m³/s of spillage for an
+# entire 730 h month adds ~15.5 R$ to the objective — about 1e-5 of a
+# typical-stage total cost (~1e10 R$). Within NEWAVE-historical bounds
+# (v29.2.1 values were already ~18× the current).
+_MICRO_UPLIFT = 100.0
+
+_PINT = 0.000273 * _MICRO_UPLIFT  # intercâmbio  → line.exchange_cost
+_PCORTEOL = 0.000344 * _MICRO_UPLIFT  # corte geração eólica → ncs.curtailment_cost
+_PEXC = 0.000355 * _MICRO_UPLIFT  # excesso de energia → bus.excess_cost
+
+# Flow-domain (R$/MWh equivalent, multiplied by ρ_avg before emission).
+# Cobre's `hydro.spillage_cost` covers ALL spillage (reservoir + run-of-river);
+# we anchor on pEVERT (controllable reservoir spillage) since that's the
+# dominant case in any NEWAVE-derived hydro fleet.
+_PEVERT = 0.000327 * _MICRO_UPLIFT  # vertimento controlável → hydro.spillage_cost
+_PTURB = 0.000333 * _MICRO_UPLIFT  # FPHA turbinamento → hydro.fpha_turbined_cost
+_PCDESV = 0.000300 * _MICRO_UPLIFT  # volume desviado → hydro.diversion_cost
+
+# --- NEWAVE hard-coded internal defaults (no user input via PENALID) -------
+# Page 87: evaporation and FPHA folga both derive from MAX_CUSTO_DEFICIT.
+# NEWAVE's manual prescribes a 10× multiplier here, making the evap-folga
+# slack roughly 10× more expensive per MWh-equivalent than the deficit
+# cost. Faithfully applying that 10× in cobre's per-(m³/s · h) LP slot
+# produces coefficients ~5e5 against a micro-penalty floor at ~2e-4 — the
+# resulting ~1e10 coefficient range trips HiGHS's condition-number
+# threshold and roughly doubles training time on the example case.
+#
+# We use 1.1× instead. Rationale: evaporation and water withdrawal are
+# both *physical-law* constraints (water cycle physics; human water-supply
+# requirements), so they belong at the top of the merit order — but their
+# job is to be "violated only as a last resort", not "100× more painful
+# than every other cost". A 10 % margin over water_withdrawal_violation_cost
+# is enough that an LP would only pick the evap slack when no alternative
+# exists, while keeping the deterrent tier numerically close to the
+# operational tier and the LP well-conditioned.
+_EVAPORATION_MULT = 1.1
+
+# --- Tie-breaking factors for PENALID flow slacks that share ρ_avg ---------
+# When PENALID supplies TURBMN, VAZMIN, TURBMX with the same R$/MWh value
+# (typical NEWAVE convention), the three slacks would otherwise have
+# identical LP coefficients — a degeneracy that hurts HiGHS performance.
+# Apply small adjacent multipliers to give each a unique value while
+# preserving a physically-defensible ordering:
+#
+#   turbined_violation_below (internal plant operation, can spill instead)
+#     < outflow_violation_below (downstream environmental / navigation)
+#     < outflow_violation_above (flood risk, public-safety regulation).
+#
+# 1 % spacing is small enough that LP decisions are unchanged in practice
+# but large enough that HiGHS sees them as numerically distinct.
+_TURBINED_BELOW_FACTOR = 0.99
+_OUTFLOW_BELOW_FACTOR = 1.00
+_OUTFLOW_ABOVE_FACTOR = 1.01
+
+# --- Cobre fields not yet wired into the LP --------------------------------
+# Storage and filling-target violation costs are declared on cobre's schema
+# but `lp_builder/matrix.rs` does NOT use them in the objective (all 0.0
+# at build time). We still emit sensible values so the case is ready for
+# the day cobre wires these in.
+_DEFAULT_STORAGE_VIOLATION_BELOW_COST = 1.0e6  # R$/hm³ (dormant in cobre LP)
+_DEFAULT_FILLING_TARGET_VIOLATION_COST = 1.0e7  # R$/hm³ (dormant in cobre LP)
+
+# --- Soft fallback for ELETRI when PENALID is silent -----------------------
+# NEWAVE's behaviour when ELETRI is absent: use the constraint only in final
+# simulation, not in policy. Cobre can't represent that nuance, so we keep
+# the slack enabled with a high penalty (10 × MAX_DEFICIT, matching
+# NEWAVE's evaporation/FPHA default magnitude).
+_ELETRI_HIGH_MULT = 10.0
+
+# --- Margin above max flow-domain slack for inflow non-negativity ----------
+# inflow_nonnegativity_cost is set 1 % above the strictest other flow-domain
+# slack so the LP never picks it over a "fixable" constraint while still
+# allowing it to fire when no alternative exists. The margin is robust to
+# floating-point noise yet small enough not to inflate the objective.
+_INFLOW_NN_MARGIN = 1.01
 
 
 def _build_canonical_pair_to_line_id(
@@ -283,96 +415,217 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     }
 
 
-def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
-    """Generate a Cobre ``penalties.json`` dict from NEWAVE deficit and penalty data.
+def _read_penalid_costs(nw_files: NewaveFiles) -> dict[str, float]:
+    """Pull ``{variable_name: first non-null R$/MWh value}`` from PENALID.DAT.
 
-    Reads deficit costs from ``sistema.dat`` and constraint violation
-    penalties from ``penalid.dat``.  Operational penalties (spillage,
-    exchange, curtailment, excess) are derived from a base spillage
-    reference value with multipliers, converted to the energy domain
-    using the average hydro productivity.
+    Falls back to an empty dict if the file is absent or unparseable. Each
+    PENALID variable can have per-REE / per-patamar values; we pick the first
+    non-null R$/MWh entry as the global default the same way NEWAVE does for
+    REE-aggregated penalty handling.
+    """
+    from inewave.newave import Penalid
+
+    if nw_files.penalid is None:
+        return {}
+    try:
+        penalid = Penalid.read(str(nw_files.penalid))
+    except (OSError, ValueError) as exc:
+        _LOG.warning("penalid.dat could not be parsed (%s); using defaults.", exc)
+        return {}
+
+    pen_df = penalid.penalidades
+    if pen_df is None or pen_df.empty:
+        return {}
+
+    out: dict[str, float] = {}
+    for var in pen_df["variavel"].unique():
+        rows = pen_df[(pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()]
+        if not rows.empty:
+            out[str(var).strip()] = float(rows.iloc[0]["valor_R$_MWh"])
+    return out
+
+
+def _own_productivities(
+    hydros_dict: dict, productivities: dict[int, float]
+) -> list[float]:
+    """Return the list of per-hydro own productivities for averaging.
+
+    Preferred source is the `productivities` map (new contract). Falls back
+    to the legacy `hydros.json:generation.productivity_mw_per_m3s` field per
+    entry so older test fixtures keep working.
+    """
+    out: list[float] = []
+    for h in hydros_dict.get("hydros", []):
+        prod = 0.0
+        if "id" in h:
+            prod = productivities.get(int(h["id"]), 0.0)
+        if prod <= 0.0:
+            legacy = h.get("generation", {}).get("productivity_mw_per_m3s")
+            if legacy is not None:
+                prod = float(legacy)
+        if prod > 0:
+            out.append(prod)
+    return out
+
+
+def convert_penalties(
+    nw_files: NewaveFiles,
+    hydros_dict: dict,
+    productivities: dict[int, float] | None = None,
+    *,
+    max_accumulated_productivity: float | None = None,
+) -> dict:
+    """Generate a Cobre ``penalties.json`` dict from NEWAVE data.
+
+    Faithful to NEWAVE User Manual v29 section 3.24:
+
+    - Bus deficit segments come from ``sistema.custo_deficit`` directly
+      (R$/MWh on both sides, no conversion).
+    - PENALID-sourced flow-domain penalties are converted to cobre's
+      coefficient slot via ``× ρ`` (where ρ is ``PROD_MEDIA_SIN`` or
+      ``MAX_PRODTACUM_SIN`` per the NEWAVE conversion table on page 87).
+    - The micro-penalties (``pINT``, ``pEVERT``, ``pTURB``, ``pCORTEOL``,
+      ``pEXC``, ``pCDESV``) are NEWAVE's hard-coded internal defaults
+      (page 88, current v29 values). They are written directly to cobre
+      and preserve NEWAVE's merit order: exchange < spillage < FPHA <
+      curtailment < excess.
+    - Evaporation and storage-violation slots without a PENALID source
+      fall back to ``10 × MAX_CUSTO_DEFICIT × ρ_max_acum`` (evaporation,
+      per the manual) or ``1e6`` (storage/filling — dormant in cobre's LP
+      today but emitted so the file is ready when cobre wires them in).
 
     Parameters
     ----------
     nw_files:
         Resolved NEWAVE file paths for the case.
     hydros_dict:
-        The already-converted ``hydros.json`` dict, used to compute the
-        average productivity for flow-to-energy penalty conversion.
+        The already-converted ``hydros.json`` dict (used for reservoir
+        useful-volume weights and the productivity fallback).
+    productivities:
+        ``{hydro_id: own_productivity_mw_per_m3s}`` for each hydro. Required
+        because productivity moved out of ``hydros.json:generation`` on
+        cobre HEAD.
+    max_accumulated_productivity:
+        Optional ``MAX_PRODTACUM_SIN`` override. When omitted, defaults to
+        ``max(productivities)`` — a coarse approximation; callers with
+        access to the cascade DAG should pass the true accumulated max.
     """
-    from inewave.newave import Penalid
-
     sistema = Sistema.read(str(nw_files.sistema))
     deficit_df = sistema.custo_deficit
 
     # Primary deficit cost: first subsystem, first patamar.
     primary_deficit_cost = 0.0
+    max_deficit_cost = 0.0
     if deficit_df is not None and not deficit_df.empty:
-        first_sub = deficit_df.sort_values(["codigo_submercado", "patamar_deficit"])
-        first_row = first_sub.iloc[0]
-        primary_deficit_cost = float(first_row["custo"])
+        first_sub = deficit_df.sort_values(
+            [
+                "codigo_submercado",
+                "patamar_deficit",
+            ]
+        )
+        primary_deficit_cost = float(first_sub.iloc[0]["custo"])
+        max_deficit_cost = float(deficit_df["custo"].max())
 
-    # Read violation penalties from penalid.dat.
-    # Each variable has a per-REE, per-patamar cost; we take the first
-    # non-NaN value for each variable as the global default.
-    penalid_costs: dict[str, float] = {}
-    if nw_files.penalid is not None:
-        try:
-            penalid = Penalid.read(str(nw_files.penalid))
-            pen_df = penalid.penalidades
-            if pen_df is not None and not pen_df.empty:
-                for var in pen_df["variavel"].unique():
-                    rows = pen_df[
-                        (pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()
-                    ]
-                    if not rows.empty:
-                        penalid_costs[var.strip()] = float(rows.iloc[0]["valor_R$_MWh"])
-        except Exception:  # noqa: BLE001
-            _LOG.warning("penalid.dat could not be parsed; using default penalties.")
+    penalid_costs = _read_penalid_costs(nw_files)
+    productivities = productivities or {}
 
-    # PENALID.DAT values are in R$/MWh. Cobre's flow-domain slacks
-    # (m³/s) use `cost * block_hours` in the objective, so the penalty
-    # must be in R$/(m³/s). The conversion is:
-    #   penalty_rate [R$/(m³/s)] = penalty_MWh [R$/MWh] × avg_prod [MW/(m³/s)]
-    # Newave converts once using a system-average own productivity
-    # (weighted by useful storage volume) and applies the same value
-    # to all plants.
-    hydros = hydros_dict.get("hydros", [])
+    # ρ_avg = PROD_MEDIA_SIN: arithmetic mean of own productivities (NEWAVE
+    # convention for VAZMIN, TURBMN, TURBMX, VOLMIN — manual table p.87).
+    own_prods = _own_productivities(hydros_dict, productivities)
+    rho_avg = sum(own_prods) / len(own_prods) if own_prods else 1.0
 
-    # Useful-volume-weighted average own productivity.
-    weighted_sum = 0.0
-    vol_sum = 0.0
-    for h in hydros:
-        prod = h["generation"].get("productivity_mw_per_m3s", 0.0)
-        useful = h["reservoir"]["max_storage_hm3"] - h["reservoir"]["min_storage_hm3"]
-        if prod > 0 and useful > 0:
-            weighted_sum += prod * useful
-            vol_sum += useful
-    avg_prod = weighted_sum / vol_sum if vol_sum > 0 else 1.0
+    # ρ_max_acum = MAX_PRODTACUM_SIN: used by NEWAVE for DESVIO and the
+    # evaporation default. When the caller doesn't supply the true cascade
+    # accumulated max we approximate by `max(own_prods)`; the caller in
+    # `pipeline.py` passes the real value computed from the cascade DAG.
+    rho_max_acum = (
+        max_accumulated_productivity
+        if max_accumulated_productivity is not None
+        else (max(own_prods) if own_prods else rho_avg)
+    )
 
-    # Flow-domain penalties: convert R$/MWh to R$/(m³/s).
-    desvio_mwh = penalid_costs.get("DESVIO", _DEFAULT_WATER_WITHDRAWAL_VIOLATION_COST)
-    vazmin_mwh = penalid_costs.get("VAZMIN", _DEFAULT_OUTFLOW_VIOLATION_BELOW_COST)
-    ghmin_mwh = penalid_costs.get("GHMIN", _DEFAULT_GENERATION_VIOLATION_BELOW_COST)
-    turbmn_mwh = penalid_costs.get("TURBMN", _DEFAULT_TURBINED_VIOLATION_BELOW_COST)
-    turbmx_mwh = penalid_costs.get("TURBMX", _DEFAULT_OUTFLOW_VIOLATION_ABOVE_COST)
+    # --------------------------------------------------------------------
+    # PENALID-sourced violation costs.
+    # --------------------------------------------------------------------
+    # Convention from NEWAVE manual p.87:
+    #   DESVIO    : × MAX_PRODTACUM_SIN
+    #   VAZMIN    : × PROD_MEDIA_SIN  → outflow_violation_below_cost
+    #   TURBMN    : × PROD_MEDIA_SIN
+    #   TURBMX    : × PROD_MEDIA_SIN  (used for outflow_violation_above_cost)
+    #   GHMIN     : direct (energy-domain slack, no productivity multiplier)
+    #   VOLMIN    : × PROD_MEDIA_SIN × C_M3S2HM3 → storage_violation_below_cost
+    desvio_mwh = penalid_costs.get("DESVIO", _EVAPORATION_MULT * max_deficit_cost)
+    vazmin_mwh = penalid_costs.get("VAZMIN", _EVAPORATION_MULT * max_deficit_cost)
+    ghmin_mwh = penalid_costs.get("GHMIN", _EVAPORATION_MULT * max_deficit_cost)
+    turbmn_mwh = penalid_costs.get("TURBMN", _EVAPORATION_MULT * max_deficit_cost)
+    turbmx_mwh = penalid_costs.get("TURBMX", _EVAPORATION_MULT * max_deficit_cost)
 
-    desvio_cost = desvio_mwh * avg_prod  # flow slack
-    vazmin_cost = vazmin_mwh * avg_prod  # flow slack
-    ghmin_cost = ghmin_mwh  # MW slack — no conversion needed
-    turbmn_cost = turbmn_mwh * avg_prod  # flow slack
-    turbmx_cost = turbmx_mwh * avg_prod  # flow slack
+    water_withdrawal_cost = desvio_mwh * rho_max_acum
+    # Apply tie-breaking factors so the three PENALID-flow slacks share an
+    # ordering even when PENALID gives them identical R$/MWh values.
+    outflow_below_cost = vazmin_mwh * rho_avg * _OUTFLOW_BELOW_FACTOR
+    outflow_above_cost = turbmx_mwh * rho_avg * _OUTFLOW_ABOVE_FACTOR
+    turbined_below_cost = turbmn_mwh * rho_avg * _TURBINED_BELOW_FACTOR
+    generation_below_cost = ghmin_mwh  # energy-domain, no productivity factor
 
-    # Spillage cost is the reference (in flow domain: $/m3s).
-    spillage_cost = _SPILLAGE_REF
+    # Storage / filling target: cobre slots are dormant in the LP today but
+    # we still populate them. VOLMIN comes from PENALID when set; otherwise
+    # use a high default.
+    #
+    # Conversion from NEWAVE R$/MWh to cobre R$/hm³ is purely volumetric:
+    # 1 hm³ of stored water released through the cascade yields
+    #   1e6 m³ × ρ MW/(m³/s) × 1/3600 s/h = (1e6/3600) × ρ MWh
+    # so cobre_coef = P_R$_MWh × ρ × (1e6/3600). The 730h/month assumption
+    # cancels out — this is dimensional energy-equivalence, not a per-hour
+    # rate. (Earlier versions used × C_M3S2HM3 here which was wrong by
+    # the factor MONTH_HOURS = 730.)
+    volmin_mwh = penalid_costs.get("VOLMIN")
+    storage_below_cost = (
+        volmin_mwh * rho_avg * HM3_TO_MWH_PER_RHO
+        if volmin_mwh is not None
+        else _DEFAULT_STORAGE_VIOLATION_BELOW_COST
+    )
 
-    # Energy-domain penalties: convert the reference from flow to energy,
-    # then apply multipliers.
-    ref_energy = _SPILLAGE_REF / avg_prod
-    exchange_cost = ref_energy * _EXCHANGE_MULT
-    fpha_turbined_cost = _SPILLAGE_REF * _FPHA_TURBINED_MULT
-    curtailment_cost = ref_energy * _NCS_CURTAILMENT_MULT
-    excess_cost = ref_energy * _EXCESS_MULT
+    # Evaporation violation: no PENALID variable. NEWAVE manual p.87 prescribes
+    # `(K × MAX_CUSTO_DEFICIT × MAX_PRODTACUM_SIN) / C_M3S2HM3` with K=10.
+    # We use K=2 (see `_EVAPORATION_MULT` rationale) so the deterrent
+    # magnitude stays above the PENALID-sourced operational slacks
+    # (typically water_withdrawal_violation_cost) without stretching the
+    # LP coefficient range past HiGHS's comfortable conditioning zone. The
+    # /C_M3S2HM3 step is dropped (only needed for NEWAVE's per-hm³ slot).
+    evaporation_cost = _EVAPORATION_MULT * max_deficit_cost * rho_max_acum
+
+    # --------------------------------------------------------------------
+    # NEWAVE micro-penalty defaults (page 88, current v29).
+    # --------------------------------------------------------------------
+    # Energy-domain (R$/MWh) passes through directly.
+    excess_cost = _PEXC
+    exchange_cost = _PINT
+    curtailment_cost = _PCORTEOL
+    # Flow-domain (multiplied by ρ_avg per NEWAVE individualized conversion).
+    spillage_cost = _PEVERT * rho_avg
+    fpha_turbined_cost = _PTURB * rho_avg
+    diversion_cost = _PCDESV * rho_avg
+
+    # Inflow non-negativity: NEWAVE has no PENALID variable for this. Cobre's
+    # default is 1000 R$/(m³/s · h), which is far below the operationally-
+    # significant flow-domain slacks above (turbined / outflow / evaporation /
+    # water-withdrawal). When the LP can choose between letting incremental
+    # natural inflow go negative (a non-physical phenomenon — implies upstream
+    # is somehow "absorbing water" the cascade can't account for) and
+    # violating another flow constraint, we want it to *always* prefer fixing
+    # the other constraint first. To enforce a strict preference, we set this
+    # cost ~1 % above the maximum of the operationally-related flow-domain
+    # costs — guarantees the LP never preferentially violates inflow non-
+    # negativity unless there is no other available slack. The 1 % margin is
+    # large enough to be numerically robust against floating-point noise yet
+    # small enough that it doesn't dominate when this slack is genuinely the
+    # only viable path.
+    inflow_nonnegativity_cost = _INFLOW_NN_MARGIN * max(
+        turbined_below_cost,
+        outflow_below_cost,
+        outflow_above_cost,
+    )
 
     return {
         "$schema": _PENALTIES_SCHEMA_URL,
@@ -388,15 +641,16 @@ def convert_penalties(nw_files: NewaveFiles, hydros_dict: dict) -> dict:
         "hydro": {
             "spillage_cost": spillage_cost,
             "fpha_turbined_cost": fpha_turbined_cost,
-            "diversion_cost": _DEFAULT_DIVERSION_COST,
-            "storage_violation_below_cost": vazmin_cost,
+            "diversion_cost": diversion_cost,
+            "storage_violation_below_cost": storage_below_cost,
             "filling_target_violation_cost": _DEFAULT_FILLING_TARGET_VIOLATION_COST,
-            "turbined_violation_below_cost": turbmn_cost,
-            "outflow_violation_below_cost": vazmin_cost,
-            "outflow_violation_above_cost": turbmx_cost,
-            "generation_violation_below_cost": ghmin_cost,
-            "evaporation_violation_cost": desvio_cost,
-            "water_withdrawal_violation_cost": desvio_cost,
+            "turbined_violation_below_cost": turbined_below_cost,
+            "outflow_violation_below_cost": outflow_below_cost,
+            "outflow_violation_above_cost": outflow_above_cost,
+            "generation_violation_below_cost": generation_below_cost,
+            "evaporation_violation_cost": evaporation_cost,
+            "water_withdrawal_violation_cost": water_withdrawal_cost,
+            "inflow_nonnegativity_cost": inflow_nonnegativity_cost,
         },
         "line": {
             "exchange_cost": exchange_cost,
@@ -866,7 +1120,10 @@ def convert_exchange_factors(
                 m = 1
                 y += 1
 
-    return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": results}
+    return {
+        "$schema": _EXCHANGE_FACTORS_SCHEMA_URL,
+        "exchange_factors": results,
+    }
 
 
 def convert_ncs_factors(
@@ -897,7 +1154,10 @@ def convert_ncs_factors(
     df: pd.DataFrame | None = patamar_file.usinas_nao_simuladas
 
     if df is None or df.empty:
-        return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": []}
+        return {
+            "$schema": _NCS_FACTORS_SCHEMA_URL,
+            "non_controllable_factors": [],
+        }
 
     dger = Dger.read(nw_files.dger)
     start_month: int = dger.mes_inicio_estudo
@@ -925,7 +1185,10 @@ def convert_ncs_factors(
     df = df[df["data"].apply(_in_horizon)].copy()
 
     if df.empty:
-        return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": []}
+        return {
+            "$schema": _NCS_FACTORS_SCHEMA_URL,
+            "non_controllable_factors": [],
+        }
 
     # Columns: codigo_submercado, indice_bloco, data, patamar, valor
     # Determine number of blocks from source.
@@ -983,7 +1246,10 @@ def convert_ncs_factors(
                         last_factor.get((sub_code, bloco, m, block_id), 1.0),
                     )
                 block_factors.append(
-                    {"block_id": block_id, "factor": max(factor, 1e-6)}
+                    {
+                        "block_id": block_id,
+                        "factor": max(factor, 1e-6),
+                    }
                 )
 
             results.append(
@@ -999,7 +1265,10 @@ def convert_ncs_factors(
                 m = 1
                 y += 1
 
-    return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": results}
+    return {
+        "$schema": _NCS_FACTORS_SCHEMA_URL,
+        "non_controllable_factors": results,
+    }
 
 
 def convert_ncs_stats(

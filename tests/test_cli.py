@@ -201,6 +201,18 @@ _FAKE_LOAD_TABLE = pa.table(
         "std_mw": pa.array([0.0], type=pa.float64()),
     }
 )
+_FAKE_HYDRO_ENERGY_PRODUCTIVITY_TABLE = pa.table(
+    {
+        "hydro_id": pa.array([0, 1], type=pa.int32()),
+        "stage_id": pa.array([None, None], type=pa.int32()),
+        "equivalent_productivity_mw_per_m3s": pa.array([0.5, 0.6], type=pa.float64()),
+        "reference_volume_hm3": pa.array([None, None], type=pa.float64()),
+        "reference_outflow_m3s": pa.array([None, None], type=pa.float64()),
+        "specific_productivity_mw_per_m3s_per_m": pa.array(
+            [None, None], type=pa.float64()
+        ),
+    }
+)
 
 
 def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type-arg]
@@ -305,7 +317,15 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
         ),
         patch(
             "cobre_bridge.pipeline.hydro_conv.convert_production_models",
-            return_value=None,
+            return_value={"production_models": []},
+        ),
+        patch(
+            "cobre_bridge.pipeline.hydro_conv.compute_base_productivities",
+            return_value={},
+        ),
+        patch(
+            "cobre_bridge.pipeline.hydro_conv.convert_hydro_energy_productivity",
+            return_value=_FAKE_HYDRO_ENERGY_PRODUCTIVITY_TABLE,
         ),
         patch(
             "cobre_bridge.pipeline.thermal_conv.convert_thermal_bounds",
@@ -427,7 +447,7 @@ class TestConvertNewaweCasePipeline:
                             "start_stage_id": 0,
                             "end_stage_id": None,
                             "model": "constant_productivity",
-                            "productivity_override": 1.23,
+                            "productivity_mw_per_m3s": 1.23,
                         }
                     ],
                 }
@@ -458,16 +478,18 @@ class TestConvertNewaweCasePipeline:
             data = json.load(f)
         assert data["production_models"][0]["hydro_id"] == 0
 
-    def test_production_models_not_written_when_converter_returns_none(
-        self, tmp_path: Path
-    ) -> None:
-        """When convert_production_models returns None, no file is written."""
+    def test_production_models_always_written(self, tmp_path: Path) -> None:
+        """Cobre HEAD requires hydro_production_models.json — pipeline always writes it.
+
+        Productivity moved out of `hydros.json:generation`, so the production
+        models file is now mandatory for the converted case to load in cobre.
+        """
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
 
         _run_with_all_mocks(src, dst)
 
-        assert not (dst / "system" / "hydro_production_models.json").exists()
+        assert (dst / "system" / "hydro_production_models.json").exists()
 
     def test_missing_required_file_raises(self, tmp_path: Path) -> None:
         from cobre_bridge.pipeline import convert_newave_case
