@@ -42,29 +42,35 @@ _SCHEMA_URL = (
 
 def _build_hydro_downstream_map(
     confhd_df: pd.DataFrame,
+    cadastro: pd.DataFrame | None = None,
 ) -> dict[int, int | None]:
-    """Return {plant_code: downstream_code} from confhd.
+    """Return ``{plant_code: downstream_code}`` for every real (non-FICT) plant.
 
-    A downstream_code of ``None`` means the plant discharges to the sea.
-    Only existing, non-fictitious plants are included.
+    The map collapses any chain of fictitious plants between a real plant and
+    its next real downstream — see
+    :func:`cobre_bridge.converters.fict_cascade.resolve_cascade` for the
+    resolution rules.  ``downstream_code`` is ``None`` when the cascade
+    terminates at the sea.
+
+    Parameters
+    ----------
+    confhd_df:
+        ``Confhd.usinas``.
+    cadastro:
+        Optional ``Hidr.cadastro`` (with MODIF.DAT overrides applied).  Used
+        only to compute the ρ_eq of fictitious plants along the chain — the
+        cascade *topology* is independent of ρ_eq, so passing ``None`` still
+        returns a correct downstream map.  Callers that also need the FICT
+        ρ_eq contribution (e.g. :func:`compute_accumulated_productivities`)
+        must pass ``cadastro`` and read it via :func:`resolve_cascade`
+        directly.
     """
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
 
-    result: dict[int, int | None] = {}
-    for _, row in non_fict.iterrows():
-        code = int(row["codigo_usina"])
-        ds_raw = row.get("codigo_usina_jusante")
-        if ds_raw is not None and not pd.isna(ds_raw) and int(ds_raw) != 0:
-            ds_code = int(ds_raw)
-            # Only reference valid study plants
-            if ds_code in non_fict["codigo_usina"].values:
-                result[code] = ds_code
-            else:
-                result[code] = None
-        else:
-            result[code] = None
-    return result
+    if cadastro is None:
+        cadastro = pd.DataFrame()
+    resolutions = resolve_cascade(confhd_df, cadastro)
+    return {code: r.downstream_code for code, r in resolutions.items()}
 
 
 def _build_hydro_to_ree(confhd_df: pd.DataFrame) -> dict[int, int]:
@@ -84,6 +90,14 @@ def compute_accumulated_productivities(
     accumulated productivity of its downstream plant.  This is computed by
     traversing the cascade DAG from downstream (sea-level sinks) to upstream.
 
+    The cascade chain is resolved with
+    :func:`cobre_bridge.converters.fict_cascade.resolve_cascade`, so any
+    fictitious plants between a real plant and its next real downstream are
+    collapsed: the FICTs' ρ_eq is folded into the upstream real plant's own
+    ρ_eq and the next real plant becomes the direct downstream.  This makes
+    cobre-bridge's accumulated productivity reproduce NEWAVE's
+    ``produtibilidade_acumulada_calculo_earm`` from ``pmo.dat``.
+
     Parameters
     ----------
     cadastro:
@@ -96,16 +110,20 @@ def compute_accumulated_productivities(
     dict[int, float]
         Mapping from plant code to accumulated productivity in MW/(m³/s).
     """
-    downstream_map = _build_hydro_downstream_map(confhd_df)
-    plant_codes = list(downstream_map.keys())
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
 
-    # Compute own productivity for each plant
+    resolutions = resolve_cascade(confhd_df, cadastro)
+    downstream_map: dict[int, int | None] = {
+        code: r.downstream_code for code, r in resolutions.items()
+    }
+
     own_prod: dict[int, float] = {}
-    for code in plant_codes:
+    for code, resolution in resolutions.items():
         if code in cadastro.index:
             own_prod[code] = _compute_productivity(cadastro.loc[code])
         else:
             own_prod[code] = 0.0
+        own_prod[code] += resolution.fict_rho_sum
 
     return _cascade_sum(downstream_map, own_prod)
 

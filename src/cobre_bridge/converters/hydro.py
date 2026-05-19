@@ -410,6 +410,14 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     # Apply MODIF.DAT permanent overrides before the main conversion loop.
     cadastro = _apply_permanent_overrides(cadastro, nw_files)
 
+    # Resolve the FICT-cascade for every real plant.  Provides the effective
+    # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
+    # be folded back into the upstream real plant's effective ρ_eq.  See
+    # ``cobre_bridge.converters.fict_cascade`` for the resolution rules.
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
+
     # Collect study plant codes for temporal override extraction.
     all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
     existing = all_existing[
@@ -502,18 +510,30 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         else:
             min_generation = 0.0
 
-        # Downstream cascade linkage.
+        # Downstream cascade linkage.  Use the FICT-cascade resolver so that
+        # plants whose physical downstream is a fictitious plant (or whose
+        # confhd jusante is 0 but a name-matched FICT.<NAME> exists) end up
+        # wired to the next real plant in the cascade, not silently
+        # disconnected.  Fall back to the raw confhd link for plants the
+        # resolver did not classify (defensive).
         downstream_id: int | None = None
-        jusante_raw = row.get("codigo_usina_jusante")
-        if (
-            jusante_raw is not None
-            and not _is_na(jusante_raw)
-            and int(jusante_raw) != 0
-        ):
+        resolution = fict_cascade.get(newave_code)
+        if resolution is not None and resolution.downstream_code is not None:
             try:
-                downstream_id = id_map.hydro_id(int(jusante_raw))
+                downstream_id = id_map.hydro_id(resolution.downstream_code)
             except KeyError:
-                pass
+                downstream_id = None
+        elif resolution is None:
+            jusante_raw = row.get("codigo_usina_jusante")
+            if (
+                jusante_raw is not None
+                and not _is_na(jusante_raw)
+                and int(jusante_raw) != 0
+            ):
+                try:
+                    downstream_id = id_map.hydro_id(int(jusante_raw))
+                except KeyError:
+                    pass
 
         # Bus assignment via REE -> subsystem.
         ree_code = int(row["ree"])
@@ -901,6 +921,18 @@ def convert_hydro_energy_productivity(
 
     total_stages = _total_study_stages(nw_files) if plants_with_drop_overrides else 0
 
+    # FICT-cascade: when a real plant's energy-cascade traverses fictitious
+    # plants, fold those FICTs' ρ_eq into the upstream real plant's own ρ_eq
+    # so that cobre's per-plant cascade sum (computed at solve time from
+    # ``hydro_energy_productivity.parquet`` plus the rewired ``downstream_id``)
+    # reproduces NEWAVE's ``produtibilidade_acumulada_calculo_earm``.  In
+    # NEWAVE's bundled cases FICT plants have ρ_esp = 0 so this is a no-op
+    # numerically; the fix is purely structural.  The helper is robust to
+    # non-zero FICT productivities (uncommon but possible).
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
+
     hydro_ids: list[int] = []
     stage_ids: list[int | None] = []
     equiv_prods: list[float] = []
@@ -914,6 +946,9 @@ def convert_hydro_energy_productivity(
             continue
         hreg = cadastro.loc[newave_code]
         base_productivity = _compute_productivity(hreg)
+        resolution = fict_cascade.get(newave_code)
+        if resolution is not None:
+            base_productivity += resolution.fict_rho_sum
         overrides = plants_with_drop_overrides.get(newave_code, [])
 
         if not overrides:
@@ -989,12 +1024,22 @@ def compute_per_stage_own_productivities(
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
 
+    # FICT-cascade fold-in: per-stage ρ_eq must already include any FICT
+    # contribution so that the per-stage ρ_acum used by VminOP and EARM
+    # accounting matches the topology rewired into ``hydros.json``.
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
+
     result: dict[int, list[float]] = {}
     for plant_code in confhd_codes:
         if plant_code not in cadastro.index:
             continue
         hreg = cadastro.loc[plant_code]
         base = _compute_productivity(hreg)
+        resolution = fict_cascade.get(plant_code)
+        if resolution is not None:
+            base += resolution.fict_rho_sum
         overrides = plants_with_drop_overrides.get(plant_code, [])
         result[plant_code] = _per_stage_productivities(
             hreg, base, overrides, nw_files, total_stages
@@ -1023,6 +1068,12 @@ def compute_base_productivities(
         ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
     ]
 
+    # FICT-cascade fold-in — keep this in lockstep with the other productivity
+    # helpers so every downstream consumer sees the same effective ρ_eq.
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
+
     result: dict[int, float] = {}
     for _, row in existing.iterrows():
         newave_code = int(row["codigo_usina"])
@@ -1032,7 +1083,11 @@ def compute_base_productivities(
             hydro_id = id_map.hydro_id(newave_code)
         except KeyError:
             continue
-        result[hydro_id] = _compute_productivity(cadastro.loc[newave_code])
+        base = _compute_productivity(cadastro.loc[newave_code])
+        resolution = fict_cascade.get(newave_code)
+        if resolution is not None:
+            base += resolution.fict_rho_sum
+        result[hydro_id] = base
     return result
 
 

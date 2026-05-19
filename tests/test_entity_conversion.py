@@ -2919,6 +2919,80 @@ class TestConvertHydrosDownstreamFict:
         assert len(result["hydros"]) == 1
         assert result["hydros"][0]["downstream_id"] is None
 
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_terminal_plant_with_matching_fict_resolves_through_chain(
+        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+    ) -> None:
+        """A real plant with confhd jusante=0 and a name-matched FICT must
+        wire to the next real plant via the FICT chain.
+
+        Topology:
+            USINA_A (code=1, jusante=0)          ← physically terminal in confhd
+            FICT.USINA (code=2, jusante=3)       ← carries the energy cascade
+            USINA_B (code=3, jusante=0)          ← real downstream
+
+        After the FICT-cascade fix, USINA_A's downstream_id must point to
+        USINA_B (cobre id=1), not None as in the pre-fix behavior.  The
+        7-char name match is ``USINA A`` (after the FICT. prefix) matching
+        ``USINA_A``'s first-7-char key — pure prefix equality.
+        """
+        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
+            (tmp_path / fname).touch()
+
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [1, 2, 3],
+                "nome_usina": ["USINA_A", "FICT.USINA_A", "USINA_B"],
+                "posto": [1, 2, 3],
+                "codigo_usina_jusante": [0, 3, 0],
+                "ree": [1, 1, 1],
+                "volume_inicial_percentual": [50.0, 50.0, 50.0],
+                "usina_existente": ["EX", "EX", "EX"],
+                "usina_modificada": [0, 0, 0],
+            }
+        )
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        mock_confhd_cls.read.return_value = mock_confhd
+
+        cadastro = _make_hidr_cadastro().copy()
+        # _make_hidr_cadastro has plants 1 and 2.  Promote plant 2 to a
+        # fictitious (zero-productivity placeholder) and add plant 3 as a
+        # second real plant cloned from plant 1.
+        plant3 = cadastro.iloc[0:1].copy()
+        plant3.index = [3]
+        cadastro = pd.concat([cadastro, plant3])
+        # Zero out FICT's specific productivity so it contributes 0 ρ_eq —
+        # cleanly isolates the topological fix from any ρ_eq fold-in.
+        cadastro.loc[2, "produtibilidade_especifica"] = 0.0
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_hidr_cls.read.return_value = mock_hidr
+
+        mock_ree = MagicMock()
+        mock_ree.rees = _make_ree_df()
+        mock_ree_cls.read.return_value = mock_ree
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 3], thermal_codes=[])
+        result = convert_hydros(_make_nw_files(tmp_path), id_map)
+
+        assert len(result["hydros"]) == 2
+        by_code = {h["name"]: h for h in result["hydros"]}
+        usina_a = by_code["USINA_A"]
+        usina_b = by_code["USINA_B"]
+        # USINA_A must wire to USINA_B via the FICT chain.
+        assert usina_a["downstream_id"] == usina_b["id"], (
+            f"Expected USINA_A.downstream_id == {usina_b['id']}, "
+            f"got {usina_a['downstream_id']}"
+        )
+        # USINA_B remains terminal.
+        assert usina_b["downstream_id"] is None
+
 
 def _make_geometry_cadastro() -> pd.DataFrame:
     """Synthetic Hidr.cadastro for generate_hydro_geometry tests.
