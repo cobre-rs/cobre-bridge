@@ -19,105 +19,152 @@ from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
 _BAND_FILL = "rgba(74,144,184,0.15)"
 _BAND_LINE = "rgba(255,255,255,0)"
 
-_COST_MAP: list[tuple[str, list[str], list[str]]] = [
-    ("Thermal Generation", ["GERACAO TERMICA"], ["thermal_cost"]),
+# Per-category mapping between NEWAVE pmo.dat `custo_operacao_series_simuladas`
+# `parcela` labels and cobre simulation cost-record columns.
+#
+# Tuple layout: (display_label, [newave_keys], [cobre_columns], hex_color).
+#
+# Ordering reflects logical grouping (generation, regularisation, hydro
+# operational violations, generic violations) and drives the legend order in
+# the stacked bar.
+_COST_MAP: list[tuple[str, list[str], list[str], str]] = [
+    # Operational / generation costs
+    ("Thermal Generation", ["GERACAO TERMICA"], ["thermal_cost"], "#D97706"),
+    ("Deficit", ["DEFICIT"], ["deficit_cost"], "#DC2626"),
+    ("Energy Excess", ["EXCESSO ENERGIA"], ["excess_cost"], "#F59E0B"),
+    ("Exchange", ["INTERCAMBIO"], ["exchange_cost"], "#7C3AED"),
+    ("Pumping", [], ["pumping_cost"], "#0891B2"),
+    # Regularisation costs (per-unit-flow charges, not violations)
     (
-        "Other Costs & Penalties",
-        [
-            "DEFICIT",
-            "EXCESSO ENERGIA",
-            "VERTIMENTO",
-            "VERTIMENTO UHE",
-            "INTERCAMBIO",
-            "VIOLACAO VZMIN",
-            "VIOL. DEFL. MAXIMA",
-            "VIOL. TURB. MINIMO",
-            "VIOL. TURB. MAXIMO",
-            "TURBINAMENTO UHE",
-            "VIOLACAO GHMIN",
-            "VIOLACAO GHMINU",
-            "VIOLACAO CAR",
-            "VIOLACAO SAR",
-            "VIOLACAO EVMIN",
-            "VIOLACAO RETIRADA",
-            "VIOL. EVAP. UHE",
-            "VIOLACAO FPHA",
-            "CORTE GER. EOLICA",
-            "VERT. FIO N. TURB.",
-            "VIOL. RESTELETRICA",
-            "VIOL. INTERC. MIN.",
-        ],
-        [
-            "deficit_cost",
-            "excess_cost",
-            "spillage_cost",
-            "exchange_cost",
-            "outflow_violation_below_cost",
-            "outflow_violation_above_cost",
-            "turbined_violation_cost",
-            "generation_violation_cost",
-            "storage_violation_cost",
-            "filling_target_cost",
-            "withdrawal_violation_cost",
-            "evaporation_violation_cost",
-            "turbined_cost",
-            "curtailment_cost",
-            "generic_violation_cost",
-            "inflow_penalty_cost",
-            "pumping_cost",
-        ],
+        "Spillage",
+        ["VERTIMENTO", "VERTIMENTO UHE", "VERT. FIO N. TURB."],
+        ["spillage_cost"],
+        "#2563EB",
+    ),
+    ("Turbined Reg.", ["TURBINAMENTO UHE"], ["turbined_cost"], "#0EA5E9"),
+    ("NCS Curtailment", ["CORTE GER. EOLICA"], ["curtailment_cost"], "#059669"),
+    # Hydro operational-bound violations (slacks priced above regularisation)
+    ("Outflow Min Viol.", ["VIOLACAO VZMIN"], ["outflow_violation_below_cost"], "#E11D48"),
+    (
+        "Outflow Max Viol.",
+        ["VIOL. DEFL. MAXIMA"],
+        ["outflow_violation_above_cost"],
+        "#F43F5E",
+    ),
+    (
+        "Turbining Bounds Viol.",
+        ["VIOL. TURB. MINIMO", "VIOL. TURB. MAXIMO"],
+        ["turbined_violation_cost"],
+        "#FB923C",
+    ),
+    (
+        "Generation Bounds Viol.",
+        ["VIOLACAO GHMIN", "VIOLACAO GHMINU"],
+        ["generation_violation_cost"],
+        "#F97316",
+    ),
+    (
+        "Storage Bounds Viol.",
+        ["VIOLACAO CAR", "VIOLACAO SAR"],
+        ["storage_violation_cost"],
+        "#C2410C",
+    ),
+    ("Filling Target Viol.", ["VIOLACAO EVMIN"], ["filling_target_cost"], "#A16207"),
+    (
+        "Water Withdrawal Viol.",
+        ["VIOLACAO RETIRADA"],
+        ["withdrawal_violation_cost"],
+        "#0284C7",
+    ),
+    ("Evaporation Viol.", ["VIOL. EVAP. UHE"], ["evaporation_violation_cost"], "#9333EA"),
+    # FPHA folga slack (NEWAVE) — cobre has no direct analogue; left as
+    # NEWAVE-only column so it shows up in the report rather than being hidden.
+    ("FPHA Slack", ["VIOLACAO FPHA"], [], "#DB2777"),
+    ("Inflow Non-Negativity", [], ["inflow_penalty_cost"], "#EA580C"),
+    # Generic constraint violations (electrical, AGRINT, etc.)
+    (
+        "Generic Constr. Viol.",
+        ["VIOL. RESTELETRICA", "VIOL. INTERC. MIN."],
+        ["generic_violation_cost"],
+        "#6D28D9",
     ),
 ]
 
+_COST_COLOR_DEFAULT = "#6B7280"  # for any unmapped residual category
 
-_COST_COLORS: dict[str, str] = {
-    "Thermal Generation": "#E8913A",
-    "Other Costs & Penalties": "#5D6D7E",
-}
-_COST_COLOR_DEFAULT = "#95A5A6"
+# Cobre cost-record fields that are aggregates / metadata and must not appear as
+# their own category in the breakdown (they would double-count or pollute the
+# chart). Mirrors the dashboard's `_NON_COST_COLS` exclusion set.
+_COBRE_NON_COST_KEYS: frozenset[str] = frozenset(
+    {
+        "total_cost",
+        "immediate_cost",
+        "future_cost",
+        "discount_factor",
+        "hydro_violation_cost",  # aggregate of the 6 hydro-violation components
+    }
+)
+
+
+def _resolve_cost_categories(
+    nw_costs: dict[str, float],
+    cobre_costs: dict[str, float],
+) -> list[tuple[str, float, float, str]]:
+    """Resolve NEWAVE/Cobre cost dicts into a sorted list of categories.
+
+    Each entry is ``(display_label, newave_sum, cobre_sum, color)``. Categories
+    with both sides ≤ 0.01 R$ are filtered out. Mapped entries from
+    :data:`_COST_MAP` come first (preserving its logical ordering); unmapped
+    NEWAVE/Cobre keys are appended at the end.
+    """
+    categories: list[tuple[str, float, float, str]] = []
+    for display_label, nw_keys, cb_keys, color in _COST_MAP:
+        nw_sum = sum(nw_costs.get(k, 0.0) for k in nw_keys)
+        cb_sum = sum(cobre_costs.get(k, 0.0) for k in cb_keys)
+        if abs(nw_sum) < 0.01 and abs(cb_sum) < 0.01:
+            continue
+        categories.append((display_label, nw_sum, cb_sum, color))
+
+    mapped_nw = {k for _, nw_keys, _, _ in _COST_MAP for k in nw_keys}
+    for k, v in sorted(nw_costs.items()):
+        if k not in mapped_nw and abs(v) > 0.01:
+            categories.append((k.title(), v, 0.0, _COST_COLOR_DEFAULT))
+
+    mapped_cb = {k for _, _, cb_keys, _ in _COST_MAP for k in cb_keys}
+    for k, v in sorted(cobre_costs.items()):
+        if k in _COBRE_NON_COST_KEYS:
+            continue
+        if k not in mapped_cb and abs(v) > 0.01:
+            categories.append((k.replace("_", " ").title(), 0.0, v, _COST_COLOR_DEFAULT))
+
+    return categories
 
 
 def cost_breakdown_chart(
     nw_costs: dict[str, float],
     cobre_costs: dict[str, float],
 ) -> str:
-    """Stacked vertical bar chart: one bar for NEWAVE, one for Cobre."""
+    """Stacked vertical bar comparing NEWAVE vs Cobre per cost category in NPV.
+
+    Bars are stacked with the largest-magnitude category at the bottom for
+    readability; each category has its own distinct color drawn from
+    :data:`_COST_MAP`. Y-axis is 10⁹ R$ for legibility on Brazilian-scale
+    cases.
+    """
     if not nw_costs and not cobre_costs:
         return "<p>No cost data available.</p>"
 
-    # Build unified category list, summing raw keys per side.
-    categories: list[tuple[str, float, float]] = []
-
-    for display_label, nw_keys, cb_keys in _COST_MAP:
-        nw_sum = sum(nw_costs.get(k, 0.0) for k in nw_keys)
-        cb_sum = sum(cobre_costs.get(k, 0.0) for k in cb_keys)
-        if abs(nw_sum) < 0.01 and abs(cb_sum) < 0.01:
-            continue
-        categories.append((display_label, nw_sum, cb_sum))
-
-    # Unmapped NEWAVE categories.
-    mapped_nw = {k for _, nw_keys, _ in _COST_MAP for k in nw_keys}
-    for k, v in sorted(nw_costs.items()):
-        if k not in mapped_nw and abs(v) > 0.01:
-            categories.append((k.title(), v, 0.0))
-
-    # Unmapped Cobre categories.
-    mapped_cb = {k for _, _, cb_keys in _COST_MAP for k in cb_keys}
-    for k, v in sorted(cobre_costs.items()):
-        if k not in mapped_cb and abs(v) > 0.01:
-            categories.append((k.replace("_", " ").title(), 0.0, v))
-
+    categories = _resolve_cost_categories(nw_costs, cobre_costs)
     if not categories:
         return "<p>No cost data available.</p>"
 
     # Sort so largest total cost is at the bottom of the stack (drawn first).
-    categories.sort(key=lambda t: -(t[1] + t[2]))
+    categories = sorted(categories, key=lambda t: -(t[1] + t[2]))
 
     x_labels = ["NEWAVE", "Cobre"]
     traces: list[dict] = []
 
-    for label, nw_v, cb_v in categories:
-        color = _COST_COLORS.get(label, _COST_COLOR_DEFAULT)
+    for label, nw_v, cb_v, color in categories:
         traces.append(
             {
                 "x": x_labels,
@@ -126,7 +173,7 @@ def cost_breakdown_chart(
                 "type": "bar",
                 "marker": {"color": color},
                 "hovertemplate": (
-                    f"%{{x}}<br>{label}: %{{y:.2f}} 10⁹ R$<extra></extra>"
+                    f"%{{x}}<br>{label}: %{{y:.3f}} 10⁹ R$<extra></extra>"
                 ),
             }
         )
@@ -136,9 +183,106 @@ def cost_breakdown_chart(
         "yaxis": {"title": "Cost (10⁹ R$)"},
         "barmode": "stack",
         "bargap": 0.4,
+        "legend": dict(_LEGEND),
+        "margin": dict(_MARGIN),
     }
 
-    return _plotly_div(traces, layout, height=550)
+    return _plotly_div(traces, layout, height=600)
+
+
+def cost_breakdown_table(
+    nw_costs: dict[str, float],
+    cobre_costs: dict[str, float],
+) -> str:
+    """Per-category NPV diff table — NEWAVE, Cobre, Δ, Δ% — sorted by |Δ|.
+
+    Returns an HTML ``<table>`` styled to fit alongside
+    :func:`cost_breakdown_chart` inside a 2-column ``chart_grid``. Color swatches
+    in the first column mirror the colors used in the bar chart so the reader
+    can cross-reference at a glance.
+    """
+    if not nw_costs and not cobre_costs:
+        return "<p>No cost data available.</p>"
+
+    categories = _resolve_cost_categories(nw_costs, cobre_costs)
+    if not categories:
+        return "<p>No cost data available.</p>"
+
+    rows: list[tuple[str, float, float, float, float, str]] = []
+    total_nw = 0.0
+    total_cb = 0.0
+    for label, nw_v, cb_v, color in categories:
+        diff = cb_v - nw_v
+        pct = (diff / nw_v * 100.0) if abs(nw_v) > 0.01 else float("nan")
+        rows.append((label, nw_v, cb_v, diff, pct, color))
+        total_nw += nw_v
+        total_cb += cb_v
+    # Sort by |Δ| descending so the largest disagreements surface first.
+    rows.sort(key=lambda r: -abs(r[3]))
+
+    def _fmt_money(v: float) -> str:
+        return f"{v / 1e9:.3f}"
+
+    def _fmt_pct(p: float) -> str:
+        if p != p:  # NaN
+            return "—"
+        return f"{p:+.1f}%"
+
+    head = (
+        "<thead><tr>"
+        '<th style="text-align:left">Category</th>'
+        '<th style="text-align:right">NEWAVE</th>'
+        '<th style="text-align:right">Cobre</th>'
+        '<th style="text-align:right">Δ</th>'
+        '<th style="text-align:right">Δ%</th>'
+        "</tr></thead>"
+    )
+
+    body_rows: list[str] = []
+    for label, nw_v, cb_v, diff, pct, color in rows:
+        swatch = (
+            f'<span style="display:inline-block;width:10px;height:10px;'
+            f"background:{color};border-radius:2px;margin-right:0.5em;"
+            f'vertical-align:middle;"></span>'
+        )
+        diff_color = (
+            "#DC2626" if diff > 0.01 * 1e9 else ("#059669" if diff < -0.01 * 1e9 else "")
+        )
+        diff_extra = (
+            f";color:{diff_color};font-weight:600" if diff_color else ""
+        )
+        body_rows.append(
+            "<tr>"
+            f'<td style="text-align:left">{swatch}{label}</td>'
+            f'<td style="text-align:right">{_fmt_money(nw_v)}</td>'
+            f'<td style="text-align:right">{_fmt_money(cb_v)}</td>'
+            f'<td style="text-align:right{diff_extra}">{_fmt_money(diff)}</td>'
+            f'<td style="text-align:right{diff_extra}">{_fmt_pct(pct)}</td>'
+            "</tr>"
+        )
+    total_diff = total_cb - total_nw
+    total_pct = (total_diff / total_nw * 100.0) if abs(total_nw) > 0.01 else float("nan")
+    body_rows.append(
+        '<tr style="font-weight:700;border-top:2px solid #374151">'
+        '<td style="text-align:left">Total</td>'
+        f'<td style="text-align:right">{_fmt_money(total_nw)}</td>'
+        f'<td style="text-align:right">{_fmt_money(total_cb)}</td>'
+        f'<td style="text-align:right">{_fmt_money(total_diff)}</td>'
+        f'<td style="text-align:right">{_fmt_pct(total_pct)}</td>'
+        "</tr>"
+    )
+    body = "<tbody>" + "".join(body_rows) + "</tbody>"
+    caption = (
+        '<caption style="caption-side:top;text-align:left;'
+        'padding-bottom:0.5em;font-weight:600">'
+        "NPV by Category (10⁹ R$)"
+        "</caption>"
+    )
+    return (
+        '<table class="cost-breakdown-table" '
+        'style="width:100%;border-collapse:collapse;font-size:0.85rem">'
+        + caption + head + body + "</table>"
+    )
 
 
 def convergence_chart(

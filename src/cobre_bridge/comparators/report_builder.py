@@ -15,6 +15,7 @@ from cobre_bridge.comparators.charts import (
     cobre_aggregate_chart,
     convergence_chart,
     cost_breakdown_chart,
+    cost_breakdown_table,
     hydro_aggregate_chart,
     overview_metrics,
     productivity_scatter,
@@ -65,8 +66,10 @@ def build_comparison_report(
     cobre_costs = pctiles.cobre_costs if pctiles else {}
     overview_parts.append(
         chart_grid(
-            [wrap_chart(cost_breakdown_chart(nw_costs, cobre_costs))],
-            single=True,
+            [
+                wrap_chart(cost_breakdown_chart(nw_costs, cobre_costs)),
+                wrap_chart(cost_breakdown_table(nw_costs, cobre_costs)),
+            ],
         )
     )
     overview_parts.append(section_title("Convergence"))
