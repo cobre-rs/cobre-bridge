@@ -145,16 +145,21 @@ def _make_hidr_cadastro() -> pd.DataFrame:
     zero) and ``canal_fuga_medio=50.0``.  With ``tipo_perda=1`` and
     ``perdas=0.0`` the loss model leaves the net drop unchanged.
 
+    For monthly-regulated plants the height is evaluated at 65% of useful
+    storage (``v_65 = vmin + 0.65 * (vmax - vmin)``), matching NEWAVE's
+    ``produtibilidade_altura_65`` convention.
+
     USINA_A: [volume_minimo=100, volume_maximo=1000]
-    - F(v) = 300*v + 0.05*v^2
-    - avg_height = (F(1000)-F(100)) / 900 = (350000-30500)/900 = 355.0
-    - net_drop = 355.0 - 50.0 = 305.0
-    - productivity_A = 0.9 * 305.0 = 274.5
+    - v_65 = 100 + 0.65 * 900 = 685.0
+    - h(v_65) = 300 + 0.1 * 685.0 = 368.5
+    - net_drop = 368.5 - 50.0 = 318.5
+    - productivity_A = 0.9 * 318.5 = 286.65
 
     USINA_B: [volume_minimo=50, volume_maximo=500]
-    - avg_height = (F(500)-F(50)) / 450 = (162500-15125)/450 = 327.5
-    - net_drop = 327.5 - 50.0 = 277.5
-    - productivity_B = 0.85 * 277.5 = 235.875
+    - v_65 = 50 + 0.65 * 450 = 342.5
+    - h(v_65) = 300 + 0.1 * 342.5 = 334.25
+    - net_drop = 334.25 - 50.0 = 284.25
+    - productivity_B = 0.85 * 284.25 = 241.6125
 
     Both productivities differ from their raw ``produtibilidade_especifica``
     values (0.9 and 0.85) because ``canal_fuga_medio`` is nonzero.
@@ -1327,7 +1332,8 @@ class TestComputeProductivity:
     """Unit tests for the ``_compute_productivity`` helper."""
 
     def test_monthly_regulated_linear_polynomial(self) -> None:
-        """tipo_regulacao='M': uses integral average of poly over [vmin, vmax]."""
+        """tipo_regulacao='M': poly evaluated at 65% useful storage (NEWAVE
+        ``produtibilidade_altura_65`` convention)."""
         from cobre_bridge.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
@@ -1346,13 +1352,13 @@ class TestComputeProductivity:
                 "produtibilidade_especifica": 0.009,
             }
         )
-        # Integral average of (300 + 0.1*v) over [100, 1000]:
-        #   avg = 355.0
-        # net_drop = 355.0 - 250.0 = 105.0
-        # adjusted_drop = 105.0 * (1 - 5.0/100) = 99.75
-        # result = 0.009 * 99.75 = 0.89775
-        avg_height = 355.0
-        expected = 0.009 * (1.0 - 5.0 / 100.0) * (avg_height - 250.0)
+        # 65% of useful storage: v_65 = 100 + 0.65 * (1000 - 100) = 685.0
+        # poly(685) = 300 + 0.1 * 685 = 368.5
+        # net_drop = 368.5 - 250.0 = 118.5
+        # adjusted_drop = 118.5 * (1 - 5.0/100) = 112.575
+        # result = 0.009 * 112.575 = 1.013175
+        v_65_height = 300.0 + 0.1 * (100.0 + 0.65 * (1000.0 - 100.0))
+        expected = 0.009 * (1.0 - 5.0 / 100.0) * (v_65_height - 250.0)
         result = _compute_productivity(hreg)
         assert result == pytest.approx(expected)
 
@@ -1459,7 +1465,7 @@ class TestComputeProductivity:
         assert result == pytest.approx(expected)
 
     def test_equal_volumes_fallback(self) -> None:
-        """tipo_regulacao='M' with equal volumes: falls back to point evaluation."""
+        """tipo_regulacao='M' with vmin == vmax: v_65 collapses to that point."""
         from cobre_bridge.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
@@ -1478,9 +1484,7 @@ class TestComputeProductivity:
                 "produtibilidade_especifica": 0.009,
             }
         )
-        # Falls back to poly(500) = 300 + 0.1*500 = 350.0
-        # net_drop = 350.0 - 250.0 = 100.0; no loss
-        # result = 0.009 * 100.0
+        # vmin == vmax: v_65 = 500.0; poly(500) = 350.0; net_drop = 100.0
         expected = 0.009 * 100.0
         result = _compute_productivity(hreg)
         assert result == pytest.approx(expected)
@@ -1560,7 +1564,7 @@ class TestComputeProductivityOverrides:
         assert result == pytest.approx(0.009 * 140.0)
 
     def test_no_overrides_matches_original_behaviour(self) -> None:
-        """With no overrides, refactored function gives same result as before."""
+        """With no overrides, M-plant ρ comes from poly evaluated at 65% storage."""
         from cobre_bridge.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
@@ -1576,8 +1580,9 @@ class TestComputeProductivityOverrides:
                 "produtibilidade_especifica": 0.009,
             }
         )
-        # avg_height = 355.0 (see TestComputeProductivity)
-        expected = 0.009 * (1.0 - 5.0 / 100.0) * (355.0 - 250.0)
+        # v_65 = 100 + 0.65 * 900 = 685; poly(685) = 368.5; net_drop = 118.5
+        v_65_height = 300.0 + 0.1 * (100.0 + 0.65 * (1000.0 - 100.0))
+        expected = 0.009 * (1.0 - 5.0 / 100.0) * (v_65_height - 250.0)
         assert _compute_productivity(hreg) == pytest.approx(expected)
 
 
@@ -2040,8 +2045,8 @@ class TestConvertHydroEnergyProductivity:
         stage_ids = table["stage_id"].to_pylist()
         assert stage_ids == [None, None]
         prods = table["equivalent_productivity_mw_per_m3s"].to_pylist()
-        # USINA_A: 0.9 * (355 - 50) = 274.5
-        assert prods[0] == pytest.approx(0.9 * 305.0)
+        # USINA_A: v_65=685, poly(685)=368.5, net_drop=318.5, ρ=0.9 * 318.5
+        assert prods[0] == pytest.approx(0.9 * 318.5)
 
     @patch("cobre_bridge.converters.hydro.Dger")
     @patch("cobre_bridge.converters.hydro.Confhd")

@@ -635,7 +635,7 @@ def _compute_productivity(
     canal_fuga_override: float | None = None,
     cmont_override: float | None = None,
 ) -> float:
-    """Compute average productivity in MW/(m^3/s) for a hydro plant.
+    """Compute constant productivity in MW/(m^3/s) for a hydro plant.
 
     Reads polynomial coefficients ``a0_volume_cota`` through
     ``a4_volume_cota`` from the plant's cadastro row to map storage volume
@@ -643,28 +643,11 @@ def _compute_productivity(
     gross drop, applies the loss model defined by ``tipo_perda`` and
     ``perdas``, then multiplies by ``produtibilidade_especifica``.
 
-    For monthly-regulated plants (``tipo_regulacao == "M"``) the height
-    is the integral average of the polynomial over
-    ``[volume_minimo, volume_maximo]``.  For all other plant types the
-    polynomial is evaluated at ``volume_referencia``.
-
-    Parameters
-    ----------
-    hreg:
-        One row of ``Hidr.cadastro``, indexed by column name.
-    canal_fuga_override:
-        If provided, replaces ``canal_fuga_medio`` as the tailrace level.
-        Used when a CFUGA temporal override is active.
-    cmont_override:
-        If provided, replaces the polynomial-derived upstream height with
-        this fixed value (in metres).  Used when a CMONT temporal override
-        is active.
-
-    Returns
-    -------
-    float
-        Average productivity in MW/(m^3/s).  Returns zero if all
-        polynomial coefficients are zero (no usable head).
+    For monthly-regulated plants (``tipo_regulacao == "M"``) the height is
+    evaluated at 65% of useful storage (``V = vmin + 0.65 × (vmax − vmin)``)
+    to match NEWAVE's ``produtibilidade_altura_65`` convention used by its
+    constant-productivity LP.  For all other plant types the polynomial is
+    evaluated at ``volume_referencia``.
     """
     coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
 
@@ -696,29 +679,13 @@ def _compute_productivity(
                 + coeffs[4] * v**4
             )
 
-        def _poly_antiderivative(v: float) -> float:
-            """Evaluate the antiderivative F(v) = c0*v + c1*v^2/2 + ..."""
-            return (
-                coeffs[0] * v
-                + coeffs[1] * v**2 / 2.0
-                + coeffs[2] * v**3 / 3.0
-                + coeffs[3] * v**4 / 4.0
-                + coeffs[4] * v**5 / 5.0
-            )
-
         tipo_regulacao = str(hreg["tipo_regulacao"]).strip()
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
         if tipo_regulacao == "M":
-            if vol_min == vol_max:
-                # Degenerate interval: fall back to point evaluation.
-                avg_height = _poly(vol_min)
-            else:
-                avg_height = (
-                    _poly_antiderivative(vol_max) - _poly_antiderivative(vol_min)
-                ) / (vol_max - vol_min)
-            net_drop = avg_height - canal_fuga
+            v_65 = vol_min + 0.65 * (vol_max - vol_min)
+            net_drop = _poly(v_65) - canal_fuga
         else:
             vol_ref = float(hreg["volume_referencia"])
             net_drop = _poly(vol_ref) - canal_fuga
