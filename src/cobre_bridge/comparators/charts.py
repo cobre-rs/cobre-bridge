@@ -60,7 +60,7 @@ _COST_MAP: list[tuple[str, list[str], list[str]]] = [
             "filling_target_cost",
             "withdrawal_violation_cost",
             "evaporation_violation_cost",
-            "fpha_turbined_cost",
+            "turbined_cost",
             "curtailment_cost",
             "generic_violation_cost",
             "inflow_penalty_cost",

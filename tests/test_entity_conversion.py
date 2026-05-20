@@ -2492,7 +2492,7 @@ class TestConvertPenalties:
         )
         required = {
             "spillage_cost",
-            "fpha_turbined_cost",
+            "turbined_cost",
             "diversion_cost",
             "storage_violation_below_cost",
             "filling_target_violation_cost",

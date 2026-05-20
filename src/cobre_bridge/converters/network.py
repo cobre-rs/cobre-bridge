@@ -67,7 +67,7 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   must be R$/(m³/s · h). NEWAVE supplies R$/MWh; the per-flow-per-hour
 #   form requires multiplying by ρ [MW/(m³/s)]:
 #     R$/MWh × MW/(m³/s) = R$/(m³/s · h).
-#   Affected: hydro.spillage_cost, hydro.fpha_turbined_cost, hydro.diversion_cost,
+#   Affected: hydro.spillage_cost, hydro.turbined_cost, hydro.diversion_cost,
 #   hydro.outflow_violation_(below|above)_cost, hydro.turbined_violation_below_cost.
 #   → Conversion: **× ρ_avg** (`PROD_MEDIA_SIN`).
 #
@@ -143,7 +143,7 @@ _PEVERT = (
 )  # vertimento controlável → hydro.spillage_cost
 _PTURB = (
     0.000333 * _MICRO_UPLIFT
-)  # FPHA turbinamento → hydro.fpha_turbined_cost
+)  # turbinamento → hydro.turbined_cost (applied to every hydro)
 _PCDESV = 0.000300 * _MICRO_UPLIFT  # volume desviado → hydro.diversion_cost
 
 # --- NEWAVE hard-coded internal defaults (no user input via PENALID) -------
@@ -624,7 +624,7 @@ def convert_penalties(
     curtailment_cost = _PCORTEOL
     # Flow-domain (multiplied by ρ_avg per NEWAVE individualized conversion).
     spillage_cost = _PEVERT * rho_avg
-    fpha_turbined_cost = _PTURB * rho_avg
+    turbined_cost = _PTURB * rho_avg
     diversion_cost = _PCDESV * rho_avg
 
     # Inflow non-negativity: NEWAVE has no PENALID variable for this. Cobre's
@@ -660,7 +660,7 @@ def convert_penalties(
         },
         "hydro": {
             "spillage_cost": spillage_cost,
-            "fpha_turbined_cost": fpha_turbined_cost,
+            "turbined_cost": turbined_cost,
             "diversion_cost": diversion_cost,
             "storage_violation_below_cost": storage_below_cost,
             "filling_target_violation_cost": _DEFAULT_FILLING_TARGET_VIOLATION_COST,

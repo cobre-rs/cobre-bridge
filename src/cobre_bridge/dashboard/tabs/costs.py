@@ -87,7 +87,7 @@ _VIOLATION_COLS: frozenset[str] = frozenset(
         "withdrawal_violation_cost",
         "inflow_penalty_cost",
         "generic_violation_cost",
-        "fpha_turbined_cost",
+        "turbined_cost",
         "generic_constraint_violation_cost",
     }
 )

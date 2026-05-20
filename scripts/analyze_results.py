@@ -97,7 +97,7 @@ def report_overview(case_dir: Path) -> None:
         "hydro_violation_cost",
         "generic_violation_cost",
         "storage_violation_cost",
-        "fpha_turbined_cost",
+        "turbined_cost",
     ]
     print("=" * 70)
     print(f"COST BREAKDOWN (avg over {n_scenarios} scenarios, sum over stages)")

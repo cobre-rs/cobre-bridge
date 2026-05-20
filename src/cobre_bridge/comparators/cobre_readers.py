@@ -713,7 +713,7 @@ def read_cobre_cost_breakdown(
         "inflow_penalty_cost",
         "generic_violation_cost",
         "spillage_cost",
-        "fpha_turbined_cost",
+        "turbined_cost",
         "curtailment_cost",
         "exchange_cost",
         "pumping_cost",
