@@ -129,6 +129,15 @@ HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
 _MICRO_UPLIFT = 100.0
 
 _PINT = 0.000273 * _MICRO_UPLIFT  # intercâmbio  → line.exchange_cost
+
+# NEWAVE halves the intercâmbio penalty on lines that touch a fictitious
+# submercado (e.g. NOFICT1). Rationale: a fictitious node is a routing-only
+# hop with no demand or generation of its own, so a real → fict → real path
+# would otherwise accumulate twice the penalty of an equivalent direct
+# real → real link. The 0.5 discount restores cost-parity between the two
+# topologies.  Emitted as the per-line `exchange_cost` override defined in
+# lines.schema.json; absence falls back to the global `_PINT` value.
+_PINT_FICTITIOUS_DISCOUNT = 0.5
 _PCORTEOL = (
     0.000344 * _MICRO_UPLIFT
 )  # corte geração eólica → ncs.curtailment_cost
@@ -348,6 +357,22 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             "lines": [],
         }
 
+    # Set of NEWAVE codes flagged as fictitious in sistema.custo_deficit.
+    # Used below to halve the exchange penalty on lines that touch a
+    # fictitious bus (see `_PINT_FICTITIOUS_DISCOUNT`).
+    fictitious_codes: set[int] = set()
+    deficit_df = sistema.custo_deficit
+    if (
+        deficit_df is not None
+        and not deficit_df.empty
+        and "ficticio" in deficit_df.columns
+    ):
+        fic_mask = deficit_df["ficticio"].fillna(False).astype(bool)
+        fictitious_codes = {
+            int(code)
+            for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
+        }
+
     # Use the study start month from dger.dat as the reference for static
     # capacities.  sistema.dat always contains full calendar years, so
     # pre-study months (before mes_inicio_estudo) may have NaN values.
@@ -417,6 +442,8 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
                 "reverse_mw": caps["reverse_mw"],
             },
         }
+        if src in fictitious_codes or tgt in fictitious_codes:
+            line_entry["exchange_cost"] = _PINT * _PINT_FICTITIOUS_DISCOUNT
         lines.append(line_entry)
 
     return {

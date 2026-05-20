@@ -282,6 +282,7 @@ def convert_thermal_bounds(
     # ------------------------------------------------------------------
     clast = Clast.read(str(nw_files.clast))
     clast_df = clast.usinas
+    clast_modif_df = clast.modificacoes
 
     # cost_by_code_year: (newave_code, indice_ano_estudo) -> cost
     cost_by_code_year: dict[tuple[int, int], float] = {}
@@ -302,6 +303,24 @@ def convert_thermal_bounds(
             ]
             if len(set(year_costs)) > 1:
                 cost_varies.add(code)
+
+    # Date-range cost overrides from the modificacoes block at the end of
+    # clast.dat. Each entry overrides the year-indexed cost for stages
+    # whose first-of-month date falls within [data_inicio, data_fim].
+    # A plant with at least one modification is treated as cost-varying
+    # even when its year-indexed costs are uniform.
+    modif_by_code: dict[int, list[dict]] = {}
+    if clast_modif_df is not None and not clast_modif_df.empty:
+        for _, row in clast_modif_df.iterrows():
+            code = int(row["codigo_usina"])
+            modif_by_code.setdefault(code, []).append(
+                {
+                    "data_inicio": row["data_inicio"],
+                    "data_fim": row["data_fim"],
+                    "custo": float(row["custo"]),
+                }
+            )
+        cost_varies.update(modif_by_code.keys())
 
     has_capacity_sources = nw_files.expt is not None or nw_files.manutt is not None
 
@@ -533,6 +552,18 @@ def convert_thermal_bounds(
             if newave_code in cost_varies:
                 year_idx = _stage_to_study_year(stage_idx, first_year_stages, num_anos)
                 stage_cost = cost_by_code_year.get((newave_code, year_idx))
+                # Apply clast.modificacoes overrides in file order; later
+                # entries win when windows overlap, matching NEWAVE's
+                # sequential application of the modification block.
+                for modif in modif_by_code.get(newave_code, []):
+                    mod_start = pd.Timestamp(modif["data_inicio"]).date()
+                    mod_end_raw = modif["data_fim"]
+                    if pd.isna(mod_end_raw):
+                        mod_end = stage_dates[-1]
+                    else:
+                        mod_end = pd.Timestamp(mod_end_raw).date()
+                    if mod_start <= stage_date <= mod_end:
+                        stage_cost = modif["custo"]
 
             rows_thermal_id.append(thermal_id)
             rows_stage_id.append(stage_idx)

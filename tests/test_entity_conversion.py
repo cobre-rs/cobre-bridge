@@ -2252,11 +2252,136 @@ def _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
 
     mock_clast = MagicMock()
     mock_clast.usinas = _make_clast_df()
+    mock_clast.modificacoes = None
     mock_clast_cls.read.return_value = mock_clast
 
     mock_term = MagicMock()
     mock_term.usinas = _make_term_df()
     mock_term_cls.read.return_value = mock_term
+
+
+class TestConvertThermalBoundsClastModificacoes:
+    """Per-stage cost overrides from the modificacoes block in clast.dat."""
+
+    def _make_id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(
+            subsystem_ids=[1, 2],
+            hydro_codes=[],
+            thermal_codes=[10, 20, 30],
+        )
+
+    def _make_dger(self) -> MagicMock:
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2023
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+        dger.num_anos_manutencao_utes = 0
+        return dger
+
+    @patch("inewave.newave.Manutt")
+    @patch("inewave.newave.Expt")
+    @patch("inewave.newave.Dger")
+    @patch("cobre_bridge.converters.thermal.Term")
+    @patch("cobre_bridge.converters.thermal.Clast")
+    @patch("cobre_bridge.converters.thermal.Conft")
+    def test_modificacao_overrides_year_indexed_cost_inside_window(
+        self,
+        mock_conft_cls,
+        mock_clast_cls,
+        mock_term_cls,
+        mock_dger_cls,
+        mock_expt_cls,
+        mock_manutt_cls,
+        tmp_path,
+    ) -> None:
+        import datetime
+
+        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+        mock_dger_cls.read.return_value = self._make_dger()
+
+        # Override TERMO_A (code 10) cost from 50.0 -> 77.0 for stages 2-4
+        # of a 12-stage 2023 horizon (March-May). Other stages keep 50.0.
+        modif_df = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "nome_usina": ["TERMO_A"],
+                "data_inicio": [datetime.datetime(2023, 3, 1)],
+                "data_fim": [datetime.datetime(2023, 5, 1)],
+                "custo": [77.0],
+            }
+        )
+        mock_clast_cls.read.return_value.modificacoes = modif_df
+
+        from cobre_bridge.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(_make_nw_files(tmp_path), self._make_id_map())
+        assert table is not None
+
+        df = table.to_pandas()
+        termo_a_id = self._make_id_map().thermal_id(10)
+        a_rows = df[df["thermal_id"] == termo_a_id].sort_values("stage_id")
+        # 12 stages emitted for the cost-varying plant.
+        assert len(a_rows) == 12
+        # Inside the modification window (stages 2, 3, 4 -> Mar, Apr, May).
+        assert a_rows.iloc[2]["cost_per_mwh"] == pytest.approx(77.0)
+        assert a_rows.iloc[3]["cost_per_mwh"] == pytest.approx(77.0)
+        assert a_rows.iloc[4]["cost_per_mwh"] == pytest.approx(77.0)
+        # Outside the window the year-1 base cost is restored.
+        assert a_rows.iloc[0]["cost_per_mwh"] == pytest.approx(50.0)
+        assert a_rows.iloc[5]["cost_per_mwh"] == pytest.approx(50.0)
+        assert a_rows.iloc[11]["cost_per_mwh"] == pytest.approx(50.0)
+        # Plants without a modificacao (and uniform year cost) emit no
+        # per-stage cost override — cost_per_mwh is left null.
+        termo_b_id = self._make_id_map().thermal_id(20)
+        b_rows = df[df["thermal_id"] == termo_b_id]
+        assert b_rows["cost_per_mwh"].isna().all()
+
+    @patch("inewave.newave.Manutt")
+    @patch("inewave.newave.Expt")
+    @patch("inewave.newave.Dger")
+    @patch("cobre_bridge.converters.thermal.Term")
+    @patch("cobre_bridge.converters.thermal.Clast")
+    @patch("cobre_bridge.converters.thermal.Conft")
+    def test_modificacao_with_open_end_extends_to_horizon(
+        self,
+        mock_conft_cls,
+        mock_clast_cls,
+        mock_term_cls,
+        mock_dger_cls,
+        mock_expt_cls,
+        mock_manutt_cls,
+        tmp_path,
+    ) -> None:
+        import datetime
+
+        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+        mock_dger_cls.read.return_value = self._make_dger()
+
+        modif_df = pd.DataFrame(
+            {
+                "codigo_usina": [20],
+                "nome_usina": ["TERMO_B"],
+                "data_inicio": [datetime.datetime(2023, 7, 1)],
+                "data_fim": [pd.NaT],
+                "custo": [120.0],
+            }
+        )
+        mock_clast_cls.read.return_value.modificacoes = modif_df
+
+        from cobre_bridge.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(_make_nw_files(tmp_path), self._make_id_map())
+        assert table is not None
+
+        df = table.to_pandas().sort_values(["thermal_id", "stage_id"])
+        termo_b_id = self._make_id_map().thermal_id(20)
+        b_rows = df[df["thermal_id"] == termo_b_id].sort_values("stage_id")
+        # Stage 5 = Jun 2023 (outside the window) keeps the base 80.0.
+        # Stage 6 = Jul 2023 onwards picks up the open-ended override.
+        assert b_rows.iloc[5]["cost_per_mwh"] == pytest.approx(80.0)
+        assert b_rows.iloc[6]["cost_per_mwh"] == pytest.approx(120.0)
+        assert b_rows.iloc[11]["cost_per_mwh"] == pytest.approx(120.0)
 
 
 # ---------------------------------------------------------------------------
@@ -2408,6 +2533,37 @@ class TestConvertLines:
         )
         assert line_12["capacity"]["direct_mw"] == pytest.approx(3000.0)
         assert line_12["capacity"]["reverse_mw"] == pytest.approx(2500.0)
+
+    @patch("cobre_bridge.converters.network.Dger")
+    @patch("cobre_bridge.converters.network.Sistema")
+    def test_fictitious_lines_get_half_exchange_cost(
+        self, mock_sistema_cls, mock_dger_cls, tmp_path
+    ) -> None:
+        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
+        from cobre_bridge.converters.network import (
+            _PINT,
+            _PINT_FICTITIOUS_DISCOUNT,
+            convert_lines,
+        )
+
+        id_map = NewaveIdMap(
+            subsystem_ids=[1, 2, 99],
+            hydro_codes=[],
+            thermal_codes=[],
+        )
+        result = convert_lines(_make_nw_files(tmp_path), id_map)
+
+        fict_bus_id = id_map.bus_id(99)
+        expected = _PINT * _PINT_FICTITIOUS_DISCOUNT
+        for ln in result["lines"]:
+            touches_fict = (
+                ln["source_bus_id"] == fict_bus_id
+                or ln["target_bus_id"] == fict_bus_id
+            )
+            if touches_fict:
+                assert ln["exchange_cost"] == pytest.approx(expected)
+            else:
+                assert "exchange_cost" not in ln
 
 
 def _setup_sistema_mocks(mock_sistema_cls, tmp_path):
