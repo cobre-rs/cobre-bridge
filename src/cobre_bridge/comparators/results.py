@@ -370,21 +370,23 @@ def _compare_convergence(
     """Compare convergence data."""
     results: list[ResultComparison] = []
 
-    nw_lookup: dict[int, dict[str, float]] = {}
-    for row in nw_conv.iter_rows(named=True):
-        it = int(row["iteration"])
-        nw_lookup[it] = {
-            "lower_bound": float(row["lower_bound"]),
-            "upper_bound_mean": float(row["upper_bound_mean"]),
-        }
+    def _load(df: pl.DataFrame) -> dict[int, dict[str, float]]:
+        out: dict[int, dict[str, float]] = {}
+        for row in df.iter_rows(named=True):
+            lb = row["lower_bound"]
+            ub = row["upper_bound_mean"]
+            # Skip iterations where either bound is missing — robust against
+            # pmo.dat layouts that inewave parses partially (NaNs in tail rows).
+            if lb is None or ub is None:
+                continue
+            out[int(row["iteration"])] = {
+                "lower_bound": float(lb),
+                "upper_bound_mean": float(ub),
+            }
+        return out
 
-    cobre_lookup: dict[int, dict[str, float]] = {}
-    for row in cobre_conv.iter_rows(named=True):
-        it = int(row["iteration"])
-        cobre_lookup[it] = {
-            "lower_bound": float(row["lower_bound"]),
-            "upper_bound_mean": float(row["upper_bound_mean"]),
-        }
+    nw_lookup = _load(nw_conv)
+    cobre_lookup = _load(cobre_conv)
 
     for it in sorted(set(nw_lookup) & set(cobre_lookup)):
         for var in ("lower_bound", "upper_bound_mean"):

@@ -11,6 +11,7 @@ not provide dedicated reader classes for them.  pmo.dat is read via
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import polars as pl
@@ -272,14 +273,65 @@ def read_medias_system(saidas_dir: Path) -> pl.DataFrame:
 # -------------------------------------------------------------------
 
 
+# Match one data row of the pmo.dat convergence table:
+#   iter   LIM.INF   ZINF   LIM.SUP   ZSUP   DZINF   ZSUP_ITER   [tempo]
+# Column semantics (NEWAVE manual):
+#   - ZINF        = cuts-based lower bound at end of iteration (SDDP LB)
+#   - ZSUP        = mean forward-simulation cost (SDDP UB)
+#   - LIM.INF/SUP = lower/upper confidence-interval brackets on ZSUP; collapse
+#                   to ZSUP when there is a single forward sample
+#   - ZSUP_ITER   = current-iteration forward cost (per-sample, not aggregated)
+# DZINF is "-" on the first iteration and numeric afterwards. The trailing
+# wall-clock field is optional. We greedily consume six numeric columns
+# (treating "-" as a missing DZINF) so that subsequent layout drift in
+# pmo.dat (longer decimal widths, extra padding) does not break us.
+_PMO_CONV_ROW = re.compile(
+    r"^\s*(\d+)"  # iteration                                     -> group 1
+    r"\s+(?:\d+\.\d+)"  # LIM.INF (not captured)
+    r"\s+(\d+\.\d+)"  # ZINF (cuts-based lower bound)           -> group 2
+    r"\s+(?:\d+\.\d+)"  # LIM.SUP (not captured)
+    r"\s+(\d+\.\d+)"  # ZSUP  (mean forward cost = upper bound) -> group 3
+    r"\s+(?:-|\d+\.\d+)"  # DZINF
+    r"\s+(?:\d+\.\d+)"  # ZSUP_ITER (per-iter sample; not captured)
+    r"(?:\s+\S+)?\s*$",  # optional tempo column
+    re.MULTILINE,
+)
+
+
+def _parse_pmo_convergence_text(text: str) -> dict[int, tuple[float, float]]:
+    """Extract the iteration table from raw pmo.dat text.
+
+    Returns ``{iteration: (zinf, zsup)}`` keyed on iteration number,
+    taking the LAST occurrence per iteration (NEWAVE writes two lines
+    per iteration; only the second carries DZINF and ZSUP_ITER, which
+    the regex requires, so this naturally selects the post-backward
+    summary line).
+    """
+    out: dict[int, tuple[float, float]] = {}
+    for match in _PMO_CONV_ROW.finditer(text):
+        it = int(match.group(1))
+        zinf = float(match.group(2))
+        zsup = float(match.group(3))
+        out[it] = (zinf, zsup)
+    return out
+
+
 def read_pmo_convergence(newave_dir: Path) -> pl.DataFrame:
     """Read pmo.dat convergence table.
 
     Returns DataFrame with columns: ``iteration`` (Int64),
-    ``lower_bound`` (Float64, ZINF), ``upper_bound_mean`` (Float64, ZSUP).
+    ``lower_bound`` (Float64), ``upper_bound_mean`` (Float64).
 
-    Returns empty DataFrame if pmo.dat not found or convergence data
-    unavailable.
+    The bound columns come from NEWAVE's ``ZINF`` (cuts-based lower
+    bound) and ``ZSUP`` (mean forward-simulation cost) fields, parsed
+    directly from the pmo.dat iteration table via regex. inewave's
+    tabular parser misaligns the high-precision columns on real-world
+    pmo.dat layouts (truncates ``LIM.INF`` to 3 decimals, drops the
+    leading digit of ``LIM.SUP``, and frequently returns ``NaN`` for
+    ``ZINF``), so we cannot use ``Pmo.convergencia`` here.
+
+    Returns empty DataFrame if pmo.dat is not found or the iteration
+    table cannot be located.
     """
     empty = pl.DataFrame(
         schema={
@@ -295,64 +347,40 @@ def read_pmo_convergence(newave_dir: Path) -> pl.DataFrame:
         return empty
 
     try:
-        from inewave.newave import Pmo
-
-        pmo = Pmo.read(str(pmo_path))
-        conv_df = pmo.convergencia
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read convergence from pmo.dat")
+        text = pmo_path.read_text(encoding="latin-1")
+    except OSError:
+        _LOG.exception("Failed to read pmo.dat at %s", pmo_path)
         return empty
 
-    if conv_df is None or conv_df.empty:
-        return empty
-
-    # Identify columns by exact name first, then by substring.
-    # inewave returns columns like: iteracao, limite_inferior_zinf, zinf,
-    # limite_superior_zinf, zsup, delta_zinf, zsup_iteracao, tempo.
-    # We want exactly "iteracao", "zinf", "zsup".
-    cols = list(conv_df.columns)
-    col_map: dict[str, str] = {}
-
-    # Exact matches first (most reliable).
-    exact = {c.lower().strip(): c for c in cols}
-    if "iteracao" in exact:
-        col_map["iteration"] = exact["iteracao"]
-    if "zinf" in exact:
-        col_map["lower_bound"] = exact["zinf"]
-    if "zsup" in exact:
-        col_map["upper_bound_mean"] = exact["zsup_iteracao"]
-
-    if "lower_bound" not in col_map or "upper_bound_mean" not in col_map:
+    rows = _parse_pmo_convergence_text(text)
+    if not rows:
         _LOG.warning(
-            "Cannot identify ZINF/ZSUP columns in pmo.dat convergence: %s",
-            list(conv_df.columns),
+            "No convergence-table rows matched in %s; "
+            "expected the NEWAVE 'ITER LIM.INF ZINF LIM.SUP ZSUP DZINF ZSUP_ITER' table",
+            pmo_path,
         )
         return empty
 
-    # Keep only the last row per iteration (inner iterations → take final).
-    subset = conv_df[
-        [col_map["iteration"], col_map["lower_bound"], col_map["upper_bound_mean"]]
-    ].copy()
-    subset.columns = ["iteration", "lower_bound", "upper_bound_mean"]
-    subset = subset.groupby("iteration", as_index=False).last()
-
-    result = pl.from_pandas(subset)
-    result = result.cast(
+    iters = sorted(rows)
+    result = pl.DataFrame(
         {
+            "iteration": iters,
+            "lower_bound": [rows[i][0] for i in iters],
+            "upper_bound_mean": [rows[i][1] for i in iters],
+        },
+        schema={
             "iteration": pl.Int64,
             "lower_bound": pl.Float64,
             "upper_bound_mean": pl.Float64,
-        }
+        },
     )
 
     # NEWAVE pmo.dat exports convergence values in 10^6 R$.
     # Multiply by 1e6 to convert to R$ (matching Cobre convention).
-    result = result.with_columns(
+    return result.with_columns(
         pl.col("lower_bound") * 1e6,
         pl.col("upper_bound_mean") * 1e6,
     )
-
-    return result
 
 
 def read_pmo_productivity(newave_dir: Path) -> pl.DataFrame:
