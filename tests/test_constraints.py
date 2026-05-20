@@ -260,6 +260,7 @@ class TestConvertVminopConstraints:
             cvar=None,
             agrint=None,
             re_dat=None,
+            volref_saz=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_vminop_constraints(nw, id_map) is None
@@ -470,6 +471,7 @@ class TestConvertElectricConstraints:
             cvar=None,
             agrint=None,
             re_dat=None,
+            volref_saz=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_electric_constraints(nw, id_map) is None
@@ -507,6 +509,7 @@ class TestConvertElectricConstraints:
             cvar=None,
             agrint=None,
             re_dat=None,
+            volref_saz=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_electric_constraints(nw, id_map) is None
@@ -636,6 +639,7 @@ def _make_minimal_nw_files(tmp_path: Path, *, agrint: Path | None = None) -> obj
         cvar=None,
         agrint=agrint,
         re_dat=None,
+        volref_saz=None,
     )
 
 

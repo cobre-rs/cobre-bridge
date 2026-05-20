@@ -7,7 +7,8 @@ references.  Binary files that are not listed in Arquivos (``hidr.dat`` and
 ``vazoes.dat``) are discovered via a case-insensitive directory scan.
 Optional files (``modif.dat``, ``ghmin.dat``, ``penalid.dat``,
 ``vazpast.dat``, ``dsvagua.dat``, ``expt.dat``, ``manutt.dat``,
-``c_adic.dat``, ``cvar.dat``, ``agrint.dat``) are returned as ``Path | None``.
+``c_adic.dat``, ``cvar.dat``, ``agrint.dat``, ``volref_saz.dat``)
+are returned as ``Path | None``.
 """
 
 from __future__ import annotations
@@ -100,6 +101,7 @@ class NewaveFiles:
     cvar: Path | None
     agrint: Path | None
     re_dat: Path | None
+    volref_saz: Path | None
 
     @classmethod
     def from_directory(cls, directory: Path) -> NewaveFiles:
@@ -185,6 +187,7 @@ class NewaveFiles:
         cvar = _opt("cvar")
         agrint = _opt("agrint")
         re_dat = _opt("re")
+        volref_saz = _opt("volume_referencia_sazonal")
 
         return cls(
             directory=directory,
@@ -210,4 +213,5 @@ class NewaveFiles:
             cvar=cvar,
             agrint=agrint,
             re_dat=re_dat,
+            volref_saz=volref_saz,
         )

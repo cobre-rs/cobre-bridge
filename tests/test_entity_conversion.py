@@ -31,6 +31,7 @@ def _make_nw_files(
     c_adic: Path | None = None,
     cvar: Path | None = None,
     agrint: Path | None = None,
+    volref_saz: Path | None = None,
 ) -> NewaveFiles:
     """Construct a ``NewaveFiles`` with sentinel paths under *tmp_path*.
 
@@ -63,6 +64,7 @@ def _make_nw_files(
         cvar=cvar,
         agrint=agrint,
         re_dat=None,
+        volref_saz=volref_saz,
     )
 
 
@@ -2105,6 +2107,253 @@ class TestConvertHydroEnergyProductivity:
         assert a_by_stage[3] == pytest.approx(override)
         assert a_by_stage[59] == pytest.approx(override)
 
+    @patch("cobre_bridge.converters.hydro.VolrefSaz")
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_seasonal_volref_emits_per_stage_rows(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        mock_volref_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """volref_saz row with non-zero values → per-stage ρ computed at
+        ``vol_min + volref[month]`` for that calendar month."""
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=1,
+        )
+
+        # USINA_A: seasonal row (every month has its own useful volume).
+        # USINA_B: not present in the file → falls back to altura_65 default.
+        volref_df = pd.DataFrame(
+            {
+                "codigo_usina": [1] * 12,
+                "nome_usina": ["USINA_A"] * 12,
+                "mes": list(range(1, 13)),
+                # Useful volumes (hm³ above vol_min=100): 100, 200, ..., 1200
+                "valor": [float(100 * m) for m in range(1, 13)],
+            }
+        )
+        mock_volref = MagicMock()
+        mock_volref.volumes = volref_df
+        mock_volref_cls.read.return_value = mock_volref
+
+        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+
+        table = convert_hydro_energy_productivity(
+            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
+            self._make_id_map(),
+        )
+        rows = table.to_pylist()
+        a_rows = [r for r in rows if r["hydro_id"] == 0]
+        b_rows = [r for r in rows if r["hydro_id"] == 1]
+
+        # USINA_A: 12 per-stage rows (1 year * 12 months); USINA_B: 1 null row.
+        assert len(a_rows) == 12
+        assert len(b_rows) == 1
+        assert b_rows[0]["stage_id"] is None
+
+        # USINA_A stage 0 = calendar month 1, useful=100, V=200, h(V)=320, drop=270, ρ=243.
+        by_stage = {
+            r["stage_id"]: r["equivalent_productivity_mw_per_m3s"] for r in a_rows
+        }
+        # ρ_esp=0.9, cf=50, h(v)=300+0.1v
+        for stage in range(12):
+            useful = 100.0 * (stage + 1)
+            expected = 0.9 * ((300.0 + 0.1 * (100.0 + useful)) - 50.0)
+            assert by_stage[stage] == pytest.approx(expected)
+
+    @patch("cobre_bridge.converters.hydro.VolrefSaz")
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_seasonal_volref_all_zero_row_falls_back_to_legacy(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        mock_volref_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """All-zero volref_saz row is NEWAVE's "no seasonal reference" sentinel:
+        emit a single null-stage row with the legacy altura_65 productivity."""
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=1,
+        )
+
+        volref_df = pd.DataFrame(
+            {
+                "codigo_usina": [1] * 12 + [2] * 12,
+                "nome_usina": ["USINA_A"] * 12 + ["USINA_B"] * 12,
+                "mes": list(range(1, 13)) * 2,
+                # USINA_A all zeros (sentinel); USINA_B all zeros (sentinel).
+                "valor": [0.0] * 24,
+            }
+        )
+        mock_volref = MagicMock()
+        mock_volref.volumes = volref_df
+        mock_volref_cls.read.return_value = mock_volref
+
+        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+
+        table = convert_hydro_energy_productivity(
+            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
+            self._make_id_map(),
+        )
+        rows = table.to_pylist()
+        assert len(rows) == 2
+        for r in rows:
+            assert r["stage_id"] is None
+        # Both fall back to altura_65 legacy default.
+        a_row = next(r for r in rows if r["hydro_id"] == 0)
+        assert a_row["equivalent_productivity_mw_per_m3s"] == pytest.approx(0.9 * 318.5)
+
+    @patch("cobre_bridge.converters.hydro.VolrefSaz")
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_seasonal_volref_zero_month_inside_nonzero_row_uses_vmin(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        mock_volref_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """A zero entry within a row that has some non-zero months means
+        "operate at vol_min" for that month — distinct from the legacy
+        fallback used for an entirely all-zero row."""
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=1,
+        )
+
+        # USINA_A: month 1 = 0 (V=vmin); month 2 = 500 (V=vmin+500); rest = 0.
+        # Plant is kept because at least one month is non-zero.
+        valor = [0.0] * 12
+        valor[1] = 500.0  # month 2
+        volref_df = pd.DataFrame(
+            {
+                "codigo_usina": [1] * 12,
+                "nome_usina": ["USINA_A"] * 12,
+                "mes": list(range(1, 13)),
+                "valor": valor,
+            }
+        )
+        mock_volref = MagicMock()
+        mock_volref.volumes = volref_df
+        mock_volref_cls.read.return_value = mock_volref
+
+        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+
+        table = convert_hydro_energy_productivity(
+            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
+            self._make_id_map(),
+        )
+        rows = table.to_pylist()
+        a_rows = sorted(
+            (r for r in rows if r["hydro_id"] == 0),
+            key=lambda r: r["stage_id"],
+        )
+        # Stage 0 = month 1 (volref=0) → V=vmin=100, h=310, drop=260, ρ=234.
+        assert a_rows[0]["equivalent_productivity_mw_per_m3s"] == pytest.approx(
+            0.9 * (300.0 + 0.1 * 100.0 - 50.0)
+        )
+        # Stage 1 = month 2 (volref=500) → V=600, h=360, drop=310, ρ=279.
+        assert a_rows[1]["equivalent_productivity_mw_per_m3s"] == pytest.approx(
+            0.9 * (300.0 + 0.1 * 600.0 - 50.0)
+        )
+
+    @patch("cobre_bridge.converters.hydro.VolrefSaz")
+    @patch("cobre_bridge.converters.hydro.Dger")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Modif")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_seasonal_volref_combined_with_cfuga_override(
+        self,
+        mock_hidr_cls: MagicMock,
+        mock_modif_cls: MagicMock,
+        mock_confhd_cls: MagicMock,
+        mock_dger_cls: MagicMock,
+        mock_volref_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Seasonal volref and CFUGA must compose: each stage uses the
+        month's reference volume AND the active canal_fuga override."""
+        self._setup_base_mocks(
+            mock_hidr_cls,
+            mock_confhd_cls,
+            mock_dger_cls,
+            tmp_path,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=1,
+        )
+
+        # CFUGA effective from month 6 (stage 5) onward — canal_fuga 50 → 60.
+        cfuga_rec = _make_cfuga_rec(month=6, year=2025, nivel=60.0)
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [cfuga_rec]
+        mock_modif_cls.read.return_value = mock_modif
+
+        # Seasonal volref: every month useful=200 → V=300, h=330.
+        volref_df = pd.DataFrame(
+            {
+                "codigo_usina": [1] * 12,
+                "nome_usina": ["USINA_A"] * 12,
+                "mes": list(range(1, 13)),
+                "valor": [200.0] * 12,
+            }
+        )
+        mock_volref = MagicMock()
+        mock_volref.volumes = volref_df
+        mock_volref_cls.read.return_value = mock_volref
+
+        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+
+        table = convert_hydro_energy_productivity(
+            _make_nw_files(
+                tmp_path,
+                modif=tmp_path / "modif.dat",
+                volref_saz=tmp_path / "volref_saz.dat",
+            ),
+            self._make_id_map(),
+        )
+        rows = [r for r in table.to_pylist() if r["hydro_id"] == 0]
+        by_stage = {
+            r["stage_id"]: r["equivalent_productivity_mw_per_m3s"] for r in rows
+        }
+        # Stages 0..4: cf=50, V=300, h=330, drop=280, ρ=252.
+        pre = 0.9 * (300.0 + 0.1 * 300.0 - 50.0)
+        # Stages 5..11: cf=60, drop=270, ρ=243.
+        post = 0.9 * (300.0 + 0.1 * 300.0 - 60.0)
+        assert by_stage[0] == pytest.approx(pre)
+        assert by_stage[4] == pytest.approx(pre)
+        assert by_stage[5] == pytest.approx(post)
+        assert by_stage[11] == pytest.approx(post)
+
     @patch("cobre_bridge.converters.hydro.Dger")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
@@ -2685,8 +2934,7 @@ class TestConvertLines:
         expected = _PINT * _PINT_FICTITIOUS_DISCOUNT
         for ln in result["lines"]:
             touches_fict = (
-                ln["source_bus_id"] == fict_bus_id
-                or ln["target_bus_id"] == fict_bus_id
+                ln["source_bus_id"] == fict_bus_id or ln["target_bus_id"] == fict_bus_id
             )
             if touches_fict:
                 assert ln["exchange_cost"] == pytest.approx(expected)
