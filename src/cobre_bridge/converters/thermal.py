@@ -416,18 +416,25 @@ def convert_thermal_bounds(
     # Pre-compute which codes have POTEF / GTMIN in EXPT.
     codes_with_potef: set[int] = set()
     codes_with_gtmin: set[int] = set()
-    # Plants whose POTEF has a finite end date — they are only
-    # available during the POTEF window (zero capacity outside).
-    potef_finite_end: dict[int, date] = {}
+    # Per-code union of POTEF availability windows.  A plant is considered
+    # in service for any stage whose date falls inside at least one window.
+    # Open-ended data_fim is treated as extending to the last stage date.
+    # This correctly handles chained POTEF schedules (e.g. a finite window
+    # followed by an open-ended one): NEWAVE applies them in sequence
+    # rather than decommissioning the plant at the first window's end.
+    potef_windows: dict[int, list[tuple[date, date]]] = {}
     for code, overrides in expt_by_code.items():
         for o in overrides:
             if o["tipo"] == "POTEF":
                 codes_with_potef.add(code)
-                if not pd.isna(o["data_fim"]):
-                    end = pd.Timestamp(o["data_fim"]).date()
-                    prev = potef_finite_end.get(code)
-                    if prev is None or end > prev:
-                        potef_finite_end[code] = end
+                ov_start = pd.Timestamp(o["data_inicio"]).date()
+                end_raw = o["data_fim"]
+                ov_end = (
+                    stage_dates[-1]
+                    if pd.isna(end_raw)
+                    else pd.Timestamp(end_raw).date()
+                )
+                potef_windows.setdefault(code, []).append((ov_start, ov_end))
             elif o["tipo"] == "GTMIN":
                 codes_with_gtmin.add(code)
 
@@ -524,10 +531,13 @@ def convert_thermal_bounds(
                 elif tipo == "IPTER":
                     ip = value
 
-            # Step 4b: POTEF with finite end defines availability window.
-            # After the POTEF range expires the plant has zero capacity.
-            potef_end = potef_finite_end.get(newave_code)
-            if potef_end is not None and stage_date > potef_end:
+            # Step 4b: a POTEF schedule defines the *only* periods the
+            # plant is available. If no POTEF window covers the current
+            # stage, the plant is out of service for that stage.
+            windows = potef_windows.get(newave_code)
+            if windows is not None and not any(
+                ws <= stage_date <= we for ws, we in windows
+            ):
                 potencia = 0.0
                 gen_min = 0.0
 

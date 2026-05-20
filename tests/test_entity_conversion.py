@@ -2343,6 +2343,134 @@ class TestConvertThermalBoundsClastModificacoes:
     @patch("cobre_bridge.converters.thermal.Term")
     @patch("cobre_bridge.converters.thermal.Clast")
     @patch("cobre_bridge.converters.thermal.Conft")
+    def test_chained_potef_finite_then_open_keeps_plant_alive(
+        self,
+        mock_conft_cls,
+        mock_clast_cls,
+        mock_term_cls,
+        mock_dger_cls,
+        mock_expt_cls,
+        mock_manutt_cls,
+        tmp_path,
+    ) -> None:
+        """Regression: two consecutive POTEF windows (finite then open-ended)
+        must keep the plant alive across both, matching NEWAVE.  Prior to the
+        fix, the first window's data_fim was treated as a decommission date,
+        zeroing capacity for every later stage even though a follow-up POTEF
+        re-activated the plant."""
+        import datetime
+
+        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+        mock_dger_cls.read.return_value = self._make_dger()
+
+        # POTEF window 1: stages 0-3 (Jan-Apr 2023) at 100 MW.
+        # POTEF window 2: stage 4 onwards (May 2023+) at 200 MW.
+        expt_df = pd.DataFrame(
+            {
+                "codigo_usina": [10, 10],
+                "tipo": ["POTEF", "POTEF"],
+                "modificacao": [100.0, 200.0],
+                "data_inicio": [
+                    datetime.datetime(2023, 1, 1),
+                    datetime.datetime(2023, 5, 1),
+                ],
+                "data_fim": [datetime.datetime(2023, 4, 1), pd.NaT],
+            }
+        )
+        expt_obj = MagicMock()
+        expt_obj.expansoes = expt_df
+        mock_expt_cls.read.return_value = expt_obj
+
+        # Use a real expt file path so the optional source is wired in.
+        (tmp_path / "expt.dat").touch()
+        nw_files = _make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+
+        from cobre_bridge.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(nw_files, self._make_id_map())
+        assert table is not None
+        df = table.to_pandas()
+        termo_a_id = self._make_id_map().thermal_id(10)
+        a_rows = df[df["thermal_id"] == termo_a_id].sort_values("stage_id")
+
+        # FCMAX=90, TEIF=0.05% (fixture stores TEIF in percent units, applied
+        # as (100-teif)/100), IP zeroed by step 1.
+        # Window 1: max = 100 * 0.9 * (1 - 0.0005) = 89.955
+        # Window 2: max = 200 * 0.9 * (1 - 0.0005) = 179.910
+        assert a_rows.iloc[0]["max_generation_mw"] == pytest.approx(89.955)
+        assert a_rows.iloc[3]["max_generation_mw"] == pytest.approx(89.955)
+        # The fix: stages from May 2023 onwards stay alive at the second
+        # POTEF capacity, instead of being zeroed by the old step 4b logic.
+        assert a_rows.iloc[4]["max_generation_mw"] == pytest.approx(179.910)
+        assert a_rows.iloc[11]["max_generation_mw"] == pytest.approx(179.910)
+
+    @patch("inewave.newave.Manutt")
+    @patch("inewave.newave.Expt")
+    @patch("inewave.newave.Dger")
+    @patch("cobre_bridge.converters.thermal.Term")
+    @patch("cobre_bridge.converters.thermal.Clast")
+    @patch("cobre_bridge.converters.thermal.Conft")
+    def test_potef_window_gap_decommissions_plant(
+        self,
+        mock_conft_cls,
+        mock_clast_cls,
+        mock_term_cls,
+        mock_dger_cls,
+        mock_expt_cls,
+        mock_manutt_cls,
+        tmp_path,
+    ) -> None:
+        """A gap between two finite POTEF windows truly decommissions the
+        plant — capacity goes to zero for stages outside any window."""
+        import datetime
+
+        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+        mock_dger_cls.read.return_value = self._make_dger()
+
+        expt_df = pd.DataFrame(
+            {
+                "codigo_usina": [10, 10],
+                "tipo": ["POTEF", "POTEF"],
+                "modificacao": [100.0, 200.0],
+                "data_inicio": [
+                    datetime.datetime(2023, 1, 1),
+                    datetime.datetime(2023, 8, 1),
+                ],
+                "data_fim": [
+                    datetime.datetime(2023, 3, 1),
+                    datetime.datetime(2023, 10, 1),
+                ],
+            }
+        )
+        expt_obj = MagicMock()
+        expt_obj.expansoes = expt_df
+        mock_expt_cls.read.return_value = expt_obj
+
+        (tmp_path / "expt.dat").touch()
+        nw_files = _make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+
+        from cobre_bridge.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(nw_files, self._make_id_map())
+        assert table is not None
+        df = table.to_pandas()
+        termo_a_id = self._make_id_map().thermal_id(10)
+        a_rows = df[df["thermal_id"] == termo_a_id].sort_values("stage_id")
+        # Stage 3 (Apr) and Stage 6 (Jul) sit in the gap → zeroed.
+        assert a_rows.iloc[3]["max_generation_mw"] == pytest.approx(0.0)
+        assert a_rows.iloc[6]["max_generation_mw"] == pytest.approx(0.0)
+        # Stage 0 (Jan) in window 1 → 89.955; stage 7 (Aug) in window 2 → 179.910.
+        assert a_rows.iloc[0]["max_generation_mw"] == pytest.approx(89.955)
+        assert a_rows.iloc[7]["max_generation_mw"] == pytest.approx(179.910)
+        # Stage 11 (Dec) past window 2 → zeroed.
+        assert a_rows.iloc[11]["max_generation_mw"] == pytest.approx(0.0)
+
+    @patch("inewave.newave.Manutt")
+    @patch("inewave.newave.Expt")
+    @patch("inewave.newave.Dger")
+    @patch("cobre_bridge.converters.thermal.Term")
+    @patch("cobre_bridge.converters.thermal.Clast")
+    @patch("cobre_bridge.converters.thermal.Conft")
     def test_modificacao_with_open_end_extends_to_horizon(
         self,
         mock_conft_cls,
