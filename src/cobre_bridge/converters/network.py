@@ -213,8 +213,6 @@ _ELETRI_HIGH_MULT = 10.0
 # floating-point noise yet small enough not to inflate the objective.
 _INFLOW_NN_MARGIN = 1.01
 
-_EXCESS_MULT = 10.0
-
 
 def _build_canonical_pair_to_line_id(
     nw_files: NewaveFiles,
@@ -683,7 +681,7 @@ def convert_penalties(
                     "depth_mw": None,
                 }
             ],
-            "excess_cost": excess_cost * _EXCESS_MULT,
+            "excess_cost": excess_cost,
         },
         "hydro": {
             "spillage_cost": spillage_cost,
