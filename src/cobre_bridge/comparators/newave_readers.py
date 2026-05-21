@@ -357,7 +357,8 @@ def read_pmo_convergence(newave_dir: Path) -> pl.DataFrame:
     if not rows:
         _LOG.warning(
             "No convergence-table rows matched in %s; "
-            "expected the NEWAVE 'ITER LIM.INF ZINF LIM.SUP ZSUP DZINF ZSUP_ITER' table",
+            "expected the NEWAVE 'ITER LIM.INF ZINF LIM.SUP ZSUP DZINF "
+            "ZSUP_ITER' table",
             pmo_path,
         )
         return empty

@@ -850,10 +850,10 @@ def compare_results(
         read_cobre_line_percentiles,
         read_cobre_lp_max_generation,
         read_cobre_spillage_energy,
-        read_cobre_training_duration,
         read_cobre_thermal_means,
         read_cobre_thermal_metadata,
         read_cobre_thermal_percentiles,
+        read_cobre_training_duration,
     )
     from cobre_bridge.comparators.newave_readers import (
         _find_saidas_dir,
