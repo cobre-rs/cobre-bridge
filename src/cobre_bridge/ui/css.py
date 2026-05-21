@@ -116,6 +116,73 @@ main { padding: 24px 32px; max-width: 1800px; margin: 0 auto; }
 }
 """
 
+COST_BREAKDOWN_TABLE_CSS: str = """
+.cost-breakdown-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 0.85rem;
+    background: #FFFFFF;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
+    font-variant-numeric: tabular-nums;
+}
+.cost-breakdown-table caption {
+    caption-side: top;
+    text-align: left;
+    padding: 12px 14px 8px 14px;
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #1F2937;
+    letter-spacing: 0.01em;
+}
+.cost-breakdown-table thead th {
+    background: #F3F4F6;
+    color: #4B5563;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    padding: 10px 14px;
+    border-bottom: 1px solid #E5E7EB;
+}
+.cost-breakdown-table tbody td {
+    padding: 8px 14px;
+    color: #1F2937;
+    border-bottom: 1px solid #F1F1EE;
+    transition: background-color 120ms ease;
+}
+.cost-breakdown-table tbody tr:nth-child(even) td {
+    background: #FBFBFA;
+}
+.cost-breakdown-table tbody tr:hover td {
+    background: #EFF6FF;
+}
+.cost-breakdown-table tbody tr:last-child td {
+    border-bottom: none;
+    border-top: 2px solid #374151;
+    background: #F9FAFB;
+    font-weight: 700;
+}
+.cost-breakdown-table tbody tr:last-child:hover td {
+    background: #F9FAFB;
+}
+.cost-breakdown-table .cb-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    margin-right: 0.6em;
+    vertical-align: middle;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.08);
+}
+.cost-breakdown-table .cb-num { text-align: right; }
+.cost-breakdown-table .cb-cat { text-align: left; }
+.cost-breakdown-table .cb-diff-pos { color: #DC2626; font-weight: 600; }
+.cost-breakdown-table .cb-diff-neg { color: #059669; font-weight: 600; }
+"""
+
 DATA_TABLE_CSS: str = """
 .data-table {
     width: 100%;
@@ -518,6 +585,7 @@ def comparison_css() -> str:
         + TAB_FADE_CSS
         + UNDERLINE_EXPAND_CSS
         + METRIC_CARD_CSS
+        + COST_BREAKDOWN_TABLE_CSS
     )
 
 

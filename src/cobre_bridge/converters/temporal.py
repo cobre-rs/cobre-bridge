@@ -10,7 +10,7 @@ import calendar
 import logging
 from datetime import date
 
-from inewave.newave import Cvar, Dger, Patamar
+from inewave.newave import Cvar, Dger, Patamar, Shist
 
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
@@ -81,6 +81,7 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     """
     dger = Dger.read(nw_files.dger)
     patamar = Patamar.read(nw_files.patamar)
+    deterministic = _is_deterministic_mode(nw_files, dger)
 
     num_anos = dger.num_anos_estudo
     if not num_anos:
@@ -232,21 +233,25 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
             lbd = lambda_override.get((year, month), const_lambda)
             risk_measure = {"cvar": {"alpha": a, "lambda": lbd}}
 
-        stages.append(
-            {
-                "id": stage_id,
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-                "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
-                "blocks": blocks,
-                "num_scenarios": num_scenarios,
-                "risk_measure": risk_measure,
-                "state_variables": {
-                    "storage": True,
-                    "inflow_lags": True,
-                },
-            }
-        )
+        stage_entry: dict = {
+            "id": stage_id,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
+            "blocks": blocks,
+            "num_scenarios": num_scenarios,
+            "risk_measure": risk_measure,
+            "state_variables": {
+                "storage": True,
+                "inflow_lags": True,
+            },
+        }
+        if deterministic:
+            # NEWAVE's deterministic mode: each stage samples its inflow
+            # residual directly from the (single) historical scenario instead
+            # of drawing from the synthetic PAR(p) distribution.
+            stage_entry["sampling_method"] = "historical_residuals"
+        stages.append(stage_entry)
 
         if stage_id < total_months - 1:
             transitions.append(
@@ -338,6 +343,110 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     return result
 
 
+def _is_deterministic_mode(
+    nw_files: NewaveFiles,
+    dger: Dger,
+) -> bool:
+    """True when NEWAVE's hidden 'deterministic mode' is active.
+
+    Triggered by the combination of:
+
+    - ``dger.num_forwards == 1`` (one forward pass)
+    - ``dger.num_aberturas == 1`` (one backward opening)
+    - ``dger.tipo_simulacao_final == 2`` (historical final simulation)
+    - ``shist.varredura == 0`` (explicit historical years)
+    - ``shist.anos_inicio_simulacoes`` has exactly one entry
+
+    When all five hold, NEWAVE drops the stochastic machinery: training
+    and simulation both replay the same single historical scenario and
+    each stage samples residuals directly off the history instead of
+    drawing from a synthetic distribution.  Mirror the same configuration
+    here so the converted cobre case reproduces NEWAVE's behavior.
+    """
+    if (dger.num_forwards or 0) != 1:
+        return False
+    if (dger.num_aberturas or 0) != 1:
+        return False
+    if dger.tipo_simulacao_final != 2:
+        return False
+    if nw_files.shist is None:
+        return False
+    shist = Shist.read(str(nw_files.shist))
+    if shist.varredura != 0:
+        return False
+    years = shist.anos_inicio_simulacoes
+    return bool(years) and len(years) == 1
+
+
+def _historical_years_from_shist(
+    nw_files: NewaveFiles,
+    dger: Dger,
+) -> list[int] | dict[str, int]:
+    """Build cobre's ``historical_years`` from ``shist.dat``.
+
+    NEWAVE's ``shist.dat`` controls which historical years drive the final
+    simulation when ``dger.tipo_simulacao_final == 2``:
+
+    - ``shist.varredura == 0`` — explicit list in ``anos_inicio_simulacoes``;
+      emit as an array.
+    - ``shist.varredura == 1`` — range starting at ``ano_inicio_varredura``;
+      the end is the most recent historical year for which a scenario still
+      has enough forward data to cover the full simulation horizon
+      (``num_anos_estudo + num_anos_pos_estudo``).  Computed as
+      ``ano_inicio_estudo − 1 − horizon_years + 1 = ano_inicio_estudo
+      − horizon_years``: the last historical year is taken to be
+      ``ano_inicio_estudo − 1`` and the scenario must fit inside it.
+
+    When ``shist.dat`` is absent, fall back to the pre-existing default of
+    ``{from: ano_inicial_historico + 1, to: ano_inicio_estudo - 1}`` so the
+    output remains valid even for cases that ship without an Shist file.
+    """
+    ano_inicio: int = int(dger.ano_inicio_estudo or 2020)
+    num_anos: int = int(dger.num_anos_estudo or 1)
+    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
+
+    if nw_files.shist is None:
+        logger.debug("shist.dat not found; using legacy default historical range.")
+        ano_ini_hist: int = int(dger.ano_inicial_historico or 1931)
+        return {"from": ano_ini_hist + 1, "to": ano_inicio - 1}
+
+    shist = Shist.read(str(nw_files.shist))
+    if shist.varredura == 0:
+        years_raw = shist.anos_inicio_simulacoes
+        if not years_raw:
+            logger.warning(
+                "shist.dat has varredura=0 but anos_inicio_simulacoes is empty;"
+                " falling back to a single-year list at ano_inicio_estudo - 1."
+            )
+            return [ano_inicio - 1]
+        return [int(y) for y in years_raw]
+
+    # varredura == 1 → range.  The most recent valid start year is
+    # ano_inicio_estudo - horizon_years so the scenario fits in history.
+    horizon_years = num_anos + num_anos_pos
+    range_from = int(shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931))
+    range_to = ano_inicio - horizon_years
+    if range_to < range_from:
+        logger.warning(
+            "shist.dat varredura range collapses: ano_inicio_varredura=%d but"
+            " latest valid year=%d (horizon=%d years); clamping range_to=range_from.",
+            range_from,
+            range_to,
+            horizon_years,
+        )
+        range_to = range_from
+    return {"from": range_from, "to": range_to}
+
+
+def _count_historical_years(historical_years: list[int] | dict[str, int]) -> int:
+    """Return how many distinct start-years are covered by a historical_years
+    spec — equivalently the number of simulation scenarios NEWAVE will run."""
+    if isinstance(historical_years, list):
+        return len(historical_years)
+    # Range form: {"from": int, "to": int} — inclusive both ends.
+    return max(0, int(historical_years["to"]) - int(historical_years["from"]) + 1)
+
+
 def convert_config(nw_files: NewaveFiles) -> dict:
     """Convert NEWAVE training parameters to a Cobre ``config.json`` dict.
 
@@ -406,6 +515,16 @@ def convert_config(nw_files: NewaveFiles) -> dict:
     else:
         simulation_enabled = tipo_simulacao_final != 0
 
+    # -- Cut selection --
+    # NEWAVE's cut-selection knobs are independent for the forward and backward
+    # passes (`selecao_de_cortes_forward` / `selecao_de_cortes_backward`);
+    # cobre's training pipeline applies a single toggle to both passes.  Mirror
+    # the union: cut selection is enabled if NEWAVE turned it on for at least
+    # one direction, and only disabled when both flags are 0.
+    forward_sel: int = dger.selecao_de_cortes_forward or 0
+    backward_sel: int = dger.selecao_de_cortes_backward or 0
+    cut_selection_enabled: bool = (forward_sel == 1) or (backward_sel == 1)
+
     # -- Training scenario source --
     training_section: dict = {
         "forward_passes": forward_passes,
@@ -415,7 +534,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "cut_selection": {
             "check_frequency": 1,
             "cut_activity_tolerance": 1e-6,
-            "enabled": True,
+            "enabled": cut_selection_enabled,
             "method": "domination",
             "domination_epsilon": 0.0,
         },
@@ -426,6 +545,16 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         training_section["scenario_source"] = {
             "seed": 42,
             "inflow": {"scheme": "out_of_sample"},
+        }
+
+    # Deterministic mode: training reuses the simulation's historical pool
+    # (single year), so set the training scenario_source to mirror it.
+    deterministic = _is_deterministic_mode(nw_files, dger)
+    if training_enabled and deterministic:
+        training_section["scenario_source"] = {
+            "seed": 42,
+            "inflow": {"scheme": "historical"},
+            "historical_years": _historical_years_from_shist(nw_files, dger),
         }
 
     # -- Simulation scenario source --
@@ -444,12 +573,15 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             inflow_scheme = "in_sample"
         sim_source: dict = {"seed": 42, "inflow": {"scheme": inflow_scheme}}
         if inflow_scheme == "historical":
-            ano_ini_hist: int = dger.ano_inicial_historico or 1931
-            ano_inicio: int = dger.ano_inicio_estudo or 2020
-            sim_source["historical_years"] = {
-                "from": ano_ini_hist + 1,
-                "to": ano_inicio - 1,
-            }
+            historical_years = _historical_years_from_shist(nw_files, dger)
+            sim_source["historical_years"] = historical_years
+            # In historical mode each scenario is one (start-year, member)
+            # tuple; the number of scenarios is fully determined by the size
+            # of the historical pool.  Override num_series_sinteticas so the
+            # cobre case doesn't request more scenarios than NEWAVE generates.
+            simulation_section["num_scenarios"] = _count_historical_years(
+                historical_years
+            )
         simulation_section["scenario_source"] = sim_source
 
     estimation: dict = {"max_order": max_order}

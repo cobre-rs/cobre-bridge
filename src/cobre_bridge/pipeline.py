@@ -263,6 +263,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     vminop_referenced_ids: list[int] = (
         list(vminop_result[2]) if vminop_result is not None else []
     )
+    rho_acum_overrides: dict[int, list[float]] = (
+        vminop_result[3] if vminop_result is not None else {}
+    )
 
     logger.debug("Converting electric constraints")
     vminop_count = (
@@ -351,7 +354,10 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
             for m in production_models_dict.get("production_models", [])
         }
     )
-    scalar_parameters_dict = scalar_params_conv.build_scalar_parameters(all_hydro_ids)
+    scalar_parameters_dict = scalar_params_conv.build_scalar_parameters(
+        all_hydro_ids,
+        rho_acum_per_stage_overrides=rho_acum_overrides or None,
+    )
     _write_json(dst / "system" / "scalar_parameters.json", scalar_parameters_dict)
 
     # ------------------------------------------------------------------
@@ -407,7 +413,7 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     _BOUNDS_COLUMNS = ["constraint_id", "stage_id", "block_id", "bound"]
 
     if vminop_result is not None:
-        vminop_dict, vminop_bounds, _ = vminop_result
+        vminop_dict, vminop_bounds, _, _ = vminop_result
         all_constraints.extend(vminop_dict.get("constraints", []))
         # VminOP bounds table has no block_id column; add a null column and
         # reorder to match the canonical schema.

@@ -26,7 +26,7 @@ shape and the seven valid ``computed_spec.tag`` variants.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
@@ -44,16 +44,32 @@ def rho_eq_name(hydro_id: int) -> str:
     return f"rho_eq_h{hydro_id}"
 
 
-def build_scalar_parameters(hydro_ids: Iterable[int]) -> dict:
+def build_scalar_parameters(
+    hydro_ids: Iterable[int],
+    rho_acum_per_stage_overrides: Mapping[int, Sequence[float]] | None = None,
+) -> dict:
     """Return a ``scalar_parameters.json`` dict declaring per-hydro parameters.
 
-    Two ``computed`` entries are emitted per ``hydro_id``: ``rho_eq_h{id}``
-    (tag ``equivalent_productivity``) and ``rho_acum_h{id}`` (tag
-    ``accumulated_productivity``). The file is always written so that
-    handwritten or generated constraint expressions can reference any
-    per-hydro productivity via ``@name`` without requiring a regeneration.
+    ``rho_eq_h{id}`` is always emitted as ``computed`` (the LP coefficient
+    is the gen = ρ·Q point productivity that cobre derives from the VHA
+    geometry).  ``rho_acum_h{id}`` is emitted as ``computed`` by default —
+    but when *rho_acum_per_stage_overrides* maps the hydro to a list of
+    per-stage values, the entry switches to ``kind: "per_stage"`` so that
+    every constraint referencing ``@rho_acum_h{id}`` uses the supplied
+    numeric values instead of cobre's cascade-summed point productivity.
+
+    Used by the VminOP pathway to inject NEWAVE's stored-energy (EARM)
+    productivity convention — the cascade-summed integrated productivity
+    ``ρ_esp · (1/useful) · ∫_vmin^vmax h(V) dV`` — which differs from the
+    point productivity by up to ~10% on plants with non-trivial head swing
+    and is what NEWAVE itself uses to evaluate VminOP constraints.
     """
     unique_ids = sorted({int(h) for h in hydro_ids})
+    overrides = (
+        {int(h): list(vs) for h, vs in rho_acum_per_stage_overrides.items()}
+        if rho_acum_per_stage_overrides is not None
+        else {}
+    )
 
     entries: list[dict] = []
     next_id = 0
@@ -70,17 +86,32 @@ def build_scalar_parameters(hydro_ids: Iterable[int]) -> dict:
             }
         )
         next_id += 1
-        entries.append(
-            {
-                "id": next_id,
-                "name": rho_acum_name(hydro_id),
-                "kind": "computed",
-                "computed_spec": {
-                    "tag": "accumulated_productivity",
-                    "hydro_id": hydro_id,
-                },
-            }
-        )
+
+        override_values = overrides.get(hydro_id)
+        if override_values is not None:
+            entries.append(
+                {
+                    "id": next_id,
+                    "name": rho_acum_name(hydro_id),
+                    "kind": "per_stage",
+                    "values": [
+                        [stage_id, float(value)]
+                        for stage_id, value in enumerate(override_values)
+                    ],
+                }
+            )
+        else:
+            entries.append(
+                {
+                    "id": next_id,
+                    "name": rho_acum_name(hydro_id),
+                    "kind": "computed",
+                    "computed_spec": {
+                        "tag": "accumulated_productivity",
+                        "hydro_id": hydro_id,
+                    },
+                }
+            )
         next_id += 1
 
     return {

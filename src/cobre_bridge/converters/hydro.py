@@ -9,7 +9,16 @@ from collections.abc import Callable
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from inewave.newave import Confhd, Dger, Ghmin, Hidr, Modif, Penalid, Ree
+from inewave.newave import (
+    Confhd,
+    Dger,
+    Ghmin,
+    Hidr,
+    Modif,
+    Penalid,
+    Ree,
+    VolrefSaz,
+)
 
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
@@ -410,6 +419,11 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     # Apply MODIF.DAT permanent overrides before the main conversion loop.
     cadastro = _apply_permanent_overrides(cadastro, nw_files)
 
+    # Seasonal reference volumes per plant — when present, fed back into the
+    # evaporation block as ``reference_volumes_hm3`` so cobre's evaporation
+    # linearization matches the per-month reference NEWAVE itself uses.
+    seasonal_volref = _read_volref_saz(nw_files)
+
     # Resolve the FICT-cascade for every real plant.  Provides the effective
     # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
     # be folded back into the upstream real plant's effective ρ_eq.  See
@@ -548,6 +562,27 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         evap_coeffs = [float(hreg[f"evaporacao_{m}"]) for m in _EVAP_MONTHS]
         has_evaporation = any(v != 0.0 for v in evap_coeffs)
 
+        # Evaporation linearization points: when the plant has a seasonal
+        # row in volref_saz.dat, emit one absolute hm³ value per calendar
+        # month (vmin + useful_volume).  Missing months default to vmin
+        # (matching NEWAVE's "operate at vmin" semantics for zero entries).
+        # Clamped into [min_storage_hm3, max_storage_hm3] so cobre's
+        # dimensional validator accepts every value even if a permanent
+        # VOLMIN override raised vmin above what the file was written for.
+        plant_seasonal_for_evap = seasonal_volref.get(newave_code)
+        evap_reference_volumes: list[float] | None = None
+        if has_evaporation and plant_seasonal_for_evap:
+            evap_reference_volumes = [
+                max(
+                    vol_min,
+                    min(
+                        vol_max,
+                        vol_min + plant_seasonal_for_evap.get(m, 0.0),
+                    ),
+                )
+                for m in range(1, 13)
+            ]
+
         # Hydraulic loss model derived from tipo_perda / perdas columns.
         tipo_perda = int(hreg.get("tipo_perda", 0) or 0)
         perdas_val = float(hreg.get("perdas", 0.0) or 0.0)
@@ -608,7 +643,16 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             },
             "specific_productivity_mw_per_m3s_per_m": rho_esp,
             "evaporation": (
-                {"coefficients_mm": evap_coeffs} if has_evaporation else None
+                {
+                    "coefficients_mm": evap_coeffs,
+                    **(
+                        {"reference_volumes_hm3": evap_reference_volumes}
+                        if evap_reference_volumes is not None
+                        else {}
+                    ),
+                }
+                if has_evaporation
+                else None
             ),
             "tailrace": tailrace,
             "diversion": _make_diversion(newave_code, id_map),
@@ -634,8 +678,9 @@ def _compute_productivity(
     *,
     canal_fuga_override: float | None = None,
     cmont_override: float | None = None,
+    useful_volume_override: float | None = None,
 ) -> float:
-    """Compute average productivity in MW/(m^3/s) for a hydro plant.
+    """Compute constant productivity in MW/(m^3/s) for a hydro plant.
 
     Reads polynomial coefficients ``a0_volume_cota`` through
     ``a4_volume_cota`` from the plant's cadastro row to map storage volume
@@ -643,28 +688,17 @@ def _compute_productivity(
     gross drop, applies the loss model defined by ``tipo_perda`` and
     ``perdas``, then multiplies by ``produtibilidade_especifica``.
 
-    For monthly-regulated plants (``tipo_regulacao == "M"``) the height
-    is the integral average of the polynomial over
-    ``[volume_minimo, volume_maximo]``.  For all other plant types the
-    polynomial is evaluated at ``volume_referencia``.
+    Reference-volume selection (in priority order):
 
-    Parameters
-    ----------
-    hreg:
-        One row of ``Hidr.cadastro``, indexed by column name.
-    canal_fuga_override:
-        If provided, replaces ``canal_fuga_medio`` as the tailrace level.
-        Used when a CFUGA temporal override is active.
-    cmont_override:
-        If provided, replaces the polynomial-derived upstream height with
-        this fixed value (in metres).  Used when a CMONT temporal override
-        is active.
+    1. ``useful_volume_override`` — explicit useful volume (hm³ above
+       ``volume_minimo``).  Used by the seasonal pathway driven by
+       ``volref_saz.dat``: ``V = volume_minimo + useful_volume_override``.
+    2. Monthly-regulated plants (``tipo_regulacao == "M"``) → 65% of useful
+       storage (``V = vmin + 0.65 × (vmax − vmin)``); matches NEWAVE's
+       ``produtibilidade_altura_65`` convention.
+    3. All other plant types → ``volume_referencia``.
 
-    Returns
-    -------
-    float
-        Average productivity in MW/(m^3/s).  Returns zero if all
-        polynomial coefficients are zero (no usable head).
+    ``cmont_override`` short-circuits the upstream polynomial entirely.
     """
     coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
 
@@ -696,32 +730,19 @@ def _compute_productivity(
                 + coeffs[4] * v**4
             )
 
-        def _poly_antiderivative(v: float) -> float:
-            """Evaluate the antiderivative F(v) = c0*v + c1*v^2/2 + ..."""
-            return (
-                coeffs[0] * v
-                + coeffs[1] * v**2 / 2.0
-                + coeffs[2] * v**3 / 3.0
-                + coeffs[3] * v**4 / 4.0
-                + coeffs[4] * v**5 / 5.0
-            )
-
-        tipo_regulacao = str(hreg["tipo_regulacao"]).strip()
         vol_min = float(hreg["volume_minimo"])
-        vol_max = float(hreg["volume_maximo"])
 
-        if tipo_regulacao == "M":
-            if vol_min == vol_max:
-                # Degenerate interval: fall back to point evaluation.
-                avg_height = _poly(vol_min)
-            else:
-                avg_height = (
-                    _poly_antiderivative(vol_max) - _poly_antiderivative(vol_min)
-                ) / (vol_max - vol_min)
-            net_drop = avg_height - canal_fuga
+        if useful_volume_override is not None:
+            net_drop = _poly(vol_min + useful_volume_override) - canal_fuga
         else:
-            vol_ref = float(hreg["volume_referencia"])
-            net_drop = _poly(vol_ref) - canal_fuga
+            tipo_regulacao = str(hreg["tipo_regulacao"]).strip()
+            vol_max = float(hreg["volume_maximo"])
+            if tipo_regulacao == "M":
+                v_65 = vol_min + 0.65 * (vol_max - vol_min)
+                net_drop = _poly(v_65) - canal_fuga
+            else:
+                vol_ref = float(hreg["volume_referencia"])
+                net_drop = _poly(vol_ref) - canal_fuga
 
     # Apply loss model.
     tipo_perda = int(hreg["tipo_perda"])
@@ -813,68 +834,331 @@ def _total_study_stages(nw_files: NewaveFiles) -> int:
     return study_months + num_anos_pos * 12
 
 
+def _compute_integrated_productivity(
+    hreg: pd.Series,
+    *,
+    canal_fuga_override: float | None = None,
+    cmont_override: float | None = None,
+) -> float:
+    """ρ_esp × ((1/useful) × ∫_vmin^vmax h(V) dV − cf − perdas).
+
+    Mirrors NEWAVE's ``produtibilidade_equivalente_volmin_volmax``: the
+    productivity averaged over the full useful storage range, used by
+    NEWAVE to convert reservoir volume to stored energy (EARM) and to
+    evaluate VminOP constraints.  This is different from the point
+    productivity at v_65 that ``_compute_productivity`` returns and that
+    the LP uses as the gen = ρ·Q coefficient.
+
+    For a polynomial ``h(V) = a0 + a1·V + ... + a4·V⁴`` the integral has
+    a closed form: ``F(V) = a0·V + a1·V²/2 + a2·V³/3 + a3·V⁴/4 + a4·V⁵/5``.
+    With ``cmont_override`` the upstream level is held constant, so the
+    integrated drop collapses to ``cmont − cf``.
+
+    Run-of-river plants (vmax == vmin) evaluate the polynomial at the
+    single operating point — equivalent to the point productivity.
+    """
+    if cmont_override is not None:
+        cf = (
+            canal_fuga_override
+            if canal_fuga_override is not None
+            else float(hreg["canal_fuga_medio"])
+        )
+        net_drop = cmont_override - cf
+    else:
+        coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+        if all(c == 0.0 for c in coeffs):
+            _LOG.warning(
+                "All volume_cota coefficients are zero for plant; "
+                "returning zero integrated productivity.",
+                extra={"plant": hreg.get("nome_usina", "unknown")},
+            )
+            return 0.0
+
+        vmin = float(hreg["volume_minimo"])
+        vmax = float(hreg["volume_maximo"])
+        cf = (
+            canal_fuga_override
+            if canal_fuga_override is not None
+            else float(hreg["canal_fuga_medio"])
+        )
+
+        if vmax - vmin <= 0.0:
+            # Run-of-river: integrate over the singleton {vmin}.
+            avg_h = sum(coeffs[i] * vmin**i for i in range(5))
+        else:
+
+            def _antideriv(v: float) -> float:
+                return (
+                    coeffs[0] * v
+                    + coeffs[1] * v**2 / 2.0
+                    + coeffs[2] * v**3 / 3.0
+                    + coeffs[3] * v**4 / 4.0
+                    + coeffs[4] * v**5 / 5.0
+                )
+
+            avg_h = (_antideriv(vmax) - _antideriv(vmin)) / (vmax - vmin)
+
+        net_drop = avg_h - cf
+
+    tipo_perda = int(hreg["tipo_perda"])
+    perdas = float(hreg["perdas"])
+    if tipo_perda == 1:
+        adjusted_drop = net_drop * (1.0 - perdas / 100.0)
+    elif tipo_perda == 2:
+        adjusted_drop = net_drop - perdas
+    else:
+        adjusted_drop = net_drop
+
+    return float(hreg["produtibilidade_especifica"]) * adjusted_drop
+
+
+def _per_stage_integrated_productivities(
+    hreg: pd.Series,
+    base_integrated: float,
+    drop_overrides: list[dict],
+    nw_files: NewaveFiles,
+    total_stages: int,
+) -> list[float]:
+    """Per-stage integrated productivity with CFUGA/CMONT step-function awareness.
+
+    Same forward-sweep shape as :func:`_per_stage_productivities` but
+    recomputes the *integrated* productivity (volmin_volmax average) at
+    each stage where canal_fuga or cmont state changes.  Stages with no
+    active override return *base_integrated*.
+    """
+    if not drop_overrides:
+        return [base_integrated] * total_stages
+
+    dger = Dger.read(str(nw_files.dger))
+    start_year = int(dger.ano_inicio_estudo)
+    start_month = int(dger.mes_inicio_estudo)
+
+    events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
+    for override in drop_overrides:
+        stage_id = (override["year"] - start_year) * 12 + (
+            override["month"] - start_month
+        )
+        if override["type"] == "CFUGA":
+            events_by_stage.setdefault(stage_id, []).append(
+                (float(override["value"]), None)
+            )
+        else:  # CMONT
+            events_by_stage.setdefault(stage_id, []).append(
+                (None, float(override["value"]))
+            )
+
+    values: list[float] = []
+    active_cfuga: float | None = None
+    active_cmont: float | None = None
+    for stage_id in range(total_stages):
+        if stage_id == 0:
+            for past_stage in sorted(s for s in events_by_stage if s <= 0):
+                for cfuga_val, cmont_val in events_by_stage[past_stage]:
+                    if cfuga_val is not None:
+                        active_cfuga = cfuga_val
+                    if cmont_val is not None:
+                        active_cmont = cmont_val
+        if stage_id in events_by_stage and stage_id > 0:
+            for cfuga_val, cmont_val in events_by_stage[stage_id]:
+                if cfuga_val is not None:
+                    active_cfuga = cfuga_val
+                if cmont_val is not None:
+                    active_cmont = cmont_val
+
+        if active_cfuga is None and active_cmont is None:
+            values.append(base_integrated)
+        else:
+            values.append(
+                _compute_integrated_productivity(
+                    hreg,
+                    canal_fuga_override=active_cfuga,
+                    cmont_override=active_cmont,
+                )
+            )
+    return values
+
+
+def compute_per_stage_own_integrated_productivities(
+    nw_files: NewaveFiles,
+) -> dict[int, list[float]]:
+    """Return ``{plant_code: [own integrated ρ per stage]}`` for every existing plant.
+
+    Companion to :func:`compute_per_stage_own_productivities` but with the
+    EARM convention: ρ is the volume-integrated productivity (matching
+    NEWAVE's ``produtibilidade_equivalente_volmin_volmax``), not the
+    point productivity at v_65.  Used by VminOP to override the
+    ``rho_acum_h{id}`` scalar parameter so the constraint coefficient
+    matches NEWAVE's stored-energy accounting rather than the LP's
+    gen = ρ·Q point coefficient.
+
+    CFUGA/CMONT temporal overrides shift the integrand at every stage
+    from the override's effective stage forward; FICT-cascade contribution
+    is folded into the upstream real plant's own value so cascade
+    traversal in NEWAVE-code space matches the rewired ``downstream_id``
+    in ``hydros.json``.
+    """
+    total_stages = _total_study_stages(nw_files)
+    if total_stages <= 0:
+        return {}
+
+    hidr = Hidr.read(str(nw_files.hidr))
+    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+
+    confhd = Confhd.read(str(nw_files.confhd))
+    confhd_df = confhd.usinas
+    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    existing = all_existing[
+        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
+    ]
+    confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
+
+    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+    plants_with_drop_overrides = {
+        code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
+        for code, overrides in temporal_overrides.items()
+        if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
+    }
+
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    fict_cascade = resolve_cascade(confhd_df, cadastro)
+
+    result: dict[int, list[float]] = {}
+    for plant_code in confhd_codes:
+        if plant_code not in cadastro.index:
+            continue
+        hreg = cadastro.loc[plant_code]
+        base = _compute_integrated_productivity(hreg)
+        resolution = fict_cascade.get(plant_code)
+        fict_extra = resolution.fict_rho_sum if resolution is not None else 0.0
+        overrides = plants_with_drop_overrides.get(plant_code, [])
+        per_stage = _per_stage_integrated_productivities(
+            hreg, base, overrides, nw_files, total_stages
+        )
+        result[plant_code] = [v + fict_extra for v in per_stage]
+    return result
+
+
+def _read_volref_saz(nw_files: NewaveFiles) -> dict[int, dict[int, float]]:
+    """Read ``volref_saz.dat`` into ``{plant_code: {calendar_month: useful_vol_hm3}}``.
+
+    NEWAVE uses two distinct conventions inside this file:
+
+    - **Row of all-zeros** — sentinel meaning "no seasonal reference for this
+      plant"; NEWAVE falls back to its altura_65 / volume_referencia default.
+      We mirror this by *excluding* the plant from the returned mapping.
+    - **Row with at least one non-zero value** — real seasonal reference.
+      Individual zero months in such a row mean "operate at exactly
+      ``volume_minimo``" (useful = 0 above the dead-storage minimum), so we
+      keep all twelve monthly entries including explicit zeros.
+
+    Returns an empty dict when ``volref_saz.dat`` is absent.
+    """
+    if nw_files.volref_saz is None:
+        _LOG.debug("volref_saz.dat not found; seasonal productivity disabled.")
+        return {}
+
+    vs = VolrefSaz.read(str(nw_files.volref_saz))
+    df = vs.volumes
+    if df is None or df.empty:
+        return {}
+
+    by_plant: dict[int, dict[int, float]] = {}
+    for _, row in df.iterrows():
+        code = int(row["codigo_usina"])
+        month = int(row["mes"])
+        by_plant.setdefault(code, {})[month] = float(row["valor"])
+
+    return {
+        code: months
+        for code, months in by_plant.items()
+        if any(v > 0.0 for v in months.values())
+    }
+
+
 def _per_stage_productivities(
     hreg: pd.Series,
     base_productivity: float,
     drop_overrides: list[dict],
     nw_files: NewaveFiles,
     total_stages: int,
+    seasonal_volref_by_month: dict[int, float] | None = None,
 ) -> list[float]:
-    """Replay CFUGA/CMONT events to produce per-stage productivity values.
+    """Build per-stage productivity values from seasonal volref + CFUGA/CMONT.
 
-    Returns a list of length *total_stages*; each entry is the productivity for
-    that stage_id. Stages before the first override use *base_productivity*.
+    For each stage *s* (0-based), the productivity is computed as:
+
+    1. Determine calendar month ``m = ((start_month − 1 + s) mod 12) + 1``.
+    2. Pick reference useful volume: ``seasonal_volref_by_month[m]`` when
+       present and positive, else fall back to NEWAVE's altura_65 /
+       volume_referencia convention (i.e. use *base_productivity*).
+    3. Apply any active CFUGA/CMONT temporal override (step-function from its
+       stage of effect forward until the next event of the same type).
+
+    Returns a list of length *total_stages*.  If neither seasonal nor temporal
+    overrides apply for a stage, that stage's value equals *base_productivity*.
     """
-    if not drop_overrides:
+    has_seasonal = bool(seasonal_volref_by_month)
+    if not drop_overrides and not has_seasonal:
         return [base_productivity] * total_stages
 
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
 
-    events: list[tuple[int, float | None, float | None]] = []
+    # Group CFUGA/CMONT events by stage_id so per-stage state can be evolved
+    # in a single forward sweep.
+    events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
     for override in drop_overrides:
         stage_id = (override["year"] - start_year) * 12 + (
             override["month"] - start_month
         )
         if override["type"] == "CFUGA":
-            events.append((stage_id, override["value"], None))
+            events_by_stage.setdefault(stage_id, []).append(
+                (float(override["value"]), None)
+            )
         else:  # CMONT
-            events.append((stage_id, None, override["value"]))
+            events_by_stage.setdefault(stage_id, []).append(
+                (None, float(override["value"]))
+            )
 
-    events.sort(key=lambda e: (e[0], 0 if e[1] is not None else 1))
+    seasonal = seasonal_volref_by_month or {}
 
-    # Group events by stage_id, compute productivity at each change point.
-    breakpoints: list[tuple[int, float]] = []
-    effective_cfuga: float | None = None
-    effective_cmont: float | None = None
-    i = 0
-    while i < len(events):
-        cur_stage = events[i][0]
-        while i < len(events) and events[i][0] == cur_stage:
-            _, cfuga_val, cmont_val = events[i]
-            if cfuga_val is not None:
-                effective_cfuga = cfuga_val
-            if cmont_val is not None:
-                effective_cmont = cmont_val
-            i += 1
-        prod = _compute_productivity(
-            hreg,
-            canal_fuga_override=effective_cfuga,
-            cmont_override=effective_cmont,
-        )
-        breakpoints.append((cur_stage, prod))
+    values: list[float] = []
+    active_cfuga: float | None = None
+    active_cmont: float | None = None
+    for stage_id in range(total_stages):
+        # Apply events whose effective stage is exactly this stage; events with
+        # negative stage_id (took effect before the study horizon) are folded
+        # in by walking events with stage_id <= 0 at stage_id == 0.
+        if stage_id == 0:
+            for past_stage in sorted(s for s in events_by_stage if s <= 0):
+                for cfuga_val, cmont_val in events_by_stage[past_stage]:
+                    if cfuga_val is not None:
+                        active_cfuga = cfuga_val
+                    if cmont_val is not None:
+                        active_cmont = cmont_val
+        if stage_id in events_by_stage and stage_id > 0:
+            for cfuga_val, cmont_val in events_by_stage[stage_id]:
+                if cfuga_val is not None:
+                    active_cfuga = cfuga_val
+                if cmont_val is not None:
+                    active_cmont = cmont_val
 
-    # Expand breakpoints into per-stage values.
-    values: list[float] = [base_productivity] * total_stages
-    for idx, (bp_stage, bp_prod) in enumerate(breakpoints):
-        if bp_stage < 0:
-            continue
-        end_stage = (
-            breakpoints[idx + 1][0] if idx + 1 < len(breakpoints) else total_stages
-        )
-        for s in range(max(bp_stage, 0), min(end_stage, total_stages)):
-            values[s] = bp_prod
+        calendar_month = ((start_month - 1 + stage_id) % 12) + 1
+        vol_useful = seasonal.get(calendar_month)
+
+        if vol_useful is None and active_cfuga is None and active_cmont is None:
+            values.append(base_productivity)
+        else:
+            values.append(
+                _compute_productivity(
+                    hreg,
+                    canal_fuga_override=active_cfuga,
+                    cmont_override=active_cmont,
+                    useful_volume_override=vol_useful,
+                )
+            )
     return values
 
 
@@ -919,7 +1203,10 @@ def convert_hydro_energy_productivity(
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
 
-    total_stages = _total_study_stages(nw_files) if plants_with_drop_overrides else 0
+    seasonal_volref = _read_volref_saz(nw_files)
+
+    needs_per_stage = bool(plants_with_drop_overrides) or bool(seasonal_volref)
+    total_stages = _total_study_stages(nw_files) if needs_per_stage else 0
 
     # FICT-cascade: when a real plant's energy-cascade traverses fictitious
     # plants, fold those FICTs' ρ_eq into the upstream real plant's own ρ_eq
@@ -945,24 +1232,29 @@ def convert_hydro_energy_productivity(
         except KeyError:
             continue
         hreg = cadastro.loc[newave_code]
-        base_productivity = _compute_productivity(hreg)
+        legacy_base = _compute_productivity(hreg)
         resolution = fict_cascade.get(newave_code)
-        if resolution is not None:
-            base_productivity += resolution.fict_rho_sum
+        fict_extra = resolution.fict_rho_sum if resolution is not None else 0.0
         overrides = plants_with_drop_overrides.get(newave_code, [])
+        plant_seasonal = seasonal_volref.get(newave_code)
 
-        if not overrides:
+        if not overrides and not plant_seasonal:
             hydro_ids.append(hydro_id)
             stage_ids.append(None)
-            equiv_prods.append(base_productivity)
+            equiv_prods.append(legacy_base + fict_extra)
         else:
             per_stage = _per_stage_productivities(
-                hreg, base_productivity, overrides, nw_files, total_stages
+                hreg,
+                legacy_base,
+                overrides,
+                nw_files,
+                total_stages,
+                seasonal_volref_by_month=plant_seasonal,
             )
             for stage_id, value in enumerate(per_stage):
                 hydro_ids.append(hydro_id)
                 stage_ids.append(stage_id)
-                equiv_prods.append(value)
+                equiv_prods.append(value + fict_extra)
 
     nulls = [None] * len(hydro_ids)
     return pa.table(
@@ -1024,6 +1316,8 @@ def compute_per_stage_own_productivities(
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
 
+    seasonal_volref = _read_volref_saz(nw_files)
+
     # FICT-cascade fold-in: per-stage ρ_eq must already include any FICT
     # contribution so that the per-stage ρ_acum used by VminOP and EARM
     # accounting matches the topology rewired into ``hydros.json``.
@@ -1036,14 +1330,20 @@ def compute_per_stage_own_productivities(
         if plant_code not in cadastro.index:
             continue
         hreg = cadastro.loc[plant_code]
-        base = _compute_productivity(hreg)
+        legacy_base = _compute_productivity(hreg)
         resolution = fict_cascade.get(plant_code)
-        if resolution is not None:
-            base += resolution.fict_rho_sum
+        fict_extra = resolution.fict_rho_sum if resolution is not None else 0.0
         overrides = plants_with_drop_overrides.get(plant_code, [])
-        result[plant_code] = _per_stage_productivities(
-            hreg, base, overrides, nw_files, total_stages
+        plant_seasonal = seasonal_volref.get(plant_code)
+        per_stage = _per_stage_productivities(
+            hreg,
+            legacy_base,
+            overrides,
+            nw_files,
+            total_stages,
+            seasonal_volref_by_month=plant_seasonal,
         )
+        result[plant_code] = [v + fict_extra for v in per_stage]
     return result
 
 
@@ -1222,13 +1522,12 @@ def convert_water_withdrawal(
     water_withdrawal_m3s: DOUBLE)`` suitable for writing to
     ``constraints/hydro_bounds.parquet``.
 
-    The ``codigo_usina`` field in ``dsvagua.dat`` is a **posto** (gauging
-    station index), not a plant code.  This function reads ``confhd.dat`` to
-    build the posto -> hydro_code mapping, then converts to 0-based Cobre IDs
-    via *id_map*.
-
-    NEWAVE stores withdrawal as a negative ``valor``; Cobre expects a positive
-    ``water_withdrawal_m3s``.  The sign is negated during conversion.
+    The ``codigo_usina`` field in ``dsvagua.dat`` is a NEWAVE 1-based
+    *plant* code (matching ``confhd``), not a posto. Each plant may
+    contribute multiple rows per stage (one per consumptive-use or
+    remaining-flow component) which are summed before the sign is
+    negated to convert NEWAVE's "withdrawal = negative valor" convention
+    into Cobre's positive ``water_withdrawal_m3s``.
 
     Parameters
     ----------
@@ -1246,9 +1545,6 @@ def convert_water_withdrawal(
         valid rows after filtering.
     """
     from inewave.newave import (  # local import to avoid hard dependency at module load
-        Confhd as _Confhd,
-    )
-    from inewave.newave import (
         Dger as _Dger,
     )
     from inewave.newave import (
@@ -1260,30 +1556,20 @@ def convert_water_withdrawal(
         _LOG.debug("dsvagua.dat not found; no water withdrawal.")
         return None
 
+    # Read dger upfront so the ``outros_usos_da_agua`` switch can
+    # short-circuit before any dsvagua I/O. NEWAVE treats 0 as "ignore
+    # dsvagua.dat" — mirror that here so Cobre's hydro_bounds match
+    # NEWAVE's actual run instead of the file contents.
+    dger = _Dger.read(str(nw_files.dger))
+    if int(getattr(dger, "outros_usos_da_agua", 1) or 0) == 0:
+        _LOG.info("dger.outros_usos_da_agua == 0; skipping dsvagua.dat conversion.")
+        return None
+
     dsvagua = _Dsvagua.read(str(dsvagua_path))
     df = dsvagua.desvios
     if df is None or df.empty:
         return None
 
-    # Read confhd for posto -> hydro_code mapping.
-    # Filter out FICT plants so they cannot overwrite real plant entries
-    # when sharing the same posto (gauging station).
-    confhd = _Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
-    posto_to_code: dict[int, int] = {}
-    for _, row in non_fict.iterrows():
-        code = int(row["codigo_usina"])
-        posto = int(row["posto"])
-        try:
-            id_map.hydro_id(code)
-            posto_to_code[posto] = code
-        except KeyError:
-            pass
-
-    # Read dger for study start date, duration, and post-study period.
-    dger = _Dger.read(str(nw_files.dger))
     start_year: int = int(dger.ano_inicio_estudo)
     start_month: int = int(dger.mes_inicio_estudo)
     num_anos: int = int(dger.num_anos_estudo or 1)
@@ -1302,23 +1588,13 @@ def convert_water_withdrawal(
     values: list[float] = []
 
     for _, row in grouped.iterrows():
-        posto = int(row["codigo_usina"])
-        hydro_code = posto_to_code.get(posto)
-        if hydro_code is None:
-            _LOG.warning(
-                "Posto %d in dsvagua.dat not found in confhd.dat; skipping.",
-                posto,
-            )
-            continue
-
+        hydro_code = int(row["codigo_usina"])
         try:
             hydro_id = id_map.hydro_id(hydro_code)
         except KeyError:
-            _LOG.warning(
-                "Hydro code %d (posto %d) not in id_map; skipping.",
-                hydro_code,
-                posto,
-            )
+            # Fictitious plants and any other entries the id_map filters
+            # out are silently dropped — dsvagua frequently carries codes
+            # outside the dispatchable hydro fleet.
             continue
 
         dt = row["data"]

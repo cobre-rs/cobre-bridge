@@ -45,6 +45,7 @@ COST_GROUPS: dict[str, list[str]] = {
     "Thermal": ["thermal_cost"],
     "Deficit": ["deficit_cost"],
     "Spillage": ["spillage_cost"],
+    "Turbined Reg.": ["turbined_cost"],
     "NCS Curtailment": ["curtailment_cost"],
     # Operational costs
     "Exchange": ["exchange_cost"],
@@ -73,6 +74,8 @@ COST_GROUP_COLORS: dict[str, str] = {
     "Thermal": "#D97706",
     "Deficit": "#DC2626",
     "Spillage": "#2563EB",
+    # Regularisation — cool/teal palette to distinguish from violations
+    "Turbined Reg.": "#0EA5E9",
     "NCS Curtailment": "#059669",
     # Operational — cool/neutral tones
     "Exchange": "#7C3AED",

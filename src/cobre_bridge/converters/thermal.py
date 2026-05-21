@@ -282,6 +282,7 @@ def convert_thermal_bounds(
     # ------------------------------------------------------------------
     clast = Clast.read(str(nw_files.clast))
     clast_df = clast.usinas
+    clast_modif_df = clast.modificacoes
 
     # cost_by_code_year: (newave_code, indice_ano_estudo) -> cost
     cost_by_code_year: dict[tuple[int, int], float] = {}
@@ -302,6 +303,24 @@ def convert_thermal_bounds(
             ]
             if len(set(year_costs)) > 1:
                 cost_varies.add(code)
+
+    # Date-range cost overrides from the modificacoes block at the end of
+    # clast.dat. Each entry overrides the year-indexed cost for stages
+    # whose first-of-month date falls within [data_inicio, data_fim].
+    # A plant with at least one modification is treated as cost-varying
+    # even when its year-indexed costs are uniform.
+    modif_by_code: dict[int, list[dict]] = {}
+    if clast_modif_df is not None and not clast_modif_df.empty:
+        for _, row in clast_modif_df.iterrows():
+            code = int(row["codigo_usina"])
+            modif_by_code.setdefault(code, []).append(
+                {
+                    "data_inicio": row["data_inicio"],
+                    "data_fim": row["data_fim"],
+                    "custo": float(row["custo"]),
+                }
+            )
+        cost_varies.update(modif_by_code.keys())
 
     has_capacity_sources = nw_files.expt is not None or nw_files.manutt is not None
 
@@ -397,18 +416,25 @@ def convert_thermal_bounds(
     # Pre-compute which codes have POTEF / GTMIN in EXPT.
     codes_with_potef: set[int] = set()
     codes_with_gtmin: set[int] = set()
-    # Plants whose POTEF has a finite end date — they are only
-    # available during the POTEF window (zero capacity outside).
-    potef_finite_end: dict[int, date] = {}
+    # Per-code union of POTEF availability windows.  A plant is considered
+    # in service for any stage whose date falls inside at least one window.
+    # Open-ended data_fim is treated as extending to the last stage date.
+    # This correctly handles chained POTEF schedules (e.g. a finite window
+    # followed by an open-ended one): NEWAVE applies them in sequence
+    # rather than decommissioning the plant at the first window's end.
+    potef_windows: dict[int, list[tuple[date, date]]] = {}
     for code, overrides in expt_by_code.items():
         for o in overrides:
             if o["tipo"] == "POTEF":
                 codes_with_potef.add(code)
-                if not pd.isna(o["data_fim"]):
-                    end = pd.Timestamp(o["data_fim"]).date()
-                    prev = potef_finite_end.get(code)
-                    if prev is None or end > prev:
-                        potef_finite_end[code] = end
+                ov_start = pd.Timestamp(o["data_inicio"]).date()
+                end_raw = o["data_fim"]
+                ov_end = (
+                    stage_dates[-1]
+                    if pd.isna(end_raw)
+                    else pd.Timestamp(end_raw).date()
+                )
+                potef_windows.setdefault(code, []).append((ov_start, ov_end))
             elif o["tipo"] == "GTMIN":
                 codes_with_gtmin.add(code)
 
@@ -505,10 +531,13 @@ def convert_thermal_bounds(
                 elif tipo == "IPTER":
                     ip = value
 
-            # Step 4b: POTEF with finite end defines availability window.
-            # After the POTEF range expires the plant has zero capacity.
-            potef_end = potef_finite_end.get(newave_code)
-            if potef_end is not None and stage_date > potef_end:
+            # Step 4b: a POTEF schedule defines the *only* periods the
+            # plant is available. If no POTEF window covers the current
+            # stage, the plant is out of service for that stage.
+            windows = potef_windows.get(newave_code)
+            if windows is not None and not any(
+                ws <= stage_date <= we for ws, we in windows
+            ):
                 potencia = 0.0
                 gen_min = 0.0
 
@@ -533,6 +562,18 @@ def convert_thermal_bounds(
             if newave_code in cost_varies:
                 year_idx = _stage_to_study_year(stage_idx, first_year_stages, num_anos)
                 stage_cost = cost_by_code_year.get((newave_code, year_idx))
+                # Apply clast.modificacoes overrides in file order; later
+                # entries win when windows overlap, matching NEWAVE's
+                # sequential application of the modification block.
+                for modif in modif_by_code.get(newave_code, []):
+                    mod_start = pd.Timestamp(modif["data_inicio"]).date()
+                    mod_end_raw = modif["data_fim"]
+                    if pd.isna(mod_end_raw):
+                        mod_end = stage_dates[-1]
+                    else:
+                        mod_end = pd.Timestamp(mod_end_raw).date()
+                    if mod_start <= stage_date <= mod_end:
+                        stage_cost = modif["custo"]
 
             rows_thermal_id.append(thermal_id)
             rows_stage_id.append(stage_idx)

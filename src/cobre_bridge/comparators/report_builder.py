@@ -15,8 +15,14 @@ from cobre_bridge.comparators.charts import (
     cobre_aggregate_chart,
     convergence_chart,
     cost_breakdown_chart,
+    cost_breakdown_table,
     hydro_aggregate_chart,
+    hydro_per_bus_chart,
+    line_summary_chart,
     overview_metrics,
+    performance_fwd_bwd_split_chart,
+    performance_iteration_chart,
+    performance_metric_cards,
     productivity_scatter,
     system_comparison_chart,
     system_per_bus_chart,
@@ -59,14 +65,16 @@ def build_comparison_report(
 
     # --- Overview tab ---
     overview_parts: list[str] = []
-    overview_parts.append(overview_metrics(summary))
-    overview_parts.append(section_title("Cost Breakdown"))
     nw_costs = pctiles.nw_costs if pctiles else {}
     cobre_costs = pctiles.cobre_costs if pctiles else {}
+    overview_parts.append(overview_metrics(summary, nw_costs, cobre_costs))
+    overview_parts.append(section_title("Cost Breakdown"))
     overview_parts.append(
         chart_grid(
-            [wrap_chart(cost_breakdown_chart(nw_costs, cobre_costs))],
-            single=True,
+            [
+                wrap_chart(cost_breakdown_chart(nw_costs, cobre_costs)),
+                wrap_chart(cost_breakdown_table(nw_costs, cobre_costs)),
+            ],
         )
     )
     overview_parts.append(section_title("Convergence"))
@@ -152,6 +160,20 @@ def build_comparison_report(
         )
     tab_contents["tab-balance"] = balance_html + "\n" + "\n".join(energy_balance_extra)
 
+    # --- Network tab ---
+    line_pct = pctiles.line if pctiles else None
+    line_bounds = pctiles.line_bounds if pctiles else None
+    line_meta = pctiles.line_meta if pctiles else []
+    network_parts: list[str] = []
+    network_parts.append(section_title("Line Net Flow"))
+    network_parts.append(
+        chart_grid(
+            [wrap_chart(line_summary_chart(results, line_pct, line_bounds, line_meta))],
+            single=True,
+        )
+    )
+    tab_contents["tab-network"] = "\n".join(network_parts)
+
     # --- Hydro Operation tab ---
     hydro_pct = pctiles.hydro if pctiles else None
     cobre_hydro_means = pctiles.cobre_hydro_means if pctiles else pl.DataFrame()
@@ -159,21 +181,30 @@ def build_comparison_report(
     nw_offset = pctiles.nw_offset if pctiles else 0
     matched_hydro_ids = {r.cobre_id for r in results if r.entity_type == "hydro"}
 
+    hydro_meta = pctiles.cobre_hydro_meta if pctiles else {}
+    bus_meta = pctiles.cobre_bus_meta if pctiles else {}
     hydro_parts: list[str] = []
-    hydro_parts.append(section_title("Aggregate Hydro Comparison"))
-    hydro_charts: list[str] = []
     for var, title in [
-        ("storage_final_hm3", "Total Storage (hm³)"),
-        ("generation_mw", "Hydro Generation (MW)"),
-        ("spillage_m3s", "Total Spillage (m³/s)"),
-        ("turbined_m3s", "Total Turbined (m³/s)"),
-        ("inflow_m3s", "Total Inflow (m³/s)"),
-        ("water_value_per_hm3", "Water Value (R$/hm³)"),
+        ("storage_final_hm3", "Storage by Bus (hm³)"),
+        ("generation_mw", "Hydro Generation by Bus (MW)"),
+        ("spillage_m3s", "Spillage by Bus (m³/s)"),
+        ("turbined_m3s", "Turbined by Bus (m³/s)"),
+        ("inflow_m3s", "Inflow by Bus (m³/s)"),
+        ("water_value_per_hm3", "Water Value by Bus (R$/hm³)"),
     ]:
-        hydro_charts.append(
-            wrap_chart(hydro_aggregate_chart(results, var, title, hydro_pct))
+        hydro_parts.append(section_title(title))
+        hydro_parts.append(
+            chart_grid(
+                [
+                    wrap_chart(
+                        hydro_per_bus_chart(
+                            results, var, title, hydro_pct, hydro_meta, bus_meta
+                        )
+                    )
+                ],
+                single=True,
+            )
         )
-    hydro_parts.append(chart_grid(hydro_charts))
 
     # System-level EARM and ENA (Cobre per-hydro aggregate vs NEWAVE SIN).
     # NEWAVE EARMF is in MWmes (mean MW over a month); convert to MWh via
@@ -211,6 +242,26 @@ def build_comparison_report(
         ),
     ]
     hydro_parts.append(chart_grid(energy_charts))
+
+    # System-aggregate (SIN) totals for each hydro variable. Sums Cobre
+    # plant values per stage and overlays the NEWAVE total. Mirrors the
+    # per-bus facet section but collapses across buses — useful as a
+    # one-glance global view alongside the per-bus disaggregation.
+    hydro_parts.append(section_title("System Totals (SIN)"))
+    aggregate_charts: list[str] = []
+    for var, title in [
+        ("storage_final_hm3", "Total Storage (hm³)"),
+        ("generation_mw", "Hydro Generation (MW)"),
+        ("spillage_m3s", "Total Spillage (m³/s)"),
+        ("turbined_m3s", "Total Turbined (m³/s)"),
+        ("inflow_m3s", "Total Inflow (m³/s)"),
+        ("water_value_per_hm3", "Water Value (R$/hm³)"),
+    ]:
+        aggregate_charts.append(
+            wrap_chart(hydro_aggregate_chart(results, var, title, hydro_pct))
+        )
+    hydro_parts.append(chart_grid(aggregate_charts))
+
     tab_contents["tab-hydro"] = "\n".join(hydro_parts)
 
     # --- Hydro Plant Details tab ---
@@ -245,6 +296,29 @@ def build_comparison_report(
         )
     )
     tab_contents["tab-productivity"] = "\n".join(prod_parts)
+
+    # --- Performance tab ---
+    nw_tim_iters = pctiles.nw_tim_iterations if pctiles else pl.DataFrame()
+    nw_tim_stages = pctiles.nw_tim_stages if pctiles else {}
+    cb_train_secs = pctiles.cobre_training_seconds if pctiles else 0.0
+    cb_conv_perf = pctiles.cobre_iteration_timing if pctiles else pl.DataFrame()
+    perf_parts: list[str] = []
+    perf_parts.append(performance_metric_cards(nw_tim_stages, cb_train_secs))
+    perf_parts.append(section_title("Time per Iteration"))
+    perf_parts.append(
+        chart_grid(
+            [wrap_chart(performance_iteration_chart(nw_tim_iters, cb_conv_perf))],
+            single=True,
+        )
+    )
+    perf_parts.append(section_title("Forward / Backward Split"))
+    perf_parts.append(
+        chart_grid(
+            [wrap_chart(performance_fwd_bwd_split_chart(nw_tim_iters, cb_conv_perf))],
+            single=True,
+        )
+    )
+    tab_contents["tab-performance"] = "\n".join(perf_parts)
 
     return build_comparison_html(
         title="Cobre vs NEWAVE Results Comparison",

@@ -10,12 +10,14 @@ import pyarrow as pa
 import pytest
 
 from cobre_bridge.converters.constraints import (
+    _compute_accumulated_integrated_productivities,
     _parse_formula,
     compute_accumulated_productivities,
     convert_agrint_constraints,
     convert_electric_constraints,
     convert_vminop_constraints,
 )
+from cobre_bridge.converters.scalar_parameters import build_scalar_parameters
 from cobre_bridge.id_map import NewaveIdMap
 
 
@@ -104,6 +106,131 @@ class TestAccumulatedProductivity:
         assert acc[1] == pytest.approx(own_1)
         assert acc[2] == pytest.approx(own_2)
         assert acc[3] == pytest.approx(own_3)
+
+
+class TestIntegratedProductivity:
+    """Tests for the EARM-flavored *integrated* productivity used by VminOP.
+
+    The closed-form integral for ``h(V) = a0 + a1·V`` over [vmin, vmax] is
+    ``a0 + a1·(vmin+vmax)/2`` — the polynomial average over the range.
+    """
+
+    def test_closed_form_average_for_linear_polynomial(self) -> None:
+        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+
+        cadastro = _make_cadastro()
+        # PLANT_A: h(V) = 300 + 0.1·V. vmin=100, vmax=1000. Average h over
+        # [100, 1000] = 300 + 0.1·550 = 355. Drop = 355 - cf=200 = 155.
+        # ρ = ρ_esp · 155 = 0.01 · 155 = 1.55.
+        result = _compute_integrated_productivity(cadastro.loc[1])
+        assert result == pytest.approx(0.01 * (300.0 + 0.1 * 550.0 - 200.0))
+
+    def test_canal_fuga_override(self) -> None:
+        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+
+        cadastro = _make_cadastro()
+        result = _compute_integrated_productivity(
+            cadastro.loc[1], canal_fuga_override=180.0
+        )
+        # Same average h=355, new drop = 355 - 180 = 175.
+        assert result == pytest.approx(0.01 * (355.0 - 180.0))
+
+    def test_cmont_override_collapses_to_constant_drop(self) -> None:
+        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+
+        cadastro = _make_cadastro()
+        # CMONT supplies the upstream level directly; the polynomial is
+        # bypassed. drop = cmont - canal_fuga_medio = 360 - 200 = 160.
+        result = _compute_integrated_productivity(cadastro.loc[1], cmont_override=360.0)
+        assert result == pytest.approx(0.01 * (360.0 - 200.0))
+
+    def test_run_of_river_uses_point_value(self) -> None:
+        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+
+        cadastro = _make_cadastro().copy()
+        # Collapse PLANT_A to run-of-river by setting vmax = vmin.
+        cadastro.loc[1, "volume_maximo"] = cadastro.loc[1, "volume_minimo"]
+        result = _compute_integrated_productivity(cadastro.loc[1])
+        # h(100) = 300 + 0.1·100 = 310. Drop = 310 - 200 = 110.
+        assert result == pytest.approx(0.01 * (310.0 - 200.0))
+
+    def test_quadratic_polynomial_uses_correct_antiderivative(self) -> None:
+        """For h(V) = a0 + a1·V + a2·V² the integrated average over
+        [vmin, vmax] is a0 + a1·(vmin+vmax)/2 + a2·(vmax³−vmin³)/(3·(vmax−vmin)).
+        Verify the closed-form matches that formula on a quadratic case."""
+        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+
+        cadastro = _make_cadastro().copy()
+        cadastro.loc[1, "a2_volume_cota"] = 1e-5  # tiny quadratic term
+        vmin, vmax = 100.0, 1000.0
+        a0, a1, a2 = 300.0, 0.1, 1e-5
+        expected_avg_h = (
+            a0
+            + a1 * (vmin + vmax) / 2.0
+            + a2 * (vmax**3 - vmin**3) / (3.0 * (vmax - vmin))
+        )
+        result = _compute_integrated_productivity(cadastro.loc[1])
+        assert result == pytest.approx(0.01 * (expected_avg_h - 200.0))
+
+
+class TestAccumulatedIntegratedProductivities:
+    """Cascade sum of integrated ρ — what VminOP uses for the rho_acum_h{id}
+    override and the per-stage RHS."""
+
+    def test_cascade_uses_integrated_not_point(self) -> None:
+        cadastro = _make_cadastro()
+        confhd_df = _make_confhd_df()
+        acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+        # Each plant's integrated ρ uses the average h, NOT h at volume_referencia.
+        # PLANT_A: 0.01 · (300 + 0.1·550 − 200) = 0.01 · 155 = 1.55
+        # PLANT_B: 0.02 · (400 + 0.05·(200+2000)/2 − 300) = 0.02 · (400+55−300) = 3.1
+        # PLANT_C: 0.03 · (500 + 0.02·1650 − 400) = 0.03 · 133 = 3.99
+        own_a = 0.01 * (300.0 + 0.1 * 550.0 - 200.0)
+        own_b = 0.02 * (400.0 + 0.05 * (200.0 + 2000.0) / 2.0 - 300.0)
+        own_c = 0.03 * (500.0 + 0.02 * (300.0 + 3000.0) / 2.0 - 400.0)
+        assert acc[3] == pytest.approx(own_c)
+        assert acc[2] == pytest.approx(own_b + own_c)
+        assert acc[1] == pytest.approx(own_a + own_b + own_c)
+
+
+class TestBuildScalarParametersOverride:
+    """build_scalar_parameters switches rho_acum_h{id} to kind=per_stage
+    only for hydros present in the override map."""
+
+    def test_no_overrides_emits_only_computed(self) -> None:
+        d = build_scalar_parameters([0, 1])
+        # 4 entries (rho_eq + rho_acum) × 2 plants; all computed.
+        assert len(d["scalar_parameters"]) == 4
+        assert all(e["kind"] == "computed" for e in d["scalar_parameters"])
+        names = [e["name"] for e in d["scalar_parameters"]]
+        assert names == ["rho_eq_h0", "rho_acum_h0", "rho_eq_h1", "rho_acum_h1"]
+
+    def test_override_switches_only_rho_acum_to_per_stage(self) -> None:
+        d = build_scalar_parameters(
+            [0, 1, 2], rho_acum_per_stage_overrides={1: [1.5, 1.6, 1.7]}
+        )
+        by_name = {e["name"]: e for e in d["scalar_parameters"]}
+        # Only plant 1's rho_acum becomes per_stage; everything else is computed.
+        assert by_name["rho_acum_h1"]["kind"] == "per_stage"
+        assert by_name["rho_acum_h1"]["values"] == [
+            [0, 1.5],
+            [1, 1.6],
+            [2, 1.7],
+        ]
+        assert "computed_spec" not in by_name["rho_acum_h1"]
+        # rho_eq_h1 is still computed — the override is only for ρ_acum.
+        assert by_name["rho_eq_h1"]["kind"] == "computed"
+        assert by_name["rho_eq_h1"]["computed_spec"]["tag"] == "equivalent_productivity"
+        # Plants without overrides stay computed.
+        assert by_name["rho_acum_h0"]["kind"] == "computed"
+        assert by_name["rho_acum_h2"]["kind"] == "computed"
+
+    def test_overrides_preserve_unique_ids(self) -> None:
+        d = build_scalar_parameters(
+            [0, 1], rho_acum_per_stage_overrides={0: [2.0], 1: [3.0]}
+        )
+        ids = [e["id"] for e in d["scalar_parameters"]]
+        assert ids == sorted(set(ids))
 
 
 class TestPerStageAccumulatedProductivities:
@@ -260,9 +387,57 @@ class TestConvertVminopConstraints:
             cvar=None,
             agrint=None,
             re_dat=None,
+            volref_saz=None,
+            shist=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_vminop_constraints(nw, id_map) is None
+
+    def test_returns_none_when_curva_aversao_zero(self, tmp_path) -> None:
+        """dger.dat curva_aversao=0 means NEWAVE disabled the risk-aversion
+        curve; cobre-bridge must skip VminOP constraints even when curva.dat
+        is present on disk."""
+        from unittest.mock import MagicMock, patch
+
+        from cobre_bridge.newave_files import NewaveFiles
+
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "curva.dat").touch()
+
+        nw = NewaveFiles(
+            directory=tmp_path,
+            dger=tmp_path / "dger.dat",
+            confhd=tmp_path / "c",
+            conft=tmp_path / "t",
+            sistema=tmp_path / "s",
+            clast=tmp_path / "cl",
+            term=tmp_path / "te",
+            ree=tmp_path / "r",
+            patamar=tmp_path / "p",
+            hidr=tmp_path / "h",
+            vazoes=tmp_path / "v",
+            modif=None,
+            ghmin=None,
+            penalid=None,
+            vazpast=None,
+            dsvagua=None,
+            curva=tmp_path / "curva.dat",
+            expt=None,
+            manutt=None,
+            c_adic=None,
+            cvar=None,
+            agrint=None,
+            re_dat=None,
+            volref_saz=None,
+            shist=None,
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
+
+        mock_dger = MagicMock()
+        mock_dger.curva_aversao = 0
+        with patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls:
+            mock_dger_cls.read.return_value = mock_dger
+            assert convert_vminop_constraints(nw, id_map) is None
 
     def test_constraint_expression_uses_hydro_storage(self, tmp_path) -> None:
         """Integration test: verifies expression format against real example data."""
@@ -330,7 +505,7 @@ def _run_example_conversion():
     result = convert_vminop_constraints(nw_files, id_map)
     if result is None:
         return None
-    constraints_dict, bounds_table, _referenced = result
+    constraints_dict, bounds_table, _referenced, _rho_overrides = result
     return constraints_dict, bounds_table
 
 
@@ -470,6 +645,8 @@ class TestConvertElectricConstraints:
             cvar=None,
             agrint=None,
             re_dat=None,
+            volref_saz=None,
+            shist=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_electric_constraints(nw, id_map) is None
@@ -507,6 +684,8 @@ class TestConvertElectricConstraints:
             cvar=None,
             agrint=None,
             re_dat=None,
+            volref_saz=None,
+            shist=None,
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_electric_constraints(nw, id_map) is None
@@ -636,6 +815,8 @@ def _make_minimal_nw_files(tmp_path: Path, *, agrint: Path | None = None) -> obj
         cvar=None,
         agrint=agrint,
         re_dat=None,
+        volref_saz=None,
+        shist=None,
     )
 
 
