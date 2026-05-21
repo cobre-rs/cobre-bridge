@@ -612,6 +612,140 @@ class TestConvertHydros:
         for h in result["hydros"]:
             assert h["hydraulic_losses"] is None
 
+    @patch("cobre_bridge.converters.hydro.VolrefSaz")
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_evaporation_reference_volumes_from_volref_saz(
+        self,
+        mock_hidr_cls,
+        mock_confhd_cls,
+        mock_ree_cls,
+        mock_volref_cls,
+        tmp_path,
+    ) -> None:
+        """Plant with seasonal volref → reference_volumes_hm3 emitted as
+        ``vmin + volref_saz[m]`` per calendar month."""
+        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+
+        # Only USINA_A (code=1) gets a non-zero seasonal row.
+        # vmin_A=100, vmax_A=1000 → useful volumes 50..600 all inside the range.
+        volref_df = pd.DataFrame(
+            {
+                "codigo_usina": [1] * 12,
+                "nome_usina": ["USINA_A"] * 12,
+                "mes": list(range(1, 13)),
+                "valor": [50.0 * m for m in range(1, 13)],
+            }
+        )
+        mock_volref = MagicMock()
+        mock_volref.volumes = volref_df
+        mock_volref_cls.read.return_value = mock_volref
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(
+            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
+            self._make_id_map(),
+        )
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
+
+        # USINA_A: reference_volumes_hm3 = vmin_A + useful → 150, 200, ..., 700.
+        assert hydro_a["evaporation"] is not None
+        assert hydro_a["evaporation"]["coefficients_mm"] == [1.5] * 12
+        assert hydro_a["evaporation"]["reference_volumes_hm3"] == [
+            100.0 + 50.0 * m for m in range(1, 13)
+        ]
+        # USINA_B has no row in volref_saz → reference_volumes_hm3 omitted.
+        assert "reference_volumes_hm3" not in hydro_b["evaporation"]
+
+    @patch("cobre_bridge.converters.hydro.VolrefSaz")
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_evaporation_reference_volumes_absent_for_all_zero_row(
+        self,
+        mock_hidr_cls,
+        mock_confhd_cls,
+        mock_ree_cls,
+        mock_volref_cls,
+        tmp_path,
+    ) -> None:
+        """All-zero volref_saz row is NEWAVE's sentinel; cobre falls back to
+        its mid-storage default, so reference_volumes_hm3 is NOT emitted."""
+        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+
+        volref_df = pd.DataFrame(
+            {
+                "codigo_usina": [1] * 12 + [2] * 12,
+                "nome_usina": ["USINA_A"] * 12 + ["USINA_B"] * 12,
+                "mes": list(range(1, 13)) * 2,
+                "valor": [0.0] * 24,
+            }
+        )
+        mock_volref = MagicMock()
+        mock_volref.volumes = volref_df
+        mock_volref_cls.read.return_value = mock_volref
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(
+            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
+            self._make_id_map(),
+        )
+        for h in result["hydros"]:
+            assert h["evaporation"] is not None
+            assert "reference_volumes_hm3" not in h["evaporation"]
+
+    @patch("cobre_bridge.converters.hydro.VolrefSaz")
+    @patch("cobre_bridge.converters.hydro.Ree")
+    @patch("cobre_bridge.converters.hydro.Confhd")
+    @patch("cobre_bridge.converters.hydro.Hidr")
+    def test_evaporation_reference_volumes_clamp_into_reservoir_range(
+        self,
+        mock_hidr_cls,
+        mock_confhd_cls,
+        mock_ree_cls,
+        mock_volref_cls,
+        tmp_path,
+    ) -> None:
+        """Useful volumes larger than (vmax-vmin) get clamped to vmax — the
+        cobre schema requires every reference volume in [min_storage,
+        max_storage], so we never emit a value outside the reservoir
+        bounds even when volref_saz has out-of-range data."""
+        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+
+        # USINA_A has useful=[100,200,...,1200]. Useful range is 900 so
+        # values 1000, 1100, 1200 exceed vmax (1000). Expect clamping to vmax.
+        volref_df = pd.DataFrame(
+            {
+                "codigo_usina": [1] * 12,
+                "nome_usina": ["USINA_A"] * 12,
+                "mes": list(range(1, 13)),
+                "valor": [100.0 * m for m in range(1, 13)],
+            }
+        )
+        mock_volref = MagicMock()
+        mock_volref.volumes = volref_df
+        mock_volref_cls.read.return_value = mock_volref
+
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(
+            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
+            self._make_id_map(),
+        )
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        ref_volumes = hydro_a["evaporation"]["reference_volumes_hm3"]
+        assert len(ref_volumes) == 12
+        # m=1..9 → vmin + 100*m = 200..1000, all <= vmax=1000.
+        # m=10..12 → would be 1100, 1200, 1300 → clamped to 1000.
+        for v in ref_volumes:
+            assert 100.0 <= v <= 1000.0
+        # Last three months hit the cap.
+        assert ref_volumes[-3:] == [1000.0, 1000.0, 1000.0]
+
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")

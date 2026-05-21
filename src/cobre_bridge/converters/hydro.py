@@ -419,6 +419,11 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     # Apply MODIF.DAT permanent overrides before the main conversion loop.
     cadastro = _apply_permanent_overrides(cadastro, nw_files)
 
+    # Seasonal reference volumes per plant — when present, fed back into the
+    # evaporation block as ``reference_volumes_hm3`` so cobre's evaporation
+    # linearization matches the per-month reference NEWAVE itself uses.
+    seasonal_volref = _read_volref_saz(nw_files)
+
     # Resolve the FICT-cascade for every real plant.  Provides the effective
     # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
     # be folded back into the upstream real plant's effective ρ_eq.  See
@@ -557,6 +562,27 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         evap_coeffs = [float(hreg[f"evaporacao_{m}"]) for m in _EVAP_MONTHS]
         has_evaporation = any(v != 0.0 for v in evap_coeffs)
 
+        # Evaporation linearization points: when the plant has a seasonal
+        # row in volref_saz.dat, emit one absolute hm³ value per calendar
+        # month (vmin + useful_volume).  Missing months default to vmin
+        # (matching NEWAVE's "operate at vmin" semantics for zero entries).
+        # Clamped into [min_storage_hm3, max_storage_hm3] so cobre's
+        # dimensional validator accepts every value even if a permanent
+        # VOLMIN override raised vmin above what the file was written for.
+        plant_seasonal_for_evap = seasonal_volref.get(newave_code)
+        evap_reference_volumes: list[float] | None = None
+        if has_evaporation and plant_seasonal_for_evap:
+            evap_reference_volumes = [
+                max(
+                    vol_min,
+                    min(
+                        vol_max,
+                        vol_min + plant_seasonal_for_evap.get(m, 0.0),
+                    ),
+                )
+                for m in range(1, 13)
+            ]
+
         # Hydraulic loss model derived from tipo_perda / perdas columns.
         tipo_perda = int(hreg.get("tipo_perda", 0) or 0)
         perdas_val = float(hreg.get("perdas", 0.0) or 0.0)
@@ -617,7 +643,16 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             },
             "specific_productivity_mw_per_m3s_per_m": rho_esp,
             "evaporation": (
-                {"coefficients_mm": evap_coeffs} if has_evaporation else None
+                {
+                    "coefficients_mm": evap_coeffs,
+                    **(
+                        {"reference_volumes_hm3": evap_reference_volumes}
+                        if evap_reference_volumes is not None
+                        else {}
+                    ),
+                }
+                if has_evaporation
+                else None
             ),
             "tailrace": tailrace,
             "diversion": _make_diversion(newave_code, id_map),
