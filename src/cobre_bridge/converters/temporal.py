@@ -475,6 +475,16 @@ def convert_config(nw_files: NewaveFiles) -> dict:
     else:
         simulation_enabled = tipo_simulacao_final != 0
 
+    # -- Cut selection --
+    # NEWAVE's cut-selection knobs are independent for the forward and backward
+    # passes (`selecao_de_cortes_forward` / `selecao_de_cortes_backward`);
+    # cobre's training pipeline applies a single toggle to both passes.  Mirror
+    # the union: cut selection is enabled if NEWAVE turned it on for at least
+    # one direction, and only disabled when both flags are 0.
+    forward_sel: int = dger.selecao_de_cortes_forward or 0
+    backward_sel: int = dger.selecao_de_cortes_backward or 0
+    cut_selection_enabled: bool = (forward_sel == 1) or (backward_sel == 1)
+
     # -- Training scenario source --
     training_section: dict = {
         "forward_passes": forward_passes,
@@ -484,7 +494,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "cut_selection": {
             "check_frequency": 1,
             "cut_activity_tolerance": 1e-6,
-            "enabled": True,
+            "enabled": cut_selection_enabled,
             "method": "domination",
             "domination_epsilon": 0.0,
         },

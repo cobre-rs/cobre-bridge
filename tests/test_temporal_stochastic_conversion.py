@@ -93,6 +93,8 @@ def _make_dger_mock(
     considera_reamostragem_cenarios: int = 0,
     ano_inicial_historico: int = 1931,
     consideracao_media_anual_afluencias: int | None = None,
+    selecao_de_cortes_forward: int = 1,
+    selecao_de_cortes_backward: int = 1,
 ) -> MagicMock:
     dger = MagicMock()
     dger.mes_inicio_estudo = mes_inicio
@@ -111,6 +113,8 @@ def _make_dger_mock(
     dger.considera_reamostragem_cenarios = considera_reamostragem_cenarios
     dger.ano_inicial_historico = ano_inicial_historico
     dger.consideracao_media_anual_afluencias = consideracao_media_anual_afluencias
+    dger.selecao_de_cortes_forward = selecao_de_cortes_forward
+    dger.selecao_de_cortes_backward = selecao_de_cortes_backward
     return dger
 
 
@@ -759,6 +763,77 @@ class TestConvertConfig:
         assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "historical"
         assert src["historical_years"] == {"from": 1932, "to": 2025}
+
+    # -- Cut selection (selecao_de_cortes_forward / _backward) --
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_cut_selection_both_flags_one_enables(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            selecao_de_cortes_forward=1, selecao_de_cortes_backward=1
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["training"]["cut_selection"]["enabled"] is True
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_cut_selection_only_forward_enables(self, mock_dger_cls, tmp_path) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            selecao_de_cortes_forward=1, selecao_de_cortes_backward=0
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["training"]["cut_selection"]["enabled"] is True
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_cut_selection_only_backward_enables(self, mock_dger_cls, tmp_path) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            selecao_de_cortes_forward=0, selecao_de_cortes_backward=1
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["training"]["cut_selection"]["enabled"] is True
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_cut_selection_both_zero_disables(self, mock_dger_cls, tmp_path) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            selecao_de_cortes_forward=0, selecao_de_cortes_backward=0
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["training"]["cut_selection"]["enabled"] is False
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_cut_selection_none_treated_as_zero(self, mock_dger_cls, tmp_path) -> None:
+        """When the dger.dat field is absent (None), treat as 0 so the
+        union rule still applies: both None → disabled."""
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock()
+        dger.selecao_de_cortes_forward = None
+        dger.selecao_de_cortes_backward = None
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["training"]["cut_selection"]["enabled"] is False
 
     # -- Shist-driven historical_years (tipo_simulacao_final == 2) --
 
