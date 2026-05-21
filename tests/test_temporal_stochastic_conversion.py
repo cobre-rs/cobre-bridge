@@ -764,6 +764,168 @@ class TestConvertConfig:
         assert src["inflow"]["scheme"] == "historical"
         assert src["historical_years"] == {"from": 1932, "to": 2025}
 
+    # -- Deterministic mode (1 fwd × 1 abertura × historical × varredura=0 × 1 year) --
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_deterministic_mode_mirrors_training_to_simulation(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """When all five deterministic conditions hold, training reuses the
+        simulation's single-year historical scenario_source."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            num_forwards=1,
+            num_aberturas=1,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        mock_shist = MagicMock()
+        mock_shist.varredura = 0
+        mock_shist.anos_inicio_simulacoes = [1983]
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        src = result["training"]["scenario_source"]
+        assert src["inflow"]["scheme"] == "historical"
+        assert src["historical_years"] == [1983]
+        # Simulation side stays consistent.
+        assert result["simulation"]["scenario_source"]["historical_years"] == [1983]
+        assert result["simulation"]["num_scenarios"] == 1
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_deterministic_mode_disabled_when_num_forwards_gt_1(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """Any one condition false → deterministic mode off; training keeps
+        its standard (or absent) scenario_source."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            num_forwards=2,  # not 1
+            num_aberturas=1,
+            considera_reamostragem_cenarios=0,
+        )
+        mock_dger_cls.read.return_value = dger
+        mock_shist = MagicMock()
+        mock_shist.varredura = 0
+        mock_shist.anos_inicio_simulacoes = [1983]
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        # With no reamostragem and not deterministic, training has no
+        # scenario_source — cobre defaults apply.
+        assert "scenario_source" not in result["training"]
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_deterministic_mode_disabled_when_multiple_historical_years(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """Two-year historical list violates the single-year requirement →
+        deterministic mode off."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            num_forwards=1,
+            num_aberturas=1,
+        )
+        mock_dger_cls.read.return_value = dger
+        mock_shist = MagicMock()
+        mock_shist.varredura = 0
+        mock_shist.anos_inicio_simulacoes = [1983, 1990]
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        assert "scenario_source" not in result["training"]
+
+    @patch("cobre_bridge.converters.temporal.Patamar")
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_deterministic_mode_stages_get_historical_residuals(
+        self, mock_dger_cls, mock_shist_cls, mock_patamar_cls, tmp_path
+    ) -> None:
+        """Every stage in the deterministic case is tagged with
+        sampling_method=historical_residuals."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        (tmp_path / "patamar.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            num_forwards=1,
+            num_aberturas=1,
+            mes_inicio=1,
+            ano_inicio=2024,
+            num_anos=2,
+            num_anos_pos=0,
+        )
+        mock_dger_cls.read.return_value = dger
+        mock_shist = MagicMock()
+        mock_shist.varredura = 0
+        mock_shist.anos_inicio_simulacoes = [1983]
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist_cls.read.return_value = mock_shist
+        mock_patamar_cls.read.return_value = _make_patamar_mock_single()
+
+        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.id_map import NewaveIdMap
+
+        result = convert_stages(
+            _make_nw_files(tmp_path, shist=tmp_path / "shist.dat"),
+            NewaveIdMap(subsystem_ids=[1], hydro_codes=[], thermal_codes=[]),
+        )
+        for stage in result["stages"]:
+            assert stage["sampling_method"] == "historical_residuals"
+
+    @patch("cobre_bridge.converters.temporal.Patamar")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_non_deterministic_mode_stages_omit_sampling_method(
+        self, mock_dger_cls, mock_patamar_cls, tmp_path
+    ) -> None:
+        """Without deterministic mode, sampling_method is omitted so cobre
+        applies its default (saa)."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "patamar.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=1,
+            num_forwards=20,  # not deterministic
+            mes_inicio=1,
+            ano_inicio=2024,
+            num_anos=2,
+            num_anos_pos=0,
+        )
+        mock_dger_cls.read.return_value = dger
+        mock_patamar_cls.read.return_value = _make_patamar_mock_single()
+
+        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.id_map import NewaveIdMap
+
+        result = convert_stages(
+            _make_nw_files(tmp_path),
+            NewaveIdMap(subsystem_ids=[1], hydro_codes=[], thermal_codes=[]),
+        )
+        for stage in result["stages"]:
+            assert "sampling_method" not in stage
+
     # -- Cut selection (selecao_de_cortes_forward / _backward) --
 
     @patch("cobre_bridge.converters.temporal.Dger")

@@ -81,6 +81,7 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     """
     dger = Dger.read(nw_files.dger)
     patamar = Patamar.read(nw_files.patamar)
+    deterministic = _is_deterministic_mode(nw_files, dger)
 
     num_anos = dger.num_anos_estudo
     if not num_anos:
@@ -232,21 +233,25 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
             lbd = lambda_override.get((year, month), const_lambda)
             risk_measure = {"cvar": {"alpha": a, "lambda": lbd}}
 
-        stages.append(
-            {
-                "id": stage_id,
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-                "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
-                "blocks": blocks,
-                "num_scenarios": num_scenarios,
-                "risk_measure": risk_measure,
-                "state_variables": {
-                    "storage": True,
-                    "inflow_lags": True,
-                },
-            }
-        )
+        stage_entry: dict = {
+            "id": stage_id,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
+            "blocks": blocks,
+            "num_scenarios": num_scenarios,
+            "risk_measure": risk_measure,
+            "state_variables": {
+                "storage": True,
+                "inflow_lags": True,
+            },
+        }
+        if deterministic:
+            # NEWAVE's deterministic mode: each stage samples its inflow
+            # residual directly from the (single) historical scenario instead
+            # of drawing from the synthetic PAR(p) distribution.
+            stage_entry["sampling_method"] = "historical_residuals"
+        stages.append(stage_entry)
 
         if stage_id < total_months - 1:
             transitions.append(
@@ -336,6 +341,41 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
         result["pre_study_stages"] = pre_study_stages
 
     return result
+
+
+def _is_deterministic_mode(
+    nw_files: NewaveFiles,
+    dger: Dger,
+) -> bool:
+    """True when NEWAVE's hidden 'deterministic mode' is active.
+
+    Triggered by the combination of:
+
+    - ``dger.num_forwards == 1`` (one forward pass)
+    - ``dger.num_aberturas == 1`` (one backward opening)
+    - ``dger.tipo_simulacao_final == 2`` (historical final simulation)
+    - ``shist.varredura == 0`` (explicit historical years)
+    - ``shist.anos_inicio_simulacoes`` has exactly one entry
+
+    When all five hold, NEWAVE drops the stochastic machinery: training
+    and simulation both replay the same single historical scenario and
+    each stage samples residuals directly off the history instead of
+    drawing from a synthetic distribution.  Mirror the same configuration
+    here so the converted cobre case reproduces NEWAVE's behavior.
+    """
+    if (dger.num_forwards or 0) != 1:
+        return False
+    if (dger.num_aberturas or 0) != 1:
+        return False
+    if dger.tipo_simulacao_final != 2:
+        return False
+    if nw_files.shist is None:
+        return False
+    shist = Shist.read(str(nw_files.shist))
+    if shist.varredura != 0:
+        return False
+    years = shist.anos_inicio_simulacoes
+    return bool(years) and len(years) == 1
 
 
 def _historical_years_from_shist(
@@ -505,6 +545,16 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         training_section["scenario_source"] = {
             "seed": 42,
             "inflow": {"scheme": "out_of_sample"},
+        }
+
+    # Deterministic mode: training reuses the simulation's historical pool
+    # (single year), so set the training scenario_source to mirror it.
+    deterministic = _is_deterministic_mode(nw_files, dger)
+    if training_enabled and deterministic:
+        training_section["scenario_source"] = {
+            "seed": 42,
+            "inflow": {"scheme": "historical"},
+            "historical_years": _historical_years_from_shist(nw_files, dger),
         }
 
     # -- Simulation scenario source --
