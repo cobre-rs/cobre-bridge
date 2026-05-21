@@ -113,23 +113,35 @@ def resolve_cascade(
     dict[int, FictCascadeResolution]
         One entry per real existing plant in ``confhd_df``.
     """
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-
-    # Index rows by code for O(1) lookup, and classify real vs FICT.  The
-    # ``fict_by_key`` map uses the FICT-suffix produced by NEWAVE's 12-char
-    # truncation rule so that ``FICT.QUEIMAD`` resolves to ``QUEIMADO``,
-    # ``FICT.TRES MA`` to ``TRES MARIAS``, etc.  Real plants that share the
-    # same truncated 7-char prefix (e.g. ``CORUMBA I`` / ``CORUMBA III`` /
-    # ``CORUMBA IV``) are recorded in ``real_by_key`` so we can detect
-    # ambiguous matches and warn rather than picking arbitrarily.
+    # Index every row (EX, NE, NC) so the cascade walker can step through
+    # plants that exist in confhd.dat but are absent from the LP.  ``NE``
+    # ("não existirá") and ``NC`` ("não construída") plants are out-of-LP
+    # — they contribute no productivity and no LP variable — but their
+    # ``codigo_usina_jusante`` link is still the authoritative topology.
+    # Treating them as opaque terminals (the previous behavior) silently
+    # disconnects any real plant whose downstream is NE/NC, leaving the
+    # upstream side without an outlet.  Walking through them mirrors the
+    # FICT pass-through but skips the ρ_eq contribution since the plant
+    # is not physically present.  The ``fict_by_key`` map uses the
+    # FICT-suffix produced by NEWAVE's 12-char truncation rule so that
+    # ``FICT.QUEIMAD`` resolves to ``QUEIMADO``, ``FICT.TRES MA`` to
+    # ``TRES MARIAS``, etc.  Real plants that share the same truncated
+    # 7-char prefix (e.g. ``CORUMBA I`` / ``CORUMBA III`` / ``CORUMBA IV``)
+    # are recorded in ``real_by_key`` so we can detect ambiguous matches
+    # and warn rather than picking arbitrarily.
     row_by_code: dict[int, pd.Series] = {}
     fict_by_key: dict[str, int] = {}
     real_codes: set[int] = set()
+    absent_codes: set[int] = set()
     real_by_key: dict[str, list[int]] = defaultdict(list)
-    for _, row in existing.iterrows():
+    for _, row in confhd_df.iterrows():
         code = int(row["codigo_usina"])
         name = str(row["nome_usina"]).strip()
+        status = str(row["usina_existente"]).strip()
         row_by_code[code] = row
+        if status != "EX":
+            absent_codes.add(code)
+            continue
         if name.startswith(_FICT_NAME_PREFIX):
             fict_by_key[_fict_to_key(name)] = code
         else:
@@ -141,20 +153,26 @@ def resolve_cascade(
         name = str(row["nome_usina"]).strip()
         if not name.startswith("FICT."):
             continue
+        if code in absent_codes:
+            # Out-of-LP plants contribute no productivity even when their
+            # name carries the FICT prefix — they are simply absent.
+            continue
         if code in cadastro.index:
             fict_rho_eq[code] = float(_compute_productivity(cadastro.loc[code]))
         else:
             fict_rho_eq[code] = 0.0
 
-    def _walk_fict_chain(
+    def _walk_chain(
         start_code: int,
     ) -> tuple[int | None, list[int], float]:
-        """Walk a FICT chain starting at *start_code*.
+        """Walk transparently through FICT and absent (NE/NC) plants.
 
         Returns ``(real_downstream, fict_codes_traversed, rho_sum)``.
-        Stops when reaching a real plant (returned), terminal (None), or
-        when a cycle is detected (defensive — should not occur in
-        well-formed NEWAVE cases).
+        Stops when reaching a real plant (returned), terminal (None), an
+        unknown code, or when a cycle is detected (defensive — should not
+        occur in well-formed NEWAVE cases).  FICT plants accumulate their
+        ``ρ_eq`` into ``rho_sum`` and appear in ``fict_codes_traversed``;
+        NE/NC plants are skipped silently as topological pass-throughs.
         """
         fict_codes: list[int] = []
         rho_sum = 0.0
@@ -167,11 +185,14 @@ def resolve_cascade(
             row = row_by_code.get(cur_code)
             if row is None:
                 return None, fict_codes, rho_sum
-            name = str(row["nome_usina"]).strip()
-            if not name.startswith("FICT."):
+            if cur_code in real_codes:
                 return cur_code, fict_codes, rho_sum
-            fict_codes.append(cur_code)
-            rho_sum += fict_rho_eq.get(cur_code, 0.0)
+            if cur_code not in absent_codes:
+                # Real-status FICT plant — pick up its ρ_eq contribution.
+                fict_codes.append(cur_code)
+                rho_sum += fict_rho_eq.get(cur_code, 0.0)
+            # NE/NC and FICT plants alike are walked through; only their
+            # ρ_eq handling differs (NE/NC contributes nothing).
             ds_raw = row.get("codigo_usina_jusante")
             cur_code = int(ds_raw) if ds_raw is not None and not pd.isna(ds_raw) else 0
         return None, fict_codes, rho_sum
@@ -192,8 +213,9 @@ def resolve_cascade(
                     fict_rho_sum=0.0,
                 )
                 continue
-            # Rule 2 — confhd points to a FICT plant.  Walk its chain.
-            real_ds, fict_codes, rho_sum = _walk_fict_chain(ds_code)
+            # Rule 2 — confhd points to a FICT or NE/NC plant.  Walk the
+            # chain to find the next real (EX) plant downstream.
+            real_ds, fict_codes, rho_sum = _walk_chain(ds_code)
             result[code] = FictCascadeResolution(
                 downstream_code=real_ds,
                 fict_chain=tuple(fict_codes),
@@ -242,11 +264,50 @@ def resolve_cascade(
                 fict_rho_sum=0.0,
             )
             continue
-        real_ds, fict_codes, rho_sum = _walk_fict_chain(fict_code)
+        real_ds, fict_codes, rho_sum = _walk_chain(fict_code)
         result[code] = FictCascadeResolution(
             downstream_code=real_ds,
             fict_chain=tuple(fict_codes),
             fict_rho_sum=rho_sum,
+        )
+
+    # Log NE/NC plants that bridged a real-to-real cascade so the operator
+    # can audit the bypassed mid-cascade links.  Top-of-cascade NE/NC
+    # leaves are intentionally not reported — they have no upstream to
+    # rewire and would only add noise.
+    rewired_absent: dict[int, list[int]] = defaultdict(list)
+    for upstream_code in result:
+        ds_raw = row_by_code[upstream_code].get("codigo_usina_jusante")
+        ds_seed = int(ds_raw) if ds_raw is not None and not pd.isna(ds_raw) else 0
+        if ds_seed == 0 or ds_seed not in absent_codes:
+            continue
+        # The original confhd link landed on an NE/NC plant; the walker
+        # found the next EX downstream (possibly through more NE/NC or
+        # FICT hops).  Attribute every NE/NC along that path to this
+        # upstream so a single log entry summarizes who got rewired.
+        cur: int = ds_seed
+        seen: set[int] = set()
+        while cur not in (0,) and cur not in seen and cur not in real_codes:
+            seen.add(cur)
+            if cur in absent_codes:
+                rewired_absent[cur].append(upstream_code)
+            row = row_by_code.get(cur)
+            if row is None:
+                break
+            ds_inner = row.get("codigo_usina_jusante")
+            cur = int(ds_inner) if ds_inner is not None and not pd.isna(ds_inner) else 0
+    for absent_code, upstreams in rewired_absent.items():
+        status = str(row_by_code[absent_code]["usina_existente"]).strip()
+        absent_name = str(row_by_code[absent_code]["nome_usina"]).strip()
+        upstream_names = [str(row_by_code[u]["nome_usina"]).strip() for u in upstreams]
+        logger.info(
+            "Bypassing %s plant '%s' (code %d): rewired %d upstream(s) %s "
+            "to its downstream in the cascade.",
+            status,
+            absent_name,
+            absent_code,
+            len(upstreams),
+            upstream_names,
         )
 
     # Warn about orphan FICT plants (no real plant name resolves to them)

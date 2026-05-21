@@ -1,0 +1,209 @@
+"""Tests for ``cobre_bridge.converters.fict_cascade.resolve_cascade``.
+
+Focuses on cascade rewiring rules — in particular, that NE/NC plants in
+the middle of a cascade are bypassed transparently so upstream real
+plants keep a valid downstream link.
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+
+def _confhd_row(
+    code: int,
+    name: str,
+    downstream: int,
+    status: str = "EX",
+) -> dict[str, object]:
+    """Build a minimal confhd row for tests."""
+    return {
+        "codigo_usina": code,
+        "nome_usina": name,
+        "codigo_usina_jusante": downstream,
+        "usina_existente": status,
+    }
+
+
+def _make_confhd(rows: list[dict[str, object]]) -> pd.DataFrame:
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture
+def empty_cadastro() -> pd.DataFrame:
+    """A cadastro with no entries — FICT ρ_eq falls back to zero."""
+    return pd.DataFrame()
+
+
+class TestNonExistingPlantBypass:
+    """NE/NC plants mid-cascade must be bypassed so the graph stays connected."""
+
+    def test_nc_plant_between_two_real_rewires_to_downstream(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A (EX) -> B (NC) -> C (EX); A should rewire to C.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 2, "EX"),
+                _confhd_row(2, "B", 3, "NC"),
+                _confhd_row(3, "C", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 3
+        assert res[1].fict_chain == ()
+        assert res[1].fict_rho_sum == 0.0
+        # C has no downstream — terminal.
+        assert res[3].downstream_code is None
+
+    def test_ne_plant_between_two_real_rewires_to_downstream(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A (EX) -> B (NE) -> C (EX); A should rewire to C.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 2, "EX"),
+                _confhd_row(2, "B", 3, "NE"),
+                _confhd_row(3, "C", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 3
+
+    def test_consecutive_absent_plants_are_all_skipped(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A (EX) -> B (NC) -> C (NE) -> D (EX); A should rewire straight to D.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 2, "EX"),
+                _confhd_row(2, "B", 3, "NC"),
+                _confhd_row(3, "C", 4, "NE"),
+                _confhd_row(4, "D", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 4
+
+    def test_absent_plant_at_chain_end_terminates_upstream(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A (EX) -> B (NC) -> 0 (terminal); A becomes terminal too.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 2, "EX"),
+                _confhd_row(2, "B", 0, "NC"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code is None
+
+    def test_top_of_cascade_absent_plant_is_not_resolved(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # B (NC) has no upstream and is not EX, so it gets no resolution row.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 0, "EX"),
+                _confhd_row(2, "B", 0, "NC"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert 2 not in res
+        assert res[1].downstream_code is None
+
+    def test_absent_plant_does_not_contribute_rho(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # Even when traversing through an NE/NC plant, fict_rho_sum stays
+        # at zero — out-of-LP plants have no productivity contribution.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 2, "EX"),
+                _confhd_row(2, "B", 3, "NC"),
+                _confhd_row(3, "C", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].fict_rho_sum == 0.0
+        assert res[1].fict_chain == ()
+
+
+class TestExistingBehaviorPreserved:
+    """Rules 1, 2, 3 still work as before when no NE/NC plants are involved."""
+
+    def test_direct_real_downstream_unaffected(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 2, "EX"),
+                _confhd_row(2, "B", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 2
+        assert res[1].fict_chain == ()
+
+    def test_fict_plant_still_walked_through(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 99, "EX"),
+                _confhd_row(99, "FICT.A", 2, "EX"),
+                _confhd_row(2, "B", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 2
+        assert res[1].fict_chain == (99,)
+
+
+class TestMixedFictAndAbsent:
+    """Combinations of FICT and NE/NC plants in the same chain."""
+
+    def test_fict_followed_by_absent_walks_through_both(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A (EX) -> F (FICT.EX) -> B (NC) -> C (EX); A->C, F in fict_chain.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 99, "EX"),
+                _confhd_row(99, "FICT.A", 2, "EX"),
+                _confhd_row(2, "B", 3, "NC"),
+                _confhd_row(3, "C", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 3
+        assert res[1].fict_chain == (99,)
+
+    def test_absent_followed_by_fict_walks_through_both(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A (EX) -> B (NC) -> F (FICT.X) -> C (EX); A->C, F in fict_chain.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 2, "EX"),
+                _confhd_row(2, "B", 99, "NC"),
+                _confhd_row(99, "FICT.X", 3, "EX"),
+                _confhd_row(3, "C", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 3
+        assert res[1].fict_chain == (99,)

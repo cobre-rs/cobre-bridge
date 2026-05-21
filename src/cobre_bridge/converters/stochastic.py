@@ -33,46 +33,73 @@ _LOAD_FACTORS_SCHEMA_URL = (
 def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
     """Return ``{posto: [upstream_posto, ...]}`` for the hydro cascade.
 
-    Builds a DAG in **posto space** from the full confhd cascade (all EX
-    plants, including FICT).  Multiple plants that share the same posto
-    collapse into a single DAG node, which naturally deduplicates upstream
-    contributions.
+    Builds a DAG in **posto space** from the full confhd cascade.  Multiple
+    plants that share the same posto collapse into a single DAG node,
+    which naturally deduplicates upstream contributions.
 
     The algorithm:
 
-    1. Map every plant code → posto and every code → downstream_code from
-       confhd (all EX plants, real and FICT).
-    2. Translate each ``code → downstream_code`` edge into a ``posto →
-       downstream_posto`` edge.  Collect all edges as a set so that
-       duplicate edges from real + FICT plant pairs sharing a posto are
-       ignored.
+    1. Map every EX plant code → posto.  NE/NC plants are not in the LP
+       and contribute no inflow series, but their ``codigo_usina_jusante``
+       links are still authoritative topology — see step 2.
+    2. For every EX plant ``P``, follow ``P.codigo_usina_jusante`` and
+       walk through any NE/NC plants in the chain until reaching the next
+       EX plant ``D`` (or the cascade terminates).  Add a posto edge
+       ``P.posto → D.posto``.  Without this walk-through, an NE/NC plant
+       sitting between two EX plants silently disconnects the upstream
+       contribution from the downstream's incremental inflow.
     3. Invert the edge direction: for each ``src_posto → dst_posto`` edge,
        record ``dst_posto ← src_posto`` (upstream).
 
     Because FICT plants share postos with real plants, and their cascade
     edges resolve to the same posto-level edges, no duplicates arise.
     """
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-
-    # Step 1: code → posto
+    # Index every row so the cascade walker can step through NE/NC plants
+    # without losing the link to the next EX plant downstream.
+    row_by_code: dict[int, pd.Series] = {}
     code_to_posto: dict[int, int] = {}
-    for _, row in existing.iterrows():
-        code_to_posto[int(row["codigo_usina"])] = int(row["posto"])
-
-    # Step 2: collect directed edges (src_posto → dst_posto) as a set
-    edges: set[tuple[int, int]] = set()
-    for _, row in existing.iterrows():
+    for _, row in confhd_df.iterrows():
         code = int(row["codigo_usina"])
-        ds_raw = row.get("codigo_usina_jusante")
-        if ds_raw is not None and not pd.isna(ds_raw) and int(ds_raw) != 0:
-            ds_code = int(ds_raw)
-            ds_posto = code_to_posto.get(ds_code)
-            if ds_posto is not None:
-                src_posto = code_to_posto[code]
-                if src_posto != ds_posto:  # skip self-loops
-                    edges.add((src_posto, ds_posto))
+        row_by_code[code] = row
+        if str(row["usina_existente"]).strip() == "EX":
+            code_to_posto[code] = int(row["posto"])
 
-    # Step 3: invert edges → upstream map
+    def _walk_to_next_ex(start_code: int) -> int | None:
+        """Follow the cascade through NE/NC plants until an EX plant is found.
+
+        Returns the EX plant code, or ``None`` when the chain terminates
+        (downstream 0, unknown code, or a cycle is detected).
+        """
+        cur: int = start_code
+        seen: set[int] = set()
+        while cur != 0 and cur not in seen:
+            seen.add(cur)
+            if cur in code_to_posto:
+                return cur
+            row = row_by_code.get(cur)
+            if row is None:
+                return None
+            ds_raw = row.get("codigo_usina_jusante")
+            cur = int(ds_raw) if ds_raw is not None and not pd.isna(ds_raw) else 0
+        return None
+
+    # Collect directed edges in posto space (src_posto → dst_posto).
+    edges: set[tuple[int, int]] = set()
+    for code, src_posto in code_to_posto.items():
+        ds_raw = row_by_code[code].get("codigo_usina_jusante")
+        if ds_raw is None or pd.isna(ds_raw) or int(ds_raw) == 0:
+            continue
+        ds_code: int | None = int(ds_raw)
+        if ds_code not in code_to_posto:
+            # Downstream is NE/NC (or otherwise absent) — walk through to
+            # the next EX plant so the posto graph stays connected.
+            ds_code = _walk_to_next_ex(ds_code)
+            if ds_code is None:
+                continue
+        dst_posto = code_to_posto[ds_code]
+        if src_posto != dst_posto:  # skip self-loops (FICT/real share postos)
+            edges.add((src_posto, dst_posto))
+
     upstream: dict[int, list[int]] = {}
     for src, dst in edges:
         upstream.setdefault(dst, []).append(src)
