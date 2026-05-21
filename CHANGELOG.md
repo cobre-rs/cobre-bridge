@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `compare results` HTML now ships three new operative-data sections:
+  - **Plant Details** picker gains four panels per hydro (evaporation,
+    water withdrawal, total inflow ≡ NEWAVE `QAFLUH`, total outflow ≡
+    turbined + spilled) plus dashed `GHMAX_FPHC` / Cobre-LP gen_max
+    overlays on the generation panel.
+  - **Hydro Operation** tab gains a _System Spillage (Energy Units)_
+    section comparing NEWAVE `VERTOT`/`VERTcont`/`VERTfio` (MWmes)
+    against `Σ spillage_m3s × ρ_eq` aggregated on the Cobre side and
+    split by `max_storage_hm3 > 0` (reservoir vs run-of-river).
+  - New **Network** tab compares directional submarket flow from
+    NWLISTOP `int*.out` files against Cobre `output/simulation/exchanges`
+    with per-line small-multiples (P10/P90 band, NEWAVE mean, capacity
+    bounds) and a capacity-utilisation heatmap.
+
+  Driven by new readers `read_nwlistop_intercambio`,
+  `read_cobre_line_means/percentiles`, `read_cobre_spillage_energy`,
+  `read_cobre_hydro_total_flows`, `read_cobre_hydro_withdrawal`, and
+  `read_cobre_lp_max_generation`.
+
 ### Changed
 
 - `convert_non_controllable_sources` now emits

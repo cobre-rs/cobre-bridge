@@ -14,6 +14,7 @@ import logging
 import re
 from pathlib import Path
 
+import pandas as pd
 import polars as pl
 
 _LOG = logging.getLogger(__name__)
@@ -456,6 +457,105 @@ def read_pmo_productivity(newave_dir: Path) -> pl.DataFrame:
     return result
 
 
+_INT_FILENAME_RE = re.compile(r"^int(\d{3})(\d{3})\.out$", re.IGNORECASE)
+
+
+def read_nwlistop_intercambio(saidas_dir: Path) -> pl.DataFrame:
+    """Read NWLISTOP ``intXXXYYY.out`` files into long-format flow data.
+
+    NWLISTOP emits one file per directional submercado pair containing
+    block-decomposed flow (``patamar``) plus an aggregated ``TOTAL``
+    row whose value is the block-hours-weighted month average — the
+    natural counterpart to the per-stage interchange we want to
+    compare against Cobre's ``net_flow_mw``.
+
+    Stage numbering follows the MEDIAS convention: 1 = first calendar
+    month of the file (typically January of NEWAVE's first study
+    year), 9 = September year 1, 21 = September year 2, etc. This
+    matches MEDIAS column headers (which start at the first study
+    month, e.g. 9 for a September-start study) so the existing
+    ``_nw_stage_offset`` logic translates both consistently into
+    Cobre's 0-based ``stage_id``.
+
+    Returns columns ``from_submarket_code`` (Int64),
+    ``to_submarket_code`` (Int64), ``from_name`` (Utf8),
+    ``to_name`` (Utf8), ``stage`` (Int64), ``variable`` (Utf8, always
+    "INTERC"), ``value`` (Float64).
+    Returns empty DataFrame when no int*.out files are present.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "from_submarket_code": pl.Int64,
+            "to_submarket_code": pl.Int64,
+            "from_name": pl.Utf8,
+            "to_name": pl.Utf8,
+            "stage": pl.Int64,
+            "variable": pl.Utf8,
+            "value": pl.Float64,
+        }
+    )
+    if not saidas_dir.is_dir():
+        return empty
+
+    matches: list[tuple[int, int, Path]] = []
+    for path in saidas_dir.iterdir():
+        m = _INT_FILENAME_RE.match(path.name)
+        if m is None:
+            continue
+        matches.append((int(m.group(1)), int(m.group(2)), path))
+    if not matches:
+        return empty
+
+    from inewave.nwlistop import Intercambio  # local import — heavy module
+
+    rows: list[dict] = []
+    for from_code, to_code, path in matches:
+        try:
+            obj = Intercambio.read(str(path))
+        except Exception:  # noqa: BLE001
+            _LOG.warning("Failed to parse %s", path)
+            continue
+        df = obj.valores
+        if df is None or df.empty:
+            continue
+        total = df[df["patamar"] == "TOTAL"].copy()
+        if total.empty:
+            continue
+        total["data"] = pd.to_datetime(total["data"])
+        min_year = int(total["data"].dt.year.min())
+        total["stage"] = (total["data"].dt.year - min_year) * 12 + total[
+            "data"
+        ].dt.month
+        # Series cover disjoint years in NWLISTOP output; mean is a no-op when
+        # only one series carries a given stage, and remains correct otherwise.
+        agg = total.groupby("stage")["valor"].mean().reset_index()
+
+        from_name = str(obj.submercado_de or "").strip()
+        to_name = str(obj.submercado_para or "").strip()
+        for _, r in agg.iterrows():
+            rows.append(
+                {
+                    "from_submarket_code": from_code,
+                    "to_submarket_code": to_code,
+                    "from_name": from_name,
+                    "to_name": to_name,
+                    "stage": int(r["stage"]),
+                    "variable": "INTERC",
+                    "value": float(r["valor"]),
+                }
+            )
+    if not rows:
+        return empty
+    return pl.from_dicts(rows).cast(
+        {
+            "from_submarket_code": pl.Int64,
+            "to_submarket_code": pl.Int64,
+            "stage": pl.Int64,
+            "value": pl.Float64,
+        }
+    )
+
+
 def read_medias_market(saidas_dir: Path) -> pl.DataFrame:
     """Read MEDIAS-MERC.CSV with all variables in long format.
 
@@ -625,3 +725,105 @@ def read_pmo_cost_breakdown(newave_dir: Path) -> dict[str, float]:
             result[name] = value
 
     return result
+
+
+# Per-iteration block in newave.tim:
+#   Iteracao   N - Backward: HHHhMMminSSs
+#                  Forward:  HHHhMMminSSs
+#                  Total:    HHHhMMminSSs
+# Whitespace between H/min/s is irregular; the regex tolerates 0+ spaces.
+_TIM_ITER_RE = re.compile(
+    r"^\s*Iteracao\s+(\d+)\s*-\s*Backward:\s*"
+    r"(\d+)h\s*(\d+)min\s*(\d+)s\s*\n"
+    r"\s*Forward:\s*(\d+)h\s*(\d+)min\s*(\d+)s\s*\n"
+    r"\s*Total:\s*(\d+)h\s*(\d+)min\s*(\d+)s",
+    re.MULTILINE,
+)
+
+
+def read_newave_tim_iterations(newave_dir: Path) -> pl.DataFrame:
+    """Parse per-iteration timings from ``newave.tim``.
+
+    Returns DataFrame with columns ``iteration`` (Int64),
+    ``backward_seconds``, ``forward_seconds``, ``total_seconds``
+    (Float64). Empty when the file is missing.
+
+    Note: NEWAVE's first iteration row carries clock-initialisation
+    garbage on the Backward / Forward fields (sometimes hundreds of
+    hours). Values are returned as-is so the caller can decide how to
+    surface them (e.g. annotate the chart but keep the data).
+    """
+    empty = pl.DataFrame(
+        schema={
+            "iteration": pl.Int64,
+            "backward_seconds": pl.Float64,
+            "forward_seconds": pl.Float64,
+            "total_seconds": pl.Float64,
+        }
+    )
+    tim_path = _find_case_insensitive(newave_dir, "newave.tim")
+    if tim_path is None:
+        _LOG.warning("newave.tim not found in %s", newave_dir)
+        return empty
+    try:
+        text = tim_path.read_text(encoding="latin-1")
+    except OSError:
+        _LOG.exception("Failed to read newave.tim at %s", tim_path)
+        return empty
+
+    rows: list[dict[str, float | int]] = []
+    for m in _TIM_ITER_RE.finditer(text):
+        it = int(m.group(1))
+        bw = int(m.group(2)) * 3600 + int(m.group(3)) * 60 + int(m.group(4))
+        fw = int(m.group(5)) * 3600 + int(m.group(6)) * 60 + int(m.group(7))
+        tt = int(m.group(8)) * 3600 + int(m.group(9)) * 60 + int(m.group(10))
+        rows.append(
+            {
+                "iteration": it,
+                "backward_seconds": float(bw),
+                "forward_seconds": float(fw),
+                "total_seconds": float(tt),
+            }
+        )
+    if not rows:
+        return empty
+    return (
+        pl.from_dicts(rows)
+        .sort("iteration")
+        .cast(
+            {
+                "iteration": pl.Int64,
+                "backward_seconds": pl.Float64,
+                "forward_seconds": pl.Float64,
+                "total_seconds": pl.Float64,
+            }
+        )
+    )
+
+
+def read_newave_tim_stages(newave_dir: Path) -> dict[str, float]:
+    """Read stage timings from ``newave.tim`` via ``inewave.Newavetim``.
+
+    Returns ``{etapa_name: seconds}`` keyed on the Portuguese stage
+    labels NEWAVE emits (e.g. ``"Tempo Total"``, ``"Calculo da
+    Politica"``, ``"Simulacao Final"``). Empty dict on parse failure.
+    """
+    tim_path = _find_case_insensitive(newave_dir, "newave.tim")
+    if tim_path is None:
+        return {}
+    try:
+        from inewave.newave import Newavetim
+
+        tim = Newavetim.read(str(tim_path))
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to parse newave.tim via inewave at %s", tim_path)
+        return {}
+    df = tim.tempos_etapas
+    if df is None or df.empty:
+        return {}
+    out: dict[str, float] = {}
+    for _, row in df.iterrows():
+        name = str(row["etapa"]).strip()
+        tdelta = row["tempo"]
+        out[name] = float(tdelta.total_seconds())
+    return out

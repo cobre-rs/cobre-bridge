@@ -134,14 +134,15 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
 
     Scans ``output/simulation/hydros/`` with Polars streaming and computes
     block-hours-weighted scenario means for flow variables (generation,
-    turbined, spillage) and plain scenario means for stage-level variables
-    (storage, inflow, water value).
+    turbined, spillage, evaporation, outflow) and plain scenario means
+    for stage-level variables (storage, inflow, water value, energy).
 
     Returns DataFrame with columns: ``entity_id``, ``stage_id``,
     ``storage_final_hm3``, ``generation_mw``, ``turbined_m3s``,
     ``spillage_m3s``, ``inflow_m3s``, ``water_value_per_hm3``,
     ``stored_energy_initial_mwh``, ``stored_energy_final_mwh``,
-    ``incremental_inflow_energy_mw``.
+    ``incremental_inflow_energy_mw``, ``evaporation_m3s``,
+    ``outflow_m3s``, ``incremental_inflow_m3s``.
     """
     empty = pl.DataFrame(
         schema={
@@ -156,6 +157,9 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
             "stored_energy_initial_mwh": pl.Float64,
             "stored_energy_final_mwh": pl.Float64,
             "incremental_inflow_energy_mw": pl.Float64,
+            "evaporation_m3s": pl.Float64,
+            "outflow_m3s": pl.Float64,
+            "incremental_inflow_m3s": pl.Float64,
         }
     )
 
@@ -163,10 +167,17 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
     if lf is None:
         return empty
 
-    flow_cols = ["generation_mw", "turbined_m3s", "spillage_m3s"]
+    flow_cols = [
+        "generation_mw",
+        "turbined_m3s",
+        "spillage_m3s",
+        "evaporation_m3s",
+        "outflow_m3s",
+    ]
     stage_cols = [
         "storage_final_hm3",
         "inflow_m3s",
+        "incremental_inflow_m3s",
         "water_value_per_hm3",
         "stored_energy_initial_mwh",
         "stored_energy_final_mwh",
@@ -211,6 +222,459 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
             result = result.with_columns(pl.lit(None).cast(pl.Float64).alias(col))
 
     return result
+
+
+def read_cobre_hydro_total_flows(
+    cobre_output_dir: Path,
+    cobre_hydro_means: pl.DataFrame,
+) -> pl.DataFrame:
+    """Compute per-(entity_id, stage_id) NEWAVE-equivalent total inflow.
+
+    ``QAFLUH`` in NEWAVE is the *total* inflow arriving at a hydro
+    plant: the local incremental inflow plus the outflow (turbined +
+    spilled) of every immediate upstream plant. Cobre emits the
+    components separately; this helper sums them via the
+    ``downstream_id`` topology from ``system/hydros.json``.
+
+    The total *outflow* is already in the Cobre simulation parquet
+    (``outflow_m3s``) and is exposed by :func:`read_cobre_hydro_means`,
+    so this function only computes the inflow side.
+
+    Parameters
+    ----------
+    cobre_output_dir:
+        Path to ``<case_dir>/output``.
+    cobre_hydro_means:
+        Output of :func:`read_cobre_hydro_means` containing
+        ``entity_id``, ``stage_id``, ``incremental_inflow_m3s`` and
+        ``outflow_m3s`` columns.
+
+    Returns
+    -------
+    pl.DataFrame
+        Columns ``entity_id``, ``stage_id``, ``total_inflow_m3s``.
+        Empty when ``hydros.json`` is missing or the source frame lacks
+        either component column.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "entity_id": pl.Int64,
+            "stage_id": pl.Int64,
+            "total_inflow_m3s": pl.Float64,
+        }
+    )
+    if cobre_hydro_means.is_empty():
+        return empty
+    required = {"entity_id", "stage_id", "incremental_inflow_m3s", "outflow_m3s"}
+    if not required.issubset(cobre_hydro_means.columns):
+        return empty
+
+    case_dir = cobre_output_dir.parent
+    hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
+    if hydros_path is None:
+        hydros_path = case_dir / "system" / "hydros.json"
+    if not hydros_path.exists():
+        return empty
+    try:
+        with hydros_path.open() as f:
+            hydros_data = json.load(f)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to parse hydros.json for total-inflow topology")
+        return empty
+
+    # parents[child_id] = list of hydro_ids whose downstream_id == child_id.
+    parents: dict[int, list[int]] = {}
+    for h in hydros_data.get("hydros", []):
+        ds = h.get("downstream_id")
+        if ds is None:
+            continue
+        parents.setdefault(int(ds), []).append(int(h["id"]))
+
+    # Per-(entity_id, stage_id) outflow lookup for the upstream sum.
+    means = cobre_hydro_means.select(
+        pl.col("entity_id").cast(pl.Int64),
+        pl.col("stage_id").cast(pl.Int64),
+        pl.col("incremental_inflow_m3s").cast(pl.Float64),
+        pl.col("outflow_m3s").cast(pl.Float64),
+    )
+    outflow_lookup: dict[tuple[int, int], float] = {}
+    for row in means.iter_rows(named=True):
+        if row["outflow_m3s"] is None:
+            continue
+        outflow_lookup[(int(row["entity_id"]), int(row["stage_id"]))] = float(
+            row["outflow_m3s"]
+        )
+
+    rows: list[dict[str, float | int]] = []
+    for row in means.iter_rows(named=True):
+        eid = int(row["entity_id"])
+        sid = int(row["stage_id"])
+        incr = row["incremental_inflow_m3s"]
+        if incr is None:
+            continue
+        upstream_sum = 0.0
+        for pid in parents.get(eid, []):
+            upstream_sum += outflow_lookup.get((pid, sid), 0.0)
+        rows.append(
+            {
+                "entity_id": eid,
+                "stage_id": sid,
+                "total_inflow_m3s": float(incr) + upstream_sum,
+            }
+        )
+    if not rows:
+        return empty
+    return pl.DataFrame(rows).cast(
+        {"entity_id": pl.Int64, "stage_id": pl.Int64, "total_inflow_m3s": pl.Float64}
+    )
+
+
+def _load_hydro_reservoir_flag(cobre_output_dir: Path) -> dict[int, bool]:
+    """Return ``{hydro_id: max_storage_hm3 > 0}`` from system/hydros.json.
+
+    The discriminator mirrors the dashboard convention (reservoir = any
+    plant with positive max storage; run-of-river otherwise).
+    """
+    case_dir = cobre_output_dir.parent
+    hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
+    if hydros_path is None:
+        hydros_path = case_dir / "system" / "hydros.json"
+    if not hydros_path.exists():
+        return {}
+    try:
+        with hydros_path.open() as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[int, bool] = {}
+    for h in data.get("hydros", []):
+        max_stor = h.get("reservoir", {}).get("max_storage_hm3", 0) or 0
+        out[int(h["id"])] = max_stor > 0
+    return out
+
+
+def read_cobre_spillage_energy(cobre_output_dir: Path) -> pl.DataFrame:
+    """Compute system spillage in MWmes (stage-average MW).
+
+    For each (scenario, stage, block) and each hydro the per-row energy
+    contribution is ``spillage_m3s × equivalent_productivity_mw_per_m3s``
+    (MW). The system aggregation is:
+
+    1. Sum across hydros within each (scenario, stage, block, category)
+       to get the system MW per block per category.
+    2. Block-hours-weighted average over blocks → stage-mean MW.
+    3. Mean across scenarios.
+
+    The reservoir / run-of-river split uses ``max_storage_hm3 > 0`` from
+    ``system/hydros.json`` (matches the dashboard rule).
+
+    Returns columns ``stage_id``, ``total_mw``, ``reservoir_mw``,
+    ``rorov_mw``. Empty when required columns or system data are
+    missing.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "stage_id": pl.Int64,
+            "total_mw": pl.Float64,
+            "reservoir_mw": pl.Float64,
+            "rorov_mw": pl.Float64,
+        }
+    )
+    lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    if lf is None:
+        return empty
+
+    available = set(lf.collect_schema().names())
+    required = {
+        "spillage_m3s",
+        "equivalent_productivity_mw_per_m3s",
+        "stage_id",
+        "block_id",
+        "scenario_id",
+    }
+    if not required.issubset(available):
+        return empty
+
+    id_col = "hydro_id" if "hydro_id" in available else "entity_id"
+    if id_col not in available:
+        return empty
+
+    is_reservoir = _load_hydro_reservoir_flag(cobre_output_dir)
+    if not is_reservoir:
+        return empty
+
+    block_hours = _load_block_hours(cobre_output_dir)
+    if block_hours is None:
+        return empty
+
+    flag_df = pl.DataFrame(
+        {
+            id_col: list(is_reservoir.keys()),
+            "category": ["reservoir" if v else "rorov" for v in is_reservoir.values()],
+        }
+    )
+
+    try:
+        per_stage = (
+            lf.with_columns(
+                (
+                    pl.col("spillage_m3s")
+                    * pl.col("equivalent_productivity_mw_per_m3s")
+                ).alias("spill_mw")
+            )
+            .join(flag_df.lazy(), on=id_col)
+            .group_by(["scenario_id", "stage_id", "block_id", "category"])
+            .agg(pl.col("spill_mw").sum())
+            .join(block_hours.lazy(), on=["stage_id", "block_id"])
+            .group_by(["scenario_id", "stage_id", "category"])
+            .agg(
+                (
+                    (pl.col("spill_mw") * pl.col("hours")).sum() / pl.col("hours").sum()
+                ).alias("mw_mean")
+            )
+            .group_by(["stage_id", "category"])
+            .agg(pl.col("mw_mean").mean())
+            .collect(engine="streaming")
+        )
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to aggregate Cobre spillage-energy")
+        return empty
+
+    if per_stage.is_empty():
+        return empty
+
+    df = per_stage.pivot(index="stage_id", on="category", values="mw_mean")
+    if "reservoir" not in df.columns:
+        df = df.with_columns(pl.lit(0.0).alias("reservoir"))
+    if "rorov" not in df.columns:
+        df = df.with_columns(pl.lit(0.0).alias("rorov"))
+    df = df.with_columns(
+        pl.col("reservoir").fill_null(0.0).alias("reservoir"),
+        pl.col("rorov").fill_null(0.0).alias("rorov"),
+    )
+    df = df.with_columns(
+        (pl.col("reservoir") + pl.col("rorov")).alias("total_mw"),
+    ).rename({"reservoir": "reservoir_mw", "rorov": "rorov_mw"})
+    return df.select(
+        pl.col("stage_id").cast(pl.Int64),
+        pl.col("total_mw").cast(pl.Float64),
+        pl.col("reservoir_mw").cast(pl.Float64),
+        pl.col("rorov_mw").cast(pl.Float64),
+    ).sort("stage_id")
+
+
+def read_cobre_iteration_timing(cobre_output_dir: Path) -> pl.DataFrame:
+    """Return per-iteration wall-clock from ``training/convergence.parquet``.
+
+    Columns: ``iteration`` (Int64), ``time_forward_ms``,
+    ``time_backward_ms``, ``time_total_ms`` (Float64). Missing timing
+    columns are filled with nulls; empty DataFrame when the parquet is
+    absent. Separate from :func:`read_cobre_convergence` which only
+    surfaces the bound columns NEWAVE pmo.dat can be compared against.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "iteration": pl.Int64,
+            "time_forward_ms": pl.Float64,
+            "time_backward_ms": pl.Float64,
+            "time_total_ms": pl.Float64,
+        }
+    )
+    conv_path = cobre_output_dir / "training" / "convergence.parquet"
+    if not conv_path.exists():
+        return empty
+    try:
+        df = pl.read_parquet(conv_path)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read convergence.parquet for timings")
+        return empty
+    keep = ["iteration", "time_forward_ms", "time_backward_ms", "time_total_ms"]
+    avail = [c for c in keep if c in df.columns]
+    if "iteration" not in avail:
+        return empty
+    out = df.select(avail).sort("iteration")
+    for col in ("time_forward_ms", "time_backward_ms", "time_total_ms"):
+        if col not in out.columns:
+            out = out.with_columns(pl.lit(None).cast(pl.Float64).alias(col))
+    return out.cast(
+        {
+            "iteration": pl.Int64,
+            "time_forward_ms": pl.Float64,
+            "time_backward_ms": pl.Float64,
+            "time_total_ms": pl.Float64,
+        }
+    )
+
+
+def read_cobre_training_duration(cobre_output_dir: Path) -> float:
+    """Return total training duration in seconds.
+
+    Sourced from ``training/metadata.json:duration_seconds``. Returns
+    ``0.0`` when the metadata file is missing or malformed.
+    """
+    meta_path = cobre_output_dir / "training" / "metadata.json"
+    if not meta_path.exists():
+        return 0.0
+    try:
+        with meta_path.open() as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        _LOG.warning("Failed to parse training/metadata.json")
+        return 0.0
+    return float(data.get("duration_seconds", 0.0) or 0.0)
+
+
+def read_cobre_line_means(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read Cobre line simulation means per (line_id, stage_id).
+
+    Computes block-hours-weighted scenario means for ``net_flow_mw``.
+    Returns columns ``entity_id``, ``stage_id``, ``net_flow_mw``.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "entity_id": pl.Int64,
+            "stage_id": pl.Int64,
+            "net_flow_mw": pl.Float64,
+        }
+    )
+    lf = _scan_simulation_entity(cobre_output_dir, "exchanges")
+    if lf is None:
+        return empty
+    available = set(lf.collect_schema().names())
+    if "net_flow_mw" not in available:
+        return empty
+    id_col = "line_id" if "line_id" in available else "entity_id"
+    block_hours = _load_block_hours(cobre_output_dir)
+    try:
+        if block_hours is not None:
+            result = (
+                _weighted_stage_mean(lf, id_col, ["net_flow_mw"], block_hours)
+                .rename({id_col: "entity_id"})
+                .sort("entity_id", "stage_id")
+                .collect(engine="streaming")
+            )
+        else:
+            result = (
+                lf.filter(pl.col("block_id") == 0)
+                .group_by(id_col, "stage_id")
+                .agg(pl.col("net_flow_mw").mean())
+                .rename({id_col: "entity_id"})
+                .sort("entity_id", "stage_id")
+                .collect(engine="streaming")
+            )
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to aggregate exchange simulation data")
+        return empty
+    return result
+
+
+def read_cobre_line_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read Cobre line p10/p50/p90 per (entity_id, stage_id).
+
+    Returns columns ``entity_id``, ``stage_id``, ``net_flow_mw_p10``,
+    ``net_flow_mw_p50``, ``net_flow_mw_p90``.
+    """
+    lf = _scan_simulation_entity(cobre_output_dir, "exchanges")
+    if lf is None:
+        return pl.DataFrame()
+    available = set(lf.collect_schema().names())
+    if "net_flow_mw" not in available:
+        return pl.DataFrame()
+    id_col = "line_id" if "line_id" in available else "entity_id"
+    block_hours = _load_block_hours(cobre_output_dir)
+    try:
+        per_sc = _weighted_scenario_values(lf, id_col, ["net_flow_mw"], [], block_hours)
+        return _compute_percentiles(per_sc, ["net_flow_mw"])
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to compute line percentiles")
+        return pl.DataFrame()
+
+
+def read_cobre_lp_max_generation(cobre_output_dir: Path) -> pl.DataFrame:
+    """Return per-(entity_id, stage_id) hydro LP max-generation bound.
+
+    Reads ``output/training/dictionaries/bounds.parquet`` and filters to
+    hydro generation upper bounds (``entity_type_code == 0``,
+    ``bound_type_code == 7``). Takes block 0 as the stage representative
+    — Cobre currently emits a stage-constant max in practice, so this
+    matches the dashboard's plant-explorer behaviour.
+
+    Returns columns: ``entity_id``, ``stage_id``,
+    ``cobre_lp_gen_max_mw``. Empty when the parquet is missing.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "entity_id": pl.Int64,
+            "stage_id": pl.Int64,
+            "cobre_lp_gen_max_mw": pl.Float64,
+        }
+    )
+    bounds_path = cobre_output_dir / "training" / "dictionaries" / "bounds.parquet"
+    if not bounds_path.exists():
+        return empty
+    try:
+        df = pl.read_parquet(bounds_path)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read bounds.parquet")
+        return empty
+    required = {
+        "entity_type_code",
+        "entity_id",
+        "stage_id",
+        "bound_type_code",
+        "bound_value",
+    }
+    if not required.issubset(df.columns):
+        return empty
+    filt = df.filter(
+        (pl.col("entity_type_code") == 0) & (pl.col("bound_type_code") == 7)
+    )
+    if "block_id" in filt.columns:
+        filt = filt.filter(pl.col("block_id") == 0)
+    return filt.select(
+        pl.col("entity_id").cast(pl.Int64),
+        pl.col("stage_id").cast(pl.Int64),
+        pl.col("bound_value").cast(pl.Float64).alias("cobre_lp_gen_max_mw"),
+    ).sort("entity_id", "stage_id")
+
+
+def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
+    """Return per-(hydro_id, stage_id) input water-withdrawal target.
+
+    Cobre does not emit realized water withdrawal as a per-stage
+    simulation result; instead the target lives in
+    ``constraints/hydro_bounds.parquet`` as ``water_withdrawal_m3s``
+    (one value per hydro-stage). Comparison against NEWAVE ``VRETIRUH``
+    therefore matches the *input* target — discrepancies beyond the
+    post-study horizon are expected (see ``hydro.py:1083`` converter
+    note).
+
+    Returns columns: ``entity_id``, ``stage_id``, ``withdrawal_m3s``.
+    Empty frame if the parquet is missing or lacks the column.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "entity_id": pl.Int64,
+            "stage_id": pl.Int64,
+            "withdrawal_m3s": pl.Float64,
+        }
+    )
+    case_dir = cobre_output_dir.parent
+    bounds_path = case_dir / "constraints" / "hydro_bounds.parquet"
+    if not bounds_path.exists():
+        return empty
+    try:
+        df = pl.read_parquet(bounds_path)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read hydro_bounds.parquet")
+        return empty
+    if "water_withdrawal_m3s" not in df.columns:
+        return empty
+    return df.select(
+        pl.col("hydro_id").cast(pl.Int64).alias("entity_id"),
+        pl.col("stage_id").cast(pl.Int64),
+        pl.col("water_withdrawal_m3s").cast(pl.Float64).alias("withdrawal_m3s"),
+    ).sort("entity_id", "stage_id")
 
 
 def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
@@ -401,10 +865,17 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     if lf is None:
         return pl.DataFrame()
 
-    flow_cols = ["generation_mw", "turbined_m3s", "spillage_m3s"]
+    flow_cols = [
+        "generation_mw",
+        "turbined_m3s",
+        "spillage_m3s",
+        "evaporation_m3s",
+        "outflow_m3s",
+    ]
     stage_cols = [
         "storage_final_hm3",
         "inflow_m3s",
+        "incremental_inflow_m3s",
         "water_value_per_hm3",
         "stored_energy_initial_mwh",
         "stored_energy_final_mwh",
@@ -932,7 +1403,7 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     backward compatibility with comparator/dashboard callers.
 
     Returns ``{entity_id: {"name": str, "productivity_mw_per_m3s": float | None,
-    "min_storage_hm3": float}}``.
+    "min_storage_hm3": float, "bus_id": int | None}}``.
     """
     hydros_path = _resolve_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
@@ -971,10 +1442,12 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         reservoir = hydro.get("reservoir", {})
         min_storage = reservoir.get("min_storage_hm3", 0.0) if reservoir else 0.0
 
+        bus_id = hydro.get("bus_id")
         result[entity_id] = {
             "name": name,
             "productivity_mw_per_m3s": float(prod) if prod is not None else None,
             "min_storage_hm3": float(min_storage),
+            "bus_id": int(bus_id) if bus_id is not None else None,
         }
 
     return result

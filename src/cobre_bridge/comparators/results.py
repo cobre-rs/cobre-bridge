@@ -12,6 +12,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pandas as pd
 import polars as pl
 
 from cobre_bridge.comparators.alignment import EntityAlignment
@@ -47,6 +48,41 @@ class PercentileData:
     cobre_costs: dict[str, float] = field(default_factory=dict)
     nw_offset: int = 0
     nw_max_stage: int | None = None
+
+    # --- Epic 1: line interchange ---
+    # Cobre per-(line_id, stage_id) p10/p50/p90 of net_flow_mw across
+    # scenarios; bound table from constraints/line_bounds.parquet; metadata
+    # list straight from system/lines.json["lines"]. NEWAVE side: mean
+    # interchange per (line_id, stage_0based) read from int*.out NWLISTOP
+    # files and aligned via EntityAlignment.lines.
+    line: pl.DataFrame = field(default_factory=pl.DataFrame)
+    line_bounds: pd.DataFrame = field(default_factory=pd.DataFrame)
+    line_meta: list[dict] = field(default_factory=list)
+    nw_line_means: pl.DataFrame = field(default_factory=pl.DataFrame)
+
+    # --- Epic 2: per-hydro derived flow variables ---
+    # Cobre per-(hydro_id, stage_id) total_inflow_m3s (incremental +
+    # upstream turbined+spilled) and total_outflow_m3s (turbined + spilled).
+    # Outflow comes directly from the parquet ``outflow_m3s`` column when
+    # present.
+    hydro_total_flows: pl.DataFrame = field(default_factory=pl.DataFrame)
+
+    # --- Epic 3: system spillage in MWmes ---
+    # Per-stage stage-mean MW of system spillage ``spillage_m3s × ρ_eq``,
+    # split into total / reservoir / run-of-river via the
+    # ``max_storage_hm3 > 0`` discriminator.
+    cobre_spillage_energy: pl.DataFrame = field(default_factory=pl.DataFrame)
+
+    # --- Performance / wall-clock timings ---
+    # NEWAVE per-iteration ``backward_seconds`` / ``forward_seconds`` /
+    # ``total_seconds`` from ``newave.tim``. NEWAVE stage labels (e.g.
+    # ``"Tempo Total"``, ``"Calculo da Politica"``) → seconds. Cobre
+    # total training duration in seconds from
+    # ``output/training/metadata.json``.
+    nw_tim_iterations: pl.DataFrame = field(default_factory=pl.DataFrame)
+    nw_tim_stages: dict[str, float] = field(default_factory=dict)
+    cobre_training_seconds: float = 0.0
+    cobre_iteration_timing: pl.DataFrame = field(default_factory=pl.DataFrame)
 
 
 @dataclass(frozen=True)
@@ -129,6 +165,16 @@ _HYDRO_VAR_MAP: dict[str, str] = {
     "QVERTUH": "spillage_m3s",
     "QINCRUH": "inflow_m3s",
     "PIVARM": "water_value_per_hm3",
+    "VEVAPUH": "evaporation_m3s",
+    # Cobre emits water withdrawal as an input constant (target) in
+    # ``constraints/hydro_bounds.parquet`` rather than as a per-stage
+    # simulation result; ``read_cobre_hydro_withdrawal`` joins it onto
+    # ``cobre_hydro`` so this map entry still resolves.
+    "VRETIRUH": "withdrawal_m3s",
+    # QAFLUH = total inflow at the plant: incremental + Σ upstream
+    # (turbined + spilled). Computed Cobre-side by
+    # ``read_cobre_hydro_total_flows``; merged into ``cobre_hydro``.
+    "QAFLUH": "total_inflow_m3s",
 }
 
 _SYSTEM_VAR_MAP: dict[str, str] = {
@@ -148,6 +194,89 @@ def _nw_stage_offset(nw_df: pl.DataFrame) -> int:
     if stages.is_empty():
         return 1
     return int(stages.min())
+
+
+def _build_gen_max_overlay(
+    nw_hydro: pl.DataFrame,
+    cobre_lp_gen_max: pl.DataFrame,
+    nw_names: dict[int, str],
+    cobre_meta: dict[int, dict],
+    nw_offset: int,
+) -> pl.DataFrame:
+    """Build per-(entity_id, stage_id) generation upper-bound overlay.
+
+    Returns columns ``entity_id``, ``stage_id``,
+    ``nw_ghmax_fphc_mw`` (NEWAVE constant-FPH max generation, MWmes
+    from MEDIAS-USIH), and ``cobre_lp_gen_max_mw`` (Cobre LP upper
+    bound at block 0). Either column may be null when the source side
+    is missing a value.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "entity_id": pl.Int64,
+            "stage_id": pl.Int64,
+            "nw_ghmax_fphc_mw": pl.Float64,
+            "cobre_lp_gen_max_mw": pl.Float64,
+        }
+    )
+    if cobre_lp_gen_max.is_empty() and nw_hydro.is_empty():
+        return empty
+
+    # NEWAVE GHMAX_FPHC → (cobre_id, stage_0based) lookup via name match.
+    cobre_by_name: dict[str, int] = {
+        meta["name"].strip().upper(): eid for eid, meta in cobre_meta.items()
+    }
+    nw_code_to_cobre_id: dict[int, int] = {}
+    for nw_code, nw_name in nw_names.items():
+        cid = cobre_by_name.get(nw_name.strip().upper())
+        if cid is not None:
+            nw_code_to_cobre_id[nw_code] = cid
+
+    nw_rows: list[dict[str, float | int]] = []
+    if not nw_hydro.is_empty():
+        for row in nw_hydro.iter_rows(named=True):
+            if row["value"] is None:
+                continue
+            var = str(row["variable"]).strip().upper()
+            if var != "GHMAX_FPHC":
+                continue
+            code = int(row["newave_code"])
+            cid = nw_code_to_cobre_id.get(code)
+            if cid is None:
+                continue
+            stage = int(row["stage"]) - nw_offset
+            nw_rows.append(
+                {
+                    "entity_id": cid,
+                    "stage_id": stage,
+                    "nw_ghmax_fphc_mw": float(row["value"]),
+                }
+            )
+
+    nw_df = (
+        pl.DataFrame(nw_rows).cast(
+            {
+                "entity_id": pl.Int64,
+                "stage_id": pl.Int64,
+                "nw_ghmax_fphc_mw": pl.Float64,
+            }
+        )
+        if nw_rows
+        else pl.DataFrame(
+            schema={
+                "entity_id": pl.Int64,
+                "stage_id": pl.Int64,
+                "nw_ghmax_fphc_mw": pl.Float64,
+            }
+        )
+    )
+
+    if cobre_lp_gen_max.is_empty():
+        return nw_df
+
+    return nw_df.join(
+        cobre_lp_gen_max, on=["entity_id", "stage_id"], how="full", coalesce=True
+    )
 
 
 def _compare_hydros(
@@ -193,9 +322,20 @@ def _compare_hydros(
             continue
         nw_lookup[(code, stage, mapped)] = float(row["value"])
 
+    # Derive NEWAVE total outflow = turbined + spillage (no MEDIAS code).
+    derived: dict[tuple[int, int, str], float] = {}
+    for (code, stage, var), val in nw_lookup.items():
+        if var != "turbined_m3s":
+            continue
+        spill = nw_lookup.get((code, stage, "spillage_m3s"))
+        if spill is None:
+            continue
+        derived[(code, stage, "outflow_m3s")] = val + spill
+    nw_lookup.update(derived)
+
     # Build Cobre lookup: (entity_id, stage, variable) -> value
     cobre_lookup: dict[tuple[int, int, str], float] = {}
-    hydro_value_cols = list(_HYDRO_VAR_MAP.values())
+    hydro_value_cols = list(_HYDRO_VAR_MAP.values()) + ["outflow_m3s"]
     for row in cobre_hydro.iter_rows(named=True):
         eid = int(row["entity_id"])
         sid = int(row["stage_id"])
@@ -408,6 +548,164 @@ def _compare_convergence(
     return results
 
 
+_LINE_VAR_MAP: dict[str, str] = {
+    "INTERC": "net_flow_mw",
+}
+
+
+def _compare_lines(
+    nw_intercambio: pl.DataFrame,
+    cobre_line: pl.DataFrame,
+    alignment: EntityAlignment,
+    nw_offset: int,
+) -> list[ResultComparison]:
+    """Compare NEWAVE intercâmbio to Cobre net line flow.
+
+    NEWAVE NWLISTOP ``int*.out`` files report directional flow (mean MW
+    over the month) per (from, to) submarket pair. The ``alignment``
+    contains ``LineEntity`` objects already matched by submarket-pair to
+    Cobre line IDs (see ``build_entity_alignment``).
+
+    Pre-study int*.out stages (NEWAVE writes all absolute calendar
+    months, including those before the study horizon) are filtered out
+    by passing the MEDIAS-derived ``nw_offset`` — these rows would
+    otherwise misalign with Cobre's ``stage_id`` numbering, which
+    starts at the first study month.
+    """
+    results: list[ResultComparison] = []
+    if nw_intercambio.is_empty() or cobre_line.is_empty():
+        return results
+
+    offset = nw_offset
+
+    # (nw_de, nw_para) → (cobre_line_id, name)
+    matched: dict[tuple[int, int], tuple[int, str]] = {}
+    for ln in alignment.lines:
+        matched[(ln.newave_de, ln.newave_para)] = (ln.cobre_line_id, ln.name)
+
+    # NEWAVE lookup: (cobre_line_id, stage_0based) -> mean MW.
+    nw_lookup: dict[tuple[int, int], float] = {}
+    for row in nw_intercambio.iter_rows(named=True):
+        if row["value"] is None:
+            continue
+        key = (int(row["from_submarket_code"]), int(row["to_submarket_code"]))
+        match = matched.get(key)
+        if match is None:
+            continue
+        cobre_line_id, _name = match
+        stage_0based = int(row["stage"]) - offset
+        if stage_0based < 0:
+            continue
+        nw_lookup[(cobre_line_id, stage_0based)] = float(row["value"])
+
+    # Cobre lookup: (entity_id, stage_id) -> net_flow_mw.
+    cobre_lookup: dict[tuple[int, int], float] = {}
+    for row in cobre_line.iter_rows(named=True):
+        eid = int(row["entity_id"])
+        sid = int(row["stage_id"])
+        val = row.get("net_flow_mw")
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            continue
+        cobre_lookup[(eid, sid)] = float(val)
+
+    # Emit comparison rows in (line, stage) order.
+    by_line: dict[int, str] = {ln.cobre_line_id: ln.name for ln in alignment.lines}
+    code_by_line: dict[int, tuple[int, int]] = {
+        ln.cobre_line_id: (ln.newave_de, ln.newave_para) for ln in alignment.lines
+    }
+    for cobre_line_id in sorted(by_line.keys()):
+        for (eid, sid), nw_val in sorted(nw_lookup.items()):
+            if eid != cobre_line_id:
+                continue
+            cobre_val = cobre_lookup.get((eid, sid))
+            if cobre_val is None:
+                continue
+            de, _para = code_by_line.get(cobre_line_id, (0, 0))
+            results.append(
+                _make_result(
+                    "line",
+                    by_line[cobre_line_id],
+                    de,
+                    cobre_line_id,
+                    sid,
+                    "net_flow_mw",
+                    nw_val,
+                    round(cobre_val, 2),
+                )
+            )
+    return results
+
+
+_SYSTEM_SPILLAGE_VAR_MAP: dict[str, str] = {
+    "VERTOT": "spill_energy_total_mw",
+    "VERTCONT": "spill_energy_reservoir_mw",
+    "VERTFIO": "spill_energy_rorov_mw",
+}
+
+
+def _compare_system_spillage(
+    nw_sin: pl.DataFrame,
+    cobre_spill_energy: pl.DataFrame,
+) -> list[ResultComparison]:
+    """Compare system spillage in MWmes between NEWAVE SIN and Cobre.
+
+    NEWAVE MEDIAS-SIN reports ``VERTOT`` (total), ``VERTcont``
+    (reservoir cascades), and ``VERTfio`` (run-of-river) — all in
+    MWmes (stage-mean MW). Cobre values come from
+    :func:`read_cobre_spillage_energy` which already produces
+    stage-mean MW per category.
+    """
+    results: list[ResultComparison] = []
+    if nw_sin.is_empty() or cobre_spill_energy.is_empty():
+        return results
+
+    offset = _nw_stage_offset(nw_sin)
+
+    # NEWAVE side: (stage_0based, mapped_var) -> value.
+    nw_lookup: dict[tuple[int, str], float] = {}
+    for row in nw_sin.iter_rows(named=True):
+        if row["value"] is None:
+            continue
+        var = str(row["variable"]).strip().upper()
+        mapped = _SYSTEM_SPILLAGE_VAR_MAP.get(var)
+        if mapped is None:
+            continue
+        stage = int(row["stage"]) - offset
+        nw_lookup[(stage, mapped)] = float(row["value"])
+
+    cobre_cols = {
+        "spill_energy_total_mw": "total_mw",
+        "spill_energy_reservoir_mw": "reservoir_mw",
+        "spill_energy_rorov_mw": "rorov_mw",
+    }
+    cobre_lookup: dict[tuple[int, str], float] = {}
+    for row in cobre_spill_energy.iter_rows(named=True):
+        sid = int(row["stage_id"])
+        for mapped, col in cobre_cols.items():
+            val = row.get(col)
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                continue
+            cobre_lookup[(sid, mapped)] = float(val)
+
+    for (stage, mapped), nw_val in sorted(nw_lookup.items()):
+        cobre_val = cobre_lookup.get((stage, mapped))
+        if cobre_val is None:
+            continue
+        results.append(
+            _make_result(
+                "system_spillage",
+                "SIN",
+                0,
+                0,
+                stage,
+                mapped,
+                nw_val,
+                cobre_val,
+            )
+        )
+    return results
+
+
 def _compare_productivity(
     alignment: EntityAlignment,
     nw_prod: pl.DataFrame,
@@ -493,6 +791,14 @@ def compare_results(
         read_cobre_hydro_means,
         read_cobre_hydro_metadata,
         read_cobre_hydro_percentiles,
+        read_cobre_hydro_total_flows,
+        read_cobre_hydro_withdrawal,
+        read_cobre_iteration_timing,
+        read_cobre_line_means,
+        read_cobre_line_percentiles,
+        read_cobre_lp_max_generation,
+        read_cobre_spillage_energy,
+        read_cobre_training_duration,
         read_cobre_thermal_means,
         read_cobre_thermal_metadata,
         read_cobre_thermal_percentiles,
@@ -505,6 +811,9 @@ def compare_results(
         read_medias_system,
         read_medias_thermal,
         read_newave_net_load,
+        read_newave_tim_iterations,
+        read_newave_tim_stages,
+        read_nwlistop_intercambio,
         read_pmo_convergence,
         read_pmo_cost_breakdown,
         read_pmo_productivity,
@@ -529,6 +838,20 @@ def compare_results(
     if saidas_dir is not None:
         nw_hydro = read_medias_hydro(saidas_dir)
         cobre_hydro = read_cobre_hydro_means(cobre_output_dir)
+        if not cobre_hydro.is_empty():
+            # Merge derived per-(hydro, stage) quantities:
+            # - total_inflow_m3s (≡ QAFLUH): incremental + Σ upstream outflow
+            # - withdrawal_m3s (≡ VRETIRUH): input target from hydro_bounds
+            total_flows = read_cobre_hydro_total_flows(cobre_output_dir, cobre_hydro)
+            if not total_flows.is_empty():
+                cobre_hydro = cobre_hydro.join(
+                    total_flows, on=["entity_id", "stage_id"], how="left"
+                )
+            withdrawal = read_cobre_hydro_withdrawal(cobre_output_dir)
+            if not withdrawal.is_empty():
+                cobre_hydro = cobre_hydro.join(
+                    withdrawal, on=["entity_id", "stage_id"], how="left"
+                )
         if not nw_hydro.is_empty():
             nw_offset = _nw_stage_offset(nw_hydro)
             stages_col = nw_hydro["stage"].drop_nulls()
@@ -536,6 +859,19 @@ def compare_results(
                 max_val = stages_col.max()
                 if max_val is not None:
                     nw_max_stage_1based = int(max_val)  # type: ignore[arg-type]
+        if not cobre_hydro.is_empty():
+            # Generation upper-bound overlay (NEWAVE GHMAX_FPHC vs Cobre LP).
+            gen_max_overlay = _build_gen_max_overlay(
+                nw_hydro,
+                read_cobre_lp_max_generation(cobre_output_dir),
+                nw_hydro_names,
+                cobre_hydro_meta,
+                nw_offset,
+            )
+            if not gen_max_overlay.is_empty():
+                cobre_hydro = cobre_hydro.join(
+                    gen_max_overlay, on=["entity_id", "stage_id"], how="left"
+                )
         if not nw_hydro.is_empty() and not cobre_hydro.is_empty():
             _LOG.info("Comparing hydro results...")
             results.extend(
@@ -561,8 +897,24 @@ def compare_results(
             results.extend(
                 _compare_buses(nw_system, cobre_bus, nw_bus_names, cobre_bus_meta)
             )
+
+        # --- Line interchange comparison (NWLISTOP int*.out) ---
+        # nw_offset is the MEDIAS-derived study-start offset (e.g., 9 for
+        # a September-start study). int*.out files emit absolute NEWAVE
+        # stages including pre-study calendar months with all-zero
+        # values, so we reuse this offset to filter them out and align
+        # the remainder with Cobre's 0-based stage_id.
+        nw_intercambio = read_nwlistop_intercambio(saidas_dir)
+        cobre_line = read_cobre_line_means(cobre_output_dir)
+        if not nw_intercambio.is_empty() and not cobre_line.is_empty():
+            _LOG.info("Comparing line interchange...")
+            results.extend(
+                _compare_lines(nw_intercambio, cobre_line, alignment, nw_offset)
+            )
     else:
         _LOG.warning("NEWAVE saidas/ directory not found; skipping MEDIAS comparison.")
+        nw_intercambio = pl.DataFrame()
+        cobre_line = pl.DataFrame()
 
     # --- Convergence comparison ---
     nw_conv = read_pmo_convergence(nw_files.directory)
@@ -613,6 +965,24 @@ def compare_results(
     hydro_pct = read_cobre_hydro_percentiles(cobre_output_dir)
     thermal_pct = read_cobre_thermal_percentiles(cobre_output_dir)
     bus_pct = read_cobre_bus_percentiles(cobre_output_dir)
+    line_pct = read_cobre_line_percentiles(cobre_output_dir)
+
+    # --- Line bounds (per stage) and line metadata for the Network tab ---
+    line_bounds_path = cobre_output_dir.parent / "constraints" / "line_bounds.parquet"
+    line_bounds = (
+        pd.read_parquet(line_bounds_path)
+        if line_bounds_path.exists()
+        else pd.DataFrame()
+    )
+    lines_json_path = cobre_output_dir.parent / "system" / "lines.json"
+    line_meta: list[dict] = []
+    if lines_json_path.exists():
+        try:
+            import json as _json
+
+            line_meta = _json.loads(lines_json_path.read_text()).get("lines", [])
+        except Exception:  # noqa: BLE001
+            _LOG.warning("Failed to read lines.json")
 
     # NEWAVE typically reports a shorter horizon than Cobre.  Truncate all
     # Cobre-side per-stage DataFrames to NEWAVE's max stage so the report's
@@ -631,6 +1001,24 @@ def compare_results(
         thermal_pct = _truncate(thermal_pct)
         bus_pct = _truncate(bus_pct)
         bus_aggregates = _truncate(bus_aggregates)
+        line_pct = _truncate(line_pct)
+        cobre_line = _truncate(cobre_line)
+
+    # --- Performance timings ---
+    nw_tim_iters = read_newave_tim_iterations(nw_files.directory)
+    nw_tim_stages = read_newave_tim_stages(nw_files.directory)
+    cobre_training_seconds = read_cobre_training_duration(cobre_output_dir)
+    cobre_iter_timing = read_cobre_iteration_timing(cobre_output_dir)
+
+    # --- System spillage in MWmes ---
+    cobre_spill_energy = read_cobre_spillage_energy(cobre_output_dir)
+    if nw_max_stage_0based is not None and not cobre_spill_energy.is_empty():
+        cobre_spill_energy = cobre_spill_energy.filter(
+            pl.col("stage_id") <= nw_max_stage_0based
+        )
+    if not nw_sin.is_empty() and not cobre_spill_energy.is_empty():
+        _LOG.info("Comparing system spillage energy...")
+        results.extend(_compare_system_spillage(nw_sin, cobre_spill_energy))
 
     pctiles = PercentileData(
         hydro=hydro_pct,
@@ -651,6 +1039,15 @@ def compare_results(
         cobre_costs=cobre_costs,
         nw_offset=nw_offset,
         nw_max_stage=nw_max_stage_0based,
+        cobre_spillage_energy=cobre_spill_energy,
+        line=line_pct,
+        line_bounds=line_bounds,
+        line_meta=line_meta,
+        nw_line_means=nw_intercambio,
+        nw_tim_iterations=nw_tim_iters,
+        nw_tim_stages=nw_tim_stages,
+        cobre_training_seconds=cobre_training_seconds,
+        cobre_iteration_timing=cobre_iter_timing,
     )
 
     _LOG.info("Results comparison: %d total comparisons", len(results))
