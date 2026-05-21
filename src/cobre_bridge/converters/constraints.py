@@ -25,8 +25,9 @@ from inewave.newave import Confhd, Curva, Dger, Hidr, Penalid, Ree, Sistema
 
 from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
+    _compute_integrated_productivity,
     _compute_productivity,
-    compute_per_stage_own_productivities,
+    compute_per_stage_own_integrated_productivities,
 )
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.id_map import NewaveIdMap
@@ -78,6 +79,38 @@ def _build_hydro_to_ree(confhd_df: pd.DataFrame) -> dict[int, int]:
     existing = confhd_df[confhd_df["usina_existente"] == "EX"]
     non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
     return {int(r["codigo_usina"]): int(r["ree"]) for _, r in non_fict.iterrows()}
+
+
+def _compute_accumulated_integrated_productivities(
+    cadastro: pd.DataFrame,
+    confhd_df: pd.DataFrame,
+) -> dict[int, float]:
+    """Cascade-sum of per-plant *integrated* productivity.
+
+    Companion to :func:`compute_accumulated_productivities` but uses the
+    EARM-flavored integrated ρ (volmin-to-volmax average of
+    ρ_esp·(h(V)−cf−perdas)) instead of the gen=ρ·Q point value at v_65.
+    Returns the cascade-summed values keyed by plant code.  Used as the
+    base-case static check in :func:`convert_vminop_constraints` — the
+    per-stage version is computed separately and accounts for CFUGA/CMONT
+    overrides.
+    """
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    resolutions = resolve_cascade(confhd_df, cadastro)
+    downstream_map: dict[int, int | None] = {
+        code: r.downstream_code for code, r in resolutions.items()
+    }
+
+    own_prod: dict[int, float] = {}
+    for code, resolution in resolutions.items():
+        if code in cadastro.index:
+            own_prod[code] = _compute_integrated_productivity(cadastro.loc[code])
+        else:
+            own_prod[code] = 0.0
+        own_prod[code] += resolution.fict_rho_sum
+
+    return _cascade_sum(downstream_map, own_prod)
 
 
 def compute_accumulated_productivities(
@@ -204,15 +237,16 @@ def compute_per_stage_acc_productivities(
 def convert_vminop_constraints(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
-) -> tuple[dict, pa.Table, list[int]] | None:
+) -> tuple[dict, pa.Table, list[int], dict[int, list[float]]] | None:
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
 
     Expressions are emitted using the cobre HEAD ``@name`` sigil, with one
-    ``@rho_acum_h{hydro_id}`` per hydro term so that the constraint
-    coefficient is resolved to cobre's own accumulated productivity at
-    solve time. The third element of the return tuple is the sorted list of
-    hydro_ids referenced via ``@name`` — used by the caller to populate
-    ``scalar_parameters.json``.
+    ``@rho_acum_h{hydro_id}`` per hydro term.  The accumulated productivity
+    used both for the per-stage RHS bound and (via the fourth return value)
+    for the ``@rho_acum_h{id}`` override is the cascade-summed *integrated*
+    productivity — NEWAVE's stored-energy / EARM convention — which differs
+    from cobre's default point ρ_acum (gen = ρ·Q coefficient) by up to ~10%
+    on plants with non-trivial head swing.
 
     Parameters
     ----------
@@ -223,9 +257,12 @@ def convert_vminop_constraints(
 
     Returns
     -------
-    tuple[dict, pa.Table, list[int]] | None
-        ``(constraints_dict, bounds_table, referenced_hydro_ids)`` or
-        ``None`` if ``curva.dat`` is absent.
+    tuple[dict, pa.Table, list[int], dict[int, list[float]]] | None
+        ``(constraints_dict, bounds_table, referenced_hydro_ids,
+        rho_acum_per_stage_overrides)`` or ``None`` if ``curva.dat`` is
+        absent.  The fourth element maps cobre hydro_id → per-stage
+        integrated ρ_acum and is fed into ``build_scalar_parameters`` so
+        the LP coefficient at ``@rho_acum_h{id}`` matches the RHS bound.
     """
     if nw_files.curva is None:
         _LOG.debug("curva.dat not found; skipping VminOP constraints.")
@@ -266,16 +303,19 @@ def convert_vminop_constraints(
     study_months = (13 - start_month) + (num_anos - 1) * 12
     num_stages = study_months + num_anos_pos * 12
 
-    # Compute accumulated productivities — both the static base map (used
-    # only for the existence check that drops zero-productivity plants from
-    # the expression) and the per-stage list used to compute every RHS bound.
-    # The LHS at solve time uses cobre's stage-resolved ρ_acum via the
-    # `@rho_acum_h{id}` sigil, so the bound must be sized with matching
-    # per-stage values; otherwise CFUGA/CMONT temporal overrides would
-    # silently desync LHS and RHS on every affected stage.
-    acc_prod = compute_accumulated_productivities(cadastro, confhd_df)
-    per_stage_own = compute_per_stage_own_productivities(nw_files)
-    per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own)
+    # NEWAVE uses the *integrated* productivity (ρ_esp · (1/useful) ·
+    # ∫_vmin^vmax h(V) dV) to evaluate stored energy / VminOP, which is the
+    # `produtibilidade_acumulada_calculo_earm` column in pmo.dat — different
+    # from the gen = ρ·Q point productivity at v_65 that the LP uses.  We
+    # compute that integrated cascade here and use it both for the per-stage
+    # RHS bound *and* (via the return value) to override the
+    # `@rho_acum_h{id}` scalar parameter in scalar_parameters.json so the
+    # LP's constraint coefficient matches NEWAVE.  Without the override the
+    # LHS would use cobre's default point ρ_acum and silently drift from
+    # the RHS by ~10% on plants with non-trivial head swing.
+    acc_prod = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+    per_stage_own_int = compute_per_stage_own_integrated_productivities(nw_files)
+    per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own_int)
 
     # Map hydros to REEs
     hydro_to_ree = _build_hydro_to_ree(confhd_df)
@@ -466,7 +506,26 @@ def convert_vminop_constraints(
         len(bound_values),
     )
 
-    return constraints_dict, bounds_table, sorted(all_referenced_ids)
+    # Build the per_stage override for rho_acum_h{id}: map cobre hydro_id to
+    # the integrated cascade ρ per stage. Only emit overrides for plants
+    # actually referenced by a VminOP expression so unaffected hydros keep
+    # cobre's default `computed` resolution.
+    rho_acum_overrides: dict[int, list[float]] = {}
+    for plant_code, per_stage_values in per_stage_acc.items():
+        try:
+            cobre_id = id_map.hydro_id(plant_code)
+        except KeyError:
+            continue
+        if cobre_id not in all_referenced_ids:
+            continue
+        rho_acum_overrides[cobre_id] = list(per_stage_values)
+
+    return (
+        constraints_dict,
+        bounds_table,
+        sorted(all_referenced_ids),
+        rho_acum_overrides,
+    )
 
 
 # ---------------------------------------------------------------------------
