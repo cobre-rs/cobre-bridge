@@ -32,6 +32,7 @@ def _make_nw_files(
     cvar: Path | None = None,
     agrint: Path | None = None,
     volref_saz: Path | None = None,
+    shist: Path | None = None,
 ) -> NewaveFiles:
     """Construct a ``NewaveFiles`` with sentinel paths under *tmp_path*.
 
@@ -65,6 +66,7 @@ def _make_nw_files(
         agrint=agrint,
         re_dat=None,
         volref_saz=volref_saz,
+        shist=shist,
     )
 
 

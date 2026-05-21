@@ -40,6 +40,7 @@ def _make_nw_files(
     dsvagua: Path | None = None,
     c_adic: Path | None = None,
     cvar: Path | None = None,
+    shist: Path | None = None,
 ) -> NewaveFiles:
     """Construct a NewaveFiles instance pointing into tmp_path.
 
@@ -70,6 +71,7 @@ def _make_nw_files(
         agrint=None,
         re_dat=None,
         volref_saz=None,
+        shist=shist,
     )
 
 
@@ -756,6 +758,126 @@ class TestConvertConfig:
         src = result["simulation"]["scenario_source"]
         assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "historical"
+        assert src["historical_years"] == {"from": 1932, "to": 2025}
+
+    # -- Shist-driven historical_years (tipo_simulacao_final == 2) --
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_shist_varredura_0_emits_explicit_list(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """shist.varredura=0 → historical_years is the explicit list from
+        anos_inicio_simulacoes."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            ano_inicio=2024,
+            num_anos=3,
+            num_anos_pos=3,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        mock_shist = MagicMock()
+        mock_shist.varredura = 0
+        mock_shist.anos_inicio_simulacoes = [1983, 1985, 1990]
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        src = result["simulation"]["scenario_source"]
+        assert src["inflow"]["scheme"] == "historical"
+        assert src["historical_years"] == [1983, 1985, 1990]
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_shist_varredura_1_emits_range_with_horizon_aware_end(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """shist.varredura=1 → historical_years is a range from
+        ano_inicio_varredura to ano_inicio_estudo - (num_anos + num_anos_pos),
+        the most recent year for which the scenario still fits in history."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        # Horizon = 3 study + 3 post-study = 6 years.  Latest valid start year
+        # = 2024 - 6 = 2018.
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            ano_inicio=2024,
+            num_anos=3,
+            num_anos_pos=3,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        mock_shist = MagicMock()
+        mock_shist.varredura = 1
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist.anos_inicio_simulacoes = []
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        src = result["simulation"]["scenario_source"]
+        assert src["inflow"]["scheme"] == "historical"
+        assert src["historical_years"] == {"from": 1932, "to": 2018}
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_shist_varredura_1_range_collapse_clamps(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """When the horizon is wider than the gap between ano_inicio_varredura
+        and ano_inicio_estudo, the range collapses to a single year — clamp
+        ``to=from`` so cobre still accepts the config."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            ano_inicio=2024,
+            num_anos=100,
+            num_anos_pos=0,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        mock_shist = MagicMock()
+        mock_shist.varredura = 1
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist.anos_inicio_simulacoes = []
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        src = result["simulation"]["scenario_source"]
+        assert src["historical_years"] == {"from": 1932, "to": 1932}
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_shist_absent_falls_back_to_legacy_range(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        """When shist.dat is not in NewaveFiles, fall back to the pre-Shist
+        default (ano_inicial_historico+1 .. ano_inicio_estudo-1)."""
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            considera_reamostragem_cenarios=0,
+            ano_inicial_historico=1931,
+            ano_inicio=2026,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))  # shist=None
+        src = result["simulation"]["scenario_source"]
         assert src["historical_years"] == {"from": 1932, "to": 2025}
 
     # -- considera_reamostragem_cenarios / training.scenario_source --

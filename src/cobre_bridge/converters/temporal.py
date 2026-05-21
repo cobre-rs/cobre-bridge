@@ -10,7 +10,7 @@ import calendar
 import logging
 from datetime import date
 
-from inewave.newave import Cvar, Dger, Patamar
+from inewave.newave import Cvar, Dger, Patamar, Shist
 
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
@@ -338,6 +338,66 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     return result
 
 
+def _historical_years_from_shist(
+    nw_files: NewaveFiles,
+    dger: Dger,
+) -> list[int] | dict[str, int]:
+    """Build cobre's ``historical_years`` from ``shist.dat``.
+
+    NEWAVE's ``shist.dat`` controls which historical years drive the final
+    simulation when ``dger.tipo_simulacao_final == 2``:
+
+    - ``shist.varredura == 0`` — explicit list in ``anos_inicio_simulacoes``;
+      emit as an array.
+    - ``shist.varredura == 1`` — range starting at ``ano_inicio_varredura``;
+      the end is the most recent historical year for which a scenario still
+      has enough forward data to cover the full simulation horizon
+      (``num_anos_estudo + num_anos_pos_estudo``).  Computed as
+      ``ano_inicio_estudo − 1 − horizon_years + 1 = ano_inicio_estudo
+      − horizon_years``: the last historical year is taken to be
+      ``ano_inicio_estudo − 1`` and the scenario must fit inside it.
+
+    When ``shist.dat`` is absent, fall back to the pre-existing default of
+    ``{from: ano_inicial_historico + 1, to: ano_inicio_estudo - 1}`` so the
+    output remains valid even for cases that ship without an Shist file.
+    """
+    ano_inicio: int = int(dger.ano_inicio_estudo or 2020)
+    num_anos: int = int(dger.num_anos_estudo or 1)
+    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
+
+    if nw_files.shist is None:
+        logger.debug("shist.dat not found; using legacy default historical range.")
+        ano_ini_hist: int = int(dger.ano_inicial_historico or 1931)
+        return {"from": ano_ini_hist + 1, "to": ano_inicio - 1}
+
+    shist = Shist.read(str(nw_files.shist))
+    if shist.varredura == 0:
+        years_raw = shist.anos_inicio_simulacoes
+        if not years_raw:
+            logger.warning(
+                "shist.dat has varredura=0 but anos_inicio_simulacoes is empty;"
+                " falling back to a single-year list at ano_inicio_estudo - 1."
+            )
+            return [ano_inicio - 1]
+        return [int(y) for y in years_raw]
+
+    # varredura == 1 → range.  The most recent valid start year is
+    # ano_inicio_estudo - horizon_years so the scenario fits in history.
+    horizon_years = num_anos + num_anos_pos
+    range_from = int(shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931))
+    range_to = ano_inicio - horizon_years
+    if range_to < range_from:
+        logger.warning(
+            "shist.dat varredura range collapses: ano_inicio_varredura=%d but"
+            " latest valid year=%d (horizon=%d years); clamping range_to=range_from.",
+            range_from,
+            range_to,
+            horizon_years,
+        )
+        range_to = range_from
+    return {"from": range_from, "to": range_to}
+
+
 def convert_config(nw_files: NewaveFiles) -> dict:
     """Convert NEWAVE training parameters to a Cobre ``config.json`` dict.
 
@@ -444,12 +504,9 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             inflow_scheme = "in_sample"
         sim_source: dict = {"seed": 42, "inflow": {"scheme": inflow_scheme}}
         if inflow_scheme == "historical":
-            ano_ini_hist: int = dger.ano_inicial_historico or 1931
-            ano_inicio: int = dger.ano_inicio_estudo or 2020
-            sim_source["historical_years"] = {
-                "from": ano_ini_hist + 1,
-                "to": ano_inicio - 1,
-            }
+            sim_source["historical_years"] = _historical_years_from_shist(
+                nw_files, dger
+            )
         simulation_section["scenario_source"] = sim_source
 
     estimation: dict = {"max_order": max_order}
