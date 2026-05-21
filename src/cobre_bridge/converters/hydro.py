@@ -1556,13 +1556,20 @@ def convert_water_withdrawal(
         _LOG.debug("dsvagua.dat not found; no water withdrawal.")
         return None
 
+    # Read dger upfront so the ``outros_usos_da_agua`` switch can
+    # short-circuit before any dsvagua I/O. NEWAVE treats 0 as "ignore
+    # dsvagua.dat" — mirror that here so Cobre's hydro_bounds match
+    # NEWAVE's actual run instead of the file contents.
+    dger = _Dger.read(str(nw_files.dger))
+    if int(getattr(dger, "outros_usos_da_agua", 1) or 0) == 0:
+        _LOG.info("dger.outros_usos_da_agua == 0; skipping dsvagua.dat conversion.")
+        return None
+
     dsvagua = _Dsvagua.read(str(dsvagua_path))
     df = dsvagua.desvios
     if df is None or df.empty:
         return None
 
-    # Read dger for study start date, duration, and post-study period.
-    dger = _Dger.read(str(nw_files.dger))
     start_year: int = int(dger.ano_inicio_estudo)
     start_month: int = int(dger.mes_inicio_estudo)
     num_anos: int = int(dger.num_anos_estudo or 1)

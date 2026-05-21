@@ -2036,6 +2036,109 @@ def _enrich_with_percentiles(
                 ]
 
 
+def _plant_max_reldiff_table(
+    results: list[ResultComparison],
+    entity_type: str,
+    variables: list[tuple[str, str]],
+) -> str:
+    """Per-plant max relative-difference summary table.
+
+    Rows: plants (sorted by overall worst max-rel-diff across all
+    variables, worst first). Columns: one per variable in *variables*
+    (skipping variables for which no NEWAVE row exists).
+
+    Cell value = ``max_stages |cobre − newave| / |newave| × 100``
+    (NEWAVE-relative, per the report convention). Stages with
+    ``|newave| ≈ 0`` are excluded — for any plant/variable that has no
+    eligible stage the cell shows "—".
+
+    Colour cues: ≤ 1 % green, ≤ 10 % amber, > 10 % red.
+    """
+    rows = [r for r in results if r.entity_type == entity_type]
+    if not rows:
+        return ""
+
+    # (plant_key, variable) -> max(rel_diff) across stages.
+    max_rd: dict[tuple[str, int, str], float] = {}
+    for r in rows:
+        if r.rel_diff is None:
+            continue
+        key = (r.entity_name, r.newave_code, r.variable)
+        cur = max_rd.get(key)
+        if cur is None or r.rel_diff > cur:
+            max_rd[key] = r.rel_diff
+
+    # Plant ordering: worst overall first (sum-of-max across variables
+    # would be skewed by missing cells; use the per-row max for the
+    # primary sort and fall back to plant name).
+    plant_keys = sorted(
+        {(name, code) for name, code, _ in max_rd},
+        key=lambda k: (
+            -max(
+                (
+                    max_rd[(k[0], k[1], v)]
+                    for v, _ in variables
+                    if (k[0], k[1], v) in max_rd
+                ),
+                default=0.0,
+            ),
+            k[0],
+        ),
+    )
+    if not plant_keys:
+        return ""
+
+    def _cell(rd: float | None) -> str:
+        if rd is None:
+            return '<td class="cb-num">—</td>'
+        pct = rd * 100.0
+        if pct <= 1.0:
+            cls = "cb-num cb-diff-neg"  # reuse green styling
+        elif pct <= 10.0:
+            cls = "cb-num"
+        else:
+            cls = "cb-num cb-diff-pos"  # reuse red styling
+        return f'<td class="{cls}">{pct:.2f}%</td>'
+
+    header_cells = '<th class="cb-cat">Plant</th>' + "".join(
+        f'<th class="cb-num">{label}</th>' for _, label in variables
+    )
+    body_rows: list[str] = []
+    for name, code in plant_keys:
+        cells = [f'<td class="cb-cat">{name}</td>']
+        for var_key, _ in variables:
+            rd = max_rd.get((name, code, var_key))
+            cells.append(_cell(rd))
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    # Footer: median max-rel-diff per variable across plants. The table
+    # CSS bolds the last tbody row to call out a totals/summary line —
+    # without this row the styling would land on whichever plant
+    # happened to sort last, which is misleading.
+    import statistics
+
+    summary_cells = ['<td class="cb-cat">Median</td>']
+    for var_key, _ in variables:
+        col_values = [
+            max_rd[(name, code, var_key)]
+            for name, code in plant_keys
+            if (name, code, var_key) in max_rd
+        ]
+        median = statistics.median(col_values) if col_values else None
+        summary_cells.append(_cell(median))
+    body_rows.append("<tr>" + "".join(summary_cells) + "</tr>")
+
+    caption_label = "Hydro" if entity_type == "hydro" else "Thermal"
+    return (
+        '<table class="cost-breakdown-table">'
+        f"<caption>{caption_label} per-plant max relative difference "
+        "(|Cobre − NEWAVE| / |NEWAVE|, over stages)</caption>"
+        f"<thead><tr>{header_cells}</tr></thead>"
+        "<tbody>" + "".join(body_rows) + "</tbody>"
+        "</table>"
+    )
+
+
 def build_hydro_detail_tab(
     results: list[ResultComparison],
     pct_df: pl.DataFrame | None = None,
@@ -2125,12 +2228,16 @@ def build_hydro_detail_tab(
 
     _enrich_with_percentiles(js_plants, all_vars, pct_df)
 
-    return _build_interactive_detail_html(
+    summary_table = _plant_max_reldiff_table(results, "hydro", _HYDRO_VARIABLES)
+    detail_html = _build_interactive_detail_html(
         js_plants,
         all_vars,
         "hydro",
         "Hydro Plant",
     )
+    if summary_table:
+        summary_table = f'<div style="margin-bottom:32px">{summary_table}</div>'
+    return summary_table + detail_html
 
 
 def build_thermal_detail_tab(
@@ -2175,12 +2282,16 @@ def build_thermal_detail_tab(
 
     _enrich_with_percentiles(js_plants, thermal_vars, pct_df)
 
-    return _build_interactive_detail_html(
+    summary_table = _plant_max_reldiff_table(results, "thermal", thermal_vars)
+    detail_html = _build_interactive_detail_html(
         js_plants,
         thermal_vars,
         "thermal",
         "Thermal Plant",
     )
+    if summary_table:
+        summary_table = f'<div style="margin-bottom:32px">{summary_table}</div>'
+    return summary_table + detail_html
 
 
 def _build_interactive_detail_html(

@@ -4326,15 +4326,19 @@ class TestWaterWithdrawalConversion:
         from cobre_bridge.converters.hydro import convert_water_withdrawal
 
         (tmp_path / "dsvagua.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         (tmp_path / "dger.dat").touch()
 
         mock_dsvagua = MagicMock()
         mock_dsvagua.desvios = None
+        mock_dger = MagicMock()
+        mock_dger.outros_usos_da_agua = 1
+        mock_dger.ano_inicio_estudo = 2020
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 5
 
-        with patch(
-            "inewave.newave.Dsvagua.read",
-            return_value=mock_dsvagua,
+        with (
+            patch("inewave.newave.Dsvagua.read", return_value=mock_dsvagua),
+            patch("inewave.newave.Dger.read", return_value=mock_dger),
         ):
             result = convert_water_withdrawal(
                 _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"),
@@ -4342,6 +4346,46 @@ class TestWaterWithdrawalConversion:
             )
 
         assert result is None
+
+    def test_dger_outros_usos_da_agua_zero_skips_dsvagua(self, tmp_path: Path) -> None:
+        """``dger.outros_usos_da_agua == 0`` short-circuits the conversion.
+
+        Mirrors NEWAVE's own behaviour — when the dger switch is 0 the
+        solver ignores ``dsvagua.dat`` regardless of its content, so the
+        converter must not emit any water-withdrawal rows.
+        """
+        import datetime
+
+        from cobre_bridge.converters.hydro import convert_water_withdrawal
+
+        (tmp_path / "dsvagua.dat").touch()
+        (tmp_path / "dger.dat").touch()
+
+        # Populate dsvagua with values that would normally produce rows;
+        # the dger flag must prevent any of them from being read.
+        rows = [
+            {"codigo_usina": 10, "data": datetime.datetime(2020, 1, 1), "valor": -2.0},
+        ]
+        mock_dsvagua = MagicMock()
+        mock_dsvagua.desvios = _make_dsvagua_df(rows)
+        mock_dger = MagicMock()
+        mock_dger.outros_usos_da_agua = 0
+        mock_dger.ano_inicio_estudo = 2020
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 5
+
+        with (
+            patch("inewave.newave.Dsvagua.read", return_value=mock_dsvagua) as _ds,
+            patch("inewave.newave.Dger.read", return_value=mock_dger),
+        ):
+            result = convert_water_withdrawal(
+                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"),
+                self._make_id_map(),
+            )
+
+        assert result is None
+        # The short-circuit must happen before any dsvagua I/O.
+        _ds.assert_not_called()
 
     def test_codes_outside_id_map_are_dropped(self, tmp_path: Path) -> None:
         """``codigo_usina`` codes the id_map doesn't know are silently dropped.

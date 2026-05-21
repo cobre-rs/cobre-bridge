@@ -16,6 +16,7 @@ from cobre_bridge.comparators.charts import (
     convergence_chart,
     cost_breakdown_chart,
     cost_breakdown_table,
+    hydro_aggregate_chart,
     hydro_per_bus_chart,
     line_summary_chart,
     overview_metrics,
@@ -241,6 +242,25 @@ def build_comparison_report(
         ),
     ]
     hydro_parts.append(chart_grid(energy_charts))
+
+    # System-aggregate (SIN) totals for each hydro variable. Sums Cobre
+    # plant values per stage and overlays the NEWAVE total. Mirrors the
+    # per-bus facet section but collapses across buses — useful as a
+    # one-glance global view alongside the per-bus disaggregation.
+    hydro_parts.append(section_title("System Totals (SIN)"))
+    aggregate_charts: list[str] = []
+    for var, title in [
+        ("storage_final_hm3", "Total Storage (hm³)"),
+        ("generation_mw", "Hydro Generation (MW)"),
+        ("spillage_m3s", "Total Spillage (m³/s)"),
+        ("turbined_m3s", "Total Turbined (m³/s)"),
+        ("inflow_m3s", "Total Inflow (m³/s)"),
+        ("water_value_per_hm3", "Water Value (R$/hm³)"),
+    ]:
+        aggregate_charts.append(
+            wrap_chart(hydro_aggregate_chart(results, var, title, hydro_pct))
+        )
+    hydro_parts.append(chart_grid(aggregate_charts))
 
     tab_contents["tab-hydro"] = "\n".join(hydro_parts)
 
