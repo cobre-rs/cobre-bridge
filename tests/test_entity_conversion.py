@@ -2230,8 +2230,12 @@ class TestConvertHydroEnergyProductivity:
         assert len(b_rows) == 1
         assert b_rows[0]["stage_id"] is None
 
-        base = 0.9 * (355.0 - 50.0)
-        override = 0.9 * (355.0 - 60.0)
+        # USINA_A is tipo_regulacao="M", so _compute_productivity evaluates the
+        # cota polynomial at v_65 = vmin + 0.65·useful = 100 + 0.65·900 = 685.
+        # h(685) = 300 + 0.1·685 = 368.5.  CFUGA overrides canal_fuga from
+        # cadastro's 50.0 to 60.0 starting at stage 3.
+        base = 0.9 * (368.5 - 50.0)
+        override = 0.9 * (368.5 - 60.0)
         # Stages 0..2 = base, stages 3..59 = override.
         a_by_stage = {
             r["stage_id"]: r["equivalent_productivity_mw_per_m3s"] for r in a_rows
