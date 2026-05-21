@@ -160,6 +160,10 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
             "evaporation_m3s": pl.Float64,
             "outflow_m3s": pl.Float64,
             "incremental_inflow_m3s": pl.Float64,
+            "evaporation_violation_pos_m3s": pl.Float64,
+            "evaporation_violation_neg_m3s": pl.Float64,
+            "water_withdrawal_violation_pos_m3s": pl.Float64,
+            "water_withdrawal_violation_neg_m3s": pl.Float64,
         }
     )
 
@@ -173,6 +177,10 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
         "spillage_m3s",
         "evaporation_m3s",
         "outflow_m3s",
+        "evaporation_violation_pos_m3s",
+        "evaporation_violation_neg_m3s",
+        "water_withdrawal_violation_pos_m3s",
+        "water_withdrawal_violation_neg_m3s",
     ]
     stage_cols = [
         "storage_final_hm3",

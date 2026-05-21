@@ -4166,39 +4166,35 @@ class TestWaterWithdrawalConversion:
         )
 
     def test_basic_returns_correct_schema(self, tmp_path: Path) -> None:
-        """Two postos, three dates each: table has the three expected columns."""
+        """Two plants, three dates each: table has the three expected columns."""
         import datetime
 
         from cobre_bridge.converters.hydro import convert_water_withdrawal
 
         (tmp_path / "dsvagua.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         (tmp_path / "dger.dat").touch()
 
         rows = [
             {
-                "codigo_usina": 1,
+                "codigo_usina": 10,
                 "data": datetime.datetime(2020, 1, 1),
                 "valor": -2.0,
             },
             {
-                "codigo_usina": 1,
+                "codigo_usina": 10,
                 "data": datetime.datetime(2020, 2, 1),
                 "valor": -3.0,
             },
             {
-                "codigo_usina": 2,
+                "codigo_usina": 20,
                 "data": datetime.datetime(2020, 1, 1),
                 "valor": -1.0,
             },
         ]
-        confhd_df = _make_withdrawal_confhd_df([(1, 10, 1), (2, 20, 1)])
         dger_mock = _make_dger_mock(2020, 1, 5)
 
         mock_dsvagua = MagicMock()
         mock_dsvagua.desvios = _make_dsvagua_df(rows)
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = confhd_df
         mock_dger = MagicMock()
         mock_dger.ano_inicio_estudo = dger_mock.ano_inicio_estudo
         mock_dger.mes_inicio_estudo = dger_mock.mes_inicio_estudo
@@ -4208,10 +4204,6 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dsvagua.read",
                 return_value=mock_dsvagua,
-            ),
-            patch(
-                "inewave.newave.Confhd.read",
-                return_value=mock_confhd,
             ),
             patch(
                 "inewave.newave.Dger.read",
@@ -4238,19 +4230,15 @@ class TestWaterWithdrawalConversion:
         from cobre_bridge.converters.hydro import convert_water_withdrawal
 
         (tmp_path / "dsvagua.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         (tmp_path / "dger.dat").touch()
 
         rows = [
-            {"codigo_usina": 1, "data": datetime.datetime(2020, 2, 1), "valor": -5.0}
+            {"codigo_usina": 10, "data": datetime.datetime(2020, 2, 1), "valor": -5.0}
         ]
-        confhd_df = _make_withdrawal_confhd_df([(1, 10, 1)])
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[10], thermal_codes=[])
 
         mock_dsvagua = MagicMock()
         mock_dsvagua.desvios = _make_dsvagua_df(rows)
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = confhd_df
         mock_dger = MagicMock()
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
@@ -4260,10 +4248,6 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dsvagua.read",
                 return_value=mock_dsvagua,
-            ),
-            patch(
-                "inewave.newave.Confhd.read",
-                return_value=mock_confhd,
             ),
             patch(
                 "inewave.newave.Dger.read",
@@ -4281,27 +4265,23 @@ class TestWaterWithdrawalConversion:
         assert row["stage_id"][0] == 1
         assert row["water_withdrawal_m3s"][0] == pytest.approx(5.0)
 
-    def test_groupby_sum_same_posto_same_date(self, tmp_path: Path) -> None:
-        """Two rows with the same posto/date are summed then negated."""
+    def test_groupby_sum_same_plant_same_date(self, tmp_path: Path) -> None:
+        """Two rows with the same plant/date are summed then negated."""
         import datetime
 
         from cobre_bridge.converters.hydro import convert_water_withdrawal
 
         (tmp_path / "dsvagua.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         (tmp_path / "dger.dat").touch()
 
         rows = [
-            {"codigo_usina": 1, "data": datetime.datetime(2020, 1, 1), "valor": -3.0},
-            {"codigo_usina": 1, "data": datetime.datetime(2020, 1, 1), "valor": -7.0},
+            {"codigo_usina": 10, "data": datetime.datetime(2020, 1, 1), "valor": -3.0},
+            {"codigo_usina": 10, "data": datetime.datetime(2020, 1, 1), "valor": -7.0},
         ]
-        confhd_df = _make_withdrawal_confhd_df([(1, 10, 1)])
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[10], thermal_codes=[])
 
         mock_dsvagua = MagicMock()
         mock_dsvagua.desvios = _make_dsvagua_df(rows)
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = confhd_df
         mock_dger = MagicMock()
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
@@ -4311,10 +4291,6 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dsvagua.read",
                 return_value=mock_dsvagua,
-            ),
-            patch(
-                "inewave.newave.Confhd.read",
-                return_value=mock_confhd,
             ),
             patch(
                 "inewave.newave.Dger.read",
@@ -4367,31 +4343,28 @@ class TestWaterWithdrawalConversion:
 
         assert result is None
 
-    def test_unknown_posto_skipped_with_warning(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """A posto not present in confhd.dat is skipped and a warning is logged."""
+    def test_codes_outside_id_map_are_dropped(self, tmp_path: Path) -> None:
+        """``codigo_usina`` codes the id_map doesn't know are silently dropped.
+
+        ``dsvagua.dat`` frequently carries codes for non-dispatchable
+        plants (fictitious nodes, RHEs, etc.) that are filtered out of
+        the id_map; logging a warning for each would be noisy.
+        """
         import datetime
-        import logging
 
         from cobre_bridge.converters.hydro import convert_water_withdrawal
 
         (tmp_path / "dsvagua.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         (tmp_path / "dger.dat").touch()
 
-        # posto 99 is not in confhd (which maps only posto 1 -> code 10).
         rows = [
-            {"codigo_usina": 1, "data": datetime.datetime(2020, 1, 1), "valor": -4.0},
+            {"codigo_usina": 10, "data": datetime.datetime(2020, 1, 1), "valor": -4.0},
             {"codigo_usina": 99, "data": datetime.datetime(2020, 1, 1), "valor": -2.0},
         ]
-        confhd_df = _make_withdrawal_confhd_df([(1, 10, 1)])
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[10], thermal_codes=[])
 
         mock_dsvagua = MagicMock()
         mock_dsvagua.desvios = _make_dsvagua_df(rows)
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = confhd_df
         mock_dger = MagicMock()
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
@@ -4403,23 +4376,15 @@ class TestWaterWithdrawalConversion:
                 return_value=mock_dsvagua,
             ),
             patch(
-                "inewave.newave.Confhd.read",
-                return_value=mock_confhd,
-            ),
-            patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
             ),
-            caplog.at_level(logging.WARNING, logger="cobre_bridge.converters.hydro"),
         ):
             result = convert_water_withdrawal(
                 _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"), id_map
             )
 
-        # The known posto 1 produces one valid row; posto 99 is skipped.
         assert result is not None
         assert result.num_rows == 1
         row = result.to_pydict()
         assert row["water_withdrawal_m3s"][0] == pytest.approx(4.0)
-        # A warning must have been logged for the unknown posto.
-        assert any("99" in record.message for record in caplog.records)

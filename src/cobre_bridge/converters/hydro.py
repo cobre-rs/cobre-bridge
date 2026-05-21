@@ -1522,13 +1522,12 @@ def convert_water_withdrawal(
     water_withdrawal_m3s: DOUBLE)`` suitable for writing to
     ``constraints/hydro_bounds.parquet``.
 
-    The ``codigo_usina`` field in ``dsvagua.dat`` is a **posto** (gauging
-    station index), not a plant code.  This function reads ``confhd.dat`` to
-    build the posto -> hydro_code mapping, then converts to 0-based Cobre IDs
-    via *id_map*.
-
-    NEWAVE stores withdrawal as a negative ``valor``; Cobre expects a positive
-    ``water_withdrawal_m3s``.  The sign is negated during conversion.
+    The ``codigo_usina`` field in ``dsvagua.dat`` is a NEWAVE 1-based
+    *plant* code (matching ``confhd``), not a posto. Each plant may
+    contribute multiple rows per stage (one per consumptive-use or
+    remaining-flow component) which are summed before the sign is
+    negated to convert NEWAVE's "withdrawal = negative valor" convention
+    into Cobre's positive ``water_withdrawal_m3s``.
 
     Parameters
     ----------
@@ -1546,9 +1545,6 @@ def convert_water_withdrawal(
         valid rows after filtering.
     """
     from inewave.newave import (  # local import to avoid hard dependency at module load
-        Confhd as _Confhd,
-    )
-    from inewave.newave import (
         Dger as _Dger,
     )
     from inewave.newave import (
@@ -1564,23 +1560,6 @@ def convert_water_withdrawal(
     df = dsvagua.desvios
     if df is None or df.empty:
         return None
-
-    # Read confhd for posto -> hydro_code mapping.
-    # Filter out FICT plants so they cannot overwrite real plant entries
-    # when sharing the same posto (gauging station).
-    confhd = _Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
-    posto_to_code: dict[int, int] = {}
-    for _, row in non_fict.iterrows():
-        code = int(row["codigo_usina"])
-        posto = int(row["posto"])
-        try:
-            id_map.hydro_id(code)
-            posto_to_code[posto] = code
-        except KeyError:
-            pass
 
     # Read dger for study start date, duration, and post-study period.
     dger = _Dger.read(str(nw_files.dger))
@@ -1602,23 +1581,13 @@ def convert_water_withdrawal(
     values: list[float] = []
 
     for _, row in grouped.iterrows():
-        posto = int(row["codigo_usina"])
-        hydro_code = posto_to_code.get(posto)
-        if hydro_code is None:
-            _LOG.warning(
-                "Posto %d in dsvagua.dat not found in confhd.dat; skipping.",
-                posto,
-            )
-            continue
-
+        hydro_code = int(row["codigo_usina"])
         try:
             hydro_id = id_map.hydro_id(hydro_code)
         except KeyError:
-            _LOG.warning(
-                "Hydro code %d (posto %d) not in id_map; skipping.",
-                hydro_code,
-                posto,
-            )
+            # Fictitious plants and any other entries the id_map filters
+            # out are silently dropped — dsvagua frequently carries codes
+            # outside the dispatchable hydro fleet.
             continue
 
         dt = row["data"]

@@ -322,6 +322,45 @@ def _compare_hydros(
             continue
         nw_lookup[(code, stage, mapped)] = float(row["value"])
 
+    # Reconstruct realized evaporation and withdrawal from the NEWAVE LP
+    # slack columns. VEVAPUH/VRETIRUH are reported as the *scheduled*
+    # values; VIOL_POS_* / VIOL_NEG_* track over- and under-application
+    # respectively. Realized = scheduled + POS − NEG (same convention as
+    # Cobre's matrix.rs water-balance row). Reading the slacks directly
+    # from the long-format ``nw_hydro`` frame avoids adding them to
+    # ``_HYDRO_VAR_MAP`` (which would spuriously emit ResultComparison
+    # rows for the slacks themselves).
+    nw_slacks: dict[tuple[int, int, str], float] = {}
+    for row in nw_hydro.iter_rows(named=True):
+        if row["value"] is None:
+            continue
+        var_raw = str(row["variable"]).strip().upper()
+        if var_raw not in (
+            "VIOL_POS_EVAP",
+            "VIOL_NEG_EVAP",
+            "VIOL_POS_VRETIRUH",
+            "VIOL_NEG_VRETIRUH",
+        ):
+            continue
+        code = int(row["newave_code"])
+        if code not in matched:
+            continue
+        stage = int(row["stage"]) - offset
+        nw_slacks[(code, stage, var_raw)] = float(row["value"])
+
+    _SLACK_PAIRS = {
+        "evaporation_m3s": ("VIOL_POS_EVAP", "VIOL_NEG_EVAP"),
+        "withdrawal_m3s": ("VIOL_POS_VRETIRUH", "VIOL_NEG_VRETIRUH"),
+    }
+    for key in list(nw_lookup.keys()):
+        code, stage, mapped = key
+        slack_vars = _SLACK_PAIRS.get(mapped)
+        if slack_vars is None:
+            continue
+        pos = nw_slacks.get((code, stage, slack_vars[0]), 0.0)
+        neg = nw_slacks.get((code, stage, slack_vars[1]), 0.0)
+        nw_lookup[key] = nw_lookup[key] + pos - neg
+
     # Derive NEWAVE total outflow = turbined + spillage (no MEDIAS code).
     derived: dict[tuple[int, int, str], float] = {}
     for (code, stage, var), val in nw_lookup.items():
@@ -357,6 +396,19 @@ def _compare_hydros(
             # Add min_storage to align with Cobre absolute storage.
             if var == "storage_final_hm3":
                 nw_val = nw_val + min_stor
+            elif var in ("evaporation_m3s", "withdrawal_m3s"):
+                # MEDIAS-USIH VEVAPUH and VRETIRUH are reported as
+                # monthly *volume* in hm³, not flow. Cobre emits m³/s.
+                # NEWAVE rounds the month-length factor to 2.63 in its
+                # internal output reporting (≈ 730 h × 3600 s / 10⁶);
+                # using the same rounded constant here makes the
+                # comparison apples-to-apples. The converter side keeps
+                # the exact 2.628 (see network.py:C_M3S2HM3) because the
+                # input-data conversion has no analogous rounding.
+                # Handled per-variable rather than via a V*-prefix
+                # heuristic to avoid mis-scaling future MEDIAS columns
+                # that happen to start with V.
+                nw_val = nw_val / 2.63
 
             results.append(
                 _make_result(
@@ -852,6 +904,40 @@ def compare_results(
                 cobre_hydro = cobre_hydro.join(
                     withdrawal, on=["entity_id", "stage_id"], how="left"
                 )
+            # Reconstruct *realized* evaporation and withdrawal flows from
+            # the LP slacks (Cobre's matrix.rs water-balance row uses
+            #    +ζ × pos_slack − ζ × neg_slack = ζ × (base − scheduled)
+            # so realized = scheduled + pos − neg).
+            # ``evaporation_m3s`` from the simulation parquet is already
+            # the LP-output (realized) flow — adding pos/neg slacks
+            # represents the same correction applied symmetrically on
+            # both sides so the comparison is apples-to-apples.
+            recon_cols = {
+                "evaporation_m3s": (
+                    "evaporation_violation_pos_m3s",
+                    "evaporation_violation_neg_m3s",
+                ),
+                "withdrawal_m3s": (
+                    "water_withdrawal_violation_pos_m3s",
+                    "water_withdrawal_violation_neg_m3s",
+                ),
+            }
+            adjustments: list[pl.Expr] = []
+            for base, (pos, neg) in recon_cols.items():
+                if (
+                    base in cobre_hydro.columns
+                    and pos in cobre_hydro.columns
+                    and neg in cobre_hydro.columns
+                ):
+                    adjustments.append(
+                        (
+                            pl.col(base).fill_null(0.0)
+                            + pl.col(pos).fill_null(0.0)
+                            - pl.col(neg).fill_null(0.0)
+                        ).alias(base)
+                    )
+            if adjustments:
+                cobre_hydro = cobre_hydro.with_columns(adjustments)
         if not nw_hydro.is_empty():
             nw_offset = _nw_stage_offset(nw_hydro)
             stages_col = nw_hydro["stage"].drop_nulls()
