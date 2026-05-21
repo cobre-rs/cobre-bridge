@@ -265,6 +265,51 @@ class TestConvertVminopConstraints:
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_vminop_constraints(nw, id_map) is None
 
+    def test_returns_none_when_curva_aversao_zero(self, tmp_path) -> None:
+        """dger.dat curva_aversao=0 means NEWAVE disabled the risk-aversion
+        curve; cobre-bridge must skip VminOP constraints even when curva.dat
+        is present on disk."""
+        from unittest.mock import MagicMock, patch
+
+        from cobre_bridge.newave_files import NewaveFiles
+
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "curva.dat").touch()
+
+        nw = NewaveFiles(
+            directory=tmp_path,
+            dger=tmp_path / "dger.dat",
+            confhd=tmp_path / "c",
+            conft=tmp_path / "t",
+            sistema=tmp_path / "s",
+            clast=tmp_path / "cl",
+            term=tmp_path / "te",
+            ree=tmp_path / "r",
+            patamar=tmp_path / "p",
+            hidr=tmp_path / "h",
+            vazoes=tmp_path / "v",
+            modif=None,
+            ghmin=None,
+            penalid=None,
+            vazpast=None,
+            dsvagua=None,
+            curva=tmp_path / "curva.dat",
+            expt=None,
+            manutt=None,
+            c_adic=None,
+            cvar=None,
+            agrint=None,
+            re_dat=None,
+            volref_saz=None,
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
+
+        mock_dger = MagicMock()
+        mock_dger.curva_aversao = 0
+        with patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls:
+            mock_dger_cls.read.return_value = mock_dger
+            assert convert_vminop_constraints(nw, id_map) is None
+
     def test_constraint_expression_uses_hydro_storage(self, tmp_path) -> None:
         """Integration test: verifies expression format against real example data."""
 

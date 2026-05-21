@@ -231,15 +231,25 @@ def convert_vminop_constraints(
         _LOG.debug("curva.dat not found; skipping VminOP constraints.")
         return None
 
+    # Honor dger.dat's `curva_aversao` switch: NEWAVE itself disables the
+    # risk-aversion curve when this flag is 0, even if curva.dat is on disk.
+    # Mirror that here so the converted cobre case matches NEWAVE's behavior.
+    # When the field is absent (None), preserve historical behavior and emit
+    # the constraints — only an explicit 0 disables them.
+    dger = Dger.read(nw_files.dger)
+    if dger.curva_aversao == 0:
+        _LOG.info(
+            "dger.dat curva_aversao=0; NEWAVE disables the risk-aversion"
+            " curve, so skipping VminOP constraints."
+        )
+        return None
+
     curva = Curva.read(str(nw_files.curva))
     curva_df = curva.curva_seguranca
     if curva_df is None or curva_df.empty:
         return None
 
     penalty_df = curva.custos_penalidades
-
-    # Read supporting data
-    dger = Dger.read(nw_files.dger)
     confhd = Confhd.read(str(nw_files.confhd))
     hidr = Hidr.read(str(nw_files.hidr))
     ree_file = Ree.read(str(nw_files.ree))
