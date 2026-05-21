@@ -880,6 +880,86 @@ class TestConvertConfig:
         src = result["simulation"]["scenario_source"]
         assert src["historical_years"] == {"from": 1932, "to": 2025}
 
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_historical_num_scenarios_matches_explicit_list(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """In historical mode, num_scenarios is overridden to the number of
+        distinct start-years — not the synthetic num_series_sinteticas."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            num_series=2000,
+            ano_inicio=2024,
+            num_anos=3,
+            num_anos_pos=3,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        mock_shist = MagicMock()
+        mock_shist.varredura = 0
+        mock_shist.anos_inicio_simulacoes = [1983, 1985, 1990]
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        assert result["simulation"]["num_scenarios"] == 3
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_historical_num_scenarios_matches_range_length(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """For a range historical_years, num_scenarios = to - from + 1."""
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        # Horizon 6 → range [1932, 2018] → 87 years.
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            num_series=2000,
+            ano_inicio=2024,
+            num_anos=3,
+            num_anos_pos=3,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        mock_shist = MagicMock()
+        mock_shist.varredura = 1
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist.anos_inicio_simulacoes = []
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        assert result["simulation"]["num_scenarios"] == 2018 - 1932 + 1
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_non_historical_num_scenarios_uses_num_series_sinteticas(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        """When simulation is not historical, num_scenarios stays
+        dger.num_series_sinteticas — the override only applies in historical
+        mode where the pool size is fixed."""
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=1,  # out_of_sample
+            num_series=2000,
+        )
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["simulation"]["num_scenarios"] == 2000
+
     # -- considera_reamostragem_cenarios / training.scenario_source --
 
     @patch("cobre_bridge.converters.temporal.Dger")

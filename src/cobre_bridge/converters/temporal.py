@@ -398,6 +398,15 @@ def _historical_years_from_shist(
     return {"from": range_from, "to": range_to}
 
 
+def _count_historical_years(historical_years: list[int] | dict[str, int]) -> int:
+    """Return how many distinct start-years are covered by a historical_years
+    spec — equivalently the number of simulation scenarios NEWAVE will run."""
+    if isinstance(historical_years, list):
+        return len(historical_years)
+    # Range form: {"from": int, "to": int} — inclusive both ends.
+    return max(0, int(historical_years["to"]) - int(historical_years["from"]) + 1)
+
+
 def convert_config(nw_files: NewaveFiles) -> dict:
     """Convert NEWAVE training parameters to a Cobre ``config.json`` dict.
 
@@ -504,8 +513,14 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             inflow_scheme = "in_sample"
         sim_source: dict = {"seed": 42, "inflow": {"scheme": inflow_scheme}}
         if inflow_scheme == "historical":
-            sim_source["historical_years"] = _historical_years_from_shist(
-                nw_files, dger
+            historical_years = _historical_years_from_shist(nw_files, dger)
+            sim_source["historical_years"] = historical_years
+            # In historical mode each scenario is one (start-year, member)
+            # tuple; the number of scenarios is fully determined by the size
+            # of the historical pool.  Override num_series_sinteticas so the
+            # cobre case doesn't request more scenarios than NEWAVE generates.
+            simulation_section["num_scenarios"] = _count_historical_years(
+                historical_years
             )
         simulation_section["scenario_source"] = sim_source
 
