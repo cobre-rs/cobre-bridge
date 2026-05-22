@@ -110,8 +110,19 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
 
     # ── Past anticipated thermal commitments (from adterm.dat) ──────────
     # Empty for non-GNL cases (despacho_antecipado_gnl=0 in dger.dat).
-    # Each entry maps a thermal's NEWAVE code to its cobre thermal_id and
-    # carries the per-delivery-stage MW commitments (block-duration-weighted).
+    # Each entry maps a thermal's NEWAVE code to its cobre thermal_id.
+    #
+    # Cobre's anticipated-thermal LP currently REQUIRES every ``values_mw``
+    # entry to be ``0.0`` — the fishing-constraint activation predicate is
+    # FALSE at every stage before the first matured delivery and the ring
+    # buffer overwrites slot 0 with the LP's own decision before any
+    # constraint can read a seeded value (see plans/anticipated-thermals
+    # AnticipatedCommitmentHistory docstring).  Non-zero entries are
+    # rejected by ``cobre-io::validation::semantic::thermal``.
+    #
+    # We still compute the block-weighted NEWAVE MW so we can warn the
+    # user about the pre-horizon dispatch being silently dropped, but we
+    # emit zeros to satisfy cobre's current validator.
     past_anticipated_commitments: list[dict] = []
     for newave_code, dispatch in read_anticipated_dispatch(nw_files).items():
         try:
@@ -123,10 +134,20 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
                 newave_code,
             )
             continue
+        if any(abs(v) > 1e-9 for v in dispatch.values_mw):
+            _LOG.warning(
+                "adterm.dat thermal code=%d carries pre-horizon dispatch "
+                "values [%s] MW that cobre's current LP cannot honour; "
+                "writing zeros to satisfy the validator (NEWAVE-side "
+                "dispatch over the next %d stages will not be enforced).",
+                newave_code,
+                ", ".join(f"{v:.4f}" for v in dispatch.values_mw),
+                dispatch.lead_stages,
+            )
         past_anticipated_commitments.append(
             {
                 "thermal_id": thermal_id,
-                "values_mw": list(dispatch.values_mw),
+                "values_mw": [0.0] * dispatch.lead_stages,
             }
         )
     past_anticipated_commitments.sort(key=lambda c: c["thermal_id"])
