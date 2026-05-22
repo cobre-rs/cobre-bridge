@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import pandas as pd
 from inewave.newave import Confhd, Hidr
 
 from cobre_bridge.id_map import NewaveIdMap
@@ -65,6 +66,23 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
         hreg = cadastro.loc[newave_code]
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
+
+        # Daily-regulation ('D') plants are frozen at ``volume_referencia``
+        # by NEWAVE — the reservoir doesn't accumulate water across stages.
+        # Mirror that by anchoring initial storage to the reference volume
+        # so it stays consistent with the (collapsed) min/max bounds set in
+        # ``hydro.py``.
+        tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
+        vol_ref_raw = hreg.get("volume_referencia")
+        if tipo_reg == "D" and vol_ref_raw is not None and not pd.isna(vol_ref_raw):
+            value_hm3 = float(vol_ref_raw)
+            storage.append(
+                {
+                    "hydro_id": id_map.hydro_id(newave_code),
+                    "value_hm3": value_hm3,
+                }
+            )
+            continue
 
         pct = float(row["volume_inicial_percentual"])
         if pct < 0.0 or pct > 100.0:

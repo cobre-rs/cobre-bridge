@@ -783,8 +783,11 @@ class TestConvertHydros:
         # Derating: 800 * 0.95 * 0.97 = 737.2
         expected = 800.0 * 0.95 * 0.97
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(expected)
-        # max_turbined_m3s must NOT be derated
-        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(4 * 222.2)
+        # max_turbined_m3s is also derated — an unavailable unit can't pass
+        # water either, so NEWAVE applies the same availability factor to flow.
+        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(
+            4 * 222.2 * 0.95 * 0.97
+        )
         # min_generation_mw must NOT be derated (it is zero here)
         assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
 

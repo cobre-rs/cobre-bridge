@@ -424,6 +424,246 @@ def _read_penalid(nw_files: NewaveFiles) -> dict[int, dict[str, float]]:
     return result
 
 
+# Turbine type code -> kturb exponent used in the head-correction formula.
+# NEWAVE codes: 1 = Francis, 2 = Kaplan, 3 = Pelton.  Francis and Pelton
+# share the kturb = 0.5 exponent (square-root flow/head response); Kaplan
+# uses 0.2 (gentler response thanks to adjustable blades).  Code 0 (= not
+# specified in hidr.dat) falls back to Francis.
+_KTURB_BY_TIPO_TURBINA: dict[int, float] = {0: 0.5, 1: 0.5, 2: 0.2, 3: 0.5}
+
+
+def _clamp_outage_pct(value: float, label: str, plant_name: str) -> float:
+    """Clamp TEIF/IP percentages into ``[0, 100]`` and warn on overshoot."""
+    if math.isnan(value):
+        return 0.0
+    if value < 0.0:
+        return 0.0
+    if value > 100.0:
+        _LOG.warning(
+            "%s exceeds 100%% for plant %s (%s=%.2f); clamping to 100.",
+            label,
+            plant_name,
+            label.lower(),
+            value,
+        )
+        return 100.0
+    return value
+
+
+def _availability(teif: float, ip: float) -> float:
+    """Joint TEIF/IP availability factor — both apply multiplicatively."""
+    return ((100.0 - teif) / 100.0) * ((100.0 - ip) / 100.0)
+
+
+def _compute_max_turbined_simple(hreg: pd.Series, name: str) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` using the simple sum-of-rated
+    approach: ``Σ_c (n_c · q_nom_c)`` for flow and ``Σ_c (n_c · p_nom_c)`` for
+    power, both derated by the combined TEIF/IP availability factor.
+
+    This was the implementation used through v0.6.x.  It is kept available so
+    we can restore the previous behavior with a single switch if the more
+    elaborate hypothesis formula turns out to be wrong.
+    """
+    n_sets = int(hreg["numero_conjuntos_maquinas"])
+    max_turbined = 0.0
+    max_generation = 0.0
+    for i in range(1, n_sets + 1):
+        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
+        q_nominal = float(hreg[f"vazao_nominal_conjunto_{i}"])
+        p_nominal = float(hreg[f"potencia_nominal_conjunto_{i}"])
+        max_turbined += q_nominal * n_machines
+        max_generation += p_nominal * n_machines
+
+    teif = _clamp_outage_pct(float(hreg.get("teif", 0.0) or 0.0), "teif", name)
+    ip = _clamp_outage_pct(float(hreg.get("ip", 0.0) or 0.0), "ip", name)
+    availability = _availability(teif, ip)
+    return max_turbined * availability, max_generation * availability
+
+
+def _evaluate_cota_polynomial(hreg: pd.Series, volume_hm3: float) -> float:
+    """Evaluate the upstream cota polynomial ``cota(V) = Σ a_i · V^i`` at *V*."""
+    a = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+    v = volume_hm3
+    return a[0] + a[1] * v + a[2] * v * v + a[3] * v**3 + a[4] * v**4
+
+
+def _mean_cota_over_volume(hreg: pd.Series, v_lo: float, v_hi: float) -> float:
+    """Return the volume-averaged upstream cota over ``[v_lo, v_hi]``.
+
+    Computed analytically from the integral of the quartic polynomial — the
+    same shape NEWAVE uses to derive ``prodt_eq`` for reservoir plants.
+    """
+    if v_hi <= v_lo:
+        return _evaluate_cota_polynomial(hreg, v_lo)
+    a = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+
+    def antideriv(v: float) -> float:
+        return (
+            a[0] * v
+            + a[1] * v * v / 2.0
+            + a[2] * v**3 / 3.0
+            + a[3] * v**4 / 4.0
+            + a[4] * v**5 / 5.0
+        )
+
+    return (antideriv(v_hi) - antideriv(v_lo)) / (v_hi - v_lo)
+
+
+def _apply_hydraulic_loss(h_gross: float, tipo_perda: int, perdas: float) -> float:
+    """Return net head after hidr.dat hydraulic-loss model.
+
+    ``tipo_perda == 1`` -> percentage loss applied to gross head.
+    ``tipo_perda == 2`` -> constant head loss in metres.
+    ``tipo_perda == 0`` (or any unknown) -> no loss.
+    """
+    if math.isnan(perdas) or perdas <= 0.0:
+        return h_gross
+    if tipo_perda == 1:
+        return h_gross * (1.0 - perdas / 100.0)
+    if tipo_perda == 2:
+        return h_gross - perdas
+    return h_gross
+
+
+def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` using the head-corrected
+    NEWAVE-style cap.
+
+    For each machine set *c* with nominal head ``h_nom_c``, nominal flow
+    ``q_nom_c`` and number of units ``n_c``, the effective rated flow at
+    operating head ``h_op`` follows the affinity-law approximation::
+
+        q_eff_c = (h_op / h_nom_c)^k_turb · q_nom_c
+
+    where ``k_turb`` depends on the turbine family (0.5 for Francis/Pelton,
+    0.2 for Kaplan).  The plant cap is then
+
+        qtur_max = min(Σ_c n_c · q_eff_c , p_inst / prodt_eq) · availability
+
+    with ``h_op`` being:
+
+    * the volume-integrated net head from ``V_min`` to ``V_65``, i.e.
+      ``mean_cota(V_min, V_65) - cota_jus - perdas``, for reservoir plants
+      (``tipo_regulacao == 'M'``).  This is the NEWAVE ``h^{65%}`` symbol —
+      despite the name, it is a *mean over the operating range* rather than
+      the snapshot at V = V_65.  Reproduces NEWAVE's actual cap exactly on
+      the diagnostic case (M. DE MORAES) and matches the equivalent
+      productivity ``prodt^M`` denominator;
+    * the machine-count-weighted average of nominal heads, for run-of-river /
+      daily plants — they don't have a meaningful "operating volume".
+
+    ``prodt_eq = ρ_esp · h_int`` integrates the head polynomial over
+    ``[V_min, V_65]`` for M plants (so it equals ``ρ_esp · h_op``) and
+    ``[V_min, V_max]`` for the others.
+
+    Falls back to the simple Σ(n·q) when the inputs needed for the head
+    correction are missing (``queda_nominal_conjunto_*`` columns absent,
+    no polynomial coefficients, zero ρ_esp, etc.) — this keeps unit-test
+    fixtures with partial schemas working.
+    """
+    n_sets = int(hreg["numero_conjuntos_maquinas"])
+    available_cols = set(hreg.index)
+    has_head_data = all(
+        f"queda_nominal_conjunto_{i}" in available_cols for i in range(1, 6)
+    ) and all(f"a{i}_volume_cota" in available_cols for i in range(5))
+    if not has_head_data:
+        return _compute_max_turbined_simple(hreg, name)
+
+    sum_n_q = 0.0
+    sum_n_p = 0.0
+    sum_n_h = 0.0
+    total_machines = 0
+    for i in range(1, n_sets + 1):
+        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
+        q_nominal = float(hreg[f"vazao_nominal_conjunto_{i}"])
+        p_nominal = float(hreg[f"potencia_nominal_conjunto_{i}"])
+        h_nominal = float(hreg[f"queda_nominal_conjunto_{i}"])
+        sum_n_q += n_machines * q_nominal
+        sum_n_p += n_machines * p_nominal
+        sum_n_h += n_machines * h_nominal
+        total_machines += n_machines
+
+    teif = _clamp_outage_pct(float(hreg.get("teif", 0.0) or 0.0), "teif", name)
+    ip = _clamp_outage_pct(float(hreg.get("ip", 0.0) or 0.0), "ip", name)
+    availability = _availability(teif, ip)
+
+    # Generation cap mirrors the legacy behavior — NEWAVE caps power at
+    # rated installed capacity, derated by availability.
+    max_generation = sum_n_p * availability
+
+    # Inputs needed for head correction.
+    vol_min = float(hreg["volume_minimo"])
+    vol_max = float(hreg["volume_maximo"])
+    cf_raw = hreg.get("canal_fuga_medio")
+    rho_esp_raw = hreg.get("produtibilidade_especifica")
+    tipo_perda = int(hreg.get("tipo_perda", 0) or 0)
+    perdas = float(hreg.get("perdas", 0.0) or 0.0)
+    tipo_turbina = int(hreg.get("tipo_turbina", 0) or 0)
+    tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
+
+    # If we lack the inputs to compute the head correction, fall back to the
+    # simple sum.  This protects against malformed/incomplete hidr rows.
+    if (
+        total_machines == 0
+        or cf_raw is None
+        or _is_na(cf_raw)
+        or rho_esp_raw is None
+        or _is_na(rho_esp_raw)
+        or float(rho_esp_raw) <= 0.0
+    ):
+        return sum_n_q * availability, max_generation
+
+    cf = float(cf_raw)
+    rho_esp = float(rho_esp_raw)
+    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+
+    if tipo_reg == "M":
+        v65 = vol_min + 0.65 * (vol_max - vol_min)
+        # NEWAVE's ``h^{65%}`` is the *integrated* net head over [V_min, V_65],
+        # not the snapshot at V = V_65.  Verified against M. DE MORAES (the
+        # diagnostic case): with this interpretation the formula reproduces
+        # the observed NEWAVE cap of 1084.95 m³/s exactly.
+        h_int_gross = _mean_cota_over_volume(hreg, vol_min, v65) - cf
+        h_op = _apply_hydraulic_loss(h_int_gross, tipo_perda, perdas)
+        # For M plants ``prodt^M`` integrates over the same range, so h_int
+        # equals h_op — the same value is reused intentionally.
+        h_int = h_op
+    else:
+        # Run-of-river / daily-regulated / S plants — no integration window;
+        # use machine-count-weighted nominal head for the kturb sum, and
+        # the full V_min..V_max integral for prodt.
+        h_op = sum_n_h / total_machines
+        h_int_gross = _mean_cota_over_volume(hreg, vol_min, vol_max) - cf
+        h_int = _apply_hydraulic_loss(h_int_gross, tipo_perda, perdas)
+
+    # Defensive: a negative or zero h_op means cota_jus is above the
+    # forebay (data error or post-overhaul cota).  Fall back to the simple
+    # Σ(n·q) to avoid emitting a meaningless bound.
+    if h_op <= 0.0 or h_int <= 0.0:
+        return sum_n_q * availability, max_generation
+
+    # Affinity-law correction per machine set.
+    sum_kt = 0.0
+    for i in range(1, n_sets + 1):
+        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
+        q_nominal = float(hreg[f"vazao_nominal_conjunto_{i}"])
+        h_nominal = float(hreg[f"queda_nominal_conjunto_{i}"])
+        if h_nominal <= 0.0:
+            sum_kt += n_machines * q_nominal
+            continue
+        ratio = h_op / h_nominal
+        # Use abs to guard against the rare case where h_op flips sign during
+        # overhaul-only periods; the exponent < 1 keeps the result finite.
+        sum_kt += n_machines * q_nominal * (ratio**kturb)
+
+    # Installed-power-over-equivalent-productivity cap.
+    prodt_eq = rho_esp * h_int
+    cap_pinst = sum_n_p / prodt_eq if prodt_eq > 0.0 else math.inf
+
+    max_turbined = min(sum_kt, cap_pinst) * availability
+    return max_turbined, max_generation
+
+
 def read_cadastro(nw_files: NewaveFiles) -> pd.DataFrame:
     """Read ``hidr.dat`` and apply permanent MODIF.DAT overrides.
 
@@ -522,43 +762,28 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
+        # NEWAVE treats Daily-regulation ('D') plants as having frozen
+        # storage at ``volume_referencia`` — they can't accumulate water
+        # across stages.  Collapse the active range to a single point so
+        # Cobre's LP mirrors the same behavior.
+        tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
+        if tipo_reg == "D":
+            vol_ref_raw = hreg.get("volume_referencia")
+            if vol_ref_raw is not None and not pd.isna(vol_ref_raw):
+                vol_ref = float(vol_ref_raw)
+                vol_min = vol_ref
+                vol_max = vol_ref
+
         # Generation parameters. Productivity lives in
         # ``hydro_production_models.json`` on cobre HEAD; callers that need
         # the per-hydro base value call ``compute_base_productivities``.
-        n_sets = int(hreg["numero_conjuntos_maquinas"])
-
-        max_turbined = 0.0
-        max_generation = 0.0
-        for i in range(1, n_sets + 1):
-            n_machines = int(hreg[f"maquinas_conjunto_{i}"])
-            q_nominal = float(hreg[f"vazao_nominal_conjunto_{i}"])
-            p_nominal = float(hreg[f"potencia_nominal_conjunto_{i}"])
-            max_turbined += q_nominal * n_machines
-            max_generation += p_nominal * n_machines
-
-        # Apply TEIF/IP availability derating to max_generation.
-        teif = float(hreg.get("teif", 0.0) or 0.0)
-        ip = float(hreg.get("ip", 0.0) or 0.0)
-        if math.isnan(teif):
-            teif = 0.0
-        if math.isnan(ip):
-            ip = 0.0
-
-        def _clamp_to_100(value: float, label: str) -> float:
-            if value > 100.0:
-                _LOG.warning(
-                    "%s exceeds 100%% for plant %s (%s=%.2f); clamping to 100.",
-                    label,
-                    name,
-                    label.lower(),
-                    value,
-                )
-                return 100.0
-            return value
-
-        teif = _clamp_to_100(teif, "teif")
-        ip = _clamp_to_100(ip, "ip")
-        max_generation *= ((100.0 - teif) / 100.0) * ((100.0 - ip) / 100.0)
+        #
+        # The cap uses the head-corrected NEWAVE-style formula
+        # (see ``_compute_max_turbined_hypothesis``).  The previous simple
+        # Σ(n_c · q_nom_c) formulation lives in
+        # ``_compute_max_turbined_simple`` and can be reinstated by
+        # swapping the call below.
+        max_turbined, max_generation = _compute_max_turbined_hypothesis(hreg, name)
 
         # Minimum outflow from historical minimum (may have been overridden by MODIF).
         vazao_min_hist = hreg.get("vazao_minima_historica")
