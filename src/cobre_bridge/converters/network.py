@@ -42,7 +42,7 @@ _NCS_FACTORS_SCHEMA_URL = (
 # Penalty conversion constants
 # --------------------------------------------------------------------------
 #
-# Source: NEWAVE User Manual v29 (CEPEL/ONS, 2023), section 3.24 "Penalidades
+# Source: NEWAVE User Manual v30 (CEPEL/ONS, 2023), section 3.24 "Penalidades
 # (Ex.: Penalid.dat)" and the internal-default tables on pages 87–88.
 #
 # Time-aspect summary (re-derived from cobre/crates/cobre-sddp/src/lp_builder/
@@ -98,7 +98,7 @@ _NCS_FACTORS_SCHEMA_URL = (
 # does not change merit order or LP decisions (all costs scale together).
 # The HM3 → MWh conversion is pure volumetric and the 730 cancels out.
 #
-# Merit order from NEWAVE micro-penalty values (current v29 defaults):
+# Merit order from NEWAVE micro-penalty values (current v30 defaults):
 #   p_INT (0.000273) < p_PFIO (0.000300) < p_EVERT (0.000327)
 #   < p_TURB (0.000333) < p_CORTEOL (0.000344) < p_EXC (0.000355)
 # (manual page 88).
@@ -110,11 +110,11 @@ C_M3S2HM3: float = MONTH_HOURS * 3600.0 / 1e6  # = 2.628 hm³ / (m³/s · month)
 # HM3 × ρ_MW_per_m3s → MWh conversion (purely volumetric; 730 cancels here).
 HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
 
-# --- NEWAVE micro-penalties (page 88, current v29) -------------------------
+# --- NEWAVE micro-penalties (page 88, current v30) -------------------------
 # Energy-domain (R$/MWh) — passed through to cobre without conversion.
 # Flow-domain (multiplied by ρ_avg before emission) — see `_PEVERT` group.
 #
-# Uniform 100× uplift over NEWAVE's v29 values. NEWAVE chose values around
+# Uniform 10× uplift over NEWAVE's v30 values. NEWAVE chose values around
 # 1e-4 R$/MWh for "absolute negligibility" in its own SPTcpp solver; with
 # HiGHS and cobre's typical case scale, that floor stretches the LP
 # coefficient range to ~1e9 against the operational/deterrent slacks at
@@ -122,11 +122,11 @@ HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
 # internal ordering (exchange < spillage < ... < excess) and the merit
 # tier (regularization ≪ violation cost) while compressing the LP
 # coefficient range to ~1e7 — comfortably away from HiGHS's 1e10
-# warning. Economic impact: at 100× uplift, 1 m³/s of spillage for an
+# warning. Economic impact: at 10× uplift, 1 m³/s of spillage for an
 # entire 730 h month adds ~15.5 R$ to the objective — about 1e-5 of a
 # typical-stage total cost (~1e10 R$). Within NEWAVE-historical bounds
-# (v29.2.1 values were already ~18× the current).
-_MICRO_UPLIFT = 100.0
+# (v30.2.1 values were already ~18× the current).
+_MICRO_UPLIFT = 1.0
 
 _PINT = 0.000273 * _MICRO_UPLIFT  # intercâmbio  → line.exchange_cost
 
@@ -516,7 +516,7 @@ def convert_penalties(
 ) -> dict:
     """Generate a Cobre ``penalties.json`` dict from NEWAVE data.
 
-    Faithful to NEWAVE User Manual v29 section 3.24:
+    Faithful to NEWAVE User Manual v30 section 3.24:
 
     - Bus deficit segments come from ``sistema.custo_deficit`` directly
       (R$/MWh on both sides, no conversion).
@@ -525,7 +525,7 @@ def convert_penalties(
       ``MAX_PRODTACUM_SIN`` per the NEWAVE conversion table on page 87).
     - The micro-penalties (``pINT``, ``pEVERT``, ``pTURB``, ``pCORTEOL``,
       ``pEXC``, ``pCDESV``) are NEWAVE's hard-coded internal defaults
-      (page 88, current v29 values). They are written directly to cobre
+      (page 88, current v30 values). They are written directly to cobre
       and preserve NEWAVE's merit order: exchange < spillage < FPHA <
       curtailment < excess.
     - Evaporation and storage-violation slots without a PENALID source
@@ -641,7 +641,7 @@ def convert_penalties(
     evaporation_cost = _EVAPORATION_MULT * max_deficit_cost * rho_max_acum
 
     # --------------------------------------------------------------------
-    # NEWAVE micro-penalty defaults (page 88, current v29).
+    # NEWAVE micro-penalty defaults (page 88, current v30).
     # --------------------------------------------------------------------
     # Energy-domain (R$/MWh) passes through directly.
     excess_cost = _PEXC
@@ -670,6 +670,8 @@ def convert_penalties(
         turbined_below_cost,
         outflow_below_cost,
         outflow_above_cost,
+        evaporation_cost,
+        water_withdrawal_cost,
     )
 
     return {

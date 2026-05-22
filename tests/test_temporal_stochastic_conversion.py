@@ -95,6 +95,7 @@ def _make_dger_mock(
     consideracao_media_anual_afluencias: int | None = None,
     selecao_de_cortes_forward: int = 1,
     selecao_de_cortes_backward: int = 1,
+    ordem_maxima_parp: int = 6,
 ) -> MagicMock:
     dger = MagicMock()
     dger.mes_inicio_estudo = mes_inicio
@@ -115,6 +116,7 @@ def _make_dger_mock(
     dger.consideracao_media_anual_afluencias = consideracao_media_anual_afluencias
     dger.selecao_de_cortes_forward = selecao_de_cortes_forward
     dger.selecao_de_cortes_backward = selecao_de_cortes_backward
+    dger.ordem_maxima_parp = ordem_maxima_parp
     return dger
 
 
@@ -798,6 +800,42 @@ class TestConvertConfig:
         # Simulation side stays consistent.
         assert result["simulation"]["scenario_source"]["historical_years"] == [1983]
         assert result["simulation"]["num_scenarios"] == 1
+        # Deterministic mode also forces estimation.max_order = 0 as a
+        # workaround for cobre's SDDP negative-gap regression when lag-state
+        # is present.
+        assert result["estimation"]["max_order"] == 0
+        assert "order_selection" not in result["estimation"]
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_non_deterministic_mode_preserves_estimation_max_order(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """Non-deterministic conversions keep the configured PAR order — the
+        max_order override is gated by deterministic mode only.
+        """
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            num_forwards=2,  # breaks deterministic mode
+            num_aberturas=1,
+            ordem_maxima_parp=4,
+            consideracao_media_anual_afluencias=0,  # → "pacf"
+        )
+        mock_dger_cls.read.return_value = dger
+        mock_shist = MagicMock()
+        mock_shist.varredura = 0
+        mock_shist.anos_inicio_simulacoes = [1983]
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        assert result["estimation"]["max_order"] == 4
+        assert result["estimation"]["order_selection"] == "pacf"
 
     @patch("cobre_bridge.converters.temporal.Shist")
     @patch("cobre_bridge.converters.temporal.Dger")

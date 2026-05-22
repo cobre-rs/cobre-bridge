@@ -103,7 +103,9 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     dger_cvar: int = int(_raw_cvar) if isinstance(_raw_cvar, int) else 0
 
     # Default: each stage uses "expectation"
-    _cvar_by_stage: dict[int, dict] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
+    _cvar_by_stage: dict[
+        int, dict
+    ] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
 
     if dger_cvar in (1, 2) and nw_files.cvar is not None:
         cvar_file = Cvar.read(str(nw_files.cvar))
@@ -214,13 +216,11 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                     fraction,
                 )
             block_hours = fraction * total_hours
-            blocks.append(
-                {
-                    "id": pat_idx - 1,
-                    "name": names[pat_idx - 1],
-                    "hours": block_hours,
-                }
-            )
+            blocks.append({
+                "id": pat_idx - 1,
+                "name": names[pat_idx - 1],
+                "hours": block_hours,
+            })
 
         # Determine risk_measure for this stage.  Deterministic mode collapses
         # to a single inflow path per stage, so CVaR has no tail to penalise —
@@ -261,13 +261,11 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
         stages.append(stage_entry)
 
         if stage_id < total_months - 1:
-            transitions.append(
-                {
-                    "source_id": stage_id,
-                    "target_id": stage_id + 1,
-                    "probability": 1.0,
-                }
-            )
+            transitions.append({
+                "source_id": stage_id,
+                "target_id": stage_id + 1,
+                "probability": 1.0,
+            })
 
         month += 1
         if month > 12:
@@ -297,14 +295,12 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
 
         for offset, (py, pm) in enumerate(pre_dates):
             pre_id = -(num_pre_months - offset)
-            pre_study_stages.append(
-                {
-                    "id": pre_id,
-                    "start_date": _month_start_date(py, pm).isoformat(),
-                    "end_date": _month_end_date(py, pm).isoformat(),
-                    "season_id": pm - 1,  # 0-based calendar month index
-                }
-            )
+            pre_study_stages.append({
+                "id": pre_id,
+                "start_date": _month_start_date(py, pm).isoformat(),
+                "end_date": _month_end_date(py, pm).isoformat(),
+                "season_id": pm - 1,  # 0-based calendar month index
+            })
 
     policy_graph: dict = {
         "type": "finite_horizon",
@@ -413,7 +409,9 @@ def _historical_years_from_shist(
     num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
 
     if nw_files.shist is None:
-        logger.debug("shist.dat not found; using legacy default historical range.")
+        logger.debug(
+            "shist.dat not found; using legacy default historical range."
+        )
         ano_ini_hist: int = int(dger.ano_inicial_historico or 1931)
         return {"from": ano_ini_hist + 1, "to": ano_inicio - 1}
 
@@ -431,7 +429,9 @@ def _historical_years_from_shist(
     # varredura == 1 → range.  The most recent valid start year is
     # ano_inicio_estudo - horizon_years so the scenario fits in history.
     horizon_years = num_anos + num_anos_pos
-    range_from = int(shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931))
+    range_from = int(
+        shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931)
+    )
     range_to = ano_inicio - horizon_years
     if range_to < range_from:
         logger.warning(
@@ -445,13 +445,17 @@ def _historical_years_from_shist(
     return {"from": range_from, "to": range_to}
 
 
-def _count_historical_years(historical_years: list[int] | dict[str, int]) -> int:
+def _count_historical_years(
+    historical_years: list[int] | dict[str, int],
+) -> int:
     """Return how many distinct start-years are covered by a historical_years
     spec — equivalently the number of simulation scenarios NEWAVE will run."""
     if isinstance(historical_years, list):
         return len(historical_years)
     # Range form: {"from": int, "to": int} — inclusive both ends.
-    return max(0, int(historical_years["to"]) - int(historical_years["from"]) + 1)
+    return max(
+        0, int(historical_years["to"]) - int(historical_years["from"]) + 1
+    )
 
 
 def convert_config(nw_files: NewaveFiles) -> dict:
@@ -502,9 +506,13 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             )
         order_selection = "pacf_annual"
 
-    tipo_execucao: int = dger.tipo_execucao if dger.tipo_execucao is not None else 1
+    tipo_execucao: int = (
+        dger.tipo_execucao if dger.tipo_execucao is not None else 1
+    )
     tipo_simulacao_final: int = (
-        dger.tipo_simulacao_final if dger.tipo_simulacao_final is not None else 1
+        dger.tipo_simulacao_final
+        if dger.tipo_simulacao_final is not None
+        else 1
     )
     considera_reamostragem: int = (
         dger.considera_reamostragem_cenarios
@@ -590,6 +598,24 @@ def convert_config(nw_files: NewaveFiles) -> dict:
                 historical_years
             )
         simulation_section["scenario_source"] = sim_source
+
+    # Deterministic-mode workaround: force max_order = 0 so the LP carries
+    # no inflow-lag state.  Cobre's SDDP exhibits a negative-gap regression
+    # when ``max_par_order > 0`` is combined with the sparse cut mask (see
+    # the per-hydro lag exclusion in ``StageIndexer::set_nonzero_mask``);
+    # disabling lags is the only safe knob from the bridge side until the
+    # cobre-side fix lands.  Lag state has no informational value in a
+    # deterministic case — every stage already sees a single fixed inflow
+    # path — so this is a no-op for correctness on this run mode.
+    if deterministic and max_order > 0:
+        logger.info(
+            "Deterministic mode: forcing estimation.max_order from %d to 0 "
+            "to avoid cobre SDDP negative-gap regression triggered by the "
+            "sparse cut mask when inflow-lag state is present.",
+            max_order,
+        )
+        max_order = 0
+        order_selection = "pacf"
 
     estimation: dict = {"max_order": max_order}
     if order_selection is not None:
