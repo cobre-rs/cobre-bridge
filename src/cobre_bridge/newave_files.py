@@ -103,6 +103,7 @@ class NewaveFiles:
     re_dat: Path | None
     volref_saz: Path | None
     shist: Path | None
+    adterm: Path | None
 
     @classmethod
     def from_directory(cls, directory: Path) -> NewaveFiles:
@@ -190,6 +191,7 @@ class NewaveFiles:
         re_dat = _opt("re")
         volref_saz = _opt("volume_referencia_sazonal")
         shist = _opt("shist")
+        adterm = _opt("adterm")
 
         return cls(
             directory=directory,
@@ -217,4 +219,5 @@ class NewaveFiles:
             re_dat=re_dat,
             volref_saz=volref_saz,
             shist=shist,
+            adterm=adterm,
         )

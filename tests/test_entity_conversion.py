@@ -67,6 +67,7 @@ def _make_nw_files(
         re_dat=None,
         volref_saz=volref_saz,
         shist=shist,
+        adterm=None,
     )
 
 
@@ -4380,6 +4381,10 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = dger_mock.mes_inicio_estudo
         mock_dger.num_anos_estudo = dger_mock.num_anos_estudo
 
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = pd.DataFrame(
+            columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
+        )
         with (
             patch(
                 "inewave.newave.Dsvagua.read",
@@ -4388,6 +4393,10 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.Confhd.read",
+                return_value=mock_confhd,
             ),
         ):
             result = convert_water_withdrawal(
@@ -4424,6 +4433,10 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
 
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = pd.DataFrame(
+            columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
+        )
         with (
             patch(
                 "inewave.newave.Dsvagua.read",
@@ -4432,6 +4445,10 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.Confhd.read",
+                return_value=mock_confhd,
             ),
         ):
             result = convert_water_withdrawal(
@@ -4467,6 +4484,10 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
 
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = pd.DataFrame(
+            columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
+        )
         with (
             patch(
                 "inewave.newave.Dsvagua.read",
@@ -4475,6 +4496,10 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.Confhd.read",
+                return_value=mock_confhd,
             ),
         ):
             result = convert_water_withdrawal(
@@ -4594,6 +4619,10 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
 
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = pd.DataFrame(
+            columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
+        )
         with (
             patch(
                 "inewave.newave.Dsvagua.read",
@@ -4602,6 +4631,10 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.Confhd.read",
+                return_value=mock_confhd,
             ),
         ):
             result = convert_water_withdrawal(

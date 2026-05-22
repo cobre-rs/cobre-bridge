@@ -72,6 +72,7 @@ def _make_nw_files(
         re_dat=None,
         volref_saz=None,
         shist=shist,
+        adterm=None,
     )
 
 
@@ -800,11 +801,12 @@ class TestConvertConfig:
         # Simulation side stays consistent.
         assert result["simulation"]["scenario_source"]["historical_years"] == [1983]
         assert result["simulation"]["num_scenarios"] == 1
-        # Deterministic mode also forces estimation.max_order = 0 as a
-        # workaround for cobre's SDDP negative-gap regression when lag-state
-        # is present.
+        # Deterministic mode also forces estimation.max_order = 0 (workaround
+        # for cobre's SDDP negative-gap regression when lag-state is present)
+        # and pins order_selection to "pacf" to avoid the residual annual
+        # coupling that survives even with max_order = 0.
         assert result["estimation"]["max_order"] == 0
-        assert "order_selection" not in result["estimation"]
+        assert result["estimation"]["order_selection"] == "pacf"
 
     @patch("cobre_bridge.converters.temporal.Shist")
     @patch("cobre_bridge.converters.temporal.Dger")
