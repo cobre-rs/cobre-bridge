@@ -300,6 +300,139 @@ def cost_breakdown_table(
     return '<table class="cost-breakdown-table">' + caption + head + body + "</table>"
 
 
+def _extract_stage_cost_series(
+    nw_sin: pl.DataFrame,
+    cobre_stage_costs: pl.DataFrame,
+    nw_offset: int,
+    nw_variable: str,
+    cb_column: str,
+) -> tuple[list[int], dict[int, float], dict[int, float]]:
+    """Pull aligned NEWAVE/Cobre per-stage cost series.
+
+    Returns the sorted list of 0-based stages present on either side, plus
+    ``{stage: R$}`` dicts for NEWAVE (from MEDIAS-SIN, converted from 10⁶ R$)
+    and Cobre (from the simulation costs parquet).
+    """
+    nw_by_stage: dict[int, float] = {}
+    if nw_sin is not None and not nw_sin.is_empty():
+        sub = nw_sin.filter(pl.col("variable") == nw_variable)
+        for row in sub.iter_rows(named=True):
+            nw_by_stage[int(row["stage"]) - nw_offset] = float(row["value"]) * 1e6
+
+    cb_by_stage: dict[int, float] = {}
+    if cobre_stage_costs is not None and not cobre_stage_costs.is_empty():
+        for row in cobre_stage_costs.iter_rows(named=True):
+            v = row.get(cb_column)
+            if v is None:
+                continue
+            cb_by_stage[int(row["stage_id"])] = float(v)
+
+    stages = sorted(set(nw_by_stage) | set(cb_by_stage))
+    return stages, nw_by_stage, cb_by_stage
+
+
+def _stage_cost_subplot(
+    nw_sin: pl.DataFrame,
+    cobre_stage_costs: pl.DataFrame,
+    nw_offset: int,
+    *,
+    nw_variable: str,
+    cb_column: str,
+    title: str,
+    nw_label: str,
+    cb_label: str,
+) -> str:
+    """Render a single stage-cost line chart (one variable, both sides)."""
+    stages, nw_by_stage, cb_by_stage = _extract_stage_cost_series(
+        nw_sin, cobre_stage_costs, nw_offset, nw_variable, cb_column
+    )
+    if not stages:
+        return f"<p>No {nw_variable} data available.</p>"
+
+    def _series(by_stage: dict[int, float]) -> list[float | None]:
+        return [round(by_stage[s] / 1e6, 4) if s in by_stage else None for s in stages]
+
+    traces: list[dict] = []
+    if nw_by_stage:
+        traces.append(
+            {
+                "x": stages,
+                "y": _series(nw_by_stage),
+                "name": nw_label,
+                "type": "scatter",
+                "mode": "lines+markers",
+                "line": {"color": COLOR_NEWAVE},
+                "hovertemplate": (
+                    f"stage %{{x}}<br>{nw_label}: %{{y:.2f}} 10⁶ R$<extra></extra>"
+                ),
+            }
+        )
+    if cb_by_stage:
+        traces.append(
+            {
+                "x": stages,
+                "y": _series(cb_by_stage),
+                "name": cb_label,
+                "type": "scatter",
+                "mode": "lines+markers",
+                "line": {"color": COLOR_COBRE},
+                "hovertemplate": (
+                    f"stage %{{x}}<br>{cb_label}: %{{y:.2f}} 10⁶ R$<extra></extra>"
+                ),
+            }
+        )
+
+    layout = {
+        "title": title,
+        "xaxis": {"title": "Stage (0-based)"},
+        "yaxis": {"title": "Cost (10⁶ R$)"},
+        "legend": {"orientation": "h", "y": -0.2},
+    }
+    return _plotly_div(traces, layout)
+
+
+def immediate_cost_chart(
+    nw_sin: pl.DataFrame,
+    cobre_stage_costs: pl.DataFrame,
+    nw_offset: int = 0,
+) -> str:
+    """Per-stage *immediate* cost: NEWAVE ``COPER`` vs Cobre ``immediate_cost``.
+
+    NEWAVE values come from MEDIAS-SIN in 10⁶ R$ (converted to R$ here by
+    multiplying by 1e6).  Stage numbering on the NEWAVE side starts at the
+    study's first calendar month — *nw_offset* (the minimum stage in
+    MEDIAS-SIN) is subtracted to align with Cobre's 0-based ``stage_id``.
+    """
+    return _stage_cost_subplot(
+        nw_sin,
+        cobre_stage_costs,
+        nw_offset,
+        nw_variable="COPER",
+        cb_column="immediate_cost",
+        title="Immediate Cost — NEWAVE COPER vs Cobre",
+        nw_label="NEWAVE COPER",
+        cb_label="Cobre immediate_cost",
+    )
+
+
+def future_cost_chart(
+    nw_sin: pl.DataFrame,
+    cobre_stage_costs: pl.DataFrame,
+    nw_offset: int = 0,
+) -> str:
+    """Per-stage *future* cost: NEWAVE ``CUSTO_FUTURO`` vs Cobre ``future_cost``."""
+    return _stage_cost_subplot(
+        nw_sin,
+        cobre_stage_costs,
+        nw_offset,
+        nw_variable="CUSTO_FUTURO",
+        cb_column="future_cost",
+        title="Future Cost — NEWAVE CUSTO_FUTURO vs Cobre",
+        nw_label="NEWAVE CUSTO_FUTURO",
+        cb_label="Cobre future_cost",
+    )
+
+
 def convergence_chart(
     nw_conv: pl.DataFrame,
     cobre_conv: pl.DataFrame,

@@ -17,8 +17,10 @@ from cobre_bridge.comparators.charts import (
     convergence_chart,
     cost_breakdown_chart,
     cost_breakdown_table,
+    future_cost_chart,
     hydro_aggregate_chart,
     hydro_per_bus_chart,
+    immediate_cost_chart,
     line_summary_chart,
     overview_metrics,
     performance_fwd_bwd_split_chart,
@@ -79,6 +81,22 @@ def build_comparison_report(
             ],
         )
     )
+    overview_parts.append(section_title("Per-Stage Cost"))
+    nw_sin = pctiles.nw_sin if pctiles else pl.DataFrame()
+    cobre_stage_costs = pctiles.cobre_stage_costs if pctiles else pl.DataFrame()
+    nw_offset = pctiles.nw_offset if pctiles else 0
+    # Two side-by-side charts — immediate and future cost have very
+    # different scales (one is per-stage operating cost, the other is a
+    # cumulative future expectation), so we don't share an axis.
+    overview_parts.append(
+        chart_grid(
+            [
+                wrap_chart(immediate_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+                wrap_chart(future_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+            ],
+        )
+    )
+
     overview_parts.append(section_title("Convergence"))
     nw_conv = pctiles.nw_convergence if pctiles else pl.DataFrame()
     cb_conv = pctiles.cobre_convergence if pctiles else pl.DataFrame()

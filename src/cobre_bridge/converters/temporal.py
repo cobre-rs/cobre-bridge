@@ -222,9 +222,13 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                 }
             )
 
-        # Determine risk_measure for this stage.
-        if dger_cvar == 0 or _cvar_constant is None and dger_cvar != 2:
+        # Determine risk_measure for this stage.  Deterministic mode collapses
+        # to a single inflow path per stage, so CVaR has no tail to penalise —
+        # force expectation regardless of the cvar.dat configuration.
+        if deterministic:
             risk_measure: str | dict = "expectation"
+        elif dger_cvar == 0 or _cvar_constant is None and dger_cvar != 2:
+            risk_measure = "expectation"
         elif dger_cvar == 1 and _cvar_constant is not None:
             risk_measure = _cvar_constant
         else:
@@ -243,7 +247,10 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
             "risk_measure": risk_measure,
             "state_variables": {
                 "storage": True,
-                "inflow_lags": True,
+                # Inflow lags add no information in deterministic mode — every
+                # stage already sees a single fixed historical residual — so
+                # drop them to keep the LP smaller.
+                "inflow_lags": not deterministic,
             },
         }
         if deterministic:

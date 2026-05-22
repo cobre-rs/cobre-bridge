@@ -46,6 +46,10 @@ class PercentileData:
     cobre_convergence: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_costs: dict[str, float] = field(default_factory=dict)
     cobre_costs: dict[str, float] = field(default_factory=dict)
+    # Per-stage immediate/future cost on the Cobre side — mean across
+    # scenarios, in R$.  Joined with MEDIAS-SIN's COPER/CUSTO_FUTURO
+    # (after the 10⁶ R$ unit conversion) by the overview-tab chart.
+    cobre_stage_costs: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_offset: int = 0
     nw_max_stage: int | None = None
 
@@ -862,6 +866,7 @@ def compare_results(
         read_cobre_line_percentiles,
         read_cobre_lp_max_generation,
         read_cobre_spillage_energy,
+        read_cobre_stage_costs,
         read_cobre_thermal_means,
         read_cobre_thermal_metadata,
         read_cobre_thermal_percentiles,
@@ -1045,6 +1050,11 @@ def compare_results(
     cobre_costs = read_cobre_cost_breakdown(
         cobre_output_dir, max_stage_id=nw_max_stage_0based
     )
+    cobre_stage_costs = read_cobre_stage_costs(cobre_output_dir)
+    if nw_max_stage_0based is not None and not cobre_stage_costs.is_empty():
+        cobre_stage_costs = cobre_stage_costs.filter(
+            pl.col("stage_id") <= nw_max_stage_0based
+        )
 
     # --- Bus-level energy balance ---
     _LOG.info("Computing bus-level aggregates...")
@@ -1168,6 +1178,7 @@ def compare_results(
         nw_hydro_names=nw_hydro_names,
         nw_costs=nw_costs,
         cobre_costs=cobre_costs,
+        cobre_stage_costs=cobre_stage_costs,
         nw_offset=nw_offset,
         nw_max_stage=nw_max_stage_0based,
         cobre_spillage_energy=cobre_spill_energy,

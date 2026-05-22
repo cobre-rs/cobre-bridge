@@ -1232,6 +1232,68 @@ def read_cobre_cost_breakdown(
     return result
 
 
+def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read Cobre per-stage immediate/future cost (mean across scenarios).
+
+    Returns a DataFrame with columns ``stage_id`` (Int64),
+    ``immediate_cost`` (Float64, R$) and ``future_cost`` (Float64, R$).
+    Both costs are reported as raw, *undiscounted* stage values — the
+    counterpart of NEWAVE's MEDIAS-SIN ``COPER`` and ``CUSTO_FUTURO``
+    variables (after the 10⁶ R$ unit conversion on the NEWAVE side).
+
+    Cobre's costs table is one row per ``(scenario_id, stage_id, block_id)``;
+    we sum block-level immediate_cost within each (scenario, stage) and
+    keep the (scenario, stage) value of future_cost, then average across
+    scenarios.  ``future_cost`` is identical across blocks of the same
+    stage so a ``max`` (= any) collapse is safe.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "stage_id": pl.Int64,
+            "immediate_cost": pl.Float64,
+            "future_cost": pl.Float64,
+        }
+    )
+
+    lf = _scan_simulation_entity(cobre_output_dir, "costs")
+    if lf is None:
+        return empty
+
+    available = set(lf.collect_schema().names())
+    if "stage_id" not in available:
+        return empty
+    if "immediate_cost" not in available and "future_cost" not in available:
+        return empty
+
+    agg_exprs: list[pl.Expr] = []
+    if "immediate_cost" in available:
+        agg_exprs.append(pl.col("immediate_cost").sum().alias("immediate_cost"))
+    if "future_cost" in available:
+        # future_cost is a per-stage quantity replicated across blocks;
+        # ``max`` collapses without double-counting.
+        agg_exprs.append(pl.col("future_cost").max().alias("future_cost"))
+
+    try:
+        per_sc = lf.group_by(["scenario_id", "stage_id"]).agg(agg_exprs)
+        mean_cols = [
+            pl.col(c).mean()
+            for c in ("immediate_cost", "future_cost")
+            if c in available
+        ]
+        df = per_sc.group_by("stage_id").agg(mean_cols).sort("stage_id").collect()
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read Cobre per-stage costs")
+        return empty
+
+    # Ensure both columns are present even if one was missing in the schema.
+    for c in ("immediate_cost", "future_cost"):
+        if c not in df.columns:
+            df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
+    return df.select(["stage_id", "immediate_cost", "future_cost"]).cast(
+        {"stage_id": pl.Int64, "immediate_cost": pl.Float64, "future_cost": pl.Float64}
+    )
+
+
 def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre convergence data from training output.
 
