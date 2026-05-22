@@ -13,6 +13,7 @@ from cobre_bridge.comparators.charts import (
     build_hydro_detail_tab,
     build_thermal_detail_tab,
     cobre_aggregate_chart,
+    constraints_comparison_chart,
     convergence_chart,
     cost_breakdown_chart,
     cost_breakdown_table,
@@ -28,6 +29,7 @@ from cobre_bridge.comparators.charts import (
     system_per_bus_chart,
     thermal_generation_chart,
 )
+from cobre_bridge.comparators.constraints_compare import per_stage_bounds
 from cobre_bridge.comparators.html_report import (
     build_comparison_html,
     chart_grid,
@@ -173,6 +175,45 @@ def build_comparison_report(
         )
     )
     tab_contents["tab-network"] = "\n".join(network_parts)
+
+    # --- Constraints tab ---
+    # Per-constraint LHS comparison: NEWAVE-side LHS evaluated against
+    # MEDIAS-USIH / int*.out output, Cobre-side LHS as the mean across
+    # scenarios and blocks from the simulation parquet. Bounds are taken
+    # from constraints/generic_constraint_bounds.parquet (block 0
+    # preferred when blocks disagree).
+    gc_constraints = pctiles.gc_constraints if pctiles else []
+    gc_bounds_df = pctiles.gc_bounds if pctiles else pl.DataFrame()
+    gc_lhs_nw = pctiles.gc_lhs_newave if pctiles else pl.DataFrame()
+    gc_lhs_cb = pctiles.gc_lhs_cobre if pctiles else pl.DataFrame()
+    gc_max_stage = pctiles.nw_max_stage if pctiles else None
+    bound_lookup = per_stage_bounds(gc_bounds_df, max_stage=gc_max_stage)
+    if gc_max_stage is not None:
+        gc_lhs_nw = (
+            gc_lhs_nw.filter(pl.col("stage_id") <= gc_max_stage)
+            if not gc_lhs_nw.is_empty()
+            else gc_lhs_nw
+        )
+        gc_lhs_cb = (
+            gc_lhs_cb.filter(pl.col("stage_id") <= gc_max_stage)
+            if not gc_lhs_cb.is_empty()
+            else gc_lhs_cb
+        )
+    constraints_parts: list[str] = []
+    constraints_parts.append(section_title("Generic Constraints — LHS vs Bound"))
+    constraints_parts.append(
+        chart_grid(
+            [
+                wrap_chart(
+                    constraints_comparison_chart(
+                        gc_constraints, gc_lhs_nw, gc_lhs_cb, bound_lookup
+                    )
+                )
+            ],
+            single=True,
+        )
+    )
+    tab_contents["tab-constraints"] = "\n".join(constraints_parts)
 
     # --- Hydro Operation tab ---
     hydro_pct = pctiles.hydro if pctiles else None

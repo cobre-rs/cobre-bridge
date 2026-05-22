@@ -2418,3 +2418,184 @@ def _build_interactive_detail_html(
     {charts_html}
     <script>{js}</script>
     """
+
+
+# -------------------------------------------------------------------
+# Generic constraints (RE, AGRINT, VminOP) — NEWAVE vs Cobre LHS
+# -------------------------------------------------------------------
+
+
+def constraints_comparison_chart(
+    constraints: list[dict],
+    lhs_newave: pl.DataFrame,
+    lhs_cobre: pl.DataFrame,
+    bound_by_constraint: dict[int, dict[int, float]],
+) -> str:
+    """Per-constraint small-multiples comparing NEWAVE vs Cobre LHS vs bound.
+
+    One panel per constraint. Each panel shows the per-stage NEWAVE LHS
+    (mean evaluated from MEDIAS-USIH / int*.out outputs), the Cobre LHS
+    (mean across scenarios and blocks from simulation parquet), and the
+    constraint bound (dashed) overlaid as a horizontal-step series for
+    every stage where the bound is defined. Constraints with no LHS
+    data on either side are skipped silently.
+
+    Parameters
+    ----------
+    constraints:
+        Constraint dicts loaded from ``generic_constraints.json``.
+    lhs_newave, lhs_cobre:
+        DataFrames with columns ``constraint_id``, ``stage_id``,
+        ``lhs_value``.
+    bound_by_constraint:
+        Output of
+        :func:`cobre_bridge.comparators.constraints_compare.per_stage_bounds`
+        — maps ``constraint_id`` to ``{stage_id: bound}``.
+
+    Returns
+    -------
+    str
+        HTML ``<div>`` with an embedded Plotly figure.  Returns a short
+        fallback ``<p>`` when no constraints have any data.
+    """
+    if not constraints:
+        return "<p>No generic constraints defined.</p>"
+
+    # Index by id for fast lookup.
+    nw_by_cid: dict[int, dict[int, float]] = {}
+    cb_by_cid: dict[int, dict[int, float]] = {}
+    if not lhs_newave.is_empty():
+        for r in lhs_newave.iter_rows(named=True):
+            nw_by_cid.setdefault(int(r["constraint_id"]), {})[int(r["stage_id"])] = (
+                float(r["lhs_value"])
+            )
+    if not lhs_cobre.is_empty():
+        for r in lhs_cobre.iter_rows(named=True):
+            cb_by_cid.setdefault(int(r["constraint_id"]), {})[int(r["stage_id"])] = (
+                float(r["lhs_value"])
+            )
+
+    # Keep only constraints that have at least one data point on either
+    # side or at least one bound entry. A constraint with no LHS data
+    # anywhere has nothing to show.
+    renderable: list[dict] = []
+    for c in constraints:
+        cid = int(c["id"])
+        if cid in nw_by_cid or cid in cb_by_cid or bound_by_constraint.get(cid):
+            renderable.append(c)
+    if not renderable:
+        return "<p>No constraint data available to compare.</p>"
+
+    ncols = 2
+    nrows = (len(renderable) + ncols - 1) // ncols
+    row_gap = 0.06
+    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
+    col_gap = 0.05
+    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+
+    traces: list[dict] = []
+    layout: dict = {"title": "Generic Constraints — LHS vs Bound"}
+    first = True
+
+    for idx, c in enumerate(renderable):
+        cid = int(c["id"])
+        name = c["name"]
+        sense = c.get("sense", "<=")
+        row_i = idx // ncols
+        col_i = idx % ncols
+        ax_idx = idx + 1
+        xa = f"x{ax_idx}" if ax_idx > 1 else "x"
+        ya = f"y{ax_idx}" if ax_idx > 1 else "y"
+
+        x0 = col_i * (col_w + col_gap)
+        x1 = x0 + col_w
+        y1 = 1.0 - row_i * (row_h + row_gap)
+        y0 = y1 - row_h
+
+        xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
+        ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
+        layout[xa_key] = {
+            "domain": [round(x0, 3), round(x1, 3)],
+            "title": "Stage" if row_i == nrows - 1 else "",
+            "anchor": ya,
+        }
+        layout[ya_key] = {
+            "domain": [round(y0, 3), round(y1, 3)],
+            "title": f"{name} ({sense})",
+            "anchor": xa,
+        }
+
+        # Union of stages with any data (NEWAVE LHS, Cobre LHS, or bound).
+        stages = sorted(
+            set(nw_by_cid.get(cid, {}).keys())
+            | set(cb_by_cid.get(cid, {}).keys())
+            | set(bound_by_constraint.get(cid, {}).keys())
+        )
+        if not stages:
+            continue
+
+        nw_y = [nw_by_cid.get(cid, {}).get(s) for s in stages]
+        cb_y = [cb_by_cid.get(cid, {}).get(s) for s in stages]
+        bound_y = [bound_by_constraint.get(cid, {}).get(s) for s in stages]
+
+        # NEWAVE LHS line (only where defined).
+        nw_x_present = [s for s, v in zip(stages, nw_y) if v is not None]
+        nw_v_present = [v for v in nw_y if v is not None]
+        if nw_x_present:
+            traces.append(
+                {
+                    "x": nw_x_present,
+                    "y": nw_v_present,
+                    "name": "NEWAVE LHS",
+                    "type": "scatter",
+                    "mode": "lines",
+                    "line": {"color": COLOR_NEWAVE, "width": 2},
+                    "xaxis": xa,
+                    "yaxis": ya,
+                    "legendgroup": "nw",
+                    "showlegend": first,
+                }
+            )
+
+        # Cobre LHS line.
+        cb_x_present = [s for s, v in zip(stages, cb_y) if v is not None]
+        cb_v_present = [v for v in cb_y if v is not None]
+        if cb_x_present:
+            traces.append(
+                {
+                    "x": cb_x_present,
+                    "y": cb_v_present,
+                    "name": "Cobre LHS (mean)",
+                    "type": "scatter",
+                    "mode": "lines",
+                    "line": {"color": COLOR_COBRE, "width": 2},
+                    "xaxis": xa,
+                    "yaxis": ya,
+                    "legendgroup": "cb",
+                    "showlegend": first,
+                }
+            )
+
+        # Bound line (dashed red, only where defined). Use markers so
+        # gaps where the bound is None remain visually obvious.
+        bd_x_present = [s for s, v in zip(stages, bound_y) if v is not None]
+        bd_v_present = [v for v in bound_y if v is not None]
+        if bd_x_present:
+            traces.append(
+                {
+                    "x": bd_x_present,
+                    "y": bd_v_present,
+                    "name": "Bound",
+                    "type": "scatter",
+                    "mode": "lines",
+                    "line": {"color": "#DC4C4C", "width": 1.5, "dash": "dash"},
+                    "xaxis": xa,
+                    "yaxis": ya,
+                    "legendgroup": "bound",
+                    "showlegend": first,
+                }
+            )
+
+        first = False
+
+    return _plotly_div(traces, layout, height=max(nrows * 300 + 80, 360))

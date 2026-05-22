@@ -248,27 +248,44 @@ def _extract_temporal_overrides(
     return result
 
 
-def _read_ghmin(nw_files: NewaveFiles) -> dict[int, float]:
-    """Read GHMIN.DAT and return a mapping of plant code -> minimum generation MW.
+def _read_ghmin_per_stage(
+    nw_files: NewaveFiles,
+    start_year: int,
+    start_month: int,
+    study_months: int,
+    total_stages: int,
+) -> dict[int, dict[int, float]]:
+    """Read GHMIN.DAT and expand into ``{plant_code: {stage_0based: min_gen_mw}}``.
 
-    If ``GHMIN.DAT`` is absent (``nw_files.ghmin is None``), returns an
-    empty dict.  Only ``patamar == 0`` rows (all load blocks) are used; if
-    multiple time periods are present for the same plant, the first
-    occurrence (earliest date) is taken.
+    GHMIN values are time-varying minimum-generation requirements in
+    MWmes that NEWAVE enforces per plant per stage.  Each (plant,
+    month, year) record sets the value from that stage forward until
+    the next record overrides it (step function).  Records with
+    ``year == 9999`` are post-study seasonal entries: each calendar
+    month they appear for becomes the value used in every post-study
+    stage with that calendar month, falling back to a seasonal repeat
+    of the last study year for unspecified months.
+
+    Only ``patamar == 0`` rows are used — they represent the all-blocks
+    mean, which matches the per-stage granularity of
+    ``hydro_bounds.parquet``.
+
+    Returns an empty mapping when ``GHMIN.DAT`` is absent.
 
     Parameters
     ----------
     nw_files:
         Resolved NEWAVE file paths for the case.
-
-    Returns
-    -------
-    dict[int, float]
-        Plant code -> minimum generation in MW.  Empty dict if file absent.
+    start_year, start_month:
+        Study start (Cobre stage 0 corresponds to this calendar month).
+    study_months:
+        Number of in-study stages.
+    total_stages:
+        Total number of stages (study + post-study).
     """
     ghmin_path = nw_files.ghmin
     if ghmin_path is None:
-        _LOG.debug("GHMIN.DAT not found; using computed min_generation fallback.")
+        _LOG.debug("GHMIN.DAT not found; emitting no per-stage min_generation.")
         return {}
 
     ghmin = Ghmin.read(str(ghmin_path))
@@ -276,20 +293,65 @@ def _read_ghmin(nw_files: NewaveFiles) -> dict[int, float]:
     if df is None or df.empty:
         return {}
 
-    # Keep only patamar=0 (all-blocks) rows.
     patamar0 = df[df["patamar"] == 0]
     if patamar0.empty:
         return {}
 
-    # Use the first (earliest) entry per plant.
-    first_per_plant = (
-        patamar0.sort_values("data").groupby("codigo_usina").first().reset_index()
-    )
+    result: dict[int, dict[int, float]] = {}
+    for code, group in patamar0.groupby("codigo_usina"):
+        code_int = int(code)
+        study_changes: list[tuple[int, float]] = []
+        pos_by_month: dict[int, float] = {}
+        for _, row in group.iterrows():
+            dt = row["data"]
+            yr = int(dt.year)
+            mo = int(dt.month)
+            value = float(row["geracao"])
+            if yr == 9999:
+                pos_by_month[mo] = value
+                continue
+            sid = (yr - start_year) * 12 + (mo - start_month)
+            if sid < 0:
+                sid = 0
+            study_changes.append((sid, value))
+        study_changes.sort()
 
-    return {
-        int(row["codigo_usina"]): float(row["geracao"])
-        for _, row in first_per_plant.iterrows()
-    }
+        per_stage: dict[int, float] = {}
+        # Step function across the study period.
+        if study_changes:
+            first_stage = study_changes[0][0]
+            cp_idx = 0
+            current: float | None = None
+            for stage_id in range(first_stage, study_months):
+                while (
+                    cp_idx < len(study_changes) and study_changes[cp_idx][0] <= stage_id
+                ):
+                    current = study_changes[cp_idx][1]
+                    cp_idx += 1
+                if current is not None:
+                    per_stage[stage_id] = current
+
+        # Seasonal pattern for post-study: prefer explicit POS entries
+        # for each calendar month; fall back to the last study year's
+        # value for that calendar month.
+        if total_stages > study_months:
+            last_year_seasonal: dict[int, float] = {}
+            for stage_id in range(max(0, study_months - 12), study_months):
+                if stage_id in per_stage:
+                    cal = ((start_month - 1 + stage_id) % 12) + 1
+                    last_year_seasonal[cal] = per_stage[stage_id]
+
+            for stage_id in range(study_months, total_stages):
+                cal = ((start_month - 1 + stage_id) % 12) + 1
+                if cal in pos_by_month:
+                    per_stage[stage_id] = pos_by_month[cal]
+                elif cal in last_year_seasonal:
+                    per_stage[stage_id] = last_year_seasonal[cal]
+
+        if per_stage:
+            result[code_int] = per_stage
+
+    return result
 
 
 # Mapping from PENALID.DAT variable names to Cobre penalty field names.
@@ -437,9 +499,6 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     existing = all_existing[
         ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
     ]
-    # Read GHMIN.DAT minimum generation map.
-    ghmin_map = _read_ghmin(nw_files)
-
     # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
     if ree_df is not None:
@@ -517,12 +576,11 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         # CFUGA/CMONT temporal overrides are handled by convert_production_models;
         # no warning needed here as per-stage productivity is now supported.
 
-        # Min generation: use GHMIN.DAT if available, otherwise approximate.
-        ghmin_value = ghmin_map.get(newave_code)
-        if ghmin_value is not None:
-            min_generation = ghmin_value
-        else:
-            min_generation = 0.0
+        # Static field is always zero — per-stage GHMIN values are
+        # emitted in ``hydro_bounds.parquet:min_generation_mw`` by
+        # :func:`convert_storage_bounds` so the LP sees the correct
+        # bound at every stage.
+        min_generation = 0.0
 
         # Downstream cascade linkage.  Use the FICT-cascade resolver so that
         # plants whose physical downstream is a fictitious plant (or whose
@@ -932,12 +990,15 @@ def _per_stage_integrated_productivities(
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
+    seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
 
     events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
+    last_event_stage = -1
     for override in drop_overrides:
         stage_id = (override["year"] - start_year) * 12 + (
             override["month"] - start_month
         )
+        last_event_stage = max(last_event_stage, stage_id)
         if override["type"] == "CFUGA":
             events_by_stage.setdefault(stage_id, []).append(
                 (float(override["value"]), None)
@@ -946,6 +1007,34 @@ def _per_stage_integrated_productivities(
             events_by_stage.setdefault(stage_id, []).append(
                 (None, float(override["value"]))
             )
+
+    # Seasonal lookup for sazonaliza_cfuga_cmont=1 (Dger): after the last
+    # explicit event, each stage's calendar month gets the value from
+    # the latest year that defined it.  See ``_per_stage_productivities``
+    # for the matching logic on the point-value productivity.
+    seasonal_cfuga: dict[int, float] = {}
+    seasonal_cmont: dict[int, float] = {}
+    if seasonalize:
+        latest_per_month_year_cfuga: dict[int, int] = {}
+        latest_per_month_year_cmont: dict[int, int] = {}
+        for override in drop_overrides:
+            year = int(override["year"])
+            month = int(override["month"])
+            value = float(override["value"])
+            if override["type"] == "CFUGA":
+                if (
+                    month not in latest_per_month_year_cfuga
+                    or year > latest_per_month_year_cfuga[month]
+                ):
+                    latest_per_month_year_cfuga[month] = year
+                    seasonal_cfuga[month] = value
+            else:  # CMONT
+                if (
+                    month not in latest_per_month_year_cmont
+                    or year > latest_per_month_year_cmont[month]
+                ):
+                    latest_per_month_year_cmont[month] = year
+                    seasonal_cmont[month] = value
 
     values: list[float] = []
     active_cfuga: float | None = None
@@ -964,6 +1053,13 @@ def _per_stage_integrated_productivities(
                     active_cfuga = cfuga_val
                 if cmont_val is not None:
                     active_cmont = cmont_val
+
+        if seasonalize and stage_id > last_event_stage:
+            calendar_month = ((start_month - 1 + stage_id) % 12) + 1
+            if calendar_month in seasonal_cfuga:
+                active_cfuga = seasonal_cfuga[calendar_month]
+            if calendar_month in seasonal_cmont:
+                active_cmont = seasonal_cmont[calendar_month]
 
         if active_cfuga is None and active_cmont is None:
             values.append(base_integrated)
@@ -1105,14 +1201,17 @@ def _per_stage_productivities(
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
+    seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
 
     # Group CFUGA/CMONT events by stage_id so per-stage state can be evolved
     # in a single forward sweep.
     events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
+    last_event_stage = -1
     for override in drop_overrides:
         stage_id = (override["year"] - start_year) * 12 + (
             override["month"] - start_month
         )
+        last_event_stage = max(last_event_stage, stage_id)
         if override["type"] == "CFUGA":
             events_by_stage.setdefault(stage_id, []).append(
                 (float(override["value"]), None)
@@ -1121,6 +1220,36 @@ def _per_stage_productivities(
             events_by_stage.setdefault(stage_id, []).append(
                 (None, float(override["value"]))
             )
+
+    # When ``sazonaliza_cfuga_cmont == 1`` (Dger), after the last explicit
+    # CFUGA/CMONT entry NEWAVE repeats the seasonal pattern observed in
+    # the latest year that defines each calendar month. Build a
+    # per-calendar-month lookup from the events so stages beyond the
+    # last explicit one can fall back to the right seasonal value.
+    seasonal_cfuga: dict[int, float] = {}
+    seasonal_cmont: dict[int, float] = {}
+    if seasonalize and drop_overrides:
+        # For each (month, type) take the value from the latest year.
+        latest_per_month_year_cfuga: dict[int, int] = {}
+        latest_per_month_year_cmont: dict[int, int] = {}
+        for override in drop_overrides:
+            year = int(override["year"])
+            month = int(override["month"])
+            value = float(override["value"])
+            if override["type"] == "CFUGA":
+                if (
+                    month not in latest_per_month_year_cfuga
+                    or year > latest_per_month_year_cfuga[month]
+                ):
+                    latest_per_month_year_cfuga[month] = year
+                    seasonal_cfuga[month] = value
+            else:  # CMONT
+                if (
+                    month not in latest_per_month_year_cmont
+                    or year > latest_per_month_year_cmont[month]
+                ):
+                    latest_per_month_year_cmont[month] = year
+                    seasonal_cmont[month] = value
 
     seasonal = seasonal_volref_by_month or {}
 
@@ -1146,6 +1275,16 @@ def _per_stage_productivities(
                     active_cmont = cmont_val
 
         calendar_month = ((start_month - 1 + stage_id) % 12) + 1
+
+        # After the last explicit event, with sazonaliza=1, the calendar
+        # month's latest-year value overrides the step-function carry.
+        # Missing months stay on whatever the step function left active.
+        if seasonalize and stage_id > last_event_stage:
+            if calendar_month in seasonal_cfuga:
+                active_cfuga = seasonal_cfuga[calendar_month]
+            if calendar_month in seasonal_cmont:
+                active_cmont = seasonal_cmont[calendar_month]
+
         vol_useful = seasonal.get(calendar_month)
 
         if vol_useful is None and active_cfuga is None and active_cmont is None:
@@ -1580,21 +1719,49 @@ def convert_water_withdrawal(
     )
     num_total_stages: int = num_study_stages + num_post_study_stages
 
+    # Build a cascade map so NC (Não Construída) plant dsvagua entries can
+    # be propagated to the immediately downstream EX plant — NEWAVE applies
+    # NC withdrawals to the next real plant in the cascade, while FICT
+    # entries are not propagated and are silently dropped.
+    confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+    plant_downstream: dict[int, int] = {}
+    plant_is_fict: dict[int, bool] = {}
+    for _, r in confhd_df.iterrows():
+        code = int(r["codigo_usina"])
+        jus = r["codigo_usina_jusante"]
+        plant_downstream[code] = int(jus) if jus is not None and not pd.isna(jus) else 0
+        plant_is_fict[code] = str(r["nome_usina"]).strip().startswith("FICT.")
+
+    def _resolve_to_hydro_id(start_code: int) -> int | None:
+        """Walk downstream from *start_code* until reaching a plant present
+        in ``id_map``. FICT plants are never propagated. Returns the hydro_id
+        of the first reachable EX plant, or ``None`` if the chain hits a
+        terminus or a FICT node first.
+        """
+        visited: set[int] = set()
+        cur = start_code
+        while cur and cur not in visited:
+            visited.add(cur)
+            if plant_is_fict.get(cur, False):
+                return None
+            try:
+                return id_map.hydro_id(cur)
+            except KeyError:
+                pass
+            cur = plant_downstream.get(cur, 0)
+        return None
+
     # Group by (codigo_usina, data) and sum valor.
     grouped = df.groupby(["codigo_usina", "data"], as_index=False)["valor"].sum()
 
-    hydro_ids: list[int] = []
-    stage_ids: list[int] = []
-    values: list[float] = []
+    # Accumulate by (hydro_id, stage_id) so propagated NC entries merge
+    # cleanly with the downstream plant's own dsvagua row.
+    accumulated: dict[tuple[int, int], float] = {}
 
     for _, row in grouped.iterrows():
         hydro_code = int(row["codigo_usina"])
-        try:
-            hydro_id = id_map.hydro_id(hydro_code)
-        except KeyError:
-            # Fictitious plants and any other entries the id_map filters
-            # out are silently dropped — dsvagua frequently carries codes
-            # outside the dispatchable hydro fleet.
+        hydro_id = _resolve_to_hydro_id(hydro_code)
+        if hydro_id is None:
             continue
 
         dt = row["data"]
@@ -1604,9 +1771,12 @@ def convert_water_withdrawal(
 
         # Negate: NEWAVE negative valor = withdrawal; Cobre positive = withdrawal.
         withdrawal = -float(row["valor"])
-        hydro_ids.append(hydro_id)
-        stage_ids.append(stage_id)
-        values.append(withdrawal)
+        key = (hydro_id, stage_id)
+        accumulated[key] = accumulated.get(key, 0.0) + withdrawal
+
+    hydro_ids: list[int] = [k[0] for k in accumulated]
+    stage_ids: list[int] = [k[1] for k in accumulated]
+    values: list[float] = list(accumulated.values())
 
     if not hydro_ids:
         return None
@@ -1696,10 +1866,6 @@ def convert_storage_bounds(
     from inewave.newave import Confhd as _Confhd
     from inewave.newave import Dger as _Dger
 
-    modif_path = nw_files.modif
-    if modif_path is None:
-        return None
-
     dger = _Dger.read(str(nw_files.dger))
     start_year: int = int(dger.ano_inicio_estudo)
     start_month: int = int(dger.mes_inicio_estudo)
@@ -1718,8 +1884,13 @@ def convert_storage_bounds(
     non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
     confhd_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
 
-    # Extract temporal overrides.
-    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+    # Extract temporal overrides — empty dict when MODIF.DAT is absent,
+    # which is fine because GHMIN.DAT alone can still produce per-stage
+    # rows.
+    if nw_files.modif is None:
+        temporal_overrides: dict[int, list[dict]] = {}
+    else:
+        temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
 
     # NEWAVE big-M sentinel: 99999 means "no limit" (restore default).
     _BIG_M = 99990.0
@@ -1771,6 +1942,13 @@ def convert_storage_bounds(
 
         return result
 
+    # GHMIN.DAT per-stage minimums.  These are not MODIF.DAT overrides
+    # but live alongside them at the per-(hydro, stage) granularity, so
+    # they merge naturally into this parquet's row set.
+    ghmin_by_plant_stage = _read_ghmin_per_stage(
+        nw_files, start_year, start_month, study_months, total_stages
+    )
+
     hydro_ids: list[int] = []
     stage_ids: list[int] = []
     min_storage_vals: list[float | None] = []
@@ -1778,16 +1956,19 @@ def convert_storage_bounds(
     min_turbined_vals: list[float | None] = []
     max_turbined_vals: list[float | None] = []
     min_outflow_vals: list[float | None] = []
+    min_generation_vals: list[float | None] = []
 
-    for newave_code in sorted(temporal_overrides):
-        overrides = temporal_overrides[newave_code]
+    plant_codes_with_data = set(temporal_overrides) | set(ghmin_by_plant_stage)
+    for newave_code in sorted(plant_codes_with_data):
+        overrides = temporal_overrides.get(newave_code, [])
         vmaxt = [o for o in overrides if o["type"] == "VMAXT"]
         vmint = [o for o in overrides if o["type"] == "VMINT"]
         turbmaxt = [o for o in overrides if o["type"] == "TURBMAXT"]
         turbmint = [o for o in overrides if o["type"] == "TURBMINT"]
         vazmint = [o for o in overrides if o["type"] == "VAZMINT"]
+        ghmin_by_stage = ghmin_by_plant_stage.get(newave_code, {})
 
-        if not any((vmaxt, vmint, turbmaxt, turbmint, vazmint)):
+        if not any((vmaxt, vmint, turbmaxt, turbmint, vazmint, ghmin_by_stage)):
             continue
 
         try:
@@ -1833,6 +2014,7 @@ def convert_storage_bounds(
             | set(turbmaxt_by_stage)
             | set(turbmint_by_stage)
             | set(vazmint_by_stage)
+            | set(ghmin_by_stage)
         )
         for stage_id in all_stages:
             hydro_ids.append(hydro_id)
@@ -1842,6 +2024,7 @@ def convert_storage_bounds(
             max_turbined_vals.append(turbmaxt_by_stage.get(stage_id))
             min_turbined_vals.append(turbmint_by_stage.get(stage_id))
             min_outflow_vals.append(vazmint_by_stage.get(stage_id))
+            min_generation_vals.append(ghmin_by_stage.get(stage_id))
 
     if not hydro_ids:
         return None
@@ -1855,6 +2038,7 @@ def convert_storage_bounds(
             "min_turbined_m3s": pa.array(min_turbined_vals, type=pa.float64()),
             "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
             "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
+            "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
         }
     ).sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
 
@@ -1876,7 +2060,11 @@ _PIMENTAL_DIVERSION_MAX_M3S = 13_900.0
 
 def _make_diversion(newave_code: int, id_map: NewaveIdMap) -> dict | None:
     """Return a diversion dict for PIMENTAL, ``None`` for all other plants."""
-    if newave_code != _PIMENTAL_NEWAVE_CODE:
+    # TEMPORARILY DISABLED: comparison study against NEWAVE which does not
+    # model an explicit PIMENTAL→BELO MONTE diversion. To re-enable, restore
+    # the body below.
+    return None
+    if newave_code != _PIMENTAL_NEWAVE_CODE:  # type: ignore[unreachable]
         return None
     try:
         bm_id = id_map.hydro_id(_BELO_MONTE_NEWAVE_CODE)

@@ -573,24 +573,31 @@ class TestParseFormula:
         assert "0.5 * hydro_generation(" in result
 
     def test_ener_interc_canonical_direction(self) -> None:
-        """ener_interc(1,2) is the canonical direction => positive coefficient."""
+        """ener_interc(A,B) with A<B (canonical) emits ``line_direct``.
+
+        NEWAVE's directional interchange is non-negative, so the converter
+        chooses between ``line_direct`` and ``line_reverse`` based on the
+        flow direction; the literal coefficient stays positive.
+        """
         id_map = self._id_map()
         line_map = self._line_map()
         result = _parse_formula("1.0ener_interc(1,2)", id_map, line_map)
         assert result is not None
-        # Canonical direction: no negation
-        assert "-1 * line_exchange" not in result
-        assert "line_exchange(0)" in result
+        assert "line_direct(0)" in result
+        assert "line_reverse" not in result
+        assert "line_exchange" not in result
 
     def test_ener_interc_reversed_direction(self) -> None:
-        """ener_interc(2,1) reverses the canonical direction => negated subtraction."""
+        """ener_interc(B,A) with B>A (reverse of canonical) emits ``line_reverse``."""
         id_map = self._id_map()
         line_map = self._line_map()
         result = _parse_formula("1.0ener_interc(2,1)", id_map, line_map)
         assert result is not None
-        # New syntax: "- line_exchange(0)" instead of "-1 * line_exchange(0)"
-        assert "- line_exchange(0)" in result
-        assert "-1 * line_exchange(0)" not in result
+        assert "line_reverse(0)" in result
+        # No legacy signed line_exchange in the new output.
+        assert "line_exchange" not in result
+        # Coefficient stays positive — direction is encoded by the variable.
+        assert "- " not in result
 
     def test_unknown_hydro_code_skipped(self) -> None:
         """Unknown hydro code produces a warning and the term is dropped."""
@@ -607,7 +614,8 @@ class TestParseFormula:
             "1.0ener_interc(2,1) + 0.5ger_usih(66)", id_map, line_map
         )
         assert result is not None
-        assert "line_exchange(" in result
+        # ener_interc(2,1) → reverse direction → line_reverse
+        assert "line_reverse(" in result
         assert "hydro_generation(" in result
 
 
@@ -962,9 +970,70 @@ class TestConvertAgrintConstraints:
             "bound",
         }
 
-    def test_reversed_direction_negates_coefficient(self, tmp_path: Path) -> None:
-        """Flow A->B where A>B should produce a negative coefficient in expression."""
-        # Group 2: flow(3->1), canonical pair is (1,3). A=3 > B=1 => reversed => negate.
+    def test_multi_term_group_with_mixed_directions(self, tmp_path: Path) -> None:
+        """Mixed direction terms (typical of NOFICT1 hubs) each pick the right
+        variable.
+
+        This pins the NEWAVE Group 4 case (``Interc(11→1) + Interc(11→3) ≤
+        8000``) — both terms target a fictitious bus from subsystems with
+        smaller codes, so canonically the lines are (1,11) and (3,11) but
+        the directional flow we care about is the reverse one on each.
+        The converter must emit ``line_reverse(line_1_11) +
+        line_reverse(line_3_11)``, not signed ``-line_exchange`` terms,
+        otherwise the constraint silently allows extra flow when one of
+        the lines runs in its canonical (direct) direction.
+        """
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(
+            "AGRUPAMENTOS DE INTERCAMBIO\n"
+            " #AG A   B   COEF\n"
+            " XXX XXX XXX XX.XXXX\n"
+            "   4  11   1  1.0000\n"
+            "   4  11   3  1.0000\n"
+            " 999\n"
+            "LIMITES POR GRUPO\n"
+            "  #AG MI ANOI MF ANOF LIM_P1  LIM_P2  LIM_P3\n"
+            " XXX  XX XXXX XX XXXX XXXXXX. XXXXXX. XXXXXX.\n"
+            "   4   1 2020 12 2020   8000.   8000.   8000.\n"
+            " 999\n",
+            encoding="latin-1",
+        )
+        (tmp_path / "dger.dat").touch()
+
+        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3, 11], hydro_codes=[], thermal_codes=[])
+
+        with (
+            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
+            patch(
+                "cobre_bridge.converters.constraints._build_line_id_map",
+                return_value={(1, 11): 3, (3, 11): 4},
+            ),
+        ):
+            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
+            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+
+        assert result is not None
+        constraints, _ = result
+        assert len(constraints) == 1
+        expr = constraints[0]["expression"]
+        # Both terms are reverse direction on their canonical lines.
+        assert "line_reverse(3)" in expr
+        assert "line_reverse(4)" in expr
+        # No signed line_exchange anywhere in the output.
+        assert "line_exchange" not in expr
+        # Coefficient stays positive — direction is encoded by variable.
+        assert not expr.lstrip().startswith("-")
+
+    def test_reversed_direction_uses_line_reverse(self, tmp_path: Path) -> None:
+        """Flow A->B where A>B emits ``line_reverse``; canonical uses ``line_direct``.
+
+        NEWAVE's ``Interc(A→B)`` is a non-negative directional flow, so the
+        converter picks ``line_direct`` (canonical A<B) or ``line_reverse``
+        (reversed A>B) instead of a signed ``line_exchange`` with a negated
+        coefficient.  This keeps the constraint tight at fictitious hubs
+        where one flow can be in its non-canonical direction.
+        """
         agrint_path = tmp_path / "agrint.dat"
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
@@ -983,13 +1052,17 @@ class TestConvertAgrintConstraints:
             result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
 
         assert result is not None
-        # Group 1: flow(1->3), canonical (1,3) => positive, no leading '-'
+        # Group 1: flow(1->3), canonical (1,3) => line_direct, no leading '-'.
         c1 = result[0][0]
-        assert c1["expression"].startswith("line_exchange(0)")
+        assert c1["expression"].startswith("line_direct(0)")
+        assert "line_exchange" not in c1["expression"]
 
-        # Group 2: flow(3->1), reversed => expression should start with '- '
+        # Group 2: flow(3->1), reverse of canonical => line_reverse with a
+        # positive coefficient (no leading '-').
         c2 = result[0][1]
-        assert c2["expression"].startswith("- line_exchange(0)")
+        assert c2["expression"].startswith("line_reverse(0)")
+        assert "line_exchange" not in c2["expression"]
+        assert not c2["expression"].startswith("-")
 
     def test_example_agrint_produces_constraints(self) -> None:
         """Integration test against the example AGRINT.DAT file."""

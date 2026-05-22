@@ -23,7 +23,8 @@ import polars as pl
 #   "0.5 * @rho_eq_h47 * hydro_generation(47)"  — literal × @name scale
 _TERM_RE = _re.compile(
     r"([+-]?\s*\d*\.?\d*)\s*\*?\s*(?:@([A-Za-z_][A-Za-z0-9_]*)\s*\*\s*)?"
-    r"(hydro_storage|hydro_generation|line_exchange)\((\d+)\)"
+    r"(hydro_storage|hydro_generation|line_exchange|line_direct|line_reverse)"
+    r"\((\d+)\)"
 )
 
 # A scalar-parameter reference resolved against simulation columns:
@@ -97,6 +98,8 @@ def evaluate_constraint_expressions(
     - ``hydro_storage(id)``    → ``storage_final_hm3`` where hydro_id=id, block_id=0
     - ``hydro_generation(id)`` → ``generation_mw``     where hydro_id=id  (per block)
     - ``line_exchange(id)``    → ``net_flow_mw``        where line_id=id   (per block)
+    - ``line_direct(id)``      → ``direct_flow_mw``     where line_id=id   (per block)
+    - ``line_reverse(id)``     → ``reverse_flow_mw``    where line_id=id   (per block)
 
     Storage-only constraints produce one row per (scenario, stage) with block_id=0.
     Mixed / generation / exchange constraints produce one row per (scenario, stage, block).
@@ -116,7 +119,7 @@ def evaluate_constraint_expressions(
         for _coeff, param_name, vtype, eid in _parse_expression(c["expression"]):
             if vtype.startswith("hydro"):
                 hydro_ids_needed.add(eid)
-            elif vtype == "line_exchange":
+            elif vtype in ("line_exchange", "line_direct", "line_reverse"):
                 line_ids_needed.add(eid)
             if param_name is not None:
                 resolved = _resolve_param_to_column(param_name)
@@ -162,17 +165,30 @@ def evaluate_constraint_expressions(
         .collect(engine="streaming")
         .to_pandas()
     )
+    # Pull all three flow columns when line-touching terms are referenced;
+    # the per-term branch below picks whichever column matches the
+    # variable type.  ``direct_flow_mw`` and ``reverse_flow_mw`` are
+    # the non-negative LP primitives behind cobre's ``line_direct`` /
+    # ``line_reverse`` variables; ``net_flow_mw = direct - reverse`` is
+    # the signed shorthand referenced by ``line_exchange``.
+    ex_cols = [
+        "scenario_id",
+        "stage_id",
+        "block_id",
+        "line_id",
+        "net_flow_mw",
+        "direct_flow_mw",
+        "reverse_flow_mw",
+    ]
     ex_pd = (
         (
             exchanges_lf.filter(pl.col("line_id").is_in(list(line_ids_needed)))
-            .select(["scenario_id", "stage_id", "block_id", "line_id", "net_flow_mw"])
+            .select(ex_cols)
             .collect(engine="streaming")
             .to_pandas()
         )
         if line_ids_needed
-        else pd.DataFrame(
-            columns=["scenario_id", "stage_id", "block_id", "line_id", "net_flow_mw"]
-        )
+        else pd.DataFrame(columns=ex_cols)
     )
 
     all_results: list[pd.DataFrame] = []
@@ -242,11 +258,16 @@ def evaluate_constraint_expressions(
                         continue
                     sub["_val"] = sub["generation_mw"]
                     join_cols = ["scenario_id", "stage_id", "block_id"]
-                else:  # line_exchange
+                else:  # line_exchange / line_direct / line_reverse
                     sub = ex_pd[ex_pd["line_id"] == eid].copy()
                     if sub.empty:
                         continue
-                    sub["_val"] = sub["net_flow_mw"]
+                    if vtype == "line_direct":
+                        sub["_val"] = sub["direct_flow_mw"]
+                    elif vtype == "line_reverse":
+                        sub["_val"] = sub["reverse_flow_mw"]
+                    else:
+                        sub["_val"] = sub["net_flow_mw"]
                     join_cols = ["scenario_id", "stage_id", "block_id"]
 
                 if param_name is not None:

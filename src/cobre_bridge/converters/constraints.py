@@ -735,9 +735,20 @@ def _parse_formula(
                 )
                 continue
 
-            # If the original direction is reversed relative to canonical, negate.
-            effective_coeff = coeff if from_sys < to_sys else -coeff
-            parsed_terms.append((effective_coeff, f"line_exchange({line_id})"))
+            # NEWAVE's ``ener_interc(A, B)`` is the directional flow from
+            # A to B as a non-negative variable.  Map to Cobre's
+            # ``line_direct``/``line_reverse`` so the sign is encoded by
+            # the variable choice rather than by negating the coefficient
+            # (the latter would dilute the bound when LP solutions route
+            # in the non-canonical direction).  See
+            # ``convert_agrint_constraints`` for the same rule applied to
+            # AGRINT terms.
+            var = (
+                f"line_direct({line_id})"
+                if from_sys < to_sys
+                else f"line_reverse({line_id})"
+            )
+            parsed_terms.append((coeff, var))
 
     if not parsed_terms:
         return None
@@ -1392,7 +1403,18 @@ def convert_agrint_constraints(
     for group_id in sorted(groups.keys()):
         terms_raw = groups[group_id]
 
-        # Build expression: each (A, B, coeff) -> directional line_exchange term
+        # Build expression: each (A, B, coeff) -> directional flow term.
+        # NEWAVE's ``Interc(A→B)`` is the *non-negative directional* flow
+        # from A to B (zero whenever physical flow goes B→A).  Cobre's
+        # ``line_direct(id)`` / ``line_reverse(id)`` are the matching
+        # non-negative LP variables: ``line_direct`` is the flow in the
+        # canonical (src<tgt) direction, ``line_reverse`` the flow in
+        # the opposite direction.
+        #
+        # The naive substitution ``-line_exchange`` (signed net flow,
+        # negated when reversed) would let the LHS go negative when one
+        # term is flowing in its non-canonical direction — diluting the
+        # bound at fictitious hubs and producing incorrect dispatch.
         parsed_terms: list[tuple[float, str]] = []
         for a, b, coeff in terms_raw:
             src, tgt = (a, b) if a < b else (b, a)
@@ -1406,11 +1428,8 @@ def convert_agrint_constraints(
                     b,
                 )
                 continue
-            # Canonical direction is src->tgt (src < tgt).
-            # If flow is A->B and A < B: positive coeff.
-            # If flow is A->B and A > B: reversed direction => negate.
-            effective_coeff = coeff if a < b else -coeff
-            parsed_terms.append((effective_coeff, f"line_exchange({line_id})"))
+            var = f"line_direct({line_id})" if a < b else f"line_reverse({line_id})"
+            parsed_terms.append((coeff, var))
 
         if not parsed_terms:
             _LOG.warning(

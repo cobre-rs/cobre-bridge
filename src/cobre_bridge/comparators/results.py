@@ -84,6 +84,18 @@ class PercentileData:
     cobre_training_seconds: float = 0.0
     cobre_iteration_timing: pl.DataFrame = field(default_factory=pl.DataFrame)
 
+    # --- Generic constraints (RE, AGRINT, VminOP) — LHS comparison ---
+    # Constraint definitions and per-(stage, block) bound table read
+    # straight from the converted Cobre case. ``lhs_newave`` evaluates
+    # each constraint's LHS against NEWAVE outputs (MEDIAS-USIH GHIDUH +
+    # int*.out interchanges) at stage_0based granularity; ``lhs_cobre``
+    # does the same against Cobre simulation parquets, collapsed to
+    # mean across scenarios and blocks.
+    gc_constraints: list[dict] = field(default_factory=list)
+    gc_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
+    gc_lhs_newave: pl.DataFrame = field(default_factory=pl.DataFrame)
+    gc_lhs_cobre: pl.DataFrame = field(default_factory=pl.DataFrame)
+
 
 @dataclass(frozen=True)
 class ResultComparison:
@@ -1096,6 +1108,39 @@ def compare_results(
     cobre_training_seconds = read_cobre_training_duration(cobre_output_dir)
     cobre_iter_timing = read_cobre_iteration_timing(cobre_output_dir)
 
+    # --- Generic constraints LHS comparison (RE / AGRINT / VminOP) ---
+    # The Cobre case directory is one level above the simulation output dir
+    # (cobre_output_dir ends in ``output/``).  Both the constraint
+    # definitions and the per-stage bound parquet live in the case's
+    # ``constraints/`` subdirectory.
+    from cobre_bridge.comparators.constraints_compare import (
+        _load_generic_constraint_bounds,
+        _load_generic_constraints,
+        evaluate_lhs_cobre,
+        evaluate_lhs_newave,
+    )
+
+    cobre_case_dir = cobre_output_dir.parent
+    gc_constraints = _load_generic_constraints(cobre_case_dir)
+    gc_bounds_df = _load_generic_constraint_bounds(cobre_case_dir)
+    if gc_constraints and saidas_dir is not None:
+        _LOG.info(
+            "Comparing %d generic constraints (RE/AGRINT/VminOP)...",
+            len(gc_constraints),
+        )
+        gc_lhs_nw = evaluate_lhs_newave(
+            gc_constraints,
+            nw_hydro,
+            nw_intercambio,
+            alignment,
+            id_map,
+            nw_offset,
+        )
+        gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
+    else:
+        gc_lhs_nw = pl.DataFrame()
+        gc_lhs_cb = pl.DataFrame()
+
     # --- System spillage in MWmes ---
     cobre_spill_energy = read_cobre_spillage_energy(cobre_output_dir)
     if nw_max_stage_0based is not None and not cobre_spill_energy.is_empty():
@@ -1134,6 +1179,10 @@ def compare_results(
         nw_tim_stages=nw_tim_stages,
         cobre_training_seconds=cobre_training_seconds,
         cobre_iteration_timing=cobre_iter_timing,
+        gc_constraints=gc_constraints,
+        gc_bounds=gc_bounds_df,
+        gc_lhs_newave=gc_lhs_nw,
+        gc_lhs_cobre=gc_lhs_cb,
     )
 
     _LOG.info("Results comparison: %d total comparisons", len(results))
