@@ -20,6 +20,8 @@ from cobre_bridge.comparators.charts import (
     future_cost_chart,
     hydro_aggregate_chart,
     hydro_per_bus_chart,
+    hydro_slack_aggregate_chart,
+    hydro_slack_per_bus_chart,
     immediate_cost_chart,
     line_summary_chart,
     overview_metrics,
@@ -321,6 +323,58 @@ def build_comparison_report(
         )
     hydro_parts.append(chart_grid(aggregate_charts))
 
+    # Slack variables: same per-bus + SIN-total treatment as the operational
+    # variables above, but driven by the per-(entity_id, stage_id) Cobre
+    # frame and the NEWAVE slack frame (no ResultComparison rows exist for
+    # slacks).  The inflow non-negativity slack has no NEWAVE counterpart,
+    # so its NEWAVE source is passed as None — the chart still renders the
+    # Cobre Mean + p10/p90 band, just without an overlaid NEWAVE line.
+    nw_hydro_slacks = pctiles.nw_hydro_slacks if pctiles else pl.DataFrame()
+    slack_specs: list[tuple[str, str, bool]] = [
+        ("water_withdrawal_violation_pos_m3s", "Withdrawal Slack Pos (m³/s)", True),
+        ("water_withdrawal_violation_neg_m3s", "Withdrawal Slack Neg (m³/s)", True),
+        ("evaporation_violation_pos_m3s", "Evaporation Slack Pos (m³/s)", True),
+        ("evaporation_violation_neg_m3s", "Evaporation Slack Neg (m³/s)", True),
+        ("inflow_nonnegativity_slack_m3s", "Inflow Non-Negativity Slack (m³/s)", False),
+    ]
+    for var, slack_title, has_newave in slack_specs:
+        hydro_parts.append(section_title(slack_title + " by Bus"))
+        hydro_parts.append(
+            chart_grid(
+                [
+                    wrap_chart(
+                        hydro_slack_per_bus_chart(
+                            cobre_hydro_means,
+                            nw_hydro_slacks if has_newave else None,
+                            var,
+                            slack_title + " by Bus",
+                            hydro_pct,
+                            hydro_meta,
+                            bus_meta,
+                            matched_ids=matched_hydro_ids or None,
+                        )
+                    )
+                ],
+                single=True,
+            )
+        )
+
+    hydro_parts.append(section_title("Hydro Slacks (SIN)"))
+    slack_sin_charts = [
+        wrap_chart(
+            hydro_slack_aggregate_chart(
+                cobre_hydro_means,
+                nw_hydro_slacks if has_newave else None,
+                var,
+                slack_title,
+                hydro_pct,
+                matched_ids=matched_hydro_ids or None,
+            )
+        )
+        for var, slack_title, has_newave in slack_specs
+    ]
+    hydro_parts.append(chart_grid(slack_sin_charts))
+
     tab_contents["tab-hydro"] = "\n".join(hydro_parts)
 
     # --- Hydro Plant Details tab ---
@@ -332,6 +386,7 @@ def build_comparison_report(
         cobre_hydro_per_stage_bounds=(
             pctiles.cobre_hydro_per_stage_bounds if pctiles else pl.DataFrame()
         ),
+        nw_hydro_slacks=(pctiles.nw_hydro_slacks if pctiles else pl.DataFrame()),
     )
 
     # --- Thermal Operation tab ---

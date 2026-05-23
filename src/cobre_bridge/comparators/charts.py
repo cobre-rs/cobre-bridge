@@ -998,6 +998,274 @@ def hydro_aggregate_chart(
     return _plotly_div(traces, layout)
 
 
+def _hydro_per_stage_sum(
+    df: pl.DataFrame | None,
+    variable: str,
+    matched_ids: set[int] | None,
+) -> dict[int, float]:
+    """Sum *variable* across (matched) hydros per ``stage_id``.
+
+    Returns an empty dict when the frame is missing/empty or the column is
+    absent.  Used by the slack-aggregate / slack-per-bus chart helpers to
+    collapse per-(entity_id, stage_id) frames into a per-stage SIN total.
+    """
+    if df is None or df.is_empty() or variable not in df.columns:
+        return {}
+    filtered = df
+    if matched_ids is not None:
+        filtered = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
+    agg = (
+        filtered.group_by("stage_id")
+        .agg(pl.col(variable).sum().alias("v"))
+        .sort("stage_id")
+    )
+    return {int(r["stage_id"]): float(r["v"]) for r in agg.iter_rows(named=True)}
+
+
+def hydro_slack_aggregate_chart(
+    cobre_hydro: pl.DataFrame,
+    nw_slacks: pl.DataFrame | None,
+    variable: str,
+    title: str,
+    pct_df: pl.DataFrame | None = None,
+    matched_ids: set[int] | None = None,
+    unit: str = "m³/s",
+) -> str:
+    """SIN-total slack chart from per-(entity_id, stage_id) frames.
+
+    Mirrors :func:`hydro_aggregate_chart` but reads both sides from
+    per-hydro frames instead of ``ResultComparison`` rows — the four hydro
+    slacks (water-withdrawal pos/neg + evaporation pos/neg) plus the
+    Cobre-only inflow non-negativity slack don't go through the comparison
+    pipeline, so the chart machinery has to consume Cobre's
+    ``cobre_hydro_means`` columns and the NEWAVE ``nw_hydro_slacks`` frame
+    (or ``None`` for slacks without a NEWAVE counterpart) directly.
+    """
+    cobre_by_stage = _hydro_per_stage_sum(cobre_hydro, variable, matched_ids)
+    nw_by_stage = _hydro_per_stage_sum(nw_slacks, variable, matched_ids)
+    if not cobre_by_stage and not nw_by_stage:
+        return f"<p>No {variable} data available.</p>"
+
+    stages = sorted(set(cobre_by_stage) | set(nw_by_stage))
+    traces = _aggregate_percentile_traces(pct_df, variable, stages, matched_ids)
+    if nw_by_stage:
+        traces.append(
+            {
+                "x": stages,
+                "y": [nw_by_stage.get(s, 0) for s in stages],
+                "name": "NEWAVE",
+                "type": "scatter",
+                "mode": "lines",
+                "line": {"color": COLOR_NEWAVE, "width": 2},
+            }
+        )
+    traces.append(
+        {
+            "x": stages,
+            "y": [cobre_by_stage.get(s, 0) for s in stages],
+            "name": "Cobre Mean",
+            "type": "scatter",
+            "mode": "lines",
+            "line": {"color": COLOR_COBRE, "width": 2},
+        }
+    )
+
+    layout = {
+        "title": title,
+        "xaxis": {"title": "Stage"},
+        "yaxis": {"title": f"{title} ({unit})"},
+    }
+    return _plotly_div(traces, layout)
+
+
+def hydro_slack_per_bus_chart(
+    cobre_hydro: pl.DataFrame,
+    nw_slacks: pl.DataFrame | None,
+    variable: str,
+    title: str,
+    pct_df: pl.DataFrame | None,
+    hydro_meta: dict[int, dict],
+    bus_meta: dict[int, dict],
+    matched_ids: set[int] | None = None,
+) -> str:
+    """Per-bus faceted slack chart from per-(entity_id, stage_id) frames.
+
+    Parallel to :func:`hydro_per_bus_chart` for the slack variables that
+    aren't surfaced through ``ResultComparison`` (no Cobre/NEWAVE comparison
+    row exists for them).  Plants are bucketed by their owning bus via
+    ``hydro_meta[cobre_id]["bus_id"]``; fictitious buses (``NOFICT*``) are
+    excluded, matching the existing per-bus charts.  When *nw_slacks* is
+    ``None`` or lacks the column, the NEWAVE trace is omitted (used for
+    ``inflow_nonnegativity_slack_m3s`` which has no NEWAVE counterpart).
+    """
+    if cobre_hydro.is_empty() or variable not in cobre_hydro.columns:
+        return f"<p>No {variable} data available.</p>"
+
+    bus_id_to_name: dict[int, str] = {
+        bid: meta.get("name", str(bid)) for bid, meta in bus_meta.items()
+    }
+    hydro_to_bus: dict[int, int] = {
+        hid: meta["bus_id"]
+        for hid, meta in hydro_meta.items()
+        if meta.get("bus_id") is not None
+    }
+
+    def _per_bus_from_frame(
+        df: pl.DataFrame | None,
+    ) -> tuple[dict[str, dict[int, float]], dict[str, set[int]]]:
+        out: dict[str, dict[int, float]] = {}
+        ids: dict[str, set[int]] = {}
+        if df is None or df.is_empty() or variable not in df.columns:
+            return out, ids
+        frame = df
+        if matched_ids is not None:
+            frame = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
+        fictitious_skip = {"NOFICT1", "NOFICT2", "NOFICT3"}
+        for row in frame.iter_rows(named=True):
+            eid = int(row["entity_id"])
+            bus_id = hydro_to_bus.get(eid)
+            if bus_id is None:
+                continue
+            bus_name = bus_id_to_name.get(bus_id, str(bus_id)).upper()
+            if bus_name in fictitious_skip:
+                continue
+            sid = int(row["stage_id"])
+            val = row.get(variable)
+            if val is None:
+                continue
+            out.setdefault(bus_name, {})
+            out[bus_name][sid] = out[bus_name].get(sid, 0.0) + float(val)
+            ids.setdefault(bus_name, set()).add(eid)
+        return out, ids
+
+    per_bus_cb, per_bus_ids = _per_bus_from_frame(cobre_hydro)
+    per_bus_nw, _ = _per_bus_from_frame(nw_slacks)
+    if not per_bus_cb and not per_bus_nw:
+        return f"<p>No {variable} data mapped to buses.</p>"
+
+    ordered = [b for b in _HYDRO_BUS_ORDER if b in per_bus_cb or b in per_bus_nw]
+    ordered += [
+        b for b in sorted(set(per_bus_cb) | set(per_bus_nw)) if b not in ordered
+    ]
+
+    p10_col = f"{variable}_p10"
+    p90_col = f"{variable}_p90"
+    per_bus_pct: dict[str, dict[int, tuple[float, float]]] = {}
+    if (
+        pct_df is not None
+        and not pct_df.is_empty()
+        and {p10_col, p90_col}.issubset(pct_df.columns)
+    ):
+        for bus_name, ids in per_bus_ids.items():
+            if not ids:
+                continue
+            agg = (
+                pct_df.filter(pl.col("entity_id").is_in(list(ids)))
+                .group_by("stage_id")
+                .agg(pl.col(p10_col).sum(), pl.col(p90_col).sum())
+            )
+            per_bus_pct[bus_name] = {
+                int(r["stage_id"]): (float(r[p10_col]), float(r[p90_col]))
+                for r in agg.iter_rows(named=True)
+            }
+
+    ncols = 2
+    nrows = (len(ordered) + ncols - 1) // ncols
+    row_gap = 0.06
+    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
+    col_gap = 0.05
+    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+
+    traces: list[dict] = []
+    layout: dict = {"title": title}
+    first = True
+
+    for idx, bus_name in enumerate(ordered):
+        cb_map = per_bus_cb.get(bus_name, {})
+        nw_map = per_bus_nw.get(bus_name, {})
+        stages = sorted(set(cb_map) | set(nw_map))
+        if not stages:
+            continue
+
+        row_i = idx // ncols
+        col_i = idx % ncols
+        ax_idx = idx + 1
+        xa = f"x{ax_idx}" if ax_idx > 1 else "x"
+        ya = f"y{ax_idx}" if ax_idx > 1 else "y"
+
+        x0 = col_i * (col_w + col_gap)
+        x1 = x0 + col_w
+        y1 = 1.0 - row_i * (row_h + row_gap)
+        y0 = y1 - row_h
+
+        xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
+        ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
+        layout[xa_key] = {
+            "domain": [round(x0, 3), round(x1, 3)],
+            "title": "Stage" if row_i == nrows - 1 else "",
+            "anchor": ya,
+        }
+        layout[ya_key] = {
+            "domain": [round(y0, 3), round(y1, 3)],
+            "title": bus_name,
+            "anchor": xa,
+        }
+
+        bus_pct = per_bus_pct.get(bus_name, {})
+        if bus_pct:
+            p10 = [bus_pct.get(s, (0.0, 0.0))[0] for s in stages]
+            p90 = [bus_pct.get(s, (0.0, 0.0))[1] for s in stages]
+            traces.append(
+                {
+                    "x": stages + stages[::-1],
+                    "y": p90 + p10[::-1],
+                    "fill": "toself",
+                    "fillcolor": _BAND_FILL,
+                    "line": {"color": _BAND_LINE},
+                    "name": "Cobre P10–P90",
+                    "hoverinfo": "skip",
+                    "type": "scatter",
+                    "xaxis": xa,
+                    "yaxis": ya,
+                    "legendgroup": "band",
+                    "showlegend": first,
+                }
+            )
+
+        if nw_map:
+            traces.append(
+                {
+                    "x": stages,
+                    "y": [nw_map.get(s, 0.0) for s in stages],
+                    "name": "NEWAVE",
+                    "type": "scatter",
+                    "mode": "lines",
+                    "line": {"color": COLOR_NEWAVE, "width": 2},
+                    "xaxis": xa,
+                    "yaxis": ya,
+                    "legendgroup": "nw",
+                    "showlegend": first,
+                }
+            )
+        traces.append(
+            {
+                "x": stages,
+                "y": [cb_map.get(s, 0.0) for s in stages],
+                "name": "Cobre Mean",
+                "type": "scatter",
+                "mode": "lines",
+                "line": {"color": COLOR_COBRE, "width": 2},
+                "xaxis": xa,
+                "yaxis": ya,
+                "legendgroup": "cb",
+                "showlegend": first,
+            }
+        )
+        first = False
+
+    return _plotly_div(traces, layout, height=max(nrows * 300 + 80, 360))
+
+
 # -------------------------------------------------------------------
 # Thermal tab charts
 # -------------------------------------------------------------------
@@ -2315,6 +2583,7 @@ def build_hydro_detail_tab(
     cobre_hydro: pl.DataFrame | None = None,
     cobre_hydro_meta: dict[int, dict] | None = None,
     cobre_hydro_per_stage_bounds: pl.DataFrame | None = None,
+    nw_hydro_slacks: pl.DataFrame | None = None,
 ) -> str:
     """Build interactive per-plant hydro detail with JS dropdown.
 
@@ -2331,6 +2600,13 @@ def build_hydro_detail_tab(
     overrides from ``constraints/hydro_bounds.parquet`` replace the
     static value at the affected stages — matching what the LP
     actually saw.
+
+    When ``nw_hydro_slacks`` is supplied, the NEWAVE
+    ``VIOL_POS_VRETIRUH`` / ``VIOL_NEG_VRETIRUH`` series (converted to
+    m³/s) are rendered as a NEWAVE line on the two withdrawal-slack
+    panels alongside the existing Cobre Mean + p10/p90 band.  The
+    inflow-non-negativity slack stays Cobre-only because NEWAVE has no
+    direct counterpart.
     """
     hydro_data = [r for r in results if r.entity_type == "hydro"]
     if not hydro_data:
@@ -2393,6 +2669,25 @@ def build_hydro_detail_tab(
 
     static_meta = cobre_hydro_meta or {}
 
+    # cobre_id -> {var: {stage_id: nw_value}} for the two withdrawal slacks.
+    # Drives the NEWAVE line on the matching cobre-only chart panels.
+    nw_slack_lookup: dict[int, dict[str, dict[int, float]]] = {}
+    _NW_SLACK_VARS = (
+        "water_withdrawal_violation_pos_m3s",
+        "water_withdrawal_violation_neg_m3s",
+    )
+    if nw_hydro_slacks is not None and not nw_hydro_slacks.is_empty():
+        avail_nw_slacks = [v for v in _NW_SLACK_VARS if v in nw_hydro_slacks.columns]
+        for row in nw_hydro_slacks.iter_rows(named=True):
+            eid = int(row["entity_id"])
+            sid = int(row["stage_id"])
+            entry_map = nw_slack_lookup.setdefault(eid, {})
+            for v in avail_nw_slacks:
+                val = row.get(v)
+                if val is None:
+                    continue
+                entry_map.setdefault(v, {})[sid] = float(val)
+
     all_vars = _HYDRO_VARIABLES + _HYDRO_COBRE_ONLY_VARIABLES
 
     js_plants: dict[str, dict] = {}
@@ -2411,11 +2706,18 @@ def build_hydro_detail_tab(
             entry[f"{var_key}_nw"] = [stage_data[s][0] for s in stages]
             entry[f"{var_key}_cb"] = [stage_data[s][1] for s in stages]
         cobre_only = cobre_only_lookup.get(cid, {})
+        nw_slacks_for_plant = nw_slack_lookup.get(cid, {})
         for var_key, _var_label in _HYDRO_COBRE_ONLY_VARIABLES:
             stage_data_co = cobre_only.get(var_key, {})
             stages = sorted(stage_data_co.keys())
             entry[f"{var_key}_stages"] = stages
-            entry[f"{var_key}_nw"] = []
+            nw_stage_map = nw_slacks_for_plant.get(var_key)
+            if nw_stage_map:
+                entry[f"{var_key}_nw"] = [
+                    round(nw_stage_map.get(s, 0.0), 2) for s in stages
+                ]
+            else:
+                entry[f"{var_key}_nw"] = []
             entry[f"{var_key}_cb"] = [round(stage_data_co[s], 2) for s in stages]
         # Cobre LP gen_max overlay (dashed trace). Aligned to the
         # generation_mw stage grid populated above.
