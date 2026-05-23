@@ -661,16 +661,21 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "estimation": estimation,
         "training": training_section,
         "modeling": {
-            # `method: "penalty"` enables the inflow-non-negativity slack columns
-            # in the LP. The slack penalty itself comes from
-            # `penalties.json::hydro.inflow_nonnegativity_cost`, which the
-            # converter populates via `convert_penalties`. The legacy
-            # `penalty_cost` field in this block is *deprecated* (see cobre
-            # config schema docs) and ignored when penalties.json supplies
-            # the value, so we intentionally omit it here to avoid misleading
-            # readers about which number actually drives the LP.
+            # `method: "truncation_with_penalty"` clamps negative PAR(p) inflow
+            # draws to zero before LP patching *and* keeps the inflow-non-
+            # negativity slack columns enabled.  The clamp closes the
+            # "free water" exploit where the LP would otherwise route negative
+            # noise through the withdrawal-neg slack (cheaper than the
+            # non-negativity slack on the cobre-bridge calibration); the
+            # slack columns remain as a defensive backstop for any edge case
+            # the truncation misses.  The slack penalty itself still comes
+            # from `penalties.json::hydro.inflow_nonnegativity_cost`, which
+            # `convert_penalties` populates.  The legacy `penalty_cost` field
+            # in this block is *deprecated* (see cobre config schema docs)
+            # and ignored when penalties.json supplies the value, so we
+            # intentionally omit it here.
             "inflow_non_negativity": {
-                "method": "penalty",
+                "method": "truncation_with_penalty",
             },
         },
         "exports": {
