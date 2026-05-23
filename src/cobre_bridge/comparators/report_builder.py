@@ -330,9 +330,13 @@ def build_comparison_report(
     # so its NEWAVE source is passed as None — the chart still renders the
     # Cobre Mean + p10/p90 band, just without an overlaid NEWAVE line.
     nw_hydro_slacks = pctiles.nw_hydro_slacks if pctiles else pl.DataFrame()
+    # Withdrawal pos/neg are SWAPPED to follow NEWAVE's sign convention; the
+    # ``_NW_HYDRO_SLACK_VARS`` mapping in ``results.py`` is correspondingly
+    # swapped so each panel pairs the right Cobre column with the right
+    # NEWAVE series.  Evaporation pos/neg already share NEWAVE's convention.
     slack_specs: list[tuple[str, str, bool]] = [
-        ("water_withdrawal_violation_pos_m3s", "Withdrawal Slack Pos (m³/s)", True),
-        ("water_withdrawal_violation_neg_m3s", "Withdrawal Slack Neg (m³/s)", True),
+        ("water_withdrawal_violation_neg_m3s", "Withdrawal Slack Pos (m³/s)", True),
+        ("water_withdrawal_violation_pos_m3s", "Withdrawal Slack Neg (m³/s)", True),
         ("evaporation_violation_pos_m3s", "Evaporation Slack Pos (m³/s)", True),
         ("evaporation_violation_neg_m3s", "Evaporation Slack Neg (m³/s)", True),
         ("inflow_nonnegativity_slack_m3s", "Inflow Non-Negativity Slack (m³/s)", False),

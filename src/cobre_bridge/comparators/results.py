@@ -318,9 +318,20 @@ def _build_gen_max_overlay(
 # reports round the month-length factor to 2.63 (≈ 730 h × 3600 s / 1e6), so
 # dividing by 2.63 yields apples-to-apples flows matching what
 # ``_compare_hydros`` already does for the VEVAPUH / VRETIRUH realized series.
+#
+# WITHDRAWAL pos/neg are SWAPPED on purpose: Cobre's sign convention for the
+# withdrawal slack is the inverse of NEWAVE's, so the column NEWAVE calls
+# ``VIOL_POS_VRETIRUH`` lines up physically with Cobre's
+# ``water_withdrawal_violation_neg_m3s`` (and vice versa).  Mapping them this
+# way keeps the comparison HTML's "Withdrawal Slack Pos / Neg" panels
+# self-consistent under NEWAVE's labelling — the display labels in
+# ``_HYDRO_COBRE_ONLY_VARIABLES`` / ``report_builder.slack_specs`` are
+# correspondingly swapped so each panel shows the column that matches its
+# header.  Evaporation pos/neg share NEWAVE's convention and don't need the
+# swap.
 _NW_HYDRO_SLACK_VARS: dict[str, str] = {
-    "VIOL_POS_VRETIRUH": "water_withdrawal_violation_pos_m3s",
-    "VIOL_NEG_VRETIRUH": "water_withdrawal_violation_neg_m3s",
+    "VIOL_POS_VRETIRUH": "water_withdrawal_violation_neg_m3s",
+    "VIOL_NEG_VRETIRUH": "water_withdrawal_violation_pos_m3s",
     "VIOL_POS_EVAP": "evaporation_violation_pos_m3s",
     "VIOL_NEG_EVAP": "evaporation_violation_neg_m3s",
 }

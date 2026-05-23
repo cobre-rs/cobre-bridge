@@ -2405,12 +2405,21 @@ _HYDRO_VARIABLES = [
 
 # Cobre-only per-plant variables (NEWAVE has no per-plant equivalent).
 # Appended to the dropdown after the comparison variables.
+#
+# Withdrawal-slack ``pos`` / ``neg`` labels follow NEWAVE's convention, which
+# is the *inverse* of Cobre's column-name convention — Cobre's
+# ``water_withdrawal_violation_pos_m3s`` is the physical equivalent of
+# NEWAVE's ``VIOL_NEG_VRETIRUH`` and vice versa.  The
+# ``_NW_HYDRO_SLACK_VARS`` mapping in ``results.py`` is correspondingly
+# swapped so each panel pairs the right Cobre column with the right NEWAVE
+# series under its NEWAVE-style label.  Evaporation slacks share NEWAVE's
+# convention so no swap is needed there.
 _HYDRO_COBRE_ONLY_VARIABLES = [
     ("stored_energy_initial_mwh", "Stored Energy Initial (MWh)"),
     ("stored_energy_final_mwh", "Stored Energy Final (MWh)"),
     ("incremental_inflow_energy_mw", "Natural Inflow Energy (MW)"),
-    ("water_withdrawal_violation_pos_m3s", "Withdrawal Slack Pos (m³/s)"),
-    ("water_withdrawal_violation_neg_m3s", "Withdrawal Slack Neg (m³/s)"),
+    ("water_withdrawal_violation_neg_m3s", "Withdrawal Slack Pos (m³/s)"),
+    ("water_withdrawal_violation_pos_m3s", "Withdrawal Slack Neg (m³/s)"),
     ("inflow_nonnegativity_slack_m3s", "Inflow Non-Negativity Slack (m³/s)"),
 ]
 
