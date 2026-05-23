@@ -582,8 +582,8 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             "check_frequency": 1,
             "cut_activity_tolerance": 1e-6,
             "enabled": cut_selection_enabled,
-            "method": "domination",
-            "domination_epsilon": 0.0,
+            "method": "lml1",
+            "memory_window": 0,
         },
     }
     if not training_enabled:
