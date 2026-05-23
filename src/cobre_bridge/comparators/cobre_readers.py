@@ -932,6 +932,14 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
         "spillage_m3s",
         "evaporation_m3s",
         "outflow_m3s",
+        # Operational slacks — surfaced as cobre-only series on the
+        # plant-detail tab.  Percentiles are needed so the band+P10/P90
+        # tooltip works the same as for the rest of the flow variables;
+        # without them only the Cobre Mean line is plotted and the
+        # unified-x hover has nothing to lock onto.
+        "water_withdrawal_violation_pos_m3s",
+        "water_withdrawal_violation_neg_m3s",
+        "inflow_nonnegativity_slack_m3s",
     ]
     stage_cols = [
         "storage_final_hm3",
