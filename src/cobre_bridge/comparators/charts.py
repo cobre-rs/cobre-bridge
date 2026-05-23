@@ -625,6 +625,10 @@ def _aggregate_percentile_traces(
             "type": "scatter",
             "legendgroup": "band",
             "showlegend": True,
+            # Wrap-around polygon — skip hover so the cursor's x-position
+            # picks up the meaningful p10/p90 line traces instead of the
+            # band's literal name.
+            "hoverinfo": "skip",
         },
         {
             "x": stages,
@@ -897,6 +901,7 @@ def hydro_per_bus_chart(
                     "fillcolor": _BAND_FILL,
                     "line": {"color": _BAND_LINE},
                     "name": "Cobre P10–P90",
+                    "hoverinfo": "skip",
                     "type": "scatter",
                     "xaxis": xa,
                     "yaxis": ya,
@@ -1162,6 +1167,7 @@ def line_summary_chart(
                     "fillcolor": _BAND_FILL,
                     "line": {"color": _BAND_LINE},
                     "name": "Cobre P10–P90",
+                    "hoverinfo": "skip",
                     "type": "scatter",
                     "xaxis": xa,
                     "yaxis": ya,
@@ -1912,6 +1918,7 @@ def build_energy_balance_tab(
                         "fillcolor": _BAND_FILL,
                         "line": {"color": _BAND_LINE},
                         "name": "Cobre P10–P90",
+                        "hoverinfo": "skip",
                         "type": "scatter",
                         "xaxis": xa,
                         "yaxis": ya,
@@ -2057,6 +2064,7 @@ def system_per_bus_chart(
                     "fillcolor": _BAND_FILL,
                     "line": {"color": _BAND_LINE},
                     "name": "Cobre P10–P90",
+                    "hoverinfo": "skip",
                     "type": "scatter",
                     "xaxis": xa,
                     "yaxis": ya,
@@ -2133,7 +2141,36 @@ _HYDRO_COBRE_ONLY_VARIABLES = [
     ("stored_energy_initial_mwh", "Stored Energy Initial (MWh)"),
     ("stored_energy_final_mwh", "Stored Energy Final (MWh)"),
     ("incremental_inflow_energy_mw", "Natural Inflow Energy (MW)"),
+    ("water_withdrawal_violation_pos_m3s", "Withdrawal Slack Pos (m³/s)"),
+    ("water_withdrawal_violation_neg_m3s", "Withdrawal Slack Neg (m³/s)"),
+    ("inflow_nonnegativity_slack_m3s", "Inflow Non-Negativity Slack (m³/s)"),
 ]
+
+# Per-comparison-variable bound mapping: which static / per-stage bound
+# columns to overlay as dashed reference lines.  Each entry is
+# ``(static_meta_key, per_stage_bound_col)`` for the lower and upper
+# bound respectively; either side may be ``None`` (e.g. "Outflow" has
+# a min but typically no max in cobre).  The dashboard renders one
+# dashed line per non-null bound; per-stage values shadow the static
+# value when both are present at a given stage.
+_HYDRO_BOUND_OVERLAY: dict[str, dict[str, tuple[str | None, str | None]]] = {
+    "storage_final_hm3": {
+        "min": ("min_storage_hm3", "min_storage_hm3"),
+        "max": ("max_storage_hm3", "max_storage_hm3"),
+    },
+    "generation_mw": {
+        "min": ("min_generation_mw", "min_generation_mw"),
+        "max": ("max_generation_mw", None),
+    },
+    "turbined_m3s": {
+        "min": ("min_turbined_m3s", "min_turbined_m3s"),
+        "max": ("max_turbined_m3s", "max_turbined_m3s"),
+    },
+    "outflow_m3s": {
+        "min": ("min_outflow_m3s", "min_outflow_m3s"),
+        "max": ("max_outflow_m3s", None),
+    },
+}
 
 
 def _enrich_with_percentiles(
@@ -2276,12 +2313,24 @@ def build_hydro_detail_tab(
     results: list[ResultComparison],
     pct_df: pl.DataFrame | None = None,
     cobre_hydro: pl.DataFrame | None = None,
+    cobre_hydro_meta: dict[int, dict] | None = None,
+    cobre_hydro_per_stage_bounds: pl.DataFrame | None = None,
 ) -> str:
     """Build interactive per-plant hydro detail with JS dropdown.
 
     Comparison variables (NEWAVE + Cobre) are populated from ``results``.
-    Cobre-only variables (EARM, ENA) are populated from ``cobre_hydro``
-    if provided — these display only the Cobre line and band.
+    Cobre-only variables (EARM, ENA, plus the three operational slacks:
+    withdrawal pos/neg and inflow non-negativity) are populated from
+    ``cobre_hydro`` if provided — these display only the Cobre line and
+    band.
+
+    When ``cobre_hydro_meta`` is supplied, static reservoir / outflow /
+    turbined / generation bounds are surfaced as dashed reference lines
+    on the matching variable charts.  When
+    ``cobre_hydro_per_stage_bounds`` is also supplied, any per-stage
+    overrides from ``constraints/hydro_bounds.parquet`` replace the
+    static value at the affected stages — matching what the LP
+    actually saw.
     """
     hydro_data = [r for r in results if r.entity_type == "hydro"]
     if not hydro_data:
@@ -2325,6 +2374,25 @@ def build_hydro_detail_tab(
                 if val_cb is not None:
                     gen_max_cb_lookup.setdefault(eid, {})[sid] = float(val_cb)
 
+    # cobre_id -> bound_col -> {stage: value} for the per-stage overrides
+    # supplied by ``hydro_bounds.parquet``.  Falls back to the empty dict
+    # when the parquet is absent.
+    per_stage_bounds_lookup: dict[int, dict[str, dict[int, float]]] = {}
+    if (
+        cobre_hydro_per_stage_bounds is not None
+        and not cobre_hydro_per_stage_bounds.is_empty()
+    ):
+        for row in cobre_hydro_per_stage_bounds.iter_rows(named=True):
+            eid = int(row["entity_id"])
+            sid = int(row["stage_id"])
+            entry_map = per_stage_bounds_lookup.setdefault(eid, {})
+            for col, val in row.items():
+                if col in ("entity_id", "stage_id") or val is None:
+                    continue
+                entry_map.setdefault(col, {})[sid] = float(val)
+
+    static_meta = cobre_hydro_meta or {}
+
     all_vars = _HYDRO_VARIABLES + _HYDRO_COBRE_ONLY_VARIABLES
 
     js_plants: dict[str, dict] = {}
@@ -2357,6 +2425,38 @@ def build_hydro_detail_tab(
             entry["generation_mw_max_cb"] = [
                 round(cb_max_map.get(s, 0.0), 2) for s in gen_stages
             ]
+
+        # Bound overlays per variable.  Static values come from
+        # ``hydros.json`` via cobre_hydro_meta; per-stage rows in
+        # hydro_bounds.parquet shadow the static value at the matching
+        # stages.  When the bound is structurally absent (e.g.
+        # max_outflow), we skip emitting the array so the JS layer
+        # doesn't draw a constant-zero dashed line.
+        meta = static_meta.get(cid, {})
+        per_stage_overrides = per_stage_bounds_lookup.get(cid, {})
+        for var_key, sides in _HYDRO_BOUND_OVERLAY.items():
+            var_stages = entry.get(f"{var_key}_stages", [])
+            if not var_stages:
+                continue
+            for side, (static_key, ps_key) in sides.items():
+                static_val = meta.get(static_key) if static_key is not None else None
+                ps_overrides = per_stage_overrides.get(ps_key, {}) if ps_key else {}
+                if static_val is None and not ps_overrides:
+                    continue
+                series = []
+                any_value = False
+                for s in var_stages:
+                    v = ps_overrides.get(s)
+                    if v is None and static_val is not None:
+                        v = static_val
+                    if v is None:
+                        series.append(None)
+                    else:
+                        series.append(round(float(v), 4))
+                        any_value = True
+                if any_value:
+                    entry[f"{var_key}_bound_{side}"] = series
+
         js_plants[pid] = entry
 
     _enrich_with_percentiles(js_plants, all_vars, pct_df)
@@ -2481,17 +2581,22 @@ def _build_interactive_detail_html(
                     name: 'Cobre P10\u2013P90',
                     type: 'scatter',
                     legendgroup: 'band',
-                    showlegend: true
+                    showlegend: true,
+                    // Skip hover on the wrap-around polygon \u2014 its y values
+                    // are the reversed-p10 closing edge and have no
+                    // meaning at the cursor x.  Real values come from
+                    // the visible p10 / p90 line traces below.
+                    hoverinfo: 'skip'
                 }});
                 traces.push({{
                     x: s, y: p10,
-                    name: 'P10', type: 'scatter', mode: 'lines',
+                    name: 'Cobre P10', type: 'scatter', mode: 'lines',
                     line: {{color: '{COLOR_COBRE}', width: 1, dash: 'dot'}},
                     legendgroup: 'band', showlegend: false
                 }});
                 traces.push({{
                     x: s, y: p90,
-                    name: 'P90', type: 'scatter', mode: 'lines',
+                    name: 'Cobre P90', type: 'scatter', mode: 'lines',
                     line: {{color: '{COLOR_COBRE}', width: 1, dash: 'dot'}},
                     legendgroup: 'band', showlegend: false
                 }});
@@ -2507,6 +2612,24 @@ def _build_interactive_detail_html(
                 traces.push({{x: s, y: maxCb, name: 'Cobre LP gen_max',
                     type: 'scatter', mode: 'lines',
                     line: {{color: '{COLOR_COBRE}', width: 1.5, dash: 'dash'}}}});
+            }}
+            // Bound overlays (static from hydros.json, with per-stage
+            // overrides from hydro_bounds.parquet shadowing where present).
+            // Rendered in a muted grey so they sit behind the comparison
+            // traces without competing for attention.  ``connectgaps:false``
+            // ensures stages where the bound is structurally undefined
+            // produce a gap in the dashed line.
+            var bMin = d['{var_key}_bound_min'];
+            if (bMin && bMin.length > 0) {{
+                traces.push({{x: s, y: bMin, name: 'Lower bound',
+                    type: 'scatter', mode: 'lines', connectgaps: false,
+                    line: {{color: '#888', width: 1.2, dash: 'dash'}}}});
+            }}
+            var bMax = d['{var_key}_bound_max'];
+            if (bMax && bMax.length > 0) {{
+                traces.push({{x: s, y: bMax, name: 'Upper bound',
+                    type: 'scatter', mode: 'lines', connectgaps: false,
+                    line: {{color: '#888', width: 1.2, dash: 'dash'}}}});
             }}
             Plotly.react('{div_id}', traces, {{
                 title: d.name + ' \u2014 {var_label}',

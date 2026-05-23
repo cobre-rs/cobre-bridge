@@ -2280,16 +2280,19 @@ def convert_storage_bounds(
 
 _PIMENTAL_NEWAVE_CODE = 314
 _BELO_MONTE_NEWAVE_CODE = 288
-_PIMENTAL_DIVERSION_MAX_M3S = 13_900.0
+# NEWAVE accounts for the PIMENTAL→BELO MONTE water transfer through the
+# fictitious-plant cascade rather than an explicit diversion channel.  Cobre
+# has no FICT-plant machinery in the LP, so without a real diversion link
+# PIMENTAL accumulates excess water that has nowhere to go (it would have
+# to spill into the sea even though BELO MONTE downstream is starving).
+# A diversion with the BELO MONTE-canal nameplate capacity of 13 000 m³/s
+# lets cobre route the flow the same way NEWAVE accounts for it.
+_PIMENTAL_DIVERSION_MAX_M3S = 13_000.0
 
 
 def _make_diversion(newave_code: int, id_map: NewaveIdMap) -> dict | None:
     """Return a diversion dict for PIMENTAL, ``None`` for all other plants."""
-    # TEMPORARILY DISABLED: comparison study against NEWAVE which does not
-    # model an explicit PIMENTAL→BELO MONTE diversion. To re-enable, restore
-    # the body below.
-    return None
-    if newave_code != _PIMENTAL_NEWAVE_CODE:  # type: ignore[unreachable]
+    if newave_code != _PIMENTAL_NEWAVE_CODE:
         return None
     try:
         bm_id = id_map.hydro_id(_BELO_MONTE_NEWAVE_CODE)

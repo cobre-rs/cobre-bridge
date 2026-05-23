@@ -46,6 +46,13 @@ _FLOW_VARS: list[str] = [
     "turbined_m3s",
     "spillage_m3s",
     "evaporation_m3s",
+    # Operational slack columns surfaced as cobre-only series so the user
+    # can see at a glance which constraints the LP had to relax.  These
+    # have no NEWAVE counterpart — they're plotted with the standard
+    # p10/p50/p90 band like any other flow variable.
+    "water_withdrawal_violation_pos_m3s",
+    "water_withdrawal_violation_neg_m3s",
+    "inflow_nonnegativity_slack_m3s",
 ]
 
 # Stage-level variables: filter block_id == 0
@@ -311,6 +318,9 @@ def _var_short(var: str) -> str:
         "stored_energy_final_mwh": "earm",
         "incremental_inflow_energy_mw": "ena",
         "equivalent_productivity_mw_per_m3s": "rhoeq",
+        "water_withdrawal_violation_pos_m3s": "wpos",
+        "water_withdrawal_violation_neg_m3s": "wneg",
+        "inflow_nonnegativity_slack_m3s": "innn",
     }
     return _MAP.get(var, var)
 
@@ -797,6 +807,20 @@ def build_hydro_explorer(
             ]
         ),
     )
+    # Operational slack columns: water-withdrawal violation in both
+    # directions (positive = over-withdrew, negative = under-withdrew)
+    # plus the inflow non-negativity slack — useful to localize which
+    # LP constraints were relaxed under stochastic noise.
+    slacks_section = collapsible_section(
+        "Operational Slacks",
+        chart_grid(
+            [
+                wrap_chart(_chart_div("hp-wpos")),
+                wrap_chart(_chart_div("hp-wneg")),
+                wrap_chart(_chart_div("hp-innn")),
+            ]
+        ),
+    )
 
     band_toggle = (
         '<div class="explorer-band-toggle" style="padding:4px 8px;">'
@@ -810,6 +834,7 @@ def build_hydro_explorer(
         + water_balance_section
         + generation_section
         + energy_section
+        + slacks_section
         + "</div>"
     )
 
@@ -999,6 +1024,37 @@ function renderHydroDetail(containerId, d) {
       plotlyLine(lbl, d.rhoeq_p90, '#795548', 'P90', 1, 'dot'),
     ], plotlyLayout({title: 'Equivalent Productivity (MW/(m\u00b3/s))', yaxis: {title: 'MW/(m\u00b3/s)'}}), _HC);
   }
+
+  // Operational slacks (m\u00b3/s) \u2014 each is silent when the LP never
+  // touched it.  Plotted in the standard p10/p50/p90 idiom so the user
+  // can see at a glance whether a violation was a tail event (band
+  // wide, p50 near zero) or systematic (whole band non-zero).
+  var wposBand = plotlyBand(lbl, d.wpos_p10, d.wpos_p90, 'rgba(244,67,54,0.15)', 'P10\u2013P90');
+  wposBand.visible = _peBandVisible;
+  Plotly.react('hp-wpos', [
+    wposBand,
+    plotlyLine(lbl, d.wpos_p50, '#F44336', 'P50'),
+    plotlyLine(lbl, d.wpos_p10, '#F44336', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.wpos_p90, '#F44336', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Withdrawal Slack Pos (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _HC);
+
+  var wnegBand = plotlyBand(lbl, d.wneg_p10, d.wneg_p90, 'rgba(244,67,54,0.15)', 'P10\u2013P90');
+  wnegBand.visible = _peBandVisible;
+  Plotly.react('hp-wneg', [
+    wnegBand,
+    plotlyLine(lbl, d.wneg_p50, '#F44336', 'P50'),
+    plotlyLine(lbl, d.wneg_p10, '#F44336', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.wneg_p90, '#F44336', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Withdrawal Slack Neg (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _HC);
+
+  var innnBand = plotlyBand(lbl, d.innn_p10, d.innn_p90, 'rgba(156,39,176,0.15)', 'P10\u2013P90');
+  innnBand.visible = _peBandVisible;
+  Plotly.react('hp-innn', [
+    innnBand,
+    plotlyLine(lbl, d.innn_p50, '#9C27B0', 'P50'),
+    plotlyLine(lbl, d.innn_p10, '#9C27B0', 'P10', 1, 'dot'),
+    plotlyLine(lbl, d.innn_p90, '#9C27B0', 'P90', 1, 'dot'),
+  ], plotlyLayout({title: 'Inflow Non-Negativity Slack (m\u00b3/s)', yaxis: {title: 'm\u00b3/s'}}), _HC);
 }
 
 var _HP_PALETTE = ['#2196F3', '#FF9800', '#4CAF50'];
@@ -1044,6 +1100,15 @@ function renderHydroComparison(entries, labels) {
     Plotly.react('hp-rhoeq', _buildTraces('rhoeq_p50'),
       plotlyLayout({title: 'Equivalent Productivity \u2014 Comparison', yaxis: {title: 'MW/(m\u00b3/s)'}}), _HC);
   }
+
+  // Slack-variable comparison mode (silent no-op when every selected
+  // plant has zero slack \u2014 the trace just shows a flat zero line).
+  Plotly.react('hp-wpos', _buildTraces('wpos_p50'),
+    plotlyLayout({title: 'Withdrawal Slack Pos (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _HC);
+  Plotly.react('hp-wneg', _buildTraces('wneg_p50'),
+    plotlyLayout({title: 'Withdrawal Slack Neg (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _HC);
+  Plotly.react('hp-innn', _buildTraces('innn_p50'),
+    plotlyLayout({title: 'Inflow Non-Negativity Slack (m\u00b3/s) \u2014 Comparison', yaxis: {title: 'm\u00b3/s'}}), _HC);
 }
 
 initPlantExplorer({
@@ -1059,13 +1124,13 @@ initComparisonMode({
   tableId: 'hp-tbody',
   dataVar: 'HP',
   labelsVar: 'HP_LABELS',
-  chartIds: ['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv','hp-earm','hp-ena','hp-rhoeq'],
+  chartIds: ['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv','hp-earm','hp-ena','hp-rhoeq','hp-wpos','hp-wneg','hp-innn'],
   renderComparison: renderHydroComparison,
   renderDetail: renderHydroDetail,
   maxCompare: 3
 });
 
-syncHover(['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv','hp-earm','hp-ena','hp-rhoeq']);
+syncHover(['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv','hp-earm','hp-ena','hp-rhoeq','hp-wpos','hp-wneg','hp-innn']);
 """
     )
 

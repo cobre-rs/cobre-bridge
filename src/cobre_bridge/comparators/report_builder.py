@@ -328,6 +328,10 @@ def build_comparison_report(
         results,
         hydro_pct,
         cobre_hydro_means,
+        cobre_hydro_meta=pctiles.cobre_hydro_meta if pctiles else {},
+        cobre_hydro_per_stage_bounds=(
+            pctiles.cobre_hydro_per_stage_bounds if pctiles else pl.DataFrame()
+        ),
     )
 
     # --- Thermal Operation tab ---

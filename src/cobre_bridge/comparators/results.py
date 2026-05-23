@@ -71,6 +71,14 @@ class PercentileData:
     # present.
     hydro_total_flows: pl.DataFrame = field(default_factory=pl.DataFrame)
 
+    # --- Per-stage hydro operational bounds (dashboard overlay) ---
+    # Per-(entity_id, stage_id) optional bound columns from
+    # ``constraints/hydro_bounds.parquet`` — read by
+    # ``read_cobre_hydro_per_stage_bounds``.  Columns are nullable per row:
+    # NULL means "no per-stage override, fall back to the static value
+    # from ``hydros.json``" (carried by ``cobre_hydro_meta``).
+    cobre_hydro_per_stage_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
+
     # --- Epic 3: system spillage in MWmes ---
     # Per-stage stage-mean MW of system spillage ``spillage_m3s × ρ_eq``,
     # split into total / reservoir / run-of-river via the
@@ -858,6 +866,7 @@ def compare_results(
         read_cobre_cost_breakdown,
         read_cobre_hydro_means,
         read_cobre_hydro_metadata,
+        read_cobre_hydro_per_stage_bounds,
         read_cobre_hydro_percentiles,
         read_cobre_hydro_total_flows,
         read_cobre_hydro_withdrawal,
@@ -1056,6 +1065,12 @@ def compare_results(
             pl.col("stage_id") <= nw_max_stage_0based
         )
 
+    cobre_hydro_per_stage_bounds = read_cobre_hydro_per_stage_bounds(cobre_output_dir)
+    if nw_max_stage_0based is not None and not cobre_hydro_per_stage_bounds.is_empty():
+        cobre_hydro_per_stage_bounds = cobre_hydro_per_stage_bounds.filter(
+            pl.col("stage_id") <= nw_max_stage_0based
+        )
+
     # --- Bus-level energy balance ---
     _LOG.info("Computing bus-level aggregates...")
     bus_aggregates = read_cobre_bus_aggregates(cobre_output_dir)
@@ -1179,6 +1194,7 @@ def compare_results(
         nw_costs=nw_costs,
         cobre_costs=cobre_costs,
         cobre_stage_costs=cobre_stage_costs,
+        cobre_hydro_per_stage_bounds=cobre_hydro_per_stage_bounds,
         nw_offset=nw_offset,
         nw_max_stage=nw_max_stage_0based,
         cobre_spillage_energy=cobre_spill_energy,

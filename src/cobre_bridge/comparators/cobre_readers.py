@@ -164,6 +164,7 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
             "evaporation_violation_neg_m3s": pl.Float64,
             "water_withdrawal_violation_pos_m3s": pl.Float64,
             "water_withdrawal_violation_neg_m3s": pl.Float64,
+            "inflow_nonnegativity_slack_m3s": pl.Float64,
         }
     )
 
@@ -181,6 +182,7 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
         "evaporation_violation_neg_m3s",
         "water_withdrawal_violation_pos_m3s",
         "water_withdrawal_violation_neg_m3s",
+        "inflow_nonnegativity_slack_m3s",
     ]
     stage_cols = [
         "storage_final_hm3",
@@ -683,6 +685,57 @@ def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
         pl.col("stage_id").cast(pl.Int64),
         pl.col("water_withdrawal_m3s").cast(pl.Float64).alias("withdrawal_m3s"),
     ).sort("entity_id", "stage_id")
+
+
+def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
+    """Per-(hydro_id, stage_id) operational bounds from
+    ``constraints/hydro_bounds.parquet``.
+
+    Surfaces every bound column the dashboard's plant-detail panel
+    overlays as dashed lines: ``min_storage_hm3``, ``max_storage_hm3``,
+    ``min_turbined_m3s``, ``max_turbined_m3s``, ``min_outflow_m3s``,
+    ``min_generation_mw``.  Columns absent from the parquet are
+    silently dropped from the result; callers should treat missing
+    columns as "no per-stage override — use the static value from
+    ``hydros.json``".
+
+    Output columns: ``entity_id`` (Int64), ``stage_id`` (Int64),
+    plus any of the bound columns that exist in the parquet, all
+    cast to ``Float64``.  Returns an empty frame when the parquet
+    is missing.
+    """
+    case_dir = cobre_output_dir.parent
+    bounds_path = case_dir / "constraints" / "hydro_bounds.parquet"
+    bound_cols = [
+        "min_storage_hm3",
+        "max_storage_hm3",
+        "min_turbined_m3s",
+        "max_turbined_m3s",
+        "min_outflow_m3s",
+        "min_generation_mw",
+    ]
+    empty_schema: dict[str, pl.DataType] = {
+        "entity_id": pl.Int64,
+        "stage_id": pl.Int64,
+    }
+    for c in bound_cols:
+        empty_schema[c] = pl.Float64
+    if not bounds_path.exists():
+        return pl.DataFrame(schema=empty_schema)
+    try:
+        df = pl.read_parquet(bounds_path)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read hydro_bounds.parquet for dashboard bounds")
+        return pl.DataFrame(schema=empty_schema)
+    available = [c for c in bound_cols if c in df.columns]
+    if not available:
+        return pl.DataFrame(schema=empty_schema)
+    select_exprs: list[pl.Expr] = [
+        pl.col("hydro_id").cast(pl.Int64).alias("entity_id"),
+        pl.col("stage_id").cast(pl.Int64),
+    ]
+    select_exprs.extend(pl.col(c).cast(pl.Float64) for c in available)
+    return df.select(select_exprs).sort("entity_id", "stage_id")
 
 
 def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
@@ -1509,14 +1562,28 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         if prod is None:
             prod = hydro.get("productivity_mw_per_m3s")
 
-        reservoir = hydro.get("reservoir", {})
-        min_storage = reservoir.get("min_storage_hm3", 0.0) if reservoir else 0.0
+        reservoir = hydro.get("reservoir", {}) or {}
+        outflow = hydro.get("outflow", {}) or {}
+        generation = hydro.get("generation", {}) or {}
 
         bus_id = hydro.get("bus_id")
         result[entity_id] = {
             "name": name,
             "productivity_mw_per_m3s": float(prod) if prod is not None else None,
-            "min_storage_hm3": float(min_storage),
+            "min_storage_hm3": float(reservoir.get("min_storage_hm3", 0.0) or 0.0),
+            "max_storage_hm3": float(reservoir.get("max_storage_hm3", 0.0) or 0.0),
+            "min_outflow_m3s": float(outflow.get("min_outflow_m3s", 0.0) or 0.0),
+            # ``max_outflow_m3s`` is typically null in cobre cases — leave as
+            # None so the dashboard can skip the dashed line.
+            "max_outflow_m3s": (
+                float(outflow["max_outflow_m3s"])
+                if outflow.get("max_outflow_m3s") is not None
+                else None
+            ),
+            "min_turbined_m3s": float(generation.get("min_turbined_m3s", 0.0) or 0.0),
+            "max_turbined_m3s": float(generation.get("max_turbined_m3s", 0.0) or 0.0),
+            "min_generation_mw": float(generation.get("min_generation_mw", 0.0) or 0.0),
+            "max_generation_mw": float(generation.get("max_generation_mw", 0.0) or 0.0),
             "bus_id": int(bus_id) if bus_id is not None else None,
         }
 
