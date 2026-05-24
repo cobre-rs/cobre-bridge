@@ -15,6 +15,7 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Clast, Conft, Term
 
+from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -58,6 +59,11 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     conft_df = conft.usinas
     clast_df = clast.usinas
     term_df = term.usinas
+
+    # Anticipated dispatch (NEWAVE GNL) — gated by dger.despacho_antecipado_gnl.
+    # Returns an empty dict when the flag is off, so non-GNL cases incur
+    # zero cost beyond the dger read inside the helper.
+    anticipated_by_code = read_anticipated_dispatch(nw_files)
 
     # Build cost lookup: codigo_usina -> cost for indice_ano_estudo == 1.
     cost_map: dict[int, float] = {}
@@ -112,6 +118,11 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         max_mw = capacity * max_factor / 100.0
         cost = cost_map.get(newave_code, 0.0)
 
+        anticipated = anticipated_by_code.get(newave_code)
+        anticipated_config = (
+            {"lead_stages": anticipated.lead_stages} if anticipated else None
+        )
+
         thermal_entry: dict = {
             "id": id_map.thermal_id(newave_code),
             "name": name,
@@ -121,7 +132,7 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
                 "min_mw": gen_min,
                 "max_mw": max_mw,
             },
-            "gnl_config": None,
+            "anticipated_config": anticipated_config,
             "entry_stage_id": None,
             "exit_stage_id": None,
         }

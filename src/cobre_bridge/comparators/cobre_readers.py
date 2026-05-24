@@ -164,6 +164,7 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
             "evaporation_violation_neg_m3s": pl.Float64,
             "water_withdrawal_violation_pos_m3s": pl.Float64,
             "water_withdrawal_violation_neg_m3s": pl.Float64,
+            "inflow_nonnegativity_slack_m3s": pl.Float64,
         }
     )
 
@@ -181,6 +182,7 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
         "evaporation_violation_neg_m3s",
         "water_withdrawal_violation_pos_m3s",
         "water_withdrawal_violation_neg_m3s",
+        "inflow_nonnegativity_slack_m3s",
     ]
     stage_cols = [
         "storage_final_hm3",
@@ -685,6 +687,57 @@ def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
     ).sort("entity_id", "stage_id")
 
 
+def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
+    """Per-(hydro_id, stage_id) operational bounds from
+    ``constraints/hydro_bounds.parquet``.
+
+    Surfaces every bound column the dashboard's plant-detail panel
+    overlays as dashed lines: ``min_storage_hm3``, ``max_storage_hm3``,
+    ``min_turbined_m3s``, ``max_turbined_m3s``, ``min_outflow_m3s``,
+    ``min_generation_mw``.  Columns absent from the parquet are
+    silently dropped from the result; callers should treat missing
+    columns as "no per-stage override — use the static value from
+    ``hydros.json``".
+
+    Output columns: ``entity_id`` (Int64), ``stage_id`` (Int64),
+    plus any of the bound columns that exist in the parquet, all
+    cast to ``Float64``.  Returns an empty frame when the parquet
+    is missing.
+    """
+    case_dir = cobre_output_dir.parent
+    bounds_path = case_dir / "constraints" / "hydro_bounds.parquet"
+    bound_cols = [
+        "min_storage_hm3",
+        "max_storage_hm3",
+        "min_turbined_m3s",
+        "max_turbined_m3s",
+        "min_outflow_m3s",
+        "min_generation_mw",
+    ]
+    empty_schema: dict[str, pl.DataType] = {
+        "entity_id": pl.Int64,
+        "stage_id": pl.Int64,
+    }
+    for c in bound_cols:
+        empty_schema[c] = pl.Float64
+    if not bounds_path.exists():
+        return pl.DataFrame(schema=empty_schema)
+    try:
+        df = pl.read_parquet(bounds_path)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read hydro_bounds.parquet for dashboard bounds")
+        return pl.DataFrame(schema=empty_schema)
+    available = [c for c in bound_cols if c in df.columns]
+    if not available:
+        return pl.DataFrame(schema=empty_schema)
+    select_exprs: list[pl.Expr] = [
+        pl.col("hydro_id").cast(pl.Int64).alias("entity_id"),
+        pl.col("stage_id").cast(pl.Int64),
+    ]
+    select_exprs.extend(pl.col(c).cast(pl.Float64) for c in available)
+    return df.select(select_exprs).sort("entity_id", "stage_id")
+
+
 def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre thermal simulation means per (entity_id, stage_id).
 
@@ -879,6 +932,14 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
         "spillage_m3s",
         "evaporation_m3s",
         "outflow_m3s",
+        # Operational slacks — surfaced as cobre-only series on the
+        # plant-detail tab.  Percentiles are needed so the band+P10/P90
+        # tooltip works the same as for the rest of the flow variables;
+        # without them only the Cobre Mean line is plotted and the
+        # unified-x hover has nothing to lock onto.
+        "water_withdrawal_violation_pos_m3s",
+        "water_withdrawal_violation_neg_m3s",
+        "inflow_nonnegativity_slack_m3s",
     ]
     stage_cols = [
         "storage_final_hm3",
@@ -1232,6 +1293,68 @@ def read_cobre_cost_breakdown(
     return result
 
 
+def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read Cobre per-stage immediate/future cost (mean across scenarios).
+
+    Returns a DataFrame with columns ``stage_id`` (Int64),
+    ``immediate_cost`` (Float64, R$) and ``future_cost`` (Float64, R$).
+    Both costs are reported as raw, *undiscounted* stage values — the
+    counterpart of NEWAVE's MEDIAS-SIN ``COPER`` and ``CUSTO_FUTURO``
+    variables (after the 10⁶ R$ unit conversion on the NEWAVE side).
+
+    Cobre's costs table is one row per ``(scenario_id, stage_id, block_id)``;
+    we sum block-level immediate_cost within each (scenario, stage) and
+    keep the (scenario, stage) value of future_cost, then average across
+    scenarios.  ``future_cost`` is identical across blocks of the same
+    stage so a ``max`` (= any) collapse is safe.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "stage_id": pl.Int64,
+            "immediate_cost": pl.Float64,
+            "future_cost": pl.Float64,
+        }
+    )
+
+    lf = _scan_simulation_entity(cobre_output_dir, "costs")
+    if lf is None:
+        return empty
+
+    available = set(lf.collect_schema().names())
+    if "stage_id" not in available:
+        return empty
+    if "immediate_cost" not in available and "future_cost" not in available:
+        return empty
+
+    agg_exprs: list[pl.Expr] = []
+    if "immediate_cost" in available:
+        agg_exprs.append(pl.col("immediate_cost").sum().alias("immediate_cost"))
+    if "future_cost" in available:
+        # future_cost is a per-stage quantity replicated across blocks;
+        # ``max`` collapses without double-counting.
+        agg_exprs.append(pl.col("future_cost").max().alias("future_cost"))
+
+    try:
+        per_sc = lf.group_by(["scenario_id", "stage_id"]).agg(agg_exprs)
+        mean_cols = [
+            pl.col(c).mean()
+            for c in ("immediate_cost", "future_cost")
+            if c in available
+        ]
+        df = per_sc.group_by("stage_id").agg(mean_cols).sort("stage_id").collect()
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read Cobre per-stage costs")
+        return empty
+
+    # Ensure both columns are present even if one was missing in the schema.
+    for c in ("immediate_cost", "future_cost"):
+        if c not in df.columns:
+            df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
+    return df.select(["stage_id", "immediate_cost", "future_cost"]).cast(
+        {"stage_id": pl.Int64, "immediate_cost": pl.Float64, "future_cost": pl.Float64}
+    )
+
+
 def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre convergence data from training output.
 
@@ -1447,14 +1570,28 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         if prod is None:
             prod = hydro.get("productivity_mw_per_m3s")
 
-        reservoir = hydro.get("reservoir", {})
-        min_storage = reservoir.get("min_storage_hm3", 0.0) if reservoir else 0.0
+        reservoir = hydro.get("reservoir", {}) or {}
+        outflow = hydro.get("outflow", {}) or {}
+        generation = hydro.get("generation", {}) or {}
 
         bus_id = hydro.get("bus_id")
         result[entity_id] = {
             "name": name,
             "productivity_mw_per_m3s": float(prod) if prod is not None else None,
-            "min_storage_hm3": float(min_storage),
+            "min_storage_hm3": float(reservoir.get("min_storage_hm3", 0.0) or 0.0),
+            "max_storage_hm3": float(reservoir.get("max_storage_hm3", 0.0) or 0.0),
+            "min_outflow_m3s": float(outflow.get("min_outflow_m3s", 0.0) or 0.0),
+            # ``max_outflow_m3s`` is typically null in cobre cases — leave as
+            # None so the dashboard can skip the dashed line.
+            "max_outflow_m3s": (
+                float(outflow["max_outflow_m3s"])
+                if outflow.get("max_outflow_m3s") is not None
+                else None
+            ),
+            "min_turbined_m3s": float(generation.get("min_turbined_m3s", 0.0) or 0.0),
+            "max_turbined_m3s": float(generation.get("max_turbined_m3s", 0.0) or 0.0),
+            "min_generation_mw": float(generation.get("min_generation_mw", 0.0) or 0.0),
+            "max_generation_mw": float(generation.get("max_generation_mw", 0.0) or 0.0),
             "bus_id": int(bus_id) if bus_id is not None else None,
         }
 

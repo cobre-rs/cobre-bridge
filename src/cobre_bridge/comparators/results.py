@@ -46,6 +46,10 @@ class PercentileData:
     cobre_convergence: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_costs: dict[str, float] = field(default_factory=dict)
     cobre_costs: dict[str, float] = field(default_factory=dict)
+    # Per-stage immediate/future cost on the Cobre side — mean across
+    # scenarios, in R$.  Joined with MEDIAS-SIN's COPER/CUSTO_FUTURO
+    # (after the 10⁶ R$ unit conversion) by the overview-tab chart.
+    cobre_stage_costs: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_offset: int = 0
     nw_max_stage: int | None = None
 
@@ -67,6 +71,23 @@ class PercentileData:
     # present.
     hydro_total_flows: pl.DataFrame = field(default_factory=pl.DataFrame)
 
+    # --- Per-stage hydro operational bounds (dashboard overlay) ---
+    # Per-(entity_id, stage_id) optional bound columns from
+    # ``constraints/hydro_bounds.parquet`` — read by
+    # ``read_cobre_hydro_per_stage_bounds``.  Columns are nullable per row:
+    # NULL means "no per-stage override, fall back to the static value
+    # from ``hydros.json``" (carried by ``cobre_hydro_meta``).
+    cobre_hydro_per_stage_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
+
+    # --- NEWAVE hydro slacks (VIOL_POS/NEG_VRETIRUH and VIOL_POS/NEG_EVAP) ---
+    # Per-(entity_id, stage_id) flow-domain values for the four NEWAVE hydro
+    # slack columns (water-withdrawal pos/neg and evaporation pos/neg),
+    # aligned to Cobre IDs and stage 0-base.  Used by the plant-detail tab
+    # to overlay NEWAVE on Cobre-only withdrawal slack panels and by the
+    # Hydro Operation tab to drive per-bus and SIN-total slack aggregates.
+    # Built by :func:`_compute_nw_hydro_slacks`.
+    nw_hydro_slacks: pl.DataFrame = field(default_factory=pl.DataFrame)
+
     # --- Epic 3: system spillage in MWmes ---
     # Per-stage stage-mean MW of system spillage ``spillage_m3s × ρ_eq``,
     # split into total / reservoir / run-of-river via the
@@ -83,6 +104,18 @@ class PercentileData:
     nw_tim_stages: dict[str, float] = field(default_factory=dict)
     cobre_training_seconds: float = 0.0
     cobre_iteration_timing: pl.DataFrame = field(default_factory=pl.DataFrame)
+
+    # --- Generic constraints (RE, AGRINT, VminOP) — LHS comparison ---
+    # Constraint definitions and per-(stage, block) bound table read
+    # straight from the converted Cobre case. ``lhs_newave`` evaluates
+    # each constraint's LHS against NEWAVE outputs (MEDIAS-USIH GHIDUH +
+    # int*.out interchanges) at stage_0based granularity; ``lhs_cobre``
+    # does the same against Cobre simulation parquets, collapsed to
+    # mean across scenarios and blocks.
+    gc_constraints: list[dict] = field(default_factory=list)
+    gc_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
+    gc_lhs_newave: pl.DataFrame = field(default_factory=pl.DataFrame)
+    gc_lhs_cobre: pl.DataFrame = field(default_factory=pl.DataFrame)
 
 
 @dataclass(frozen=True)
@@ -276,6 +309,116 @@ def _build_gen_max_overlay(
 
     return nw_df.join(
         cobre_lp_gen_max, on=["entity_id", "stage_id"], how="full", coalesce=True
+    )
+
+
+# MEDIAS reports VIOL_POS_VRETIRUH / VIOL_NEG_VRETIRUH and VIOL_POS_EVAP /
+# VIOL_NEG_EVAP as monthly volumes in hm³ (same convention as VRETIRUH /
+# VEVAPUH).  Cobre emits the matching slacks in m³/s.  NEWAVE's internal
+# reports round the month-length factor to 2.63 (≈ 730 h × 3600 s / 1e6), so
+# dividing by 2.63 yields apples-to-apples flows matching what
+# ``_compare_hydros`` already does for the VEVAPUH / VRETIRUH realized series.
+#
+# WITHDRAWAL pos/neg are SWAPPED on purpose: Cobre's sign convention for the
+# withdrawal slack is the inverse of NEWAVE's, so the column NEWAVE calls
+# ``VIOL_POS_VRETIRUH`` lines up physically with Cobre's
+# ``water_withdrawal_violation_neg_m3s`` (and vice versa).  Mapping them this
+# way keeps the comparison HTML's "Withdrawal Slack Pos / Neg" panels
+# self-consistent under NEWAVE's labelling — the display labels in
+# ``_HYDRO_COBRE_ONLY_VARIABLES`` / ``report_builder.slack_specs`` are
+# correspondingly swapped so each panel shows the column that matches its
+# header.  Evaporation pos/neg share NEWAVE's convention and don't need the
+# swap.
+_NW_HYDRO_SLACK_VARS: dict[str, str] = {
+    "VIOL_POS_VRETIRUH": "water_withdrawal_violation_neg_m3s",
+    "VIOL_NEG_VRETIRUH": "water_withdrawal_violation_pos_m3s",
+    "VIOL_POS_EVAP": "evaporation_violation_pos_m3s",
+    "VIOL_NEG_EVAP": "evaporation_violation_neg_m3s",
+}
+_NW_HYDRO_SLACK_COLUMNS: tuple[str, ...] = tuple(_NW_HYDRO_SLACK_VARS.values())
+
+
+def _compute_nw_hydro_slacks(
+    nw_hydro: pl.DataFrame,
+    nw_names: dict[int, str],
+    cobre_meta: dict[int, dict],
+) -> pl.DataFrame:
+    """Build a per-(entity_id, stage_id) frame of NEWAVE hydro slacks.
+
+    Surfaces ``VIOL_POS_VRETIRUH`` / ``VIOL_NEG_VRETIRUH`` (water withdrawal)
+    and ``VIOL_POS_EVAP`` / ``VIOL_NEG_EVAP`` (evaporation) from MEDIAS-USIH
+    aligned to Cobre's ``entity_id`` and ``stage_id`` (0-based) conventions
+    and converted from hm³/month to m³/s with the same /2.63 factor used by
+    :func:`_compare_hydros` for the realized withdrawal / evaporation series.
+    The chart layer joins this against the matching Cobre slack columns so
+    the Hydro Operation tab can render NEWAVE alongside Cobre on per-bus and
+    SIN-total slack panels.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "entity_id": pl.Int64,
+            "stage_id": pl.Int64,
+            "water_withdrawal_violation_pos_m3s": pl.Float64,
+            "water_withdrawal_violation_neg_m3s": pl.Float64,
+            "evaporation_violation_pos_m3s": pl.Float64,
+            "evaporation_violation_neg_m3s": pl.Float64,
+        }
+    )
+    if nw_hydro.is_empty() or not nw_names or not cobre_meta:
+        return empty
+
+    cobre_by_name: dict[str, int] = {
+        meta["name"].strip().upper(): eid for eid, meta in cobre_meta.items()
+    }
+    nw_code_to_cobre_id: dict[int, int] = {}
+    for nw_code, nw_name in nw_names.items():
+        cid = cobre_by_name.get(nw_name.strip().upper())
+        if cid is not None:
+            nw_code_to_cobre_id[nw_code] = cid
+    if not nw_code_to_cobre_id:
+        return empty
+
+    offset = _nw_stage_offset(nw_hydro)
+    rows: dict[tuple[int, int], dict[str, float]] = {}
+    for row in nw_hydro.iter_rows(named=True):
+        if row["value"] is None:
+            continue
+        var_raw = str(row["variable"]).strip().upper()
+        col = _NW_HYDRO_SLACK_VARS.get(var_raw)
+        if col is None:
+            continue
+        code = int(row["newave_code"])
+        cid = nw_code_to_cobre_id.get(code)
+        if cid is None:
+            continue
+        stage = int(row["stage"]) - offset
+        rows.setdefault((cid, stage), {})[col] = float(row["value"]) / 2.63
+
+    if not rows:
+        return empty
+
+    return (
+        pl.DataFrame(
+            [
+                {
+                    "entity_id": eid,
+                    "stage_id": sid,
+                    **{col: cols.get(col, 0.0) for col in _NW_HYDRO_SLACK_COLUMNS},
+                }
+                for (eid, sid), cols in rows.items()
+            ]
+        )
+        .cast(
+            {
+                "entity_id": pl.Int64,
+                "stage_id": pl.Int64,
+                "water_withdrawal_violation_pos_m3s": pl.Float64,
+                "water_withdrawal_violation_neg_m3s": pl.Float64,
+                "evaporation_violation_pos_m3s": pl.Float64,
+                "evaporation_violation_neg_m3s": pl.Float64,
+            }
+        )
+        .sort("entity_id", "stage_id")
     )
 
 
@@ -842,6 +985,7 @@ def compare_results(
         read_cobre_cost_breakdown,
         read_cobre_hydro_means,
         read_cobre_hydro_metadata,
+        read_cobre_hydro_per_stage_bounds,
         read_cobre_hydro_percentiles,
         read_cobre_hydro_total_flows,
         read_cobre_hydro_withdrawal,
@@ -850,6 +994,7 @@ def compare_results(
         read_cobre_line_percentiles,
         read_cobre_lp_max_generation,
         read_cobre_spillage_energy,
+        read_cobre_stage_costs,
         read_cobre_thermal_means,
         read_cobre_thermal_metadata,
         read_cobre_thermal_percentiles,
@@ -885,6 +1030,7 @@ def compare_results(
     nw_offset = 0
     nw_max_stage_1based: int | None = None
     cobre_hydro = pl.DataFrame()
+    nw_hydro_slacks = pl.DataFrame()
 
     # --- Hydro comparison ---
     if saidas_dir is not None:
@@ -963,6 +1109,9 @@ def compare_results(
             results.extend(
                 _compare_hydros(nw_hydro, cobre_hydro, nw_hydro_names, cobre_hydro_meta)
             )
+        nw_hydro_slacks = _compute_nw_hydro_slacks(
+            nw_hydro, nw_hydro_names, cobre_hydro_meta
+        )
 
         # --- Thermal comparison ---
         nw_thermal = read_medias_thermal(saidas_dir)
@@ -1033,6 +1182,21 @@ def compare_results(
     cobre_costs = read_cobre_cost_breakdown(
         cobre_output_dir, max_stage_id=nw_max_stage_0based
     )
+    cobre_stage_costs = read_cobre_stage_costs(cobre_output_dir)
+    if nw_max_stage_0based is not None and not cobre_stage_costs.is_empty():
+        cobre_stage_costs = cobre_stage_costs.filter(
+            pl.col("stage_id") <= nw_max_stage_0based
+        )
+
+    cobre_hydro_per_stage_bounds = read_cobre_hydro_per_stage_bounds(cobre_output_dir)
+    if nw_max_stage_0based is not None and not cobre_hydro_per_stage_bounds.is_empty():
+        cobre_hydro_per_stage_bounds = cobre_hydro_per_stage_bounds.filter(
+            pl.col("stage_id") <= nw_max_stage_0based
+        )
+    if nw_max_stage_0based is not None and not nw_hydro_slacks.is_empty():
+        nw_hydro_slacks = nw_hydro_slacks.filter(
+            pl.col("stage_id") <= nw_max_stage_0based
+        )
 
     # --- Bus-level energy balance ---
     _LOG.info("Computing bus-level aggregates...")
@@ -1096,6 +1260,39 @@ def compare_results(
     cobre_training_seconds = read_cobre_training_duration(cobre_output_dir)
     cobre_iter_timing = read_cobre_iteration_timing(cobre_output_dir)
 
+    # --- Generic constraints LHS comparison (RE / AGRINT / VminOP) ---
+    # The Cobre case directory is one level above the simulation output dir
+    # (cobre_output_dir ends in ``output/``).  Both the constraint
+    # definitions and the per-stage bound parquet live in the case's
+    # ``constraints/`` subdirectory.
+    from cobre_bridge.comparators.constraints_compare import (
+        _load_generic_constraint_bounds,
+        _load_generic_constraints,
+        evaluate_lhs_cobre,
+        evaluate_lhs_newave,
+    )
+
+    cobre_case_dir = cobre_output_dir.parent
+    gc_constraints = _load_generic_constraints(cobre_case_dir)
+    gc_bounds_df = _load_generic_constraint_bounds(cobre_case_dir)
+    if gc_constraints and saidas_dir is not None:
+        _LOG.info(
+            "Comparing %d generic constraints (RE/AGRINT/VminOP)...",
+            len(gc_constraints),
+        )
+        gc_lhs_nw = evaluate_lhs_newave(
+            gc_constraints,
+            nw_hydro,
+            nw_intercambio,
+            alignment,
+            id_map,
+            nw_offset,
+        )
+        gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
+    else:
+        gc_lhs_nw = pl.DataFrame()
+        gc_lhs_cb = pl.DataFrame()
+
     # --- System spillage in MWmes ---
     cobre_spill_energy = read_cobre_spillage_energy(cobre_output_dir)
     if nw_max_stage_0based is not None and not cobre_spill_energy.is_empty():
@@ -1123,6 +1320,9 @@ def compare_results(
         nw_hydro_names=nw_hydro_names,
         nw_costs=nw_costs,
         cobre_costs=cobre_costs,
+        cobre_stage_costs=cobre_stage_costs,
+        cobre_hydro_per_stage_bounds=cobre_hydro_per_stage_bounds,
+        nw_hydro_slacks=nw_hydro_slacks,
         nw_offset=nw_offset,
         nw_max_stage=nw_max_stage_0based,
         cobre_spillage_energy=cobre_spill_energy,
@@ -1134,6 +1334,10 @@ def compare_results(
         nw_tim_stages=nw_tim_stages,
         cobre_training_seconds=cobre_training_seconds,
         cobre_iteration_timing=cobre_iter_timing,
+        gc_constraints=gc_constraints,
+        gc_bounds=gc_bounds_df,
+        gc_lhs_newave=gc_lhs_nw,
+        gc_lhs_cobre=gc_lhs_cb,
     )
 
     _LOG.info("Results comparison: %d total comparisons", len(results))

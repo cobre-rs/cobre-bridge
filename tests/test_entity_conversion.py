@@ -67,6 +67,7 @@ def _make_nw_files(
         re_dat=None,
         volref_saz=volref_saz,
         shist=shist,
+        adterm=None,
     )
 
 
@@ -783,8 +784,11 @@ class TestConvertHydros:
         # Derating: 800 * 0.95 * 0.97 = 737.2
         expected = 800.0 * 0.95 * 0.97
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(expected)
-        # max_turbined_m3s must NOT be derated
-        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(4 * 222.2)
+        # max_turbined_m3s is also derated — an unavailable unit can't pass
+        # water either, so NEWAVE applies the same availability factor to flow.
+        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(
+            4 * 222.2 * 0.95 * 0.97
+        )
         # min_generation_mw must NOT be derated (it is zero here)
         assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
 
@@ -1242,91 +1246,53 @@ class TestExtractTemporalOverrides:
 
 
 # ---------------------------------------------------------------------------
-# _read_ghmin unit tests  (ticket-006)
+# _read_ghmin_per_stage unit tests
 # ---------------------------------------------------------------------------
 
 
-class TestReadGhmin:
-    """Unit tests for ``_read_ghmin``."""
+class TestReadGhminPerStage:
+    """Unit tests for ``_read_ghmin_per_stage``.
+
+    GHMIN values are time-varying and now live in
+    ``hydro_bounds.parquet:min_generation_mw`` rather than the static
+    ``hydros.json:generation.min_generation_mw``.  This helper expands
+    each (plant, month, year) record into a per-(plant, stage_0based)
+    mapping with step-function semantics and seasonal post-study
+    repetition.
+    """
 
     def test_missing_ghmin_returns_empty(self, tmp_path) -> None:
-        """No GHMIN.DAT -> empty dict, no error."""
-        from cobre_bridge.converters.hydro import _read_ghmin
+        from cobre_bridge.converters.hydro import _read_ghmin_per_stage
 
-        result = _read_ghmin(_make_nw_files(tmp_path, ghmin=None))
+        result = _read_ghmin_per_stage(
+            _make_nw_files(tmp_path, ghmin=None),
+            start_year=2024,
+            start_month=9,
+            study_months=12,
+            total_stages=24,
+        )
         assert result == {}
 
-    def test_reads_plant_min_generation(self, tmp_path) -> None:
-        """Single plant entry returned with correct MW value."""
+    def test_step_function_persists_until_next_entry(self, tmp_path) -> None:
+        """Sparse entries persist the last applied value forward."""
         import datetime
 
-        from cobre_bridge.converters.hydro import _read_ghmin
+        from cobre_bridge.converters.hydro import _read_ghmin_per_stage
 
         (tmp_path / "ghmin.dat").touch()
 
-        ghmin_df = pd.DataFrame(
-            {
-                "codigo_usina": [1],
-                "data": [datetime.datetime(2025, 1, 1)],
-                "patamar": [0],
-                "geracao": [50.0],
-            }
-        )
-        mock_ghmin = MagicMock()
-        mock_ghmin.geracoes = ghmin_df
-
-        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
-            mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin(_make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"))
-
-        assert result == {1: pytest.approx(50.0)}
-
-    def test_multiple_plants(self, tmp_path) -> None:
-        """Multiple plants returned with correct MW values."""
-        import datetime
-
-        from cobre_bridge.converters.hydro import _read_ghmin
-
-        (tmp_path / "ghmin.dat").touch()
-
-        ghmin_df = pd.DataFrame(
-            {
-                "codigo_usina": [1, 2],
-                "data": [
-                    datetime.datetime(2025, 1, 1),
-                    datetime.datetime(2025, 1, 1),
-                ],
-                "patamar": [0, 0],
-                "geracao": [50.0, 120.0],
-            }
-        )
-        mock_ghmin = MagicMock()
-        mock_ghmin.geracoes = ghmin_df
-
-        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
-            mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin(_make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"))
-
-        assert result[1] == pytest.approx(50.0)
-        assert result[2] == pytest.approx(120.0)
-
-    def test_multiple_periods_uses_earliest(self, tmp_path) -> None:
-        """When multiple time periods exist, earliest date is used."""
-        import datetime
-
-        from cobre_bridge.converters.hydro import _read_ghmin
-
-        (tmp_path / "ghmin.dat").touch()
-
+        # Plant 1 at Sep 2024 = 100 MW, Dec 2024 = 80 MW.
+        # Stages 0 (Sep) and 1 (Oct) and 2 (Nov) should all be 100.
+        # Stage 3 (Dec) and onwards should be 80 within the study.
         ghmin_df = pd.DataFrame(
             {
                 "codigo_usina": [1, 1],
                 "data": [
-                    datetime.datetime(2025, 3, 1),
-                    datetime.datetime(2025, 1, 1),
+                    datetime.datetime(2024, 9, 1),
+                    datetime.datetime(2024, 12, 1),
                 ],
                 "patamar": [0, 0],
-                "geracao": [999.0, 50.0],
+                "geracao": [100.0, 80.0],
             }
         )
         mock_ghmin = MagicMock()
@@ -1334,16 +1300,66 @@ class TestReadGhmin:
 
         with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
             mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin(_make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"))
+            result = _read_ghmin_per_stage(
+                _make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
+                start_year=2024,
+                start_month=9,
+                study_months=12,
+                total_stages=12,
+            )
 
-        # Earliest date (Jan) has geracao=50.0.
-        assert result[1] == pytest.approx(50.0)
+        per_stage = result[1]
+        assert per_stage[0] == pytest.approx(100.0)
+        assert per_stage[1] == pytest.approx(100.0)
+        assert per_stage[2] == pytest.approx(100.0)
+        assert per_stage[3] == pytest.approx(80.0)
+        assert per_stage[4] == pytest.approx(80.0)
+
+    def test_post_study_uses_pos_seasonal_pattern(self, tmp_path) -> None:
+        """POS year=9999 entries supply per-calendar-month values."""
+        import datetime
+
+        from cobre_bridge.converters.hydro import _read_ghmin_per_stage
+
+        (tmp_path / "ghmin.dat").touch()
+
+        ghmin_df = pd.DataFrame(
+            {
+                "codigo_usina": [1, 1, 1],
+                "data": [
+                    datetime.datetime(2024, 9, 1),  # study Sep 2024
+                    datetime.datetime(9999, 9, 1),  # POS Sep
+                    datetime.datetime(9999, 12, 1),  # POS Dec
+                ],
+                "patamar": [0, 0, 0],
+                "geracao": [100.0, 150.0, 200.0],
+            }
+        )
+        mock_ghmin = MagicMock()
+        mock_ghmin.geracoes = ghmin_df
+
+        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
+            mock_ghmin_cls.read.return_value = mock_ghmin
+            result = _read_ghmin_per_stage(
+                _make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
+                start_year=2024,
+                start_month=9,
+                study_months=12,  # study ends Aug 2025
+                total_stages=24,  # post-study: Sep 2025 – Aug 2026
+            )
+
+        per_stage = result[1]
+        # Stage 12 = Sep 2025 → POS Sep = 150.
+        assert per_stage[12] == pytest.approx(150.0)
+        # Stage 15 = Dec 2025 → POS Dec = 200.
+        assert per_stage[15] == pytest.approx(200.0)
 
     def test_patamar_nonzero_excluded(self, tmp_path) -> None:
-        """Rows with patamar != 0 are excluded."""
+        """Rows with patamar != 0 are excluded — only the all-blocks mean
+        is meaningful at hydro_bounds' stage granularity."""
         import datetime
 
-        from cobre_bridge.converters.hydro import _read_ghmin
+        from cobre_bridge.converters.hydro import _read_ghmin_per_stage
 
         (tmp_path / "ghmin.dat").touch()
 
@@ -1351,10 +1367,10 @@ class TestReadGhmin:
             {
                 "codigo_usina": [1, 1],
                 "data": [
-                    datetime.datetime(2025, 1, 1),
-                    datetime.datetime(2025, 1, 1),
+                    datetime.datetime(2024, 9, 1),
+                    datetime.datetime(2024, 9, 1),
                 ],
-                "patamar": [1, 2],  # no patamar=0 rows
+                "patamar": [1, 2],
                 "geracao": [50.0, 60.0],
             }
         )
@@ -1363,7 +1379,13 @@ class TestReadGhmin:
 
         with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
             mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin(_make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"))
+            result = _read_ghmin_per_stage(
+                _make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
+                start_year=2024,
+                start_month=9,
+                study_months=12,
+                total_stages=12,
+            )
 
         assert result == {}
 
@@ -1374,7 +1396,12 @@ class TestReadGhmin:
 
 
 class TestConvertHydrosGhmin:
-    """Integration tests verifying GHMIN.DAT override in convert_hydros."""
+    """Integration tests for GHMIN handling.
+
+    GHMIN values are now emitted per-stage in ``hydro_bounds.parquet``
+    and the static ``hydros.json:generation.min_generation_mw`` is
+    always 0.0.  These tests pin both halves of that contract.
+    """
 
     def _make_id_map(self) -> NewaveIdMap:
         return NewaveIdMap(
@@ -1386,10 +1413,10 @@ class TestConvertHydrosGhmin:
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_ghmin_overrides_approximation(
+    def test_static_min_generation_is_zero_when_ghmin_present(
         self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
     ) -> None:
-        """When GHMIN has an entry for a plant, min_generation_mw uses that value."""
+        """The static field is always zero — GHMIN goes elsewhere."""
         import datetime
 
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
@@ -1415,23 +1442,177 @@ class TestConvertHydrosGhmin:
             )
 
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
-        assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(99.9)
+        assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
 
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_no_ghmin_uses_fallback(
+    def test_static_min_generation_is_zero_when_ghmin_absent(
         self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
     ) -> None:
-        """When no GHMIN.DAT, min_generation_mw uses the approximation."""
+        """With no GHMIN.DAT, static min_generation_mw is still 0."""
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
         result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
-        # USINA_A: vazao_minima_historica=0 -> min_outflow=0 -> min_generation=0
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# _per_stage_productivities: sazonaliza_cfuga_cmont behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestPerStageProductivitiesSazonalCfugaCmont:
+    """Verify that CFUGA/CMONT step-function carries vs. seasonal cycling.
+
+    NEWAVE's Dger ``sazonaliza_cfuga_cmont`` flag changes how
+    CFUGA/CMONT overrides are extended beyond their last explicit
+    entry: when ``0`` the last applied value carries forward
+    indefinitely (pure step function); when ``1`` each calendar
+    month picks up the value from the latest year that defined it
+    and that seasonal pattern repeats month-by-month thereafter.
+    """
+
+    def _hreg(self) -> pd.Series:
+        # Linear cota polynomial so we can read head off the coefficients.
+        return _make_hreg(
+            {
+                "tipo_regulacao": "M",
+                "volume_minimo": 0.0,
+                "volume_maximo": 1000.0,
+                "a0_volume_cota": 0.0,
+                "a1_volume_cota": 1.0,
+                "a2_volume_cota": 0.0,
+                "a3_volume_cota": 0.0,
+                "a4_volume_cota": 0.0,
+                "canal_fuga_medio": 0.0,
+                "tipo_perda": 1,
+                "perdas": 0.0,
+                "produtibilidade_especifica": 1.0,
+                "volume_referencia": 500.0,
+            }
+        )
+
+    def _patch_dger(self, tmp_path, sazonaliza: int):
+        """Patch ``cobre_bridge.converters.hydro.Dger`` to return a fake
+        Dger with a controllable ``sazonaliza_cfuga_cmont``.
+
+        Returns the patcher context manager so the caller can ``with``
+        on it.
+        """
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = 2024
+        mock_dger.mes_inicio_estudo = 9
+        mock_dger.sazonaliza_cfuga_cmont = sazonaliza
+        ctx = patch("cobre_bridge.converters.hydro.Dger")
+        cls = ctx.__enter__()
+        cls.read.return_value = mock_dger
+        return ctx
+
+    def test_step_function_carries_when_sazonaliza_zero(self, tmp_path) -> None:
+        from cobre_bridge.converters.hydro import _per_stage_productivities
+
+        overrides = [
+            {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
+            {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
+        ]
+        ctx = self._patch_dger(tmp_path, sazonaliza=0)
+        try:
+            vals = _per_stage_productivities(
+                self._hreg(),
+                base_productivity=0.0,
+                drop_overrides=overrides,
+                nw_files=_make_nw_files(tmp_path),
+                total_stages=24,
+            )
+        finally:
+            ctx.__exit__(None, None, None)
+
+        # tipo_regulacao = "M": v_65 = vmin + 0.65*(vmax-vmin) = 650.
+        # cota(650) = 0 + 1*650 = 650. perdas=0 → prod = 1 * (650 - cfuga).
+        # Stage 0 = Sep 2024 → CFUGA 5.0 → 645.
+        # Stage 1 = Oct 2024 → CFUGA 10.0 → 640.
+        # Stage 12 = Sep 2025 → no event → step-function carries 10.0 →
+        # head = 640 (step function, NOT seasonal).
+        assert vals[0] == pytest.approx(645.0)
+        assert vals[1] == pytest.approx(640.0)
+        assert vals[12] == pytest.approx(640.0)
+
+    def test_seasonal_cycle_after_last_event_when_sazonaliza_one(
+        self, tmp_path
+    ) -> None:
+        from cobre_bridge.converters.hydro import _per_stage_productivities
+
+        overrides = [
+            {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
+            {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
+        ]
+        ctx = self._patch_dger(tmp_path, sazonaliza=1)
+        try:
+            vals = _per_stage_productivities(
+                self._hreg(),
+                base_productivity=0.0,
+                drop_overrides=overrides,
+                nw_files=_make_nw_files(tmp_path),
+                total_stages=24,
+            )
+        finally:
+            ctx.__exit__(None, None, None)
+
+        # See test_step_function_carries_when_sazonaliza_zero for the
+        # head computation: prod = 650 - cfuga at every stage.
+        # Stage 0 = Sep 2024 = explicit 5.0 → 645.
+        # Stage 1 = Oct 2024 = explicit 10.0 → 640.
+        # Stage 12 = Sep 2025 → AFTER last_event_stage (1, Oct 2024) →
+        # seasonal cfuga[9] = 5.0 → 645.
+        # Stage 13 = Oct 2025 → seasonal cfuga[10] = 10.0 → 640.
+        assert vals[0] == pytest.approx(645.0)
+        assert vals[1] == pytest.approx(640.0)
+        assert vals[12] == pytest.approx(645.0)
+        assert vals[13] == pytest.approx(640.0)
+
+    def test_seasonal_picks_latest_year_value_per_month(self, tmp_path) -> None:
+        """When the same calendar month appears in multiple years, the
+        latest year's value becomes the seasonal value."""
+        from cobre_bridge.converters.hydro import _per_stage_productivities
+
+        overrides = [
+            {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
+            {"type": "CFUGA", "year": 2025, "month": 9, "value": 7.0},  # newer
+            {"type": "CFUGA", "year": 2025, "month": 10, "value": 10.0},
+        ]
+        ctx = self._patch_dger(tmp_path, sazonaliza=1)
+        try:
+            vals = _per_stage_productivities(
+                self._hreg(),
+                base_productivity=0.0,
+                drop_overrides=overrides,
+                nw_files=_make_nw_files(tmp_path),
+                total_stages=36,
+            )
+        finally:
+            ctx.__exit__(None, None, None)
+
+        # Stage 24 = Sep 2026 → AFTER last_event_stage → seasonal cfuga[9]
+        # = 7.0 (Sep 2025 won over Sep 2024) → prod = 650 - 7 = 643.
+        assert vals[24] == pytest.approx(643.0)
+
+    def test_no_overrides_returns_base(self, tmp_path) -> None:
+        """Without any CFUGA/CMONT overrides the base value is returned
+        unchanged at every stage."""
+        from cobre_bridge.converters.hydro import _per_stage_productivities
+
+        vals = _per_stage_productivities(
+            self._hreg(),
+            base_productivity=42.0,
+            drop_overrides=[],
+            nw_files=_make_nw_files(tmp_path),
+            total_stages=12,
+        )
+        assert vals == [42.0] * 12
 
 
 def _make_hreg(overrides: dict) -> pd.Series:
@@ -4200,6 +4381,10 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = dger_mock.mes_inicio_estudo
         mock_dger.num_anos_estudo = dger_mock.num_anos_estudo
 
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = pd.DataFrame(
+            columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
+        )
         with (
             patch(
                 "inewave.newave.Dsvagua.read",
@@ -4208,6 +4393,10 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.Confhd.read",
+                return_value=mock_confhd,
             ),
         ):
             result = convert_water_withdrawal(
@@ -4244,6 +4433,10 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
 
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = pd.DataFrame(
+            columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
+        )
         with (
             patch(
                 "inewave.newave.Dsvagua.read",
@@ -4252,6 +4445,10 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.Confhd.read",
+                return_value=mock_confhd,
             ),
         ):
             result = convert_water_withdrawal(
@@ -4287,6 +4484,10 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
 
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = pd.DataFrame(
+            columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
+        )
         with (
             patch(
                 "inewave.newave.Dsvagua.read",
@@ -4295,6 +4496,10 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.Confhd.read",
+                return_value=mock_confhd,
             ),
         ):
             result = convert_water_withdrawal(
@@ -4414,6 +4619,10 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
 
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = pd.DataFrame(
+            columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
+        )
         with (
             patch(
                 "inewave.newave.Dsvagua.read",
@@ -4422,6 +4631,10 @@ class TestWaterWithdrawalConversion:
             patch(
                 "inewave.newave.Dger.read",
                 return_value=mock_dger,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.Confhd.read",
+                return_value=mock_confhd,
             ),
         ):
             result = convert_water_withdrawal(

@@ -13,11 +13,16 @@ from cobre_bridge.comparators.charts import (
     build_hydro_detail_tab,
     build_thermal_detail_tab,
     cobre_aggregate_chart,
+    constraints_comparison_chart,
     convergence_chart,
     cost_breakdown_chart,
     cost_breakdown_table,
+    future_cost_chart,
     hydro_aggregate_chart,
     hydro_per_bus_chart,
+    hydro_slack_aggregate_chart,
+    hydro_slack_per_bus_chart,
+    immediate_cost_chart,
     line_summary_chart,
     overview_metrics,
     performance_fwd_bwd_split_chart,
@@ -28,6 +33,7 @@ from cobre_bridge.comparators.charts import (
     system_per_bus_chart,
     thermal_generation_chart,
 )
+from cobre_bridge.comparators.constraints_compare import per_stage_bounds
 from cobre_bridge.comparators.html_report import (
     build_comparison_html,
     chart_grid,
@@ -77,6 +83,22 @@ def build_comparison_report(
             ],
         )
     )
+    overview_parts.append(section_title("Per-Stage Cost"))
+    nw_sin = pctiles.nw_sin if pctiles else pl.DataFrame()
+    cobre_stage_costs = pctiles.cobre_stage_costs if pctiles else pl.DataFrame()
+    nw_offset = pctiles.nw_offset if pctiles else 0
+    # Two side-by-side charts — immediate and future cost have very
+    # different scales (one is per-stage operating cost, the other is a
+    # cumulative future expectation), so we don't share an axis.
+    overview_parts.append(
+        chart_grid(
+            [
+                wrap_chart(immediate_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+                wrap_chart(future_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+            ],
+        )
+    )
+
     overview_parts.append(section_title("Convergence"))
     nw_conv = pctiles.nw_convergence if pctiles else pl.DataFrame()
     cb_conv = pctiles.cobre_convergence if pctiles else pl.DataFrame()
@@ -174,6 +196,45 @@ def build_comparison_report(
     )
     tab_contents["tab-network"] = "\n".join(network_parts)
 
+    # --- Constraints tab ---
+    # Per-constraint LHS comparison: NEWAVE-side LHS evaluated against
+    # MEDIAS-USIH / int*.out output, Cobre-side LHS as the mean across
+    # scenarios and blocks from the simulation parquet. Bounds are taken
+    # from constraints/generic_constraint_bounds.parquet (block 0
+    # preferred when blocks disagree).
+    gc_constraints = pctiles.gc_constraints if pctiles else []
+    gc_bounds_df = pctiles.gc_bounds if pctiles else pl.DataFrame()
+    gc_lhs_nw = pctiles.gc_lhs_newave if pctiles else pl.DataFrame()
+    gc_lhs_cb = pctiles.gc_lhs_cobre if pctiles else pl.DataFrame()
+    gc_max_stage = pctiles.nw_max_stage if pctiles else None
+    bound_lookup = per_stage_bounds(gc_bounds_df, max_stage=gc_max_stage)
+    if gc_max_stage is not None:
+        gc_lhs_nw = (
+            gc_lhs_nw.filter(pl.col("stage_id") <= gc_max_stage)
+            if not gc_lhs_nw.is_empty()
+            else gc_lhs_nw
+        )
+        gc_lhs_cb = (
+            gc_lhs_cb.filter(pl.col("stage_id") <= gc_max_stage)
+            if not gc_lhs_cb.is_empty()
+            else gc_lhs_cb
+        )
+    constraints_parts: list[str] = []
+    constraints_parts.append(section_title("Generic Constraints — LHS vs Bound"))
+    constraints_parts.append(
+        chart_grid(
+            [
+                wrap_chart(
+                    constraints_comparison_chart(
+                        gc_constraints, gc_lhs_nw, gc_lhs_cb, bound_lookup
+                    )
+                )
+            ],
+            single=True,
+        )
+    )
+    tab_contents["tab-constraints"] = "\n".join(constraints_parts)
+
     # --- Hydro Operation tab ---
     hydro_pct = pctiles.hydro if pctiles else None
     cobre_hydro_means = pctiles.cobre_hydro_means if pctiles else pl.DataFrame()
@@ -262,6 +323,62 @@ def build_comparison_report(
         )
     hydro_parts.append(chart_grid(aggregate_charts))
 
+    # Slack variables: same per-bus + SIN-total treatment as the operational
+    # variables above, but driven by the per-(entity_id, stage_id) Cobre
+    # frame and the NEWAVE slack frame (no ResultComparison rows exist for
+    # slacks).  The inflow non-negativity slack has no NEWAVE counterpart,
+    # so its NEWAVE source is passed as None — the chart still renders the
+    # Cobre Mean + p10/p90 band, just without an overlaid NEWAVE line.
+    nw_hydro_slacks = pctiles.nw_hydro_slacks if pctiles else pl.DataFrame()
+    # Withdrawal pos/neg are SWAPPED to follow NEWAVE's sign convention; the
+    # ``_NW_HYDRO_SLACK_VARS`` mapping in ``results.py`` is correspondingly
+    # swapped so each panel pairs the right Cobre column with the right
+    # NEWAVE series.  Evaporation pos/neg already share NEWAVE's convention.
+    slack_specs: list[tuple[str, str, bool]] = [
+        ("water_withdrawal_violation_neg_m3s", "Withdrawal Slack Pos (m³/s)", True),
+        ("water_withdrawal_violation_pos_m3s", "Withdrawal Slack Neg (m³/s)", True),
+        ("evaporation_violation_pos_m3s", "Evaporation Slack Pos (m³/s)", True),
+        ("evaporation_violation_neg_m3s", "Evaporation Slack Neg (m³/s)", True),
+        ("inflow_nonnegativity_slack_m3s", "Inflow Non-Negativity Slack (m³/s)", False),
+    ]
+    for var, slack_title, has_newave in slack_specs:
+        hydro_parts.append(section_title(slack_title + " by Bus"))
+        hydro_parts.append(
+            chart_grid(
+                [
+                    wrap_chart(
+                        hydro_slack_per_bus_chart(
+                            cobre_hydro_means,
+                            nw_hydro_slacks if has_newave else None,
+                            var,
+                            slack_title + " by Bus",
+                            hydro_pct,
+                            hydro_meta,
+                            bus_meta,
+                            matched_ids=matched_hydro_ids or None,
+                        )
+                    )
+                ],
+                single=True,
+            )
+        )
+
+    hydro_parts.append(section_title("Hydro Slacks (SIN)"))
+    slack_sin_charts = [
+        wrap_chart(
+            hydro_slack_aggregate_chart(
+                cobre_hydro_means,
+                nw_hydro_slacks if has_newave else None,
+                var,
+                slack_title,
+                hydro_pct,
+                matched_ids=matched_hydro_ids or None,
+            )
+        )
+        for var, slack_title, has_newave in slack_specs
+    ]
+    hydro_parts.append(chart_grid(slack_sin_charts))
+
     tab_contents["tab-hydro"] = "\n".join(hydro_parts)
 
     # --- Hydro Plant Details tab ---
@@ -269,6 +386,11 @@ def build_comparison_report(
         results,
         hydro_pct,
         cobre_hydro_means,
+        cobre_hydro_meta=pctiles.cobre_hydro_meta if pctiles else {},
+        cobre_hydro_per_stage_bounds=(
+            pctiles.cobre_hydro_per_stage_bounds if pctiles else pl.DataFrame()
+        ),
+        nw_hydro_slacks=(pctiles.nw_hydro_slacks if pctiles else pl.DataFrame()),
     )
 
     # --- Thermal Operation tab ---

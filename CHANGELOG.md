@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-24
+
+### Added
+
+- **GNL anticipated thermal dispatch**. New `converters/anticipated.py`
+  reads `adterm.dat` (gated by `dger.despacho_antecipado_gnl`) and
+  aggregates per-(thermal, lag, patamar) MW values via a
+  block-duration-weighted mean, preserving total committed MWh under
+  Cobre's constant-MW-per-stage convention. Each thermal now declares
+  `anticipated_config` (with `lead_stages`) in `thermals.json`,
+  replacing the dead `gnl_config: null` field. `adterm` is added as an
+  optional file to `NewaveFiles` resolved via `arquivos.dat`.
+- **Head-corrected turbined-flow cap** for hydro plants. NEWAVE's
+  effective turbination cap applies an affinity-law correction with the
+  volume-integrated head and a `pinst/prodt` clamp, not the nameplate
+  `Σ(n·q_nom)`. New `_compute_max_turbined_hypothesis` implements
+
+      qtur_max = min(Σ_c n_c · q_nom_c · (h_op / h_nom_c)^k_turb,
+                     pinst / (ρ_esp · h_int)) · (1 - teif) · (1 - ip)
+
+  with `h_op = mean_cota(V_min, V_65) - cota_jus - perdas` for reservoir
+  plants and the machine-count-weighted nominal head for D/F/S plants.
+  Reproduces M. DE MORAES's binding peak to within 0.0001 % across all
+  28 stages, closing a persistent ~108 m³/s gap that distorted hydro
+  operation. Legacy `_compute_max_turbined_simple` preserved as
+  fallback when `hidr.dat` columns are missing.
+
+- **PIMENTAL → BELO MONTE diversion** (13 000 m³/s nameplate)
+  restored. Without the explicit channel the Cobre LP had nowhere to
+  route the upstream water NEWAVE accounts for via the fictitious-plant
+  cascade, producing spurious spillage and downstream starvation.
+- **NC plant support** in converters.
+- **Operational-slack visibility** in both `cobre-bridge dashboard`
+  and `cobre-bridge compare results`:
+  - Plant-detail tab now plots `water_withdrawal_violation_{pos,neg}`
+    and `inflow_nonnegativity_slack` with p10/p50/p90 bands, so the
+    user can localize which plants/stages the LP had to relax under
+    stochastic noise.
+  - Plant-detail tab overlays NEWAVE `VIOL_POS/NEG_VRETIRUH` on the two
+    withdrawal-slack panels (converted /2.63 from hm³ to m³/s),
+    matching NEWAVE's sign convention.
+  - Hydro Operation tab gains per-bus + SIN-total aggregates for all
+    four paired hydro slacks (withdrawal + evaporation) plus the
+    Cobre-only inflow non-negativity slack — driven by
+    per-(entity_id, stage_id) frames since slacks don't go through the
+    `ResultComparison` pipeline.
+  - Dashed bound overlays for storage / generation / turbined / outflow
+    on the compare-results tab (the dashboard tab already had them).
+    Static values come from `hydros.json` via
+    `read_cobre_hydro_metadata` and are shadowed per-stage by overrides
+    from `constraints/hydro_bounds.parquet` via the new
+    `read_cobre_hydro_per_stage_bounds` reader.
+- **Risk-measure selection logging** in `convert_stages`. INFO log at
+  the top names the selected mode (expectation / constant-CVaR /
+  per-stage CVaR, from `dger.cvar`) and resolved alpha/lambda when CVaR
+  is in play. Per-stage branch refactored into four explicit cases
+  mirroring the log; output is bit-identical.
+- **Spec doc** `docs/findings/cobre-anticipated-thermal-pre-horizon-
+limitation.md` for the Cobre maintainers: self-contained spec of the
+  "non-zero `past_anticipated_commitments` rejected" limitation, the
+  bridge-side workaround, and the functional/acceptance requirements
+  that would let cobre-bridge restore NEWAVE-parity GNL dispatch by
+  flipping a single line.
+
+### Changed
+
+- **Default cut selection** now emits `method: "lml1"` with
+  `memory_window: 0` (was `domination` + `domination_epsilon: 0.0`).
+  Aligns with the `RowSelectionConfig` schema (`memory_window` is
+  required for `lml1`).
+- **Default inflow non-negativity** now `truncation_with_penalty`:
+  clamp negative PAR(p) draws to zero before LP patching and keep the
+  non-negativity slack columns as a backstop. Closes the exploit where
+  the LP would otherwise route negative inflow noise through the
+  withdrawal-neg slack (priced 1 R$/(m³/s) below the nonneg slack on
+  the cobre-bridge calibration).
+- **`inflow_nonnegativity_cost`** anchored to
+  `water_withdrawal_violation_cost + 1` R$/m³/s (was 1.01 × max of
+  flow-domain slacks, which made it cheaper than withdrawal and let
+  the LP buy "free" water to dodge withdrawal violations).
+- **D-regulation plant initial storage** anchored to
+  `volume_referencia`, consistent with the collapsed
+  `[vmin, vmax] = vref` bounds (NEWAVE freezes D reservoirs across
+  stages).
+- Stronger guard rails in deterministic mode.
+
+### Fixed
+
+- **Withdrawal slack sign labels** in `compare results` HTML. Cobre's
+  `water_withdrawal_violation_pos/neg` columns use the inverse sign
+  convention of NEWAVE's `VIOL_POS/NEG_VRETIRUH`; the NEWAVE → Cobre
+  column mapping and display labels are swapped so each "Pos" / "Neg"
+  panel pairs the columns that mean the same physical violation.
+  Evaporation slacks already shared NEWAVE's convention and are left
+  as-is.
+- **Slack p10/p90 emission**. `read_cobre_hydro_percentiles`'
+  `flow_cols` list now includes the three operational slacks added
+  above, so the percentile frame ships
+  `water_withdrawal_violation_{pos,neg}_m3s_{p10,p90}` and
+  `inflow_nonnegativity_slack_m3s_{p10,p90}` columns. Without them,
+  `_build_interactive_detail_html` emitted only the bare `Cobre Mean`
+  trace per slack chart and the `x unified` hover had nothing to lock
+  onto, breaking the band+P10/P90 tooltip every other flow variable
+  enjoys.
+- **P10–P90 unified-hover tooltip**: every band-trace site (5 in
+  `charts.py` plus the interactive plant-detail JS) now sets
+  `hoverinfo: "skip"` on the closing-polygon trace, and the visible
+  p10/p90 lines are renamed to "Cobre P10" / "Cobre P90". Previously
+  the unified hover showed the literal text `Cobre P10–P90` instead of
+  values at the cursor x.
+- **`past_anticipated_commitments` rejected by Cobre validator**.
+  `convert_initial_conditions` now zeroes the `values_mw` array
+  (length still `lead_stages`, as Cobre requires) and emits a WARNING
+  naming the `adterm.dat` code and the MW values being dropped — so
+  the user knows exactly what pre-horizon NEWAVE dispatch is not being
+  honoured. `read_anticipated_dispatch` keeps computing the true
+  block-weighted MW so the warning is informative; the zero-out
+  policy lives at the conversion site, not in the reader. Flipping a
+  single line restores genuine values when Cobre lifts the limitation.
+- Miscellaneous converter fixes uncovered during the `pmo_set_24`
+  stochastic-case investigation.
+
 ## [0.6.2] - 2026-05-21
 
 ### Added

@@ -155,6 +155,35 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     else:
         _cvar_constant = None
 
+    # Announce the chosen risk-measure mode so the conversion log makes
+    # the cvar/expectation switch obvious without having to inspect
+    # stages.json.  Deterministic mode always wins; otherwise dger.cvar
+    # drives the selection (0 → expectation, 1 → constant CVaR, 2 →
+    # per-stage CVaR).
+    if deterministic:
+        logger.info(
+            "Risk measure: forcing 'expectation' on every stage "
+            "(deterministic mode active — single inflow path, no CVaR tail)."
+        )
+    elif dger_cvar == 0:
+        logger.info("Risk measure: 'expectation' on every stage (dger.cvar=0).")
+    elif dger_cvar == 1 and _cvar_constant is not None:
+        cvar_p = _cvar_constant["cvar"]
+        logger.info(
+            "Risk measure: constant CVaR(alpha=%.4f, lambda=%.4f) on every "
+            "stage (dger.cvar=1, cvar.dat::valores_constantes).",
+            cvar_p["alpha"],
+            cvar_p["lambda"],
+        )
+    elif dger_cvar == 2:
+        logger.info(
+            "Risk measure: per-stage CVaR with constant fallback "
+            "alpha=%.4f, lambda=%.4f (dger.cvar=2, "
+            "cvar.dat::alfa_variavel + lambda_variavel).",
+            const_alpha,
+            const_lambda,
+        )
+
     # Build block duration lookup: {(month, patamar) -> fraction}
     # Patamar.duracao_mensal_patamares columns: data (datetime), patamar (int),
     # valor (float, fraction of month).
@@ -222,16 +251,29 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                 }
             )
 
-        # Determine risk_measure for this stage.
-        if dger_cvar == 0 or _cvar_constant is None and dger_cvar != 2:
-            risk_measure: str | dict = "expectation"
+        # Determine risk_measure for this stage.  Modes (mirrors the
+        # top-of-function log message):
+        #   * deterministic mode wins — single inflow path means CVaR
+        #     has no tail to penalise, so expectation is correct;
+        #   * dger.cvar=0 → expectation;
+        #   * dger.cvar=1 → the same constant CVaR(alpha,lambda) on every
+        #     stage (already-built ``_cvar_constant`` is reused);
+        #   * dger.cvar=2 → per-stage alpha/lambda from cvar.dat with the
+        #     constant ``valores_constantes`` as the fallback.
+        risk_measure: str | dict
+        if deterministic or dger_cvar == 0:
+            risk_measure = "expectation"
         elif dger_cvar == 1 and _cvar_constant is not None:
             risk_measure = _cvar_constant
-        else:
-            # dger_cvar == 2: use per-stage alpha/lambda, falling back to constant.
+        elif dger_cvar == 2:
             a = alpha_override.get((year, month), const_alpha)
             lbd = lambda_override.get((year, month), const_lambda)
             risk_measure = {"cvar": {"alpha": a, "lambda": lbd}}
+        else:
+            # Defensive: should only fire if dger.cvar ∈ {1, 2} but cvar.dat
+            # was missing (the top-of-function block downgrades to
+            # dger_cvar=0 and warns, so we shouldn't reach here in practice).
+            risk_measure = "expectation"
 
         stage_entry: dict = {
             "id": stage_id,
@@ -243,7 +285,10 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
             "risk_measure": risk_measure,
             "state_variables": {
                 "storage": True,
-                "inflow_lags": True,
+                # Inflow lags add no information in deterministic mode — every
+                # stage already sees a single fixed historical residual — so
+                # drop them to keep the LP smaller.
+                "inflow_lags": not deterministic,
             },
         }
         if deterministic:
@@ -438,7 +483,9 @@ def _historical_years_from_shist(
     return {"from": range_from, "to": range_to}
 
 
-def _count_historical_years(historical_years: list[int] | dict[str, int]) -> int:
+def _count_historical_years(
+    historical_years: list[int] | dict[str, int],
+) -> int:
     """Return how many distinct start-years are covered by a historical_years
     spec — equivalently the number of simulation scenarios NEWAVE will run."""
     if isinstance(historical_years, list):
@@ -535,8 +582,8 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             "check_frequency": 1,
             "cut_activity_tolerance": 1e-6,
             "enabled": cut_selection_enabled,
-            "method": "domination",
-            "domination_epsilon": 0.0,
+            "method": "lml1",
+            "memory_window": 0,
         },
     }
     if not training_enabled:
@@ -584,6 +631,24 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             )
         simulation_section["scenario_source"] = sim_source
 
+    # Deterministic-mode workaround: force max_order = 0 so the LP carries
+    # no inflow-lag state.  Cobre's SDDP exhibits a negative-gap regression
+    # when ``max_par_order > 0`` is combined with the sparse cut mask (see
+    # the per-hydro lag exclusion in ``StageIndexer::set_nonzero_mask``);
+    # disabling lags is the only safe knob from the bridge side until the
+    # cobre-side fix lands.  Lag state has no informational value in a
+    # deterministic case — every stage already sees a single fixed inflow
+    # path — so this is a no-op for correctness on this run mode.
+    if deterministic and max_order > 0:
+        logger.info(
+            "Deterministic mode: forcing estimation.max_order from %d to 0 "
+            "to avoid cobre SDDP negative-gap regression triggered by the "
+            "sparse cut mask when inflow-lag state is present.",
+            max_order,
+        )
+        max_order = 0
+        order_selection = "pacf"
+
     estimation: dict = {"max_order": max_order}
     if order_selection is not None:
         estimation["order_selection"] = order_selection
@@ -596,16 +661,21 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "estimation": estimation,
         "training": training_section,
         "modeling": {
-            # `method: "penalty"` enables the inflow-non-negativity slack columns
-            # in the LP. The slack penalty itself comes from
-            # `penalties.json::hydro.inflow_nonnegativity_cost`, which the
-            # converter populates via `convert_penalties`. The legacy
-            # `penalty_cost` field in this block is *deprecated* (see cobre
-            # config schema docs) and ignored when penalties.json supplies
-            # the value, so we intentionally omit it here to avoid misleading
-            # readers about which number actually drives the LP.
+            # `method: "truncation_with_penalty"` clamps negative PAR(p) inflow
+            # draws to zero before LP patching *and* keeps the inflow-non-
+            # negativity slack columns enabled.  The clamp closes the
+            # "free water" exploit where the LP would otherwise route negative
+            # noise through the withdrawal-neg slack (cheaper than the
+            # non-negativity slack on the cobre-bridge calibration); the
+            # slack columns remain as a defensive backstop for any edge case
+            # the truncation misses.  The slack penalty itself still comes
+            # from `penalties.json::hydro.inflow_nonnegativity_cost`, which
+            # `convert_penalties` populates.  The legacy `penalty_cost` field
+            # in this block is *deprecated* (see cobre config schema docs)
+            # and ignored when penalties.json supplies the value, so we
+            # intentionally omit it here.
             "inflow_non_negativity": {
-                "method": "penalty",
+                "method": "truncation_with_penalty",
             },
         },
         "exports": {

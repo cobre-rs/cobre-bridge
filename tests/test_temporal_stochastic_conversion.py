@@ -72,6 +72,7 @@ def _make_nw_files(
         re_dat=None,
         volref_saz=None,
         shist=shist,
+        adterm=None,
     )
 
 
@@ -95,6 +96,7 @@ def _make_dger_mock(
     consideracao_media_anual_afluencias: int | None = None,
     selecao_de_cortes_forward: int = 1,
     selecao_de_cortes_backward: int = 1,
+    ordem_maxima_parp: int = 6,
 ) -> MagicMock:
     dger = MagicMock()
     dger.mes_inicio_estudo = mes_inicio
@@ -115,6 +117,7 @@ def _make_dger_mock(
     dger.consideracao_media_anual_afluencias = consideracao_media_anual_afluencias
     dger.selecao_de_cortes_forward = selecao_de_cortes_forward
     dger.selecao_de_cortes_backward = selecao_de_cortes_backward
+    dger.ordem_maxima_parp = ordem_maxima_parp
     return dger
 
 
@@ -798,6 +801,43 @@ class TestConvertConfig:
         # Simulation side stays consistent.
         assert result["simulation"]["scenario_source"]["historical_years"] == [1983]
         assert result["simulation"]["num_scenarios"] == 1
+        # Deterministic mode also forces estimation.max_order = 0 (workaround
+        # for cobre's SDDP negative-gap regression when lag-state is present)
+        # and pins order_selection to "pacf" to avoid the residual annual
+        # coupling that survives even with max_order = 0.
+        assert result["estimation"]["max_order"] == 0
+        assert result["estimation"]["order_selection"] == "pacf"
+
+    @patch("cobre_bridge.converters.temporal.Shist")
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_non_deterministic_mode_preserves_estimation_max_order(
+        self, mock_dger_cls, mock_shist_cls, tmp_path
+    ) -> None:
+        """Non-deterministic conversions keep the configured PAR order — the
+        max_order override is gated by deterministic mode only.
+        """
+        (tmp_path / "dger.dat").touch()
+        (tmp_path / "shist.dat").touch()
+        dger = _make_dger_mock(
+            tipo_execucao=1,
+            tipo_simulacao_final=2,
+            num_forwards=2,  # breaks deterministic mode
+            num_aberturas=1,
+            ordem_maxima_parp=4,
+            consideracao_media_anual_afluencias=0,  # → "pacf"
+        )
+        mock_dger_cls.read.return_value = dger
+        mock_shist = MagicMock()
+        mock_shist.varredura = 0
+        mock_shist.anos_inicio_simulacoes = [1983]
+        mock_shist.ano_inicio_varredura = 1932
+        mock_shist_cls.read.return_value = mock_shist
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        assert result["estimation"]["max_order"] == 4
+        assert result["estimation"]["order_selection"] == "pacf"
 
     @patch("cobre_bridge.converters.temporal.Shist")
     @patch("cobre_bridge.converters.temporal.Dger")
@@ -1950,3 +1990,99 @@ class TestConvertRecentInflowLagsWithFile:
             )
 
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_upstream_postos — NE/NC cascade bypass
+# ---------------------------------------------------------------------------
+
+
+def _confhd_row(
+    code: int,
+    posto: int,
+    downstream: int,
+    status: str = "EX",
+) -> dict[str, object]:
+    return {
+        "codigo_usina": code,
+        "nome_usina": f"PLANT_{code}",
+        "posto": posto,
+        "codigo_usina_jusante": downstream,
+        "usina_existente": status,
+    }
+
+
+class TestBuildUpstreamPostosNonExistingBypass:
+    """``_build_upstream_postos`` must walk through NE/NC plants so the
+    posto-level cascade stays connected.  Without this, the downstream
+    EX plant's incremental inflow fails to subtract the upstream EX
+    plant's natural inflow."""
+
+    def test_nc_plant_between_two_ex_plants_keeps_posto_edge(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        # A (EX, posto 100) -> B (NC, posto 200) -> C (EX, posto 300)
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 2, "EX"),
+                _confhd_row(2, 200, 3, "NC"),
+                _confhd_row(3, 300, 0, "EX"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd)
+        assert upstream.get(300) == [100]
+
+    def test_ne_plant_between_two_ex_plants_keeps_posto_edge(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 2, "EX"),
+                _confhd_row(2, 200, 3, "NE"),
+                _confhd_row(3, 300, 0, "EX"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd)
+        assert upstream.get(300) == [100]
+
+    def test_consecutive_absent_plants_collapse_to_single_edge(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 2, "EX"),
+                _confhd_row(2, 200, 3, "NC"),
+                _confhd_row(3, 300, 4, "NE"),
+                _confhd_row(4, 400, 0, "EX"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd)
+        assert upstream.get(400) == [100]
+        # No edge to the bypassed postos 200/300.
+        assert 200 not in upstream
+        assert 300 not in upstream
+
+    def test_absent_at_chain_end_yields_no_edge(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        # A (EX) -> B (NC) -> 0 (terminal); A has no downstream edge.
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 2, "EX"),
+                _confhd_row(2, 200, 0, "NC"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd)
+        assert upstream == {}
+
+    def test_direct_ex_to_ex_edge_preserved(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 2, "EX"),
+                _confhd_row(2, 200, 0, "EX"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd)
+        assert upstream.get(200) == [100]

@@ -27,6 +27,7 @@ COMPARISON_TABS = [
     ("tab-system", "System"),
     ("tab-balance", "Energy Balance"),
     ("tab-network", "Network"),
+    ("tab-constraints", "Constraints"),
     ("tab-hydro", "Hydro Operation"),
     ("tab-hydro-detail", "Hydro Details"),
     ("tab-thermal", "Thermal Operation"),

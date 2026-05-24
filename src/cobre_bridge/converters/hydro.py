@@ -248,27 +248,44 @@ def _extract_temporal_overrides(
     return result
 
 
-def _read_ghmin(nw_files: NewaveFiles) -> dict[int, float]:
-    """Read GHMIN.DAT and return a mapping of plant code -> minimum generation MW.
+def _read_ghmin_per_stage(
+    nw_files: NewaveFiles,
+    start_year: int,
+    start_month: int,
+    study_months: int,
+    total_stages: int,
+) -> dict[int, dict[int, float]]:
+    """Read GHMIN.DAT and expand into ``{plant_code: {stage_0based: min_gen_mw}}``.
 
-    If ``GHMIN.DAT`` is absent (``nw_files.ghmin is None``), returns an
-    empty dict.  Only ``patamar == 0`` rows (all load blocks) are used; if
-    multiple time periods are present for the same plant, the first
-    occurrence (earliest date) is taken.
+    GHMIN values are time-varying minimum-generation requirements in
+    MWmes that NEWAVE enforces per plant per stage.  Each (plant,
+    month, year) record sets the value from that stage forward until
+    the next record overrides it (step function).  Records with
+    ``year == 9999`` are post-study seasonal entries: each calendar
+    month they appear for becomes the value used in every post-study
+    stage with that calendar month, falling back to a seasonal repeat
+    of the last study year for unspecified months.
+
+    Only ``patamar == 0`` rows are used — they represent the all-blocks
+    mean, which matches the per-stage granularity of
+    ``hydro_bounds.parquet``.
+
+    Returns an empty mapping when ``GHMIN.DAT`` is absent.
 
     Parameters
     ----------
     nw_files:
         Resolved NEWAVE file paths for the case.
-
-    Returns
-    -------
-    dict[int, float]
-        Plant code -> minimum generation in MW.  Empty dict if file absent.
+    start_year, start_month:
+        Study start (Cobre stage 0 corresponds to this calendar month).
+    study_months:
+        Number of in-study stages.
+    total_stages:
+        Total number of stages (study + post-study).
     """
     ghmin_path = nw_files.ghmin
     if ghmin_path is None:
-        _LOG.debug("GHMIN.DAT not found; using computed min_generation fallback.")
+        _LOG.debug("GHMIN.DAT not found; emitting no per-stage min_generation.")
         return {}
 
     ghmin = Ghmin.read(str(ghmin_path))
@@ -276,20 +293,65 @@ def _read_ghmin(nw_files: NewaveFiles) -> dict[int, float]:
     if df is None or df.empty:
         return {}
 
-    # Keep only patamar=0 (all-blocks) rows.
     patamar0 = df[df["patamar"] == 0]
     if patamar0.empty:
         return {}
 
-    # Use the first (earliest) entry per plant.
-    first_per_plant = (
-        patamar0.sort_values("data").groupby("codigo_usina").first().reset_index()
-    )
+    result: dict[int, dict[int, float]] = {}
+    for code, group in patamar0.groupby("codigo_usina"):
+        code_int = int(code)
+        study_changes: list[tuple[int, float]] = []
+        pos_by_month: dict[int, float] = {}
+        for _, row in group.iterrows():
+            dt = row["data"]
+            yr = int(dt.year)
+            mo = int(dt.month)
+            value = float(row["geracao"])
+            if yr == 9999:
+                pos_by_month[mo] = value
+                continue
+            sid = (yr - start_year) * 12 + (mo - start_month)
+            if sid < 0:
+                sid = 0
+            study_changes.append((sid, value))
+        study_changes.sort()
 
-    return {
-        int(row["codigo_usina"]): float(row["geracao"])
-        for _, row in first_per_plant.iterrows()
-    }
+        per_stage: dict[int, float] = {}
+        # Step function across the study period.
+        if study_changes:
+            first_stage = study_changes[0][0]
+            cp_idx = 0
+            current: float | None = None
+            for stage_id in range(first_stage, study_months):
+                while (
+                    cp_idx < len(study_changes) and study_changes[cp_idx][0] <= stage_id
+                ):
+                    current = study_changes[cp_idx][1]
+                    cp_idx += 1
+                if current is not None:
+                    per_stage[stage_id] = current
+
+        # Seasonal pattern for post-study: prefer explicit POS entries
+        # for each calendar month; fall back to the last study year's
+        # value for that calendar month.
+        if total_stages > study_months:
+            last_year_seasonal: dict[int, float] = {}
+            for stage_id in range(max(0, study_months - 12), study_months):
+                if stage_id in per_stage:
+                    cal = ((start_month - 1 + stage_id) % 12) + 1
+                    last_year_seasonal[cal] = per_stage[stage_id]
+
+            for stage_id in range(study_months, total_stages):
+                cal = ((start_month - 1 + stage_id) % 12) + 1
+                if cal in pos_by_month:
+                    per_stage[stage_id] = pos_by_month[cal]
+                elif cal in last_year_seasonal:
+                    per_stage[stage_id] = last_year_seasonal[cal]
+
+        if per_stage:
+            result[code_int] = per_stage
+
+    return result
 
 
 # Mapping from PENALID.DAT variable names to Cobre penalty field names.
@@ -360,6 +422,246 @@ def _read_penalid(nw_files: NewaveFiles) -> dict[int, dict[str, float]]:
         result[ree_code][cobre_field] = cost
 
     return result
+
+
+# Turbine type code -> kturb exponent used in the head-correction formula.
+# NEWAVE codes: 1 = Francis, 2 = Kaplan, 3 = Pelton.  Francis and Pelton
+# share the kturb = 0.5 exponent (square-root flow/head response); Kaplan
+# uses 0.2 (gentler response thanks to adjustable blades).  Code 0 (= not
+# specified in hidr.dat) falls back to Francis.
+_KTURB_BY_TIPO_TURBINA: dict[int, float] = {0: 0.5, 1: 0.5, 2: 0.2, 3: 0.5}
+
+
+def _clamp_outage_pct(value: float, label: str, plant_name: str) -> float:
+    """Clamp TEIF/IP percentages into ``[0, 100]`` and warn on overshoot."""
+    if math.isnan(value):
+        return 0.0
+    if value < 0.0:
+        return 0.0
+    if value > 100.0:
+        _LOG.warning(
+            "%s exceeds 100%% for plant %s (%s=%.2f); clamping to 100.",
+            label,
+            plant_name,
+            label.lower(),
+            value,
+        )
+        return 100.0
+    return value
+
+
+def _availability(teif: float, ip: float) -> float:
+    """Joint TEIF/IP availability factor — both apply multiplicatively."""
+    return ((100.0 - teif) / 100.0) * ((100.0 - ip) / 100.0)
+
+
+def _compute_max_turbined_simple(hreg: pd.Series, name: str) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` using the simple sum-of-rated
+    approach: ``Σ_c (n_c · q_nom_c)`` for flow and ``Σ_c (n_c · p_nom_c)`` for
+    power, both derated by the combined TEIF/IP availability factor.
+
+    This was the implementation used through v0.6.x.  It is kept available so
+    we can restore the previous behavior with a single switch if the more
+    elaborate hypothesis formula turns out to be wrong.
+    """
+    n_sets = int(hreg["numero_conjuntos_maquinas"])
+    max_turbined = 0.0
+    max_generation = 0.0
+    for i in range(1, n_sets + 1):
+        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
+        q_nominal = float(hreg[f"vazao_nominal_conjunto_{i}"])
+        p_nominal = float(hreg[f"potencia_nominal_conjunto_{i}"])
+        max_turbined += q_nominal * n_machines
+        max_generation += p_nominal * n_machines
+
+    teif = _clamp_outage_pct(float(hreg.get("teif", 0.0) or 0.0), "teif", name)
+    ip = _clamp_outage_pct(float(hreg.get("ip", 0.0) or 0.0), "ip", name)
+    availability = _availability(teif, ip)
+    return max_turbined * availability, max_generation * availability
+
+
+def _evaluate_cota_polynomial(hreg: pd.Series, volume_hm3: float) -> float:
+    """Evaluate the upstream cota polynomial ``cota(V) = Σ a_i · V^i`` at *V*."""
+    a = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+    v = volume_hm3
+    return a[0] + a[1] * v + a[2] * v * v + a[3] * v**3 + a[4] * v**4
+
+
+def _mean_cota_over_volume(hreg: pd.Series, v_lo: float, v_hi: float) -> float:
+    """Return the volume-averaged upstream cota over ``[v_lo, v_hi]``.
+
+    Computed analytically from the integral of the quartic polynomial — the
+    same shape NEWAVE uses to derive ``prodt_eq`` for reservoir plants.
+    """
+    if v_hi <= v_lo:
+        return _evaluate_cota_polynomial(hreg, v_lo)
+    a = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+
+    def antideriv(v: float) -> float:
+        return (
+            a[0] * v
+            + a[1] * v * v / 2.0
+            + a[2] * v**3 / 3.0
+            + a[3] * v**4 / 4.0
+            + a[4] * v**5 / 5.0
+        )
+
+    return (antideriv(v_hi) - antideriv(v_lo)) / (v_hi - v_lo)
+
+
+def _apply_hydraulic_loss(h_gross: float, tipo_perda: int, perdas: float) -> float:
+    """Return net head after hidr.dat hydraulic-loss model.
+
+    ``tipo_perda == 1`` -> percentage loss applied to gross head.
+    ``tipo_perda == 2`` -> constant head loss in metres.
+    ``tipo_perda == 0`` (or any unknown) -> no loss.
+    """
+    if math.isnan(perdas) or perdas <= 0.0:
+        return h_gross
+    if tipo_perda == 1:
+        return h_gross * (1.0 - perdas / 100.0)
+    if tipo_perda == 2:
+        return h_gross - perdas
+    return h_gross
+
+
+def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` using the head-corrected
+    NEWAVE-style cap.
+
+    For each machine set *c* with nominal head ``h_nom_c``, nominal flow
+    ``q_nom_c`` and number of units ``n_c``, the effective rated flow at
+    operating head ``h_op`` follows the affinity-law approximation::
+
+        q_eff_c = (h_op / h_nom_c)^k_turb · q_nom_c
+
+    where ``k_turb`` depends on the turbine family (0.5 for Francis/Pelton,
+    0.2 for Kaplan).  The plant cap is then
+
+        qtur_max = min(Σ_c n_c · q_eff_c , p_inst / prodt_eq) · availability
+
+    with ``h_op`` being:
+
+    * the volume-integrated net head from ``V_min`` to ``V_65``, i.e.
+      ``mean_cota(V_min, V_65) - cota_jus - perdas``, for reservoir plants
+      (``tipo_regulacao == 'M'``).  This is the NEWAVE ``h^{65%}`` symbol —
+      despite the name, it is a *mean over the operating range* rather than
+      the snapshot at V = V_65.  Reproduces NEWAVE's actual cap exactly on
+      the diagnostic case (M. DE MORAES) and matches the equivalent
+      productivity ``prodt^M`` denominator;
+    * the machine-count-weighted average of nominal heads, for run-of-river /
+      daily plants — they don't have a meaningful "operating volume".
+
+    ``prodt_eq = ρ_esp · h_int`` integrates the head polynomial over
+    ``[V_min, V_65]`` for M plants (so it equals ``ρ_esp · h_op``) and
+    ``[V_min, V_max]`` for the others.
+
+    Falls back to the simple Σ(n·q) when the inputs needed for the head
+    correction are missing (``queda_nominal_conjunto_*`` columns absent,
+    no polynomial coefficients, zero ρ_esp, etc.) — this keeps unit-test
+    fixtures with partial schemas working.
+    """
+    n_sets = int(hreg["numero_conjuntos_maquinas"])
+    available_cols = set(hreg.index)
+    has_head_data = all(
+        f"queda_nominal_conjunto_{i}" in available_cols for i in range(1, 6)
+    ) and all(f"a{i}_volume_cota" in available_cols for i in range(5))
+    if not has_head_data:
+        return _compute_max_turbined_simple(hreg, name)
+
+    sum_n_q = 0.0
+    sum_n_p = 0.0
+    sum_n_h = 0.0
+    total_machines = 0
+    for i in range(1, n_sets + 1):
+        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
+        q_nominal = float(hreg[f"vazao_nominal_conjunto_{i}"])
+        p_nominal = float(hreg[f"potencia_nominal_conjunto_{i}"])
+        h_nominal = float(hreg[f"queda_nominal_conjunto_{i}"])
+        sum_n_q += n_machines * q_nominal
+        sum_n_p += n_machines * p_nominal
+        sum_n_h += n_machines * h_nominal
+        total_machines += n_machines
+
+    teif = _clamp_outage_pct(float(hreg.get("teif", 0.0) or 0.0), "teif", name)
+    ip = _clamp_outage_pct(float(hreg.get("ip", 0.0) or 0.0), "ip", name)
+    availability = _availability(teif, ip)
+
+    # Generation cap mirrors the legacy behavior — NEWAVE caps power at
+    # rated installed capacity, derated by availability.
+    max_generation = sum_n_p * availability
+
+    # Inputs needed for head correction.
+    vol_min = float(hreg["volume_minimo"])
+    vol_max = float(hreg["volume_maximo"])
+    cf_raw = hreg.get("canal_fuga_medio")
+    rho_esp_raw = hreg.get("produtibilidade_especifica")
+    tipo_perda = int(hreg.get("tipo_perda", 0) or 0)
+    perdas = float(hreg.get("perdas", 0.0) or 0.0)
+    tipo_turbina = int(hreg.get("tipo_turbina", 0) or 0)
+    tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
+
+    # If we lack the inputs to compute the head correction, fall back to the
+    # simple sum.  This protects against malformed/incomplete hidr rows.
+    if (
+        total_machines == 0
+        or cf_raw is None
+        or _is_na(cf_raw)
+        or rho_esp_raw is None
+        or _is_na(rho_esp_raw)
+        or float(rho_esp_raw) <= 0.0
+    ):
+        return sum_n_q * availability, max_generation
+
+    cf = float(cf_raw)
+    rho_esp = float(rho_esp_raw)
+    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+
+    if tipo_reg == "M":
+        v65 = vol_min + 0.65 * (vol_max - vol_min)
+        # NEWAVE's ``h^{65%}`` is the *integrated* net head over [V_min, V_65],
+        # not the snapshot at V = V_65.  Verified against M. DE MORAES (the
+        # diagnostic case): with this interpretation the formula reproduces
+        # the observed NEWAVE cap of 1084.95 m³/s exactly.
+        h_int_gross = _mean_cota_over_volume(hreg, vol_min, v65) - cf
+        h_op = _apply_hydraulic_loss(h_int_gross, tipo_perda, perdas)
+        # For M plants ``prodt^M`` integrates over the same range, so h_int
+        # equals h_op — the same value is reused intentionally.
+        h_int = h_op
+    else:
+        # Run-of-river / daily-regulated / S plants — no integration window;
+        # use machine-count-weighted nominal head for the kturb sum, and
+        # the full V_min..V_max integral for prodt.
+        h_op = sum_n_h / total_machines
+        h_int_gross = _mean_cota_over_volume(hreg, vol_min, vol_max) - cf
+        h_int = _apply_hydraulic_loss(h_int_gross, tipo_perda, perdas)
+
+    # Defensive: a negative or zero h_op means cota_jus is above the
+    # forebay (data error or post-overhaul cota).  Fall back to the simple
+    # Σ(n·q) to avoid emitting a meaningless bound.
+    if h_op <= 0.0 or h_int <= 0.0:
+        return sum_n_q * availability, max_generation
+
+    # Affinity-law correction per machine set.
+    sum_kt = 0.0
+    for i in range(1, n_sets + 1):
+        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
+        q_nominal = float(hreg[f"vazao_nominal_conjunto_{i}"])
+        h_nominal = float(hreg[f"queda_nominal_conjunto_{i}"])
+        if h_nominal <= 0.0:
+            sum_kt += n_machines * q_nominal
+            continue
+        ratio = h_op / h_nominal
+        # Use abs to guard against the rare case where h_op flips sign during
+        # overhaul-only periods; the exponent < 1 keeps the result finite.
+        sum_kt += n_machines * q_nominal * (ratio**kturb)
+
+    # Installed-power-over-equivalent-productivity cap.
+    prodt_eq = rho_esp * h_int
+    cap_pinst = sum_n_p / prodt_eq if prodt_eq > 0.0 else math.inf
+
+    max_turbined = min(sum_kt, cap_pinst) * availability
+    return max_turbined, max_generation
 
 
 def read_cadastro(nw_files: NewaveFiles) -> pd.DataFrame:
@@ -437,9 +739,6 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     existing = all_existing[
         ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
     ]
-    # Read GHMIN.DAT minimum generation map.
-    ghmin_map = _read_ghmin(nw_files)
-
     # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
     if ree_df is not None:
@@ -463,43 +762,28 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
+        # NEWAVE treats Daily-regulation ('D') plants as having frozen
+        # storage at ``volume_referencia`` — they can't accumulate water
+        # across stages.  Collapse the active range to a single point so
+        # Cobre's LP mirrors the same behavior.
+        tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
+        if tipo_reg == "D":
+            vol_ref_raw = hreg.get("volume_referencia")
+            if vol_ref_raw is not None and not pd.isna(vol_ref_raw):
+                vol_ref = float(vol_ref_raw)
+                vol_min = vol_ref
+                vol_max = vol_ref
+
         # Generation parameters. Productivity lives in
         # ``hydro_production_models.json`` on cobre HEAD; callers that need
         # the per-hydro base value call ``compute_base_productivities``.
-        n_sets = int(hreg["numero_conjuntos_maquinas"])
-
-        max_turbined = 0.0
-        max_generation = 0.0
-        for i in range(1, n_sets + 1):
-            n_machines = int(hreg[f"maquinas_conjunto_{i}"])
-            q_nominal = float(hreg[f"vazao_nominal_conjunto_{i}"])
-            p_nominal = float(hreg[f"potencia_nominal_conjunto_{i}"])
-            max_turbined += q_nominal * n_machines
-            max_generation += p_nominal * n_machines
-
-        # Apply TEIF/IP availability derating to max_generation.
-        teif = float(hreg.get("teif", 0.0) or 0.0)
-        ip = float(hreg.get("ip", 0.0) or 0.0)
-        if math.isnan(teif):
-            teif = 0.0
-        if math.isnan(ip):
-            ip = 0.0
-
-        def _clamp_to_100(value: float, label: str) -> float:
-            if value > 100.0:
-                _LOG.warning(
-                    "%s exceeds 100%% for plant %s (%s=%.2f); clamping to 100.",
-                    label,
-                    name,
-                    label.lower(),
-                    value,
-                )
-                return 100.0
-            return value
-
-        teif = _clamp_to_100(teif, "teif")
-        ip = _clamp_to_100(ip, "ip")
-        max_generation *= ((100.0 - teif) / 100.0) * ((100.0 - ip) / 100.0)
+        #
+        # The cap uses the head-corrected NEWAVE-style formula
+        # (see ``_compute_max_turbined_hypothesis``).  The previous simple
+        # Σ(n_c · q_nom_c) formulation lives in
+        # ``_compute_max_turbined_simple`` and can be reinstated by
+        # swapping the call below.
+        max_turbined, max_generation = _compute_max_turbined_hypothesis(hreg, name)
 
         # Minimum outflow from historical minimum (may have been overridden by MODIF).
         vazao_min_hist = hreg.get("vazao_minima_historica")
@@ -517,12 +801,11 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         # CFUGA/CMONT temporal overrides are handled by convert_production_models;
         # no warning needed here as per-stage productivity is now supported.
 
-        # Min generation: use GHMIN.DAT if available, otherwise approximate.
-        ghmin_value = ghmin_map.get(newave_code)
-        if ghmin_value is not None:
-            min_generation = ghmin_value
-        else:
-            min_generation = 0.0
+        # Static field is always zero — per-stage GHMIN values are
+        # emitted in ``hydro_bounds.parquet:min_generation_mw`` by
+        # :func:`convert_storage_bounds` so the LP sees the correct
+        # bound at every stage.
+        min_generation = 0.0
 
         # Downstream cascade linkage.  Use the FICT-cascade resolver so that
         # plants whose physical downstream is a fictitious plant (or whose
@@ -932,12 +1215,15 @@ def _per_stage_integrated_productivities(
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
+    seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
 
     events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
+    last_event_stage = -1
     for override in drop_overrides:
         stage_id = (override["year"] - start_year) * 12 + (
             override["month"] - start_month
         )
+        last_event_stage = max(last_event_stage, stage_id)
         if override["type"] == "CFUGA":
             events_by_stage.setdefault(stage_id, []).append(
                 (float(override["value"]), None)
@@ -946,6 +1232,34 @@ def _per_stage_integrated_productivities(
             events_by_stage.setdefault(stage_id, []).append(
                 (None, float(override["value"]))
             )
+
+    # Seasonal lookup for sazonaliza_cfuga_cmont=1 (Dger): after the last
+    # explicit event, each stage's calendar month gets the value from
+    # the latest year that defined it.  See ``_per_stage_productivities``
+    # for the matching logic on the point-value productivity.
+    seasonal_cfuga: dict[int, float] = {}
+    seasonal_cmont: dict[int, float] = {}
+    if seasonalize:
+        latest_per_month_year_cfuga: dict[int, int] = {}
+        latest_per_month_year_cmont: dict[int, int] = {}
+        for override in drop_overrides:
+            year = int(override["year"])
+            month = int(override["month"])
+            value = float(override["value"])
+            if override["type"] == "CFUGA":
+                if (
+                    month not in latest_per_month_year_cfuga
+                    or year > latest_per_month_year_cfuga[month]
+                ):
+                    latest_per_month_year_cfuga[month] = year
+                    seasonal_cfuga[month] = value
+            else:  # CMONT
+                if (
+                    month not in latest_per_month_year_cmont
+                    or year > latest_per_month_year_cmont[month]
+                ):
+                    latest_per_month_year_cmont[month] = year
+                    seasonal_cmont[month] = value
 
     values: list[float] = []
     active_cfuga: float | None = None
@@ -964,6 +1278,13 @@ def _per_stage_integrated_productivities(
                     active_cfuga = cfuga_val
                 if cmont_val is not None:
                     active_cmont = cmont_val
+
+        if seasonalize and stage_id > last_event_stage:
+            calendar_month = ((start_month - 1 + stage_id) % 12) + 1
+            if calendar_month in seasonal_cfuga:
+                active_cfuga = seasonal_cfuga[calendar_month]
+            if calendar_month in seasonal_cmont:
+                active_cmont = seasonal_cmont[calendar_month]
 
         if active_cfuga is None and active_cmont is None:
             values.append(base_integrated)
@@ -1105,14 +1426,17 @@ def _per_stage_productivities(
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
+    seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
 
     # Group CFUGA/CMONT events by stage_id so per-stage state can be evolved
     # in a single forward sweep.
     events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
+    last_event_stage = -1
     for override in drop_overrides:
         stage_id = (override["year"] - start_year) * 12 + (
             override["month"] - start_month
         )
+        last_event_stage = max(last_event_stage, stage_id)
         if override["type"] == "CFUGA":
             events_by_stage.setdefault(stage_id, []).append(
                 (float(override["value"]), None)
@@ -1121,6 +1445,36 @@ def _per_stage_productivities(
             events_by_stage.setdefault(stage_id, []).append(
                 (None, float(override["value"]))
             )
+
+    # When ``sazonaliza_cfuga_cmont == 1`` (Dger), after the last explicit
+    # CFUGA/CMONT entry NEWAVE repeats the seasonal pattern observed in
+    # the latest year that defines each calendar month. Build a
+    # per-calendar-month lookup from the events so stages beyond the
+    # last explicit one can fall back to the right seasonal value.
+    seasonal_cfuga: dict[int, float] = {}
+    seasonal_cmont: dict[int, float] = {}
+    if seasonalize and drop_overrides:
+        # For each (month, type) take the value from the latest year.
+        latest_per_month_year_cfuga: dict[int, int] = {}
+        latest_per_month_year_cmont: dict[int, int] = {}
+        for override in drop_overrides:
+            year = int(override["year"])
+            month = int(override["month"])
+            value = float(override["value"])
+            if override["type"] == "CFUGA":
+                if (
+                    month not in latest_per_month_year_cfuga
+                    or year > latest_per_month_year_cfuga[month]
+                ):
+                    latest_per_month_year_cfuga[month] = year
+                    seasonal_cfuga[month] = value
+            else:  # CMONT
+                if (
+                    month not in latest_per_month_year_cmont
+                    or year > latest_per_month_year_cmont[month]
+                ):
+                    latest_per_month_year_cmont[month] = year
+                    seasonal_cmont[month] = value
 
     seasonal = seasonal_volref_by_month or {}
 
@@ -1146,6 +1500,16 @@ def _per_stage_productivities(
                     active_cmont = cmont_val
 
         calendar_month = ((start_month - 1 + stage_id) % 12) + 1
+
+        # After the last explicit event, with sazonaliza=1, the calendar
+        # month's latest-year value overrides the step-function carry.
+        # Missing months stay on whatever the step function left active.
+        if seasonalize and stage_id > last_event_stage:
+            if calendar_month in seasonal_cfuga:
+                active_cfuga = seasonal_cfuga[calendar_month]
+            if calendar_month in seasonal_cmont:
+                active_cmont = seasonal_cmont[calendar_month]
+
         vol_useful = seasonal.get(calendar_month)
 
         if vol_useful is None and active_cfuga is None and active_cmont is None:
@@ -1580,21 +1944,49 @@ def convert_water_withdrawal(
     )
     num_total_stages: int = num_study_stages + num_post_study_stages
 
+    # Build a cascade map so NC (Não Construída) plant dsvagua entries can
+    # be propagated to the immediately downstream EX plant — NEWAVE applies
+    # NC withdrawals to the next real plant in the cascade, while FICT
+    # entries are not propagated and are silently dropped.
+    confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+    plant_downstream: dict[int, int] = {}
+    plant_is_fict: dict[int, bool] = {}
+    for _, r in confhd_df.iterrows():
+        code = int(r["codigo_usina"])
+        jus = r["codigo_usina_jusante"]
+        plant_downstream[code] = int(jus) if jus is not None and not pd.isna(jus) else 0
+        plant_is_fict[code] = str(r["nome_usina"]).strip().startswith("FICT.")
+
+    def _resolve_to_hydro_id(start_code: int) -> int | None:
+        """Walk downstream from *start_code* until reaching a plant present
+        in ``id_map``. FICT plants are never propagated. Returns the hydro_id
+        of the first reachable EX plant, or ``None`` if the chain hits a
+        terminus or a FICT node first.
+        """
+        visited: set[int] = set()
+        cur = start_code
+        while cur and cur not in visited:
+            visited.add(cur)
+            if plant_is_fict.get(cur, False):
+                return None
+            try:
+                return id_map.hydro_id(cur)
+            except KeyError:
+                pass
+            cur = plant_downstream.get(cur, 0)
+        return None
+
     # Group by (codigo_usina, data) and sum valor.
     grouped = df.groupby(["codigo_usina", "data"], as_index=False)["valor"].sum()
 
-    hydro_ids: list[int] = []
-    stage_ids: list[int] = []
-    values: list[float] = []
+    # Accumulate by (hydro_id, stage_id) so propagated NC entries merge
+    # cleanly with the downstream plant's own dsvagua row.
+    accumulated: dict[tuple[int, int], float] = {}
 
     for _, row in grouped.iterrows():
         hydro_code = int(row["codigo_usina"])
-        try:
-            hydro_id = id_map.hydro_id(hydro_code)
-        except KeyError:
-            # Fictitious plants and any other entries the id_map filters
-            # out are silently dropped — dsvagua frequently carries codes
-            # outside the dispatchable hydro fleet.
+        hydro_id = _resolve_to_hydro_id(hydro_code)
+        if hydro_id is None:
             continue
 
         dt = row["data"]
@@ -1604,9 +1996,12 @@ def convert_water_withdrawal(
 
         # Negate: NEWAVE negative valor = withdrawal; Cobre positive = withdrawal.
         withdrawal = -float(row["valor"])
-        hydro_ids.append(hydro_id)
-        stage_ids.append(stage_id)
-        values.append(withdrawal)
+        key = (hydro_id, stage_id)
+        accumulated[key] = accumulated.get(key, 0.0) + withdrawal
+
+    hydro_ids: list[int] = [k[0] for k in accumulated]
+    stage_ids: list[int] = [k[1] for k in accumulated]
+    values: list[float] = list(accumulated.values())
 
     if not hydro_ids:
         return None
@@ -1696,10 +2091,6 @@ def convert_storage_bounds(
     from inewave.newave import Confhd as _Confhd
     from inewave.newave import Dger as _Dger
 
-    modif_path = nw_files.modif
-    if modif_path is None:
-        return None
-
     dger = _Dger.read(str(nw_files.dger))
     start_year: int = int(dger.ano_inicio_estudo)
     start_month: int = int(dger.mes_inicio_estudo)
@@ -1718,8 +2109,13 @@ def convert_storage_bounds(
     non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
     confhd_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
 
-    # Extract temporal overrides.
-    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+    # Extract temporal overrides — empty dict when MODIF.DAT is absent,
+    # which is fine because GHMIN.DAT alone can still produce per-stage
+    # rows.
+    if nw_files.modif is None:
+        temporal_overrides: dict[int, list[dict]] = {}
+    else:
+        temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
 
     # NEWAVE big-M sentinel: 99999 means "no limit" (restore default).
     _BIG_M = 99990.0
@@ -1771,6 +2167,13 @@ def convert_storage_bounds(
 
         return result
 
+    # GHMIN.DAT per-stage minimums.  These are not MODIF.DAT overrides
+    # but live alongside them at the per-(hydro, stage) granularity, so
+    # they merge naturally into this parquet's row set.
+    ghmin_by_plant_stage = _read_ghmin_per_stage(
+        nw_files, start_year, start_month, study_months, total_stages
+    )
+
     hydro_ids: list[int] = []
     stage_ids: list[int] = []
     min_storage_vals: list[float | None] = []
@@ -1778,16 +2181,19 @@ def convert_storage_bounds(
     min_turbined_vals: list[float | None] = []
     max_turbined_vals: list[float | None] = []
     min_outflow_vals: list[float | None] = []
+    min_generation_vals: list[float | None] = []
 
-    for newave_code in sorted(temporal_overrides):
-        overrides = temporal_overrides[newave_code]
+    plant_codes_with_data = set(temporal_overrides) | set(ghmin_by_plant_stage)
+    for newave_code in sorted(plant_codes_with_data):
+        overrides = temporal_overrides.get(newave_code, [])
         vmaxt = [o for o in overrides if o["type"] == "VMAXT"]
         vmint = [o for o in overrides if o["type"] == "VMINT"]
         turbmaxt = [o for o in overrides if o["type"] == "TURBMAXT"]
         turbmint = [o for o in overrides if o["type"] == "TURBMINT"]
         vazmint = [o for o in overrides if o["type"] == "VAZMINT"]
+        ghmin_by_stage = ghmin_by_plant_stage.get(newave_code, {})
 
-        if not any((vmaxt, vmint, turbmaxt, turbmint, vazmint)):
+        if not any((vmaxt, vmint, turbmaxt, turbmint, vazmint, ghmin_by_stage)):
             continue
 
         try:
@@ -1833,6 +2239,7 @@ def convert_storage_bounds(
             | set(turbmaxt_by_stage)
             | set(turbmint_by_stage)
             | set(vazmint_by_stage)
+            | set(ghmin_by_stage)
         )
         for stage_id in all_stages:
             hydro_ids.append(hydro_id)
@@ -1842,6 +2249,7 @@ def convert_storage_bounds(
             max_turbined_vals.append(turbmaxt_by_stage.get(stage_id))
             min_turbined_vals.append(turbmint_by_stage.get(stage_id))
             min_outflow_vals.append(vazmint_by_stage.get(stage_id))
+            min_generation_vals.append(ghmin_by_stage.get(stage_id))
 
     if not hydro_ids:
         return None
@@ -1855,6 +2263,7 @@ def convert_storage_bounds(
             "min_turbined_m3s": pa.array(min_turbined_vals, type=pa.float64()),
             "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
             "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
+            "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
         }
     ).sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
 
@@ -1871,7 +2280,14 @@ def convert_storage_bounds(
 
 _PIMENTAL_NEWAVE_CODE = 314
 _BELO_MONTE_NEWAVE_CODE = 288
-_PIMENTAL_DIVERSION_MAX_M3S = 13_900.0
+# NEWAVE accounts for the PIMENTAL→BELO MONTE water transfer through the
+# fictitious-plant cascade rather than an explicit diversion channel.  Cobre
+# has no FICT-plant machinery in the LP, so without a real diversion link
+# PIMENTAL accumulates excess water that has nowhere to go (it would have
+# to spill into the sea even though BELO MONTE downstream is starving).
+# A diversion with the BELO MONTE-canal nameplate capacity of 13 000 m³/s
+# lets cobre route the flow the same way NEWAVE accounts for it.
+_PIMENTAL_DIVERSION_MAX_M3S = 13_000.0
 
 
 def _make_diversion(newave_code: int, id_map: NewaveIdMap) -> dict | None:
