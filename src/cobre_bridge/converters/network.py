@@ -166,7 +166,7 @@ _PCDESV = 0.000300 * _MICRO_UPLIFT  # volume desviado → hydro.diversion_cost
 # is enough that an LP would only pick the evap slack when no alternative
 # exists, while keeping the deterrent tier numerically close to the
 # operational tier and the LP well-conditioned.
-_EVAPORATION_MULT = 1.1
+_EVAPORATION_MULT = 10.0
 
 # --- Tie-breaking factors for PENALID flow slacks that share ρ_avg ---------
 # When PENALID supplies TURBMN, VAZMIN, TURBMX with the same R$/MWh value
@@ -181,9 +181,9 @@ _EVAPORATION_MULT = 1.1
 #
 # 1 % spacing is small enough that LP decisions are unchanged in practice
 # but large enough that HiGHS sees them as numerically distinct.
-_TURBINED_BELOW_FACTOR = 0.99
+_TURBINED_BELOW_FACTOR = 1.00
 _OUTFLOW_BELOW_FACTOR = 1.00
-_OUTFLOW_ABOVE_FACTOR = 1.01
+_OUTFLOW_ABOVE_FACTOR = 1.00
 
 # --- Cobre fields not yet wired into the LP --------------------------------
 # Storage and filling-target violation costs are declared on cobre's schema
@@ -339,6 +339,94 @@ def convert_buses(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         "$schema": _BUSES_SCHEMA_URL,
         "buses": buses,
     }
+
+
+def convert_bus_penalty_overrides(
+    nw_files: NewaveFiles,
+    id_map: NewaveIdMap,
+) -> pa.Table | None:
+    """Build ``constraints/penalty_overrides_bus.parquet`` for fictitious buses.
+
+    NEWAVE fictitious submarkets (``custo_deficit.ficticio``) are pure
+    transshipment nodes: no real load/generation, and NEWAVE forbids energy
+    excess there.  Cobre has no hard per-bus "no excess" flag, so we override the
+    per-bus ``excess_cost`` (sparse, per stage) to the deficit cost — symmetric
+    with unserved energy — without which Cobre dumps surplus energy at the
+    fictitious node for ~free.
+
+    Returns ``None`` when the case has no fictitious submarkets (no file
+    emitted, mirroring the sparse-override contract).
+
+    Returns
+    -------
+    pyarrow.Table | None
+        Columns: ``bus_id`` (INT32), ``stage_id`` (INT32),
+        ``excess_cost`` (DOUBLE) — one row per (fictitious bus, stage).
+    """
+    sistema = Sistema.read(str(nw_files.sistema))
+    deficit_df = sistema.custo_deficit
+
+    if deficit_df is None or deficit_df.empty or "ficticio" not in deficit_df.columns:
+        return None
+
+    fic_mask = deficit_df["ficticio"].fillna(False).astype(bool)
+    fictitious_codes = {
+        int(code) for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
+    }
+    if not fictitious_codes:
+        return None
+
+    # Excess at a fictitious node is penalised at the deficit cost — symmetric
+    # with unserved energy, and equal to the deficit_segments cost convert_buses
+    # assigns to these buses. Uses the reference (first non-null, positive)
+    # deficit cost from custo_deficit.
+    deficit_costs = [
+        float(c)
+        for c in deficit_df["custo"].tolist()
+        if c is not None and not _is_na(c) and float(c) > 0.0
+    ]
+    if not deficit_costs:
+        return None
+    excess_cost = deficit_costs[0]
+
+    dger = Dger.read(nw_files.dger)
+    start_month: int = dger.mes_inicio_estudo
+    num_anos: int = dger.num_anos_estudo or 1
+    num_anos_pos: int = dger.num_anos_pos_estudo or 0
+    study_months = (13 - start_month) + (num_anos - 1) * 12
+    total_stages = study_months + num_anos_pos * 12
+
+    bus_ids: list[int] = []
+    stage_ids: list[int] = []
+    costs: list[float] = []
+    for code in sorted(fictitious_codes):
+        try:
+            bus_id = id_map.bus_id(code)
+        except KeyError:
+            continue
+        for stage_id in range(total_stages):
+            bus_ids.append(bus_id)
+            stage_ids.append(stage_id)
+            costs.append(excess_cost)
+
+    if not bus_ids:
+        return None
+
+    schema = pa.schema(
+        [
+            pa.field("bus_id", pa.int32()),
+            pa.field("stage_id", pa.int32()),
+            pa.field("excess_cost", pa.float64()),
+        ]
+    )
+    return pa.table(
+        {
+            "bus_id": pa.array(bus_ids, type=pa.int32()),
+            "stage_id": pa.array(stage_ids, type=pa.int32()),
+            "excess_cost": pa.array(costs, type=pa.float64()),
+        },
+        schema=schema,
+    )
 
 
 def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:

@@ -405,6 +405,14 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         pq.write_table(thermal_bounds_table, thermal_bounds_path, compression="zstd")
         logger.debug("Wrote %s", thermal_bounds_path)
 
+    # Per-bus excess-cost override: forbid energy excess at fictitious
+    # submarkets (pure transshipment nodes) by pricing it prohibitively.
+    bus_penalty_table = network_conv.convert_bus_penalty_overrides(nw_files, id_map)
+    if bus_penalty_table is not None:
+        bus_penalty_path = constraints_dir / "penalty_overrides_bus.parquet"
+        pq.write_table(bus_penalty_table, bus_penalty_path, compression="zstd")
+        logger.debug("Wrote %s", bus_penalty_path)
+
     # Merge VminOP and electric constraints into a single output.
     all_constraints: list[dict] = []
     bounds_tables: list[pa.Table] = []

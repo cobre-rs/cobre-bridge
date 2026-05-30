@@ -938,7 +938,8 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
                 else None
             ),
             "tailrace": tailrace,
-            "diversion": _make_diversion(newave_code, id_map),
+            "diversion": None,
+            # "diversion": _make_diversion(newave_code, id_map),
             "filling": None,
             "efficiency": None,
             "hydraulic_losses": hydraulic_losses,
