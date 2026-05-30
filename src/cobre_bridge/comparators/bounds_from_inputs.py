@@ -459,16 +459,20 @@ def compute_thermal_bounds(
     codes_with_gtmin: set[int] = set()
     potef_finite_end: dict[int, date] = {}
     for code, overrides in expt_by_code.items():
-        for o in overrides:
-            if o["tipo"] == "POTEF":
-                codes_with_potef.add(code)
-                if not pd.isna(o["data_fim"]):
-                    end = pd.Timestamp(o["data_fim"]).date()
-                    prev = potef_finite_end.get(code)
-                    if prev is None or end > prev:
-                        potef_finite_end[code] = end
-            elif o["tipo"] == "GTMIN":
-                codes_with_gtmin.add(code)
+        potef_ovs = [o for o in overrides if o["tipo"] == "POTEF"]
+        if potef_ovs:
+            codes_with_potef.add(code)
+            # A plant decommissions only if its LAST POTEF (by start date) has
+            # a finite end. A later open-ended POTEF supersedes an earlier
+            # finite one, so keying off the max finite end across all POTEF
+            # entries would wrongly zero capacity that a subsequent POTEF
+            # restores (e.g. TERMORIO: POTEF 989.20 ends 2026-06, POTEF 1058.30
+            # open from 2026-07 -> capacity must NOT be zeroed after 2026-06).
+            last_potef = max(potef_ovs, key=lambda o: pd.Timestamp(o["data_inicio"]))
+            if not pd.isna(last_potef["data_fim"]):
+                potef_finite_end[code] = pd.Timestamp(last_potef["data_fim"]).date()
+        if any(o["tipo"] == "GTMIN" for o in overrides):
+            codes_with_gtmin.add(code)
 
     # MANUTT maintenance events.
     manutt_by_code: dict[int, pd.DataFrame] = {}
@@ -638,13 +642,20 @@ def compute_line_bounds(
         if key not in date_lookup:
             date_lookup[key] = {"direct_mw": 0.0, "reverse_mw": 0.0}
 
+        # Direction convention MUST match convert_lines / convert_line_bounds
+        # in converters/network.py: per inewave's SISTEMA.DAT parse order,
+        # sentido == 0 is the first block (de -> para), sentido == 1 the
+        # reverse. Comparing against a flipped convention here previously
+        # reported every line as a (spurious) direct/reverse mismatch.
         if de < para:
-            if sentido == 1:
+            # de -> para is the "direct" direction.
+            if sentido == 0:
                 date_lookup[key]["direct_mw"] = valor
             else:
                 date_lookup[key]["reverse_mw"] = valor
         else:
-            if sentido == 1:
+            # de -> para is the "reverse" direction.
+            if sentido == 0:
                 date_lookup[key]["reverse_mw"] = valor
             else:
                 date_lookup[key]["direct_mw"] = valor
