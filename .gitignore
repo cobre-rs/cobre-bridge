@@ -28,5 +28,12 @@ htmlcov/
 
 # examples
 example/
-.claude/
+
+# Local .claude config is ignored, except the project's NEWAVE<->Cobre
+# comparison skill, which is tracked and shared with the team.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/compare-newave-cobre/
+
 plans/
