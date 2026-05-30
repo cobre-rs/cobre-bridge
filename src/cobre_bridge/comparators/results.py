@@ -143,7 +143,10 @@ class ResultVariableStats:
     max_abs_diff: float = 0.0
     mean_rel_diff: float = 0.0
     max_rel_diff: float = 0.0
-    correlation: float = 0.0
+    within_tol_rate: float = 0.0  # fraction in [0, 1] within --tolerance
+    mean_smape: float = 0.0  # symmetric MAPE in [0, 2]
+    max_smape: float = 0.0
+    correlation: float | None = None  # None when undefined (constant series)
 
 
 @dataclass
@@ -162,6 +165,32 @@ def _compute_diff(nw_value: float, cobre_value: float) -> tuple[float, float | N
     if abs(nw_value) > 1e-10:
         rel_diff = abs_diff / abs(nw_value)
     return abs_diff, rel_diff
+
+
+def _smape(nw_value: float, cobre_value: float) -> float:
+    """Symmetric mean absolute percentage error for one pair, in [0, 2].
+
+    Robust to a near-zero reference (unlike ``|d| / |nw|``): returns 0 when
+    both values are effectively zero (perfect agreement).
+    """
+    denom = (abs(nw_value) + abs(cobre_value)) / 2.0
+    if denom <= 1e-12:
+        return 0.0
+    return abs(nw_value - cobre_value) / denom
+
+
+def _within_tolerance(nw_value: float, cobre_value: float, tolerance: float) -> bool:
+    """True if Cobre is within ``tolerance`` (relative) of the NEWAVE reference.
+
+    When the reference is ~0, counts as a match only if Cobre is also ~0 (both
+    effectively zero); otherwise uses ``|nw - cobre| <= tolerance * |nw|``.
+    The 1e-9 / 1e-6 floors are absolute and tuned for physical magnitudes
+    (MW, m³/s, hm³); adjust if comparing very small-scale quantities.
+    """
+    denom = abs(nw_value)
+    if denom <= 1e-9:
+        return abs(cobre_value) <= 1e-6
+    return abs(nw_value - cobre_value) <= tolerance * denom
 
 
 def _make_result(
@@ -1344,8 +1373,14 @@ def compare_results(
     return results, pctiles
 
 
-def build_results_summary(results: list[ResultComparison]) -> ResultsSummary:
-    """Compute aggregate statistics from comparison results."""
+def build_results_summary(
+    results: list[ResultComparison], tolerance: float = 1e-2
+) -> ResultsSummary:
+    """Compute aggregate statistics from comparison results.
+
+    ``tolerance`` is the relative tolerance used for the per-variable
+    within-tolerance match rate (mirrors ``compare bounds``).
+    """
     summary = ResultsSummary(total=len(results))
 
     # Group by entity type.
@@ -1370,7 +1405,19 @@ def build_results_summary(results: list[ResultComparison]) -> ResultsSummary:
         stats.mean_rel_diff = sum(rel_diffs) / len(rel_diffs) if rel_diffs else 0.0
         stats.max_rel_diff = max(rel_diffs) if rel_diffs else 0.0
 
-        # Pearson correlation.
+        # Bounded symmetric error (robust to near-zero references) and the
+        # within-tolerance match rate.
+        smapes = [_smape(r.newave_value, r.cobre_value) for r in group]
+        stats.mean_smape = sum(smapes) / len(smapes) if smapes else 0.0
+        stats.max_smape = max(smapes) if smapes else 0.0
+        n_within = sum(
+            1
+            for r in group
+            if _within_tolerance(r.newave_value, r.cobre_value, tolerance)
+        )
+        stats.within_tol_rate = n_within / len(group) if group else 0.0
+
+        # Pearson correlation (None when undefined, e.g. a constant series).
         nw_vals = [r.newave_value for r in group]
         cb_vals = [r.cobre_value for r in group]
         if len(nw_vals) > 1:
@@ -1381,11 +1428,15 @@ def build_results_summary(results: list[ResultComparison]) -> ResultsSummary:
     return summary
 
 
-def _pearson(xs: list[float], ys: list[float]) -> float:
-    """Compute Pearson correlation coefficient."""
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    """Pearson correlation coefficient; ``None`` when undefined.
+
+    Returns ``None`` for fewer than two points or a constant (zero-variance)
+    series, so callers can distinguish "uncomputable" from a genuine 0.0.
+    """
     n = len(xs)
     if n < 2:
-        return 0.0
+        return None
     mean_x = sum(xs) / n
     mean_y = sum(ys) / n
     cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
@@ -1393,5 +1444,5 @@ def _pearson(xs: list[float], ys: list[float]) -> float:
     var_y = sum((y - mean_y) ** 2 for y in ys)
     denom = math.sqrt(var_x * var_y)
     if denom < 1e-15:
-        return 0.0
+        return None
     return cov / denom

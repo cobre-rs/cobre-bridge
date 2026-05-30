@@ -179,6 +179,19 @@ def write_report_parquet(
 # -------------------------------------------------------------------
 
 
+def _fmt_metric(x: float) -> str:
+    """Format a metric value for the summary table.
+
+    Scientific notation for very large or very small magnitudes (so columns
+    like ``lower_bound`` stay readable instead of printing a 10-digit float),
+    thousands-grouped fixed-point otherwise.
+    """
+    ax = abs(x)
+    if ax >= 1e6 or (0 < ax < 1e-3):
+        return f"{x:.3e}"
+    return f"{x:,.3f}"
+
+
 def print_results_summary(
     summary: ResultsSummary,
     newave_dir: Path,
@@ -198,30 +211,33 @@ def print_results_summary(
     out = sys.stdout
 
     out.write("\nCobre vs NEWAVE Results Comparison\n")
-    out.write("=" * 76 + "\n")
+    out.write("=" * 88 + "\n")
     out.write(f"NEWAVE case:  {newave_dir}\n")
     out.write(f"Cobre output: {cobre_output_dir}\n\n")
 
-    # Per-variable table.
-    _W = 76
+    # Per-variable table. WithinTol = share within the (relative) tolerance;
+    # sMAPE = mean symmetric error (robust to near-zero NEWAVE references).
+    _W = 88
     out.write(
-        f"{'Variable':<22} {'Count':>6} "
-        f"{'Mean|D|':>10} {'Max|D|':>10} "
-        f"{'Mean|D%|':>10} {'Max|D%|':>10} "
-        f"{'r':>6}\n"
+        f"{'Variable':<26} {'Count':>6} "
+        f"{'Mean|D|':>13} {'Max|D|':>13} "
+        f"{'WithinTol':>9} {'sMAPE':>8} "
+        f"{'r':>7}\n"
     )
     out.write("-" * _W + "\n")
 
     for var in sorted(summary.by_variable):
         stats = summary.by_variable[var]
-        mean_pct = f"{stats.mean_rel_diff * 100:.2f}%" if stats.mean_rel_diff else "N/A"
-        max_pct = f"{stats.max_rel_diff * 100:.2f}%" if stats.max_rel_diff else "N/A"
-        corr = f"{stats.correlation:.4f}" if stats.correlation else "N/A"
+        mean_d = _fmt_metric(stats.mean_abs_diff)
+        max_d = _fmt_metric(stats.max_abs_diff)
+        within = f"{stats.within_tol_rate * 100:.1f}%"
+        smape = f"{stats.mean_smape * 100:.1f}%"
+        corr = f"{stats.correlation:.4f}" if stats.correlation is not None else "N/A"
         out.write(
-            f"{var:<22} {stats.count:>6} "
-            f"{stats.mean_abs_diff:>10.4f} {stats.max_abs_diff:>10.4f} "
-            f"{mean_pct:>10} {max_pct:>10} "
-            f"{corr:>6}\n"
+            f"{var:<26} {stats.count:>6} "
+            f"{mean_d:>13} {max_d:>13} "
+            f"{within:>9} {smape:>8} "
+            f"{corr:>7}\n"
         )
 
     out.write("-" * _W + "\n")

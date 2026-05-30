@@ -129,7 +129,7 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     )
 
     # Print text summary.
-    summary = build_results_summary(results)
+    summary = build_results_summary(results, tolerance)
     print_results_summary(summary, newave_dir, cobre_output_dir)
 
     # HTML report.
