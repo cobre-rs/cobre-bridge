@@ -494,8 +494,19 @@ def convert_thermal_bounds(
             effective = _apply_maint_to_capacity(base_cap, maint_rows, stage_dates)
             maint_reduction = np.maximum(0.0, base_cap - effective)
 
+        # NEWAVE freezes the post-study tail at the LAST STUDY STAGE's
+        # configuration: it re-uses neither the per-calendar-month base nor the
+        # per-month EXPT windows dated inside the tail.
+        # So for post-study stages we evaluate the
+        # base and windowed overrides at the last-study-stage date (``ref_date``),
+        # while open-ended overrides still apply across the tail and POTEF
+        # availability (step 4b) uses the ACTUAL stage date.
+        last_study_idx = study_months - 1
         for stage_idx, stage_date in enumerate(stage_dates):
-            cal_month = stage_date.month
+            is_post_study = stage_idx >= study_months
+            ref_date = stage_dates[last_study_idx] if is_post_study else stage_date
+
+            cal_month = ref_date.month
             vals = _base(newave_code, cal_month)
             potencia = vals["potencia"]
             fcmax = vals["fcmax"]
@@ -517,16 +528,22 @@ def convert_thermal_bounds(
             if stage_idx >= maint_end_stage and newave_code in codes_with_gtmin:
                 gen_min = 0.0
 
-            # Step 4: apply EXPT overrides in file order.
+            # Step 4: apply EXPT overrides in file order. Closed windows are
+            # tested against ref_date (frozen in the tail); an open-ended override
+            # blankets the whole tail. Open-ended entries come last in file
+            # order, so they win over any per-month window for the stage.
             for override in overrides:
                 ov_start = pd.Timestamp(override["data_inicio"]).date()
                 ov_end_raw = override["data_fim"]
-                if pd.isna(ov_end_raw):
-                    ov_end = stage_dates[-1]
+                open_ended = pd.isna(ov_end_raw)
+                ov_end = (
+                    stage_dates[-1] if open_ended else pd.Timestamp(ov_end_raw).date()
+                )
+                if open_ended and is_post_study:
+                    applies = True
                 else:
-                    ov_end = pd.Timestamp(ov_end_raw).date()
-
-                if not (ov_start <= stage_date <= ov_end):
+                    applies = ov_start <= ref_date <= ov_end
+                if not applies:
                     continue
 
                 tipo = override["tipo"]

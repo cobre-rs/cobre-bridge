@@ -457,22 +457,27 @@ def compute_thermal_bounds(
 
     codes_with_potef: set[int] = set()
     codes_with_gtmin: set[int] = set()
-    potef_finite_end: dict[int, date] = {}
+    # Per-code union of POTEF availability windows (mirrors
+    # convert_thermal_bounds): a plant is in service for any stage inside at
+    # least one window. This handles BOTH pre-commissioning (stage before the
+    # first POTEF start) and decommissioning (stage after the last finite end),
+    # and chained schedules (a finite window followed by an open-ended one).
+    # Open-ended data_fim extends to the last stage date.
+    potef_windows: dict[int, list[tuple[date, date]]] = {}
     for code, overrides in expt_by_code.items():
-        potef_ovs = [o for o in overrides if o["tipo"] == "POTEF"]
-        if potef_ovs:
-            codes_with_potef.add(code)
-            # A plant decommissions only if its LAST POTEF (by start date) has
-            # a finite end. A later open-ended POTEF supersedes an earlier
-            # finite one, so keying off the max finite end across all POTEF
-            # entries would wrongly zero capacity that a subsequent POTEF
-            # restores (e.g. TERMORIO: POTEF 989.20 ends 2026-06, POTEF 1058.30
-            # open from 2026-07 -> capacity must NOT be zeroed after 2026-06).
-            last_potef = max(potef_ovs, key=lambda o: pd.Timestamp(o["data_inicio"]))
-            if not pd.isna(last_potef["data_fim"]):
-                potef_finite_end[code] = pd.Timestamp(last_potef["data_fim"]).date()
-        if any(o["tipo"] == "GTMIN" for o in overrides):
-            codes_with_gtmin.add(code)
+        for o in overrides:
+            if o["tipo"] == "POTEF":
+                codes_with_potef.add(code)
+                ov_start = pd.Timestamp(o["data_inicio"]).date()
+                end_raw = o["data_fim"]
+                ov_end = (
+                    stage_dates[-1]
+                    if pd.isna(end_raw)
+                    else pd.Timestamp(end_raw).date()
+                )
+                potef_windows.setdefault(code, []).append((ov_start, ov_end))
+            elif o["tipo"] == "GTMIN":
+                codes_with_gtmin.add(code)
 
     # MANUTT maintenance events.
     manutt_by_code: dict[int, pd.DataFrame] = {}
@@ -507,8 +512,17 @@ def compute_thermal_bounds(
             effective = _apply_maint_to_capacity(base_cap, maint_rows, stage_dates)
             maint_reduction = np.maximum(0.0, base_cap - effective)
 
+        # NEWAVE freezes the post-study tail at the LAST STUDY STAGE config
+        # (base + windowed overrides evaluated at ref_date), overridden by any
+        # permanent open-ended (data_fim = NaT) modification that still applies
+        # across the tail. POTEF availability uses the ACTUAL stage date. Mirrors
+        # convert_thermal_bounds.
+        last_study_idx = study_months - 1
         for stage_idx, stage_date in enumerate(stage_dates):
-            cal_month = stage_date.month
+            is_post_study = stage_idx >= study_months
+            ref_date = stage_dates[last_study_idx] if is_post_study else stage_date
+
+            cal_month = ref_date.month
             vals = _base(newave_code, cal_month)
             potencia = vals["potencia"]
             fcmax = vals["fcmax"]
@@ -525,15 +539,21 @@ def compute_thermal_bounds(
             if stage_idx >= maint_end_stage and newave_code in codes_with_gtmin:
                 gen_min = 0.0
 
+            # Closed windows tested against ref_date (frozen in the tail); an
+            # open-ended override blankets the whole tail and wins (last in file).
             for override in overrides:
                 ov_start = pd.Timestamp(override["data_inicio"]).date()
                 ov_end_raw = override["data_fim"]
-                if pd.isna(ov_end_raw):
-                    ov_end = stage_dates[-1]
-                else:
-                    ov_end = pd.Timestamp(ov_end_raw).date()
+                open_ended = pd.isna(ov_end_raw)
+                ov_end = (
+                    stage_dates[-1] if open_ended else pd.Timestamp(ov_end_raw).date()
+                )
 
-                if not (ov_start <= stage_date <= ov_end):
+                if open_ended and is_post_study:
+                    applies = True
+                else:
+                    applies = ov_start <= ref_date <= ov_end
+                if not applies:
                     continue
 
                 tipo = override["tipo"]
@@ -549,8 +569,13 @@ def compute_thermal_bounds(
                 elif tipo == "IPTER":
                     ip = value
 
-            potef_end = potef_finite_end.get(newave_code)
-            if potef_end is not None and stage_date > potef_end:
+            # A POTEF schedule defines the only periods the plant is available.
+            # If no window covers this stage, it is out of service (mirrors
+            # convert_thermal_bounds step 4b).
+            windows = potef_windows.get(newave_code)
+            if windows is not None and not any(
+                ws <= stage_date <= we for ws, we in windows
+            ):
                 potencia = 0.0
                 gen_min = 0.0
 
