@@ -1352,102 +1352,25 @@ def _per_stage_integrated_productivities(
 ) -> list[float]:
     """Per-stage integrated productivity with CFUGA/CMONT step-function awareness.
 
-    Same forward-sweep shape as :func:`_per_stage_productivities` but
-    recomputes the *integrated* productivity (volmin_volmax average) at
-    each stage where canal_fuga or cmont state changes.  Stages with no
-    active override return *base_integrated*.
+    Recomputes the *integrated* productivity (volmin_volmax average) at each
+    stage where canal_fuga or cmont state changes; stages with no active override
+    return *base_integrated*. The per-stage ``(CFUGA, CMONT)`` step-function sweep
+    is shared with :func:`_per_stage_equivalent_productivities` via
+    :func:`_per_stage_drop_overrides` (the integrated variant differs only in
+    applying :func:`_compute_integrated_productivity` instead of the point ρ).
     """
     if not drop_overrides:
         return [base_integrated] * total_stages
 
-    dger = Dger.read(str(nw_files.dger))
-    start_year = int(dger.ano_inicio_estudo)
-    start_month = int(dger.mes_inicio_estudo)
-    seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
-
-    events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
-    last_event_stage = -1
-    for override in drop_overrides:
-        stage_id = (override["year"] - start_year) * 12 + (
-            override["month"] - start_month
+    drops = _per_stage_drop_overrides(drop_overrides, nw_files, total_stages)
+    return [
+        base_integrated
+        if cfuga is None and cmont is None
+        else _compute_integrated_productivity(
+            hreg, canal_fuga_override=cfuga, cmont_override=cmont
         )
-        last_event_stage = max(last_event_stage, stage_id)
-        if override["type"] == "CFUGA":
-            events_by_stage.setdefault(stage_id, []).append(
-                (float(override["value"]), None)
-            )
-        else:  # CMONT
-            events_by_stage.setdefault(stage_id, []).append(
-                (None, float(override["value"]))
-            )
-
-    # Seasonal lookup for sazonaliza_cfuga_cmont=1 (Dger): after the last
-    # explicit event, each stage's calendar month gets the value from
-    # the latest year that defined it.  See ``_per_stage_productivities``
-    # for the matching logic on the point-value productivity.
-    seasonal_cfuga: dict[int, float] = {}
-    seasonal_cmont: dict[int, float] = {}
-    if seasonalize:
-        latest_per_month_year_cfuga: dict[int, int] = {}
-        latest_per_month_year_cmont: dict[int, int] = {}
-        for override in drop_overrides:
-            year = int(override["year"])
-            month = int(override["month"])
-            value = float(override["value"])
-            if override["type"] == "CFUGA":
-                if (
-                    month not in latest_per_month_year_cfuga
-                    or year > latest_per_month_year_cfuga[month]
-                ):
-                    latest_per_month_year_cfuga[month] = year
-                    seasonal_cfuga[month] = value
-            else:  # CMONT
-                if (
-                    month not in latest_per_month_year_cmont
-                    or year > latest_per_month_year_cmont[month]
-                ):
-                    latest_per_month_year_cmont[month] = year
-                    seasonal_cmont[month] = value
-
-    values: list[float] = []
-    active_cfuga: float | None = None
-    active_cmont: float | None = None
-    for stage_id in range(total_stages):
-        if stage_id == 0:
-            for past_stage in sorted(s for s in events_by_stage if s <= 0):
-                for cfuga_val, cmont_val in events_by_stage[past_stage]:
-                    if cfuga_val is not None:
-                        active_cfuga = cfuga_val
-                    if cmont_val is not None:
-                        active_cmont = cmont_val
-        if stage_id in events_by_stage and stage_id > 0:
-            for cfuga_val, cmont_val in events_by_stage[stage_id]:
-                if cfuga_val is not None:
-                    active_cfuga = cfuga_val
-                if cmont_val is not None:
-                    active_cmont = cmont_val
-
-        if seasonalize and stage_id > last_event_stage:
-            calendar_month = ((start_month - 1 + stage_id) % 12) + 1
-            if calendar_month in seasonal_cfuga:
-                active_cfuga = seasonal_cfuga[calendar_month]
-            if calendar_month in seasonal_cmont:
-                active_cmont = seasonal_cmont[calendar_month]
-
-        if active_cfuga is None and active_cmont is None:
-            values.append(base_integrated)
-        else:
-            values.append(
-                _compute_integrated_productivity(
-                    hreg,
-                    canal_fuga_override=active_cfuga,
-                    cmont_override=active_cmont,
-                )
-            )
-
-    # Post-study continues the seasonal CFUGA/CMONT cycle (when
-    # ``sazonaliza_cfuga_cmont == 1``), mirroring _per_stage_productivities.
-    return values
+        for cfuga, cmont in drops
+    ]
 
 
 def compute_per_stage_own_integrated_productivities(
