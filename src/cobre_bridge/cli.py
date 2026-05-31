@@ -235,8 +235,13 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
     print(str(report))
 
     if report.warnings:
+        print(
+            f"\nCompleted with {len(report.warnings)} warning(s) — "
+            "some sections may be degraded or skipped:",
+            file=sys.stderr,
+        )
         for warning in report.warnings:
-            print(f"Warning: {warning}", file=sys.stderr)
+            print(f"  - {warning}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Optional post-conversion validation.

@@ -652,3 +652,66 @@ class TestPipelineInflowHistory:
 
         history_path = dst / "scenarios" / "inflow_history.parquet"
         assert history_path.exists(), "inflow_history.parquet was not written"
+
+
+class TestConversionWarningCapture:
+    """``convert_newave_case`` surfaces converter warnings via ConversionReport."""
+
+    def test_captures_and_dedupes_package_warnings(self, tmp_path: Path) -> None:
+        import logging
+
+        from cobre_bridge import pipeline
+        from cobre_bridge.pipeline import ConversionReport, convert_newave_case
+
+        log = logging.getLogger("cobre_bridge.converters.fake")
+
+        def fake_impl(src: Path, dst: Path) -> ConversionReport:
+            log.warning("vazpast.dat unreadable; using empty tendency")
+            log.warning("vazpast.dat unreadable; using empty tendency")  # duplicate
+            log.info("informational, not a degradation")  # below WARNING → ignored
+            log.warning("REE.DAT has no entries")
+            return ConversionReport(hydro_count=3)
+
+        with patch.object(
+            pipeline, "_convert_newave_case_impl", side_effect=fake_impl
+        ):
+            report = convert_newave_case(tmp_path, tmp_path)
+
+        assert report.hydro_count == 3
+        assert report.warnings == [
+            "vazpast.dat unreadable; using empty tendency",
+            "REE.DAT has no entries",
+        ]
+
+    def test_no_warnings_when_clean(self, tmp_path: Path) -> None:
+        from cobre_bridge import pipeline
+        from cobre_bridge.pipeline import ConversionReport, convert_newave_case
+
+        with patch.object(
+            pipeline,
+            "_convert_newave_case_impl",
+            return_value=ConversionReport(hydro_count=1),
+        ):
+            report = convert_newave_case(tmp_path, tmp_path)
+
+        assert report.warnings == []
+
+    def test_collector_detached_even_on_exception(self, tmp_path: Path) -> None:
+        import logging
+
+        from cobre_bridge import pipeline
+        from cobre_bridge.pipeline import convert_newave_case
+
+        pkg_logger = logging.getLogger("cobre_bridge")
+        handlers_before = list(pkg_logger.handlers)
+        with patch.object(
+            pipeline,
+            "_convert_newave_case_impl",
+            side_effect=RuntimeError("boom"),
+        ):
+            with pytest.raises(RuntimeError, match="boom"):
+                convert_newave_case(tmp_path, tmp_path)
+
+        # The capture handler must be removed in the finally block, leaving the
+        # package logger's handler list exactly as it was.
+        assert pkg_logger.handlers == handlers_before

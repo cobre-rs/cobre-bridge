@@ -838,20 +838,30 @@ def _get_individualizado_cutoff(
     date in production cases; we take the first REE's value.
 
     Returns the :data:`_NO_INDIVIDUALIZADO_CUTOFF` sentinel (a stage index
-    beyond any real horizon, i.e. "individualised everywhere, no cutoff") when
-    the REE information is missing or unreadable.
+    beyond any real horizon) when the REE information is missing or unreadable.
+    Because ``is_post_indiv = stage >= cutoff`` is then always False, the
+    post-individualizado RE / seasonal-extrapolation bounds are dropped — so
+    both fallback paths warn loudly rather than degrading silently (the warning
+    is captured into :attr:`ConversionReport.warnings`).
     """
     try:
-        ree_file = Ree.read(str(nw_files.ree))
-        ree_df = ree_file.rees
+        ree_df = Ree.read(str(nw_files.ree)).rees
         if ree_df is None or ree_df.empty:
+            _LOG.warning(
+                "REE.DAT has no entries; the individualizado cutoff is unknown, "
+                "so post-individualizado electric (RE) bounds are not emitted."
+            )
             return _NO_INDIVIDUALIZADO_CUTOFF
         row = ree_df.iloc[0]
         end_month = int(row["mes_fim_individualizado"])
         end_year = int(row["ano_fim_individualizado"])
         return (end_year - start_year) * 12 + (end_month - start_month)
     except Exception:  # noqa: BLE001
-        _LOG.warning("Could not read individualizado cutoff from REE.DAT.")
+        _LOG.warning(
+            "Could not read the individualizado cutoff from REE.DAT; "
+            "post-individualizado electric (RE) bounds are not emitted.",
+            exc_info=True,
+        )
         return _NO_INDIVIDUALIZADO_CUTOFF
 
 

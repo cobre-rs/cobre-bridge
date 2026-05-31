@@ -49,6 +49,25 @@ class ConversionReport:
         )
 
 
+class _WarningCollector(logging.Handler):
+    """Capture ``WARNING``+ records emitted under ``cobre_bridge`` during a run.
+
+    Converters log every degraded-input substitution (vazpast → empty, c_adic →
+    no load, EXPT/RE skipped, REE.DAT cutoff fallback, …) at ``WARNING`` level.
+    Attaching this to the package logger for the duration of a conversion lets
+    :func:`convert_newave_case` report those degradations through
+    :attr:`ConversionReport.warnings` instead of letting them pass silently.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.WARNING:
+            self.messages.append(record.getMessage())
+
+
 def _compute_prod_media_sin_safe(nw_files: NewaveFiles) -> float | None:
     """Return ``PROD_MEDIA_SIN`` (mean PRODT), or ``None`` on failure.
 
@@ -164,7 +183,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     Returns
     -------
     ConversionReport
-        Summary of what was converted.
+        Summary of what was converted, including a ``warnings`` list of every
+        degraded-input substitution that occurred (empty when the conversion
+        ran clean).
 
     Raises
     ------
@@ -172,6 +193,22 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         If *src* does not exist, is not a directory, or a required NEWAVE
         file is missing.
     """
+    collector = _WarningCollector()
+    pkg_logger = logging.getLogger("cobre_bridge")
+    pkg_logger.addHandler(collector)
+    try:
+        report = _convert_newave_case_impl(src, dst)
+    finally:
+        pkg_logger.removeHandler(collector)
+    # De-duplicate while preserving first-occurrence order: a warning emitted
+    # once per repeated parse (e.g. the fictitious-plant exclusion) should
+    # surface once, not N times.
+    report.warnings = list(dict.fromkeys(collector.messages))
+    return report
+
+
+def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
+    """Run the conversion pipeline (warning capture handled by the wrapper)."""
     report = ConversionReport()
 
     # ------------------------------------------------------------------
