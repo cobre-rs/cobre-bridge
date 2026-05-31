@@ -579,6 +579,96 @@ def read_medias_sin(saidas_dir: Path) -> pl.DataFrame:
     return _read_medias_csv(saidas_dir, "MEDIAS-SIN.CSV")
 
 
+_MERCL_FILE_RE = re.compile(r"mercl(\d+)\.out$", re.IGNORECASE)
+_MERCL_YEAR_RE = re.compile(r"ANO:\s*(\d{4})")
+_MERCL_VALUE_RE = re.compile(r"-?\d+\.\d*")
+
+
+def _parse_mercl_file(path: Path) -> dict[tuple[int, int], float]:
+    """Parse an nwlistop ``mercl<NNN>.out`` file.
+
+    Returns ``{(year, month): net_load_mwmed}``.  Each ``ANO: YYYY`` block is
+    followed by a header row (bare column indices 1..12) and a value row of 12
+    trailing-dot floats; calendar months outside the horizon are written ``0.``.
+    """
+    out: dict[tuple[int, int], float] = {}
+    lines = path.read_text(encoding="latin-1", errors="replace").splitlines()
+    for i, line in enumerate(lines):
+        m = _MERCL_YEAR_RE.search(line)
+        if m is None:
+            continue
+        year = int(m.group(1))
+        # The value row is the first following line with >= 12 *dotted* floats
+        # (the header row carries bare indices 1..12, which have no dot).
+        for j in range(i + 1, min(i + 4, len(lines))):
+            nums = _MERCL_VALUE_RE.findall(lines[j])
+            if len(nums) >= 12:
+                for month, raw in enumerate(nums[:12], start=1):
+                    out[(year, month)] = float(raw)
+                break
+    return out
+
+
+def read_newave_net_load_nwlistop(newave_dir: Path) -> pl.DataFrame:
+    """Read net load (MERCADO LIQUIDO) from per-submarket ``mercl*.out`` files.
+
+    nwlistop writes one ``mercl<NNN>.out`` per submarket (``mercl001`` =
+    submarket 1, ...) plus ``merclsin.out`` for the SIN total.  Unlike the
+    ``sistema.dat`` reconstruction in :func:`read_newave_net_load`, these cover
+    the **full horizon** (study + post-study), so the energy-balance charts and
+    the comparison data do not drop after the study period.
+
+    Returns the same schema as :func:`read_newave_net_load`, or an empty frame
+    when no per-submarket ``mercl`` files are present.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "newave_code": pl.Int64,
+            "stage": pl.Int64,
+            "variable": pl.Utf8,
+            "value": pl.Float64,
+        }
+    )
+    saidas = _find_saidas_dir(newave_dir)
+    if saidas is None:
+        return empty
+    # Per-submarket files only; merclsin.out (the SIN total) has no digits and
+    # is excluded by the regex.
+    files = sorted(p for p in saidas.iterdir() if _MERCL_FILE_RE.match(p.name))
+    if not files:
+        return empty
+
+    parsed: dict[int, dict[tuple[int, int], float]] = {}
+    for p in files:
+        m = _MERCL_FILE_RE.match(p.name)
+        if m is None:
+            continue
+        code = int(m.group(1))  # mercl001 -> submarket 1 (sequential codes)
+        parsed[code] = _parse_mercl_file(p)
+    parsed = {code: months for code, months in parsed.items() if months}
+    if not parsed:
+        return empty
+
+    # MEDIAS stage numbering: stage = (year - base_year) * 12 + month, so the
+    # study's first calendar month (e.g. September -> 9) keeps its MEDIAS index.
+    base_year = min(year for months in parsed.values() for (year, _m) in months)
+    rows: list[tuple[int, int, str, float]] = []
+    for code, months in parsed.items():
+        for (year, month), value in months.items():
+            # Drop the pre-study calendar months NEWAVE writes as 0.
+            if value == 0.0:
+                continue
+            stage = (year - base_year) * 12 + month
+            rows.append((code, stage, "NET_LOAD", value))
+    if not rows:
+        return empty
+    return pl.DataFrame(
+        rows,
+        schema=["newave_code", "stage", "variable", "value"],
+        orient="row",
+    ).cast({"newave_code": pl.Int64, "stage": pl.Int64, "value": pl.Float64})
+
+
 def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     """Read deterministic net load from ``sistema.dat`` and ``c_adic.dat``.
 
@@ -594,7 +684,15 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     - ``stage`` (Int64): stage number (aligned with MEDIAS column naming)
     - ``variable`` (Utf8): always ``"NET_LOAD"``
     - ``value`` (Float64): net load in MW·med
+
+    Prefers the nwlistop ``mercl*.out`` files (full horizon) when present,
+    falling back to this ``sistema.dat`` reconstruction (study period only,
+    since post-study dates are written under a filtered-out sentinel year).
     """
+    nwlistop = read_newave_net_load_nwlistop(newave_dir)
+    if not nwlistop.is_empty():
+        return nwlistop
+
     empty = pl.DataFrame(
         schema={
             "newave_code": pl.Int64,
