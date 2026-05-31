@@ -3551,6 +3551,208 @@ class TestConvertThermalBoundsClastModificacoes:
 
 
 # ---------------------------------------------------------------------------
+# Thermal-bound per-stage steps (extracted from the convert_thermal_bounds loop)
+# ---------------------------------------------------------------------------
+
+
+class TestThermalBoundStageSteps:
+    """Each of the 6 per-stage steps is now an isolated, testable helper."""
+
+    @staticmethod
+    def _state(**overrides: float):
+        from cobre_bridge.converters.thermal import _StageInputs
+
+        defaults = {
+            "potencia": 100.0,
+            "fcmax": 100.0,
+            "teif": 0.0,
+            "ip": 0.0,
+            "gen_min": 0.0,
+        }
+        defaults.update(overrides)
+        return _StageInputs(**defaults)
+
+    def test_step1_zeroes_ip_before_maintenance_end(self) -> None:
+        from cobre_bridge.converters.thermal import (
+            _step1_zero_ip_before_maintenance,
+        )
+
+        state = self._state(ip=8.0)
+        _step1_zero_ip_before_maintenance(state, stage_idx=2, maint_end_stage=5)
+        assert state.ip == 0.0
+        # At/after the maintenance end IP is left untouched.
+        state2 = self._state(ip=8.0)
+        _step1_zero_ip_before_maintenance(state2, stage_idx=5, maint_end_stage=5)
+        assert state2.ip == 8.0
+
+    def test_step2_nulls_potencia_only_for_potef_after_maint_end(self) -> None:
+        from cobre_bridge.converters.thermal import _step2_null_potencia_for_potef
+
+        state = self._state(potencia=100.0)
+        _step2_null_potencia_for_potef(state, 5, 5, has_potef=True)
+        assert state.potencia == 0.0
+        # No POTEF → untouched; before maint end → untouched.
+        s_no_potef = self._state(potencia=100.0)
+        _step2_null_potencia_for_potef(s_no_potef, 5, 5, has_potef=False)
+        assert s_no_potef.potencia == 100.0
+        s_before = self._state(potencia=100.0)
+        _step2_null_potencia_for_potef(s_before, 4, 5, has_potef=True)
+        assert s_before.potencia == 100.0
+
+    def test_step3_nulls_gen_min_only_for_gtmin_after_maint_end(self) -> None:
+        from cobre_bridge.converters.thermal import _step3_null_gen_min_for_gtmin
+
+        state = self._state(gen_min=50.0)
+        _step3_null_gen_min_for_gtmin(state, 5, 5, has_gtmin=True)
+        assert state.gen_min == 0.0
+        s_no = self._state(gen_min=50.0)
+        _step3_null_gen_min_for_gtmin(s_no, 5, 5, has_gtmin=False)
+        assert s_no.gen_min == 50.0
+
+    def test_step4_applies_in_file_order_for_closed_window(self) -> None:
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+
+        state = self._state()
+        overrides = [
+            {
+                "tipo": "FCMAX",
+                "modificacao": 73.38,
+                "data_inicio": "2024-01-01",
+                "data_fim": "2024-12-01",
+            },
+            {
+                "tipo": "GTMIN",
+                "modificacao": 469.62,
+                "data_inicio": "2024-01-01",
+                "data_fim": "2024-12-01",
+            },
+        ]
+        _step4_apply_expt_overrides(
+            state,
+            overrides,
+            ref_date=date(2024, 6, 1),
+            is_post_study=False,
+            last_stage_date=date(2030, 12, 1),
+        )
+        assert state.fcmax == pytest.approx(73.38)
+        assert state.gen_min == pytest.approx(469.62)
+
+    def test_step4_skips_window_not_covering_ref_date(self) -> None:
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+
+        state = self._state(fcmax=100.0)
+        overrides = [
+            {
+                "tipo": "FCMAX",
+                "modificacao": 50.0,
+                "data_inicio": "2024-01-01",
+                "data_fim": "2024-03-01",
+            }
+        ]
+        _step4_apply_expt_overrides(
+            state,
+            overrides,
+            ref_date=date(2024, 6, 1),  # outside the window
+            is_post_study=False,
+            last_stage_date=date(2030, 12, 1),
+        )
+        assert state.fcmax == 100.0
+
+    def test_step4_open_ended_override_blankets_post_study_tail(self) -> None:
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+
+        state = self._state(potencia=100.0)
+        overrides = [
+            {
+                "tipo": "POTEF",
+                "modificacao": 250.0,
+                "data_inicio": "2024-01-01",
+                "data_fim": float("nan"),  # open-ended
+            }
+        ]
+        _step4_apply_expt_overrides(
+            state,
+            overrides,
+            ref_date=date(2026, 12, 1),
+            is_post_study=True,
+            last_stage_date=date(2030, 12, 1),
+        )
+        assert state.potencia == pytest.approx(250.0)
+
+    def test_step4b_zeroes_out_of_window_stage(self) -> None:
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import (
+            _step4b_apply_potef_availability,
+        )
+
+        state = self._state(potencia=100.0, gen_min=30.0)
+        windows = [(date(2024, 1, 1), date(2024, 6, 1))]
+        _step4b_apply_potef_availability(state, windows, stage_date=date(2024, 9, 1))
+        assert state.potencia == 0.0
+        assert state.gen_min == 0.0
+        # Inside a window → untouched.
+        s_in = self._state(potencia=100.0, gen_min=30.0)
+        _step4b_apply_potef_availability(s_in, windows, stage_date=date(2024, 3, 1))
+        assert s_in.potencia == 100.0
+
+    def test_step5_subtracts_maint_reduction_before_maint_end(self) -> None:
+        import numpy as np
+
+        from cobre_bridge.converters.thermal import _step5_apply_maint_reduction
+
+        state = self._state(potencia=100.0)
+        reduction = np.array([10.0, 20.0, 30.0])
+        _step5_apply_maint_reduction(state, reduction, stage_idx=1, maint_end_stage=3)
+        assert state.potencia == pytest.approx(80.0)
+        # At/after maint end → no reduction.
+        s2 = self._state(potencia=100.0)
+        _step5_apply_maint_reduction(s2, reduction, stage_idx=3, maint_end_stage=3)
+        assert s2.potencia == 100.0
+
+    def test_step6_normal_case(self) -> None:
+        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+
+        state = self._state(potencia=200.0, fcmax=100.0, ip=0.0, teif=0.0, gen_min=50.0)
+        min_mw, max_mw = _step6_evaluate_bounds(state)
+        assert max_mw == pytest.approx(200.0)
+        assert min_mw == pytest.approx(50.0)
+
+    def test_step6_documents_fcmax_below_gtmin_clamp(self) -> None:
+        """KNOWN ISSUE: a low FCMAX drives max_mw below GTMIN, and min_mw is
+        clamped DOWN to max_mw — forcing an inflexible plant below its minimum.
+
+        This pins the *current* (pre-fix) behaviour so a future GTMIN-vs-FCMAX
+        precedence fix is a deliberate, visible change. (ANGRA-1-like numbers:
+        potencia 1350, FCMAX 73.38% → max 420.88 < GTMIN 469.62.)
+        """
+        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+
+        state = self._state(
+            potencia=420.88, fcmax=100.0, ip=0.0, teif=0.0, gen_min=469.62
+        )
+        min_mw, max_mw = _step6_evaluate_bounds(state)
+        assert max_mw == pytest.approx(420.88)
+        # The bug: min is pulled down to max instead of honoring GTMIN (469.62).
+        assert min_mw == pytest.approx(420.88)
+        assert min_mw < 469.62
+
+    def test_step6_clamps_negative_potencia_to_zero(self) -> None:
+        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+
+        state = self._state(potencia=-5.0, fcmax=100.0, gen_min=10.0)
+        min_mw, max_mw = _step6_evaluate_bounds(state)
+        assert max_mw == 0.0
+        assert min_mw == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Bus conversion
 # ---------------------------------------------------------------------------
 
