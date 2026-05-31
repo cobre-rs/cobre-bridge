@@ -19,33 +19,11 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
+from cobre_bridge.horizon import BIG_M, build_stage_dates, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
-
-# NEWAVE big-M sentinel: values >= this threshold mean "no limit".
-_BIG_M = 99990.0
-
-
-# -------------------------------------------------------------------
-# Shared temporal helpers
-# -------------------------------------------------------------------
-
-
-def _build_stage_dates(
-    start_year: int, start_month: int, total_stages: int
-) -> list[date]:
-    """Return first-of-month dates for each study stage."""
-    stages: list[date] = []
-    y, m = start_year, start_month
-    for _ in range(total_stages):
-        stages.append(date(y, m, 1))
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-    return stages
 
 
 def _read_study_params(
@@ -58,14 +36,15 @@ def _read_study_params(
     """
     from inewave.newave import Dger
 
-    dger = Dger.read(str(nw_files.dger))
-    start_year: int = int(dger.ano_inicio_estudo)
-    start_month: int = int(dger.mes_inicio_estudo)
-    num_anos: int = int(dger.num_anos_estudo or 1)
-    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
-    return start_year, start_month, num_anos, num_anos_pos, study_months, total_stages
+    h = study_horizon(Dger.read(str(nw_files.dger)))
+    return (
+        h.start_year,
+        h.start_month,
+        h.num_anos,
+        h.num_anos_pos,
+        h.study_months,
+        h.total_stages,
+    )
 
 
 # -------------------------------------------------------------------
@@ -219,7 +198,7 @@ def compute_hydro_bounds(
         for stage_id in range(first_stage, study_months):
             while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
                 raw = changepoints[cp_idx][1]
-                current = None if raw >= _BIG_M else transform(raw)
+                current = None if raw >= BIG_M else transform(raw)
                 cp_idx += 1
             if current is not None:
                 result_inner[stage_id] = current
@@ -395,19 +374,16 @@ def compute_thermal_bounds(
     from inewave.newave import Dger, Expt, Manutt, Term
 
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
+    h = study_horizon(dger)
+    start_month, start_year = h.start_month, h.start_year
     num_maint_years: int = dger.num_anos_manutencao_utes or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    study_months, total_stages = h.study_months, h.total_stages
 
     maint_end_stage = (start_year + num_maint_years - start_year) * 12 + (
         1 - start_month
     )
 
-    stage_dates = _build_stage_dates(start_year, start_month, total_stages)
+    stage_dates = build_stage_dates(start_year, start_month, total_stages)
 
     # Base values per (thermal_code, calendar_month) from TERM.
     term = Term.read(str(nw_files.term))
@@ -649,12 +625,9 @@ def compute_line_bounds(
         return {}
 
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    h = study_horizon(dger)
+    start_month, start_year = h.start_month, h.start_year
+    study_months, total_stages = h.study_months, h.total_stages
 
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1

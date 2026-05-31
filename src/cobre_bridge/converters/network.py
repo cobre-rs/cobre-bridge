@@ -10,6 +10,7 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Dger, Sistema
 
+from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -394,11 +395,7 @@ def convert_bus_penalty_overrides(
     excess_cost = deficit_costs[0]
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    total_stages = study_horizon(dger).total_stages
 
     bus_ids: list[int] = []
     stage_ids: list[int] = []
@@ -1028,12 +1025,11 @@ def convert_line_bounds(
         )
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     # Study end boundary: first month *after* the study horizon.
     study_end_year = start_year + (start_month - 1 + study_months) // 12
@@ -1154,12 +1150,10 @@ def _build_ncs_group_to_id(
         return {}
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    total_stages = horizon.total_stages
 
     def _in_horizon(dt: object) -> bool:
         try:
@@ -1219,12 +1213,10 @@ def convert_non_controllable_sources(
         return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": []}
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    total_stages = horizon.total_stages
 
     # Filter to study + post-study horizon only.
     # Rows with year == 9999 are post-study entries in inewave convention.
@@ -1333,12 +1325,11 @@ def convert_exchange_factors(
         return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": []}
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
@@ -1489,12 +1480,11 @@ def convert_ncs_factors(
         }
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
@@ -1652,12 +1642,11 @@ def convert_ncs_stats(
         )
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1

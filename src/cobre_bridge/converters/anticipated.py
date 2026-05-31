@@ -58,6 +58,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from inewave.newave import Adterm, Dger, Patamar
 
+from cobre_bridge.horizon import study_horizon
+
 if TYPE_CHECKING:
     from cobre_bridge.newave_files import NewaveFiles
 
@@ -186,13 +188,12 @@ def read_anticipated_dispatch(
 
     patamar = Patamar.read(str(nw_files.patamar))
     # Need the case's calendar start to weight by the right month's blocks.
-    num_anos = dger.num_anos_estudo or 0
-    start_month: int = dger.mes_inicio_estudo or 1
-    start_year: int = dger.ano_inicio_estudo or 0
-    num_anos_pos = dger.num_anos_pos_estudo or 0
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
     # Mirror the temporal converter's horizon calculation.
-    study_months = (13 - start_month) + (num_anos - 1) * 12 if num_anos else 0
-    pos_months = num_anos_pos * 12
+    study_months = horizon.study_months
+    pos_months = horizon.pos_months
     n_stages_total = study_months + pos_months
 
     block_fractions = _block_fractions_by_stage(

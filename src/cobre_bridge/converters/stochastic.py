@@ -19,6 +19,7 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Confhd, Dger, Patamar, Sistema, Vazoes
 
+from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -459,12 +460,11 @@ def convert_load_factors(
     df_carga: pd.DataFrame | None = patamar.carga_patamares
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     # Study end boundary: first month *after* the study horizon.
     study_end_year = start_year + (start_month - 1 + study_months) // 12
@@ -553,7 +553,7 @@ def convert_load_factors(
     return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": load_factors}
 
 
-def _derive_study_stage_months(dger: object) -> list[int]:
+def _derive_study_stage_months(dger: Dger) -> list[int]:
     """Return the ordered sequence of calendar months (1-12) for each study stage.
 
     Parameters
@@ -566,13 +566,11 @@ def _derive_study_stage_months(dger: object) -> list[int]:
     -------
     list[int]
         Calendar month (1-12) for each stage.  Length equals
-        ``(13 - start_month) + (num_anos - 1) * 12 + num_anos_pos * 12``.
+        :attr:`~cobre_bridge.horizon.StudyHorizon.total_stages`.
     """
-    start_month: int = dger.mes_inicio_estudo  # type: ignore[attr-defined]
-    num_anos: int = dger.num_anos_estudo or 1  # type: ignore[attr-defined]
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0  # type: ignore[attr-defined]
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    total_stages = horizon.total_stages
     return [((start_month - 1 + i) % 12) + 1 for i in range(total_stages)]
 
 
@@ -689,12 +687,12 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
     df_load: pd.DataFrame = sistema_obj.mercado_energia
 
     dger = Dger.read(nw_files.dger)
-    start_month = dger.mes_inicio_estudo
-    start_year = dger.ano_inicio_estudo
-    num_anos = dger.num_anos_estudo or 1
-    num_anos_pos = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    num_anos = horizon.num_anos
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     # Load optional C_ADIC additions: {(sub_code, year_or_9999, cal_month) -> mw}.
     cadical_lookup: dict[tuple[int, int, int], float] = {}

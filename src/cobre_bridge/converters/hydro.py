@@ -20,6 +20,7 @@ from inewave.newave import (
     VolrefSaz,
 )
 
+from cobre_bridge.horizon import BIG_M, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -1262,12 +1263,7 @@ def convert_production_models(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dic
 
 def _total_study_stages(nw_files: NewaveFiles) -> int:
     """Return the total number of stages in the study (including post-study)."""
-    dger = Dger.read(str(nw_files.dger))
-    start_month: int = int(dger.mes_inicio_estudo)
-    num_anos: int = int(dger.num_anos_estudo or 0)
-    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    return study_months + num_anos_pos * 12
+    return study_horizon(Dger.read(str(nw_files.dger))).total_stages
 
 
 def _compute_integrated_productivity(
@@ -2131,15 +2127,18 @@ def convert_water_withdrawal(
     if df is None or df.empty:
         return None
 
-    start_year: int = int(dger.ano_inicio_estudo)
-    start_month: int = int(dger.mes_inicio_estudo)
-    num_anos: int = int(dger.num_anos_estudo or 1)
-    num_study_stages: int = (13 - start_month) + (num_anos - 1) * 12
+    horizon = study_horizon(dger)
+    start_year = horizon.start_year
+    start_month = horizon.start_month
+    num_study_stages = horizon.study_months
+    # Defensive post-study count: tolerate a missing/non-numeric
+    # ``num_anos_pos_estudo`` (e.g. an unset mock attribute) by treating it as 0
+    # rather than routing through the canonical horizon's int() coercion.
     _pos = dger.num_anos_pos_estudo
     num_post_study_stages: int = (
         int(_pos) * 12 if isinstance(_pos, (int, float)) and _pos else 0
     )
-    num_total_stages: int = num_study_stages + num_post_study_stages
+    num_total_stages = num_study_stages + num_post_study_stages
 
     # Build a cascade map so NC (Não Construída) plant dsvagua entries can
     # be propagated to the immediately downstream EX plant — NEWAVE applies
@@ -2293,12 +2292,11 @@ def convert_storage_bounds(
     from inewave.newave import Dger as _Dger
 
     dger = _Dger.read(str(nw_files.dger))
-    start_year: int = int(dger.ano_inicio_estudo)
-    start_month: int = int(dger.mes_inicio_estudo)
-    num_anos: int = int(dger.num_anos_estudo or 1)
-    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_year = horizon.start_year
+    start_month = horizon.start_month
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     # Post-study seasonalize flags (dger). VMINT/VMAXT repeat the last study
     # year's seasonal pattern only when their flag is set (e.g. flood-control
@@ -2324,9 +2322,6 @@ def convert_storage_bounds(
         temporal_overrides: dict[int, list[dict]] = {}
     else:
         temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
-
-    # NEWAVE big-M sentinel: 99999 means "no limit" (restore default).
-    _BIG_M = 99990.0
 
     def _build_step_function(
         recs: list[dict],
@@ -2368,7 +2363,7 @@ def convert_storage_bounds(
         for stage_id in range(first_stage, study_months):
             while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
                 raw = changepoints[cp_idx][1]
-                current = None if raw >= _BIG_M else transform(raw)
+                current = None if raw >= BIG_M else transform(raw)
                 cp_idx += 1
             if current is not None:
                 result[stage_id] = current

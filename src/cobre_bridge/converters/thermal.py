@@ -16,6 +16,7 @@ import pyarrow as pa
 from inewave.newave import Clast, Conft, Term
 
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
+from cobre_bridge.horizon import build_stage_dates, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -146,21 +147,6 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     }
 
 
-def _build_stage_dates(
-    start_year: int, start_month: int, total_stages: int
-) -> list[date]:
-    """Return a list of first-of-month dates for each study stage."""
-    stages: list[date] = []
-    y, m = start_year, start_month
-    for _ in range(total_stages):
-        stages.append(date(y, m, 1))
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-    return stages
-
-
 def _month_date_to_stage_index(
     stage_dates: list[date], target_year: int, target_month: int
 ) -> int | None:
@@ -279,14 +265,14 @@ def convert_thermal_bounds(
     from inewave.newave import Dger, Expt, Manutt
 
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    num_anos = horizon.num_anos
     num_maint_years: int = dger.num_anos_manutencao_utes or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
-    first_year_stages = 13 - start_month
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
+    first_year_stages = horizon.first_year_stages
 
     # ------------------------------------------------------------------
     # 0. Build per-stage cost lookup from CLAST.DAT.
@@ -346,7 +332,7 @@ def convert_thermal_bounds(
     # period covers March-December 2026 (10 stages), not 12.
     maint_end_stage = num_maint_years * 12 + (1 - start_month)
 
-    stage_dates = _build_stage_dates(start_year, start_month, total_stages)
+    stage_dates = build_stage_dates(start_year, start_month, total_stages)
 
     # ------------------------------------------------------------------
     # 1. Build base values per (thermal_code, calendar_month) from term.

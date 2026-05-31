@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -133,22 +134,17 @@ def _detect_reservoir_plants(nw_files: NewaveFiles) -> set[int]:
 def _detect_newave_stages(nw_files: NewaveFiles) -> int:
     """Compute total number of NEWAVE stages from DGER parameters.
 
-    ``study_months = (13 - start_month) + (num_anos - 1) * 12``
-    ``total_stages = study_months + num_anos_pos * 12``
+    Delegates the horizon arithmetic to
+    :func:`cobre_bridge.horizon.study_horizon`; an empty study
+    (``num_anos_estudo`` of 0/None) reports zero stages.
     """
     from inewave.newave import Dger
 
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    num_anos: int = dger.num_anos_estudo
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-
-    if not num_anos:
+    if not dger.num_anos_estudo:
         return 0
 
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
-    return total_stages
+    return study_horizon(dger).total_stages
 
 
 def build_entity_alignment(

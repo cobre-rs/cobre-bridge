@@ -30,6 +30,7 @@ from cobre_bridge.converters.hydro import (
     compute_per_stage_own_integrated_productivities,
 )
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
+from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -339,12 +340,10 @@ def convert_vminop_constraints(
     confhd_df = confhd.usinas
 
     # Study horizon parameters
-    start_month = dger.mes_inicio_estudo
-    start_year = dger.ano_inicio_estudo
-    num_anos = dger.num_anos_estudo or 1
-    num_anos_pos = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    num_stages = study_months + num_anos_pos * 12
+    _horizon = study_horizon(dger)
+    start_month = _horizon.start_month
+    start_year = _horizon.start_year
+    num_stages = _horizon.total_stages
 
     # NEWAVE uses the *integrated* productivity (ρ_esp · (1/useful) ·
     # ∫_vmin^vmax h(V) dV) to evaluate stored energy / VminOP, which is the
@@ -1003,12 +1002,11 @@ def convert_electric_constraints(
     from inewave.newave import Patamar as _Patamar
 
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    num_stages = study_months + num_anos_pos * 12
+    _horizon = study_horizon(dger)
+    start_month = _horizon.start_month
+    start_year = _horizon.start_year
+    num_anos = _horizon.num_anos
+    num_stages = _horizon.total_stages
 
     patamar = _Patamar.read(str(nw_files.patamar))
     num_patamares: int = patamar.numero_patamares or 1
@@ -1428,12 +1426,11 @@ def convert_agrint_constraints(
 
     # Study horizon
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    num_stages = study_months + num_anos_pos * 12
+    _horizon = study_horizon(dger)
+    start_month = _horizon.start_month
+    start_year = _horizon.start_year
+    study_months = _horizon.study_months
+    num_stages = _horizon.total_stages
 
     line_id_map = _build_line_id_map(nw_files)
 
