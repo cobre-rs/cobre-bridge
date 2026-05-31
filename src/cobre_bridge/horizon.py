@@ -21,6 +21,7 @@ NEWAVE conventions encoded here:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date
 
@@ -115,3 +116,75 @@ def stage_dates_for(horizon: StudyHorizon) -> list[date]:
     return build_stage_dates(
         horizon.start_year, horizon.start_month, horizon.total_stages
     )
+
+
+def seasonal_step_function(
+    recs: Iterable[tuple[int, int, float]],
+    transform: Callable[[float], float],
+    *,
+    seasonalize: bool,
+    horizon: StudyHorizon,
+) -> dict[int, float]:
+    """Forward-fill dated override records into per-stage values.
+
+    ``recs`` are ``(year, month, raw_value)`` change-points: each sets the value
+    from its stage onward until the next overrides it. A raw value ``>= BIG_M``
+    clears the fill ("restore default"). Returns ``{stage_id: transform(value)}``
+    for every stage that has an active value.
+
+    Post-study extrapolation follows NEWAVE's rule, selected by *seasonalize*:
+
+    - ``True`` (e.g. VMINT/VMAXT with their ``sazonaliza_*`` flag set): repeat the
+      last study year's monthly pattern, so a genuinely seasonal constraint keeps
+      cycling through the static final period.
+    - ``False`` (e.g. VAZMINT / TURBMINT / TURBMAXT, which have no seasonalize
+      flag): freeze the last study stage's value across the post-study tail.
+
+    This is the single source of truth shared by the storage-bounds converter
+    (``converters.hydro.convert_storage_bounds``) and the bounds comparator
+    (``comparators.bounds_from_inputs.compute_hydro_bounds``); keeping them in
+    lock-step is what lets ``compare bounds`` mean anything.
+    """
+    sm = horizon.start_month
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
+
+    changepoints: list[tuple[int, float]] = []
+    for year, month, value in recs:
+        sid = (year - horizon.start_year) * 12 + (month - sm)
+        changepoints.append((max(0, sid), value))
+    changepoints.sort()
+    if not changepoints:
+        return {}
+
+    result: dict[int, float] = {}
+    cp_idx = 0
+    current: float | None = None
+    for stage_id in range(changepoints[0][0], study_months):
+        while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
+            raw = changepoints[cp_idx][1]
+            current = None if raw >= BIG_M else transform(raw)
+            cp_idx += 1
+        if current is not None:
+            result[stage_id] = current
+
+    if total_stages <= study_months:
+        return result
+
+    if seasonalize:
+        seasonal: dict[int, float] = {}
+        for stage_id in range(max(0, study_months - 12), study_months):
+            if stage_id in result:
+                cal = ((sm - 1 + stage_id) % 12) + 1
+                seasonal[cal] = result[stage_id]
+        for stage_id in range(study_months, total_stages):
+            cal = ((sm - 1 + stage_id) % 12) + 1
+            if cal in seasonal:
+                result[stage_id] = seasonal[cal]
+    else:
+        last = study_months - 1
+        if last in result:
+            for stage_id in range(study_months, total_stages):
+                result[stage_id] = result[last]
+
+    return result

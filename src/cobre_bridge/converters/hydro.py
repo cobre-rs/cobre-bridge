@@ -20,7 +20,7 @@ from inewave.newave import (
     VolrefSaz,
 )
 
-from cobre_bridge.horizon import BIG_M, study_horizon
+from cobre_bridge.horizon import seasonal_step_function, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -2329,66 +2329,20 @@ def convert_storage_bounds(
         *,
         seasonalize: bool,
     ) -> dict[int, float]:
-        """Build a step-function from override records.
+        """Thin adapter over :func:`cobre_bridge.horizon.seasonal_step_function`.
 
-        Each record sets the value from its stage onward until the next
-        record overrides it.  Raw values >= 99990 (big-M) mean "restore
-        default" and clear the forward-fill.
-
-        Post-study extrapolation depends on *seasonalize*:
-
-        - ``True`` (VMINT/VMAXT when their dger ``sazonaliza_*`` flag is set):
-          repeat the last study year's monthly pattern, so a genuinely seasonal
-          constraint (e.g. flood-control "volume de espera") keeps cycling.
-        - ``False`` (outflow VAZMINT, turbined TURBMINT/TURBMAXT, which have no
-          seasonalize flag): freeze the last study stage's value through the
-          tail — NEWAVE holds the last value rather than synthesising a season.
+        Maps MODIF override dicts to ``(year, month, value)`` change-points. The
+        forward-fill, big-M clearing, and seasonalize-vs-freeze post-study logic
+        now live in the shared helper, so the bounds comparator
+        (``bounds_from_inputs``) and this converter stay in lock-step by
+        construction instead of via copied code.
         """
-        changepoints: list[tuple[int, float]] = []
-        for rec in recs:
-            sid = (rec["year"] - start_year) * 12 + (rec["month"] - start_month)
-            if sid < 0:
-                sid = 0
-            changepoints.append((sid, rec["value"]))
-        changepoints.sort()
-
-        if not changepoints:
-            return {}
-
-        result: dict[int, float] = {}
-        cp_idx = 0
-        current: float | None = None
-        first_stage = changepoints[0][0]
-
-        for stage_id in range(first_stage, study_months):
-            while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
-                raw = changepoints[cp_idx][1]
-                current = None if raw >= BIG_M else transform(raw)
-                cp_idx += 1
-            if current is not None:
-                result[stage_id] = current
-
-        if total_stages <= study_months:
-            return result
-
-        if seasonalize:
-            seasonal: dict[int, float] = {}
-            for stage_id in range(max(0, study_months - 12), study_months):
-                if stage_id in result:
-                    cal = ((start_month - 1 + stage_id) % 12) + 1
-                    seasonal[cal] = result[stage_id]
-            for stage_id in range(study_months, total_stages):
-                cal = ((start_month - 1 + stage_id) % 12) + 1
-                if cal in seasonal:
-                    result[stage_id] = seasonal[cal]
-        else:
-            # Freeze the last study stage's value through the post-study tail.
-            last = study_months - 1
-            if last in result:
-                for stage_id in range(study_months, total_stages):
-                    result[stage_id] = result[last]
-
-        return result
+        return seasonal_step_function(
+            [(int(r["year"]), int(r["month"]), float(r["value"])) for r in recs],
+            transform,
+            seasonalize=seasonalize,
+            horizon=horizon,
+        )
 
     # GHMIN.DAT per-stage minimums.  These are not MODIF.DAT overrides
     # but live alongside them at the per-(hydro, stage) granularity, so

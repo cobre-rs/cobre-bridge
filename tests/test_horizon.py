@@ -11,6 +11,7 @@ from cobre_bridge.horizon import (
     BIG_M,
     POST_STUDY_YEAR,
     build_stage_dates,
+    seasonal_step_function,
     stage_dates_for,
     study_horizon,
 )
@@ -83,3 +84,30 @@ def test_stage_dates_for_matches_horizon_length():
     dates = stage_dates_for(h)
     assert len(dates) == h.total_stages
     assert dates[0] == date(2024, 9, 1)
+
+
+def test_seasonal_step_function_forward_fills_and_clears_on_big_m():
+    h = study_horizon(_dger(num_anos_pos=0))  # study-only, 28 stages
+    # value 100 from Sept-2024 (stage 0); big-M at Jan-2025 (stage 4) clears it.
+    recs = [(2024, 9, 100.0), (2025, 1, BIG_M)]
+    out = seasonal_step_function(recs, lambda v: v, seasonalize=False, horizon=h)
+    assert out[0] == 100.0
+    assert out[3] == 100.0  # forward-filled through Dec-2024
+    assert 4 not in out  # big-M cleared the fill from Jan-2025 on
+
+
+def test_seasonal_step_function_freeze_vs_seasonal_post_study():
+    h = study_horizon(_dger())  # study_months 28, total 64
+    recs = [(2024, 9, 10.0), (2025, 1, 50.0)]  # 10 then 50 from Jan onward
+    frozen = seasonal_step_function(recs, lambda v: v, seasonalize=False, horizon=h)
+    seasonal = seasonal_step_function(recs, lambda v: v, seasonalize=True, horizon=h)
+    # freeze: every post-study stage holds the last study stage's value
+    assert frozen[h.study_months - 1] == 50.0
+    assert all(frozen[s] == 50.0 for s in range(h.study_months, h.total_stages))
+    # seasonal: post-study repeats the last study year's monthly pattern (all 50)
+    assert all(seasonal[s] == 50.0 for s in range(h.study_months, h.total_stages))
+
+
+def test_seasonal_step_function_empty_recs():
+    h = study_horizon(_dger())
+    assert seasonal_step_function([], lambda v: v, seasonalize=False, horizon=h) == {}

@@ -19,32 +19,15 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from cobre_bridge.horizon import BIG_M, build_stage_dates, study_horizon
+from cobre_bridge.horizon import (
+    build_stage_dates,
+    seasonal_step_function,
+    study_horizon,
+)
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
-
-
-def _read_study_params(
-    nw_files: NewaveFiles,
-) -> tuple[int, int, int, int, int, int]:
-    """Read DGER and return temporal parameters.
-
-    Returns (start_year, start_month, num_anos, num_anos_pos,
-    study_months, total_stages).
-    """
-    from inewave.newave import Dger
-
-    h = study_horizon(Dger.read(str(nw_files.dger)))
-    return (
-        h.start_year,
-        h.start_month,
-        h.num_anos,
-        h.num_anos_pos,
-        h.study_months,
-        h.total_stages,
-    )
 
 
 # -------------------------------------------------------------------
@@ -138,22 +121,15 @@ def compute_hydro_bounds(
     if modif_path is None:
         return {}
 
-    (
-        start_year,
-        start_month,
-        _num_anos,
-        _num_anos_pos,
-        study_months,
-        total_stages,
-    ) = _read_study_params(nw_files)
+    from inewave.newave import Dger
+
+    dger = Dger.read(str(nw_files.dger))
+    horizon = study_horizon(dger)
 
     # Post-study seasonalize flags (mirror convert_storage_bounds): VMINT/VMAXT
     # repeat seasonally only when their dger flag is set; outflow/turbined freeze.
-    from inewave.newave import Dger
-
-    _dger = Dger.read(str(nw_files.dger))
-    sazonaliza_vmaxt = int(getattr(_dger, "sazonaliza_vmaxt", 0) or 0) == 1
-    sazonaliza_vmint = int(getattr(_dger, "sazonaliza_vmint", 0) or 0) == 1
+    sazonaliza_vmaxt = int(getattr(dger, "sazonaliza_vmaxt", 0) or 0) == 1
+    sazonaliza_vmint = int(getattr(dger, "sazonaliza_vmint", 0) or 0) == 1
 
     cadastro = read_cadastro(nw_files)
 
@@ -171,58 +147,18 @@ def compute_hydro_bounds(
         *,
         seasonalize: bool,
     ) -> dict[int, float]:
-        """Build a step-function from override records.
+        """Thin adapter over :func:`cobre_bridge.horizon.seasonal_step_function`.
 
-        Mirrors ``hydro.convert_storage_bounds._build_step_function`` exactly,
-        including the post-study rule: *seasonalize* repeats the last study
-        year's monthly pattern (VMINT/VMAXT with their dger flag set), while
-        ``not seasonalize`` freezes the last study stage value (VAZMINT /
-        TURBMINT/TURBMAXT, which have no seasonalize flag).
+        Shares the forward-fill + seasonalize-vs-freeze post-study logic with
+        ``hydro.convert_storage_bounds`` so this comparator checks the converter
+        against the *same* derivation, not a hand-maintained copy of it.
         """
-        changepoints: list[tuple[int, float]] = []
-        for rec in recs:
-            sid = (rec["year"] - start_year) * 12 + (rec["month"] - start_month)
-            if sid < 0:
-                sid = 0
-            changepoints.append((sid, rec["value"]))
-        changepoints.sort()
-
-        if not changepoints:
-            return {}
-
-        result_inner: dict[int, float] = {}
-        cp_idx = 0
-        current: float | None = None
-        first_stage = changepoints[0][0]
-
-        for stage_id in range(first_stage, study_months):
-            while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
-                raw = changepoints[cp_idx][1]
-                current = None if raw >= BIG_M else transform(raw)
-                cp_idx += 1
-            if current is not None:
-                result_inner[stage_id] = current
-
-        if total_stages <= study_months:
-            return result_inner
-
-        if seasonalize:
-            seasonal: dict[int, float] = {}
-            for stage_id in range(max(0, study_months - 12), study_months):
-                if stage_id in result_inner:
-                    cal = ((start_month - 1 + stage_id) % 12) + 1
-                    seasonal[cal] = result_inner[stage_id]
-            for stage_id in range(study_months, total_stages):
-                cal = ((start_month - 1 + stage_id) % 12) + 1
-                if cal in seasonal:
-                    result_inner[stage_id] = seasonal[cal]
-        else:
-            last = study_months - 1
-            if last in result_inner:
-                for stage_id in range(study_months, total_stages):
-                    result_inner[stage_id] = result_inner[last]
-
-        return result_inner
+        return seasonal_step_function(
+            [(int(r["year"]), int(r["month"]), float(r["value"])) for r in recs],
+            transform,
+            seasonalize=seasonalize,
+            horizon=horizon,
+        )
 
     result: dict[tuple[int, int, str], float] = {}
 
