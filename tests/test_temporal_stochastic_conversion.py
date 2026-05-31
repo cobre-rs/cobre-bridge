@@ -97,6 +97,7 @@ def _make_dger_mock(
     selecao_de_cortes_forward: int = 1,
     selecao_de_cortes_backward: int = 1,
     ordem_maxima_parp: int = 6,
+    impressao_estados_geracao_cortes: int | None = None,
 ) -> MagicMock:
     dger = MagicMock()
     dger.mes_inicio_estudo = mes_inicio
@@ -118,6 +119,7 @@ def _make_dger_mock(
     dger.selecao_de_cortes_forward = selecao_de_cortes_forward
     dger.selecao_de_cortes_backward = selecao_de_cortes_backward
     dger.ordem_maxima_parp = ordem_maxima_parp
+    dger.impressao_estados_geracao_cortes = impressao_estados_geracao_cortes
     return dger
 
 
@@ -638,6 +640,45 @@ class TestConvertConfig:
 
         result = convert_config(_make_nw_files(tmp_path))
         assert result["simulation"]["num_scenarios"] == 500
+
+    # -- impressao_estados_geracao_cortes / exports.states --
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_export_states_true_when_flag_zero(self, mock_dger_cls, tmp_path) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(impressao_estados_geracao_cortes=0)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["exports"]["states"] is True
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_export_states_false_when_flag_nonzero(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(impressao_estados_geracao_cortes=1)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["exports"]["states"] is False
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_export_states_false_when_flag_absent(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(impressao_estados_geracao_cortes=None)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["exports"]["states"] is False
 
     # -- tipo_execucao / training.enabled --
 

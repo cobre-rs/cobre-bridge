@@ -552,6 +552,13 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         else 0
     )
 
+    # impressao_estados_geracao_cortes (dger.dat line 90): when 0, NEWAVE
+    # writes the visited cut-generation states (the per-stage cortese*.dat
+    # files).  Mirror that on the Cobre side via `exports.states` so the two
+    # models' visited forward-pass trial points can be compared.  A None or
+    # non-zero value leaves the Cobre default (states export off).
+    export_states: bool = dger.impressao_estados_geracao_cortes == 0
+
     # tipo_execucao: 0 = simulation only, 1 = training (+ simulation).
     training_enabled: bool = tipo_execucao == 1
 
@@ -679,6 +686,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             },
         },
         "exports": {
+            "states": export_states,
             "stochastic": True,
         },
         "simulation": simulation_section,
