@@ -115,21 +115,13 @@ HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
 # Energy-domain (R$/MWh) — passed through to cobre without conversion.
 # Flow-domain (multiplied by ρ_avg before emission) — see `_PEVERT` group.
 #
-# Uniform 10× uplift over NEWAVE's v30 values. NEWAVE chose values around
-# 1e-4 R$/MWh for "absolute negligibility" in its own SPTcpp solver; with
-# HiGHS and cobre's typical case scale, that floor stretches the LP
-# coefficient range to ~1e9 against the operational/deterrent slacks at
-# ~5e4. Multiplying every micro-penalty by the same factor preserves the
-# internal ordering (exchange < spillage < ... < excess) and the merit
-# tier (regularization ≪ violation cost) while compressing the LP
-# coefficient range to ~1e7 — comfortably away from HiGHS's 1e10
-# warning. Economic impact: at 10× uplift, 1 m³/s of spillage for an
-# entire 730 h month adds ~15.5 R$ to the objective — about 1e-5 of a
-# typical-stage total cost (~1e10 R$). Within NEWAVE-historical bounds
-# (v30.2.1 values were already ~18× the current).
-_MICRO_UPLIFT = 1.0
-
-_PINT = 0.000273 * _MICRO_UPLIFT  # intercâmbio  → line.exchange_cost
+# These are NEWAVE's v30 values verbatim: tiny (~1e-4 R$/MWh) regularization
+# costs whose only role is to break LP ties in a fixed merit order
+# (exchange < spillage < … < excess), well below any operational or deterrent
+# cost. An earlier revision multiplied them by a uniform uplift factor to widen
+# the HiGHS coefficient range; that factor was reverted to 1.0 (a no-op) and is
+# now dropped — the bare NEWAVE values condition fine at cobre's case scale.
+_PINT = 0.000273  # intercâmbio  → line.exchange_cost
 
 # NEWAVE halves the intercâmbio penalty on lines that touch a fictitious
 # submercado (e.g. NOFICT1). Rationale: a fictitious node is a routing-only
@@ -139,8 +131,8 @@ _PINT = 0.000273 * _MICRO_UPLIFT  # intercâmbio  → line.exchange_cost
 # topologies.  Emitted as the per-line `exchange_cost` override defined in
 # lines.schema.json; absence falls back to the global `_PINT` value.
 _PINT_FICTITIOUS_DISCOUNT = 0.5
-_PCORTEOL = 0.000344 * _MICRO_UPLIFT  # corte geração eólica → ncs.curtailment_cost
-_PEXC = 0.000355 * _MICRO_UPLIFT  # excesso de energia → bus.excess_cost
+_PCORTEOL = 0.000344  # corte geração eólica → ncs.curtailment_cost
+_PEXC = 0.000355  # excesso de energia → bus.excess_cost
 
 # Flow-domain (R$/MWh equivalent, multiplied by ρ_avg before emission).
 # Cobre's `hydro.spillage_cost` covers ALL spillage (reservoir + run-of-river).
@@ -148,48 +140,28 @@ _PEXC = 0.000355 * _MICRO_UPLIFT  # excesso de energia → bus.excess_cost
 # column) BOTH controllable (pEVERT) and run-of-river (pPFIO) spillage use the
 # same base 0.000300 — only the REE-aggregated ("NEWAVE equivalente") column
 # raises pEVERT to 0.000327. Cobre cases are individualized, so anchor on 0.000300.
-_PEVERT = 0.000300 * _MICRO_UPLIFT  # vertimento controlável → hydro.spillage_cost
-_PTURB = (
-    0.000333 * _MICRO_UPLIFT
-)  # turbinamento → hydro.turbined_cost (applied to every hydro)
-_PCDESV = 0.000300 * _MICRO_UPLIFT  # volume desviado → hydro.diversion_cost
+_PEVERT = 0.000300  # vertimento controlável → hydro.spillage_cost
+_PTURB = 0.000333  # turbinamento → hydro.turbined_cost (applied to every hydro)
+_PCDESV = 0.000300  # volume desviado → hydro.diversion_cost
 
 # --- NEWAVE hard-coded internal defaults (no user input via PENALID) -------
-# Page 87: evaporation and FPHA folga both derive from MAX_CUSTO_DEFICIT.
-# NEWAVE's manual prescribes a 10× multiplier here, making the evap-folga
-# slack roughly 10× more expensive per MWh-equivalent than the deficit
-# cost. Faithfully applying that 10× in cobre's per-(m³/s · h) LP slot
-# produces coefficients ~5e5 against a micro-penalty floor at ~2e-4 — the
-# resulting ~1e10 coefficient range trips HiGHS's condition-number
-# threshold and roughly doubles training time on the example case.
-#
-# We use 1.1× instead. Rationale: evaporation and water withdrawal are
-# both *physical-law* constraints (water cycle physics; human water-supply
-# requirements), so they belong at the top of the merit order — but their
-# job is to be "violated only as a last resort", not "100× more painful
-# than every other cost". A 10 % margin over water_withdrawal_violation_cost
-# is enough that an LP would only pick the evap slack when no alternative
-# exists, while keeping the deterrent tier numerically close to the
-# operational tier and the LP well-conditioned.
+# Page 87: evaporation and FPHA folga both derive from MAX_CUSTO_DEFICIT, and
+# NEWAVE's manual prescribes a 10× multiplier — the evap/FPHA folga slack is
+# ~10× more expensive per MWh-equivalent than the deficit cost, putting these
+# physical-law constraints (water-cycle physics, water-supply requirements) at
+# the top of the merit order so the LP violates them only as a last resort.
+# We apply that 10× faithfully (it doubles as the PENALID fallback below, and
+# `_ELETRI_HIGH_MULT` reuses the same magnitude). Earlier revisions trialled
+# softer factors (1.1×, 2×) to tame HiGHS's coefficient range, but the bare
+# 10× conditions acceptably at cobre's case scale and stays NEWAVE-faithful.
 _EVAPORATION_MULT = 10.0
 
-# --- Tie-breaking factors for PENALID flow slacks that share ρ_avg ---------
-# When PENALID supplies TURBMN, VAZMIN, TURBMX with the same R$/MWh value
-# (typical NEWAVE convention), the three slacks would otherwise have
-# identical LP coefficients — a degeneracy that hurts HiGHS performance.
-# Apply small adjacent multipliers to give each a unique value while
-# preserving a physically-defensible ordering:
-#
-#   turbined_violation_below (internal plant operation, can spill instead)
-#     < outflow_violation_below (downstream environmental / navigation)
-#     < outflow_violation_above (flood risk, public-safety regulation).
-#
-# 1 % spacing is small enough that LP decisions are unchanged in practice
-# but large enough that HiGHS sees them as numerically distinct.
-_TURBINED_BELOW_FACTOR = 1.00
-_OUTFLOW_BELOW_FACTOR = 1.00
-_OUTFLOW_ABOVE_FACTOR = 1.00
-
+# NOTE: when PENALID supplies TURBMN, VAZMIN, TURBMX with the same R$/MWh value
+# (typical NEWAVE convention), the resulting turbined/outflow-below/outflow-above
+# slack costs share an LP coefficient (ρ_avg cancels nothing). An earlier
+# revision multiplied each by a ~1 % "tie-break" factor to break that
+# degeneracy; the factors were all reverted to 1.00 (no-op) and have been
+# dropped. Reintroduce distinct spacing here if HiGHS degeneracy resurfaces.
 # --- Cobre fields not yet wired into the LP --------------------------------
 # Storage and filling-target violation costs are declared on cobre's schema
 # but `lp_builder/matrix.rs` does NOT use them in the objective (all 0.0
@@ -629,11 +601,9 @@ def _hydro_penalty_costs(
     turbmx_mwh = penalid_costs.get("TURBMX", _EVAPORATION_MULT * max_deficit_cost)
 
     water_withdrawal_cost = desvio_mwh * rho_max_acum
-    # Apply tie-breaking factors so the three PENALID-flow slacks share an
-    # ordering even when PENALID gives them identical R$/MWh values.
-    outflow_below_cost = vazmin_mwh * rho_avg * _OUTFLOW_BELOW_FACTOR
-    outflow_above_cost = turbmx_mwh * rho_avg * _OUTFLOW_ABOVE_FACTOR
-    turbined_below_cost = turbmn_mwh * rho_avg * _TURBINED_BELOW_FACTOR
+    outflow_below_cost = vazmin_mwh * rho_avg
+    outflow_above_cost = turbmx_mwh * rho_avg
+    turbined_below_cost = turbmn_mwh * rho_avg
     generation_below_cost = ghmin_mwh  # energy-domain, no productivity factor
 
     # Storage / filling target: cobre slots are dormant in the LP today but
@@ -655,12 +625,11 @@ def _hydro_penalty_costs(
     )
 
     # Evaporation violation: no PENALID variable. NEWAVE manual p.87 prescribes
-    # `(K × MAX_CUSTO_DEFICIT × MAX_PRODTACUM_SIN) / C_M3S2HM3` with K=10.
-    # We use K=2 (see `_EVAPORATION_MULT` rationale) so the deterrent
-    # magnitude stays above the PENALID-sourced operational slacks
-    # (typically water_withdrawal_violation_cost) without stretching the
-    # LP coefficient range past HiGHS's comfortable conditioning zone. The
-    # /C_M3S2HM3 step is dropped (only needed for NEWAVE's per-hm³ slot).
+    # `(K × MAX_CUSTO_DEFICIT × MAX_PRODTACUM_SIN) / C_M3S2HM3` with K=10, which
+    # we apply faithfully (K == `_EVAPORATION_MULT`) so the deterrent magnitude
+    # sits above the PENALID-sourced operational slacks (typically
+    # water_withdrawal_violation_cost). The /C_M3S2HM3 step is dropped (only
+    # needed for NEWAVE's per-hm³ slot).
     evaporation_cost = _EVAPORATION_MULT * max_deficit_cost * rho_max_acum
 
     # Flow-domain micro-penalties (× ρ_avg per NEWAVE individualized conversion).
