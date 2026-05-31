@@ -26,8 +26,6 @@ from inewave.newave import Confhd, Curva, Dger, Hidr, Penalid, Ree, Sistema
 
 from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
-    _compute_integrated_productivity,
-    _compute_productivity,
     compute_per_stage_own_integrated_productivities,
 )
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
@@ -35,6 +33,7 @@ from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.plants import active_hydros
+from cobre_bridge.productivity import compute_productivity, integrated_productivity
 
 _LOG = logging.getLogger(__name__)
 
@@ -134,7 +133,7 @@ def _compute_accumulated_integrated_productivities(
     own_prod: dict[int, float] = {}
     for code, resolution in resolutions.items():
         if code in cadastro.index:
-            own_prod[code] = _compute_integrated_productivity(cadastro.loc[code])
+            own_prod[code] = integrated_productivity(cadastro.loc[code])
         else:
             own_prod[code] = 0.0
         own_prod[code] += resolution.fict_rho_sum
@@ -182,7 +181,7 @@ def compute_accumulated_productivities(
     own_prod: dict[int, float] = {}
     for code, resolution in resolutions.items():
         if code in cadastro.index:
-            own_prod[code] = _compute_productivity(cadastro.loc[code])
+            own_prod[code] = compute_productivity(cadastro.loc[code])
         else:
             own_prod[code] = 0.0
         own_prod[code] += resolution.fict_rho_sum
@@ -249,7 +248,7 @@ def compute_max_prodtacum_sin(nw_files: NewaveFiles) -> float | None:
         if code in cadastro.index:
             hreg = cadastro.loc[code]
             useful = float(hreg["volume_maximo"]) - float(hreg["volume_minimo"])
-            own_max[code] = _compute_productivity(hreg, useful_volume_override=useful)
+            own_max[code] = compute_productivity(hreg, useful_volume_override=useful)
         else:
             own_max[code] = 0.0
         own_max[code] += resolution.fict_rho_sum
