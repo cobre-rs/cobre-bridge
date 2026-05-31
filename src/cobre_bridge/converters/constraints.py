@@ -186,6 +186,49 @@ def _cascade_sum(
     return result
 
 
+def compute_max_prodtacum_sin(nw_files: NewaveFiles) -> float | None:
+    """Return ``MAX_PRODTACUM_SIN`` = max accumulated productivity at altura máxima.
+
+    NEWAVE converts the DESVIO ("outros usos da água" / water-withdrawal) and
+    evaporation penalties with the **maximum accumulated cascade productivity**
+    (manual §3.24). pmo.dat shows these penalties are **fixed** over the whole
+    study — the max is ITAIPU's cascade, which carries no CFUGA/CMONT temporal
+    override, so it never moves — and the per-plant productivity is taken at the
+    **maximum height** (vol_max), i.e. NEWAVE's
+    ``produtibilidade_acumulada_calculo_altura_maxima``. On the example case this
+    returns ≈ 6.4458, matching pmo's "PENALIDADE POR VIOLACAO DOS OUTROS USOS"
+    (19 149.55 → implied 6.4371) and Pmo's 6.4420; the legacy 65%-reference
+    accumulated max was 6.3542 (~1.4% low).
+
+    Falls back to ``None`` when the NEWAVE files cannot be read (mocked tests).
+    """
+    from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+    try:
+        hidr = Hidr.read(str(nw_files.hidr))
+        cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+        confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+    except (OSError, ValueError, AttributeError, TypeError, KeyError):
+        return None
+
+    resolutions = resolve_cascade(confhd_df, cadastro)
+    downstream_map: dict[int, int | None] = {
+        code: r.downstream_code for code, r in resolutions.items()
+    }
+    own_max: dict[int, float] = {}
+    for code, resolution in resolutions.items():
+        if code in cadastro.index:
+            hreg = cadastro.loc[code]
+            useful = float(hreg["volume_maximo"]) - float(hreg["volume_minimo"])
+            own_max[code] = _compute_productivity(hreg, useful_volume_override=useful)
+        else:
+            own_max[code] = 0.0
+        own_max[code] += resolution.fict_rho_sum
+
+    acc = _cascade_sum(downstream_map, own_max)
+    return max(acc.values()) if acc else None
+
+
 def compute_per_stage_acc_productivities(
     confhd_df: pd.DataFrame,
     per_stage_own: dict[int, list[float]],

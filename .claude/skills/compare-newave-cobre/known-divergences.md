@@ -324,3 +324,89 @@ Two linked symptoms, one root cause.
 - **Evidence/ref:** example case 2-iteration run, 2026-05-30; per-plant `MEDIAS-USIH`
   `VIOL_GHMINUH`/`VIOL_VAZMINUH` vs Cobre `hydros` `generation_slack_mw`/
   `outflow_slack_below_m3s`; floors from `hydro_per_stage_bounds`.
+
+### `forward.dat` is the high-precision penalty/cost oracle (decode recipe)
+
+- **What:** NEWAVE's binary forward-simulation dump exposes — at full precision,
+  per scenario — `custo_operacao` (live per-stage immediate cost, 10³R$),
+  `custo_geracao_termica` (10³R$), and every physical violation quantity
+  (`violacao_defluencia_minima` hm³, `volume_vertido`/`volume_turbinado` hm³,
+  `deficit`, `geracao_termica`, `intercambio`, …). Far better than MEDIAS
+  (scenario-averaged, frozen COPER). Decode it with `forward_penalty_experiment.py`
+  (repo root).
+- **Decode dims:** read `forwarh.dat` (`Forwarh`) for `tamanho_registro`,
+  `numero_series_gravadas`, REE/submarket/patamar counts; n_stages =
+  filesize / record_size / n_series. Plant counts from `confhd`/`conft`, agrint
+  groups from `agrint`, GNL lag from `adterm` (NaN→0). Example: **64 stages, 1
+  series**. Stage map: **forward `estagio` k ↔ Cobre `stage_id` k−1 ↔ MEDIAS stage
+  k+8**.
+- **Freeze structure (≠ MEDIAS):** in forward.dat `custo_operacao` is **LIVE**
+  (varies per stage, has the violation spikes), while `custo_geracao_termica`
+  **freezes** at the last study month through the post-study tail. (Example:
+  study = stages 1–28, last study Dec-2026; thermal frozen 813,618 ×10³R$ /
+  5,739.6 MWmes for stages 29–64.) So `custo_operacao − custo_geracao_termica`
+  isolates the live **non-thermal (penalty) cost** — but only in the **study
+  horizon** where thermal is live.
+- **Violation-cost breakout props are 0** in this run (`custo_violacao_*`,
+  `penalidade_curva_aversao` all dumped as zero) — don't pair them; reconstruct
+  from `op − thermal` instead.
+
+### Penalty productivities now match NEWAVE (PRODT / altura-máxima) — FIXED
+
+- **Status: implemented (2026-05-31).** The penalty-conversion productivities were
+  re-derived from inputs to match NEWAVE's pmo.dat-applied values exactly:
+  - **PROD_MEDIA_SIN** (VAZMIN / TURBMN / TURBMX / spillage / turbined micro) = mean
+    **PRODT** (`produtibilidade_equivalente_volmin_volmax`, the vol_min→vol_max
+    _equivalent_ via analytic head-integral, `hydro._equivalent_productivity`), over
+    **all** existing plants incl. zeros, **no FICT fold**. = **0.62916** (pmo VAZMIN
+    821.78 ⟹ 0.6294). Was 0.656 (65%-reference point value, ρ>0-only, FICT-folded).
+    → `outflow_violation_below_cost` 2250.55 → **2158.78**.
+  - **Per-stage:** PROD_MEDIA_SIN drifts ~0.15% per config via the 5 CFUGA/CMONT
+    movers (STO ANTONIO, TUCURUI, JIRAU, BELO MONTE, PIMENTAL) — VOLREF_SAZ is _not_
+    applied (PRODT is volume-independent). Reproduces pmo's 820.53→821.78 wiggle. So
+    the `penalty_overrides_hydro.parquet` VAZMIN/turbined columns now **vary in the
+    decimals** while water_withdrawal/evaporation are **fixed** (absent from the
+    override) — matching pmo exactly. (`hydro.compute_per_stage_prodt_sin_mean`,
+    `_per_stage_equivalent_productivities`, shared `_per_stage_drop_overrides`.)
+  - **MAX_PRODTACUM_SIN** (DESVIO "outros usos" / evaporation) = max accumulated ρ at
+    **altura máxima** (`produtibilidade_acumulada_calculo_altura_maxima`), **constant**
+    = **6.4458** (pmo OUTROS USOS 19,149.55 ⟹ 6.4371; Pmo 6.4420). Was 6.3542
+    (65%-ref). → `water_withdrawal_violation_cost` 49,676.85 → **50,392.90** (now within
+    0.13% of pmo). `constraints.compute_max_prodtacum_sin`.
+- **Validated end-to-end:** all reconcile with pmo.dat to ≤0.15%. 919 tests pass (+9
+  new in `TestEquivalentProductivity` / `TestProductivitySinMeansExample`).
+- **Evidence/ref:** `pmo.dat:28371` (VAZMIN) `:28271` (OUTROS USOS); `Pmo.
+produtibilidades_equivalentes` (`volmin_volmax`, `acumulada_calculo_altura_maxima`);
+  `penalid.dat` VAZMIN 3431.22 / DESVIO 7818. [[project_forward_penalty_validation]]
+
+### Outflow (VAZMIN) penalty overcharged ~4% — `rho_avg` vs PROD_MEDIA_SIN (uniform) [superseded by FIX above]
+
+- **GROUND TRUTH = pmo.dat, not forward.dat.** `pmo.dat` reports the _final_ penalty
+  values NEWAVE used, in `(R$/hm³)·(mês/h)`, in the section
+  `PENALIDADE POR VIOLACAO DE VAZAO MINIMA`. The value is **uniform across every REE**
+  (821.78 at Sep/stage 0, seasonally ~820.5–821.8) — a **single system-wide penalty
+  applying PROD_MEDIA_SIN**, exactly as the manual says. TURBMIN/TURBMAX share the same
+  821.78; OUTROS USOS (DESVIO) = 19,149.55; EVAPORAÇÃO = 191,314.77; FPHA = 78,106.20
+  R$/MWh (= 10 × max_deficit_cost).
+- **The penalty is NOT per-plant.** (Earlier revisions of this entry claimed a per-plant
+  head-dependent ρ from a `forward.dat` `op−therm` reconstruction — that was WRONG, an
+  artifact of a corrupted `custo_geracao_termica` field, byte-identical at stages 24/25.
+  Retracted.)
+- **Reconciliation:** pmo VAZMIN 821.78 × 730 h = 599,900 R$/hm³; energy identity
+  `599,900 = 3431.22 R$/MWh (penalid) × 277.78 MWh/(hm³·ρ) × ρ` ⟹ NEWAVE
+**ρ_SIN = 0.629**. Our converter uses **rho_avg = 0.656**
+(`network.py:\_hydro_penalty_costs`, `outflow_violation_below_cost = 3431.22 × 0.656 =
+  2250.55` R$/(m³/s)/h ≡ 856 in pmo units). **856 / 821.78 = 1.042 → we OVERCHARGE
+  VAZMIN by ~4.2%, uniformly.** Matches the original pre-forward.dat figure
+  (NEWAVE ≈ 1.577e6 vs ours 1.643e6 R$/(m³/s)·stage).
+- **Verdict:** **minor, expected, low-priority.** The ~4.2% is purely that our
+  `rho_avg` (0.656) is ~4% above NEWAVE's PROD_MEDIA_SIN (0.629) — a productivity-mean
+  definition difference (plant set / weighting / reference volume), not a structural
+  bug. Same 4% rides `turbined_violation_below` (pmo 821.78 too). To close it, match
+  NEWAVE's PROD_MEDIA_SIN definition. Cost impact negligible; merit order unaffected.
+- **Method note:** `forward.dat` `op−therm` is **unreliable for VAZMIN** in this run —
+  `custo_geracao_termica` is duplicated/stale at the violation stages. Use **pmo.dat**
+  penalty sections as the authoritative source for the _applied_ penalty values.
+- **Evidence/ref:** `pmo.dat:28371` (VAZMIN), `:28271/28595/28695/28705` (other
+  penalties); penalid VAZMIN=3431.22 (`penalid.dat`); micro-penalties confirmed
+  negligible. [[project_forward_penalty_validation]]

@@ -2088,6 +2088,106 @@ def _make_cmont_rec(month: int, year: int, nivel: float) -> MagicMock:
     return r
 
 
+class TestEquivalentProductivity:
+    """Unit tests for ``_equivalent_productivity`` (NEWAVE PRODT)."""
+
+    def test_linear_polynomial_uses_mean_head(self) -> None:
+        """h(v)=a0+a1·v → mean head over [vmin,vmax] = a0 + a1·(vmin+vmax)/2."""
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({})  # a0=300, a1=0.1, vmin=100, vmax=1000, cfuga=250
+        # mean head = 300 + 0.1·550 = 355 ; net = 105 ; ·0.95 loss ; ·0.009 pesp
+        assert _equivalent_productivity(hreg) == pytest.approx(
+            0.009 * (355.0 - 250.0) * 0.95
+        )
+
+    def test_differs_from_point_reference(self) -> None:
+        """PRODT (mean over range) ≠ the 65%-volume point productivity."""
+        from cobre_bridge.converters.hydro import (
+            _compute_productivity,
+            _equivalent_productivity,
+        )
+
+        # Non-linear forebay curve so the average over [vmin,vmax] differs from
+        # the value at the 65% reference point.
+        hreg = _make_hreg({"a2_volume_cota": 1e-4})
+        assert _equivalent_productivity(hreg) != pytest.approx(
+            _compute_productivity(hreg)
+        )
+
+    def test_run_of_river_uses_point_head(self) -> None:
+        """Vmax == Vmin → head evaluated at Vmin (no integral)."""
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({"volume_minimo": 500.0, "volume_maximo": 500.0})
+        # h(500) = 300 + 0.1·500 = 350 ; net 100 ; ·0.95 ; ·0.009
+        assert _equivalent_productivity(hreg) == pytest.approx(
+            0.009 * (350.0 - 250.0) * 0.95
+        )
+
+    def test_canal_fuga_override(self) -> None:
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({})
+        assert _equivalent_productivity(
+            hreg, canal_fuga_override=300.0
+        ) == pytest.approx(0.009 * (355.0 - 300.0) * 0.95)
+
+    def test_cmont_override_pins_forebay(self) -> None:
+        """CMONT pins the upstream level → head = cmont − cfuga (no integral)."""
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({})
+        assert _equivalent_productivity(hreg, cmont_override=400.0) == pytest.approx(
+            0.009 * (400.0 - 250.0) * 0.95
+        )
+
+    def test_zero_polynomial_returns_zero(self) -> None:
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({f"a{i}_volume_cota": 0.0 for i in range(5)})
+        assert _equivalent_productivity(hreg) == 0.0
+
+
+class TestProductivitySinMeansExample:
+    """Integration: SIN-mean productivities match NEWAVE's pmo.dat conventions."""
+
+    EXAMPLE = Path("example/newave_rodada")
+
+    def _nw_files(self):
+        if not (self.EXAMPLE / "pmo.dat").exists():
+            pytest.skip("example/newave_rodada not available")
+        from cobre_bridge.newave_files import NewaveFiles
+
+        return NewaveFiles.from_directory(self.EXAMPLE)
+
+    def test_prodt_sin_mean_matches_penalty(self) -> None:
+        """PROD_MEDIA_SIN = mean PRODT ≈ pmo VAZMIN-implied ρ (0.629)."""
+        from cobre_bridge.converters.hydro import compute_prodt_sin_mean
+
+        assert compute_prodt_sin_mean(self._nw_files()) == pytest.approx(
+            0.629, abs=2e-3
+        )
+
+    def test_per_stage_prodt_varies_in_decimals(self) -> None:
+        """VAZMIN/TURBMN/TURBMX productivity drifts ~0.15% per CFUGA/CMONT config."""
+        from cobre_bridge.converters.hydro import compute_per_stage_prodt_sin_mean
+
+        per_stage = compute_per_stage_prodt_sin_mean(self._nw_files())
+        assert len(per_stage) > 1
+        assert all(0.628 < v < 0.631 for v in per_stage)
+        spread = max(per_stage) / min(per_stage) - 1.0
+        assert 1e-4 < spread < 5e-3  # decimal wiggle, not flat, not seasonal-large
+
+    def test_max_prodtacum_sin_at_altura_maxima(self) -> None:
+        """MAX_PRODTACUM_SIN ≈ pmo OUTROS USOS-implied ρ_acum (6.44), constant."""
+        from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
+
+        assert compute_max_prodtacum_sin(self._nw_files()) == pytest.approx(
+            6.44, abs=2e-2
+        )
+
+
 class TestConvertProductionModels:
     """Unit tests for ``convert_production_models``."""
 

@@ -731,6 +731,7 @@ def convert_penalties(
     productivities: dict[int, float] | None = None,
     *,
     max_accumulated_productivity: float | None = None,
+    prod_media_sin: float | None = None,
 ) -> dict:
     """Generate a Cobre ``penalties.json`` dict from NEWAVE data.
 
@@ -786,10 +787,19 @@ def convert_penalties(
     penalid_costs = _read_penalid_costs(nw_files)
     productivities = productivities or {}
 
-    # ρ_avg = PROD_MEDIA_SIN: arithmetic mean of own productivities (NEWAVE
-    # convention for VAZMIN, TURBMN, TURBMX, VOLMIN — manual table p.87).
+    # ρ_avg = PROD_MEDIA_SIN: NEWAVE converts the PENALID R$/MWh penalties
+    # (VAZMIN, TURBMN, TURBMX, VOLMIN — manual table p.87) with the mean **PRODT**
+    # (equivalent productivity vol_min→vol_max) over ALL existing plants including
+    # zeros. Validated against pmo.dat's applied penalties (0.6299 ↔ penalty
+    # 821.78). Pass it in via ``prod_media_sin`` (see ``hydro.compute_prodt_sin_mean``).
+    # The legacy fallback — mean of the 65%-reference own ρ, ρ>0 only — is ~4%
+    # high; kept only for callers/tests that don't supply ``prod_media_sin``.
     own_prods = _own_productivities(hydros_dict, productivities)
-    rho_avg = sum(own_prods) / len(own_prods) if own_prods else 1.0
+    rho_avg = (
+        prod_media_sin
+        if prod_media_sin is not None
+        else (sum(own_prods) / len(own_prods) if own_prods else 1.0)
+    )
 
     # ρ_max_acum = MAX_PRODTACUM_SIN: used by NEWAVE for DESVIO and the
     # evaporation default. When the caller doesn't supply the true cascade

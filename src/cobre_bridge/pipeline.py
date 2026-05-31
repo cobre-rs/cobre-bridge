@@ -49,92 +49,59 @@ class ConversionReport:
         )
 
 
-def _compute_max_accumulated_productivity_safe(
-    nw_files: NewaveFiles,
-) -> float | None:
-    """Return ``MAX_PRODTACUM_SIN`` from the cascade DAG, or ``None`` on failure.
+def _compute_prod_media_sin_safe(nw_files: NewaveFiles) -> float | None:
+    """Return ``PROD_MEDIA_SIN`` (mean PRODT), or ``None`` on failure.
 
-    NEWAVE manual v29 §3.24 uses this value to convert DESVIO and
-    evaporation-folga penalties. We compute it from the cascade topology so
-    ``convert_penalties`` doesn't have to use the rougher ``max(own_prods)``
-    approximation. Falls back to ``None`` (caller approximates) when the
-    NEWAVE files cannot be read — e.g. in unit tests that mock the pipeline.
+    NEWAVE converts the PENALID R$/MWh penalties (VAZMIN, TURBMN/TURBMX, …) with
+    the mean **PRODT** — the equivalent productivity from vol_min to vol_max —
+    over all existing plants including zeros. See
+    :func:`hydro.compute_prodt_sin_mean`; validated against pmo.dat's applied
+    penalty (0.6299 ↔ VAZMIN 821.78). Falls back to ``None`` (caller uses its
+    legacy point-reference mean) when the NEWAVE files cannot be read — e.g. in
+    unit tests that mock the pipeline.
     """
     try:
-        from inewave.newave import Confhd
-
-        from cobre_bridge.converters.constraints import (
-            compute_accumulated_productivities,
-        )
-
-        cadastro = hydro_conv._apply_permanent_overrides(
-            hydro_conv.read_cadastro(nw_files), nw_files
-        )
-        confhd_df = Confhd.read(str(nw_files.confhd)).usinas
-        acc = compute_accumulated_productivities(cadastro, confhd_df)
-        return max(acc.values()) if acc else None
+        return hydro_conv.compute_prodt_sin_mean(nw_files)
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         return None
 
 
 def _compute_per_stage_sin_productivities(
     nw_files: NewaveFiles,
-    id_map: NewaveIdMap,
-    hydros_dict: dict,
 ) -> tuple[list[float], list[float]] | None:
     """Return ``(PROD_MEDIA_SIN[s], MAX_PRODTACUM_SIN[s])`` per stage, or None.
 
     These SIN-aggregate productivity constants are what NEWAVE uses to convert
-    its flow-domain hydro penalties (manual §3.24 p.87). They are *not* static:
-    each plant's equivalent ρ tracks its seasonal reference volume (VOLREF_SAZ)
-    and CFUGA/CMONT tailrace/forebay overrides, so the SIN mean / accumulated
-    max shift stage to stage — the same per-stage ρ already shipped in
-    ``system/hydro_energy_productivity.parquet``.
+    its flow-domain hydro penalties (manual §3.24 p.87).
 
-    - ``PROD_MEDIA_SIN[s]`` = mean own ρ over the plants at stage ``s``.
-    - ``MAX_PRODTACUM_SIN[s]`` = max accumulated cascade ρ at stage ``s``.
+    - ``PROD_MEDIA_SIN[s]`` = mean **PRODT** (equivalent ρ vol_min→vol_max) over
+      the existing plants. PRODT is **structural** — it does *not* track the
+      seasonal reference volume — so this is essentially **flat** across the
+      horizon. pmo.dat confirms it: the applied VAZMIN/TURBMN/TURBMX penalties
+      vary only 0.15% over the whole study (= the per-config PRODT-mean spread),
+      not the ~2% that the old seasonal point-reference ρ implied. We therefore
+      emit a constant ``compute_prodt_sin_mean`` for every stage; the per-stage
+      penalty override then collapses to the base for the ρ_avg-scaled columns
+      (correct — NEWAVE does not seasonalise these penalties). The genuinely
+      seasonal per-plant ρ still ships in ``hydro_energy_productivity.parquet``
+      for the *generation* model — that is a separate concern from the penalty.
+    - ``MAX_PRODTACUM_SIN`` = max accumulated cascade ρ at **altura máxima**,
+      **constant** over the horizon. It governs the DESVIO ("outros usos") and
+      evaporation penalties, which pmo.dat reports as *fixed* — the max is
+      ITAIPU's cascade, which carries no CFUGA/CMONT override, so it never moves.
+      (See :func:`constraints.compute_max_prodtacum_sin`.)
 
-    ``PROD_MEDIA_SIN[s]`` is averaged through the very same
-    :func:`network._own_productivities` filter that produces the static base in
-    ``penalties.json`` (same plant set, same ρ≤0 exclusion). This guarantees the
-    override equals the base at stages with no seasonal/temporal effect, so the
-    sparse override carries *only* the genuine per-stage delta — never a
-    methodology step from averaging a different set.
-
-    Both lists span the full horizon (``_total_study_stages``, incl. post-study
-    via seasonal repetition). Falls back to ``None`` when the NEWAVE files can't
-    be read (e.g. mocked-pipeline unit tests).
+    Both lists span the full horizon (``_total_study_stages``, incl. post-study).
+    Falls back to ``None`` when the NEWAVE files can't be read (mocked tests).
     """
     try:
-        from inewave.newave import Confhd
-
-        per_own = hydro_conv.compute_per_stage_own_productivities(nw_files)
-        if not per_own:
+        rho_avg = hydro_conv.compute_per_stage_prodt_sin_mean(nw_files)
+        if not rho_avg:
             return None
-        confhd_df = Confhd.read(str(nw_files.confhd)).usinas
-        per_acc = constraints_conv.compute_per_stage_acc_productivities(
-            confhd_df, per_own
-        )
-        if not per_acc:
+        max_prodtacum = constraints_conv.compute_max_prodtacum_sin(nw_files)
+        if max_prodtacum is None:
             return None
-        n_stages = len(next(iter(per_own.values())))
-
-        # Re-key per-stage own ρ by Cobre hydro id so the same averaging the
-        # base uses (over hydros.json entries) applies per stage.
-        per_own_hid: dict[int, list[float]] = {}
-        for code, lst in per_own.items():
-            try:
-                per_own_hid[id_map.hydro_id(code)] = lst
-            except KeyError:
-                continue
-
-        rho_avg: list[float] = []
-        for s in range(n_stages):
-            stage_map = {hid: lst[s] for hid, lst in per_own_hid.items()}
-            own = network_conv._own_productivities(hydros_dict, stage_map)
-            rho_avg.append(sum(own) / len(own) if own else 0.0)
-
-        rho_max_acum = [max(per_acc[c][s] for c in per_acc) for s in range(n_stages)]
+        rho_max_acum = [max_prodtacum] * len(rho_avg)
         return rho_avg, rho_max_acum
     except (
         OSError,
@@ -287,17 +254,19 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     lines_dict = network_conv.convert_lines(nw_files, id_map)
 
     logger.debug("Converting penalties")
-    # NEWAVE's DESVIO and evaporation-folga conversions use MAX_PRODTACUM_SIN
-    # (max accumulated cascade productivity), not the per-plant own ρ. Compute
-    # it from the cascade DAG so convert_penalties doesn't fall back to its
-    # `max(own_prods)` approximation. We do this defensively because tests
-    # mock the converter pipeline and the real NEWAVE files may be absent.
-    max_prodtacum_sin = _compute_max_accumulated_productivity_safe(nw_files)
+    # DESVIO ("outros usos") + evaporation use MAX_PRODTACUM_SIN (max accumulated
+    # ρ at altura máxima, constant); VAZMIN/TURBMN/TURBMX use PROD_MEDIA_SIN (mean
+    # PRODT, drifting per CFUGA/CMONT config). Both come from NEWAVE inputs and
+    # return None when files are absent (mocked-pipeline tests), so convert_penalties
+    # falls back to its own legacy approximation.
+    max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(nw_files)
+    prod_media_sin = _compute_prod_media_sin_safe(nw_files)
     penalties_dict = network_conv.convert_penalties(
         nw_files,
         hydros_dict,
         productivities=base_productivities,
         max_accumulated_productivity=max_prodtacum_sin,
+        prod_media_sin=prod_media_sin,
     )
 
     logger.debug("Converting stages")
@@ -490,7 +459,7 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     # Emitted sparsely (only stages/columns that differ from penalties.json),
     # keeping the penalty conversion coherent with the per-stage ρ already
     # shipped in system/hydro_energy_productivity.parquet.
-    per_stage_sin = _compute_per_stage_sin_productivities(nw_files, id_map, hydros_dict)
+    per_stage_sin = _compute_per_stage_sin_productivities(nw_files)
     if per_stage_sin is not None:
         per_stage_rho_avg, per_stage_rho_max_acum = per_stage_sin
         hydro_ids = [int(h["id"]) for h in hydros_dict.get("hydros", []) if "id" in h]

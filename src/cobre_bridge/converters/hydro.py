@@ -1044,6 +1044,158 @@ def _compute_productivity(
     return produtibilidade * adjusted_drop
 
 
+def _equivalent_productivity(
+    hreg: pd.Series,
+    *,
+    canal_fuga_override: float | None = None,
+    cmont_override: float | None = None,
+) -> float:
+    """Compute NEWAVE's PRODT (``produtibilidade_equivalente_volmin_volmax``).
+
+    PRODT is the *equivalent* productivity from the minimum to the maximum
+    operative volume (pmo.dat: "PROD. EQUIVALENTE (DO VOL. MINIMO AO VOL.
+    MAXIMO)"). Unlike :func:`_compute_productivity`, which evaluates the head at
+    a single reference volume, PRODT uses the **mean upstream head over the
+    useful-volume range**, obtained analytically from the volume→cota
+    polynomial::
+
+        h_eq = (1 / (Vmax - Vmin)) ∫_{Vmin}^{Vmax} (a0 + a1 V + … + a4 V⁴) dV
+             = Σ_i a_i (Vmax^{i+1} - Vmin^{i+1}) / ((i+1)(Vmax - Vmin))
+
+    productivity = ``produtibilidade_especifica × (h_eq − canal_fuga − perdas)``
+    with the same loss model as :func:`_compute_productivity`.
+
+    NEWAVE uses the **mean PRODT over the SIN** (`PROD_MEDIA_SIN`) to convert the
+    PENALID R$/MWh penalties (VAZMIN, TURBMN/TURBMX, …) to the flow domain — see
+    :func:`compute_prodt_sin_mean`. This reproduces pmo.dat's PRODT per plant to
+    ~1e-3 (the only outliers are run-of-river plants whose tailrace varies with
+    outflow, negligible in the SIN mean).
+
+    Run-of-river plants (``Vmax == Vmin``) fall back to the point head at
+    ``Vmin``; all-zero polynomials return 0 (matches NEWAVE).
+
+    ``canal_fuga_override`` / ``cmont_override`` carry MODIF.DAT CFUGA / CMONT
+    temporal overrides: CFUGA replaces the mean tailrace; CMONT pins the upstream
+    level to a constant (so the head is ``cmont − cfuga``, no integral). These
+    are what make PRODT — and hence ``PROD_MEDIA_SIN`` — drift slightly per
+    configuration (see :func:`compute_per_stage_prodt_sin_mean`).
+    """
+    canal_fuga = (
+        canal_fuga_override
+        if canal_fuga_override is not None
+        else float(hreg["canal_fuga_medio"])
+    )
+
+    if cmont_override is not None:
+        net_drop = cmont_override - canal_fuga
+    else:
+        coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+        if all(c == 0.0 for c in coeffs):
+            return 0.0
+
+        vol_min = float(hreg["volume_minimo"])
+        vol_max = float(hreg["volume_maximo"])
+
+        if vol_max - vol_min < 1e-9:
+            h_eq = sum(coeffs[i] * vol_min**i for i in range(5))
+        else:
+            integral = sum(
+                coeffs[i] * (vol_max ** (i + 1) - vol_min ** (i + 1)) / (i + 1)
+                for i in range(5)
+            )
+            h_eq = integral / (vol_max - vol_min)
+
+        net_drop = h_eq - canal_fuga
+
+    tipo_perda = int(hreg["tipo_perda"])
+    perdas = float(hreg["perdas"])
+    if tipo_perda == 1:
+        net_drop *= 1.0 - perdas / 100.0
+    elif tipo_perda == 2:
+        net_drop -= perdas
+
+    return float(hreg["produtibilidade_especifica"]) * net_drop
+
+
+def compute_prodt_sin_mean(nw_files: NewaveFiles) -> float:
+    """Return ``PROD_MEDIA_SIN`` = mean PRODT over existing plants (NEWAVE).
+
+    This is the system-average productivity NEWAVE uses to convert the PENALID
+    R$/MWh penalties to the flow/volume domain (pmo.dat "PENALIDADE POR VIOLACAO
+    DE VAZAO MINIMA" etc.). Two conventions matter and are matched here:
+
+    - the per-plant productivity is **PRODT** (:func:`_equivalent_productivity`),
+      not the 65%-reference point value used for energy; and
+    - the mean is over **all** existing non-fictitious plants **including** those
+      with zero PRODT — no ``ρ > 0`` filter and no fictitious-cascade fold-in.
+
+    On the example case this returns ≈ 0.6299, matching pmo's penalty-implied ρ
+    (0.6294) to 0.06%; the legacy 65%-reference mean was 0.656 (~4% high).
+    """
+    hidr = Hidr.read(str(nw_files.hidr))
+    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+
+    confhd = Confhd.read(str(nw_files.confhd))
+    confhd_df = confhd.usinas
+    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    existing = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+
+    prodt: list[float] = []
+    for _, row in existing.iterrows():
+        code = int(row["codigo_usina"])
+        if code in cadastro.index:
+            prodt.append(_equivalent_productivity(cadastro.loc[code]))
+    return sum(prodt) / len(prodt) if prodt else 1.0
+
+
+def compute_per_stage_prodt_sin_mean(nw_files: NewaveFiles) -> list[float]:
+    """Return ``PROD_MEDIA_SIN[s]`` = mean PRODT per stage (CFUGA/CMONT-driven).
+
+    Same plant set and convention as :func:`compute_prodt_sin_mean` (mean PRODT
+    over all existing plants, zeros included, no FICT fold), but **per stage**:
+    the handful of plants carrying MODIF.DAT CFUGA/CMONT temporal overrides make
+    the SIN mean drift slightly per configuration — ≈0.15% on the example case,
+    the decimal wiggle pmo.dat shows on the VAZMIN / TURBMN / TURBMX penalties
+    (820.53…821.78). PRODT ignores VOLREF_SAZ, so only CFUGA/CMONT move it.
+
+    Returns ``[]`` when the horizon can't be read (mocked-pipeline unit tests).
+    """
+    total_stages = _total_study_stages(nw_files)
+    if total_stages <= 0:
+        return []
+
+    hidr = Hidr.read(str(nw_files.hidr))
+    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+    confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    existing = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+    codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
+
+    temporal = _extract_temporal_overrides(nw_files, codes)
+    drop_by_plant = {
+        code: [o for o in ov if o["type"] in ("CFUGA", "CMONT")]
+        for code, ov in temporal.items()
+    }
+
+    stage_sum = [0.0] * total_stages
+    count = 0
+    for code in codes:
+        if code not in cadastro.index:
+            continue
+        hreg = cadastro.loc[code]
+        series = _per_stage_equivalent_productivities(
+            hreg,
+            _equivalent_productivity(hreg),
+            drop_by_plant.get(code, []),
+            nw_files,
+            total_stages,
+        )
+        for s in range(total_stages):
+            stage_sum[s] += series[s]
+        count += 1
+    return [v / count for v in stage_sum] if count else []
+
+
 def convert_production_models(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     """Build ``hydro_production_models.json`` with model selection only.
 
@@ -1401,6 +1553,120 @@ def _read_volref_saz(nw_files: NewaveFiles) -> dict[int, dict[int, float]]:
     }
 
 
+def _per_stage_drop_overrides(
+    drop_overrides: list[dict],
+    nw_files: NewaveFiles,
+    total_stages: int,
+) -> list[tuple[float | None, float | None]]:
+    """Per-stage effective ``(CFUGA, CMONT)`` from MODIF.DAT step-functions.
+
+    Evolves the CFUGA / CMONT temporal overrides into a per-stage
+    ``(canal_fuga, cmont)`` state: each event applies from its stage of effect
+    forward; events before the horizon fold in at stage 0; and when
+    ``sazonaliza_cfuga_cmont == 1`` the calendar month's latest-year value
+    repeats after the last explicit event. Shared by both
+    :func:`_per_stage_productivities` (point ρ, combined with VOLREF_SAZ) and
+    :func:`_per_stage_equivalent_productivities` (PRODT, which ignores VOLREF_SAZ).
+    """
+    if not drop_overrides:
+        return [(None, None)] * total_stages
+
+    dger = Dger.read(str(nw_files.dger))
+    start_year = int(dger.ano_inicio_estudo)
+    start_month = int(dger.mes_inicio_estudo)
+    seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
+
+    events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
+    last_event_stage = -1
+    for override in drop_overrides:
+        stage_id = (override["year"] - start_year) * 12 + (
+            override["month"] - start_month
+        )
+        last_event_stage = max(last_event_stage, stage_id)
+        if override["type"] == "CFUGA":
+            events_by_stage.setdefault(stage_id, []).append(
+                (float(override["value"]), None)
+            )
+        else:  # CMONT
+            events_by_stage.setdefault(stage_id, []).append(
+                (None, float(override["value"]))
+            )
+
+    # sazonaliza_cfuga_cmont == 1: after the last explicit entry NEWAVE repeats
+    # the seasonal pattern from the latest year defining each calendar month.
+    seasonal_cfuga: dict[int, float] = {}
+    seasonal_cmont: dict[int, float] = {}
+    if seasonalize:
+        latest_cfuga: dict[int, int] = {}
+        latest_cmont: dict[int, int] = {}
+        for override in drop_overrides:
+            year = int(override["year"])
+            month = int(override["month"])
+            value = float(override["value"])
+            if override["type"] == "CFUGA":
+                if month not in latest_cfuga or year > latest_cfuga[month]:
+                    latest_cfuga[month] = year
+                    seasonal_cfuga[month] = value
+            elif month not in latest_cmont or year > latest_cmont[month]:
+                latest_cmont[month] = year
+                seasonal_cmont[month] = value
+
+    drops: list[tuple[float | None, float | None]] = []
+    active_cfuga: float | None = None
+    active_cmont: float | None = None
+    for stage_id in range(total_stages):
+        if stage_id == 0:
+            for past_stage in sorted(s for s in events_by_stage if s <= 0):
+                for cfuga_val, cmont_val in events_by_stage[past_stage]:
+                    if cfuga_val is not None:
+                        active_cfuga = cfuga_val
+                    if cmont_val is not None:
+                        active_cmont = cmont_val
+        if stage_id in events_by_stage and stage_id > 0:
+            for cfuga_val, cmont_val in events_by_stage[stage_id]:
+                if cfuga_val is not None:
+                    active_cfuga = cfuga_val
+                if cmont_val is not None:
+                    active_cmont = cmont_val
+
+        calendar_month = ((start_month - 1 + stage_id) % 12) + 1
+        if seasonalize and stage_id > last_event_stage:
+            if calendar_month in seasonal_cfuga:
+                active_cfuga = seasonal_cfuga[calendar_month]
+            if calendar_month in seasonal_cmont:
+                active_cmont = seasonal_cmont[calendar_month]
+
+        drops.append((active_cfuga, active_cmont))
+    return drops
+
+
+def _per_stage_equivalent_productivities(
+    hreg: pd.Series,
+    base_prodt: float,
+    drop_overrides: list[dict],
+    nw_files: NewaveFiles,
+    total_stages: int,
+) -> list[float]:
+    """Per-stage PRODT, applying CFUGA/CMONT temporal overrides.
+
+    PRODT (vol_min→vol_max equivalent) is independent of the operating volume,
+    so — unlike :func:`_per_stage_productivities` — VOLREF_SAZ is *not* applied;
+    the only per-stage driver is the CFUGA/CMONT tailrace/forebay. Plants with no
+    such override get a flat list at ``base_prodt``.
+    """
+    if not drop_overrides:
+        return [base_prodt] * total_stages
+    drops = _per_stage_drop_overrides(drop_overrides, nw_files, total_stages)
+    return [
+        base_prodt
+        if cfuga is None and cmont is None
+        else _equivalent_productivity(
+            hreg, canal_fuga_override=cfuga, cmont_override=cmont
+        )
+        for cfuga, cmont in drops
+    ]
+
+
 def _per_stage_productivities(
     hreg: pd.Series,
     base_productivity: float,
@@ -1427,93 +1693,14 @@ def _per_stage_productivities(
     if not drop_overrides and not has_seasonal:
         return [base_productivity] * total_stages
 
-    dger = Dger.read(str(nw_files.dger))
-    start_year = int(dger.ano_inicio_estudo)
-    start_month = int(dger.mes_inicio_estudo)
-    seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
-
-    # Group CFUGA/CMONT events by stage_id so per-stage state can be evolved
-    # in a single forward sweep.
-    events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
-    last_event_stage = -1
-    for override in drop_overrides:
-        stage_id = (override["year"] - start_year) * 12 + (
-            override["month"] - start_month
-        )
-        last_event_stage = max(last_event_stage, stage_id)
-        if override["type"] == "CFUGA":
-            events_by_stage.setdefault(stage_id, []).append(
-                (float(override["value"]), None)
-            )
-        else:  # CMONT
-            events_by_stage.setdefault(stage_id, []).append(
-                (None, float(override["value"]))
-            )
-
-    # When ``sazonaliza_cfuga_cmont == 1`` (Dger), after the last explicit
-    # CFUGA/CMONT entry NEWAVE repeats the seasonal pattern observed in
-    # the latest year that defines each calendar month. Build a
-    # per-calendar-month lookup from the events so stages beyond the
-    # last explicit one can fall back to the right seasonal value.
-    seasonal_cfuga: dict[int, float] = {}
-    seasonal_cmont: dict[int, float] = {}
-    if seasonalize and drop_overrides:
-        # For each (month, type) take the value from the latest year.
-        latest_per_month_year_cfuga: dict[int, int] = {}
-        latest_per_month_year_cmont: dict[int, int] = {}
-        for override in drop_overrides:
-            year = int(override["year"])
-            month = int(override["month"])
-            value = float(override["value"])
-            if override["type"] == "CFUGA":
-                if (
-                    month not in latest_per_month_year_cfuga
-                    or year > latest_per_month_year_cfuga[month]
-                ):
-                    latest_per_month_year_cfuga[month] = year
-                    seasonal_cfuga[month] = value
-            else:  # CMONT
-                if (
-                    month not in latest_per_month_year_cmont
-                    or year > latest_per_month_year_cmont[month]
-                ):
-                    latest_per_month_year_cmont[month] = year
-                    seasonal_cmont[month] = value
-
+    start_month = int(Dger.read(str(nw_files.dger)).mes_inicio_estudo)
+    drops = _per_stage_drop_overrides(drop_overrides, nw_files, total_stages)
     seasonal = seasonal_volref_by_month or {}
 
     values: list[float] = []
-    active_cfuga: float | None = None
-    active_cmont: float | None = None
     for stage_id in range(total_stages):
-        # Apply events whose effective stage is exactly this stage; events with
-        # negative stage_id (took effect before the study horizon) are folded
-        # in by walking events with stage_id <= 0 at stage_id == 0.
-        if stage_id == 0:
-            for past_stage in sorted(s for s in events_by_stage if s <= 0):
-                for cfuga_val, cmont_val in events_by_stage[past_stage]:
-                    if cfuga_val is not None:
-                        active_cfuga = cfuga_val
-                    if cmont_val is not None:
-                        active_cmont = cmont_val
-        if stage_id in events_by_stage and stage_id > 0:
-            for cfuga_val, cmont_val in events_by_stage[stage_id]:
-                if cfuga_val is not None:
-                    active_cfuga = cfuga_val
-                if cmont_val is not None:
-                    active_cmont = cmont_val
-
+        active_cfuga, active_cmont = drops[stage_id]
         calendar_month = ((start_month - 1 + stage_id) % 12) + 1
-
-        # After the last explicit event, with sazonaliza=1, the calendar
-        # month's latest-year value overrides the step-function carry.
-        # Missing months stay on whatever the step function left active.
-        if seasonalize and stage_id > last_event_stage:
-            if calendar_month in seasonal_cfuga:
-                active_cfuga = seasonal_cfuga[calendar_month]
-            if calendar_month in seasonal_cmont:
-                active_cmont = seasonal_cmont[calendar_month]
-
         vol_useful = seasonal.get(calendar_month)
 
         if vol_useful is None and active_cfuga is None and active_cmont is None:
