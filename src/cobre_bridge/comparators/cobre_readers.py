@@ -1349,6 +1349,27 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
     )
 
 
+def read_converted_penalties(cobre_output_dir: Path) -> dict:
+    """Load the converted ``penalties.json`` for the Cobre case.
+
+    ``penalties.json`` lives at the Cobre *case* root (the parent of the
+    ``output`` directory the comparator is pointed at), so we look there first,
+    then in the output dir itself. Returns the parsed dict, or ``{}`` when not
+    found — callers should treat an empty dict as "penalties unavailable".
+    """
+    for candidate in (
+        cobre_output_dir.parent / "penalties.json",
+        cobre_output_dir / "penalties.json",
+    ):
+        if candidate.is_file():
+            try:
+                return json.loads(candidate.read_text())
+            except (OSError, json.JSONDecodeError):
+                _LOG.warning("Failed to parse %s", candidate)
+                return {}
+    return {}
+
+
 def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre convergence data from training output.
 

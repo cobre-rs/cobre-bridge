@@ -342,6 +342,90 @@ class TestCompareHydrosProductivity:
         assert prod == []  # turbined == 0 on both sides → no productivity row
 
 
+class TestReconstructedCost:
+    """Reconstruct NEWAVE live immediate cost from MEDIAS × our penalties."""
+
+    def test_read_converted_penalties(self, tmp_path: Path) -> None:
+        from cobre_bridge.comparators.cobre_readers import read_converted_penalties
+
+        (tmp_path / "penalties.json").write_text('{"hydro": {"spillage_cost": 0.5}}')
+        out = tmp_path / "output"
+        out.mkdir()
+        # Found at the case root (parent of output).
+        assert read_converted_penalties(out)["hydro"]["spillage_cost"] == 0.5
+        # Absent (neither dir nor its parent has penalties.json) → empty dict.
+        isolated = tmp_path / "sub"
+        isolated.mkdir()
+        assert read_converted_penalties(isolated / "output") == {}
+
+    def test_stage_cost_composition(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        import polars as pl
+
+        from cobre_bridge.comparators import newave_readers as nr
+
+        # MEDIAS-SIN: thermal (CTERM) + electric, in 10⁶ R$; stage col min = 1
+        # → offset 1 → 0-based stage 0.
+        sin = pl.DataFrame(
+            {
+                "newave_code": [0, 0],
+                "stage": [1, 1],
+                "variable": ["CTERM", "CVIOL_ELETRICA"],
+                "value": [100.0, 1.0],
+            }
+        )
+        # MEDIAS-USIH: two plants violate min outflow (m³/s).
+        usih = pl.DataFrame(
+            {
+                "newave_code": [5, 6],
+                "stage": [1, 1],
+                "variable": ["VIOL_VAZMINUH", "VIOL_VAZMINUH"],
+                "value": [100.0, 200.0],
+            }
+        )
+        penalties = {
+            "hydro": {"outflow_violation_below_cost": 2.0},
+            "line": {"exchange_cost": 0.001},
+        }
+        with (
+            patch.object(
+                nr,
+                "_read_medias_csv",
+                side_effect=lambda s, fn: sin if "SIN" in fn else usih,
+            ),
+            patch.object(nr, "_find_saidas_dir", return_value=tmp_path),
+            patch.object(nr, "read_nwlistop_intercambio", return_value=pl.DataFrame()),
+        ):
+            df = nr.read_newave_stage_cost_composition(tmp_path, penalties)
+
+        row = df.filter(pl.col("stage_id") == 0).row(0, named=True)
+        assert row["thermal"] == pytest.approx(100.0e6)  # CTERM × 1e6
+        assert row["electric_violation"] == pytest.approx(1.0e6)
+        # outflow = Σ(100+200) m³/s × coeff 2.0 × 730 h.
+        assert row["outflow_violation"] == pytest.approx(300.0 * 2.0 * 730.0)
+        assert row["total_cost"] == pytest.approx(100e6 + 1e6 + 300 * 2 * 730)
+
+    def test_reconstructed_cost_chart(self) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.charts import reconstructed_cost_chart
+
+        nw = pl.DataFrame({"stage_id": [0, 1], "total_cost": [100.0e6, 200.0e6]})
+        cb = pl.DataFrame(
+            {
+                "stage_id": [0, 1],
+                "immediate_cost": [110.0e6, 190.0e6],
+                "future_cost": [0.0, 0.0],
+                "thermal_cost": [0.0, 0.0],
+            }
+        )
+        html = reconstructed_cost_chart(nw, cb)
+        assert "NEWAVE reconstructed" in html
+        assert "100.0" in html and "200.0" in html  # NEWAVE /1e6
+        assert "110.0" in html and "190.0" in html  # Cobre /1e6
+
+
 class TestOverviewCostCharts:
     """Overview thermal-cost (CTERM) and other-costs (COPER − CTERM) charts."""
 

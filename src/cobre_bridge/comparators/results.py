@@ -37,6 +37,10 @@ class PercentileData:
     nw_market: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_net_load: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_sin: pl.DataFrame = field(default_factory=pl.DataFrame)
+    # NEWAVE per-stage *live* immediate cost reconstructed from MEDIAS quantities
+    # × cobre-bridge's converted penalties (read_newave_stage_cost_composition).
+    # Columns: stage_id, thermal, deficit, …, total_cost (R$).
+    nw_reconstructed_costs: pl.DataFrame = field(default_factory=pl.DataFrame)
     cobre_hydro_means: pl.DataFrame = field(default_factory=pl.DataFrame)
     cobre_bus_meta: dict[int, dict] = field(default_factory=dict)
     cobre_hydro_meta: dict[int, dict] = field(default_factory=dict)
@@ -1011,6 +1015,50 @@ def _compare_productivity(
     return results
 
 
+def _compare_reconstructed_costs(
+    nw_reconstructed_costs: pl.DataFrame,
+    cobre_stage_costs: pl.DataFrame,
+) -> list[ResultComparison]:
+    """Per-stage NEWAVE reconstructed immediate cost vs Cobre ``immediate_cost``.
+
+    NEWAVE side is rebuilt from MEDIAS quantities × cobre-bridge's converted
+    penalties (see ``read_newave_stage_cost_composition``); the comparison thus
+    tests whether our penalties reproduce NEWAVE's exported costs, on the live
+    (un-frozen) immediate cost.
+    """
+    results: list[ResultComparison] = []
+    if (
+        nw_reconstructed_costs is None
+        or nw_reconstructed_costs.is_empty()
+        or cobre_stage_costs is None
+        or cobre_stage_costs.is_empty()
+    ):
+        return results
+    cb_by_stage: dict[int, float] = {}
+    for row in cobre_stage_costs.iter_rows(named=True):
+        v = row.get("immediate_cost")
+        if v is not None:
+            cb_by_stage[int(row["stage_id"])] = float(v)
+    for row in nw_reconstructed_costs.iter_rows(named=True):
+        stage = int(row["stage_id"])
+        cobre_val = cb_by_stage.get(stage)
+        if cobre_val is None:
+            continue
+        results.append(
+            _make_result(
+                "cost",
+                "SIN immediate (reconstructed)",
+                0,
+                0,
+                stage,
+                "immediate_cost_reconstructed",
+                float(row["total_cost"]),
+                cobre_val,
+            )
+        )
+    return results
+
+
 def compare_results(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
@@ -1067,6 +1115,7 @@ def compare_results(
         read_cobre_thermal_metadata,
         read_cobre_thermal_percentiles,
         read_cobre_training_duration,
+        read_converted_penalties,
     )
     from cobre_bridge.comparators.newave_readers import (
         _find_saidas_dir,
@@ -1076,6 +1125,7 @@ def compare_results(
         read_medias_system,
         read_medias_thermal,
         read_newave_net_load,
+        read_newave_stage_cost_composition,
         read_newave_tim_iterations,
         read_newave_tim_stages,
         read_nwlistop_intercambio,
@@ -1271,9 +1321,25 @@ def compare_results(
     bus_aggregates = read_cobre_bus_aggregates(cobre_output_dir)
     nw_market = pl.DataFrame()
     nw_sin = pl.DataFrame()
+    nw_reconstructed_costs = pl.DataFrame()
     if saidas_dir is not None:
         nw_market = read_medias_market(saidas_dir)
         nw_sin = read_medias_sin(saidas_dir)
+        # Reconstruct NEWAVE's live per-stage immediate cost from MEDIAS
+        # quantities × our converted penalties (tests whether our penalties
+        # reproduce the costs NEWAVE itself exports). Empty if penalties absent.
+        converted_penalties = read_converted_penalties(cobre_output_dir)
+        if converted_penalties:
+            nw_reconstructed_costs = read_newave_stage_cost_composition(
+                nw_files.directory, converted_penalties
+            )
+            if (
+                nw_max_stage_0based is not None
+                and not nw_reconstructed_costs.is_empty()
+            ):
+                nw_reconstructed_costs = nw_reconstructed_costs.filter(
+                    pl.col("stage_id") <= nw_max_stage_0based
+                )
 
     # --- NEWAVE deterministic net load (load - NCS from sistema.dat) ---
     nw_net_load = read_newave_net_load(nw_files.directory)
@@ -1371,6 +1437,12 @@ def compare_results(
         _LOG.info("Comparing system spillage energy...")
         results.extend(_compare_system_spillage(nw_sin, cobre_spill_energy))
 
+    if not nw_reconstructed_costs.is_empty():
+        _LOG.info("Comparing reconstructed NEWAVE immediate cost...")
+        results.extend(
+            _compare_reconstructed_costs(nw_reconstructed_costs, cobre_stage_costs)
+        )
+
     pctiles = PercentileData(
         hydro=hydro_pct,
         thermal=thermal_pct,
@@ -1381,6 +1453,7 @@ def compare_results(
         nw_market=nw_market,
         nw_net_load=nw_net_load,
         nw_sin=nw_sin,
+        nw_reconstructed_costs=nw_reconstructed_costs,
         cobre_hydro_means=cobre_hydro,
         cobre_bus_meta=cobre_bus_meta,
         cobre_hydro_meta=cobre_hydro_meta,
