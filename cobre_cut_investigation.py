@@ -21,6 +21,7 @@ Importable API:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -29,7 +30,33 @@ import numpy as np
 import pandas as pd
 
 FLATC = "flatc"
-SCHEMA_PATH = Path("/home/rjalves/git/cobre/crates/cobre-io/schemas/policy.fbs")
+
+
+def _resolve_schema_path() -> Path:
+    """Locate Cobre's ``policy.fbs``.
+
+    Honours ``COBRE_SCHEMA_PATH`` (or ``COBRE_REPO``), then falls back to the
+    usual checkout locations — so the script is portable across machines
+    without editing this constant.
+    """
+    rel = Path("crates/cobre-io/schemas/policy.fbs")
+    env = os.environ.get("COBRE_SCHEMA_PATH")
+    if env:
+        return Path(env)
+    candidates = [
+        Path(os.environ["COBRE_REPO"]) / rel if "COBRE_REPO" in os.environ else None,
+        Path.home() / "git" / "cobre" / rel,
+        Path("/home/rogerio/git/cobre") / rel,
+        Path("/home/rjalves/git/cobre") / rel,
+    ]
+    for c in candidates:
+        if c is not None and c.exists():
+            return c
+    # Return the primary default so the FileNotFoundError message is actionable.
+    return Path.home() / "git" / "cobre" / rel
+
+
+SCHEMA_PATH = _resolve_schema_path()
 COBRE_MONETARY_UNIT_RS = 1.0e6  # Cobre cut values are in 10⁶ R$ -> ×1e6 = R$
 
 
@@ -86,6 +113,84 @@ def hydro_id_to_name(case_dir: Path | str) -> dict[int, str]:
         "hydros"
     ]
     return {h["id"]: h["name"] for h in hydros}
+
+
+def decode_stage_states(case_dir: Path | str, stage_id: int) -> dict:
+    """Decode ``policy/states/stage_NNN.bin`` (FlatBuffers ``StageStates``).
+
+    Only present when the run set ``exports.states = true``. ``data`` is a flat
+    ``count * state_dimension`` float array.
+    """
+    bin_path = (
+        Path(case_dir) / "output" / "policy" / "states" / f"stage_{stage_id:03d}.bin"
+    )
+    if not bin_path.exists():
+        raise FileNotFoundError(f"states file not found: {bin_path}")
+    if not SCHEMA_PATH.exists():
+        raise FileNotFoundError(f"FlatBuffers schema not found: {SCHEMA_PATH}")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(
+            [
+                FLATC,
+                "-t",
+                "--strict-json",
+                "--raw-binary",
+                "--root-type",
+                "StageStates",
+                "-o",
+                tmp,
+                str(SCHEMA_PATH),
+                "--",
+                str(bin_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads((Path(tmp) / f"stage_{stage_id:03d}.json").read_text())
+
+
+def cobre_states(case_dir: Path | str, stage_id: int) -> pd.DataFrame:
+    """Visited forward-pass storage states at a stage (hm3), labelled by reservoir.
+
+    Returns long-format ``[trial_index, entity_id, nome, storage_hm3]`` across the
+    ``count`` trial points stored for the stage. The state-variable order comes from
+    ``training/dictionaries/state_dictionary.json`` (all 151 hydro storages, hm3).
+    """
+    d = decode_stage_states(case_dir, stage_id)
+    dim = int(d["state_dimension"])
+    cnt = int(d.get("count", 0))
+    flat = np.array(d.get("data") or [], dtype=float)
+    state_vars = json.loads(
+        (
+            Path(case_dir)
+            / "output"
+            / "training"
+            / "dictionaries"
+            / "state_dictionary.json"
+        ).read_text()
+    )["state_variables"]
+    names = hydro_id_to_name(case_dir)
+    rows: list[dict] = []
+    if cnt and flat.size == cnt * dim:
+        mat = flat.reshape(cnt, dim)
+        for k in range(cnt):
+            for j, sv in enumerate(state_vars):
+                eid = sv["entity_id"]
+                rows.append(
+                    {
+                        "trial_index": k,
+                        "entity_id": eid,
+                        "nome": names.get(eid, ""),
+                        "storage_hm3": float(mat[k, j]),
+                    }
+                )
+    out = pd.DataFrame(
+        rows, columns=["trial_index", "entity_id", "nome", "storage_hm3"]
+    )
+    out.attrs["count"] = cnt
+    out.attrs["state_dimension"] = dim
+    return out
 
 
 def cobre_water_values(

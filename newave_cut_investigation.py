@@ -59,7 +59,14 @@ def read_newave_cut_coefficients(
     cortes_path = case_dir / "cortes.dat"
 
     tamanho_registro = int(cortesh.tamanho_corte)
-    lag_maximo_gnl = int(cortesh.lag_maximo_gnl) or 2
+    # Trust the cortesh header: it is the authority for THIS file's layout.
+    # ⚠️ Do NOT fall back to ``or 2`` — when GNL anticipation is off
+    # (``despacho_antecipado_gnl=0`` -> ``lag_maximo_gnl=0``, no ``pi_gnl``
+    # columns), forcing 2 reserves 2 phantom GNL lags and MISALIGNS the whole
+    # ``pi_varm`` block, re-attributing storage water values to the wrong UHE
+    # codes and fabricating a spurious ``pi_gnl`` dual (was read as ~39% of the
+    # cut). A legitimate 0 must be passed through as 0.
+    lag_maximo_gnl = int(cortesh.lag_maximo_gnl or 0)
     ultimo = cortesh.ultimo_registro_cortes_estagio
     numero_total_cortes = int(ultimo["indice_ultimo_corte"].max())
 
