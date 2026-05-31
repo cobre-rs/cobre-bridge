@@ -17,6 +17,18 @@ import polars as pl
 _LOG = logging.getLogger(__name__)
 
 
+class CobreReadError(RuntimeError):
+    """A Cobre output file/dir existed but could not be read or parsed.
+
+    Raised when a reader fails while reading an *already-confirmed-present*
+    Cobre output (parquet/dir/JSON) that feeds the bounds/results comparison.
+    A genuinely **absent** optional output must still yield an empty frame
+    (never this error) — only a real read/schema/dtype failure on existing
+    data raises, so the comparison engine never silently treats unreadable
+    output as "no divergence".
+    """
+
+
 def _load_block_hours(cobre_output_dir: Path) -> pl.DataFrame | None:
     """Load block hours from stages.json as a Polars DataFrame.
 
@@ -122,9 +134,14 @@ def _scan_simulation_entity(
     pattern = sim_dir / "**/*.parquet"
     try:
         lf = pl.scan_parquet(pattern, hive_partitioning=True)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to scan parquets in %s", sim_dir)
-        return None
+        # ``scan_parquet`` is lazy and will not surface a malformed/corrupt
+        # file until the schema or data is actually touched.  Probe the
+        # schema eagerly so a present-but-unreadable parquet raises here —
+        # the single choke point every simulation reader shares — instead of
+        # leaking a raw polars error past each reader's narrower try/except.
+        lf.collect_schema()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(f"Failed to scan parquets in {sim_dir}") from exc
 
     return lf
 
@@ -223,9 +240,11 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
                 .sort("entity_id", "stage_id")
                 .collect(engine="streaming")
             )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate hydro simulation data")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate hydro simulation data: "
+            f"{cobre_output_dir / 'simulation' / 'hydros'}"
+        ) from exc
 
     for col in flow_cols + stage_cols:
         if col not in result.columns:
@@ -288,9 +307,10 @@ def read_cobre_hydro_total_flows(
     try:
         with hydros_path.open() as f:
             hydros_data = json.load(f)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to parse hydros.json for total-inflow topology")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            f"Failed to parse hydros.json for total-inflow topology: {hydros_path}"
+        ) from exc
 
     # parents[child_id] = list of hydro_ids whose downstream_id == child_id.
     parents: dict[int, list[int]] = {}
@@ -446,9 +466,11 @@ def read_cobre_spillage_energy(cobre_output_dir: Path) -> pl.DataFrame:
             .agg(pl.col("mw_mean").mean())
             .collect(engine="streaming")
         )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate Cobre spillage-energy")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate Cobre spillage-energy: "
+            f"{cobre_output_dir / 'simulation' / 'hydros'}"
+        ) from exc
 
     if per_stage.is_empty():
         return empty
@@ -572,9 +594,11 @@ def read_cobre_line_means(cobre_output_dir: Path) -> pl.DataFrame:
                 .sort("entity_id", "stage_id")
                 .collect(engine="streaming")
             )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate exchange simulation data")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate exchange simulation data: "
+            f"{cobre_output_dir / 'simulation' / 'exchanges'}"
+        ) from exc
     return result
 
 
@@ -595,9 +619,11 @@ def read_cobre_line_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     try:
         per_sc = _weighted_scenario_values(lf, id_col, ["net_flow_mw"], [], block_hours)
         return _compute_percentiles(per_sc, ["net_flow_mw"])
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to compute line percentiles")
-        return pl.DataFrame()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to compute line percentiles: "
+            f"{cobre_output_dir / 'simulation' / 'exchanges'}"
+        ) from exc
 
 
 def read_cobre_lp_max_generation(cobre_output_dir: Path) -> pl.DataFrame:
@@ -624,9 +650,8 @@ def read_cobre_lp_max_generation(cobre_output_dir: Path) -> pl.DataFrame:
         return empty
     try:
         df = pl.read_parquet(bounds_path)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read bounds.parquet")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(f"Failed to read bounds.parquet: {bounds_path}") from exc
     required = {
         "entity_type_code",
         "entity_id",
@@ -675,9 +700,10 @@ def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
         return empty
     try:
         df = pl.read_parquet(bounds_path)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read hydro_bounds.parquet")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            f"Failed to read hydro_bounds.parquet: {bounds_path}"
+        ) from exc
     if "water_withdrawal_m3s" not in df.columns:
         return empty
     return df.select(
@@ -724,9 +750,10 @@ def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
         return pl.DataFrame(schema=empty_schema)
     try:
         df = pl.read_parquet(bounds_path)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read hydro_bounds.parquet for dashboard bounds")
-        return pl.DataFrame(schema=empty_schema)
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            f"Failed to read hydro_bounds.parquet for dashboard bounds: {bounds_path}"
+        ) from exc
     available = [c for c in bound_cols if c in df.columns]
     if not available:
         return pl.DataFrame(schema=empty_schema)
@@ -783,9 +810,11 @@ def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
                 .sort("entity_id", "stage_id")
                 .collect(engine="streaming")
             )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate thermal simulation data")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate thermal simulation data: "
+            f"{cobre_output_dir / 'simulation' / 'thermals'}"
+        ) from exc
 
     return result
 
@@ -839,9 +868,11 @@ def read_cobre_bus_means(cobre_output_dir: Path) -> pl.DataFrame:
                 .sort("entity_id", "stage_id")
                 .collect(engine="streaming")
             )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate bus simulation data")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate bus simulation data: "
+            f"{cobre_output_dir / 'simulation' / 'buses'}"
+        ) from exc
 
     for col in ("spot_price", "deficit_mw"):
         if col not in result.columns:
@@ -964,9 +995,11 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
             lf, id_col, avail_flow, avail_stage, block_hours
         )
         return _compute_percentiles(per_sc, all_vars)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to compute hydro percentiles")
-        return pl.DataFrame()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to compute hydro percentiles: "
+            f"{cobre_output_dir / 'simulation' / 'hydros'}"
+        ) from exc
 
 
 def read_cobre_thermal_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
@@ -986,9 +1019,11 @@ def read_cobre_thermal_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
             lf, id_col, ["generation_mw"], [], block_hours
         )
         return _compute_percentiles(per_sc, ["generation_mw"])
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to compute thermal percentiles")
-        return pl.DataFrame()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to compute thermal percentiles: "
+            f"{cobre_output_dir / 'simulation' / 'thermals'}"
+        ) from exc
 
 
 def read_cobre_bus_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
@@ -1007,9 +1042,11 @@ def read_cobre_bus_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     try:
         per_sc = _weighted_scenario_values(lf, id_col, flow_cols, [], block_hours)
         return _compute_percentiles(per_sc, flow_cols)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to compute bus percentiles")
-        return pl.DataFrame()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to compute bus percentiles: "
+            f"{cobre_output_dir / 'simulation' / 'buses'}"
+        ) from exc
 
 
 def _load_entity_bus_map(
@@ -1280,9 +1317,11 @@ def read_cobre_cost_breakdown(
 
         per_sc = lf.group_by("scenario_id").agg(disc_exprs)
         means = per_sc.select([pl.col(c).mean() for c in cols]).collect()
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read Cobre cost breakdown")
-        return {}
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to read Cobre cost breakdown: "
+            f"{cobre_output_dir / 'simulation' / 'costs'}"
+        ) from exc
 
     result: dict[str, float] = {}
     for c in cols:
@@ -1336,9 +1375,11 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
         per_sc = lf.group_by(["scenario_id", "stage_id"]).agg(agg_exprs)
         mean_cols = [pl.col(c).mean() for c in _ALL_COLS if c in available]
         df = per_sc.group_by("stage_id").agg(mean_cols).sort("stage_id").collect()
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read Cobre per-stage costs")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to read Cobre per-stage costs: "
+            f"{cobre_output_dir / 'simulation' / 'costs'}"
+        ) from exc
 
     # Ensure all columns are present even if one was missing in the schema.
     for c in _ALL_COLS:
@@ -1391,9 +1432,10 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
 
     try:
         df = pl.read_parquet(conv_path)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read convergence.parquet")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            f"Failed to read convergence.parquet: {conv_path}"
+        ) from exc
 
     # Map columns to standard names.  Prefer exact matches first to avoid
     # collisions (e.g. "upper_bound_std" overwriting "upper_bound_mean").
