@@ -18,6 +18,7 @@ import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import pandas as pd
 import pyarrow as pa
@@ -41,6 +42,33 @@ _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
     "/book/src/schemas/generic_constraints.schema.json"
 )
+
+
+class VminopResult(NamedTuple):
+    """Result of :func:`convert_vminop_constraints`.
+
+    Field order matches the legacy 4-tuple so existing index/destructure callers
+    keep working; new code should use the names. ``constraints_dict`` is the full
+    ``{"$schema", "constraints": [...]}`` object; ``bounds`` has no ``block_id``
+    column (the pipeline adds a null one when merging).
+    """
+
+    constraints_dict: dict
+    bounds: pa.Table
+    referenced_hydro_ids: list[int]
+    rho_acum_overrides: dict[int, list[float]]
+
+
+class GenericConstraintResult(NamedTuple):
+    """Result of the electric / AGRINT constraint converters.
+
+    ``constraints`` is the list of constraint dicts; ``bounds`` is the per-
+    ``(constraint_id, stage_id, block_id)`` bounds table. Field order matches the
+    legacy 2-tuple, so existing ``a, b = result`` callers keep working.
+    """
+
+    constraints: list[dict]
+    bounds: pa.Table
 
 
 def _build_hydro_downstream_map(
@@ -281,7 +309,7 @@ def compute_per_stage_acc_productivities(
 def convert_vminop_constraints(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
-) -> tuple[dict, pa.Table, list[int], dict[int, list[float]]] | None:
+) -> VminopResult | None:
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
 
     Expressions are emitted using the cobre HEAD ``@name`` sigil, with one
@@ -562,7 +590,7 @@ def convert_vminop_constraints(
             continue
         rho_acum_overrides[cobre_id] = list(per_stage_values)
 
-    return (
+    return VminopResult(
         constraints_dict,
         bounds_table,
         sorted(all_referenced_ids),
@@ -974,7 +1002,7 @@ def convert_electric_constraints(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
     start_id: int = 0,
-) -> tuple[list[dict], pa.Table] | None:
+) -> GenericConstraintResult | None:
     """Convert electric constraints from restricao-eletrica.csv and RE.DAT.
 
     ``restricao-eletrica.csv`` provides constraints for the individualised
@@ -1268,7 +1296,7 @@ def convert_electric_constraints(
         cutoff,
     )
 
-    return constraints, bounds_table
+    return GenericConstraintResult(constraints, bounds_table)
 
 
 # ---------------------------------------------------------------------------
@@ -1404,7 +1432,7 @@ def convert_agrint_constraints(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
     start_id: int = 0,
-) -> tuple[list[dict], pa.Table] | None:
+) -> GenericConstraintResult | None:
     """Convert AGRINT.DAT exchange group constraints to Cobre generic constraints.
 
     Each group in AGRINT.DAT defines a weighted sum of directional interchange
@@ -1591,4 +1619,4 @@ def convert_agrint_constraints(
         len(bound_values),
     )
 
-    return constraints, bounds_table
+    return GenericConstraintResult(constraints, bounds_table)

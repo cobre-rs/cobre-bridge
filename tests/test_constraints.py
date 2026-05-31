@@ -1154,3 +1154,37 @@ class TestConvertAgrintConstraints:
         _, bounds_table = result
         bounds = bounds_table.column("bound").to_pylist()
         assert all(b >= 0 for b in bounds)
+
+
+class TestConstraintResultTypes:
+    """The constraint converters return named tuples (named + index access)."""
+
+    def test_vminop_result_named_and_tuple_access(self) -> None:
+        import pyarrow as pa
+
+        from cobre_bridge.converters.constraints import VminopResult
+
+        bounds = pa.table({"constraint_id": [0]})
+        r = VminopResult({"constraints": [1, 2]}, bounds, [3, 4], {5: [1.0]})
+        # Named access (new).
+        assert r.constraints_dict == {"constraints": [1, 2]}
+        assert r.bounds is bounds
+        assert r.referenced_hydro_ids == [3, 4]
+        assert r.rho_acum_overrides == {5: [1.0]}
+        # Legacy index / destructure still works (backward compatible).
+        assert r[2] == [3, 4]
+        cdict, b, ids, overrides = r
+        assert cdict == {"constraints": [1, 2]}
+        assert ids == [3, 4]
+
+    def test_generic_constraint_result_named_and_tuple_access(self) -> None:
+        import pyarrow as pa
+
+        from cobre_bridge.converters.constraints import GenericConstraintResult
+
+        bounds = pa.table({"constraint_id": [0]})
+        r = GenericConstraintResult([{"id": 0}], bounds)
+        assert r.constraints == [{"id": 0}]
+        assert r.bounds is bounds
+        constraints, b = r  # legacy unpack
+        assert constraints == [{"id": 0}]

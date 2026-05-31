@@ -68,6 +68,24 @@ class _WarningCollector(logging.Handler):
             self.messages.append(record.getMessage())
 
 
+class _ConstraintIdAllocator:
+    """Hands out contiguous, non-overlapping generic-constraint ID ranges.
+
+    VminOP, electric, and AGRINT constraints share one 0-based ID space. Each
+    converter is given the next free start ID; after it returns, ``advance(n)``
+    reserves the ``n`` IDs it produced so the next converter starts past them.
+    This replaces the by-hand offset arithmetic
+    (``start_id = vminop_count + electric_count``) that silently corrupts IDs if
+    a term is missed.
+    """
+
+    def __init__(self) -> None:
+        self.next_id = 0
+
+    def advance(self, count: int) -> None:
+        self.next_id += count
+
+
 def _compute_prod_media_sin_safe(nw_files: NewaveFiles) -> float | None:
     """Return ``PROD_MEDIA_SIN`` (mean PRODT), or ``None`` on failure.
 
@@ -290,27 +308,32 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     logger.debug("Converting storage bounds from VMAXT/VMINT")
     storage_bounds_table = hydro_conv.convert_storage_bounds(nw_files, id_map)
 
+    # Generic constraints (VminOP, electric, AGRINT) share one ID space; the
+    # allocator hands each converter the next free start ID so the pipeline no
+    # longer threads `start_id = vminop_count + electric_count` by hand.
+    constraint_ids = _ConstraintIdAllocator()
+
     logger.debug("Converting VminOP constraints")
     vminop_result = constraints_conv.convert_vminop_constraints(nw_files, id_map)
-    vminop_referenced_ids: list[int] = (
-        list(vminop_result[2]) if vminop_result is not None else []
-    )
-    rho_acum_overrides: dict[int, list[float]] = (
-        vminop_result[3] if vminop_result is not None else {}
-    )
+    vminop_referenced_ids: list[int] = []
+    rho_acum_overrides: dict[int, list[float]] = {}
+    if vminop_result is not None:
+        vminop_referenced_ids = list(vminop_result.referenced_hydro_ids)
+        rho_acum_overrides = vminop_result.rho_acum_overrides
+        constraint_ids.advance(
+            len(vminop_result.constraints_dict.get("constraints", []))
+        )
 
     logger.debug("Converting electric constraints")
-    vminop_count = (
-        len(vminop_result[0].get("constraints", [])) if vminop_result is not None else 0
-    )
     electric_result = constraints_conv.convert_electric_constraints(
-        nw_files, id_map, start_id=vminop_count
+        nw_files, id_map, start_id=constraint_ids.next_id
     )
+    if electric_result is not None:
+        constraint_ids.advance(len(electric_result.constraints))
 
     logger.debug("Converting AGRINT group constraints")
-    electric_count = len(electric_result[0]) if electric_result is not None else 0
     agrint_result = constraints_conv.convert_agrint_constraints(
-        nw_files, id_map, start_id=vminop_count + electric_count
+        nw_files, id_map, start_id=constraint_ids.next_id
     )
 
     logger.debug("Converting load factors")
@@ -475,10 +498,10 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     _BOUNDS_COLUMNS = ["constraint_id", "stage_id", "block_id", "bound"]
 
     if vminop_result is not None:
-        vminop_dict, vminop_bounds, _, _ = vminop_result
-        all_constraints.extend(vminop_dict.get("constraints", []))
+        all_constraints.extend(vminop_result.constraints_dict.get("constraints", []))
         # VminOP bounds table has no block_id column; add a null column and
         # reorder to match the canonical schema.
+        vminop_bounds = vminop_result.bounds
         n = len(vminop_bounds)
         vminop_bounds_extended = vminop_bounds.append_column(
             pa.field("block_id", pa.int32()),
@@ -487,14 +510,12 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
         bounds_tables.append(vminop_bounds_extended)
 
     if electric_result is not None:
-        elec_constraints, elec_bounds = electric_result
-        all_constraints.extend(elec_constraints)
-        bounds_tables.append(elec_bounds)
+        all_constraints.extend(electric_result.constraints)
+        bounds_tables.append(electric_result.bounds)
 
     if agrint_result is not None:
-        agrint_constraints, agrint_bounds = agrint_result
-        all_constraints.extend(agrint_constraints)
-        bounds_tables.append(agrint_bounds)
+        all_constraints.extend(agrint_result.constraints)
+        bounds_tables.append(agrint_result.bounds)
 
     if all_constraints:
         merged_dict = {

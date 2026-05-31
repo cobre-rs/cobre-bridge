@@ -715,3 +715,17 @@ class TestConversionWarningCapture:
         # The capture handler must be removed in the finally block, leaving the
         # package logger's handler list exactly as it was.
         assert pkg_logger.handlers == handlers_before
+
+
+def test_constraint_id_allocator_advances_contiguously() -> None:
+    """The allocator hands out contiguous, non-overlapping ID ranges."""
+    from cobre_bridge.pipeline import _ConstraintIdAllocator
+
+    alloc = _ConstraintIdAllocator()
+    assert alloc.next_id == 0
+    alloc.advance(3)  # VminOP used IDs 0,1,2
+    assert alloc.next_id == 3  # electric starts here
+    alloc.advance(0)  # electric produced nothing
+    assert alloc.next_id == 3  # AGRINT still starts at 3
+    alloc.advance(2)
+    assert alloc.next_id == 5
