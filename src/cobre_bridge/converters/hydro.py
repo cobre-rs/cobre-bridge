@@ -940,7 +940,6 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             ),
             "tailrace": tailrace,
             "diversion": None,
-            # "diversion": _make_diversion(newave_code, id_map),
             "filling": None,
             "efficiency": None,
             "hydraulic_losses": hydraulic_losses,
@@ -2448,42 +2447,6 @@ def convert_storage_bounds(
             "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
         }
     ).sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
-
-
-# ---------------------------------------------------------------------------
-# Hardcoded diversion: PIMENTAL → BELO MONTE
-# ---------------------------------------------------------------------------
-# The Belo Monte complex has two powerhouses sharing a reservoir. PIMENTAL
-# (NEWAVE code 314) is the complementary powerhouse at the dam site; BELO
-# MONTE (code 288) is the main powerhouse connected by a diversion canal.
-# NEWAVE splits the Xingu river inflow between the two postos (302 / 292)
-# but does not model an explicit diversion. We add it here so that cobre
-# can route excess water from PIMENTAL to BELO MONTE instead of spilling.
-
-_PIMENTAL_NEWAVE_CODE = 314
-_BELO_MONTE_NEWAVE_CODE = 288
-# NEWAVE accounts for the PIMENTAL→BELO MONTE water transfer through the
-# fictitious-plant cascade rather than an explicit diversion channel.  Cobre
-# has no FICT-plant machinery in the LP, so without a real diversion link
-# PIMENTAL accumulates excess water that has nowhere to go (it would have
-# to spill into the sea even though BELO MONTE downstream is starving).
-# A diversion with the BELO MONTE-canal nameplate capacity of 13 000 m³/s
-# lets cobre route the flow the same way NEWAVE accounts for it.
-_PIMENTAL_DIVERSION_MAX_M3S = 13_000.0
-
-
-def _make_diversion(newave_code: int, id_map: NewaveIdMap) -> dict | None:
-    """Return a diversion dict for PIMENTAL, ``None`` for all other plants."""
-    if newave_code != _PIMENTAL_NEWAVE_CODE:
-        return None
-    try:
-        bm_id = id_map.hydro_id(_BELO_MONTE_NEWAVE_CODE)
-    except KeyError:
-        return None
-    return {
-        "downstream_id": bm_id,
-        "max_flow_m3s": _PIMENTAL_DIVERSION_MAX_M3S,
-    }
 
 
 def _is_na(value: object) -> bool:
