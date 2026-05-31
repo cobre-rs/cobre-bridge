@@ -820,6 +820,12 @@ def _parse_yyyymm(period_str: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
+# Sentinel stage index returned when the individualizado cutoff date is
+# unavailable: a value past any realistic horizon, so every stage is treated
+# as individualised (no cutoff applied).
+_NO_INDIVIDUALIZADO_CUTOFF = 9999
+
+
 def _get_individualizado_cutoff(
     nw_files: NewaveFiles,
     start_year: int,
@@ -831,20 +837,22 @@ def _get_individualizado_cutoff(
     and converts to a 0-based stage index.  All REEs share the same cutoff
     date in production cases; we take the first REE's value.
 
-    Returns *num_stages* (i.e. no cutoff) if the information is unavailable.
+    Returns the :data:`_NO_INDIVIDUALIZADO_CUTOFF` sentinel (a stage index
+    beyond any real horizon, i.e. "individualised everywhere, no cutoff") when
+    the REE information is missing or unreadable.
     """
     try:
         ree_file = Ree.read(str(nw_files.ree))
         ree_df = ree_file.rees
         if ree_df is None or ree_df.empty:
-            return 9999
+            return _NO_INDIVIDUALIZADO_CUTOFF
         row = ree_df.iloc[0]
         end_month = int(row["mes_fim_individualizado"])
         end_year = int(row["ano_fim_individualizado"])
         return (end_year - start_year) * 12 + (end_month - start_month)
     except Exception:  # noqa: BLE001
         _LOG.warning("Could not read individualizado cutoff from REE.DAT.")
-        return 9999
+        return _NO_INDIVIDUALIZADO_CUTOFF
 
 
 def _parse_re_dat(

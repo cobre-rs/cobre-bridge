@@ -461,9 +461,11 @@ def _compute_max_turbined_simple(hreg: pd.Series, name: str) -> tuple[float, flo
     approach: ``Σ_c (n_c · q_nom_c)`` for flow and ``Σ_c (n_c · p_nom_c)`` for
     power, both derated by the combined TEIF/IP availability factor.
 
-    This was the implementation used through v0.6.x.  It is kept available so
-    we can restore the previous behavior with a single switch if the more
-    elaborate hypothesis formula turns out to be wrong.
+    This is **live code on two paths**: it is the fallback
+    :func:`_compute_max_turbined_hypothesis` calls whenever a plant lacks the
+    head data (``queda_nominal_conjunto_*`` / cota polynomial) the corrected
+    formula needs, and it is the v0.6.x formulation the top-level caller can be
+    switched back to if the head-corrected hypothesis proves wrong.
     """
     n_sets = int(hreg["numero_conjuntos_maquinas"])
     max_turbined = 0.0
