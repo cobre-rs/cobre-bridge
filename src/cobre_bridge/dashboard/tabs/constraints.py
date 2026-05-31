@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from cobre_bridge.constraint_expr import evaluate_constraint_expressions
 from cobre_bridge.dashboard.tabs.constraints_utils import (
     build_constraints_summary_table,
-    evaluate_constraint_expressions,
 )
 from cobre_bridge.ui.html import (
     metric_card,

@@ -26,9 +26,11 @@ import pandas as pd
 import polars as pl
 
 from cobre_bridge.comparators.alignment import EntityAlignment
-from cobre_bridge.dashboard.tabs.constraints_utils import (
-    _parse_expression,
-    _resolve_param_to_column,
+from cobre_bridge.comparators.cobre_readers import _scan_simulation_entity
+from cobre_bridge.constraint_expr import (
+    evaluate_constraint_expressions,
+    parse_expression,
+    resolve_param_to_column,
 )
 from cobre_bridge.id_map import NewaveIdMap
 
@@ -203,7 +205,7 @@ def evaluate_lhs_newave(
     rows: list[dict] = []
     for c in constraints:
         cid = int(c["id"])
-        terms = _parse_expression(c["expression"])
+        terms = parse_expression(c["expression"])
         if not terms:
             continue
         # Determine the set of stages we can evaluate for this
@@ -258,7 +260,7 @@ def evaluate_lhs_newave(
                 # NEWAVE trace.  This affects VminOP only; RE/AGRINT
                 # never reference @-parameters.
                 if param_name is not None:
-                    resolved = _resolve_param_to_column(param_name)
+                    resolved = resolve_param_to_column(param_name)
                     if resolved is not None:
                         stage_complete = False
                         break
@@ -296,8 +298,8 @@ def evaluate_lhs_cobre(
 ) -> pl.DataFrame:
     """Evaluate each constraint's LHS from Cobre simulation outputs.
 
-    Reuses the dashboard's
-    :func:`cobre_bridge.dashboard.tabs.constraints_utils.evaluate_constraint_expressions`
+    Uses the shared
+    :func:`cobre_bridge.constraint_expr.evaluate_constraint_expressions`
     (which returns one row per (constraint, scenario, stage, block)) and
     collapses to mean across scenarios and blocks per (constraint, stage).
 
@@ -317,19 +319,15 @@ def evaluate_lhs_cobre(
             }
         )
 
-    from cobre_bridge.dashboard.data import scan_entity
-    from cobre_bridge.dashboard.tabs.constraints_utils import (
-        evaluate_constraint_expressions,
+    # Scan with the comparator's own simulation reader (which already takes the
+    # ``output/`` directory directly), instead of reaching into the dashboard's
+    # case-dir-based scanner via a synthetic ``cobre_output_dir.parent``. A
+    # missing entity directory yields an empty LazyFrame, matching the prior
+    # behaviour; a present-but-corrupt parquet raises CobreReadError.
+    hydros_lf = _scan_simulation_entity(cobre_output_dir, "hydros") or pl.LazyFrame()
+    exchanges_lf = (
+        _scan_simulation_entity(cobre_output_dir, "exchanges") or pl.LazyFrame()
     )
-
-    # The dashboard's scan_entity expects a *case* directory (it appends
-    # ``output/simulation/<entity>`` itself); we instead receive the
-    # ``output/`` directory in the comparator, so emulate the same scan
-    # one level shallower by constructing an artificial case_dir whose
-    # ``output`` subdir is what we already hold.
-    artificial_case_dir = cobre_output_dir.parent
-    hydros_lf = scan_entity(artificial_case_dir, "hydros")
-    exchanges_lf = scan_entity(artificial_case_dir, "exchanges")
 
     lhs_pd: pd.DataFrame = evaluate_constraint_expressions(
         constraints, hydros_lf, exchanges_lf
