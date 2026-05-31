@@ -77,6 +77,77 @@ def _compute_max_accumulated_productivity_safe(
         return None
 
 
+def _compute_per_stage_sin_productivities(
+    nw_files: NewaveFiles,
+    id_map: NewaveIdMap,
+    hydros_dict: dict,
+) -> tuple[list[float], list[float]] | None:
+    """Return ``(PROD_MEDIA_SIN[s], MAX_PRODTACUM_SIN[s])`` per stage, or None.
+
+    These SIN-aggregate productivity constants are what NEWAVE uses to convert
+    its flow-domain hydro penalties (manual §3.24 p.87). They are *not* static:
+    each plant's equivalent ρ tracks its seasonal reference volume (VOLREF_SAZ)
+    and CFUGA/CMONT tailrace/forebay overrides, so the SIN mean / accumulated
+    max shift stage to stage — the same per-stage ρ already shipped in
+    ``system/hydro_energy_productivity.parquet``.
+
+    - ``PROD_MEDIA_SIN[s]`` = mean own ρ over the plants at stage ``s``.
+    - ``MAX_PRODTACUM_SIN[s]`` = max accumulated cascade ρ at stage ``s``.
+
+    ``PROD_MEDIA_SIN[s]`` is averaged through the very same
+    :func:`network._own_productivities` filter that produces the static base in
+    ``penalties.json`` (same plant set, same ρ≤0 exclusion). This guarantees the
+    override equals the base at stages with no seasonal/temporal effect, so the
+    sparse override carries *only* the genuine per-stage delta — never a
+    methodology step from averaging a different set.
+
+    Both lists span the full horizon (``_total_study_stages``, incl. post-study
+    via seasonal repetition). Falls back to ``None`` when the NEWAVE files can't
+    be read (e.g. mocked-pipeline unit tests).
+    """
+    try:
+        from inewave.newave import Confhd
+
+        per_own = hydro_conv.compute_per_stage_own_productivities(nw_files)
+        if not per_own:
+            return None
+        confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+        per_acc = constraints_conv.compute_per_stage_acc_productivities(
+            confhd_df, per_own
+        )
+        if not per_acc:
+            return None
+        n_stages = len(next(iter(per_own.values())))
+
+        # Re-key per-stage own ρ by Cobre hydro id so the same averaging the
+        # base uses (over hydros.json entries) applies per stage.
+        per_own_hid: dict[int, list[float]] = {}
+        for code, lst in per_own.items():
+            try:
+                per_own_hid[id_map.hydro_id(code)] = lst
+            except KeyError:
+                continue
+
+        rho_avg: list[float] = []
+        for s in range(n_stages):
+            stage_map = {hid: lst[s] for hid, lst in per_own_hid.items()}
+            own = network_conv._own_productivities(hydros_dict, stage_map)
+            rho_avg.append(sum(own) / len(own) if own else 0.0)
+
+        rho_max_acum = [max(per_acc[c][s] for c in per_acc) for s in range(n_stages)]
+        return rho_avg, rho_max_acum
+    except (
+        OSError,
+        ValueError,
+        AttributeError,
+        TypeError,
+        KeyError,
+        StopIteration,
+        ZeroDivisionError,
+    ):
+        return None
+
+
 def _build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
     """Read Confhd, Conft, Sistema, and Ree to build the NewaveIdMap."""
     from inewave.newave import Confhd, Conft, Ree, Sistema
@@ -412,6 +483,28 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         bus_penalty_path = constraints_dir / "penalty_overrides_bus.parquet"
         pq.write_table(bus_penalty_table, bus_penalty_path, compression="zstd")
         logger.debug("Wrote %s", bus_penalty_path)
+
+    # Per-stage hydro penalty override: NEWAVE's PROD_MEDIA_SIN / MAX_PRODTACUM_SIN
+    # shift with seasonal (VOLREF_SAZ) and temporal (CFUGA/CMONT) productivity
+    # changes, so the ρ-scaled flow-domain hydro penalties are stage-varying.
+    # Emitted sparsely (only stages/columns that differ from penalties.json),
+    # keeping the penalty conversion coherent with the per-stage ρ already
+    # shipped in system/hydro_energy_productivity.parquet.
+    per_stage_sin = _compute_per_stage_sin_productivities(nw_files, id_map, hydros_dict)
+    if per_stage_sin is not None:
+        per_stage_rho_avg, per_stage_rho_max_acum = per_stage_sin
+        hydro_ids = [int(h["id"]) for h in hydros_dict.get("hydros", []) if "id" in h]
+        hydro_penalty_table = network_conv.convert_hydro_penalty_overrides(
+            nw_files,
+            hydro_ids,
+            penalties_dict["hydro"],
+            per_stage_rho_avg,
+            per_stage_rho_max_acum,
+        )
+        if hydro_penalty_table is not None:
+            hydro_penalty_path = constraints_dir / "penalty_overrides_hydro.parquet"
+            pq.write_table(hydro_penalty_table, hydro_penalty_path, compression="zstd")
+            logger.debug("Wrote %s", hydro_penalty_path)
 
     # Merge VminOP and electric constraints into a single output.
     all_constraints: list[dict] = []

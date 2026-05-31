@@ -1216,6 +1216,11 @@ def _per_stage_integrated_productivities(
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
+    num_anos = int(dger.num_anos_estudo or 0)
+    # Last study month (December) — the post-study tail freezes here, mirroring
+    # _per_stage_productivities so the VminOP integrated ρ stays coherent with
+    # the frozen post-study generation/penalty ρ.
+    study_months = (13 - start_month) + (num_anos - 1) * 12
     seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
 
     events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
@@ -1297,6 +1302,14 @@ def _per_stage_integrated_productivities(
                     cmont_override=active_cmont,
                 )
             )
+
+    # Post-study tail: freeze at the last study month (December), matching
+    # _per_stage_productivities (see its post-study comment).
+    if 0 < study_months < total_stages:
+        freeze_value = values[study_months - 1]
+        for stage_id in range(study_months, total_stages):
+            values[stage_id] = freeze_value
+
     return values
 
 
@@ -1427,6 +1440,11 @@ def _per_stage_productivities(
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
+    num_anos = int(dger.num_anos_estudo or 0)
+    # Last stage of the *study* period (post-study tail excluded). NEWAVE study
+    # periods always end in December, so ``study_months - 1`` is the last study
+    # December — the value the post-study tail is frozen to (see below).
+    study_months = (13 - start_month) + (num_anos - 1) * 12
     seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
 
     # Group CFUGA/CMONT events by stage_id so per-stage state can be evolved
@@ -1524,6 +1542,18 @@ def _per_stage_productivities(
                     useful_volume_override=vol_useful,
                 )
             )
+
+    # Post-study tail: freeze productivity at the last study month (December)
+    # instead of continuing the seasonal volref / CFUGA-CMONT cycle. NEWAVE's
+    # post-study period reuses the final study-year terminal configuration (the
+    # same convention applied to thermal bounds), so the per-stage ρ must stay
+    # flat through the tail — keeping generation (hydro_energy_productivity) and
+    # the ρ-scaled penalties coherent with the frozen post-study LP.
+    if 0 < study_months < total_stages:
+        freeze_value = values[study_months - 1]
+        for stage_id in range(study_months, total_stages):
+            values[stage_id] = freeze_value
+
     return values
 
 

@@ -1496,16 +1496,20 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             }
         )
 
-    def _patch_dger(self, tmp_path, sazonaliza: int):
+    def _patch_dger(self, tmp_path, sazonaliza: int, num_anos_estudo: int = 3):
         """Patch ``cobre_bridge.converters.hydro.Dger`` to return a fake
         Dger with a controllable ``sazonaliza_cfuga_cmont``.
 
-        Returns the patcher context manager so the caller can ``with``
-        on it.
+        ``num_anos_estudo`` defaults to 3 → study_months = 4 + 2*12 = 28 (start
+        month 9), placing the seasonal-cycle assertions inside the study period.
+        Lower it to push the post-study freeze boundary earlier.
+
+        Returns the patcher context manager so the caller can ``with`` on it.
         """
         mock_dger = MagicMock()
         mock_dger.ano_inicio_estudo = 2024
         mock_dger.mes_inicio_estudo = 9
+        mock_dger.num_anos_estudo = num_anos_estudo
         mock_dger.sazonaliza_cfuga_cmont = sazonaliza
         ctx = patch("cobre_bridge.converters.hydro.Dger")
         cls = ctx.__enter__()
@@ -1613,6 +1617,75 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             total_stages=12,
         )
         assert vals == [42.0] * 12
+
+    def test_post_study_freezes_at_last_study_december(self, tmp_path) -> None:
+        """The post-study tail freezes at the last study December's value,
+        instead of continuing the seasonal CFUGA/CMONT cycle.
+
+        With ``num_anos_estudo`` patched to 1 (study_months = 4 for start
+        month 9), stages 0-3 are the study period (Sep-Dec 2024) and stages
+        4+ are post-study. NEWAVE reuses the final study-year terminal config
+        through the tail, so every post-study stage must equal stage 3 (Dec).
+        """
+        from cobre_bridge.converters.hydro import _per_stage_productivities
+
+        overrides = [
+            {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
+            {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
+        ]
+        # 1-year study (study_months = 4 for start month 9) so the post-study
+        # tail begins at stage 4 — early enough to assert on.
+        ctx = self._patch_dger(tmp_path, sazonaliza=1, num_anos_estudo=1)
+        try:
+            vals = _per_stage_productivities(
+                self._hreg(),
+                base_productivity=0.0,
+                drop_overrides=overrides,
+                nw_files=_make_nw_files(tmp_path),
+                total_stages=24,
+            )
+        finally:
+            ctx.__exit__(None, None, None)
+
+        # Study period (stages 0-3): Sep=645, Oct=640, then step-carry 640.
+        # Stage 3 = Dec 2024 → last study month → 640 (CFUGA 10 carried).
+        assert vals[3] == pytest.approx(640.0)
+        # Post-study (stages 4-23): all frozen at stage 3's value, NOT the
+        # seasonal Sep value (645) that the in-study cycle would give.
+        assert all(v == pytest.approx(640.0) for v in vals[4:])
+        # Specifically, stage 12 (Sep 2025) would be 645 if seasonal; frozen.
+        assert vals[12] == pytest.approx(640.0)
+
+    def test_integrated_post_study_freezes_at_last_study_december(
+        self, tmp_path
+    ) -> None:
+        """The VminOP integrated productivity tail freezes post-study too,
+        mirroring _per_stage_productivities so the two stay coherent."""
+        from cobre_bridge.converters.hydro import (
+            _per_stage_integrated_productivities,
+        )
+
+        overrides = [
+            {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
+            {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
+        ]
+        # 1-year study → study_months = 4; post-study tail = stages 4-23.
+        ctx = self._patch_dger(tmp_path, sazonaliza=1, num_anos_estudo=1)
+        try:
+            vals = _per_stage_integrated_productivities(
+                self._hreg(),
+                base_integrated=0.0,
+                drop_overrides=overrides,
+                nw_files=_make_nw_files(tmp_path),
+                total_stages=24,
+            )
+        finally:
+            ctx.__exit__(None, None, None)
+
+        # The whole post-study tail equals the last study stage (Dec, stage 3),
+        # rather than cycling the seasonal CFUGA pattern.
+        assert len({round(v, 9) for v in vals[4:]}) == 1
+        assert all(v == pytest.approx(vals[3]) for v in vals[4:])
 
 
 def _make_hreg(overrides: dict) -> pd.Series:
@@ -3358,6 +3431,117 @@ class TestConvertPenalties:
             "inflow_nonnegativity_cost",
         }
         assert required == set(result["hydro"].keys())
+
+
+class TestHydroPenaltyCosts:
+    """The pure ρ-scaling helper shared by the base and per-stage paths."""
+
+    def test_flow_penalties_scale_linearly_with_rho_avg(self) -> None:
+        from cobre_bridge.converters.network import _PEVERT, _hydro_penalty_costs
+
+        single = _hydro_penalty_costs(
+            rho_avg=1.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        double = _hydro_penalty_costs(
+            rho_avg=2.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        # spillage_cost = _PEVERT * rho_avg → doubles with rho_avg.
+        assert single["spillage_cost"] == pytest.approx(_PEVERT * 1.0)
+        assert double["spillage_cost"] == pytest.approx(2.0 * single["spillage_cost"])
+        # water_withdrawal uses rho_max_acum (held fixed) → unchanged.
+        assert double["water_withdrawal_violation_cost"] == pytest.approx(
+            single["water_withdrawal_violation_cost"]
+        )
+
+    def test_water_withdrawal_scales_with_rho_max_acum(self) -> None:
+        from cobre_bridge.converters.network import _hydro_penalty_costs
+
+        low = _hydro_penalty_costs(
+            rho_avg=1.0, rho_max_acum=1.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        high = _hydro_penalty_costs(
+            rho_avg=1.0, rho_max_acum=3.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        assert high["water_withdrawal_violation_cost"] == pytest.approx(
+            3.0 * low["water_withdrawal_violation_cost"]
+        )
+        # spillage (rho_avg only) is unaffected by rho_max_acum.
+        assert high["spillage_cost"] == pytest.approx(low["spillage_cost"])
+
+
+class TestConvertHydroPenaltyOverrides:
+    """Per-stage, SIN-uniform hydro penalty override parquet."""
+
+    @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
+    @patch("cobre_bridge.converters.network.Sistema")
+    def test_sin_uniform_sparse_per_stage(
+        self, mock_sistema_cls, _mock_penalid, tmp_path
+    ) -> None:
+        from cobre_bridge.converters.network import (
+            _PEVERT,
+            _hydro_penalty_costs,
+            convert_hydro_penalty_overrides,
+        )
+
+        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+        # Build the base via the same helper the override diffs against, with
+        # the mocked max_deficit_cost (max custo = 500*2 = 1000). Stage 1 then
+        # uses exactly the base (ρ_avg=0.6, ρ_max_acum=2.0) → no override.
+        base = _hydro_penalty_costs(
+            rho_avg=0.6, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=1000.0
+        )
+        table = convert_hydro_penalty_overrides(
+            _make_nw_files(tmp_path),
+            hydro_ids=[0, 1],
+            base_hydro_penalties=base,
+            per_stage_rho_avg=[0.5, 0.6, 0.55],
+            per_stage_rho_max_acum=[2.0, 2.0, 2.0],
+        )
+        assert table is not None
+        df = table.to_pandas()
+
+        # Required key columns + only ρ-scaled columns that differ are present.
+        assert {"hydro_id", "stage_id"}.issubset(df.columns)
+        assert "generation_violation_below_cost" not in df.columns
+        assert "filling_target_violation_cost" not in df.columns
+
+        # Stage 1 matches the base exactly → no rows emitted for it (sparse).
+        assert sorted(df["stage_id"].unique().tolist()) == [0, 2]
+
+        # SIN-uniform: both hydros share one value per stage.
+        s0 = df[df["stage_id"] == 0]
+        assert s0["hydro_id"].tolist() == [0, 1]
+        assert s0["spillage_cost"].nunique() == 1
+        assert s0["spillage_cost"].iloc[0] == pytest.approx(_PEVERT * 0.5)
+
+        # Output obeys the (hydro_id, stage_id) ordering contract.
+        ordered = df.sort_values(["hydro_id", "stage_id"]).reset_index(drop=True)
+        assert df.reset_index(drop=True).equals(ordered)
+
+    @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
+    @patch("cobre_bridge.converters.network.Sistema")
+    def test_returns_none_when_no_stage_differs(
+        self, mock_sistema_cls, _mock_penalid, tmp_path
+    ) -> None:
+        from cobre_bridge.converters.network import (
+            _hydro_penalty_costs,
+            convert_hydro_penalty_overrides,
+        )
+
+        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+        # max_deficit_cost from the mocked deficit df (max custo = 500*2 = 1000).
+        base = _hydro_penalty_costs(
+            rho_avg=0.6, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=1000.0
+        )
+        # Every stage uses exactly the base ρ → fully sparse → None.
+        table = convert_hydro_penalty_overrides(
+            _make_nw_files(tmp_path),
+            hydro_ids=[0, 1],
+            base_hydro_penalties=base,
+            per_stage_rho_avg=[0.6, 0.6],
+            per_stage_rho_max_acum=[2.0, 2.0],
+        )
+        assert table is None
 
 
 # ---------------------------------------------------------------------------
