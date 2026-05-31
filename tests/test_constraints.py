@@ -975,6 +975,59 @@ class TestConvertAgrintConstraints:
             "bound",
         }
 
+    def test_post_study_freezes_at_last_study_value(self, tmp_path: Path) -> None:
+        """Post-study AGRINT limits freeze at the last study stage value and
+        ignore future-dated agrint.dat entries (NEWAVE convention — the pmo.dat
+        "LIMITES DOS AGRUPAMENTOS DE INTERCAMBIO" POS row is flat at the last
+        study December value)."""
+        from unittest.mock import MagicMock
+
+        content = (
+            "AGRUPAMENTOS DE INTERCAMBIO\n"
+            " #AG A   B   COEF\n"
+            " XXX XXX XXX XX.XXXX\n"
+            "   1   1   3  1.0000\n"
+            " 999\n"
+            "LIMITES POR GRUPO\n"
+            "  #AG MI ANOI MF ANOF LIM_P1  LIM_P2  LIM_P3\n"
+            " XXX  XX XXXX XX XXXX XXXXXX. XXXXXX. XXXXXX.\n"
+            "   1   1 2020 12 2020  10000.  10000.  10000.\n"
+            "   1   1 2021 12 2021  20000.  20000.  20000.\n"
+            " 999\n"
+        )
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(content, encoding="latin-1")
+        (tmp_path / "dger.dat").touch()
+
+        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1  # study_months = 12 (Jan–Dec 2020)
+        dger.num_anos_pos_estudo = 1  # post-study 2021 → stages 12–23
+
+        with (
+            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
+            patch(
+                "cobre_bridge.converters.constraints._build_line_id_map",
+                return_value={(1, 3): 0},
+            ),
+        ):
+            mock_dger_cls.read.return_value = dger
+            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+
+        assert result is not None
+        _, bounds = result
+        b0 = bounds.to_pandas().query("block_id == 0").set_index("stage_id")["bound"]
+        # Study (0–11): 10000.
+        assert b0[0] == 10000.0
+        assert b0[11] == 10000.0
+        # Post-study (12–23): frozen at 10000, NOT the 2021 entry's 20000.
+        for s in range(12, 24):
+            assert b0[s] == 10000.0
+
     def test_multi_term_group_with_mixed_directions(self, tmp_path: Path) -> None:
         """Mixed direction terms (typical of NOFICT1 hubs) each pick the right
         variable.

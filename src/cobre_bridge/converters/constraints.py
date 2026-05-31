@@ -1462,7 +1462,14 @@ def convert_agrint_constraints(
             }
         )
 
-        # Collect limit rows for this group
+        # Collect study-period limit rows for this group, keyed by
+        # (stage, block). AGRINT has no seasonalize flag: NEWAVE freezes its
+        # post-study limits at the last study stage value and ignores any
+        # post-study-dated agrint.dat entries (planned future expansion). The
+        # pmo.dat "LIMITES DOS AGRUPAMENTOS DE INTERCAMBIO (MWmedio)" block
+        # confirms this — its POS row is flat at the last study (December)
+        # value. So clamp to the study period here, then freeze the tail.
+        group_bounds: dict[tuple[int, int], float] = {}
         for grp, mi, anoi, mf, anof, lims in limits:
             if grp != group_id:
                 continue
@@ -1475,20 +1482,38 @@ def convert_agrint_constraints(
             else:
                 end_y, end_m = anof, mf
 
-            # Iterate month by month within [mi/anoi .. end_m/end_y]
+            # Iterate month by month within [mi/anoi .. end_m/end_y], keeping
+            # only the study period (post-study is handled by the freeze below).
             y, m = anoi, mi
             while (y, m) <= (end_y, end_m):
                 stage_id = (y - start_year) * 12 + (m - start_month)
-                if 0 <= stage_id < num_stages:
+                if 0 <= stage_id < study_months:
                     for block_idx, lim_val in enumerate(lims):
-                        bound_constraint_ids.append(constraint_id)
-                        bound_stage_ids.append(stage_id)
-                        bound_block_ids.append(block_idx)
-                        bound_values.append(lim_val)
+                        group_bounds[(stage_id, block_idx)] = lim_val
                 m += 1
                 if m > 12:
                     m = 1
                     y += 1
+
+        # Emit study-period bounds.
+        for (stage_id, block_idx), lim_val in group_bounds.items():
+            bound_constraint_ids.append(constraint_id)
+            bound_stage_ids.append(stage_id)
+            bound_block_ids.append(block_idx)
+            bound_values.append(lim_val)
+
+        # Freeze the last study stage value through the post-study tail.
+        last_study_stage = study_months - 1
+        if num_stages > study_months:
+            for block_idx in sorted({b for (_, b) in group_bounds}):
+                freeze_val = group_bounds.get((last_study_stage, block_idx))
+                if freeze_val is None:
+                    continue
+                for stage_id in range(study_months, num_stages):
+                    bound_constraint_ids.append(constraint_id)
+                    bound_stage_ids.append(stage_id)
+                    bound_block_ids.append(block_idx)
+                    bound_values.append(freeze_val)
 
     if not constraints:
         return None
