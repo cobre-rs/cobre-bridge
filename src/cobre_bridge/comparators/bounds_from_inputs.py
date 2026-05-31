@@ -168,6 +168,14 @@ def compute_hydro_bounds(
         total_stages,
     ) = _read_study_params(nw_files)
 
+    # Post-study seasonalize flags (mirror convert_storage_bounds): VMINT/VMAXT
+    # repeat seasonally only when their dger flag is set; outflow/turbined freeze.
+    from inewave.newave import Dger
+
+    _dger = Dger.read(str(nw_files.dger))
+    sazonaliza_vmaxt = int(getattr(_dger, "sazonaliza_vmaxt", 0) or 0) == 1
+    sazonaliza_vmint = int(getattr(_dger, "sazonaliza_vmint", 0) or 0) == 1
+
     cadastro = read_cadastro(nw_files)
 
     confhd = Confhd.read(str(nw_files.confhd))
@@ -181,12 +189,16 @@ def compute_hydro_bounds(
     def _build_step_function(
         recs: list[dict],
         transform: Callable[[float], float],
+        *,
+        seasonalize: bool,
     ) -> dict[int, float]:
         """Build a step-function from override records.
 
-        Each record sets the value from its stage onward until the next
-        record overrides it.  Raw values >= _BIG_M mean "restore default"
-        and clear the forward-fill.
+        Mirrors ``hydro.convert_storage_bounds._build_step_function`` exactly,
+        including the post-study rule: *seasonalize* repeats the last study
+        year's monthly pattern (VMINT/VMAXT with their dger flag set), while
+        ``not seasonalize`` freezes the last study stage value (VAZMINT /
+        TURBMINT/TURBMAXT, which have no seasonalize flag).
         """
         changepoints: list[tuple[int, float]] = []
         for rec in recs:
@@ -212,19 +224,24 @@ def compute_hydro_bounds(
             if current is not None:
                 result_inner[stage_id] = current
 
-        # Post-study seasonal repetition from last study year.
-        seasonal: dict[int, float] = {}
-        for stage_id in range(max(0, study_months - 12), study_months):
-            if stage_id in result_inner:
-                cal = ((start_month - 1 + stage_id) % 12) + 1
-                seasonal[cal] = result_inner[stage_id]
+        if total_stages <= study_months:
+            return result_inner
 
-        for stage_id in range(study_months, total_stages):
-            cal = ((start_month - 1 + stage_id) % 12) + 1
-            if cal in seasonal:
-                current = seasonal[cal]
-            if current is not None:
-                result_inner[stage_id] = current
+        if seasonalize:
+            seasonal: dict[int, float] = {}
+            for stage_id in range(max(0, study_months - 12), study_months):
+                if stage_id in result_inner:
+                    cal = ((start_month - 1 + stage_id) % 12) + 1
+                    seasonal[cal] = result_inner[stage_id]
+            for stage_id in range(study_months, total_stages):
+                cal = ((start_month - 1 + stage_id) % 12) + 1
+                if cal in seasonal:
+                    result_inner[stage_id] = seasonal[cal]
+        else:
+            last = study_months - 1
+            if last in result_inner:
+                for stage_id in range(study_months, total_stages):
+                    result_inner[stage_id] = result_inner[last]
 
         return result_inner
 
@@ -264,19 +281,23 @@ def compute_hydro_bounds(
         def _identity(val: float) -> float:
             return val
 
-        # Storage bounds (percentage -> hm3).
+        # Storage bounds (percentage -> hm3). Seasonal post-study iff flag set.
         vmaxt_by_stage: dict[int, float] = {}
         vmint_by_stage: dict[int, float] = {}
         if useful > 0:
-            vmaxt_by_stage = _build_step_function(vmaxt, _pct_to_hm3)
-            vmint_by_stage = _build_step_function(vmint, _pct_to_hm3)
+            vmaxt_by_stage = _build_step_function(
+                vmaxt, _pct_to_hm3, seasonalize=sazonaliza_vmaxt
+            )
+            vmint_by_stage = _build_step_function(
+                vmint, _pct_to_hm3, seasonalize=sazonaliza_vmint
+            )
 
-        # Turbined bounds (absolute m3/s).
-        turbmaxt_by_stage = _build_step_function(turbmaxt, _identity)
-        turbmint_by_stage = _build_step_function(turbmint, _identity)
+        # Turbined bounds (absolute m3/s) — no seasonalize flag → freeze.
+        turbmaxt_by_stage = _build_step_function(turbmaxt, _identity, seasonalize=False)
+        turbmint_by_stage = _build_step_function(turbmint, _identity, seasonalize=False)
 
-        # Outflow bounds (absolute m3/s).
-        vazmint_by_stage = _build_step_function(vazmint, _identity)
+        # Outflow bounds (absolute m3/s) — no seasonalize flag → freeze.
+        vazmint_by_stage = _build_step_function(vazmint, _identity, seasonalize=False)
 
         all_stages = sorted(
             set(vmaxt_by_stage)
@@ -613,8 +634,9 @@ def compute_line_bounds(
     Returns ``{(cobre_line_id, stage_id, bound_name): value}`` where
     ``bound_name`` is one of: ``direct_flow_max``, ``reverse_flow_max``.
 
-    Values are in MW.  For post-study stages, the last available study
-    year's bounds are repeated seasonally.
+    Values are in MW.  Interchange limits have no seasonalize flag, so
+    post-study stages freeze at the last study stage's bounds (mirrors
+    ``network.convert_line_bounds``).
 
     Returns an empty dict if ``sistema.dat`` has no interchange limits.
     """
@@ -698,8 +720,16 @@ def compute_line_bounds(
 
     result: dict[tuple[int, int, str], float] = {}
 
+    # Interchange limits have no seasonalize flag → post-study freezes at the
+    # last study stage's value (mirror convert_line_bounds in network.py).
+    ls_y = start_year + (start_month - 1 + study_months - 1) // 12
+    ls_m = ((start_month - 1 + study_months - 1) % 12) + 1
+
     for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
         src, tgt = pair
+        freeze_caps = date_lookup.get((src, tgt, ls_y, ls_m)) or last_year_lookup.get(
+            (src, tgt, ls_m), {"direct_mw": 0.0, "reverse_mw": 0.0}
+        )
         y, m = start_year, start_month
         for stage_id in range(total_stages):
             is_post_study = (y > study_end_year) or (
@@ -707,9 +737,7 @@ def compute_line_bounds(
             )
 
             if is_post_study:
-                caps = last_year_lookup.get(
-                    (src, tgt, m), {"direct_mw": 0.0, "reverse_mw": 0.0}
-                )
+                caps = freeze_caps
             else:
                 caps = date_lookup.get((src, tgt, y, m))
                 if caps is None:

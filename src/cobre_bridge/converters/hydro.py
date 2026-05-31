@@ -1216,11 +1216,6 @@ def _per_stage_integrated_productivities(
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
-    num_anos = int(dger.num_anos_estudo or 0)
-    # Last study month (December) — the post-study tail freezes here, mirroring
-    # _per_stage_productivities so the VminOP integrated ρ stays coherent with
-    # the frozen post-study generation/penalty ρ.
-    study_months = (13 - start_month) + (num_anos - 1) * 12
     seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
 
     events_by_stage: dict[int, list[tuple[float | None, float | None]]] = {}
@@ -1303,13 +1298,8 @@ def _per_stage_integrated_productivities(
                 )
             )
 
-    # Post-study tail: freeze at the last study month (December), matching
-    # _per_stage_productivities (see its post-study comment).
-    if 0 < study_months < total_stages:
-        freeze_value = values[study_months - 1]
-        for stage_id in range(study_months, total_stages):
-            values[stage_id] = freeze_value
-
+    # Post-study continues the seasonal CFUGA/CMONT cycle (when
+    # ``sazonaliza_cfuga_cmont == 1``), mirroring _per_stage_productivities.
     return values
 
 
@@ -1440,11 +1430,6 @@ def _per_stage_productivities(
     dger = Dger.read(str(nw_files.dger))
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
-    num_anos = int(dger.num_anos_estudo or 0)
-    # Last stage of the *study* period (post-study tail excluded). NEWAVE study
-    # periods always end in December, so ``study_months - 1`` is the last study
-    # December — the value the post-study tail is frozen to (see below).
-    study_months = (13 - start_month) + (num_anos - 1) * 12
     seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
 
     # Group CFUGA/CMONT events by stage_id so per-stage state can be evolved
@@ -1543,17 +1528,11 @@ def _per_stage_productivities(
                 )
             )
 
-    # Post-study tail: freeze productivity at the last study month (December)
-    # instead of continuing the seasonal volref / CFUGA-CMONT cycle. NEWAVE's
-    # post-study period reuses the final study-year terminal configuration (the
-    # same convention applied to thermal bounds), so the per-stage ρ must stay
-    # flat through the tail — keeping generation (hydro_energy_productivity) and
-    # the ρ-scaled penalties coherent with the frozen post-study LP.
-    if 0 < study_months < total_stages:
-        freeze_value = values[study_months - 1]
-        for stage_id in range(study_months, total_stages):
-            values[stage_id] = freeze_value
-
+    # Post-study tail continues the seasonal cycle: VOLREF_SAZ is an always-
+    # seasonal monthly reference volume, and CFUGA/CMONT repeat seasonally when
+    # ``sazonaliza_cfuga_cmont == 1`` (handled above). NEWAVE re-applies these
+    # seasonal patterns every year, including post-study — only the quantities
+    # without a seasonalize flag (outflow / turbined bounds) freeze.
     return values
 
 
@@ -2115,7 +2094,11 @@ def convert_storage_bounds(
     Each override acts as a step function: the value persists from its
     effective date until the next override for the same plant.
 
-    For post-study stages, the last study year's seasonal pattern is repeated.
+    Post-study extrapolation is per-quantity: VMINT/VMAXT repeat the last study
+    year's seasonal pattern only when their dger ``sazonaliza_*`` flag is set
+    (e.g. flood-control "volume de espera"); outflow (VAZMINT) and turbined
+    (TURBMINT/TURBMAXT) have no seasonalize flag and freeze the last study
+    stage value.
 
     Returns ``None`` if MODIF.DAT is absent or contains no relevant records.
     """
@@ -2129,6 +2112,13 @@ def convert_storage_bounds(
     num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
     study_months = (13 - start_month) + (num_anos - 1) * 12
     total_stages = study_months + num_anos_pos * 12
+
+    # Post-study seasonalize flags (dger). VMINT/VMAXT repeat the last study
+    # year's seasonal pattern only when their flag is set (e.g. flood-control
+    # "volume de espera"); outflow (VAZMINT) and turbined (TURBMINT/TURBMAXT)
+    # have no such flag and always freeze the last study stage value.
+    sazonaliza_vmaxt = int(getattr(dger, "sazonaliza_vmaxt", 0) or 0) == 1
+    sazonaliza_vmint = int(getattr(dger, "sazonaliza_vmint", 0) or 0) == 1
 
     # Read hidr.dat with permanent overrides for vol_min/vol_max.
     cadastro = read_cadastro(nw_files)
@@ -2154,12 +2144,23 @@ def convert_storage_bounds(
     def _build_step_function(
         recs: list[dict],
         transform: Callable[[float], float],
+        *,
+        seasonalize: bool,
     ) -> dict[int, float]:
         """Build a step-function from override records.
 
         Each record sets the value from its stage onward until the next
         record overrides it.  Raw values >= 99990 (big-M) mean "restore
         default" and clear the forward-fill.
+
+        Post-study extrapolation depends on *seasonalize*:
+
+        - ``True`` (VMINT/VMAXT when their dger ``sazonaliza_*`` flag is set):
+          repeat the last study year's monthly pattern, so a genuinely seasonal
+          constraint (e.g. flood-control "volume de espera") keeps cycling.
+        - ``False`` (outflow VAZMINT, turbined TURBMINT/TURBMAXT, which have no
+          seasonalize flag): freeze the last study stage's value through the
+          tail — NEWAVE holds the last value rather than synthesising a season.
         """
         changepoints: list[tuple[int, float]] = []
         for rec in recs:
@@ -2185,16 +2186,25 @@ def convert_storage_bounds(
             if current is not None:
                 result[stage_id] = current
 
-        seasonal: dict[int, float] = {}
-        for stage_id in range(max(0, study_months - 12), study_months):
-            if stage_id in result:
-                cal = ((start_month - 1 + stage_id) % 12) + 1
-                seasonal[cal] = result[stage_id]
+        if total_stages <= study_months:
+            return result
 
-        for stage_id in range(study_months, total_stages):
-            cal = ((start_month - 1 + stage_id) % 12) + 1
-            if cal in seasonal:
-                result[stage_id] = seasonal[cal]
+        if seasonalize:
+            seasonal: dict[int, float] = {}
+            for stage_id in range(max(0, study_months - 12), study_months):
+                if stage_id in result:
+                    cal = ((start_month - 1 + stage_id) % 12) + 1
+                    seasonal[cal] = result[stage_id]
+            for stage_id in range(study_months, total_stages):
+                cal = ((start_month - 1 + stage_id) % 12) + 1
+                if cal in seasonal:
+                    result[stage_id] = seasonal[cal]
+        else:
+            # Freeze the last study stage's value through the post-study tail.
+            last = study_months - 1
+            if last in result:
+                for stage_id in range(study_months, total_stages):
+                    result[stage_id] = result[last]
 
         return result
 
@@ -2250,19 +2260,24 @@ def convert_storage_bounds(
         def _identity(val: float) -> float:
             return val
 
-        # Storage bounds (percentage -> hm³).
+        # Storage bounds (percentage -> hm³). Seasonal post-study iff the
+        # corresponding dger flag is set; otherwise freeze.
         vmaxt_by_stage: dict[int, float] = {}
         vmint_by_stage: dict[int, float] = {}
         if useful > 0:
-            vmaxt_by_stage = _build_step_function(vmaxt, _pct_to_hm3)
-            vmint_by_stage = _build_step_function(vmint, _pct_to_hm3)
+            vmaxt_by_stage = _build_step_function(
+                vmaxt, _pct_to_hm3, seasonalize=sazonaliza_vmaxt
+            )
+            vmint_by_stage = _build_step_function(
+                vmint, _pct_to_hm3, seasonalize=sazonaliza_vmint
+            )
 
-        # Turbined bounds (absolute m³/s).
-        turbmaxt_by_stage = _build_step_function(turbmaxt, _identity)
-        turbmint_by_stage = _build_step_function(turbmint, _identity)
+        # Turbined bounds (absolute m³/s) — no seasonalize flag → freeze.
+        turbmaxt_by_stage = _build_step_function(turbmaxt, _identity, seasonalize=False)
+        turbmint_by_stage = _build_step_function(turbmint, _identity, seasonalize=False)
 
-        # Outflow bounds (absolute m³/s).
-        vazmint_by_stage = _build_step_function(vazmint, _identity)
+        # Outflow bounds (absolute m³/s) — no seasonalize flag → freeze.
+        vazmint_by_stage = _build_step_function(vazmint, _identity, seasonalize=False)
 
         all_stages = sorted(
             set(vmaxt_by_stage)

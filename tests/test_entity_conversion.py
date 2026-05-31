@@ -1390,6 +1390,113 @@ class TestReadGhminPerStage:
         assert result == {}
 
 
+class TestConvertStorageBoundsPostStudy:
+    """Per-quantity post-study extrapolation in convert_storage_bounds.
+
+    VMINT/VMAXT repeat the last study year's seasonal pattern only when their
+    dger ``sazonaliza_*`` flag is set; outflow (VAZMINT) and turbined
+    (TURBMINT/TURBMAXT) have no flag and freeze the last study stage value.
+    """
+
+    def _run(self, tmp_path, overrides, *, vmaxt_flag=1, vmint_flag=1):
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        # start_month=1, 1 study year → study_months=12 (Jan–Dec); 1 post-study
+        # year → stages 12–23 (Jan–Dec again).
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = 2024
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 1
+        mock_dger.num_anos_pos_estudo = 1
+        mock_dger.sazonaliza_vmaxt = vmaxt_flag
+        mock_dger.sazonaliza_vmint = vmint_flag
+
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "usina_existente": ["EX"],
+                "nome_usina": ["TEST"],
+            }
+        )
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        cadastro = pd.DataFrame(
+            {"volume_minimo": [0.0], "volume_maximo": [100.0]}, index=[10]
+        )
+        id_map = MagicMock()
+        id_map.hydro_id = lambda c: 0
+
+        nw = _make_nw_files(tmp_path, modif=tmp_path / "modif.dat")
+        with (
+            patch("inewave.newave.Dger") as md,
+            patch("inewave.newave.Confhd") as mc,
+            patch("cobre_bridge.converters.hydro.read_cadastro", return_value=cadastro),
+            patch(
+                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                return_value={10: overrides},
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={},
+            ),
+        ):
+            md.read.return_value = mock_dger
+            mc.read.return_value = mock_confhd
+            tbl = convert_storage_bounds(nw, id_map)
+        assert tbl is not None
+        return tbl.to_pandas().set_index("stage_id")
+
+    def test_outflow_freezes_post_study(self, tmp_path) -> None:
+        """VAZMINT (no flag) freezes the post-study tail at last study Dec."""
+        overrides = [
+            {"type": "VAZMINT", "year": 2024, "month": 1, "value": 10.0},
+            {"type": "VAZMINT", "year": 2024, "month": 12, "value": 120.0},
+        ]
+        df = self._run(tmp_path, overrides)
+        # Study: Jan–Nov step-carry 10, Dec=120.
+        assert df.loc[0, "min_outflow_m3s"] == pytest.approx(10.0)
+        assert df.loc[11, "min_outflow_m3s"] == pytest.approx(120.0)
+        # Post-study (12–23): all frozen at Dec=120, NOT the seasonal Jan=10.
+        for s in range(12, 24):
+            assert df.loc[s, "min_outflow_m3s"] == pytest.approx(120.0)
+
+    def test_turbined_min_freezes_post_study(self, tmp_path) -> None:
+        """TURBMINT (no flag) freezes the post-study tail."""
+        overrides = [
+            {"type": "TURBMINT", "year": 2024, "month": 1, "value": 5.0},
+            {"type": "TURBMINT", "year": 2024, "month": 12, "value": 50.0},
+        ]
+        df = self._run(tmp_path, overrides)
+        assert df.loc[11, "min_turbined_m3s"] == pytest.approx(50.0)
+        for s in range(12, 24):
+            assert df.loc[s, "min_turbined_m3s"] == pytest.approx(50.0)
+
+    def test_vmaxt_seasonalizes_when_flag_set(self, tmp_path) -> None:
+        """VMAXT with sazonaliza_vmaxt=1 repeats the seasonal pattern."""
+        overrides = [
+            {"type": "VMAXT", "year": 2024, "month": 1, "value": 50.0},
+            {"type": "VMAXT", "year": 2024, "month": 12, "value": 80.0},
+        ]
+        df = self._run(tmp_path, overrides, vmaxt_flag=1)
+        # vol_min=0, useful=100 → pct == hm3. Study Jan=50, Dec=80.
+        assert df.loc[0, "max_storage_hm3"] == pytest.approx(50.0)
+        assert df.loc[11, "max_storage_hm3"] == pytest.approx(80.0)
+        # Post-study seasonal: stage 12 (Jan) keeps 50, stage 23 (Dec) keeps 80.
+        assert df.loc[12, "max_storage_hm3"] == pytest.approx(50.0)
+        assert df.loc[23, "max_storage_hm3"] == pytest.approx(80.0)
+
+    def test_vmaxt_freezes_when_flag_clear(self, tmp_path) -> None:
+        """VMAXT with sazonaliza_vmaxt=0 freezes the post-study tail."""
+        overrides = [
+            {"type": "VMAXT", "year": 2024, "month": 1, "value": 50.0},
+            {"type": "VMAXT", "year": 2024, "month": 12, "value": 80.0},
+        ]
+        df = self._run(tmp_path, overrides, vmaxt_flag=0)
+        # Post-study frozen at Dec=80, NOT seasonal Jan=50.
+        assert df.loc[12, "max_storage_hm3"] == pytest.approx(80.0)
+        assert df.loc[23, "max_storage_hm3"] == pytest.approx(80.0)
+
+
 # ---------------------------------------------------------------------------
 # convert_hydros integration tests for ticket-006
 # ---------------------------------------------------------------------------
@@ -1618,14 +1725,13 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
         )
         assert vals == [42.0] * 12
 
-    def test_post_study_freezes_at_last_study_december(self, tmp_path) -> None:
-        """The post-study tail freezes at the last study December's value,
-        instead of continuing the seasonal CFUGA/CMONT cycle.
+    def test_post_study_continues_seasonal_cycle(self, tmp_path) -> None:
+        """Post-study continues the seasonal CFUGA/CMONT cycle (no freeze).
 
-        With ``num_anos_estudo`` patched to 1 (study_months = 4 for start
-        month 9), stages 0-3 are the study period (Sep-Dec 2024) and stages
-        4+ are post-study. NEWAVE reuses the final study-year terminal config
-        through the tail, so every post-study stage must equal stage 3 (Dec).
+        VOLREF_SAZ / CFUGA-CMONT seasonal patterns are re-applied every year,
+        including post-study, when ``sazonaliza_cfuga_cmont == 1`` — only the
+        no-flag bounds (outflow / turbined) freeze. With study_months = 4,
+        stages 4+ are post-study and must keep cycling Sep=645 / Oct=640.
         """
         from cobre_bridge.converters.hydro import _per_stage_productivities
 
@@ -1633,8 +1739,6 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
             {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
         ]
-        # 1-year study (study_months = 4 for start month 9) so the post-study
-        # tail begins at stage 4 — early enough to assert on.
         ctx = self._patch_dger(tmp_path, sazonaliza=1, num_anos_estudo=1)
         try:
             vals = _per_stage_productivities(
@@ -1647,45 +1751,10 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
         finally:
             ctx.__exit__(None, None, None)
 
-        # Study period (stages 0-3): Sep=645, Oct=640, then step-carry 640.
-        # Stage 3 = Dec 2024 → last study month → 640 (CFUGA 10 carried).
-        assert vals[3] == pytest.approx(640.0)
-        # Post-study (stages 4-23): all frozen at stage 3's value, NOT the
-        # seasonal Sep value (645) that the in-study cycle would give.
-        assert all(v == pytest.approx(640.0) for v in vals[4:])
-        # Specifically, stage 12 (Sep 2025) would be 645 if seasonal; frozen.
-        assert vals[12] == pytest.approx(640.0)
-
-    def test_integrated_post_study_freezes_at_last_study_december(
-        self, tmp_path
-    ) -> None:
-        """The VminOP integrated productivity tail freezes post-study too,
-        mirroring _per_stage_productivities so the two stay coherent."""
-        from cobre_bridge.converters.hydro import (
-            _per_stage_integrated_productivities,
-        )
-
-        overrides = [
-            {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
-            {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
-        ]
-        # 1-year study → study_months = 4; post-study tail = stages 4-23.
-        ctx = self._patch_dger(tmp_path, sazonaliza=1, num_anos_estudo=1)
-        try:
-            vals = _per_stage_integrated_productivities(
-                self._hreg(),
-                base_integrated=0.0,
-                drop_overrides=overrides,
-                nw_files=_make_nw_files(tmp_path),
-                total_stages=24,
-            )
-        finally:
-            ctx.__exit__(None, None, None)
-
-        # The whole post-study tail equals the last study stage (Dec, stage 3),
-        # rather than cycling the seasonal CFUGA pattern.
-        assert len({round(v, 9) for v in vals[4:]}) == 1
-        assert all(v == pytest.approx(vals[3]) for v in vals[4:])
+        # Post-study Sep (stage 12) keeps the seasonal Sep value (645), and
+        # post-study Oct (stage 13) keeps Oct (640) — NOT frozen at Dec's 640.
+        assert vals[12] == pytest.approx(645.0)
+        assert vals[13] == pytest.approx(640.0)
 
 
 def _make_hreg(overrides: dict) -> pd.Series:

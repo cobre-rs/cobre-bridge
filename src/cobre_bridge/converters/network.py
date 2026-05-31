@@ -973,10 +973,11 @@ def convert_line_bounds(
     row per (line, stage) pair with direct and reverse MW bounds.
 
     The canonical pair logic (``src < tgt``) and line ID assignment exactly
-    mirror ``convert_lines`` so that line IDs are consistent.  For post-study
-    stages, the last available study year's bounds are repeated seasonally.
-    Per-block exchange bound factors from ``patamar.dat::intercambio_patamares``
-    are emitted separately via ``convert_exchange_factors``.
+    mirror ``convert_lines`` so that line IDs are consistent.  Interchange
+    limits have no seasonalize flag, so post-study stages freeze at the last
+    study stage's bounds.  Per-block exchange bound factors from
+    ``patamar.dat::intercambio_patamares`` are emitted separately via
+    ``convert_exchange_factors``.
 
     Parameters
     ----------
@@ -1079,8 +1080,17 @@ def convert_line_bounds(
     rows_direct: list[float] = []
     rows_reverse: list[float] = []
 
+    # Last study stage's (year, calendar month). Interchange limits have no
+    # seasonalize flag, so the post-study tail freezes at this stage's value
+    # rather than repeating the last study year's seasonal pattern.
+    ls_y = start_year + (start_month - 1 + study_months - 1) // 12
+    ls_m = ((start_month - 1 + study_months - 1) % 12) + 1
+
     for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
         src, tgt = pair
+        freeze_caps = date_lookup.get((src, tgt, ls_y, ls_m)) or last_year_lookup.get(
+            (src, tgt, ls_m), {"direct_mw": 0.0, "reverse_mw": 0.0}
+        )
         y, m = start_year, start_month
         for stage_id in range(total_stages):
             is_post_study = (y > study_end_year) or (
@@ -1088,9 +1098,7 @@ def convert_line_bounds(
             )
 
             if is_post_study:
-                caps = last_year_lookup.get(
-                    (src, tgt, m), {"direct_mw": 0.0, "reverse_mw": 0.0}
-                )
+                caps = freeze_caps
             else:
                 caps = date_lookup.get((src, tgt, y, m))
                 if caps is None:
