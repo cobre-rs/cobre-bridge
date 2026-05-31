@@ -2149,43 +2149,269 @@ class TestEquivalentProductivity:
         assert _equivalent_productivity(hreg) == 0.0
 
 
-class TestProductivitySinMeansExample:
-    """Integration: SIN-mean productivities match NEWAVE's pmo.dat conventions."""
+class TestProductivitySinMeans:
+    """SIN-mean productivity aggregation over synthetic plant sets.
 
-    EXAMPLE = Path("example/newave_rodada")
+    These exercise the EX / FICT / out-of-cadastro filtering and the averaging
+    wiring of the ``PROD_MEDIA_SIN`` helpers without depending on the
+    (git-ignored) example case. Every expected value is *derived* from the same
+    synthetic cadastro the function reads — never a hard-coded example snapshot.
+    The per-plant productivity math itself is covered by
+    :class:`TestEquivalentProductivity` / :class:`TestComputeProductivity`.
+    """
 
-    def _nw_files(self):
-        if not (self.EXAMPLE / "pmo.dat").exists():
-            pytest.skip("example/newave_rodada not available")
-        from cobre_bridge.newave_files import NewaveFiles
+    @staticmethod
+    def _cadastro(rows: dict[int, dict]) -> pd.DataFrame:
+        """Build a ``Hidr.cadastro``-shaped frame indexed by plant code."""
+        return pd.DataFrame({code: _make_hreg(ov) for code, ov in rows.items()}).T
 
-        return NewaveFiles.from_directory(self.EXAMPLE)
+    @staticmethod
+    def _confhd(rows: list[dict]) -> pd.DataFrame:
+        return pd.DataFrame(rows)
 
-    def test_prodt_sin_mean_matches_penalty(self) -> None:
-        """PROD_MEDIA_SIN = mean PRODT ≈ pmo VAZMIN-implied ρ (0.629)."""
+    @staticmethod
+    def _patch_hydro_reads(cadastro: pd.DataFrame, confhd: pd.DataFrame):
+        hidr_obj = MagicMock()
+        hidr_obj.cadastro = cadastro
+        confhd_obj = MagicMock()
+        confhd_obj.usinas = confhd
+        hidr = patch("cobre_bridge.converters.hydro.Hidr")
+        conf = patch("cobre_bridge.converters.hydro.Confhd")
+        overrides = patch(
+            "cobre_bridge.converters.hydro._apply_permanent_overrides",
+            new=lambda cadastro, nw_files: cadastro,
+        )
+        return hidr_obj, confhd_obj, hidr, conf, overrides
+
+    def test_prodt_sin_mean_averages_existing_nonfict_in_cadastro(
+        self, tmp_path: Path
+    ) -> None:
+        """Mean over EX, non-FICT plants present in cadastro; others excluded."""
+        from cobre_bridge.converters.hydro import (
+            _equivalent_productivity,
+            compute_prodt_sin_mean,
+        )
+
+        cadastro = self._cadastro(
+            {
+                1: {"produtibilidade_especifica": 0.009, "canal_fuga_medio": 250.0},
+                2: {"produtibilidade_especifica": 0.010, "canal_fuga_medio": 300.0},
+                3: {"produtibilidade_especifica": 0.008},  # FICT by name → excluded
+                # code 4 is EX/non-FICT but absent from cadastro → skipped
+            }
+        )
+        confhd = self._confhd(
+            [
+                {"codigo_usina": 1, "nome_usina": "PLANT A", "usina_existente": "EX"},
+                {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
+                {"codigo_usina": 3, "nome_usina": "FICT. X", "usina_existente": "EX"},
+                {"codigo_usina": 4, "nome_usina": "PLANT D", "usina_existente": "EX"},
+                {"codigo_usina": 5, "nome_usina": "PLANT E", "usina_existente": "NE"},
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
+            cadastro, confhd
+        )
+        with hidr as mh, conf as mc, overrides:
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            result = compute_prodt_sin_mean(nw)
+
+        expected = (
+            _equivalent_productivity(cadastro.loc[1])
+            + _equivalent_productivity(cadastro.loc[2])
+        ) / 2
+        assert result == pytest.approx(expected)
+
+    def test_prodt_sin_mean_no_eligible_plants_returns_unit_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """No EX/non-FICT plant in cadastro → fall back to 1.0, not divide-by-zero."""
         from cobre_bridge.converters.hydro import compute_prodt_sin_mean
 
-        assert compute_prodt_sin_mean(self._nw_files()) == pytest.approx(
-            0.629, abs=2e-3
+        cadastro = self._cadastro({1: {}})
+        confhd = self._confhd(
+            [
+                {
+                    "codigo_usina": 9,
+                    "nome_usina": "FICT. ONLY",
+                    "usina_existente": "EX",
+                },
+                {"codigo_usina": 8, "nome_usina": "GONE", "usina_existente": "NE"},
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
+            cadastro, confhd
+        )
+        with hidr as mh, conf as mc, overrides:
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            assert compute_prodt_sin_mean(nw) == 1.0
+
+    def test_per_stage_prodt_flat_without_temporal_overrides(
+        self, tmp_path: Path
+    ) -> None:
+        """No CFUGA/CMONT override → every stage equals the constant SIN mean."""
+        from cobre_bridge.converters.hydro import (
+            _equivalent_productivity,
+            compute_per_stage_prodt_sin_mean,
         )
 
-    def test_per_stage_prodt_varies_in_decimals(self) -> None:
-        """VAZMIN/TURBMN/TURBMX productivity drifts ~0.15% per CFUGA/CMONT config."""
-        from cobre_bridge.converters.hydro import compute_per_stage_prodt_sin_mean
+        cadastro = self._cadastro(
+            {
+                1: {"produtibilidade_especifica": 0.009},
+                2: {"produtibilidade_especifica": 0.011, "canal_fuga_medio": 280.0},
+            }
+        )
+        confhd = self._confhd(
+            [
+                {"codigo_usina": 1, "nome_usina": "PLANT A", "usina_existente": "EX"},
+                {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
+            cadastro, confhd
+        )
+        with (
+            hidr as mh,
+            conf as mc,
+            overrides,
+            patch("cobre_bridge.converters.hydro._total_study_stages", return_value=4),
+            patch(
+                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                return_value={},
+            ),
+        ):
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            per_stage = compute_per_stage_prodt_sin_mean(nw)
 
-        per_stage = compute_per_stage_prodt_sin_mean(self._nw_files())
-        assert len(per_stage) > 1
-        assert all(0.628 < v < 0.631 for v in per_stage)
-        spread = max(per_stage) / min(per_stage) - 1.0
-        assert 1e-4 < spread < 5e-3  # decimal wiggle, not flat, not seasonal-large
+        base = (
+            _equivalent_productivity(cadastro.loc[1])
+            + _equivalent_productivity(cadastro.loc[2])
+        ) / 2
+        assert len(per_stage) == 4
+        assert all(v == pytest.approx(base) for v in per_stage)
 
-    def test_max_prodtacum_sin_at_altura_maxima(self) -> None:
-        """MAX_PRODTACUM_SIN ≈ pmo OUTROS USOS-implied ρ_acum (6.44), constant."""
+    def test_per_stage_prodt_routes_overrides_and_averages_per_stage(
+        self, tmp_path: Path
+    ) -> None:
+        """A plant carrying a CFUGA override drifts; the SIN mean tracks it per stage."""
+        from cobre_bridge.converters.hydro import (
+            _equivalent_productivity,
+            compute_per_stage_prodt_sin_mean,
+        )
+
+        cadastro = self._cadastro({1: {}, 2: {"produtibilidade_especifica": 0.011}})
+        confhd = self._confhd(
+            [
+                {"codigo_usina": 1, "nome_usina": "PLANT A", "usina_existente": "EX"},
+                {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+
+        def fake_series(hreg, base, drops, nw_files, total_stages):
+            # Plants with a routed CFUGA/CMONT override drift per stage; others flat.
+            if drops:
+                return [base, base * 1.02, base * 0.98][:total_stages]
+            return [base] * total_stages
+
+        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
+            cadastro, confhd
+        )
+        with (
+            hidr as mh,
+            conf as mc,
+            overrides,
+            patch("cobre_bridge.converters.hydro._total_study_stages", return_value=3),
+            patch(
+                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                return_value={1: [{"type": "CFUGA"}]},
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._per_stage_equivalent_productivities",
+                side_effect=fake_series,
+            ),
+        ):
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            per_stage = compute_per_stage_prodt_sin_mean(nw)
+
+        b1 = _equivalent_productivity(cadastro.loc[1])
+        b2 = _equivalent_productivity(cadastro.loc[2])
+        expected = [
+            (b1 + b2) / 2,
+            (b1 * 1.02 + b2) / 2,
+            (b1 * 0.98 + b2) / 2,
+        ]
+        assert per_stage == pytest.approx(expected)
+
+    def test_max_prodtacum_sin_picks_cascade_max(self, tmp_path: Path) -> None:
+        """Accumulated productivity peaks at the head of the longest cascade."""
+        from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        # Cascade A(1) → B(2) → terminal; C(3) standalone.
+        cadastro = self._cadastro({1: {}, 2: {}, 3: {}})
+        confhd = self._confhd(
+            [
+                {
+                    "codigo_usina": 1,
+                    "nome_usina": "A",
+                    "usina_existente": "EX",
+                    "codigo_usina_jusante": 2,
+                },
+                {
+                    "codigo_usina": 2,
+                    "nome_usina": "B",
+                    "usina_existente": "EX",
+                    "codigo_usina_jusante": 0,
+                },
+                {
+                    "codigo_usina": 3,
+                    "nome_usina": "C",
+                    "usina_existente": "EX",
+                    "codigo_usina_jusante": 0,
+                },
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+        hidr_obj = MagicMock()
+        hidr_obj.cadastro = cadastro
+        confhd_obj = MagicMock()
+        confhd_obj.usinas = confhd
+        with (
+            patch("cobre_bridge.converters.constraints.Hidr") as mh,
+            patch("cobre_bridge.converters.constraints.Confhd") as mc,
+            patch(
+                "cobre_bridge.converters.constraints._apply_permanent_overrides",
+                new=lambda cadastro, nw_files: cadastro,
+            ),
+        ):
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            result = compute_max_prodtacum_sin(nw)
+
+        def own(code: int) -> float:
+            hreg = cadastro.loc[code]
+            useful = float(hreg["volume_maximo"]) - float(hreg["volume_minimo"])
+            return _compute_productivity(hreg, useful_volume_override=useful)
+
+        acc_a = own(1) + own(2)  # A accumulates B downstream
+        assert result == pytest.approx(max(acc_a, own(2), own(3)))
+
+    def test_max_prodtacum_sin_returns_none_on_read_error(self, tmp_path: Path) -> None:
+        """Unreadable NEWAVE inputs → None (soft fallback for mocked pipelines)."""
         from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
 
-        assert compute_max_prodtacum_sin(self._nw_files()) == pytest.approx(
-            6.44, abs=2e-2
-        )
+        nw = _make_nw_files(tmp_path)
+        with patch("cobre_bridge.converters.constraints.Hidr") as mh:
+            mh.read.side_effect = OSError("no file")
+            assert compute_max_prodtacum_sin(nw) is None
 
 
 class TestConvertProductionModels:
