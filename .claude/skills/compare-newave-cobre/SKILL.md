@@ -139,6 +139,15 @@ After the cost comparison is exhausted, move to operation results, still
   or a comparator function (`comparators/results.py`, `bounds_from_inputs.py`,
   `{newave,cobre}_readers.py`). Comparator reimplementations have caused false
   positives before — see `known-divergences.md`.
+- **For a water-value / future-cost (FCF) gap, drop below the simulated results to
+  the cuts themselves.** The simulated `water_value_per_hm3` is a dual; the FCF Cobre
+  _builds_ lives in `output/policy/cuts/stage_NNN.bin`. The repo-root WIP scripts
+  `compare_cuts.py` / `cobre_cut_investigation.py` / `newave_cut_investigation.py`
+  decode and align a single cut per side (by reservoir name, units pinned to R$) so
+  you can compare coefficients and intercepts directly. **Beware the state space:**
+  NEWAVE's cut gradient is w.r.t. REE-aggregated energy, Cobre's w.r.t. individual
+  storage — confirm they're apples-to-apples before reading a per-reservoir mismatch
+  as a bug. See the "Water value / FCF gap" entry in `known-divergences.md`.
 
 ## Step 4 — Report
 
