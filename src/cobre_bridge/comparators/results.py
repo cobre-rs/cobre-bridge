@@ -219,6 +219,11 @@ def _make_result(
     )
 
 
+# Minimum turbined flow (m³/s) for the derived gen/turbined productivity to be
+# meaningful. At/near zero turbining, generation is also ~0, so the ratio is an
+# undefined 0/0 — those stages are filtered out of the productivity comparison.
+_PRODUCTIVITY_TURB_EPS: float = 1.0e-6
+
 # MEDIAS variable name -> our standard variable name.
 _HYDRO_VAR_MAP: dict[str, str] = {
     "VARMUH": "storage_final_hm3",
@@ -592,6 +597,40 @@ def _compare_hydros(
                     var,
                     nw_val,
                     cobre_val,
+                )
+            )
+
+    # --- Derived: operational hydro productivity = generation / turbined ---
+    # The effective ρ a plant achieves, in MW per m³/s. Stages where either
+    # model turbined ~0 are filtered out (gen/turbined is 0/0 there — undefined
+    # and noisy). Emitted as a "hydro" variable so it flows into both the
+    # per-variable summary table and the Hydro Details per-plant tab.
+    prod_stages: dict[int, set[int]] = {}
+    for code, stage, var in nw_lookup:
+        if var in ("generation_mw", "turbined_m3s"):
+            prod_stages.setdefault(code, set()).add(stage)
+
+    for nw_code, (cobre_id, name, _min_stor) in sorted(matched.items()):
+        for stage in sorted(prod_stages.get(nw_code, ())):
+            nw_gen = nw_lookup.get((nw_code, stage, "generation_mw"))
+            nw_turb = nw_lookup.get((nw_code, stage, "turbined_m3s"))
+            cb_gen = cobre_lookup.get((cobre_id, stage, "generation_mw"))
+            cb_turb = cobre_lookup.get((cobre_id, stage, "turbined_m3s"))
+            if nw_gen is None or nw_turb is None or cb_gen is None or cb_turb is None:
+                continue
+            # Filter turbined == 0 points out (both sides must turbine).
+            if nw_turb <= _PRODUCTIVITY_TURB_EPS or cb_turb <= _PRODUCTIVITY_TURB_EPS:
+                continue
+            results.append(
+                _make_result(
+                    "hydro",
+                    name,
+                    nw_code,
+                    cobre_id,
+                    stage,
+                    "productivity_mw_per_m3s",
+                    round(nw_gen / nw_turb, 4),
+                    round(cb_gen / cb_turb, 4),
                 )
             )
 

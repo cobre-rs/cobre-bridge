@@ -293,6 +293,55 @@ class TestBoundsFromInputs:
         assert result == {}
 
 
+class TestCompareHydrosProductivity:
+    """Derived operational productivity = generation / turbined (m³/s)."""
+
+    @staticmethod
+    def _run():
+        import polars as pl
+
+        from cobre_bridge.comparators.results import _compare_hydros
+
+        # stage column min = 9 → offset 9 → stages map to 0 (turb>0) and 1
+        # (turb==0, must be filtered out of the productivity comparison).
+        nw_hydro = pl.DataFrame(
+            {
+                "newave_code": [1, 1, 1, 1],
+                "stage": [9, 9, 10, 10],
+                "variable": ["GHIDUH", "QTURUH", "GHIDUH", "QTURUH"],
+                "value": [30.0, 100.0, 0.0, 0.0],
+            }
+        )
+        cobre_hydro = pl.DataFrame(
+            {
+                "entity_id": [0, 0],
+                "stage_id": [0, 1],
+                "generation_mw": [33.0, 0.0],
+                "turbined_m3s": [100.0, 0.0],
+            }
+        )
+        nw_names = {1: "TEST"}
+        cobre_meta = {0: {"name": "TEST", "min_storage_hm3": 0.0}}
+        return _compare_hydros(nw_hydro, cobre_hydro, nw_names, cobre_meta)
+
+    def test_productivity_emitted_with_ratio_value(self) -> None:
+        prod = [r for r in self._run() if r.variable == "productivity_mw_per_m3s"]
+        assert len(prod) == 1  # only the turbined>0 stage
+        r = prod[0]
+        assert r.entity_type == "hydro"
+        assert r.stage == 0
+        assert r.newave_value == pytest.approx(0.3)  # 30 / 100
+        assert r.cobre_value == pytest.approx(0.33)  # 33 / 100
+
+    def test_zero_turbined_stage_filtered_out(self) -> None:
+        prod = [
+            r
+            for r in self._run()
+            if r.variable == "productivity_mw_per_m3s" and r.stage == 1
+        ]
+        assert prod == []  # turbined == 0 on both sides → no productivity row
+
+
 # -------------------------------------------------------------------
 # Edge cases and error handling
 # -------------------------------------------------------------------

@@ -2394,6 +2394,7 @@ _HYDRO_VARIABLES = [
     ("storage_final_hm3", "Storage (hm³)"),
     ("generation_mw", "Generation (MW)"),
     ("turbined_m3s", "Turbined (m³/s)"),
+    ("productivity_mw_per_m3s", "Productivity = Gen / Turbined (MW per m³/s)"),
     ("spillage_m3s", "Spillage (m³/s)"),
     ("outflow_m3s", "Total Outflow (m³/s)"),
     ("inflow_m3s", "Incremental Inflow (m³/s)"),
