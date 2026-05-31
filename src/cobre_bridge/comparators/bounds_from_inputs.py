@@ -26,6 +26,7 @@ from cobre_bridge.horizon import (
 )
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.plants import active_hydro_codes
 
 _LOG = logging.getLogger(__name__)
 
@@ -135,9 +136,7 @@ def compute_hydro_bounds(
 
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
-    confhd_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
+    confhd_codes = active_hydro_codes(confhd_df)
 
     temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
 

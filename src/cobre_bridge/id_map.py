@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from cobre_bridge.plants import active_hydro_codes, fictitious_existing_names
+
 if TYPE_CHECKING:
     from cobre_bridge.newave_files import NewaveFiles
 
@@ -121,18 +123,14 @@ def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
 
     # Hydro codes from confhd — existing, non-fictitious plants only.
     confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
-    fict_names = existing.loc[
-        existing["nome_usina"].str.strip().str.startswith("FICT."), "nome_usina"
-    ].tolist()
+    fict_names = fictitious_existing_names(confhd_df)
     if fict_names:
         _LOG.warning(
             "Excluding %d fictitious plant(s) from id_map: %s",
             len(fict_names),
             fict_names,
         )
-    hydro_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
+    hydro_codes = active_hydro_codes(confhd_df)
 
     # Thermal codes from conft.
     conft_df = conft.usinas

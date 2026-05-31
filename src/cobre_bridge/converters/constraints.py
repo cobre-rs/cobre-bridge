@@ -33,6 +33,7 @@ from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.plants import active_hydros
 
 _LOG = logging.getLogger(__name__)
 
@@ -77,8 +78,7 @@ def _build_hydro_downstream_map(
 
 def _build_hydro_to_ree(confhd_df: pd.DataFrame) -> dict[int, int]:
     """Return {plant_code: ree_code} for existing non-fictitious plants."""
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+    non_fict = active_hydros(confhd_df)
     return {int(r["codigo_usina"]): int(r["ree"]) for _, r in non_fict.iterrows()}
 
 

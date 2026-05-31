@@ -10,6 +10,7 @@ from inewave.newave import Confhd, Hidr
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.plants import active_hydros
 
 _LOG = logging.getLogger(__name__)
 
@@ -47,11 +48,7 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
     cadastro = hidr.cadastro
     confhd_df = confhd.usinas
 
-    # Filter to existing, non-fictitious plants — same criterion as hydro.py.
-    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = all_existing[
-        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
-    ]
+    existing = active_hydros(confhd_df)
 
     storage: list[dict] = []
     for _, row in existing.iterrows():

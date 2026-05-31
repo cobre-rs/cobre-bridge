@@ -23,6 +23,7 @@ from inewave.newave import (
 from cobre_bridge.horizon import seasonal_step_function, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.plants import active_hydro_codes, active_hydros
 
 _LOG = logging.getLogger(__name__)
 
@@ -738,10 +739,7 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     fict_cascade = resolve_cascade(confhd_df, cadastro)
 
     # Collect study plant codes for temporal override extraction.
-    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = all_existing[
-        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
-    ]
+    existing = active_hydros(confhd_df)
     # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
     if ree_df is not None:
@@ -1139,8 +1137,7 @@ def compute_prodt_sin_mean(nw_files: NewaveFiles) -> float:
 
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+    existing = active_hydros(confhd_df)
 
     prodt: list[float] = []
     for _, row in existing.iterrows():
@@ -1169,8 +1166,7 @@ def compute_per_stage_prodt_sin_mean(nw_files: NewaveFiles) -> list[float]:
     hidr = Hidr.read(str(nw_files.hidr))
     cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
     confhd_df = Confhd.read(str(nw_files.confhd)).usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+    existing = active_hydros(confhd_df)
     codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal = _extract_temporal_overrides(nw_files, codes)
@@ -1228,10 +1224,7 @@ def convert_production_models(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dic
     """
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = all_existing[
-        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
-    ]
+    existing = active_hydros(confhd_df)
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     production_models: list[dict] = []
@@ -1480,10 +1473,7 @@ def compute_per_stage_own_integrated_productivities(
 
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = all_existing[
-        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
-    ]
+    existing = active_hydros(confhd_df)
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
@@ -1748,10 +1738,7 @@ def convert_hydro_energy_productivity(
 
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = all_existing[
-        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
-    ]
+    existing = active_hydros(confhd_df)
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
@@ -1861,10 +1848,7 @@ def compute_per_stage_own_productivities(
 
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = all_existing[
-        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
-    ]
+    existing = active_hydros(confhd_df)
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
@@ -1921,10 +1905,7 @@ def compute_base_productivities(
 
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    all_existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    existing = all_existing[
-        ~all_existing["nome_usina"].str.strip().str.startswith("FICT.")
-    ]
+    existing = active_hydros(confhd_df)
 
     # FICT-cascade fold-in — keep this in lockstep with the other productivity
     # helpers so every downstream consumer sees the same effective ρ_eq.
@@ -2312,9 +2293,7 @@ def convert_storage_bounds(
     # Read confhd for the list of active plant codes.
     confhd = _Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
-    confhd_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
+    confhd_codes = active_hydro_codes(confhd_df)
 
     # Extract temporal overrides — empty dict when MODIF.DAT is absent,
     # which is fine because GHMIN.DAT alone can still produce per-stage
