@@ -24,6 +24,7 @@ from cobre_bridge.comparators.charts import (
     hydro_slack_per_bus_chart,
     immediate_cost_chart,
     line_summary_chart,
+    other_costs_chart,
     overview_metrics,
     performance_fwd_bwd_split_chart,
     performance_iteration_chart,
@@ -31,6 +32,7 @@ from cobre_bridge.comparators.charts import (
     productivity_scatter,
     system_comparison_chart,
     system_per_bus_chart,
+    thermal_cost_chart,
     thermal_generation_chart,
 )
 from cobre_bridge.comparators.constraints_compare import per_stage_bounds
@@ -95,6 +97,17 @@ def build_comparison_report(
             [
                 wrap_chart(immediate_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
                 wrap_chart(future_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+            ],
+        )
+    )
+    # Thermal-only (CTERM, live on both sides) and the non-thermal remainder
+    # (COPER − CTERM) — the latter goes negative for NEWAVE in the post-study
+    # because COPER is frozen at the last study value while CTERM stays live.
+    overview_parts.append(
+        chart_grid(
+            [
+                wrap_chart(thermal_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+                wrap_chart(other_costs_chart(nw_sin, cobre_stage_costs, nw_offset)),
             ],
         )
     )

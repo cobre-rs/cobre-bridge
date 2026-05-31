@@ -433,6 +433,101 @@ def future_cost_chart(
     )
 
 
+def thermal_cost_chart(
+    nw_sin: pl.DataFrame,
+    cobre_stage_costs: pl.DataFrame,
+    nw_offset: int = 0,
+) -> str:
+    """Per-stage thermal cost: NEWAVE ``CTERM`` vs Cobre ``thermal_cost``.
+
+    Unlike the immediate-cost chart (NEWAVE ``COPER``), CTERM is the live
+    thermal generation cost on both sides, so this is an apples-to-apples
+    comparison even in the post-study (where COPER is frozen — see
+    :func:`other_costs_chart`).
+    """
+    return _stage_cost_subplot(
+        nw_sin,
+        cobre_stage_costs,
+        nw_offset,
+        nw_variable="CTERM",
+        cb_column="thermal_cost",
+        title="Thermal Cost — NEWAVE CTERM vs Cobre",
+        nw_label="NEWAVE CTERM",
+        cb_label="Cobre thermal_cost",
+    )
+
+
+def other_costs_chart(
+    nw_sin: pl.DataFrame,
+    cobre_stage_costs: pl.DataFrame,
+    nw_offset: int = 0,
+) -> str:
+    """Per-stage non-thermal operation cost: ``COPER − CTERM`` per stage.
+
+    NEWAVE: ``COPER − CTERM``. Cobre: ``immediate_cost − thermal_cost``. This
+    isolates everything in the immediate cost that is *not* thermal generation
+    (deficit, penalties, slacks). On the NEWAVE side it goes **negative** in the
+    post-study because COPER is frozen at the last study value while CTERM
+    tracks the live post-study thermal cost — so this chart surfaces that
+    frozen-COPER gap explicitly.
+    """
+    _, nw_coper, cb_imm = _extract_stage_cost_series(
+        nw_sin, cobre_stage_costs, nw_offset, "COPER", "immediate_cost"
+    )
+    _, nw_cterm, cb_therm = _extract_stage_cost_series(
+        nw_sin, cobre_stage_costs, nw_offset, "CTERM", "thermal_cost"
+    )
+
+    nw_other = {s: nw_coper[s] - nw_cterm[s] for s in nw_coper if s in nw_cterm}
+    cb_other = {s: cb_imm[s] - cb_therm[s] for s in cb_imm if s in cb_therm}
+
+    stages = sorted(set(nw_other) | set(cb_other))
+    if not stages:
+        return "<p>No COPER/CTERM data available.</p>"
+
+    def _series(by_stage: dict[int, float]) -> list[float | None]:
+        return [round(by_stage[s] / 1e6, 4) if s in by_stage else None for s in stages]
+
+    traces: list[dict] = []
+    if nw_other:
+        traces.append(
+            {
+                "x": stages,
+                "y": _series(nw_other),
+                "name": "NEWAVE COPER − CTERM",
+                "type": "scatter",
+                "mode": "lines+markers",
+                "line": {"color": COLOR_NEWAVE},
+                "hovertemplate": (
+                    "stage %{x}<br>NEWAVE COPER − CTERM: %{y:.2f} 10⁶ R$<extra></extra>"
+                ),
+            }
+        )
+    if cb_other:
+        traces.append(
+            {
+                "x": stages,
+                "y": _series(cb_other),
+                "name": "Cobre immediate − thermal",
+                "type": "scatter",
+                "mode": "lines+markers",
+                "line": {"color": COLOR_COBRE},
+                "hovertemplate": (
+                    "stage %{x}<br>Cobre immediate − thermal: "
+                    "%{y:.2f} 10⁶ R$<extra></extra>"
+                ),
+            }
+        )
+
+    layout = {
+        "title": "Other Costs — COPER − CTERM (non-thermal operation)",
+        "xaxis": {"title": "Stage (0-based)"},
+        "yaxis": {"title": "Cost (10⁶ R$)"},
+        "legend": {"orientation": "h", "y": -0.2},
+    }
+    return _plotly_div(traces, layout)
+
+
 def convergence_chart(
     nw_conv: pl.DataFrame,
     cobre_conv: pl.DataFrame,

@@ -342,6 +342,78 @@ class TestCompareHydrosProductivity:
         assert prod == []  # turbined == 0 on both sides → no productivity row
 
 
+class TestOverviewCostCharts:
+    """Overview thermal-cost (CTERM) and other-costs (COPER − CTERM) charts."""
+
+    @staticmethod
+    def _data():
+        import polars as pl
+
+        # nw_offset will be 0 (min stage == 0). Distinctive values so the
+        # substring assertions can't false-match elsewhere in the plotly JSON.
+        nw_sin = pl.DataFrame(
+            {
+                "newave_code": [0, 0, 0, 0],
+                "stage": [0, 0, 1, 1],
+                "variable": ["COPER", "CTERM", "COPER", "CTERM"],
+                "value": [137.0, 100.0, 70.0, 95.0],  # 10⁶ R$
+            }
+        )
+        cobre = pl.DataFrame(
+            {
+                "stage_id": [0, 1],
+                "immediate_cost": [150.0e6, 50.0e6],
+                "future_cost": [0.0, 0.0],
+                "thermal_cost": [110.0e6, 90.0e6],
+            }
+        )
+        return nw_sin, cobre
+
+    def test_thermal_cost_chart_plots_cterm(self) -> None:
+        from cobre_bridge.comparators.charts import thermal_cost_chart
+
+        html = thermal_cost_chart(*self._data(), nw_offset=0)
+        assert "No CTERM" not in html
+        assert "NEWAVE CTERM" in html
+        assert "100.0" in html and "95.0" in html  # CTERM values
+        assert "110.0" in html  # Cobre thermal_cost / 1e6
+
+    def test_other_costs_chart_is_coper_minus_cterm(self) -> None:
+        from cobre_bridge.comparators.charts import other_costs_chart
+
+        html = other_costs_chart(*self._data(), nw_offset=0)
+        assert "No COPER" not in html
+        # NEWAVE COPER − CTERM: 137−100 = 37, 70−95 = −25 (negative, like the
+        # frozen-COPER post-study gap).
+        assert "37.0" in html and "-25.0" in html
+        # Cobre immediate − thermal: 150−110 = 40, 50−90 = −40.
+        assert "40.0" in html and "-40.0" in html
+
+    def test_stage_costs_reader_includes_thermal_cost(self, tmp_path: Path) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.cobre_readers import read_cobre_stage_costs
+
+        d = tmp_path / "simulation" / "costs" / "scenario_id=0000"
+        d.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "scenario_id": [0, 0],
+                "stage_id": [0, 0],
+                "block_id": [0, 1],
+                "immediate_cost": [10.0, 20.0],
+                "future_cost": [5.0, 5.0],
+                "thermal_cost": [8.0, 12.0],
+            }
+        ).write_parquet(d / "data.parquet")
+
+        df = read_cobre_stage_costs(tmp_path)
+        assert "thermal_cost" in df.columns
+        row = df.filter(pl.col("stage_id") == 0).row(0, named=True)
+        assert row["thermal_cost"] == pytest.approx(20.0)  # block sum 8 + 12
+        assert row["immediate_cost"] == pytest.approx(30.0)  # 10 + 20
+
+
 # -------------------------------------------------------------------
 # Edge cases and error handling
 # -------------------------------------------------------------------
