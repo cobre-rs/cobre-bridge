@@ -522,8 +522,13 @@ def compute_thermal_bounds(
                 * ((100.0 - ip) / 100.0)
                 * ((100.0 - teif) / 100.0)
             )
-            max_mw = max(0.0, max_mw)
-            min_mw = max(0.0, min(gen_min, max_mw))
+            # Per NEWAVE, FCMAX sets the max and GTMIN the min independently; a
+            # min above max is a data error NEWAVE rejects. Honor GTMIN and lift
+            # the cap to keep the bound feasible (mirrors
+            # thermal._step6_evaluate_bounds); do NOT clamp the min down.
+            capacity_max = max(0.0, max_mw)
+            min_mw = max(0.0, gen_min)
+            max_mw = max(capacity_max, min_mw)
 
             result[(thermal_id, stage_idx, "generation_min")] = min_mw
             result[(thermal_id, stage_idx, "generation_max")] = max_mw

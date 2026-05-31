@@ -358,28 +358,34 @@ def _step5_apply_maint_reduction(
         state.potencia -= float(maint_reduction[stage_idx])
 
 
-def _step6_evaluate_bounds(state: _StageInputs) -> tuple[float, float]:
-    """Step 6: evaluate ``(min_mw, max_mw)`` from the resolved stage parameters.
+def _step6_evaluate_bounds(state: _StageInputs) -> tuple[float, float, bool]:
+    """Step 6: evaluate ``(min_mw, max_mw, gtmin_above_capacity)``.
 
-    ``max_mw = potencia * (fcmax/100) * ((100-ip)/100) * ((100-teif)/100)`` and
-    ``min_mw = clamp(gen_min, [0, max_mw])``.
+    Per NEWAVE, FCMAX sets the maximum generation and GTMIN the minimum, and the
+    two are **independent**::
 
-    KNOWN ISSUE (FCMAX/GTMIN): ``min_mw`` is clamped DOWN to ``max_mw``, so when a
-    low FCMAX drives ``max_mw`` below ``gen_min`` (GTMIN) the plant is forced
-    below its inflexible minimum (e.g. a nuclear plant). NEWAVE appears to honor
-    GTMIN regardless. Behaviour is preserved here pending confirmation of
-    NEWAVE's GTMIN-vs-FCMAX precedence rule — see the converter-bugs memory.
+        capacity_max = potencia * (fcmax/100) * ((100-ip)/100) * ((100-teif)/100)
+        min_mw       = gen_min   (GTMIN)
+
+    NEWAVE treats ``min_mw > capacity_max`` as a data error (an inflexible plant
+    whose minimum exceeds its available capacity). Cobre honors the inflexible
+    GTMIN and lifts the upper bound to ``max(capacity_max, gen_min)`` to keep the
+    LP feasible, returning ``gtmin_above_capacity`` so the caller can surface the
+    (rare) condition. The former code instead clamped ``min_mw`` DOWN to
+    ``capacity_max``, silently forcing the plant below its GTMIN.
     """
     potencia = max(0.0, state.potencia)
-    max_mw = (
+    capacity_max = max(
+        0.0,
         potencia
         * (state.fcmax / 100.0)
         * ((100.0 - state.ip) / 100.0)
-        * ((100.0 - state.teif) / 100.0)
+        * ((100.0 - state.teif) / 100.0),
     )
-    max_mw = max(0.0, max_mw)
-    min_mw = max(0.0, min(state.gen_min, max_mw))
-    return min_mw, max_mw
+    min_mw = max(0.0, state.gen_min)
+    gtmin_above_capacity = min_mw > capacity_max
+    max_mw = max(capacity_max, min_mw)
+    return min_mw, max_mw, gtmin_above_capacity
 
 
 def convert_thermal_bounds(
@@ -603,6 +609,8 @@ def convert_thermal_bounds(
     rows_min: list[float] = []
     rows_max: list[float] = []
     rows_cost: list[float | None] = []
+    # Plants where GTMIN exceeded the FCMAX-derived capacity (warned once each).
+    gtmin_above_capacity_codes: set[int] = set()
 
     for newave_code in sorted(all_codes):
         try:
@@ -660,7 +668,9 @@ def convert_thermal_bounds(
             _step5_apply_maint_reduction(
                 state, maint_reduction, stage_idx, maint_end_stage
             )
-            min_mw, max_mw = _step6_evaluate_bounds(state)
+            min_mw, max_mw, gtmin_above_capacity = _step6_evaluate_bounds(state)
+            if gtmin_above_capacity:
+                gtmin_above_capacity_codes.add(newave_code)
 
             # Per-stage cost override from CLAST (only for varying-cost thermals).
             stage_cost: float | None = None
@@ -685,6 +695,16 @@ def convert_thermal_bounds(
             rows_min.append(min_mw)
             rows_max.append(max_mw)
             rows_cost.append(stage_cost)
+
+    if gtmin_above_capacity_codes:
+        _LOG.warning(
+            "GTMIN exceeds the FCMAX-derived capacity for %d thermal plant(s) "
+            "%s in at least one stage; honoring GTMIN (NEWAVE rejects such "
+            "min > max inputs). Check EXPT FCMAX/GTMIN and MANUTT for these "
+            "plants.",
+            len(gtmin_above_capacity_codes),
+            sorted(gtmin_above_capacity_codes),
+        )
 
     if not rows_thermal_id:
         return None

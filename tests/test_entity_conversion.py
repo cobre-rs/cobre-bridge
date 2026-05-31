@@ -3720,36 +3720,39 @@ class TestThermalBoundStageSteps:
         from cobre_bridge.converters.thermal import _step6_evaluate_bounds
 
         state = self._state(potencia=200.0, fcmax=100.0, ip=0.0, teif=0.0, gen_min=50.0)
-        min_mw, max_mw = _step6_evaluate_bounds(state)
+        min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
         assert max_mw == pytest.approx(200.0)
         assert min_mw == pytest.approx(50.0)
+        assert exceeded is False
 
-    def test_step6_documents_fcmax_below_gtmin_clamp(self) -> None:
-        """KNOWN ISSUE: a low FCMAX drives max_mw below GTMIN, and min_mw is
-        clamped DOWN to max_mw — forcing an inflexible plant below its minimum.
+    def test_step6_honors_gtmin_above_capacity(self) -> None:
+        """GTMIN (the inflexible minimum) is honored even when it exceeds the
+        FCMAX-derived capacity; the cap is lifted to keep the bound feasible.
 
-        This pins the *current* (pre-fix) behaviour so a future GTMIN-vs-FCMAX
-        precedence fix is a deliberate, visible change. (ANGRA-1-like numbers:
-        potencia 1350, FCMAX 73.38% → max 420.88 < GTMIN 469.62.)
+        Per NEWAVE, FCMAX and GTMIN are independent and NEWAVE rejects min > max.
+        Cobre formerly clamped min DOWN to max, forcing the plant below GTMIN;
+        now it honors GTMIN. (ANGRA-1-like numbers: capacity 420.88 < GTMIN
+        469.62 → bound [469.62, 469.62], not [420.88, 420.88].)
         """
         from cobre_bridge.converters.thermal import _step6_evaluate_bounds
 
         state = self._state(
             potencia=420.88, fcmax=100.0, ip=0.0, teif=0.0, gen_min=469.62
         )
-        min_mw, max_mw = _step6_evaluate_bounds(state)
-        assert max_mw == pytest.approx(420.88)
-        # The bug: min is pulled down to max instead of honoring GTMIN (469.62).
-        assert min_mw == pytest.approx(420.88)
-        assert min_mw < 469.62
+        min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
+        assert min_mw == pytest.approx(469.62)  # GTMIN honored, not clamped down
+        assert max_mw == pytest.approx(469.62)  # cap lifted to GTMIN for feasibility
+        assert exceeded is True
 
     def test_step6_clamps_negative_potencia_to_zero(self) -> None:
         from cobre_bridge.converters.thermal import _step6_evaluate_bounds
 
         state = self._state(potencia=-5.0, fcmax=100.0, gen_min=10.0)
-        min_mw, max_mw = _step6_evaluate_bounds(state)
-        assert max_mw == 0.0
-        assert min_mw == 0.0
+        min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
+        # gen_min 10 > capacity 0 → honor GTMIN, lift cap.
+        assert min_mw == pytest.approx(10.0)
+        assert max_mw == pytest.approx(10.0)
+        assert exceeded is True
 
 
 # ---------------------------------------------------------------------------
