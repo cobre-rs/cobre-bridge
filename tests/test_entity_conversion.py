@@ -5011,6 +5011,7 @@ class TestWaterWithdrawalConversion:
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
+        mock_dger.num_anos_pos_estudo = 0
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = pd.DataFrame(
@@ -5062,6 +5063,7 @@ class TestWaterWithdrawalConversion:
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
+        mock_dger.num_anos_pos_estudo = 0
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = pd.DataFrame(
@@ -5197,6 +5199,7 @@ class TestWaterWithdrawalConversion:
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
+        mock_dger.num_anos_pos_estudo = 0
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = pd.DataFrame(

@@ -20,9 +20,14 @@ from inewave.newave import (
     VolrefSaz,
 )
 
-from cobre_bridge.horizon import seasonal_step_function, study_horizon
+from cobre_bridge.horizon import (
+    POST_STUDY_YEAR,
+    seasonal_step_function,
+    study_horizon,
+)
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.pandas_utils import is_na
 from cobre_bridge.plants import active_hydro_codes, active_hydros
 
 _LOG = logging.getLogger(__name__)
@@ -309,7 +314,7 @@ def _read_ghmin_per_stage(
             yr = int(dt.year)
             mo = int(dt.month)
             value = float(row["geracao"])
-            if yr == 9999:
+            if yr == POST_STUDY_YEAR:
                 pos_by_month[mo] = value
                 continue
             sid = (yr - start_year) * 12 + (mo - start_month)
@@ -610,9 +615,9 @@ def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float,
     if (
         total_machines == 0
         or cf_raw is None
-        or _is_na(cf_raw)
+        or is_na(cf_raw)
         or rho_esp_raw is None
-        or _is_na(rho_esp_raw)
+        or is_na(rho_esp_raw)
         or float(rho_esp_raw) <= 0.0
     ):
         return sum_n_q * availability, max_generation
@@ -825,7 +830,7 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
             jusante_raw = row.get("codigo_usina_jusante")
             if (
                 jusante_raw is not None
-                and not _is_na(jusante_raw)
+                and not is_na(jusante_raw)
                 and int(jusante_raw) != 0
             ):
                 try:
@@ -2113,14 +2118,8 @@ def convert_water_withdrawal(
     start_year = horizon.start_year
     start_month = horizon.start_month
     num_study_stages = horizon.study_months
-    # Defensive post-study count: tolerate a missing/non-numeric
-    # ``num_anos_pos_estudo`` (e.g. an unset mock attribute) by treating it as 0
-    # rather than routing through the canonical horizon's int() coercion.
-    _pos = dger.num_anos_pos_estudo
-    num_post_study_stages: int = (
-        int(_pos) * 12 if isinstance(_pos, (int, float)) and _pos else 0
-    )
-    num_total_stages = num_study_stages + num_post_study_stages
+    num_post_study_stages = horizon.pos_months
+    num_total_stages = horizon.total_stages
 
     # Build a cascade map so NC (Não Construída) plant dsvagua entries can
     # be propagated to the immediately downstream EX plant — NEWAVE applies
@@ -2428,13 +2427,3 @@ def convert_storage_bounds(
             "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
         }
     ).sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
-
-
-def _is_na(value: object) -> bool:
-    """Return True if *value* is a pandas NA/NaN sentinel."""
-    if isinstance(value, float) and math.isnan(value):
-        return True
-    try:
-        return pd.isna(value)  # type: ignore[return-value]
-    except (TypeError, ValueError):
-        return False

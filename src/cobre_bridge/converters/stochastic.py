@@ -18,7 +18,7 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Cadic, Confhd, Dger, Patamar, Sistema, Vazoes
 
-from cobre_bridge.horizon import study_horizon
+from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -696,7 +696,7 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
             if pd.isna(val):
                 continue
             y, m = dt.year, dt.month
-            if y == 9999:
+            if y == POST_STUDY_YEAR:
                 pos_values[m] = float(val)
             else:
                 study_values[(y, m)] = float(val)
@@ -709,8 +709,10 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
                 val = pos_values.get(m)
                 if val is None:
                     val = study_values.get((start_year + num_anos - 1, m), 0.0)
-                # C_ADIC post-study: use sentinel year 9999
-                val = (val or 0.0) + cadical_lookup.get((sub_int, 9999, m), 0.0)
+                # C_ADIC post-study: use the post-study sentinel year.
+                val = (val or 0.0) + cadical_lookup.get(
+                    (sub_int, POST_STUDY_YEAR, m), 0.0
+                )
             else:
                 val = study_values.get((y, m), 0.0)
                 val += cadical_lookup.get((sub_int, y, m), 0.0)

@@ -10,9 +10,10 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Dger, Sistema
 
-from cobre_bridge.horizon import study_horizon
+from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.pandas_utils import is_na
 
 _LOG = logging.getLogger(__name__)
 
@@ -263,10 +264,10 @@ def convert_buses(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
 
         corte = row.get("corte")
         depth_mw: float | None = (
-            float(corte) if corte is not None and not _is_na(corte) else None
+            float(corte) if corte is not None and not is_na(corte) else None
         )
         cost_raw = row["custo"]
-        cost = float(cost_raw) if not _is_na(cost_raw) else None
+        cost = float(cost_raw) if not is_na(cost_raw) else None
         buses_by_code[code]["segments"].append(
             {
                 "patamar": int(row["patamar_deficit"]),
@@ -360,7 +361,7 @@ def convert_bus_penalty_overrides(
     deficit_costs = [
         float(c)
         for c in deficit_df["custo"].tolist()
-        if c is not None and not _is_na(c) and float(c) > 0.0
+        if c is not None and not is_na(c) and float(c) > 0.0
     ]
     if not deficit_costs:
         return None
@@ -1130,7 +1131,7 @@ def _build_ncs_group_to_id(
             mo = int(dt.month)  # type: ignore[union-attr]
         except (AttributeError, TypeError, ValueError):
             return False
-        if yr == 9999:
+        if yr == POST_STUDY_YEAR:
             return True
         stage_id = (yr - start_year) * 12 + (mo - start_month)
         return 0 <= stage_id < total_stages
@@ -1195,7 +1196,7 @@ def convert_non_controllable_sources(
             mo = int(dt.month)  # type: ignore[union-attr]
         except (AttributeError, TypeError, ValueError):
             return False
-        if yr == 9999:
+        if yr == POST_STUDY_YEAR:
             return True
         stage_id = (yr - start_year) * 12 + (mo - start_month)
         return 0 <= stage_id < total_stages
@@ -1465,7 +1466,7 @@ def convert_ncs_factors(
             mo = int(dt.month)  # type: ignore[union-attr]
         except (AttributeError, TypeError, ValueError):
             return False
-        if yr == 9999:
+        if yr == POST_STUDY_YEAR:
             return True
         stage_id = (yr - start_year) * 12 + (mo - start_month)
         return 0 <= stage_id < total_stages
@@ -1629,7 +1630,7 @@ def convert_ncs_stats(
 
     for _, row in df_raw.iterrows():
         val_raw = row["valor"]
-        if _is_na(val_raw):
+        if is_na(val_raw):
             continue
         val = float(val_raw)
         sub_code = int(row["codigo_submercado"])
@@ -1714,20 +1715,3 @@ def convert_ncs_stats(
 def _subsystem_name_from_id(subsystem_code: int) -> str:
     """Return a short name string for a subsystem code (fallback to str)."""
     return str(subsystem_code)
-
-
-def _is_na(value: object) -> bool:
-    """Return True if *value* is a pandas NA/NaN sentinel."""
-    try:
-        import math
-
-        if isinstance(value, float) and math.isnan(value):
-            return True
-    except (TypeError, ValueError):
-        pass
-    try:
-        import pandas as pd
-
-        return pd.isna(value)  # type: ignore[return-value]
-    except (TypeError, ImportError):
-        return False
