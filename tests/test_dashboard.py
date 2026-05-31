@@ -405,14 +405,15 @@ def test_get_renderable_tabs_excludes_modules_where_can_render_is_false() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_get_renderable_tabs_skips_tab_when_render_raises() -> None:
-    # Arrange: one tab raises, one succeeds
+def test_get_renderable_tabs_shows_placeholder_when_render_raises() -> None:
+    # Arrange: one tab raises, one succeeds. The failing tab must stay visible
+    # with an error placeholder rather than vanishing.
     mock_bad = MagicMock()
     mock_bad.TAB_ID = "tab-bad"
     mock_bad.TAB_LABEL = "Bad"
     mock_bad.TAB_ORDER = 10
     mock_bad.can_render.return_value = True
-    mock_bad.render.side_effect = RuntimeError("rendering failed")
+    mock_bad.render.side_effect = RuntimeError("rendering <failed>")
 
     mock_good = MagicMock()
     mock_good.TAB_ID = "tab-good"
@@ -426,9 +427,13 @@ def test_get_renderable_tabs_skips_tab_when_render_raises() -> None:
     with patch("cobre_bridge.dashboard.tabs.TAB_MODULES", [mock_bad, mock_good]):
         result = get_renderable_tabs(fake_data)
 
-    ids = [tab_id for tab_id, _label, _html in result]
-    assert "tab-bad" not in ids
-    assert "tab-good" in ids
+    by_id = {tab_id: html for tab_id, _label, html in result}
+    assert "tab-bad" in by_id  # not dropped
+    assert "tab-good" in by_id
+    assert "failed to render" in by_id["tab-bad"]
+    # The exception text is HTML-escaped in the placeholder.
+    assert "rendering &lt;failed&gt;" in by_id["tab-bad"]
+    assert "<failed>" not in by_id["tab-bad"]
 
 
 def test_get_renderable_tabs_returns_correct_tuple_structure() -> None:

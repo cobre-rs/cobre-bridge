@@ -84,13 +84,33 @@ TAB_MODULES: list[TabModule] = [
 # ---------------------------------------------------------------------------
 
 
+def _render_error_placeholder(tab_label: str, exc: Exception) -> str:
+    """HTML shown in place of a tab whose ``render()`` raised.
+
+    Keeps the tab visible (with an escaped error message) instead of silently
+    dropping it, so a single failing tab can't make the dashboard look as if
+    that section simply does not exist.
+    """
+    import html as _html
+
+    return (
+        '<div style="padding:24px;color:#8a1f1f;background:#fdecec;'
+        'border:1px solid #f3b5b5;border-radius:6px;">'
+        f"<strong>{_html.escape(tab_label)} failed to render.</strong>"
+        '<pre style="white-space:pre-wrap;margin-top:8px;">'
+        f"{_html.escape(str(exc))}</pre>"
+        "</div>"
+    )
+
+
 def get_renderable_tabs(data: DashboardData) -> list[tuple[str, str, str]]:
     """Return ordered, renderable tabs for *data*.
 
     Steps:
     1. Sort ``TAB_MODULES`` by ``TAB_ORDER`` (ascending).
     2. Filter to modules where ``can_render(data)`` is True.
-    3. Call ``render(data)`` on each; skip and log on any exception.
+    3. Call ``render(data)`` on each; on any exception, log and substitute an
+       in-tab error placeholder rather than dropping the tab.
 
     Returns:
         List of ``(tab_id, tab_label, rendered_html)`` tuples.
@@ -104,11 +124,11 @@ def get_renderable_tabs(data: DashboardData) -> list[tuple[str, str, str]]:
             html = module.render(data)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Tab %r (%s) raised an exception during render and will be skipped: %s",
+                "Tab %r raised an exception during render; showing an error "
+                "placeholder instead of dropping it: %s",
                 module.TAB_ID,
-                type(module).__name__,
                 exc,
             )
-            continue
+            html = _render_error_placeholder(module.TAB_LABEL, exc)
         result.append((module.TAB_ID, module.TAB_LABEL, html))
     return result

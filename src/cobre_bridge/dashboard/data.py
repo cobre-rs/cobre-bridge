@@ -74,7 +74,7 @@ def load_stage_labels(case_dir: Path) -> dict[int, str]:
         if start:
             try:
                 labels[sid] = pd.to_datetime(start).strftime("%b %Y")
-            except Exception:
+            except (ValueError, TypeError):
                 labels[sid] = str(sid)
         else:
             labels[sid] = str(sid)
