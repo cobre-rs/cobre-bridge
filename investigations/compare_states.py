@@ -18,13 +18,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from cobre_cut_investigation import cobre_states
+from cortese_investigation import read_cortese
 from inewave.newave.confhd import Confhd
 from inewave.newave.hidr import Hidr
 
 from cobre_bridge.converters.hydro import _apply_permanent_overrides
 from cobre_bridge.newave_files import NewaveFiles
-from cobre_cut_investigation import cobre_states
-from cortese_investigation import read_cortese
 
 NEWAVE_DIR = Path("./example/newave_rodada")
 COBRE_DIR = Path("./example/cobre_rodada")

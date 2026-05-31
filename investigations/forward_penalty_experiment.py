@@ -238,14 +238,11 @@ def main() -> None:
         )
     print(
         "\n  WARNING: this op-therm reconstruction is UNRELIABLE for VAZMIN -- "
-        "custo_geracao_termica\n  is duplicated/stale at the violation stages "
-        "(byte-identical at s24/s25), which\n  inflates op-therm and fakes a high "
-        "per-plant 'NW_rho_eff'. Do NOT trust columns above.\n  GROUND TRUTH is "
-        "pmo.dat: 'PENALIDADE POR VIOLACAO DE VAZAO MINIMA' = 821.78 (R$/hm3)(mes/h),\n"
-        "  UNIFORM across all REEs (system PROD_MEDIA_SIN, not per-plant). 821.78*730 "
-        "= 599,900\n  R$/hm3 = 3431.22 * 277.78 * rho -> rho_SIN=0.629 vs our "
-        "rho_avg=0.656 -> we OVERCHARGE\n  VAZMIN by ~4.2%, uniformly (penalty value "
-        "itself, 3431.22 R$/MWh, is correct)."
+        "custo_geracao_termica\n  can be stale/duplicated at the violation stages, "
+        "which inflates op-therm and fakes a\n  high per-plant 'NW_rho_eff'. Do NOT "
+        "trust the columns above. GROUND TRUTH is\n  pmo.dat's 'PENALIDADE POR "
+        "VIOLACAO DE VAZAO MINIMA' section: a single penalty UNIFORM\n  across all "
+        "REEs (the system-wide PROD_MEDIA_SIN), not per-plant."
     )
 
     # ---- micro-penalties (negligibility) ----

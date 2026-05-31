@@ -1,30 +1,34 @@
-"""Per-bus energy-balance comparison NEWAVE vs Cobre on the no-exchange case.
+"""Per-bus energy-balance comparison NEWAVE vs Cobre.
 
-With every exchange removed, each submarket/bus is a closed system: net load
-(NCS treated as non-curtailable) must be met by *local* thermal + hydro, with
-excess/deficit absorbing any imbalance. That isolates each bus, so a per-bus
-balance directly shows *which* bus and *which* component (thermal vs hydro)
-drives Cobre's much larger excess.
+Intended for a **no-exchange** case: with every exchange removed, each
+submarket/bus is a closed system (net load, with NCS treated as non-curtailable,
+met by *local* thermal + hydro and balanced by excess/deficit), so a per-bus
+balance isolates *which* bus and *which* component (thermal vs hydro) any gap
+comes from. (With exchange present the NEWAVE balance won't close, since this
+script omits the exchange term.)
 
-All quantities are reported as stage-average MW (MWmed), block-hour weighted, so
-the 730h-vs-real-calendar-hours difference between the two models is neutralised.
-Summing the per-stage MWmed over the 64 stages gives the "MWmes" totals.
+All quantities are reported as stage-average MW (MWmed), so the
+730h-vs-real-calendar-hours difference between the two models is neutralised.
+Summing the per-stage MWmed over all stages gives the "MWmes" totals.
 
-Run:  .venv/bin/python compare_sem_intercambio.py
+Run from the repo root:
+    python investigations/compare_sem_intercambio.py <cobre_dir> <newave_dir>
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
+import forward_penalty_experiment as fpe
 import polars as pl
 from inewave.newave import Confhd, Conft, Ree
 
-import forward_penalty_experiment as fpe
-
-COBRE = Path("example/cobre_rodada_sem_intercambio")
-NEWAVE = Path("example/newave_rodada_sem_intercambio")
+# Case dirs are required at runtime (argv); both must be a no-exchange
+# converted pair (a Cobre output dir and its source NEWAVE dir).
+COBRE = Path()  # set from argv in main()
+NEWAVE = Path()  # set from argv in main()
 
 SUB_NAME = {1: "SUDESTE", 2: "SUL", 3: "NORDESTE", 4: "NORTE"}
 
@@ -185,6 +189,14 @@ def newave_per_bus() -> pl.DataFrame:
 
 
 def main() -> None:
+    global COBRE, NEWAVE
+    if len(sys.argv) < 3:
+        sys.exit(
+            "usage: python investigations/compare_sem_intercambio.py "
+            "<cobre_dir> <newave_dir>\n  (both must be a no-exchange converted pair)"
+        )
+    COBRE = Path(sys.argv[1])
+    NEWAVE = Path(sys.argv[2])
     cob = cobre_per_bus()
     nw = newave_per_bus()
 

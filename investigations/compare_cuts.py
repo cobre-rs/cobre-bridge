@@ -1,12 +1,13 @@
 """Side-by-side NEWAVE vs Cobre FCF cut comparison (per-reservoir water values).
 
-Stage alignment (study period). NEWAVE indexes stage 1 = January; this case
-starts in September, so the cost-to-go September accesses is NEWAVE ``estudo``
-stage 10 (October). Cobre is 0-based with September = stage 0, and ``stage_s.bin``
-holds the cost-to-go that stage ``s`` accesses. Therefore:
+Stage alignment (study period). NEWAVE indexes ``estudo`` stage 1 = January of
+its first study year; Cobre is 0-based from the case's first month, and
+``stage_s.bin`` holds the cost-to-go that stage ``s`` accesses. So the mapping is
+a fixed offset that depends on the case's start month:
 
-    Cobre stage s  <->  NEWAVE ('estudo', s + 10),   for s in 0..26
+    Cobre stage s  <->  NEWAVE ('estudo', s + NEWAVE_ESTUDO_OFFSET)
 
+Set ``NEWAVE_ESTUDO_OFFSET`` / ``MAX_ALIGNED_COBRE_STAGE`` below per case.
 Post-study ('pos') stages need separate handling (NEWAVE may REE-aggregate them).
 
 Units are pinned: the readers normalize NEWAVE (10³ R$) and Cobre (10⁶ R$) to R$,
@@ -21,13 +22,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-
 from cobre_cut_investigation import cobre_water_values
 from newave_cut_investigation import newave_water_values
 
 NEWAVE_DIR = Path("./example/newave_rodada")
 COBRE_DIR = Path("./example/cobre_rodada")
-COBRE_STAGE = 0  # September's cost-to-go (<-> NEWAVE estudo 10)
+COBRE_STAGE = 0  # which Cobre study stage's cost-to-go to compare
+# Case-dependent stage alignment (defaults are for the repo's example case):
+NEWAVE_ESTUDO_OFFSET = 10  # Cobre stage s <-> NEWAVE estudo (s + offset)
+MAX_ALIGNED_COBRE_STAGE = 26  # last study stage that maps to an estudo cut
 # Which cut to compare. "first_real" = each solver's first real cut (skips
 # NEWAVE's iteration-0 zero placeholder); "newest" = the converged cut.
 SELECT = "first_real"
@@ -35,11 +38,12 @@ SELECT = "first_real"
 
 def newave_stage_for(cobre_stage: int) -> tuple[str, int]:
     """Map a Cobre study stage to its NEWAVE (tipo_estagio, estagio)."""
-    if 0 <= cobre_stage <= 26:
-        return ("estudo", cobre_stage + 10)
+    if 0 <= cobre_stage <= MAX_ALIGNED_COBRE_STAGE:
+        return ("estudo", cobre_stage + NEWAVE_ESTUDO_OFFSET)
     raise ValueError(
-        f"Cobre stage {cobre_stage} is post-study; only study stages 0..26 "
-        "are aligned for now (pos stages need the aggregated layout)."
+        f"Cobre stage {cobre_stage} is post-study; only study stages "
+        f"0..{MAX_ALIGNED_COBRE_STAGE} are aligned for now (pos stages need the "
+        "aggregated layout)."
     )
 
 
