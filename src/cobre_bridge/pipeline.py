@@ -22,7 +22,7 @@ from cobre_bridge.converters import scalar_parameters as scalar_params_conv
 from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.id_map import build_id_map
 from cobre_bridge.newave_files import NewaveFiles
 
 logger = logging.getLogger(__name__)
@@ -115,56 +115,11 @@ def _compute_per_stage_sin_productivities(
         return None
 
 
-def _build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
-    """Read Confhd, Conft, Sistema, and Ree to build the NewaveIdMap."""
-    from inewave.newave import Confhd, Conft, Ree, Sistema
-
-    confhd = Confhd.read(str(nw_files.confhd))
-    conft = Conft.read(str(nw_files.conft))
-    sistema = Sistema.read(str(nw_files.sistema))
-    ree_file = Ree.read(str(nw_files.ree))
-
-    # Hydro codes from confhd — existing, non-fictitious plants only.
-    confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
-    fict_names = existing.loc[
-        existing["nome_usina"].str.strip().str.startswith("FICT."), "nome_usina"
-    ].tolist()
-    if fict_names:
-        logger.warning(
-            "Excluding %d fictitious plant(s) from id_map: %s",
-            len(fict_names),
-            fict_names,
-        )
-    hydro_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
-
-    # Thermal codes from conft.
-    conft_df = conft.usinas
-    thermal_codes = [int(r["codigo_usina"]) for _, r in conft_df.iterrows()]
-
-    # Subsystem codes from sistema deficit table.
-    deficit_df = sistema.custo_deficit
-    if deficit_df is not None:
-        subsystem_ids = sorted(
-            set(int(r["codigo_submercado"]) for _, r in deficit_df.iterrows())
-        )
-    else:
-        subsystem_ids = []
-
-    # Also include subsystem codes referenced in ree.dat (for completeness).
-    ree_df = ree_file.rees
-    if ree_df is not None:
-        for _, row in ree_df.iterrows():
-            code = int(row["submercado"])
-            if code not in subsystem_ids:
-                subsystem_ids.append(code)
-
-    return NewaveIdMap(
-        subsystem_ids=subsystem_ids,
-        hydro_codes=hydro_codes,
-        thermal_codes=thermal_codes,
-    )
+# The id-map builder moved to ``cobre_bridge.id_map.build_id_map`` (its natural
+# home, next to NewaveIdMap) so the comparators can use a public entry point
+# instead of reaching into this module's internals. Kept as an alias for
+# backward compatibility with existing importers.
+_build_id_map = build_id_map
 
 
 def _merge_hydro_bounds(

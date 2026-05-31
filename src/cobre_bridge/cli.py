@@ -45,8 +45,8 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
         print_summary,
         write_report_parquet,
     )
+    from cobre_bridge.id_map import build_id_map
     from cobre_bridge.newave_files import NewaveFiles
-    from cobre_bridge.pipeline import _build_id_map
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -66,7 +66,7 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
 
     # Build alignment.
     nw_files = NewaveFiles.from_directory(newave_dir)
-    id_map = _build_id_map(nw_files)
+    id_map = build_id_map(nw_files)
 
     variables: set[str] | None = None
     if args.variables:
@@ -109,8 +109,8 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary
     from cobre_bridge.comparators.results import build_results_summary, compare_results
+    from cobre_bridge.id_map import build_id_map
     from cobre_bridge.newave_files import NewaveFiles
-    from cobre_bridge.pipeline import _build_id_map
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -123,7 +123,7 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    id_map = _build_id_map(nw_files)
+    id_map = build_id_map(nw_files)
     lines_json = _load_lines_json(cobre_output_dir)
     alignment = build_entity_alignment(id_map, nw_files, lines_json)
 

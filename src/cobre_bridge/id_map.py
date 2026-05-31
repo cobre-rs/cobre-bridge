@@ -7,6 +7,14 @@ this class to share the same mapping produced during entity conversion.
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cobre_bridge.newave_files import NewaveFiles
+
+_LOG = logging.getLogger(__name__)
+
 
 class NewaveIdMap:
     """Bidirectional ID map from NEWAVE 1-based codes to Cobre 0-based IDs.
@@ -93,3 +101,62 @@ class NewaveIdMap:
     def all_thermal_codes(self) -> list[int]:
         """Sorted list of registered NEWAVE thermal codes."""
         return sorted(self._thermal)
+
+
+def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
+    """Build the canonical :class:`NewaveIdMap` from a case's NEWAVE inputs.
+
+    Reads ``confhd.dat`` (hydros, existing non-fictitious only), ``conft.dat``
+    (thermals), ``sistema.dat`` + ``ree.dat`` (subsystems). This is the single
+    public entry point shared by the conversion pipeline and the comparators, so
+    both derive the NEWAVE→Cobre mapping the same way (it used to live as a
+    private ``pipeline._build_id_map`` that the comparators reached into).
+    """
+    from inewave.newave import Confhd, Conft, Ree, Sistema
+
+    confhd = Confhd.read(str(nw_files.confhd))
+    conft = Conft.read(str(nw_files.conft))
+    sistema = Sistema.read(str(nw_files.sistema))
+    ree_file = Ree.read(str(nw_files.ree))
+
+    # Hydro codes from confhd — existing, non-fictitious plants only.
+    confhd_df = confhd.usinas
+    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
+    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
+    fict_names = existing.loc[
+        existing["nome_usina"].str.strip().str.startswith("FICT."), "nome_usina"
+    ].tolist()
+    if fict_names:
+        _LOG.warning(
+            "Excluding %d fictitious plant(s) from id_map: %s",
+            len(fict_names),
+            fict_names,
+        )
+    hydro_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
+
+    # Thermal codes from conft.
+    conft_df = conft.usinas
+    thermal_codes = [int(r["codigo_usina"]) for _, r in conft_df.iterrows()]
+
+    # Subsystem codes from sistema deficit table.
+    deficit_df = sistema.custo_deficit
+    if deficit_df is not None:
+        subsystem_ids = sorted(
+            {int(r["codigo_submercado"]) for _, r in deficit_df.iterrows()}
+        )
+    else:
+        subsystem_ids = []
+
+    # Also include subsystem codes referenced in ree.dat (for completeness).
+    ree_df = ree_file.rees
+    if ree_df is not None:
+        for _, row in ree_df.iterrows():
+            code = int(row["submercado"])
+            if code not in subsystem_ids:
+                subsystem_ids.append(code)
+
+    return NewaveIdMap(
+        subsystem_ids=subsystem_ids,
+        hydro_codes=hydro_codes,
+        thermal_codes=thermal_codes,
+    )

@@ -207,7 +207,7 @@ class TestCliExitCodeTwoOnCobreReadError:
                 "cobre_bridge.newave_files.NewaveFiles.from_directory",
                 return_value=object(),
             ),
-            patch("cobre_bridge.pipeline._build_id_map", return_value=object()),
+            patch("cobre_bridge.id_map.build_id_map", return_value=object()),
             patch(
                 "cobre_bridge.comparators.alignment.build_entity_alignment",
                 return_value=object(),
@@ -247,7 +247,7 @@ class TestCliExitCodeTwoOnCobreReadError:
                 "cobre_bridge.newave_files.NewaveFiles.from_directory",
                 return_value=object(),
             ),
-            patch("cobre_bridge.pipeline._build_id_map", return_value=object()),
+            patch("cobre_bridge.id_map.build_id_map", return_value=object()),
             patch(
                 "cobre_bridge.comparators.alignment.build_entity_alignment",
                 return_value=object(),
