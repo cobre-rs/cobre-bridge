@@ -13,7 +13,6 @@ Only rendered when stochastic output is available (data.stochastic_available).
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -26,6 +25,9 @@ from cobre_bridge.dashboard.chart_helpers import make_chart_card
 from cobre_bridge.ui.html import (
     chart_grid,
     collapsible_section,
+    escape_attr,
+    escape_text,
+    json_for_script,
     plant_explorer_table,
     wrap_chart,
 )
@@ -1233,7 +1235,7 @@ def _render_section_d(data: DashboardData) -> str:
     js = f"""
 <script>
 (function() {{
-    var _cd = {json.dumps(corr_data)};
+    var _cd = {json_for_script(corr_data)};
     // Build bus separator shapes and annotations
     var _shapes = [], _annotations = [];
     _cd.busBoundaries.forEach(function(b) {{
@@ -1511,9 +1513,9 @@ def _render_section_c(data: DashboardData) -> str:
         bus_id = meta.get("bus_id", "")
         bus_name = data.bus_names.get(bus_id, str(bus_id)) if bus_id != "" else ""
         table_rows.append(
-            f'<tr data-name="{name.lower()}" data-index="{hid}">'
-            f"<td>{name}</td>"
-            f"<td>{bus_name}</td>"
+            f'<tr data-name="{escape_attr(name.lower())}" data-index="{hid}">'
+            f"<td>{escape_text(name)}</td>"
+            f"<td>{escape_text(bus_name)}</td>"
             f"</tr>"
         )
 
@@ -1551,7 +1553,7 @@ def _render_section_c(data: DashboardData) -> str:
     synth_color = _SYNTH_COLOR
     js = f"""
 <script>
-window._stochHydroData = {json.dumps(hydro_json)};
+window._stochHydroData = {json_for_script(hydro_json)};
 function _renderStochHydro(containerId, entry) {{
     var chartDiv = document.getElementById('stoch-hydro-chart');
     if (!chartDiv) return;

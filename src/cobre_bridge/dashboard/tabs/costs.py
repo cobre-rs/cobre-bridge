@@ -14,7 +14,6 @@ Ticket-015 extends this module with four temporal evolution sections:
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -35,6 +34,7 @@ from cobre_bridge.dashboard.chart_helpers import (
 from cobre_bridge.ui.html import (
     chart_grid,
     collapsible_section,
+    json_for_script,
     metric_card,
     metrics_grid,
     section_title,
@@ -606,7 +606,7 @@ def _build_composition_section(data: DashboardData) -> str:
             default_collapsed=False,
         )
 
-    data_json = json.dumps(comp_data, separators=(",", ":"))
+    data_json = json_for_script(comp_data)
 
     content = (
         '<div style="margin-bottom:16px;">'

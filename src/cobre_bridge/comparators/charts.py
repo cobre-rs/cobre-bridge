@@ -14,6 +14,7 @@ from cobre_bridge.comparators.results import (
     ResultsSummary,
 )
 from cobre_bridge.horizon import is_effectively_infinite
+from cobre_bridge.ui.html import escape_text, json_for_script
 from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS as _LEGEND
 from cobre_bridge.ui.plotly_helpers import MARGIN_DEFAULTS as _MARGIN
 from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
@@ -2719,7 +2720,7 @@ def _plant_max_reldiff_table(
     )
     body_rows: list[str] = []
     for name, code in plant_keys:
-        cells = [f'<td class="cb-cat">{name}</td>']
+        cells = [f'<td class="cb-cat">{escape_text(name)}</td>']
         for var_key, _ in variables:
             rd = max_rd.get((name, code, var_key))
             cells.append(_cell(rd))
@@ -3012,9 +3013,7 @@ def _build_interactive_detail_html(
     label: str,
 ) -> str:
     """Build the HTML/JS for interactive per-plant detail charts."""
-    import json as _json
-
-    data_json = _json.dumps(js_plants)
+    data_json = json_for_script(js_plants)
 
     # Build chart divs.
     chart_divs: list[str] = []
@@ -3113,8 +3112,8 @@ def _build_interactive_detail_html(
                 title: d.name + ' \u2014 {var_label}',
                 xaxis: {{title: 'Stage'}},
                 yaxis: {{title: '{var_label}'}},
-                legend: {_json.dumps(_LEGEND)},
-                margin: {_json.dumps(_MARGIN)},
+                legend: {json_for_script(_LEGEND)},
+                margin: {json_for_script(_MARGIN)},
                 template: 'plotly_white',
                 hovermode: 'x unified',
                 height: 350

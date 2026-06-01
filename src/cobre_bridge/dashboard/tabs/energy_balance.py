@@ -17,7 +17,6 @@ Implements six sections of the Energy Balance tab (Tab 4):
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import plotly.graph_objects as go
@@ -33,6 +32,7 @@ from cobre_bridge.dashboard.data import _compute_lp_load, _stage_avg_mw, entity_
 from cobre_bridge.ui.html import (
     chart_grid,
     collapsible_section,
+    json_for_script,
     metric_card,
     metrics_grid,
     section_title,
@@ -1545,8 +1545,8 @@ def _build_hero_section(data: DashboardData) -> str:
             single=True,
         )
 
-    data_json = json.dumps(hero_data, separators=(",", ":"))
-    labels_json = json.dumps(xlabels)
+    data_json = json_for_script(hero_data)
+    labels_json = json_for_script(xlabels)
 
     hydro_color = GENERATION_COLORS["hydro"]
     thermal_color = GENERATION_COLORS["thermal"]

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from cobre_bridge.ui.html import escape_text
+
 
 def build_constraints_summary_table(
     constraints: list[dict],
@@ -59,9 +61,9 @@ def build_constraints_summary_table(
         )
         rows_html.append(
             f'<tr style="background:{bg};">'
-            f"<td>{name}</td>"
-            f"<td>{ctype}</td>"
-            f"<td><code>{sense}</code></td>"
+            f"<td>{escape_text(name)}</td>"
+            f"<td>{escape_text(ctype)}</td>"
+            f"<td><code>{escape_text(sense)}</code></td>"
             f"<td style='text-align:center;'>{active_stages}</td>"
             f"<td style='text-align:right;'>{bound_range}</td>"
             f"<td style='text-align:center;'>{slack_enabled}</td>"

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Sequence
 
 import plotly.graph_objects as go
+
+from cobre_bridge.ui.html import json_for_script
 
 LEGEND_DEFAULTS: dict = dict(
     orientation="h",
@@ -95,8 +96,8 @@ def plotly_div(
     layout.setdefault("template", "plotly_white")
     layout.setdefault("hovermode", "x unified")
 
-    data_json = json.dumps(traces)
-    layout_json = json.dumps(layout)
+    data_json = json_for_script(traces)
+    layout_json = json_for_script(layout)
 
     return (
         f'<div id="{div_id}"></div>\n'
