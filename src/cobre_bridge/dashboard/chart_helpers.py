@@ -24,7 +24,7 @@ from cobre_bridge.ui.plotly_helpers import (
 from cobre_bridge.ui.plotly_helpers import (
     fig_to_html,
 )
-from cobre_bridge.ui.theme import hex_to_rgba
+from cobre_bridge.ui.theme import BOUND_LINE_COLOR, hex_to_rgba
 
 try:
     import pandas as pd
@@ -35,8 +35,6 @@ try:
     import polars as pl
 except ImportError:  # pragma: no cover
     pl = None  # type: ignore[assignment]
-
-_BOUNDS_COLOR: str = "#6B7280"
 
 #: Mapping from logical cost group name to known Cobre cost component columns.
 #: The ``"Other"`` key is intentionally absent — it is computed dynamically in
@@ -298,7 +296,7 @@ def add_bounds_overlay(
         subplot_kwargs["col"] = col
 
     x = bounds_df[x_col]
-    bound_line = dict(color=_BOUNDS_COLOR, width=1.5, dash="dash")
+    bound_line = dict(color=BOUND_LINE_COLOR, width=1.5, dash="dash")
 
     if min_col is not None:
         fig.add_trace(

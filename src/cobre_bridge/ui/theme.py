@@ -1,7 +1,15 @@
 """Shared visual design tokens for the cobre-bridge UI.
 
-Single source of truth for all color constants used across the dashboard
-and comparator HTML reports. Do not define colors elsewhere.
+Canonical source for the **semantic** colours used across the dashboard and
+comparator Plotly charts: the per-entity generation palette (hydro/thermal/ncs),
+bounds/comparison/cost-component colours, and chart accents. Reference these
+constants from chart code instead of repeating the hex values.
+
+Two kinds of colour legitimately live elsewhere and are *not* governed here: the
+page **CSS** (``ui/css.py``) and **local categorical palettes** that map a fixed
+set of labels to distinct hues for a single chart (e.g. the cost-category and
+constraint-type maps, the plant-explorer scenario colours, the performance-phase
+palette). Those are intentionally independent of the semantic tokens.
 """
 
 from __future__ import annotations
@@ -35,8 +43,11 @@ CHART_PALETTES: dict[str, list[str]] = {
     "default": BUS_COLORS,
 }
 
+# ``hydro`` is intentionally the same #4A90B8 as ``COLORS["hydro"]`` so the
+# entity reads identically across the generation charts and the hydro tab
+# (resolves the prior #4A90B8/#3B82F6 hydro collision).
 GENERATION_COLORS: dict[str, str] = {
-    "hydro": "#3B82F6",
+    "hydro": "#4A90B8",
     "thermal": "#F59E0B",
     "ncs": "#10B981",
 }
