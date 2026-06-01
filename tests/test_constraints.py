@@ -13,6 +13,7 @@ from cobre_bridge.converters.constraints import (
     _compute_accumulated_integrated_productivities,
     _is_stored_energy_reservoir,
     _parse_formula,
+    _warn_if_fixed_penalization,
     compute_accumulated_productivities,
     convert_agrint_constraints,
     convert_electric_constraints,
@@ -96,6 +97,32 @@ class TestStoredEnergyReservoirFilter:
 
     def test_unknown_code_excluded(self) -> None:
         assert _is_stored_energy_reservoir(self._cad("M", 100.0, 200.0), 999) is False
+
+
+class TestFixedPenalizationWarning:
+    """curva.dat TIPO DE PENALIZACAO = 0 (FIXA) is unsupported by Cobre; the
+    conversion must warn so the VminOP-penalty difference is expected."""
+
+    def test_fixa_emits_warning(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            fired = _warn_if_fixed_penalization([0, 11, 1])
+        assert fired is True
+        assert "FIXA" in caplog.text
+        assert "MES PENALIZACAO = 11" in caplog.text
+
+    def test_maxpen_does_not_warn(self) -> None:
+        assert _warn_if_fixed_penalization([1, 11, 1]) is False
+
+    def test_none_does_not_warn(self) -> None:
+        assert _warn_if_fixed_penalization(None) is False
+
+    def test_empty_does_not_warn(self) -> None:
+        assert _warn_if_fixed_penalization([]) is False
+
+    def test_malformed_first_field_does_not_warn(self) -> None:
+        assert _warn_if_fixed_penalization(["x"]) is False
 
 
 class TestAccumulatedProductivity:

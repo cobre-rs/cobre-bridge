@@ -170,9 +170,11 @@ def _apply_permanent_overrides(
                 )
 
             elif type_name == "DefaultRegister":
-                # inewave uses DefaultRegister for unrecognised records.
-                _LOG.warning(
-                    "MODIF.DAT contains an unrecognised record (DefaultRegister)"
+                # inewave emits DefaultRegister for records it does not model
+                # (e.g. COTAREA). These are benign for the conversion, so log at
+                # debug level only — no user-facing warning.
+                _LOG.debug(
+                    "MODIF.DAT contains an unmodeled record (DefaultRegister)"
                     " for plant %d; skipping.",
                     code,
                 )

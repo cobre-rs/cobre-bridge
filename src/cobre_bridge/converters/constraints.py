@@ -18,7 +18,7 @@ import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pandas as pd
 import pyarrow as pa
@@ -307,6 +307,42 @@ def compute_per_stage_acc_productivities(
     return result
 
 
+def _warn_if_fixed_penalization(configuracoes_penalizacao: list[Any] | None) -> bool:
+    """Warn when curva.dat selects FIXA penalization, which Cobre cannot model.
+
+    The penalization-config line of curva.dat carries, as its first field, the
+    ``TIPO DE PENALIZACAO``: ``0`` = FIXA, ``1`` = MAXPEN (followed by the
+    ``MES PENALIZACAO`` and the pre/post seasonal flag).  Under **FIXA** NEWAVE
+    accumulates every VminOP (minimum stored energy) violation across the
+    horizon into a single calendar month — which presumes a stage *is* a
+    calendar month.  Cobre models the violation per stage (the MAXPEN
+    convention) and makes no stage-is-a-month assumption, so it does not (and is
+    unlikely to) support FIXA.
+
+    Emits a warning so the operator knows a VminOP-penalty difference is
+    expected.  Returns ``True`` when the warning fired (for testability).
+    """
+    if not configuracoes_penalizacao:
+        return False
+    try:
+        tipo = int(configuracoes_penalizacao[0])
+    except (TypeError, ValueError, IndexError):
+        return False
+    if tipo != 0:
+        return False
+    mes = configuracoes_penalizacao[1] if len(configuracoes_penalizacao) > 1 else "?"
+    _LOG.warning(
+        "curva.dat selects TIPO DE PENALIZACAO = 0 (FIXA): NEWAVE accumulates "
+        "all VminOP (minimum stored energy) violations into a single calendar "
+        "month (MES PENALIZACAO = %s). Cobre does not support FIXA — it "
+        "penalizes VminOP violations per stage (the MAXPEN convention) and does "
+        "not assume a stage is a calendar month, so a difference in the VminOP "
+        "violation penalty is expected.",
+        mes,
+    )
+    return True
+
+
 def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
     """True iff NEWAVE counts plant ``code``'s storage in a REE's stored energy.
 
@@ -386,6 +422,10 @@ def convert_vminop_constraints(
     curva_df = curva.curva_seguranca
     if curva_df is None or curva_df.empty:
         return None
+
+    # NEWAVE's FIXA penalization (TIPO DE PENALIZACAO = 0) is not representable
+    # in Cobre; warn so the VminOP-penalty difference is expected, not a bug.
+    _warn_if_fixed_penalization(curva.configuracoes_penalizacao)
 
     penalty_df = curva.custos_penalidades
     confhd = Confhd.read(str(nw_files.confhd))
