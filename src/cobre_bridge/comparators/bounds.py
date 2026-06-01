@@ -14,12 +14,14 @@ from pathlib import Path
 
 import polars as pl
 
+from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators.alignment import (
     EntityAlignment,
     HydroEntity,
     LineEntity,
     ThermalEntity,
 )
+from cobre_bridge.horizon import is_effectively_infinite
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -60,16 +62,10 @@ _ENTITY_TYPE_HYDRO = 0
 _ENTITY_TYPE_THERMAL = 1
 _ENTITY_TYPE_LINE = 3
 
-# NEWAVE uses 99999 as a "big M" sentinel meaning "no limit".
-_NEWAVE_BIG_M = 99990.0
 
-
-def _is_effectively_infinite(value: float) -> bool:
-    """Return True if the value represents an unbounded variable.
-
-    Catches both IEEE inf and NEWAVE's 99999 sentinel.
-    """
-    return math.isinf(value) or abs(value) >= _NEWAVE_BIG_M
+# The "is this bound unbounded?" predicate now lives in cobre_bridge.horizon
+# (next to BIG_M); kept as an alias for this module's callers and tests.
+_is_effectively_infinite = is_effectively_infinite
 
 
 def _bounds_match(a: float, b: float, tolerance: float) -> bool:
@@ -250,7 +246,7 @@ def _read_converter_line_bounds(
     The converter output lives one level above the Cobre output directory
     (``cobre_output_dir.parent``).
     """
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     path = case_dir / "constraints" / "line_bounds.parquet"
     if not path.exists():
         _LOG.warning("line_bounds.parquet not found at %s", path)

@@ -27,8 +27,8 @@ from cobre_bridge.ui.html import (
     wrap_chart,
 )
 from cobre_bridge.ui.plotly_helpers import (
-    LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
+    apply_standard_layout,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import COLORS, GENERATION_COLORS
@@ -343,10 +343,9 @@ def _chart_training_mini(conv: pd.DataFrame) -> go.Figure | None:
             legendgroup=ub_legend_group,
         )
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         yaxis_title="Cost",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
     )
     return fig
 
@@ -385,12 +384,10 @@ def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
 
     for label, lf, color in sources:
         try:
-            stage_mw: dict[int, float] | object = _stage_avg_mw(
-                lf, "generation_mwh", data.stage_hours, []
-            )
+            stage_mw = _stage_avg_mw(lf, "generation_mwh", data.stage_hours)
         except (ValueError, TypeError, KeyError):
             continue
-        if not isinstance(stage_mw, dict) or not stage_mw:
+        if not stage_mw:
             continue
 
         stages = sorted(stage_mw.keys())

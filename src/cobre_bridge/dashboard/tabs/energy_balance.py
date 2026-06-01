@@ -17,7 +17,6 @@ Implements six sections of the Energy Balance tab (Tab 4):
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import plotly.graph_objects as go
@@ -33,6 +32,7 @@ from cobre_bridge.dashboard.data import _compute_lp_load, _stage_avg_mw, entity_
 from cobre_bridge.ui.html import (
     chart_grid,
     collapsible_section,
+    json_for_script,
     metric_card,
     metrics_grid,
     section_title,
@@ -44,6 +44,7 @@ from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
 from cobre_bridge.ui.plotly_helpers import (
+    apply_standard_layout,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import BUS_COLORS, COLORS, GENERATION_COLORS
@@ -214,13 +215,9 @@ def _chart_gen_mix_hero(data: DashboardData) -> go.Figure:
     Returns:
         A :class:`plotly.graph_objects.Figure`.
     """
-    h_gen = _stage_avg_mw(data.hydros_lf, "generation_mwh", data.stage_hours, [])
-    t_gen = _stage_avg_mw(data.thermals_lf, "generation_mwh", data.stage_hours, [])
-    n_gen = _stage_avg_mw(data.ncs_lf, "generation_mwh", data.stage_hours, [])
-
-    assert isinstance(h_gen, dict)
-    assert isinstance(t_gen, dict)
-    assert isinstance(n_gen, dict)
+    h_gen = _stage_avg_mw(data.hydros_lf, "generation_mwh", data.stage_hours)
+    t_gen = _stage_avg_mw(data.thermals_lf, "generation_mwh", data.stage_hours)
+    n_gen = _stage_avg_mw(data.ncs_lf, "generation_mwh", data.stage_hours)
 
     load_ser = _compute_lp_load(
         data.load_stats,
@@ -1158,11 +1155,10 @@ def _chart_curtailment_by_source(data: DashboardData) -> go.Figure | None:
             textposition="auto",
         )
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Curtailment (GWh)",
         yaxis=dict(autorange="reversed"),
-        legend=_LEGEND,
-        margin=_MARGIN,
     )
     return fig
 
@@ -1545,8 +1541,8 @@ def _build_hero_section(data: DashboardData) -> str:
             single=True,
         )
 
-    data_json = json.dumps(hero_data, separators=(",", ":"))
-    labels_json = json.dumps(xlabels)
+    data_json = json_for_script(hero_data)
+    labels_json = json_for_script(xlabels)
 
     hydro_color = GENERATION_COLORS["hydro"]
     thermal_color = GENERATION_COLORS["thermal"]

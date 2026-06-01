@@ -11,7 +11,9 @@ import pytest
 
 from cobre_bridge.converters.constraints import (
     _compute_accumulated_integrated_productivities,
+    _is_stored_energy_reservoir,
     _parse_formula,
+    _warn_if_fixed_penalization,
     compute_accumulated_productivities,
     convert_agrint_constraints,
     convert_electric_constraints,
@@ -59,6 +61,68 @@ def _make_confhd_df() -> pd.DataFrame:
             "volume_inicial_percentual": [50.0, 50.0, 50.0],
         }
     )
+
+
+class TestStoredEnergyReservoirFilter:
+    """VminOP includes only NEWAVE's EARM plant set: monthly-regulating
+    reservoirs with usable storage (matching pmo.dat's
+    ``produtibilidade_acumulada_calculo_earm``)."""
+
+    @staticmethod
+    def _cad(tipo: str, vmin: float, vmax: float) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "tipo_regulacao": [tipo],
+                "volume_minimo": [vmin],
+                "volume_maximo": [vmax],
+            },
+            index=pd.Index([42], name="codigo_usina"),
+        )
+
+    def test_monthly_reservoir_with_useful_volume_included(self) -> None:
+        assert _is_stored_energy_reservoir(self._cad("M", 100.0, 200.0), 42) is True
+
+    def test_run_of_river_excluded_even_with_useful_volume(self) -> None:
+        # JIRAU is 'D' with a large operative volume range but is run-of-river.
+        assert _is_stored_energy_reservoir(self._cad("D", 1249.8, 2746.7), 42) is False
+
+    def test_special_regime_excluded_even_with_useful_volume(self) -> None:
+        # ITAIPU is 'S' with ~1709 hm3 of useful volume yet not in EARM.
+        assert (
+            _is_stored_energy_reservoir(self._cad("S", 27695.2, 29403.9), 42) is False
+        )
+
+    def test_monthly_without_useful_volume_excluded(self) -> None:
+        assert _is_stored_energy_reservoir(self._cad("M", 100.0, 100.0), 42) is False
+
+    def test_unknown_code_excluded(self) -> None:
+        assert _is_stored_energy_reservoir(self._cad("M", 100.0, 200.0), 999) is False
+
+
+class TestFixedPenalizationWarning:
+    """curva.dat TIPO DE PENALIZACAO = 0 (FIXA) is unsupported by Cobre; the
+    conversion must warn so the VminOP-penalty difference is expected."""
+
+    def test_fixa_emits_warning(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            fired = _warn_if_fixed_penalization([0, 11, 1])
+        assert fired is True
+        assert "FIXA" in caplog.text
+        assert "MES PENALIZACAO = 11" in caplog.text
+
+    def test_maxpen_does_not_warn(self) -> None:
+        assert _warn_if_fixed_penalization([1, 11, 1]) is False
+
+    def test_none_does_not_warn(self) -> None:
+        assert _warn_if_fixed_penalization(None) is False
+
+    def test_empty_does_not_warn(self) -> None:
+        assert _warn_if_fixed_penalization([]) is False
+
+    def test_malformed_first_field_does_not_warn(self) -> None:
+        assert _warn_if_fixed_penalization(["x"]) is False
 
 
 class TestAccumulatedProductivity:
@@ -177,17 +241,36 @@ class TestAccumulatedIntegratedProductivities:
     """Cascade sum of integrated ρ — what VminOP uses for the rho_acum_h{id}
     override and the per-stage RHS."""
 
-    def test_cascade_uses_integrated_not_point(self) -> None:
+    def test_cascade_uses_integral_for_monthly_reservoir(self) -> None:
+        # Monthly-regulating ('M') reservoirs use the volmin→volmax integral
+        # (NEWAVE's produtibilidade_equivalente_volmin_volmax), NOT h at
+        # volume_referencia.
         cadastro = _make_cadastro()
+        cadastro["tipo_regulacao"] = "M"
         confhd_df = _make_confhd_df()
         acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
-        # Each plant's integrated ρ uses the average h, NOT h at volume_referencia.
         # PLANT_A: 0.01 · (300 + 0.1·550 − 200) = 0.01 · 155 = 1.55
-        # PLANT_B: 0.02 · (400 + 0.05·(200+2000)/2 − 300) = 0.02 · (400+55−300) = 3.1
-        # PLANT_C: 0.03 · (500 + 0.02·1650 − 400) = 0.03 · 133 = 3.99
+        # PLANT_B: 0.02 · (400 + 0.05·(200+2000)/2 − 300) = 0.02 · 155 = 3.1
+        # PLANT_C: 0.03 · (500 + 0.02·(300+3000)/2 − 400) = 0.03 · 133 = 3.99
         own_a = 0.01 * (300.0 + 0.1 * 550.0 - 200.0)
         own_b = 0.02 * (400.0 + 0.05 * (200.0 + 2000.0) / 2.0 - 300.0)
         own_c = 0.03 * (500.0 + 0.02 * (300.0 + 3000.0) / 2.0 - 400.0)
+        assert acc[3] == pytest.approx(own_c)
+        assert acc[2] == pytest.approx(own_b + own_c)
+        assert acc[1] == pytest.approx(own_a + own_b + own_c)
+
+    def test_cascade_uses_point_at_vref_for_run_of_river(self) -> None:
+        # Run-of-river ('D') plants use the point productivity at
+        # volume_referencia, matching NEWAVE's EARM convention for them.
+        cadastro = _make_cadastro()  # all tipo_regulacao == "D"
+        confhd_df = _make_confhd_df()
+        acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+        # PLANT_A @vref=500: 0.01 · (300 + 0.1·500 − 200) = 0.01 · 150 = 1.5
+        # PLANT_B @vref=1000: 0.02 · (400 + 0.05·1000 − 300) = 0.02 · 150 = 3.0
+        # PLANT_C @vref=1500: 0.03 · (500 + 0.02·1500 − 400) = 0.03 · 130 = 3.9
+        own_a = 0.01 * (300.0 + 0.1 * 500.0 - 200.0)
+        own_b = 0.02 * (400.0 + 0.05 * 1000.0 - 300.0)
+        own_c = 0.03 * (500.0 + 0.02 * 1500.0 - 400.0)
         assert acc[3] == pytest.approx(own_c)
         assert acc[2] == pytest.approx(own_b + own_c)
         assert acc[1] == pytest.approx(own_a + own_b + own_c)
@@ -975,6 +1058,59 @@ class TestConvertAgrintConstraints:
             "bound",
         }
 
+    def test_post_study_freezes_at_last_study_value(self, tmp_path: Path) -> None:
+        """Post-study AGRINT limits freeze at the last study stage value and
+        ignore future-dated agrint.dat entries (NEWAVE convention — the pmo.dat
+        "LIMITES DOS AGRUPAMENTOS DE INTERCAMBIO" POS row is flat at the last
+        study December value)."""
+        from unittest.mock import MagicMock
+
+        content = (
+            "AGRUPAMENTOS DE INTERCAMBIO\n"
+            " #AG A   B   COEF\n"
+            " XXX XXX XXX XX.XXXX\n"
+            "   1   1   3  1.0000\n"
+            " 999\n"
+            "LIMITES POR GRUPO\n"
+            "  #AG MI ANOI MF ANOF LIM_P1  LIM_P2  LIM_P3\n"
+            " XXX  XX XXXX XX XXXX XXXXXX. XXXXXX. XXXXXX.\n"
+            "   1   1 2020 12 2020  10000.  10000.  10000.\n"
+            "   1   1 2021 12 2021  20000.  20000.  20000.\n"
+            " 999\n"
+        )
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(content, encoding="latin-1")
+        (tmp_path / "dger.dat").touch()
+
+        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1  # study_months = 12 (Jan–Dec 2020)
+        dger.num_anos_pos_estudo = 1  # post-study 2021 → stages 12–23
+
+        with (
+            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
+            patch(
+                "cobre_bridge.converters.constraints._build_line_id_map",
+                return_value={(1, 3): 0},
+            ),
+        ):
+            mock_dger_cls.read.return_value = dger
+            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+
+        assert result is not None
+        _, bounds = result
+        b0 = bounds.to_pandas().query("block_id == 0").set_index("stage_id")["bound"]
+        # Study (0–11): 10000.
+        assert b0[0] == 10000.0
+        assert b0[11] == 10000.0
+        # Post-study (12–23): frozen at 10000, NOT the 2021 entry's 20000.
+        for s in range(12, 24):
+            assert b0[s] == 10000.0
+
     def test_multi_term_group_with_mixed_directions(self, tmp_path: Path) -> None:
         """Mixed direction terms (typical of NOFICT1 hubs) each pick the right
         variable.
@@ -1101,3 +1237,37 @@ class TestConvertAgrintConstraints:
         _, bounds_table = result
         bounds = bounds_table.column("bound").to_pylist()
         assert all(b >= 0 for b in bounds)
+
+
+class TestConstraintResultTypes:
+    """The constraint converters return named tuples (named + index access)."""
+
+    def test_vminop_result_named_and_tuple_access(self) -> None:
+        import pyarrow as pa
+
+        from cobre_bridge.converters.constraints import VminopResult
+
+        bounds = pa.table({"constraint_id": [0]})
+        r = VminopResult({"constraints": [1, 2]}, bounds, [3, 4], {5: [1.0]})
+        # Named access (new).
+        assert r.constraints_dict == {"constraints": [1, 2]}
+        assert r.bounds is bounds
+        assert r.referenced_hydro_ids == [3, 4]
+        assert r.rho_acum_overrides == {5: [1.0]}
+        # Legacy index / destructure still works (backward compatible).
+        assert r[2] == [3, 4]
+        cdict, b, ids, overrides = r
+        assert cdict == {"constraints": [1, 2]}
+        assert ids == [3, 4]
+
+    def test_generic_constraint_result_named_and_tuple_access(self) -> None:
+        import pyarrow as pa
+
+        from cobre_bridge.converters.constraints import GenericConstraintResult
+
+        bounds = pa.table({"constraint_id": [0]})
+        r = GenericConstraintResult([{"id": 0}], bounds)
+        assert r.constraints == [{"id": 0}]
+        assert r.bounds is bounds
+        constraints, b = r  # legacy unpack
+        assert constraints == [{"id": 0}]

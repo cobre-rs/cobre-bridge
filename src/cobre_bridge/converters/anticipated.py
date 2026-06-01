@@ -36,16 +36,17 @@ where ``f_b`` is the block fraction at the delivery stage (from
 ``patamar.dat``).  This preserves the total committed MWh exactly while
 respecting the cobre LP's constant-MW-per-stage convention.
 
-**Current cobre limitation.**  At write time
-(``cobre`` feat/anticipated-thermals), the semantic validator
-rejects any non-zero ``values_mw`` entry because the LP's
-fishing-constraint activation predicate is FALSE at every stage
-before the first matured delivery, and the ring-buffer shift
-overwrites slot 0 with the LP's own decision before any constraint
-reads a seeded value.  ``convert_initial_conditions`` therefore emits
-zeros and emits a WARNING naming the lost MW values.  This module
-keeps returning the *true* block-weighted MWs so the warning can be
-informative; the policy lives at the conversion site, not here.
+**Cobre seeding (>= 0.7.0).**  Cobre honours non-zero pre-horizon
+seeds: the always-active anticipated "fishing" equality pins
+generation to the committed MW at each delivery stage (``slot 0`` may
+hold a non-zero seed at stage 0), so passing the true committed MW
+through reproduces NEWAVE's pre-commitment.  The semantic validator
+only rejects a committed value outside the plant's static generation
+bounds ``[min_mw, max_mw]``.  ``convert_initial_conditions`` therefore
+writes these block-weighted MWs directly, clamping into the bounds (with
+a warning) on the rare out-of-range value; this module just returns the
+*true* block-weighted MWs — the bounds policy lives at the conversion
+site, not here.
 """
 
 from __future__ import annotations
@@ -57,6 +58,8 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 from inewave.newave import Adterm, Dger, Patamar
+
+from cobre_bridge.horizon import study_horizon
 
 if TYPE_CHECKING:
     from cobre_bridge.newave_files import NewaveFiles
@@ -186,13 +189,12 @@ def read_anticipated_dispatch(
 
     patamar = Patamar.read(str(nw_files.patamar))
     # Need the case's calendar start to weight by the right month's blocks.
-    num_anos = dger.num_anos_estudo or 0
-    start_month: int = dger.mes_inicio_estudo or 1
-    start_year: int = dger.ano_inicio_estudo or 0
-    num_anos_pos = dger.num_anos_pos_estudo or 0
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
     # Mirror the temporal converter's horizon calculation.
-    study_months = (13 - start_month) + (num_anos - 1) * 12 if num_anos else 0
-    pos_months = num_anos_pos * 12
+    study_months = horizon.study_months
+    pos_months = horizon.pos_months
     n_stages_total = study_months + pos_months
 
     block_fractions = _block_fractions_by_stage(

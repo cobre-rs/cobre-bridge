@@ -26,9 +26,11 @@ import pandas as pd
 import polars as pl
 
 from cobre_bridge.comparators.alignment import EntityAlignment
-from cobre_bridge.dashboard.tabs.constraints_utils import (
-    _parse_expression,
-    _resolve_param_to_column,
+from cobre_bridge.comparators.cobre_readers import _scan_simulation_entity
+from cobre_bridge.constraint_expr import (
+    evaluate_constraint_expressions,
+    parse_expression,
+    resolve_param_to_column,
 )
 from cobre_bridge.id_map import NewaveIdMap
 
@@ -162,10 +164,10 @@ def evaluate_lhs_newave(
             hydro_storage[(cobre_id, stage_0based)] = float(row["value"])
 
     # --- Build line exchange lookup: (cobre_line_id, stage_0based) -> MW
-    # Aligned via EntityAlignment.lines: each Cobre line records the
-    # NEWAVE directional pair (newave_de → newave_para) plus a
-    # ``reversed`` flag.  When ``reversed`` is True the NEWAVE row's
-    # flow is the opposite sign of Cobre's net_flow_mw.
+    # Aligned via EntityAlignment.lines: each Cobre line records the NEWAVE
+    # directional pair (newave_de → newave_para), which matches the Cobre
+    # (source, target) orientation by construction.  NWLISTOP rows for the
+    # opposite (para, de) ordering carry the opposite sign, so they are negated.
     line_flow: dict[tuple[int, int], float] = {}
     if not nw_line_means.is_empty() and alignment.lines:
         # Build (de, para, stage_0based) -> value for both directions.
@@ -189,21 +191,18 @@ def evaluate_lhs_newave(
                 continue
             for (de_k, para_k, s), val in nw_by_pair.items():
                 if de_k == de and para_k == para:
-                    sign = -1.0 if line.reversed else 1.0
-                    line_flow[(line.cobre_line_id, s)] = sign * val
+                    line_flow[(line.cobre_line_id, s)] = val
                 elif de_k == para and para_k == de:
-                    # Reversed-direction NWLISTOP row supplies the
-                    # opposite sign of what our alignment expects.
-                    sign = 1.0 if line.reversed else -1.0
-                    # Only fill if the canonical-direction row hasn't
-                    # already populated this slot.
-                    line_flow.setdefault((line.cobre_line_id, s), sign * val)
+                    # Reversed-ordering NWLISTOP row supplies the opposite sign
+                    # of what our alignment expects.  Only fill if the
+                    # canonical-direction row hasn't already populated this slot.
+                    line_flow.setdefault((line.cobre_line_id, s), -val)
 
     # --- Per-constraint LHS evaluation ---
     rows: list[dict] = []
     for c in constraints:
         cid = int(c["id"])
-        terms = _parse_expression(c["expression"])
+        terms = parse_expression(c["expression"])
         if not terms:
             continue
         # Determine the set of stages we can evaluate for this
@@ -258,7 +257,7 @@ def evaluate_lhs_newave(
                 # NEWAVE trace.  This affects VminOP only; RE/AGRINT
                 # never reference @-parameters.
                 if param_name is not None:
-                    resolved = _resolve_param_to_column(param_name)
+                    resolved = resolve_param_to_column(param_name)
                     if resolved is not None:
                         stage_complete = False
                         break
@@ -296,8 +295,8 @@ def evaluate_lhs_cobre(
 ) -> pl.DataFrame:
     """Evaluate each constraint's LHS from Cobre simulation outputs.
 
-    Reuses the dashboard's
-    :func:`cobre_bridge.dashboard.tabs.constraints_utils.evaluate_constraint_expressions`
+    Uses the shared
+    :func:`cobre_bridge.constraint_expr.evaluate_constraint_expressions`
     (which returns one row per (constraint, scenario, stage, block)) and
     collapses to mean across scenarios and blocks per (constraint, stage).
 
@@ -317,19 +316,28 @@ def evaluate_lhs_cobre(
             }
         )
 
-    from cobre_bridge.dashboard.data import scan_entity
-    from cobre_bridge.dashboard.tabs.constraints_utils import (
-        evaluate_constraint_expressions,
+    # Scan with the comparator's own simulation reader (which already takes the
+    # ``output/`` directory directly), instead of reaching into the dashboard's
+    # case-dir-based scanner via a synthetic ``cobre_output_dir.parent``. A
+    # present-but-corrupt parquet raises CobreReadError.
+    # NB: ``lf or pl.LazyFrame()`` would evaluate ``bool(lf)``, which polars
+    # rejects ("truth value of a LazyFrame is ambiguous") — use explicit None
+    # checks.
+    empty = pl.DataFrame(
+        schema={
+            "constraint_id": pl.Int32,
+            "stage_id": pl.Int32,
+            "lhs_value": pl.Float64,
+        }
     )
 
-    # The dashboard's scan_entity expects a *case* directory (it appends
-    # ``output/simulation/<entity>`` itself); we instead receive the
-    # ``output/`` directory in the comparator, so emulate the same scan
-    # one level shallower by constructing an artificial case_dir whose
-    # ``output`` subdir is what we already hold.
-    artificial_case_dir = cobre_output_dir.parent
-    hydros_lf = scan_entity(artificial_case_dir, "hydros")
-    exchanges_lf = scan_entity(artificial_case_dir, "exchanges")
+    hydros_lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    if hydros_lf is None:
+        # No hydro simulation → no operation data to evaluate the LHS against.
+        return empty
+    exchanges_lf = _scan_simulation_entity(cobre_output_dir, "exchanges")
+    if exchanges_lf is None:
+        exchanges_lf = pl.LazyFrame()
 
     lhs_pd: pd.DataFrame = evaluate_constraint_expressions(
         constraints, hydros_lf, exchanges_lf

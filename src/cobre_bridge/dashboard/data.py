@@ -17,6 +17,11 @@ import pandas as pd
 import polars as pl
 import pyarrow.parquet as pq
 
+from cobre_bridge.cobre_io import (
+    productivity_from_energy_parquet,
+    productivity_from_production_models,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -74,7 +79,7 @@ def load_stage_labels(case_dir: Path) -> dict[int, str]:
         if start:
             try:
                 labels[sid] = pd.to_datetime(start).strftime("%b %Y")
-            except Exception:
+            except (ValueError, TypeError):
                 labels[sid] = str(sid)
         else:
             labels[sid] = str(sid)
@@ -124,75 +129,6 @@ def load_ncs_bus_map(case_dir: Path) -> dict[int, int]:
     return {n["id"]: n["bus_id"] for n in d["non_controllable_sources"]}
 
 
-def _productivity_from_energy_parquet(case_dir: Path) -> dict[int, float]:
-    """Return ``{hydro_id: ρ_eq}`` from ``hydro_energy_productivity.parquet``.
-
-    Cobre's productivity-resolution-rules contract puts per-(hydro, stage)
-    ρ_eq in the parquet override table. We prefer the per-hydro NULL-stage_id
-    "default" row and fall back to the smallest-stage_id row when no default
-    exists. Returns ``{}`` when the file is absent.
-    """
-    parquet_path = case_dir / "system" / "hydro_energy_productivity.parquet"
-    if not parquet_path.exists():
-        return {}
-    try:
-        import pyarrow.parquet as pq
-
-        table = pq.read_table(parquet_path)
-    except (OSError, ImportError):
-        return {}
-    cols = table.column_names
-    if "hydro_id" not in cols or "equivalent_productivity_mw_per_m3s" not in cols:
-        return {}
-    hydro_ids = table["hydro_id"].to_pylist()
-    stage_ids = (
-        table["stage_id"].to_pylist() if "stage_id" in cols else [None] * len(hydro_ids)
-    )
-    values = table["equivalent_productivity_mw_per_m3s"].to_pylist()
-
-    result: dict[int, float] = {}
-    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
-        if sid is None and v is not None and hid not in result:
-            result[int(hid)] = float(v)
-
-    fallback: dict[int, tuple[int, float]] = {}
-    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
-        if sid is None or v is None:
-            continue
-        hid_i = int(hid)
-        if hid_i in result:
-            continue
-        cur = fallback.get(hid_i)
-        if cur is None or sid < cur[0]:
-            fallback[hid_i] = (sid, float(v))
-    for hid, (_sid, v) in fallback.items():
-        result[hid] = v
-    return result
-
-
-def _productivity_from_production_models(case_dir: Path) -> dict[int, float]:
-    """Legacy fallback: read ``productivity_mw_per_m3s`` from production-models JSON.
-
-    Pre-modernization cobre-bridge cases (before the parquet-only contract)
-    embed productivity in JSON stage_range entries. Returns ``{}`` when the
-    file is absent or carries only model selection.
-    """
-    pm_path = case_dir / "system" / "hydro_production_models.json"
-    if not pm_path.exists():
-        return {}
-    with open(pm_path) as f:
-        d = json.load(f)
-    result: dict[int, float] = {}
-    for m in d.get("production_models", []):
-        hydro_id = int(m.get("hydro_id"))
-        for entry in m.get("stage_ranges") or []:
-            prod = entry.get("productivity_mw_per_m3s")
-            if prod is not None:
-                result[hydro_id] = float(prod)
-                break
-    return result
-
-
 def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
     """Return hydro_id -> {bus_id, name, vol_max, vol_min, max_gen_mw, max_turbined}.
 
@@ -207,9 +143,9 @@ def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
         return {}
     with open(path) as f:
         d = json.load(f)
-    productivities = _productivity_from_energy_parquet(case_dir)
+    productivities = productivity_from_energy_parquet(case_dir)
     if not productivities:
-        productivities = _productivity_from_production_models(case_dir)
+        productivities = productivity_from_production_models(case_dir)
     result = {}
     for h in d["hydros"]:
         gen = h.get("generation", {})
@@ -241,32 +177,28 @@ def _stage_avg_mw(
     lf: pl.LazyFrame,
     mwh_col: str,
     stage_hours: dict[int, float],
-    group_cols: list[str],
-) -> dict[int, float] | pl.DataFrame:
+) -> dict[int, float]:
     """Compute stage-average MW from MWh summed across all blocks via LazyFrame.
 
-    Scans all blocks (no block_id filter), sums mwh_col per
-    (scenario, stage [+ group_cols]), divides by total stage hours, then
-    averages across scenarios.
+    Scans all blocks (no block_id filter), sums ``mwh_col`` per
+    (scenario, stage), divides by total stage hours, then averages across
+    scenarios.
 
-    Returns dict[int, float] mapping stage_id -> avg_mw when group_cols is empty,
-    or a Polars DataFrame with columns [stage_id, *group_cols, _avg_mw] otherwise.
+    Returns ``{stage_id: avg_mw}``.
     """
     hours_df = pl.DataFrame(
         {"stage_id": list(stage_hours.keys()), "_hours": list(stage_hours.values())}
     )
     result = (
-        lf.group_by(["scenario_id", "stage_id"] + group_cols)
+        lf.group_by(["scenario_id", "stage_id"])
         .agg(pl.col(mwh_col).sum())
         .join(hours_df.lazy(), on="stage_id")
         .with_columns((pl.col(mwh_col) / pl.col("_hours")).alias("_avg_mw"))
-        .group_by(["stage_id"] + group_cols)
+        .group_by("stage_id")
         .agg(pl.col("_avg_mw").mean())
         .sort("stage_id")
         .collect(engine="streaming")
     )
-    if group_cols:
-        return result
     return dict(zip(result["stage_id"].to_list(), result["_avg_mw"].to_list()))
 
 

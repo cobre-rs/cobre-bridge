@@ -11,17 +11,18 @@ metrics_grid).
 
 from __future__ import annotations
 
-import json
 import math
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from cobre_bridge.constraint_expr import evaluate_constraint_expressions
 from cobre_bridge.dashboard.tabs.constraints_utils import (
     build_constraints_summary_table,
-    evaluate_constraint_expressions,
 )
 from cobre_bridge.ui.html import (
+    escape_attr,
+    json_for_script,
     metric_card,
     metrics_grid,
     section_title,
@@ -307,7 +308,7 @@ def _build_lhs_section(data: DashboardData, lhs_df: pd.DataFrame) -> str:
     lhs_data = _build_constraint_lhs_data(
         data.gc_constraints, lhs_df, data.gc_bounds, data.stage_labels
     )
-    data_json = json.dumps(lhs_data, separators=(",", ":"))
+    data_json = json_for_script(lhs_data)
 
     options_html = "\n".join(
         f'<option value="{c["id"]}">{c["name"]}</option>' for c in data.gc_constraints
@@ -429,7 +430,7 @@ def _add_type_filter_and_row_attrs(
         ctype = c["name"].split("_")[0]
         modified = modified.replace(
             '<tr style="background:',
-            f'<tr data-cid="{cid}" data-type="{ctype}"'
+            f'<tr data-cid="{cid}" data-type="{escape_attr(ctype)}"'
             f' onclick="selectConstraint({cid})" style="cursor:pointer;background:',
             1,
         )

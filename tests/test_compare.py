@@ -293,6 +293,181 @@ class TestBoundsFromInputs:
         assert result == {}
 
 
+class TestCompareHydrosProductivity:
+    """Derived operational productivity = generation / turbined (m³/s)."""
+
+    @staticmethod
+    def _run():
+        import polars as pl
+
+        from cobre_bridge.comparators.results import _compare_hydros
+
+        # stage column min = 9 → offset 9 → stages map to 0 (turb>0) and 1
+        # (turb==0, must be filtered out of the productivity comparison).
+        nw_hydro = pl.DataFrame(
+            {
+                "newave_code": [1, 1, 1, 1],
+                "stage": [9, 9, 10, 10],
+                "variable": ["GHIDUH", "QTURUH", "GHIDUH", "QTURUH"],
+                "value": [30.0, 100.0, 0.0, 0.0],
+            }
+        )
+        cobre_hydro = pl.DataFrame(
+            {
+                "entity_id": [0, 0],
+                "stage_id": [0, 1],
+                "generation_mw": [33.0, 0.0],
+                "turbined_m3s": [100.0, 0.0],
+            }
+        )
+        nw_names = {1: "TEST"}
+        cobre_meta = {0: {"name": "TEST", "min_storage_hm3": 0.0}}
+        return _compare_hydros(nw_hydro, cobre_hydro, nw_names, cobre_meta)
+
+    def test_productivity_emitted_with_ratio_value(self) -> None:
+        prod = [r for r in self._run() if r.variable == "productivity_mw_per_m3s"]
+        assert len(prod) == 1  # only the turbined>0 stage
+        r = prod[0]
+        assert r.entity_type == "hydro"
+        assert r.stage == 0
+        assert r.newave_value == pytest.approx(0.3)  # 30 / 100
+        assert r.cobre_value == pytest.approx(0.33)  # 33 / 100
+
+    def test_zero_turbined_stage_filtered_out(self) -> None:
+        prod = [
+            r
+            for r in self._run()
+            if r.variable == "productivity_mw_per_m3s" and r.stage == 1
+        ]
+        assert prod == []  # turbined == 0 on both sides → no productivity row
+
+
+class TestReconstructedCost:
+    """Reconstruct NEWAVE live immediate cost from MEDIAS × our penalties."""
+
+    def test_read_converted_penalties(self, tmp_path: Path) -> None:
+        from cobre_bridge.comparators.cobre_readers import read_converted_penalties
+
+        (tmp_path / "penalties.json").write_text('{"hydro": {"spillage_cost": 0.5}}')
+        out = tmp_path / "output"
+        out.mkdir()
+        # Found at the case root (parent of output).
+        assert read_converted_penalties(out)["hydro"]["spillage_cost"] == 0.5
+        # Absent (neither dir nor its parent has penalties.json) → empty dict.
+        isolated = tmp_path / "sub"
+        isolated.mkdir()
+        assert read_converted_penalties(isolated / "output") == {}
+
+
+class TestOverviewCostCharts:
+    """Overview thermal-cost (CTERM) and other-costs (COPER − CTERM) charts."""
+
+    @staticmethod
+    def _data():
+        import polars as pl
+
+        # nw_offset will be 0 (min stage == 0). Distinctive values so the
+        # substring assertions can't false-match elsewhere in the plotly JSON.
+        nw_sin = pl.DataFrame(
+            {
+                "newave_code": [0, 0, 0, 0],
+                "stage": [0, 0, 1, 1],
+                "variable": ["COPER", "CTERM", "COPER", "CTERM"],
+                "value": [137.0, 100.0, 70.0, 95.0],  # 10⁶ R$
+            }
+        )
+        cobre = pl.DataFrame(
+            {
+                "stage_id": [0, 1],
+                "immediate_cost": [150.0e6, 50.0e6],
+                "future_cost": [0.0, 0.0],
+                "thermal_cost": [110.0e6, 90.0e6],
+            }
+        )
+        return nw_sin, cobre
+
+    def test_thermal_cost_chart_plots_cterm(self) -> None:
+        from cobre_bridge.comparators.charts import thermal_cost_chart
+
+        html = thermal_cost_chart(*self._data(), nw_offset=0)
+        assert "No CTERM" not in html
+        assert "NEWAVE CTERM" in html
+        assert "100.0" in html and "95.0" in html  # CTERM values
+        assert "110.0" in html  # Cobre thermal_cost / 1e6
+
+    def test_other_costs_chart_is_coper_minus_cterm(self) -> None:
+        from cobre_bridge.comparators.charts import other_costs_chart
+
+        html = other_costs_chart(*self._data(), nw_offset=0)
+        assert "No COPER" not in html
+        # NEWAVE COPER − CTERM: 137−100 = 37, 70−95 = −25 (negative, like the
+        # frozen-COPER post-study gap).
+        assert "37.0" in html and "-25.0" in html
+        # Cobre immediate − thermal: 150−110 = 40, 50−90 = −40.
+        assert "40.0" in html and "-40.0" in html
+
+    def test_stage_costs_reader_includes_thermal_cost(self, tmp_path: Path) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.cobre_readers import read_cobre_stage_costs
+
+        d = tmp_path / "simulation" / "costs" / "scenario_id=0000"
+        d.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "scenario_id": [0, 0],
+                "stage_id": [0, 0],
+                "block_id": [0, 1],
+                "immediate_cost": [10.0, 20.0],
+                "future_cost": [5.0, 5.0],
+                "thermal_cost": [8.0, 12.0],
+            }
+        ).write_parquet(d / "data.parquet")
+
+        df = read_cobre_stage_costs(tmp_path)
+        assert "thermal_cost" in df.columns
+        row = df.filter(pl.col("stage_id") == 0).row(0, named=True)
+        assert row["thermal_cost"] == pytest.approx(20.0)  # block sum 8 + 12
+        assert row["immediate_cost"] == pytest.approx(30.0)  # 10 + 20
+
+    def test_generic_violation_groups_all_newave_restriction_parcelas(self) -> None:
+        from cobre_bridge.comparators.charts import _resolve_cost_categories
+
+        # cobre-bridge converts the risk-aversion curve/surface (CAR/SAR),
+        # electric (RESTELETRICA), interchange (INTERC. MIN.), hydraulic
+        # (RHQ/RHV) and piecewise-linear (RLPP) restrictions ALL into generic
+        # constraints, so NEWAVE's separate parcelas must sum into the single
+        # "Generic Constr. Viol." row to compare against Cobre's aggregated
+        # generic_violation_cost.
+        nw_costs = {
+            "VIOLACAO CAR": 1.0e7,
+            "VIOLACAO SAR": 2.0e7,
+            "VIOL. RESTELETRICA": 3.0e7,
+            "VIOL. INTERC. MIN.": 4.0e7,
+            "VIOLACAO RHQ": 5.0e7,
+            "VIOLACAO RHV": 6.0e7,
+            "VIOL.RLPP DEFLMAX": 7.0e7,
+            "VIOL.RLPP DEFLMAXU": 8.0e7,
+            "VIOL.RLPP TURBMAX": 9.0e7,
+            "VIOL.RLPP TURBMAXU": 1.0e8,
+        }
+        cobre_costs = {
+            "generic_violation_cost": 5.5e8,
+            "storage_violation_cost": 1.0e7,
+        }
+
+        cats = {
+            label: (nw, cb)
+            for label, nw, cb, _ in _resolve_cost_categories(nw_costs, cobre_costs)
+        }
+        # All 10 NEWAVE parcelas land in one row, equal to Cobre's aggregate.
+        assert cats["Generic Constr. Viol."] == pytest.approx((5.5e8, 5.5e8))
+        # CAR/SAR no longer pollute the storage-bounds row (NEWAVE side empty;
+        # the row is now Cobre-only, carrying the individual-reservoir slack).
+        assert cats["Storage Bounds Viol."][0] == pytest.approx(0.0)
+        assert cats["Storage Bounds Viol."][1] == pytest.approx(1.0e7)
+
+
 # -------------------------------------------------------------------
 # Edge cases and error handling
 # -------------------------------------------------------------------
@@ -308,7 +483,7 @@ class TestEdgeCases:
             read_medias_system,
             read_medias_thermal,
             read_pmo_convergence,
-            read_pmo_productivity,
+            read_pmo_productivity_detail,
         )
 
         fake_dir = tmp_path / "nonexistent"
@@ -316,7 +491,7 @@ class TestEdgeCases:
         assert read_medias_thermal(fake_dir).is_empty()
         assert read_medias_system(fake_dir).is_empty()
         assert read_pmo_convergence(fake_dir).is_empty()
-        assert read_pmo_productivity(fake_dir).is_empty()
+        assert read_pmo_productivity_detail(fake_dir).is_empty()
 
     def test_cobre_readers_missing_dir(self, tmp_path: Path) -> None:
         """Cobre readers return empty DataFrames when dir missing."""
@@ -494,3 +669,441 @@ class TestComparisonReportIntegration:
         html = build_comparison_report(results, pctiles)
 
         assert "Plotly.newPlot" in html
+
+
+class TestProductivityDetail:
+    """Productivity-tab readers, assembly, and charts (no example/ deps).
+
+    The Productivity tab is a *static* conversion-fidelity check: NEWAVE pmo
+    productivities vs what cobre-bridge computes from the same HIDR cadastro,
+    plus a per-stage realized-productivity line chart and a grouped
+    building-blocks table.
+    """
+
+    @staticmethod
+    def _write_hydros_json(tmp_path: Path) -> None:
+        """Write a tiny ``system/hydros.json`` (building blocks only)."""
+        import json
+
+        system = tmp_path / "system"
+        system.mkdir(parents=True, exist_ok=True)
+        (system / "hydros.json").write_text(
+            json.dumps(
+                {
+                    "hydros": [
+                        {
+                            "id": 0,
+                            "name": "ALPHA",
+                            "reservoir": {
+                                "min_storage_hm3": 100.0,
+                                "max_storage_hm3": 500.0,
+                            },
+                            "specific_productivity_mw_per_m3s_per_m": 0.009,
+                            "tailrace": {
+                                "type": "polynomial",
+                                "coefficients": [672.0],
+                            },
+                            "hydraulic_losses": {"type": "constant", "value_m": 0.8},
+                        },
+                        {
+                            "id": 1,
+                            "name": "BETA",
+                            "reservoir": {
+                                "min_storage_hm3": 0.0,
+                                "max_storage_hm3": 0.0,
+                            },
+                            "specific_productivity_mw_per_m3s_per_m": 0.01,
+                            "tailrace": {
+                                "type": "polynomial",
+                                "coefficients": [400.0],
+                            },
+                            "hydraulic_losses": {"type": "constant", "value_m": 0.0},
+                        },
+                    ]
+                }
+            )
+        )
+
+    def test_cobre_productivity_detail_reader(self, tmp_path: Path) -> None:
+        """Cobre reader surfaces the converted building blocks per hydro."""
+        from cobre_bridge.comparators.cobre_readers import (
+            read_cobre_productivity_detail,
+        )
+
+        out = tmp_path / "output"
+        out.mkdir()
+        self._write_hydros_json(tmp_path)  # hydros.json resolves from case_dir
+
+        detail = read_cobre_productivity_detail(out)
+        assert set(detail) == {0, 1}
+        alpha = detail[0]
+        assert alpha["name"] == "ALPHA"
+        assert alpha["specific_productivity"] == pytest.approx(0.009)
+        assert alpha["tailwater_m"] == pytest.approx(672.0)
+        assert alpha["losses_m"] == pytest.approx(0.8)
+        assert alpha["vmin_hm3"] == pytest.approx(100.0)
+        assert alpha["vmax_hm3"] == pytest.approx(500.0)
+        # The reader no longer reads point/equivalent/accumulated from Cobre.
+        assert "point" not in alpha
+        assert "equivalent" not in alpha
+        assert "accumulated" not in alpha
+
+    def test_cobre_productivity_detail_missing_dir(self, tmp_path: Path) -> None:
+        from cobre_bridge.comparators.cobre_readers import (
+            read_cobre_productivity_detail,
+        )
+
+        assert read_cobre_productivity_detail(tmp_path / "nope") == {}
+
+    def test_pmo_productivity_detail_missing_pmo(self, tmp_path: Path) -> None:
+        from cobre_bridge.comparators.newave_readers import (
+            read_pmo_productivity_detail,
+        )
+
+        df = read_pmo_productivity_detail(tmp_path / "nope")
+        assert df.is_empty()
+        assert df.columns == [
+            "plant_name",
+            "altura_min",
+            "altura_65",
+            "altura_max",
+            "equivalent",
+            "accumulated_earm",
+        ]
+
+    @staticmethod
+    def _detail_df():
+        """A small productivity_detail frame for the chart/table smoke tests.
+
+        ``cb_point`` / ``cb_equivalent`` / ``cb_accumulated`` are the
+        cobre-bridge *static* values (here close to the pmo side, so the
+        scatters cluster on y = x).
+        """
+        import polars as pl
+
+        from cobre_bridge.comparators.results import _PRODUCTIVITY_DETAIL_SCHEMA
+
+        return pl.DataFrame(
+            {
+                "plant_name": ["ALPHA", "BETA"],
+                "newave_code": [1, 2],
+                "cobre_id": [0, 1],
+                "nw_altura_min": [0.69, None],
+                "nw_altura_65": [0.81, 0.40],
+                "nw_altura_max": [0.85, None],
+                "nw_equivalent": [0.7865, 0.50],
+                "nw_accumulated_earm": [5.35, 0.50],
+                "nw_specific_productivity": [0.009, 0.0102],
+                "nw_tailwater_m": [672.0, 400.0],
+                "nw_losses_m": [0.8, 0.0],
+                "nw_vmin_hm3": [100.0, 0.0],
+                "nw_vmax_hm3": [500.0, 0.0],
+                "cb_point": [0.811, 0.401],
+                "cb_equivalent": [0.7860, 0.50],
+                "cb_accumulated": [5.349, 0.50],
+                "cb_specific_productivity": [0.009, 0.0098],
+                "cb_tailwater_m": [672.0, 405.0],
+                "cb_losses_m": [0.8, 0.0],
+                "cb_vmin_hm3": [100.0, 0.0],
+                "cb_vmax_hm3": [500.0, 0.0],
+            },
+            schema=_PRODUCTIVITY_DETAIL_SCHEMA,
+        )
+
+    def test_build_productivity_detail_computes_cobre_bridge_side(self) -> None:
+        """cb_point/equivalent/accumulated come from the converter, not Cobre."""
+        import pandas as pd
+
+        from cobre_bridge.comparators.alignment import (
+            EntityAlignment,
+            HydroEntity,
+        )
+        from cobre_bridge.comparators.results import _build_productivity_detail
+        from cobre_bridge.productivity import compute_productivity
+
+        alignment = EntityAlignment(
+            hydros=[
+                HydroEntity(
+                    newave_code=6, cobre_id=69, name="ALPHA", has_reservoir=True
+                )
+            ]
+        )
+        nw_detail = __import__("polars").DataFrame(
+            {
+                "plant_name": ["ALPHA"],
+                "altura_min": [0.6926],
+                "altura_65": [0.813],
+                "altura_max": [0.8545],
+                "equivalent": [0.7865],
+                "accumulated_earm": [5.3517],
+            }
+        )
+        # Monthly-regulated plant with a simple linear volume→cota polynomial:
+        #   h(v) = 600 + 0.2 v ;  v_65 = vmin + 0.65 (vmax − vmin) = 360 ;
+        #   h(360) = 672 ; net_drop = 672 − 200 = 472 ; additive losses 0.8 ;
+        #   ρ_point = 0.009 × (472 − 0.8) = 4.2408
+        cadastro = pd.DataFrame(
+            {
+                "produtibilidade_especifica": [0.009],
+                "canal_fuga_medio": [200.0],
+                "perdas": [0.8],
+                "tipo_perda": [2],
+                "tipo_regulacao": ["M"],
+                "volume_minimo": [100.0],
+                "volume_maximo": [500.0],
+                "volume_referencia": [360.0],
+                "a0_volume_cota": [600.0],
+                "a1_volume_cota": [0.2],
+                "a2_volume_cota": [0.0],
+                "a3_volume_cota": [0.0],
+                "a4_volume_cota": [0.0],
+            },
+            index=pd.Index([6], name="codigo_usina"),
+        )
+        cobre_detail = {
+            69: {
+                "name": "ALPHA",
+                "specific_productivity": 0.009,
+                "tailwater_m": 200.0,
+                "losses_m": 0.8,
+                "vmin_hm3": 100.0,
+                "vmax_hm3": 500.0,
+            }
+        }
+        cb_accumulated = {6: 12.34}
+        df = _build_productivity_detail(
+            alignment, nw_detail, cadastro, cobre_detail, cb_accumulated
+        )
+        assert df.height == 1
+        row = df.row(0, named=True)
+        # NEWAVE pmo side carried through.
+        assert row["nw_altura_65"] == pytest.approx(0.813)
+        assert row["nw_equivalent"] == pytest.approx(0.7865)
+        assert row["nw_accumulated_earm"] == pytest.approx(5.3517)
+        # cobre-bridge side computed from the cadastro / cascade map.
+        expected_point = compute_productivity(cadastro.loc[6])
+        assert row["cb_point"] == pytest.approx(expected_point)
+        assert row["cb_point"] == pytest.approx(4.2408)
+        # Monthly plant → stored_energy_productivity integrates; just assert
+        # it is populated and finite.
+        assert row["cb_equivalent"] is not None
+        assert row["cb_accumulated"] == pytest.approx(12.34)
+        # Building blocks from system/hydros.json.
+        assert row["cb_tailwater_m"] == pytest.approx(200.0)
+
+    def test_build_detail_run_of_river_uses_volume_referencia(self) -> None:
+        """Daily-regulation ('D') plants compare against volume_referencia, not
+        the dead-storage volume_minimo/maximo the converter freezes them off."""
+        import pandas as pd
+        import polars as pl
+
+        from cobre_bridge.comparators.alignment import (
+            EntityAlignment,
+            HydroEntity,
+        )
+        from cobre_bridge.comparators.results import _build_productivity_detail
+
+        alignment = EntityAlignment(
+            hydros=[
+                HydroEntity(newave_code=4, cobre_id=7, name="ROR", has_reservoir=False)
+            ]
+        )
+        cadastro = pd.DataFrame(
+            {
+                "tipo_regulacao": ["D"],
+                "volume_minimo": [304.0],
+                "volume_maximo": [304.0],
+                "volume_referencia": [265.9],
+            },
+            index=pd.Index([4], name="codigo_usina"),
+        )
+        cobre_detail = {7: {"name": "ROR", "vmin_hm3": 265.9, "vmax_hm3": 265.9}}
+        df = _build_productivity_detail(
+            alignment, pl.DataFrame({"plant_name": ["ROR"]}), cadastro, cobre_detail, {}
+        )
+        row = df.row(0, named=True)
+        # NEWAVE side uses volume_referencia (265.9), matching Cobre — no
+        # spurious delta vs the cadastro volume_minimo/maximo (304).
+        assert row["nw_vmin_hm3"] == pytest.approx(265.9)
+        assert row["nw_vmax_hm3"] == pytest.approx(265.9)
+        assert row["cb_vmin_hm3"] == pytest.approx(265.9)
+
+    def test_comparison_scatter_renders_series_and_stats(self) -> None:
+        from cobre_bridge.comparators.charts import (
+            productivity_comparison_scatter,
+        )
+
+        df = self._detail_df()
+        for kind, nw_label, cb_label in (
+            ("point", "produtibilidade_altura_65", "compute_productivity"),
+            (
+                "equivalent",
+                "produtibilidade_equivalente_volmin_volmax",
+                "stored_energy_productivity",
+            ),
+            (
+                "accumulated",
+                "produtibilidade_acumulada_calculo_earm",
+                "accumulated_integrated_productivity",
+            ),
+        ):
+            html = productivity_comparison_scatter(df, kind)
+            assert "Plotly.newPlot" in html
+            assert nw_label in html
+            assert cb_label in html
+            assert "rel. err" in html
+            assert "y = x" in html
+
+    def test_comparison_scatter_empty_and_bad_kind(self) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.charts import (
+            productivity_comparison_scatter,
+        )
+
+        assert "No productivity data" in productivity_comparison_scatter(
+            pl.DataFrame(), "point"
+        )
+        with pytest.raises(ValueError, match="Unknown productivity kind"):
+            productivity_comparison_scatter(self._detail_df(), "bogus")
+
+    @staticmethod
+    def _per_stage_results():
+        """Per-stage productivity_mw_per_m3s ResultComparison rows, 2 plants."""
+        from cobre_bridge.comparators.results import ResultComparison
+
+        rows: list[ResultComparison] = []
+        for name, code, cid, base in (("ALPHA", 1, 0, 0.78), ("BETA", 2, 1, 0.40)):
+            for stage in range(3):
+                nw = base + 0.01 * stage
+                cb = base + 0.012 * stage
+                rows.append(
+                    ResultComparison(
+                        entity_type="hydro",
+                        entity_name=name,
+                        newave_code=code,
+                        cobre_id=cid,
+                        stage=stage,
+                        variable="productivity_mw_per_m3s",
+                        newave_value=nw,
+                        cobre_value=cb,
+                        abs_diff=abs(nw - cb),
+                        rel_diff=abs(nw - cb) / nw,
+                    )
+                )
+        return rows
+
+    def test_per_stage_chart_reuses_shared_per_plant_dropdown(self) -> None:
+        from cobre_bridge.comparators.charts import productivity_per_stage_chart
+
+        html = productivity_per_stage_chart(self._per_stage_results())
+        # Reuses the shared interactive per-plant <select> dropdown widget
+        # (same as the hydro/thermal detail tabs) — every plant is selectable.
+        assert "<select" in html
+        assert "ALPHA (1)" in html and "BETA (2)" in html
+        assert "prodstage-chart-productivity-mw-per-m3s" in html
+        assert "Realized productivity" in html
+        # Per-stage NEWAVE + Cobre arrays embedded for the JS to plot.
+        assert "productivity_mw_per_m3s_nw" in html
+        assert "productivity_mw_per_m3s_cb" in html
+
+    def test_per_stage_chart_no_rows(self) -> None:
+        from cobre_bridge.comparators.charts import productivity_per_stage_chart
+
+        assert "No per-stage productivity data" in productivity_per_stage_chart([])
+
+    def test_blocks_table_grouped_header_and_highlight(self) -> None:
+        from cobre_bridge.comparators.charts import productivity_blocks_table
+
+        html = productivity_blocks_table(self._detail_df())
+        assert "cost-breakdown-table" in html
+        assert "prod-blocks-table" in html
+        assert "Productivity Building Blocks" in html
+        # Two-level grouped header: metric label spans 3 sub-columns.
+        assert 'colspan="3"' in html
+        assert "ρ_esp" in html
+        assert "Tailwater" in html
+        # Per-group sub-columns and group tint/separator cues.
+        assert ">Δ%<" in html
+        assert "cb-group-tint" in html
+        assert "cb-group-sep" in html
+        # BETA: ρ_esp 0.0102 vs 0.0098 (~−3.9%) → Δ% cell highlighted.
+        assert "cb-diff-pos" in html
+        assert "ALPHA" in html and "BETA" in html
+
+    def test_blocks_table_empty(self) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.charts import productivity_blocks_table
+
+        assert "No productivity data" in productivity_blocks_table(pl.DataFrame())
+
+
+class TestEvaluateLhsCobre:
+    """Regression cover for evaluate_lhs_cobre's simulation-scan paths.
+
+    The real-LazyFrame path was untested and regressed once: `lf or
+    pl.LazyFrame()` evaluated bool(lf), which polars rejects.
+    """
+
+    @staticmethod
+    def _storage_constraint() -> list[dict]:
+        return [
+            {
+                "id": 0,
+                "name": "VminOP_0",
+                "expression": "hydro_storage(0)",
+                "sense": ">=",
+                "slack": {"enabled": False},
+            }
+        ]
+
+    def test_evaluates_lhs_from_a_real_simulation_lazyframe(self) -> None:
+        """A present simulation (LazyFrame, not None) must evaluate, not raise."""
+        import polars as pl
+
+        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+
+        hydros = pl.DataFrame(
+            {
+                "scenario_id": [0, 0],
+                "stage_id": [0, 1],
+                "block_id": [0, 0],
+                "hydro_id": [0, 0],
+                "storage_final_hm3": [100.0, 200.0],
+                "generation_mw": [10.0, 20.0],
+            }
+        ).lazy()
+
+        def fake_scan(_output_dir, entity):
+            return hydros if entity == "hydros" else None
+
+        with patch(
+            "cobre_bridge.comparators.constraints_compare._scan_simulation_entity",
+            side_effect=fake_scan,
+        ):
+            result = evaluate_lhs_cobre(self._storage_constraint(), Path("/out"))
+
+        rows = {
+            (r["constraint_id"], r["stage_id"]): r["lhs_value"]
+            for r in result.iter_rows(named=True)
+        }
+        assert rows[(0, 0)] == pytest.approx(100.0)
+        assert rows[(0, 1)] == pytest.approx(200.0)
+
+    def test_missing_simulation_returns_empty(self) -> None:
+        """Both entities absent (None) → empty frame, no error."""
+        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+
+        with patch(
+            "cobre_bridge.comparators.constraints_compare._scan_simulation_entity",
+            return_value=None,
+        ):
+            result = evaluate_lhs_cobre(self._storage_constraint(), Path("/out"))
+        assert result.is_empty()
+
+    def test_no_constraints_returns_empty_without_scanning(self) -> None:
+        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+
+        result = evaluate_lhs_cobre([], Path("/out"))
+        assert result.is_empty()

@@ -8,6 +8,7 @@ GTMIN/IPTER overrides) and ``manutt.dat`` (scheduled maintenance windows).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 import numpy as np
@@ -16,6 +17,7 @@ import pyarrow as pa
 from inewave.newave import Clast, Conft, Term
 
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
+from cobre_bridge.horizon import build_stage_dates, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -38,6 +40,45 @@ _SCHEMA_URL = (
 )
 
 
+def thermal_generation_bounds(nw_files: NewaveFiles) -> dict[int, tuple[float, float]]:
+    """Return ``{codigo_usina: (min_mw, max_mw)}`` static generation bounds.
+
+    These are the plant-level (non-stage-varying) bounds written to
+    ``thermals.json`` as ``generation.min_mw`` / ``generation.max_mw``, and the
+    interval Cobre's semantic validator enforces on each
+    ``past_anticipated_commitments.values_mw`` entry:
+
+    * ``max_mw = potencia_instalada * fator_capacidade_maximo / 100`` and
+    * ``min_mw = geracao_minima``,
+
+    both from ``term.dat`` month 1 (falling back to any month for plants absent
+    from month 1, with ``min_mw = 0``). Plants absent from ``term.dat`` map to
+    ``(0.0, 0.0)``.
+    """
+    term = Term.read(str(nw_files.term))
+    term_df = term.usinas
+    bounds: dict[int, tuple[float, float]] = {}
+    if term_df is None:
+        return bounds
+
+    month1 = term_df[term_df["mes"] == 1]
+    for _, row in month1.iterrows():
+        code = int(row["codigo_usina"])
+        cap = float(row["potencia_instalada"])
+        max_factor = float(row["fator_capacidade_maximo"])
+        bounds[code] = (float(row["geracao_minima"]), cap * max_factor / 100.0)
+
+    # Plants present in term.dat but not in month 1: use any row, min_mw = 0.
+    for _, row in term_df.iterrows():
+        code = int(row["codigo_usina"])
+        if code not in bounds:
+            cap = float(row["potencia_instalada"])
+            max_factor = float(row["fator_capacidade_maximo"])
+            bounds[code] = (0.0, cap * max_factor / 100.0)
+
+    return bounds
+
+
 def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE thermal plant data to a Cobre ``thermals.json`` dict.
 
@@ -54,11 +95,9 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     """
     conft = Conft.read(str(nw_files.conft))
     clast = Clast.read(str(nw_files.clast))
-    term = Term.read(str(nw_files.term))
 
     conft_df = conft.usinas
     clast_df = clast.usinas
-    term_df = term.usinas
 
     # Anticipated dispatch (NEWAVE GNL) — gated by dger.despacho_antecipado_gnl.
     # Returns an empty dict when the flag is off, so non-GNL cases incur
@@ -72,33 +111,9 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         for _, row in first_year.iterrows():
             cost_map[int(row["codigo_usina"])] = float(row["valor"])
 
-    # Build term lookup: codigo_usina -> (capacity, max_factor, min_gen_month1).
-    term_map: dict[int, dict[str, float]] = {}
-    if term_df is not None:
-        # Use the first month's geracao_minima (mes == 1).
-        month1 = term_df[term_df["mes"] == 1]
-        for _, row in month1.iterrows():
-            code = int(row["codigo_usina"])
-            cap = float(row["potencia_instalada"])
-            max_factor = float(row["fator_capacidade_maximo"])
-            gen_min = float(row["geracao_minima"])
-            term_map[code] = {
-                "capacity": cap,
-                "max_factor": max_factor,
-                "gen_min": gen_min,
-            }
-
-        # For plants that appear in term but not in month1, use any row.
-        for _, row in term_df.iterrows():
-            code = int(row["codigo_usina"])
-            if code not in term_map:
-                cap = float(row["potencia_instalada"])
-                max_factor = float(row["fator_capacidade_maximo"])
-                term_map[code] = {
-                    "capacity": cap,
-                    "max_factor": max_factor,
-                    "gen_min": 0.0,
-                }
+    # Static (min_mw, max_mw) per plant — single-sourced so the anticipated
+    # commitment seeding clamps against the very bounds written here.
+    gen_bounds = thermal_generation_bounds(nw_files)
 
     thermals: list[dict] = []
     for _, row in conft_df.iterrows():
@@ -108,14 +123,7 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
 
         bus_id = id_map.bus_id(submercado)
 
-        term_info = term_map.get(
-            newave_code, {"capacity": 0.0, "max_factor": 1.0, "gen_min": 0.0}
-        )
-        capacity = term_info["capacity"]
-        max_factor = term_info["max_factor"]
-        gen_min = term_info["gen_min"]
-
-        max_mw = capacity * max_factor / 100.0
+        gen_min, max_mw = gen_bounds.get(newave_code, (0.0, 0.0))
         cost = cost_map.get(newave_code, 0.0)
 
         anticipated = anticipated_by_code.get(newave_code)
@@ -144,21 +152,6 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         "$schema": _SCHEMA_URL,
         "thermals": thermals,
     }
-
-
-def _build_stage_dates(
-    start_year: int, start_month: int, total_stages: int
-) -> list[date]:
-    """Return a list of first-of-month dates for each study stage."""
-    stages: list[date] = []
-    y, m = start_year, start_month
-    for _ in range(total_stages):
-        stages.append(date(y, m, 1))
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-    return stages
 
 
 def _month_date_to_stage_index(
@@ -253,6 +246,154 @@ def _stage_to_study_year(
     return min(year, num_anos)
 
 
+@dataclass
+class _StageInputs:
+    """Mutable per-stage thermal parameters threaded through the 6 bound steps.
+
+    Each ``_step*`` helper transforms this state in place, mirroring NEWAVE's
+    sintetizador processing order. Making the state explicit lets every step —
+    including the FCMAX/GTMIN interaction in :func:`_step6_evaluate_bounds` — be
+    unit-tested in isolation, which the former mutate-in-place monolith over
+    shared loop locals could not.
+    """
+
+    potencia: float
+    fcmax: float
+    teif: float
+    ip: float
+    gen_min: float
+
+
+def _step1_zero_ip_before_maintenance(
+    state: _StageInputs, stage_idx: int, maint_end_stage: int
+) -> None:
+    """Step 1: zero IP for ALL plants in stages before the maintenance end."""
+    if stage_idx < maint_end_stage:
+        state.ip = 0.0
+
+
+def _step2_null_potencia_for_potef(
+    state: _StageInputs, stage_idx: int, maint_end_stage: int, has_potef: bool
+) -> None:
+    """Step 2: null ``potencia`` for stages >= maint end when EXPT POTEF exists.
+
+    EXPT restores the real value in step 4; zeroing first means a plant with no
+    POTEF window covering a stage stays at zero capacity there.
+    """
+    if stage_idx >= maint_end_stage and has_potef:
+        state.potencia = 0.0
+
+
+def _step3_null_gen_min_for_gtmin(
+    state: _StageInputs, stage_idx: int, maint_end_stage: int, has_gtmin: bool
+) -> None:
+    """Step 3: null ``gen_min`` for stages >= maint end when EXPT GTMIN exists.
+
+    EXPT restores the real value in step 4.
+    """
+    if stage_idx >= maint_end_stage and has_gtmin:
+        state.gen_min = 0.0
+
+
+def _step4_apply_expt_overrides(
+    state: _StageInputs,
+    overrides: list[dict],
+    ref_date: date,
+    is_post_study: bool,
+    last_stage_date: date,
+) -> None:
+    """Step 4: apply EXPT overrides (POTEF/FCMAX/TEIFT/GTMIN/IPTER) in file order.
+
+    Closed windows test against ``ref_date`` (frozen at the last study stage in
+    the post-study tail); an open-ended override blankets the whole tail and,
+    coming last in file order, wins over any per-month window for the stage.
+    """
+    for override in overrides:
+        ov_start = pd.Timestamp(override["data_inicio"]).date()
+        ov_end_raw = override["data_fim"]
+        open_ended = pd.isna(ov_end_raw)
+        ov_end = last_stage_date if open_ended else pd.Timestamp(ov_end_raw).date()
+        if open_ended and is_post_study:
+            applies = True
+        else:
+            applies = ov_start <= ref_date <= ov_end
+        if not applies:
+            continue
+
+        tipo = override["tipo"]
+        value = override["modificacao"]
+        if tipo == "POTEF":
+            state.potencia = value
+        elif tipo == "FCMAX":
+            state.fcmax = value
+        elif tipo == "TEIFT":
+            state.teif = value
+        elif tipo == "GTMIN":
+            state.gen_min = value
+        elif tipo == "IPTER":
+            state.ip = value
+
+
+def _step4b_apply_potef_availability(
+    state: _StageInputs,
+    windows: list[tuple[date, date]] | None,
+    stage_date: date,
+) -> None:
+    """Step 4b: a POTEF schedule defines the *only* periods the plant is available.
+
+    Outside every window (tested against the ACTUAL stage date, not the frozen
+    ``ref_date``) the plant is out of service for that stage.
+    """
+    if windows is not None and not any(ws <= stage_date <= we for ws, we in windows):
+        state.potencia = 0.0
+        state.gen_min = 0.0
+
+
+def _step5_apply_maint_reduction(
+    state: _StageInputs,
+    maint_reduction: np.ndarray | None,
+    stage_idx: int,
+    maint_end_stage: int,
+) -> None:
+    """Step 5: MANUTT subtracts its capacity reduction from ``potencia``.
+
+    Applied only in stages before the maintenance end, matching sintetizador,
+    which applies EXPT (step 4) before MANUTT.
+    """
+    if maint_reduction is not None and stage_idx < maint_end_stage:
+        state.potencia -= float(maint_reduction[stage_idx])
+
+
+def _step6_evaluate_bounds(state: _StageInputs) -> tuple[float, float, bool]:
+    """Step 6: evaluate ``(min_mw, max_mw, gtmin_above_capacity)``.
+
+    Per NEWAVE, FCMAX sets the maximum generation and GTMIN the minimum, and the
+    two are **independent**::
+
+        capacity_max = potencia * (fcmax/100) * ((100-ip)/100) * ((100-teif)/100)
+        min_mw       = gen_min   (GTMIN)
+
+    NEWAVE treats ``min_mw > capacity_max`` as a data error (an inflexible plant
+    whose minimum exceeds its available capacity). Cobre honors the inflexible
+    GTMIN and lifts the upper bound to ``max(capacity_max, gen_min)`` to keep the
+    LP feasible, returning ``gtmin_above_capacity`` so the caller can surface the
+    (rare) condition. The former code instead clamped ``min_mw`` DOWN to
+    ``capacity_max``, silently forcing the plant below its GTMIN.
+    """
+    potencia = max(0.0, state.potencia)
+    capacity_max = max(
+        0.0,
+        potencia
+        * (state.fcmax / 100.0)
+        * ((100.0 - state.ip) / 100.0)
+        * ((100.0 - state.teif) / 100.0),
+    )
+    min_mw = max(0.0, state.gen_min)
+    gtmin_above_capacity = min_mw > capacity_max
+    max_mw = max(capacity_max, min_mw)
+    return min_mw, max_mw, gtmin_above_capacity
+
+
 def convert_thermal_bounds(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
@@ -279,14 +420,14 @@ def convert_thermal_bounds(
     from inewave.newave import Dger, Expt, Manutt
 
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    num_anos = horizon.num_anos
     num_maint_years: int = dger.num_anos_manutencao_utes or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
-    first_year_stages = 13 - start_month
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
+    first_year_stages = horizon.first_year_stages
 
     # ------------------------------------------------------------------
     # 0. Build per-stage cost lookup from CLAST.DAT.
@@ -346,7 +487,7 @@ def convert_thermal_bounds(
     # period covers March-December 2026 (10 stages), not 12.
     maint_end_stage = num_maint_years * 12 + (1 - start_month)
 
-    stage_dates = _build_stage_dates(start_year, start_month, total_stages)
+    stage_dates = build_stage_dates(start_year, start_month, total_stages)
 
     # ------------------------------------------------------------------
     # 1. Build base values per (thermal_code, calendar_month) from term.
@@ -474,6 +615,8 @@ def convert_thermal_bounds(
     rows_min: list[float] = []
     rows_max: list[float] = []
     rows_cost: list[float | None] = []
+    # Plants where GTMIN exceeded the FCMAX-derived capacity (warned once each).
+    gtmin_above_capacity_codes: set[int] = set()
 
     for newave_code in sorted(all_codes):
         try:
@@ -494,79 +637,46 @@ def convert_thermal_bounds(
             effective = _apply_maint_to_capacity(base_cap, maint_rows, stage_dates)
             maint_reduction = np.maximum(0.0, base_cap - effective)
 
+        # NEWAVE freezes the post-study tail at the LAST STUDY STAGE's
+        # configuration: it re-uses neither the per-calendar-month base nor the
+        # per-month EXPT windows dated inside the tail.
+        # So for post-study stages we evaluate the
+        # base and windowed overrides at the last-study-stage date (``ref_date``),
+        # while open-ended overrides still apply across the tail and POTEF
+        # availability (step 4b) uses the ACTUAL stage date.
+        last_study_idx = study_months - 1
         for stage_idx, stage_date in enumerate(stage_dates):
-            cal_month = stage_date.month
-            vals = _base(newave_code, cal_month)
-            potencia = vals["potencia"]
-            fcmax = vals["fcmax"]
-            teif = vals["teif"]
-            ip = vals["ip"]
-            gen_min = vals["gen_min"]
+            is_post_study = stage_idx >= study_months
+            ref_date = stage_dates[last_study_idx] if is_post_study else stage_date
 
-            # Step 1: global IP zeroing before maintenance_end.
-            if stage_idx < maint_end_stage:
-                ip = 0.0
+            cal_month = ref_date.month
+            state = _StageInputs(**_base(newave_code, cal_month))
 
-            # Step 2: null potencia for stages >= maint_end
-            # if this plant has POTEF overrides (EXPT will restore).
-            if stage_idx >= maint_end_stage and newave_code in codes_with_potef:
-                potencia = 0.0
-
-            # Step 3: null gen_min for stages >= maint_end
-            # if this plant has GTMIN overrides (EXPT will restore).
-            if stage_idx >= maint_end_stage and newave_code in codes_with_gtmin:
-                gen_min = 0.0
-
-            # Step 4: apply EXPT overrides in file order.
-            for override in overrides:
-                ov_start = pd.Timestamp(override["data_inicio"]).date()
-                ov_end_raw = override["data_fim"]
-                if pd.isna(ov_end_raw):
-                    ov_end = stage_dates[-1]
-                else:
-                    ov_end = pd.Timestamp(ov_end_raw).date()
-
-                if not (ov_start <= stage_date <= ov_end):
-                    continue
-
-                tipo = override["tipo"]
-                value = override["modificacao"]
-                if tipo == "POTEF":
-                    potencia = value
-                elif tipo == "FCMAX":
-                    fcmax = value
-                elif tipo == "TEIFT":
-                    teif = value
-                elif tipo == "GTMIN":
-                    gen_min = value
-                elif tipo == "IPTER":
-                    ip = value
-
-            # Step 4b: a POTEF schedule defines the *only* periods the
-            # plant is available. If no POTEF window covers the current
-            # stage, the plant is out of service for that stage.
-            windows = potef_windows.get(newave_code)
-            if windows is not None and not any(
-                ws <= stage_date <= we for ws, we in windows
-            ):
-                potencia = 0.0
-                gen_min = 0.0
-
-            # Step 5: MANUTT subtracts from potencia (only before maint_end).
-            if maint_reduction is not None and stage_idx < maint_end_stage:
-                potencia -= float(maint_reduction[stage_idx])
-
-            potencia = max(0.0, potencia)
-
-            # Step 6: evaluate formula.
-            max_mw = (
-                potencia
-                * (fcmax / 100.0)
-                * ((100.0 - ip) / 100.0)
-                * ((100.0 - teif) / 100.0)
+            _step1_zero_ip_before_maintenance(state, stage_idx, maint_end_stage)
+            _step2_null_potencia_for_potef(
+                state,
+                stage_idx,
+                maint_end_stage,
+                newave_code in codes_with_potef,
             )
-            max_mw = max(0.0, max_mw)
-            min_mw = max(0.0, min(gen_min, max_mw))
+            _step3_null_gen_min_for_gtmin(
+                state,
+                stage_idx,
+                maint_end_stage,
+                newave_code in codes_with_gtmin,
+            )
+            _step4_apply_expt_overrides(
+                state, overrides, ref_date, is_post_study, stage_dates[-1]
+            )
+            _step4b_apply_potef_availability(
+                state, potef_windows.get(newave_code), stage_date
+            )
+            _step5_apply_maint_reduction(
+                state, maint_reduction, stage_idx, maint_end_stage
+            )
+            min_mw, max_mw, gtmin_above_capacity = _step6_evaluate_bounds(state)
+            if gtmin_above_capacity:
+                gtmin_above_capacity_codes.add(newave_code)
 
             # Per-stage cost override from CLAST (only for varying-cost thermals).
             stage_cost: float | None = None
@@ -591,6 +701,16 @@ def convert_thermal_bounds(
             rows_min.append(min_mw)
             rows_max.append(max_mw)
             rows_cost.append(stage_cost)
+
+    if gtmin_above_capacity_codes:
+        _LOG.warning(
+            "GTMIN exceeds the FCMAX-derived capacity for %d thermal plant(s) "
+            "%s in at least one stage; honoring GTMIN (NEWAVE rejects such "
+            "min > max inputs). Check EXPT FCMAX/GTMIN and MANUTT for these "
+            "plants.",
+            len(gtmin_above_capacity_codes),
+            sorted(gtmin_above_capacity_codes),
+        )
 
     if not rows_thermal_id:
         return None

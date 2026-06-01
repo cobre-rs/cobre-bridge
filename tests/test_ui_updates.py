@@ -30,9 +30,18 @@ def test_generation_colors_keys() -> None:
 
 def test_generation_colors_values() -> None:
     """GENERATION_COLORS values must match the specified hex codes."""
-    assert GENERATION_COLORS["hydro"] == "#3B82F6"
+    # hydro shares COLORS["hydro"] so the entity reads identically across the
+    # generation charts and the hydro tab (resolved hydro colour collision).
+    assert GENERATION_COLORS["hydro"] == "#4A90B8"
     assert GENERATION_COLORS["thermal"] == "#F59E0B"
     assert GENERATION_COLORS["ncs"] == "#10B981"
+
+
+def test_hydro_color_is_consistent_across_palettes() -> None:
+    """The hydro entity must read identically wherever it is drawn (no collision)."""
+    from cobre_bridge.ui.theme import COLORS
+
+    assert GENERATION_COLORS["hydro"] == COLORS["hydro"]
 
 
 def test_performance_phase_colors_keys() -> None:

@@ -638,12 +638,12 @@ def test_render_returns_string() -> None:
 
 
 class TestParseExpression:
-    """``_parse_expression`` recognises both legacy literal coefficients and the cobre HEAD ``@name`` sigil."""
+    """``parse_expression`` recognises both legacy literal coefficients and the cobre HEAD ``@name`` sigil."""
 
     def _parse(self, expr: str) -> list[tuple]:
-        from cobre_bridge.dashboard.tabs.constraints_utils import _parse_expression
+        from cobre_bridge.constraint_expr import parse_expression
 
-        return _parse_expression(expr)
+        return parse_expression(expr)
 
     def test_legacy_literal_coefficient(self) -> None:
         terms = self._parse("5.68 * hydro_storage(78)")
@@ -689,14 +689,12 @@ class TestParseExpression:
 
 
 class TestResolveParamToColumn:
-    """``_resolve_param_to_column`` maps cobre-bridge's per-hydro names to simulation columns."""
+    """``resolve_param_to_column`` maps cobre-bridge's per-hydro names to simulation columns."""
 
     def _resolve(self, name: str):
-        from cobre_bridge.dashboard.tabs.constraints_utils import (
-            _resolve_param_to_column,
-        )
+        from cobre_bridge.constraint_expr import resolve_param_to_column
 
-        return _resolve_param_to_column(name)
+        return resolve_param_to_column(name)
 
     def test_rho_acum(self) -> None:
         assert self._resolve("rho_acum_h78") == (
@@ -758,9 +756,7 @@ class TestEvaluateAtName:
     """``evaluate_constraint_expressions`` resolves ``@name`` against simulation columns."""
 
     def _evaluate(self, expression: str, *, with_productivity: bool = True):
-        from cobre_bridge.dashboard.tabs.constraints_utils import (
-            evaluate_constraint_expressions,
-        )
+        from cobre_bridge.constraint_expr import evaluate_constraint_expressions
 
         constraints = [
             {

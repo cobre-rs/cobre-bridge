@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -44,13 +45,12 @@ class LineEntity:
     Cobre models each normalized pair as a single line where positive flow
     goes from source_bus to target_bus.
 
-    The NEWAVE ``INT`` variable for pair (de, para) reports:
-    - ``limite_superior``: max flow in the de->para direction
-    - ``limite_inferior``: max flow in the para->de direction (negative)
-
-    When the Cobre line's (source_bus, target_bus) matches (de, para),
-    ``flow_max`` corresponds to ``limite_superior`` and ``flow_min`` to
-    ``abs(limite_inferior)``.  When reversed, the mapping flips.
+    ``newave_de`` / ``newave_para`` are the NEWAVE subsystem codes of the Cobre
+    line's ``source_bus_id`` / ``target_bus_id``, so the Cobre orientation
+    ``(source, target)`` always corresponds to NEWAVE ``(de, para)`` by
+    construction.  NEWAVE result files (NWLISTOP) may list a pair in either
+    ``(de, para)`` or ``(para, de)`` order; that file-ordering is handled where
+    the rows are read (sign-flipped on the reverse-ordered match), not here.
     """
 
     cobre_line_id: int
@@ -59,7 +59,6 @@ class LineEntity:
     target_bus_id: int
     newave_de: int
     newave_para: int
-    reversed: bool  # True if Cobre (src,tgt) = NEWAVE (para,de)
 
 
 @dataclass
@@ -74,7 +73,7 @@ class EntityAlignment:
     num_newave_stages: int = 0
 
 
-def _read_reference_names(
+def read_reference_names(
     nw_files: NewaveFiles,
 ) -> tuple[dict[int, str], dict[int, str], dict[int, str]]:
     """Read entity names from NEWAVE input files via inewave.
@@ -133,22 +132,17 @@ def _detect_reservoir_plants(nw_files: NewaveFiles) -> set[int]:
 def _detect_newave_stages(nw_files: NewaveFiles) -> int:
     """Compute total number of NEWAVE stages from DGER parameters.
 
-    ``study_months = (13 - start_month) + (num_anos - 1) * 12``
-    ``total_stages = study_months + num_anos_pos * 12``
+    Delegates the horizon arithmetic to
+    :func:`cobre_bridge.horizon.study_horizon`; an empty study
+    (``num_anos_estudo`` of 0/None) reports zero stages.
     """
     from inewave.newave import Dger
 
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    num_anos: int = dger.num_anos_estudo
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-
-    if not num_anos:
+    if not dger.num_anos_estudo:
         return 0
 
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
-    return total_stages
+    return study_horizon(dger).total_stages
 
 
 def build_entity_alignment(
@@ -168,7 +162,7 @@ def build_entity_alignment(
     lines_json:
         The ``lines`` list from the converted Cobre ``lines.json``.
     """
-    hydro_names, thermal_names, subsystem_names = _read_reference_names(nw_files)
+    hydro_names, thermal_names, subsystem_names = read_reference_names(nw_files)
     reservoir_codes = _detect_reservoir_plants(nw_files)
     num_stages = _detect_newave_stages(nw_files)
 
@@ -245,7 +239,6 @@ def build_entity_alignment(
                 target_bus_id=tgt_bus,
                 newave_de=nw_de,
                 newave_para=nw_para,
-                reversed=False,
             )
         )
 

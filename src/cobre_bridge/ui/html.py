@@ -2,6 +2,47 @@
 
 from __future__ import annotations
 
+import html as _html
+import json
+
+
+def escape_text(value: object) -> str:
+    """Escape *value* for use as HTML **text** content (e.g. inside ``<td>``).
+
+    Neutralises ``&``, ``<`` and ``>`` so NEWAVE-derived names (plant, line,
+    case names) cannot inject markup. Use :func:`escape_attr` for values placed
+    inside quoted attributes.
+    """
+    return _html.escape(str(value), quote=False)
+
+
+def escape_attr(value: object) -> str:
+    """Escape *value* for use inside a quoted HTML **attribute**.
+
+    Like :func:`escape_text` but also escapes ``"`` and ``'`` so the value
+    cannot terminate the attribute (safe for both single- and double-quoted).
+    """
+    return _html.escape(str(value), quote=True)
+
+
+def json_for_script(obj: object) -> str:
+    """Serialise *obj* to JSON safe to embed inside an HTML ``<script>`` block.
+
+    ``json.dumps`` alone does not neutralise ``</script>`` or the JavaScript
+    line separators U+2028/U+2029, so a NEWAVE name containing ``</script>``
+    could break out of the script context. This escapes ``<``, ``>``, ``&`` and
+    the line separators as ``\\uXXXX`` sequences — valid JSON (round-trips via
+    ``json.loads``) but inert in HTML.  Output uses compact separators.
+    """
+    return (
+        json.dumps(obj, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
 
 def wrap_chart(html: str) -> str:
     """Wrap an HTML fragment in a chart-card container div with an expand button."""
@@ -211,11 +252,16 @@ def build_html(
     Returns:
         A complete ``<!DOCTYPE html>`` document string.
     """
+    # ``title`` carries the case-directory name (NEWAVE-derived) and tab labels
+    # are interpolated as text; escape both so a crafted name cannot inject HTML.
+    title = escape_text(title)
+
     nav_buttons: list[str] = []
     for i, (tab_id, tab_label) in enumerate(tab_defs):
         active_cls = ' class="active"' if i == 0 else ""
         nav_buttons.append(
-            f"<button{active_cls} onclick=\"showTab('{tab_id}', this)\">{tab_label}</button>"
+            f"<button{active_cls} onclick=\"showTab('{tab_id}', this)\">"
+            f"{escape_text(tab_label)}</button>"
         )
 
     tab_sections: list[str] = []

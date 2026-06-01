@@ -13,7 +13,6 @@ Only rendered when stochastic output is available (data.stochastic_available).
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -26,15 +25,19 @@ from cobre_bridge.dashboard.chart_helpers import make_chart_card
 from cobre_bridge.ui.html import (
     chart_grid,
     collapsible_section,
+    escape_attr,
+    escape_text,
+    json_for_script,
     plant_explorer_table,
     wrap_chart,
 )
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
+    apply_standard_layout,
     stage_x_labels,
 )
-from cobre_bridge.ui.theme import COLORS
+from cobre_bridge.ui.theme import COLORS, hex_to_rgba
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -57,15 +60,6 @@ _NO_DATA = "<p>No data.</p>"
 # ---------------------------------------------------------------------------
 # Helper: convert hex color to rgba string
 # ---------------------------------------------------------------------------
-
-
-def _hex_to_rgba(hex_color: str, alpha: float) -> str:
-    """Convert a 6-digit hex colour string to an ``rgba(...)`` CSS value."""
-    h = hex_color.lstrip("#")
-    r = int(h[0:2], 16)
-    g = int(h[2:4], 16)
-    b = int(h[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +281,7 @@ def _add_mean_std_band(
 
     lower = [m - s for m, s in zip(mean_vals, std_vals)]
     upper = [m + s for m, s in zip(mean_vals, std_vals)]
-    fill_color = _hex_to_rgba(color, 0.18)
+    fill_color = hex_to_rgba(color, 0.18)
 
     # Lower bound (invisible anchor for fill="tonexty")
     fig.add_trace(
@@ -589,12 +583,11 @@ def _chart_hydro_explorer(
         else "No Data"
     )
 
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         title=f"Inflow — {first_name}",
         xaxis_title="Stage",
         yaxis_title="Inflow (m³/s)",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
         template="plotly_white",
         updatemenus=[
             {
@@ -858,11 +851,10 @@ def _chart_noise_histogram(noise_openings: pd.DataFrame) -> go.Figure:
             hovertemplate="x: %{x:.3f}<br>N(0,1): %{y:.4f}<extra></extra>",
         )
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Value",
         yaxis_title="Density",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
         template="plotly_white",
     )
     return fig
@@ -1053,12 +1045,11 @@ def _chart_order_reduction_reasons(fitting_report: dict) -> go.Figure:
                 hovertemplate=f"{reason}<br>%{{x}}: %{{y}} reductions<extra></extra>",
             )
         )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Season (Month)",
         yaxis_title="Count of Reductions",
         barmode="stack",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
         template="plotly_white",
     )
     return fig
@@ -1145,8 +1136,13 @@ def _render_section_d(data: DashboardData) -> str:
         mat: np.ndarray,
         idx: list[int],
     ) -> list[list[float]]:
-        """Reorder a matrix by the given index permutation."""
-        return mat[np.ix_(idx, idx)].tolist()
+        """Reorder a matrix by the given index permutation.
+
+        Correlations are rounded to 4 decimals: the heatmap hover shows ``.3f``
+        and the colour scale resolves far less, so full float64 reprs (~18
+        chars each) are pure payload bloat — rounding cuts this block ~3x.
+        """
+        return np.round(mat[np.ix_(idx, idx)], 4).tolist()
 
     # Build per-season synthetic matrices from correlation.json profiles
     synthetic_by_season: dict[str, list[list[float]]] = {}
@@ -1194,8 +1190,11 @@ def _render_section_d(data: DashboardData) -> str:
                 index=sorted_ids, columns=sorted_ids
             ).values.copy()
             np.fill_diagonal(corr_arr, 1.0)
-            historical_by_season[month_names[month_idx]] = np.nan_to_num(
-                corr_arr, nan=0.0
+            # Round to 4 decimals to match the synthetic matrices (see
+            # ``_reorder_matrix``) — keeps the heatmap's .3f hover exact while
+            # avoiding full float64 reprs in the embedded payload.
+            historical_by_season[month_names[month_idx]] = np.round(
+                np.nan_to_num(corr_arr, nan=0.0), 4
             ).tolist()
 
     # Determine available seasons
@@ -1235,7 +1234,7 @@ def _render_section_d(data: DashboardData) -> str:
     js = f"""
 <script>
 (function() {{
-    var _cd = {json.dumps(corr_data)};
+    var _cd = {json_for_script(corr_data)};
     // Build bus separator shapes and annotations
     var _shapes = [], _annotations = [];
     _cd.busBoundaries.forEach(function(b) {{
@@ -1513,9 +1512,9 @@ def _render_section_c(data: DashboardData) -> str:
         bus_id = meta.get("bus_id", "")
         bus_name = data.bus_names.get(bus_id, str(bus_id)) if bus_id != "" else ""
         table_rows.append(
-            f'<tr data-name="{name.lower()}" data-index="{hid}">'
-            f"<td>{name}</td>"
-            f"<td>{bus_name}</td>"
+            f'<tr data-name="{escape_attr(name.lower())}" data-index="{hid}">'
+            f"<td>{escape_text(name)}</td>"
+            f"<td>{escape_text(bus_name)}</td>"
             f"</tr>"
         )
 
@@ -1553,7 +1552,7 @@ def _render_section_c(data: DashboardData) -> str:
     synth_color = _SYNTH_COLOR
     js = f"""
 <script>
-window._stochHydroData = {json.dumps(hydro_json)};
+window._stochHydroData = {json_for_script(hydro_json)};
 function _renderStochHydro(containerId, entry) {{
     var chartDiv = document.getElementById('stoch-hydro-chart');
     if (!chartDiv) return;

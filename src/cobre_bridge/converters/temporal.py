@@ -12,6 +12,7 @@ from datetime import date
 
 from inewave.newave import Cvar, Dger, Patamar, Shist
 
+from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -213,11 +214,11 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     stages: list[dict] = []
     transitions: list[dict] = []
 
-    num_anos_pos = dger.num_anos_pos_estudo or 0
+    horizon = study_horizon(dger)
     # Study runs from mes_inicio to December of (ano_inicio + num_anos - 1).
-    study_months = (13 - start_month) + (num_anos - 1) * 12
+    study_months = horizon.study_months
     # Post-study adds num_anos_pos full calendar years after that.
-    pos_months = num_anos_pos * 12
+    pos_months = horizon.pos_months
     total_months = study_months + pos_months
 
     year = start_year
@@ -447,8 +448,9 @@ def _historical_years_from_shist(
     output remains valid even for cases that ship without an Shist file.
     """
     ano_inicio: int = int(dger.ano_inicio_estudo or 2020)
-    num_anos: int = int(dger.num_anos_estudo or 1)
-    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
+    horizon = study_horizon(dger)
+    num_anos = horizon.num_anos
+    num_anos_pos = horizon.num_anos_pos
 
     if nw_files.shist is None:
         logger.debug("shist.dat not found; using legacy default historical range.")
@@ -551,6 +553,13 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         if dger.considera_reamostragem_cenarios is not None
         else 0
     )
+
+    # impressao_estados_geracao_cortes (dger.dat line 90): when 0, NEWAVE
+    # writes the visited cut-generation states (the per-stage cortese*.dat
+    # files).  Mirror that on the Cobre side via `exports.states` so the two
+    # models' visited forward-pass trial points can be compared.  A None or
+    # non-zero value leaves the Cobre default (states export off).
+    export_states: bool = dger.impressao_estados_geracao_cortes == 0
 
     # tipo_execucao: 0 = simulation only, 1 = training (+ simulation).
     training_enabled: bool = tipo_execucao == 1
@@ -679,6 +688,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             },
         },
         "exports": {
+            "states": export_states,
             "stochastic": True,
         },
         "simulation": simulation_section,

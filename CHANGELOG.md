@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-01
+
+### Added
+
+- **Productivity tab overhaul** in `compare results`. The tab now explains
+  productivity in both models across three sections: (A) static-fidelity
+  scatters comparing NEWAVE pmo productivities against the converted Cobre
+  values, (B) a per-stage **realized productivity** (gen / turbined) chart
+  driven by the shared per-plant dropdown widget (all plants, one at a time),
+  and (C) a **building-blocks table** pairing each NEWAVE/Cobre input column
+  2-by-2 with Δ% highlighting. Productivity is shown as constant within a
+  stage and varying across stages.
+- **Operational hydro productivity** (gen / turbined) comparison, surfaced
+  per plant alongside the existing operation variables.
+- **Overview cost breakdown** gains thermal-cost and other-costs charts, and
+  the generic-constraint violation row now sums the matching NEWAVE parcelas
+  (`VIOLACAO CAR`, `VIOLACAO SAR`, `VIOL. RESTELETRICA`, `VIOL. INTERC. MIN.`,
+  `VIOLACAO RHQ`, `VIOLACAO RHV`, `VIOL.RLPP *`) so generic violations compare
+  like-for-like with Cobre's `storage_violation_cost`.
+- **Trustworthy results metrics**: each `ResultComparison` now reports
+  `WithinTol` and `sMAPE`, so large relative errors on tiny quantities are no
+  longer mistaken for structural divergences.
+- **Full-horizon net load** read from NWLISTOP `mercl` files for the Energy
+  Balance comparison.
+- **FIXA VminOP penalization warning**. `curva.dat`'s
+  `configuracoes_penalizacao` TIPO=0 (FIXA) is not supported by Cobre; the
+  conversion now warns when it is encountered. The unmodelled-`modif.dat`
+  `DefaultRegister` log was downgraded from a warning to debug.
+- **Per-stage hydro penalty overrides** with post-study productivity freeze.
+- **Visited cut-generation state export** from `convert`, emitted when the
+  source NEWAVE case exports them.
+
+### Changed
+
+- **Production-scale dashboard size**. The cut-cost diagnostic scatter
+  (`chart_cuts_vs_solve_time_scatter`) embedded one marker per backward LP
+  sample (~12 M points on a 2000-scenario / 50-iteration run → 191 MB and
+  unrenderable). It now collapses each `(iteration, stage)` group — where the
+  cut count and stage are constant — to a **median ms/LP with a p25–p75 error
+  bar**, preserving the cost-of-cut curve while cutting that chart from
+  ~191 MB to ~0.1 MB. The Spatial Correlation heatmaps (§D) now round their
+  matrices to 4 decimals (the hover shows `.3f`). Combined, a production
+  dashboard drops from **~208 MB to ~10 MB** with no perceptible visual loss.
+- **VminOP generic constraints** are now built only for genuine
+  stored-energy reservoirs (`tipo_regulacao == "M"` with a non-degenerate
+  `[vmin, vmax]`) rather than gating on a positive accumulated productivity,
+  and their coefficients use per-regulation reference productivities matched
+  to the pmo.dat `produtibilidade_acumulada_calculo_earm` values to the 4
+  decimals NEWAVE prints (equivalent own-productivity exact, accumulated
+  within ~0.01 %).
+- **NEWAVE penalty productivities** matched to pmo.dat: PRODT mean for
+  VAZMIN/turbined penalties, accumulated maximum-height productivity for
+  withdrawal/evaporation, with per-configuration CFUGA/CMONT variation.
+- **GNL anticipated dispatch** now seeds the real block-weighted `adterm`
+  MW values (honoured by cobre ≥ 0.7.0) instead of zeroing them.
+- **Theme single-source-of-truth**: one `hex_to_rgba`, an honest theme SSOT,
+  and a fix for the hydro colour collision across charts.
+- **Dependencies**: `cobre-python>=0.8.0` (validation extra), `pyarrow>=24.0.0`,
+  `pandas>=3.0.3`, `polars>=1.41.2`.
+- Large internal refactor toward architectural cleanliness — extracted
+  productivity / constraint-expression / study-horizon domain modules,
+  single-sourced the case↔output directory convention, replaced
+  hand-threaded constraint offsets with named result types and an ID
+  allocator, and promoted several cross-module reach-ins to public APIs.
+
+### Fixed
+
+- **Security**: NEWAVE-derived strings (plant / line / case names) are now
+  HTML-escaped in the dashboard and comparison report, so a crafted name
+  cannot inject markup.
+- **Thermal `GTMIN`** is honoured independently of `FCMAX` — the converter no
+  longer clamps the minimum-generation bound down to a lowered maximum.
+- **Thermal post-study `EXPT` bounds** are frozen at the last study stage.
+- **AGRINT post-study exchange-group limits** are frozen at the last study
+  value rather than dropping to zero.
+- **Post-study seasonalization** now follows the `dger` flag, seasonalizing
+  flagged quantities and freezing only the flagless ones.
+- **`compare results`** robustness: fail loudly on unreadable Cobre output
+  (no false "no divergence"), corrected line direction and thermal `POTEF`
+  in the computed bounds, and fixed an `evaluate_lhs_cobre` crash on a real
+  simulation `LazyFrame`.
+
 ## [0.7.0] - 2026-05-24
 
 ### Added

@@ -149,7 +149,6 @@ class TestCompareLines:
                     target_bus_id=1,
                     newave_de=1,
                     newave_para=2,
-                    reversed=False,
                 ),
             ],
         )
@@ -196,7 +195,6 @@ class TestCompareLines:
                     target_bus_id=1,
                     newave_de=1,
                     newave_para=2,
-                    reversed=False,
                 ),
             ],
         )

@@ -12,61 +12,17 @@ which applies permanent MODIF overrides.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
-from datetime import date, timedelta
 
-import numpy as np
 import pandas as pd
 
+from cobre_bridge.horizon import (
+    seasonal_step_function,
+    study_horizon,
+)
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
-
-_LOG = logging.getLogger(__name__)
-
-# NEWAVE big-M sentinel: values >= this threshold mean "no limit".
-_BIG_M = 99990.0
-
-
-# -------------------------------------------------------------------
-# Shared temporal helpers
-# -------------------------------------------------------------------
-
-
-def _build_stage_dates(
-    start_year: int, start_month: int, total_stages: int
-) -> list[date]:
-    """Return first-of-month dates for each study stage."""
-    stages: list[date] = []
-    y, m = start_year, start_month
-    for _ in range(total_stages):
-        stages.append(date(y, m, 1))
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-    return stages
-
-
-def _read_study_params(
-    nw_files: NewaveFiles,
-) -> tuple[int, int, int, int, int, int]:
-    """Read DGER and return temporal parameters.
-
-    Returns (start_year, start_month, num_anos, num_anos_pos,
-    study_months, total_stages).
-    """
-    from inewave.newave import Dger
-
-    dger = Dger.read(str(nw_files.dger))
-    start_year: int = int(dger.ano_inicio_estudo)
-    start_month: int = int(dger.mes_inicio_estudo)
-    num_anos: int = int(dger.num_anos_estudo or 1)
-    num_anos_pos: int = int(dger.num_anos_pos_estudo or 0)
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
-    return start_year, start_month, num_anos, num_anos_pos, study_months, total_stages
-
+from cobre_bridge.plants import active_hydro_codes
 
 # -------------------------------------------------------------------
 # Hydro bounds
@@ -159,74 +115,42 @@ def compute_hydro_bounds(
     if modif_path is None:
         return {}
 
-    (
-        start_year,
-        start_month,
-        _num_anos,
-        _num_anos_pos,
-        study_months,
-        total_stages,
-    ) = _read_study_params(nw_files)
+    from inewave.newave import Dger
+
+    dger = Dger.read(str(nw_files.dger))
+    horizon = study_horizon(dger)
+
+    # Post-study seasonalize flags (mirror convert_storage_bounds): VMINT/VMAXT
+    # repeat seasonally only when their dger flag is set; outflow/turbined freeze.
+    sazonaliza_vmaxt = int(getattr(dger, "sazonaliza_vmaxt", 0) or 0) == 1
+    sazonaliza_vmint = int(getattr(dger, "sazonaliza_vmint", 0) or 0) == 1
 
     cadastro = read_cadastro(nw_files)
 
     confhd = Confhd.read(str(nw_files.confhd))
     confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
-    confhd_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
+    confhd_codes = active_hydro_codes(confhd_df)
 
     temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
 
     def _build_step_function(
         recs: list[dict],
         transform: Callable[[float], float],
+        *,
+        seasonalize: bool,
     ) -> dict[int, float]:
-        """Build a step-function from override records.
+        """Thin adapter over :func:`cobre_bridge.horizon.seasonal_step_function`.
 
-        Each record sets the value from its stage onward until the next
-        record overrides it.  Raw values >= _BIG_M mean "restore default"
-        and clear the forward-fill.
+        Shares the forward-fill + seasonalize-vs-freeze post-study logic with
+        ``hydro.convert_storage_bounds`` so this comparator checks the converter
+        against the *same* derivation, not a hand-maintained copy of it.
         """
-        changepoints: list[tuple[int, float]] = []
-        for rec in recs:
-            sid = (rec["year"] - start_year) * 12 + (rec["month"] - start_month)
-            if sid < 0:
-                sid = 0
-            changepoints.append((sid, rec["value"]))
-        changepoints.sort()
-
-        if not changepoints:
-            return {}
-
-        result_inner: dict[int, float] = {}
-        cp_idx = 0
-        current: float | None = None
-        first_stage = changepoints[0][0]
-
-        for stage_id in range(first_stage, study_months):
-            while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
-                raw = changepoints[cp_idx][1]
-                current = None if raw >= _BIG_M else transform(raw)
-                cp_idx += 1
-            if current is not None:
-                result_inner[stage_id] = current
-
-        # Post-study seasonal repetition from last study year.
-        seasonal: dict[int, float] = {}
-        for stage_id in range(max(0, study_months - 12), study_months):
-            if stage_id in result_inner:
-                cal = ((start_month - 1 + stage_id) % 12) + 1
-                seasonal[cal] = result_inner[stage_id]
-
-        for stage_id in range(study_months, total_stages):
-            cal = ((start_month - 1 + stage_id) % 12) + 1
-            if cal in seasonal:
-                current = seasonal[cal]
-            if current is not None:
-                result_inner[stage_id] = current
-
-        return result_inner
+        return seasonal_step_function(
+            [(int(r["year"]), int(r["month"]), float(r["value"])) for r in recs],
+            transform,
+            seasonalize=seasonalize,
+            horizon=horizon,
+        )
 
     result: dict[tuple[int, int, str], float] = {}
 
@@ -264,19 +188,23 @@ def compute_hydro_bounds(
         def _identity(val: float) -> float:
             return val
 
-        # Storage bounds (percentage -> hm3).
+        # Storage bounds (percentage -> hm3). Seasonal post-study iff flag set.
         vmaxt_by_stage: dict[int, float] = {}
         vmint_by_stage: dict[int, float] = {}
         if useful > 0:
-            vmaxt_by_stage = _build_step_function(vmaxt, _pct_to_hm3)
-            vmint_by_stage = _build_step_function(vmint, _pct_to_hm3)
+            vmaxt_by_stage = _build_step_function(
+                vmaxt, _pct_to_hm3, seasonalize=sazonaliza_vmaxt
+            )
+            vmint_by_stage = _build_step_function(
+                vmint, _pct_to_hm3, seasonalize=sazonaliza_vmint
+            )
 
-        # Turbined bounds (absolute m3/s).
-        turbmaxt_by_stage = _build_step_function(turbmaxt, _identity)
-        turbmint_by_stage = _build_step_function(turbmint, _identity)
+        # Turbined bounds (absolute m3/s) — no seasonalize flag → freeze.
+        turbmaxt_by_stage = _build_step_function(turbmaxt, _identity, seasonalize=False)
+        turbmint_by_stage = _build_step_function(turbmint, _identity, seasonalize=False)
 
-        # Outflow bounds (absolute m3/s).
-        vazmint_by_stage = _build_step_function(vazmint, _identity)
+        # Outflow bounds (absolute m3/s) — no seasonalize flag → freeze.
+        vazmint_by_stage = _build_step_function(vazmint, _identity, seasonalize=False)
 
         all_stages = sorted(
             set(vmaxt_by_stage)
@@ -309,264 +237,47 @@ def compute_hydro_bounds(
 # -------------------------------------------------------------------
 
 
-def _apply_maint_to_capacity(
-    base_capacity: float,
-    maint_rows: pd.DataFrame,
-    stage_dates: list[date],
-) -> np.ndarray:
-    """Compute monthly effective capacity after subtracting maintenance windows.
-
-    Returns an array of shape (total_stages,) with the monthly average
-    effective capacity after maintenance deductions.
-    """
-    import calendar as _cal
-
-    total_stages = len(stage_dates)
-    effective = np.full(total_stages, base_capacity, dtype=float)
-
-    for _, row in maint_rows.iterrows():
-        start_dt = pd.Timestamp(row["data_inicio"])
-        duration_days = int(row["duracao"])
-        unit_power = float(row["potencia"])
-        end_dt = start_dt + timedelta(days=duration_days)
-
-        for stage_idx, stage_start in enumerate(stage_dates):
-            _, days_in_month = _cal.monthrange(stage_start.year, stage_start.month)
-            if stage_start.month == 12:
-                stage_end = date(stage_start.year + 1, 1, 1)
-            else:
-                stage_end = date(stage_start.year, stage_start.month + 1, 1)
-
-            maint_start_date = start_dt.date()
-            maint_end_date = end_dt.date()
-
-            overlap_start = max(maint_start_date, stage_start)
-            overlap_end = min(maint_end_date, stage_end)
-            overlap_days = (overlap_end - overlap_start).days
-            if overlap_days <= 0:
-                continue
-
-            fraction = overlap_days / days_in_month
-            effective[stage_idx] -= unit_power * fraction
-
-    return effective
-
-
 def compute_thermal_bounds(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
 ) -> dict[tuple[int, int, str], float]:
-    """Compute per-stage thermal generation bounds from NEWAVE input files.
+    """Return per-stage thermal generation bounds for the bounds comparison.
 
-    Returns ``{(cobre_thermal_id, stage_id, bound_name): value}`` where
-    ``bound_name`` is one of: ``generation_min``, ``generation_max``.
+    ``{(cobre_thermal_id, stage_id, bound_name): value}`` where ``bound_name``
+    is ``generation_min`` or ``generation_max`` (MW).
 
-    Values are in MW.  Follows the sintetizador processing order:
-    IP zeroing, POTEF/GTMIN nulling, EXPT overrides, MANUTT reduction,
-    formula evaluation.
+    Delegates to the converter's
+    :func:`cobre_bridge.converters.thermal.convert_thermal_bounds` — the single
+    definition of how thermal bounds are built from NEWAVE inputs — and reshapes
+    its parquet output into the comparison lookup. This stops the comparator
+    from silently drifting from the converter (it used to be a near-verbatim
+    copy that had to be patched in lockstep, e.g. the FCMAX/GTMIN fix).
 
-    Returns an empty dict if neither ``expt.dat`` nor ``manutt.dat`` is
-    present.
+    Returns an empty dict when neither ``expt.dat`` nor ``manutt.dat`` is present
+    (no override-driven thermal bounds to check). The converter's plant set
+    (``expt | manutt | base | cost_varies``) matches the comparator's former
+    ``expt | manutt | base`` because ``cost_varies`` is a subset of the base
+    plants, so the comparison keys are unchanged.
     """
     if nw_files.expt is None and nw_files.manutt is None:
         return {}
 
-    from inewave.newave import Dger, Expt, Manutt, Term
+    from cobre_bridge.converters.thermal import convert_thermal_bounds
 
-    dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    num_maint_years: int = dger.num_anos_manutencao_utes or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    table = convert_thermal_bounds(nw_files, id_map)
+    if table is None:
+        return {}
 
-    maint_end_stage = (start_year + num_maint_years - start_year) * 12 + (
-        1 - start_month
-    )
-
-    stage_dates = _build_stage_dates(start_year, start_month, total_stages)
-
-    # Base values per (thermal_code, calendar_month) from TERM.
-    term = Term.read(str(nw_files.term))
-    term_df = term.usinas
-
-    BaseRow = dict[str, float]
-    base_by_code_month: dict[tuple[int, int], BaseRow] = {}
-    if term_df is not None:
-        for _, row in term_df.iterrows():
-            code = int(row["codigo_usina"])
-            mes = int(row["mes"])
-            if mes < 1 or mes > 12:
-                continue
-            base_by_code_month[(code, mes)] = {
-                "potencia": float(row["potencia_instalada"]),
-                "fcmax": float(row["fator_capacidade_maximo"]),
-                "teif": float(row.get("teif", 0.0)),
-                "ip": float(row.get("indisponibilidade_programada", 0.0)),
-                "gen_min": float(row["geracao_minima"]),
-            }
-
-    base_default: dict[int, BaseRow] = {}
-    if term_df is not None:
-        for _, row in term_df.iterrows():
-            code = int(row["codigo_usina"])
-            if code not in base_default:
-                base_default[code] = {
-                    "potencia": float(row["potencia_instalada"]),
-                    "fcmax": float(row["fator_capacidade_maximo"]),
-                    "teif": float(row.get("teif", 0.0)),
-                    "ip": float(row.get("indisponibilidade_programada", 0.0)),
-                    "gen_min": float(row["geracao_minima"]),
-                }
-
-    def _base(code: int, cal_month: int) -> BaseRow:
-        row = base_by_code_month.get((code, cal_month))
-        if row is not None:
-            return dict(row)
-        default = base_default.get(code)
-        if default is not None:
-            return dict(default)
-        return {
-            "potencia": 0.0,
-            "fcmax": 100.0,
-            "teif": 0.0,
-            "ip": 0.0,
-            "gen_min": 0.0,
-        }
-
-    # EXPT overrides.
-    expt_by_code: dict[int, list[dict]] = {}
-    if nw_files.expt is not None:
-        try:
-            expt_obj = Expt.read(str(nw_files.expt))
-            expt_df = expt_obj.expansoes
-            for _, row in expt_df.iterrows():
-                code = int(row["codigo_usina"])
-                expt_by_code.setdefault(code, []).append(
-                    {
-                        "tipo": str(row["tipo"]),
-                        "modificacao": float(row["modificacao"]),
-                        "data_inicio": row["data_inicio"],
-                        "data_fim": row["data_fim"],
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            _LOG.warning("expt.dat could not be parsed; EXPT overrides skipped.")
-
-    codes_with_potef: set[int] = set()
-    codes_with_gtmin: set[int] = set()
-    potef_finite_end: dict[int, date] = {}
-    for code, overrides in expt_by_code.items():
-        for o in overrides:
-            if o["tipo"] == "POTEF":
-                codes_with_potef.add(code)
-                if not pd.isna(o["data_fim"]):
-                    end = pd.Timestamp(o["data_fim"]).date()
-                    prev = potef_finite_end.get(code)
-                    if prev is None or end > prev:
-                        potef_finite_end[code] = end
-            elif o["tipo"] == "GTMIN":
-                codes_with_gtmin.add(code)
-
-    # MANUTT maintenance events.
-    manutt_by_code: dict[int, pd.DataFrame] = {}
-    if nw_files.manutt is not None:
-        try:
-            manutt_obj = Manutt.read(str(nw_files.manutt))
-            manutt_df = manutt_obj.manutencoes
-            for code, grp in manutt_df.groupby("codigo_usina"):
-                manutt_by_code[int(code)] = grp.reset_index(drop=True)
-        except Exception:  # noqa: BLE001
-            _LOG.warning("manutt.dat could not be parsed; maintenance skipped.")
-
-    all_codes = (
-        set(expt_by_code.keys()) | set(manutt_by_code.keys()) | set(base_default.keys())
-    )
-
+    cols = table.to_pydict()
     result: dict[tuple[int, int, str], float] = {}
-
-    for newave_code in sorted(all_codes):
-        try:
-            thermal_id = id_map.thermal_id(newave_code)
-        except KeyError:
-            continue
-
-        overrides = expt_by_code.get(newave_code, [])
-        maint_rows = manutt_by_code.get(newave_code)
-        has_maint = maint_rows is not None and not maint_rows.empty
-
-        base_cap = base_default.get(newave_code, {}).get("potencia", 0.0)
-        maint_reduction: np.ndarray | None = None
-        if has_maint:
-            effective = _apply_maint_to_capacity(base_cap, maint_rows, stage_dates)
-            maint_reduction = np.maximum(0.0, base_cap - effective)
-
-        for stage_idx, stage_date in enumerate(stage_dates):
-            cal_month = stage_date.month
-            vals = _base(newave_code, cal_month)
-            potencia = vals["potencia"]
-            fcmax = vals["fcmax"]
-            teif = vals["teif"]
-            ip = vals["ip"]
-            gen_min = vals["gen_min"]
-
-            if stage_idx < maint_end_stage:
-                ip = 0.0
-
-            if stage_idx >= maint_end_stage and newave_code in codes_with_potef:
-                potencia = 0.0
-
-            if stage_idx >= maint_end_stage and newave_code in codes_with_gtmin:
-                gen_min = 0.0
-
-            for override in overrides:
-                ov_start = pd.Timestamp(override["data_inicio"]).date()
-                ov_end_raw = override["data_fim"]
-                if pd.isna(ov_end_raw):
-                    ov_end = stage_dates[-1]
-                else:
-                    ov_end = pd.Timestamp(ov_end_raw).date()
-
-                if not (ov_start <= stage_date <= ov_end):
-                    continue
-
-                tipo = override["tipo"]
-                value = override["modificacao"]
-                if tipo == "POTEF":
-                    potencia = value
-                elif tipo == "FCMAX":
-                    fcmax = value
-                elif tipo == "TEIFT":
-                    teif = value
-                elif tipo == "GTMIN":
-                    gen_min = value
-                elif tipo == "IPTER":
-                    ip = value
-
-            potef_end = potef_finite_end.get(newave_code)
-            if potef_end is not None and stage_date > potef_end:
-                potencia = 0.0
-                gen_min = 0.0
-
-            if maint_reduction is not None and stage_idx < maint_end_stage:
-                potencia -= float(maint_reduction[stage_idx])
-
-            potencia = max(0.0, potencia)
-
-            max_mw = (
-                potencia
-                * (fcmax / 100.0)
-                * ((100.0 - ip) / 100.0)
-                * ((100.0 - teif) / 100.0)
-            )
-            max_mw = max(0.0, max_mw)
-            min_mw = max(0.0, min(gen_min, max_mw))
-
-            result[(thermal_id, stage_idx, "generation_min")] = min_mw
-            result[(thermal_id, stage_idx, "generation_max")] = max_mw
-
+    for thermal_id, stage_id, min_mw, max_mw in zip(
+        cols["thermal_id"],
+        cols["stage_id"],
+        cols["min_generation_mw"],
+        cols["max_generation_mw"],
+    ):
+        result[(int(thermal_id), int(stage_id), "generation_min")] = float(min_mw)
+        result[(int(thermal_id), int(stage_id), "generation_max")] = float(max_mw)
     return result
 
 
@@ -584,8 +295,9 @@ def compute_line_bounds(
     Returns ``{(cobre_line_id, stage_id, bound_name): value}`` where
     ``bound_name`` is one of: ``direct_flow_max``, ``reverse_flow_max``.
 
-    Values are in MW.  For post-study stages, the last available study
-    year's bounds are repeated seasonally.
+    Values are in MW.  Interchange limits have no seasonalize flag, so
+    post-study stages freeze at the last study stage's bounds (mirrors
+    ``network.convert_line_bounds``).
 
     Returns an empty dict if ``sistema.dat`` has no interchange limits.
     """
@@ -598,12 +310,9 @@ def compute_line_bounds(
         return {}
 
     dger = Dger.read(str(nw_files.dger))
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    h = study_horizon(dger)
+    start_month, start_year = h.start_month, h.start_year
+    study_months, total_stages = h.study_months, h.total_stages
 
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
@@ -638,13 +347,20 @@ def compute_line_bounds(
         if key not in date_lookup:
             date_lookup[key] = {"direct_mw": 0.0, "reverse_mw": 0.0}
 
+        # Direction convention MUST match convert_lines / convert_line_bounds
+        # in converters/network.py: per inewave's SISTEMA.DAT parse order,
+        # sentido == 0 is the first block (de -> para), sentido == 1 the
+        # reverse. Comparing against a flipped convention here previously
+        # reported every line as a (spurious) direct/reverse mismatch.
         if de < para:
-            if sentido == 1:
+            # de -> para is the "direct" direction.
+            if sentido == 0:
                 date_lookup[key]["direct_mw"] = valor
             else:
                 date_lookup[key]["reverse_mw"] = valor
         else:
-            if sentido == 1:
+            # de -> para is the "reverse" direction.
+            if sentido == 0:
                 date_lookup[key]["reverse_mw"] = valor
             else:
                 date_lookup[key]["direct_mw"] = valor
@@ -662,8 +378,16 @@ def compute_line_bounds(
 
     result: dict[tuple[int, int, str], float] = {}
 
+    # Interchange limits have no seasonalize flag → post-study freezes at the
+    # last study stage's value (mirror convert_line_bounds in network.py).
+    ls_y = start_year + (start_month - 1 + study_months - 1) // 12
+    ls_m = ((start_month - 1 + study_months - 1) % 12) + 1
+
     for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
         src, tgt = pair
+        freeze_caps = date_lookup.get((src, tgt, ls_y, ls_m)) or last_year_lookup.get(
+            (src, tgt, ls_m), {"direct_mw": 0.0, "reverse_mw": 0.0}
+        )
         y, m = start_year, start_month
         for stage_id in range(total_stages):
             is_post_study = (y > study_end_year) or (
@@ -671,9 +395,7 @@ def compute_line_bounds(
             )
 
             if is_post_study:
-                caps = last_year_lookup.get(
-                    (src, tgt, m), {"direct_mw": 0.0, "reverse_mw": 0.0}
-                )
+                caps = freeze_caps
             else:
                 caps = date_lookup.get((src, tgt, y, m))
                 if caps is None:

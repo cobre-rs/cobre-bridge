@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from cobre_bridge.converters.hydro import _compute_productivity
+from cobre_bridge.productivity import compute_productivity
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ def resolve_cascade(
             # name carries the FICT prefix — they are simply absent.
             continue
         if code in cadastro.index:
-            fict_rho_eq[code] = float(_compute_productivity(cadastro.loc[code]))
+            fict_rho_eq[code] = float(compute_productivity(cadastro.loc[code]))
         else:
             fict_rho_eq[code] = 0.0
 

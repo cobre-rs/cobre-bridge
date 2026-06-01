@@ -181,6 +181,24 @@ COST_BREAKDOWN_TABLE_CSS: str = """
 .cost-breakdown-table .cb-cat { text-align: left; }
 .cost-breakdown-table .cb-diff-pos { color: #DC2626; font-weight: 600; }
 .cost-breakdown-table .cb-diff-neg { color: #059669; font-weight: 600; }
+/* Productivity building-blocks table: per-metric column grouping cues. */
+.prod-blocks-table thead th { text-align: center; }
+.prod-blocks-table .cb-group-tint { background: #F1F5F9; }
+.prod-blocks-table thead .cb-group-tint { background: #E7EEF5; }
+.prod-blocks-table .cb-group-sep { border-left: 2px solid #94A3B8; }
+.prod-blocks-table tbody tr:nth-child(even) td.cb-group-tint { background: #E9EFF5; }
+.prod-blocks-table tbody tr:hover td.cb-group-tint { background: #E0EAF6; }
+.prod-blocks-table .cb-cat {
+    position: sticky;
+    left: 0;
+    background: #FFFFFF;
+    z-index: 1;
+}
+.prod-blocks-table .cb-caption-note {
+    font-weight: 400;
+    font-size: 0.8rem;
+    color: #6B7280;
+}
 """
 
 DATA_TABLE_CSS: str = """

@@ -739,3 +739,37 @@ class TestLightweightPayloads:
         # ~50-char string per sample which dominated long-run file size.
         assert "customdata" in html
         assert '"text":[' not in html
+
+    def test_cuts_vs_solve_time_aggregates_per_iter_stage(self) -> None:
+        """The scatter collapses raw backward samples to one point per
+        (iteration, stage) group with a p25-p75 error bar — not one marker per
+        (iteration, stage, opening, worker) sample, which reached ~12M points
+        (191 MB) on the production case and could not render in a browser.
+        """
+        import re
+
+        from cobre_bridge.dashboard.tabs.performance_charts import (
+            chart_cuts_vs_solve_time_scatter,
+        )
+
+        n_iter, n_stages, n_openings = 10, 20, 5
+        solver = self._backward_synthetic_frame(
+            n_iter=n_iter, n_stages=n_stages, n_openings=n_openings
+        )
+        cuts = pd.DataFrame(
+            [
+                {"iteration": i, "stage": s, "cuts_active_after": (i + s) % 50 + 1}
+                for i in range(n_iter)
+                for s in range(n_stages)
+            ]
+        )
+        html = chart_cuts_vs_solve_time_scatter(solver, cuts)
+        # Spread is preserved as an asymmetric error bar, not raw points.
+        assert '"error_y":' in html
+        assert '"arrayminus":' in html
+        # Exactly one point per (iteration, stage) group — not per raw sample.
+        x_match = re.search(r'"x":\[([^\]]*)\]', html)
+        assert x_match is not None
+        n_points = x_match.group(1).count(",") + 1
+        assert n_points == n_iter * n_stages
+        assert n_points < n_iter * n_stages * n_openings

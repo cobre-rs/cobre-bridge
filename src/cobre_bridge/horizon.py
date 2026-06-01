@@ -1,0 +1,202 @@
+"""Canonical NEWAVE study-horizon arithmetic — the single source of truth.
+
+Every per-stage table the pipeline emits (inflows, loads, bounds, penalties,
+constraints) is sized against the study horizon, and the study/post-study
+boundary drives post-study extrapolation. That arithmetic used to be hand-copied
+at ~25 sites across the converters and comparators; this module owns it so all of
+them agree by construction.
+
+NEWAVE conventions encoded here:
+
+- The study runs from ``mes_inicio_estudo`` of ``ano_inicio_estudo`` through
+  December of ``ano_inicio_estudo + num_anos_estudo - 1`` — i.e.
+  ``study_months = (13 - start_month) + (num_anos - 1) * 12`` stages.
+- ``num_anos_pos_estudo`` full calendar years follow, adding ``num_anos_pos * 12``
+  post-study stages, for ``total_stages`` in all.
+- Seasonal records for the post-study (static final) period are tagged with the
+  sentinel year ``9999`` (:data:`POST_STUDY_YEAR`).
+- ``99990`` and above is NEWAVE's "big-M" sentinel meaning "no limit / restore
+  default" in bound records (:data:`BIG_M`).
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import date
+
+from inewave.newave import Dger
+
+# NEWAVE tags post-study (static final period) seasonal data with year 9999.
+POST_STUDY_YEAR = 9999
+
+# NEWAVE bound records use 99999 as a "big-M" sentinel meaning "no limit".
+# Compare with >= this threshold to catch the family of 9999x sentinels.
+BIG_M = 99990.0
+
+
+def is_effectively_infinite(value: float) -> bool:
+    """Return True if *value* represents an unbounded bound.
+
+    Catches both IEEE infinity and NEWAVE's big-M sentinel (``abs(value) >=
+    BIG_M`` — the 99999 family meaning "no limit"). Shared by the bounds
+    comparator and the chart layer so the "is this bound unbounded?" test has
+    one definition.
+    """
+    return math.isinf(value) or abs(value) >= BIG_M
+
+
+@dataclass(frozen=True)
+class StudyHorizon:
+    """Resolved study-horizon dimensions for a NEWAVE case.
+
+    Build with :func:`study_horizon`; every field is a plain count/index so the
+    object is cheap to pass around and compare.
+    """
+
+    start_year: int
+    start_month: int
+    num_anos: int
+    """Number of study years (``num_anos_estudo``)."""
+    num_anos_pos: int
+    """Number of post-study years (``num_anos_pos_estudo``)."""
+    study_months: int
+    """Number of study stages."""
+    total_stages: int
+    """Number of stages overall (study + post-study)."""
+
+    @property
+    def last_study_stage(self) -> int:
+        """0-based index of the final study stage (the freeze point)."""
+        return self.study_months - 1
+
+    @property
+    def first_year_stages(self) -> int:
+        """Number of stages in the (partial) first calendar year."""
+        return 13 - self.start_month
+
+    @property
+    def pos_months(self) -> int:
+        """Number of post-study stages."""
+        return self.num_anos_pos * 12
+
+    def is_post_study(self, stage_id: int) -> bool:
+        """True if ``stage_id`` (0-based) falls in the post-study tail."""
+        return stage_id >= self.study_months
+
+
+def study_horizon(dger: Dger) -> StudyHorizon:
+    """Resolve the :class:`StudyHorizon` from a parsed ``dger.dat``.
+
+    ``num_anos_estudo`` falls back to 1 and ``num_anos_pos_estudo`` to 0 when
+    absent/zero (the pipeline rejects a genuinely empty study earlier).
+    """
+    start_year = int(dger.ano_inicio_estudo)
+    start_month = int(dger.mes_inicio_estudo)
+    num_anos = int(dger.num_anos_estudo or 1)
+    num_anos_pos = int(dger.num_anos_pos_estudo or 0)
+    study_months = (13 - start_month) + (num_anos - 1) * 12
+    total_stages = study_months + num_anos_pos * 12
+    return StudyHorizon(
+        start_year=start_year,
+        start_month=start_month,
+        num_anos=num_anos,
+        num_anos_pos=num_anos_pos,
+        study_months=study_months,
+        total_stages=total_stages,
+    )
+
+
+def build_stage_dates(
+    start_year: int, start_month: int, total_stages: int
+) -> list[date]:
+    """Return the first-of-month date of each stage, in order."""
+    stages: list[date] = []
+    year, month = start_year, start_month
+    for _ in range(total_stages):
+        stages.append(date(year, month, 1))
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return stages
+
+
+def stage_dates_for(horizon: StudyHorizon) -> list[date]:
+    """Convenience: :func:`build_stage_dates` for a resolved horizon."""
+    return build_stage_dates(
+        horizon.start_year, horizon.start_month, horizon.total_stages
+    )
+
+
+def seasonal_step_function(
+    recs: Iterable[tuple[int, int, float]],
+    transform: Callable[[float], float],
+    *,
+    seasonalize: bool,
+    horizon: StudyHorizon,
+) -> dict[int, float]:
+    """Forward-fill dated override records into per-stage values.
+
+    ``recs`` are ``(year, month, raw_value)`` change-points: each sets the value
+    from its stage onward until the next overrides it. A raw value ``>= BIG_M``
+    clears the fill ("restore default"). Returns ``{stage_id: transform(value)}``
+    for every stage that has an active value.
+
+    Post-study extrapolation follows NEWAVE's rule, selected by *seasonalize*:
+
+    - ``True`` (e.g. VMINT/VMAXT with their ``sazonaliza_*`` flag set): repeat the
+      last study year's monthly pattern, so a genuinely seasonal constraint keeps
+      cycling through the static final period.
+    - ``False`` (e.g. VAZMINT / TURBMINT / TURBMAXT, which have no seasonalize
+      flag): freeze the last study stage's value across the post-study tail.
+
+    This is the single source of truth shared by the storage-bounds converter
+    (``converters.hydro.convert_storage_bounds``) and the bounds comparator
+    (``comparators.bounds_from_inputs.compute_hydro_bounds``); keeping them in
+    lock-step is what lets ``compare bounds`` mean anything.
+    """
+    sm = horizon.start_month
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
+
+    changepoints: list[tuple[int, float]] = []
+    for year, month, value in recs:
+        sid = (year - horizon.start_year) * 12 + (month - sm)
+        changepoints.append((max(0, sid), value))
+    changepoints.sort()
+    if not changepoints:
+        return {}
+
+    result: dict[int, float] = {}
+    cp_idx = 0
+    current: float | None = None
+    for stage_id in range(changepoints[0][0], study_months):
+        while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
+            raw = changepoints[cp_idx][1]
+            current = None if raw >= BIG_M else transform(raw)
+            cp_idx += 1
+        if current is not None:
+            result[stage_id] = current
+
+    if total_stages <= study_months:
+        return result
+
+    if seasonalize:
+        seasonal: dict[int, float] = {}
+        for stage_id in range(max(0, study_months - 12), study_months):
+            if stage_id in result:
+                cal = ((sm - 1 + stage_id) % 12) + 1
+                seasonal[cal] = result[stage_id]
+        for stage_id in range(study_months, total_stages):
+            cal = ((sm - 1 + stage_id) % 12) + 1
+            if cal in seasonal:
+                result[stage_id] = seasonal[cal]
+    else:
+        last = study_months - 1
+        if last in result:
+            for stage_id in range(study_months, total_stages):
+                result[stage_id] = result[last]
+
+    return result

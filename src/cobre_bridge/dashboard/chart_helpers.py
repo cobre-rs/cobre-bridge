@@ -24,6 +24,7 @@ from cobre_bridge.ui.plotly_helpers import (
 from cobre_bridge.ui.plotly_helpers import (
     fig_to_html,
 )
+from cobre_bridge.ui.theme import BOUND_LINE_COLOR, hex_to_rgba
 
 try:
     import pandas as pd
@@ -34,8 +35,6 @@ try:
     import polars as pl
 except ImportError:  # pragma: no cover
     pl = None  # type: ignore[assignment]
-
-_BOUNDS_COLOR: str = "#6B7280"
 
 #: Mapping from logical cost group name to known Cobre cost component columns.
 #: The ``"Other"`` key is intentionally absent — it is computed dynamically in
@@ -250,7 +249,7 @@ def add_mean_p50_band(
                 mode="lines",
                 line=dict(width=0),
                 fill="tonexty",
-                fillcolor=_hex_to_rgba(color, 0.15),
+                fillcolor=hex_to_rgba(color, 0.15),
                 hoverinfo="skip",
             ),
             **subplot_kwargs,
@@ -297,7 +296,7 @@ def add_bounds_overlay(
         subplot_kwargs["col"] = col
 
     x = bounds_df[x_col]
-    bound_line = dict(color=_BOUNDS_COLOR, width=1.5, dash="dash")
+    bound_line = dict(color=BOUND_LINE_COLOR, width=1.5, dash="dash")
 
     if min_col is not None:
         fig.add_trace(
@@ -551,22 +550,3 @@ def compute_cost_summary(
 
     agg = agg.sort_values("mean", ascending=False).reset_index(drop=True)
     return agg[summary_cols]
-
-
-def _hex_to_rgba(hex_color: str, alpha: float) -> str:
-    """Convert a 6-digit hex colour string to an ``rgba(...)`` CSS value.
-
-    Args:
-        hex_color: A hex colour string such as ``"#3B82F6"`` (the leading
-            ``#`` is required).
-        alpha: Opacity in the range 0.0–1.0.
-
-    Returns:
-        An ``rgba(r, g, b, alpha)`` string suitable for Plotly's
-        ``fillcolor`` parameter.
-    """
-    hex_color = hex_color.lstrip("#")
-    r = int(hex_color[0:2], 16)
-    g = int(hex_color[2:4], 16)
-    b = int(hex_color[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Sequence
 
 import plotly.graph_objects as go
+
+from cobre_bridge.ui.html import json_for_script
 
 LEGEND_DEFAULTS: dict = dict(
     orientation="h",
@@ -42,6 +43,41 @@ def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
     )
 
 
+def apply_standard_layout(fig: go.Figure, **layout: object) -> go.Figure:
+    """Apply the dashboard's standard ``legend``/``margin`` defaults to *fig*.
+
+    Replaces the repeated ``fig.update_layout(..., legend=LEGEND_DEFAULTS,
+    margin=MARGIN_DEFAULTS, ...)``. ``legend`` and ``margin`` default to the
+    shared constants but can be overridden in ``**layout``; everything else
+    (``title``, ``xaxis_title``, ``barmode``, ``height``, …) is forwarded to
+    :meth:`plotly.graph_objects.Figure.update_layout`. Mutates *fig* in place and
+    also returns it, so it fits both ``make_chart_card(apply_standard_layout(...))``
+    and ``return apply_standard_layout(...)`` call sites.
+    """
+    layout.setdefault("legend", LEGEND_DEFAULTS)
+    layout.setdefault("margin", MARGIN_DEFAULTS)
+    fig.update_layout(**layout)
+    return fig
+
+
+def render_figure(
+    fig: go.Figure,
+    *,
+    unified_hover: bool = True,
+    **layout: object,
+) -> str:
+    """Apply the standard layout to *fig* and return an HTML fragment.
+
+    Equivalent to :func:`apply_standard_layout` followed by :func:`fig_to_html`;
+    collapses the ``fig.update_layout(..., legend=LEGEND_DEFAULTS,
+    margin=MARGIN_DEFAULTS, ...)`` + ``fig_to_html(fig)`` boilerplate into one
+    call for the tabs that render straight to HTML.
+    """
+    return fig_to_html(
+        apply_standard_layout(fig, **layout), unified_hover=unified_hover
+    )
+
+
 def plotly_div(
     traces: list[dict],
     layout: dict,
@@ -60,8 +96,8 @@ def plotly_div(
     layout.setdefault("template", "plotly_white")
     layout.setdefault("hovermode", "x unified")
 
-    data_json = json.dumps(traces)
-    layout_json = json.dumps(layout)
+    data_json = json_for_script(traces)
+    layout_json = json_for_script(layout)
 
     return (
         f'<div id="{div_id}"></div>\n'

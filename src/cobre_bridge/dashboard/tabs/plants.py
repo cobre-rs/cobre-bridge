@@ -8,7 +8,6 @@ percentile bands.  Sub-tab switching is handled by SUB_TAB_JS.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -18,6 +17,9 @@ from cobre_bridge.ui.html import (
     _sparkline_svg,
     chart_grid,
     collapsible_section,
+    escape_attr,
+    escape_text,
+    json_for_script,
     plant_explorer_table,
     section_title,
     wrap_chart,
@@ -517,10 +519,10 @@ def build_thermal_explorer(
             else ""
         )
         table_rows.append(
-            f'<tr data-name="{name.lower()}" data-index="{tid}">'
+            f'<tr data-name="{escape_attr(name.lower())}" data-index="{tid}">'
             f'<td><input type="checkbox" class="compare-checkbox" data-id="{tid}"></td>'
-            f"<td>{name}</td>"
-            f"<td>{bus}</td>"
+            f"<td>{escape_text(name)}</td>"
+            f"<td>{escape_text(bus)}</td>"
             f'<td data-sort-value="{max_mw:.0f}">{max_mw:.0f}</td>'
             f'<td data-sort-value="{cost_per_mwh:.2f}">{cost_per_mwh:.2f} R$/MWh</td>'
             f"<td>{gen_spark}</td>"
@@ -585,8 +587,8 @@ def build_thermal_explorer(
 
     # --- Embedded JS (data + render functions only — PLANT_EXPLORER_JS emitted
     #     once in render()) ---------------------------------------------------
-    data_json = json.dumps(thermal_data, separators=(",", ":"))
-    labels_json = json.dumps(xlabels)
+    data_json = json_for_script(thermal_data)
+    labels_json = json_for_script(xlabels)
 
     inline_js = (
         "\nvar TT = "
@@ -741,10 +743,10 @@ def build_hydro_explorer(
             else ""
         )
         table_rows.append(
-            f'<tr data-name="{name.lower()}" data-index="{hid}">'
+            f'<tr data-name="{escape_attr(name.lower())}" data-index="{hid}">'
             f'<td><input type="checkbox" class="compare-checkbox" data-id="{hid}"></td>'
-            f"<td>{name}</td>"
-            f"<td>{bus}</td>"
+            f"<td>{escape_text(name)}</td>"
+            f"<td>{escape_text(bus)}</td>"
             f'<td data-sort-value="{max_gen_mw:.0f}">{max_gen_mw:.0f}</td>'
             f'<td data-sort-value="{vol_max:.0f}">{vol_max:.0f}</td>'
             f"<td>{gen_spark}</td>"
@@ -844,8 +846,8 @@ def build_hydro_explorer(
 
     # --- Embedded JS (data + render functions only — PLANT_EXPLORER_JS emitted
     #     once in render()) ---------------------------------------------------
-    data_json = json.dumps(hydro_data, separators=(",", ":"))
-    labels_json = json.dumps(xlabels)
+    data_json = json_for_script(hydro_data)
+    labels_json = json_for_script(xlabels)
 
     inline_js = (
         "\nvar HP = "

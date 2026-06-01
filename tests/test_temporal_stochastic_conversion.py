@@ -97,6 +97,7 @@ def _make_dger_mock(
     selecao_de_cortes_forward: int = 1,
     selecao_de_cortes_backward: int = 1,
     ordem_maxima_parp: int = 6,
+    impressao_estados_geracao_cortes: int | None = None,
 ) -> MagicMock:
     dger = MagicMock()
     dger.mes_inicio_estudo = mes_inicio
@@ -118,6 +119,7 @@ def _make_dger_mock(
     dger.selecao_de_cortes_forward = selecao_de_cortes_forward
     dger.selecao_de_cortes_backward = selecao_de_cortes_backward
     dger.ordem_maxima_parp = ordem_maxima_parp
+    dger.impressao_estados_geracao_cortes = impressao_estados_geracao_cortes
     return dger
 
 
@@ -638,6 +640,45 @@ class TestConvertConfig:
 
         result = convert_config(_make_nw_files(tmp_path))
         assert result["simulation"]["num_scenarios"] == 500
+
+    # -- impressao_estados_geracao_cortes / exports.states --
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_export_states_true_when_flag_zero(self, mock_dger_cls, tmp_path) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(impressao_estados_geracao_cortes=0)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["exports"]["states"] is True
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_export_states_false_when_flag_nonzero(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(impressao_estados_geracao_cortes=1)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["exports"]["states"] is False
+
+    @patch("cobre_bridge.converters.temporal.Dger")
+    def test_export_states_false_when_flag_absent(
+        self, mock_dger_cls, tmp_path
+    ) -> None:
+        (tmp_path / "dger.dat").touch()
+        dger = _make_dger_mock(impressao_estados_geracao_cortes=None)
+        mock_dger_cls.read.return_value = dger
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(_make_nw_files(tmp_path))
+        assert result["exports"]["states"] is False
 
     # -- tipo_execucao / training.enabled --
 
@@ -1773,6 +1814,129 @@ class TestConvertLoadStats:
         bus0_means = [m for bid, m in zip(df["bus_id"], df["mean_mw"]) if bid == 0]
         assert bus0_means[0] == pytest.approx(3000.0)
         assert bus0_means[1] == pytest.approx(2800.0)
+
+
+def _make_cadic_mock(rows: list[dict]) -> MagicMock:
+    """Build a Cadic mock whose ``cargas`` matches inewave's schema."""
+    mock = MagicMock()
+    mock.cargas = pd.DataFrame(rows) if rows else None
+    return mock
+
+
+class TestParseCadical:
+    """``_parse_cadical`` aggregates inewave's ``Cadic.cargas`` into a lookup."""
+
+    @patch("cobre_bridge.converters.stochastic.Cadic")
+    def test_sums_razoes_per_subsystem_year_month(
+        self, mock_cadic_cls, tmp_path
+    ) -> None:
+        from cobre_bridge.converters.stochastic import _parse_cadical
+
+        # Two razões for (sub 1, 2024-01) sum; sub 2 and POS (year 9999) distinct.
+        mock_cadic_cls.read.return_value = _make_cadic_mock(
+            [
+                {
+                    "codigo_submercado": 1,
+                    "nome_submercado": "SE",
+                    "razao": "SMALL PLANTS",
+                    "data": datetime.datetime(2024, 1, 1),
+                    "valor": 10.0,
+                },
+                {
+                    "codigo_submercado": 1,
+                    "nome_submercado": "SE",
+                    "razao": "OTHER",
+                    "data": datetime.datetime(2024, 1, 1),
+                    "valor": 2.5,
+                },
+                {
+                    "codigo_submercado": 2,
+                    "nome_submercado": "S",
+                    "razao": "SMALL PLANTS",
+                    "data": datetime.datetime(2024, 1, 1),
+                    "valor": 7.0,
+                },
+                {
+                    "codigo_submercado": 1,
+                    "nome_submercado": "SE",
+                    "razao": "SMALL PLANTS",
+                    "data": datetime.datetime(9999, 6, 1),  # POS sentinel
+                    "valor": 4.0,
+                },
+            ]
+        )
+        result = _parse_cadical(tmp_path / "c_adic.dat")
+        assert result[(1, 2024, 1)] == pytest.approx(12.5)  # 10.0 + 2.5
+        assert result[(2, 2024, 1)] == pytest.approx(7.0)
+        assert result[(1, 9999, 6)] == pytest.approx(4.0)
+
+    @patch("cobre_bridge.converters.stochastic.Cadic")
+    def test_skips_nan_values(self, mock_cadic_cls, tmp_path) -> None:
+        from cobre_bridge.converters.stochastic import _parse_cadical
+
+        mock_cadic_cls.read.return_value = _make_cadic_mock(
+            [
+                {
+                    "codigo_submercado": 1,
+                    "nome_submercado": "SE",
+                    "razao": "X",
+                    "data": datetime.datetime(2024, 3, 1),
+                    "valor": float("nan"),
+                },
+            ]
+        )
+        assert _parse_cadical(tmp_path / "c_adic.dat") == {}
+
+    @patch("cobre_bridge.converters.stochastic.Cadic")
+    def test_empty_cargas_returns_empty(self, mock_cadic_cls, tmp_path) -> None:
+        from cobre_bridge.converters.stochastic import _parse_cadical
+
+        mock_cadic_cls.read.return_value = _make_cadic_mock([])  # cargas is None
+        assert _parse_cadical(tmp_path / "c_adic.dat") == {}
+
+    @patch("cobre_bridge.converters.stochastic.Cadic")
+    @patch("cobre_bridge.converters.stochastic.Dger")
+    @patch("cobre_bridge.converters.stochastic.Sistema")
+    def test_cadic_additions_reach_load(
+        self, mock_sistema_cls, mock_dger_cls, mock_cadic_cls, tmp_path
+    ) -> None:
+        """C_ADIC must-take energy is added to the per-(subsystem, stage) load."""
+        from cobre_bridge.converters.stochastic import convert_load_stats
+
+        (tmp_path / "sistema.dat").touch()
+        (tmp_path / "dger.dat").touch()
+        rows = [
+            {
+                "codigo_submercado": 1,
+                "data": datetime.datetime(2024, month, 1),
+                "valor": 1000.0,
+            }
+            for month in (1, 2)
+        ]
+        mock = MagicMock()
+        mock.mercado_energia = pd.DataFrame(rows)
+        mock_sistema_cls.read.return_value = mock
+        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(
+            ano_inicio=2024, num_anos=1
+        )
+        mock_cadic_cls.read.return_value = _make_cadic_mock(
+            [
+                {
+                    "codigo_submercado": 1,
+                    "nome_submercado": "SE",
+                    "razao": "SMALL",
+                    "data": datetime.datetime(2024, 1, 1),
+                    "valor": 50.0,
+                },
+            ]
+        )
+        id_map = _make_id_map_buses([1])
+        nw = _make_nw_files(tmp_path, c_adic=tmp_path / "c_adic.dat")
+
+        df = convert_load_stats(nw, id_map).to_pydict()
+        bus0 = [m for bid, m in zip(df["bus_id"], df["mean_mw"]) if bid == 0]
+        assert bus0[0] == pytest.approx(1050.0)  # Jan load + C_ADIC
+        assert bus0[1] == pytest.approx(1000.0)  # Feb load, no C_ADIC
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,25 @@ from pathlib import Path
 
 import polars as pl
 
+from cobre_bridge.cobre_io import (
+    case_dir_for,
+    productivity_from_energy_parquet,
+    productivity_from_production_models,
+)
+
 _LOG = logging.getLogger(__name__)
+
+
+class CobreReadError(RuntimeError):
+    """A Cobre output file/dir existed but could not be read or parsed.
+
+    Raised when a reader fails while reading an *already-confirmed-present*
+    Cobre output (parquet/dir/JSON) that feeds the bounds/results comparison.
+    A genuinely **absent** optional output must still yield an empty frame
+    (never this error) — only a real read/schema/dtype failure on existing
+    data raises, so the comparison engine never silently treats unreadable
+    output as "no divergence".
+    """
 
 
 def _load_block_hours(cobre_output_dir: Path) -> pl.DataFrame | None:
@@ -23,7 +41,7 @@ def _load_block_hours(cobre_output_dir: Path) -> pl.DataFrame | None:
     Returns DataFrame with columns ``stage_id``, ``block_id``, ``hours``
     or None if stages.json cannot be found or parsed.
     """
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     for candidate in [case_dir, cobre_output_dir]:
         p = candidate / "stages.json"
         if p.exists():
@@ -122,9 +140,14 @@ def _scan_simulation_entity(
     pattern = sim_dir / "**/*.parquet"
     try:
         lf = pl.scan_parquet(pattern, hive_partitioning=True)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to scan parquets in %s", sim_dir)
-        return None
+        # ``scan_parquet`` is lazy and will not surface a malformed/corrupt
+        # file until the schema or data is actually touched.  Probe the
+        # schema eagerly so a present-but-unreadable parquet raises here —
+        # the single choke point every simulation reader shares — instead of
+        # leaking a raw polars error past each reader's narrower try/except.
+        lf.collect_schema()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(f"Failed to scan parquets in {sim_dir}") from exc
 
     return lf
 
@@ -223,9 +246,11 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
                 .sort("entity_id", "stage_id")
                 .collect(engine="streaming")
             )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate hydro simulation data")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate hydro simulation data: "
+            f"{cobre_output_dir / 'simulation' / 'hydros'}"
+        ) from exc
 
     for col in flow_cols + stage_cols:
         if col not in result.columns:
@@ -279,7 +304,7 @@ def read_cobre_hydro_total_flows(
     if not required.issubset(cobre_hydro_means.columns):
         return empty
 
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
         hydros_path = case_dir / "system" / "hydros.json"
@@ -288,9 +313,10 @@ def read_cobre_hydro_total_flows(
     try:
         with hydros_path.open() as f:
             hydros_data = json.load(f)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to parse hydros.json for total-inflow topology")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            f"Failed to parse hydros.json for total-inflow topology: {hydros_path}"
+        ) from exc
 
     # parents[child_id] = list of hydro_ids whose downstream_id == child_id.
     parents: dict[int, list[int]] = {}
@@ -345,7 +371,7 @@ def _load_hydro_reservoir_flag(cobre_output_dir: Path) -> dict[int, bool]:
     The discriminator mirrors the dashboard convention (reservoir = any
     plant with positive max storage; run-of-river otherwise).
     """
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
         hydros_path = case_dir / "system" / "hydros.json"
@@ -446,9 +472,11 @@ def read_cobre_spillage_energy(cobre_output_dir: Path) -> pl.DataFrame:
             .agg(pl.col("mw_mean").mean())
             .collect(engine="streaming")
         )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate Cobre spillage-energy")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate Cobre spillage-energy: "
+            f"{cobre_output_dir / 'simulation' / 'hydros'}"
+        ) from exc
 
     if per_stage.is_empty():
         return empty
@@ -572,9 +600,11 @@ def read_cobre_line_means(cobre_output_dir: Path) -> pl.DataFrame:
                 .sort("entity_id", "stage_id")
                 .collect(engine="streaming")
             )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate exchange simulation data")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate exchange simulation data: "
+            f"{cobre_output_dir / 'simulation' / 'exchanges'}"
+        ) from exc
     return result
 
 
@@ -595,9 +625,11 @@ def read_cobre_line_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     try:
         per_sc = _weighted_scenario_values(lf, id_col, ["net_flow_mw"], [], block_hours)
         return _compute_percentiles(per_sc, ["net_flow_mw"])
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to compute line percentiles")
-        return pl.DataFrame()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to compute line percentiles: "
+            f"{cobre_output_dir / 'simulation' / 'exchanges'}"
+        ) from exc
 
 
 def read_cobre_lp_max_generation(cobre_output_dir: Path) -> pl.DataFrame:
@@ -624,9 +656,8 @@ def read_cobre_lp_max_generation(cobre_output_dir: Path) -> pl.DataFrame:
         return empty
     try:
         df = pl.read_parquet(bounds_path)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read bounds.parquet")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(f"Failed to read bounds.parquet: {bounds_path}") from exc
     required = {
         "entity_type_code",
         "entity_id",
@@ -669,15 +700,16 @@ def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
             "withdrawal_m3s": pl.Float64,
         }
     )
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     bounds_path = case_dir / "constraints" / "hydro_bounds.parquet"
     if not bounds_path.exists():
         return empty
     try:
         df = pl.read_parquet(bounds_path)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read hydro_bounds.parquet")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            f"Failed to read hydro_bounds.parquet: {bounds_path}"
+        ) from exc
     if "water_withdrawal_m3s" not in df.columns:
         return empty
     return df.select(
@@ -704,7 +736,7 @@ def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
     cast to ``Float64``.  Returns an empty frame when the parquet
     is missing.
     """
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     bounds_path = case_dir / "constraints" / "hydro_bounds.parquet"
     bound_cols = [
         "min_storage_hm3",
@@ -724,9 +756,10 @@ def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
         return pl.DataFrame(schema=empty_schema)
     try:
         df = pl.read_parquet(bounds_path)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read hydro_bounds.parquet for dashboard bounds")
-        return pl.DataFrame(schema=empty_schema)
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            f"Failed to read hydro_bounds.parquet for dashboard bounds: {bounds_path}"
+        ) from exc
     available = [c for c in bound_cols if c in df.columns]
     if not available:
         return pl.DataFrame(schema=empty_schema)
@@ -783,9 +816,11 @@ def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
                 .sort("entity_id", "stage_id")
                 .collect(engine="streaming")
             )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate thermal simulation data")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate thermal simulation data: "
+            f"{cobre_output_dir / 'simulation' / 'thermals'}"
+        ) from exc
 
     return result
 
@@ -839,9 +874,11 @@ def read_cobre_bus_means(cobre_output_dir: Path) -> pl.DataFrame:
                 .sort("entity_id", "stage_id")
                 .collect(engine="streaming")
             )
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to aggregate bus simulation data")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to aggregate bus simulation data: "
+            f"{cobre_output_dir / 'simulation' / 'buses'}"
+        ) from exc
 
     for col in ("spot_price", "deficit_mw"):
         if col not in result.columns:
@@ -964,9 +1001,11 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
             lf, id_col, avail_flow, avail_stage, block_hours
         )
         return _compute_percentiles(per_sc, all_vars)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to compute hydro percentiles")
-        return pl.DataFrame()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to compute hydro percentiles: "
+            f"{cobre_output_dir / 'simulation' / 'hydros'}"
+        ) from exc
 
 
 def read_cobre_thermal_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
@@ -986,9 +1025,11 @@ def read_cobre_thermal_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
             lf, id_col, ["generation_mw"], [], block_hours
         )
         return _compute_percentiles(per_sc, ["generation_mw"])
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to compute thermal percentiles")
-        return pl.DataFrame()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to compute thermal percentiles: "
+            f"{cobre_output_dir / 'simulation' / 'thermals'}"
+        ) from exc
 
 
 def read_cobre_bus_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
@@ -1007,9 +1048,11 @@ def read_cobre_bus_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     try:
         per_sc = _weighted_scenario_values(lf, id_col, flow_cols, [], block_hours)
         return _compute_percentiles(per_sc, flow_cols)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to compute bus percentiles")
-        return pl.DataFrame()
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to compute bus percentiles: "
+            f"{cobre_output_dir / 'simulation' / 'buses'}"
+        ) from exc
 
 
 def _load_entity_bus_map(
@@ -1280,9 +1323,11 @@ def read_cobre_cost_breakdown(
 
         per_sc = lf.group_by("scenario_id").agg(disc_exprs)
         means = per_sc.select([pl.col(c).mean() for c in cols]).collect()
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read Cobre cost breakdown")
-        return {}
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to read Cobre cost breakdown: "
+            f"{cobre_output_dir / 'simulation' / 'costs'}"
+        ) from exc
 
     result: dict[str, float] = {}
     for c in cols:
@@ -1294,26 +1339,24 @@ def read_cobre_cost_breakdown(
 
 
 def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
-    """Read Cobre per-stage immediate/future cost (mean across scenarios).
+    """Read Cobre per-stage immediate/future/thermal cost (mean across scenarios).
 
     Returns a DataFrame with columns ``stage_id`` (Int64),
-    ``immediate_cost`` (Float64, R$) and ``future_cost`` (Float64, R$).
-    Both costs are reported as raw, *undiscounted* stage values — the
-    counterpart of NEWAVE's MEDIAS-SIN ``COPER`` and ``CUSTO_FUTURO``
-    variables (after the 10⁶ R$ unit conversion on the NEWAVE side).
+    ``immediate_cost`` (Float64, R$), ``future_cost`` (Float64, R$) and
+    ``thermal_cost`` (Float64, R$). All are raw, *undiscounted* stage values —
+    the counterparts of NEWAVE's MEDIAS-SIN ``COPER`` / ``CUSTO_FUTURO`` /
+    ``CTERM`` (after the 10⁶ R$ unit conversion on the NEWAVE side).
 
     Cobre's costs table is one row per ``(scenario_id, stage_id, block_id)``;
-    we sum block-level immediate_cost within each (scenario, stage) and
-    keep the (scenario, stage) value of future_cost, then average across
-    scenarios.  ``future_cost`` is identical across blocks of the same
+    we sum block-level immediate_cost / thermal_cost within each (scenario,
+    stage) and keep the (scenario, stage) value of future_cost, then average
+    across scenarios.  ``future_cost`` is identical across blocks of the same
     stage so a ``max`` (= any) collapse is safe.
     """
+    _SUM_COLS = ("immediate_cost", "thermal_cost")
+    _ALL_COLS = ("immediate_cost", "future_cost", "thermal_cost")
     empty = pl.DataFrame(
-        schema={
-            "stage_id": pl.Int64,
-            "immediate_cost": pl.Float64,
-            "future_cost": pl.Float64,
-        }
+        schema={"stage_id": pl.Int64, **{c: pl.Float64 for c in _ALL_COLS}}
     )
 
     lf = _scan_simulation_entity(cobre_output_dir, "costs")
@@ -1323,12 +1366,12 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
     available = set(lf.collect_schema().names())
     if "stage_id" not in available:
         return empty
-    if "immediate_cost" not in available and "future_cost" not in available:
+    if not any(c in available for c in _ALL_COLS):
         return empty
 
-    agg_exprs: list[pl.Expr] = []
-    if "immediate_cost" in available:
-        agg_exprs.append(pl.col("immediate_cost").sum().alias("immediate_cost"))
+    agg_exprs: list[pl.Expr] = [
+        pl.col(c).sum().alias(c) for c in _SUM_COLS if c in available
+    ]
     if "future_cost" in available:
         # future_cost is a per-stage quantity replicated across blocks;
         # ``max`` collapses without double-counting.
@@ -1336,23 +1379,42 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
 
     try:
         per_sc = lf.group_by(["scenario_id", "stage_id"]).agg(agg_exprs)
-        mean_cols = [
-            pl.col(c).mean()
-            for c in ("immediate_cost", "future_cost")
-            if c in available
-        ]
+        mean_cols = [pl.col(c).mean() for c in _ALL_COLS if c in available]
         df = per_sc.group_by("stage_id").agg(mean_cols).sort("stage_id").collect()
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read Cobre per-stage costs")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            "Failed to read Cobre per-stage costs: "
+            f"{cobre_output_dir / 'simulation' / 'costs'}"
+        ) from exc
 
-    # Ensure both columns are present even if one was missing in the schema.
-    for c in ("immediate_cost", "future_cost"):
+    # Ensure all columns are present even if one was missing in the schema.
+    for c in _ALL_COLS:
         if c not in df.columns:
             df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
-    return df.select(["stage_id", "immediate_cost", "future_cost"]).cast(
-        {"stage_id": pl.Int64, "immediate_cost": pl.Float64, "future_cost": pl.Float64}
+    return df.select(["stage_id", *_ALL_COLS]).cast(
+        {"stage_id": pl.Int64, **{c: pl.Float64 for c in _ALL_COLS}}
     )
+
+
+def read_converted_penalties(cobre_output_dir: Path) -> dict:
+    """Load the converted ``penalties.json`` for the Cobre case.
+
+    ``penalties.json`` lives at the Cobre *case* root (the parent of the
+    ``output`` directory the comparator is pointed at), so we look there first,
+    then in the output dir itself. Returns the parsed dict, or ``{}`` when not
+    found — callers should treat an empty dict as "penalties unavailable".
+    """
+    for candidate in (
+        case_dir_for(cobre_output_dir) / "penalties.json",
+        cobre_output_dir / "penalties.json",
+    ):
+        if candidate.is_file():
+            try:
+                return json.loads(candidate.read_text())
+            except (OSError, json.JSONDecodeError):
+                _LOG.warning("Failed to parse %s", candidate)
+                return {}
+    return {}
 
 
 def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
@@ -1376,9 +1438,10 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
 
     try:
         df = pl.read_parquet(conv_path)
-    except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read convergence.parquet")
-        return empty
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(
+            f"Failed to read convergence.parquet: {conv_path}"
+        ) from exc
 
     # Map columns to standard names.  Prefer exact matches first to avoid
     # collisions (e.g. "upper_bound_std" overwriting "upper_bound_mean").
@@ -1436,92 +1499,12 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
 
 def _resolve_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
     """Locate a `system/<filename>` JSON near the Cobre output directory."""
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     for candidate in [case_dir, cobre_output_dir, case_dir.parent]:
         p = candidate / "system" / filename
         if p.exists():
             return p
     return None
-
-
-def _productivity_from_energy_parquet(case_dir: Path) -> dict[int, float]:
-    """Return ``{hydro_id: ρ_eq}`` from ``hydro_energy_productivity.parquet``.
-
-    Prefers the per-hydro NULL-stage_id row as a "default" value; falls back to
-    the productivity at the smallest stage_id when no default row exists. This
-    is the new cobre productivity-resolution-rules contract: the parquet is the
-    authoritative source for non-FPHA ρ_eq.
-    """
-    parquet_path = case_dir / "system" / "hydro_energy_productivity.parquet"
-    if not parquet_path.exists():
-        return {}
-    try:
-        import pyarrow.parquet as pq
-
-        table = pq.read_table(parquet_path)
-    except (OSError, ImportError):
-        _LOG.warning("Failed to read %s", parquet_path)
-        return {}
-
-    cols = table.column_names
-    if "hydro_id" not in cols or "equivalent_productivity_mw_per_m3s" not in cols:
-        return {}
-    hydro_ids = table["hydro_id"].to_pylist()
-    stage_ids = (
-        table["stage_id"].to_pylist() if "stage_id" in cols else [None] * len(hydro_ids)
-    )
-    values = table["equivalent_productivity_mw_per_m3s"].to_pylist()
-
-    # First pass: take NULL-stage_id rows (per-hydro defaults).
-    result: dict[int, float] = {}
-    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
-        if sid is None and v is not None and hid not in result:
-            result[int(hid)] = float(v)
-
-    # Second pass: for hydros without a default row, fall back to the smallest
-    # stage_id row's value (best-effort representative).
-    by_hydro_min_stage: dict[int, tuple[int, float]] = {}
-    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
-        if sid is None or v is None:
-            continue
-        hid_i = int(hid)
-        if hid_i in result:
-            continue
-        cur = by_hydro_min_stage.get(hid_i)
-        if cur is None or sid < cur[0]:
-            by_hydro_min_stage[hid_i] = (sid, float(v))
-    for hid, (_sid, v) in by_hydro_min_stage.items():
-        result[hid] = v
-    return result
-
-
-def _productivity_from_production_models(case_dir: Path) -> dict[int, float]:
-    """Legacy fallback: read productivity from ``hydro_production_models.json``.
-
-    Pre-modernization cobre-bridge cases emit ``productivity_mw_per_m3s`` in the
-    JSON stage_range entries; this helper preserves dashboard/compare support
-    for those older outputs. New cases use
-    :func:`_productivity_from_energy_parquet` instead.
-    """
-    pm_path = case_dir / "system" / "hydro_production_models.json"
-    if not pm_path.exists():
-        return {}
-    try:
-        with pm_path.open() as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        _LOG.warning("Failed to parse %s", pm_path)
-        return {}
-    result: dict[int, float] = {}
-    for model in data.get("production_models", []):
-        hydro_id = int(model.get("hydro_id"))
-        ranges = model.get("stage_ranges") or []
-        for entry in ranges:
-            prod = entry.get("productivity_mw_per_m3s")
-            if prod is not None:
-                result[hydro_id] = float(prod)
-                break
-    return result
 
 
 def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
@@ -1549,8 +1532,8 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         return {}
 
     case_dir = hydros_path.parent.parent
-    energy_productivity = _productivity_from_energy_parquet(case_dir)
-    pm_productivity = _productivity_from_production_models(case_dir)
+    energy_productivity = productivity_from_energy_parquet(case_dir)
+    pm_productivity = productivity_from_production_models(case_dir)
 
     result: dict[int, dict] = {}
     for hydro in data.get("hydros", []):
@@ -1598,9 +1581,69 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     return result
 
 
+def read_cobre_productivity_detail(cobre_output_dir: Path) -> dict[int, dict]:
+    """Read the per-hydro converted building blocks for the Productivity tab.
+
+    Surfaces the productivity building blocks cobre-bridge wrote into
+    ``system/hydros.json`` so the Building-Blocks table can show them next to
+    the NEWAVE HIDR cadastro values: ``specific_productivity``
+    (``specific_productivity_mw_per_m3s_per_m``), ``tailwater_m`` (constant
+    ``tailrace.coefficients[0]``), ``losses_m`` (constant
+    ``hydraulic_losses.value_m``), ``vmin_hm3`` / ``vmax_hm3``.
+
+    Returns ``{hydro_id: {"name", "specific_productivity", "tailwater_m",
+    "losses_m", "vmin_hm3", "vmax_hm3"}}``; per-field values are ``None``
+    when absent.  Returns an empty dict when ``hydros.json`` cannot be
+    located.  (The point/equivalent/accumulated productivities are *not*
+    read from Cobre here — the Productivity-tab scatters validate the
+    conversion against what cobre-bridge computes from the NEWAVE inputs,
+    and the realized per-stage productivity comes from the simulation
+    generation/turbined comparison rows.)
+    """
+    hydros_path = _resolve_system_json(cobre_output_dir, "hydros.json")
+    if hydros_path is None:
+        _LOG.warning("hydros.json not found near %s", cobre_output_dir)
+        return {}
+    try:
+        with hydros_path.open() as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        _LOG.warning("Failed to parse hydros.json for productivity detail")
+        return {}
+
+    result: dict[int, dict] = {}
+    for hydro in data.get("hydros", []):
+        hid = int(hydro["id"])
+
+        tailrace = hydro.get("tailrace") or {}
+        coeffs = tailrace.get("coefficients") or []
+        tailwater_m = float(coeffs[0]) if coeffs else None
+
+        losses = hydro.get("hydraulic_losses") or {}
+        losses_m = (
+            float(losses["value_m"])
+            if losses.get("type") == "constant" and losses.get("value_m") is not None
+            else None
+        )
+
+        reservoir = hydro.get("reservoir") or {}
+        spec = hydro.get("specific_productivity_mw_per_m3s_per_m")
+
+        result[hid] = {
+            "name": str(hydro.get("name", f"hydro_{hid}")),
+            "specific_productivity": float(spec) if spec is not None else None,
+            "tailwater_m": tailwater_m,
+            "losses_m": losses_m,
+            "vmin_hm3": float(reservoir.get("min_storage_hm3", 0.0) or 0.0),
+            "vmax_hm3": float(reservoir.get("max_storage_hm3", 0.0) or 0.0),
+        }
+
+    return result
+
+
 def _find_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
     """Locate a system JSON file near the Cobre output directory."""
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     for candidate in [case_dir, cobre_output_dir, case_dir.parent]:
         p = candidate / "system" / filename
         if p.exists():

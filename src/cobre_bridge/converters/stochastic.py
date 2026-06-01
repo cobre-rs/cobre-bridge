@@ -10,15 +10,15 @@ the ``scenarios/`` directory of a Cobre case.
 from __future__ import annotations
 
 import logging
-import re
 from datetime import date
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from inewave.newave import Confhd, Dger, Patamar, Sistema, Vazoes
+from inewave.newave import Cadic, Confhd, Dger, Patamar, Sistema, Vazoes
 
+from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -459,12 +459,11 @@ def convert_load_factors(
     df_carga: pd.DataFrame | None = patamar.carga_patamares
 
     dger = Dger.read(nw_files.dger)
-    start_month: int = dger.mes_inicio_estudo
-    start_year: int = dger.ano_inicio_estudo
-    num_anos: int = dger.num_anos_estudo or 1
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     # Study end boundary: first month *after* the study horizon.
     study_end_year = start_year + (start_month - 1 + study_months) // 12
@@ -553,7 +552,7 @@ def convert_load_factors(
     return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": load_factors}
 
 
-def _derive_study_stage_months(dger: object) -> list[int]:
+def _derive_study_stage_months(dger: Dger) -> list[int]:
     """Return the ordered sequence of calendar months (1-12) for each study stage.
 
     Parameters
@@ -566,30 +565,27 @@ def _derive_study_stage_months(dger: object) -> list[int]:
     -------
     list[int]
         Calendar month (1-12) for each stage.  Length equals
-        ``(13 - start_month) + (num_anos - 1) * 12 + num_anos_pos * 12``.
+        :attr:`~cobre_bridge.horizon.StudyHorizon.total_stages`.
     """
-    start_month: int = dger.mes_inicio_estudo  # type: ignore[attr-defined]
-    num_anos: int = dger.num_anos_estudo or 1  # type: ignore[attr-defined]
-    num_anos_pos: int = dger.num_anos_pos_estudo or 0  # type: ignore[attr-defined]
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    total_stages = horizon.total_stages
     return [((start_month - 1 + i) % 12) + 1 for i in range(total_stages)]
 
 
 def _parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
     """Parse a C_ADIC.DAT file into a lookup of added load values.
 
-    C_ADIC.DAT contains must-take energy (in average MW) that NEWAVE adds to
-    the bus load.  All entries for the same (subsystem_code, year, cal_month)
-    are summed so the caller receives a single additive contribution.
+    Delegates the fixed-width parsing to inewave's
+    :class:`~inewave.newave.Cadic` reader. C_ADIC.DAT contains must-take energy
+    (in average MW) that NEWAVE adds to the bus load, broken down by *razão*
+    (reason) per subsystem per month. All razões for the same
+    ``(subsystem_code, year, cal_month)`` are summed so the caller receives a
+    single additive contribution.
 
-    The file format uses a fixed-width column layout:
-    - Column 0-3: year (4 digits) or "POS" for post-study template
-    - Columns 7, 15, 23, 31, 39, 47, 55, 63, 71, 79, 87, 95: monthly values
-      (8-char fields, one per calendar month Jan-Dec)
-    - A new block begins with a header line starting with spaces then an
-      integer subsystem code.
-    - The file ends with a line containing "999".
+    Post-study ("POS") rows carry inewave's sentinel year ``9999`` (PRE rows use
+    ``1``), consistent with the convention in :func:`convert_load_stats`; PRE
+    years simply never match a study/post-study stage and are ignored downstream.
 
     Parameters
     ----------
@@ -599,61 +595,20 @@ def _parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
     Returns
     -------
     dict[tuple[int, int, int], float]
-        Mapping of (subsystem_code, year, cal_month_1_based) -> total_mw.
-        For post-study rows the sentinel year ``9999`` is used, consistent
-        with the convention in ``convert_load_stats``.
+        Mapping of ``(subsystem_code, year, cal_month_1_based) -> total_mw``.
     """
-    # Fixed column start positions for the 12 monthly values (Jan=0, Dec=11).
-    _MONTH_COLS = [7, 15, 23, 31, 39, 47, 55, 63, 71, 79, 87, 95]
-
+    cargas = Cadic.read(str(path)).cargas
     result: dict[tuple[int, int, int], float] = {}
+    if cargas is None:
+        return result
 
-    with path.open(encoding="latin-1") as f:
-        lines = [line.rstrip("\r\n") for line in f]
-
-    current_sub: int | None = None
-    # Skip line 0 (XXX format marker) and line 1 (month-name header).
-    i = 2
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-
-        # File terminator.
-        if stripped == "999":
-            break
-
-        # Block header: leading whitespace followed by an integer subsystem code.
-        m_hdr = re.match(r"^\s+(\d+)\s+", line)
-        if m_hdr:
-            current_sub = int(m_hdr.group(1))
-            i += 1
+    for _, row in cargas.iterrows():
+        value = row["valor"]
+        if pd.isna(value):
             continue
-
-        if current_sub is None:
-            i += 1
-            continue
-
-        # Determine year token and parse monthly values.
-        is_pos = stripped.startswith("POS")
-        m_yr = re.match(r"^(\d{4})\s", line)
-        if not is_pos and not m_yr:
-            i += 1
-            continue
-
-        year_key = 9999 if is_pos else int(m_yr.group(1))  # type: ignore[union-attr]
-
-        for cal_month, col_start in enumerate(_MONTH_COLS, start=1):
-            cell = line[col_start : col_start + 8].strip()
-            if not cell:
-                continue
-            try:
-                value = float(cell)
-            except ValueError:
-                continue
-            key = (current_sub, year_key, cal_month)
-            result[key] = result.get(key, 0.0) + value
-
-        i += 1
+        dt = row["data"]
+        key = (int(row["codigo_submercado"]), int(dt.year), int(dt.month))
+        result[key] = result.get(key, 0.0) + float(value)
 
     return result
 
@@ -689,12 +644,12 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
     df_load: pd.DataFrame = sistema_obj.mercado_energia
 
     dger = Dger.read(nw_files.dger)
-    start_month = dger.mes_inicio_estudo
-    start_year = dger.ano_inicio_estudo
-    num_anos = dger.num_anos_estudo or 1
-    num_anos_pos = dger.num_anos_pos_estudo or 0
-    study_months = (13 - start_month) + (num_anos - 1) * 12
-    total_stages = study_months + num_anos_pos * 12
+    horizon = study_horizon(dger)
+    start_month = horizon.start_month
+    start_year = horizon.start_year
+    num_anos = horizon.num_anos
+    study_months = horizon.study_months
+    total_stages = horizon.total_stages
 
     # Load optional C_ADIC additions: {(sub_code, year_or_9999, cal_month) -> mw}.
     cadical_lookup: dict[tuple[int, int, int], float] = {}
@@ -741,7 +696,7 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
             if pd.isna(val):
                 continue
             y, m = dt.year, dt.month
-            if y == 9999:
+            if y == POST_STUDY_YEAR:
                 pos_values[m] = float(val)
             else:
                 study_values[(y, m)] = float(val)
@@ -754,8 +709,10 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
                 val = pos_values.get(m)
                 if val is None:
                     val = study_values.get((start_year + num_anos - 1, m), 0.0)
-                # C_ADIC post-study: use sentinel year 9999
-                val = (val or 0.0) + cadical_lookup.get((sub_int, 9999, m), 0.0)
+                # C_ADIC post-study: use the post-study sentinel year.
+                val = (val or 0.0) + cadical_lookup.get(
+                    (sub_int, POST_STUDY_YEAR, m), 0.0
+                )
             else:
                 val = study_values.get((y, m), 0.0)
                 val += cadical_lookup.get((sub_int, y, m), 0.0)

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from cobre_bridge import __version__
+from cobre_bridge.cobre_io import case_dir_for
 
 
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
@@ -17,7 +18,7 @@ def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
     Searches for ``system/lines.json`` near the output directory.
     Returns an empty list if not found.
     """
-    cobre_case_dir = cobre_output_dir.parent
+    cobre_case_dir = case_dir_for(cobre_output_dir)
     lines_path = cobre_case_dir / "system" / "lines.json"
     if not lines_path.exists():
         for candidate in [cobre_output_dir, cobre_output_dir.parent]:
@@ -38,14 +39,15 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
     """Execute the compare bounds subcommand."""
     from cobre_bridge.comparators.alignment import build_entity_alignment
     from cobre_bridge.comparators.bounds import compare_bounds
+    from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import (
         build_summary,
         print_mismatches,
         print_summary,
         write_report_parquet,
     )
+    from cobre_bridge.id_map import build_id_map
     from cobre_bridge.newave_files import NewaveFiles
-    from cobre_bridge.pipeline import _build_id_map
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -65,7 +67,7 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
 
     # Build alignment.
     nw_files = NewaveFiles.from_directory(newave_dir)
-    id_map = _build_id_map(nw_files)
+    id_map = build_id_map(nw_files)
 
     variables: set[str] | None = None
     if args.variables:
@@ -73,15 +75,21 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
 
     alignment = build_entity_alignment(id_map, nw_files, lines_json)
 
-    # Run comparison.
-    results = compare_bounds(
-        alignment=alignment,
-        nw_files=nw_files,
-        id_map=id_map,
-        cobre_output_dir=cobre_output_dir,
-        tolerance=tolerance,
-        variables=variables,
-    )
+    # Run comparison.  A CobreReadError means an *existing* Cobre output file
+    # was unreadable/malformed — fail loudly (exit 2) rather than report a
+    # false "no divergence" on data we could not actually read.
+    try:
+        results = compare_bounds(
+            alignment=alignment,
+            nw_files=nw_files,
+            id_map=id_map,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+            variables=variables,
+        )
+    except CobreReadError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     # Output.
     summary = build_summary(results)
@@ -99,10 +107,11 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
 def _run_results_comparison(args: argparse.Namespace) -> None:
     """Execute the compare results subcommand."""
     from cobre_bridge.comparators.alignment import build_entity_alignment
+    from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary
     from cobre_bridge.comparators.results import build_results_summary, compare_results
+    from cobre_bridge.id_map import build_id_map
     from cobre_bridge.newave_files import NewaveFiles
-    from cobre_bridge.pipeline import _build_id_map
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -115,21 +124,27 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    id_map = _build_id_map(nw_files)
+    id_map = build_id_map(nw_files)
     lines_json = _load_lines_json(cobre_output_dir)
     alignment = build_entity_alignment(id_map, nw_files, lines_json)
 
-    # Run comparison.
-    results, pctiles = compare_results(
-        nw_files=nw_files,
-        id_map=id_map,
-        alignment=alignment,
-        cobre_output_dir=cobre_output_dir,
-        tolerance=tolerance,
-    )
+    # Run comparison.  A CobreReadError means an *existing* Cobre output file
+    # was unreadable/malformed — fail loudly (exit 2) rather than report a
+    # false "no divergence" on data we could not actually read.
+    try:
+        results, pctiles = compare_results(
+            nw_files=nw_files,
+            id_map=id_map,
+            alignment=alignment,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+        )
+    except CobreReadError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     # Print text summary.
-    summary = build_results_summary(results)
+    summary = build_results_summary(results, tolerance)
     print_results_summary(summary, newave_dir, cobre_output_dir)
 
     # HTML report.
@@ -221,8 +236,13 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
     print(str(report))
 
     if report.warnings:
+        print(
+            f"\nCompleted with {len(report.warnings)} warning(s) — "
+            "some sections may be degraded or skipped:",
+            file=sys.stderr,
+        )
         for warning in report.warnings:
-            print(f"Warning: {warning}", file=sys.stderr)
+            print(f"  - {warning}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Optional post-conversion validation.

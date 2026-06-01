@@ -7,6 +7,7 @@ the logic exercised by each converter.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1390,6 +1391,113 @@ class TestReadGhminPerStage:
         assert result == {}
 
 
+class TestConvertStorageBoundsPostStudy:
+    """Per-quantity post-study extrapolation in convert_storage_bounds.
+
+    VMINT/VMAXT repeat the last study year's seasonal pattern only when their
+    dger ``sazonaliza_*`` flag is set; outflow (VAZMINT) and turbined
+    (TURBMINT/TURBMAXT) have no flag and freeze the last study stage value.
+    """
+
+    def _run(self, tmp_path, overrides, *, vmaxt_flag=1, vmint_flag=1):
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        # start_month=1, 1 study year → study_months=12 (Jan–Dec); 1 post-study
+        # year → stages 12–23 (Jan–Dec again).
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = 2024
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 1
+        mock_dger.num_anos_pos_estudo = 1
+        mock_dger.sazonaliza_vmaxt = vmaxt_flag
+        mock_dger.sazonaliza_vmint = vmint_flag
+
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "usina_existente": ["EX"],
+                "nome_usina": ["TEST"],
+            }
+        )
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        cadastro = pd.DataFrame(
+            {"volume_minimo": [0.0], "volume_maximo": [100.0]}, index=[10]
+        )
+        id_map = MagicMock()
+        id_map.hydro_id = lambda c: 0
+
+        nw = _make_nw_files(tmp_path, modif=tmp_path / "modif.dat")
+        with (
+            patch("inewave.newave.Dger") as md,
+            patch("inewave.newave.Confhd") as mc,
+            patch("cobre_bridge.converters.hydro.read_cadastro", return_value=cadastro),
+            patch(
+                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                return_value={10: overrides},
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={},
+            ),
+        ):
+            md.read.return_value = mock_dger
+            mc.read.return_value = mock_confhd
+            tbl = convert_storage_bounds(nw, id_map)
+        assert tbl is not None
+        return tbl.to_pandas().set_index("stage_id")
+
+    def test_outflow_freezes_post_study(self, tmp_path) -> None:
+        """VAZMINT (no flag) freezes the post-study tail at last study Dec."""
+        overrides = [
+            {"type": "VAZMINT", "year": 2024, "month": 1, "value": 10.0},
+            {"type": "VAZMINT", "year": 2024, "month": 12, "value": 120.0},
+        ]
+        df = self._run(tmp_path, overrides)
+        # Study: Jan–Nov step-carry 10, Dec=120.
+        assert df.loc[0, "min_outflow_m3s"] == pytest.approx(10.0)
+        assert df.loc[11, "min_outflow_m3s"] == pytest.approx(120.0)
+        # Post-study (12–23): all frozen at Dec=120, NOT the seasonal Jan=10.
+        for s in range(12, 24):
+            assert df.loc[s, "min_outflow_m3s"] == pytest.approx(120.0)
+
+    def test_turbined_min_freezes_post_study(self, tmp_path) -> None:
+        """TURBMINT (no flag) freezes the post-study tail."""
+        overrides = [
+            {"type": "TURBMINT", "year": 2024, "month": 1, "value": 5.0},
+            {"type": "TURBMINT", "year": 2024, "month": 12, "value": 50.0},
+        ]
+        df = self._run(tmp_path, overrides)
+        assert df.loc[11, "min_turbined_m3s"] == pytest.approx(50.0)
+        for s in range(12, 24):
+            assert df.loc[s, "min_turbined_m3s"] == pytest.approx(50.0)
+
+    def test_vmaxt_seasonalizes_when_flag_set(self, tmp_path) -> None:
+        """VMAXT with sazonaliza_vmaxt=1 repeats the seasonal pattern."""
+        overrides = [
+            {"type": "VMAXT", "year": 2024, "month": 1, "value": 50.0},
+            {"type": "VMAXT", "year": 2024, "month": 12, "value": 80.0},
+        ]
+        df = self._run(tmp_path, overrides, vmaxt_flag=1)
+        # vol_min=0, useful=100 → pct == hm3. Study Jan=50, Dec=80.
+        assert df.loc[0, "max_storage_hm3"] == pytest.approx(50.0)
+        assert df.loc[11, "max_storage_hm3"] == pytest.approx(80.0)
+        # Post-study seasonal: stage 12 (Jan) keeps 50, stage 23 (Dec) keeps 80.
+        assert df.loc[12, "max_storage_hm3"] == pytest.approx(50.0)
+        assert df.loc[23, "max_storage_hm3"] == pytest.approx(80.0)
+
+    def test_vmaxt_freezes_when_flag_clear(self, tmp_path) -> None:
+        """VMAXT with sazonaliza_vmaxt=0 freezes the post-study tail."""
+        overrides = [
+            {"type": "VMAXT", "year": 2024, "month": 1, "value": 50.0},
+            {"type": "VMAXT", "year": 2024, "month": 12, "value": 80.0},
+        ]
+        df = self._run(tmp_path, overrides, vmaxt_flag=0)
+        # Post-study frozen at Dec=80, NOT seasonal Jan=50.
+        assert df.loc[12, "max_storage_hm3"] == pytest.approx(80.0)
+        assert df.loc[23, "max_storage_hm3"] == pytest.approx(80.0)
+
+
 # ---------------------------------------------------------------------------
 # convert_hydros integration tests for ticket-006
 # ---------------------------------------------------------------------------
@@ -1496,16 +1604,20 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             }
         )
 
-    def _patch_dger(self, tmp_path, sazonaliza: int):
+    def _patch_dger(self, tmp_path, sazonaliza: int, num_anos_estudo: int = 3):
         """Patch ``cobre_bridge.converters.hydro.Dger`` to return a fake
         Dger with a controllable ``sazonaliza_cfuga_cmont``.
 
-        Returns the patcher context manager so the caller can ``with``
-        on it.
+        ``num_anos_estudo`` defaults to 3 → study_months = 4 + 2*12 = 28 (start
+        month 9), placing the seasonal-cycle assertions inside the study period.
+        Lower it to push the post-study freeze boundary earlier.
+
+        Returns the patcher context manager so the caller can ``with`` on it.
         """
         mock_dger = MagicMock()
         mock_dger.ano_inicio_estudo = 2024
         mock_dger.mes_inicio_estudo = 9
+        mock_dger.num_anos_estudo = num_anos_estudo
         mock_dger.sazonaliza_cfuga_cmont = sazonaliza
         ctx = patch("cobre_bridge.converters.hydro.Dger")
         cls = ctx.__enter__()
@@ -1613,6 +1725,37 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             total_stages=12,
         )
         assert vals == [42.0] * 12
+
+    def test_post_study_continues_seasonal_cycle(self, tmp_path) -> None:
+        """Post-study continues the seasonal CFUGA/CMONT cycle (no freeze).
+
+        VOLREF_SAZ / CFUGA-CMONT seasonal patterns are re-applied every year,
+        including post-study, when ``sazonaliza_cfuga_cmont == 1`` — only the
+        no-flag bounds (outflow / turbined) freeze. With study_months = 4,
+        stages 4+ are post-study and must keep cycling Sep=645 / Oct=640.
+        """
+        from cobre_bridge.converters.hydro import _per_stage_productivities
+
+        overrides = [
+            {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
+            {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
+        ]
+        ctx = self._patch_dger(tmp_path, sazonaliza=1, num_anos_estudo=1)
+        try:
+            vals = _per_stage_productivities(
+                self._hreg(),
+                base_productivity=0.0,
+                drop_overrides=overrides,
+                nw_files=_make_nw_files(tmp_path),
+                total_stages=24,
+            )
+        finally:
+            ctx.__exit__(None, None, None)
+
+        # Post-study Sep (stage 12) keeps the seasonal Sep value (645), and
+        # post-study Oct (stage 13) keeps Oct (640) — NOT frozen at Dec's 640.
+        assert vals[12] == pytest.approx(645.0)
+        assert vals[13] == pytest.approx(640.0)
 
 
 def _make_hreg(overrides: dict) -> pd.Series:
@@ -1944,6 +2087,332 @@ def _make_cmont_rec(month: int, year: int, nivel: float) -> MagicMock:
     r.data_inicio = datetime.datetime(year, month, 1)
     r.nivel = nivel
     return r
+
+
+class TestEquivalentProductivity:
+    """Unit tests for ``_equivalent_productivity`` (NEWAVE PRODT)."""
+
+    def test_linear_polynomial_uses_mean_head(self) -> None:
+        """h(v)=a0+a1·v → mean head over [vmin,vmax] = a0 + a1·(vmin+vmax)/2."""
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({})  # a0=300, a1=0.1, vmin=100, vmax=1000, cfuga=250
+        # mean head = 300 + 0.1·550 = 355 ; net = 105 ; ·0.95 loss ; ·0.009 pesp
+        assert _equivalent_productivity(hreg) == pytest.approx(
+            0.009 * (355.0 - 250.0) * 0.95
+        )
+
+    def test_differs_from_point_reference(self) -> None:
+        """PRODT (mean over range) ≠ the 65%-volume point productivity."""
+        from cobre_bridge.converters.hydro import (
+            _compute_productivity,
+            _equivalent_productivity,
+        )
+
+        # Non-linear forebay curve so the average over [vmin,vmax] differs from
+        # the value at the 65% reference point.
+        hreg = _make_hreg({"a2_volume_cota": 1e-4})
+        assert _equivalent_productivity(hreg) != pytest.approx(
+            _compute_productivity(hreg)
+        )
+
+    def test_run_of_river_uses_point_head(self) -> None:
+        """Vmax == Vmin → head evaluated at Vmin (no integral)."""
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({"volume_minimo": 500.0, "volume_maximo": 500.0})
+        # h(500) = 300 + 0.1·500 = 350 ; net 100 ; ·0.95 ; ·0.009
+        assert _equivalent_productivity(hreg) == pytest.approx(
+            0.009 * (350.0 - 250.0) * 0.95
+        )
+
+    def test_canal_fuga_override(self) -> None:
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({})
+        assert _equivalent_productivity(
+            hreg, canal_fuga_override=300.0
+        ) == pytest.approx(0.009 * (355.0 - 300.0) * 0.95)
+
+    def test_cmont_override_pins_forebay(self) -> None:
+        """CMONT pins the upstream level → head = cmont − cfuga (no integral)."""
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({})
+        assert _equivalent_productivity(hreg, cmont_override=400.0) == pytest.approx(
+            0.009 * (400.0 - 250.0) * 0.95
+        )
+
+    def test_zero_polynomial_returns_zero(self) -> None:
+        from cobre_bridge.converters.hydro import _equivalent_productivity
+
+        hreg = _make_hreg({f"a{i}_volume_cota": 0.0 for i in range(5)})
+        assert _equivalent_productivity(hreg) == 0.0
+
+
+class TestProductivitySinMeans:
+    """SIN-mean productivity aggregation over synthetic plant sets.
+
+    These exercise the EX / FICT / out-of-cadastro filtering and the averaging
+    wiring of the ``PROD_MEDIA_SIN`` helpers without depending on the
+    (git-ignored) example case. Every expected value is *derived* from the same
+    synthetic cadastro the function reads — never a hard-coded example snapshot.
+    The per-plant productivity math itself is covered by
+    :class:`TestEquivalentProductivity` / :class:`TestComputeProductivity`.
+    """
+
+    @staticmethod
+    def _cadastro(rows: dict[int, dict]) -> pd.DataFrame:
+        """Build a ``Hidr.cadastro``-shaped frame indexed by plant code."""
+        return pd.DataFrame({code: _make_hreg(ov) for code, ov in rows.items()}).T
+
+    @staticmethod
+    def _confhd(rows: list[dict]) -> pd.DataFrame:
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _patch_hydro_reads(cadastro: pd.DataFrame, confhd: pd.DataFrame):
+        hidr_obj = MagicMock()
+        hidr_obj.cadastro = cadastro
+        confhd_obj = MagicMock()
+        confhd_obj.usinas = confhd
+        hidr = patch("cobre_bridge.converters.hydro.Hidr")
+        conf = patch("cobre_bridge.converters.hydro.Confhd")
+        overrides = patch(
+            "cobre_bridge.converters.hydro._apply_permanent_overrides",
+            new=lambda cadastro, nw_files: cadastro,
+        )
+        return hidr_obj, confhd_obj, hidr, conf, overrides
+
+    def test_prodt_sin_mean_averages_existing_nonfict_in_cadastro(
+        self, tmp_path: Path
+    ) -> None:
+        """Mean over EX, non-FICT plants present in cadastro; others excluded."""
+        from cobre_bridge.converters.hydro import (
+            _equivalent_productivity,
+            compute_prodt_sin_mean,
+        )
+
+        cadastro = self._cadastro(
+            {
+                1: {"produtibilidade_especifica": 0.009, "canal_fuga_medio": 250.0},
+                2: {"produtibilidade_especifica": 0.010, "canal_fuga_medio": 300.0},
+                3: {"produtibilidade_especifica": 0.008},  # FICT by name → excluded
+                # code 4 is EX/non-FICT but absent from cadastro → skipped
+            }
+        )
+        confhd = self._confhd(
+            [
+                {"codigo_usina": 1, "nome_usina": "PLANT A", "usina_existente": "EX"},
+                {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
+                {"codigo_usina": 3, "nome_usina": "FICT. X", "usina_existente": "EX"},
+                {"codigo_usina": 4, "nome_usina": "PLANT D", "usina_existente": "EX"},
+                {"codigo_usina": 5, "nome_usina": "PLANT E", "usina_existente": "NE"},
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
+            cadastro, confhd
+        )
+        with hidr as mh, conf as mc, overrides:
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            result = compute_prodt_sin_mean(nw)
+
+        expected = (
+            _equivalent_productivity(cadastro.loc[1])
+            + _equivalent_productivity(cadastro.loc[2])
+        ) / 2
+        assert result == pytest.approx(expected)
+
+    def test_prodt_sin_mean_no_eligible_plants_returns_unit_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """No EX/non-FICT plant in cadastro → fall back to 1.0, not divide-by-zero."""
+        from cobre_bridge.converters.hydro import compute_prodt_sin_mean
+
+        cadastro = self._cadastro({1: {}})
+        confhd = self._confhd(
+            [
+                {
+                    "codigo_usina": 9,
+                    "nome_usina": "FICT. ONLY",
+                    "usina_existente": "EX",
+                },
+                {"codigo_usina": 8, "nome_usina": "GONE", "usina_existente": "NE"},
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
+            cadastro, confhd
+        )
+        with hidr as mh, conf as mc, overrides:
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            assert compute_prodt_sin_mean(nw) == 1.0
+
+    def test_per_stage_prodt_flat_without_temporal_overrides(
+        self, tmp_path: Path
+    ) -> None:
+        """No CFUGA/CMONT override → every stage equals the constant SIN mean."""
+        from cobre_bridge.converters.hydro import (
+            _equivalent_productivity,
+            compute_per_stage_prodt_sin_mean,
+        )
+
+        cadastro = self._cadastro(
+            {
+                1: {"produtibilidade_especifica": 0.009},
+                2: {"produtibilidade_especifica": 0.011, "canal_fuga_medio": 280.0},
+            }
+        )
+        confhd = self._confhd(
+            [
+                {"codigo_usina": 1, "nome_usina": "PLANT A", "usina_existente": "EX"},
+                {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
+            cadastro, confhd
+        )
+        with (
+            hidr as mh,
+            conf as mc,
+            overrides,
+            patch("cobre_bridge.converters.hydro._total_study_stages", return_value=4),
+            patch(
+                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                return_value={},
+            ),
+        ):
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            per_stage = compute_per_stage_prodt_sin_mean(nw)
+
+        base = (
+            _equivalent_productivity(cadastro.loc[1])
+            + _equivalent_productivity(cadastro.loc[2])
+        ) / 2
+        assert len(per_stage) == 4
+        assert all(v == pytest.approx(base) for v in per_stage)
+
+    def test_per_stage_prodt_routes_overrides_and_averages_per_stage(
+        self, tmp_path: Path
+    ) -> None:
+        """A plant carrying a CFUGA override drifts; the SIN mean tracks it per stage."""
+        from cobre_bridge.converters.hydro import (
+            _equivalent_productivity,
+            compute_per_stage_prodt_sin_mean,
+        )
+
+        cadastro = self._cadastro({1: {}, 2: {"produtibilidade_especifica": 0.011}})
+        confhd = self._confhd(
+            [
+                {"codigo_usina": 1, "nome_usina": "PLANT A", "usina_existente": "EX"},
+                {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+
+        def fake_series(hreg, base, drops, nw_files, total_stages):
+            # Plants with a routed CFUGA/CMONT override drift per stage; others flat.
+            if drops:
+                return [base, base * 1.02, base * 0.98][:total_stages]
+            return [base] * total_stages
+
+        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
+            cadastro, confhd
+        )
+        with (
+            hidr as mh,
+            conf as mc,
+            overrides,
+            patch("cobre_bridge.converters.hydro._total_study_stages", return_value=3),
+            patch(
+                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                return_value={1: [{"type": "CFUGA"}]},
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._per_stage_equivalent_productivities",
+                side_effect=fake_series,
+            ),
+        ):
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            per_stage = compute_per_stage_prodt_sin_mean(nw)
+
+        b1 = _equivalent_productivity(cadastro.loc[1])
+        b2 = _equivalent_productivity(cadastro.loc[2])
+        expected = [
+            (b1 + b2) / 2,
+            (b1 * 1.02 + b2) / 2,
+            (b1 * 0.98 + b2) / 2,
+        ]
+        assert per_stage == pytest.approx(expected)
+
+    def test_max_prodtacum_sin_picks_cascade_max(self, tmp_path: Path) -> None:
+        """Accumulated productivity peaks at the head of the longest cascade."""
+        from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
+        from cobre_bridge.converters.hydro import _compute_productivity
+
+        # Cascade A(1) → B(2) → terminal; C(3) standalone.
+        cadastro = self._cadastro({1: {}, 2: {}, 3: {}})
+        confhd = self._confhd(
+            [
+                {
+                    "codigo_usina": 1,
+                    "nome_usina": "A",
+                    "usina_existente": "EX",
+                    "codigo_usina_jusante": 2,
+                },
+                {
+                    "codigo_usina": 2,
+                    "nome_usina": "B",
+                    "usina_existente": "EX",
+                    "codigo_usina_jusante": 0,
+                },
+                {
+                    "codigo_usina": 3,
+                    "nome_usina": "C",
+                    "usina_existente": "EX",
+                    "codigo_usina_jusante": 0,
+                },
+            ]
+        )
+        nw = _make_nw_files(tmp_path)
+        hidr_obj = MagicMock()
+        hidr_obj.cadastro = cadastro
+        confhd_obj = MagicMock()
+        confhd_obj.usinas = confhd
+        with (
+            patch("cobre_bridge.converters.constraints.Hidr") as mh,
+            patch("cobre_bridge.converters.constraints.Confhd") as mc,
+            patch(
+                "cobre_bridge.converters.constraints._apply_permanent_overrides",
+                new=lambda cadastro, nw_files: cadastro,
+            ),
+        ):
+            mh.read.return_value = hidr_obj
+            mc.read.return_value = confhd_obj
+            result = compute_max_prodtacum_sin(nw)
+
+        def own(code: int) -> float:
+            hreg = cadastro.loc[code]
+            useful = float(hreg["volume_maximo"]) - float(hreg["volume_minimo"])
+            return _compute_productivity(hreg, useful_volume_override=useful)
+
+        acc_a = own(1) + own(2)  # A accumulates B downstream
+        assert result == pytest.approx(max(acc_a, own(2), own(3)))
+
+    def test_max_prodtacum_sin_returns_none_on_read_error(self, tmp_path: Path) -> None:
+        """Unreadable NEWAVE inputs → None (soft fallback for mocked pipelines)."""
+        from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
+
+        nw = _make_nw_files(tmp_path)
+        with patch("cobre_bridge.converters.constraints.Hidr") as mh:
+            mh.read.side_effect = OSError("no file")
+            assert compute_max_prodtacum_sin(nw) is None
 
 
 class TestConvertProductionModels:
@@ -3083,6 +3552,211 @@ class TestConvertThermalBoundsClastModificacoes:
 
 
 # ---------------------------------------------------------------------------
+# Thermal-bound per-stage steps (extracted from the convert_thermal_bounds loop)
+# ---------------------------------------------------------------------------
+
+
+class TestThermalBoundStageSteps:
+    """Each of the 6 per-stage steps is now an isolated, testable helper."""
+
+    @staticmethod
+    def _state(**overrides: float):
+        from cobre_bridge.converters.thermal import _StageInputs
+
+        defaults = {
+            "potencia": 100.0,
+            "fcmax": 100.0,
+            "teif": 0.0,
+            "ip": 0.0,
+            "gen_min": 0.0,
+        }
+        defaults.update(overrides)
+        return _StageInputs(**defaults)
+
+    def test_step1_zeroes_ip_before_maintenance_end(self) -> None:
+        from cobre_bridge.converters.thermal import (
+            _step1_zero_ip_before_maintenance,
+        )
+
+        state = self._state(ip=8.0)
+        _step1_zero_ip_before_maintenance(state, stage_idx=2, maint_end_stage=5)
+        assert state.ip == 0.0
+        # At/after the maintenance end IP is left untouched.
+        state2 = self._state(ip=8.0)
+        _step1_zero_ip_before_maintenance(state2, stage_idx=5, maint_end_stage=5)
+        assert state2.ip == 8.0
+
+    def test_step2_nulls_potencia_only_for_potef_after_maint_end(self) -> None:
+        from cobre_bridge.converters.thermal import _step2_null_potencia_for_potef
+
+        state = self._state(potencia=100.0)
+        _step2_null_potencia_for_potef(state, 5, 5, has_potef=True)
+        assert state.potencia == 0.0
+        # No POTEF → untouched; before maint end → untouched.
+        s_no_potef = self._state(potencia=100.0)
+        _step2_null_potencia_for_potef(s_no_potef, 5, 5, has_potef=False)
+        assert s_no_potef.potencia == 100.0
+        s_before = self._state(potencia=100.0)
+        _step2_null_potencia_for_potef(s_before, 4, 5, has_potef=True)
+        assert s_before.potencia == 100.0
+
+    def test_step3_nulls_gen_min_only_for_gtmin_after_maint_end(self) -> None:
+        from cobre_bridge.converters.thermal import _step3_null_gen_min_for_gtmin
+
+        state = self._state(gen_min=50.0)
+        _step3_null_gen_min_for_gtmin(state, 5, 5, has_gtmin=True)
+        assert state.gen_min == 0.0
+        s_no = self._state(gen_min=50.0)
+        _step3_null_gen_min_for_gtmin(s_no, 5, 5, has_gtmin=False)
+        assert s_no.gen_min == 50.0
+
+    def test_step4_applies_in_file_order_for_closed_window(self) -> None:
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+
+        state = self._state()
+        overrides = [
+            {
+                "tipo": "FCMAX",
+                "modificacao": 73.38,
+                "data_inicio": "2024-01-01",
+                "data_fim": "2024-12-01",
+            },
+            {
+                "tipo": "GTMIN",
+                "modificacao": 469.62,
+                "data_inicio": "2024-01-01",
+                "data_fim": "2024-12-01",
+            },
+        ]
+        _step4_apply_expt_overrides(
+            state,
+            overrides,
+            ref_date=date(2024, 6, 1),
+            is_post_study=False,
+            last_stage_date=date(2030, 12, 1),
+        )
+        assert state.fcmax == pytest.approx(73.38)
+        assert state.gen_min == pytest.approx(469.62)
+
+    def test_step4_skips_window_not_covering_ref_date(self) -> None:
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+
+        state = self._state(fcmax=100.0)
+        overrides = [
+            {
+                "tipo": "FCMAX",
+                "modificacao": 50.0,
+                "data_inicio": "2024-01-01",
+                "data_fim": "2024-03-01",
+            }
+        ]
+        _step4_apply_expt_overrides(
+            state,
+            overrides,
+            ref_date=date(2024, 6, 1),  # outside the window
+            is_post_study=False,
+            last_stage_date=date(2030, 12, 1),
+        )
+        assert state.fcmax == 100.0
+
+    def test_step4_open_ended_override_blankets_post_study_tail(self) -> None:
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+
+        state = self._state(potencia=100.0)
+        overrides = [
+            {
+                "tipo": "POTEF",
+                "modificacao": 250.0,
+                "data_inicio": "2024-01-01",
+                "data_fim": float("nan"),  # open-ended
+            }
+        ]
+        _step4_apply_expt_overrides(
+            state,
+            overrides,
+            ref_date=date(2026, 12, 1),
+            is_post_study=True,
+            last_stage_date=date(2030, 12, 1),
+        )
+        assert state.potencia == pytest.approx(250.0)
+
+    def test_step4b_zeroes_out_of_window_stage(self) -> None:
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import (
+            _step4b_apply_potef_availability,
+        )
+
+        state = self._state(potencia=100.0, gen_min=30.0)
+        windows = [(date(2024, 1, 1), date(2024, 6, 1))]
+        _step4b_apply_potef_availability(state, windows, stage_date=date(2024, 9, 1))
+        assert state.potencia == 0.0
+        assert state.gen_min == 0.0
+        # Inside a window → untouched.
+        s_in = self._state(potencia=100.0, gen_min=30.0)
+        _step4b_apply_potef_availability(s_in, windows, stage_date=date(2024, 3, 1))
+        assert s_in.potencia == 100.0
+
+    def test_step5_subtracts_maint_reduction_before_maint_end(self) -> None:
+        import numpy as np
+
+        from cobre_bridge.converters.thermal import _step5_apply_maint_reduction
+
+        state = self._state(potencia=100.0)
+        reduction = np.array([10.0, 20.0, 30.0])
+        _step5_apply_maint_reduction(state, reduction, stage_idx=1, maint_end_stage=3)
+        assert state.potencia == pytest.approx(80.0)
+        # At/after maint end → no reduction.
+        s2 = self._state(potencia=100.0)
+        _step5_apply_maint_reduction(s2, reduction, stage_idx=3, maint_end_stage=3)
+        assert s2.potencia == 100.0
+
+    def test_step6_normal_case(self) -> None:
+        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+
+        state = self._state(potencia=200.0, fcmax=100.0, ip=0.0, teif=0.0, gen_min=50.0)
+        min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
+        assert max_mw == pytest.approx(200.0)
+        assert min_mw == pytest.approx(50.0)
+        assert exceeded is False
+
+    def test_step6_honors_gtmin_above_capacity(self) -> None:
+        """GTMIN (the inflexible minimum) is honored even when it exceeds the
+        FCMAX-derived capacity; the cap is lifted to keep the bound feasible.
+
+        Per NEWAVE, FCMAX and GTMIN are independent and NEWAVE rejects min > max.
+        Cobre formerly clamped min DOWN to max, forcing the plant below GTMIN;
+        now it honors GTMIN. (ANGRA-1-like numbers: capacity 420.88 < GTMIN
+        469.62 → bound [469.62, 469.62], not [420.88, 420.88].)
+        """
+        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+
+        state = self._state(
+            potencia=420.88, fcmax=100.0, ip=0.0, teif=0.0, gen_min=469.62
+        )
+        min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
+        assert min_mw == pytest.approx(469.62)  # GTMIN honored, not clamped down
+        assert max_mw == pytest.approx(469.62)  # cap lifted to GTMIN for feasibility
+        assert exceeded is True
+
+    def test_step6_clamps_negative_potencia_to_zero(self) -> None:
+        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+
+        state = self._state(potencia=-5.0, fcmax=100.0, gen_min=10.0)
+        min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
+        # gen_min 10 > capacity 0 → honor GTMIN, lift cap.
+        assert min_mw == pytest.approx(10.0)
+        assert max_mw == pytest.approx(10.0)
+        assert exceeded is True
+
+
+# ---------------------------------------------------------------------------
 # Bus conversion
 # ---------------------------------------------------------------------------
 
@@ -3360,6 +4034,117 @@ class TestConvertPenalties:
         assert required == set(result["hydro"].keys())
 
 
+class TestHydroPenaltyCosts:
+    """The pure ρ-scaling helper shared by the base and per-stage paths."""
+
+    def test_flow_penalties_scale_linearly_with_rho_avg(self) -> None:
+        from cobre_bridge.converters.network import _PEVERT, _hydro_penalty_costs
+
+        single = _hydro_penalty_costs(
+            rho_avg=1.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        double = _hydro_penalty_costs(
+            rho_avg=2.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        # spillage_cost = _PEVERT * rho_avg → doubles with rho_avg.
+        assert single["spillage_cost"] == pytest.approx(_PEVERT * 1.0)
+        assert double["spillage_cost"] == pytest.approx(2.0 * single["spillage_cost"])
+        # water_withdrawal uses rho_max_acum (held fixed) → unchanged.
+        assert double["water_withdrawal_violation_cost"] == pytest.approx(
+            single["water_withdrawal_violation_cost"]
+        )
+
+    def test_water_withdrawal_scales_with_rho_max_acum(self) -> None:
+        from cobre_bridge.converters.network import _hydro_penalty_costs
+
+        low = _hydro_penalty_costs(
+            rho_avg=1.0, rho_max_acum=1.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        high = _hydro_penalty_costs(
+            rho_avg=1.0, rho_max_acum=3.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        assert high["water_withdrawal_violation_cost"] == pytest.approx(
+            3.0 * low["water_withdrawal_violation_cost"]
+        )
+        # spillage (rho_avg only) is unaffected by rho_max_acum.
+        assert high["spillage_cost"] == pytest.approx(low["spillage_cost"])
+
+
+class TestConvertHydroPenaltyOverrides:
+    """Per-stage, SIN-uniform hydro penalty override parquet."""
+
+    @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
+    @patch("cobre_bridge.converters.network.Sistema")
+    def test_sin_uniform_sparse_per_stage(
+        self, mock_sistema_cls, _mock_penalid, tmp_path
+    ) -> None:
+        from cobre_bridge.converters.network import (
+            _PEVERT,
+            _hydro_penalty_costs,
+            convert_hydro_penalty_overrides,
+        )
+
+        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+        # Build the base via the same helper the override diffs against, with
+        # the mocked max_deficit_cost (max custo = 500*2 = 1000). Stage 1 then
+        # uses exactly the base (ρ_avg=0.6, ρ_max_acum=2.0) → no override.
+        base = _hydro_penalty_costs(
+            rho_avg=0.6, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=1000.0
+        )
+        table = convert_hydro_penalty_overrides(
+            _make_nw_files(tmp_path),
+            hydro_ids=[0, 1],
+            base_hydro_penalties=base,
+            per_stage_rho_avg=[0.5, 0.6, 0.55],
+            per_stage_rho_max_acum=[2.0, 2.0, 2.0],
+        )
+        assert table is not None
+        df = table.to_pandas()
+
+        # Required key columns + only ρ-scaled columns that differ are present.
+        assert {"hydro_id", "stage_id"}.issubset(df.columns)
+        assert "generation_violation_below_cost" not in df.columns
+        assert "filling_target_violation_cost" not in df.columns
+
+        # Stage 1 matches the base exactly → no rows emitted for it (sparse).
+        assert sorted(df["stage_id"].unique().tolist()) == [0, 2]
+
+        # SIN-uniform: both hydros share one value per stage.
+        s0 = df[df["stage_id"] == 0]
+        assert s0["hydro_id"].tolist() == [0, 1]
+        assert s0["spillage_cost"].nunique() == 1
+        assert s0["spillage_cost"].iloc[0] == pytest.approx(_PEVERT * 0.5)
+
+        # Output obeys the (hydro_id, stage_id) ordering contract.
+        ordered = df.sort_values(["hydro_id", "stage_id"]).reset_index(drop=True)
+        assert df.reset_index(drop=True).equals(ordered)
+
+    @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
+    @patch("cobre_bridge.converters.network.Sistema")
+    def test_returns_none_when_no_stage_differs(
+        self, mock_sistema_cls, _mock_penalid, tmp_path
+    ) -> None:
+        from cobre_bridge.converters.network import (
+            _hydro_penalty_costs,
+            convert_hydro_penalty_overrides,
+        )
+
+        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+        # max_deficit_cost from the mocked deficit df (max custo = 500*2 = 1000).
+        base = _hydro_penalty_costs(
+            rho_avg=0.6, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=1000.0
+        )
+        # Every stage uses exactly the base ρ → fully sparse → None.
+        table = convert_hydro_penalty_overrides(
+            _make_nw_files(tmp_path),
+            hydro_ids=[0, 1],
+            base_hydro_penalties=base,
+            per_stage_rho_avg=[0.6, 0.6],
+            per_stage_rho_max_acum=[2.0, 2.0],
+        )
+        assert table is None
+
+
 # ---------------------------------------------------------------------------
 # Initial conditions conversion
 # ---------------------------------------------------------------------------
@@ -3474,6 +4259,159 @@ def _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path, pct_b: float = 75.
     mock_confhd = MagicMock()
     mock_confhd.usinas = df
     mock_confhd_cls.read.return_value = mock_confhd
+
+
+class TestThermalGenerationBounds:
+    """``thermal_generation_bounds`` returns the static ``[min_mw, max_mw]``."""
+
+    @patch("cobre_bridge.converters.thermal.Term")
+    def test_bounds_from_term_month1(self, mock_term_cls, tmp_path) -> None:
+        from cobre_bridge.converters.thermal import thermal_generation_bounds
+
+        mock_term = MagicMock()
+        mock_term.usinas = _make_term_df()
+        mock_term_cls.read.return_value = mock_term
+
+        bounds = thermal_generation_bounds(_make_nw_files(tmp_path))
+        # max_mw = potencia_instalada * fator_capacidade_maximo / 100;
+        # min_mw = geracao_minima.
+        assert bounds[10] == pytest.approx((10.0, 90.0))
+        assert bounds[20] == pytest.approx((0.0, 200.0))
+        assert bounds[30] == pytest.approx((5.0, 40.0))
+
+    @patch("cobre_bridge.converters.thermal.Term")
+    def test_no_usinas_returns_empty(self, mock_term_cls, tmp_path) -> None:
+        from cobre_bridge.converters.thermal import thermal_generation_bounds
+
+        mock_term = MagicMock()
+        mock_term.usinas = None
+        mock_term_cls.read.return_value = mock_term
+
+        assert thermal_generation_bounds(_make_nw_files(tmp_path)) == {}
+
+
+class TestAnticipatedCommitmentSeeding:
+    """``convert_initial_conditions`` writes real adterm MW, clamped to bounds.
+
+    Cobre (>= 0.7.0) honours non-zero pre-horizon seeds, so the committed MW is
+    passed through (no longer zeroed); only out-of-bounds values are clamped.
+    """
+
+    def _id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(
+            subsystem_ids=[1],
+            hydro_codes=[1, 2],
+            thermal_codes=[86],
+        )
+
+    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
+    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch("cobre_bridge.converters.initial_conditions.Confhd")
+    @patch("cobre_bridge.converters.initial_conditions.Hidr")
+    def test_in_range_values_pass_through(
+        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+    ) -> None:
+        from cobre_bridge.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+        mock_read.return_value = {
+            86: AnticipatedDispatch(lead_stages=2, values_mw=[204.5647, 0.0])
+        }
+        mock_bounds.return_value = {86: (0.0, 481.27)}
+
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+        ):
+            result = convert_initial_conditions(
+                _make_nw_files(tmp_path), self._id_map()
+            )
+
+        assert result["past_anticipated_commitments"] == [
+            {"thermal_id": 0, "values_mw": [204.5647, 0.0]}
+        ]
+        assert "clamping" not in caplog.text
+
+    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
+    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch("cobre_bridge.converters.initial_conditions.Confhd")
+    @patch("cobre_bridge.converters.initial_conditions.Hidr")
+    def test_out_of_range_values_clamped_and_warned(
+        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+    ) -> None:
+        from cobre_bridge.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+        # 600 > max 481.27 -> clamp to 481.27; -5 < min 0 -> clamp to 0.
+        mock_read.return_value = {
+            86: AnticipatedDispatch(lead_stages=2, values_mw=[600.0, -5.0])
+        }
+        mock_bounds.return_value = {86: (0.0, 481.27)}
+
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+        ):
+            result = convert_initial_conditions(
+                _make_nw_files(tmp_path), self._id_map()
+            )
+
+        commitments = result["past_anticipated_commitments"]
+        assert commitments[0]["values_mw"] == pytest.approx([481.27, 0.0])
+        assert "code=86" in caplog.text
+        assert "clamping" in caplog.text
+
+    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
+    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch("cobre_bridge.converters.initial_conditions.Confhd")
+    @patch("cobre_bridge.converters.initial_conditions.Hidr")
+    def test_code_absent_from_id_map_skipped(
+        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+    ) -> None:
+        from cobre_bridge.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+        mock_read.return_value = {
+            999: AnticipatedDispatch(lead_stages=1, values_mw=[100.0])
+        }
+        mock_bounds.return_value = {999: (0.0, 500.0)}
+
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+        ):
+            result = convert_initial_conditions(
+                _make_nw_files(tmp_path), self._id_map()
+            )
+
+        # Unknown thermal -> skipped, so no commitments key is emitted.
+        assert "past_anticipated_commitments" not in result
+        assert "absent from" in caplog.text
+
+    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
+    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch("cobre_bridge.converters.initial_conditions.Confhd")
+    @patch("cobre_bridge.converters.initial_conditions.Hidr")
+    def test_non_gnl_case_skips_bounds_computation(
+        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path
+    ) -> None:
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+        mock_read.return_value = {}
+
+        result = convert_initial_conditions(_make_nw_files(tmp_path), self._id_map())
+
+        assert "past_anticipated_commitments" not in result
+        mock_bounds.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -4432,6 +5370,7 @@ class TestWaterWithdrawalConversion:
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
+        mock_dger.num_anos_pos_estudo = 0
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = pd.DataFrame(
@@ -4483,6 +5422,7 @@ class TestWaterWithdrawalConversion:
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
+        mock_dger.num_anos_pos_estudo = 0
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = pd.DataFrame(
@@ -4618,6 +5558,7 @@ class TestWaterWithdrawalConversion:
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
+        mock_dger.num_anos_pos_estudo = 0
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = pd.DataFrame(

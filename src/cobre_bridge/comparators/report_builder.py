@@ -24,13 +24,17 @@ from cobre_bridge.comparators.charts import (
     hydro_slack_per_bus_chart,
     immediate_cost_chart,
     line_summary_chart,
+    other_costs_chart,
     overview_metrics,
     performance_fwd_bwd_split_chart,
     performance_iteration_chart,
     performance_metric_cards,
-    productivity_scatter,
+    productivity_blocks_table,
+    productivity_comparison_scatter,
+    productivity_per_stage_chart,
     system_comparison_chart,
     system_per_bus_chart,
+    thermal_cost_chart,
     thermal_generation_chart,
 )
 from cobre_bridge.comparators.constraints_compare import per_stage_bounds
@@ -95,6 +99,17 @@ def build_comparison_report(
             [
                 wrap_chart(immediate_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
                 wrap_chart(future_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+            ],
+        )
+    )
+    # Thermal-only (CTERM, live on both sides) and the non-thermal remainder
+    # (COPER − CTERM) — the latter goes negative for NEWAVE in the post-study
+    # because COPER is frozen at the last study value while CTERM stays live.
+    overview_parts.append(
+        chart_grid(
+            [
+                wrap_chart(thermal_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+                wrap_chart(other_costs_chart(nw_sin, cobre_stage_costs, nw_offset)),
             ],
         )
     )
@@ -409,14 +424,61 @@ def build_comparison_report(
     tab_contents["tab-thermal-detail"] = build_thermal_detail_tab(results, thermal_pct)
 
     # --- Productivity tab ---
+    prod_df = pctiles.productivity_detail if pctiles else pl.DataFrame()
     prod_parts: list[str] = []
-    prod_parts.append(section_title("Productivity Comparison"))
-    prod_parts.append(
-        chart_grid(
-            [wrap_chart(productivity_scatter(results))],
-            single=True,
-        )
+    static_title = (
+        "Static productivity — pmo vs cobre-bridge conversion "
+        "(point / equivalent / accumulated)"
     )
+    if prod_df.is_empty():
+        prod_parts.append(section_title(static_title))
+        prod_parts.append("<p>No productivity data available.</p>")
+    else:
+        prod_parts.append(section_title(static_title))
+        prod_parts.append(
+            chart_grid(
+                [
+                    wrap_chart(
+                        productivity_comparison_scatter(
+                            prod_df,
+                            "point",
+                            "Point — pmo altura_65 vs compute_productivity",
+                        )
+                    ),
+                    wrap_chart(
+                        productivity_comparison_scatter(
+                            prod_df,
+                            "equivalent",
+                            "Equivalent — pmo vs stored_energy_productivity",
+                        )
+                    ),
+                    wrap_chart(
+                        productivity_comparison_scatter(
+                            prod_df,
+                            "accumulated",
+                            "Accumulated — pmo vs cobre-bridge cascade",
+                        )
+                    ),
+                ]
+            )
+        )
+        prod_parts.append(section_title("Realized productivity across stages"))
+        prod_parts.append(
+            '<p style="color:#64748B;margin:-8px 0 12px">Productivity is constant'
+            " within a stage but varies across stages, tracking the reservoir"
+            " head reached each stage — pick a reservoir to compare NEWAVE vs"
+            " Cobre.</p>"
+        )
+        # Reuses the shared per-plant dropdown widget (same as the hydro/thermal
+        # detail tabs), so every reservoir is selectable — not a fixed subset.
+        prod_parts.append(productivity_per_stage_chart(results))
+        prod_parts.append(section_title("Productivity Building Blocks"))
+        prod_parts.append(
+            chart_grid(
+                [wrap_chart(productivity_blocks_table(prod_df))],
+                single=True,
+            )
+        )
     tab_contents["tab-productivity"] = "\n".join(prod_parts)
 
     # --- Performance tab ---

@@ -22,7 +22,7 @@ from cobre_bridge.converters import scalar_parameters as scalar_params_conv
 from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.id_map import build_id_map
 from cobre_bridge.newave_files import NewaveFiles
 
 logger = logging.getLogger(__name__)
@@ -49,84 +49,114 @@ class ConversionReport:
         )
 
 
-def _compute_max_accumulated_productivity_safe(
-    nw_files: NewaveFiles,
-) -> float | None:
-    """Return ``MAX_PRODTACUM_SIN`` from the cascade DAG, or ``None`` on failure.
+class _WarningCollector(logging.Handler):
+    """Capture ``WARNING``+ records emitted under ``cobre_bridge`` during a run.
 
-    NEWAVE manual v29 §3.24 uses this value to convert DESVIO and
-    evaporation-folga penalties. We compute it from the cascade topology so
-    ``convert_penalties`` doesn't have to use the rougher ``max(own_prods)``
-    approximation. Falls back to ``None`` (caller approximates) when the
-    NEWAVE files cannot be read — e.g. in unit tests that mock the pipeline.
+    Converters log every degraded-input substitution (vazpast → empty, c_adic →
+    no load, EXPT/RE skipped, REE.DAT cutoff fallback, …) at ``WARNING`` level.
+    Attaching this to the package logger for the duration of a conversion lets
+    :func:`convert_newave_case` report those degradations through
+    :attr:`ConversionReport.warnings` instead of letting them pass silently.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.WARNING:
+            self.messages.append(record.getMessage())
+
+
+class _ConstraintIdAllocator:
+    """Hands out contiguous, non-overlapping generic-constraint ID ranges.
+
+    VminOP, electric, and AGRINT constraints share one 0-based ID space. Each
+    converter is given the next free start ID; after it returns, ``advance(n)``
+    reserves the ``n`` IDs it produced so the next converter starts past them.
+    This replaces the by-hand offset arithmetic
+    (``start_id = vminop_count + electric_count``) that silently corrupts IDs if
+    a term is missed.
+    """
+
+    def __init__(self) -> None:
+        self.next_id = 0
+
+    def advance(self, count: int) -> None:
+        self.next_id += count
+
+
+def _compute_prod_media_sin_safe(nw_files: NewaveFiles) -> float | None:
+    """Return ``PROD_MEDIA_SIN`` (mean PRODT), or ``None`` on failure.
+
+    NEWAVE converts the PENALID R$/MWh penalties (VAZMIN, TURBMN/TURBMX, …) with
+    the mean **PRODT** — the equivalent productivity from vol_min to vol_max —
+    over all existing plants including zeros. See
+    :func:`hydro.compute_prodt_sin_mean`; validated against pmo.dat's applied
+    penalty (0.6299 ↔ VAZMIN 821.78). Falls back to ``None`` (caller uses its
+    legacy point-reference mean) when the NEWAVE files cannot be read — e.g. in
+    unit tests that mock the pipeline.
     """
     try:
-        from inewave.newave import Confhd
-
-        from cobre_bridge.converters.constraints import (
-            compute_accumulated_productivities,
-        )
-
-        cadastro = hydro_conv._apply_permanent_overrides(
-            hydro_conv.read_cadastro(nw_files), nw_files
-        )
-        confhd_df = Confhd.read(str(nw_files.confhd)).usinas
-        acc = compute_accumulated_productivities(cadastro, confhd_df)
-        return max(acc.values()) if acc else None
+        return hydro_conv.compute_prodt_sin_mean(nw_files)
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         return None
 
 
-def _build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
-    """Read Confhd, Conft, Sistema, and Ree to build the NewaveIdMap."""
-    from inewave.newave import Confhd, Conft, Ree, Sistema
+def _compute_per_stage_sin_productivities(
+    nw_files: NewaveFiles,
+) -> tuple[list[float], list[float]] | None:
+    """Return ``(PROD_MEDIA_SIN[s], MAX_PRODTACUM_SIN[s])`` per stage, or None.
 
-    confhd = Confhd.read(str(nw_files.confhd))
-    conft = Conft.read(str(nw_files.conft))
-    sistema = Sistema.read(str(nw_files.sistema))
-    ree_file = Ree.read(str(nw_files.ree))
+    These SIN-aggregate productivity constants are what NEWAVE uses to convert
+    its flow-domain hydro penalties (manual §3.24 p.87).
 
-    # Hydro codes from confhd — existing, non-fictitious plants only.
-    confhd_df = confhd.usinas
-    existing = confhd_df[confhd_df["usina_existente"] == "EX"]
-    non_fict = existing[~existing["nome_usina"].str.strip().str.startswith("FICT.")]
-    fict_names = existing.loc[
-        existing["nome_usina"].str.strip().str.startswith("FICT."), "nome_usina"
-    ].tolist()
-    if fict_names:
-        logger.warning(
-            "Excluding %d fictitious plant(s) from id_map: %s",
-            len(fict_names),
-            fict_names,
-        )
-    hydro_codes = [int(r["codigo_usina"]) for _, r in non_fict.iterrows()]
+    - ``PROD_MEDIA_SIN[s]`` = mean **PRODT** (equivalent ρ vol_min→vol_max) over
+      the existing plants. PRODT is **structural** — it does *not* track the
+      seasonal reference volume — so this is essentially **flat** across the
+      horizon. pmo.dat confirms it: the applied VAZMIN/TURBMN/TURBMX penalties
+      vary only 0.15% over the whole study (= the per-config PRODT-mean spread),
+      not the ~2% that the old seasonal point-reference ρ implied. We therefore
+      emit a constant ``compute_prodt_sin_mean`` for every stage; the per-stage
+      penalty override then collapses to the base for the ρ_avg-scaled columns
+      (correct — NEWAVE does not seasonalise these penalties). The genuinely
+      seasonal per-plant ρ still ships in ``hydro_energy_productivity.parquet``
+      for the *generation* model — that is a separate concern from the penalty.
+    - ``MAX_PRODTACUM_SIN`` = max accumulated cascade ρ at **altura máxima**,
+      **constant** over the horizon. It governs the DESVIO ("outros usos") and
+      evaporation penalties, which pmo.dat reports as *fixed* — the max is
+      ITAIPU's cascade, which carries no CFUGA/CMONT override, so it never moves.
+      (See :func:`constraints.compute_max_prodtacum_sin`.)
 
-    # Thermal codes from conft.
-    conft_df = conft.usinas
-    thermal_codes = [int(r["codigo_usina"]) for _, r in conft_df.iterrows()]
+    Both lists span the full horizon (``_total_study_stages``, incl. post-study).
+    Falls back to ``None`` when the NEWAVE files can't be read (mocked tests).
+    """
+    try:
+        rho_avg = hydro_conv.compute_per_stage_prodt_sin_mean(nw_files)
+        if not rho_avg:
+            return None
+        max_prodtacum = constraints_conv.compute_max_prodtacum_sin(nw_files)
+        if max_prodtacum is None:
+            return None
+        rho_max_acum = [max_prodtacum] * len(rho_avg)
+        return rho_avg, rho_max_acum
+    except (
+        OSError,
+        ValueError,
+        AttributeError,
+        TypeError,
+        KeyError,
+        StopIteration,
+        ZeroDivisionError,
+    ):
+        return None
 
-    # Subsystem codes from sistema deficit table.
-    deficit_df = sistema.custo_deficit
-    if deficit_df is not None:
-        subsystem_ids = sorted(
-            set(int(r["codigo_submercado"]) for _, r in deficit_df.iterrows())
-        )
-    else:
-        subsystem_ids = []
 
-    # Also include subsystem codes referenced in ree.dat (for completeness).
-    ree_df = ree_file.rees
-    if ree_df is not None:
-        for _, row in ree_df.iterrows():
-            code = int(row["submercado"])
-            if code not in subsystem_ids:
-                subsystem_ids.append(code)
-
-    return NewaveIdMap(
-        subsystem_ids=subsystem_ids,
-        hydro_codes=hydro_codes,
-        thermal_codes=thermal_codes,
-    )
+# The id-map builder moved to ``cobre_bridge.id_map.build_id_map`` (its natural
+# home, next to NewaveIdMap) so the comparators can use a public entry point
+# instead of reaching into this module's internals. Kept as an alias for
+# backward compatibility with existing importers.
+_build_id_map = build_id_map
 
 
 def _merge_hydro_bounds(
@@ -171,7 +201,9 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     Returns
     -------
     ConversionReport
-        Summary of what was converted.
+        Summary of what was converted, including a ``warnings`` list of every
+        degraded-input substitution that occurred (empty when the conversion
+        ran clean).
 
     Raises
     ------
@@ -179,6 +211,22 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         If *src* does not exist, is not a directory, or a required NEWAVE
         file is missing.
     """
+    collector = _WarningCollector()
+    pkg_logger = logging.getLogger("cobre_bridge")
+    pkg_logger.addHandler(collector)
+    try:
+        report = _convert_newave_case_impl(src, dst)
+    finally:
+        pkg_logger.removeHandler(collector)
+    # De-duplicate while preserving first-occurrence order: a warning emitted
+    # once per repeated parse (e.g. the fictitious-plant exclusion) should
+    # surface once, not N times.
+    report.warnings = list(dict.fromkeys(collector.messages))
+    return report
+
+
+def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
+    """Run the conversion pipeline (warning capture handled by the wrapper)."""
     report = ConversionReport()
 
     # ------------------------------------------------------------------
@@ -216,17 +264,19 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     lines_dict = network_conv.convert_lines(nw_files, id_map)
 
     logger.debug("Converting penalties")
-    # NEWAVE's DESVIO and evaporation-folga conversions use MAX_PRODTACUM_SIN
-    # (max accumulated cascade productivity), not the per-plant own ρ. Compute
-    # it from the cascade DAG so convert_penalties doesn't fall back to its
-    # `max(own_prods)` approximation. We do this defensively because tests
-    # mock the converter pipeline and the real NEWAVE files may be absent.
-    max_prodtacum_sin = _compute_max_accumulated_productivity_safe(nw_files)
+    # DESVIO ("outros usos") + evaporation use MAX_PRODTACUM_SIN (max accumulated
+    # ρ at altura máxima, constant); VAZMIN/TURBMN/TURBMX use PROD_MEDIA_SIN (mean
+    # PRODT, drifting per CFUGA/CMONT config). Both come from NEWAVE inputs and
+    # return None when files are absent (mocked-pipeline tests), so convert_penalties
+    # falls back to its own legacy approximation.
+    max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(nw_files)
+    prod_media_sin = _compute_prod_media_sin_safe(nw_files)
     penalties_dict = network_conv.convert_penalties(
         nw_files,
         hydros_dict,
         productivities=base_productivities,
         max_accumulated_productivity=max_prodtacum_sin,
+        prod_media_sin=prod_media_sin,
     )
 
     logger.debug("Converting stages")
@@ -258,27 +308,32 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     logger.debug("Converting storage bounds from VMAXT/VMINT")
     storage_bounds_table = hydro_conv.convert_storage_bounds(nw_files, id_map)
 
+    # Generic constraints (VminOP, electric, AGRINT) share one ID space; the
+    # allocator hands each converter the next free start ID so the pipeline no
+    # longer threads `start_id = vminop_count + electric_count` by hand.
+    constraint_ids = _ConstraintIdAllocator()
+
     logger.debug("Converting VminOP constraints")
     vminop_result = constraints_conv.convert_vminop_constraints(nw_files, id_map)
-    vminop_referenced_ids: list[int] = (
-        list(vminop_result[2]) if vminop_result is not None else []
-    )
-    rho_acum_overrides: dict[int, list[float]] = (
-        vminop_result[3] if vminop_result is not None else {}
-    )
+    vminop_referenced_ids: list[int] = []
+    rho_acum_overrides: dict[int, list[float]] = {}
+    if vminop_result is not None:
+        vminop_referenced_ids = list(vminop_result.referenced_hydro_ids)
+        rho_acum_overrides = vminop_result.rho_acum_overrides
+        constraint_ids.advance(
+            len(vminop_result.constraints_dict.get("constraints", []))
+        )
 
     logger.debug("Converting electric constraints")
-    vminop_count = (
-        len(vminop_result[0].get("constraints", [])) if vminop_result is not None else 0
-    )
     electric_result = constraints_conv.convert_electric_constraints(
-        nw_files, id_map, start_id=vminop_count
+        nw_files, id_map, start_id=constraint_ids.next_id
     )
+    if electric_result is not None:
+        constraint_ids.advance(len(electric_result.constraints))
 
     logger.debug("Converting AGRINT group constraints")
-    electric_count = len(electric_result[0]) if electric_result is not None else 0
     agrint_result = constraints_conv.convert_agrint_constraints(
-        nw_files, id_map, start_id=vminop_count + electric_count
+        nw_files, id_map, start_id=constraint_ids.next_id
     )
 
     logger.debug("Converting load factors")
@@ -405,6 +460,36 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         pq.write_table(thermal_bounds_table, thermal_bounds_path, compression="zstd")
         logger.debug("Wrote %s", thermal_bounds_path)
 
+    # Per-bus excess-cost override: forbid energy excess at fictitious
+    # submarkets (pure transshipment nodes) by pricing it prohibitively.
+    bus_penalty_table = network_conv.convert_bus_penalty_overrides(nw_files, id_map)
+    if bus_penalty_table is not None:
+        bus_penalty_path = constraints_dir / "penalty_overrides_bus.parquet"
+        pq.write_table(bus_penalty_table, bus_penalty_path, compression="zstd")
+        logger.debug("Wrote %s", bus_penalty_path)
+
+    # Per-stage hydro penalty override: NEWAVE's PROD_MEDIA_SIN / MAX_PRODTACUM_SIN
+    # shift with seasonal (VOLREF_SAZ) and temporal (CFUGA/CMONT) productivity
+    # changes, so the ρ-scaled flow-domain hydro penalties are stage-varying.
+    # Emitted sparsely (only stages/columns that differ from penalties.json),
+    # keeping the penalty conversion coherent with the per-stage ρ already
+    # shipped in system/hydro_energy_productivity.parquet.
+    per_stage_sin = _compute_per_stage_sin_productivities(nw_files)
+    if per_stage_sin is not None:
+        per_stage_rho_avg, per_stage_rho_max_acum = per_stage_sin
+        hydro_ids = [int(h["id"]) for h in hydros_dict.get("hydros", []) if "id" in h]
+        hydro_penalty_table = network_conv.convert_hydro_penalty_overrides(
+            nw_files,
+            hydro_ids,
+            penalties_dict["hydro"],
+            per_stage_rho_avg,
+            per_stage_rho_max_acum,
+        )
+        if hydro_penalty_table is not None:
+            hydro_penalty_path = constraints_dir / "penalty_overrides_hydro.parquet"
+            pq.write_table(hydro_penalty_table, hydro_penalty_path, compression="zstd")
+            logger.debug("Wrote %s", hydro_penalty_path)
+
     # Merge VminOP and electric constraints into a single output.
     all_constraints: list[dict] = []
     bounds_tables: list[pa.Table] = []
@@ -413,10 +498,10 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     _BOUNDS_COLUMNS = ["constraint_id", "stage_id", "block_id", "bound"]
 
     if vminop_result is not None:
-        vminop_dict, vminop_bounds, _, _ = vminop_result
-        all_constraints.extend(vminop_dict.get("constraints", []))
+        all_constraints.extend(vminop_result.constraints_dict.get("constraints", []))
         # VminOP bounds table has no block_id column; add a null column and
         # reorder to match the canonical schema.
+        vminop_bounds = vminop_result.bounds
         n = len(vminop_bounds)
         vminop_bounds_extended = vminop_bounds.append_column(
             pa.field("block_id", pa.int32()),
@@ -425,14 +510,12 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         bounds_tables.append(vminop_bounds_extended)
 
     if electric_result is not None:
-        elec_constraints, elec_bounds = electric_result
-        all_constraints.extend(elec_constraints)
-        bounds_tables.append(elec_bounds)
+        all_constraints.extend(electric_result.constraints)
+        bounds_tables.append(electric_result.bounds)
 
     if agrint_result is not None:
-        agrint_constraints, agrint_bounds = agrint_result
-        all_constraints.extend(agrint_constraints)
-        bounds_tables.append(agrint_bounds)
+        all_constraints.extend(agrint_result.constraints)
+        bounds_tables.append(agrint_result.bounds)
 
     if all_constraints:
         merged_dict = {

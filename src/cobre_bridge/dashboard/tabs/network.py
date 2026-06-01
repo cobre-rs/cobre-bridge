@@ -12,7 +12,6 @@ Implements three sections of the Network tab (Tab 7):
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -21,7 +20,12 @@ import polars as pl
 
 from cobre_bridge.dashboard.chart_helpers import make_chart_card
 from cobre_bridge.dashboard.data import entity_name
-from cobre_bridge.ui.html import chart_grid, section_title, wrap_chart
+from cobre_bridge.ui.html import (
+    chart_grid,
+    json_for_script,
+    section_title,
+    wrap_chart,
+)
 from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
@@ -172,8 +176,8 @@ def build_line_explorer(
         f'<option value="{lid}">{d["name"]} (id={lid})</option>'
         for lid, d in sorted(line_data.items(), key=lambda x: x[1]["name"])
     )
-    data_json = json.dumps(line_data, separators=(",", ":"))
-    labels_json = json.dumps(xlabels)
+    data_json = json_for_script(line_data)
+    labels_json = json_for_script(xlabels)
 
     chart_html = (
         '<div class="chart-grid-single">'
