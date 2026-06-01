@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from cobre_bridge import __version__
+from cobre_bridge.cobre_io import case_dir_for
 
 
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
@@ -17,7 +18,7 @@ def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
     Searches for ``system/lines.json`` near the output directory.
     Returns an empty list if not found.
     """
-    cobre_case_dir = cobre_output_dir.parent
+    cobre_case_dir = case_dir_for(cobre_output_dir)
     lines_path = cobre_case_dir / "system" / "lines.json"
     if not lines_path.exists():
         for candidate in [cobre_output_dir, cobre_output_dir.parent]:

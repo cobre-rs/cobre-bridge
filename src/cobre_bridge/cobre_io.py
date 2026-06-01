@@ -19,6 +19,22 @@ from pathlib import Path
 _LOG = logging.getLogger(__name__)
 
 
+def case_dir_for(output_dir: Path) -> Path:
+    """Return the Cobre *case* directory that owns *output_dir*.
+
+    A Cobre case lays its inputs (``system/``, ``constraints/``,
+    ``penalties.json``, …) in the case directory and its solver outputs
+    (``simulation/``, ``training/``, ``policy/``) one level below, in
+    ``<case_dir>/output``. The comparator is handed the ``output/`` directory,
+    so the case directory is its parent.
+
+    This is the single home for that "``output`` sits under the case" contract,
+    which used to be hard-coded as ``cobre_output_dir.parent`` at ~13 sites — and
+    the one place a future custom ``--output`` layout would override.
+    """
+    return output_dir.parent
+
+
 def productivity_from_energy_parquet(case_dir: Path) -> dict[int, float]:
     """Return ``{hydro_id: ρ_eq}`` from ``hydro_energy_productivity.parquet``.
 

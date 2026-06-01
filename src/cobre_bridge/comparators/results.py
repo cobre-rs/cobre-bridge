@@ -15,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
+from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators.alignment import EntityAlignment
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
@@ -1352,13 +1353,15 @@ def compare_results(
     line_pct = read_cobre_line_percentiles(cobre_output_dir)
 
     # --- Line bounds (per stage) and line metadata for the Network tab ---
-    line_bounds_path = cobre_output_dir.parent / "constraints" / "line_bounds.parquet"
+    line_bounds_path = (
+        case_dir_for(cobre_output_dir) / "constraints" / "line_bounds.parquet"
+    )
     line_bounds = (
         pd.read_parquet(line_bounds_path)
         if line_bounds_path.exists()
         else pd.DataFrame()
     )
-    lines_json_path = cobre_output_dir.parent / "system" / "lines.json"
+    lines_json_path = case_dir_for(cobre_output_dir) / "system" / "lines.json"
     line_meta: list[dict] = []
     if lines_json_path.exists():
         try:
@@ -1406,7 +1409,7 @@ def compare_results(
         evaluate_lhs_newave,
     )
 
-    cobre_case_dir = cobre_output_dir.parent
+    cobre_case_dir = case_dir_for(cobre_output_dir)
     gc_constraints = _load_generic_constraints(cobre_case_dir)
     gc_bounds_df = _load_generic_constraint_bounds(cobre_case_dir)
     if gc_constraints and saidas_dir is not None:

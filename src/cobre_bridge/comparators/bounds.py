@@ -14,6 +14,7 @@ from pathlib import Path
 
 import polars as pl
 
+from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators.alignment import (
     EntityAlignment,
     HydroEntity,
@@ -245,7 +246,7 @@ def _read_converter_line_bounds(
     The converter output lives one level above the Cobre output directory
     (``cobre_output_dir.parent``).
     """
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     path = case_dir / "constraints" / "line_bounds.parquet"
     if not path.exists():
         _LOG.warning("line_bounds.parquet not found at %s", path)

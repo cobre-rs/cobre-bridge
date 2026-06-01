@@ -15,6 +15,7 @@ from pathlib import Path
 import polars as pl
 
 from cobre_bridge.cobre_io import (
+    case_dir_for,
     productivity_from_energy_parquet,
     productivity_from_production_models,
 )
@@ -40,7 +41,7 @@ def _load_block_hours(cobre_output_dir: Path) -> pl.DataFrame | None:
     Returns DataFrame with columns ``stage_id``, ``block_id``, ``hours``
     or None if stages.json cannot be found or parsed.
     """
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     for candidate in [case_dir, cobre_output_dir]:
         p = candidate / "stages.json"
         if p.exists():
@@ -303,7 +304,7 @@ def read_cobre_hydro_total_flows(
     if not required.issubset(cobre_hydro_means.columns):
         return empty
 
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
         hydros_path = case_dir / "system" / "hydros.json"
@@ -370,7 +371,7 @@ def _load_hydro_reservoir_flag(cobre_output_dir: Path) -> dict[int, bool]:
     The discriminator mirrors the dashboard convention (reservoir = any
     plant with positive max storage; run-of-river otherwise).
     """
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
         hydros_path = case_dir / "system" / "hydros.json"
@@ -699,7 +700,7 @@ def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
             "withdrawal_m3s": pl.Float64,
         }
     )
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     bounds_path = case_dir / "constraints" / "hydro_bounds.parquet"
     if not bounds_path.exists():
         return empty
@@ -735,7 +736,7 @@ def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
     cast to ``Float64``.  Returns an empty frame when the parquet
     is missing.
     """
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     bounds_path = case_dir / "constraints" / "hydro_bounds.parquet"
     bound_cols = [
         "min_storage_hm3",
@@ -1404,7 +1405,7 @@ def read_converted_penalties(cobre_output_dir: Path) -> dict:
     found — callers should treat an empty dict as "penalties unavailable".
     """
     for candidate in (
-        cobre_output_dir.parent / "penalties.json",
+        case_dir_for(cobre_output_dir) / "penalties.json",
         cobre_output_dir / "penalties.json",
     ):
         if candidate.is_file():
@@ -1498,7 +1499,7 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
 
 def _resolve_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
     """Locate a `system/<filename>` JSON near the Cobre output directory."""
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     for candidate in [case_dir, cobre_output_dir, case_dir.parent]:
         p = candidate / "system" / filename
         if p.exists():
@@ -1582,7 +1583,7 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
 
 def _find_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
     """Locate a system JSON file near the Cobre output directory."""
-    case_dir = cobre_output_dir.parent
+    case_dir = case_dir_for(cobre_output_dir)
     for candidate in [case_dir, cobre_output_dir, case_dir.parent]:
         p = candidate / "system" / filename
         if p.exists():
