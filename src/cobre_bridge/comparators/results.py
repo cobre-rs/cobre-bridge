@@ -1091,7 +1091,7 @@ def compare_results(
         Relative tolerance for results comparison (informational).
 
     """
-    from cobre_bridge.comparators.alignment import _read_reference_names
+    from cobre_bridge.comparators.alignment import read_reference_names
     from cobre_bridge.comparators.cobre_readers import (
         read_cobre_bus_aggregates,
         read_cobre_bus_means,
@@ -1137,7 +1137,7 @@ def compare_results(
     results: list[ResultComparison] = []
 
     # Read entity names from both sides.
-    nw_hydro_names, nw_thermal_names, nw_bus_names = _read_reference_names(nw_files)
+    nw_hydro_names, nw_thermal_names, nw_bus_names = read_reference_names(nw_files)
     cobre_hydro_meta = read_cobre_hydro_metadata(cobre_output_dir)
     cobre_thermal_meta = read_cobre_thermal_metadata(cobre_output_dir)
     cobre_bus_meta = read_cobre_bus_metadata(cobre_output_dir)

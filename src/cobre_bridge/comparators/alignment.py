@@ -75,7 +75,7 @@ class EntityAlignment:
     num_newave_stages: int = 0
 
 
-def _read_reference_names(
+def read_reference_names(
     nw_files: NewaveFiles,
 ) -> tuple[dict[int, str], dict[int, str], dict[int, str]]:
     """Read entity names from NEWAVE input files via inewave.
@@ -164,7 +164,7 @@ def build_entity_alignment(
     lines_json:
         The ``lines`` list from the converted Cobre ``lines.json``.
     """
-    hydro_names, thermal_names, subsystem_names = _read_reference_names(nw_files)
+    hydro_names, thermal_names, subsystem_names = read_reference_names(nw_files)
     reservoir_codes = _detect_reservoir_plants(nw_files)
     num_stages = _detect_newave_stages(nw_files)
 
