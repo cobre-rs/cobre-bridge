@@ -30,7 +30,6 @@ from cobre_bridge.comparators.charts import (
     performance_iteration_chart,
     performance_metric_cards,
     productivity_scatter,
-    reconstructed_cost_chart,
     system_comparison_chart,
     system_per_bus_chart,
     thermal_cost_chart,
@@ -146,18 +145,6 @@ def build_comparison_report(
                     system_comparison_chart(results, "deficit_mw", "Deficit", bus_pct)
                 )
             ],
-            single=True,
-        )
-    )
-    # Reconstructed immediate cost: NEWAVE rebuilt from MEDIAS quantities × our
-    # converted penalties vs Cobre — a direct test of whether our penalties
-    # reproduce the costs NEWAVE exports (and free of the frozen-COPER artifact).
-    nw_recon = pctiles.nw_reconstructed_costs if pctiles else pl.DataFrame()
-    cobre_stage_costs = pctiles.cobre_stage_costs if pctiles else pl.DataFrame()
-    system_parts.append(section_title("Reconstructed Immediate Cost"))
-    system_parts.append(
-        chart_grid(
-            [wrap_chart(reconstructed_cost_chart(nw_recon, cobre_stage_costs))],
             single=True,
         )
     )

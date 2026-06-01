@@ -155,6 +155,34 @@ yet filled in.
   `crates/cobre-io/src/validation/semantic/thermal.rs`,
   `crates/cobre-sddp/src/setup/mod.rs`.
 
+### Deck drift — converted deck edited after the NEWAVE run (pmo echo ≠ current dger/confhd)
+
+- **Symptom:** a results comparison diverges, but the NEWAVE `saidas/` and the converted Cobre
+  case were built from **different input decks**. Telltale: input `.dat` files have **mtimes
+  later than `saidas/pmo.dat`** (deck edited after the run), and `pmo.dat`'s own config echo
+  contradicts the current `.dat` files.
+- **Where:** any comparison. First seen in `example/comparacao_prod` (2026-06): `dger.dat` and
+  `confhd.dat` were edited ~7 days after the run that produced `saidas/`. `pmo.dat` echo says
+  `CONSIDERA ANTECIPACAO DE GERACAO TERMOELETRICA  SIM` (anticipated GNL dispatch ON — ST.CRUZ
+  NOVA pinned at 204.56 MWmed at stage 0 in MEDIAS-USIT), but the current `dger.dat` field 55
+  `DESP. ANTEC. GNL` = **0**, so the converter writes `anticipated_config = null` on every
+  thermal and Cobre runs the GNL plant free (at its 500 MW economic max).
+- **Root cause:** **not a converter bug** — the converter faithfully mirrors the (edited) deck;
+  the deck no longer matches the executed run.
+- **Verdict:** **input mismatch (fix the deck, not the code).** Rebuild Cobre from a deck that
+  matches the run (here: restore `DESP. ANTEC. GNL = 1`; requires cobre-python ≥ 0.7.0 to seed —
+  see [[project_gnl_anticipated_seeding]]) before trusting the comparison.
+- **Triage rule:** before reading any divergence, run
+  `stat -c '%y  %n' <case>/*.dat <case>/saidas/pmo.dat` — if any input is newer than `pmo.dat`,
+  suspect deck drift, then cross-check `pmo.dat`'s config echo (`ANTECIPACAO…`,
+  `NUMERO DE USINAS`, sim type, FPHA, POS) against the current deck.
+- **Caveat — drift is usually a sideshow for magnitude:** in comparacao_prod the GNL flag moved
+  only ~300 MW (one plant), while the actual aggregate gap was **+7000 MWmed thermal at stages
+  0–1** (exact mirror of −7000 MWmed hydro; load conserved), decaying to ~0 by stage 8 — i.e. the
+  dominant cause was early-stage **water-value / FCF hoarding** (Cobre values water higher early
+  and burns thermal; NEWAVE CMO ≈ 176 R$/MWh at stage 0), the separate entry below. Confirm the
+  deck before attributing magnitude either way.
+
 ### End-of-study immediate-cost gap = min-outflow / min-gen violations (dispatch, not bug)
 
 - **Symptom:** per-stage immediate cost (NEWAVE `COPER` vs Cobre `immediate_cost`)
