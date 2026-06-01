@@ -384,12 +384,10 @@ def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
 
     for label, lf, color in sources:
         try:
-            stage_mw: dict[int, float] | object = _stage_avg_mw(
-                lf, "generation_mwh", data.stage_hours, []
-            )
+            stage_mw = _stage_avg_mw(lf, "generation_mwh", data.stage_hours)
         except (ValueError, TypeError, KeyError):
             continue
-        if not isinstance(stage_mw, dict) or not stage_mw:
+        if not stage_mw:
             continue
 
         stages = sorted(stage_mw.keys())

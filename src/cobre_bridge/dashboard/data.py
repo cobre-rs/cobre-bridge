@@ -177,32 +177,28 @@ def _stage_avg_mw(
     lf: pl.LazyFrame,
     mwh_col: str,
     stage_hours: dict[int, float],
-    group_cols: list[str],
-) -> dict[int, float] | pl.DataFrame:
+) -> dict[int, float]:
     """Compute stage-average MW from MWh summed across all blocks via LazyFrame.
 
-    Scans all blocks (no block_id filter), sums mwh_col per
-    (scenario, stage [+ group_cols]), divides by total stage hours, then
-    averages across scenarios.
+    Scans all blocks (no block_id filter), sums ``mwh_col`` per
+    (scenario, stage), divides by total stage hours, then averages across
+    scenarios.
 
-    Returns dict[int, float] mapping stage_id -> avg_mw when group_cols is empty,
-    or a Polars DataFrame with columns [stage_id, *group_cols, _avg_mw] otherwise.
+    Returns ``{stage_id: avg_mw}``.
     """
     hours_df = pl.DataFrame(
         {"stage_id": list(stage_hours.keys()), "_hours": list(stage_hours.values())}
     )
     result = (
-        lf.group_by(["scenario_id", "stage_id"] + group_cols)
+        lf.group_by(["scenario_id", "stage_id"])
         .agg(pl.col(mwh_col).sum())
         .join(hours_df.lazy(), on="stage_id")
         .with_columns((pl.col(mwh_col) / pl.col("_hours")).alias("_avg_mw"))
-        .group_by(["stage_id"] + group_cols)
+        .group_by("stage_id")
         .agg(pl.col("_avg_mw").mean())
         .sort("stage_id")
         .collect(engine="streaming")
     )
-    if group_cols:
-        return result
     return dict(zip(result["stage_id"].to_list(), result["_avg_mw"].to_list()))
 
 

@@ -215,13 +215,9 @@ def _chart_gen_mix_hero(data: DashboardData) -> go.Figure:
     Returns:
         A :class:`plotly.graph_objects.Figure`.
     """
-    h_gen = _stage_avg_mw(data.hydros_lf, "generation_mwh", data.stage_hours, [])
-    t_gen = _stage_avg_mw(data.thermals_lf, "generation_mwh", data.stage_hours, [])
-    n_gen = _stage_avg_mw(data.ncs_lf, "generation_mwh", data.stage_hours, [])
-
-    assert isinstance(h_gen, dict)
-    assert isinstance(t_gen, dict)
-    assert isinstance(n_gen, dict)
+    h_gen = _stage_avg_mw(data.hydros_lf, "generation_mwh", data.stage_hours)
+    t_gen = _stage_avg_mw(data.thermals_lf, "generation_mwh", data.stage_hours)
+    n_gen = _stage_avg_mw(data.ncs_lf, "generation_mwh", data.stage_hours)
 
     load_ser = _compute_lp_load(
         data.load_stats,
