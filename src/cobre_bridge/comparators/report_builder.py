@@ -464,11 +464,14 @@ def build_comparison_report(
         )
         prod_parts.append(section_title("Realized productivity across stages"))
         prod_parts.append(
-            chart_grid(
-                [wrap_chart(productivity_per_stage_chart(results, prod_df))],
-                single=True,
-            )
+            '<p style="color:#64748B;margin:-8px 0 12px">Productivity is constant'
+            " within a stage but varies across stages, tracking the reservoir"
+            " head reached each stage — pick a reservoir to compare NEWAVE vs"
+            " Cobre.</p>"
         )
+        # Reuses the shared per-plant dropdown widget (same as the hydro/thermal
+        # detail tabs), so every reservoir is selectable — not a fixed subset.
+        prod_parts.append(productivity_per_stage_chart(results))
         prod_parts.append(section_title("Productivity Building Blocks"))
         prod_parts.append(
             chart_grid(

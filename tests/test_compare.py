@@ -993,33 +993,24 @@ class TestProductivityDetail:
                 )
         return rows
 
-    def test_per_stage_chart_dropdown_one_plant_at_a_time(self) -> None:
+    def test_per_stage_chart_reuses_shared_per_plant_dropdown(self) -> None:
         from cobre_bridge.comparators.charts import productivity_per_stage_chart
 
-        html = productivity_per_stage_chart(
-            self._per_stage_results(), self._detail_df()
-        )
-        assert "Plotly.newPlot" in html
-        assert "Realized productivity across stages" in html
-        assert "varies across stages" in html
-        # NEWAVE (solid) + Cobre (dashed) traces; plant chosen via a dropdown.
-        assert '"name":"NEWAVE"' in html
-        assert '"name":"Cobre"' in html
-        assert '"dash":"dash"' in html
-        # A dropdown with one button per plant (plant names are button labels,
-        # not trace names) — only one plant's pair is visible at a time.
-        assert "updatemenus" in html
-        assert "ALPHA" in html and "BETA" in html
-        assert '"visible":false' in html  # the non-default plant starts hidden
+        html = productivity_per_stage_chart(self._per_stage_results())
+        # Reuses the shared interactive per-plant <select> dropdown widget
+        # (same as the hydro/thermal detail tabs) — every plant is selectable.
+        assert "<select" in html
+        assert "ALPHA (1)" in html and "BETA (2)" in html
+        assert "prodstage-chart-productivity-mw-per-m3s" in html
+        assert "Realized productivity" in html
+        # Per-stage NEWAVE + Cobre arrays embedded for the JS to plot.
+        assert "productivity_mw_per_m3s_nw" in html
+        assert "productivity_mw_per_m3s_cb" in html
 
     def test_per_stage_chart_no_rows(self) -> None:
-        import polars as pl
-
         from cobre_bridge.comparators.charts import productivity_per_stage_chart
 
-        assert "No per-stage productivity data" in productivity_per_stage_chart(
-            [], pl.DataFrame()
-        )
+        assert "No per-stage productivity data" in productivity_per_stage_chart([])
 
     def test_blocks_table_grouped_header_and_highlight(self) -> None:
         from cobre_bridge.comparators.charts import productivity_blocks_table

@@ -2117,150 +2117,46 @@ def productivity_comparison_scatter(
     return _plotly_div(traces, layout)
 
 
-def productivity_per_stage_chart(
-    results: list[ResultComparison],
-    df: pl.DataFrame,
-    max_plants: int = 8,
-) -> str:
-    """Realized per-stage productivity (generation / turbined) by plant.
+def productivity_per_stage_chart(results: list[ResultComparison]) -> str:
+    """Per-plant realized productivity (generation / turbined) across stages.
 
     Productivity is **constant within a stage but varies across stages** in
-    both models, tracking the reservoir head reached each stage. This chart
-    reuses the per-stage ``productivity_mw_per_m3s`` hydro comparison rows
-    already produced in results.py and plots, for the largest reservoirs,
-    NEWAVE (solid) vs Cobre (dashed) realized productivity over ``stage_id``,
-    one hue per plant.
-
-    Plants are chosen as the top *max_plants* reservoirs by ``vmax_hm3``
-    (from ``df`` = ``productivity_detail``) that have those per-stage rows.
-    Falls back to a ``<p>`` note when no per-stage productivity rows exist.
+    both models, tracking the reservoir head reached each stage. Reuses the
+    shared interactive per-plant widget (:func:`_build_interactive_detail_html`
+    — the same JS ``<select>`` dropdown the hydro/thermal detail tabs use), so
+    every reservoir is selectable one at a time (NEWAVE vs Cobre) rather than a
+    hand-picked subset. Driven by the per-stage ``productivity_mw_per_m3s``
+    hydro comparison rows already produced in results.py.
     """
-    prod_rows = [
-        r
-        for r in results
-        if r.entity_type == "hydro" and r.variable == "productivity_mw_per_m3s"
-    ]
-    if not prod_rows:
-        return "<p>No per-stage productivity data available.</p>"
-
-    # Ranking by reservoir size (vmax) so the chart shows plants with the most
-    # head swing first; fall back to plant-name order when df lacks vmax.
-    rank: dict[str, float] = {}
-    if not df.is_empty() and {"plant_name", "nw_vmax_hm3"}.issubset(df.columns):
-        for row in df.iter_rows(named=True):
-            vmax = row.get("nw_vmax_hm3")
-            rank[str(row["plant_name"]).strip().upper()] = (
-                float(vmax) if vmax is not None else 0.0
-            )
-
-    # Group per-stage values by plant name.
-    by_plant_nw: dict[str, dict[int, float]] = {}
-    by_plant_cb: dict[str, dict[int, float]] = {}
-    for r in prod_rows:
-        by_plant_nw.setdefault(r.entity_name, {})[r.stage] = r.newave_value
-        by_plant_cb.setdefault(r.entity_name, {})[r.stage] = r.cobre_value
-
-    plants = sorted(
-        by_plant_nw,
-        key=lambda name: -rank.get(name.strip().upper(), 0.0),
-    )[:max_plants]
-
-    # One reservoir at a time (NEWAVE vs Cobre), selectable via a dropdown, so
-    # the chart is never overplotted. All plants' traces are emitted but only
-    # the first (largest) plant's pair starts visible; each dropdown button
-    # toggles visibility to its own plant.
-    traces: list[dict] = []
-    rendered: list[str] = []
-    for name in plants:
-        nw_map = by_plant_nw.get(name, {})
-        cb_map = by_plant_cb.get(name, {})
-        stages = sorted(set(nw_map) | set(cb_map))
-        if not stages:
+    var_key = "productivity_mw_per_m3s"
+    plants: dict[tuple[str, int], dict[int, tuple[float, float]]] = {}
+    cobre_ids: dict[tuple[str, int], int] = {}
+    for r in results:
+        if r.entity_type != "hydro" or r.variable != var_key:
             continue
-        safe = escape_text(name)
-        first = len(rendered) == 0
-        traces.append(
-            {
-                "x": stages,
-                "y": [nw_map.get(s) for s in stages],
-                "name": "NEWAVE",
-                "type": "scatter",
-                "mode": "lines+markers",
-                "line": {"color": COLOR_NEWAVE, "width": 2},
-                "visible": first,
-                "hovertemplate": (
-                    f"{safe} NEWAVE<br>stage %{{x}}<br>"
-                    "ρ %{y:.4f} MW per m³/s<extra></extra>"
-                ),
-            }
-        )
-        traces.append(
-            {
-                "x": stages,
-                "y": [cb_map.get(s) for s in stages],
-                "name": "Cobre",
-                "type": "scatter",
-                "mode": "lines+markers",
-                "line": {"color": COLOR_COBRE, "width": 2, "dash": "dash"},
-                "visible": first,
-                "hovertemplate": (
-                    f"{safe} Cobre<br>stage %{{x}}<br>"
-                    "ρ %{y:.4f} MW per m³/s<extra></extra>"
-                ),
-            }
-        )
-        rendered.append(name)
+        key = (r.entity_name, r.newave_code)
+        plants.setdefault(key, {})[r.stage] = (r.newave_value, r.cobre_value)
+        cobre_ids[key] = r.cobre_id
 
-    if not traces:
+    if not plants:
         return "<p>No per-stage productivity data available.</p>"
 
-    n = len(rendered)
-    title = "Realized productivity across stages"
-    subtitle = (
-        "Constant within a stage, varies across stages — productivity tracks "
-        "the reservoir head reached each stage. Solid = NEWAVE, dashed = Cobre."
+    js_plants: dict[str, dict] = {}
+    for (name, code), stage_data in sorted(plants.items()):
+        stages = sorted(stage_data)
+        js_plants[f"{code}_{name}"] = {
+            "name": name,
+            "code": code,
+            "cobre_id": cobre_ids[(name, code)],
+            f"{var_key}_stages": stages,
+            f"{var_key}_nw": [stage_data[s][0] for s in stages],
+            f"{var_key}_cb": [stage_data[s][1] for s in stages],
+        }
+
+    variables = [(var_key, "Realized productivity — Gen / Turbined (MW per m³/s)")]
+    return _build_interactive_detail_html(
+        js_plants, variables, "prodstage", "Reservoir"
     )
-
-    def _title_for(plant: str) -> str:
-        return f"{title} — {plant}<br><sub>{subtitle}</sub>"
-
-    buttons: list[dict] = []
-    for k, name in enumerate(rendered):
-        vis = [False] * (2 * n)
-        vis[2 * k] = True
-        vis[2 * k + 1] = True
-        buttons.append(
-            {
-                "label": name,
-                "method": "update",
-                "args": [
-                    {"visible": vis},
-                    {"title.text": _title_for(escape_text(name))},
-                ],
-            }
-        )
-
-    layout = {
-        "title": {"text": _title_for(escape_text(rendered[0]))},
-        "xaxis": {"title": "Stage (0-based)"},
-        "yaxis": {"title": "Productivity (MW per m³/s)"},
-        "legend": {"orientation": "h", "y": -0.2},
-        "updatemenus": [
-            {
-                "type": "dropdown",
-                "active": 0,
-                "showactive": True,
-                "x": 0.0,
-                "xanchor": "left",
-                "y": 1.18,
-                "yanchor": "top",
-                "buttons": buttons,
-            }
-        ],
-        "margin": {"t": 110},
-    }
-
-    return _plotly_div(traces, layout, height=480)
 
 
 def _prod_blocks_pct(nw: float | None, cb: float | None) -> float | None:
