@@ -672,9 +672,7 @@ class TestConversionWarningCapture:
             log.warning("REE.DAT has no entries")
             return ConversionReport(hydro_count=3)
 
-        with patch.object(
-            pipeline, "_convert_newave_case_impl", side_effect=fake_impl
-        ):
+        with patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl):
             report = convert_newave_case(tmp_path, tmp_path)
 
         assert report.hydro_count == 3
