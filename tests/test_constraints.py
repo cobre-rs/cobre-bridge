@@ -11,6 +11,7 @@ import pytest
 
 from cobre_bridge.converters.constraints import (
     _compute_accumulated_integrated_productivities,
+    _is_stored_energy_reservoir,
     _parse_formula,
     compute_accumulated_productivities,
     convert_agrint_constraints,
@@ -59,6 +60,42 @@ def _make_confhd_df() -> pd.DataFrame:
             "volume_inicial_percentual": [50.0, 50.0, 50.0],
         }
     )
+
+
+class TestStoredEnergyReservoirFilter:
+    """VminOP includes only NEWAVE's EARM plant set: monthly-regulating
+    reservoirs with usable storage (matching pmo.dat's
+    ``produtibilidade_acumulada_calculo_earm``)."""
+
+    @staticmethod
+    def _cad(tipo: str, vmin: float, vmax: float) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "tipo_regulacao": [tipo],
+                "volume_minimo": [vmin],
+                "volume_maximo": [vmax],
+            },
+            index=pd.Index([42], name="codigo_usina"),
+        )
+
+    def test_monthly_reservoir_with_useful_volume_included(self) -> None:
+        assert _is_stored_energy_reservoir(self._cad("M", 100.0, 200.0), 42) is True
+
+    def test_run_of_river_excluded_even_with_useful_volume(self) -> None:
+        # JIRAU is 'D' with a large operative volume range but is run-of-river.
+        assert _is_stored_energy_reservoir(self._cad("D", 1249.8, 2746.7), 42) is False
+
+    def test_special_regime_excluded_even_with_useful_volume(self) -> None:
+        # ITAIPU is 'S' with ~1709 hm3 of useful volume yet not in EARM.
+        assert (
+            _is_stored_energy_reservoir(self._cad("S", 27695.2, 29403.9), 42) is False
+        )
+
+    def test_monthly_without_useful_volume_excluded(self) -> None:
+        assert _is_stored_energy_reservoir(self._cad("M", 100.0, 100.0), 42) is False
+
+    def test_unknown_code_excluded(self) -> None:
+        assert _is_stored_energy_reservoir(self._cad("M", 100.0, 200.0), 999) is False
 
 
 class TestAccumulatedProductivity:

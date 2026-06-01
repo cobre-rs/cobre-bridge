@@ -305,6 +305,30 @@ def compute_per_stage_acc_productivities(
     return result
 
 
+def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
+    """True iff NEWAVE counts plant ``code``'s storage in a REE's stored energy.
+
+    NEWAVE's stored-energy (EARM) and VminOP accounting include **only
+    monthly-regulating reservoirs** (``tipo_regulacao == "M"``) that have usable
+    storage (``volume_maximo > volume_minimo``).  Run-of-river (``"D"``) and
+    special-regime (``"S"``) plants are excluded even when their *accumulated*
+    cascade productivity is positive from downstream powerhouses — e.g. ITAIPU
+    (``"S"``) and JIRAU (``"D"``) carry storage but are not part of NEWAVE's
+    stored energy.  This reproduces the plant set of pmo.dat's
+    ``produtibilidade_acumulada_calculo_earm`` column.
+
+    Distinct from ``alignment._detect_reservoir_plants`` (useful-volume only):
+    that set is broader because it does not gate on ``tipo_regulacao``.
+    """
+    if code not in cadastro.index:
+        return False
+    if str(cadastro.loc[code, "tipo_regulacao"]).strip() != "M":
+        return False
+    vol_min = float(cadastro.loc[code, "volume_minimo"])
+    vol_max = float(cadastro.loc[code, "volume_maximo"])
+    return vol_max - vol_min > 0.0
+
+
 def convert_vminop_constraints(
     nw_files: NewaveFiles,
     id_map: NewaveIdMap,
@@ -318,6 +342,10 @@ def convert_vminop_constraints(
     productivity — NEWAVE's stored-energy / EARM convention — which differs
     from cobre's default point ρ_acum (gen = ρ·Q coefficient) by up to ~10%
     on plants with non-trivial head swing.
+
+    Only monthly-regulating reservoirs with usable storage participate in a
+    REE's expression (see :func:`_is_stored_energy_reservoir`); run-of-river and
+    special-regime plants are excluded to match NEWAVE's EARM plant set.
 
     Parameters
     ----------
@@ -437,6 +465,14 @@ def convert_vminop_constraints(
         referenced_ids: list[int] = []
 
         for plant_code in sorted(hydros_in_ree):
+            # NEWAVE's stored energy (EARM) — and thus the VminOP expression —
+            # counts only monthly-regulating reservoirs with usable storage.
+            # Gate on that, not on ``acc_prod > 0`` alone: run-of-river /
+            # special-regime plants such as ITAIPU and JIRAU carry a positive
+            # *accumulated* productivity from downstream powerhouses yet are not
+            # part of NEWAVE's stored energy.
+            if not _is_stored_energy_reservoir(cadastro, plant_code):
+                continue
             if acc_prod.get(plant_code, 0.0) <= 0.0:
                 continue
             try:
