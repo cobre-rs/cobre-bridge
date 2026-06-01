@@ -322,12 +322,25 @@ def evaluate_lhs_cobre(
     # Scan with the comparator's own simulation reader (which already takes the
     # ``output/`` directory directly), instead of reaching into the dashboard's
     # case-dir-based scanner via a synthetic ``cobre_output_dir.parent``. A
-    # missing entity directory yields an empty LazyFrame, matching the prior
-    # behaviour; a present-but-corrupt parquet raises CobreReadError.
-    hydros_lf = _scan_simulation_entity(cobre_output_dir, "hydros") or pl.LazyFrame()
-    exchanges_lf = (
-        _scan_simulation_entity(cobre_output_dir, "exchanges") or pl.LazyFrame()
+    # present-but-corrupt parquet raises CobreReadError.
+    # NB: ``lf or pl.LazyFrame()`` would evaluate ``bool(lf)``, which polars
+    # rejects ("truth value of a LazyFrame is ambiguous") — use explicit None
+    # checks.
+    empty = pl.DataFrame(
+        schema={
+            "constraint_id": pl.Int32,
+            "stage_id": pl.Int32,
+            "lhs_value": pl.Float64,
+        }
     )
+
+    hydros_lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    if hydros_lf is None:
+        # No hydro simulation → no operation data to evaluate the LHS against.
+        return empty
+    exchanges_lf = _scan_simulation_entity(cobre_output_dir, "exchanges")
+    if exchanges_lf is None:
+        exchanges_lf = pl.LazyFrame()
 
     lhs_pd: pd.DataFrame = evaluate_constraint_expressions(
         constraints, hydros_lf, exchanges_lf

@@ -699,3 +699,73 @@ class TestComparisonReportIntegration:
         html = build_comparison_report(results, pctiles)
 
         assert "Plotly.newPlot" in html
+
+
+class TestEvaluateLhsCobre:
+    """Regression cover for evaluate_lhs_cobre's simulation-scan paths.
+
+    The real-LazyFrame path was untested and regressed once: `lf or
+    pl.LazyFrame()` evaluated bool(lf), which polars rejects.
+    """
+
+    @staticmethod
+    def _storage_constraint() -> list[dict]:
+        return [
+            {
+                "id": 0,
+                "name": "VminOP_0",
+                "expression": "hydro_storage(0)",
+                "sense": ">=",
+                "slack": {"enabled": False},
+            }
+        ]
+
+    def test_evaluates_lhs_from_a_real_simulation_lazyframe(self) -> None:
+        """A present simulation (LazyFrame, not None) must evaluate, not raise."""
+        import polars as pl
+
+        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+
+        hydros = pl.DataFrame(
+            {
+                "scenario_id": [0, 0],
+                "stage_id": [0, 1],
+                "block_id": [0, 0],
+                "hydro_id": [0, 0],
+                "storage_final_hm3": [100.0, 200.0],
+                "generation_mw": [10.0, 20.0],
+            }
+        ).lazy()
+
+        def fake_scan(_output_dir, entity):
+            return hydros if entity == "hydros" else None
+
+        with patch(
+            "cobre_bridge.comparators.constraints_compare._scan_simulation_entity",
+            side_effect=fake_scan,
+        ):
+            result = evaluate_lhs_cobre(self._storage_constraint(), Path("/out"))
+
+        rows = {
+            (r["constraint_id"], r["stage_id"]): r["lhs_value"]
+            for r in result.iter_rows(named=True)
+        }
+        assert rows[(0, 0)] == pytest.approx(100.0)
+        assert rows[(0, 1)] == pytest.approx(200.0)
+
+    def test_missing_simulation_returns_empty(self) -> None:
+        """Both entities absent (None) → empty frame, no error."""
+        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+
+        with patch(
+            "cobre_bridge.comparators.constraints_compare._scan_simulation_entity",
+            return_value=None,
+        ):
+            result = evaluate_lhs_cobre(self._storage_constraint(), Path("/out"))
+        assert result.is_empty()
+
+    def test_no_constraints_returns_empty_without_scanning(self) -> None:
+        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+
+        result = evaluate_lhs_cobre([], Path("/out"))
+        assert result.is_empty()
