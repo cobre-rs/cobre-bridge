@@ -20,7 +20,7 @@ from cobre_bridge.comparators.alignment import (
     LineEntity,
     ThermalEntity,
 )
-from cobre_bridge.horizon import BIG_M
+from cobre_bridge.horizon import is_effectively_infinite
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
@@ -62,12 +62,9 @@ _ENTITY_TYPE_THERMAL = 1
 _ENTITY_TYPE_LINE = 3
 
 
-def _is_effectively_infinite(value: float) -> bool:
-    """Return True if the value represents an unbounded variable.
-
-    Catches both IEEE inf and NEWAVE's 99999 sentinel.
-    """
-    return math.isinf(value) or abs(value) >= BIG_M
+# The "is this bound unbounded?" predicate now lives in cobre_bridge.horizon
+# (next to BIG_M); kept as an alias for this module's callers and tests.
+_is_effectively_infinite = is_effectively_infinite
 
 
 def _bounds_match(a: float, b: float, tolerance: float) -> bool:

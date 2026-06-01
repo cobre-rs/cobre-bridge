@@ -5,7 +5,6 @@ from __future__ import annotations
 import pandas as pd
 import polars as pl
 
-from cobre_bridge.comparators.bounds import _is_effectively_infinite
 from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
@@ -14,6 +13,7 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     ResultsSummary,
 )
+from cobre_bridge.horizon import is_effectively_infinite
 from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS as _LEGEND
 from cobre_bridge.ui.plotly_helpers import MARGIN_DEFAULTS as _MARGIN
 from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
@@ -1619,9 +1619,9 @@ def line_summary_chart(
         finite_lower: list[tuple[int, float]] = []
         for s in stages:
             d_cap, r_cap = stage_caps.get(lid, {}).get(s, (d_static, r_static))
-            if not _is_effectively_infinite(d_cap):
+            if not is_effectively_infinite(d_cap):
                 finite_upper.append((s, d_cap))
-            if not _is_effectively_infinite(r_cap):
+            if not is_effectively_infinite(r_cap):
                 finite_lower.append((s, -r_cap))
         if finite_upper:
             traces.append(
