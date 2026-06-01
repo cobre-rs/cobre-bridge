@@ -118,6 +118,15 @@ class PercentileData:
     gc_lhs_newave: pl.DataFrame = field(default_factory=pl.DataFrame)
     gc_lhs_cobre: pl.DataFrame = field(default_factory=pl.DataFrame)
 
+    # --- Productivity detail (Productivity tab) ---
+    # One row per aligned hydro carrying NEWAVE's head-dependent
+    # productivities (altura min/65/max, equivalent, accumulated_earm) plus
+    # the HIDR cadastro building blocks (specific productivity, tailwater =
+    # canal_fuga_medio, losses, vmin, vmax), alongside Cobre's point /
+    # equivalent / accumulated productivities and building blocks.  Built by
+    # :func:`_build_productivity_detail`.
+    productivity_detail: pl.DataFrame = field(default_factory=pl.DataFrame)
+
 
 @dataclass(frozen=True)
 class ResultComparison:
@@ -970,46 +979,130 @@ def _compare_system_spillage(
     return results
 
 
-def _compare_productivity(
+_PRODUCTIVITY_DETAIL_SCHEMA = {
+    "plant_name": pl.Utf8,
+    "newave_code": pl.Int64,
+    "cobre_id": pl.Int64,
+    # NEWAVE pmo.dat head-dependent productivities (FPHA).
+    "nw_altura_min": pl.Float64,
+    "nw_altura_65": pl.Float64,
+    "nw_altura_max": pl.Float64,
+    "nw_equivalent": pl.Float64,
+    "nw_accumulated_earm": pl.Float64,
+    # NEWAVE HIDR cadastro building blocks.
+    "nw_specific_productivity": pl.Float64,
+    "nw_tailwater_m": pl.Float64,
+    "nw_losses_m": pl.Float64,
+    "nw_vmin_hm3": pl.Float64,
+    "nw_vmax_hm3": pl.Float64,
+    # cobre-bridge side: the *static* productivities the converter computes
+    # from the NEWAVE inputs (HIDR cadastro + cascade), so the scatters are a
+    # conversion-fidelity check against the matching pmo column rather than a
+    # comparison against the per-stage simulation output.
+    "cb_point": pl.Float64,
+    "cb_equivalent": pl.Float64,
+    "cb_accumulated": pl.Float64,
+    # cobre-bridge converted building blocks (from system/hydros.json).
+    "cb_specific_productivity": pl.Float64,
+    "cb_tailwater_m": pl.Float64,
+    "cb_losses_m": pl.Float64,
+    "cb_vmin_hm3": pl.Float64,
+    "cb_vmax_hm3": pl.Float64,
+}
+
+
+def _build_productivity_detail(
     alignment: EntityAlignment,
-    nw_prod: pl.DataFrame,
-    cobre_meta: dict[int, dict],
-) -> list[ResultComparison]:
-    """Compare hydro productivity values."""
-    results: list[ResultComparison] = []
+    nw_prod_detail: pl.DataFrame,
+    nw_cadastro: pd.DataFrame,
+    cobre_prod_detail: dict[int, dict],
+    cb_accumulated: dict[int, float],
+) -> pl.DataFrame:
+    """Assemble the per-plant static productivity comparison frame.
 
-    # nw_prod has plant_name (str) and productivity (float).
-    # Build lookup by uppercased name for fuzzy matching.
-    nw_lookup: dict[str, float] = {}
-    for row in nw_prod.iter_rows(named=True):
-        name = str(row["plant_name"]).strip().upper()
-        nw_lookup[name] = float(row["productivity"])
+    One row per aligned hydro pair (``alignment.hydros``). The NEWAVE side
+    carries the pmo.dat head-dependent productivities (matched by plant name)
+    and the HIDR cadastro building blocks (matched by NEWAVE code). The
+    cobre-bridge side carries the *static* productivities the converter
+    computes from those same inputs — ``cb_point`` from
+    :func:`compute_productivity`, ``cb_equivalent`` from
+    :func:`stored_energy_productivity`, ``cb_accumulated`` from the cascade
+    accumulated map — plus the building blocks written into
+    ``system/hydros.json`` (``cobre_prod_detail``). Matching pmo and
+    cobre-bridge columns should land on ``y = x`` (validating the
+    conversion), since both are derived from the same NEWAVE inputs.
 
+    Returns an empty frame (with the full schema) when there are no aligned
+    hydros.
+    """
+    from cobre_bridge.productivity import (
+        compute_productivity,
+        stored_energy_productivity,
+    )
+
+    nw_by_name: dict[str, dict] = {}
+    for row in nw_prod_detail.iter_rows(named=True):
+        nw_by_name[str(row["plant_name"]).strip().upper()] = row
+
+    def _cad_float(code: int, column: str) -> float | None:
+        if code not in nw_cadastro.index or column not in nw_cadastro.columns:
+            return None
+        value = nw_cadastro.loc[code, column]
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f else None  # drop NaN
+
+    def _cb_static(code: int) -> tuple[float | None, float | None, float | None]:
+        """cobre-bridge (point, equivalent, accumulated) computed from inputs."""
+        if code not in nw_cadastro.index:
+            return None, None, None
+        hreg = nw_cadastro.loc[code]
+        try:
+            point = float(compute_productivity(hreg))
+            equiv = float(stored_energy_productivity(hreg))
+        except (KeyError, ValueError, TypeError):
+            point = equiv = None  # type: ignore[assignment]
+        acc = cb_accumulated.get(code)
+        return point, equiv, (float(acc) if acc is not None else None)
+
+    rows: list[dict] = []
     for hydro in alignment.hydros:
-        # Try matching by name (uppercased).
-        nw_val = nw_lookup.get(hydro.name.strip().upper())
-        if nw_val is None:
-            continue
-        meta = cobre_meta.get(hydro.cobre_id)
-        if meta is None:
-            continue
-        cobre_val = meta.get("productivity_mw_per_m3s")
-        if cobre_val is None:
-            continue
-        results.append(
-            _make_result(
-                "productivity",
-                hydro.name,
-                hydro.newave_code,
-                hydro.cobre_id,
-                0,
-                "productivity",
-                nw_val,
-                float(cobre_val),
-            )
+        nw_prod = nw_by_name.get(hydro.name.strip().upper(), {})
+        cb = cobre_prod_detail.get(hydro.cobre_id, {})
+        cb_point, cb_equiv, cb_acc = _cb_static(hydro.newave_code)
+        rows.append(
+            {
+                "plant_name": hydro.name,
+                "newave_code": hydro.newave_code,
+                "cobre_id": hydro.cobre_id,
+                "nw_altura_min": nw_prod.get("altura_min"),
+                "nw_altura_65": nw_prod.get("altura_65"),
+                "nw_altura_max": nw_prod.get("altura_max"),
+                "nw_equivalent": nw_prod.get("equivalent"),
+                "nw_accumulated_earm": nw_prod.get("accumulated_earm"),
+                "nw_specific_productivity": _cad_float(
+                    hydro.newave_code, "produtibilidade_especifica"
+                ),
+                "nw_tailwater_m": _cad_float(hydro.newave_code, "canal_fuga_medio"),
+                "nw_losses_m": _cad_float(hydro.newave_code, "perdas"),
+                "nw_vmin_hm3": _cad_float(hydro.newave_code, "volume_minimo"),
+                "nw_vmax_hm3": _cad_float(hydro.newave_code, "volume_maximo"),
+                "cb_point": cb_point,
+                "cb_equivalent": cb_equiv,
+                "cb_accumulated": cb_acc,
+                "cb_specific_productivity": cb.get("specific_productivity"),
+                "cb_tailwater_m": cb.get("tailwater_m"),
+                "cb_losses_m": cb.get("losses_m"),
+                "cb_vmin_hm3": cb.get("vmin_hm3"),
+                "cb_vmax_hm3": cb.get("vmax_hm3"),
+            }
         )
 
-    return results
+    if not rows:
+        return pl.DataFrame(schema=_PRODUCTIVITY_DETAIL_SCHEMA)
+    return pl.DataFrame(rows, schema=_PRODUCTIVITY_DETAIL_SCHEMA)
 
 
 def compare_results(
@@ -1062,6 +1155,7 @@ def compare_results(
         read_cobre_line_means,
         read_cobre_line_percentiles,
         read_cobre_lp_max_generation,
+        read_cobre_productivity_detail,
         read_cobre_spillage_energy,
         read_cobre_stage_costs,
         read_cobre_thermal_means,
@@ -1082,8 +1176,9 @@ def compare_results(
         read_nwlistop_intercambio,
         read_pmo_convergence,
         read_pmo_cost_breakdown,
-        read_pmo_productivity,
+        read_pmo_productivity_detail,
     )
+    from cobre_bridge.converters.hydro import read_cadastro
 
     results: list[ResultComparison] = []
 
@@ -1099,6 +1194,7 @@ def compare_results(
     nw_offset = 0
     nw_max_stage_1based: int | None = None
     cobre_hydro = pl.DataFrame()
+    nw_hydro = pl.DataFrame()
     nw_hydro_slacks = pl.DataFrame()
 
     # --- Hydro comparison ---
@@ -1227,12 +1323,36 @@ def compare_results(
         _LOG.info("Comparing convergence data...")
         results.extend(_compare_convergence(nw_conv, cobre_conv))
 
-    # --- Productivity comparison ---
-    nw_prod = read_pmo_productivity(nw_files.directory)
-    cobre_meta = read_cobre_hydro_metadata(cobre_output_dir)
-    if not nw_prod.is_empty() and cobre_meta:
-        _LOG.info("Comparing productivity data...")
-        results.extend(_compare_productivity(alignment, nw_prod, cobre_meta))
+    # --- Productivity detail (static conversion-fidelity check) ---
+    # Per-plant NEWAVE pmo productivities vs the *static* productivities
+    # cobre-bridge computes from the same HIDR cadastro + cascade, plus the
+    # converted building blocks — assembled for the Productivity tab.
+    _LOG.info("Building productivity detail...")
+    nw_prod_detail = read_pmo_productivity_detail(nw_files.directory)
+    cobre_prod_detail = read_cobre_productivity_detail(cobre_output_dir)
+    cb_accumulated: dict[int, float] = {}
+    try:
+        nw_cadastro = read_cadastro(nw_files)
+    except Exception:  # noqa: BLE001
+        _LOG.warning("Failed to read HIDR cadastro for productivity building blocks")
+        nw_cadastro = pd.DataFrame()
+    if not nw_cadastro.empty:
+        try:
+            from inewave.newave import Confhd
+
+            from cobre_bridge.converters.constraints import (
+                _compute_accumulated_integrated_productivities,
+            )
+
+            confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+            cb_accumulated = _compute_accumulated_integrated_productivities(
+                nw_cadastro, confhd_df
+            )
+        except Exception:  # noqa: BLE001
+            _LOG.warning("Failed to compute accumulated productivities for the tab")
+    productivity_detail = _build_productivity_detail(
+        alignment, nw_prod_detail, nw_cadastro, cobre_prod_detail, cb_accumulated
+    )
 
     # --- Cost breakdown ---
     # NEWAVE typically runs a shorter horizon than Cobre.  Restrict
@@ -1409,6 +1529,7 @@ def compare_results(
         gc_bounds=gc_bounds_df,
         gc_lhs_newave=gc_lhs_nw,
         gc_lhs_cobre=gc_lhs_cb,
+        productivity_detail=productivity_detail,
     )
 
     _LOG.info("Results comparison: %d total comparisons", len(results))

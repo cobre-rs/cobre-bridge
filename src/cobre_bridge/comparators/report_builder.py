@@ -29,7 +29,9 @@ from cobre_bridge.comparators.charts import (
     performance_fwd_bwd_split_chart,
     performance_iteration_chart,
     performance_metric_cards,
-    productivity_scatter,
+    productivity_blocks_table,
+    productivity_comparison_scatter,
+    productivity_per_stage_chart,
     system_comparison_chart,
     system_per_bus_chart,
     thermal_cost_chart,
@@ -422,14 +424,58 @@ def build_comparison_report(
     tab_contents["tab-thermal-detail"] = build_thermal_detail_tab(results, thermal_pct)
 
     # --- Productivity tab ---
+    prod_df = pctiles.productivity_detail if pctiles else pl.DataFrame()
     prod_parts: list[str] = []
-    prod_parts.append(section_title("Productivity Comparison"))
-    prod_parts.append(
-        chart_grid(
-            [wrap_chart(productivity_scatter(results))],
-            single=True,
-        )
+    static_title = (
+        "Static productivity — pmo vs cobre-bridge conversion "
+        "(point / equivalent / accumulated)"
     )
+    if prod_df.is_empty():
+        prod_parts.append(section_title(static_title))
+        prod_parts.append("<p>No productivity data available.</p>")
+    else:
+        prod_parts.append(section_title(static_title))
+        prod_parts.append(
+            chart_grid(
+                [
+                    wrap_chart(
+                        productivity_comparison_scatter(
+                            prod_df,
+                            "point",
+                            "Point — pmo altura_65 vs compute_productivity",
+                        )
+                    ),
+                    wrap_chart(
+                        productivity_comparison_scatter(
+                            prod_df,
+                            "equivalent",
+                            "Equivalent — pmo vs stored_energy_productivity",
+                        )
+                    ),
+                    wrap_chart(
+                        productivity_comparison_scatter(
+                            prod_df,
+                            "accumulated",
+                            "Accumulated — pmo vs cobre-bridge cascade",
+                        )
+                    ),
+                ]
+            )
+        )
+        prod_parts.append(section_title("Realized productivity across stages"))
+        prod_parts.append(
+            chart_grid(
+                [wrap_chart(productivity_per_stage_chart(results, prod_df))],
+                single=True,
+            )
+        )
+        prod_parts.append(section_title("Productivity Building Blocks"))
+        prod_parts.append(
+            chart_grid(
+                [wrap_chart(productivity_blocks_table(prod_df))],
+                single=True,
+            )
+        )
     tab_contents["tab-productivity"] = "\n".join(prod_parts)
 
     # --- Performance tab ---

@@ -385,24 +385,45 @@ def read_pmo_convergence(newave_dir: Path) -> pl.DataFrame:
     )
 
 
-def read_pmo_productivity(newave_dir: Path) -> pl.DataFrame:
-    """Read pmo.dat productivity data.
+# pmo.dat ``produtibilidades_equivalentes`` source columns → output names.
+# These are the per-plant productivities NEWAVE's FPHA produces at different
+# heads (altura min/65/max), the equivalent productivity between min/max
+# volume, and the accumulated productivity used for EARM. Many run-of-river
+# plants leave the altura_* / acumulada columns NaN — preserved as null so the
+# per-comparison drop-NaN logic in the report keeps them out of each scatter
+# without crashing.
+_PMO_PROD_COLUMNS: dict[str, str] = {
+    "produtibilidade_altura_minima": "altura_min",
+    "produtibilidade_altura_65": "altura_65",
+    "produtibilidade_altura_maxima": "altura_max",
+    "produtibilidade_equivalente_volmin_volmax": "equivalent",
+    "produtibilidade_acumulada_calculo_earm": "accumulated_earm",
+}
 
-    Returns DataFrame with columns: ``plant_name`` (Utf8),
-    ``productivity`` (Float64).
 
-    The plant name is the NEWAVE plant name from ``nome_usina``.
-    The preferred productivity column is
-    ``produtibilidade_equivalente_volmin_volmax`` (equivalent
-    productivity between min and max volume).
+def read_pmo_productivity_detail(newave_dir: Path) -> pl.DataFrame:
+    """Read the per-plant productivity breakdown from pmo.dat.
 
-    Returns empty DataFrame if pmo.dat not found or productivity data
-    unavailable.
+    Pulls ``pmo.produtibilidades_equivalentes`` (filtered to the first
+    configuration, ``configuracao == min``) and surfaces the head-dependent
+    productivities NEWAVE's FPHA computes.
+
+    Returns DataFrame with columns: ``plant_name`` (Utf8), ``altura_min``,
+    ``altura_65``, ``altura_max``, ``equivalent``, ``accumulated_earm``
+    (all Float64; NaN preserved as null so run-of-river plants with no
+    head-dependence don't crash per-column comparisons).
+
+    Returns an empty DataFrame with the correct schema if pmo.dat is not
+    found or the productivity table is unavailable.
     """
     empty = pl.DataFrame(
         schema={
             "plant_name": pl.Utf8,
-            "productivity": pl.Float64,
+            "altura_min": pl.Float64,
+            "altura_65": pl.Float64,
+            "altura_max": pl.Float64,
+            "equivalent": pl.Float64,
+            "accumulated_earm": pl.Float64,
         }
     )
 
@@ -422,40 +443,41 @@ def read_pmo_productivity(newave_dir: Path) -> pl.DataFrame:
 
     if prod_df is None or prod_df.empty:
         return empty
-
-    # Identify name column and best productivity column.
-    name_col: str | None = None
-    prod_col: str | None = None
-    for col in prod_df.columns:
-        lower = str(col).lower().strip()
-        if "nome" in lower or lower == "usina":
-            name_col = col
-        # Prefer the volmin_volmax equivalent productivity.
-        elif lower == "produtibilidade_equivalente_volmin_volmax":
-            prod_col = col
-
-    # Fallback: first column with "produtibilidade" in the name.
-    if prod_col is None:
-        for col in prod_df.columns:
-            if "produtibilidade" in str(col).lower():
-                prod_col = col
-                break
-
-    if name_col is None or prod_col is None:
+    if "nome_usina" not in prod_df.columns:
         _LOG.warning(
-            "Cannot identify name/productivity columns in pmo.dat: %s",
+            "pmo.dat productivities lack nome_usina column: %s",
             list(prod_df.columns),
         )
         return empty
 
-    result = pl.from_pandas(prod_df[[name_col, prod_col]])
-    result = result.rename({name_col: "plant_name", prod_col: "productivity"})
-    result = result.with_columns(
-        pl.col("plant_name").str.strip_chars(),
-        pl.col("productivity").cast(pl.Float64, strict=False),
-    ).drop_nulls(subset=["plant_name", "productivity"])
+    df = prod_df
+    if "configuracao" in df.columns:
+        df = df[df["configuracao"] == df["configuracao"].min()]
 
-    return result
+    source_cols = [c for c in _PMO_PROD_COLUMNS if c in df.columns]
+    result = pl.from_pandas(df[["nome_usina", *source_cols]])
+    result = result.rename(
+        {"nome_usina": "plant_name", **{c: _PMO_PROD_COLUMNS[c] for c in source_cols}}
+    )
+    casts = [pl.col("plant_name").str.strip_chars()]
+    casts += [
+        pl.col(_PMO_PROD_COLUMNS[c]).cast(pl.Float64, strict=False) for c in source_cols
+    ]
+    result = result.with_columns(casts).drop_nulls(subset=["plant_name"])
+
+    # Backfill any column the source frame lacked so the schema is stable.
+    for out_name in _PMO_PROD_COLUMNS.values():
+        if out_name not in result.columns:
+            result = result.with_columns(pl.lit(None).cast(pl.Float64).alias(out_name))
+
+    return result.select(
+        "plant_name",
+        "altura_min",
+        "altura_65",
+        "altura_max",
+        "equivalent",
+        "accumulated_earm",
+    )
 
 
 _INT_FILENAME_RE = re.compile(r"^int(\d{3})(\d{3})\.out$", re.IGNORECASE)

@@ -1581,6 +1581,66 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     return result
 
 
+def read_cobre_productivity_detail(cobre_output_dir: Path) -> dict[int, dict]:
+    """Read the per-hydro converted building blocks for the Productivity tab.
+
+    Surfaces the productivity building blocks cobre-bridge wrote into
+    ``system/hydros.json`` so the Building-Blocks table can show them next to
+    the NEWAVE HIDR cadastro values: ``specific_productivity``
+    (``specific_productivity_mw_per_m3s_per_m``), ``tailwater_m`` (constant
+    ``tailrace.coefficients[0]``), ``losses_m`` (constant
+    ``hydraulic_losses.value_m``), ``vmin_hm3`` / ``vmax_hm3``.
+
+    Returns ``{hydro_id: {"name", "specific_productivity", "tailwater_m",
+    "losses_m", "vmin_hm3", "vmax_hm3"}}``; per-field values are ``None``
+    when absent.  Returns an empty dict when ``hydros.json`` cannot be
+    located.  (The point/equivalent/accumulated productivities are *not*
+    read from Cobre here — the Productivity-tab scatters validate the
+    conversion against what cobre-bridge computes from the NEWAVE inputs,
+    and the realized per-stage productivity comes from the simulation
+    generation/turbined comparison rows.)
+    """
+    hydros_path = _resolve_system_json(cobre_output_dir, "hydros.json")
+    if hydros_path is None:
+        _LOG.warning("hydros.json not found near %s", cobre_output_dir)
+        return {}
+    try:
+        with hydros_path.open() as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        _LOG.warning("Failed to parse hydros.json for productivity detail")
+        return {}
+
+    result: dict[int, dict] = {}
+    for hydro in data.get("hydros", []):
+        hid = int(hydro["id"])
+
+        tailrace = hydro.get("tailrace") or {}
+        coeffs = tailrace.get("coefficients") or []
+        tailwater_m = float(coeffs[0]) if coeffs else None
+
+        losses = hydro.get("hydraulic_losses") or {}
+        losses_m = (
+            float(losses["value_m"])
+            if losses.get("type") == "constant" and losses.get("value_m") is not None
+            else None
+        )
+
+        reservoir = hydro.get("reservoir") or {}
+        spec = hydro.get("specific_productivity_mw_per_m3s_per_m")
+
+        result[hid] = {
+            "name": str(hydro.get("name", f"hydro_{hid}")),
+            "specific_productivity": float(spec) if spec is not None else None,
+            "tailwater_m": tailwater_m,
+            "losses_m": losses_m,
+            "vmin_hm3": float(reservoir.get("min_storage_hm3", 0.0) or 0.0),
+            "vmax_hm3": float(reservoir.get("max_storage_hm3", 0.0) or 0.0),
+        }
+
+    return result
+
+
 def _find_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
     """Locate a system JSON file near the Cobre output directory."""
     case_dir = case_dir_for(cobre_output_dir)

@@ -1991,18 +1991,72 @@ def performance_fwd_bwd_split_chart(
 # Productivity tab charts
 # -------------------------------------------------------------------
 
+# kind -> (pmo column, cobre-bridge column, pmo label, cobre-bridge label).
+# Each productivity-comparison scatter is a *static* conversion-fidelity
+# check: the NEWAVE pmo.dat productivity against the value cobre-bridge
+# computes from the same HIDR cadastro inputs. Both sides live in the
+# ``productivity_detail`` frame built in results.py and should land on y = x.
+_PRODUCTIVITY_KINDS: dict[str, tuple[str, str, str, str]] = {
+    "point": (
+        "nw_altura_65",
+        "cb_point",
+        "produtibilidade_altura_65",
+        "compute_productivity",
+    ),
+    "equivalent": (
+        "nw_equivalent",
+        "cb_equivalent",
+        "produtibilidade_equivalente_volmin_volmax",
+        "stored_energy_productivity",
+    ),
+    "accumulated": (
+        "nw_accumulated_earm",
+        "cb_accumulated",
+        "produtibilidade_acumulada_calculo_earm",
+        "accumulated_integrated_productivity",
+    ),
+}
 
-def productivity_scatter(
-    results: list[ResultComparison],
+
+def productivity_comparison_scatter(
+    df: pl.DataFrame,
+    kind: str,
+    title: str | None = None,
 ) -> str:
-    """Scatter plot of NEWAVE vs Cobre productivity."""
-    prod = [r for r in results if r.entity_type == "productivity"]
-    if not prod:
+    """Static conversion-fidelity scatter for one productivity *kind*.
+
+    *kind* selects the (pmo, cobre-bridge) column pair from
+    :data:`_PRODUCTIVITY_KINDS`: ``"point"`` (pmo ``produtibilidade_altura_65``
+    vs ``compute_productivity``), ``"equivalent"`` (pmo
+    ``produtibilidade_equivalente_volmin_volmax`` vs
+    ``stored_energy_productivity``), ``"accumulated"`` (pmo
+    ``produtibilidade_acumulada_calculo_earm`` vs the cascade
+    accumulated-integrated value). Both sides are derived from the same
+    NEWAVE inputs, so the points should land on the ``y = x`` reference line —
+    this validates the conversion rather than comparing against the
+    per-stage simulation output. NEWAVE pmo is on x, cobre-bridge on y; rows
+    where either side is null are skipped. Annotated with mean & max relative
+    error ``|cobre-bridge − pmo| / pmo`` and the number of plants compared.
+    """
+    if kind not in _PRODUCTIVITY_KINDS:
+        raise ValueError(f"Unknown productivity kind: {kind!r}")
+    nw_col, cb_col, nw_label, cb_label = _PRODUCTIVITY_KINDS[kind]
+    if df.is_empty() or nw_col not in df.columns or cb_col not in df.columns:
         return "<p>No productivity data available.</p>"
 
-    nw_vals = [r.newave_value for r in prod]
-    cb_vals = [r.cobre_value for r in prod]
-    names = [r.entity_name for r in prod]
+    sub = df.select("plant_name", nw_col, cb_col).drop_nulls([nw_col, cb_col])
+    if sub.is_empty():
+        return "<p>No productivity data available.</p>"
+
+    nw_vals = [float(v) for v in sub[nw_col].to_list()]
+    cb_vals = [float(v) for v in sub[cb_col].to_list()]
+    names = [escape_text(n) for n in sub["plant_name"].to_list()]
+
+    rel_errs = [
+        abs(cb - nw) / abs(nw) for nw, cb in zip(nw_vals, cb_vals) if abs(nw) > 1e-12
+    ]
+    mean_rel = sum(rel_errs) / len(rel_errs) if rel_errs else 0.0
+    max_rel = max(rel_errs) if rel_errs else 0.0
 
     min_val = min(min(nw_vals), min(cb_vals))
     max_val = max(max(nw_vals), max(cb_vals))
@@ -2016,28 +2070,279 @@ def productivity_scatter(
             "type": "scatter",
             "mode": "markers",
             "marker": {"color": COLOR_COBRE, "size": 8},
+            "hovertemplate": (
+                "%{text}<br>pmo: %{x:.4f}<br>cobre-bridge: %{y:.4f}<extra></extra>"
+            ),
         },
         {
             "x": [min_val, max_val],
             "y": [min_val, max_val],
-            "name": "Perfect match",
+            "name": "y = x",
             "type": "scatter",
             "mode": "lines",
-            "line": {
-                "color": "#8B9298",
-                "dash": "dash",
-            },
+            "line": {"color": "#8B9298", "dash": "dash"},
             "showlegend": False,
+            "hoverinfo": "skip",
         },
     ]
 
     layout = {
-        "title": "Productivity: NEWAVE vs Cobre",
-        "xaxis": {"title": "NEWAVE productivity"},
-        "yaxis": {"title": "Cobre productivity"},
+        "title": title or f"Static productivity: {nw_label} vs {cb_label}",
+        "xaxis": {"title": f"NEWAVE pmo {nw_label}"},
+        "yaxis": {"title": f"cobre-bridge {cb_label}"},
+        "annotations": [
+            {
+                "xref": "paper",
+                "yref": "paper",
+                "x": 0.02,
+                "y": 0.98,
+                "xanchor": "left",
+                "yanchor": "top",
+                "showarrow": False,
+                "align": "left",
+                "bgcolor": "rgba(255,255,255,0.75)",
+                "bordercolor": "#D1D5DB",
+                "borderwidth": 1,
+                "borderpad": 4,
+                "font": {"size": 11},
+                "text": (
+                    f"N = {len(nw_vals)} plants<br>"
+                    f"mean rel. err = {mean_rel * 100:.2f}%<br>"
+                    f"max rel. err = {max_rel * 100:.2f}%"
+                ),
+            }
+        ],
     }
 
     return _plotly_div(traces, layout)
+
+
+# Categorical hues for the per-stage realized-productivity chart — a local
+# palette mapping a handful of plants to distinct colours (one hue per plant),
+# independent of the semantic NEWAVE/Cobre tokens (NEWAVE = solid, Cobre =
+# dashed in the same hue).
+_PRODUCTIVITY_PLANT_HUES: list[str] = [
+    "#4A90B8",
+    "#F5A623",
+    "#4A8B6F",
+    "#DC4C4C",
+    "#B87333",
+    "#7C3AED",
+    "#0891B2",
+    "#DB2777",
+]
+
+
+def productivity_per_stage_chart(
+    results: list[ResultComparison],
+    df: pl.DataFrame,
+    max_plants: int = 8,
+) -> str:
+    """Realized per-stage productivity (generation / turbined) by plant.
+
+    Productivity is **constant within a stage but varies across stages** in
+    both models, tracking the reservoir head reached each stage. This chart
+    reuses the per-stage ``productivity_mw_per_m3s`` hydro comparison rows
+    already produced in results.py and plots, for the largest reservoirs,
+    NEWAVE (solid) vs Cobre (dashed) realized productivity over ``stage_id``,
+    one hue per plant.
+
+    Plants are chosen as the top *max_plants* reservoirs by ``vmax_hm3``
+    (from ``df`` = ``productivity_detail``) that have those per-stage rows.
+    Falls back to a ``<p>`` note when no per-stage productivity rows exist.
+    """
+    prod_rows = [
+        r
+        for r in results
+        if r.entity_type == "hydro" and r.variable == "productivity_mw_per_m3s"
+    ]
+    if not prod_rows:
+        return "<p>No per-stage productivity data available.</p>"
+
+    # Ranking by reservoir size (vmax) so the chart shows plants with the most
+    # head swing first; fall back to plant-name order when df lacks vmax.
+    rank: dict[str, float] = {}
+    if not df.is_empty() and {"plant_name", "nw_vmax_hm3"}.issubset(df.columns):
+        for row in df.iter_rows(named=True):
+            vmax = row.get("nw_vmax_hm3")
+            rank[str(row["plant_name"]).strip().upper()] = (
+                float(vmax) if vmax is not None else 0.0
+            )
+
+    # Group per-stage values by plant name.
+    by_plant_nw: dict[str, dict[int, float]] = {}
+    by_plant_cb: dict[str, dict[int, float]] = {}
+    for r in prod_rows:
+        by_plant_nw.setdefault(r.entity_name, {})[r.stage] = r.newave_value
+        by_plant_cb.setdefault(r.entity_name, {})[r.stage] = r.cobre_value
+
+    plants = sorted(
+        by_plant_nw,
+        key=lambda name: -rank.get(name.strip().upper(), 0.0),
+    )[:max_plants]
+
+    traces: list[dict] = []
+    for idx, name in enumerate(plants):
+        hue = _PRODUCTIVITY_PLANT_HUES[idx % len(_PRODUCTIVITY_PLANT_HUES)]
+        nw_map = by_plant_nw.get(name, {})
+        cb_map = by_plant_cb.get(name, {})
+        stages = sorted(set(nw_map) | set(cb_map))
+        if not stages:
+            continue
+        safe = escape_text(name)
+        traces.append(
+            {
+                "x": stages,
+                "y": [nw_map.get(s) for s in stages],
+                "name": f"{safe} (NEWAVE)",
+                "type": "scatter",
+                "mode": "lines",
+                "line": {"color": hue, "width": 2},
+                "legendgroup": safe,
+                "hovertemplate": (
+                    f"{safe} NEWAVE<br>stage %{{x}}<br>"
+                    "ρ %{y:.4f} MW per m³/s<extra></extra>"
+                ),
+            }
+        )
+        traces.append(
+            {
+                "x": stages,
+                "y": [cb_map.get(s) for s in stages],
+                "name": f"{safe} (Cobre)",
+                "type": "scatter",
+                "mode": "lines",
+                "line": {"color": hue, "width": 2, "dash": "dash"},
+                "legendgroup": safe,
+                "hovertemplate": (
+                    f"{safe} Cobre<br>stage %{{x}}<br>"
+                    "ρ %{y:.4f} MW per m³/s<extra></extra>"
+                ),
+            }
+        )
+
+    if not traces:
+        return "<p>No per-stage productivity data available.</p>"
+
+    title = "Realized productivity across stages "
+    title += "(constant within a stage, varies across stages)"
+    subtitle = (
+        "Productivity tracks the reservoir head reached each stage; "
+        "solid = NEWAVE, dashed = Cobre (same hue per plant)."
+    )
+
+    layout = {
+        "title": {"text": f"{title}<br><sub>{subtitle}</sub>"},
+        "xaxis": {"title": "Stage (0-based)"},
+        "yaxis": {"title": "Productivity (MW per m³/s)"},
+        "legend": {"orientation": "h", "y": -0.2},
+    }
+
+    return _plotly_div(traces, layout, height=520)
+
+
+def _prod_blocks_pct(nw: float | None, cb: float | None) -> float | None:
+    """Relative diff (Cobre − NEWAVE)/NEWAVE in %, or None when NEWAVE ≈ 0."""
+    if nw is None or cb is None or abs(nw) <= 1e-12:
+        return None
+    return (cb - nw) / nw * 100.0
+
+
+def productivity_blocks_table(df: pl.DataFrame) -> str:
+    """Grouped building-blocks table — per metric: NEWAVE | Cobre | Δ%.
+
+    One row per aligned hydro. The columns are organised into metric groups
+    (ρ_esp, tailwater, losses, vmin, vmax), each spanning three sub-columns —
+    NEWAVE, Cobre, Δ% — via a two-level header (``colspan`` on the top row).
+    Alternate metric groups get a subtle background tint across both header
+    and body cells and a stronger left border, so the 2-by-2 (3-by-3 with Δ%)
+    pairing is visually unmistakable. Δ% = (Cobre − NEWAVE)/NEWAVE (blank when
+    NEWAVE ≈ 0); cells with ``|Δ%| > 1%`` are highlighted. Reuses the
+    ``cost-breakdown-table`` styling.
+    """
+    if df.is_empty():
+        return "<p>No productivity data available.</p>"
+
+    # Column groups: (label, nw_col, cb_col, fmt_decimals).
+    groups: list[tuple[str, str, str, int]] = [
+        ("ρ_esp", "nw_specific_productivity", "cb_specific_productivity", 5),
+        ("Tailwater (m)", "nw_tailwater_m", "cb_tailwater_m", 2),
+        ("Losses (m)", "nw_losses_m", "cb_losses_m", 3),
+        ("Vmin (hm³)", "nw_vmin_hm3", "cb_vmin_hm3", 1),
+        ("Vmax (hm³)", "nw_vmax_hm3", "cb_vmax_hm3", 1),
+    ]
+    groups = [g for g in groups if g[1] in df.columns and g[2] in df.columns]
+    if not groups:
+        return "<p>No productivity data available.</p>"
+
+    def _fmt(v: float | None, decimals: int) -> str:
+        return "—" if v is None else f"{v:.{decimals}f}"
+
+    def _fmt_pct(p: float | None) -> str:
+        return "" if p is None else f"{p:+.1f}%"
+
+    def _cls(idx: int, *, sub_index: int, extra: str = "") -> str:
+        """Class string for a numeric cell in metric-group *idx*.
+
+        Even groups (0-based) get ``cb-group-tint``; the first sub-column
+        (``sub_index == 0``) of any group after the first gets
+        ``cb-group-sep`` (the stronger vertical separator).
+        """
+        parts = ["cb-num"]
+        if idx % 2 == 0:
+            parts.append("cb-group-tint")
+        if idx > 0 and sub_index == 0:
+            parts.append("cb-group-sep")
+        if extra:
+            parts.append(extra)
+        return " ".join(parts)
+
+    # --- Two-level header ---
+    top_cells = ['<th class="cb-cat" rowspan="2">Plant</th>']
+    sub_cells: list[str] = []
+    for idx, (label, _, _, _) in enumerate(groups):
+        top_cells.append(
+            f'<th class="{_cls(idx, sub_index=0)}" colspan="3">'
+            f"{escape_text(label)}</th>"
+        )
+        for j, sub in enumerate(("NEWAVE", "Cobre", "Δ%")):
+            sub_cells.append(f'<th class="{_cls(idx, sub_index=j)}">{sub}</th>')
+    head = f"<thead><tr>{''.join(top_cells)}</tr><tr>{''.join(sub_cells)}</tr></thead>"
+
+    # --- Body ---
+    body_rows: list[str] = []
+    for row in df.iter_rows(named=True):
+        cells = [f'<td class="cb-cat">{escape_text(row["plant_name"])}</td>']
+        for idx, (_, nw_col, cb_col, decimals) in enumerate(groups):
+            nw_v = row.get(nw_col)
+            cb_v = row.get(cb_col)
+            pct = _prod_blocks_pct(nw_v, cb_v)
+            highlight = "cb-diff-pos" if (pct is not None and abs(pct) > 1.0) else ""
+            cells.append(
+                f'<td class="{_cls(idx, sub_index=0)}">{_fmt(nw_v, decimals)}</td>'
+            )
+            cells.append(
+                f'<td class="{_cls(idx, sub_index=1)}">{_fmt(cb_v, decimals)}</td>'
+            )
+            cells.append(
+                f'<td class="{_cls(idx, sub_index=2, extra=highlight)}">'
+                f"{_fmt_pct(pct)}</td>"
+            )
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    body = "<tbody>" + "".join(body_rows) + "</tbody>"
+    caption = (
+        "<caption>Productivity Building Blocks "
+        '<span class="cb-caption-note">— columns are grouped per metric: '
+        "NEWAVE vs Cobre vs Δ%</span></caption>"
+    )
+    return (
+        '<table class="cost-breakdown-table prod-blocks-table">'
+        + caption
+        + head
+        + body
+        + "</table>"
+    )
 
 
 # -------------------------------------------------------------------
