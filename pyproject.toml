@@ -4,17 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.7.0"
+version = "0.8.0"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 dependencies = [
     "inewave>=1.13.2",
-    "pyarrow>=23.0.1",
-    "pandas>=3.0.2",
+    "pyarrow>=24.0.0",
+    "pandas>=3.0.3",
     "plotly>=6.7.0",
-    "polars>=1.39.3",
+    "polars>=1.41.2",
 ]
 
 [project.optional-dependencies]
@@ -25,9 +25,10 @@ dev = [
     "ruff",
 ]
 validation = [
-    # >=0.7.0: anticipated-thermal pre-horizon seeding (non-zero
-    # past_anticipated_commitments.values_mw honoured by the LP fishing equality).
-    "cobre-python>=0.7.0",
+    # >=0.8.0: tracks the cobre v0.8 schema line read by `convert --validate`.
+    # (>=0.7.0 first honoured non-zero anticipated-thermal pre-horizon seeds via
+    # past_anticipated_commitments.values_mw in the LP fishing equality.)
+    "cobre-python>=0.8.0",
 ]
 
 [project.scripts]
