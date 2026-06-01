@@ -73,7 +73,7 @@ _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
     ),
     (
         "Storage Bounds Viol.",
-        ["VIOLACAO CAR", "VIOLACAO SAR"],
+        [],
         ["storage_violation_cost"],
         "#C2410C",
     ),
@@ -94,10 +94,26 @@ _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
     # NEWAVE-only column so it shows up in the report rather than being hidden.
     ("FPHA Slack", ["VIOLACAO FPHA"], [], "#DB2777"),
     ("Inflow Non-Negativity", [], ["inflow_penalty_cost"], "#EA580C"),
-    # Generic constraint violations (electrical, AGRINT, etc.)
+    # Generic constraint violations: NEWAVE reports the risk-aversion curve and
+    # surface (CAR/SAR), electric (RESTELETRICA), interchange-group
+    # (INTERC. MIN.), hydraulic (RHQ/RHV) and piecewise-linear (RLPP) restriction
+    # violations as separate parcelas, but cobre-bridge converts them all into
+    # Cobre generic constraints, so Cobre aggregates their slacks into a single
+    # `generic_violation_cost`. Sum the NEWAVE parcelas to compare like-for-like.
     (
         "Generic Constr. Viol.",
-        ["VIOL. RESTELETRICA", "VIOL. INTERC. MIN."],
+        [
+            "VIOLACAO CAR",
+            "VIOLACAO SAR",
+            "VIOL. RESTELETRICA",
+            "VIOL. INTERC. MIN.",
+            "VIOLACAO RHQ",
+            "VIOLACAO RHV",
+            "VIOL.RLPP DEFLMAX",
+            "VIOL.RLPP DEFLMAXU",
+            "VIOL.RLPP TURBMAX",
+            "VIOL.RLPP TURBMAXU",
+        ],
         ["generic_violation_cost"],
         "#6D28D9",
     ),

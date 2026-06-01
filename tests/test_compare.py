@@ -497,6 +497,43 @@ class TestOverviewCostCharts:
         assert row["thermal_cost"] == pytest.approx(20.0)  # block sum 8 + 12
         assert row["immediate_cost"] == pytest.approx(30.0)  # 10 + 20
 
+    def test_generic_violation_groups_all_newave_restriction_parcelas(self) -> None:
+        from cobre_bridge.comparators.charts import _resolve_cost_categories
+
+        # cobre-bridge converts the risk-aversion curve/surface (CAR/SAR),
+        # electric (RESTELETRICA), interchange (INTERC. MIN.), hydraulic
+        # (RHQ/RHV) and piecewise-linear (RLPP) restrictions ALL into generic
+        # constraints, so NEWAVE's separate parcelas must sum into the single
+        # "Generic Constr. Viol." row to compare against Cobre's aggregated
+        # generic_violation_cost.
+        nw_costs = {
+            "VIOLACAO CAR": 1.0e7,
+            "VIOLACAO SAR": 2.0e7,
+            "VIOL. RESTELETRICA": 3.0e7,
+            "VIOL. INTERC. MIN.": 4.0e7,
+            "VIOLACAO RHQ": 5.0e7,
+            "VIOLACAO RHV": 6.0e7,
+            "VIOL.RLPP DEFLMAX": 7.0e7,
+            "VIOL.RLPP DEFLMAXU": 8.0e7,
+            "VIOL.RLPP TURBMAX": 9.0e7,
+            "VIOL.RLPP TURBMAXU": 1.0e8,
+        }
+        cobre_costs = {
+            "generic_violation_cost": 5.5e8,
+            "storage_violation_cost": 1.0e7,
+        }
+
+        cats = {
+            label: (nw, cb)
+            for label, nw, cb, _ in _resolve_cost_categories(nw_costs, cobre_costs)
+        }
+        # All 10 NEWAVE parcelas land in one row, equal to Cobre's aggregate.
+        assert cats["Generic Constr. Viol."] == pytest.approx((5.5e8, 5.5e8))
+        # CAR/SAR no longer pollute the storage-bounds row (NEWAVE side empty;
+        # the row is now Cobre-only, carrying the individual-reservoir slack).
+        assert cats["Storage Bounds Viol."][0] == pytest.approx(0.0)
+        assert cats["Storage Bounds Viol."][1] == pytest.approx(1.0e7)
+
 
 # -------------------------------------------------------------------
 # Edge cases and error handling
