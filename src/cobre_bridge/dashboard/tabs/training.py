@@ -20,7 +20,7 @@ from cobre_bridge.ui.html import (
     metrics_grid,
     section_title,
 )
-from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS, MARGIN_DEFAULTS
+from cobre_bridge.ui.plotly_helpers import apply_standard_layout
 from cobre_bridge.ui.theme import COLORS, COPPER_ACCENT, PERFORMANCE_PHASE_COLORS
 
 if TYPE_CHECKING:
@@ -193,10 +193,9 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
         },
     ]
 
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Iteration",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
         updatemenus=[
             {
                 "type": "dropdown",
@@ -259,10 +258,9 @@ def _chart_lb_delta(conv: pd.DataFrame) -> go.Figure | None:
         annotation_text="0",
         annotation_position="right",
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Iteration",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
     )
     fig.update_yaxes(title_text="LB Improvement (%)", secondary_y=False)
     fig.update_yaxes(title_text="Gap (%)", secondary_y=True)
@@ -292,11 +290,10 @@ def _chart_gap_evolution(conv: pd.DataFrame) -> go.Figure | None:
         annotation_text="0%",
         annotation_position="right",
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Iteration",
         yaxis_title="Gap (%)",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
     )
     return fig
 
@@ -327,10 +324,9 @@ def _chart_cut_pool(conv: pd.DataFrame) -> go.Figure:
         secondary_y=True,
     )
 
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Iteration",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
         barmode="overlay",
     )
     fig.update_yaxes(title_text="Cuts Active", secondary_y=False)
@@ -526,12 +522,11 @@ def _chart_timing_stacked(timing: pd.DataFrame) -> go.Figure | None:
             )
         )
 
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         barmode="stack",
         xaxis_title="Iteration",
         yaxis_title="Time (ms)",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
     )
     return fig
 
@@ -566,12 +561,11 @@ def _chart_phase_distribution(timing: pd.DataFrame) -> go.Figure | None:
             )
         )
 
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         barmode="stack",
         xaxis_title="Percentage of Total Time (%)",
         xaxis={"range": [0, 100]},
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
     )
     return fig
 

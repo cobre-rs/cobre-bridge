@@ -42,25 +42,39 @@ def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
     )
 
 
+def apply_standard_layout(fig: go.Figure, **layout: object) -> go.Figure:
+    """Apply the dashboard's standard ``legend``/``margin`` defaults to *fig*.
+
+    Replaces the repeated ``fig.update_layout(..., legend=LEGEND_DEFAULTS,
+    margin=MARGIN_DEFAULTS, ...)``. ``legend`` and ``margin`` default to the
+    shared constants but can be overridden in ``**layout``; everything else
+    (``title``, ``xaxis_title``, ``barmode``, ``height``, …) is forwarded to
+    :meth:`plotly.graph_objects.Figure.update_layout`. Mutates *fig* in place and
+    also returns it, so it fits both ``make_chart_card(apply_standard_layout(...))``
+    and ``return apply_standard_layout(...)`` call sites.
+    """
+    layout.setdefault("legend", LEGEND_DEFAULTS)
+    layout.setdefault("margin", MARGIN_DEFAULTS)
+    fig.update_layout(**layout)
+    return fig
+
+
 def render_figure(
     fig: go.Figure,
     *,
     unified_hover: bool = True,
     **layout: object,
 ) -> str:
-    """Apply the dashboard's standard layout to *fig* and return an HTML fragment.
+    """Apply the standard layout to *fig* and return an HTML fragment.
 
-    Collapses the repeated ``fig.update_layout(..., legend=LEGEND_DEFAULTS,
+    Equivalent to :func:`apply_standard_layout` followed by :func:`fig_to_html`;
+    collapses the ``fig.update_layout(..., legend=LEGEND_DEFAULTS,
     margin=MARGIN_DEFAULTS, ...)`` + ``fig_to_html(fig)`` boilerplate into one
-    call. ``legend`` and ``margin`` default to the shared constants but can be
-    overridden by passing them in ``**layout``; every other layout keyword
-    (``title``, ``xaxis_title``, ``barmode``, ``height``, …) is forwarded to
-    :meth:`plotly.graph_objects.Figure.update_layout` verbatim.
+    call for the tabs that render straight to HTML.
     """
-    layout.setdefault("legend", LEGEND_DEFAULTS)
-    layout.setdefault("margin", MARGIN_DEFAULTS)
-    fig.update_layout(**layout)
-    return fig_to_html(fig, unified_hover=unified_hover)
+    return fig_to_html(
+        apply_standard_layout(fig, **layout), unified_hover=unified_hover
+    )
 
 
 def plotly_div(

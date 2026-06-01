@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
+    apply_standard_layout,
     fig_to_html,
     render_figure,
 )
@@ -61,6 +62,20 @@ def test_render_figure_forwards_unified_hover() -> None:
 
     factory_html = render_figure(_bar_fig(), title="A", unified_hover=False)
     assert _normalise_ids(manual_html) == _normalise_ids(factory_html)
+
+
+def test_apply_standard_layout_matches_manual_and_returns_fig() -> None:
+    """apply_standard_layout(fig, **kw) mutates fig like the manual update_layout
+    and returns it (for make_chart_card / return-fig call sites)."""
+    manual = _bar_fig()
+    manual.update_layout(
+        title="T", xaxis_title="X", legend=LEGEND_DEFAULTS, margin=MARGIN_DEFAULTS
+    )
+
+    fig = _bar_fig()
+    returned = apply_standard_layout(fig, title="T", xaxis_title="X")
+    assert returned is fig  # mutates in place AND returns the same figure
+    assert fig.to_dict()["layout"] == manual.to_dict()["layout"]
 
 
 def test_render_figure_lets_caller_override_legend_and_margin() -> None:
