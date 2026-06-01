@@ -42,6 +42,27 @@ def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
     )
 
 
+def render_figure(
+    fig: go.Figure,
+    *,
+    unified_hover: bool = True,
+    **layout: object,
+) -> str:
+    """Apply the dashboard's standard layout to *fig* and return an HTML fragment.
+
+    Collapses the repeated ``fig.update_layout(..., legend=LEGEND_DEFAULTS,
+    margin=MARGIN_DEFAULTS, ...)`` + ``fig_to_html(fig)`` boilerplate into one
+    call. ``legend`` and ``margin`` default to the shared constants but can be
+    overridden by passing them in ``**layout``; every other layout keyword
+    (``title``, ``xaxis_title``, ``barmode``, ``height``, …) is forwarded to
+    :meth:`plotly.graph_objects.Figure.update_layout` verbatim.
+    """
+    layout.setdefault("legend", LEGEND_DEFAULTS)
+    layout.setdefault("margin", MARGIN_DEFAULTS)
+    fig.update_layout(**layout)
+    return fig_to_html(fig, unified_hover=unified_hover)
+
+
 def plotly_div(
     traces: list[dict],
     layout: dict,

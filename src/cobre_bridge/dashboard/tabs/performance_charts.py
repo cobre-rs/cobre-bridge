@@ -37,6 +37,7 @@ from cobre_bridge.ui.plotly_helpers import (
 )
 from cobre_bridge.ui.plotly_helpers import (
     fig_to_html,
+    render_figure,
 )
 from cobre_bridge.ui.theme import COLORS, PERFORMANCE_PHASE_COLORS
 
@@ -172,16 +173,14 @@ def chart_iteration_timing_breakdown(timing: pd.DataFrame) -> str:
                 hovertemplate=f"{label}: %{{y:.0f}} ms<extra></extra>",
             )
         )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Iteration Timing — Top-Level Phases (non-overlapping, sums to total)",
         xaxis_title="Iteration",
         yaxis_title="Time (ms)",
         barmode="stack",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def _solve_time_heatmap(solver_train: pd.DataFrame, phase: str, title: str) -> str:
@@ -264,16 +263,14 @@ def chart_simplex_by_stage(solver_train: pd.DataFrame) -> str:
             name="Avg Simplex Iterations",
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Average Simplex Iterations per Stage (backward phase)",
         xaxis_title="Stage",
         yaxis_title="Simplex Iterations",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=400,
         showlegend=False,
     )
-    return fig_to_html(fig)
 
 
 def chart_lp_dimensions(scaling_report: dict) -> str:
@@ -320,15 +317,13 @@ def chart_lp_dimensions(scaling_report: dict) -> str:
     )
     fig.update_yaxes(title_text="Columns / Rows", secondary_y=False)
     fig.update_yaxes(title_text="Non-zeros", secondary_y=True)
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="LP Dimensions by Stage",
         xaxis_title="Stage",
         barmode="group",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def chart_scaling_quality(scaling_report: dict) -> str:
@@ -372,16 +367,14 @@ def chart_scaling_quality(scaling_report: dict) -> str:
             mode="lines+markers",
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Matrix Coefficient Ratio by Stage (log scale — lower is better)",
         xaxis_title="Stage",
         yaxis_title="Coefficient Ratio",
         yaxis_type="log",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def chart_simulation_scenario_times(solver_sim: pd.DataFrame) -> str:
@@ -444,16 +437,14 @@ def chart_basis_reuse(solver_train: pd.DataFrame) -> str:
             name="Basis Reuse Rate",
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Basis Warm-start Reuse Rate per Stage (backward phase, avg over iterations)",
         xaxis_title="Stage",
         yaxis_title="Reuse Rate (0-1)",
         yaxis={"range": [0, 1]},
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=400,
     )
-    return fig_to_html(fig)
 
 
 def chart_solver_time_breakdown_by_phase(solver_train: pd.DataFrame) -> str:
@@ -477,15 +468,13 @@ def chart_solver_time_breakdown_by_phase(solver_train: pd.DataFrame) -> str:
                 marker_color=color,
             )
         )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Time Breakdown by Phase (seconds)",
         yaxis_title="Time (s)",
         barmode="stack",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=400,
     )
-    return fig_to_html(fig)
 
 
 def chart_solver_time_per_stage(solver_train: pd.DataFrame) -> str:
@@ -520,16 +509,14 @@ def chart_solver_time_per_stage(solver_train: pd.DataFrame) -> str:
             marker_color=COLORS["thermal"],
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Backward Pass: Avg Solve vs Overhead per Stage (ms)",
         xaxis_title="Stage",
         yaxis_title="Time (ms)",
         barmode="stack",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=400,
     )
-    return fig_to_html(fig)
 
 
 def chart_forward_vs_backward_per_iter(solver_train: pd.DataFrame) -> str:
@@ -561,16 +548,14 @@ def chart_forward_vs_backward_per_iter(solver_train: pd.DataFrame) -> str:
                 marker_color=COLORS["thermal"],
             )
         )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="LP Solve Time per Iteration (seconds)",
         xaxis_title="Iteration",
         yaxis_title="Time (s)",
         barmode="group",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=400,
     )
-    return fig_to_html(fig)
 
 
 def chart_set_bounds_by_stage(solver_train: pd.DataFrame) -> str:
@@ -631,16 +616,14 @@ def chart_cost_per_simplex_iter(solver_train: pd.DataFrame) -> str:
             hovertemplate="Stage: %{x}<br>Cost: %{y:.2f} us/iter<extra></extra>",
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Solver Cost per Simplex Iteration by Stage (Backward, averaged over SDDP iters)",
         xaxis_title="Stage",
         yaxis_title="Microseconds per Simplex Iteration",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
         showlegend=False,
     )
-    return fig_to_html(fig)
 
 
 def chart_parallel_overhead_decomposition(timing: pd.DataFrame) -> str:
@@ -762,16 +745,14 @@ def chart_parallel_overhead_share(timing: pd.DataFrame) -> str:
                 hovertemplate=f"{label}: {value / 1000:.1f}s ({pct:.1f}%)<extra></extra>",
             )
         )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Cumulative Parallel Overhead Share (fwd + bwd)",
         barmode="stack",
         xaxis={"title": "% of total parallel overhead", "range": [0, 100]},
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=220,
         showlegend=True,
     )
-    return fig_to_html(fig)
 
 
 def chart_timing_waterfall(timing: pd.DataFrame) -> str:
@@ -804,13 +785,11 @@ def chart_timing_waterfall(timing: pd.DataFrame) -> str:
             hovertemplate="%{label}: %{value:.0f} ms (%{percent})<extra></extra>",
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title=f"Cumulative Phase Totals — {grand / 1000:.1f}s total",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def _backward_breakdown_columns(timing: pd.DataFrame) -> list[tuple[str, str, str]]:
@@ -1119,16 +1098,14 @@ def chart_basis_reuse_over_iterations(solver_train: pd.DataFrame) -> str:
         annotation_text="perfect reuse",
         annotation_position="right",
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Basis Warm-start Reuse — per SDDP iteration",
         xaxis_title="Iteration",
         yaxis_title="Reuse rate",
         yaxis={"range": [0, 1.05]},
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=400,
     )
-    return fig_to_html(fig)
 
 
 def chart_solver_time_breakdown_over_iterations(solver_train: pd.DataFrame) -> str:
@@ -1167,16 +1144,14 @@ def chart_solver_time_breakdown_over_iterations(solver_train: pd.DataFrame) -> s
                 hovertemplate=f"{label}: %{{y:,.0f}} ms<extra></extra>",
             )
         )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Backward Solver CPU Components — per SDDP iteration (aggregate across stages/workers)",
         xaxis_title="Iteration",
         yaxis_title="Time (ms)",
         barmode="stack",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def chart_retry_level_heatmap(retry_histogram: pd.DataFrame) -> str:
@@ -1273,16 +1248,14 @@ def chart_cut_count_per_stage(
             hovertemplate="Stage %{x}: %{y} active<extra></extra>",
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title=f"Cut Count per Stage (iteration {iter_to_use})",
         xaxis_title="Stage",
         yaxis_title="Cuts",
         barmode="overlay",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def _pick_highlight_stages(cut_selection: pd.DataFrame, n: int = 8) -> list[int]:
@@ -1338,15 +1311,13 @@ def chart_active_cuts_growth_by_stage(cut_selection: pd.DataFrame) -> str:
                 ),
             )
         )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Active Cuts Growth per Stage (top 8 stages by terminal active count)",
         xaxis_title="Iteration",
         yaxis_title="Active cuts",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -1447,15 +1418,13 @@ def chart_lp_difficulty_multi_iter(solver_train: pd.DataFrame) -> str:
     )
     if fig is None:
         return "<p>No backward solver data available.</p>"
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="LP Difficulty per Stage (avg simplex iter / LP, backward phase)",
         xaxis_title="Stage",
         yaxis_title="Simplex iter / LP",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def chart_lp_solve_time_multi_iter(solver_train: pd.DataFrame) -> str:
@@ -1465,16 +1434,14 @@ def chart_lp_solve_time_multi_iter(solver_train: pd.DataFrame) -> str:
     )
     if fig is None:
         return "<p>No backward solver data available.</p>"
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="LP Solve Time per Stage (ms/LP, backward phase, log scale)",
         xaxis_title="Stage",
         yaxis_title="ms / LP",
         yaxis_type="log",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -1676,15 +1643,13 @@ def chart_convergence_vs_wall_time(conv: pd.DataFrame, timing: pd.DataFrame) -> 
             hovertemplate="%{x:.1f} s wall: UB %{y:.2f}<extra></extra>",
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Convergence vs Wall Time",
         xaxis_title="Cumulative wall time (s)",
         yaxis_title="Objective value",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -1766,16 +1731,14 @@ def _opening_0_vs_rest_by_stage(
                 hovertemplate=("Stage %{x} — warm: " + hover_fmt + "<extra></extra>"),
             )
         )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title=title,
         xaxis_title="Stage",
         yaxis_title=y_title,
         barmode="group",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def chart_backward_opening_0_solve_time(solver_train: pd.DataFrame) -> str:
@@ -1907,18 +1870,16 @@ def chart_backward_opening_0_share(solver_train: pd.DataFrame) -> str:
                 ),
             )
         )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title=(
             f"Opening 0 (cold) share of backward workload — "
             f"{openings_max} openings per (iter, stage, worker)"
         ),
         barmode="stack",
         xaxis={"title": "% share", "range": [0, 100]},
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=300,
     )
-    return fig_to_html(fig)
 
 
 def _box_stats_by_stage(bwd: pd.DataFrame, value_col: str) -> pd.DataFrame:
@@ -1991,16 +1952,14 @@ def chart_backward_per_opening_solve_time(solver_train: pd.DataFrame) -> str:
             ),
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Backward Solve Time per Opening — by stage (ms, log y)",
         xaxis_title="Stage",
         yaxis_title="Solve time (ms)",
         yaxis_type="log",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def chart_backward_per_opening_simplex(solver_train: pd.DataFrame) -> str:
@@ -2042,15 +2001,13 @@ def chart_backward_per_opening_simplex(solver_train: pd.DataFrame) -> str:
             ),
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Backward Simplex Iterations per Opening — by stage",
         xaxis_title="Stage",
         yaxis_title="Simplex iterations (per LP)",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=420,
     )
-    return fig_to_html(fig)
 
 
 def chart_backward_load_balance_per_worker(solver_train: pd.DataFrame) -> str:
@@ -2169,13 +2126,11 @@ def chart_worker_wall_time_distribution(timing_raw: pd.DataFrame) -> str:
             hovertemplate="%{x}: %{y:.1f} s backward<extra></extra>",
         )
     )
-    fig.update_layout(
+    return render_figure(
+        fig,
         title="Per-Worker Wall Time Across Training (fwd + bwd, summed)",
         xaxis_title="Worker",
         yaxis_title="Wall time (s)",
         barmode="stack",
-        legend=_LEGEND,
-        margin=_MARGIN,
         height=400,
     )
-    return fig_to_html(fig)
