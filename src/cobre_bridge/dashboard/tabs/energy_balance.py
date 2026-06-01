@@ -44,6 +44,7 @@ from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
 from cobre_bridge.ui.plotly_helpers import (
+    apply_standard_layout,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import BUS_COLORS, COLORS, GENERATION_COLORS
@@ -1158,11 +1159,10 @@ def _chart_curtailment_by_source(data: DashboardData) -> go.Figure | None:
             textposition="auto",
         )
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Curtailment (GWh)",
         yaxis=dict(autorange="reversed"),
-        legend=_LEGEND,
-        margin=_MARGIN,
     )
     return fig
 

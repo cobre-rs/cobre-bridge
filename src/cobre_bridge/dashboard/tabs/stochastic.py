@@ -32,6 +32,7 @@ from cobre_bridge.ui.html import (
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
+    apply_standard_layout,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import COLORS
@@ -589,12 +590,11 @@ def _chart_hydro_explorer(
         else "No Data"
     )
 
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         title=f"Inflow — {first_name}",
         xaxis_title="Stage",
         yaxis_title="Inflow (m³/s)",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
         template="plotly_white",
         updatemenus=[
             {
@@ -858,11 +858,10 @@ def _chart_noise_histogram(noise_openings: pd.DataFrame) -> go.Figure:
             hovertemplate="x: %{x:.3f}<br>N(0,1): %{y:.4f}<extra></extra>",
         )
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Value",
         yaxis_title="Density",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
         template="plotly_white",
     )
     return fig
@@ -1053,12 +1052,11 @@ def _chart_order_reduction_reasons(fitting_report: dict) -> go.Figure:
                 hovertemplate=f"{reason}<br>%{{x}}: %{{y}} reductions<extra></extra>",
             )
         )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Season (Month)",
         yaxis_title="Count of Reductions",
         barmode="stack",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
         template="plotly_white",
     )
     return fig

@@ -27,8 +27,8 @@ from cobre_bridge.ui.html import (
     wrap_chart,
 )
 from cobre_bridge.ui.plotly_helpers import (
-    LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
+    apply_standard_layout,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import COLORS, GENERATION_COLORS
@@ -343,10 +343,9 @@ def _chart_training_mini(conv: pd.DataFrame) -> go.Figure | None:
             legendgroup=ub_legend_group,
         )
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         yaxis_title="Cost",
-        legend=LEGEND_DEFAULTS,
-        margin=MARGIN_DEFAULTS,
     )
     return fig
 

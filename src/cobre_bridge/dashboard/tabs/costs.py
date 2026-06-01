@@ -47,6 +47,7 @@ from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
 from cobre_bridge.ui.plotly_helpers import (
+    apply_standard_layout,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import BUS_COLORS, COLORS
@@ -749,11 +750,10 @@ def _render_category_evolution(data: DashboardData) -> str:
         pct["_x"] = pct["stage_id"].map(stage_to_x)
         add_mean_p50_band(fig, pct, "_x", group_name, color)
 
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Stage",
         yaxis_title="Cost (R$)",
-        legend=_LEGEND,
-        margin=_MARGIN,
     )
 
     chart_html = make_chart_card(
@@ -1064,11 +1064,10 @@ def _render_violations(data: DashboardData) -> str:
             marker_color=colors,
         )
     )
-    fig.update_layout(
+    apply_standard_layout(
+        fig,
         xaxis_title="Mean Cost (R$)",
         yaxis=dict(autorange="reversed"),
-        legend=_LEGEND,
-        margin=_MARGIN,
     )
 
     chart_html = make_chart_card(
