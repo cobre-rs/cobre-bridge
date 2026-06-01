@@ -164,10 +164,10 @@ def evaluate_lhs_newave(
             hydro_storage[(cobre_id, stage_0based)] = float(row["value"])
 
     # --- Build line exchange lookup: (cobre_line_id, stage_0based) -> MW
-    # Aligned via EntityAlignment.lines: each Cobre line records the
-    # NEWAVE directional pair (newave_de → newave_para) plus a
-    # ``reversed`` flag.  When ``reversed`` is True the NEWAVE row's
-    # flow is the opposite sign of Cobre's net_flow_mw.
+    # Aligned via EntityAlignment.lines: each Cobre line records the NEWAVE
+    # directional pair (newave_de → newave_para), which matches the Cobre
+    # (source, target) orientation by construction.  NWLISTOP rows for the
+    # opposite (para, de) ordering carry the opposite sign, so they are negated.
     line_flow: dict[tuple[int, int], float] = {}
     if not nw_line_means.is_empty() and alignment.lines:
         # Build (de, para, stage_0based) -> value for both directions.
@@ -191,15 +191,12 @@ def evaluate_lhs_newave(
                 continue
             for (de_k, para_k, s), val in nw_by_pair.items():
                 if de_k == de and para_k == para:
-                    sign = -1.0 if line.reversed else 1.0
-                    line_flow[(line.cobre_line_id, s)] = sign * val
+                    line_flow[(line.cobre_line_id, s)] = val
                 elif de_k == para and para_k == de:
-                    # Reversed-direction NWLISTOP row supplies the
-                    # opposite sign of what our alignment expects.
-                    sign = 1.0 if line.reversed else -1.0
-                    # Only fill if the canonical-direction row hasn't
-                    # already populated this slot.
-                    line_flow.setdefault((line.cobre_line_id, s), sign * val)
+                    # Reversed-ordering NWLISTOP row supplies the opposite sign
+                    # of what our alignment expects.  Only fill if the
+                    # canonical-direction row hasn't already populated this slot.
+                    line_flow.setdefault((line.cobre_line_id, s), -val)
 
     # --- Per-constraint LHS evaluation ---
     rows: list[dict] = []

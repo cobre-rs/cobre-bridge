@@ -45,13 +45,12 @@ class LineEntity:
     Cobre models each normalized pair as a single line where positive flow
     goes from source_bus to target_bus.
 
-    The NEWAVE ``INT`` variable for pair (de, para) reports:
-    - ``limite_superior``: max flow in the de->para direction
-    - ``limite_inferior``: max flow in the para->de direction (negative)
-
-    When the Cobre line's (source_bus, target_bus) matches (de, para),
-    ``flow_max`` corresponds to ``limite_superior`` and ``flow_min`` to
-    ``abs(limite_inferior)``.  When reversed, the mapping flips.
+    ``newave_de`` / ``newave_para`` are the NEWAVE subsystem codes of the Cobre
+    line's ``source_bus_id`` / ``target_bus_id``, so the Cobre orientation
+    ``(source, target)`` always corresponds to NEWAVE ``(de, para)`` by
+    construction.  NEWAVE result files (NWLISTOP) may list a pair in either
+    ``(de, para)`` or ``(para, de)`` order; that file-ordering is handled where
+    the rows are read (sign-flipped on the reverse-ordered match), not here.
     """
 
     cobre_line_id: int
@@ -60,7 +59,6 @@ class LineEntity:
     target_bus_id: int
     newave_de: int
     newave_para: int
-    reversed: bool  # True if Cobre (src,tgt) = NEWAVE (para,de)
 
 
 @dataclass
@@ -241,7 +239,6 @@ def build_entity_alignment(
                 target_bus_id=tgt_bus,
                 newave_de=nw_de,
                 newave_para=nw_para,
-                reversed=False,
             )
         )
 
