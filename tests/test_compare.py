@@ -891,6 +891,43 @@ class TestProductivityDetail:
         # Building blocks from system/hydros.json.
         assert row["cb_tailwater_m"] == pytest.approx(200.0)
 
+    def test_build_detail_run_of_river_uses_volume_referencia(self) -> None:
+        """Daily-regulation ('D') plants compare against volume_referencia, not
+        the dead-storage volume_minimo/maximo the converter freezes them off."""
+        import pandas as pd
+        import polars as pl
+
+        from cobre_bridge.comparators.alignment import (
+            EntityAlignment,
+            HydroEntity,
+        )
+        from cobre_bridge.comparators.results import _build_productivity_detail
+
+        alignment = EntityAlignment(
+            hydros=[
+                HydroEntity(newave_code=4, cobre_id=7, name="ROR", has_reservoir=False)
+            ]
+        )
+        cadastro = pd.DataFrame(
+            {
+                "tipo_regulacao": ["D"],
+                "volume_minimo": [304.0],
+                "volume_maximo": [304.0],
+                "volume_referencia": [265.9],
+            },
+            index=pd.Index([4], name="codigo_usina"),
+        )
+        cobre_detail = {7: {"name": "ROR", "vmin_hm3": 265.9, "vmax_hm3": 265.9}}
+        df = _build_productivity_detail(
+            alignment, pl.DataFrame({"plant_name": ["ROR"]}), cadastro, cobre_detail, {}
+        )
+        row = df.row(0, named=True)
+        # NEWAVE side uses volume_referencia (265.9), matching Cobre — no
+        # spurious delta vs the cadastro volume_minimo/maximo (304).
+        assert row["nw_vmin_hm3"] == pytest.approx(265.9)
+        assert row["nw_vmax_hm3"] == pytest.approx(265.9)
+        assert row["cb_vmin_hm3"] == pytest.approx(265.9)
+
     def test_comparison_scatter_renders_series_and_stats(self) -> None:
         from cobre_bridge.comparators.charts import (
             productivity_comparison_scatter,
@@ -956,7 +993,7 @@ class TestProductivityDetail:
                 )
         return rows
 
-    def test_per_stage_chart_has_multiple_plant_lines(self) -> None:
+    def test_per_stage_chart_dropdown_one_plant_at_a_time(self) -> None:
         from cobre_bridge.comparators.charts import productivity_per_stage_chart
 
         html = productivity_per_stage_chart(
@@ -965,11 +1002,15 @@ class TestProductivityDetail:
         assert "Plotly.newPlot" in html
         assert "Realized productivity across stages" in html
         assert "varies across stages" in html
-        # One solid (NEWAVE) + one dashed (Cobre) trace per plant.
-        assert "ALPHA (NEWAVE)" in html
-        assert "ALPHA (Cobre)" in html
-        assert "BETA (NEWAVE)" in html
+        # NEWAVE (solid) + Cobre (dashed) traces; plant chosen via a dropdown.
+        assert '"name":"NEWAVE"' in html
+        assert '"name":"Cobre"' in html
         assert '"dash":"dash"' in html
+        # A dropdown with one button per plant (plant names are button labels,
+        # not trace names) — only one plant's pair is visible at a time.
+        assert "updatemenus" in html
+        assert "ALPHA" in html and "BETA" in html
+        assert '"visible":false' in html  # the non-default plant starts hidden
 
     def test_per_stage_chart_no_rows(self) -> None:
         import polars as pl

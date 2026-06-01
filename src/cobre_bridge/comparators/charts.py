@@ -2117,22 +2117,6 @@ def productivity_comparison_scatter(
     return _plotly_div(traces, layout)
 
 
-# Categorical hues for the per-stage realized-productivity chart — a local
-# palette mapping a handful of plants to distinct colours (one hue per plant),
-# independent of the semantic NEWAVE/Cobre tokens (NEWAVE = solid, Cobre =
-# dashed in the same hue).
-_PRODUCTIVITY_PLANT_HUES: list[str] = [
-    "#4A90B8",
-    "#F5A623",
-    "#4A8B6F",
-    "#DC4C4C",
-    "#B87333",
-    "#7C3AED",
-    "#0891B2",
-    "#DB2777",
-]
-
-
 def productivity_per_stage_chart(
     results: list[ResultComparison],
     df: pl.DataFrame,
@@ -2181,24 +2165,29 @@ def productivity_per_stage_chart(
         key=lambda name: -rank.get(name.strip().upper(), 0.0),
     )[:max_plants]
 
+    # One reservoir at a time (NEWAVE vs Cobre), selectable via a dropdown, so
+    # the chart is never overplotted. All plants' traces are emitted but only
+    # the first (largest) plant's pair starts visible; each dropdown button
+    # toggles visibility to its own plant.
     traces: list[dict] = []
-    for idx, name in enumerate(plants):
-        hue = _PRODUCTIVITY_PLANT_HUES[idx % len(_PRODUCTIVITY_PLANT_HUES)]
+    rendered: list[str] = []
+    for name in plants:
         nw_map = by_plant_nw.get(name, {})
         cb_map = by_plant_cb.get(name, {})
         stages = sorted(set(nw_map) | set(cb_map))
         if not stages:
             continue
         safe = escape_text(name)
+        first = len(rendered) == 0
         traces.append(
             {
                 "x": stages,
                 "y": [nw_map.get(s) for s in stages],
-                "name": f"{safe} (NEWAVE)",
+                "name": "NEWAVE",
                 "type": "scatter",
-                "mode": "lines",
-                "line": {"color": hue, "width": 2},
-                "legendgroup": safe,
+                "mode": "lines+markers",
+                "line": {"color": COLOR_NEWAVE, "width": 2},
+                "visible": first,
                 "hovertemplate": (
                     f"{safe} NEWAVE<br>stage %{{x}}<br>"
                     "ρ %{y:.4f} MW per m³/s<extra></extra>"
@@ -2209,36 +2198,69 @@ def productivity_per_stage_chart(
             {
                 "x": stages,
                 "y": [cb_map.get(s) for s in stages],
-                "name": f"{safe} (Cobre)",
+                "name": "Cobre",
                 "type": "scatter",
-                "mode": "lines",
-                "line": {"color": hue, "width": 2, "dash": "dash"},
-                "legendgroup": safe,
+                "mode": "lines+markers",
+                "line": {"color": COLOR_COBRE, "width": 2, "dash": "dash"},
+                "visible": first,
                 "hovertemplate": (
                     f"{safe} Cobre<br>stage %{{x}}<br>"
                     "ρ %{y:.4f} MW per m³/s<extra></extra>"
                 ),
             }
         )
+        rendered.append(name)
 
     if not traces:
         return "<p>No per-stage productivity data available.</p>"
 
-    title = "Realized productivity across stages "
-    title += "(constant within a stage, varies across stages)"
+    n = len(rendered)
+    title = "Realized productivity across stages"
     subtitle = (
-        "Productivity tracks the reservoir head reached each stage; "
-        "solid = NEWAVE, dashed = Cobre (same hue per plant)."
+        "Constant within a stage, varies across stages — productivity tracks "
+        "the reservoir head reached each stage. Solid = NEWAVE, dashed = Cobre."
     )
 
+    def _title_for(plant: str) -> str:
+        return f"{title} — {plant}<br><sub>{subtitle}</sub>"
+
+    buttons: list[dict] = []
+    for k, name in enumerate(rendered):
+        vis = [False] * (2 * n)
+        vis[2 * k] = True
+        vis[2 * k + 1] = True
+        buttons.append(
+            {
+                "label": name,
+                "method": "update",
+                "args": [
+                    {"visible": vis},
+                    {"title.text": _title_for(escape_text(name))},
+                ],
+            }
+        )
+
     layout = {
-        "title": {"text": f"{title}<br><sub>{subtitle}</sub>"},
+        "title": {"text": _title_for(escape_text(rendered[0]))},
         "xaxis": {"title": "Stage (0-based)"},
         "yaxis": {"title": "Productivity (MW per m³/s)"},
         "legend": {"orientation": "h", "y": -0.2},
+        "updatemenus": [
+            {
+                "type": "dropdown",
+                "active": 0,
+                "showactive": True,
+                "x": 0.0,
+                "xanchor": "left",
+                "y": 1.18,
+                "yanchor": "top",
+                "buttons": buttons,
+            }
+        ],
+        "margin": {"t": 110},
     }
 
-    return _plotly_div(traces, layout, height=520)
+    return _plotly_div(traces, layout, height=480)
 
 
 def _prod_blocks_pct(nw: float | None, cb: float | None) -> float | None:

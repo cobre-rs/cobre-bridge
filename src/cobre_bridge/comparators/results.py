@@ -1054,6 +1054,26 @@ def _build_productivity_detail(
             return None
         return f if f == f else None  # drop NaN
 
+    def _nw_reservoir_bounds(code: int) -> tuple[float | None, float | None]:
+        """NEWAVE reservoir bounds as cobre-bridge models them.
+
+        Daily-regulation ('D') plants are frozen at ``volume_referencia`` by the
+        converter (they can't store across stages), so compare like-for-like
+        against Cobre's reservoir rather than the dead-storage
+        ``volume_minimo``/``volume_maximo``. Otherwise every run-of-river plant
+        shows a spurious Vmin/Vmax delta in the building-blocks table.
+        """
+        if code in nw_cadastro.index and "tipo_regulacao" in nw_cadastro.columns:
+            reg = str(nw_cadastro.loc[code, "tipo_regulacao"]).strip()
+            if reg == "D":
+                vref = _cad_float(code, "volume_referencia")
+                if vref is not None:
+                    return vref, vref
+        return (
+            _cad_float(code, "volume_minimo"),
+            _cad_float(code, "volume_maximo"),
+        )
+
     def _cb_static(code: int) -> tuple[float | None, float | None, float | None]:
         """cobre-bridge (point, equivalent, accumulated) computed from inputs."""
         if code not in nw_cadastro.index:
@@ -1072,6 +1092,7 @@ def _build_productivity_detail(
         nw_prod = nw_by_name.get(hydro.name.strip().upper(), {})
         cb = cobre_prod_detail.get(hydro.cobre_id, {})
         cb_point, cb_equiv, cb_acc = _cb_static(hydro.newave_code)
+        nw_vmin, nw_vmax = _nw_reservoir_bounds(hydro.newave_code)
         rows.append(
             {
                 "plant_name": hydro.name,
@@ -1087,8 +1108,8 @@ def _build_productivity_detail(
                 ),
                 "nw_tailwater_m": _cad_float(hydro.newave_code, "canal_fuga_medio"),
                 "nw_losses_m": _cad_float(hydro.newave_code, "perdas"),
-                "nw_vmin_hm3": _cad_float(hydro.newave_code, "volume_minimo"),
-                "nw_vmax_hm3": _cad_float(hydro.newave_code, "volume_maximo"),
+                "nw_vmin_hm3": nw_vmin,
+                "nw_vmax_hm3": nw_vmax,
                 "cb_point": cb_point,
                 "cb_equivalent": cb_equiv,
                 "cb_accumulated": cb_acc,
