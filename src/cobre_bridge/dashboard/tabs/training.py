@@ -21,7 +21,12 @@ from cobre_bridge.ui.html import (
     section_title,
 )
 from cobre_bridge.ui.plotly_helpers import apply_standard_layout
-from cobre_bridge.ui.theme import COLORS, COPPER_ACCENT, PERFORMANCE_PHASE_COLORS
+from cobre_bridge.ui.theme import (
+    COLORS,
+    COPPER_ACCENT,
+    PERFORMANCE_PHASE_COLORS,
+    hex_to_rgba,
+)
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -84,15 +89,6 @@ def _build_metrics_row(data: DashboardData) -> str:
     return metrics_grid(cards)
 
 
-def _hex_to_rgba(hex_color: str, alpha: float) -> str:
-    """Convert a 6-digit hex colour string to an ``rgba(...)`` CSS value."""
-    hex_color = hex_color.lstrip("#")
-    r = int(hex_color[0:2], 16)
-    g = int(hex_color[2:4], 16)
-    b = int(hex_color[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"
-
-
 def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
     """Full convergence chart: lower bound, upper bound mean, +/- std band, zoom.
 
@@ -128,7 +124,7 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
             mode="lines",
             line={"width": 0},
             fill="tonexty",
-            fillcolor=_hex_to_rgba(COLORS["upper_bound"], 0.15),
+            fillcolor=hex_to_rgba(COLORS["upper_bound"], 0.15),
             showlegend=True,
             hoverinfo="skip",
         ),

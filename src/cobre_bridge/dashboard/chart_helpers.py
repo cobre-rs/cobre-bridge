@@ -24,6 +24,7 @@ from cobre_bridge.ui.plotly_helpers import (
 from cobre_bridge.ui.plotly_helpers import (
     fig_to_html,
 )
+from cobre_bridge.ui.theme import hex_to_rgba
 
 try:
     import pandas as pd
@@ -250,7 +251,7 @@ def add_mean_p50_band(
                 mode="lines",
                 line=dict(width=0),
                 fill="tonexty",
-                fillcolor=_hex_to_rgba(color, 0.15),
+                fillcolor=hex_to_rgba(color, 0.15),
                 hoverinfo="skip",
             ),
             **subplot_kwargs,
@@ -551,22 +552,3 @@ def compute_cost_summary(
 
     agg = agg.sort_values("mean", ascending=False).reset_index(drop=True)
     return agg[summary_cols]
-
-
-def _hex_to_rgba(hex_color: str, alpha: float) -> str:
-    """Convert a 6-digit hex colour string to an ``rgba(...)`` CSS value.
-
-    Args:
-        hex_color: A hex colour string such as ``"#3B82F6"`` (the leading
-            ``#`` is required).
-        alpha: Opacity in the range 0.0–1.0.
-
-    Returns:
-        An ``rgba(r, g, b, alpha)`` string suitable for Plotly's
-        ``fillcolor`` parameter.
-    """
-    hex_color = hex_color.lstrip("#")
-    r = int(hex_color[0:2], 16)
-    g = int(hex_color[2:4], 16)
-    b = int(hex_color[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"

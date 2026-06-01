@@ -37,7 +37,7 @@ from cobre_bridge.ui.plotly_helpers import (
     apply_standard_layout,
     stage_x_labels,
 )
-from cobre_bridge.ui.theme import COLORS
+from cobre_bridge.ui.theme import COLORS, hex_to_rgba
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -60,15 +60,6 @@ _NO_DATA = "<p>No data.</p>"
 # ---------------------------------------------------------------------------
 # Helper: convert hex color to rgba string
 # ---------------------------------------------------------------------------
-
-
-def _hex_to_rgba(hex_color: str, alpha: float) -> str:
-    """Convert a 6-digit hex colour string to an ``rgba(...)`` CSS value."""
-    h = hex_color.lstrip("#")
-    r = int(h[0:2], 16)
-    g = int(h[2:4], 16)
-    b = int(h[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +281,7 @@ def _add_mean_std_band(
 
     lower = [m - s for m, s in zip(mean_vals, std_vals)]
     upper = [m + s for m, s in zip(mean_vals, std_vals)]
-    fill_color = _hex_to_rgba(color, 0.18)
+    fill_color = hex_to_rgba(color, 0.18)
 
     # Lower bound (invisible anchor for fill="tonexty")
     fig.add_trace(
