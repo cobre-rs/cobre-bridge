@@ -8,6 +8,7 @@ import pandas as pd
 from inewave.newave import Confhd, Hidr
 
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
+from cobre_bridge.converters.thermal import thermal_generation_bounds
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.plants import active_hydros
@@ -109,19 +110,17 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
     # Empty for non-GNL cases (despacho_antecipado_gnl=0 in dger.dat).
     # Each entry maps a thermal's NEWAVE code to its cobre thermal_id.
     #
-    # Cobre's anticipated-thermal LP currently REQUIRES every ``values_mw``
-    # entry to be ``0.0`` — the fishing-constraint activation predicate is
-    # FALSE at every stage before the first matured delivery and the ring
-    # buffer overwrites slot 0 with the LP's own decision before any
-    # constraint can read a seeded value (see plans/anticipated-thermals
-    # AnticipatedCommitmentHistory docstring).  Non-zero entries are
-    # rejected by ``cobre-io::validation::semantic::thermal``.
-    #
-    # We still compute the block-weighted NEWAVE MW so we can warn the
-    # user about the pre-horizon dispatch being silently dropped, but we
-    # emit zeros to satisfy cobre's current validator.
+    # Cobre (>= 0.7.0) honours non-zero pre-horizon seeds: the always-active
+    # anticipated "fishing" equality pins generation to the committed MW at
+    # each delivery stage, faithfully reproducing NEWAVE's pre-commitment.
+    # The committed value must lie within the plant's static generation bounds
+    # ``[min_mw, max_mw]`` (``thermals.json`` / ``cobre-io`` semantic validator);
+    # an out-of-range seed makes that stage's fishing equality infeasible, so we
+    # clamp into range and warn rather than emit a case cobre would reject.
+    anticipated = read_anticipated_dispatch(nw_files)
+    gen_bounds = thermal_generation_bounds(nw_files) if anticipated else {}
     past_anticipated_commitments: list[dict] = []
-    for newave_code, dispatch in read_anticipated_dispatch(nw_files).items():
+    for newave_code, dispatch in anticipated.items():
         try:
             thermal_id = id_map.thermal_id(newave_code)
         except KeyError:
@@ -131,20 +130,23 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
                 newave_code,
             )
             continue
-        if any(abs(v) > 1e-9 for v in dispatch.values_mw):
+        lo, hi = gen_bounds.get(newave_code, (float("-inf"), float("inf")))
+        seeded = [min(max(v, lo), hi) for v in dispatch.values_mw]
+        if any(abs(s - v) > 1e-9 for s, v in zip(seeded, dispatch.values_mw)):
             _LOG.warning(
-                "adterm.dat thermal code=%d carries pre-horizon dispatch "
-                "values [%s] MW that cobre's current LP cannot honour; "
-                "writing zeros to satisfy the validator (NEWAVE-side "
-                "dispatch over the next %d stages will not be enforced).",
+                "adterm.dat thermal code=%d committed dispatch [%s] MW falls "
+                "outside the plant's generation bounds [%.4f, %.4f]; clamping to "
+                "[%s] to keep cobre's anticipated fishing equality feasible.",
                 newave_code,
                 ", ".join(f"{v:.4f}" for v in dispatch.values_mw),
-                dispatch.lead_stages,
+                lo,
+                hi,
+                ", ".join(f"{s:.4f}" for s in seeded),
             )
         past_anticipated_commitments.append(
             {
                 "thermal_id": thermal_id,
-                "values_mw": [0.0] * dispatch.lead_stages,
+                "values_mw": seeded,
             }
         )
     past_anticipated_commitments.sort(key=lambda c: c["thermal_id"])

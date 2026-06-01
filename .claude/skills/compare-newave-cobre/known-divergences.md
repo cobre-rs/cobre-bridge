@@ -126,6 +126,35 @@ yet filled in.
 - **Evidence/ref:** fix in `investigations/newave_cut_investigation.py`.
   [[project_cut_investigation_state]].
 
+### GNL anticipated dispatch (adterm.dat) is now seeded, not zeroed (fixed)
+
+- **Symptom:** in a **GNL case** (`dger.despacho_antecipado_gnl` on, `adterm.dat`
+  present), the first 1–2 stages of a pre-committed thermal diverge — NEWAVE forces
+  the anticipated dispatch (e.g. ~204.6 MW at stage 0) but Cobre let the LP choose
+  freely. Historically accompanied by a converter WARNING _"…cobre's current LP
+  cannot honour; writing zeros…"_.
+- **Where:** results; thermal generation / immediate cost, first `lead_stages`
+  stages of the GNL plant only.
+- **Root cause (historical):** the converter wrote
+  `past_anticipated_commitments.values_mw = [0.0]*lead_stages` because **an older
+  Cobre** couldn't honour a non-zero pre-horizon seed. That limitation is **gone in
+  Cobre ≥ 0.7.0**: the always-active anticipated "fishing" equality pins generation
+  to the committed MW (`setup/mod.rs` "Pre-horizon seeding is enabled"; validator
+  only rejects values outside `[min_generation_mw, max_generation_mw]`).
+- **Fix:** the converter now passes the **real block-weighted committed MW** through
+  (clamping into the plant's static generation bounds, with a warning, only on the
+  rare out-of-range value). Requires the consuming Cobre to be **≥ 0.7.0**
+  (`cobre-python>=0.7.0`); an older Cobre will reject the now-non-zero seed.
+- **Verdict:** **expected divergence eliminated.** A residual first-stage gap on a
+  GNL plant should now be investigated as a real difference, _not_ dismissed as the
+  zeroing artifact. If you still see the old "writing zeros" warning, the conversion
+  predates this fix.
+- **Evidence/ref:** `converters/initial_conditions.py` (seeding loop),
+  `converters/anticipated.py` (block-weighted MW), `converters/thermal.py`
+  (`thermal_generation_bounds`). Verified against Cobre v0.8.0
+  `crates/cobre-io/src/validation/semantic/thermal.rs`,
+  `crates/cobre-sddp/src/setup/mod.rs`.
+
 ### End-of-study immediate-cost gap = min-outflow / min-gen violations (dispatch, not bug)
 
 - **Symptom:** per-stage immediate cost (NEWAVE `COPER` vs Cobre `immediate_cost`)

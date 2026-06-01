@@ -40,6 +40,45 @@ _SCHEMA_URL = (
 )
 
 
+def thermal_generation_bounds(nw_files: NewaveFiles) -> dict[int, tuple[float, float]]:
+    """Return ``{codigo_usina: (min_mw, max_mw)}`` static generation bounds.
+
+    These are the plant-level (non-stage-varying) bounds written to
+    ``thermals.json`` as ``generation.min_mw`` / ``generation.max_mw``, and the
+    interval Cobre's semantic validator enforces on each
+    ``past_anticipated_commitments.values_mw`` entry:
+
+    * ``max_mw = potencia_instalada * fator_capacidade_maximo / 100`` and
+    * ``min_mw = geracao_minima``,
+
+    both from ``term.dat`` month 1 (falling back to any month for plants absent
+    from month 1, with ``min_mw = 0``). Plants absent from ``term.dat`` map to
+    ``(0.0, 0.0)``.
+    """
+    term = Term.read(str(nw_files.term))
+    term_df = term.usinas
+    bounds: dict[int, tuple[float, float]] = {}
+    if term_df is None:
+        return bounds
+
+    month1 = term_df[term_df["mes"] == 1]
+    for _, row in month1.iterrows():
+        code = int(row["codigo_usina"])
+        cap = float(row["potencia_instalada"])
+        max_factor = float(row["fator_capacidade_maximo"])
+        bounds[code] = (float(row["geracao_minima"]), cap * max_factor / 100.0)
+
+    # Plants present in term.dat but not in month 1: use any row, min_mw = 0.
+    for _, row in term_df.iterrows():
+        code = int(row["codigo_usina"])
+        if code not in bounds:
+            cap = float(row["potencia_instalada"])
+            max_factor = float(row["fator_capacidade_maximo"])
+            bounds[code] = (0.0, cap * max_factor / 100.0)
+
+    return bounds
+
+
 def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE thermal plant data to a Cobre ``thermals.json`` dict.
 
@@ -56,11 +95,9 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     """
     conft = Conft.read(str(nw_files.conft))
     clast = Clast.read(str(nw_files.clast))
-    term = Term.read(str(nw_files.term))
 
     conft_df = conft.usinas
     clast_df = clast.usinas
-    term_df = term.usinas
 
     # Anticipated dispatch (NEWAVE GNL) — gated by dger.despacho_antecipado_gnl.
     # Returns an empty dict when the flag is off, so non-GNL cases incur
@@ -74,33 +111,9 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         for _, row in first_year.iterrows():
             cost_map[int(row["codigo_usina"])] = float(row["valor"])
 
-    # Build term lookup: codigo_usina -> (capacity, max_factor, min_gen_month1).
-    term_map: dict[int, dict[str, float]] = {}
-    if term_df is not None:
-        # Use the first month's geracao_minima (mes == 1).
-        month1 = term_df[term_df["mes"] == 1]
-        for _, row in month1.iterrows():
-            code = int(row["codigo_usina"])
-            cap = float(row["potencia_instalada"])
-            max_factor = float(row["fator_capacidade_maximo"])
-            gen_min = float(row["geracao_minima"])
-            term_map[code] = {
-                "capacity": cap,
-                "max_factor": max_factor,
-                "gen_min": gen_min,
-            }
-
-        # For plants that appear in term but not in month1, use any row.
-        for _, row in term_df.iterrows():
-            code = int(row["codigo_usina"])
-            if code not in term_map:
-                cap = float(row["potencia_instalada"])
-                max_factor = float(row["fator_capacidade_maximo"])
-                term_map[code] = {
-                    "capacity": cap,
-                    "max_factor": max_factor,
-                    "gen_min": 0.0,
-                }
+    # Static (min_mw, max_mw) per plant — single-sourced so the anticipated
+    # commitment seeding clamps against the very bounds written here.
+    gen_bounds = thermal_generation_bounds(nw_files)
 
     thermals: list[dict] = []
     for _, row in conft_df.iterrows():
@@ -110,14 +123,7 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
 
         bus_id = id_map.bus_id(submercado)
 
-        term_info = term_map.get(
-            newave_code, {"capacity": 0.0, "max_factor": 1.0, "gen_min": 0.0}
-        )
-        capacity = term_info["capacity"]
-        max_factor = term_info["max_factor"]
-        gen_min = term_info["gen_min"]
-
-        max_mw = capacity * max_factor / 100.0
+        gen_min, max_mw = gen_bounds.get(newave_code, (0.0, 0.0))
         cost = cost_map.get(newave_code, 0.0)
 
         anticipated = anticipated_by_code.get(newave_code)

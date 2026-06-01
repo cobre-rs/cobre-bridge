@@ -25,7 +25,9 @@ dev = [
     "ruff",
 ]
 validation = [
-    "cobre-python>=0.6.1",
+    # >=0.7.0: anticipated-thermal pre-horizon seeding (non-zero
+    # past_anticipated_commitments.values_mw honoured by the LP fishing equality).
+    "cobre-python>=0.7.0",
 ]
 
 [project.scripts]

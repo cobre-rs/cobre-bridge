@@ -36,16 +36,17 @@ where ``f_b`` is the block fraction at the delivery stage (from
 ``patamar.dat``).  This preserves the total committed MWh exactly while
 respecting the cobre LP's constant-MW-per-stage convention.
 
-**Current cobre limitation.**  At write time
-(``cobre`` feat/anticipated-thermals), the semantic validator
-rejects any non-zero ``values_mw`` entry because the LP's
-fishing-constraint activation predicate is FALSE at every stage
-before the first matured delivery, and the ring-buffer shift
-overwrites slot 0 with the LP's own decision before any constraint
-reads a seeded value.  ``convert_initial_conditions`` therefore emits
-zeros and emits a WARNING naming the lost MW values.  This module
-keeps returning the *true* block-weighted MWs so the warning can be
-informative; the policy lives at the conversion site, not here.
+**Cobre seeding (>= 0.7.0).**  Cobre honours non-zero pre-horizon
+seeds: the always-active anticipated "fishing" equality pins
+generation to the committed MW at each delivery stage (``slot 0`` may
+hold a non-zero seed at stage 0), so passing the true committed MW
+through reproduces NEWAVE's pre-commitment.  The semantic validator
+only rejects a committed value outside the plant's static generation
+bounds ``[min_mw, max_mw]``.  ``convert_initial_conditions`` therefore
+writes these block-weighted MWs directly, clamping into the bounds (with
+a warning) on the rare out-of-range value; this module just returns the
+*true* block-weighted MWs — the bounds policy lives at the conversion
+site, not here.
 """
 
 from __future__ import annotations

@@ -7,6 +7,7 @@ the logic exercised by each converter.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -4258,6 +4259,159 @@ def _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path, pct_b: float = 75.
     mock_confhd = MagicMock()
     mock_confhd.usinas = df
     mock_confhd_cls.read.return_value = mock_confhd
+
+
+class TestThermalGenerationBounds:
+    """``thermal_generation_bounds`` returns the static ``[min_mw, max_mw]``."""
+
+    @patch("cobre_bridge.converters.thermal.Term")
+    def test_bounds_from_term_month1(self, mock_term_cls, tmp_path) -> None:
+        from cobre_bridge.converters.thermal import thermal_generation_bounds
+
+        mock_term = MagicMock()
+        mock_term.usinas = _make_term_df()
+        mock_term_cls.read.return_value = mock_term
+
+        bounds = thermal_generation_bounds(_make_nw_files(tmp_path))
+        # max_mw = potencia_instalada * fator_capacidade_maximo / 100;
+        # min_mw = geracao_minima.
+        assert bounds[10] == pytest.approx((10.0, 90.0))
+        assert bounds[20] == pytest.approx((0.0, 200.0))
+        assert bounds[30] == pytest.approx((5.0, 40.0))
+
+    @patch("cobre_bridge.converters.thermal.Term")
+    def test_no_usinas_returns_empty(self, mock_term_cls, tmp_path) -> None:
+        from cobre_bridge.converters.thermal import thermal_generation_bounds
+
+        mock_term = MagicMock()
+        mock_term.usinas = None
+        mock_term_cls.read.return_value = mock_term
+
+        assert thermal_generation_bounds(_make_nw_files(tmp_path)) == {}
+
+
+class TestAnticipatedCommitmentSeeding:
+    """``convert_initial_conditions`` writes real adterm MW, clamped to bounds.
+
+    Cobre (>= 0.7.0) honours non-zero pre-horizon seeds, so the committed MW is
+    passed through (no longer zeroed); only out-of-bounds values are clamped.
+    """
+
+    def _id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(
+            subsystem_ids=[1],
+            hydro_codes=[1, 2],
+            thermal_codes=[86],
+        )
+
+    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
+    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch("cobre_bridge.converters.initial_conditions.Confhd")
+    @patch("cobre_bridge.converters.initial_conditions.Hidr")
+    def test_in_range_values_pass_through(
+        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+    ) -> None:
+        from cobre_bridge.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+        mock_read.return_value = {
+            86: AnticipatedDispatch(lead_stages=2, values_mw=[204.5647, 0.0])
+        }
+        mock_bounds.return_value = {86: (0.0, 481.27)}
+
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+        ):
+            result = convert_initial_conditions(
+                _make_nw_files(tmp_path), self._id_map()
+            )
+
+        assert result["past_anticipated_commitments"] == [
+            {"thermal_id": 0, "values_mw": [204.5647, 0.0]}
+        ]
+        assert "clamping" not in caplog.text
+
+    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
+    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch("cobre_bridge.converters.initial_conditions.Confhd")
+    @patch("cobre_bridge.converters.initial_conditions.Hidr")
+    def test_out_of_range_values_clamped_and_warned(
+        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+    ) -> None:
+        from cobre_bridge.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+        # 600 > max 481.27 -> clamp to 481.27; -5 < min 0 -> clamp to 0.
+        mock_read.return_value = {
+            86: AnticipatedDispatch(lead_stages=2, values_mw=[600.0, -5.0])
+        }
+        mock_bounds.return_value = {86: (0.0, 481.27)}
+
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+        ):
+            result = convert_initial_conditions(
+                _make_nw_files(tmp_path), self._id_map()
+            )
+
+        commitments = result["past_anticipated_commitments"]
+        assert commitments[0]["values_mw"] == pytest.approx([481.27, 0.0])
+        assert "code=86" in caplog.text
+        assert "clamping" in caplog.text
+
+    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
+    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch("cobre_bridge.converters.initial_conditions.Confhd")
+    @patch("cobre_bridge.converters.initial_conditions.Hidr")
+    def test_code_absent_from_id_map_skipped(
+        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+    ) -> None:
+        from cobre_bridge.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+        mock_read.return_value = {
+            999: AnticipatedDispatch(lead_stages=1, values_mw=[100.0])
+        }
+        mock_bounds.return_value = {999: (0.0, 500.0)}
+
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+        ):
+            result = convert_initial_conditions(
+                _make_nw_files(tmp_path), self._id_map()
+            )
+
+        # Unknown thermal -> skipped, so no commitments key is emitted.
+        assert "past_anticipated_commitments" not in result
+        assert "absent from" in caplog.text
+
+    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
+    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch("cobre_bridge.converters.initial_conditions.Confhd")
+    @patch("cobre_bridge.converters.initial_conditions.Hidr")
+    def test_non_gnl_case_skips_bounds_computation(
+        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path
+    ) -> None:
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+        mock_read.return_value = {}
+
+        result = convert_initial_conditions(_make_nw_files(tmp_path), self._id_map())
+
+        assert "past_anticipated_commitments" not in result
+        mock_bounds.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
