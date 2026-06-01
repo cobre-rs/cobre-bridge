@@ -14,6 +14,11 @@ from pathlib import Path
 
 import polars as pl
 
+from cobre_bridge.cobre_io import (
+    productivity_from_energy_parquet,
+    productivity_from_production_models,
+)
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -1501,86 +1506,6 @@ def _resolve_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
     return None
 
 
-def _productivity_from_energy_parquet(case_dir: Path) -> dict[int, float]:
-    """Return ``{hydro_id: ρ_eq}`` from ``hydro_energy_productivity.parquet``.
-
-    Prefers the per-hydro NULL-stage_id row as a "default" value; falls back to
-    the productivity at the smallest stage_id when no default row exists. This
-    is the new cobre productivity-resolution-rules contract: the parquet is the
-    authoritative source for non-FPHA ρ_eq.
-    """
-    parquet_path = case_dir / "system" / "hydro_energy_productivity.parquet"
-    if not parquet_path.exists():
-        return {}
-    try:
-        import pyarrow.parquet as pq
-
-        table = pq.read_table(parquet_path)
-    except (OSError, ImportError):
-        _LOG.warning("Failed to read %s", parquet_path)
-        return {}
-
-    cols = table.column_names
-    if "hydro_id" not in cols or "equivalent_productivity_mw_per_m3s" not in cols:
-        return {}
-    hydro_ids = table["hydro_id"].to_pylist()
-    stage_ids = (
-        table["stage_id"].to_pylist() if "stage_id" in cols else [None] * len(hydro_ids)
-    )
-    values = table["equivalent_productivity_mw_per_m3s"].to_pylist()
-
-    # First pass: take NULL-stage_id rows (per-hydro defaults).
-    result: dict[int, float] = {}
-    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
-        if sid is None and v is not None and hid not in result:
-            result[int(hid)] = float(v)
-
-    # Second pass: for hydros without a default row, fall back to the smallest
-    # stage_id row's value (best-effort representative).
-    by_hydro_min_stage: dict[int, tuple[int, float]] = {}
-    for hid, sid, v in zip(hydro_ids, stage_ids, values, strict=True):
-        if sid is None or v is None:
-            continue
-        hid_i = int(hid)
-        if hid_i in result:
-            continue
-        cur = by_hydro_min_stage.get(hid_i)
-        if cur is None or sid < cur[0]:
-            by_hydro_min_stage[hid_i] = (sid, float(v))
-    for hid, (_sid, v) in by_hydro_min_stage.items():
-        result[hid] = v
-    return result
-
-
-def _productivity_from_production_models(case_dir: Path) -> dict[int, float]:
-    """Legacy fallback: read productivity from ``hydro_production_models.json``.
-
-    Pre-modernization cobre-bridge cases emit ``productivity_mw_per_m3s`` in the
-    JSON stage_range entries; this helper preserves dashboard/compare support
-    for those older outputs. New cases use
-    :func:`_productivity_from_energy_parquet` instead.
-    """
-    pm_path = case_dir / "system" / "hydro_production_models.json"
-    if not pm_path.exists():
-        return {}
-    try:
-        with pm_path.open() as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        _LOG.warning("Failed to parse %s", pm_path)
-        return {}
-    result: dict[int, float] = {}
-    for model in data.get("production_models", []):
-        hydro_id = int(model.get("hydro_id"))
-        ranges = model.get("stage_ranges") or []
-        for entry in ranges:
-            prod = entry.get("productivity_mw_per_m3s")
-            if prod is not None:
-                result[hydro_id] = float(prod)
-                break
-    return result
-
-
 def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     """Read hydro metadata from Cobre system JSON files.
 
@@ -1606,8 +1531,8 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         return {}
 
     case_dir = hydros_path.parent.parent
-    energy_productivity = _productivity_from_energy_parquet(case_dir)
-    pm_productivity = _productivity_from_production_models(case_dir)
+    energy_productivity = productivity_from_energy_parquet(case_dir)
+    pm_productivity = productivity_from_production_models(case_dir)
 
     result: dict[int, dict] = {}
     for hydro in data.get("hydros", []):
