@@ -9,6 +9,7 @@ from cobre_bridge.productivity import (
     compute_productivity,
     equivalent_productivity,
     integrated_productivity,
+    stored_energy_productivity,
 )
 
 
@@ -54,7 +55,7 @@ def test_constraints_and_fict_cascade_import_public_names() -> None:
     import cobre_bridge.converters.fict_cascade as fc
 
     assert c.compute_productivity is compute_productivity
-    assert c.integrated_productivity is integrated_productivity
+    assert c.stored_energy_productivity is stored_energy_productivity
     assert fc.compute_productivity is compute_productivity
 
 

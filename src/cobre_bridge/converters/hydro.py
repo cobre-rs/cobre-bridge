@@ -33,6 +33,7 @@ from cobre_bridge.productivity import (
     compute_productivity,
     equivalent_productivity,
     integrated_productivity,
+    stored_energy_productivity,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ _LOG = logging.getLogger(__name__)
 _compute_productivity = compute_productivity
 _equivalent_productivity = equivalent_productivity
 _compute_integrated_productivity = integrated_productivity
+_stored_energy_productivity = stored_energy_productivity
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
@@ -1141,7 +1143,7 @@ def _per_stage_integrated_productivities(
     return [
         base_integrated
         if cfuga is None and cmont is None
-        else _compute_integrated_productivity(
+        else _stored_energy_productivity(
             hreg, canal_fuga_override=cfuga, cmont_override=cmont
         )
         for cfuga, cmont in drops
@@ -1195,7 +1197,7 @@ def compute_per_stage_own_integrated_productivities(
         if plant_code not in cadastro.index:
             continue
         hreg = cadastro.loc[plant_code]
-        base = _compute_integrated_productivity(hreg)
+        base = _stored_energy_productivity(hreg)
         resolution = fict_cascade.get(plant_code)
         fict_extra = resolution.fict_rho_sum if resolution is not None else 0.0
         overrides = plants_with_drop_overrides.get(plant_code, [])

@@ -254,3 +254,40 @@ def integrated_productivity(
         adjusted_drop = net_drop
 
     return float(hreg["produtibilidade_especifica"]) * adjusted_drop
+
+
+def stored_energy_productivity(
+    hreg: pd.Series,
+    *,
+    canal_fuga_override: float | None = None,
+    cmont_override: float | None = None,
+) -> float:
+    """NEWAVE's ``produtibilidade_equivalente_volmin_volmax`` (stored-energy ρ).
+
+    The upstream-level reference depends on the regulation type, matching the
+    values pmo.dat prints in its ``produtibilidades_equivalentes`` table:
+
+    - **monthly-regulating reservoirs** (``tipo_regulacao == "M"``) use the
+      volume-integrated mean head over ``[vmin, vmax]``
+      (:func:`integrated_productivity`);
+    - **run-of-river / special-regime plants** (``"D"`` / ``"S"``) use the
+      **point** productivity at ``volume_referencia``
+      (:func:`compute_productivity`) — NEWAVE does *not* integrate the operative
+      range for them, so the volmin→volmax integral over- or under-shoots by a
+      few percent on plants with head swing.
+
+    CFUGA / CMONT MODIF overrides are threaded through to whichever primitive
+    applies (a CMONT override pins the upstream level in both, collapsing the
+    integral/point distinction to ``cmont − canal_fuga``).
+    """
+    if str(hreg["tipo_regulacao"]).strip() == "M":
+        return integrated_productivity(
+            hreg,
+            canal_fuga_override=canal_fuga_override,
+            cmont_override=cmont_override,
+        )
+    return compute_productivity(
+        hreg,
+        canal_fuga_override=canal_fuga_override,
+        cmont_override=cmont_override,
+    )

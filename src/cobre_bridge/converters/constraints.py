@@ -33,7 +33,7 @@ from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.plants import active_hydros
-from cobre_bridge.productivity import compute_productivity, integrated_productivity
+from cobre_bridge.productivity import compute_productivity, stored_energy_productivity
 
 _LOG = logging.getLogger(__name__)
 
@@ -113,15 +113,17 @@ def _compute_accumulated_integrated_productivities(
     cadastro: pd.DataFrame,
     confhd_df: pd.DataFrame,
 ) -> dict[int, float]:
-    """Cascade-sum of per-plant *integrated* productivity.
+    """Cascade-sum of per-plant stored-energy (EARM) productivity.
 
     Companion to :func:`compute_accumulated_productivities` but uses the
-    EARM-flavored integrated ρ (volmin-to-volmax average of
-    ρ_esp·(h(V)−cf−perdas)) instead of the gen=ρ·Q point value at v_65.
-    Returns the cascade-summed values keyed by plant code.  Used as the
-    base-case static check in :func:`convert_vminop_constraints` — the
-    per-stage version is computed separately and accounts for CFUGA/CMONT
-    overrides.
+    EARM-flavored ρ that matches pmo.dat's
+    ``produtibilidade_equivalente_volmin_volmax`` — the volmin→volmax integral
+    for monthly reservoirs and the point at ``volume_referencia`` for
+    run-of-river / special plants (see :func:`stored_energy_productivity`) —
+    instead of the gen=ρ·Q point value at v_65.  Returns the cascade-summed
+    values keyed by plant code.  Used as the base-case static check in
+    :func:`convert_vminop_constraints` — the per-stage version is computed
+    separately and accounts for CFUGA/CMONT overrides.
     """
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
@@ -133,7 +135,7 @@ def _compute_accumulated_integrated_productivities(
     own_prod: dict[int, float] = {}
     for code, resolution in resolutions.items():
         if code in cadastro.index:
-            own_prod[code] = integrated_productivity(cadastro.loc[code])
+            own_prod[code] = stored_energy_productivity(cadastro.loc[code])
         else:
             own_prod[code] = 0.0
         own_prod[code] += resolution.fict_rho_sum

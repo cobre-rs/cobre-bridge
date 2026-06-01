@@ -214,17 +214,36 @@ class TestAccumulatedIntegratedProductivities:
     """Cascade sum of integrated ρ — what VminOP uses for the rho_acum_h{id}
     override and the per-stage RHS."""
 
-    def test_cascade_uses_integrated_not_point(self) -> None:
+    def test_cascade_uses_integral_for_monthly_reservoir(self) -> None:
+        # Monthly-regulating ('M') reservoirs use the volmin→volmax integral
+        # (NEWAVE's produtibilidade_equivalente_volmin_volmax), NOT h at
+        # volume_referencia.
         cadastro = _make_cadastro()
+        cadastro["tipo_regulacao"] = "M"
         confhd_df = _make_confhd_df()
         acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
-        # Each plant's integrated ρ uses the average h, NOT h at volume_referencia.
         # PLANT_A: 0.01 · (300 + 0.1·550 − 200) = 0.01 · 155 = 1.55
-        # PLANT_B: 0.02 · (400 + 0.05·(200+2000)/2 − 300) = 0.02 · (400+55−300) = 3.1
-        # PLANT_C: 0.03 · (500 + 0.02·1650 − 400) = 0.03 · 133 = 3.99
+        # PLANT_B: 0.02 · (400 + 0.05·(200+2000)/2 − 300) = 0.02 · 155 = 3.1
+        # PLANT_C: 0.03 · (500 + 0.02·(300+3000)/2 − 400) = 0.03 · 133 = 3.99
         own_a = 0.01 * (300.0 + 0.1 * 550.0 - 200.0)
         own_b = 0.02 * (400.0 + 0.05 * (200.0 + 2000.0) / 2.0 - 300.0)
         own_c = 0.03 * (500.0 + 0.02 * (300.0 + 3000.0) / 2.0 - 400.0)
+        assert acc[3] == pytest.approx(own_c)
+        assert acc[2] == pytest.approx(own_b + own_c)
+        assert acc[1] == pytest.approx(own_a + own_b + own_c)
+
+    def test_cascade_uses_point_at_vref_for_run_of_river(self) -> None:
+        # Run-of-river ('D') plants use the point productivity at
+        # volume_referencia, matching NEWAVE's EARM convention for them.
+        cadastro = _make_cadastro()  # all tipo_regulacao == "D"
+        confhd_df = _make_confhd_df()
+        acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+        # PLANT_A @vref=500: 0.01 · (300 + 0.1·500 − 200) = 0.01 · 150 = 1.5
+        # PLANT_B @vref=1000: 0.02 · (400 + 0.05·1000 − 300) = 0.02 · 150 = 3.0
+        # PLANT_C @vref=1500: 0.03 · (500 + 0.02·1500 − 400) = 0.03 · 130 = 3.9
+        own_a = 0.01 * (300.0 + 0.1 * 500.0 - 200.0)
+        own_b = 0.02 * (400.0 + 0.05 * 1000.0 - 300.0)
+        own_c = 0.03 * (500.0 + 0.02 * 1500.0 - 400.0)
         assert acc[3] == pytest.approx(own_c)
         assert acc[2] == pytest.approx(own_b + own_c)
         assert acc[1] == pytest.approx(own_a + own_b + own_c)
