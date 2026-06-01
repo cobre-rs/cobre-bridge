@@ -1452,18 +1452,20 @@ def chart_lp_solve_time_multi_iter(solver_train: pd.DataFrame) -> str:
 def chart_cuts_vs_solve_time_scatter(
     solver_train: pd.DataFrame, cut_selection: pd.DataFrame
 ) -> str:
-    """Scatter of active cuts (x) vs avg solve ms/LP (y), coloured by stage.
+    """Scatter of active cuts (x) vs median solve ms/LP (y), coloured by stage.
 
-    One point per (iteration, stage, opening, worker) backward sample.
-    Reveals the empirical cost-of-cut curve: cuts → LP size → solve time.
+    One point per **(iteration, stage)** group, not per raw backward sample.
+    Within a group the cut count (``cuts_active_after``) and the stage are
+    constant — only the solve time varies across openings/workers — so each
+    point carries the **median** ms/LP plus an asymmetric p25–p75 error bar
+    for spread. This collapses the backward-sample cloud (production runs reach
+    ~12M rows) to a few thousand points, keeping the empirical cost-of-cut
+    curve and its per-stage slope while making the chart both small enough to
+    embed and light enough for the browser to render.
+
     Stages with many cuts that DON'T solve slowly (lower-left of their hue
     band) are well-warm-started; stages where cuts translate directly into
     LP time (steep positive slope) are the cut-management targets.
-
-    The serialised payload uses ``customdata = [iteration]`` per point and
-    a static ``hovertemplate`` instead of per-point formatted strings —
-    cuts ~80% of the previous chart-data bytes for long runs by avoiding
-    one ~50-char string per sample.
     """
     if solver_train.empty or cut_selection.empty:
         return "<p>Requires both solver and cut selection data.</p>"
@@ -1482,12 +1484,25 @@ def chart_cuts_vs_solve_time_scatter(
     if merged.empty:
         return "<p>No overlapping (iteration, stage) data.</p>"
 
-    # Round y to 2 decimals: solve-time visualisation does not need
-    # sub-10-µs precision and rounding compresses the JSON payload further.
-    y_vals = merged["ms_per_lp"].round(2).tolist()
-    x_vals = merged["cuts_active_after"].astype(int).tolist()
-    stage_vals = merged["stage"].astype(int).tolist()
-    iter_vals = merged["iteration"].astype(int).tolist()
+    # Collapse each (iteration, stage) group to a median + p25/p75 spread.
+    # ``cuts_active_after`` and ``stage`` are constant within a group, so the
+    # only aggregation is over the solve-time distribution — turning millions
+    # of raw markers into one point per group.
+    summary = merged.groupby(["iteration", "stage"], as_index=False, sort=True).agg(
+        cuts=("cuts_active_after", "first"),
+        med=("ms_per_lp", "median"),
+        q1=("ms_per_lp", lambda s: s.quantile(0.25)),
+        q3=("ms_per_lp", lambda s: s.quantile(0.75)),
+    )
+
+    # Round to 2 decimals: solve-time visualisation does not need sub-10-µs
+    # precision and rounding compresses the JSON payload.
+    x_vals = summary["cuts"].astype(int).tolist()
+    y_vals = summary["med"].round(2).tolist()
+    stage_vals = summary["stage"].astype(int).tolist()
+    iter_vals = summary["iteration"].astype(int).tolist()
+    err_plus = (summary["q3"] - summary["med"]).round(2).clip(lower=0).tolist()
+    err_minus = (summary["med"] - summary["q1"]).round(2).clip(lower=0).tolist()
 
     fig = go.Figure(
         go.Scatter(
@@ -1495,25 +1510,34 @@ def chart_cuts_vs_solve_time_scatter(
             y=y_vals,
             mode="markers",
             marker={
-                "size": 5,
+                "size": 6,
                 "color": stage_vals,
                 "colorscale": "Viridis",
                 "colorbar": {"title": "Stage"},
-                "opacity": 0.7,
+                "opacity": 0.8,
                 "line": {"width": 0},
+            },
+            error_y={
+                "type": "data",
+                "symmetric": False,
+                "array": err_plus,
+                "arrayminus": err_minus,
+                "thickness": 0.6,
+                "width": 0,
+                "color": "rgba(100,116,139,0.3)",
             },
             customdata=iter_vals,
             hovertemplate=(
                 "iter %{customdata}, stage %{marker.color}<br>"
-                "%{x} cuts → %{y:.2f} ms/LP"
+                "%{x} cuts → %{y:.2f} ms/LP (median)"
                 "<extra></extra>"
             ),
         )
     )
     fig.update_layout(
-        title="Active Cuts vs LP Solve Time — one point per (iteration, stage)",
+        title="Active Cuts vs LP Solve Time — median per (iteration, stage)",
         xaxis_title="Active cuts at stage",
-        yaxis_title="Avg solve ms / LP",
+        yaxis_title="Median solve ms / LP",
         margin=_MARGIN,
         height=440,
         showlegend=False,

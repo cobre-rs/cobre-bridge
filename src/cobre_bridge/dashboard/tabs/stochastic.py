@@ -1136,8 +1136,13 @@ def _render_section_d(data: DashboardData) -> str:
         mat: np.ndarray,
         idx: list[int],
     ) -> list[list[float]]:
-        """Reorder a matrix by the given index permutation."""
-        return mat[np.ix_(idx, idx)].tolist()
+        """Reorder a matrix by the given index permutation.
+
+        Correlations are rounded to 4 decimals: the heatmap hover shows ``.3f``
+        and the colour scale resolves far less, so full float64 reprs (~18
+        chars each) are pure payload bloat — rounding cuts this block ~3x.
+        """
+        return np.round(mat[np.ix_(idx, idx)], 4).tolist()
 
     # Build per-season synthetic matrices from correlation.json profiles
     synthetic_by_season: dict[str, list[list[float]]] = {}
@@ -1185,8 +1190,11 @@ def _render_section_d(data: DashboardData) -> str:
                 index=sorted_ids, columns=sorted_ids
             ).values.copy()
             np.fill_diagonal(corr_arr, 1.0)
-            historical_by_season[month_names[month_idx]] = np.nan_to_num(
-                corr_arr, nan=0.0
+            # Round to 4 decimals to match the synthetic matrices (see
+            # ``_reorder_matrix``) — keeps the heatmap's .3f hover exact while
+            # avoiding full float64 reprs in the embedded payload.
+            historical_by_season[month_names[month_idx]] = np.round(
+                np.nan_to_num(corr_arr, nan=0.0), 4
             ).tolist()
 
     # Determine available seasons
