@@ -135,7 +135,7 @@ def _compute_per_stage_sin_productivities(
         rho_avg = hydro_conv.compute_per_stage_prodt_sin_mean(case)
         if not rho_avg:
             return None
-        max_prodtacum = constraints_conv.compute_max_prodtacum_sin(case.files)
+        max_prodtacum = constraints_conv.compute_max_prodtacum_sin(case)
         if max_prodtacum is None:
             return None
         rho_max_acum = [max_prodtacum] * len(rho_avg)
@@ -274,7 +274,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # PRODT, drifting per CFUGA/CMONT config). Both come from NEWAVE inputs and
     # return None when files are absent (mocked-pipeline tests), so convert_penalties
     # falls back to its own legacy approximation.
-    max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(nw_files)
+    max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(case)
     prod_media_sin = _compute_prod_media_sin_safe(case)
     penalties_dict = network_conv.convert_penalties(
         case,
@@ -319,7 +319,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     constraint_ids = _ConstraintIdAllocator()
 
     logger.debug("Converting VminOP constraints")
-    vminop_result = constraints_conv.convert_vminop_constraints(nw_files, id_map)
+    vminop_result = constraints_conv.convert_vminop_constraints(case, id_map)
     vminop_referenced_ids: list[int] = []
     rho_acum_overrides: dict[int, list[float]] = {}
     if vminop_result is not None:
@@ -331,14 +331,14 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
 
     logger.debug("Converting electric constraints")
     electric_result = constraints_conv.convert_electric_constraints(
-        nw_files, id_map, start_id=constraint_ids.next_id
+        case, id_map, start_id=constraint_ids.next_id
     )
     if electric_result is not None:
         constraint_ids.advance(len(electric_result.constraints))
 
     logger.debug("Converting AGRINT group constraints")
     agrint_result = constraints_conv.convert_agrint_constraints(
-        nw_files, id_map, start_id=constraint_ids.next_id
+        case, id_map, start_id=constraint_ids.next_id
     )
 
     logger.debug("Converting load factors")

@@ -2119,22 +2119,16 @@ class TestProductivitySinMeans:
                 },
             ]
         )
-        nw = _make_nw_files(tmp_path)
         hidr_obj = MagicMock()
         hidr_obj.cadastro = cadastro
         confhd_obj = MagicMock()
         confhd_obj.usinas = confhd
-        with (
-            patch("cobre_bridge.converters.constraints.Hidr") as mh,
-            patch("cobre_bridge.converters.constraints.Confhd") as mc,
-            patch(
-                "cobre_bridge.converters.constraints._apply_permanent_overrides",
-                new=lambda cadastro, nw_files: cadastro,
-            ),
+        case = make_case(tmp_path, hidr=hidr_obj, confhd=confhd_obj)
+        with patch(
+            "cobre_bridge.converters.constraints._apply_permanent_overrides",
+            new=lambda cadastro, case: cadastro,
         ):
-            mh.read.return_value = hidr_obj
-            mc.read.return_value = confhd_obj
-            result = compute_max_prodtacum_sin(nw)
+            result = compute_max_prodtacum_sin(case)
 
         def own(code: int) -> float:
             hreg = cadastro.loc[code]
@@ -2148,10 +2142,10 @@ class TestProductivitySinMeans:
         """Unreadable NEWAVE inputs → None (soft fallback for mocked pipelines)."""
         from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
 
-        nw = _make_nw_files(tmp_path)
-        with patch("cobre_bridge.converters.constraints.Hidr") as mh:
+        case = make_case(tmp_path)
+        with patch("cobre_bridge.case.Hidr") as mh:
             mh.read.side_effect = OSError("no file")
-            assert compute_max_prodtacum_sin(nw) is None
+            assert compute_max_prodtacum_sin(case) is None
 
 
 class TestConvertProductionModels:

@@ -22,7 +22,6 @@ from typing import Any, NamedTuple
 
 import pandas as pd
 import pyarrow as pa
-from inewave.newave import Confhd, Curva, Dger, Hidr, Penalid, Ree, Sistema
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro import (
@@ -32,7 +31,6 @@ from cobre_bridge.converters.hydro import (
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.plants import active_hydros
 from cobre_bridge.productivity import compute_productivity, stored_energy_productivity
 
@@ -217,7 +215,7 @@ def _cascade_sum(
     return result
 
 
-def compute_max_prodtacum_sin(nw_files: NewaveFiles) -> float | None:
+def compute_max_prodtacum_sin(case: NewaveCase) -> float | None:
     """Return ``MAX_PRODTACUM_SIN`` = max accumulated productivity at altura máxima.
 
     NEWAVE converts the DESVIO ("outros usos da água" / water-withdrawal) and
@@ -236,9 +234,8 @@ def compute_max_prodtacum_sin(nw_files: NewaveFiles) -> float | None:
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
     try:
-        hidr = Hidr.read(str(nw_files.hidr))
-        cadastro = _apply_permanent_overrides(hidr.cadastro, NewaveCase(files=nw_files))
-        confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+        cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
+        confhd_df = case.confhd.usinas
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         return None
 
@@ -369,7 +366,7 @@ def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
 
 
 def convert_vminop_constraints(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> VminopResult | None:
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
@@ -388,8 +385,8 @@ def convert_vminop_constraints(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID mapping.
 
@@ -402,7 +399,7 @@ def convert_vminop_constraints(
         integrated ρ_acum and is fed into ``build_scalar_parameters`` so
         the LP coefficient at ``@rho_acum_h{id}`` matches the RHS bound.
     """
-    if nw_files.curva is None:
+    if case.curva is None:
         _LOG.debug("curva.dat not found; skipping VminOP constraints.")
         return None
 
@@ -411,7 +408,7 @@ def convert_vminop_constraints(
     # Mirror that here so the converted cobre case matches NEWAVE's behavior.
     # When the field is absent (None), preserve historical behavior and emit
     # the constraints — only an explicit 0 disables them.
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
     if dger.curva_aversao == 0:
         _LOG.info(
             "dger.dat curva_aversao=0; NEWAVE disables the risk-aversion"
@@ -419,7 +416,7 @@ def convert_vminop_constraints(
         )
         return None
 
-    curva = Curva.read(str(nw_files.curva))
+    curva = case.curva
     curva_df = curva.curva_seguranca
     if curva_df is None or curva_df.empty:
         return None
@@ -429,12 +426,12 @@ def convert_vminop_constraints(
     _warn_if_fixed_penalization(curva.configuracoes_penalizacao)
 
     penalty_df = curva.custos_penalidades
-    confhd = Confhd.read(str(nw_files.confhd))
-    hidr = Hidr.read(str(nw_files.hidr))
-    ree_file = Ree.read(str(nw_files.ree))
+    confhd = case.confhd
+    hidr = case.hidr
+    ree_file = case.ree
 
     cadastro = hidr.cadastro
-    cadastro = _apply_permanent_overrides(cadastro, NewaveCase(files=nw_files))
+    cadastro = _apply_permanent_overrides(cadastro, case)
     confhd_df = confhd.usinas
 
     # Study horizon parameters
@@ -454,9 +451,7 @@ def convert_vminop_constraints(
     # LHS would use cobre's default point ρ_acum and silently drift from
     # the RHS by ~10% on plants with non-trivial head swing.
     acc_prod = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
-    per_stage_own_int = compute_per_stage_own_integrated_productivities(
-        NewaveCase(files=nw_files)
-    )
+    per_stage_own_int = compute_per_stage_own_integrated_productivities(case)
     per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own_int)
 
     # Map hydros to REEs
@@ -778,7 +773,7 @@ def _parse_restricao_eletrica(
     return expressions, horizons, bounds
 
 
-def _build_line_id_map(nw_files: NewaveFiles) -> dict[tuple[int, int], int]:
+def _build_line_id_map(case: NewaveCase) -> dict[tuple[int, int], int]:
     """Build the canonical (src, tgt) -> line_id mapping.
 
     Replicates the exact logic from ``convert_lines`` in network.py so that
@@ -790,7 +785,7 @@ def _build_line_id_map(nw_files: NewaveFiles) -> dict[tuple[int, int], int]:
         Maps canonical (smaller_subsystem, larger_subsystem) to 0-based
         line ID.  Only pairs from ``sistema.dat`` are included.
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     limites_df = sistema.limites_intercambio
 
     if limites_df is None or limites_df.empty:
@@ -798,7 +793,7 @@ def _build_line_id_map(nw_files: NewaveFiles) -> dict[tuple[int, int], int]:
 
     from datetime import datetime as _dt
 
-    dger = Dger.read(str(nw_files.dger))
+    dger = case.dger
     study_start_dt = _dt(dger.ano_inicio_estudo, dger.mes_inicio_estudo, 1)
     first_month = limites_df[limites_df["data"] == study_start_dt]
     if first_month.empty:
@@ -935,7 +930,7 @@ _NO_INDIVIDUALIZADO_CUTOFF = 9999
 
 
 def _get_individualizado_cutoff(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     start_year: int,
     start_month: int,
 ) -> int:
@@ -953,7 +948,7 @@ def _get_individualizado_cutoff(
     is captured into :attr:`ConversionReport.warnings`).
     """
     try:
-        ree_df = Ree.read(str(nw_files.ree)).rees
+        ree_df = case.ree.rees
         if ree_df is None or ree_df.empty:
             _LOG.warning(
                 "REE.DAT has no entries; the individualizado cutoff is unknown, "
@@ -974,7 +969,7 @@ def _get_individualizado_cutoff(
 
 
 def _parse_re_dat(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     start_year: int,
     start_month: int,
     num_stages: int,
@@ -997,13 +992,11 @@ def _parse_re_dat(
     conjuntos: dict[int, list[int]] = {}
     re_dat_bounds: dict[int, dict[tuple[int, int], float]] = {}
 
-    if nw_files.re_dat is None:
+    if case.files.re_dat is None:
         return conjuntos, re_dat_bounds
 
     try:
-        from inewave.newave import Re
-
-        re_file = Re.read(str(nw_files.re_dat))
+        re_file = case.re_dat
     except Exception:  # noqa: BLE001
         _LOG.warning("Could not parse RE.DAT; skipping RE constraints.")
         return conjuntos, re_dat_bounds
@@ -1079,7 +1072,7 @@ def _parse_re_dat(
 
 
 def convert_electric_constraints(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
     start_id: int = 0,
 ) -> GenericConstraintResult | None:
@@ -1092,8 +1085,8 @@ def convert_electric_constraints(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID mapping.
     start_id:
@@ -1109,8 +1102,8 @@ def convert_electric_constraints(
         bound: DOUBLE)``.
     """
     # Check for data sources before reading DGER.
-    re_path = _find_restricao_eletrica(nw_files.directory)
-    has_re_dat = nw_files.re_dat is not None
+    re_path = _find_restricao_eletrica(case.files.directory)
+    has_re_dat = case.files.re_dat is not None
 
     if re_path is None and not has_re_dat:
         _LOG.debug("No electric constraints found; skipping.")
@@ -1125,31 +1118,29 @@ def convert_electric_constraints(
         expressions, horizons, bounds_rows = _parse_restricao_eletrica(re_path)
 
     # Study horizon.
-    from inewave.newave import Patamar as _Patamar
-
-    dger = Dger.read(str(nw_files.dger))
+    dger = case.dger
     _horizon = study_horizon(dger)
     start_month = _horizon.start_month
     start_year = _horizon.start_year
     num_anos = _horizon.num_anos
     num_stages = _horizon.total_stages
 
-    patamar = _Patamar.read(str(nw_files.patamar))
+    patamar = case.patamar
     num_patamares: int = patamar.numero_patamares or 1
 
     # Individualised period cutoff.
-    cutoff = _get_individualizado_cutoff(nw_files, start_year, start_month)
+    cutoff = _get_individualizado_cutoff(case, start_year, start_month)
 
     # Parse RE.DAT (post-individualised bounds + plant sets).
     re_conjuntos, re_dat_bounds = _parse_re_dat(
-        nw_files, start_year, start_month, num_stages, num_patamares
+        case, start_year, start_month, num_stages, num_patamares
     )
 
     if not expressions and not re_conjuntos:
         _LOG.debug("No electric constraints found; skipping.")
         return None
 
-    line_id_map = _build_line_id_map(nw_files)
+    line_id_map = _build_line_id_map(case)
 
     # Read ELETRI penalty from PENALID.DAT for slack costs.
     # NEWAVE manual v29 §3.24: ELETRI is energy-domain (R$/MWh) and applies
@@ -1159,9 +1150,9 @@ def convert_electric_constraints(
     # (10 × MAX_DEFICIT, matching NEWAVE's evaporation/FPHA-folga magnitude)
     # so RE_* constraints stay soft but very expensive to violate.
     eletri_penalty: float | None = None
-    if nw_files.penalid is not None:
+    if case.files.penalid is not None:
         try:
-            penalid = Penalid.read(str(nw_files.penalid))
+            penalid = case.penalid
             df_pen = penalid.penalidades
             if df_pen is not None and not df_pen.empty:
                 eletri = df_pen[
@@ -1177,9 +1168,7 @@ def convert_electric_constraints(
     if eletri_penalty is None:
         # Fall back to 10 × MAX_DEFICIT (NEWAVE evaporation-folga convention).
         try:
-            from inewave.newave import Sistema as _Sistema
-
-            _sis = _Sistema.read(str(nw_files.sistema))
+            _sis = case.sistema
             _def_df = _sis.custo_deficit
             if _def_df is not None and not _def_df.empty:
                 eletri_penalty = 10.0 * float(_def_df["custo"].max())
@@ -1509,7 +1498,7 @@ def _parse_agrint(
 
 
 def convert_agrint_constraints(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
     start_id: int = 0,
 ) -> GenericConstraintResult | None:
@@ -1521,8 +1510,8 @@ def convert_agrint_constraints(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID mapping (used indirectly via ``_build_line_id_map``).
     start_id:
@@ -1537,28 +1526,26 @@ def convert_agrint_constraints(
         ``(constraint_id: INT32, stage_id: INT32, block_id: INT32,
         bound: DOUBLE)``.
     """
-    if nw_files.agrint is None:
+    if case.files.agrint is None:
         _LOG.debug("agrint.dat not found; skipping AGRINT constraints.")
         return None
 
-    from inewave.newave import Patamar as _Patamar_ag
-
-    patamar_ag = _Patamar_ag.read(str(nw_files.patamar))
+    patamar_ag = case.patamar
     num_patamares_ag: int = patamar_ag.numero_patamares or 1
 
-    groups, limits = _parse_agrint(nw_files.agrint, num_patamares_ag)
+    groups, limits = _parse_agrint(case.files.agrint, num_patamares_ag)
     if not groups or not limits:
         return None
 
     # Study horizon
-    dger = Dger.read(str(nw_files.dger))
+    dger = case.dger
     _horizon = study_horizon(dger)
     start_month = _horizon.start_month
     start_year = _horizon.start_year
     study_months = _horizon.study_months
     num_stages = _horizon.total_stages
 
-    line_id_map = _build_line_id_map(nw_files)
+    line_id_map = _build_line_id_map(case)
 
     constraints: list[dict] = []
     bound_constraint_ids: list[int] = []
