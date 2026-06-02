@@ -295,18 +295,18 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     ic_dict = ic_conv.convert_initial_conditions(case, id_map)
 
     logger.debug("Extracting recent inflow lags from vazpast.dat")
-    past_inflow_lags = stochastic_conv.convert_recent_inflow_lags(nw_files, id_map)
+    past_inflow_lags = stochastic_conv.convert_recent_inflow_lags(case, id_map)
     if past_inflow_lags:
         ic_dict["past_inflows"] = past_inflow_lags
 
     logger.debug("Converting inflow stats")
-    inflow_table = stochastic_conv.convert_inflow_stats(nw_files, id_map)
+    inflow_table = stochastic_conv.convert_inflow_stats(case, id_map)
 
     logger.debug("Converting load stats")
-    load_table = stochastic_conv.convert_load_stats(nw_files, id_map)
+    load_table = stochastic_conv.convert_load_stats(case, id_map)
 
     logger.debug("Converting inflow history from vazoes.dat")
-    inflow_history_table = stochastic_conv.convert_inflow_history(nw_files, id_map)
+    inflow_history_table = stochastic_conv.convert_inflow_history(case, id_map)
 
     logger.debug("Converting water withdrawal")
     withdrawal_table = hydro_conv.convert_water_withdrawal(nw_files, id_map)
@@ -343,7 +343,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     )
 
     logger.debug("Converting load factors")
-    load_factors_dict = stochastic_conv.convert_load_factors(nw_files, id_map)
+    load_factors_dict = stochastic_conv.convert_load_factors(case, id_map)
 
     logger.debug("Converting line bounds")
     line_bounds_table = network_conv.convert_line_bounds(nw_files, id_map)

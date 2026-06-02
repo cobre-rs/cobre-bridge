@@ -16,11 +16,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from inewave.newave import Cadic, Confhd, Dger, Patamar, Sistema, Vazoes
+from inewave.newave import Cadic, Dger, Vazoes
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ _INFLOW_HISTORY_SCHEMA = pa.schema(
 
 
 def convert_recent_inflow_lags(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> list[dict]:
     """Extract 12 recent inflow lags from vazpast.dat for initial_conditions.json.
@@ -151,14 +151,12 @@ def convert_recent_inflow_lags(
 
     Returns an empty list if ``vazpast.dat`` is absent.
     """
-    from inewave.newave import Vazpast
-
-    if nw_files.vazpast is None:
+    if case.files.vazpast is None:
         logger.debug("vazpast.dat not found; no recent inflow lags.")
         return []
 
     try:
-        vazpast_obj = Vazpast.read(nw_files.vazpast)
+        vazpast_obj = case.vazpast
     except Exception:  # noqa: BLE001
         logger.warning("vazpast.dat could not be parsed; skipping recent lags.")
         return []
@@ -167,13 +165,12 @@ def convert_recent_inflow_lags(
     if df_tend is None or df_tend.empty:
         return []
 
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
     start_m = dger.mes_inicio_estudo
 
     # The vazpast "codigo_usina" column is actually the posto (gauging station),
     # same convention as vazoes.dat.  Map posto -> hydro_code -> cobre_id.
-    confhd_obj = Confhd.read(nw_files.confhd)
-    confhd_df = confhd_obj.usinas
+    confhd_df = case.confhd.usinas
     posto_to_cobre_id: dict[int, int] = {}
     for _, row in confhd_df.iterrows():
         code = int(row["codigo_usina"])
@@ -216,7 +213,7 @@ def convert_recent_inflow_lags(
 
 
 def convert_inflow_history(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> pa.Table:
     """Convert the full historical inflow series from vazoes.dat to Parquet.
@@ -229,12 +226,13 @@ def convert_inflow_history(
     pa.Table
         Columns: ``hydro_id`` (INT32), ``date`` (DATE32), ``value_m3s`` (DOUBLE).
     """
-    vazoes_obj = Vazoes.read(nw_files.vazoes)
+    # vazoes.dat is large and read only here, so it stays uncached on case.files.
+    vazoes_obj = Vazoes.read(case.files.vazoes)
     df_vazoes: pd.DataFrame | None = vazoes_obj.vazoes
     if df_vazoes is None or df_vazoes.empty:
         raise FileNotFoundError("vazoes.dat not found or empty")
 
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
     hist_start_year: int = dger.ano_inicial_historico
     study_start_year: int = dger.ano_inicio_estudo
     study_start_month: int = dger.mes_inicio_estudo
@@ -245,8 +243,7 @@ def convert_inflow_history(
     cutoff_months = (study_start_year - hist_start_year) * 12 + (study_start_month - 1)
     n_rows = min(cutoff_months, n_total_rows)
 
-    confhd_obj = Confhd.read(nw_files.confhd)
-    confhd_df = confhd_obj.usinas
+    confhd_df = case.confhd.usinas
 
     posto_to_hydro: dict[int, int] = {}
     for _, row in confhd_df.iterrows():
@@ -302,7 +299,7 @@ def convert_inflow_history(
     )
 
 
-def convert_inflow_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
+def convert_inflow_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     """Convert NEWAVE historical inflow data to Cobre inflow seasonal statistics.
 
     For each hydro plant and each study stage (calendar month), computes the
@@ -312,8 +309,8 @@ def convert_inflow_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map produced during entity conversion.  Used to resolve
         NEWAVE hydro codes to 0-based Cobre hydro IDs.
@@ -331,16 +328,15 @@ def convert_inflow_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table
     FileNotFoundError
         If ``vazoes.dat`` DataFrame is empty.
     """
-    vazoes_obj = Vazoes.read(nw_files.vazoes)
+    vazoes_obj = Vazoes.read(case.files.vazoes)
     df_vazoes: pd.DataFrame | None = vazoes_obj.vazoes
 
     if df_vazoes is None or df_vazoes.empty:
         raise FileNotFoundError("vazoes.dat not found or empty")
 
-    confhd_obj = Confhd.read(nw_files.confhd)
-    confhd_df: pd.DataFrame = confhd_obj.usinas
+    confhd_df: pd.DataFrame = case.confhd.usinas
 
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
 
     # Truncate to months before the study start (same window as inflow_history).
     hist_start_year: int = dger.ano_inicial_historico
@@ -428,7 +424,7 @@ def convert_inflow_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table
 
 
 def convert_load_factors(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> dict:
     """Convert NEWAVE patamar load factors to a Cobre ``load_factors.json`` dict.
@@ -442,8 +438,8 @@ def convert_load_factors(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map.  Used to resolve NEWAVE subsystem codes to 0-based
         Cobre bus IDs.
@@ -455,10 +451,10 @@ def convert_load_factors(
         of ``{"bus_id": int, "stage_id": int, "block_factors": [...]}``
         entries.
     """
-    patamar = Patamar.read(nw_files.patamar)
+    patamar = case.patamar
     df_carga: pd.DataFrame | None = patamar.carga_patamares
 
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
     horizon = study_horizon(dger)
     start_month = horizon.start_month
     start_year = horizon.start_year
@@ -613,7 +609,7 @@ def _parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
     return result
 
 
-def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
+def convert_load_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     """Convert NEWAVE subsystem load data to Cobre load seasonal statistics.
 
     Reads ``sistema.dat`` and converts the ``mercado_energia`` DataFrame
@@ -627,8 +623,8 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map.  Used to resolve NEWAVE subsystem codes to 0-based
         Cobre bus IDs.
@@ -640,10 +636,10 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
         ``mean_mw`` (float64), ``std_mw`` (float64).  One row per
         (bus, stage) pair.
     """
-    sistema_obj = Sistema.read(nw_files.sistema)
+    sistema_obj = case.sistema
     df_load: pd.DataFrame = sistema_obj.mercado_energia
 
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
     horizon = study_horizon(dger)
     start_month = horizon.start_month
     start_year = horizon.start_year
@@ -653,13 +649,13 @@ def convert_load_stats(nw_files: NewaveFiles, id_map: NewaveIdMap) -> pa.Table:
 
     # Load optional C_ADIC additions: {(sub_code, year_or_9999, cal_month) -> mw}.
     cadical_lookup: dict[tuple[int, int, int], float] = {}
-    if nw_files.c_adic is not None:
+    if case.files.c_adic is not None:
         try:
-            cadical_lookup = _parse_cadical(nw_files.c_adic)
+            cadical_lookup = _parse_cadical(case.files.c_adic)
             logger.debug(
                 "Loaded %d C_ADIC entries from %s",
                 len(cadical_lookup),
-                nw_files.c_adic,
+                case.files.c_adic,
             )
         except Exception:  # noqa: BLE001
             logger.warning(

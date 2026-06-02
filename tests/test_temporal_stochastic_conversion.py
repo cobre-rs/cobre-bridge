@@ -18,8 +18,7 @@ import pyarrow as pa
 import pytest
 
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
-from tests.conftest import make_case
+from tests.conftest import make_case, make_nw_files
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,49 +31,6 @@ def _make_id_map_hydros(hydro_codes: list[int]) -> NewaveIdMap:
 
 def _make_id_map_buses(subsystem_ids: list[int]) -> NewaveIdMap:
     return NewaveIdMap(subsystem_ids=subsystem_ids, hydro_codes=[], thermal_codes=[])
-
-
-def _make_nw_files(
-    tmp_path,
-    *,
-    vazpast: Path | None = None,
-    dsvagua: Path | None = None,
-    c_adic: Path | None = None,
-    cvar: Path | None = None,
-    shist: Path | None = None,
-) -> NewaveFiles:
-    """Construct a NewaveFiles instance pointing into tmp_path.
-
-    Does not access the filesystem — passes paths directly to the constructor.
-    """
-    return NewaveFiles(
-        directory=tmp_path,
-        dger=tmp_path / "dger.dat",
-        confhd=tmp_path / "confhd.dat",
-        conft=tmp_path / "conft.dat",
-        sistema=tmp_path / "sistema.dat",
-        clast=tmp_path / "clast.dat",
-        term=tmp_path / "term.dat",
-        ree=tmp_path / "ree.dat",
-        patamar=tmp_path / "patamar.dat",
-        hidr=tmp_path / "hidr.dat",
-        vazoes=tmp_path / "vazoes.dat",
-        modif=None,
-        ghmin=None,
-        penalid=None,
-        vazpast=vazpast,
-        dsvagua=dsvagua,
-        curva=None,
-        expt=None,
-        manutt=None,
-        c_adic=c_adic,
-        cvar=cvar,
-        agrint=None,
-        re_dat=None,
-        volref_saz=None,
-        shist=shist,
-        adterm=None,
-    )
 
 
 def _make_dger_mock(
@@ -1160,78 +1116,67 @@ def _make_dger_inflow_mock(
 
 
 class TestConvertInflowStats:
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
     @patch("cobre_bridge.converters.stochastic.Vazoes")
-    def test_returns_pyarrow_table(
-        self, mock_vazoes_cls, mock_confhd_cls, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_returns_pyarrow_table(self, mock_vazoes_cls, tmp_path) -> None:
         (tmp_path / "vazoes.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         mock_vazoes_cls.read.return_value = _make_vazoes_mock(
             num_years=10, postos=[1, 2]
         )
-        mock_confhd_cls.read.return_value = _make_confhd_mock({1: 1, 2: 2})
-        mock_dger_cls.read.return_value = _make_dger_inflow_mock()
+        case = make_case(
+            tmp_path,
+            confhd=_make_confhd_mock({1: 1, 2: 2}),
+            dger=_make_dger_inflow_mock(),
+        )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
 
         from cobre_bridge.converters.stochastic import convert_inflow_stats
 
-        result = convert_inflow_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_inflow_stats(case, id_map)
         assert isinstance(result, pa.Table)
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
     @patch("cobre_bridge.converters.stochastic.Vazoes")
-    def test_schema_columns(
-        self, mock_vazoes_cls, mock_confhd_cls, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_schema_columns(self, mock_vazoes_cls, tmp_path) -> None:
         (tmp_path / "vazoes.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         mock_vazoes_cls.read.return_value = _make_vazoes_mock(
             num_years=10, postos=[1, 2]
         )
-        mock_confhd_cls.read.return_value = _make_confhd_mock({1: 1, 2: 2})
-        mock_dger_cls.read.return_value = _make_dger_inflow_mock()
+        case = make_case(
+            tmp_path,
+            confhd=_make_confhd_mock({1: 1, 2: 2}),
+            dger=_make_dger_inflow_mock(),
+        )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
 
         from cobre_bridge.converters.stochastic import convert_inflow_stats
 
-        result = convert_inflow_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_inflow_stats(case, id_map)
         assert result.column_names == ["hydro_id", "stage_id", "mean_m3s", "std_m3s"]
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
     @patch("cobre_bridge.converters.stochastic.Vazoes")
-    def test_column_types(
-        self, mock_vazoes_cls, mock_confhd_cls, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_column_types(self, mock_vazoes_cls, tmp_path) -> None:
         (tmp_path / "vazoes.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         mock_vazoes_cls.read.return_value = _make_vazoes_mock(
             num_years=10, postos=[1, 2]
         )
-        mock_confhd_cls.read.return_value = _make_confhd_mock({1: 1, 2: 2})
-        mock_dger_cls.read.return_value = _make_dger_inflow_mock()
+        case = make_case(
+            tmp_path,
+            confhd=_make_confhd_mock({1: 1, 2: 2}),
+            dger=_make_dger_inflow_mock(),
+        )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
 
         from cobre_bridge.converters.stochastic import convert_inflow_stats
 
-        result = convert_inflow_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_inflow_stats(case, id_map)
         assert result.schema.field("hydro_id").type == pa.int32()
         assert result.schema.field("stage_id").type == pa.int32()
         assert result.schema.field("mean_m3s").type == pa.float64()
         assert result.schema.field("std_m3s").type == pa.float64()
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
     @patch("cobre_bridge.converters.stochastic.Vazoes")
-    def test_january_mean_correct(
-        self, mock_vazoes_cls, mock_confhd_cls, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_january_mean_correct(self, mock_vazoes_cls, tmp_path) -> None:
         """mean_m3s for January stages must equal the mean of all January values."""
         (tmp_path / "vazoes.dat").touch()
-        (tmp_path / "confhd.dat").touch()
 
         num_years = 10
         rows = []
@@ -1247,16 +1192,17 @@ class TestConvertInflowStats:
         mock_vazoes = MagicMock()
         mock_vazoes.vazoes = df
         mock_vazoes_cls.read.return_value = mock_vazoes
-        mock_confhd_cls.read.return_value = _make_confhd_mock({1: 1})
-        mock_dger_cls.read.return_value = _make_dger_inflow_mock(
-            mes_inicio_estudo=1, num_anos_estudo=num_years
+        case = make_case(
+            tmp_path,
+            confhd=_make_confhd_mock({1: 1}),
+            dger=_make_dger_inflow_mock(mes_inicio_estudo=1, num_anos_estudo=num_years),
         )
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
 
         from cobre_bridge.converters.stochastic import convert_inflow_stats
 
-        result = convert_inflow_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_inflow_stats(case, id_map)
         df_result = result.to_pydict()
 
         expected_jan_mean = float(np.mean(jan_vals))
@@ -1267,42 +1213,40 @@ class TestConvertInflowStats:
         ]
         assert len(jan_stage_ids) > 0, "No January stage found with expected mean"
 
-    @patch("cobre_bridge.converters.stochastic.Confhd")
     @patch("cobre_bridge.converters.stochastic.Vazoes")
     def test_empty_vazoes_raises_file_not_found(
-        self, mock_vazoes_cls, mock_confhd_cls, tmp_path
+        self, mock_vazoes_cls, tmp_path
     ) -> None:
         (tmp_path / "vazoes.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         mock_obj = MagicMock()
         mock_obj.vazoes = pd.DataFrame()
         mock_vazoes_cls.read.return_value = mock_obj
-        mock_confhd_cls.read.return_value = _make_confhd_mock({})
+        case = make_case(tmp_path, confhd=_make_confhd_mock({}))
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
 
         from cobre_bridge.converters.stochastic import convert_inflow_stats
 
         with pytest.raises(FileNotFoundError, match="vazoes.dat not found or empty"):
-            convert_inflow_stats(_make_nw_files(tmp_path), id_map)
+            convert_inflow_stats(case, id_map)
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
     @patch("cobre_bridge.converters.stochastic.Vazoes")
     def test_missing_posto_column_produces_zero(
-        self, mock_vazoes_cls, mock_confhd_cls, mock_dger_cls, tmp_path
+        self, mock_vazoes_cls, tmp_path
     ) -> None:
         """Hydro whose posto column is absent in vazoes -> mean/std = 0.0."""
         (tmp_path / "vazoes.dat").touch()
-        (tmp_path / "confhd.dat").touch()
         mock_vazoes_cls.read.return_value = _make_vazoes_mock(num_years=5, postos=[1])
-        mock_confhd_cls.read.return_value = _make_confhd_mock({1: 1, 2: 99})
-        mock_dger_cls.read.return_value = _make_dger_inflow_mock(num_anos_estudo=5)
+        case = make_case(
+            tmp_path,
+            confhd=_make_confhd_mock({1: 1, 2: 99}),
+            dger=_make_dger_inflow_mock(num_anos_estudo=5),
+        )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
 
         from cobre_bridge.converters.stochastic import convert_inflow_stats
 
-        result = convert_inflow_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_inflow_stats(case, id_map)
         df = result.to_pydict()
         hydro2_means = [m for hid, m in zip(df["hydro_id"], df["mean_m3s"]) if hid == 1]
         assert all(m == 0.0 for m in hydro2_means)
@@ -1359,110 +1303,86 @@ def _make_load_stats_dger_mock(
 
 
 class TestConvertLoadStats:
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Sistema")
-    def test_returns_pyarrow_table(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "sistema.dat").touch()
-        (tmp_path / "dger.dat").touch()
-        mock_sistema_cls.read.return_value = _make_sistema_mock(
-            subsystem_codes=[1, 2, 3, 4], num_months=60
+    def test_returns_pyarrow_table(self, tmp_path) -> None:
+        case = make_case(
+            tmp_path,
+            sistema=_make_sistema_mock(subsystem_codes=[1, 2, 3, 4], num_months=60),
+            dger=_make_load_stats_dger_mock(num_anos=5),
         )
-        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(num_anos=5)
         id_map = _make_id_map_buses([1, 2, 3, 4])
 
         from cobre_bridge.converters.stochastic import convert_load_stats
 
-        result = convert_load_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_load_stats(case, id_map)
         assert isinstance(result, pa.Table)
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Sistema")
-    def test_schema_columns(self, mock_sistema_cls, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "sistema.dat").touch()
-        (tmp_path / "dger.dat").touch()
-        mock_sistema_cls.read.return_value = _make_sistema_mock(
-            subsystem_codes=[1, 2], num_months=12
+    def test_schema_columns(self, tmp_path) -> None:
+        case = make_case(
+            tmp_path,
+            sistema=_make_sistema_mock(subsystem_codes=[1, 2], num_months=12),
+            dger=_make_load_stats_dger_mock(num_anos=1),
         )
-        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(num_anos=1)
         id_map = _make_id_map_buses([1, 2])
 
         from cobre_bridge.converters.stochastic import convert_load_stats
 
-        result = convert_load_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_load_stats(case, id_map)
         assert result.column_names == ["bus_id", "stage_id", "mean_mw", "std_mw"]
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Sistema")
-    def test_column_types(self, mock_sistema_cls, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "sistema.dat").touch()
-        (tmp_path / "dger.dat").touch()
-        mock_sistema_cls.read.return_value = _make_sistema_mock(
-            subsystem_codes=[1, 2], num_months=12
+    def test_column_types(self, tmp_path) -> None:
+        case = make_case(
+            tmp_path,
+            sistema=_make_sistema_mock(subsystem_codes=[1, 2], num_months=12),
+            dger=_make_load_stats_dger_mock(num_anos=1),
         )
-        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(num_anos=1)
         id_map = _make_id_map_buses([1, 2])
 
         from cobre_bridge.converters.stochastic import convert_load_stats
 
-        result = convert_load_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_load_stats(case, id_map)
         assert result.schema.field("bus_id").type == pa.int32()
         assert result.schema.field("stage_id").type == pa.int32()
         assert result.schema.field("mean_mw").type == pa.float64()
         assert result.schema.field("std_mw").type == pa.float64()
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Sistema")
-    def test_row_count_four_subsystems_60_months(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "sistema.dat").touch()
-        (tmp_path / "dger.dat").touch()
-        mock_sistema_cls.read.return_value = _make_sistema_mock(
-            subsystem_codes=[1, 2, 3, 4], num_months=60
+    def test_row_count_four_subsystems_60_months(self, tmp_path) -> None:
+        case = make_case(
+            tmp_path,
+            sistema=_make_sistema_mock(subsystem_codes=[1, 2, 3, 4], num_months=60),
+            dger=_make_load_stats_dger_mock(num_anos=5),
         )
-        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(num_anos=5)
         id_map = _make_id_map_buses([1, 2, 3, 4])
 
         from cobre_bridge.converters.stochastic import convert_load_stats
 
-        result = convert_load_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_load_stats(case, id_map)
         assert result.num_rows == 4 * 60
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Sistema")
-    def test_std_mw_all_zeros(self, mock_sistema_cls, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "sistema.dat").touch()
-        (tmp_path / "dger.dat").touch()
-        mock_sistema_cls.read.return_value = _make_sistema_mock(
-            subsystem_codes=[1, 2, 3, 4], num_months=60
+    def test_std_mw_all_zeros(self, tmp_path) -> None:
+        case = make_case(
+            tmp_path,
+            sistema=_make_sistema_mock(subsystem_codes=[1, 2, 3, 4], num_months=60),
+            dger=_make_load_stats_dger_mock(num_anos=5),
         )
-        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(num_anos=5)
         id_map = _make_id_map_buses([1, 2, 3, 4])
 
         from cobre_bridge.converters.stochastic import convert_load_stats
 
-        result = convert_load_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_load_stats(case, id_map)
         std_vals = result.column("std_mw").to_pylist()
         assert all(v == 0.0 for v in std_vals)
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Sistema")
-    def test_stage_ids_per_bus_sequential(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "sistema.dat").touch()
-        (tmp_path / "dger.dat").touch()
-        mock_sistema_cls.read.return_value = _make_sistema_mock(
-            subsystem_codes=[1, 2], num_months=12
+    def test_stage_ids_per_bus_sequential(self, tmp_path) -> None:
+        case = make_case(
+            tmp_path,
+            sistema=_make_sistema_mock(subsystem_codes=[1, 2], num_months=12),
+            dger=_make_load_stats_dger_mock(num_anos=1),
         )
-        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(num_anos=1)
         id_map = _make_id_map_buses([1, 2])
 
         from cobre_bridge.converters.stochastic import convert_load_stats
 
-        result = convert_load_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_load_stats(case, id_map)
         df = result.to_pydict()
         for bus_id in [0, 1]:
             stages = [
@@ -1470,14 +1390,8 @@ class TestConvertLoadStats:
             ]
             assert stages == list(range(12))
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Sistema")
-    def test_mean_mw_values_match_source(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_mean_mw_values_match_source(self, tmp_path) -> None:
         """mean_mw values must equal the raw 'valor' from mercado_energia."""
-        (tmp_path / "sistema.dat").touch()
-        (tmp_path / "dger.dat").touch()
         # Deterministic load: 2 subsystems, 2 months.
         rows = [
             {
@@ -1503,14 +1417,17 @@ class TestConvertLoadStats:
         ]
         mock = MagicMock()
         mock.mercado_energia = pd.DataFrame(rows)
-        mock_sistema_cls.read.return_value = mock
         # 1 year study so stage 0=Jan, stage 1=Feb.
-        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(num_anos=1)
+        case = make_case(
+            tmp_path,
+            sistema=mock,
+            dger=_make_load_stats_dger_mock(num_anos=1),
+        )
         id_map = _make_id_map_buses([1, 2])
 
         from cobre_bridge.converters.stochastic import convert_load_stats
 
-        result = convert_load_stats(_make_nw_files(tmp_path), id_map)
+        result = convert_load_stats(case, id_map)
         df = result.to_pydict()
 
         # Bus 0 (subsystem 1), stage 0 -> 3000.0; stage 1 -> 2800.0.
@@ -1598,16 +1515,10 @@ class TestParseCadical:
         assert _parse_cadical(tmp_path / "c_adic.dat") == {}
 
     @patch("cobre_bridge.converters.stochastic.Cadic")
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Sistema")
-    def test_cadic_additions_reach_load(
-        self, mock_sistema_cls, mock_dger_cls, mock_cadic_cls, tmp_path
-    ) -> None:
+    def test_cadic_additions_reach_load(self, mock_cadic_cls, tmp_path) -> None:
         """C_ADIC must-take energy is added to the per-(subsystem, stage) load."""
         from cobre_bridge.converters.stochastic import convert_load_stats
 
-        (tmp_path / "sistema.dat").touch()
-        (tmp_path / "dger.dat").touch()
         rows = [
             {
                 "codigo_submercado": 1,
@@ -1618,10 +1529,6 @@ class TestParseCadical:
         ]
         mock = MagicMock()
         mock.mercado_energia = pd.DataFrame(rows)
-        mock_sistema_cls.read.return_value = mock
-        mock_dger_cls.read.return_value = _make_load_stats_dger_mock(
-            ano_inicio=2024, num_anos=1
-        )
         mock_cadic_cls.read.return_value = _make_cadic_mock(
             [
                 {
@@ -1634,9 +1541,13 @@ class TestParseCadical:
             ]
         )
         id_map = _make_id_map_buses([1])
-        nw = _make_nw_files(tmp_path, c_adic=tmp_path / "c_adic.dat")
+        case = make_case(
+            make_nw_files(tmp_path, c_adic=tmp_path / "c_adic.dat"),
+            sistema=mock,
+            dger=_make_load_stats_dger_mock(ano_inicio=2024, num_anos=1),
+        )
 
-        df = convert_load_stats(nw, id_map).to_pydict()
+        df = convert_load_stats(case, id_map).to_pydict()
         bus0 = [m for bid, m in zip(df["bus_id"], df["mean_mw"]) if bid == 0]
         assert bus0[0] == pytest.approx(1050.0)  # Jan load + C_ADIC
         assert bus0[1] == pytest.approx(1000.0)  # Feb load, no C_ADIC
@@ -1718,58 +1629,39 @@ class TestConvertRecentInflowLagsNoFile:
 
         from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
 
-        result = convert_recent_inflow_lags(_make_nw_files(tmp_path), id_map)
+        result = convert_recent_inflow_lags(make_case(tmp_path), id_map)
         assert result == []
 
 
 class TestConvertRecentInflowLagsWithFile:
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
-    def test_returns_12_lags_per_hydro(
-        self, mock_confhd_cls, mock_dger_cls, tmp_path: Path
-    ) -> None:
-        from unittest.mock import patch as _patch
-
+    def test_returns_12_lags_per_hydro(self, tmp_path: Path) -> None:
         (tmp_path / "vazpast.dat").touch()
-        (tmp_path / "confhd.dat").touch()
-        (tmp_path / "dger.dat").touch()
 
-        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1, 2: 2})
         dger_mock = MagicMock()
         dger_mock.mes_inicio_estudo = 3  # March
-        mock_dger_cls.read.return_value = dger_mock
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
         vazpast_mock = _make_vazpast_mock(postos=[1, 2], num_months=12)
+        case = make_case(
+            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
+            confhd=_make_confhd_posto_mock({1: 1, 2: 2}),
+            dger=dger_mock,
+            vazpast=vazpast_mock,
+        )
 
         from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
 
-        with _patch("inewave.newave.Vazpast", create=True) as mock_vp_cls:
-            mock_vp_cls.read.return_value = vazpast_mock
-            result = convert_recent_inflow_lags(
-                _make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-                id_map,
-            )
+        result = convert_recent_inflow_lags(case, id_map)
 
         assert len(result) == 2
         assert all(len(e["values_m3s"]) == 12 for e in result)
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
-    def test_lag_order_march_start(
-        self, mock_confhd_cls, mock_dger_cls, tmp_path: Path
-    ) -> None:
+    def test_lag_order_march_start(self, tmp_path: Path) -> None:
         """Study starts March: lag1=Feb, lag2=Jan, lag3=Dec, ..., lag12=Mar."""
-        from unittest.mock import patch as _patch
-
         (tmp_path / "vazpast.dat").touch()
-        (tmp_path / "confhd.dat").touch()
-        (tmp_path / "dger.dat").touch()
 
-        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1})
         dger_mock = MagicMock()
         dger_mock.mes_inicio_estudo = 3
-        mock_dger_cls.read.return_value = dger_mock
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
 
@@ -1780,15 +1672,16 @@ class TestConvertRecentInflowLagsWithFile:
         ]
         vp_mock = MagicMock()
         vp_mock.tendencia = pd.DataFrame(rows)
+        case = make_case(
+            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
+            confhd=_make_confhd_posto_mock({1: 1}),
+            dger=dger_mock,
+            vazpast=vp_mock,
+        )
 
         from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
 
-        with _patch("inewave.newave.Vazpast", create=True) as mock_vp_cls:
-            mock_vp_cls.read.return_value = vp_mock
-            result = convert_recent_inflow_lags(
-                _make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-                id_map,
-            )
+        result = convert_recent_inflow_lags(case, id_map)
 
         lags = result[0]["values_m3s"]
         # lag1=Feb(200), lag2=Jan(100), lag3=Dec(1200), lag4=Nov(1100), ...
@@ -1797,64 +1690,49 @@ class TestConvertRecentInflowLagsWithFile:
         assert lags[2] == 1200.0  # December
         assert lags[11] == 300.0  # March (12 months back)
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
-    def test_unknown_plant_skipped(
-        self, mock_confhd_cls, mock_dger_cls, tmp_path: Path
-    ) -> None:
-        from unittest.mock import patch as _patch
-
+    def test_unknown_plant_skipped(self, tmp_path: Path) -> None:
         (tmp_path / "vazpast.dat").touch()
-        (tmp_path / "confhd.dat").touch()
-        (tmp_path / "dger.dat").touch()
 
-        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1})
         dger_mock = MagicMock()
         dger_mock.mes_inicio_estudo = 1
-        mock_dger_cls.read.return_value = dger_mock
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
         # vazpast has plant 1 (in id_map) and plant 99 (not in id_map)
         vazpast_mock = _make_vazpast_mock(postos=[1, 99], num_months=12)
+        case = make_case(
+            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
+            confhd=_make_confhd_posto_mock({1: 1}),
+            dger=dger_mock,
+            vazpast=vazpast_mock,
+        )
 
         from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
 
-        with _patch("inewave.newave.Vazpast", create=True) as mock_vp_cls:
-            mock_vp_cls.read.return_value = vazpast_mock
-            result = convert_recent_inflow_lags(
-                _make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-                id_map,
-            )
+        result = convert_recent_inflow_lags(case, id_map)
 
         assert len(result) == 1
         assert result[0]["hydro_id"] == 0
 
-    @patch("cobre_bridge.converters.stochastic.Dger")
-    @patch("cobre_bridge.converters.stochastic.Confhd")
-    def test_parse_failure_returns_empty(
-        self, mock_confhd_cls, mock_dger_cls, tmp_path: Path
-    ) -> None:
+    @patch("cobre_bridge.case.Vazpast")
+    def test_parse_failure_returns_empty(self, mock_vp_cls, tmp_path: Path) -> None:
         """If Vazpast.read() raises, return empty list gracefully."""
-        from unittest.mock import patch as _patch
-
         (tmp_path / "vazpast.dat").touch()
-        (tmp_path / "confhd.dat").touch()
-        (tmp_path / "dger.dat").touch()
 
-        mock_confhd_cls.read.return_value = _make_confhd_posto_mock({1: 1})
         dger_mock = MagicMock()
         dger_mock.mes_inicio_estudo = 1
-        mock_dger_cls.read.return_value = dger_mock
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
+
+        # vazpast left un-injected so case.vazpast parses; Vazpast.read raises.
+        mock_vp_cls.read.side_effect = RuntimeError("bad file")
+        case = make_case(
+            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
+            confhd=_make_confhd_posto_mock({1: 1}),
+            dger=dger_mock,
+        )
 
         from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
 
-        with _patch("inewave.newave.Vazpast", create=True) as mock_vp_cls:
-            mock_vp_cls.read.side_effect = RuntimeError("bad file")
-            result = convert_recent_inflow_lags(
-                _make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-                id_map,
-            )
+        result = convert_recent_inflow_lags(case, id_map)
 
         assert result == []
 
