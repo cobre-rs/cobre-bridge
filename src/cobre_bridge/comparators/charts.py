@@ -13,6 +13,7 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     ResultsSummary,
 )
+from cobre_bridge.cost_categories import AGGREGATE_COST_COLUMNS
 from cobre_bridge.horizon import is_effectively_infinite
 from cobre_bridge.ui.html import escape_text, json_for_script
 from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS as _LEGEND
@@ -37,6 +38,8 @@ _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
     ("Energy Excess", ["EXCESSO ENERGIA"], ["excess_cost"], "#F59E0B"),
     ("Exchange", ["INTERCAMBIO"], ["exchange_cost"], "#7C3AED"),
     ("Pumping", [], ["pumping_cost"], "#0891B2"),
+    # Energy-contract cost — cobre-only column (no NEWAVE parcela analogue).
+    ("Contract", [], ["contract_cost"], "#0D9488"),
     # Regularisation costs (per-unit-flow charges, not violations)
     (
         "Spillage",
@@ -123,16 +126,8 @@ _COST_COLOR_DEFAULT = "#6B7280"  # for any unmapped residual category
 
 # Cobre cost-record fields that are aggregates / metadata and must not appear as
 # their own category in the breakdown (they would double-count or pollute the
-# chart). Mirrors the dashboard's `_NON_COST_COLS` exclusion set.
-_COBRE_NON_COST_KEYS: frozenset[str] = frozenset(
-    {
-        "total_cost",
-        "immediate_cost",
-        "future_cost",
-        "discount_factor",
-        "hydro_violation_cost",  # aggregate of the 6 hydro-violation components
-    }
-)
+# chart). Single-sourced with the dashboard via cost_categories.
+_COBRE_NON_COST_KEYS: frozenset[str] = AGGREGATE_COST_COLUMNS
 
 
 def _resolve_cost_categories(

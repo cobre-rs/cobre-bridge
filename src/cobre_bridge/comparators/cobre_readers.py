@@ -19,6 +19,7 @@ from cobre_bridge.cobre_io import (
     productivity_from_energy_parquet,
     productivity_from_production_models,
 )
+from cobre_bridge.cost_categories import COBRE_COST_COMPONENT_COLUMNS
 
 _LOG = logging.getLogger(__name__)
 
@@ -1280,27 +1281,10 @@ def read_cobre_cost_breakdown(
     if lf is None:
         return {}
 
-    cost_cols = [
-        "thermal_cost",
-        "deficit_cost",
-        "excess_cost",
-        "storage_violation_cost",
-        "filling_target_cost",
-        "hydro_violation_cost",
-        "outflow_violation_below_cost",
-        "outflow_violation_above_cost",
-        "turbined_violation_cost",
-        "generation_violation_cost",
-        "evaporation_violation_cost",
-        "withdrawal_violation_cost",
-        "inflow_penalty_cost",
-        "generic_violation_cost",
-        "spillage_cost",
-        "turbined_cost",
-        "curtailment_cost",
-        "exchange_cost",
-        "pumping_cost",
-    ]
+    # Sum every individual cost component (the canonical set, so no column is
+    # silently dropped — contract_cost used to be missing here). The aggregate
+    # roll-ups (hydro_violation_cost, total/immediate/future) are excluded.
+    cost_cols = list(COBRE_COST_COMPONENT_COLUMNS)
 
     available = set(lf.collect_schema().names())
     cols = [c for c in cost_cols if c in available]
