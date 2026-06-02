@@ -24,6 +24,7 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Confhd, Curva, Dger, Hidr, Penalid, Ree, Sistema
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
     compute_per_stage_own_integrated_productivities,
@@ -236,7 +237,7 @@ def compute_max_prodtacum_sin(nw_files: NewaveFiles) -> float | None:
 
     try:
         hidr = Hidr.read(str(nw_files.hidr))
-        cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+        cadastro = _apply_permanent_overrides(hidr.cadastro, NewaveCase(files=nw_files))
         confhd_df = Confhd.read(str(nw_files.confhd)).usinas
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         return None
@@ -433,7 +434,7 @@ def convert_vminop_constraints(
     ree_file = Ree.read(str(nw_files.ree))
 
     cadastro = hidr.cadastro
-    cadastro = _apply_permanent_overrides(cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(cadastro, NewaveCase(files=nw_files))
     confhd_df = confhd.usinas
 
     # Study horizon parameters
@@ -453,7 +454,9 @@ def convert_vminop_constraints(
     # LHS would use cobre's default point ρ_acum and silently drift from
     # the RHS by ~10% on plants with non-trivial head swing.
     acc_prod = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
-    per_stage_own_int = compute_per_stage_own_integrated_productivities(nw_files)
+    per_stage_own_int = compute_per_stage_own_integrated_productivities(
+        NewaveCase(files=nw_files)
+    )
     per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own_int)
 
     # Map hydros to REEs

@@ -9,24 +9,14 @@ from collections.abc import Callable
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from inewave.newave import (
-    Confhd,
-    Dger,
-    Ghmin,
-    Hidr,
-    Modif,
-    Penalid,
-    Ree,
-    VolrefSaz,
-)
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.horizon import (
     POST_STUDY_YEAR,
     seasonal_step_function,
     study_horizon,
 )
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.pandas_utils import is_na
 from cobre_bridge.plants import active_hydro_codes, active_hydros
 from cobre_bridge.productivity import (
@@ -78,11 +68,11 @@ _TEMPORAL_OVERRIDE_TYPES = frozenset(
 
 
 def _apply_permanent_overrides(
-    cadastro: pd.DataFrame, nw_files: NewaveFiles
+    cadastro: pd.DataFrame, case: NewaveCase
 ) -> pd.DataFrame:
     """Apply MODIF.DAT permanent overrides to the hidr.dat cadastro.
 
-    Reads ``MODIF.DAT`` from *nw_files* and
+    Reads ``MODIF.DAT`` from *case* and
     applies permanent override records — VAZMIN, VOLMAX, VOLMIN, NUMCNJ,
     NUMMAQ — to a *copy* of *cadastro*.  The original DataFrame is not
     mutated.
@@ -91,20 +81,19 @@ def _apply_permanent_overrides(
     ----------
     cadastro:
         The ``Hidr.cadastro`` DataFrame indexed by ``codigo_usina``.
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
 
     Returns
     -------
     pd.DataFrame
         A new DataFrame with permanent overrides applied.
     """
-    modif_path = nw_files.modif
-    if modif_path is None:
+    modif = case.modif
+    if modif is None:
         _LOG.debug("MODIF.DAT not found; skipping permanent overrides.")
         return cadastro
 
-    modif = Modif.read(str(modif_path))
     result = cadastro.copy()
 
     # Ensure float dtype for columns that permanent overrides may assign floats
@@ -191,7 +180,7 @@ def _apply_permanent_overrides(
 
 
 def _extract_temporal_overrides(
-    nw_files: NewaveFiles, confhd_codes: list[int]
+    case: NewaveCase, confhd_codes: list[int]
 ) -> dict[int, list[dict]]:
     """Extract MODIF.DAT temporal overrides for plants in *confhd_codes*.
 
@@ -206,8 +195,8 @@ def _extract_temporal_overrides(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     confhd_codes:
         List of plant codes present in the study (from confhd.dat).  Records
         for plants not in this list are excluded.
@@ -218,12 +207,11 @@ def _extract_temporal_overrides(
         Temporal override records per plant code.  Empty dict if MODIF.DAT is
         absent.
     """
-    modif_path = nw_files.modif
-    if modif_path is None:
+    modif = case.modif
+    if modif is None:
         _LOG.debug("MODIF.DAT not found; no temporal overrides extracted.")
         return {}
 
-    modif = Modif.read(str(modif_path))
     confhd_set = set(confhd_codes)
     result: dict[int, list[dict]] = {}
 
@@ -273,7 +261,7 @@ def _extract_temporal_overrides(
 
 
 def _read_ghmin_per_stage(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     start_year: int,
     start_month: int,
     study_months: int,
@@ -298,8 +286,8 @@ def _read_ghmin_per_stage(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     start_year, start_month:
         Study start (Cobre stage 0 corresponds to this calendar month).
     study_months:
@@ -307,12 +295,11 @@ def _read_ghmin_per_stage(
     total_stages:
         Total number of stages (study + post-study).
     """
-    ghmin_path = nw_files.ghmin
-    if ghmin_path is None:
+    ghmin = case.ghmin
+    if ghmin is None:
         _LOG.debug("GHMIN.DAT not found; emitting no per-stage min_generation.")
         return {}
 
-    ghmin = Ghmin.read(str(ghmin_path))
     df = ghmin.geracoes
     if df is None or df.empty:
         return {}
@@ -389,18 +376,18 @@ _PENALID_VAR_MAP: dict[str, str] = {
 }
 
 
-def _read_penalid(nw_files: NewaveFiles) -> dict[int, dict[str, float]]:
+def _read_penalid(case: NewaveCase) -> dict[int, dict[str, float]]:
     """Read PENALID.DAT and return per-REE penalty override mappings.
 
-    If ``PENALID.DAT`` is absent (``nw_files.penalid is None``), returns an
+    If ``PENALID.DAT`` is absent (``case.penalid is None``), returns an
     empty dict.  Only the first patamar tier (``patamar_penalidade == 1``)
     is used — tier 2 has NaN costs (unbounded) and is skipped.  NaN values
     within tier 1 are also skipped.
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
 
     Returns
     -------
@@ -410,12 +397,11 @@ def _read_penalid(nw_files: NewaveFiles) -> dict[int, dict[str, float]]:
         are included.  Returns an empty dict if the file is absent or
         contains no usable rows.
     """
-    penalid_path = nw_files.penalid
-    if penalid_path is None:
+    penalid = case.penalid
+    if penalid is None:
         _LOG.debug("PENALID.DAT not found; leaving all plant penalties as None.")
         return {}
 
-    penalid = Penalid.read(str(penalid_path))
     df: pd.DataFrame | None = penalid.penalidades
     if df is None or df.empty:
         return {}
@@ -690,13 +676,13 @@ def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float,
     return max_turbined, max_generation
 
 
-def read_cadastro(nw_files: NewaveFiles) -> pd.DataFrame:
+def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     """Read ``hidr.dat`` and apply permanent MODIF.DAT overrides.
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
 
     Returns
     -------
@@ -705,15 +691,14 @@ def read_cadastro(nw_files: NewaveFiles) -> pd.DataFrame:
         permanent MODIF.DAT overrides (VAZMIN, VOLMAX, VOLMIN, NUMCNJ,
         NUMMAQ) already applied.
     """
-    hidr = Hidr.read(str(nw_files.hidr))
-    cadastro = hidr.cadastro
-    return _apply_permanent_overrides(cadastro, nw_files)
+    cadastro = case.hidr.cadastro
+    return _apply_permanent_overrides(cadastro, case)
 
 
-def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
+def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE hydro plant data to a Cobre ``hydros.json`` dict.
 
-    Reads ``hidr.dat``, ``confhd.dat``, and ``ree.dat`` from *nw_files*.
+    Reads ``hidr.dat``, ``confhd.dat``, and ``ree.dat`` from *case*.
     Returns a dict with a ``"hydros"`` key containing a list of hydro
     entries sorted by Cobre 0-based ID.
 
@@ -724,8 +709,8 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Pre-built ID mapping used for bus and downstream-hydro cross-
         references.
@@ -736,21 +721,21 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         If a hydro in ``confhd.dat`` references a code not found in
         ``hidr.dat``.
     """
-    hidr = Hidr.read(str(nw_files.hidr))
-    confhd = Confhd.read(str(nw_files.confhd))
-    ree_file = Ree.read(str(nw_files.ree))
+    hidr = case.hidr
+    confhd = case.confhd
+    ree_file = case.ree
 
     cadastro = hidr.cadastro  # DataFrame indexed by codigo_usina (1-based)
     confhd_df = confhd.usinas
     ree_df = ree_file.rees  # columns: codigo, nome, submercado, ...
 
     # Apply MODIF.DAT permanent overrides before the main conversion loop.
-    cadastro = _apply_permanent_overrides(cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(cadastro, case)
 
     # Seasonal reference volumes per plant — when present, fed back into the
     # evaporation block as ``reference_volumes_hm3`` so cobre's evaporation
     # linearization matches the per-month reference NEWAVE itself uses.
-    seasonal_volref = _read_volref_saz(nw_files)
+    seasonal_volref = _read_volref_saz(case)
 
     # Resolve the FICT-cascade for every real plant.  Provides the effective
     # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
@@ -979,7 +964,7 @@ def convert_hydros(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     }
 
 
-def compute_prodt_sin_mean(nw_files: NewaveFiles) -> float:
+def compute_prodt_sin_mean(case: NewaveCase) -> float:
     """Return ``PROD_MEDIA_SIN`` = mean PRODT over existing plants (NEWAVE).
 
     This is the system-average productivity NEWAVE uses to convert the PENALID
@@ -994,11 +979,9 @@ def compute_prodt_sin_mean(nw_files: NewaveFiles) -> float:
     On the example case this returns ≈ 0.6299, matching pmo's penalty-implied ρ
     (0.6294) to 0.06%; the legacy 65%-reference mean was 0.656 (~4% high).
     """
-    hidr = Hidr.read(str(nw_files.hidr))
-    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
-    confhd = Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
+    confhd_df = case.confhd.usinas
     existing = active_hydros(confhd_df)
 
     prodt: list[float] = []
@@ -1009,7 +992,7 @@ def compute_prodt_sin_mean(nw_files: NewaveFiles) -> float:
     return sum(prodt) / len(prodt) if prodt else 1.0
 
 
-def compute_per_stage_prodt_sin_mean(nw_files: NewaveFiles) -> list[float]:
+def compute_per_stage_prodt_sin_mean(case: NewaveCase) -> list[float]:
     """Return ``PROD_MEDIA_SIN[s]`` = mean PRODT per stage (CFUGA/CMONT-driven).
 
     Same plant set and convention as :func:`compute_prodt_sin_mean` (mean PRODT
@@ -1021,17 +1004,16 @@ def compute_per_stage_prodt_sin_mean(nw_files: NewaveFiles) -> list[float]:
 
     Returns ``[]`` when the horizon can't be read (mocked-pipeline unit tests).
     """
-    total_stages = _total_study_stages(nw_files)
+    total_stages = _total_study_stages(case)
     if total_stages <= 0:
         return []
 
-    hidr = Hidr.read(str(nw_files.hidr))
-    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
-    confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
+    confhd_df = case.confhd.usinas
     existing = active_hydros(confhd_df)
     codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
-    temporal = _extract_temporal_overrides(nw_files, codes)
+    temporal = _extract_temporal_overrides(case, codes)
     drop_by_plant = {
         code: [o for o in ov if o["type"] in ("CFUGA", "CMONT")]
         for code, ov in temporal.items()
@@ -1047,7 +1029,7 @@ def compute_per_stage_prodt_sin_mean(nw_files: NewaveFiles) -> list[float]:
             hreg,
             _equivalent_productivity(hreg),
             drop_by_plant.get(code, []),
-            nw_files,
+            case,
             total_stages,
         )
         for s in range(total_stages):
@@ -1056,7 +1038,7 @@ def compute_per_stage_prodt_sin_mean(nw_files: NewaveFiles) -> list[float]:
     return [v / count for v in stage_sum] if count else []
 
 
-def convert_production_models(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
+def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Build ``hydro_production_models.json`` with model selection only.
 
     After the cobre productivity-resolution-rules plan, ``productivity_mw_per_m3s``
@@ -1072,8 +1054,8 @@ def convert_production_models(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dic
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Pre-built entity ID map used to translate NEWAVE plant codes to
         0-based Cobre hydro IDs.
@@ -1084,8 +1066,7 @@ def convert_production_models(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dic
         A dict with a ``"production_models"`` key ready to serialise as
         ``system/hydro_production_models.json``.
     """
-    confhd = Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
+    confhd_df = case.confhd.usinas
     existing = active_hydros(confhd_df)
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
@@ -1117,16 +1098,16 @@ def convert_production_models(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dic
     }
 
 
-def _total_study_stages(nw_files: NewaveFiles) -> int:
+def _total_study_stages(case: NewaveCase) -> int:
     """Return the total number of stages in the study (including post-study)."""
-    return study_horizon(Dger.read(str(nw_files.dger))).total_stages
+    return study_horizon(case.dger).total_stages
 
 
 def _per_stage_integrated_productivities(
     hreg: pd.Series,
     base_integrated: float,
     drop_overrides: list[dict],
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     total_stages: int,
 ) -> list[float]:
     """Per-stage integrated productivity with CFUGA/CMONT step-function awareness.
@@ -1141,7 +1122,7 @@ def _per_stage_integrated_productivities(
     if not drop_overrides:
         return [base_integrated] * total_stages
 
-    drops = _per_stage_drop_overrides(drop_overrides, nw_files, total_stages)
+    drops = _per_stage_drop_overrides(drop_overrides, case, total_stages)
     return [
         base_integrated
         if cfuga is None and cmont is None
@@ -1153,7 +1134,7 @@ def _per_stage_integrated_productivities(
 
 
 def compute_per_stage_own_integrated_productivities(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
 ) -> dict[int, list[float]]:
     """Return ``{plant_code: [own integrated ρ per stage]}`` for every existing plant.
 
@@ -1171,19 +1152,17 @@ def compute_per_stage_own_integrated_productivities(
     traversal in NEWAVE-code space matches the rewired ``downstream_id``
     in ``hydros.json``.
     """
-    total_stages = _total_study_stages(nw_files)
+    total_stages = _total_study_stages(case)
     if total_stages <= 0:
         return {}
 
-    hidr = Hidr.read(str(nw_files.hidr))
-    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
-    confhd = Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
+    confhd_df = case.confhd.usinas
     existing = active_hydros(confhd_df)
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
-    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+    temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
     plants_with_drop_overrides = {
         code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
         for code, overrides in temporal_overrides.items()
@@ -1204,13 +1183,13 @@ def compute_per_stage_own_integrated_productivities(
         fict_extra = resolution.fict_rho_sum if resolution is not None else 0.0
         overrides = plants_with_drop_overrides.get(plant_code, [])
         per_stage = _per_stage_integrated_productivities(
-            hreg, base, overrides, nw_files, total_stages
+            hreg, base, overrides, case, total_stages
         )
         result[plant_code] = [v + fict_extra for v in per_stage]
     return result
 
 
-def _read_volref_saz(nw_files: NewaveFiles) -> dict[int, dict[int, float]]:
+def _read_volref_saz(case: NewaveCase) -> dict[int, dict[int, float]]:
     """Read ``volref_saz.dat`` into ``{plant_code: {calendar_month: useful_vol_hm3}}``.
 
     NEWAVE uses two distinct conventions inside this file:
@@ -1225,11 +1204,11 @@ def _read_volref_saz(nw_files: NewaveFiles) -> dict[int, dict[int, float]]:
 
     Returns an empty dict when ``volref_saz.dat`` is absent.
     """
-    if nw_files.volref_saz is None:
+    vs = case.volref_saz
+    if vs is None:
         _LOG.debug("volref_saz.dat not found; seasonal productivity disabled.")
         return {}
 
-    vs = VolrefSaz.read(str(nw_files.volref_saz))
     df = vs.volumes
     if df is None or df.empty:
         return {}
@@ -1249,7 +1228,7 @@ def _read_volref_saz(nw_files: NewaveFiles) -> dict[int, dict[int, float]]:
 
 def _per_stage_drop_overrides(
     drop_overrides: list[dict],
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     total_stages: int,
 ) -> list[tuple[float | None, float | None]]:
     """Per-stage effective ``(CFUGA, CMONT)`` from MODIF.DAT step-functions.
@@ -1265,7 +1244,7 @@ def _per_stage_drop_overrides(
     if not drop_overrides:
         return [(None, None)] * total_stages
 
-    dger = Dger.read(str(nw_files.dger))
+    dger = case.dger
     start_year = int(dger.ano_inicio_estudo)
     start_month = int(dger.mes_inicio_estudo)
     seasonalize = int(getattr(dger, "sazonaliza_cfuga_cmont", 0) or 0) == 1
@@ -1338,7 +1317,7 @@ def _per_stage_equivalent_productivities(
     hreg: pd.Series,
     base_prodt: float,
     drop_overrides: list[dict],
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     total_stages: int,
 ) -> list[float]:
     """Per-stage PRODT, applying CFUGA/CMONT temporal overrides.
@@ -1350,7 +1329,7 @@ def _per_stage_equivalent_productivities(
     """
     if not drop_overrides:
         return [base_prodt] * total_stages
-    drops = _per_stage_drop_overrides(drop_overrides, nw_files, total_stages)
+    drops = _per_stage_drop_overrides(drop_overrides, case, total_stages)
     return [
         base_prodt
         if cfuga is None and cmont is None
@@ -1365,7 +1344,7 @@ def _per_stage_productivities(
     hreg: pd.Series,
     base_productivity: float,
     drop_overrides: list[dict],
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     total_stages: int,
     seasonal_volref_by_month: dict[int, float] | None = None,
 ) -> list[float]:
@@ -1387,8 +1366,8 @@ def _per_stage_productivities(
     if not drop_overrides and not has_seasonal:
         return [base_productivity] * total_stages
 
-    start_month = int(Dger.read(str(nw_files.dger)).mes_inicio_estudo)
-    drops = _per_stage_drop_overrides(drop_overrides, nw_files, total_stages)
+    start_month = int(case.dger.mes_inicio_estudo)
+    drops = _per_stage_drop_overrides(drop_overrides, case, total_stages)
     seasonal = seasonal_volref_by_month or {}
 
     values: list[float] = []
@@ -1418,7 +1397,7 @@ def _per_stage_productivities(
 
 
 def convert_hydro_energy_productivity(
-    nw_files: NewaveFiles, id_map: NewaveIdMap
+    case: NewaveCase, id_map: NewaveIdMap
 ) -> pa.Table:
     """Build the per-(hydro, stage) ρ_eq override parquet table.
 
@@ -1440,25 +1419,23 @@ def convert_hydro_energy_productivity(
     ``specific_productivity_mw_per_m3s_per_m``) are left NULL — NEWAVE does not
     provide per-stage values for them.
     """
-    hidr = Hidr.read(str(nw_files.hidr))
-    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
-    confhd = Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
+    confhd_df = case.confhd.usinas
     existing = active_hydros(confhd_df)
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
-    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+    temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
     plants_with_drop_overrides = {
         code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
         for code, overrides in temporal_overrides.items()
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
 
-    seasonal_volref = _read_volref_saz(nw_files)
+    seasonal_volref = _read_volref_saz(case)
 
     needs_per_stage = bool(plants_with_drop_overrides) or bool(seasonal_volref)
-    total_stages = _total_study_stages(nw_files) if needs_per_stage else 0
+    total_stages = _total_study_stages(case) if needs_per_stage else 0
 
     # FICT-cascade: when a real plant's energy-cascade traverses fictitious
     # plants, fold those FICTs' ρ_eq into the upstream real plant's own ρ_eq
@@ -1499,7 +1476,7 @@ def convert_hydro_energy_productivity(
                 hreg,
                 legacy_base,
                 overrides,
-                nw_files,
+                case,
                 total_stages,
                 seasonal_volref_by_month=plant_seasonal,
             )
@@ -1526,7 +1503,7 @@ def convert_hydro_energy_productivity(
 
 
 def compute_per_stage_own_productivities(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
 ) -> dict[int, list[float]]:
     """Return ``{plant_code: [own ρ_eq per stage]}`` for every existing plant.
 
@@ -1546,26 +1523,24 @@ def compute_per_stage_own_productivities(
     Keys are NEWAVE plant codes (not Cobre ids) since cascade traversal in
     ``compute_accumulated_productivities`` works in NEWAVE-code space.
     """
-    total_stages = _total_study_stages(nw_files)
+    total_stages = _total_study_stages(case)
     if total_stages <= 0:
         return {}
 
-    hidr = Hidr.read(str(nw_files.hidr))
-    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
-    confhd = Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
+    confhd_df = case.confhd.usinas
     existing = active_hydros(confhd_df)
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
-    temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+    temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
     plants_with_drop_overrides = {
         code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
         for code, overrides in temporal_overrides.items()
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
 
-    seasonal_volref = _read_volref_saz(nw_files)
+    seasonal_volref = _read_volref_saz(case)
 
     # FICT-cascade fold-in: per-stage ρ_eq must already include any FICT
     # contribution so that the per-stage ρ_acum used by VminOP and EARM
@@ -1588,7 +1563,7 @@ def compute_per_stage_own_productivities(
             hreg,
             legacy_base,
             overrides,
-            nw_files,
+            case,
             total_stages,
             seasonal_volref_by_month=plant_seasonal,
         )
@@ -1597,7 +1572,7 @@ def compute_per_stage_own_productivities(
 
 
 def compute_base_productivities(
-    nw_files: NewaveFiles, id_map: NewaveIdMap
+    case: NewaveCase, id_map: NewaveIdMap
 ) -> dict[int, float]:
     """Return ``{hydro_id: base_productivity_mw_per_m3s}`` for every hydro.
 
@@ -1607,11 +1582,9 @@ def compute_base_productivities(
     ``hydros_dict[i]["generation"]["productivity_mw_per_m3s"]`` should call
     this instead now that productivity has moved out of `hydros.json`.
     """
-    hidr = Hidr.read(str(nw_files.hidr))
-    cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
-    confhd = Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
+    confhd_df = case.confhd.usinas
     existing = active_hydros(confhd_df)
 
     # FICT-cascade fold-in — keep this in lockstep with the other productivity
@@ -1758,12 +1731,10 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
     )
 
 
-def convert_water_withdrawal(
-    nw_files: NewaveFiles, id_map: NewaveIdMap
-) -> pa.Table | None:
+def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table | None:
     """Convert NEWAVE water withdrawal data to a hydro_bounds Parquet table.
 
-    Reads ``dsvagua.dat`` (optional) from *nw_files* and produces a
+    Reads ``dsvagua.dat`` (optional) from *case* and produces a
     ``pa.Table`` with columns ``(hydro_id: INT32, stage_id: INT32,
     water_withdrawal_m3s: DOUBLE)`` suitable for writing to
     ``constraints/hydro_bounds.parquet``.
@@ -1777,8 +1748,8 @@ def convert_water_withdrawal(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Pre-built entity ID map.
 
@@ -1790,15 +1761,7 @@ def convert_water_withdrawal(
         or ``None`` when ``dsvagua.dat`` is absent, empty, or yields no
         valid rows after filtering.
     """
-    from inewave.newave import (  # local import to avoid hard dependency at module load
-        Dger as _Dger,
-    )
-    from inewave.newave import (
-        Dsvagua as _Dsvagua,
-    )
-
-    dsvagua_path = nw_files.dsvagua
-    if dsvagua_path is None:
+    if case.files.dsvagua is None:
         _LOG.debug("dsvagua.dat not found; no water withdrawal.")
         return None
 
@@ -1806,12 +1769,14 @@ def convert_water_withdrawal(
     # short-circuit before any dsvagua I/O. NEWAVE treats 0 as "ignore
     # dsvagua.dat" — mirror that here so Cobre's hydro_bounds match
     # NEWAVE's actual run instead of the file contents.
-    dger = _Dger.read(str(nw_files.dger))
+    dger = case.dger
     if int(getattr(dger, "outros_usos_da_agua", 1) or 0) == 0:
         _LOG.info("dger.outros_usos_da_agua == 0; skipping dsvagua.dat conversion.")
         return None
 
-    dsvagua = _Dsvagua.read(str(dsvagua_path))
+    dsvagua = case.dsvagua
+    if dsvagua is None:
+        return None
     df = dsvagua.desvios
     if df is None or df.empty:
         return None
@@ -1827,7 +1792,7 @@ def convert_water_withdrawal(
     # be propagated to the immediately downstream EX plant — NEWAVE applies
     # NC withdrawals to the next real plant in the cascade, while FICT
     # entries are not propagated and are silently dropped.
-    confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+    confhd_df = case.confhd.usinas
     plant_downstream: dict[int, int] = {}
     plant_is_fict: dict[int, bool] = {}
     for _, r in confhd_df.iterrows():
@@ -1947,7 +1912,7 @@ def convert_water_withdrawal(
 
 
 def convert_storage_bounds(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> pa.Table | None:
     """Build per-stage hydro bounds from MODIF.DAT temporal overrides.
@@ -1971,10 +1936,7 @@ def convert_storage_bounds(
 
     Returns ``None`` if MODIF.DAT is absent or contains no relevant records.
     """
-    from inewave.newave import Confhd as _Confhd
-    from inewave.newave import Dger as _Dger
-
-    dger = _Dger.read(str(nw_files.dger))
+    dger = case.dger
     horizon = study_horizon(dger)
     start_year = horizon.start_year
     start_month = horizon.start_month
@@ -1989,20 +1951,19 @@ def convert_storage_bounds(
     sazonaliza_vmint = int(getattr(dger, "sazonaliza_vmint", 0) or 0) == 1
 
     # Read hidr.dat with permanent overrides for vol_min/vol_max.
-    cadastro = read_cadastro(nw_files)
+    cadastro = read_cadastro(case)
 
     # Read confhd for the list of active plant codes.
-    confhd = _Confhd.read(str(nw_files.confhd))
-    confhd_df = confhd.usinas
+    confhd_df = case.confhd.usinas
     confhd_codes = active_hydro_codes(confhd_df)
 
     # Extract temporal overrides — empty dict when MODIF.DAT is absent,
     # which is fine because GHMIN.DAT alone can still produce per-stage
     # rows.
-    if nw_files.modif is None:
+    if case.files.modif is None:
         temporal_overrides: dict[int, list[dict]] = {}
     else:
-        temporal_overrides = _extract_temporal_overrides(nw_files, confhd_codes)
+        temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
 
     def _build_step_function(
         recs: list[dict],
@@ -2029,7 +1990,7 @@ def convert_storage_bounds(
     # but live alongside them at the per-(hydro, stage) granularity, so
     # they merge naturally into this parquet's row set.
     ghmin_by_plant_stage = _read_ghmin_per_stage(
-        nw_files, start_year, start_month, study_months, total_stages
+        case, start_year, start_month, study_months, total_stages
     )
 
     hydro_ids: list[int] = []

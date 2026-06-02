@@ -219,7 +219,7 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
     """Return patch context managers for all converter functions and _build_id_map."""
     return [
         patch(
-            "cobre_bridge.pipeline.NewaveFiles.from_directory",
+            "cobre_bridge.pipeline.NewaveCase.from_directory",
             return_value=MagicMock(),
         ),
         patch("cobre_bridge.pipeline._build_id_map", return_value=fake_id_map),
@@ -498,7 +498,7 @@ class TestConvertNewaweCasePipeline:
         dst = tmp_path / "cobre_case"
 
         with patch(
-            "cobre_bridge.pipeline.NewaveFiles.from_directory",
+            "cobre_bridge.pipeline.NewaveCase.from_directory",
             side_effect=FileNotFoundError(
                 f"Required NEWAVE file not found in {src}: hidr.dat"
             ),

@@ -362,54 +362,34 @@ class TestConvertHydros:
             thermal_codes=[],
         )
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_returns_hydros_key(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_returns_hydros_key(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         assert "hydros" in result
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_hydro_count_matches_existing_plants(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_hydro_count_matches_existing_plants(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         assert len(result["hydros"]) == 2
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_hydro_ids_are_zero_based_and_sorted(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_hydro_ids_are_zero_based_and_sorted(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         ids = [h["id"] for h in result["hydros"]]
         assert ids == sorted(ids)
         assert ids[0] == 0
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_hydro_has_required_fields(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_hydro_has_required_fields(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
             assert "id" in h
             assert "name" in h
@@ -421,17 +401,12 @@ class TestConvertHydros:
             assert "generation" in h
             assert h["generation"]["model"] == "constant_productivity"
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_cascade_downstream_linkage(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_cascade_downstream_linkage(self, tmp_path) -> None:
         """Plant 2 (code=2) is downstream of plant 1 (code=1)."""
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         # USINA_A (code=1, cobre id=0) has no downstream.
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["downstream_id"] is None
@@ -439,30 +414,20 @@ class TestConvertHydros:
         hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
         assert hydro_b["downstream_id"] == 0
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_bus_id_matches_ree_subsystem(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_bus_id_matches_ree_subsystem(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
             # Both plants are in REE 1 -> subsystem 1 -> bus 0.
             assert h["bus_id"] == 0
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_generation_values_match_machine_sets(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_generation_values_match_machine_sets(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         gen = hydro_a["generation"]
         # USINA_A: 1 set, 4 machines, 200 MW each, flow 222.2 each.
@@ -474,165 +439,75 @@ class TestConvertHydros:
         assert "productivity_mw_per_m3s" not in gen
         assert hydro_a["specific_productivity_mw_per_m3s_per_m"] == pytest.approx(0.9)
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_schema_key_present(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_schema_key_present(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         assert "$schema" in result
         assert "hydros.schema.json" in result["$schema"]
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_hydro_code_absent_in_hidr_raises_value_error(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_hydro_code_absent_in_hidr_raises_value_error(self, tmp_path) -> None:
         # Set up mocks but make the cadastro empty (no plants).
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = pd.DataFrame()  # empty — no plants
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_ree = MagicMock()
-        mock_ree.rees = _make_ree_df()
-        mock_ree_cls.read.return_value = mock_ree
+        case = _hydro_case(tmp_path, cadastro=pd.DataFrame())
 
         from cobre_bridge.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         with pytest.raises(ValueError, match="not found in hidr.dat"):
-            convert_hydros(_make_nw_files(tmp_path), id_map)
+            convert_hydros(case, id_map)
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_hydraulic_losses_factor(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_hydraulic_losses_factor(self, tmp_path) -> None:
         """tipo_perda=1 and perdas=5.0 (%) -> hydraulic_losses factor dict."""
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
         cadastro = _make_hidr_cadastro().copy()
         cadastro["tipo_perda"] = 1
         cadastro["perdas"] = 5.0  # 5% — stored as percentage in hidr.dat
 
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = cadastro
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_ree = MagicMock()
-        mock_ree.rees = _make_ree_df()
-        mock_ree_cls.read.return_value = mock_ree
+        case = _hydro_case(tmp_path, cadastro=cadastro)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
             assert h["hydraulic_losses"] == {
                 "type": "factor",
                 "value": pytest.approx(0.05),  # 5% / 100 = 0.05
             }
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_hydraulic_losses_constant(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_hydraulic_losses_constant(self, tmp_path) -> None:
         """tipo_perda=2 and perdas=3.5 -> hydraulic_losses constant dict."""
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
         cadastro = _make_hidr_cadastro().copy()
         cadastro["tipo_perda"] = 2
         cadastro["perdas"] = 3.5
 
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = cadastro
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_ree = MagicMock()
-        mock_ree.rees = _make_ree_df()
-        mock_ree_cls.read.return_value = mock_ree
+        case = _hydro_case(tmp_path, cadastro=cadastro)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
             assert h["hydraulic_losses"] == {
                 "type": "constant",
                 "value_m": pytest.approx(3.5),
             }
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_hydraulic_losses_none_when_zero(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_hydraulic_losses_none_when_zero(self, tmp_path) -> None:
         """perdas=0.0 produces hydraulic_losses=None regardless of tipo_perda."""
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
         cadastro = _make_hidr_cadastro().copy()
         cadastro["tipo_perda"] = 1
         cadastro["perdas"] = 0.0
 
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = cadastro
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_ree = MagicMock()
-        mock_ree.rees = _make_ree_df()
-        mock_ree_cls.read.return_value = mock_ree
+        case = _hydro_case(tmp_path, cadastro=cadastro)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
             assert h["hydraulic_losses"] is None
 
-    @patch("cobre_bridge.converters.hydro.VolrefSaz")
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_evaporation_reference_volumes_from_volref_saz(
-        self,
-        mock_hidr_cls,
-        mock_confhd_cls,
-        mock_ree_cls,
-        mock_volref_cls,
-        tmp_path,
-    ) -> None:
+    def test_evaporation_reference_volumes_from_volref_saz(self, tmp_path) -> None:
         """Plant with seasonal volref → reference_volumes_hm3 emitted as
         ``vmin + volref_saz[m]`` per calendar month."""
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
-
         # Only USINA_A (code=1) gets a non-zero seasonal row.
         # vmin_A=100, vmax_A=1000 → useful volumes 50..600 all inside the range.
         volref_df = pd.DataFrame(
@@ -643,16 +518,15 @@ class TestConvertHydros:
                 "valor": [50.0 * m for m in range(1, 13)],
             }
         )
-        mock_volref = MagicMock()
-        mock_volref.volumes = volref_df
-        mock_volref_cls.read.return_value = mock_volref
+        case = _hydro_case(
+            tmp_path,
+            volref_volumes=volref_df,
+            volref_saz=tmp_path / "volref_saz.dat",
+        )
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(
-            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
-            self._make_id_map(),
-        )
+        result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
 
@@ -665,22 +539,11 @@ class TestConvertHydros:
         # USINA_B has no row in volref_saz → reference_volumes_hm3 omitted.
         assert "reference_volumes_hm3" not in hydro_b["evaporation"]
 
-    @patch("cobre_bridge.converters.hydro.VolrefSaz")
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
     def test_evaporation_reference_volumes_absent_for_all_zero_row(
-        self,
-        mock_hidr_cls,
-        mock_confhd_cls,
-        mock_ree_cls,
-        mock_volref_cls,
-        tmp_path,
+        self, tmp_path
     ) -> None:
         """All-zero volref_saz row is NEWAVE's sentinel; cobre falls back to
         its mid-storage default, so reference_volumes_hm3 is NOT emitted."""
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
-
         volref_df = pd.DataFrame(
             {
                 "codigo_usina": [1] * 12 + [2] * 12,
@@ -689,38 +552,26 @@ class TestConvertHydros:
                 "valor": [0.0] * 24,
             }
         )
-        mock_volref = MagicMock()
-        mock_volref.volumes = volref_df
-        mock_volref_cls.read.return_value = mock_volref
+        case = _hydro_case(
+            tmp_path,
+            volref_volumes=volref_df,
+            volref_saz=tmp_path / "volref_saz.dat",
+        )
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(
-            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
-            self._make_id_map(),
-        )
+        result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
             assert h["evaporation"] is not None
             assert "reference_volumes_hm3" not in h["evaporation"]
 
-    @patch("cobre_bridge.converters.hydro.VolrefSaz")
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
     def test_evaporation_reference_volumes_clamp_into_reservoir_range(
-        self,
-        mock_hidr_cls,
-        mock_confhd_cls,
-        mock_ree_cls,
-        mock_volref_cls,
-        tmp_path,
+        self, tmp_path
     ) -> None:
         """Useful volumes larger than (vmax-vmin) get clamped to vmax — the
         cobre schema requires every reference volume in [min_storage,
         max_storage], so we never emit a value outside the reservoir
         bounds even when volref_saz has out-of-range data."""
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
-
         # USINA_A has useful=[100,200,...,1200]. Useful range is 900 so
         # values 1000, 1100, 1200 exceed vmax (1000). Expect clamping to vmax.
         volref_df = pd.DataFrame(
@@ -731,16 +582,15 @@ class TestConvertHydros:
                 "valor": [100.0 * m for m in range(1, 13)],
             }
         )
-        mock_volref = MagicMock()
-        mock_volref.volumes = volref_df
-        mock_volref_cls.read.return_value = mock_volref
+        case = _hydro_case(
+            tmp_path,
+            volref_volumes=volref_df,
+            volref_saz=tmp_path / "volref_saz.dat",
+        )
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(
-            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
-            self._make_id_map(),
-        )
+        result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         ref_volumes = hydro_a["evaporation"]["reference_volumes_hm3"]
         assert len(ref_volumes) == 12
@@ -751,36 +601,18 @@ class TestConvertHydros:
         # Last three months hit the cap.
         assert ref_volumes[-3:] == [1000.0, 1000.0, 1000.0]
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_teif_ip_derating_reduces_max_generation(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_teif_ip_derating_reduces_max_generation(self, tmp_path) -> None:
         """TEIF=5%, IP=3% reduces max_generation by factor 0.95 * 0.97 = 0.9215."""
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
         cadastro = _make_hidr_cadastro().copy()
         # Override only USINA_A (code=1) with non-zero TEIF/IP.
         cadastro.loc[1, "teif"] = 5.0
         cadastro.loc[1, "ip"] = 3.0
 
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = cadastro
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_ree = MagicMock()
-        mock_ree.rees = _make_ree_df()
-        mock_ree_cls.read.return_value = mock_ree
+        case = _hydro_case(tmp_path, cadastro=cadastro)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         # USINA_A nominal: 4 machines * 200 MW = 800 MW
         # Derating: 800 * 0.95 * 0.97 = 737.2
@@ -794,68 +626,80 @@ class TestConvertHydros:
         # min_generation_mw must NOT be derated (it is zero here)
         assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_zero_teif_ip_no_derating(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_zero_teif_ip_no_derating(self, tmp_path) -> None:
         """TEIF=0% and IP=0% leaves max_generation_mw unchanged."""
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         # teif=0, ip=0 -> factor = 1.0 -> no change from nominal 800 MW
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_nan_teif_treated_as_zero(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_nan_teif_treated_as_zero(self, tmp_path) -> None:
         """NaN teif is treated as 0.0 — no derating, no error."""
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
         cadastro = _make_hidr_cadastro().copy()
         cadastro.loc[1, "teif"] = float("nan")
         cadastro.loc[1, "ip"] = float("nan")
 
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = cadastro
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_ree = MagicMock()
-        mock_ree.rees = _make_ree_df()
-        mock_ree_cls.read.return_value = mock_ree
+        case = _hydro_case(tmp_path, cadastro=cadastro)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         # NaN treated as 0 -> factor = 1.0 -> no change from nominal 800 MW
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
 
 
-def _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path):
-    """Wire mock read() returns for the three hydro-required files."""
+def _hydro_case(
+    tmp_path,
+    *,
+    cadastro: pd.DataFrame | None = None,
+    confhd: pd.DataFrame | None = None,
+    rees: pd.DataFrame | None = None,
+    modif=None,
+    volref_volumes: pd.DataFrame | None = None,
+    ghmin=None,
+    penalid=None,
+    dsvagua=None,
+    **file_overrides,
+):
+    """Build a ``NewaveCase`` with mock hydro readers pre-cached.
+
+    The three required hydro files (hidr/confhd/ree) default to the shared
+    synthetic fixtures; pass ``cadastro`` / ``confhd`` / ``rees`` DataFrames to
+    override. Optional readers (modif, volref_saz, ghmin, penalid, dsvagua) are
+    passed as already-built mock reader objects; for those guarded behind a
+    ``case.files.X`` path check, set the matching path via ``file_overrides``
+    (e.g. ``volref_saz=tmp_path / "volref_saz.dat"``).
+    """
     mock_hidr = MagicMock()
-    mock_hidr.cadastro = _make_hidr_cadastro()
-    mock_hidr_cls.read.return_value = mock_hidr
+    mock_hidr.cadastro = _make_hidr_cadastro() if cadastro is None else cadastro
 
     mock_confhd = MagicMock()
-    mock_confhd.usinas = _make_confhd_df()
-    mock_confhd_cls.read.return_value = mock_confhd
+    mock_confhd.usinas = _make_confhd_df() if confhd is None else confhd
 
     mock_ree = MagicMock()
-    mock_ree.rees = _make_ree_df()
-    mock_ree_cls.read.return_value = mock_ree
+    mock_ree.rees = _make_ree_df() if rees is None else rees
+
+    parsed: dict = {"hidr": mock_hidr, "confhd": mock_confhd, "ree": mock_ree}
+
+    if volref_volumes is not None:
+        mock_volref = MagicMock()
+        mock_volref.volumes = volref_volumes
+        parsed["volref_saz"] = mock_volref
+    if modif is not None:
+        parsed["modif"] = modif
+    if ghmin is not None:
+        parsed["ghmin"] = ghmin
+    if penalid is not None:
+        parsed["penalid"] = penalid
+    if dsvagua is not None:
+        parsed["dsvagua"] = dsvagua
+
+    files = make_nw_files(tmp_path, **file_overrides)
+    return make_case(files, **parsed)
 
 
 # ---------------------------------------------------------------------------
@@ -869,21 +713,24 @@ class TestApplyPermanentOverrides:
     def _base_cadastro(self) -> pd.DataFrame:
         return _make_hidr_cadastro()
 
+    def _modif_case(self, tmp_path, mock_modif):
+        """Build a case whose MODIF reader is *mock_modif* (path set)."""
+        return make_case(
+            make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            modif=mock_modif,
+        )
+
     def test_missing_modif_returns_unchanged(self, tmp_path) -> None:
         """No MODIF.DAT -> cadastro returned unchanged."""
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         cadastro = self._base_cadastro()
-        result = _apply_permanent_overrides(
-            cadastro, _make_nw_files(tmp_path, modif=None)
-        )
+        result = _apply_permanent_overrides(cadastro, make_case(tmp_path, modif=None))
         pd.testing.assert_frame_equal(result, cadastro)
 
     def test_volmax_override(self, tmp_path) -> None:
         """VOLMAX record updates volume_maximo for the target plant."""
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         # Build MODIF mock: plant 1 gets VOLMAX=2000.
         volmax_rec = MagicMock()
@@ -898,12 +745,9 @@ class TestApplyPermanentOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [volmax_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _apply_permanent_overrides(
-                self._base_cadastro(),
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            )
+        result = _apply_permanent_overrides(
+            self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+        )
 
         assert float(result.loc[1, "volume_maximo"]) == pytest.approx(2000.0)
         # Plant 2 must be unchanged.
@@ -912,8 +756,6 @@ class TestApplyPermanentOverrides:
     def test_vazmin_override(self, tmp_path) -> None:
         """VAZMIN record updates vazao_minima_historica for the target plant."""
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         vazmin_rec = MagicMock()
         type(vazmin_rec).__name__ = "VAZMIN"
@@ -926,12 +768,9 @@ class TestApplyPermanentOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [vazmin_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _apply_permanent_overrides(
-                self._base_cadastro(),
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            )
+        result = _apply_permanent_overrides(
+            self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+        )
 
         assert float(result.loc[2, "vazao_minima_historica"]) == pytest.approx(75.5)
         # Plant 1 must be unchanged (was 0).
@@ -940,8 +779,6 @@ class TestApplyPermanentOverrides:
     def test_numcnj_nummaq_override(self, tmp_path) -> None:
         """NUMCNJ + NUMMAQ records update machine set counts."""
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         numcnj_rec = MagicMock()
         type(numcnj_rec).__name__ = "NUMCNJ"
@@ -959,12 +796,9 @@ class TestApplyPermanentOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [numcnj_rec, nummaq_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _apply_permanent_overrides(
-                self._base_cadastro(),
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            )
+        result = _apply_permanent_overrides(
+            self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+        )
 
         assert int(result.loc[1, "numero_conjuntos_maquinas"]) == 2
         assert int(result.loc[1, "maquinas_conjunto_2"]) == 3
@@ -974,8 +808,6 @@ class TestApplyPermanentOverrides:
         import logging
 
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         volcota_rec = MagicMock()
         type(volcota_rec).__name__ = "VOLCOTA"
@@ -987,15 +819,10 @@ class TestApplyPermanentOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [volcota_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            with caplog.at_level(
-                logging.WARNING, logger="cobre_bridge.converters.hydro"
-            ):
-                result = _apply_permanent_overrides(
-                    self._base_cadastro(),
-                    _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-                )
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge.converters.hydro"):
+            result = _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
 
         # Values must be unchanged (dtype may differ due to float cast for safety).
         pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
@@ -1007,8 +834,6 @@ class TestApplyPermanentOverrides:
 
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
-        (tmp_path / "modif.dat").touch()
-
         usina_rec = MagicMock()
         usina_rec.codigo = 999  # not in cadastro
 
@@ -1016,26 +841,19 @@ class TestApplyPermanentOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = []
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            with caplog.at_level(
-                logging.WARNING, logger="cobre_bridge.converters.hydro"
-            ):
-                result = _apply_permanent_overrides(
-                    self._base_cadastro(),
-                    _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-                )
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge.converters.hydro"):
+            result = _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
 
         pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
         assert any("999" in msg for msg in caplog.messages)
 
     def test_temporal_records_skipped_in_permanent_pass(self, tmp_path) -> None:
         """Temporal override types are ignored in _apply_permanent_overrides."""
-        from cobre_bridge.converters.hydro import _apply_permanent_overrides
-
-        (tmp_path / "modif.dat").touch()
-
         import datetime
+
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         vazmint_rec = MagicMock()
         type(vazmint_rec).__name__ = "VAZMINT"
@@ -1049,12 +867,9 @@ class TestApplyPermanentOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [vazmint_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _apply_permanent_overrides(
-                self._base_cadastro(),
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            )
+        result = _apply_permanent_overrides(
+            self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+        )
 
         # vazao_minima_historica must stay at the base value (0).
         assert float(result.loc[1, "vazao_minima_historica"]) == pytest.approx(0.0)
@@ -1068,13 +883,18 @@ class TestApplyPermanentOverrides:
 class TestExtractTemporalOverrides:
     """Unit tests for ``_extract_temporal_overrides``."""
 
+    def _modif_case(self, tmp_path, mock_modif):
+        """Build a case whose MODIF reader is *mock_modif* (path set)."""
+        return make_case(
+            make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            modif=mock_modif,
+        )
+
     def test_missing_modif_returns_empty(self, tmp_path) -> None:
         """No MODIF.DAT -> empty dict returned, no error."""
         from cobre_bridge.converters.hydro import _extract_temporal_overrides
 
-        result = _extract_temporal_overrides(
-            _make_nw_files(tmp_path, modif=None), [1, 2]
-        )
+        result = _extract_temporal_overrides(make_case(tmp_path, modif=None), [1, 2])
         assert result == {}
 
     def test_extracts_vazmint_records(self, tmp_path) -> None:
@@ -1082,8 +902,6 @@ class TestExtractTemporalOverrides:
         import datetime
 
         from cobre_bridge.converters.hydro import _extract_temporal_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         vazmint_rec = MagicMock()
         type(vazmint_rec).__name__ = "VAZMINT"
@@ -1097,11 +915,9 @@ class TestExtractTemporalOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [vazmint_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [1, 2]
-            )
+        result = _extract_temporal_overrides(
+            self._modif_case(tmp_path, mock_modif), [1, 2]
+        )
 
         assert 1 in result
         assert result[1] == [
@@ -1113,8 +929,6 @@ class TestExtractTemporalOverrides:
         import datetime
 
         from cobre_bridge.converters.hydro import _extract_temporal_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         vazmint_rec = MagicMock()
         type(vazmint_rec).__name__ = "VAZMINT"
@@ -1129,11 +943,9 @@ class TestExtractTemporalOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [vazmint_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [1, 2]
-            )
+        result = _extract_temporal_overrides(
+            self._modif_case(tmp_path, mock_modif), [1, 2]
+        )
 
         assert result == {}
 
@@ -1142,8 +954,6 @@ class TestExtractTemporalOverrides:
         import datetime
 
         from cobre_bridge.converters.hydro import _extract_temporal_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         def _vazmint(month: int, vazao: float) -> MagicMock:
             r = MagicMock()
@@ -1161,11 +971,9 @@ class TestExtractTemporalOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = recs
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [1]
-            )
+        result = _extract_temporal_overrides(
+            self._modif_case(tmp_path, mock_modif), [1]
+        )
 
         assert len(result[1]) == 3
         assert result[1][0]["value"] == pytest.approx(50.0)
@@ -1177,8 +985,6 @@ class TestExtractTemporalOverrides:
         import datetime
 
         from cobre_bridge.converters.hydro import _extract_temporal_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         cfuga_rec = MagicMock()
         type(cfuga_rec).__name__ = "CFUGA"
@@ -1192,11 +998,9 @@ class TestExtractTemporalOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [cfuga_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [2]
-            )
+        result = _extract_temporal_overrides(
+            self._modif_case(tmp_path, mock_modif), [2]
+        )
 
         assert result[2] == [
             {"type": "CFUGA", "month": 6, "year": 2025, "value": pytest.approx(75.4)}
@@ -1207,8 +1011,6 @@ class TestExtractTemporalOverrides:
         import datetime
 
         from cobre_bridge.converters.hydro import _extract_temporal_overrides
-
-        (tmp_path / "modif.dat").touch()
 
         turbmint_rec = MagicMock()
         type(turbmint_rec).__name__ = "TURBMINT"
@@ -1227,11 +1029,9 @@ class TestExtractTemporalOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [turbmint_rec, turbmaxt_rec]
 
-        with patch("cobre_bridge.converters.hydro.Modif") as mock_modif_cls:
-            mock_modif_cls.read.return_value = mock_modif
-            result = _extract_temporal_overrides(
-                _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"), [1]
-            )
+        result = _extract_temporal_overrides(
+            self._modif_case(tmp_path, mock_modif), [1]
+        )
 
         assert result[1][0] == {
             "type": "TURBMINT",
@@ -1263,11 +1063,18 @@ class TestReadGhminPerStage:
     repetition.
     """
 
+    def _ghmin_case(self, tmp_path, mock_ghmin):
+        """Build a case whose GHMIN reader is *mock_ghmin* (path set)."""
+        return make_case(
+            make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
+            ghmin=mock_ghmin,
+        )
+
     def test_missing_ghmin_returns_empty(self, tmp_path) -> None:
         from cobre_bridge.converters.hydro import _read_ghmin_per_stage
 
         result = _read_ghmin_per_stage(
-            _make_nw_files(tmp_path, ghmin=None),
+            make_case(tmp_path, ghmin=None),
             start_year=2024,
             start_month=9,
             study_months=12,
@@ -1280,8 +1087,6 @@ class TestReadGhminPerStage:
         import datetime
 
         from cobre_bridge.converters.hydro import _read_ghmin_per_stage
-
-        (tmp_path / "ghmin.dat").touch()
 
         # Plant 1 at Sep 2024 = 100 MW, Dec 2024 = 80 MW.
         # Stages 0 (Sep) and 1 (Oct) and 2 (Nov) should all be 100.
@@ -1300,15 +1105,13 @@ class TestReadGhminPerStage:
         mock_ghmin = MagicMock()
         mock_ghmin.geracoes = ghmin_df
 
-        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
-            mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin_per_stage(
-                _make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
-                start_year=2024,
-                start_month=9,
-                study_months=12,
-                total_stages=12,
-            )
+        result = _read_ghmin_per_stage(
+            self._ghmin_case(tmp_path, mock_ghmin),
+            start_year=2024,
+            start_month=9,
+            study_months=12,
+            total_stages=12,
+        )
 
         per_stage = result[1]
         assert per_stage[0] == pytest.approx(100.0)
@@ -1322,8 +1125,6 @@ class TestReadGhminPerStage:
         import datetime
 
         from cobre_bridge.converters.hydro import _read_ghmin_per_stage
-
-        (tmp_path / "ghmin.dat").touch()
 
         ghmin_df = pd.DataFrame(
             {
@@ -1340,15 +1141,13 @@ class TestReadGhminPerStage:
         mock_ghmin = MagicMock()
         mock_ghmin.geracoes = ghmin_df
 
-        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
-            mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin_per_stage(
-                _make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
-                start_year=2024,
-                start_month=9,
-                study_months=12,  # study ends Aug 2025
-                total_stages=24,  # post-study: Sep 2025 – Aug 2026
-            )
+        result = _read_ghmin_per_stage(
+            self._ghmin_case(tmp_path, mock_ghmin),
+            start_year=2024,
+            start_month=9,
+            study_months=12,  # study ends Aug 2025
+            total_stages=24,  # post-study: Sep 2025 – Aug 2026
+        )
 
         per_stage = result[1]
         # Stage 12 = Sep 2025 → POS Sep = 150.
@@ -1362,8 +1161,6 @@ class TestReadGhminPerStage:
         import datetime
 
         from cobre_bridge.converters.hydro import _read_ghmin_per_stage
-
-        (tmp_path / "ghmin.dat").touch()
 
         ghmin_df = pd.DataFrame(
             {
@@ -1379,15 +1176,13 @@ class TestReadGhminPerStage:
         mock_ghmin = MagicMock()
         mock_ghmin.geracoes = ghmin_df
 
-        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
-            mock_ghmin_cls.read.return_value = mock_ghmin
-            result = _read_ghmin_per_stage(
-                _make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
-                start_year=2024,
-                start_month=9,
-                study_months=12,
-                total_stages=12,
-            )
+        result = _read_ghmin_per_stage(
+            self._ghmin_case(tmp_path, mock_ghmin),
+            start_year=2024,
+            start_month=9,
+            study_months=12,
+            total_stages=12,
+        )
 
         assert result == {}
 
@@ -1428,10 +1223,12 @@ class TestConvertStorageBoundsPostStudy:
         id_map = MagicMock()
         id_map.hydro_id = lambda c: 0
 
-        nw = _make_nw_files(tmp_path, modif=tmp_path / "modif.dat")
+        case = make_case(
+            make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            dger=mock_dger,
+            confhd=mock_confhd,
+        )
         with (
-            patch("inewave.newave.Dger") as md,
-            patch("inewave.newave.Confhd") as mc,
             patch("cobre_bridge.converters.hydro.read_cadastro", return_value=cadastro),
             patch(
                 "cobre_bridge.converters.hydro._extract_temporal_overrides",
@@ -1442,9 +1239,7 @@ class TestConvertStorageBoundsPostStudy:
                 return_value={},
             ),
         ):
-            md.read.return_value = mock_dger
-            mc.read.return_value = mock_confhd
-            tbl = convert_storage_bounds(nw, id_map)
+            tbl = convert_storage_bounds(case, id_map)
         assert tbl is not None
         return tbl.to_pandas().set_index("stage_id")
 
@@ -1519,16 +1314,9 @@ class TestConvertHydrosGhmin:
             thermal_codes=[],
         )
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_static_min_generation_is_zero_when_ghmin_present(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_static_min_generation_is_zero_when_ghmin_present(self, tmp_path) -> None:
         """The static field is always zero — GHMIN goes elsewhere."""
         import datetime
-
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
 
         ghmin_df = pd.DataFrame(
             {
@@ -1541,30 +1329,25 @@ class TestConvertHydrosGhmin:
         mock_ghmin_obj = MagicMock()
         mock_ghmin_obj.geracoes = ghmin_df
 
+        # convert_hydros never reads GHMIN (the per-stage values live in
+        # hydro_bounds.parquet); the GHMIN mock is supplied to mirror a case
+        # where the file is present, and the static field must still be 0.
+        case = _hydro_case(tmp_path, ghmin=mock_ghmin_obj)
+
         from cobre_bridge.converters.hydro import convert_hydros
 
-        with patch("cobre_bridge.converters.hydro.Ghmin") as mock_ghmin_cls:
-            mock_ghmin_cls.read.return_value = mock_ghmin_obj
-            result = convert_hydros(
-                _make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat"),
-                self._make_id_map(),
-            )
+        result = convert_hydros(case, self._make_id_map())
 
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_static_min_generation_is_zero_when_ghmin_absent(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_static_min_generation_is_zero_when_ghmin_absent(self, tmp_path) -> None:
         """With no GHMIN.DAT, static min_generation_mw is still 0."""
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+        case = _hydro_case(tmp_path)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
-        result = convert_hydros(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["generation"]["min_generation_mw"] == pytest.approx(0.0)
 
@@ -1605,25 +1388,20 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             }
         )
 
-    def _patch_dger(self, tmp_path, sazonaliza: int, num_anos_estudo: int = 3):
-        """Patch ``cobre_bridge.converters.hydro.Dger`` to return a fake
-        Dger with a controllable ``sazonaliza_cfuga_cmont``.
+    def _dger_case(self, tmp_path, sazonaliza: int, num_anos_estudo: int = 3):
+        """Build a case whose ``dger`` carries a controllable
+        ``sazonaliza_cfuga_cmont``.
 
         ``num_anos_estudo`` defaults to 3 → study_months = 4 + 2*12 = 28 (start
         month 9), placing the seasonal-cycle assertions inside the study period.
         Lower it to push the post-study freeze boundary earlier.
-
-        Returns the patcher context manager so the caller can ``with`` on it.
         """
         mock_dger = MagicMock()
         mock_dger.ano_inicio_estudo = 2024
         mock_dger.mes_inicio_estudo = 9
         mock_dger.num_anos_estudo = num_anos_estudo
         mock_dger.sazonaliza_cfuga_cmont = sazonaliza
-        ctx = patch("cobre_bridge.converters.hydro.Dger")
-        cls = ctx.__enter__()
-        cls.read.return_value = mock_dger
-        return ctx
+        return make_case(tmp_path, dger=mock_dger)
 
     def test_step_function_carries_when_sazonaliza_zero(self, tmp_path) -> None:
         from cobre_bridge.converters.hydro import _per_stage_productivities
@@ -1632,17 +1410,13 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
             {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
         ]
-        ctx = self._patch_dger(tmp_path, sazonaliza=0)
-        try:
-            vals = _per_stage_productivities(
-                self._hreg(),
-                base_productivity=0.0,
-                drop_overrides=overrides,
-                nw_files=_make_nw_files(tmp_path),
-                total_stages=24,
-            )
-        finally:
-            ctx.__exit__(None, None, None)
+        vals = _per_stage_productivities(
+            self._hreg(),
+            base_productivity=0.0,
+            drop_overrides=overrides,
+            case=self._dger_case(tmp_path, sazonaliza=0),
+            total_stages=24,
+        )
 
         # tipo_regulacao = "M": v_65 = vmin + 0.65*(vmax-vmin) = 650.
         # cota(650) = 0 + 1*650 = 650. perdas=0 → prod = 1 * (650 - cfuga).
@@ -1663,17 +1437,13 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
             {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
         ]
-        ctx = self._patch_dger(tmp_path, sazonaliza=1)
-        try:
-            vals = _per_stage_productivities(
-                self._hreg(),
-                base_productivity=0.0,
-                drop_overrides=overrides,
-                nw_files=_make_nw_files(tmp_path),
-                total_stages=24,
-            )
-        finally:
-            ctx.__exit__(None, None, None)
+        vals = _per_stage_productivities(
+            self._hreg(),
+            base_productivity=0.0,
+            drop_overrides=overrides,
+            case=self._dger_case(tmp_path, sazonaliza=1),
+            total_stages=24,
+        )
 
         # See test_step_function_carries_when_sazonaliza_zero for the
         # head computation: prod = 650 - cfuga at every stage.
@@ -1697,17 +1467,13 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             {"type": "CFUGA", "year": 2025, "month": 9, "value": 7.0},  # newer
             {"type": "CFUGA", "year": 2025, "month": 10, "value": 10.0},
         ]
-        ctx = self._patch_dger(tmp_path, sazonaliza=1)
-        try:
-            vals = _per_stage_productivities(
-                self._hreg(),
-                base_productivity=0.0,
-                drop_overrides=overrides,
-                nw_files=_make_nw_files(tmp_path),
-                total_stages=36,
-            )
-        finally:
-            ctx.__exit__(None, None, None)
+        vals = _per_stage_productivities(
+            self._hreg(),
+            base_productivity=0.0,
+            drop_overrides=overrides,
+            case=self._dger_case(tmp_path, sazonaliza=1),
+            total_stages=36,
+        )
 
         # Stage 24 = Sep 2026 → AFTER last_event_stage → seasonal cfuga[9]
         # = 7.0 (Sep 2025 won over Sep 2024) → prod = 650 - 7 = 643.
@@ -1722,7 +1488,7 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             self._hreg(),
             base_productivity=42.0,
             drop_overrides=[],
-            nw_files=_make_nw_files(tmp_path),
+            case=make_case(tmp_path),
             total_stages=12,
         )
         assert vals == [42.0] * 12
@@ -1741,17 +1507,13 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
             {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
             {"type": "CFUGA", "year": 2024, "month": 10, "value": 10.0},
         ]
-        ctx = self._patch_dger(tmp_path, sazonaliza=1, num_anos_estudo=1)
-        try:
-            vals = _per_stage_productivities(
-                self._hreg(),
-                base_productivity=0.0,
-                drop_overrides=overrides,
-                nw_files=_make_nw_files(tmp_path),
-                total_stages=24,
-            )
-        finally:
-            ctx.__exit__(None, None, None)
+        vals = _per_stage_productivities(
+            self._hreg(),
+            base_productivity=0.0,
+            drop_overrides=overrides,
+            case=self._dger_case(tmp_path, sazonaliza=1, num_anos_estudo=1),
+            total_stages=24,
+        )
 
         # Post-study Sep (stage 12) keeps the seasonal Sep value (645), and
         # post-study Oct (stage 13) keeps Oct (640) — NOT frozen at Dec's 640.
@@ -2171,19 +1933,19 @@ class TestProductivitySinMeans:
     def _confhd(rows: list[dict]) -> pd.DataFrame:
         return pd.DataFrame(rows)
 
-    @staticmethod
-    def _patch_hydro_reads(cadastro: pd.DataFrame, confhd: pd.DataFrame):
+    def _case(self, tmp_path, cadastro: pd.DataFrame, confhd: pd.DataFrame):
+        """Build a case with hidr/confhd mocks. The ``_apply_permanent_overrides``
+        identity patch is returned separately so callers can ``with`` on it."""
         hidr_obj = MagicMock()
         hidr_obj.cadastro = cadastro
         confhd_obj = MagicMock()
         confhd_obj.usinas = confhd
-        hidr = patch("cobre_bridge.converters.hydro.Hidr")
-        conf = patch("cobre_bridge.converters.hydro.Confhd")
+        case = make_case(tmp_path, hidr=hidr_obj, confhd=confhd_obj)
         overrides = patch(
             "cobre_bridge.converters.hydro._apply_permanent_overrides",
-            new=lambda cadastro, nw_files: cadastro,
+            new=lambda cadastro, case: cadastro,
         )
-        return hidr_obj, confhd_obj, hidr, conf, overrides
+        return case, overrides
 
     def test_prodt_sin_mean_averages_existing_nonfict_in_cadastro(
         self, tmp_path: Path
@@ -2211,14 +1973,9 @@ class TestProductivitySinMeans:
                 {"codigo_usina": 5, "nome_usina": "PLANT E", "usina_existente": "NE"},
             ]
         )
-        nw = _make_nw_files(tmp_path)
-        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
-            cadastro, confhd
-        )
-        with hidr as mh, conf as mc, overrides:
-            mh.read.return_value = hidr_obj
-            mc.read.return_value = confhd_obj
-            result = compute_prodt_sin_mean(nw)
+        case, overrides = self._case(tmp_path, cadastro, confhd)
+        with overrides:
+            result = compute_prodt_sin_mean(case)
 
         expected = (
             _equivalent_productivity(cadastro.loc[1])
@@ -2243,14 +2000,9 @@ class TestProductivitySinMeans:
                 {"codigo_usina": 8, "nome_usina": "GONE", "usina_existente": "NE"},
             ]
         )
-        nw = _make_nw_files(tmp_path)
-        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
-            cadastro, confhd
-        )
-        with hidr as mh, conf as mc, overrides:
-            mh.read.return_value = hidr_obj
-            mc.read.return_value = confhd_obj
-            assert compute_prodt_sin_mean(nw) == 1.0
+        case, overrides = self._case(tmp_path, cadastro, confhd)
+        with overrides:
+            assert compute_prodt_sin_mean(case) == 1.0
 
     def test_per_stage_prodt_flat_without_temporal_overrides(
         self, tmp_path: Path
@@ -2273,13 +2025,8 @@ class TestProductivitySinMeans:
                 {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
             ]
         )
-        nw = _make_nw_files(tmp_path)
-        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
-            cadastro, confhd
-        )
+        case, overrides = self._case(tmp_path, cadastro, confhd)
         with (
-            hidr as mh,
-            conf as mc,
             overrides,
             patch("cobre_bridge.converters.hydro._total_study_stages", return_value=4),
             patch(
@@ -2287,9 +2034,7 @@ class TestProductivitySinMeans:
                 return_value={},
             ),
         ):
-            mh.read.return_value = hidr_obj
-            mc.read.return_value = confhd_obj
-            per_stage = compute_per_stage_prodt_sin_mean(nw)
+            per_stage = compute_per_stage_prodt_sin_mean(case)
 
         base = (
             _equivalent_productivity(cadastro.loc[1])
@@ -2314,20 +2059,15 @@ class TestProductivitySinMeans:
                 {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
             ]
         )
-        nw = _make_nw_files(tmp_path)
 
-        def fake_series(hreg, base, drops, nw_files, total_stages):
+        def fake_series(hreg, base, drops, case, total_stages):
             # Plants with a routed CFUGA/CMONT override drift per stage; others flat.
             if drops:
                 return [base, base * 1.02, base * 0.98][:total_stages]
             return [base] * total_stages
 
-        hidr_obj, confhd_obj, hidr, conf, overrides = self._patch_hydro_reads(
-            cadastro, confhd
-        )
+        case, overrides = self._case(tmp_path, cadastro, confhd)
         with (
-            hidr as mh,
-            conf as mc,
             overrides,
             patch("cobre_bridge.converters.hydro._total_study_stages", return_value=3),
             patch(
@@ -2339,9 +2079,7 @@ class TestProductivitySinMeans:
                 side_effect=fake_series,
             ),
         ):
-            mh.read.return_value = hidr_obj
-            mc.read.return_value = confhd_obj
-            per_stage = compute_per_stage_prodt_sin_mean(nw)
+            per_stage = compute_per_stage_prodt_sin_mean(case)
 
         b1 = _equivalent_productivity(cadastro.loc[1])
         b2 = _equivalent_productivity(cadastro.loc[2])
@@ -2426,63 +2164,53 @@ class TestConvertProductionModels:
             thermal_codes=[],
         )
 
-    def _setup_base_mocks(
+    def _base_case(
         self,
-        mock_hidr_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
         tmp_path: Path,
         *,
+        modif=None,
         ano_inicio: int = 2025,
         mes_inicio: int = 1,
         num_anos: int = 5,
-    ) -> None:
+    ):
+        """Build a case with hidr/confhd/dger mocks (and optional modif).
+
+        Pass *modif* as a mock reader object; the matching path is set so the
+        ``case.files.modif`` guard sees a present file.
+        """
         mock_hidr = MagicMock()
         mock_hidr.cadastro = _make_hidr_cadastro()
-        mock_hidr_cls.read.return_value = mock_hidr
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
 
-        mock_dger_cls.read.return_value = _make_prod_model_dger_mock(
+        mock_dger = _make_prod_model_dger_mock(
             ano_inicio=ano_inicio,
             mes_inicio=mes_inicio,
             num_anos=num_anos,
             num_anos_pos=0,
         )
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_returns_all_hydros_when_no_modif(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+        parsed: dict = {"hidr": mock_hidr, "confhd": mock_confhd, "dger": mock_dger}
+        if modif is not None:
+            parsed["modif"] = modif
+            files = make_nw_files(tmp_path, modif=tmp_path / "modif.dat")
+        else:
+            files = make_nw_files(tmp_path)
+        return make_case(files, **parsed)
+
+    def test_returns_all_hydros_when_no_modif(self, tmp_path: Path) -> None:
         """No MODIF.DAT: every hydro still gets a single-range entry.
 
         Cobre HEAD requires the productivity for every hydro to live in
         ``hydro_production_models.json`` (it was removed from hydros.json
         generation block), so we always emit an entry per plant.
         """
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = _make_hidr_cadastro()
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_dger_cls.read.return_value = _make_prod_model_dger_mock()
+        case = self._base_case(tmp_path)
 
         from cobre_bridge.converters.hydro import convert_production_models
 
-        result = convert_production_models(
-            _make_nw_files(tmp_path, modif=None), self._make_id_map()
-        )
+        result = convert_production_models(case, self._make_id_map())
         assert result is not None
         models = result["production_models"]
         assert len(models) == 2  # USINA_A and USINA_B
@@ -2496,30 +2224,9 @@ class TestConvertProductionModels:
             # not in the JSON stage_range entries.
             assert "productivity_mw_per_m3s" not in ranges[0]
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Modif")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_returns_all_hydros_when_no_cfuga_cmont(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_modif_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_returns_all_hydros_when_no_cfuga_cmont(self, tmp_path: Path) -> None:
         """MODIF.DAT present but only VAZMINT overrides -> per-hydro entries with single range."""
         import datetime
-
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = _make_hidr_cadastro()
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_dger_cls.read.return_value = _make_prod_model_dger_mock()
 
         vazmint_rec = MagicMock()
         type(vazmint_rec).__name__ = "VAZMINT"
@@ -2532,14 +2239,12 @@ class TestConvertProductionModels:
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [vazmint_rec]
-        mock_modif_cls.read.return_value = mock_modif
+
+        case = self._base_case(tmp_path, modif=mock_modif)
 
         from cobre_bridge.converters.hydro import convert_production_models
 
-        result = convert_production_models(
-            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            self._make_id_map(),
-        )
+        result = convert_production_models(case, self._make_id_map())
         assert result is not None
         models = result["production_models"]
         # Both hydros still get an entry, each with one stage range
@@ -2550,30 +2255,8 @@ class TestConvertProductionModels:
             assert len(ranges) == 1
             assert ranges[0]["end_stage_id"] is None
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Modif")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_single_cfuga_override_two_ranges(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_modif_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_single_cfuga_override_two_ranges(self, tmp_path: Path) -> None:
         """One CFUGA override at stage 3 -> two stage_ranges (base then overridden)."""
-        # Study: start Jan 2025, 5 years -> 60 stages total.
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=5,
-        )
-
         cfuga_rec = _make_cfuga_rec(month=4, year=2025, nivel=60.0)
         usina_rec = MagicMock()
         usina_rec.codigo = 1
@@ -2581,14 +2264,15 @@ class TestConvertProductionModels:
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [cfuga_rec]
-        mock_modif_cls.read.return_value = mock_modif
+
+        # Study: start Jan 2025, 5 years -> 60 stages total.
+        case = self._base_case(
+            tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
+        )
 
         from cobre_bridge.converters.hydro import convert_production_models
 
-        result = convert_production_models(
-            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            self._make_id_map(),
-        )
+        result = convert_production_models(case, self._make_id_map())
 
         assert result is not None
         assert "production_models" in result
@@ -2608,29 +2292,8 @@ class TestConvertProductionModels:
         assert ranges[0]["model"] == "constant_productivity"
         assert "productivity_mw_per_m3s" not in ranges[0]
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Modif")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_cmont_override_bypasses_polynomial(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_modif_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_cmont_override_bypasses_polynomial(self, tmp_path: Path) -> None:
         """CMONT override at stage 0 -> single stage_range using cmont as height."""
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=5,
-        )
-
         cmont_rec = _make_cmont_rec(month=1, year=2025, nivel=400.0)
         usina_rec = MagicMock()
         usina_rec.codigo = 1
@@ -2638,14 +2301,14 @@ class TestConvertProductionModels:
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [cmont_rec]
-        mock_modif_cls.read.return_value = mock_modif
+
+        case = self._base_case(
+            tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
+        )
 
         from cobre_bridge.converters.hydro import convert_production_models
 
-        result = convert_production_models(
-            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            self._make_id_map(),
-        )
+        result = convert_production_models(case, self._make_id_map())
 
         assert result is not None
         models = result["production_models"]
@@ -2658,29 +2321,8 @@ class TestConvertProductionModels:
         assert ranges[0]["end_stage_id"] is None
         assert "productivity_mw_per_m3s" not in ranges[0]
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Modif")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_multiple_overrides_three_ranges(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_modif_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_multiple_overrides_three_ranges(self, tmp_path: Path) -> None:
         """Two CFUGA overrides -> three stage_ranges."""
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=5,
-        )
-
         recs = [
             _make_cfuga_rec(month=6, year=2025, nivel=55.0),  # stage 5
             _make_cfuga_rec(month=1, year=2026, nivel=65.0),  # stage 12
@@ -2691,14 +2333,14 @@ class TestConvertProductionModels:
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = recs
-        mock_modif_cls.read.return_value = mock_modif
+
+        case = self._base_case(
+            tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
+        )
 
         from cobre_bridge.converters.hydro import convert_production_models
 
-        result = convert_production_models(
-            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            self._make_id_map(),
-        )
+        result = convert_production_models(case, self._make_id_map())
 
         assert result is not None
         # JSON now has a single model-only stage_range per hydro; the multiple
@@ -2709,29 +2351,8 @@ class TestConvertProductionModels:
         assert ranges[0]["end_stage_id"] is None
         assert "productivity_mw_per_m3s" not in ranges[0]
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Modif")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_output_sorted_by_hydro_id(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_modif_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_output_sorted_by_hydro_id(self, tmp_path: Path) -> None:
         """production_models list is sorted ascending by hydro_id."""
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=5,
-        )
-
         # Both plants have CFUGA overrides; plant codes 1 and 2 -> ids 0 and 1.
         usina_rec1 = MagicMock()
         usina_rec1.codigo = 1
@@ -2746,14 +2367,14 @@ class TestConvertProductionModels:
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec2, usina_rec1]  # reversed order
         mock_modif.modificacoes_usina.side_effect = _mods
-        mock_modif_cls.read.return_value = mock_modif
+
+        case = self._base_case(
+            tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
+        )
 
         from cobre_bridge.converters.hydro import convert_production_models
 
-        result = convert_production_models(
-            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            self._make_id_map(),
-        )
+        result = convert_production_models(case, self._make_id_map())
 
         assert result is not None
         ids = [m["hydro_id"] for m in result["production_models"]]
@@ -2775,59 +2396,54 @@ class TestConvertHydroEnergyProductivity:
             thermal_codes=[],
         )
 
-    def _setup_base_mocks(
+    def _base_case(
         self,
-        mock_hidr_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
         tmp_path: Path,
         *,
+        modif=None,
+        volref_volumes: pd.DataFrame | None = None,
         ano_inicio: int = 2025,
         mes_inicio: int = 1,
         num_anos: int = 5,
-    ) -> None:
+    ):
+        """Build a case with hidr/confhd/dger mocks plus optional modif/volref.
+
+        *modif* is a mock reader object; *volref_volumes* is a DataFrame for the
+        VolrefSaz reader. Matching file paths are set so the ``case.files.X``
+        guards see present files.
+        """
         mock_hidr = MagicMock()
         mock_hidr.cadastro = _make_hidr_cadastro()
-        mock_hidr_cls.read.return_value = mock_hidr
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
 
-        mock_dger_cls.read.return_value = _make_prod_model_dger_mock(
+        mock_dger = _make_prod_model_dger_mock(
             ano_inicio=ano_inicio,
             mes_inicio=mes_inicio,
             num_anos=num_anos,
             num_anos_pos=0,
         )
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_null_stage_row_per_hydro_when_no_overrides(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+        parsed: dict = {"hidr": mock_hidr, "confhd": mock_confhd, "dger": mock_dger}
+        file_overrides: dict = {}
+        if modif is not None:
+            parsed["modif"] = modif
+            file_overrides["modif"] = tmp_path / "modif.dat"
+        if volref_volumes is not None:
+            mock_volref = MagicMock()
+            mock_volref.volumes = volref_volumes
+            parsed["volref_saz"] = mock_volref
+            file_overrides["volref_saz"] = tmp_path / "volref_saz.dat"
+        return make_case(make_nw_files(tmp_path, **file_overrides), **parsed)
+
+    def test_null_stage_row_per_hydro_when_no_overrides(self, tmp_path: Path) -> None:
         """Without CFUGA/CMONT: one NULL-stage_id row per hydro with base productivity."""
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = _make_hidr_cadastro()
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_dger_cls.read.return_value = _make_prod_model_dger_mock()
+        case = self._base_case(tmp_path)
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
 
-        table = convert_hydro_energy_productivity(
-            _make_nw_files(tmp_path, modif=None),
-            self._make_id_map(),
-        )
+        table = convert_hydro_energy_productivity(case, self._make_id_map())
 
         assert table.num_rows == 2
         assert table.column_names[:2] == ["hydro_id", "stage_id"]
@@ -2837,43 +2453,22 @@ class TestConvertHydroEnergyProductivity:
         # USINA_A: v_65=685, poly(685)=368.5, net_drop=318.5, ρ=0.9 * 318.5
         assert prods[0] == pytest.approx(0.9 * 318.5)
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Modif")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_per_stage_rows_for_cfuga_override(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_modif_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_per_stage_rows_for_cfuga_override(self, tmp_path: Path) -> None:
         """CFUGA at stage 3 → per-stage rows for the full horizon; stages [0..2] use base."""
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=5,
-        )
-
         cfuga_rec = _make_cfuga_rec(month=4, year=2025, nivel=60.0)
         usina_rec = MagicMock()
         usina_rec.codigo = 1
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [cfuga_rec]
-        mock_modif_cls.read.return_value = mock_modif
+
+        case = self._base_case(
+            tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
+        )
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
 
-        table = convert_hydro_energy_productivity(
-            _make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
-            self._make_id_map(),
-        )
+        table = convert_hydro_energy_productivity(case, self._make_id_map())
 
         # USINA_A (hydro_id=0): 60 per-stage rows. USINA_B (hydro_id=1): 1 NULL row.
         rows = table.to_pylist()
@@ -2898,30 +2493,9 @@ class TestConvertHydroEnergyProductivity:
         assert a_by_stage[3] == pytest.approx(override)
         assert a_by_stage[59] == pytest.approx(override)
 
-    @patch("cobre_bridge.converters.hydro.VolrefSaz")
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_seasonal_volref_emits_per_stage_rows(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        mock_volref_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_seasonal_volref_emits_per_stage_rows(self, tmp_path: Path) -> None:
         """volref_saz row with non-zero values → per-stage ρ computed at
         ``vol_min + volref[month]`` for that calendar month."""
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=1,
-        )
-
         # USINA_A: seasonal row (every month has its own useful volume).
         # USINA_B: not present in the file → falls back to altura_65 default.
         volref_df = pd.DataFrame(
@@ -2933,16 +2507,18 @@ class TestConvertHydroEnergyProductivity:
                 "valor": [float(100 * m) for m in range(1, 13)],
             }
         )
-        mock_volref = MagicMock()
-        mock_volref.volumes = volref_df
-        mock_volref_cls.read.return_value = mock_volref
+
+        case = self._base_case(
+            tmp_path,
+            volref_volumes=volref_df,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=1,
+        )
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
 
-        table = convert_hydro_energy_productivity(
-            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
-            self._make_id_map(),
-        )
+        table = convert_hydro_energy_productivity(case, self._make_id_map())
         rows = table.to_pylist()
         a_rows = [r for r in rows if r["hydro_id"] == 0]
         b_rows = [r for r in rows if r["hydro_id"] == 1]
@@ -2962,30 +2538,11 @@ class TestConvertHydroEnergyProductivity:
             expected = 0.9 * ((300.0 + 0.1 * (100.0 + useful)) - 50.0)
             assert by_stage[stage] == pytest.approx(expected)
 
-    @patch("cobre_bridge.converters.hydro.VolrefSaz")
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
     def test_seasonal_volref_all_zero_row_falls_back_to_legacy(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        mock_volref_cls: MagicMock,
-        tmp_path: Path,
+        self, tmp_path: Path
     ) -> None:
         """All-zero volref_saz row is NEWAVE's "no seasonal reference" sentinel:
         emit a single null-stage row with the legacy altura_65 productivity."""
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=1,
-        )
-
         volref_df = pd.DataFrame(
             {
                 "codigo_usina": [1] * 12 + [2] * 12,
@@ -2995,16 +2552,18 @@ class TestConvertHydroEnergyProductivity:
                 "valor": [0.0] * 24,
             }
         )
-        mock_volref = MagicMock()
-        mock_volref.volumes = volref_df
-        mock_volref_cls.read.return_value = mock_volref
+
+        case = self._base_case(
+            tmp_path,
+            volref_volumes=volref_df,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=1,
+        )
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
 
-        table = convert_hydro_energy_productivity(
-            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
-            self._make_id_map(),
-        )
+        table = convert_hydro_energy_productivity(case, self._make_id_map())
         rows = table.to_pylist()
         assert len(rows) == 2
         for r in rows:
@@ -3013,31 +2572,12 @@ class TestConvertHydroEnergyProductivity:
         a_row = next(r for r in rows if r["hydro_id"] == 0)
         assert a_row["equivalent_productivity_mw_per_m3s"] == pytest.approx(0.9 * 318.5)
 
-    @patch("cobre_bridge.converters.hydro.VolrefSaz")
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
     def test_seasonal_volref_zero_month_inside_nonzero_row_uses_vmin(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        mock_volref_cls: MagicMock,
-        tmp_path: Path,
+        self, tmp_path: Path
     ) -> None:
         """A zero entry within a row that has some non-zero months means
         "operate at vol_min" for that month — distinct from the legacy
         fallback used for an entirely all-zero row."""
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=1,
-        )
-
         # USINA_A: month 1 = 0 (V=vmin); month 2 = 500 (V=vmin+500); rest = 0.
         # Plant is kept because at least one month is non-zero.
         valor = [0.0] * 12
@@ -3050,16 +2590,18 @@ class TestConvertHydroEnergyProductivity:
                 "valor": valor,
             }
         )
-        mock_volref = MagicMock()
-        mock_volref.volumes = volref_df
-        mock_volref_cls.read.return_value = mock_volref
+
+        case = self._base_case(
+            tmp_path,
+            volref_volumes=volref_df,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=1,
+        )
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
 
-        table = convert_hydro_energy_productivity(
-            _make_nw_files(tmp_path, volref_saz=tmp_path / "volref_saz.dat"),
-            self._make_id_map(),
-        )
+        table = convert_hydro_energy_productivity(case, self._make_id_map())
         rows = table.to_pylist()
         a_rows = sorted(
             (r for r in rows if r["hydro_id"] == 0),
@@ -3074,32 +2616,9 @@ class TestConvertHydroEnergyProductivity:
             0.9 * (300.0 + 0.1 * 600.0 - 50.0)
         )
 
-    @patch("cobre_bridge.converters.hydro.VolrefSaz")
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Modif")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_seasonal_volref_combined_with_cfuga_override(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_modif_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        mock_volref_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_seasonal_volref_combined_with_cfuga_override(self, tmp_path: Path) -> None:
         """Seasonal volref and CFUGA must compose: each stage uses the
         month's reference volume AND the active canal_fuga override."""
-        self._setup_base_mocks(
-            mock_hidr_cls,
-            mock_confhd_cls,
-            mock_dger_cls,
-            tmp_path,
-            ano_inicio=2025,
-            mes_inicio=1,
-            num_anos=1,
-        )
-
         # CFUGA effective from month 6 (stage 5) onward — canal_fuga 50 → 60.
         cfuga_rec = _make_cfuga_rec(month=6, year=2025, nivel=60.0)
         usina_rec = MagicMock()
@@ -3107,7 +2626,6 @@ class TestConvertHydroEnergyProductivity:
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [cfuga_rec]
-        mock_modif_cls.read.return_value = mock_modif
 
         # Seasonal volref: every month useful=200 → V=300, h=330.
         volref_df = pd.DataFrame(
@@ -3118,20 +2636,19 @@ class TestConvertHydroEnergyProductivity:
                 "valor": [200.0] * 12,
             }
         )
-        mock_volref = MagicMock()
-        mock_volref.volumes = volref_df
-        mock_volref_cls.read.return_value = mock_volref
+
+        case = self._base_case(
+            tmp_path,
+            modif=mock_modif,
+            volref_volumes=volref_df,
+            ano_inicio=2025,
+            mes_inicio=1,
+            num_anos=1,
+        )
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
 
-        table = convert_hydro_energy_productivity(
-            _make_nw_files(
-                tmp_path,
-                modif=tmp_path / "modif.dat",
-                volref_saz=tmp_path / "volref_saz.dat",
-            ),
-            self._make_id_map(),
-        )
+        table = convert_hydro_energy_productivity(case, self._make_id_map())
         rows = [r for r in table.to_pylist() if r["hydro_id"] == 0]
         by_stage = {
             r["stage_id"]: r["equivalent_productivity_mw_per_m3s"] for r in rows
@@ -3145,33 +2662,13 @@ class TestConvertHydroEnergyProductivity:
         assert by_stage[5] == pytest.approx(post)
         assert by_stage[11] == pytest.approx(post)
 
-    @patch("cobre_bridge.converters.hydro.Dger")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_other_override_columns_are_null(
-        self,
-        mock_hidr_cls: MagicMock,
-        mock_confhd_cls: MagicMock,
-        mock_dger_cls: MagicMock,
-        tmp_path: Path,
-    ) -> None:
+    def test_other_override_columns_are_null(self, tmp_path: Path) -> None:
         """reference_volume_hm3 / reference_outflow_m3s / ρ_esp columns remain NULL."""
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = _make_hidr_cadastro()
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_dger_cls.read.return_value = _make_prod_model_dger_mock()
+        case = self._base_case(tmp_path)
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
 
-        table = convert_hydro_energy_productivity(
-            _make_nw_files(tmp_path, modif=None),
-            self._make_id_map(),
-        )
+        table = convert_hydro_energy_productivity(case, self._make_id_map())
 
         for col in (
             "reference_volume_hm3",
@@ -4273,17 +3770,8 @@ class TestCrossReferenceConsistency:
             thermal_codes=[10, 20, 30],
         )
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_all_bus_ids_are_valid(
-        self,
-        mock_hidr_cls,
-        mock_confhd_cls,
-        mock_ree_cls,
-        tmp_path,
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_all_bus_ids_are_valid(self, tmp_path) -> None:
+        hydro_case = _hydro_case(tmp_path)
 
         conft, clast, term = _thermal_readers()
         dger = MagicMock()
@@ -4307,7 +3795,7 @@ class TestCrossReferenceConsistency:
         buses_result = convert_buses(
             make_case(nw_files, sistema=_make_sistema_mock()), id_map
         )
-        hydros_result = convert_hydros(nw_files, id_map)
+        hydros_result = convert_hydros(hydro_case, id_map)
         thermals_result = convert_thermals(thermal_case, id_map)
 
         valid_bus_ids = {b["id"] for b in buses_result["buses"]}
@@ -4322,17 +3810,12 @@ class TestCrossReferenceConsistency:
                 f"Thermal '{t['name']}' has bus_id={t['bus_id']} not in buses"
             )
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_downstream_ids_are_valid(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
+    def test_downstream_ids_are_valid(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path)
         from cobre_bridge.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
-        result = convert_hydros(_make_nw_files(tmp_path), id_map)
+        result = convert_hydros(case, id_map)
         valid_hydro_ids = {h["id"] for h in result["hydros"]}
 
         for h in result["hydros"]:
@@ -4507,21 +3990,13 @@ class TestBuildIdMap:
 class TestConvertHydrosDownstreamFict:
     """Downstream reference to a fictitious plant must produce downstream_id=None."""
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_downstream_to_fict_is_none(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_downstream_to_fict_is_none(self, tmp_path) -> None:
         """Plant with a fictitious downstream gets downstream_id=None.
 
         USINA_A (code=1) has codigo_usina_jusante=2, which is FICT.SERRA M.
         Because FICT.SERRA M is absent from id_map, the KeyError catch in
         hydro.py must produce downstream_id=None for USINA_A.
         """
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
         # Build a confhd DataFrame where plant 1 points downstream to a
         # fictitious plant (code=2) that is NOT present in the id_map.
         confhd_df = pd.DataFrame(
@@ -4536,34 +4011,23 @@ class TestConvertHydrosDownstreamFict:
                 "usina_modificada": [0],
             }
         )
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = confhd_df
-        mock_confhd_cls.read.return_value = mock_confhd
 
         # Hidr.cadastro for plant 1 only.
         cadastro = _make_hidr_cadastro().iloc[:1].copy()
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = cadastro
-        mock_hidr_cls.read.return_value = mock_hidr
 
-        mock_ree = MagicMock()
-        mock_ree.rees = _make_ree_df()
-        mock_ree_cls.read.return_value = mock_ree
+        case = _hydro_case(tmp_path, cadastro=cadastro, confhd=confhd_df)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
         # id_map has only plant 1; plant 2 (fictitious) is absent.
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
-        result = convert_hydros(_make_nw_files(tmp_path), id_map)
+        result = convert_hydros(case, id_map)
 
         assert len(result["hydros"]) == 1
         assert result["hydros"][0]["downstream_id"] is None
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
     def test_terminal_plant_with_matching_fict_resolves_through_chain(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
+        self, tmp_path
     ) -> None:
         """A real plant with confhd jusante=0 and a name-matched FICT must
         wire to the next real plant via the FICT chain.
@@ -4578,9 +4042,6 @@ class TestConvertHydrosDownstreamFict:
         7-char name match is ``USINA A`` (after the FICT. prefix) matching
         ``USINA_A``'s first-7-char key — pure prefix equality.
         """
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
         confhd_df = pd.DataFrame(
             {
                 "codigo_usina": [1, 2, 3],
@@ -4593,9 +4054,6 @@ class TestConvertHydrosDownstreamFict:
                 "usina_modificada": [0, 0, 0],
             }
         )
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = confhd_df
-        mock_confhd_cls.read.return_value = mock_confhd
 
         cadastro = _make_hidr_cadastro().copy()
         # _make_hidr_cadastro has plants 1 and 2.  Promote plant 2 to a
@@ -4608,18 +4066,12 @@ class TestConvertHydrosDownstreamFict:
         # cleanly isolates the topological fix from any ρ_eq fold-in.
         cadastro.loc[2, "produtibilidade_especifica"] = 0.0
 
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = cadastro
-        mock_hidr_cls.read.return_value = mock_hidr
-
-        mock_ree = MagicMock()
-        mock_ree.rees = _make_ree_df()
-        mock_ree_cls.read.return_value = mock_ree
+        case = _hydro_case(tmp_path, cadastro=cadastro, confhd=confhd_df)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 3], thermal_codes=[])
-        result = convert_hydros(_make_nw_files(tmp_path), id_map)
+        result = convert_hydros(case, id_map)
 
         assert len(result["hydros"]) == 2
         by_code = {h["name"]: h for h in result["hydros"]}
@@ -4864,20 +4316,21 @@ def _make_penalid_df() -> pd.DataFrame:
 class TestReadPenalid:
     """Unit tests for ``_read_penalid``."""
 
+    def _penalid_case(self, tmp_path, mock_penalid):
+        """Build a case whose PENALID reader is *mock_penalid* (path set)."""
+        return make_case(
+            make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat"),
+            penalid=mock_penalid,
+        )
+
     def test_reads_penalties_by_ree(self, tmp_path) -> None:
         """Correct Cobre field names and values are returned per REE."""
         from cobre_bridge.converters.hydro import _read_penalid
 
-        (tmp_path / "penalid.dat").touch()
-
         mock_penalid = MagicMock()
         mock_penalid.penalidades = _make_penalid_df()
 
-        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
-            mock_cls.read.return_value = mock_penalid
-            result = _read_penalid(
-                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat")
-            )
+        result = _read_penalid(self._penalid_case(tmp_path, mock_penalid))
 
         # REE 1 checks.
         assert 1 in result
@@ -4897,7 +4350,7 @@ class TestReadPenalid:
         from cobre_bridge.converters.hydro import _read_penalid
 
         # No penalid.dat — pass penalid=None.
-        result = _read_penalid(_make_nw_files(tmp_path, penalid=None))
+        result = _read_penalid(make_case(tmp_path, penalid=None))
 
         assert result == {}
 
@@ -4906,8 +4359,6 @@ class TestReadPenalid:
         import math
 
         from cobre_bridge.converters.hydro import _read_penalid
-
-        (tmp_path / "penalid.dat").touch()
 
         df = pd.DataFrame(
             {
@@ -4923,11 +4374,7 @@ class TestReadPenalid:
         mock_penalid = MagicMock()
         mock_penalid.penalidades = df
 
-        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
-            mock_cls.read.return_value = mock_penalid
-            result = _read_penalid(
-                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat")
-            )
+        result = _read_penalid(self._penalid_case(tmp_path, mock_penalid))
 
         assert 1 in result
         # DESVIO had NaN — must be absent.
@@ -4938,8 +4385,6 @@ class TestReadPenalid:
     def test_patamar2_rows_ignored(self, tmp_path) -> None:
         """Tier-2 patamar rows are excluded even when they have numeric values."""
         from cobre_bridge.converters.hydro import _read_penalid
-
-        (tmp_path / "penalid.dat").touch()
 
         df = pd.DataFrame(
             {
@@ -4955,11 +4400,7 @@ class TestReadPenalid:
         mock_penalid = MagicMock()
         mock_penalid.penalidades = df
 
-        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
-            mock_cls.read.return_value = mock_penalid
-            result = _read_penalid(
-                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat")
-            )
+        result = _read_penalid(self._penalid_case(tmp_path, mock_penalid))
 
         assert result == {}
 
@@ -4967,27 +4408,19 @@ class TestReadPenalid:
 class TestConvertHydrosPenalid:
     """Integration tests for PENALID.DAT -> hydro penalties in convert_hydros."""
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_penalid_present_still_leaves_penalties_none(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_penalid_present_still_leaves_penalties_none(self, tmp_path) -> None:
         """Per-plant penalties are always None; PENALID is handled globally."""
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
-        (tmp_path / "penalid.dat").touch()
-
+        # convert_hydros does not read PENALID (per-plant overrides were removed;
+        # the PENALID mock is supplied only to mirror a case where the file is
+        # present). The case carries it for parity with production.
         mock_penalid = MagicMock()
         mock_penalid.penalidades = _make_penalid_df()
+        case = _hydro_case(tmp_path, penalid=mock_penalid)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
-        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
-            mock_cls.read.return_value = mock_penalid
-            result = convert_hydros(
-                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat"), id_map
-            )
+        result = convert_hydros(case, id_map)
 
         # Per-plant penalty overrides were removed: PENALID values are
         # converted once via system-average productivity in penalties.json.
@@ -4997,20 +4430,14 @@ class TestConvertHydrosPenalid:
                 "(per-plant overrides removed; handled globally)"
             )
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_missing_penalid_leaves_penalties_none(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_missing_penalid_leaves_penalties_none(self, tmp_path) -> None:
         """When PENALID.DAT is absent, every hydro entry has penalties=None."""
-        _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
-        # Deliberately do NOT create penalid.dat.
+        case = _hydro_case(tmp_path)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
-        result = convert_hydros(_make_nw_files(tmp_path), id_map)
+        result = convert_hydros(case, id_map)
 
         for hydro in result["hydros"]:
             assert hydro["penalties"] is None, (
@@ -5018,16 +4445,8 @@ class TestConvertHydrosPenalid:
                 "when PENALID.DAT is absent"
             )
 
-    @patch("cobre_bridge.converters.hydro.Ree")
-    @patch("cobre_bridge.converters.hydro.Confhd")
-    @patch("cobre_bridge.converters.hydro.Hidr")
-    def test_different_rees_still_get_none_penalties(
-        self, mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path
-    ) -> None:
+    def test_different_rees_still_get_none_penalties(self, tmp_path) -> None:
         """Plants in different REEs still get penalties=None (global handling)."""
-        for fname in ("hidr.dat", "confhd.dat", "ree.dat"):
-            (tmp_path / fname).touch()
-
         # Two plants in different REEs: plant 1 in REE 1, plant 2 in REE 2.
         confhd_df = pd.DataFrame(
             {
@@ -5041,34 +4460,18 @@ class TestConvertHydrosPenalid:
                 "usina_modificada": [0, 0],
             }
         )
-        mock_confhd = MagicMock()
-        mock_confhd.usinas = confhd_df
-        mock_confhd_cls.read.return_value = mock_confhd
-
-        mock_hidr = MagicMock()
-        mock_hidr.cadastro = _make_hidr_cadastro()
-        mock_hidr_cls.read.return_value = mock_hidr
 
         # REE table: REE 1 -> subsystem 1, REE 2 -> subsystem 1.
         ree_df = pd.DataFrame(
             {"codigo": [1, 2], "nome": ["SE", "S"], "submercado": [1, 1]}
         )
-        mock_ree = MagicMock()
-        mock_ree.rees = ree_df
-        mock_ree_cls.read.return_value = mock_ree
 
-        (tmp_path / "penalid.dat").touch()
-        mock_penalid = MagicMock()
-        mock_penalid.penalidades = _make_penalid_df()
+        case = _hydro_case(tmp_path, confhd=confhd_df, rees=ree_df)
 
         from cobre_bridge.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
-        with patch("cobre_bridge.converters.hydro.Penalid") as mock_cls:
-            mock_cls.read.return_value = mock_penalid
-            result = convert_hydros(
-                _make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat"), id_map
-            )
+        result = convert_hydros(case, id_map)
 
         for hydro in result["hydros"]:
             assert hydro["penalties"] is None
@@ -5128,14 +4531,21 @@ class TestWaterWithdrawalConversion:
             thermal_codes=[],
         )
 
+    def _withdrawal_case(self, tmp_path, *, dsvagua, dger, confhd=None):
+        """Build a case for ``convert_water_withdrawal`` with dsvagua/dger/confhd
+        mocks pre-cached (dsvagua path set so the present-file guard passes)."""
+        parsed: dict = {"dger": dger, "dsvagua": dsvagua}
+        if confhd is not None:
+            parsed["confhd"] = confhd
+        return make_case(
+            make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"), **parsed
+        )
+
     def test_basic_returns_correct_schema(self, tmp_path: Path) -> None:
         """Two plants, three dates each: table has the three expected columns."""
         import datetime
 
         from cobre_bridge.converters.hydro import convert_water_withdrawal
-
-        (tmp_path / "dsvagua.dat").touch()
-        (tmp_path / "dger.dat").touch()
 
         rows = [
             {
@@ -5167,24 +4577,10 @@ class TestWaterWithdrawalConversion:
         mock_confhd.usinas = pd.DataFrame(
             columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
         )
-        with (
-            patch(
-                "inewave.newave.Dsvagua.read",
-                return_value=mock_dsvagua,
-            ),
-            patch(
-                "inewave.newave.Dger.read",
-                return_value=mock_dger,
-            ),
-            patch(
-                "cobre_bridge.converters.hydro.Confhd.read",
-                return_value=mock_confhd,
-            ),
-        ):
-            result = convert_water_withdrawal(
-                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"),
-                self._make_id_map(),
-            )
+        case = self._withdrawal_case(
+            tmp_path, dsvagua=mock_dsvagua, dger=mock_dger, confhd=mock_confhd
+        )
+        result = convert_water_withdrawal(case, self._make_id_map())
 
         assert result is not None
         assert result.schema.names == ["hydro_id", "stage_id", "water_withdrawal_m3s"]
@@ -5220,23 +4616,10 @@ class TestWaterWithdrawalConversion:
         mock_confhd.usinas = pd.DataFrame(
             columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
         )
-        with (
-            patch(
-                "inewave.newave.Dsvagua.read",
-                return_value=mock_dsvagua,
-            ),
-            patch(
-                "inewave.newave.Dger.read",
-                return_value=mock_dger,
-            ),
-            patch(
-                "cobre_bridge.converters.hydro.Confhd.read",
-                return_value=mock_confhd,
-            ),
-        ):
-            result = convert_water_withdrawal(
-                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"), id_map
-            )
+        case = self._withdrawal_case(
+            tmp_path, dsvagua=mock_dsvagua, dger=mock_dger, confhd=mock_confhd
+        )
+        result = convert_water_withdrawal(case, id_map)
 
         assert result is not None
         assert result.num_rows == 1
@@ -5272,23 +4655,10 @@ class TestWaterWithdrawalConversion:
         mock_confhd.usinas = pd.DataFrame(
             columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
         )
-        with (
-            patch(
-                "inewave.newave.Dsvagua.read",
-                return_value=mock_dsvagua,
-            ),
-            patch(
-                "inewave.newave.Dger.read",
-                return_value=mock_dger,
-            ),
-            patch(
-                "cobre_bridge.converters.hydro.Confhd.read",
-                return_value=mock_confhd,
-            ),
-        ):
-            result = convert_water_withdrawal(
-                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"), id_map
-            )
+        case = self._withdrawal_case(
+            tmp_path, dsvagua=mock_dsvagua, dger=mock_dger, confhd=mock_confhd
+        )
+        result = convert_water_withdrawal(case, id_map)
 
         assert result is not None
         assert result.num_rows == 1
@@ -5301,21 +4671,15 @@ class TestWaterWithdrawalConversion:
         """When dsvagua.dat is absent the converter returns None without error."""
         from cobre_bridge.converters.hydro import convert_water_withdrawal
 
-        # Do NOT create dsvagua.dat — only create the other required files.
-        (tmp_path / "confhd.dat").touch()
-        (tmp_path / "dger.dat").touch()
-
-        result = convert_water_withdrawal(
-            _make_nw_files(tmp_path, dsvagua=None), self._make_id_map()
-        )
+        # dsvagua absent (path None) — the converter must return None before
+        # touching dger.
+        case = make_case(make_nw_files(tmp_path, dsvagua=None))
+        result = convert_water_withdrawal(case, self._make_id_map())
         assert result is None
 
     def test_empty_desvios_returns_none(self, tmp_path: Path) -> None:
         """When desvios is None the converter returns None."""
         from cobre_bridge.converters.hydro import convert_water_withdrawal
-
-        (tmp_path / "dsvagua.dat").touch()
-        (tmp_path / "dger.dat").touch()
 
         mock_dsvagua = MagicMock()
         mock_dsvagua.desvios = None
@@ -5325,14 +4689,8 @@ class TestWaterWithdrawalConversion:
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
 
-        with (
-            patch("inewave.newave.Dsvagua.read", return_value=mock_dsvagua),
-            patch("inewave.newave.Dger.read", return_value=mock_dger),
-        ):
-            result = convert_water_withdrawal(
-                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"),
-                self._make_id_map(),
-            )
+        case = self._withdrawal_case(tmp_path, dsvagua=mock_dsvagua, dger=mock_dger)
+        result = convert_water_withdrawal(case, self._make_id_map())
 
         assert result is None
 
@@ -5343,38 +4701,27 @@ class TestWaterWithdrawalConversion:
         solver ignores ``dsvagua.dat`` regardless of its content, so the
         converter must not emit any water-withdrawal rows.
         """
-        import datetime
-
         from cobre_bridge.converters.hydro import convert_water_withdrawal
 
-        (tmp_path / "dsvagua.dat").touch()
-        (tmp_path / "dger.dat").touch()
-
-        # Populate dsvagua with values that would normally produce rows;
-        # the dger flag must prevent any of them from being read.
-        rows = [
-            {"codigo_usina": 10, "data": datetime.datetime(2020, 1, 1), "valor": -2.0},
-        ]
-        mock_dsvagua = MagicMock()
-        mock_dsvagua.desvios = _make_dsvagua_df(rows)
         mock_dger = MagicMock()
         mock_dger.outros_usos_da_agua = 0
         mock_dger.ano_inicio_estudo = 2020
         mock_dger.mes_inicio_estudo = 1
         mock_dger.num_anos_estudo = 5
 
-        with (
-            patch("inewave.newave.Dsvagua.read", return_value=mock_dsvagua) as _ds,
-            patch("inewave.newave.Dger.read", return_value=mock_dger),
-        ):
-            result = convert_water_withdrawal(
-                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"),
-                self._make_id_map(),
-            )
+        # Do NOT pre-cache the dsvagua slot: the dger switch must short-circuit
+        # before ``case.dsvagua`` is ever accessed. If the short-circuit
+        # regressed, the cached_property would attempt to parse the (absent)
+        # dsvagua.dat path and raise, failing this test loudly.
+        case = make_case(
+            make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"),
+            dger=mock_dger,
+        )
+        result = convert_water_withdrawal(case, self._make_id_map())
 
         assert result is None
-        # The short-circuit must happen before any dsvagua I/O.
-        _ds.assert_not_called()
+        # The short-circuit must happen before any dsvagua access.
+        assert "dsvagua" not in case.__dict__
 
     def test_codes_outside_id_map_are_dropped(self, tmp_path: Path) -> None:
         """``codigo_usina`` codes the id_map doesn't know are silently dropped.
@@ -5408,23 +4755,10 @@ class TestWaterWithdrawalConversion:
         mock_confhd.usinas = pd.DataFrame(
             columns=["codigo_usina", "codigo_usina_jusante", "nome_usina"]
         )
-        with (
-            patch(
-                "inewave.newave.Dsvagua.read",
-                return_value=mock_dsvagua,
-            ),
-            patch(
-                "inewave.newave.Dger.read",
-                return_value=mock_dger,
-            ),
-            patch(
-                "cobre_bridge.converters.hydro.Confhd.read",
-                return_value=mock_confhd,
-            ),
-        ):
-            result = convert_water_withdrawal(
-                _make_nw_files(tmp_path, dsvagua=tmp_path / "dsvagua.dat"), id_map
-            )
+        case = self._withdrawal_case(
+            tmp_path, dsvagua=mock_dsvagua, dger=mock_dger, confhd=mock_confhd
+        )
+        result = convert_water_withdrawal(case, id_map)
 
         assert result is not None
         assert result.num_rows == 1

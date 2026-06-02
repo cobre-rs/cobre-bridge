@@ -24,7 +24,6 @@ from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
 from cobre_bridge.id_map import build_id_map
-from cobre_bridge.newave_files import NewaveFiles
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +86,7 @@ class _ConstraintIdAllocator:
         self.next_id += count
 
 
-def _compute_prod_media_sin_safe(nw_files: NewaveFiles) -> float | None:
+def _compute_prod_media_sin_safe(case: NewaveCase) -> float | None:
     """Return ``PROD_MEDIA_SIN`` (mean PRODT), or ``None`` on failure.
 
     NEWAVE converts the PENALID R$/MWh penalties (VAZMIN, TURBMN/TURBMX, …) with
@@ -99,13 +98,13 @@ def _compute_prod_media_sin_safe(nw_files: NewaveFiles) -> float | None:
     unit tests that mock the pipeline.
     """
     try:
-        return hydro_conv.compute_prodt_sin_mean(nw_files)
+        return hydro_conv.compute_prodt_sin_mean(case)
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         return None
 
 
 def _compute_per_stage_sin_productivities(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
 ) -> tuple[list[float], list[float]] | None:
     """Return ``(PROD_MEDIA_SIN[s], MAX_PRODTACUM_SIN[s])`` per stage, or None.
 
@@ -133,10 +132,10 @@ def _compute_per_stage_sin_productivities(
     Falls back to ``None`` when the NEWAVE files can't be read (mocked tests).
     """
     try:
-        rho_avg = hydro_conv.compute_per_stage_prodt_sin_mean(nw_files)
+        rho_avg = hydro_conv.compute_per_stage_prodt_sin_mean(case)
         if not rho_avg:
             return None
-        max_prodtacum = constraints_conv.compute_max_prodtacum_sin(nw_files)
+        max_prodtacum = constraints_conv.compute_max_prodtacum_sin(case.files)
         if max_prodtacum is None:
             return None
         rho_max_acum = [max_prodtacum] * len(rho_avg)
@@ -251,13 +250,13 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # 3. Call all converters.
     # ------------------------------------------------------------------
     logger.debug("Converting hydros")
-    hydros_dict = hydro_conv.convert_hydros(nw_files, id_map)
+    hydros_dict = hydro_conv.convert_hydros(case, id_map)
 
     logger.debug("Computing base hydro productivities")
-    base_productivities = hydro_conv.compute_base_productivities(nw_files, id_map)
+    base_productivities = hydro_conv.compute_base_productivities(case, id_map)
 
     logger.debug("Generating hydro geometry")
-    cadastro = hydro_conv.read_cadastro(nw_files)
+    cadastro = hydro_conv.read_cadastro(case)
     geometry_table = hydro_conv.generate_hydro_geometry(cadastro, id_map)
 
     logger.debug("Converting thermals")
@@ -276,7 +275,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # return None when files are absent (mocked-pipeline tests), so convert_penalties
     # falls back to its own legacy approximation.
     max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(nw_files)
-    prod_media_sin = _compute_prod_media_sin_safe(nw_files)
+    prod_media_sin = _compute_prod_media_sin_safe(case)
     penalties_dict = network_conv.convert_penalties(
         case,
         hydros_dict,
@@ -309,10 +308,10 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     inflow_history_table = stochastic_conv.convert_inflow_history(case, id_map)
 
     logger.debug("Converting water withdrawal")
-    withdrawal_table = hydro_conv.convert_water_withdrawal(nw_files, id_map)
+    withdrawal_table = hydro_conv.convert_water_withdrawal(case, id_map)
 
     logger.debug("Converting storage bounds from VMAXT/VMINT")
-    storage_bounds_table = hydro_conv.convert_storage_bounds(nw_files, id_map)
+    storage_bounds_table = hydro_conv.convert_storage_bounds(case, id_map)
 
     # Generic constraints (VminOP, electric, AGRINT) share one ID space; the
     # allocator hands each converter the next free start ID so the pipeline no
@@ -361,11 +360,11 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     ncs_stats_table = network_conv.convert_ncs_stats(case, id_map)
 
     logger.debug("Converting production models")
-    production_models_dict = hydro_conv.convert_production_models(nw_files, id_map)
+    production_models_dict = hydro_conv.convert_production_models(case, id_map)
 
     logger.debug("Converting hydro energy productivity overrides")
     hydro_energy_productivity_table = hydro_conv.convert_hydro_energy_productivity(
-        nw_files, id_map
+        case, id_map
     )
 
     logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
@@ -480,7 +479,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # Emitted sparsely (only stages/columns that differ from penalties.json),
     # keeping the penalty conversion coherent with the per-stage ρ already
     # shipped in system/hydro_energy_productivity.parquet.
-    per_stage_sin = _compute_per_stage_sin_productivities(nw_files)
+    per_stage_sin = _compute_per_stage_sin_productivities(case)
     if per_stage_sin is not None:
         per_stage_rho_avg, per_stage_rho_max_acum = per_stage_sin
         hydro_ids = [int(h["id"]) for h in hydros_dict.get("hydros", []) if "id" in h]
