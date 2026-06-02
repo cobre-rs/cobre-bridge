@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
@@ -204,10 +204,9 @@ class TestCliExitCodeTwoOnCobreReadError:
         with (
             patch("cobre_bridge.cli._load_lines_json", return_value=[]),
             patch(
-                "cobre_bridge.newave_files.NewaveFiles.from_directory",
-                return_value=object(),
+                "cobre_bridge.case.NewaveCase.from_directory",
+                return_value=MagicMock(),
             ),
-            patch("cobre_bridge.id_map.build_id_map", return_value=object()),
             patch(
                 "cobre_bridge.comparators.alignment.build_entity_alignment",
                 return_value=object(),
@@ -244,10 +243,9 @@ class TestCliExitCodeTwoOnCobreReadError:
         with (
             patch("cobre_bridge.cli._load_lines_json", return_value=[]),
             patch(
-                "cobre_bridge.newave_files.NewaveFiles.from_directory",
-                return_value=object(),
+                "cobre_bridge.case.NewaveCase.from_directory",
+                return_value=MagicMock(),
             ),
-            patch("cobre_bridge.id_map.build_id_map", return_value=object()),
             patch(
                 "cobre_bridge.comparators.alignment.build_entity_alignment",
                 return_value=object(),

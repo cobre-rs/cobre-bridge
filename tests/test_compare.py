@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pyarrow as pa
 import pytest
 
 from cobre_bridge.comparators.alignment import (
@@ -28,6 +29,7 @@ from cobre_bridge.comparators.results import (
     build_results_summary,
 )
 from cobre_bridge.id_map import NewaveIdMap
+from tests.conftest import make_case
 
 # -------------------------------------------------------------------
 # Bounds comparison unit tests
@@ -246,51 +248,83 @@ class TestHtmlReport:
 
 
 class TestBoundsFromInputs:
-    def test_compute_hydro_bounds_no_modif(self) -> None:
-        """Empty dict when MODIF is absent."""
-        from cobre_bridge.comparators.bounds_from_inputs import (
-            compute_hydro_bounds,
-        )
+    """The bounds 'expected' side now delegates to the converters (ARCH-01).
 
-        nw_files = MagicMock()
-        nw_files.modif = None
-        id_map = MagicMock()
+    These verify the delegation + reshape into the comparison dict, not an
+    independent re-derivation (which drifted and caused false positives).
+    """
 
-        result = compute_hydro_bounds(nw_files, id_map)
-        assert result == {}
-
-    def test_compute_thermal_bounds_no_expt_no_manutt(
-        self,
+    def test_compute_hydro_bounds_reshapes_converter_table(
+        self, tmp_path: Path
     ) -> None:
-        """Empty dict when neither expt.dat nor manutt.dat present."""
-        from cobre_bridge.comparators.bounds_from_inputs import (
-            compute_thermal_bounds,
+        from cobre_bridge.comparators.bounds_from_inputs import compute_hydro_bounds
+
+        table = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], pa.int32()),
+                "stage_id": pa.array([0, 1], pa.int32()),
+                "min_storage_hm3": pa.array([10.0, None], pa.float64()),
+                "max_storage_hm3": pa.array([100.0, 110.0], pa.float64()),
+                "min_turbined_m3s": pa.array([None, None], pa.float64()),
+                "max_turbined_m3s": pa.array([None, None], pa.float64()),
+                "min_outflow_m3s": pa.array([5.0, None], pa.float64()),
+                "min_generation_mw": pa.array([7.0, 7.0], pa.float64()),
+            }
         )
+        case = make_case(tmp_path)
+        with patch(
+            "cobre_bridge.converters.hydro.convert_storage_bounds",
+            return_value=table,
+        ):
+            result = compute_hydro_bounds(case, MagicMock())
 
-        nw_files = MagicMock()
-        nw_files.expt = None
-        nw_files.manutt = None
-        id_map = MagicMock()
+        assert result[(0, 0, "storage_min")] == 10.0
+        assert result[(0, 0, "storage_max")] == 100.0
+        assert result[(0, 1, "storage_max")] == 110.0
+        assert result[(0, 0, "outflow_min")] == 5.0
+        # None cells are skipped; hydro generation (GHMIN) is intentionally
+        # not part of the bounds comparison.
+        assert (0, 1, "storage_min") not in result
+        assert not any(name == "generation_min" for (_, _, name) in result)
 
-        result = compute_thermal_bounds(nw_files, id_map)
-        assert result == {}
+    def test_compute_hydro_bounds_empty_when_converter_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.comparators.bounds_from_inputs import compute_hydro_bounds
 
-    def test_compute_line_bounds_no_limits(self) -> None:
-        """Empty dict when sistema has no interchange limits."""
-        from cobre_bridge.comparators.bounds_from_inputs import (
-            compute_line_bounds,
+        case = make_case(tmp_path)
+        with patch(
+            "cobre_bridge.converters.hydro.convert_storage_bounds", return_value=None
+        ):
+            assert compute_hydro_bounds(case, MagicMock()) == {}
+
+    def test_compute_thermal_bounds_no_expt_no_manutt(self, tmp_path: Path) -> None:
+        """Empty dict when neither expt.dat nor manutt.dat present (path guard)."""
+        from cobre_bridge.comparators.bounds_from_inputs import compute_thermal_bounds
+
+        case = make_case(tmp_path)  # expt/manutt default to None
+        assert compute_thermal_bounds(case, MagicMock()) == {}
+
+    def test_compute_line_bounds_reshapes_converter_table(self, tmp_path: Path) -> None:
+        from cobre_bridge.comparators.bounds_from_inputs import compute_line_bounds
+
+        table = pa.table(
+            {
+                "line_id": pa.array([0], pa.int32()),
+                "stage_id": pa.array([0], pa.int32()),
+                "direct_mw": pa.array([500.0], pa.float64()),
+                "reverse_mw": pa.array([300.0], pa.float64()),
+            }
         )
+        case = make_case(tmp_path)
+        with patch(
+            "cobre_bridge.converters.network.convert_line_bounds",
+            return_value=table,
+        ):
+            result = compute_line_bounds(case, MagicMock())
 
-        nw_files = MagicMock()
-        id_map = MagicMock()
-
-        with patch("inewave.newave.Sistema") as mock_sis:
-            mock_inst = MagicMock()
-            mock_inst.limites_intercambio = None
-            mock_sis.read.return_value = mock_inst
-            result = compute_line_bounds(nw_files, id_map)
-
-        assert result == {}
+        assert result[(0, 0, "direct_flow_max")] == 500.0
+        assert result[(0, 0, "reverse_flow_max")] == 300.0
 
 
 class TestCompareHydrosProductivity:

@@ -37,6 +37,7 @@ def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
 
 def _run_bounds_comparison(args: argparse.Namespace) -> None:
     """Execute the compare bounds subcommand."""
+    from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import build_entity_alignment
     from cobre_bridge.comparators.bounds import compare_bounds
     from cobre_bridge.comparators.cobre_readers import CobreReadError
@@ -46,8 +47,6 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
         print_summary,
         write_report_parquet,
     )
-    from cobre_bridge.id_map import build_id_map
-    from cobre_bridge.newave_files import NewaveFiles
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -65,15 +64,15 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
 
     lines_json = _load_lines_json(cobre_output_dir)
 
-    # Build alignment.
-    nw_files = NewaveFiles.from_directory(newave_dir)
-    id_map = build_id_map(nw_files)
+    # Build the parsed case once; the id-map reuses its cached readers.
+    case = NewaveCase.from_directory(newave_dir)
+    id_map = case.id_map
 
     variables: set[str] | None = None
     if args.variables:
         variables = {v.strip() for v in args.variables.split(",")}
 
-    alignment = build_entity_alignment(id_map, nw_files, lines_json)
+    alignment = build_entity_alignment(id_map, case, lines_json)
 
     # Run comparison.  A CobreReadError means an *existing* Cobre output file
     # was unreadable/malformed — fail loudly (exit 2) rather than report a
@@ -81,7 +80,7 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
     try:
         results = compare_bounds(
             alignment=alignment,
-            nw_files=nw_files,
+            case=case,
             id_map=id_map,
             cobre_output_dir=cobre_output_dir,
             tolerance=tolerance,
@@ -106,34 +105,33 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
 
 def _run_results_comparison(args: argparse.Namespace) -> None:
     """Execute the compare results subcommand."""
+    from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import build_entity_alignment
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary
     from cobre_bridge.comparators.results import build_results_summary, compare_results
-    from cobre_bridge.id_map import build_id_map
-    from cobre_bridge.newave_files import NewaveFiles
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
     tolerance: float = args.tolerance
 
-    # Build alignment.
+    # Build the parsed case once; the id-map reuses its cached readers.
     try:
-        nw_files = NewaveFiles.from_directory(newave_dir)
+        case = NewaveCase.from_directory(newave_dir)
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    id_map = build_id_map(nw_files)
+    id_map = case.id_map
     lines_json = _load_lines_json(cobre_output_dir)
-    alignment = build_entity_alignment(id_map, nw_files, lines_json)
+    alignment = build_entity_alignment(id_map, case, lines_json)
 
     # Run comparison.  A CobreReadError means an *existing* Cobre output file
     # was unreadable/malformed — fail loudly (exit 2) rather than report a
     # false "no divergence" on data we could not actually read.
     try:
         results, pctiles = compare_results(
-            nw_files=nw_files,
+            case=case,
             id_map=id_map,
             alignment=alignment,
             cobre_output_dir=cobre_output_dir,

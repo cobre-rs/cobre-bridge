@@ -15,10 +15,10 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators.alignment import EntityAlignment
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 
@@ -1127,7 +1127,7 @@ def _build_productivity_detail(
 
 
 def compare_results(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
     alignment: EntityAlignment,
     cobre_output_dir: Path,
@@ -1146,8 +1146,8 @@ def compare_results(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE input file paths (for locating pmo.dat).
+    case:
+        Parsed NEWAVE case (for names, cadastro, and locating pmo.dat).
     id_map:
         Entity ID mapping (used only for productivity fallback).
     alignment:
@@ -1204,13 +1204,13 @@ def compare_results(
     results: list[ResultComparison] = []
 
     # Read entity names from both sides.
-    nw_hydro_names, nw_thermal_names, nw_bus_names = read_reference_names(nw_files)
+    nw_hydro_names, nw_thermal_names, nw_bus_names = read_reference_names(case)
     cobre_hydro_meta = read_cobre_hydro_metadata(cobre_output_dir)
     cobre_thermal_meta = read_cobre_thermal_metadata(cobre_output_dir)
     cobre_bus_meta = read_cobre_bus_metadata(cobre_output_dir)
 
     # Locate NEWAVE saidas directory.
-    saidas_dir = _find_saidas_dir(nw_files.directory)
+    saidas_dir = _find_saidas_dir(case.files.directory)
 
     nw_offset = 0
     nw_max_stage_1based: int | None = None
@@ -1338,7 +1338,7 @@ def compare_results(
         cobre_line = pl.DataFrame()
 
     # --- Convergence comparison ---
-    nw_conv = read_pmo_convergence(nw_files.directory)
+    nw_conv = read_pmo_convergence(case.files.directory)
     cobre_conv = read_cobre_convergence(cobre_output_dir)
     if not nw_conv.is_empty() and not cobre_conv.is_empty():
         _LOG.info("Comparing convergence data...")
@@ -1349,23 +1349,21 @@ def compare_results(
     # cobre-bridge computes from the same HIDR cadastro + cascade, plus the
     # converted building blocks — assembled for the Productivity tab.
     _LOG.info("Building productivity detail...")
-    nw_prod_detail = read_pmo_productivity_detail(nw_files.directory)
+    nw_prod_detail = read_pmo_productivity_detail(case.files.directory)
     cobre_prod_detail = read_cobre_productivity_detail(cobre_output_dir)
     cb_accumulated: dict[int, float] = {}
     try:
-        nw_cadastro = read_cadastro(nw_files)
+        nw_cadastro = read_cadastro(case)
     except Exception:  # noqa: BLE001
         _LOG.warning("Failed to read HIDR cadastro for productivity building blocks")
         nw_cadastro = pd.DataFrame()
     if not nw_cadastro.empty:
         try:
-            from inewave.newave import Confhd
-
             from cobre_bridge.converters.constraints import (
                 _compute_accumulated_integrated_productivities,
             )
 
-            confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+            confhd_df = case.confhd.usinas
             cb_accumulated = _compute_accumulated_integrated_productivities(
                 nw_cadastro, confhd_df
             )
@@ -1388,7 +1386,7 @@ def compare_results(
     _LOG.info(
         "Reading cost breakdowns (NEWAVE max stage_0based=%s)...", nw_max_stage_0based
     )
-    nw_costs = read_pmo_cost_breakdown(nw_files.directory)
+    nw_costs = read_pmo_cost_breakdown(case.files.directory)
     cobre_costs = read_cobre_cost_breakdown(
         cobre_output_dir, max_stage_id=nw_max_stage_0based
     )
@@ -1418,7 +1416,7 @@ def compare_results(
         nw_sin = read_medias_sin(saidas_dir)
 
     # --- NEWAVE deterministic net load (load - NCS from sistema.dat) ---
-    nw_net_load = read_newave_net_load(nw_files.directory)
+    nw_net_load = read_newave_net_load(case.files.directory)
 
     # --- Percentile statistics ---
     _LOG.info("Computing Cobre percentile statistics...")
@@ -1467,8 +1465,8 @@ def compare_results(
         cobre_line = _truncate(cobre_line)
 
     # --- Performance timings ---
-    nw_tim_iters = read_newave_tim_iterations(nw_files.directory)
-    nw_tim_stages = read_newave_tim_stages(nw_files.directory)
+    nw_tim_iters = read_newave_tim_iterations(case.files.directory)
+    nw_tim_stages = read_newave_tim_stages(case.files.directory)
     cobre_training_seconds = read_cobre_training_duration(cobre_output_dir)
     cobre_iter_timing = read_cobre_iteration_timing(cobre_output_dir)
 

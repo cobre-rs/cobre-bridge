@@ -14,6 +14,7 @@ from pathlib import Path
 
 import polars as pl
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators.alignment import (
     EntityAlignment,
@@ -23,7 +24,6 @@ from cobre_bridge.comparators.alignment import (
 )
 from cobre_bridge.horizon import is_effectively_infinite
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 
@@ -310,7 +310,7 @@ def _compare_lines(
 
 def compare_bounds(
     alignment: EntityAlignment,
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
     cobre_output_dir: Path,
     tolerance: float = 1e-3,
@@ -325,8 +325,8 @@ def compare_bounds(
     ----------
     alignment:
         Pre-built entity alignment.
-    nw_files:
-        Resolved NEWAVE input file paths.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID mapping (NEWAVE codes to Cobre IDs).
     cobre_output_dir:
@@ -358,9 +358,9 @@ def compare_bounds(
 
     # Compute NEWAVE bounds from input files.
     _LOG.info("Computing NEWAVE bounds from input files...")
-    computed_hydro = compute_hydro_bounds(nw_files, id_map)
-    computed_thermal = compute_thermal_bounds(nw_files, id_map)
-    computed_line = compute_line_bounds(nw_files, id_map)
+    computed_hydro = compute_hydro_bounds(case, id_map)
+    computed_thermal = compute_thermal_bounds(case, id_map)
+    computed_line = compute_line_bounds(case, id_map)
     _LOG.info(
         "Computed: %d hydro entries, %d thermal entries, %d line entries",
         len(computed_hydro),
