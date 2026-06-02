@@ -14,6 +14,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
 from cobre_bridge.converters import initial_conditions as ic_conv
@@ -233,7 +234,12 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # 1. Discover and validate all source files via caso.dat -> Arquivos.
     # ------------------------------------------------------------------
     logger.debug("Discovering NEWAVE files from %s", src)
-    nw_files = NewaveFiles.from_directory(src)
+    # Build the parsed-case object once. Converters are being migrated to read
+    # parsed inputs from ``case`` (each file parsed once); until a converter is
+    # migrated it still receives ``case.files`` (the NewaveFiles paths), so this
+    # is behaviour-preserving.
+    case = NewaveCase.from_directory(src)
+    nw_files = case.files
 
     # ------------------------------------------------------------------
     # 2. Build the entity ID map.
