@@ -10,7 +10,6 @@ from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.converters.thermal import thermal_generation_bounds
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.plants import active_hydros
 
 _LOG = logging.getLogger(__name__)
 
@@ -43,9 +42,8 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         ``hidr.dat``.
     """
     cadastro = case.hidr.cadastro
-    confhd_df = case.confhd.usinas
 
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
 
     storage: list[dict] = []
     for _, row in existing.iterrows():

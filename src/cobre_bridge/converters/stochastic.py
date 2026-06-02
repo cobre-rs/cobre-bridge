@@ -454,8 +454,7 @@ def convert_load_factors(
     patamar = case.patamar
     df_carga: pd.DataFrame | None = patamar.carga_patamares
 
-    dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months
@@ -639,8 +638,7 @@ def convert_load_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     sistema_obj = case.sistema
     df_load: pd.DataFrame = sistema_obj.mercado_energia
 
-    dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     num_anos = horizon.num_anos

@@ -214,7 +214,7 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
     stages: list[dict] = []
     transitions: list[dict] = []
 
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     # Study runs from mes_inicio to December of (ano_inicio + num_anos - 1).
     study_months = horizon.study_months
     # Post-study adds num_anos_pos full calendar years after that.

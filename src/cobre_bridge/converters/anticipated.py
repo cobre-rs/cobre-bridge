@@ -59,8 +59,6 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from inewave.newave import Dger, Patamar
 
-from cobre_bridge.horizon import study_horizon
-
 if TYPE_CHECKING:
     from cobre_bridge.case import NewaveCase
 
@@ -189,7 +187,7 @@ def read_anticipated_dispatch(
 
     patamar = case.patamar
     # Need the case's calendar start to weight by the right month's blocks.
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     # Mirror the temporal converter's horizon calculation.

@@ -58,6 +58,9 @@ from inewave.newave import (
 from cobre_bridge.newave_files import NewaveFiles
 
 if TYPE_CHECKING:
+    import pandas as pd
+
+    from cobre_bridge.horizon import StudyHorizon
     from cobre_bridge.id_map import NewaveIdMap
 
 
@@ -188,6 +191,36 @@ class NewaveCase:
         return Adterm.read(str(path)) if path is not None else None
 
     # --- Derived state ---------------------------------------------------------
+
+    @cached_property
+    def horizon(self) -> StudyHorizon:
+        """The study-horizon dimensions for this case (cached).
+
+        ``StudyHorizon`` is a frozen dataclass, so the cached instance is safe to
+        share across the converters that size their per-stage tables against it.
+        """
+        from cobre_bridge.horizon import study_horizon
+
+        return study_horizon(self.dger)
+
+    @property
+    def active_hydros(self) -> pd.DataFrame:
+        """The existing, non-fictitious hydro rows that enter the Cobre LP.
+
+        The canonical "active hydro" set (``plants.active_hydros``). Recomputed
+        per access (not cached) — it's a cheap confhd filter and callers may hold
+        their own view, so a shared cached DataFrame could alias.
+        """
+        from cobre_bridge.plants import active_hydros
+
+        return active_hydros(self.confhd.usinas)
+
+    @property
+    def active_hydro_codes(self) -> list[int]:
+        """``codigo_usina`` of the active hydros, in confhd declaration order."""
+        from cobre_bridge.plants import active_hydro_codes
+
+        return active_hydro_codes(self.confhd.usinas)
 
     @cached_property
     def id_map(self) -> NewaveIdMap:

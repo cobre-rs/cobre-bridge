@@ -29,7 +29,6 @@ from cobre_bridge.converters.hydro import (
     compute_per_stage_own_integrated_productivities,
 )
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
-from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.plants import active_hydros
 from cobre_bridge.productivity import compute_productivity, stored_energy_productivity
@@ -435,7 +434,7 @@ def convert_vminop_constraints(
     confhd_df = confhd.usinas
 
     # Study horizon parameters
-    _horizon = study_horizon(dger)
+    _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
     num_stages = _horizon.total_stages
@@ -1118,8 +1117,7 @@ def convert_electric_constraints(
         expressions, horizons, bounds_rows = _parse_restricao_eletrica(re_path)
 
     # Study horizon.
-    dger = case.dger
-    _horizon = study_horizon(dger)
+    _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
     num_anos = _horizon.num_anos
@@ -1538,8 +1536,7 @@ def convert_agrint_constraints(
         return None
 
     # Study horizon
-    dger = case.dger
-    _horizon = study_horizon(dger)
+    _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
     study_months = _horizon.study_months

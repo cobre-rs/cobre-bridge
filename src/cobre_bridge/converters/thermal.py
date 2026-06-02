@@ -17,7 +17,7 @@ import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
-from cobre_bridge.horizon import build_stage_dates, study_horizon
+from cobre_bridge.horizon import build_stage_dates
 from cobre_bridge.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -413,7 +413,7 @@ def convert_thermal_bounds(
     Returns ``None`` if no bounds or cost overrides are needed.
     """
     dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     num_anos = horizon.num_anos

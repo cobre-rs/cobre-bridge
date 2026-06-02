@@ -10,7 +10,7 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
-from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
+from cobre_bridge.horizon import POST_STUDY_YEAR
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
 
@@ -366,8 +366,7 @@ def convert_bus_penalty_overrides(
         return None
     excess_cost = deficit_costs[0]
 
-    dger = case.dger
-    total_stages = study_horizon(dger).total_stages
+    total_stages = case.horizon.total_stages
 
     bus_ids: list[int] = []
     stage_ids: list[int] = []
@@ -991,8 +990,7 @@ def convert_line_bounds(
             schema=_LINE_BOUNDS_SCHEMA,
         )
 
-    dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months
@@ -1116,8 +1114,7 @@ def _build_ncs_group_to_id(
     if df_ncs is None or df_ncs.empty:
         return {}
 
-    dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     total_stages = horizon.total_stages
@@ -1179,8 +1176,7 @@ def convert_non_controllable_sources(
     if df_ncs is None or df_ncs.empty:
         return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": []}
 
-    dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     total_stages = horizon.total_stages
@@ -1289,8 +1285,7 @@ def convert_exchange_factors(
     if df is None or df.empty:
         return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": []}
 
-    dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months
@@ -1442,8 +1437,7 @@ def convert_ncs_factors(
             "non_controllable_factors": [],
         }
 
-    dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months
@@ -1602,8 +1596,7 @@ def convert_ncs_stats(
             schema=_NCS_STATS_SCHEMA,
         )
 
-    dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months

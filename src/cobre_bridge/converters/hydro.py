@@ -14,11 +14,9 @@ from cobre_bridge.case import NewaveCase
 from cobre_bridge.horizon import (
     POST_STUDY_YEAR,
     seasonal_step_function,
-    study_horizon,
 )
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
-from cobre_bridge.plants import active_hydro_codes, active_hydros
 from cobre_bridge.productivity import (
     compute_productivity,
     equivalent_productivity,
@@ -746,7 +744,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     fict_cascade = resolve_cascade(confhd_df, cadastro)
 
     # Collect study plant codes for temporal override extraction.
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
     # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
     if ree_df is not None:
@@ -981,8 +979,7 @@ def compute_prodt_sin_mean(case: NewaveCase) -> float:
     """
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
-    confhd_df = case.confhd.usinas
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
 
     prodt: list[float] = []
     for _, row in existing.iterrows():
@@ -1009,8 +1006,7 @@ def compute_per_stage_prodt_sin_mean(case: NewaveCase) -> list[float]:
         return []
 
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
-    confhd_df = case.confhd.usinas
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
     codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal = _extract_temporal_overrides(case, codes)
@@ -1066,8 +1062,7 @@ def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         A dict with a ``"production_models"`` key ready to serialise as
         ``system/hydro_production_models.json``.
     """
-    confhd_df = case.confhd.usinas
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     production_models: list[dict] = []
@@ -1100,7 +1095,7 @@ def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 
 def _total_study_stages(case: NewaveCase) -> int:
     """Return the total number of stages in the study (including post-study)."""
-    return study_horizon(case.dger).total_stages
+    return case.horizon.total_stages
 
 
 def _per_stage_integrated_productivities(
@@ -1159,7 +1154,7 @@ def compute_per_stage_own_integrated_productivities(
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
     confhd_df = case.confhd.usinas
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
@@ -1422,7 +1417,7 @@ def convert_hydro_energy_productivity(
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
     confhd_df = case.confhd.usinas
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
@@ -1530,7 +1525,7 @@ def compute_per_stage_own_productivities(
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
     confhd_df = case.confhd.usinas
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
 
     temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
@@ -1585,7 +1580,7 @@ def compute_base_productivities(
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
     confhd_df = case.confhd.usinas
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
 
     # FICT-cascade fold-in — keep this in lockstep with the other productivity
     # helpers so every downstream consumer sees the same effective ρ_eq.
@@ -1781,7 +1776,7 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
     if df is None or df.empty:
         return None
 
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_year = horizon.start_year
     start_month = horizon.start_month
     num_study_stages = horizon.study_months
@@ -1937,7 +1932,7 @@ def convert_storage_bounds(
     Returns ``None`` if MODIF.DAT is absent or contains no relevant records.
     """
     dger = case.dger
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_year = horizon.start_year
     start_month = horizon.start_month
     study_months = horizon.study_months
@@ -1954,8 +1949,7 @@ def convert_storage_bounds(
     cadastro = read_cadastro(case)
 
     # Read confhd for the list of active plant codes.
-    confhd_df = case.confhd.usinas
-    confhd_codes = active_hydro_codes(confhd_df)
+    confhd_codes = case.active_hydro_codes
 
     # Extract temporal overrides — empty dict when MODIF.DAT is absent,
     # which is fine because GHMIN.DAT alone can still produce per-stage
