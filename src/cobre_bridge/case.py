@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from inewave.newave import (
     Adterm,
@@ -55,6 +56,9 @@ from inewave.newave import (
 )
 
 from cobre_bridge.newave_files import NewaveFiles
+
+if TYPE_CHECKING:
+    from cobre_bridge.id_map import NewaveIdMap
 
 
 @dataclass
@@ -182,3 +186,20 @@ class NewaveCase:
     def adterm(self) -> Adterm | None:
         path = self.files.adterm
         return Adterm.read(str(path)) if path is not None else None
+
+    # --- Derived state ---------------------------------------------------------
+
+    @cached_property
+    def id_map(self) -> NewaveIdMap:
+        """The canonical NEWAVE→Cobre :class:`NewaveIdMap` for this case.
+
+        Built from the cached ``confhd``/``conft``/``sistema``/``ree`` readers, so
+        it reuses parses already done rather than re-reading the four files (the
+        free ``id_map.build_id_map`` re-reads them for callers that only hold
+        paths, e.g. the CLI compare commands).
+        """
+        from cobre_bridge.id_map import build_id_map_from_readers
+
+        return build_id_map_from_readers(
+            self.confhd, self.conft, self.sistema, self.ree
+        )

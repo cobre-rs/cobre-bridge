@@ -233,18 +233,15 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # 1. Discover and validate all source files via caso.dat -> Arquivos.
     # ------------------------------------------------------------------
     logger.debug("Discovering NEWAVE files from %s", src)
-    # Build the parsed-case object once. Converters are being migrated to read
-    # parsed inputs from ``case`` (each file parsed once); until a converter is
-    # migrated it still receives ``case.files`` (the NewaveFiles paths), so this
-    # is behaviour-preserving.
+    # Build the parsed-case object once; every converter reads its parsed inputs
+    # from ``case`` (each NEWAVE file parsed once and cached).
     case = NewaveCase.from_directory(src)
-    nw_files = case.files
 
     # ------------------------------------------------------------------
-    # 2. Build the entity ID map.
+    # 2. Build the entity ID map (from the case's cached readers).
     # ------------------------------------------------------------------
     logger.debug("Building NewaveIdMap from %s", src)
-    id_map = _build_id_map(nw_files)
+    id_map = case.id_map
 
     # ------------------------------------------------------------------
     # 3. Call all converters.

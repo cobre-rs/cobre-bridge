@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 from cobre_bridge.plants import active_hydro_codes, fictitious_existing_names
 
 if TYPE_CHECKING:
+    from inewave.newave import Confhd, Conft, Ree, Sistema
+
     from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
@@ -120,7 +122,20 @@ def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
     conft = Conft.read(str(nw_files.conft))
     sistema = Sistema.read(str(nw_files.sistema))
     ree_file = Ree.read(str(nw_files.ree))
+    return build_id_map_from_readers(confhd, conft, sistema, ree_file)
 
+
+def build_id_map_from_readers(
+    confhd: Confhd,
+    conft: Conft,
+    sistema: Sistema,
+    ree_file: Ree,
+) -> NewaveIdMap:
+    """Build the canonical :class:`NewaveIdMap` from already-parsed readers.
+
+    The core of :func:`build_id_map`, factored out so :attr:`NewaveCase.id_map`
+    can reuse the case's cached readers instead of re-parsing the four files.
+    """
     # Hydro codes from confhd — existing, non-fictitious plants only.
     confhd_df = confhd.usinas
     fict_names = fictitious_existing_names(confhd_df)

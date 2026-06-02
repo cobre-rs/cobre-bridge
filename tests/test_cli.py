@@ -216,13 +216,18 @@ _FAKE_HYDRO_ENERGY_PRODUCTIVITY_TABLE = pa.table(
 
 
 def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type-arg]
-    """Return patch context managers for all converter functions and _build_id_map."""
+    """Return patch context managers for all converter functions.
+
+    The parsed case is mocked at ``NewaveCase.from_directory``; its ``id_map``
+    is the supplied ``fake_id_map`` (the pipeline now reads ``case.id_map``).
+    """
+    fake_case = MagicMock()
+    fake_case.id_map = fake_id_map
     return [
         patch(
             "cobre_bridge.pipeline.NewaveCase.from_directory",
-            return_value=MagicMock(),
+            return_value=fake_case,
         ),
-        patch("cobre_bridge.pipeline._build_id_map", return_value=fake_id_map),
         patch(
             "cobre_bridge.pipeline.hydro_conv.convert_hydros",
             return_value=_FAKE_HYDROS,
