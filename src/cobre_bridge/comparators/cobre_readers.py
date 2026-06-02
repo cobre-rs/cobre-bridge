@@ -1497,16 +1497,6 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
     return result
 
 
-def _resolve_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
-    """Locate a `system/<filename>` JSON near the Cobre output directory."""
-    case_dir = case_dir_for(cobre_output_dir)
-    for candidate in [case_dir, cobre_output_dir, case_dir.parent]:
-        p = candidate / "system" / filename
-        if p.exists():
-            return p
-    return None
-
-
 def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     """Read hydro metadata from Cobre system JSON files.
 
@@ -1519,7 +1509,7 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     Returns ``{entity_id: {"name": str, "productivity_mw_per_m3s": float | None,
     "min_storage_hm3": float, "bus_id": int | None}}``.
     """
-    hydros_path = _resolve_system_json(cobre_output_dir, "hydros.json")
+    hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
         _LOG.warning("hydros.json not found near %s", cobre_output_dir)
         return {}
@@ -1600,7 +1590,7 @@ def read_cobre_productivity_detail(cobre_output_dir: Path) -> dict[int, dict]:
     and the realized per-stage productivity comes from the simulation
     generation/turbined comparison rows.)
     """
-    hydros_path = _resolve_system_json(cobre_output_dir, "hydros.json")
+    hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
         _LOG.warning("hydros.json not found near %s", cobre_output_dir)
         return {}
