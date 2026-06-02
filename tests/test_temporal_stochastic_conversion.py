@@ -19,6 +19,7 @@ import pytest
 
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
+from tests.conftest import make_case
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -161,103 +162,65 @@ def _make_patamar_mock_three_blocks() -> MagicMock:
     return pat
 
 
-def _setup_dger_and_patamar(mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar):
-    """Create dummy files and configure mock read() returns."""
-    (tmp_path / "dger.dat").touch()
-    (tmp_path / "patamar.dat").touch()
-    mock_dger_cls.read.return_value = dger
-    mock_patamar_cls.read.return_value = patamar
-
-
 # ---------------------------------------------------------------------------
 # Tests: convert_stages
 # ---------------------------------------------------------------------------
 
 
 class TestConvertStagesSingleBlock:
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_stage_count_five_years(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_stage_count_five_years(self, tmp_path) -> None:
         dger = _make_dger_mock(num_anos=5)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         assert len(result["stages"]) == 60
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_stage_ids_are_sequential_zero_based(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_stage_ids_are_sequential_zero_based(self, tmp_path) -> None:
         dger = _make_dger_mock(num_anos=5)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         ids = [s["id"] for s in result["stages"]]
         assert ids == list(range(60))
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_first_stage_dates_jan_2020(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_first_stage_dates_jan_2020(self, tmp_path) -> None:
         dger = _make_dger_mock(mes_inicio=1, ano_inicio=2020, num_anos=5)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         stage0 = result["stages"][0]
         assert stage0["start_date"] == "2020-01-01"
         assert stage0["end_date"] == "2020-02-01"
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_last_stage_end_date(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_last_stage_end_date(self, tmp_path) -> None:
         # 5 years starting Jan 2020 -> last stage is Dec 2024, end = 2025-01-01.
         dger = _make_dger_mock(mes_inicio=1, ano_inicio=2020, num_anos=5)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         last = result["stages"][-1]
         assert last["end_date"] == "2025-01-01"
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_block_hours_january(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_block_hours_january(self, tmp_path) -> None:
         dger = _make_dger_mock(mes_inicio=1, ano_inicio=2020, num_anos=1)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         stage0 = result["stages"][0]  # January 2020
         assert len(stage0["blocks"]) == 1
         block = stage0["blocks"][0]
@@ -266,69 +229,45 @@ class TestConvertStagesSingleBlock:
         assert block["name"] == "SINGLE"
         assert block["id"] == 0
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_num_scenarios_from_dger(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_num_scenarios_from_dger(self, tmp_path) -> None:
         dger = _make_dger_mock(num_aberturas=50)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
             assert stage["num_scenarios"] == 50
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_discount_rate_percent_to_decimal(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_discount_rate_percent_to_decimal(self, tmp_path) -> None:
         dger = _make_dger_mock(taxa_de_desconto=12.0)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         assert result["policy_graph"]["annual_discount_rate"] == pytest.approx(0.12)
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_policy_graph_is_finite_horizon(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_policy_graph_is_finite_horizon(self, tmp_path) -> None:
         dger = _make_dger_mock()
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         assert result["policy_graph"]["type"] == "finite_horizon"
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_transitions_are_linear(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_transitions_are_linear(self, tmp_path) -> None:
         dger = _make_dger_mock(num_anos=2)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         transitions = result["policy_graph"]["transitions"]
         # 24 stages -> 23 transitions.
         assert len(transitions) == 23
@@ -338,46 +277,28 @@ class TestConvertStagesSingleBlock:
             assert t["target_id"] == i + 1
             assert t["probability"] == pytest.approx(1.0)
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_risk_measure_is_expectation(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_risk_measure_is_expectation(self, tmp_path) -> None:
         dger = _make_dger_mock(cvar=0)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
             assert stage["risk_measure"] == "expectation"
 
-    @patch("cobre_bridge.converters.temporal.Cvar")
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_risk_measure_constant_cvar(
-        self, mock_dger_cls, mock_patamar_cls, mock_cvar_cls, tmp_path
-    ) -> None:
+    def test_risk_measure_constant_cvar(self, tmp_path) -> None:
         """dger.cvar == 1 produces constant CVaR risk_measure for all stages."""
         dger = _make_dger_mock(num_anos=1, cvar=1)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
         cvar_mock = MagicMock()
         cvar_mock.valores_constantes = [15.0, 40.0]
-        mock_cvar_cls.read.return_value = cvar_mock
-        cvar_path = tmp_path / "cvar.dat"
-        cvar_path.touch()
+        case = make_case(tmp_path, dger=dger, patamar=patamar, cvar=cvar_mock)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(
-            _make_nw_files(tmp_path, cvar=cvar_path), _make_id_map_hydros([])
-        )
+        result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
             rm = stage["risk_measure"]
             assert isinstance(rm, dict), f"Expected dict, got {rm!r}"
@@ -385,18 +306,10 @@ class TestConvertStagesSingleBlock:
             assert rm["cvar"]["alpha"] == pytest.approx(0.15)
             assert rm["cvar"]["lambda"] == pytest.approx(0.40)
 
-    @patch("cobre_bridge.converters.temporal.Cvar")
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_risk_measure_temporal_cvar_uses_override(
-        self, mock_dger_cls, mock_patamar_cls, mock_cvar_cls, tmp_path
-    ) -> None:
+    def test_risk_measure_temporal_cvar_uses_override(self, tmp_path) -> None:
         """dger.cvar==2: temporal alpha/lambda; zero rows fall back to constant."""
         dger = _make_dger_mock(mes_inicio=1, ano_inicio=2020, num_anos=1, cvar=2)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
 
         # Month 1 (Jan 2020): alpha=0 => use constant 0.15; lambda=20% override
         # Month 2 (Feb 2020): alpha=10% override; lambda=0 => use constant 0.40
@@ -412,15 +325,11 @@ class TestConvertStagesSingleBlock:
         cvar_mock.valores_constantes = [15.0, 40.0]
         cvar_mock.alfa_variavel = pd.DataFrame(alpha_rows)
         cvar_mock.lambda_variavel = pd.DataFrame(lambda_rows)
-        mock_cvar_cls.read.return_value = cvar_mock
-        cvar_path = tmp_path / "cvar.dat"
-        cvar_path.touch()
+        case = make_case(tmp_path, dger=dger, patamar=patamar, cvar=cvar_mock)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(
-            _make_nw_files(tmp_path, cvar=cvar_path), _make_id_map_hydros([])
-        )
+        result = convert_stages(case, _make_id_map_hydros([]))
         stages = result["stages"]
         # Stage 0 (Jan 2020): alpha=0.0 => fallback 0.15; lambda=20.0 => 0.20
         rm0 = stages[0]["risk_measure"]
@@ -434,94 +343,62 @@ class TestConvertStagesSingleBlock:
         assert rm1["cvar"]["alpha"] == pytest.approx(0.10)
         assert rm1["cvar"]["lambda"] == pytest.approx(0.40)
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_risk_measure_cvar0_without_file_uses_expectation(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_risk_measure_cvar0_without_file_uses_expectation(self, tmp_path) -> None:
         """When cvar.dat is absent, risk_measure defaults to 'expectation'."""
         dger = _make_dger_mock(num_anos=1, cvar=1)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        # cvar=None => file absent => fallback expectation
-        result = convert_stages(
-            _make_nw_files(tmp_path, cvar=None), _make_id_map_hydros([])
-        )
+        # cvar absent => fallback expectation
+        result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
             assert stage["risk_measure"] == "expectation"
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_zero_study_years_raises_value_error(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_zero_study_years_raises_value_error(self, tmp_path) -> None:
         dger = _make_dger_mock(num_anos=0)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
         with pytest.raises(ValueError, match="zero study years"):
-            convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+            convert_stages(case, _make_id_map_hydros([]))
 
 
 class TestConvertStagesThreeBlocks:
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_three_blocks_present(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_three_blocks_present(self, tmp_path) -> None:
         dger = _make_dger_mock(num_anos=1)
         patamar = _make_patamar_mock_three_blocks()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
             assert len(stage["blocks"]) == 3
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_three_blocks_names(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_three_blocks_names(self, tmp_path) -> None:
         dger = _make_dger_mock(num_anos=1)
         patamar = _make_patamar_mock_three_blocks()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         stage0 = result["stages"][0]
         names = [b["name"] for b in stage0["blocks"]]
         assert names == ["HEAVY", "MEDIUM", "LIGHT"]
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_block_hours_sum_to_month_hours(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_block_hours_sum_to_month_hours(self, tmp_path) -> None:
         dger = _make_dger_mock(mes_inicio=1, ano_inicio=2020, num_anos=1)
         patamar = _make_patamar_mock_three_blocks()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         for i, stage in enumerate(result["stages"]):
             year = 2020
             month = i + 1
@@ -531,60 +408,42 @@ class TestConvertStagesThreeBlocks:
 
 
 class TestConvertStagesPreStudy:
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_pre_study_stages_generated(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_pre_study_stages_generated(self, tmp_path) -> None:
         dger = _make_dger_mock(
             mes_inicio=1, ano_inicio=2020, num_anos=5, num_anos_pre=1
         )
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         pre = result.get("pre_study_stages", [])
         assert len(pre) == 12
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_pre_study_ids_are_negative(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_pre_study_ids_are_negative(self, tmp_path) -> None:
         dger = _make_dger_mock(
             mes_inicio=1, ano_inicio=2020, num_anos=5, num_anos_pre=1
         )
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         pre = result["pre_study_stages"]
         assert all(s["id"] < 0 for s in pre)
         ids = [s["id"] for s in pre]
         assert ids == list(range(-12, 0))
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_no_pre_study_key_when_zero(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_no_pre_study_key_when_zero(self, tmp_path) -> None:
         dger = _make_dger_mock(num_anos_pre=0)
         patamar = _make_patamar_mock_single()
-        _setup_dger_and_patamar(
-            mock_dger_cls, mock_patamar_cls, tmp_path, dger, patamar
-        )
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
 
-        result = convert_stages(_make_nw_files(tmp_path), _make_id_map_hydros([]))
+        result = convert_stages(case, _make_id_map_hydros([]))
         assert "pre_study_stages" not in result
 
 
@@ -594,180 +453,144 @@ class TestConvertStagesPreStudy:
 
 
 class TestConvertConfig:
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_forward_passes(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_forward_passes(self, tmp_path) -> None:
         dger = _make_dger_mock(num_forwards=20)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["training"]["forward_passes"] == 20
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_iteration_limit(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_iteration_limit(self, tmp_path) -> None:
         dger = _make_dger_mock(num_max_iteracoes=200)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         rules = result["training"]["stopping_rules"]
         assert len(rules) == 1
         assert rules[0]["type"] == "iteration_limit"
         assert rules[0]["limit"] == 200
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_simulation_enabled_default(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_simulation_enabled_default(self, tmp_path) -> None:
         dger = _make_dger_mock(tipo_execucao=1, tipo_simulacao_final=1)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["simulation"]["enabled"] is True
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_num_scenarios_from_num_series(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_num_scenarios_from_num_series(self, tmp_path) -> None:
         dger = _make_dger_mock(num_series=500)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["simulation"]["num_scenarios"] == 500
 
     # -- impressao_estados_geracao_cortes / exports.states --
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_export_states_true_when_flag_zero(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_export_states_true_when_flag_zero(self, tmp_path) -> None:
         dger = _make_dger_mock(impressao_estados_geracao_cortes=0)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["exports"]["states"] is True
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_export_states_false_when_flag_nonzero(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_export_states_false_when_flag_nonzero(self, tmp_path) -> None:
         dger = _make_dger_mock(impressao_estados_geracao_cortes=1)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["exports"]["states"] is False
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_export_states_false_when_flag_absent(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_export_states_false_when_flag_absent(self, tmp_path) -> None:
         dger = _make_dger_mock(impressao_estados_geracao_cortes=None)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["exports"]["states"] is False
 
     # -- tipo_execucao / training.enabled --
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_tipo_execucao_1_enables_training(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_tipo_execucao_1_enables_training(self, tmp_path) -> None:
         dger = _make_dger_mock(tipo_execucao=1)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert (
             "enabled" not in result["training"]
             or result["training"].get("enabled") is not False
         )
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_tipo_execucao_0_disables_training(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_tipo_execucao_0_disables_training(self, tmp_path) -> None:
         dger = _make_dger_mock(tipo_execucao=0, tipo_simulacao_final=1)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["training"]["enabled"] is False
         assert result["simulation"]["enabled"] is True
 
     # -- tipo_simulacao_final / simulation --
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_tipo_simulacao_final_0_disables_simulation(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_tipo_simulacao_final_0_disables_simulation(self, tmp_path) -> None:
         dger = _make_dger_mock(tipo_execucao=1, tipo_simulacao_final=0)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["simulation"]["enabled"] is False
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_simulation_reamostragem_1_out_of_sample(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_simulation_reamostragem_1_out_of_sample(self, tmp_path) -> None:
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=1,
             considera_reamostragem_cenarios=1,
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["simulation"]["enabled"] is True
         src = result["simulation"]["scenario_source"]
         assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "out_of_sample"
         assert "historical_years" not in src
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_simulation_reamostragem_0_in_sample(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_simulation_reamostragem_0_in_sample(self, tmp_path) -> None:
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=1,
             considera_reamostragem_cenarios=0,
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["simulation"]["enabled"] is True
         src = result["simulation"]["scenario_source"]
         assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "in_sample"
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_tipo_simulacao_final_2_overrides_reamostragem(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_tipo_simulacao_final_2_overrides_reamostragem(self, tmp_path) -> None:
         """tipo_simulacao_final=2 forces historical even when reamostragem=1."""
-        (tmp_path / "dger.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -775,22 +598,18 @@ class TestConvertConfig:
             ano_inicial_historico=1931,
             ano_inicio=2026,
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["simulation"]["enabled"] is True
         src = result["simulation"]["scenario_source"]
         assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "historical"
         assert src["historical_years"] == {"from": 1932, "to": 2025}
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_tipo_simulacao_final_2_without_reamostragem(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_tipo_simulacao_final_2_without_reamostragem(self, tmp_path) -> None:
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -798,11 +617,11 @@ class TestConvertConfig:
             ano_inicial_historico=1931,
             ano_inicio=2026,
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         src = result["simulation"]["scenario_source"]
         assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "historical"
@@ -810,32 +629,25 @@ class TestConvertConfig:
 
     # -- Deterministic mode (1 fwd × 1 abertura × historical × varredura=0 × 1 year) --
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_deterministic_mode_mirrors_training_to_simulation(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
-    ) -> None:
+    def test_deterministic_mode_mirrors_training_to_simulation(self, tmp_path) -> None:
         """When all five deterministic conditions hold, training reuses the
         simulation's single-year historical scenario_source."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
             num_forwards=1,
             num_aberturas=1,
         )
-        mock_dger_cls.read.return_value = dger
 
         mock_shist = MagicMock()
         mock_shist.varredura = 0
         mock_shist.anos_inicio_simulacoes = [1983]
         mock_shist.ano_inicio_varredura = 1932
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         src = result["training"]["scenario_source"]
         assert src["inflow"]["scheme"] == "historical"
         assert src["historical_years"] == [1983]
@@ -849,16 +661,12 @@ class TestConvertConfig:
         assert result["estimation"]["max_order"] == 0
         assert result["estimation"]["order_selection"] == "pacf"
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
     def test_non_deterministic_mode_preserves_estimation_max_order(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
+        self, tmp_path
     ) -> None:
         """Non-deterministic conversions keep the configured PAR order — the
         max_order override is gated by deterministic mode only.
         """
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -867,28 +675,21 @@ class TestConvertConfig:
             ordem_maxima_parp=4,
             consideracao_media_anual_afluencias=0,  # → "pacf"
         )
-        mock_dger_cls.read.return_value = dger
         mock_shist = MagicMock()
         mock_shist.varredura = 0
         mock_shist.anos_inicio_simulacoes = [1983]
         mock_shist.ano_inicio_varredura = 1932
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         assert result["estimation"]["max_order"] == 4
         assert result["estimation"]["order_selection"] == "pacf"
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_deterministic_mode_disabled_when_num_forwards_gt_1(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
-    ) -> None:
+    def test_deterministic_mode_disabled_when_num_forwards_gt_1(self, tmp_path) -> None:
         """Any one condition false → deterministic mode off; training keeps
         its standard (or absent) scenario_source."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -896,58 +697,44 @@ class TestConvertConfig:
             num_aberturas=1,
             considera_reamostragem_cenarios=0,
         )
-        mock_dger_cls.read.return_value = dger
         mock_shist = MagicMock()
         mock_shist.varredura = 0
         mock_shist.anos_inicio_simulacoes = [1983]
         mock_shist.ano_inicio_varredura = 1932
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         # With no reamostragem and not deterministic, training has no
         # scenario_source — cobre defaults apply.
         assert "scenario_source" not in result["training"]
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
     def test_deterministic_mode_disabled_when_multiple_historical_years(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
+        self, tmp_path
     ) -> None:
         """Two-year historical list violates the single-year requirement →
         deterministic mode off."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
             num_forwards=1,
             num_aberturas=1,
         )
-        mock_dger_cls.read.return_value = dger
         mock_shist = MagicMock()
         mock_shist.varredura = 0
         mock_shist.anos_inicio_simulacoes = [1983, 1990]
         mock_shist.ano_inicio_varredura = 1932
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         assert "scenario_source" not in result["training"]
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_deterministic_mode_stages_get_historical_residuals(
-        self, mock_dger_cls, mock_shist_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_deterministic_mode_stages_get_historical_residuals(self, tmp_path) -> None:
         """Every stage in the deterministic case is tagged with
         sampling_method=historical_residuals."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
-        (tmp_path / "patamar.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -958,33 +745,26 @@ class TestConvertConfig:
             num_anos=2,
             num_anos_pos=0,
         )
-        mock_dger_cls.read.return_value = dger
         mock_shist = MagicMock()
         mock_shist.varredura = 0
         mock_shist.anos_inicio_simulacoes = [1983]
         mock_shist.ano_inicio_varredura = 1932
-        mock_shist_cls.read.return_value = mock_shist
-        mock_patamar_cls.read.return_value = _make_patamar_mock_single()
+        patamar = _make_patamar_mock_single()
+        case = make_case(tmp_path, dger=dger, shist=mock_shist, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
         from cobre_bridge.id_map import NewaveIdMap
 
         result = convert_stages(
-            _make_nw_files(tmp_path, shist=tmp_path / "shist.dat"),
+            case,
             NewaveIdMap(subsystem_ids=[1], hydro_codes=[], thermal_codes=[]),
         )
         for stage in result["stages"]:
             assert stage["sampling_method"] == "historical_residuals"
 
-    @patch("cobre_bridge.converters.temporal.Patamar")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_non_deterministic_mode_stages_omit_sampling_method(
-        self, mock_dger_cls, mock_patamar_cls, tmp_path
-    ) -> None:
+    def test_non_deterministic_mode_stages_omit_sampling_method(self, tmp_path) -> None:
         """Without deterministic mode, sampling_method is omitted so cobre
         applies its default (saa)."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "patamar.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=1,
@@ -994,14 +774,14 @@ class TestConvertConfig:
             num_anos=2,
             num_anos_pos=0,
         )
-        mock_dger_cls.read.return_value = dger
-        mock_patamar_cls.read.return_value = _make_patamar_mock_single()
+        patamar = _make_patamar_mock_single()
+        case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
         from cobre_bridge.id_map import NewaveIdMap
 
         result = convert_stages(
-            _make_nw_files(tmp_path),
+            case,
             NewaveIdMap(subsystem_ids=[1], hydro_codes=[], thermal_codes=[]),
         )
         for stage in result["stages"]:
@@ -1009,86 +789,68 @@ class TestConvertConfig:
 
     # -- Cut selection (selecao_de_cortes_forward / _backward) --
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_cut_selection_both_flags_one_enables(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_cut_selection_both_flags_one_enables(self, tmp_path) -> None:
         dger = _make_dger_mock(
             selecao_de_cortes_forward=1, selecao_de_cortes_backward=1
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["training"]["cut_selection"]["enabled"] is True
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_cut_selection_only_forward_enables(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_cut_selection_only_forward_enables(self, tmp_path) -> None:
         dger = _make_dger_mock(
             selecao_de_cortes_forward=1, selecao_de_cortes_backward=0
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["training"]["cut_selection"]["enabled"] is True
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_cut_selection_only_backward_enables(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_cut_selection_only_backward_enables(self, tmp_path) -> None:
         dger = _make_dger_mock(
             selecao_de_cortes_forward=0, selecao_de_cortes_backward=1
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["training"]["cut_selection"]["enabled"] is True
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_cut_selection_both_zero_disables(self, mock_dger_cls, tmp_path) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_cut_selection_both_zero_disables(self, tmp_path) -> None:
         dger = _make_dger_mock(
             selecao_de_cortes_forward=0, selecao_de_cortes_backward=0
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["training"]["cut_selection"]["enabled"] is False
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_cut_selection_none_treated_as_zero(self, mock_dger_cls, tmp_path) -> None:
+    def test_cut_selection_none_treated_as_zero(self, tmp_path) -> None:
         """When the dger.dat field is absent (None), treat as 0 so the
         union rule still applies: both None → disabled."""
-        (tmp_path / "dger.dat").touch()
         dger = _make_dger_mock()
         dger.selecao_de_cortes_forward = None
         dger.selecao_de_cortes_backward = None
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["training"]["cut_selection"]["enabled"] is False
 
     # -- Shist-driven historical_years (tipo_simulacao_final == 2) --
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_shist_varredura_0_emits_explicit_list(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
-    ) -> None:
+    def test_shist_varredura_0_emits_explicit_list(self, tmp_path) -> None:
         """shist.varredura=0 → historical_years is the explicit list from
         anos_inicio_simulacoes."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -1096,31 +858,26 @@ class TestConvertConfig:
             num_anos=3,
             num_anos_pos=3,
         )
-        mock_dger_cls.read.return_value = dger
 
         mock_shist = MagicMock()
         mock_shist.varredura = 0
         mock_shist.anos_inicio_simulacoes = [1983, 1985, 1990]
         mock_shist.ano_inicio_varredura = 1932
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         src = result["simulation"]["scenario_source"]
         assert src["inflow"]["scheme"] == "historical"
         assert src["historical_years"] == [1983, 1985, 1990]
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
     def test_shist_varredura_1_emits_range_with_horizon_aware_end(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
+        self, tmp_path
     ) -> None:
         """shist.varredura=1 → historical_years is a range from
         ano_inicio_varredura to ano_inicio_estudo - (num_anos + num_anos_pos),
         the most recent year for which the scenario still fits in history."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         # Horizon = 3 study + 3 post-study = 6 years.  Latest valid start year
         # = 2024 - 6 = 2018.
         dger = _make_dger_mock(
@@ -1130,31 +887,24 @@ class TestConvertConfig:
             num_anos=3,
             num_anos_pos=3,
         )
-        mock_dger_cls.read.return_value = dger
 
         mock_shist = MagicMock()
         mock_shist.varredura = 1
         mock_shist.ano_inicio_varredura = 1932
         mock_shist.anos_inicio_simulacoes = []
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         src = result["simulation"]["scenario_source"]
         assert src["inflow"]["scheme"] == "historical"
         assert src["historical_years"] == {"from": 1932, "to": 2018}
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_shist_varredura_1_range_collapse_clamps(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
-    ) -> None:
+    def test_shist_varredura_1_range_collapse_clamps(self, tmp_path) -> None:
         """When the horizon is wider than the gap between ano_inicio_varredura
         and ano_inicio_estudo, the range collapses to a single year — clamp
         ``to=from`` so cobre still accepts the config."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -1162,27 +912,22 @@ class TestConvertConfig:
             num_anos=100,
             num_anos_pos=0,
         )
-        mock_dger_cls.read.return_value = dger
 
         mock_shist = MagicMock()
         mock_shist.varredura = 1
         mock_shist.ano_inicio_varredura = 1932
         mock_shist.anos_inicio_simulacoes = []
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         src = result["simulation"]["scenario_source"]
         assert src["historical_years"] == {"from": 1932, "to": 1932}
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_shist_absent_falls_back_to_legacy_range(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_shist_absent_falls_back_to_legacy_range(self, tmp_path) -> None:
         """When shist.dat is not in NewaveFiles, fall back to the pre-Shist
         default (ano_inicial_historico+1 .. ano_inicio_estudo-1)."""
-        (tmp_path / "dger.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -1190,23 +935,17 @@ class TestConvertConfig:
             ano_inicial_historico=1931,
             ano_inicio=2026,
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)  # shist absent
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))  # shist=None
+        result = convert_config(case)
         src = result["simulation"]["scenario_source"]
         assert src["historical_years"] == {"from": 1932, "to": 2025}
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_historical_num_scenarios_matches_explicit_list(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
-    ) -> None:
+    def test_historical_num_scenarios_matches_explicit_list(self, tmp_path) -> None:
         """In historical mode, num_scenarios is overridden to the number of
         distinct start-years — not the synthetic num_series_sinteticas."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=2,
@@ -1215,27 +954,20 @@ class TestConvertConfig:
             num_anos=3,
             num_anos_pos=3,
         )
-        mock_dger_cls.read.return_value = dger
 
         mock_shist = MagicMock()
         mock_shist.varredura = 0
         mock_shist.anos_inicio_simulacoes = [1983, 1985, 1990]
         mock_shist.ano_inicio_varredura = 1932
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         assert result["simulation"]["num_scenarios"] == 3
 
-    @patch("cobre_bridge.converters.temporal.Shist")
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_historical_num_scenarios_matches_range_length(
-        self, mock_dger_cls, mock_shist_cls, tmp_path
-    ) -> None:
+    def test_historical_num_scenarios_matches_range_length(self, tmp_path) -> None:
         """For a range historical_years, num_scenarios = to - from + 1."""
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "shist.dat").touch()
         # Horizon 6 → range [1932, 2018] → 87 years.
         dger = _make_dger_mock(
             tipo_execucao=1,
@@ -1245,141 +977,112 @@ class TestConvertConfig:
             num_anos=3,
             num_anos_pos=3,
         )
-        mock_dger_cls.read.return_value = dger
 
         mock_shist = MagicMock()
         mock_shist.varredura = 1
         mock_shist.ano_inicio_varredura = 1932
         mock_shist.anos_inicio_simulacoes = []
-        mock_shist_cls.read.return_value = mock_shist
+        case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path, shist=tmp_path / "shist.dat"))
+        result = convert_config(case)
         assert result["simulation"]["num_scenarios"] == 2018 - 1932 + 1
 
-    @patch("cobre_bridge.converters.temporal.Dger")
     def test_non_historical_num_scenarios_uses_num_series_sinteticas(
-        self, mock_dger_cls, tmp_path
+        self, tmp_path
     ) -> None:
         """When simulation is not historical, num_scenarios stays
         dger.num_series_sinteticas — the override only applies in historical
         mode where the pool size is fixed."""
-        (tmp_path / "dger.dat").touch()
         dger = _make_dger_mock(
             tipo_execucao=1,
             tipo_simulacao_final=1,  # out_of_sample
             num_series=2000,
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["simulation"]["num_scenarios"] == 2000
 
     # -- considera_reamostragem_cenarios / training.scenario_source --
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_reamostragem_adds_training_scenario_source(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_reamostragem_adds_training_scenario_source(self, tmp_path) -> None:
         dger = _make_dger_mock(tipo_execucao=1, considera_reamostragem_cenarios=1)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         src = result["training"]["scenario_source"]
         assert src["seed"] == 42
         assert src["inflow"]["scheme"] == "out_of_sample"
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_no_reamostragem_no_training_scenario_source(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_no_reamostragem_no_training_scenario_source(self, tmp_path) -> None:
         dger = _make_dger_mock(tipo_execucao=1, considera_reamostragem_cenarios=0)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert "scenario_source" not in result["training"]
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_reamostragem_ignored_when_training_disabled(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
-        (tmp_path / "dger.dat").touch()
+    def test_reamostragem_ignored_when_training_disabled(self, tmp_path) -> None:
         dger = _make_dger_mock(
             tipo_execucao=0,
             considera_reamostragem_cenarios=1,
             tipo_simulacao_final=1,
         )
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["training"]["enabled"] is False
         assert "scenario_source" not in result["training"]
 
     # -- consideracao_media_anual_afluencias / estimation.order_selection --
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_order_selection_omitted_when_field_absent(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_order_selection_omitted_when_field_absent(self, tmp_path) -> None:
         """Old NEWAVE files lacking the field → omit order_selection (cobre default)."""
-        (tmp_path / "dger.dat").touch()
         dger = _make_dger_mock(consideracao_media_anual_afluencias=None)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert "order_selection" not in result["estimation"]
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_order_selection_pacf_when_zero(self, mock_dger_cls, tmp_path) -> None:
+    def test_order_selection_pacf_when_zero(self, tmp_path) -> None:
         """consideracao_media_anual_afluencias=0 → classical PAR(p) → 'pacf'."""
-        (tmp_path / "dger.dat").touch()
         dger = _make_dger_mock(consideracao_media_anual_afluencias=0)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["estimation"]["order_selection"] == "pacf"
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_order_selection_pacf_annual_when_three(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_order_selection_pacf_annual_when_three(self, tmp_path) -> None:
         """consideracao_media_anual_afluencias=3 (exact PAR(p)-A) → 'pacf_annual'."""
-        (tmp_path / "dger.dat").touch()
         dger = _make_dger_mock(consideracao_media_anual_afluencias=3)
-        mock_dger_cls.read.return_value = dger
+        case = make_case(tmp_path, dger=dger)
 
         from cobre_bridge.converters.temporal import convert_config
 
-        result = convert_config(_make_nw_files(tmp_path))
+        result = convert_config(case)
         assert result["estimation"]["order_selection"] == "pacf_annual"
 
-    @patch("cobre_bridge.converters.temporal.Dger")
-    def test_order_selection_pacf_annual_when_one_or_two(
-        self, mock_dger_cls, tmp_path
-    ) -> None:
+    def test_order_selection_pacf_annual_when_one_or_two(self, tmp_path) -> None:
         """Approximate PAR(p)-A variants (1, 2) also map to 'pacf_annual'."""
         from cobre_bridge.converters.temporal import convert_config
 
         for value in (1, 2):
-            (tmp_path / "dger.dat").touch()
             dger = _make_dger_mock(consideracao_media_anual_afluencias=value)
-            mock_dger_cls.read.return_value = dger
-            result = convert_config(_make_nw_files(tmp_path))
+            case = make_case(tmp_path, dger=dger)
+            result = convert_config(case)
             assert result["estimation"]["order_selection"] == "pacf_annual"
 
 

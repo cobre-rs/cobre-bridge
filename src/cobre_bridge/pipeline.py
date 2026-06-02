@@ -286,10 +286,10 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     )
 
     logger.debug("Converting stages")
-    stages_dict = temporal_conv.convert_stages(nw_files, id_map)
+    stages_dict = temporal_conv.convert_stages(case, id_map)
 
     logger.debug("Converting config")
-    config_dict = temporal_conv.convert_config(nw_files)
+    config_dict = temporal_conv.convert_config(case)
 
     logger.debug("Converting initial conditions")
     ic_dict = ic_conv.convert_initial_conditions(case, id_map)
