@@ -57,12 +57,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
-from inewave.newave import Adterm, Dger, Patamar
+from inewave.newave import Dger, Patamar
 
 from cobre_bridge.horizon import study_horizon
 
 if TYPE_CHECKING:
-    from cobre_bridge.newave_files import NewaveFiles
+    from cobre_bridge.case import NewaveCase
 
 _LOG = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ def _block_fractions_by_stage(
 
 
 def read_anticipated_dispatch(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
 ) -> dict[int, AnticipatedDispatch]:
     """Return ``{codigo_usina: AnticipatedDispatch}`` from adterm.dat.
 
@@ -170,12 +170,12 @@ def read_anticipated_dispatch(
     semantic validator otherwise rejects ``entry_stage_id +
     lead_stages > n_stages``.
     """
-    dger = Dger.read(str(nw_files.dger))
+    dger = case.dger
     if not is_anticipated_dispatch_enabled(dger):
         _LOG.debug("despacho_antecipado_gnl=0 (or absent); ignoring adterm.dat.")
         return {}
 
-    adterm_path: Path | None = nw_files.adterm
+    adterm_path: Path | None = case.files.adterm
     if adterm_path is None or not adterm_path.exists():
         _LOG.info(
             "despacho_antecipado_gnl is on but adterm.dat is missing; "
@@ -183,11 +183,11 @@ def read_anticipated_dispatch(
         )
         return {}
 
-    despachos: pd.DataFrame | None = Adterm.read(str(adterm_path)).despachos
+    despachos: pd.DataFrame | None = case.adterm.despachos
     if despachos is None or despachos.empty:
         return {}
 
-    patamar = Patamar.read(str(nw_files.patamar))
+    patamar = case.patamar
     # Need the case's calendar start to weight by the right month's blocks.
     horizon = study_horizon(dger)
     start_month = horizon.start_month

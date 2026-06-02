@@ -261,7 +261,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     geometry_table = hydro_conv.generate_hydro_geometry(cadastro, id_map)
 
     logger.debug("Converting thermals")
-    thermals_dict = thermal_conv.convert_thermals(nw_files, id_map)
+    thermals_dict = thermal_conv.convert_thermals(case, id_map)
 
     logger.debug("Converting buses")
     buses_dict = network_conv.convert_buses(nw_files, id_map)
@@ -369,7 +369,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     )
 
     logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
-    thermal_bounds_table = thermal_conv.convert_thermal_bounds(nw_files, id_map)
+    thermal_bounds_table = thermal_conv.convert_thermal_bounds(case, id_map)
 
     # ------------------------------------------------------------------
     # 4. Create the output directory structure.

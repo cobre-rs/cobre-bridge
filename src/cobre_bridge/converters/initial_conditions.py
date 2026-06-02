@@ -113,8 +113,8 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # ``[min_mw, max_mw]`` (``thermals.json`` / ``cobre-io`` semantic validator);
     # an out-of-range seed makes that stage's fishing equality infeasible, so we
     # clamp into range and warn rather than emit a case cobre would reject.
-    anticipated = read_anticipated_dispatch(case.files)
-    gen_bounds = thermal_generation_bounds(case.files) if anticipated else {}
+    anticipated = read_anticipated_dispatch(case)
+    gen_bounds = thermal_generation_bounds(case) if anticipated else {}
     past_anticipated_commitments: list[dict] = []
     for newave_code, dispatch in anticipated.items():
         try:

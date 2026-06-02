@@ -262,9 +262,12 @@ def compute_thermal_bounds(
     if nw_files.expt is None and nw_files.manutt is None:
         return {}
 
+    from cobre_bridge.case import NewaveCase
     from cobre_bridge.converters.thermal import convert_thermal_bounds
 
-    table = convert_thermal_bounds(nw_files, id_map)
+    # The converter now consumes a parsed NewaveCase; the comparator still works
+    # from paths, so wrap them (parse-on-demand, behaviour-identical).
+    table = convert_thermal_bounds(NewaveCase(files=nw_files), id_map)
     if table is None:
         return {}
 

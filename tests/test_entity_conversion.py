@@ -16,7 +16,7 @@ import pytest
 
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
-from tests.conftest import make_case
+from tests.conftest import make_case, make_nw_files
 
 
 def _make_nw_files(
@@ -3194,54 +3194,46 @@ class TestConvertThermals:
             thermal_codes=[10, 20, 30],
         )
 
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_returns_thermals_key(
-        self, mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
-    ) -> None:
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+    def test_returns_thermals_key(self, tmp_path) -> None:
+        conft, clast, term = _thermal_readers()
+        dger = MagicMock()
+        dger.despacho_antecipado_gnl = 0
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_thermals(case, self._make_id_map())
         assert "thermals" in result
 
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_thermal_count(
-        self, mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
-    ) -> None:
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+    def test_thermal_count(self, tmp_path) -> None:
+        conft, clast, term = _thermal_readers()
+        dger = MagicMock()
+        dger.despacho_antecipado_gnl = 0
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_thermals(case, self._make_id_map())
         assert len(result["thermals"]) == 3
 
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_thermal_ids_are_zero_based_sorted(
-        self, mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
-    ) -> None:
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+    def test_thermal_ids_are_zero_based_sorted(self, tmp_path) -> None:
+        conft, clast, term = _thermal_readers()
+        dger = MagicMock()
+        dger.despacho_antecipado_gnl = 0
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_thermals(case, self._make_id_map())
         ids = [t["id"] for t in result["thermals"]]
         assert ids == sorted(ids)
         assert ids[0] == 0
 
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_cost_per_mwh_scalar(
-        self, mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
-    ) -> None:
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+    def test_cost_per_mwh_scalar(self, tmp_path) -> None:
+        conft, clast, term = _thermal_readers()
+        dger = MagicMock()
+        dger.despacho_antecipado_gnl = 0
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_thermals(case, self._make_id_map())
         for t in result["thermals"]:
             assert "cost_per_mwh" in t
             assert isinstance(t["cost_per_mwh"], float)
@@ -3250,16 +3242,14 @@ class TestConvertThermals:
             assert "min_mw" in t["generation"]
             assert "max_mw" in t["generation"]
 
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_bus_id_assignment(
-        self, mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
-    ) -> None:
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+    def test_bus_id_assignment(self, tmp_path) -> None:
+        conft, clast, term = _thermal_readers()
+        dger = MagicMock()
+        dger.despacho_antecipado_gnl = 0
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_thermals(case, self._make_id_map())
         # TERMO_A (code 10) and TERMO_B (code 20) are in submercado 1 -> bus 0.
         # TERMO_C (code 30) is in submercado 2 -> bus 1.
         termo_a = next(t for t in result["thermals"] if t["name"] == "TERMO_A")
@@ -3267,37 +3257,28 @@ class TestConvertThermals:
         assert termo_a["bus_id"] == 0
         assert termo_c["bus_id"] == 1
 
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_capacity_uses_factor(
-        self, mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path
-    ) -> None:
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
+    def test_capacity_uses_factor(self, tmp_path) -> None:
+        conft, clast, term = _thermal_readers()
+        dger = MagicMock()
+        dger.despacho_antecipado_gnl = 0
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
         from cobre_bridge.converters.thermal import convert_thermals
 
-        result = convert_thermals(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_thermals(case, self._make_id_map())
         # TERMO_A: potencia=100, factor=0.9 -> max_mw=90.
         termo_a = next(t for t in result["thermals"] if t["name"] == "TERMO_A")
         assert termo_a["generation"]["max_mw"] == pytest.approx(90.0)
 
 
-def _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path):
-    for fname in ("conft.dat", "clast.dat", "term.dat"):
-        (tmp_path / fname).touch()
-
-    mock_conft = MagicMock()
-    mock_conft.usinas = _make_conft_df()
-    mock_conft_cls.read.return_value = mock_conft
-
-    mock_clast = MagicMock()
-    mock_clast.usinas = _make_clast_df()
-    mock_clast.modificacoes = None
-    mock_clast_cls.read.return_value = mock_clast
-
-    mock_term = MagicMock()
-    mock_term.usinas = _make_term_df()
-    mock_term_cls.read.return_value = mock_term
+def _thermal_readers():
+    conft = MagicMock()
+    conft.usinas = _make_conft_df()
+    clast = MagicMock()
+    clast.usinas = _make_clast_df()
+    clast.modificacoes = None
+    term = MagicMock()
+    term.usinas = _make_term_df()
+    return conft, clast, term
 
 
 class TestConvertThermalBoundsClastModificacoes:
@@ -3319,26 +3300,12 @@ class TestConvertThermalBoundsClastModificacoes:
         dger.num_anos_manutencao_utes = 0
         return dger
 
-    @patch("inewave.newave.Manutt")
-    @patch("inewave.newave.Expt")
-    @patch("inewave.newave.Dger")
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
     def test_modificacao_overrides_year_indexed_cost_inside_window(
-        self,
-        mock_conft_cls,
-        mock_clast_cls,
-        mock_term_cls,
-        mock_dger_cls,
-        mock_expt_cls,
-        mock_manutt_cls,
-        tmp_path,
+        self, tmp_path
     ) -> None:
         import datetime
 
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
-        mock_dger_cls.read.return_value = self._make_dger()
+        conft, clast, term = _thermal_readers()
 
         # Override TERMO_A (code 10) cost from 50.0 -> 77.0 for stages 2-4
         # of a 12-stage 2023 horizon (March-May). Other stages keep 50.0.
@@ -3351,11 +3318,18 @@ class TestConvertThermalBoundsClastModificacoes:
                 "custo": [77.0],
             }
         )
-        mock_clast_cls.read.return_value.modificacoes = modif_df
+        clast.modificacoes = modif_df
+        case = make_case(
+            tmp_path,
+            conft=conft,
+            clast=clast,
+            term=term,
+            dger=self._make_dger(),
+        )
 
         from cobre_bridge.converters.thermal import convert_thermal_bounds
 
-        table = convert_thermal_bounds(_make_nw_files(tmp_path), self._make_id_map())
+        table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
 
         df = table.to_pandas()
@@ -3377,22 +3351,7 @@ class TestConvertThermalBoundsClastModificacoes:
         b_rows = df[df["thermal_id"] == termo_b_id]
         assert b_rows["cost_per_mwh"].isna().all()
 
-    @patch("inewave.newave.Manutt")
-    @patch("inewave.newave.Expt")
-    @patch("inewave.newave.Dger")
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_chained_potef_finite_then_open_keeps_plant_alive(
-        self,
-        mock_conft_cls,
-        mock_clast_cls,
-        mock_term_cls,
-        mock_dger_cls,
-        mock_expt_cls,
-        mock_manutt_cls,
-        tmp_path,
-    ) -> None:
+    def test_chained_potef_finite_then_open_keeps_plant_alive(self, tmp_path) -> None:
         """Regression: two consecutive POTEF windows (finite then open-ended)
         must keep the plant alive across both, matching NEWAVE.  Prior to the
         fix, the first window's data_fim was treated as a decommission date,
@@ -3400,8 +3359,7 @@ class TestConvertThermalBoundsClastModificacoes:
         re-activated the plant."""
         import datetime
 
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
-        mock_dger_cls.read.return_value = self._make_dger()
+        conft, clast, term = _thermal_readers()
 
         # POTEF window 1: stages 0-3 (Jan-Apr 2023) at 100 MW.
         # POTEF window 2: stage 4 onwards (May 2023+) at 200 MW.
@@ -3419,15 +3377,21 @@ class TestConvertThermalBoundsClastModificacoes:
         )
         expt_obj = MagicMock()
         expt_obj.expansoes = expt_df
-        mock_expt_cls.read.return_value = expt_obj
 
         # Use a real expt file path so the optional source is wired in.
-        (tmp_path / "expt.dat").touch()
-        nw_files = _make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+        nw = make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+        case = make_case(
+            nw,
+            conft=conft,
+            clast=clast,
+            term=term,
+            dger=self._make_dger(),
+            expt=expt_obj,
+        )
 
         from cobre_bridge.converters.thermal import convert_thermal_bounds
 
-        table = convert_thermal_bounds(nw_files, self._make_id_map())
+        table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
         df = table.to_pandas()
         termo_a_id = self._make_id_map().thermal_id(10)
@@ -3444,28 +3408,12 @@ class TestConvertThermalBoundsClastModificacoes:
         assert a_rows.iloc[4]["max_generation_mw"] == pytest.approx(179.910)
         assert a_rows.iloc[11]["max_generation_mw"] == pytest.approx(179.910)
 
-    @patch("inewave.newave.Manutt")
-    @patch("inewave.newave.Expt")
-    @patch("inewave.newave.Dger")
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_potef_window_gap_decommissions_plant(
-        self,
-        mock_conft_cls,
-        mock_clast_cls,
-        mock_term_cls,
-        mock_dger_cls,
-        mock_expt_cls,
-        mock_manutt_cls,
-        tmp_path,
-    ) -> None:
+    def test_potef_window_gap_decommissions_plant(self, tmp_path) -> None:
         """A gap between two finite POTEF windows truly decommissions the
         plant — capacity goes to zero for stages outside any window."""
         import datetime
 
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
-        mock_dger_cls.read.return_value = self._make_dger()
+        conft, clast, term = _thermal_readers()
 
         expt_df = pd.DataFrame(
             {
@@ -3484,14 +3432,20 @@ class TestConvertThermalBoundsClastModificacoes:
         )
         expt_obj = MagicMock()
         expt_obj.expansoes = expt_df
-        mock_expt_cls.read.return_value = expt_obj
 
-        (tmp_path / "expt.dat").touch()
-        nw_files = _make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+        nw = make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+        case = make_case(
+            nw,
+            conft=conft,
+            clast=clast,
+            term=term,
+            dger=self._make_dger(),
+            expt=expt_obj,
+        )
 
         from cobre_bridge.converters.thermal import convert_thermal_bounds
 
-        table = convert_thermal_bounds(nw_files, self._make_id_map())
+        table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
         df = table.to_pandas()
         termo_a_id = self._make_id_map().thermal_id(10)
@@ -3505,26 +3459,10 @@ class TestConvertThermalBoundsClastModificacoes:
         # Stage 11 (Dec) past window 2 → zeroed.
         assert a_rows.iloc[11]["max_generation_mw"] == pytest.approx(0.0)
 
-    @patch("inewave.newave.Manutt")
-    @patch("inewave.newave.Expt")
-    @patch("inewave.newave.Dger")
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
-    def test_modificacao_with_open_end_extends_to_horizon(
-        self,
-        mock_conft_cls,
-        mock_clast_cls,
-        mock_term_cls,
-        mock_dger_cls,
-        mock_expt_cls,
-        mock_manutt_cls,
-        tmp_path,
-    ) -> None:
+    def test_modificacao_with_open_end_extends_to_horizon(self, tmp_path) -> None:
         import datetime
 
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
-        mock_dger_cls.read.return_value = self._make_dger()
+        conft, clast, term = _thermal_readers()
 
         modif_df = pd.DataFrame(
             {
@@ -3535,11 +3473,18 @@ class TestConvertThermalBoundsClastModificacoes:
                 "custo": [120.0],
             }
         )
-        mock_clast_cls.read.return_value.modificacoes = modif_df
+        clast.modificacoes = modif_df
+        case = make_case(
+            tmp_path,
+            conft=conft,
+            clast=clast,
+            term=term,
+            dger=self._make_dger(),
+        )
 
         from cobre_bridge.converters.thermal import convert_thermal_bounds
 
-        table = convert_thermal_bounds(_make_nw_files(tmp_path), self._make_id_map())
+        table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
 
         df = table.to_pandas().sort_values(["thermal_id", "stage_id"])
@@ -4230,30 +4175,28 @@ def _ic_case(tmp_path, pct_b: float = 75.0):
 class TestThermalGenerationBounds:
     """``thermal_generation_bounds`` returns the static ``[min_mw, max_mw]``."""
 
-    @patch("cobre_bridge.converters.thermal.Term")
-    def test_bounds_from_term_month1(self, mock_term_cls, tmp_path) -> None:
+    def test_bounds_from_term_month1(self, tmp_path) -> None:
         from cobre_bridge.converters.thermal import thermal_generation_bounds
 
-        mock_term = MagicMock()
-        mock_term.usinas = _make_term_df()
-        mock_term_cls.read.return_value = mock_term
+        term = MagicMock()
+        term.usinas = _make_term_df()
+        case = make_case(tmp_path, term=term)
 
-        bounds = thermal_generation_bounds(_make_nw_files(tmp_path))
+        bounds = thermal_generation_bounds(case)
         # max_mw = potencia_instalada * fator_capacidade_maximo / 100;
         # min_mw = geracao_minima.
         assert bounds[10] == pytest.approx((10.0, 90.0))
         assert bounds[20] == pytest.approx((0.0, 200.0))
         assert bounds[30] == pytest.approx((5.0, 40.0))
 
-    @patch("cobre_bridge.converters.thermal.Term")
-    def test_no_usinas_returns_empty(self, mock_term_cls, tmp_path) -> None:
+    def test_no_usinas_returns_empty(self, tmp_path) -> None:
         from cobre_bridge.converters.thermal import thermal_generation_bounds
 
-        mock_term = MagicMock()
-        mock_term.usinas = None
-        mock_term_cls.read.return_value = mock_term
+        term = MagicMock()
+        term.usinas = None
+        case = make_case(tmp_path, term=term)
 
-        assert thermal_generation_bounds(_make_nw_files(tmp_path)) == {}
+        assert thermal_generation_bounds(case) == {}
 
 
 class TestAnticipatedCommitmentSeeding:
@@ -4378,9 +4321,6 @@ class TestCrossReferenceConsistency:
         )
 
     @patch("cobre_bridge.converters.network.Sistema")
-    @patch("cobre_bridge.converters.thermal.Term")
-    @patch("cobre_bridge.converters.thermal.Clast")
-    @patch("cobre_bridge.converters.thermal.Conft")
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
@@ -4389,15 +4329,19 @@ class TestCrossReferenceConsistency:
         mock_hidr_cls,
         mock_confhd_cls,
         mock_ree_cls,
-        mock_conft_cls,
-        mock_clast_cls,
-        mock_term_cls,
         mock_sistema_cls,
         tmp_path,
     ) -> None:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
-        _setup_thermal_mocks(mock_conft_cls, mock_clast_cls, mock_term_cls, tmp_path)
         _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+
+        conft, clast, term = _thermal_readers()
+        dger = MagicMock()
+        dger.despacho_antecipado_gnl = 0
+        nw_files = _make_nw_files(tmp_path)
+        thermal_case = make_case(
+            nw_files, conft=conft, clast=clast, term=term, dger=dger
+        )
 
         from cobre_bridge.converters.hydro import convert_hydros
         from cobre_bridge.converters.network import convert_buses
@@ -4410,9 +4354,9 @@ class TestCrossReferenceConsistency:
             thermal_codes=[10, 20, 30],
         )
 
-        buses_result = convert_buses(_make_nw_files(tmp_path), id_map)
-        hydros_result = convert_hydros(_make_nw_files(tmp_path), id_map)
-        thermals_result = convert_thermals(_make_nw_files(tmp_path), id_map)
+        buses_result = convert_buses(nw_files, id_map)
+        hydros_result = convert_hydros(nw_files, id_map)
+        thermals_result = convert_thermals(thermal_case, id_map)
 
         valid_bus_ids = {b["id"] for b in buses_result["buses"]}
 

@@ -14,12 +14,11 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from inewave.newave import Clast, Conft, Term
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.horizon import build_stage_dates, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ _SCHEMA_URL = (
 )
 
 
-def thermal_generation_bounds(nw_files: NewaveFiles) -> dict[int, tuple[float, float]]:
+def thermal_generation_bounds(case: NewaveCase) -> dict[int, tuple[float, float]]:
     """Return ``{codigo_usina: (min_mw, max_mw)}`` static generation bounds.
 
     These are the plant-level (non-stage-varying) bounds written to
@@ -55,8 +54,7 @@ def thermal_generation_bounds(nw_files: NewaveFiles) -> dict[int, tuple[float, f
     from month 1, with ``min_mw = 0``). Plants absent from ``term.dat`` map to
     ``(0.0, 0.0)``.
     """
-    term = Term.read(str(nw_files.term))
-    term_df = term.usinas
+    term_df = case.term.usinas
     bounds: dict[int, tuple[float, float]] = {}
     if term_df is None:
         return bounds
@@ -79,30 +77,27 @@ def thermal_generation_bounds(nw_files: NewaveFiles) -> dict[int, tuple[float, f
     return bounds
 
 
-def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
+def convert_thermals(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE thermal plant data to a Cobre ``thermals.json`` dict.
 
-    Reads ``conft.dat``, ``clast.dat``, and ``term.dat`` from *nw_files*.
+    Reads ``conft.dat``, ``clast.dat``, and ``term.dat`` from *case*.
     Returns a dict with a ``"thermals"`` key containing a list of thermal
     entries sorted by Cobre 0-based ID.
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Pre-built ID mapping for bus cross-references.
     """
-    conft = Conft.read(str(nw_files.conft))
-    clast = Clast.read(str(nw_files.clast))
-
-    conft_df = conft.usinas
-    clast_df = clast.usinas
+    conft_df = case.conft.usinas
+    clast_df = case.clast.usinas
 
     # Anticipated dispatch (NEWAVE GNL) — gated by dger.despacho_antecipado_gnl.
     # Returns an empty dict when the flag is off, so non-GNL cases incur
     # zero cost beyond the dger read inside the helper.
-    anticipated_by_code = read_anticipated_dispatch(nw_files)
+    anticipated_by_code = read_anticipated_dispatch(case)
 
     # Build cost lookup: codigo_usina -> cost for indice_ano_estudo == 1.
     cost_map: dict[int, float] = {}
@@ -113,7 +108,7 @@ def convert_thermals(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
 
     # Static (min_mw, max_mw) per plant — single-sourced so the anticipated
     # commitment seeding clamps against the very bounds written here.
-    gen_bounds = thermal_generation_bounds(nw_files)
+    gen_bounds = thermal_generation_bounds(case)
 
     thermals: list[dict] = []
     for _, row in conft_df.iterrows():
@@ -395,7 +390,7 @@ def _step6_evaluate_bounds(state: _StageInputs) -> tuple[float, float, bool]:
 
 
 def convert_thermal_bounds(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> pa.Table | None:
     """Build per-stage thermal generation bounds from EXPT.DAT and MANUTT.DAT.
@@ -417,9 +412,7 @@ def convert_thermal_bounds(
 
     Returns ``None`` if no bounds or cost overrides are needed.
     """
-    from inewave.newave import Dger, Expt, Manutt
-
-    dger = Dger.read(str(nw_files.dger))
+    dger = case.dger
     horizon = study_horizon(dger)
     start_month = horizon.start_month
     start_year = horizon.start_year
@@ -432,7 +425,7 @@ def convert_thermal_bounds(
     # ------------------------------------------------------------------
     # 0. Build per-stage cost lookup from CLAST.DAT.
     # ------------------------------------------------------------------
-    clast = Clast.read(str(nw_files.clast))
+    clast = case.clast
     clast_df = clast.usinas
     clast_modif_df = clast.modificacoes
 
@@ -474,7 +467,7 @@ def convert_thermal_bounds(
             )
         cost_varies.update(modif_by_code.keys())
 
-    has_capacity_sources = nw_files.expt is not None or nw_files.manutt is not None
+    has_capacity_sources = case.files.expt is not None or case.files.manutt is not None
 
     # If no EXPT/MANUTT and no varying costs, nothing to emit.
     if not has_capacity_sources and not cost_varies:
@@ -492,8 +485,7 @@ def convert_thermal_bounds(
     # ------------------------------------------------------------------
     # 1. Build base values per (thermal_code, calendar_month) from term.
     # ------------------------------------------------------------------
-    term = Term.read(str(nw_files.term))
-    term_df = term.usinas
+    term_df = case.term.usinas
 
     BaseRow = dict[str, float]
     base_by_code_month: dict[tuple[int, int], BaseRow] = {}
@@ -548,9 +540,9 @@ def convert_thermal_bounds(
     # 2. Load EXPT overrides.
     # ------------------------------------------------------------------
     expt_by_code: dict[int, list[dict]] = {}
-    if nw_files.expt is not None:
+    if case.files.expt is not None:
         try:
-            expt_obj = Expt.read(str(nw_files.expt))
+            expt_obj = case.expt
             expt_df = expt_obj.expansoes
             for _, row in expt_df.iterrows():
                 code = int(row["codigo_usina"])
@@ -594,9 +586,9 @@ def convert_thermal_bounds(
     # 3. Load MANUTT maintenance events.
     # ------------------------------------------------------------------
     manutt_by_code: dict[int, pd.DataFrame] = {}
-    if nw_files.manutt is not None:
+    if case.files.manutt is not None:
         try:
-            manutt_obj = Manutt.read(str(nw_files.manutt))
+            manutt_obj = case.manutt
             manutt_df = manutt_obj.manutencoes
             for code, grp in manutt_df.groupby("codigo_usina"):
                 manutt_by_code[int(code)] = grp.reset_index(drop=True)
