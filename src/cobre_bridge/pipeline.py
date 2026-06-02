@@ -264,10 +264,10 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     thermals_dict = thermal_conv.convert_thermals(case, id_map)
 
     logger.debug("Converting buses")
-    buses_dict = network_conv.convert_buses(nw_files, id_map)
+    buses_dict = network_conv.convert_buses(case, id_map)
 
     logger.debug("Converting lines")
-    lines_dict = network_conv.convert_lines(nw_files, id_map)
+    lines_dict = network_conv.convert_lines(case, id_map)
 
     logger.debug("Converting penalties")
     # DESVIO ("outros usos") + evaporation use MAX_PRODTACUM_SIN (max accumulated
@@ -278,7 +278,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(nw_files)
     prod_media_sin = _compute_prod_media_sin_safe(nw_files)
     penalties_dict = network_conv.convert_penalties(
-        nw_files,
+        case,
         hydros_dict,
         productivities=base_productivities,
         max_accumulated_productivity=max_prodtacum_sin,
@@ -346,19 +346,19 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     load_factors_dict = stochastic_conv.convert_load_factors(case, id_map)
 
     logger.debug("Converting line bounds")
-    line_bounds_table = network_conv.convert_line_bounds(nw_files, id_map)
+    line_bounds_table = network_conv.convert_line_bounds(case, id_map)
 
     logger.debug("Converting non-controllable sources")
-    ncs_dict = network_conv.convert_non_controllable_sources(nw_files, id_map)
+    ncs_dict = network_conv.convert_non_controllable_sources(case, id_map)
 
     logger.debug("Converting exchange factors")
-    exchange_factors_dict = network_conv.convert_exchange_factors(nw_files, id_map)
+    exchange_factors_dict = network_conv.convert_exchange_factors(case, id_map)
 
     logger.debug("Converting NCS block factors")
-    ncs_factors_dict = network_conv.convert_ncs_factors(nw_files, id_map)
+    ncs_factors_dict = network_conv.convert_ncs_factors(case, id_map)
 
     logger.debug("Converting NCS stats")
-    ncs_stats_table = network_conv.convert_ncs_stats(nw_files, id_map)
+    ncs_stats_table = network_conv.convert_ncs_stats(case, id_map)
 
     logger.debug("Converting production models")
     production_models_dict = hydro_conv.convert_production_models(nw_files, id_map)
@@ -468,7 +468,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
 
     # Per-bus excess-cost override: forbid energy excess at fictitious
     # submarkets (pure transshipment nodes) by pricing it prohibitively.
-    bus_penalty_table = network_conv.convert_bus_penalty_overrides(nw_files, id_map)
+    bus_penalty_table = network_conv.convert_bus_penalty_overrides(case, id_map)
     if bus_penalty_table is not None:
         bus_penalty_path = constraints_dir / "penalty_overrides_bus.parquet"
         pq.write_table(bus_penalty_table, bus_penalty_path, compression="zstd")
@@ -485,7 +485,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
         per_stage_rho_avg, per_stage_rho_max_acum = per_stage_sin
         hydro_ids = [int(h["id"]) for h in hydros_dict.get("hydros", []) if "id" in h]
         hydro_penalty_table = network_conv.convert_hydro_penalty_overrides(
-            nw_files,
+            case,
             hydro_ids,
             penalties_dict["hydro"],
             per_stage_rho_avg,

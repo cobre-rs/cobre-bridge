@@ -3716,52 +3716,45 @@ class TestConvertBuses:
             thermal_codes=[],
         )
 
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_returns_buses_key(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_returns_buses_key(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
+        result = convert_buses(case, self._make_id_map())
         assert "buses" in result
 
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_bus_count_includes_fictitious(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_bus_count_includes_fictitious(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
+        result = convert_buses(case, self._make_id_map())
         # 3 subsystems total: 1, 2, 99.
         assert len(result["buses"]) == 3
 
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_bus_ids_are_zero_based_sorted(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_bus_ids_are_zero_based_sorted(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
+        result = convert_buses(case, self._make_id_map())
         ids = [b["id"] for b in result["buses"]]
         assert ids == sorted(ids)
         assert ids[0] == 0
 
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_bus_has_deficit_segments(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_bus_has_deficit_segments(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
+        result = convert_buses(case, self._make_id_map())
         for b in result["buses"]:
             assert "deficit_segments" in b
             assert isinstance(b["deficit_segments"], list)
             assert len(b["deficit_segments"]) == 2  # 2 patamares
 
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_last_deficit_segment_depth_is_null(
-        self, mock_sistema_cls, tmp_path
-    ) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_last_deficit_segment_depth_is_null(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_buses
 
-        result = convert_buses(_make_nw_files(tmp_path), self._make_id_map())
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
+        result = convert_buses(case, self._make_id_map())
         for b in result["buses"]:
             last_seg = b["deficit_segments"][-1]
             assert last_seg["depth_mw"] is None
@@ -3780,42 +3773,28 @@ class TestConvertLines:
             thermal_codes=[],
         )
 
-    def _setup(self, mock_sistema_cls, mock_dger_cls, tmp_path):
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def _make_case(self, tmp_path):
         dger = MagicMock()
         dger.mes_inicio_estudo = 1
         dger.ano_inicio_estudo = 2023
-        mock_dger_cls.read.return_value = dger
+        return make_case(tmp_path, sistema=_make_sistema_mock(), dger=dger)
 
-    @patch("cobre_bridge.converters.network.Dger")
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_returns_lines_key(self, mock_sistema_cls, mock_dger_cls, tmp_path) -> None:
-        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
+    def test_returns_lines_key(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         assert "lines" in result
 
-    @patch("cobre_bridge.converters.network.Dger")
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_line_count_three_pairs(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
-        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
+    def test_line_count_three_pairs(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         assert len(result["lines"]) == 3
 
-    @patch("cobre_bridge.converters.network.Dger")
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_line_capacity_structure(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
-        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
+    def test_line_capacity_structure(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         for line in result["lines"]:
             assert "capacity" in line
             assert "direct_mw" in line["capacity"]
@@ -3823,27 +3802,17 @@ class TestConvertLines:
             assert "source_bus_id" in line
             assert "target_bus_id" in line
 
-    @patch("cobre_bridge.converters.network.Dger")
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_line_ids_sequential(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
-        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
+    def test_line_ids_sequential(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         ids = [ln["id"] for ln in result["lines"]]
         assert ids == list(range(len(ids)))
 
-    @patch("cobre_bridge.converters.network.Dger")
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_first_month_used_for_capacity(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
-        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
+    def test_first_month_used_for_capacity(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_lines
 
-        result = convert_lines(_make_nw_files(tmp_path), self._make_id_map())
+        result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         line_12 = next(
             ln
             for ln in result["lines"]
@@ -3852,12 +3821,7 @@ class TestConvertLines:
         assert line_12["capacity"]["direct_mw"] == pytest.approx(3000.0)
         assert line_12["capacity"]["reverse_mw"] == pytest.approx(2500.0)
 
-    @patch("cobre_bridge.converters.network.Dger")
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_fictitious_lines_get_half_exchange_cost(
-        self, mock_sistema_cls, mock_dger_cls, tmp_path
-    ) -> None:
-        self._setup(mock_sistema_cls, mock_dger_cls, tmp_path)
+    def test_fictitious_lines_get_half_exchange_cost(self, tmp_path) -> None:
         from cobre_bridge.converters.network import (
             _PINT,
             _PINT_FICTITIOUS_DISCOUNT,
@@ -3869,7 +3833,7 @@ class TestConvertLines:
             hydro_codes=[],
             thermal_codes=[],
         )
-        result = convert_lines(_make_nw_files(tmp_path), id_map)
+        result = convert_lines(self._make_case(tmp_path), id_map)
 
         fict_bus_id = id_map.bus_id(99)
         expected = _PINT * _PINT_FICTITIOUS_DISCOUNT
@@ -3883,12 +3847,12 @@ class TestConvertLines:
                 assert "exchange_cost" not in ln
 
 
-def _setup_sistema_mocks(mock_sistema_cls, tmp_path):
-    (tmp_path / "sistema.dat").touch()
+def _make_sistema_mock() -> MagicMock:
+    """Build the ``Sistema`` reader mock shared by the network tests."""
     mock_sistema = MagicMock()
     mock_sistema.custo_deficit = _make_deficit_df(n_patamares=2)
     mock_sistema.limites_intercambio = _make_intercambio_df()
-    mock_sistema_cls.read.return_value = mock_sistema
+    return mock_sistema
 
 
 # ---------------------------------------------------------------------------
@@ -3897,13 +3861,12 @@ def _setup_sistema_mocks(mock_sistema_cls, tmp_path):
 
 
 class TestConvertPenalties:
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_returns_required_keys(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_returns_required_keys(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_penalties
 
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_penalties(
-            _make_nw_files(tmp_path),
+            case,
             {
                 "hydros": [
                     {
@@ -3919,15 +3882,12 @@ class TestConvertPenalties:
         for key in ("bus", "hydro", "line", "non_controllable_source"):
             assert key in result
 
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_bus_deficit_uses_first_subsystem_first_tier(
-        self, mock_sistema_cls, tmp_path
-    ) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_bus_deficit_uses_first_subsystem_first_tier(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_penalties
 
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_penalties(
-            _make_nw_files(tmp_path),
+            case,
             {
                 "hydros": [
                     {
@@ -3944,13 +3904,12 @@ class TestConvertPenalties:
         seg = result["bus"]["deficit_segments"][0]
         assert seg["cost"] == pytest.approx(500.0)
 
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_hydro_has_all_penalty_fields(self, mock_sistema_cls, tmp_path) -> None:
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+    def test_hydro_has_all_penalty_fields(self, tmp_path) -> None:
         from cobre_bridge.converters.network import convert_penalties
 
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_penalties(
-            _make_nw_files(tmp_path),
+            case,
             {
                 "hydros": [
                     {
@@ -4020,17 +3979,14 @@ class TestConvertHydroPenaltyOverrides:
     """Per-stage, SIN-uniform hydro penalty override parquet."""
 
     @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_sin_uniform_sparse_per_stage(
-        self, mock_sistema_cls, _mock_penalid, tmp_path
-    ) -> None:
+    def test_sin_uniform_sparse_per_stage(self, _mock_penalid, tmp_path) -> None:
         from cobre_bridge.converters.network import (
             _PEVERT,
             _hydro_penalty_costs,
             convert_hydro_penalty_overrides,
         )
 
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
         # Build the base via the same helper the override diffs against, with
         # the mocked max_deficit_cost (max custo = 500*2 = 1000). Stage 1 then
         # uses exactly the base (ρ_avg=0.6, ρ_max_acum=2.0) → no override.
@@ -4038,7 +3994,7 @@ class TestConvertHydroPenaltyOverrides:
             rho_avg=0.6, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=1000.0
         )
         table = convert_hydro_penalty_overrides(
-            _make_nw_files(tmp_path),
+            case,
             hydro_ids=[0, 1],
             base_hydro_penalties=base,
             per_stage_rho_avg=[0.5, 0.6, 0.55],
@@ -4066,23 +4022,20 @@ class TestConvertHydroPenaltyOverrides:
         assert df.reset_index(drop=True).equals(ordered)
 
     @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
-    @patch("cobre_bridge.converters.network.Sistema")
-    def test_returns_none_when_no_stage_differs(
-        self, mock_sistema_cls, _mock_penalid, tmp_path
-    ) -> None:
+    def test_returns_none_when_no_stage_differs(self, _mock_penalid, tmp_path) -> None:
         from cobre_bridge.converters.network import (
             _hydro_penalty_costs,
             convert_hydro_penalty_overrides,
         )
 
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
+        case = make_case(tmp_path, sistema=_make_sistema_mock())
         # max_deficit_cost from the mocked deficit df (max custo = 500*2 = 1000).
         base = _hydro_penalty_costs(
             rho_avg=0.6, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=1000.0
         )
         # Every stage uses exactly the base ρ → fully sparse → None.
         table = convert_hydro_penalty_overrides(
-            _make_nw_files(tmp_path),
+            case,
             hydro_ids=[0, 1],
             base_hydro_penalties=base,
             per_stage_rho_avg=[0.6, 0.6],
@@ -4320,7 +4273,6 @@ class TestCrossReferenceConsistency:
             thermal_codes=[10, 20, 30],
         )
 
-    @patch("cobre_bridge.converters.network.Sistema")
     @patch("cobre_bridge.converters.hydro.Ree")
     @patch("cobre_bridge.converters.hydro.Confhd")
     @patch("cobre_bridge.converters.hydro.Hidr")
@@ -4329,11 +4281,9 @@ class TestCrossReferenceConsistency:
         mock_hidr_cls,
         mock_confhd_cls,
         mock_ree_cls,
-        mock_sistema_cls,
         tmp_path,
     ) -> None:
         _setup_hydro_mocks(mock_hidr_cls, mock_confhd_cls, mock_ree_cls, tmp_path)
-        _setup_sistema_mocks(mock_sistema_cls, tmp_path)
 
         conft, clast, term = _thermal_readers()
         dger = MagicMock()
@@ -4354,7 +4304,9 @@ class TestCrossReferenceConsistency:
             thermal_codes=[10, 20, 30],
         )
 
-        buses_result = convert_buses(nw_files, id_map)
+        buses_result = convert_buses(
+            make_case(nw_files, sistema=_make_sistema_mock()), id_map
+        )
         hydros_result = convert_hydros(nw_files, id_map)
         thermals_result = convert_thermals(thermal_case, id_map)
 
