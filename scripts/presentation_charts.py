@@ -22,8 +22,8 @@ Requires matplotlib (not a package dependency)::
 Usage::
 
     python scripts/presentation_charts.py \\
-        --newave example/comparacao_prod/newave \\
-        --cobre  example/comparacao_prod/cobre/output \\
+        --newave example/newave \\
+        --cobre  example/cobre/output \\
         --outdir example/presentation
 """
 
@@ -406,13 +406,13 @@ def main() -> None:
     parser.add_argument(
         "--newave",
         type=Path,
-        default=Path("example/comparacao_prod/newave"),
+        default=Path("example/newave_rodada"),
         help="NEWAVE case dir (with saidas/).",
     )
     parser.add_argument(
         "--cobre",
         type=Path,
-        default=Path("example/comparacao_prod/cobre/output"),
+        default=Path("example/cobre_rodada/output"),
         help="Cobre output dir (with simulation/, training/).",
     )
     parser.add_argument(
