@@ -16,6 +16,7 @@ import pytest
 
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
+from tests.conftest import make_case
 
 
 def _make_nw_files(
@@ -4158,35 +4159,21 @@ class TestConvertInitialConditions:
             thermal_codes=[],
         )
 
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
-    def test_returns_storage_and_filling_storage(
-        self, mock_hidr_cls, mock_confhd_cls, tmp_path
-    ) -> None:
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+    def test_returns_storage_and_filling_storage(self, tmp_path) -> None:
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
-        result = convert_initial_conditions(
-            _make_nw_files(tmp_path), self._make_id_map()
-        )
+        result = convert_initial_conditions(_ic_case(tmp_path), self._make_id_map())
         assert "storage" in result
         assert "filling_storage" in result
 
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
-    def test_storage_values_converted_from_percentage(
-        self, mock_hidr_cls, mock_confhd_cls, tmp_path
-    ) -> None:
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+    def test_storage_values_converted_from_percentage(self, tmp_path) -> None:
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
-        result = convert_initial_conditions(
-            _make_nw_files(tmp_path), self._make_id_map()
-        )
+        result = convert_initial_conditions(_ic_case(tmp_path), self._make_id_map())
         # New formula: (pct / 100) * (vol_max - vol_min) + vol_min
         # USINA_A: pct=50%, vol_min=100, vol_max=1000
         #   -> (0.50) * (1000 - 100) + 100 = 450 + 100 = 550 hm3.
@@ -4196,69 +4183,48 @@ class TestConvertInitialConditions:
         assert storage[0] == pytest.approx(550.0)
         assert storage[1] == pytest.approx(387.5)
 
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
-    def test_storage_sorted_by_hydro_id(
-        self, mock_hidr_cls, mock_confhd_cls, tmp_path
-    ) -> None:
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+    def test_storage_sorted_by_hydro_id(self, tmp_path) -> None:
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
-        result = convert_initial_conditions(
-            _make_nw_files(tmp_path), self._make_id_map()
-        )
+        result = convert_initial_conditions(_ic_case(tmp_path), self._make_id_map())
         ids = [s["hydro_id"] for s in result["storage"]]
         assert ids == sorted(ids)
 
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
-    def test_out_of_range_percentage_clamped(
-        self, mock_hidr_cls, mock_confhd_cls, tmp_path
-    ) -> None:
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path, pct_b=120.0)
+    def test_out_of_range_percentage_clamped(self, tmp_path) -> None:
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
         # Should not raise; pct is clamped to 100.
         result = convert_initial_conditions(
-            _make_nw_files(tmp_path), self._make_id_map()
+            _ic_case(tmp_path, pct_b=120.0), self._make_id_map()
         )
         storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
         # pct clamped to 100 -> vol_max=500 -> 500.0 hm3.
         assert storage[1] == pytest.approx(500.0)
 
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
-    def test_filling_storage_is_empty(
-        self, mock_hidr_cls, mock_confhd_cls, tmp_path
-    ) -> None:
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
+    def test_filling_storage_is_empty(self, tmp_path) -> None:
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
-        result = convert_initial_conditions(
-            _make_nw_files(tmp_path), self._make_id_map()
-        )
+        result = convert_initial_conditions(_ic_case(tmp_path), self._make_id_map())
         assert result["filling_storage"] == []
 
 
-def _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path, pct_b: float = 75.0):
-    for fname in ("hidr.dat", "confhd.dat"):
-        (tmp_path / fname).touch()
-
+def _ic_case(tmp_path, pct_b: float = 75.0):
+    """Build a NewaveCase with hidr/confhd readers pre-cached for IC tests."""
     mock_hidr = MagicMock()
     mock_hidr.cadastro = _make_hidr_cadastro()
-    mock_hidr_cls.read.return_value = mock_hidr
 
     df = _make_confhd_df().copy()
     df.loc[df["codigo_usina"] == 2, "volume_inicial_percentual"] = pct_b
     mock_confhd = MagicMock()
     mock_confhd.usinas = df
-    mock_confhd_cls.read.return_value = mock_confhd
+
+    return make_case(tmp_path, hidr=mock_hidr, confhd=mock_confhd)
 
 
 class TestThermalGenerationBounds:
@@ -4306,17 +4272,14 @@ class TestAnticipatedCommitmentSeeding:
 
     @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
     @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
     def test_in_range_values_pass_through(
-        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+        self, mock_read, mock_bounds, tmp_path, caplog
     ) -> None:
         from cobre_bridge.converters.anticipated import AnticipatedDispatch
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
         mock_read.return_value = {
             86: AnticipatedDispatch(lead_stages=2, values_mw=[204.5647, 0.0])
         }
@@ -4325,9 +4288,7 @@ class TestAnticipatedCommitmentSeeding:
         with caplog.at_level(
             logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
         ):
-            result = convert_initial_conditions(
-                _make_nw_files(tmp_path), self._id_map()
-            )
+            result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
         assert result["past_anticipated_commitments"] == [
             {"thermal_id": 0, "values_mw": [204.5647, 0.0]}
@@ -4336,17 +4297,14 @@ class TestAnticipatedCommitmentSeeding:
 
     @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
     @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
     def test_out_of_range_values_clamped_and_warned(
-        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+        self, mock_read, mock_bounds, tmp_path, caplog
     ) -> None:
         from cobre_bridge.converters.anticipated import AnticipatedDispatch
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
         # 600 > max 481.27 -> clamp to 481.27; -5 < min 0 -> clamp to 0.
         mock_read.return_value = {
             86: AnticipatedDispatch(lead_stages=2, values_mw=[600.0, -5.0])
@@ -4356,9 +4314,7 @@ class TestAnticipatedCommitmentSeeding:
         with caplog.at_level(
             logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
         ):
-            result = convert_initial_conditions(
-                _make_nw_files(tmp_path), self._id_map()
-            )
+            result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
         commitments = result["past_anticipated_commitments"]
         assert commitments[0]["values_mw"] == pytest.approx([481.27, 0.0])
@@ -4367,17 +4323,14 @@ class TestAnticipatedCommitmentSeeding:
 
     @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
     @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
     def test_code_absent_from_id_map_skipped(
-        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path, caplog
+        self, mock_read, mock_bounds, tmp_path, caplog
     ) -> None:
         from cobre_bridge.converters.anticipated import AnticipatedDispatch
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
         mock_read.return_value = {
             999: AnticipatedDispatch(lead_stages=1, values_mw=[100.0])
         }
@@ -4386,9 +4339,7 @@ class TestAnticipatedCommitmentSeeding:
         with caplog.at_level(
             logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
         ):
-            result = convert_initial_conditions(
-                _make_nw_files(tmp_path), self._id_map()
-            )
+            result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
         # Unknown thermal -> skipped, so no commitments key is emitted.
         assert "past_anticipated_commitments" not in result
@@ -4396,19 +4347,16 @@ class TestAnticipatedCommitmentSeeding:
 
     @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
     @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
-    @patch("cobre_bridge.converters.initial_conditions.Confhd")
-    @patch("cobre_bridge.converters.initial_conditions.Hidr")
     def test_non_gnl_case_skips_bounds_computation(
-        self, mock_hidr_cls, mock_confhd_cls, mock_read, mock_bounds, tmp_path
+        self, mock_read, mock_bounds, tmp_path
     ) -> None:
         from cobre_bridge.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
-        _setup_ic_mocks(mock_hidr_cls, mock_confhd_cls, tmp_path)
         mock_read.return_value = {}
 
-        result = convert_initial_conditions(_make_nw_files(tmp_path), self._id_map())
+        result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
         assert "past_anticipated_commitments" not in result
         mock_bounds.assert_not_called()

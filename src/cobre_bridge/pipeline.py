@@ -292,7 +292,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     config_dict = temporal_conv.convert_config(nw_files)
 
     logger.debug("Converting initial conditions")
-    ic_dict = ic_conv.convert_initial_conditions(nw_files, id_map)
+    ic_dict = ic_conv.convert_initial_conditions(case, id_map)
 
     logger.debug("Extracting recent inflow lags from vazpast.dat")
     past_inflow_lags = stochastic_conv.convert_recent_inflow_lags(nw_files, id_map)

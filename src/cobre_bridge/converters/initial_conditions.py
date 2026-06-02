@@ -5,12 +5,11 @@ from __future__ import annotations
 import logging
 
 import pandas as pd
-from inewave.newave import Confhd, Hidr
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.converters.thermal import thermal_generation_bounds
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.plants import active_hydros
 
 _LOG = logging.getLogger(__name__)
@@ -21,10 +20,10 @@ _SCHEMA_URL = (
 )
 
 
-def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
+def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE initial reservoir storage to a Cobre initial_conditions dict.
 
-    Reads ``hidr.dat`` and ``confhd.dat`` from *nw_files*.  Initial
+    Reads ``hidr.dat`` and ``confhd.dat`` from *case*.  Initial
     storage is derived from ``Confhd.usinas.volume_inicial_percentual``
     (a percentage of ``volume_maximo`` from Hidr).
 
@@ -32,8 +31,8 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Pre-built ID mapping for hydro IDs.
 
@@ -43,11 +42,8 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
         If a hydro in ``confhd.dat`` references a code absent in
         ``hidr.dat``.
     """
-    hidr = Hidr.read(str(nw_files.hidr))
-    confhd = Confhd.read(str(nw_files.confhd))
-
-    cadastro = hidr.cadastro
-    confhd_df = confhd.usinas
+    cadastro = case.hidr.cadastro
+    confhd_df = case.confhd.usinas
 
     existing = active_hydros(confhd_df)
 
@@ -117,8 +113,8 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
     # ``[min_mw, max_mw]`` (``thermals.json`` / ``cobre-io`` semantic validator);
     # an out-of-range seed makes that stage's fishing equality infeasible, so we
     # clamp into range and warn rather than emit a case cobre would reject.
-    anticipated = read_anticipated_dispatch(nw_files)
-    gen_bounds = thermal_generation_bounds(nw_files) if anticipated else {}
+    anticipated = read_anticipated_dispatch(case.files)
+    gen_bounds = thermal_generation_bounds(case.files) if anticipated else {}
     past_anticipated_commitments: list[dict] = []
     for newave_code, dispatch in anticipated.items():
         try:
