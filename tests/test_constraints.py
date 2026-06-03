@@ -10,10 +10,10 @@ import pyarrow as pa
 import pytest
 
 from cobre_bridge.converters.constraints import (
-    _compute_accumulated_integrated_productivities,
     _is_stored_energy_reservoir,
     _parse_formula,
     _warn_if_fixed_penalization,
+    compute_accumulated_integrated_productivities,
     compute_accumulated_productivities,
     convert_agrint_constraints,
     convert_electric_constraints,
@@ -249,7 +249,7 @@ class TestAccumulatedIntegratedProductivities:
         cadastro = _make_cadastro()
         cadastro["tipo_regulacao"] = "M"
         confhd_df = _make_confhd_df()
-        acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+        acc = compute_accumulated_integrated_productivities(cadastro, confhd_df)
         # PLANT_A: 0.01 · (300 + 0.1·550 − 200) = 0.01 · 155 = 1.55
         # PLANT_B: 0.02 · (400 + 0.05·(200+2000)/2 − 300) = 0.02 · 155 = 3.1
         # PLANT_C: 0.03 · (500 + 0.02·(300+3000)/2 − 400) = 0.03 · 133 = 3.99
@@ -265,7 +265,7 @@ class TestAccumulatedIntegratedProductivities:
         # volume_referencia, matching NEWAVE's EARM convention for them.
         cadastro = _make_cadastro()  # all tipo_regulacao == "D"
         confhd_df = _make_confhd_df()
-        acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+        acc = compute_accumulated_integrated_productivities(cadastro, confhd_df)
         # PLANT_A @vref=500: 0.01 · (300 + 0.1·500 − 200) = 0.01 · 150 = 1.5
         # PLANT_B @vref=1000: 0.02 · (400 + 0.05·1000 − 300) = 0.02 · 150 = 3.0
         # PLANT_C @vref=1500: 0.03 · (500 + 0.02·1500 − 400) = 0.03 · 130 = 3.9

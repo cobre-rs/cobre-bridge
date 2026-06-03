@@ -807,3 +807,74 @@ class TestEvaluateAtName:
         df = self._evaluate("@rho_acum_h0 * hydro_storage(0)", with_productivity=False)
         s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
         assert s0["lhs_value"].iloc[0] == 0.0
+
+
+def _make_multiblock_hydros_lf() -> pl.LazyFrame:
+    """1 scenario, 2 stages, 2 blocks. Storage lives at block 0; generation
+    spans both blocks. A storage-only constraint must collapse to one row per
+    (scenario, stage) at block 0 — a per-block fan-out would duplicate it.
+    """
+    return pl.DataFrame(
+        {
+            "scenario_id": pl.Series([0] * 8, dtype=pl.Int64),
+            "stage_id": pl.Series([0, 0, 0, 0, 1, 1, 1, 1], dtype=pl.Int32),
+            "block_id": pl.Series([0, 0, 1, 1, 0, 0, 1, 1], dtype=pl.Int32),
+            "hydro_id": pl.Series([0, 1, 0, 1, 0, 1, 0, 1], dtype=pl.Int32),
+            "storage_final_hm3": pl.Series(
+                [100.0, 200.0, 100.0, 200.0, 150.0, 250.0, 150.0, 250.0],
+                dtype=pl.Float64,
+            ),
+            "generation_mw": pl.Series(
+                [10.0, 20.0, 11.0, 21.0, 30.0, 40.0, 31.0, 41.0], dtype=pl.Float64
+            ),
+            "accumulated_productivity_mw_per_m3s": pl.Series(
+                [2.0, 3.0, 2.0, 3.0, 2.0, 3.0, 2.0, 3.0], dtype=pl.Float64
+            ),
+        }
+    ).lazy()
+
+
+class TestStorageOnlyFastPath:
+    """Storage-only constraints emit exactly one row per (scenario, stage) at
+    block_id=0 — even with multiple blocks present in the simulation output.
+
+    Regression for the dead ``storage_only`` fast path: the variable-type set
+    was built from the term's param_name slot instead of its variable-type
+    slot, so the branch was unreachable and storage-only constraints were
+    fanned out across every block. Correctness was only recovered downstream
+    because consumers re-averaged across blocks.
+    """
+
+    def _evaluate(self, expression: str):
+        from cobre_bridge.constraint_expr import evaluate_constraint_expressions
+
+        constraints = [
+            {
+                "id": 0,
+                "name": "test",
+                "expression": expression,
+                "sense": ">=",
+                "slack": {"enabled": False},
+            }
+        ]
+        return evaluate_constraint_expressions(
+            constraints,
+            _make_multiblock_hydros_lf(),
+            _empty_exchanges_lf(),
+        )
+
+    def test_storage_only_collapses_to_one_row_per_stage(self) -> None:
+        df = self._evaluate("@rho_acum_h0 * hydro_storage(0)")
+        # Two stages, one scenario -> exactly two rows, not 4 (block fan-out).
+        assert len(df) == 2
+        assert set(df["block_id"].unique()) == {0}
+        by_stage = df.set_index("stage_id")["lhs_value"]
+        assert by_stage[0] == 200.0  # 2.0 * 100.0
+        assert by_stage[1] == 300.0  # 2.0 * 150.0
+
+    def test_mixed_constraint_still_fans_out_per_block(self) -> None:
+        """A constraint touching generation keeps the per-block grid."""
+        df = self._evaluate("@rho_acum_h0 * hydro_storage(0) + hydro_generation(0)")
+        # Two stages x two blocks -> 4 rows.
+        assert len(df) == 4
+        assert set(df["block_id"].unique()) == {0, 1}

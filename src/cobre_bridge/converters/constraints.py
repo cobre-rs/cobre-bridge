@@ -107,11 +107,18 @@ def _build_hydro_to_ree(confhd_df: pd.DataFrame) -> dict[int, int]:
     return {int(r["codigo_usina"]): int(r["ree"]) for _, r in non_fict.iterrows()}
 
 
-def _compute_accumulated_integrated_productivities(
+def compute_accumulated_integrated_productivities(
     cadastro: pd.DataFrame,
     confhd_df: pd.DataFrame,
 ) -> dict[int, float]:
     """Cascade-sum of per-plant stored-energy (EARM) productivity.
+
+    Public, stable seam: the results comparator
+    (:mod:`cobre_bridge.comparators.results`) calls this to build its
+    productivity-detail tab, so the ``(cadastro, confhd_df) -> {code: rho}``
+    contract is shared across the converter↔comparator boundary. It is *not*
+    interchangeable with :func:`compute_accumulated_productivities` (which uses
+    the gen=ρ·Q point value); keep both distinct.
 
     Companion to :func:`compute_accumulated_productivities` but uses the
     EARM-flavored ρ that matches pmo.dat's
@@ -449,7 +456,7 @@ def convert_vminop_constraints(
     # LP's constraint coefficient matches NEWAVE.  Without the override the
     # LHS would use cobre's default point ρ_acum and silently drift from
     # the RHS by ~10% on plants with non-trivial head swing.
-    acc_prod = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+    acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)
     per_stage_own_int = compute_per_stage_own_integrated_productivities(case)
     per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own_int)
 

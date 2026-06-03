@@ -36,22 +36,6 @@ class TabModule(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Ordering reference
-# ---------------------------------------------------------------------------
-
-DEFAULT_TAB_ORDER: dict[str, int] = {
-    "tab-overview": 0,
-    "tab-stochastic": 10,
-    "tab-training": 20,
-    "tab-energy-balance": 30,
-    "tab-costs": 40,
-    "tab-plants": 50,
-    "tab-network": 60,
-    "tab-constraints": 80,
-    "tab-performance": 90,
-}
-
-# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 

@@ -173,7 +173,10 @@ def _run_dashboard(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     output_path: Path = args.output or (case_dir / "dashboard.html")
+    print(f"Building dashboard from {case_dir} ...")
     build_dashboard(case_dir, output_path)
+    size_kb = output_path.stat().st_size / 1024
+    print(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
     sys.exit(0)
 
 
@@ -299,6 +302,7 @@ def main() -> None:
     convert_subparsers = convert_parser.add_subparsers(
         dest="source",
         metavar="SOURCE",
+        required=True,
     )
 
     # convert newave sub-subcommand
@@ -342,6 +346,7 @@ def main() -> None:
     compare_subparsers = compare_parser.add_subparsers(
         dest="compare_source",
         metavar="SOURCE",
+        required=True,
     )
 
     # compare bounds sub-subcommand

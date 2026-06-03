@@ -1444,13 +1444,13 @@ def _make_cadic_mock(rows: list[dict]) -> MagicMock:
 
 
 class TestParseCadical:
-    """``_parse_cadical`` aggregates inewave's ``Cadic.cargas`` into a lookup."""
+    """``parse_cadical`` aggregates inewave's ``Cadic.cargas`` into a lookup."""
 
     @patch("cobre_bridge.converters.stochastic.Cadic")
     def test_sums_razoes_per_subsystem_year_month(
         self, mock_cadic_cls, tmp_path
     ) -> None:
-        from cobre_bridge.converters.stochastic import _parse_cadical
+        from cobre_bridge.converters.stochastic import parse_cadical
 
         # Two razões for (sub 1, 2024-01) sum; sub 2 and POS (year 9999) distinct.
         mock_cadic_cls.read.return_value = _make_cadic_mock(
@@ -1485,14 +1485,14 @@ class TestParseCadical:
                 },
             ]
         )
-        result = _parse_cadical(tmp_path / "c_adic.dat")
+        result = parse_cadical(tmp_path / "c_adic.dat")
         assert result[(1, 2024, 1)] == pytest.approx(12.5)  # 10.0 + 2.5
         assert result[(2, 2024, 1)] == pytest.approx(7.0)
         assert result[(1, 9999, 6)] == pytest.approx(4.0)
 
     @patch("cobre_bridge.converters.stochastic.Cadic")
     def test_skips_nan_values(self, mock_cadic_cls, tmp_path) -> None:
-        from cobre_bridge.converters.stochastic import _parse_cadical
+        from cobre_bridge.converters.stochastic import parse_cadical
 
         mock_cadic_cls.read.return_value = _make_cadic_mock(
             [
@@ -1505,14 +1505,14 @@ class TestParseCadical:
                 },
             ]
         )
-        assert _parse_cadical(tmp_path / "c_adic.dat") == {}
+        assert parse_cadical(tmp_path / "c_adic.dat") == {}
 
     @patch("cobre_bridge.converters.stochastic.Cadic")
     def test_empty_cargas_returns_empty(self, mock_cadic_cls, tmp_path) -> None:
-        from cobre_bridge.converters.stochastic import _parse_cadical
+        from cobre_bridge.converters.stochastic import parse_cadical
 
         mock_cadic_cls.read.return_value = _make_cadic_mock([])  # cargas is None
-        assert _parse_cadical(tmp_path / "c_adic.dat") == {}
+        assert parse_cadical(tmp_path / "c_adic.dat") == {}
 
     @patch("cobre_bridge.converters.stochastic.Cadic")
     def test_cadic_additions_reach_load(self, mock_cadic_cls, tmp_path) -> None:

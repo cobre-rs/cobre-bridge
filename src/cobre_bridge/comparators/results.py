@@ -1360,11 +1360,11 @@ def compare_results(
     if not nw_cadastro.empty:
         try:
             from cobre_bridge.converters.constraints import (
-                _compute_accumulated_integrated_productivities,
+                compute_accumulated_integrated_productivities,
             )
 
             confhd_df = case.confhd.usinas
-            cb_accumulated = _compute_accumulated_integrated_productivities(
+            cb_accumulated = compute_accumulated_integrated_productivities(
                 nw_cadastro, confhd_df
             )
         except Exception:  # noqa: BLE001

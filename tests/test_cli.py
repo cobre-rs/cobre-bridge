@@ -551,6 +551,16 @@ class TestCliExitCodes:
         assert result.returncode == 1
         assert "hidr.dat" in result.stderr
 
+    def test_convert_without_source_exits_nonzero(self) -> None:
+        """``convert`` with no SOURCE must error (exit 2), not silently succeed."""
+        result = _run_cli_subprocess("convert")
+        assert result.returncode == 2
+
+    def test_compare_without_source_exits_nonzero(self) -> None:
+        """``compare`` with no SOURCE must error (exit 2), not silently succeed."""
+        result = _run_cli_subprocess("compare")
+        assert result.returncode == 2
+
 
 class TestCliInProcess:
     """In-process CLI tests that patch the pipeline to avoid inewave I/O."""
@@ -718,6 +728,33 @@ class TestConversionWarningCapture:
         # The capture handler must be removed in the finally block, leaving the
         # package logger's handler list exactly as it was.
         assert pkg_logger.handlers == handlers_before
+
+    def test_partial_outputs_cleared_on_failure(self, tmp_path: Path) -> None:
+        """A failure partway through the write phase must not leave a partial,
+        valid-looking case behind: the known pipeline outputs are removed so a
+        plain (no --force) re-run is not refused as non-empty."""
+        from cobre_bridge import pipeline
+        from cobre_bridge.pipeline import convert_newave_case
+
+        dst = tmp_path / "dst"
+
+        def fake_impl(src: Path, d: Path) -> object:
+            # Simulate a write phase that got partway: a top-level JSON and a
+            # system/ subdir were written before the failure.
+            (d / "system").mkdir(parents=True, exist_ok=True)
+            (d / "config.json").write_text("{}")
+            (d / "system" / "hydros.json").write_text("{}")
+            raise RuntimeError("disk full mid-write")
+
+        with patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl):
+            with pytest.raises(RuntimeError, match="disk full"):
+                convert_newave_case(tmp_path, dst)
+
+        # No pipeline outputs survive — dst holds no half-written case.
+        assert not (dst / "config.json").exists()
+        assert not (dst / "system").exists()
+        # dst itself may remain but must be empty, so a no-force re-run proceeds.
+        assert not any(dst.iterdir())
 
 
 def test_constraint_id_allocator_advances_contiguously() -> None:

@@ -216,6 +216,16 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     pkg_logger.addHandler(collector)
     try:
         report = _convert_newave_case_impl(src, dst)
+    except BaseException:
+        # The write phase is a sequence of independent file writes with no
+        # rollback, so a failure partway through (disk full, a converter
+        # raising mid-write, an interrupt) can leave a subset of the output
+        # files behind. Remove the known pipeline outputs so a half-written
+        # case is never mistaken for a complete one and a plain (no --force)
+        # re-run is not refused as "destination not empty". Re-raise so the
+        # CLI still reports the original failure.
+        _clear_dst_contents(dst)
+        raise
     finally:
         pkg_logger.removeHandler(collector)
     # De-duplicate while preserving first-occurrence order: a warning emitted

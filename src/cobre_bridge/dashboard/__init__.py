@@ -6,6 +6,7 @@ discovers renderable tabs, and writes a self-contained HTML file.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from cobre_bridge.dashboard.data import DashboardData
@@ -13,6 +14,8 @@ from cobre_bridge.dashboard.tabs import get_renderable_tabs
 from cobre_bridge.ui.css import dashboard_css
 from cobre_bridge.ui.html import build_html
 from cobre_bridge.ui.js import TAB_SWITCH_JS
+
+logger = logging.getLogger(__name__)
 
 
 def build_dashboard(case_dir: Path, output_path: Path) -> None:
@@ -32,8 +35,8 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         js=TAB_SWITCH_JS,
     )
 
-    print(f"Writing dashboard to {output_path} ...")
+    logger.info("Writing dashboard to %s", output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     size_kb = output_path.stat().st_size / 1024
-    print(f"Done. File size: {size_kb:.0f} KB")
+    logger.info("Dashboard written (%.0f KB)", size_kb)

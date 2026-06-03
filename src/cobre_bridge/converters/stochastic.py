@@ -568,8 +568,14 @@ def _derive_study_stage_months(dger: Dger) -> list[int]:
     return [((start_month - 1 + i) % 12) + 1 for i in range(total_stages)]
 
 
-def _parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
+def parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
     """Parse a C_ADIC.DAT file into a lookup of added load values.
+
+    Public, stable parsing seam: both this converter and the results
+    comparator (:mod:`cobre_bridge.comparators.newave_readers`) reconstruct
+    NEWAVE load from C_ADIC via this function, so its signature and the
+    ``(subsystem_code, year, cal_month) -> total_mw`` return shape are part of
+    the shared contract — change them in lockstep with both callers.
 
     Delegates the fixed-width parsing to inewave's
     :class:`~inewave.newave.Cadic` reader. C_ADIC.DAT contains must-take energy
@@ -649,7 +655,7 @@ def convert_load_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     cadical_lookup: dict[tuple[int, int, int], float] = {}
     if case.files.c_adic is not None:
         try:
-            cadical_lookup = _parse_cadical(case.files.c_adic)
+            cadical_lookup = parse_cadical(case.files.c_adic)
             logger.debug(
                 "Loaded %d C_ADIC entries from %s",
                 len(cadical_lookup),

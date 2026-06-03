@@ -18,8 +18,7 @@ import polars as pl
 import pyarrow.parquet as pq
 
 from cobre_bridge.cobre_io import (
-    productivity_from_energy_parquet,
-    productivity_from_production_models,
+    resolve_hydro_productivities,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,16 +142,14 @@ def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
         return {}
     with open(path) as f:
         d = json.load(f)
-    productivities = productivity_from_energy_parquet(case_dir)
-    if not productivities:
-        productivities = productivity_from_production_models(case_dir)
+    # Share the single canonical productivity cascade with the comparator so
+    # the dashboard and compare report never disagree on a plant's ρ.
+    productivities = resolve_hydro_productivities(case_dir, d["hydros"])
     result = {}
     for h in d["hydros"]:
         gen = h.get("generation", {})
         res = h.get("reservoir", {})
-        prod = productivities.get(h["id"])
-        if prod is None:
-            prod = gen.get("productivity_mw_per_m3s", 0) or 0
+        prod = productivities.get(h["id"]) or 0
         max_turbined = gen.get("max_turbined_m3s", 0)
         result[h["id"]] = {
             "bus_id": h["bus_id"],
@@ -340,6 +337,444 @@ def compute_non_fictitious_bus_ids(load_stats: pd.DataFrame) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
+# Section loaders
+#
+# ``DashboardData.load`` is composed from these cohesive, independently
+# callable section loaders instead of one monolithic block. Each owns a single
+# slice of the case and returns a small sub-struct, which keeps the loading
+# grouped by concern and lets a future partial/lazy dashboard pull only the
+# sections it needs. The aggregate ``DashboardData`` still exposes the flat
+# fields every tab already consumes, so tab code is unaffected.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class TemporalContext:
+    """Run configuration and stage/block time resolution."""
+
+    config: dict
+    discount_rate: float
+    stages_data: dict
+    stage_hours: dict[int, float]
+    block_hours: dict[tuple[int, int], float]
+    bh_df: pl.DataFrame
+    line_meta: list[dict]
+
+
+def load_temporal_context(case_dir: Path) -> TemporalContext:
+    """Load config.json / stages.json and the derived stage & block hour maps."""
+    config_path = case_dir / "config.json"
+    config: dict = {}
+    if config_path.exists():
+        try:
+            with config_path.open() as f:
+                config = json.load(f)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse config.json; using empty dict")
+    discount_rate = float(config.get("discount_rate", 0.0))
+
+    stages_json_path = case_dir / "stages.json"
+    with stages_json_path.open() as f:
+        stages_data = json.load(f)
+
+    # stages.json policy_graph is the authoritative discount rate when present.
+    pg_rate = stages_data.get("policy_graph", {}).get("annual_discount_rate")
+    if pg_rate is not None:
+        discount_rate = float(pg_rate)
+
+    stage_hours: dict[int, float] = {}
+    for s in stages_data["stages"]:
+        stage_hours[s["id"]] = sum(b["hours"] for b in s["blocks"])
+
+    block_hours: dict[tuple[int, int], float] = {}
+    for s in stages_data["stages"]:
+        for b in s["blocks"]:
+            block_hours[(s["id"], b["id"])] = b["hours"]
+
+    bh_keys = list(block_hours.keys())
+    bh_df = pl.DataFrame(
+        {
+            "stage_id": [k[0] for k in bh_keys],
+            "block_id": [k[1] for k in bh_keys],
+            "_bh": [block_hours[k] for k in bh_keys],
+        }
+    )
+
+    lines_path = case_dir / "system" / "lines.json"
+    with lines_path.open() as f:
+        line_meta: list[dict] = json.load(f)["lines"]
+
+    return TemporalContext(
+        config=config,
+        discount_rate=discount_rate,
+        stages_data=stages_data,
+        stage_hours=stage_hours,
+        block_hours=block_hours,
+        bh_df=bh_df,
+        line_meta=line_meta,
+    )
+
+
+@dataclasses.dataclass
+class EntityMetadata:
+    """Entity name/metadata lookups derived from the system JSON files."""
+
+    names: dict[tuple[str, int], str]
+    stage_labels: dict[int, str]
+    hydro_bus_map: dict[int, int]
+    thermal_meta: dict[int, dict]
+    ncs_bus_map: dict[int, int]
+    hydro_meta: dict[int, dict]
+    bus_names: dict[int, str]
+
+
+def load_entity_metadata(case_dir: Path) -> EntityMetadata:
+    """Load entity name maps and hydro/thermal metadata dictionaries."""
+    names = load_names(case_dir)
+    bus_names = {eid: nm for (entity, eid), nm in names.items() if entity == "buses"}
+    return EntityMetadata(
+        names=names,
+        stage_labels=load_stage_labels(case_dir),
+        hydro_bus_map=load_hydro_bus_map(case_dir),
+        thermal_meta=load_thermal_metadata(case_dir),
+        ncs_bus_map=load_ncs_bus_map(case_dir),
+        hydro_meta=load_hydro_metadata(case_dir),
+        bus_names=bus_names,
+    )
+
+
+@dataclasses.dataclass
+class SimulationData:
+    """Simulation outputs: per-entity LazyFrames plus collected cost/violation
+    frames. Empty frames when the case is training-only."""
+
+    hydros_lf: pl.LazyFrame
+    thermals_lf: pl.LazyFrame
+    ncs_lf: pl.LazyFrame
+    buses_lf: pl.LazyFrame
+    exchanges_lf: pl.LazyFrame
+    inflow_lags_lf: pl.LazyFrame
+    costs: pd.DataFrame
+    gc_violations: pd.DataFrame
+
+
+def load_simulation_data(case_dir: Path) -> SimulationData:
+    """Scan the hive-partitioned simulation outputs (LazyFrames) and collect the
+    small cost/violation frames consumed eagerly by chart functions."""
+    hydros_lf = scan_entity(case_dir, "hydros")
+    thermals_lf = scan_entity(case_dir, "thermals")
+    ncs_lf = scan_entity(case_dir, "non_controllables")
+    buses_lf = scan_entity(case_dir, "buses")
+    exchanges_lf = scan_entity(case_dir, "exchanges")
+
+    inflow_lags_dir = case_dir / "output" / "simulation" / "inflow_lags"
+    if inflow_lags_dir.exists():
+        inflow_lags_lf = pl.scan_parquet(
+            str(inflow_lags_dir / "**" / "*.parquet"), hive_partitioning=True
+        )
+    else:
+        inflow_lags_lf = pl.LazyFrame()
+
+    # Costs is stage-level only (~236 K rows total), collect to pandas for
+    # chart_cost_* functions. Empty when the case is training-only.
+    costs_dir = case_dir / "output" / "simulation" / "costs"
+    if costs_dir.exists() and any(costs_dir.rglob("*.parquet")):
+        costs = (
+            pl.scan_parquet(str(costs_dir / "**" / "*.parquet"), hive_partitioning=True)
+            .collect(engine="streaming")
+            .to_pandas()
+        )
+    else:
+        costs = pd.DataFrame()
+
+    # violations/generic: collect to pandas once (needed by
+    # build_constraints_summary_table).
+    gc_viol_dir = case_dir / "output" / "simulation" / "violations" / "generic"
+    if gc_viol_dir.exists():
+        gc_violations = (
+            pl.scan_parquet(
+                str(gc_viol_dir / "**" / "*.parquet"), hive_partitioning=True
+            )
+            .collect(engine="streaming")
+            .to_pandas()
+        )
+    else:
+        gc_violations = pd.DataFrame()
+
+    return SimulationData(
+        hydros_lf=hydros_lf,
+        thermals_lf=thermals_lf,
+        ncs_lf=ncs_lf,
+        buses_lf=buses_lf,
+        exchanges_lf=exchanges_lf,
+        inflow_lags_lf=inflow_lags_lf,
+        costs=costs,
+        gc_violations=gc_violations,
+    )
+
+
+@dataclasses.dataclass
+class ScenarioInputs:
+    """Optional Cobre scenario/constraint input artifacts (empty when absent)."""
+
+    load_stats: pd.DataFrame
+    load_factors_list: list[dict]
+    non_fictitious_bus_ids: list[int]
+    ncs_stats: pd.DataFrame
+    inflow_history: pd.DataFrame
+    exchange_factors: list[dict]
+    line_bounds: pd.DataFrame
+    hydro_bounds: pd.DataFrame
+    thermal_bounds: pd.DataFrame
+
+
+def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
+    """Load the optional scenario inputs and input constraint bounds.
+
+    Both load files are optional Cobre inputs (see case-format.md); they fall
+    back to empty structures so cases without an explicit load scenario still
+    render — charts degrade to a zero-load series via ``_compute_lp_load``.
+    """
+    ls_path = case_dir / "scenarios" / "load_seasonal_stats.parquet"
+    load_stats = (
+        pq.read_table(ls_path).to_pandas() if ls_path.exists() else pd.DataFrame()
+    )
+    lf_path = case_dir / "scenarios" / "load_factors.json"
+    load_factors_list: list[dict] = []
+    if lf_path.exists():
+        with lf_path.open() as f:
+            load_factors_list = json.load(f)["load_factors"]
+
+    non_fictitious_bus_ids = compute_non_fictitious_bus_ids(load_stats)
+
+    ncs_stats_path = case_dir / "scenarios" / "non_controllable_stats.parquet"
+    ncs_stats = (
+        pq.read_table(ncs_stats_path).to_pandas()
+        if ncs_stats_path.exists()
+        else pd.DataFrame()
+    )
+
+    ih_path = case_dir / "scenarios" / "inflow_history.parquet"
+    inflow_history = (
+        pq.read_table(ih_path).to_pandas() if ih_path.exists() else pd.DataFrame()
+    )
+
+    ef_path = case_dir / "constraints" / "exchange_factors.json"
+    exchange_factors: list[dict] = []
+    if ef_path.exists():
+        with ef_path.open() as f:
+            exchange_factors = json.load(f).get("exchange_factors", [])
+
+    lb_path = case_dir / "constraints" / "line_bounds.parquet"
+    line_bounds = (
+        pq.read_table(lb_path).to_pandas() if lb_path.exists() else pd.DataFrame()
+    )
+    hb_path = case_dir / "constraints" / "hydro_bounds.parquet"
+    hydro_bounds = (
+        pq.read_table(hb_path).to_pandas() if hb_path.exists() else pd.DataFrame()
+    )
+    tb_path = case_dir / "constraints" / "thermal_bounds.parquet"
+    thermal_bounds = (
+        pq.read_table(tb_path).to_pandas() if tb_path.exists() else pd.DataFrame()
+    )
+
+    return ScenarioInputs(
+        load_stats=load_stats,
+        load_factors_list=load_factors_list,
+        non_fictitious_bus_ids=non_fictitious_bus_ids,
+        ncs_stats=ncs_stats,
+        inflow_history=inflow_history,
+        exchange_factors=exchange_factors,
+        line_bounds=line_bounds,
+        hydro_bounds=hydro_bounds,
+        thermal_bounds=thermal_bounds,
+    )
+
+
+@dataclasses.dataclass
+class SolverPerformance:
+    """Training/simulation solver timing and diagnostics (optional)."""
+
+    timing: pd.DataFrame
+    timing_raw: pd.DataFrame
+    solver_train: pd.DataFrame
+    solver_sim: pd.DataFrame
+    scaling_report: dict
+    cut_selection: pd.DataFrame
+    retry_histogram: pd.DataFrame
+    lp_bounds: pd.DataFrame
+
+
+def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerformance:
+    """Load solver/performance artifacts. ``conv`` (convergence) is needed to
+    correct the timing wall-times. All frames fall back to empty when absent."""
+    timing_path = case_dir / "output" / "training" / "timing" / "iterations.parquet"
+    timing_raw = (
+        pq.read_table(timing_path).to_pandas()
+        if timing_path.exists()
+        else pd.DataFrame()
+    )
+    timing = _aggregate_timing_by_iteration(timing_raw)
+    timing = _correct_wall_times_from_convergence(timing, conv)
+
+    solver_train_path = (
+        case_dir / "output" / "training" / "solver" / "iterations.parquet"
+    )
+    solver_train = (
+        pq.read_table(solver_train_path).to_pandas()
+        if solver_train_path.exists()
+        else pd.DataFrame()
+    )
+    sim_solver_path = (
+        case_dir / "output" / "simulation" / "solver" / "iterations.parquet"
+    )
+    solver_sim = (
+        pq.read_table(sim_solver_path).to_pandas()
+        if sim_solver_path.exists()
+        else pd.DataFrame()
+    )
+    scaling_path = case_dir / "output" / "training" / "scaling_report.json"
+    if scaling_path.exists():
+        with scaling_path.open() as f:
+            scaling_report: dict = json.load(f)
+    else:
+        scaling_report = {}
+    cs_path = case_dir / "output" / "training" / "cut_selection" / "iterations.parquet"
+    cut_selection = (
+        pq.read_table(cs_path).to_pandas() if cs_path.exists() else pd.DataFrame()
+    )
+    retry_path = case_dir / "output" / "training" / "solver" / "retry_histogram.parquet"
+    retry_histogram = (
+        pq.read_table(retry_path).to_pandas() if retry_path.exists() else pd.DataFrame()
+    )
+    bounds_path = case_dir / "output" / "training" / "dictionaries" / "bounds.parquet"
+    lp_bounds = (
+        pq.read_table(bounds_path).to_pandas()
+        if bounds_path.exists()
+        else pd.DataFrame()
+    )
+    return SolverPerformance(
+        timing=timing,
+        timing_raw=timing_raw,
+        solver_train=solver_train,
+        solver_sim=solver_sim,
+        scaling_report=scaling_report,
+        cut_selection=cut_selection,
+        retry_histogram=retry_histogram,
+        lp_bounds=lp_bounds,
+    )
+
+
+@dataclasses.dataclass
+class StochasticData:
+    """Stochastic model fitting outputs (empty/absent for training-less cases)."""
+
+    available: bool
+    inflow_stats_stoch: pd.DataFrame
+    ar_coefficients: pd.DataFrame
+    noise_openings: pd.DataFrame
+    fitting_report: dict
+    correlation: dict
+
+
+def load_stochastic_data(case_dir: Path) -> StochasticData:
+    """Load output/stochastic/* (inflow fit, AR coefficients, correlation)."""
+    stochastic_dir = case_dir / "output" / "stochastic"
+    available = stochastic_dir.exists()
+    if available:
+        inflow_stats_stoch = pq.read_table(
+            stochastic_dir / "inflow_seasonal_stats.parquet"
+        ).to_pandas()
+        ar_coefficients = pq.read_table(
+            stochastic_dir / "inflow_ar_coefficients.parquet"
+        ).to_pandas()
+        noise_openings = pq.read_table(
+            stochastic_dir / "noise_openings.parquet"
+        ).to_pandas()
+        fitting_report: dict = json.load(
+            (stochastic_dir / "fitting_report.json").open()
+        )
+        corr_path = stochastic_dir / "correlation.json"
+        if corr_path.exists():
+            correlation: dict = json.load(corr_path.open())
+        else:
+            logger.warning(
+                "output/stochastic/correlation.json missing; using empty dict"
+            )
+            correlation = {}
+    else:
+        inflow_stats_stoch = pd.DataFrame()
+        ar_coefficients = pd.DataFrame()
+        noise_openings = pd.DataFrame()
+        fitting_report = {}
+        correlation = {}
+    return StochasticData(
+        available=available,
+        inflow_stats_stoch=inflow_stats_stoch,
+        ar_coefficients=ar_coefficients,
+        noise_openings=noise_openings,
+        fitting_report=fitting_report,
+        correlation=correlation,
+    )
+
+
+@dataclasses.dataclass
+class OutputMetadata:
+    """``metadata.json`` from each output subdirectory."""
+
+    training: dict
+    simulation: dict
+    policy: dict
+
+
+def load_output_metadata(case_dir: Path) -> OutputMetadata:
+    """Load output/{training,simulation,policy}/metadata.json (empty if absent)."""
+
+    def _load_metadata(subdir: str) -> dict:
+        meta_path = case_dir / "output" / subdir / "metadata.json"
+        if not meta_path.exists():
+            return {}
+        try:
+            with meta_path.open() as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse output/%s/metadata.json", subdir)
+            return {}
+
+    return OutputMetadata(
+        training=_load_metadata("training"),
+        simulation=_load_metadata("simulation"),
+        policy=_load_metadata("policy"),
+    )
+
+
+@dataclasses.dataclass
+class GenericConstraintData:
+    """Generic-constraint definitions and their resolved bounds (optional)."""
+
+    constraints: list[dict]
+    bounds: pd.DataFrame
+
+
+def load_generic_constraints(case_dir: Path) -> GenericConstraintData:
+    """Load constraints/generic_constraints.json and the bounds parquet."""
+    gc_path = case_dir / "constraints" / "generic_constraints.json"
+    constraints: list[dict] = []
+    if gc_path.exists():
+        with gc_path.open() as f:
+            gc_data = json.load(f)
+        constraints = gc_data.get("constraints", [])
+
+    gc_bounds_path = case_dir / "constraints" / "generic_constraint_bounds.parquet"
+    bounds = (
+        pq.read_table(gc_bounds_path).to_pandas()
+        if gc_bounds_path.exists()
+        else pd.DataFrame()
+    )
+    return GenericConstraintData(constraints=constraints, bounds=bounds)
+
+
+# ---------------------------------------------------------------------------
 # DashboardData dataclass
 # ---------------------------------------------------------------------------
 
@@ -462,312 +897,52 @@ class DashboardData:
     def load(cls, case_dir: Path) -> DashboardData:
         """Load all dashboard data from a Cobre case directory.
 
-        Replicates the data loading logic from ``build_dashboard()`` lines
-        6137-6323 and the sim_manifest filtering at lines 6655-6665.
-
-        Raises ``FileNotFoundError`` if required files (convergence.parquet,
-        stages.json) are missing.  Optional files fall back to empty
-        DataFrames / empty dicts.
+        Thin orchestrator: each cohesive section is read by a dedicated
+        ``load_*`` loader returning a sub-struct, then composed into the flat
+        aggregate every tab consumes. Raises ``FileNotFoundError`` if required
+        files (convergence.parquet, stages.json) are missing; optional files
+        fall back to empty DataFrames / empty dicts inside each loader.
         """
-        print(f"Loading data from {case_dir} ...")
+        logger.info("Loading dashboard data from %s", case_dir)
 
-        # ------------------------------------------------------------------
-        # Training data — small single-file parquets, load as pandas
-        # ------------------------------------------------------------------
+        # Training convergence is required and feeds the timing wall-time fix.
         conv = pq.read_table(
             case_dir / "output" / "training" / "convergence.parquet"
         ).to_pandas()
 
-        # ------------------------------------------------------------------
-        # Simulation entity data — large hive-partitioned parquets, LazyFrames
-        # ------------------------------------------------------------------
-        hydros_lf = scan_entity(case_dir, "hydros")
-        thermals_lf = scan_entity(case_dir, "thermals")
-        ncs_lf = scan_entity(case_dir, "non_controllables")
-        buses_lf = scan_entity(case_dir, "buses")
-        exchanges_lf = scan_entity(case_dir, "exchanges")
-
-        inflow_lags_dir = case_dir / "output" / "simulation" / "inflow_lags"
-        if inflow_lags_dir.exists():
-            inflow_lags_lf = pl.scan_parquet(
-                str(inflow_lags_dir / "**" / "*.parquet"), hive_partitioning=True
-            )
-        else:
-            inflow_lags_lf = pl.LazyFrame()
-
-        # Costs is stage-level only (~236 K rows total), collect to pandas
-        # for chart_cost_* functions. Empty when the case is training-only.
-        costs_dir = case_dir / "output" / "simulation" / "costs"
-        if costs_dir.exists() and any(costs_dir.rglob("*.parquet")):
-            costs = (
-                pl.scan_parquet(
-                    str(costs_dir / "**" / "*.parquet"),
-                    hive_partitioning=True,
-                )
-                .collect(engine="streaming")
-                .to_pandas()
-            )
-        else:
-            costs = pd.DataFrame()
-
-        lb_path = case_dir / "constraints" / "line_bounds.parquet"
-        line_bounds = (
-            pq.read_table(lb_path).to_pandas() if lb_path.exists() else pd.DataFrame()
-        )
-
-        hb_path = case_dir / "constraints" / "hydro_bounds.parquet"
-        hydro_bounds = (
-            pq.read_table(hb_path).to_pandas() if hb_path.exists() else pd.DataFrame()
-        )
-
-        tb_path = case_dir / "constraints" / "thermal_bounds.parquet"
-        thermal_bounds = (
-            pq.read_table(tb_path).to_pandas() if tb_path.exists() else pd.DataFrame()
-        )
-
-        names = load_names(case_dir)
-        stage_labels = load_stage_labels(case_dir)
-        hydro_bus_map = load_hydro_bus_map(case_dir)
-        thermal_meta = load_thermal_metadata(case_dir)
-        ncs_bus_map = load_ncs_bus_map(case_dir)
-        hydro_meta = load_hydro_metadata(case_dir)
-
-        # Build bus_names dict: id -> name from names dict
-        bus_names = {
-            eid: nm for (entity, eid), nm in names.items() if entity == "buses"
-        }
-
-        # Config (optional — v2 tabs need run configuration)
-        config_path = case_dir / "config.json"
-        config: dict = {}
-        if config_path.exists():
-            try:
-                with config_path.open() as f:
-                    config = json.load(f)
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse config.json; using empty dict")
-        discount_rate = float(config.get("discount_rate", 0.0))
-
-        # Stage hours: total hours per stage (sum of block hours)
-        stages_json_path = case_dir / "stages.json"
-        with stages_json_path.open() as f:
-            stages_data = json.load(f)
-
-        # Override discount_rate from stages.json policy_graph if present
-        # (the authoritative location for Cobre cases).
-        pg_rate = stages_data.get("policy_graph", {}).get("annual_discount_rate")
-        if pg_rate is not None:
-            discount_rate = float(pg_rate)
-
-        stage_hours: dict[int, float] = {}
-        for s in stages_data["stages"]:
-            stage_hours[s["id"]] = sum(b["hours"] for b in s["blocks"])
-
-        # Line metadata for exchange calculations
-        lines_path = case_dir / "system" / "lines.json"
-        with lines_path.open() as f:
-            line_meta: list[dict] = json.load(f)["lines"]
-
-        # Load input data for LP load computation. Both files are optional
-        # Cobre inputs (see book/src/reference/case-format.md); fall back to
-        # empty structures so cases without an explicit load scenario still
-        # render — charts that consume these degrade to a zero-load series
-        # via ``_compute_lp_load``.
-        ls_path = case_dir / "scenarios" / "load_seasonal_stats.parquet"
-        load_stats = (
-            pq.read_table(ls_path).to_pandas() if ls_path.exists() else pd.DataFrame()
-        )
-        lf_path = case_dir / "scenarios" / "load_factors.json"
-        load_factors_list: list[dict] = []
-        if lf_path.exists():
-            with lf_path.open() as f:
-                load_factors_list = json.load(f)["load_factors"]
-
-        non_fictitious_bus_ids = compute_non_fictitious_bus_ids(load_stats)
-
-        ncs_stats_path = case_dir / "scenarios" / "non_controllable_stats.parquet"
-        ncs_stats = (
-            pq.read_table(ncs_stats_path).to_pandas()
-            if ncs_stats_path.exists()
-            else pd.DataFrame()
-        )
-
-        ih_path = case_dir / "scenarios" / "inflow_history.parquet"
-        inflow_history = (
-            pq.read_table(ih_path).to_pandas() if ih_path.exists() else pd.DataFrame()
-        )
-
-        ef_path = case_dir / "constraints" / "exchange_factors.json"
-        exchange_factors: list[dict] = []
-        if ef_path.exists():
-            with ef_path.open() as f:
-                exchange_factors = json.load(f).get("exchange_factors", [])
-
-        block_hours: dict[tuple[int, int], float] = {}
-        for s in stages_data["stages"]:
-            for b in s["blocks"]:
-                block_hours[(s["id"], b["id"])] = b["hours"]
-
-        # Build block-hours DataFrame once for weighted-average joins
-        # across all chart functions
-        bh_keys = list(block_hours.keys())
-        bh_df = pl.DataFrame(
-            {
-                "stage_id": [k[0] for k in bh_keys],
-                "block_id": [k[1] for k in bh_keys],
-                "_bh": [block_hours[k] for k in bh_keys],
-            }
-        )
-
-        # Performance / solver data (optional — graceful fallback to empty frames)
-        timing_path = case_dir / "output" / "training" / "timing" / "iterations.parquet"
-        timing_raw = (
-            pq.read_table(timing_path).to_pandas()
-            if timing_path.exists()
-            else pd.DataFrame()
-        )
-        timing = _aggregate_timing_by_iteration(timing_raw)
-        timing = _correct_wall_times_from_convergence(timing, conv)
-        solver_train_path = (
-            case_dir / "output" / "training" / "solver" / "iterations.parquet"
-        )
-        solver_train = (
-            pq.read_table(solver_train_path).to_pandas()
-            if solver_train_path.exists()
-            else pd.DataFrame()
-        )
-        sim_solver_path = (
-            case_dir / "output" / "simulation" / "solver" / "iterations.parquet"
-        )
-        solver_sim = (
-            pq.read_table(sim_solver_path).to_pandas()
-            if sim_solver_path.exists()
-            else pd.DataFrame()
-        )
-        scaling_path = case_dir / "output" / "training" / "scaling_report.json"
-        if scaling_path.exists():
-            with scaling_path.open() as f:
-                scaling_report: dict = json.load(f)
-        else:
-            scaling_report = {}
-        cs_path = (
-            case_dir / "output" / "training" / "cut_selection" / "iterations.parquet"
-        )
-        cut_selection = (
-            pq.read_table(cs_path).to_pandas() if cs_path.exists() else pd.DataFrame()
-        )
-        retry_path = (
-            case_dir / "output" / "training" / "solver" / "retry_histogram.parquet"
-        )
-        retry_histogram = (
-            pq.read_table(retry_path).to_pandas()
-            if retry_path.exists()
-            else pd.DataFrame()
-        )
-        stochastic_dir = case_dir / "output" / "stochastic"
-        stochastic_available = stochastic_dir.exists()
-        if stochastic_available:
-            inflow_stats_stoch = pq.read_table(
-                stochastic_dir / "inflow_seasonal_stats.parquet"
-            ).to_pandas()
-            ar_coefficients = pq.read_table(
-                stochastic_dir / "inflow_ar_coefficients.parquet"
-            ).to_pandas()
-            noise_openings = pq.read_table(
-                stochastic_dir / "noise_openings.parquet"
-            ).to_pandas()
-            fitting_report: dict = json.load(
-                (stochastic_dir / "fitting_report.json").open()
-            )
-            corr_path = stochastic_dir / "correlation.json"
-            if corr_path.exists():
-                correlation: dict = json.load(corr_path.open())
-            else:
-                logger.warning(
-                    "output/stochastic/correlation.json missing; using empty dict"
-                )
-                correlation = {}
-        else:
-            inflow_stats_stoch = pd.DataFrame()
-            ar_coefficients = pd.DataFrame()
-            noise_openings = pd.DataFrame()
-            fitting_report = {}
-            correlation = {}
-
-        # Output metadata (from metadata.json in each output subdirectory)
-        def _load_metadata(subdir: str) -> dict:
-            meta_path = case_dir / "output" / subdir / "metadata.json"
-            if not meta_path.exists():
-                return {}
-            try:
-                with meta_path.open() as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse output/%s/metadata.json", subdir)
-                return {}
-
-        training_metadata = _load_metadata("training")
-        simulation_metadata = _load_metadata("simulation")
-        policy_metadata = _load_metadata("policy")
-
-        # Load resolved LP bounds dictionary (actual bounds used by the solver)
-        bounds_path = (
-            case_dir / "output" / "training" / "dictionaries" / "bounds.parquet"
-        )
-        lp_bounds = (
-            pq.read_table(bounds_path).to_pandas()
-            if bounds_path.exists()
-            else pd.DataFrame()
-        )
-
-        # Generic constraints data (optional — graceful fallback when absent)
-        gc_path = case_dir / "constraints" / "generic_constraints.json"
-        gc_constraints: list[dict] = []
-        if gc_path.exists():
-            with gc_path.open() as f:
-                gc_data = json.load(f)
-            gc_constraints = gc_data.get("constraints", [])
-
-        gc_bounds_path = case_dir / "constraints" / "generic_constraint_bounds.parquet"
-        gc_bounds = (
-            pq.read_table(gc_bounds_path).to_pandas()
-            if gc_bounds_path.exists()
-            else pd.DataFrame()
-        )
-
-        # violations/generic: collect to pandas once (needed by
-        # build_constraints_summary_table)
-        gc_viol_dir = case_dir / "output" / "simulation" / "violations" / "generic"
-        if gc_viol_dir.exists():
-            gc_violations = (
-                pl.scan_parquet(
-                    str(gc_viol_dir / "**" / "*.parquet"),
-                    hive_partitioning=True,
-                )
-                .collect(engine="streaming")
-                .to_pandas()
-            )
-        else:
-            gc_violations = pd.DataFrame()
+        # Each cohesive section is read by its own loader (above) and composed
+        # into the flat aggregate below.
+        temporal = load_temporal_context(case_dir)
+        entities = load_entity_metadata(case_dir)
+        simulation = load_simulation_data(case_dir)
+        scenario = load_scenario_inputs(case_dir)
+        performance = load_solver_performance(case_dir, conv)
+        stochastic = load_stochastic_data(case_dir)
+        metadata = load_output_metadata(case_dir)
+        constraints = load_generic_constraints(case_dir)
 
         case_name = case_dir.resolve().name
+        costs = simulation.costs
         simulation_available = not costs.empty
         if simulation_available:
             n_scenarios = int(costs["scenario_id"].nunique())
             n_stages = int(costs["stage_id"].nunique())
         else:
             n_scenarios = 0
-            n_stages = len(stages_data.get("stages", []))
-        print(
-            f"  {n_scenarios} scenarios, {n_stages} stages,"
-            f" {len(stage_labels)} stage labels"
-            f"{'' if simulation_available else ' (training-only; no simulation)'}"
+            n_stages = len(temporal.stages_data.get("stages", []))
+        logger.info(
+            "Loaded %d scenarios, %d stages, %d stage labels%s",
+            n_scenarios,
+            n_stages,
+            len(entities.stage_labels),
+            "" if simulation_available else " (training-only; no simulation)",
         )
 
         # Filter simulation solver to actual scenario count from metadata
-        actual_sim_scenarios = simulation_metadata.get("scenarios", {}).get(
+        actual_sim_scenarios = metadata.simulation.get("scenarios", {}).get(
             "completed", n_scenarios
         )
+        solver_sim = performance.solver_sim
         if not solver_sim.empty:
             solver_sim = solver_sim.head(actual_sim_scenarios)
 
@@ -775,57 +950,57 @@ class DashboardData:
             case_dir=case_dir,
             case_name=case_name,
             conv=conv,
-            hydros_lf=hydros_lf,
-            thermals_lf=thermals_lf,
-            ncs_lf=ncs_lf,
-            buses_lf=buses_lf,
-            exchanges_lf=exchanges_lf,
+            hydros_lf=simulation.hydros_lf,
+            thermals_lf=simulation.thermals_lf,
+            ncs_lf=simulation.ncs_lf,
+            buses_lf=simulation.buses_lf,
+            exchanges_lf=simulation.exchanges_lf,
             costs=costs,
-            line_bounds=line_bounds,
-            names=names,
-            stage_labels=stage_labels,
-            hydro_bus_map=hydro_bus_map,
-            thermal_meta=thermal_meta,
-            ncs_bus_map=ncs_bus_map,
-            hydro_meta=hydro_meta,
-            bus_names=bus_names,
-            non_fictitious_bus_ids=non_fictitious_bus_ids,
-            stage_hours=stage_hours,
-            block_hours=block_hours,
-            bh_df=bh_df,
-            line_meta=line_meta,
-            load_stats=load_stats,
-            load_factors_list=load_factors_list,
-            timing=timing,
-            timing_raw=timing_raw,
-            solver_train=solver_train,
+            line_bounds=scenario.line_bounds,
+            names=entities.names,
+            stage_labels=entities.stage_labels,
+            hydro_bus_map=entities.hydro_bus_map,
+            thermal_meta=entities.thermal_meta,
+            ncs_bus_map=entities.ncs_bus_map,
+            hydro_meta=entities.hydro_meta,
+            bus_names=entities.bus_names,
+            non_fictitious_bus_ids=scenario.non_fictitious_bus_ids,
+            stage_hours=temporal.stage_hours,
+            block_hours=temporal.block_hours,
+            bh_df=temporal.bh_df,
+            line_meta=temporal.line_meta,
+            load_stats=scenario.load_stats,
+            load_factors_list=scenario.load_factors_list,
+            timing=performance.timing,
+            timing_raw=performance.timing_raw,
+            solver_train=performance.solver_train,
             solver_sim=solver_sim,
-            scaling_report=scaling_report,
-            cut_selection=cut_selection,
+            scaling_report=performance.scaling_report,
+            cut_selection=performance.cut_selection,
             simulation_available=simulation_available,
-            stochastic_available=stochastic_available,
-            inflow_stats_stoch=inflow_stats_stoch,
-            ar_coefficients=ar_coefficients,
-            noise_openings=noise_openings,
-            fitting_report=fitting_report,
-            inflow_history=inflow_history,
-            correlation=correlation,
-            inflow_lags_lf=inflow_lags_lf,
-            training_metadata=training_metadata,
-            simulation_metadata=simulation_metadata,
-            policy_metadata=policy_metadata,
-            config=config,
-            discount_rate=discount_rate,
-            stages_data=stages_data,
-            lp_bounds=lp_bounds,
-            gc_constraints=gc_constraints,
-            gc_bounds=gc_bounds,
-            gc_violations=gc_violations,
-            hydro_bounds=hydro_bounds,
-            thermal_bounds=thermal_bounds,
-            ncs_stats=ncs_stats,
-            exchange_factors=exchange_factors,
-            retry_histogram=retry_histogram,
+            stochastic_available=stochastic.available,
+            inflow_stats_stoch=stochastic.inflow_stats_stoch,
+            ar_coefficients=stochastic.ar_coefficients,
+            noise_openings=stochastic.noise_openings,
+            fitting_report=stochastic.fitting_report,
+            inflow_history=scenario.inflow_history,
+            correlation=stochastic.correlation,
+            inflow_lags_lf=simulation.inflow_lags_lf,
+            training_metadata=metadata.training,
+            simulation_metadata=metadata.simulation,
+            policy_metadata=metadata.policy,
+            config=temporal.config,
+            discount_rate=temporal.discount_rate,
+            stages_data=temporal.stages_data,
+            lp_bounds=performance.lp_bounds,
+            gc_constraints=constraints.constraints,
+            gc_bounds=constraints.bounds,
+            gc_violations=simulation.gc_violations,
+            hydro_bounds=scenario.hydro_bounds,
+            thermal_bounds=scenario.thermal_bounds,
+            ncs_stats=scenario.ncs_stats,
+            exchange_factors=scenario.exchange_factors,
+            retry_histogram=performance.retry_histogram,
             n_scenarios=n_scenarios,
             n_stages=n_stages,
         )

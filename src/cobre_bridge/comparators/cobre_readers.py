@@ -16,8 +16,7 @@ import polars as pl
 
 from cobre_bridge.cobre_io import (
     case_dir_for,
-    productivity_from_energy_parquet,
-    productivity_from_production_models,
+    resolve_hydro_productivities,
 )
 from cobre_bridge.cost_categories import COBRE_COST_COMPONENT_COLUMNS
 
@@ -1506,26 +1505,17 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         return {}
 
     case_dir = hydros_path.parent.parent
-    energy_productivity = productivity_from_energy_parquet(case_dir)
-    pm_productivity = productivity_from_production_models(case_dir)
+    # Productivity resolution is shared with the dashboard via the single
+    # canonical cascade in cobre_io so the two products never report a
+    # different ρ for the same plant (see resolve_hydro_productivities).
+    productivities = resolve_hydro_productivities(case_dir, data.get("hydros", []))
 
     result: dict[int, dict] = {}
     for hydro in data.get("hydros", []):
         entity_id = int(hydro["id"])
         name = str(hydro.get("name", f"hydro_{entity_id}"))
 
-        # Preferred source: hydro_energy_productivity.parquet (new contract).
-        # Fall back through hydro_production_models.json and the deprecated
-        # generation.productivity_mw_per_m3s embedded field for legacy outputs.
-        prod = energy_productivity.get(entity_id)
-        if prod is None:
-            prod = pm_productivity.get(entity_id)
-        if prod is None:
-            gen = hydro.get("generation", {})
-            if isinstance(gen, dict):
-                prod = gen.get("productivity_mw_per_m3s")
-        if prod is None:
-            prod = hydro.get("productivity_mw_per_m3s")
+        prod = productivities.get(entity_id)
 
         reservoir = hydro.get("reservoir", {}) or {}
         outflow = hydro.get("outflow", {}) or {}
