@@ -1188,6 +1188,7 @@ def compare_results(
         _find_saidas_dir,
         read_medias_hydro,
         read_medias_market,
+        read_medias_ree,
         read_medias_sin,
         read_medias_system,
         read_medias_thermal,
@@ -1478,6 +1479,7 @@ def compare_results(
     from cobre_bridge.comparators.constraints_compare import (
         _load_generic_constraint_bounds,
         _load_generic_constraints,
+        apply_vminop_useful_energy,
         evaluate_lhs_cobre,
         evaluate_lhs_newave,
     )
@@ -1499,6 +1501,19 @@ def compare_results(
             nw_offset,
         )
         gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
+        # VminOP constraints bound stored energy; re-express their LHS/bound as
+        # useful stored energy (MWmonth) so they compare like-for-like against
+        # NEWAVE's per-REE EARMF from MEDIAS-REE.CSV.  RE/AGRINT are untouched.
+        gc_bounds_df, gc_lhs_nw, gc_lhs_cb = apply_vminop_useful_energy(
+            gc_constraints,
+            gc_bounds_df,
+            gc_lhs_nw,
+            gc_lhs_cb,
+            cobre_case_dir,
+            cobre_output_dir,
+            read_medias_ree(saidas_dir),
+            nw_offset,
+        )
     else:
         gc_lhs_nw = pl.DataFrame()
         gc_lhs_cb = pl.DataFrame()

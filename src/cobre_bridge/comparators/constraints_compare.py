@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -393,3 +394,228 @@ def per_stage_bounds(
                 per_stage[stage] = float(row["bound"])
         out[cid_int] = per_stage
     return out
+
+
+# --- VminOP useful-energy rewrite -------------------------------------------
+#
+# VminOP (security-curve) constraints bound *stored energy*: their expression
+# is ``Σ @rho_acum_h{id} * hydro_storage(id) >= bound``.  The generic LHS
+# evaluator above resolves ``@rho_acum`` to cobre's *default* point
+# productivity ``accumulated_productivity_mw_per_m3s`` (MW/(m³/s)), which is the
+# energy-per-volume coefficient over-scaled by the hm³↔(m³/s)·month factor
+# (≈ 2.628) relative to the *override* the LP actually uses (energy-scaled,
+# MWmonth/hm³).  That makes the raw VminOP LHS incomparable to its own bound and
+# to NEWAVE.  This rewrite re-expresses VminOP rows as **useful stored energy
+# in MWmonth** so they line up with NEWAVE's per-REE ``EARMF`` (MEDIAS-REE):
+#
+#   cobre LHS  = Σ override_ρ_acum(stage) · (storage_final − Vmin)   [useful]
+#   NEWAVE LHS = EARMF for the constraint's REE                       [useful]
+#   bound      = stored-bound − dead-energy (= pct · useful EARMX)    [useful]
+#
+# where dead-energy = Σ override_ρ_acum(stage) · Vmin removes the absolute-vs-
+# relative-to-minimum offset (cobre stores absolute volume; NEWAVE EARM is
+# relative to the minimum operative volume).  RE / AGRINT rows are untouched.
+_VMINOP_REE_RE = re.compile(r"for REE (\d+)")
+_GC_SCHEMA = {
+    "constraint_id": pl.Int32,
+    "stage_id": pl.Int32,
+    "lhs_value": pl.Float64,
+}
+
+
+def _is_vminop(constraint: dict) -> bool:
+    """True when the constraint scales ``hydro_storage`` by an ``@rho_acum``.
+
+    RE / AGRINT constraints never reference ``@rho_acum_h{id}``; only VminOP
+    (security-curve) constraints do, so this cleanly partitions the set.
+    """
+    for _, param_name, vtype, _ in parse_expression(constraint.get("expression", "")):
+        if (
+            vtype == "hydro_storage"
+            and param_name is not None
+            and param_name.startswith("rho_acum_h")
+        ):
+            return True
+    return False
+
+
+def _load_rho_acum_overrides(cobre_case_dir: Path) -> dict[int, dict[int, float]]:
+    """Load per-stage ρ_acum overrides from ``system/scalar_parameters.json``.
+
+    Returns ``{hydro_id: {stage_id: ρ_acum}}`` where ρ_acum is the energy-scaled
+    coefficient (MWmonth/hm³) the VminOP LP uses, so ρ·storage[hm³] is MWmonth.
+    """
+    path = cobre_case_dir / "system" / "scalar_parameters.json"
+    out: dict[int, dict[int, float]] = {}
+    if not path.exists():
+        return out
+    try:
+        with path.open() as f:
+            params = json.load(f).get("scalar_parameters", [])
+    except (OSError, json.JSONDecodeError) as exc:
+        _LOG.warning("scalar_parameters.json could not be parsed: %s", exc)
+        return out
+    for entry in params:
+        m = re.fullmatch(r"rho_acum_h(\d+)", str(entry.get("name", "")))
+        if m is None or entry.get("kind") != "per_stage":
+            continue
+        out[int(m.group(1))] = {int(s): float(v) for s, v in entry.get("values", [])}
+    return out
+
+
+def _load_hydro_min_storage(cobre_case_dir: Path) -> dict[int, float]:
+    """Load minimum operative storage (hm³) per hydro id from ``hydros.json``."""
+    path = cobre_case_dir / "system" / "hydros.json"
+    out: dict[int, float] = {}
+    if not path.exists():
+        return out
+    try:
+        with path.open() as f:
+            hydros = json.load(f).get("hydros", [])
+    except (OSError, json.JSONDecodeError) as exc:
+        _LOG.warning("hydros.json could not be parsed: %s", exc)
+        return out
+    for h in hydros:
+        vmin = (h.get("reservoir") or {}).get("min_storage_hm3")
+        if vmin is not None:
+            out[int(h["id"])] = float(vmin)
+    return out
+
+
+def apply_vminop_useful_energy(
+    constraints: list[dict],
+    gc_bounds: pl.DataFrame,
+    gc_lhs_nw: pl.DataFrame,
+    gc_lhs_cb: pl.DataFrame,
+    cobre_case_dir: Path,
+    cobre_output_dir: Path,
+    nw_ree: pl.DataFrame,
+    nw_offset: int,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """Re-express VminOP rows as *useful* stored energy (MWmonth).
+
+    Rewrites the VminOP entries of ``(gc_bounds, gc_lhs_nw, gc_lhs_cb)`` so the
+    Constraints tab compares like-for-like useful stored energy:
+
+    - cobre LHS  = Σ override ρ_acum(stage) · (storage_final − Vmin)
+    - NEWAVE LHS = ``EARMF`` (MEDIAS-REE) for the constraint's REE
+    - bound      = original stored-bound − dead-volume energy (= pct · useful)
+
+    RE / AGRINT rows pass through unchanged.  If any required input is missing
+    (no scalar parameters, no min-storage, no simulation), the inputs are
+    returned untouched so the caller degrades gracefully to the prior behaviour.
+
+    Returns the updated ``(gc_bounds, gc_lhs_nw, gc_lhs_cb)``.
+    """
+    vminop = [c for c in constraints if _is_vminop(c)]
+    if not vminop:
+        return gc_bounds, gc_lhs_nw, gc_lhs_cb
+
+    rho = _load_rho_acum_overrides(cobre_case_dir)
+    vmin = _load_hydro_min_storage(cobre_case_dir)
+    hydros_lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    if not rho or not vmin or hydros_lf is None:
+        _LOG.warning(
+            "VminOP useful-energy rewrite skipped (missing ρ_acum/Vmin/sim data)."
+        )
+        return gc_bounds, gc_lhs_nw, gc_lhs_cb
+
+    storage = (
+        hydros_lf.select("hydro_id", "stage_id", "storage_final_hm3")
+        .group_by(["hydro_id", "stage_id"])
+        .agg(pl.col("storage_final_hm3").mean().alias("sf"))
+        .collect()
+    )
+    sf_lookup = {
+        (int(r["hydro_id"]), int(r["stage_id"])): float(r["sf"])
+        for r in storage.iter_rows(named=True)
+    }
+
+    earmf: dict[tuple[int, int], float] = {}
+    if not nw_ree.is_empty():
+        for r in nw_ree.filter(pl.col("variable") == "EARMF").iter_rows(named=True):
+            earmf[(int(r["newave_code"]), int(r["stage"]) - nw_offset)] = float(
+                r["value"]
+            )
+
+    bounds_by_cs = per_stage_bounds(gc_bounds)
+    cb_rows: list[dict] = []
+    nw_rows: list[dict] = []
+    dead_by_cs: dict[tuple[int, int], float] = {}
+    for c in vminop:
+        cid = int(c["id"])
+        hydro_ids = [
+            eid
+            for _, _, vtype, eid in parse_expression(c["expression"])
+            if vtype == "hydro_storage"
+        ]
+        ree_match = _VMINOP_REE_RE.search(str(c.get("description", "")))
+        ree_code = int(ree_match.group(1)) if ree_match else None
+        for stage in sorted(bounds_by_cs.get(cid, {})):
+            cb_useful = 0.0
+            dead = 0.0
+            complete = True
+            for hid in hydro_ids:
+                rho_s = rho.get(hid, {}).get(stage)
+                vm = vmin.get(hid)
+                sf = sf_lookup.get((hid, stage))
+                if rho_s is None or vm is None or sf is None:
+                    complete = False
+                    break
+                cb_useful += rho_s * (sf - vm)
+                dead += rho_s * vm
+            if not complete:
+                continue
+            cb_rows.append(
+                {"constraint_id": cid, "stage_id": stage, "lhs_value": cb_useful}
+            )
+            dead_by_cs[(cid, stage)] = dead
+            if ree_code is not None and (ree_code, stage) in earmf:
+                nw_rows.append(
+                    {
+                        "constraint_id": cid,
+                        "stage_id": stage,
+                        "lhs_value": earmf[(ree_code, stage)],
+                    }
+                )
+
+    vminop_ids = [int(c["id"]) for c in vminop]
+
+    # Replace cobre VminOP LHS rows with the useful-energy values.
+    cb_keep = (
+        gc_lhs_cb.filter(~pl.col("constraint_id").is_in(vminop_ids))
+        if not gc_lhs_cb.is_empty()
+        else gc_lhs_cb
+    )
+    cb_new = pl.DataFrame(cb_rows, schema=_GC_SCHEMA)
+    gc_lhs_cb_out = pl.concat([cb_keep, cb_new]) if cb_rows else gc_lhs_cb
+
+    # Add NEWAVE VminOP LHS rows (none existed before — the generic evaluator
+    # skips @rho_acum constraints on the NEWAVE side).
+    nw_new = pl.DataFrame(nw_rows, schema=_GC_SCHEMA)
+    gc_lhs_nw_out = pl.concat([gc_lhs_nw, nw_new]) if nw_rows else gc_lhs_nw
+
+    # Subtract dead-volume energy from VminOP bounds → useful (pct·EARMX) bound.
+    if dead_by_cs and not gc_bounds.is_empty():
+        dead_df = pl.DataFrame(
+            [
+                {"constraint_id": cid, "stage_id": s, "dead": d}
+                for (cid, s), d in dead_by_cs.items()
+            ],
+            schema={
+                "constraint_id": pl.Int32,
+                "stage_id": pl.Int32,
+                "dead": pl.Float64,
+            },
+        )
+        gc_bounds_out = (
+            gc_bounds.join(dead_df, on=["constraint_id", "stage_id"], how="left")
+            .with_columns(
+                (pl.col("bound") - pl.col("dead").fill_null(0.0)).alias("bound")
+            )
+            .drop("dead")
+        )
+    else:
+        gc_bounds_out = gc_bounds
+
+    return gc_bounds_out, gc_lhs_nw_out, gc_lhs_cb_out
