@@ -36,3 +36,10 @@ python investigations/<script>.py [args]
 | `compare_cuts.py`               | Side-by-side NEWAVE vs Cobre FCF cut / water-value comparison. Imports the two `*_cut_investigation` scripts.                                                                                       |
 | `cortese_investigation.py`      | Decode NEWAVE FCF visited-states file (`cortese.dat`).                                                                                                                                              |
 | `compare_states.py`             | Compare NEWAVE visited storage states against Cobre's. Imports `cobre_cut_investigation`.                                                                                                           |
+
+## Reference notes
+
+| Doc                                   | Purpose                                                                                                                                                                                                                                           |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cobre_side_findings.md`              | **Consolidated list of issues requiring Cobre-side (solver) intervention** — hand this to the Cobre maintainers. Unbounded under-withdrawal slack, per-block replication of per-stage generic constraints, micro-penalty/solver-tolerance excess. |
+| `withdrawal_slack_bound_reference.md` | NEWAVE's implicit bound on the water-withdrawal violation (`realized ∈ [0, T]`); full derivation backing Finding 1 of `cobre_side_findings.md`.                                                                                                   |

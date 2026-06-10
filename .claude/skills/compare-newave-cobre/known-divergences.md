@@ -41,12 +41,6 @@ appears, the _root cause_, and the _verdict_:
 These surfaced in git history and are likely recurring; the interpretation is not
 yet filled in.
 
-### Withdrawal slack pos/neg labels
-
-- **Root cause:** NEWAVE and Cobre label the withdrawal slack with opposite pos/neg
-  sign; the comparator was realigned to the NEWAVE convention. _Confirm exact semantics._
-- **Evidence/ref:** commit "fix(compare): align withdrawal slack pos/neg labels".
-
 ### Inflow non-negativity handling
 
 - **Root cause:** converter default is `truncation_with_penalty`. _Confirm how/whether
@@ -88,19 +82,6 @@ yet filled in.
 - **Evidence/ref:** [[project_cobre_excess_root_cause]],
   [[project_excess_penalty_diagnostic]]. Per-bus method:
   `investigations/compare_sem_intercambio.py`.
-
-### Hardcoded hydro-complex diversion → spurious min-outflow advantage (resolved)
-
-- **Symptom:** large operation-cost gap dominated by the minimum-outflow violation
-  penalty; at one hydro complex Cobre kept too little water in a riverbed reach and
-  routed the rest through the powerhouse, dodging a min-outflow violation that NEWAVE
-  incurs.
-- **Root cause:** a **hardcoded diversion addition** for a specific complex in
-  `converters/hydro.py` mis-routed water.
-- **Resolution:** removed the hardcoded addition; riverbed outflow now matches NEWAVE
-  and Cobre incurs the same penalty. Total cost agrees closely.
-- **Verdict:** **resolved** (was concerning).
-- **Evidence/ref:** fix in `converters/hydro.py`.
 
 ### Tooling false-positive: NEWAVE cut parser defaulted the GNL lag count (fixed)
 
@@ -155,33 +136,17 @@ yet filled in.
   `crates/cobre-io/src/validation/semantic/thermal.rs`,
   `crates/cobre-sddp/src/setup/mod.rs`.
 
-### Deck drift — converted deck edited after the NEWAVE run (pmo echo ≠ current dger/confhd)
+### Deck drift — converted deck edited after the NEWAVE run
 
-- **Symptom:** a results comparison diverges, but the NEWAVE `saidas/` and the converted Cobre
-  case were built from **different input decks**. Telltale: input `.dat` files have **mtimes
-  later than `saidas/pmo.dat`** (deck edited after the run), and `pmo.dat`'s own config echo
-  contradicts the current `.dat` files.
-- **Where:** any comparison. First seen in `example/comparacao_prod` (2026-06): `dger.dat` and
-  `confhd.dat` were edited ~7 days after the run that produced `saidas/`. `pmo.dat` echo says
-  `CONSIDERA ANTECIPACAO DE GERACAO TERMOELETRICA  SIM` (anticipated GNL dispatch ON — ST.CRUZ
-  NOVA pinned at 204.56 MWmed at stage 0 in MEDIAS-USIT), but the current `dger.dat` field 55
-  `DESP. ANTEC. GNL` = **0**, so the converter writes `anticipated_config = null` on every
-  thermal and Cobre runs the GNL plant free (at its 500 MW economic max).
-- **Root cause:** **not a converter bug** — the converter faithfully mirrors the (edited) deck;
-  the deck no longer matches the executed run.
-- **Verdict:** **input mismatch (fix the deck, not the code).** Rebuild Cobre from a deck that
-  matches the run (here: restore `DESP. ANTEC. GNL = 1`; requires cobre-python ≥ 0.7.0 to seed —
-  see [[project_gnl_anticipated_seeding]]) before trusting the comparison.
-- **Triage rule:** before reading any divergence, run
-  `stat -c '%y  %n' <case>/*.dat <case>/saidas/pmo.dat` — if any input is newer than `pmo.dat`,
-  suspect deck drift, then cross-check `pmo.dat`'s config echo (`ANTECIPACAO…`,
-  `NUMERO DE USINAS`, sim type, FPHA, POS) against the current deck.
-- **Caveat — drift is usually a sideshow for magnitude:** in comparacao_prod the GNL flag moved
-  only ~300 MW (one plant), while the actual aggregate gap was **+7000 MWmed thermal at stages
-  0–1** (exact mirror of −7000 MWmed hydro; load conserved), decaying to ~0 by stage 8 — i.e. the
-  dominant cause was early-stage **water-value / FCF hoarding** (Cobre values water higher early
-  and burns thermal; NEWAVE CMO ≈ 176 R$/MWh at stage 0), the separate entry below. Confirm the
-  deck before attributing magnitude either way.
+- **Triage rule (pre-flight, any comparison):** before trusting a divergence, run
+  `stat -c '%y  %n' <case>/*.dat <case>/saidas/pmo.dat`. If any input `.dat` is **newer
+  than `saidas/pmo.dat`**, the deck was edited after the run that produced `saidas/`, so
+  the converted Cobre case and the NEWAVE outputs may be from different decks. Cross-check
+  `pmo.dat`'s config echo (anticipation flag, plant counts, sim type, FPHA, POS) against
+  the current `.dat` files before reading any result.
+- **Verdict:** input mismatch — **fix the deck, not the code** (the converter faithfully
+  mirrors whatever deck it is given). _The rodada_2000 cases pass this check (inputs
+  ~10:59, `pmo.dat` 11:05)._
 
 ### End-of-study immediate-cost gap = min-outflow / min-gen violations (dispatch, not bug)
 
@@ -228,9 +193,226 @@ yet filled in.
   `Pmo.produtibilidades_equivalentes`; `penalid.dat`.
   [[project_forward_penalty_validation]].
 
+### Water-withdrawal violation — conserved cascade-wide, degenerate per-plant redistribution
+
+- **Symptom:** Cobre shows large per-plant `water_withdrawal_violation_neg_m3s` at
+  **upstream run-of-river** plants of a withdrawal cascade (e.g. PICADA ~25–30 m³/s,
+  SOBRAGI; CASTRO ALVES only in post-study) — **far exceeding those plants' own
+  withdrawal targets** (PICADA target ≈ 1.08 m³/s, slack ≈ 24.7). NEWAVE instead
+  reports the shortfall (`VIOL_POS_VRETIRUH`) concentrated at the **downstream**
+  withdrawal plant (SIMPLICIO). Reads as "Cobre violates withdrawal a lot more."
+- **Where:** results; Hydro Operation withdrawal-slack panels. The Paraíba do Sul /
+  Santa Cecília withdrawal cascade `PICADA(126) → SOBRAGI(127) → SIMPLICIO(129) → …`
+  (the urban-supply diversion to the Guandu).
+- **Root cause — conserved degeneracy, not a bug.** Verified on
+  `example/{newave,cobre}_rodada_2000_sem_pos` and `…_completo`:
+  - **Bounds 100 % match**; the LP feasible region is identical.
+  - The **per-stage TOTAL** under-delivery across the cascade is **identical** to the
+    digit (sem_pos Σ = 503.2 m³/s-stages NEWAVE vs 503.2 Cobre; completo 632.9 vs
+    632.1), so the penalty is the same: Cobre `withdrawal_violation_cost` ≈ NEWAVE's
+    **unattributed COPER residual** (`COPER − CTERM − CDEF`; NEWAVE leaves its named
+    `CDSVC/CDSVF/VIOL_DSV` diversion-cost columns at 0). **Inflows and spillage match
+    exactly** — it is **not** turbine↔spill.
+  - The divergence is purely **where the conserved slack is placed**. Cobre's
+    under-withdrawal (`neg`) slack has upper bound **`[0, +∞)`** per plant whenever
+    `water_withdrawal_m3s > 0` (cobre `crates/cobre-sddp/src/lp_builder/matrix.rs`
+    `fill_withdrawal_slack_columns`, ~line 567) — **not** bounded by the plant's own
+    target. So the LP can dump the whole cascade shortfall as an unbounded `neg` slack
+    (a water source) at the upstream run-of-river plants and **turbine that relief
+    water** (PICADA turbined = 41.6 m³/s cap vs inflow 18). NEWAVE's shortfall is
+    bounded per plant, so it lands at the big downstream withdrawal (SIMPLICIO).
+  - **Converter is correct:** the per-plant target it writes
+    (`hydro_bounds.water_withdrawal_m3s`) equals NEWAVE's required withdrawal
+    (`VRETIRUH` realized + `VIOL_POS_VRETIRUH`, ÷2.63) to the digit.
+- **Verdict:** **expected** — cost-neutral degenerate redistribution (total operation
+  cost COPER vs immediate matches stage-by-stage on sem_pos, within ~2 %).
+  **Independent of post-study** (sem_pos and completo behave identically).
+- **Latent Cobre-side improvement (optional, not a bridge fix):** bound the `neg`
+  under-withdrawal slack at `[0, water_withdrawal_m3s]` (you cannot under-withdraw more
+  than the target). That would force the shortfall onto the downstream withdrawal plant
+  and make the per-plant attribution match NEWAVE, removing the non-physical upstream
+  "injection."
+- **Evidence/ref:** cobre `matrix.rs:567`; MEDIAS-USIH `VRETIRUH`/`VIOL_POS_VRETIRUH`
+  (hm³/month, ÷2.63 → m³/s); converter `hydro_bounds.water_withdrawal_m3s`.
+  [[project_withdrawal_violation_degeneracy]].
+
+### Per-bus / per-reservoir storage allocation differs — same-cost degeneracy (two mechanisms)
+
+- **Symptom:** aggregating reservoir storage by submarket/bus, NEWAVE and Cobre place
+  the stored water differently — NEWAVE holds **more in NORTE**, Cobre more in
+  **SUDESTE/SUL** (roughly, not the same hm³/stages; per-bus and SIN totals wander
+  ±~4000 hm³). At the reservoir level individual reservoirs diverge by **40–100 % of
+  usable capacity** (EMBORCAÇÃO, ITUMBIARA, NOVA PONTE, CORUMBÁ, SANTA BRANCA), some
+  even anti-correlated (BATALHA). Feels wrong for a deterministic single-scenario run.
+- **Where:** results; Hydro Operation storage (`storage_final_hm3` vs NEWAVE
+  `VARMUH`+vol_min). Verified on `…_2000_sem_pos` and `…_2000_sem_pos_carga`.
+- **Root cause — same-cost degeneracy, two coexisting mechanisms.** Year 2000 is wet, so
+  **CMO/spot ≈ 0 in every submarket, every stage** (Cobre `spot_price` ~1e-4, NEWAVE
+  `CMO` = 0.00): an extra MWh is free, must-run thermal aside.
+  1. **Zero water value** in SUL / NORDESTE / NORTE (`PIVARM` and `water_value_per_hm3`
+     ≈ 0–0.1 R$/hm³) — storage there is a flat direction; chiefly **BALBINA** (isolated
+     Amazon) and **TUCURUÍ** in transitions.
+  2. **Reservoir substitution** in SUDESTE, where water **is** valued (~21k–600k R$/hm³)
+     but many reservoirs in a cascade/REE share the **same marginal value** (e.g.
+     EMBORCAÇÃO/ITUMBIARA/NOVA PONTE/SERRA FAÇÃO/MIRANDA all 21,423) and the security
+     curve (curva.dat) is a **single aggregate-REE VminOP** soft constraint, so which
+     reservoir holds the energy is free as long as the REE total stays above the curve.
+     (SANTA BRANCA pinned at its 10 % floor in Cobre while NEWAVE cycles it 10 %↔100 % is
+     this substitution — both keep the SUDESTE aggregate above the curve, **VminOP
+     violation = 0 on both sides**.)
+     Total operation cost matches to **0.65 %** (`COPER` vs `immediate`, 1.0065) and the
+     **future cost matches to ~1 %** (NEWAVE `CUSTO_FUTURO` vs Cobre `future_cost`),
+     confirming cost-equivalence. _(Correction to an earlier read: water is **not** ≈0
+     everywhere — that was true only for the NORTE reservoirs first inspected. SUDESTE water
+     is valued; its storage scatter is substitution-degenerate, not zero-value.)_
+- **The +10 GW SUDESTE load experiment (`…_carga`) did NOT break this.** It was absorbed
+  entirely by **free hydro drawdown** (GHTOT +10 000 MWmed, thermal unchanged, deficit 0,
+  EARMF −54 000 MWmês, COPER **identical**, CMO still 0). The storage divergences are
+  **unchanged** from the base case (not load-amplified) — pre-existing policy/FCF
+  differences, still cost-equivalent. A residual systematic tilt remains (Cobre stores
+  ~1–2 % less value, FCF ~0.8 % lower) — the _Water value / FCF gap_.
+- **Verdict:** **expected** — same-cost degenerate allocation; the forward-pass signature
+  of the _Water value / FCF gap_. **Not a converter bug.**
+- **Validation rule:** do **not** read per-bus / per-reservoir storage scatter as a
+  conversion error while **CMO ≈ 0 and VminOP/curva violation = 0 on both sides**. Judge
+  fidelity on **cost** (immediate + future) and on **constrained** quantities. A storage
+  divergence is only concerning if it moves **total cost** or causes a **VminOP/curva
+  violation on one side only**. **To actually break the degeneracy you need true scarcity
+  — nonzero CMO/deficit; +10 GW was not enough, try a much larger load or a dry year.**
+- **Evidence/ref:** NEWAVE `MEDIAS-MERC` `CMO`, `MEDIAS-SIN` `CUSTO_FUTURO`/`VIOL_CAR`,
+  `MEDIAS-USIH` `PIVARM`/`VARMUH`; Cobre `buses.spot_price`,
+  `costs.future_cost`/`generic_violation_cost`, `hydros.water_value_per_hm3`; curva.dat →
+  `converters/constraints.py:convert_vminop_constraints`.
+  [[project_storage_allocation_degeneracy]]; relates to _Water value / FCF gap_.
+
+### Security-curve (VminOP) slack penalty ~2.6× too high — Cobre deficits instead of violating the curve (CONFIRMED unit bug)
+
+- **Symptom:** under **scarcity only** (load raised until CMO>0 / deficit appears), NEWAVE
+  and Cobre diverge in operating strategy and **total operation cost by ~2×**
+  (`…_2000_sem_pos_carga` with +10 GW in **each** of SUDESTE/SUL/NORDESTE: NEWAVE `COPER`
+  2.35e12 vs Cobre `immediate` 1.12e12, ratio 0.48). NEWAVE **drains reservoirs to ~3–7 %**,
+  violating the security curve massively (`VIOL_CAR` huge) and taking terminal deficits;
+  **Cobre holds storage at the curve (~25 %+)**, `generic_violation_cost ≈ 0`, and **deficits
+  ~40 % more** (9.66e11 vs 6.96e11). Even at the **terminal stage** (sem_pos ⇒ future value
+  = 0) Cobre holds ~58 000 MWmês while deficiting — clearly suboptimal.
+- **Where:** results under scarcity; per-stage stored energy (`EARMF` vs Cobre
+  `stored_energy_final_mwh`), deficit, `MEDIAS-SIN VIOL_CAR` vs Cobre
+  `generic_violation_cost`. **Invisible in surplus** (CMO=0, the curve is never the binding
+  trade-off — see the storage-degeneracy entry; this is why +10 GW in one bus showed nothing).
+- **Root cause — units mismatch in the VminOP slack penalty (converter).** The VminOP LHS is
+  `Σ ρ_acum[MW/(m³/s)] · hydro_storage[hm³]`, which is **not** energy — it is the true stored
+  energy (MWmês) **times the hm³↔(m³/s)·month factor ≈ 2.628** (= 730 h·3600 s / 1e6).
+  Verified: `Σ ρ_acum·(V−vmin)` for REE 1 = 108 526 vs NEWAVE `EARMF` = 39 555 MWmês →
+  **ratio 2.74 ≈ 2.628**. The slack penalty is the penalid.dat curva CUSTO **3431.22 R$/MWh**,
+  and Cobre multiplies it by `block_hours` (`matrix.rs:~1575`). Net effective penalty on a
+  unit of _real_ energy shortfall = **3431.22 × 2.628 ≈ 9017 R$/MWh**, which **exceeds the
+  deficit cost 7810.62 R$/MWh** → the merit order is **flipped**: Cobre deficits rather than
+  dip below the curve. NEWAVE has the correct ordering (3431 < 7810) so it drains and violates
+  the CAR before deficiting. (Draining an upstream reservoir generates the **accumulated**
+  ρ_acum energy as the water passes the whole cascade — same ρ_acum as the EARM drop — so once
+  the units are right the per-MWh comparison is simply 3431 vs 7810; the FCF/cuts agree to
+  ~5 %, so this is **not** a policy/cut gap and **not** a structural CAR-usage difference.)
+- **The vmin term is already handled** (not a bug): the LHS uses **absolute** storage but
+  `_rhs_at` adds the dead-volume energy back (`dead_s = Σ ρ·vmin`), so the binding condition is
+  `Σ ρ·(V−vmin) ≥ pct·E_useful` and the slack measures the **useful**-energy shortfall.
+- **Verdict:** **FIXED (converter).** First case where NEWAVE and Cobre genuinely disagreed on
+  dispatch (not same-cost).
+- **Fix — IMPLEMENTED (Option A, per-stage).** `converters/constraints.py:convert_vminop_constraints`
+  now converts `per_stage_acc` (ρ_acum) from MW/(m³/s) to MWmês/hm³ before it feeds both the LHS
+  coefficients and the RHS, so the VminOP is in true stored energy and `penalty × block_hours`
+  resolves to the penalid.dat R$/MWh. The factor cancels between LHS and RHS, so the binding
+  storage level is unchanged; `@rho_acum_h{id}` was verified to be consumed **only** by the VminOP
+  expression (Cobre computes `stored_energy_final_mwh` independently and correctly). The factor is
+  applied **per stage using each stage's real month length** (`_month_hours`; cobre stage
+  durations are actual month hours — 672 h Feb … 744 h Dec — not NEWAVE's fixed 730 h), so the
+  effective penalty is exactly 3431.22 R$/MWh on every stage (the fixed 730 h left a ±~9 % error,
+  worst in February). Restores `CAR (3431) < deficit (7810)` so Cobre violates the curve before
+  deficiting. Verified at conversion level (RHS scales by the per-stage factor). **Still TODO:
+  re-run Cobre on carga3** and confirm (1) `generic_violation_cost` > 0, (2) drawdown matches
+  NEWAVE, (3) cost ratio → ~1.0, (4) surplus cases (sem_pos/completo) unregressed.
+- **Evidence/ref:** NEWAVE `MEDIAS-SIN` `COPER`/`CDEF`/`VIOL_CAR`/`EARMF`/`CUSTO_FUTURO`;
+  Cobre `costs.{immediate,deficit,future}_cost`/`generic_violation_cost`,
+  `hydros.stored_energy_final_mwh`; `curva.dat`; `converters/constraints.py`;
+  cobre `crates/cobre-sddp/src/lp_builder/matrix.rs:~1575`.
+  [[project_storage_allocation_degeneracy]].
+
+### Thermal cost (CTERM) > Cobre `thermal_cost` — GNL anticipated-commitment cost booked outside the thermal category (expected)
+
+- **Symptom:** per-stage and total NEWAVE `CTERM` runs **systematically above** Cobre
+  `thermal_cost` (~6 % total on `…_2000_sem_pos_carga`: 1.354e11 vs 1.279e11) **even
+  though thermal generation is identical** — SIN `GTERM` matches ratio 1.000 every
+  stage, and per-plant to <0.2 %. It localizes per **submarket** to exactly the buses
+  holding **GNL anticipated plants**: NORDESTE (P. SERGIPE I, ~5.6e9) and SUDESTE
+  (ST.CRUZ NOVA + LINHARES, ~2e9) — together the whole gap (~7.6e9). SUL and NORTE match
+  to the cent. A small extra wobble at the **first 2 / last 2 stages** (±8–17 %) is the
+  lead-time boundary plus a clast `modificacoes` date-edge.
+- **Where:** results; Per-Stage Cost → Thermal (`CTERM` vs `thermal_cost`). Per-bus via
+  `MEDIAS-MERC` (`GTERM`/`CTERM` per submarket code 1=SE,2=S,3=NE,4=N) vs Cobre
+  `thermals` aggregated by `bus_id`.
+- **Root cause — accounting-basis difference (_where_ GNL fuel is booked), not a missing
+  cost.** Cobre models GNL plants as **anticipated dispatch**
+  (`anticipated_config.lead_stages`). It charges their fuel on the **decision column at
+  the decision stage, discounted to delivery** —
+  `objective = cost_per_mwh × delivery_hours × discount_factor[delivery]`
+  (`crates/cobre-sddp/src/lp_builder/matrix.rs::fill_anticipated_decision_objective`) —
+  and **zeroes the delivery-stage generation cost**
+  (`zero_anticipated_delivery_thermal_cost`, so `generation_cost = 0` for these plants
+  at _every_ stage). In `simulation/extraction.rs`, `immediate_cost` (L1211, whole
+  objective − θ) **includes** this commitment cost but `thermal_cost` (L1213,
+  `range_sum(indexer.thermal)` = generation columns only) **excludes** it; it lands in
+  the **unattributed remainder of `immediate_cost`** (not `contract_cost`, which is 0).
+  NEWAVE instead books GNL fuel in `CTERM` **at delivery**, nominal, in the plant's
+  submarket.
+- **Categorization is Cobre-side; the mismatched pairing is bridge-side.** The exclusion
+  is decided in Cobre's `extraction.rs`; cobre-bridge reads the `thermal_cost` column
+  **verbatim** (`comparators/cobre_readers.py::read_cobre_stage_costs`) and pairs it with
+  `CTERM` (`comparators/charts.py::thermal_cost_chart`). That chart's docstring claim of
+  _"apples-to-apples … live thermal generation cost on both sides"_ is **wrong** — the
+  gap is exactly the GNL anticipated fuel.
+- **Verdict:** **expected** — basis difference, **not** a conversion bug and **not** a
+  missing cost (the total `immediate_cost` includes it). The converter correctly emits
+  GNL plants with `cost_per_mwh` and `anticipated_config`.
+- **Rules:**
+  - **Per-plant thermal — use `GTERMTOT`, not `GTERM`.** NEWAVE reports `GTERM` =
+    generation **above** the must-run minimum, `GTMIN` = the minimum, and
+    `GTERMTOT = GTERM + GTMIN = SIN total` (verified ratio 1.000 every stage). Using
+    `GTERM` under-reports each plant by ~21 % and fabricates phantom dispatch-mix
+    differences (it caused a false "Cobre runs ANGRA full / +35 % thermal energy" read).
+  - **Thermal cost — `CTERM` ↔ `thermal_cost` is NOT apples-to-apples.** Expect a gap =
+    the GNL anticipated fuel, localized to the GNL submarkets. Compare GNL-inclusive
+    **total `immediate_cost`** instead; per-stage it is shifted by `lead_stages` (Cobre
+    at commitment, NEWAVE at delivery) and discounted.
+- **Cobre-side improvement (reporting only):** surface the anticipated commitment cost as
+  its own cost category (or attribute it to `thermal_cost` at delivery) so the breakdown
+  reconciles — `investigations/cobre_side_findings.md` Finding 4.
+- **Evidence/ref:** cobre `matrix.rs::fill_anticipated_decision_objective` /
+  `zero_anticipated_delivery_thermal_cost`; `simulation/extraction.rs:1211,1213`; NEWAVE
+  `MEDIAS-MERC`/`MEDIAS-USIT` `GTERM`/`GTMIN`/`GTERMTOT`/`CTERM`; bridge
+  `comparators/cobre_readers.py`, `comparators/charts.py`.
+  [[project_thermal_cost_gnl_accounting]].
+
 ---
 
 ## Under investigation
+
+### Post-study (pós-estudo) cost divergence — completo only, not from withdrawal
+
+- **Symptom:** total operation cost (NEWAVE `COPER` vs Cobre `immediate_cost`) matches
+  within ~2 % on the **no-post-study** case (`…_2000_sem_pos`, 28 stages) but diverges
+  **+4 % overall (up to +16 % per stage)** on the **post-study** case
+  (`…_2000_completo`, 64 stages = study + 3 + 3 post). The withdrawal violation is
+  **conserved in both** (see Confirmed entry), so this residual is **not** the
+  withdrawal — it sits in the post-study tail.
+- **Where:** results; per-stage immediate cost in the post-study stages.
+- **Root cause:** not yet isolated. Candidate: end-of-horizon water management / FCF and
+  the converter's post-study extrapolation (last-year seasonal repetition; cf. the known
+  water-withdrawal post-study converter bug at `hydro.py:1083`). Running `sem_pos` was the
+  right move — it confirms the **core conversion is sound** and localizes the residual to
+  the post-study construction the user already suspected.
+- **Verdict:** open — investigate next; distinct from the (resolved) withdrawal degeneracy.
+- **Next step:** drill `compare results` on completo stages 28–63 (cost-first §3a): which
+  cost component drives the +16 % spikes, and whether it tracks post-study inflow/FCF
+  extrapolation.
 
 ### Water value / FCF gap — cut coefficients
 

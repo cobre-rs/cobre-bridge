@@ -12,6 +12,7 @@ import pytest
 from cobre_bridge.converters.constraints import (
     _is_stored_energy_reservoir,
     _parse_formula,
+    _vminop_energy_factor,
     _warn_if_fixed_penalization,
     compute_accumulated_integrated_productivities,
     compute_accumulated_productivities,
@@ -19,6 +20,7 @@ from cobre_bridge.converters.constraints import (
     convert_electric_constraints,
     convert_vminop_constraints,
 )
+from cobre_bridge.converters.network import C_M3S2HM3
 from cobre_bridge.converters.scalar_parameters import build_scalar_parameters
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
@@ -1122,3 +1124,37 @@ class TestConstraintResultTypes:
         assert r.bounds is bounds
         constraints, b = r  # legacy unpack
         assert constraints == [{"id": 0}]
+
+
+class TestVminopEnergyFactor:
+    """Guard the VminOP unit conversion: ρ_acum·hm³ → MWmonth must use each
+    stage's *real* month length, not NEWAVE's fixed 730 h.
+
+    Regression for the security-curve bug: leaving the VminOP LHS in
+    ρ_acum·hm³ (≈ 2.628× true MWmonth) while cobre prices the slack
+    ``× block_hours`` made the effective curve-violation penalty exceed the
+    deficit cost, so cobre deficited instead of drawing reservoirs down.
+    """
+
+    def test_factor_matches_real_month_hours(self) -> None:
+        # Study starting Sep 2024 (the example horizon).
+        #   stage 0 = Sep 2024 (30 d = 720 h)
+        #   stage 3 = Dec 2024 (31 d = 744 h)
+        #   stage 5 = Feb 2025 (28 d = 672 h)
+        assert _vminop_energy_factor(2024, 9, 0) == pytest.approx(720 * 3600 / 1e6)
+        assert _vminop_energy_factor(2024, 9, 3) == pytest.approx(744 * 3600 / 1e6)
+        assert _vminop_energy_factor(2024, 9, 5) == pytest.approx(672 * 3600 / 1e6)
+
+    def test_factor_differs_from_fixed_constant_off_730(self) -> None:
+        # Short/long months must NOT use the fixed 730 h constant — that was the
+        # bug. February (672 h) is ~8% below C_M3S2HM3.
+        feb = _vminop_energy_factor(2024, 9, 5)
+        assert feb != pytest.approx(C_M3S2HM3)
+        assert feb / C_M3S2HM3 == pytest.approx(672 / 730)
+
+    def test_factor_equals_constant_for_730h_month(self) -> None:
+        # A hypothetical 730 h month (NEWAVE's convention) reproduces C_M3S2HM3.
+        # No real calendar month is 730 h, so assert the relationship holds via
+        # the month-hours ratio instead (April = 30 d = 720 h).
+        apr = _vminop_energy_factor(2025, 4, 0)
+        assert apr == pytest.approx(C_M3S2HM3 * 720 / 730)

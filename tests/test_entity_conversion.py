@@ -3140,6 +3140,34 @@ class TestThermalBoundStageSteps:
         _step4b_apply_potef_availability(s_in, windows, stage_date=date(2024, 3, 1))
         assert s_in.potencia == 100.0
 
+    def test_step4b_zeroes_expt_plant_without_potef(self) -> None:
+        """EXPT plant with modifier-only entries (no POTEF) is not installed.
+
+        NEWAVE reports GERACAO MAXIMA = 0 for such a plant (e.g. LINHARES,
+        which carries only a TEIFT entry); without the flag it would fall back
+        to its TERM.DAT registry capacity.
+        """
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import (
+            _step4b_apply_potef_availability,
+        )
+
+        # No POTEF window + flagged as EXPT-without-POTEF → held out of service.
+        state = self._state(potencia=204.0, gen_min=0.0)
+        _step4b_apply_potef_availability(
+            state, None, stage_date=date(2024, 9, 1), expt_without_potef=True
+        )
+        assert state.potencia == 0.0
+        assert state.gen_min == 0.0
+
+        # No POTEF window + NOT flagged (purely TERM.DAT plant) → untouched.
+        s_keep = self._state(potencia=204.0, gen_min=0.0)
+        _step4b_apply_potef_availability(
+            s_keep, None, stage_date=date(2024, 9, 1), expt_without_potef=False
+        )
+        assert s_keep.potencia == 204.0
+
     def test_step5_subtracts_maint_reduction_before_maint_end(self) -> None:
         import numpy as np
 

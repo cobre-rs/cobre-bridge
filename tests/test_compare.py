@@ -416,6 +416,8 @@ class TestOverviewCostCharts:
                 "immediate_cost": [150.0e6, 50.0e6],
                 "future_cost": [0.0, 0.0],
                 "thermal_cost": [110.0e6, 90.0e6],
+                "anticipated_thermal_cost": [0.0, 0.0],
+                "thermal_cost_total": [110.0e6, 90.0e6],
             }
         )
         return nw_sin, cobre
@@ -463,6 +465,65 @@ class TestOverviewCostCharts:
         row = df.filter(pl.col("stage_id") == 0).row(0, named=True)
         assert row["thermal_cost"] == pytest.approx(20.0)  # block sum 8 + 12
         assert row["immediate_cost"] == pytest.approx(30.0)  # 10 + 20
+        # Pre-anticipation run (no anticipated_thermal_cost column): the derived
+        # thermal_cost_total falls back to thermal_cost (anticipated read as 0).
+        assert "thermal_cost_total" in df.columns
+        assert row["thermal_cost_total"] == pytest.approx(20.0)
+
+    def test_stage_costs_reader_folds_anticipated_into_thermal_total(
+        self, tmp_path: Path
+    ) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.cobre_readers import read_cobre_stage_costs
+
+        d = tmp_path / "simulation" / "costs" / "scenario_id=0000"
+        d.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "scenario_id": [0],
+                "stage_id": [0],
+                "block_id": [0],
+                "immediate_cost": [30.0],
+                "future_cost": [5.0],
+                "thermal_cost": [8.0],
+                "anticipated_thermal_cost": [7.0],
+            }
+        ).write_parquet(d / "data.parquet")
+
+        row = read_cobre_stage_costs(tmp_path).row(0, named=True)
+        assert row["thermal_cost"] == pytest.approx(8.0)
+        assert row["anticipated_thermal_cost"] == pytest.approx(7.0)
+        # NEWAVE-comparable thermal total = live + anticipated GNL fuel.
+        assert row["thermal_cost_total"] == pytest.approx(15.0)
+
+    def test_thermal_cost_chart_includes_anticipated_in_cobre_series(self) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.charts import thermal_cost_chart
+
+        nw_sin = pl.DataFrame(
+            {
+                "newave_code": [0],
+                "stage": [0],
+                "variable": ["CTERM"],
+                "value": [100.0],
+            }
+        )
+        cobre = pl.DataFrame(
+            {
+                "stage_id": [0],
+                "immediate_cost": [150.0e6],
+                "future_cost": [0.0],
+                "thermal_cost": [90.0e6],
+                "anticipated_thermal_cost": [10.0e6],
+                "thermal_cost_total": [100.0e6],
+            }
+        )
+        html = thermal_cost_chart(nw_sin, cobre, nw_offset=0)
+        # Cobre series plots thermal_cost_total (90 + 10) = 100, not 90.
+        assert "100.0" in html
+        assert "anticipated" in html  # legend label
 
     def test_generic_violation_groups_all_newave_restriction_parcelas(self) -> None:
         from cobre_bridge.comparators.charts import _resolve_cost_categories

@@ -333,13 +333,28 @@ def _step4b_apply_potef_availability(
     state: _StageInputs,
     windows: list[tuple[date, date]] | None,
     stage_date: date,
+    *,
+    expt_without_potef: bool = False,
 ) -> None:
     """Step 4b: a POTEF schedule defines the *only* periods the plant is available.
 
     Outside every window (tested against the ACTUAL stage date, not the frozen
     ``ref_date``) the plant is out of service for that stage.
+
+    A plant referenced in EXPT.DAT with modifier-only entries (TEIFT/FCMAX/
+    GTMIN/IPTER) but **no establishing POTEF** has no installed power: the
+    modifiers have nothing to modify, so NEWAVE reports
+    ``GERACAO MAXIMA POR CLASSE TERMICA = 0`` for it every stage. ``expt_without_potef``
+    marks that case so the plant is held out of service across the whole horizon
+    rather than falling back to its TERM.DAT registry capacity (e.g. LINHARES,
+    which carries only a TEIFT entry in the validation deck).
     """
-    if windows is not None and not any(ws <= stage_date <= we for ws, we in windows):
+    if windows is None:
+        if expt_without_potef:
+            state.potencia = 0.0
+            state.gen_min = 0.0
+        return
+    if not any(ws <= stage_date <= we for ws, we in windows):
         state.potencia = 0.0
         state.gen_min = 0.0
 
@@ -582,6 +597,19 @@ def convert_thermal_bounds(
             elif o["tipo"] == "GTMIN":
                 codes_with_gtmin.add(code)
 
+    # Plants referenced in EXPT with modifier-only entries (TEIFT/FCMAX/GTMIN/
+    # IPTER) but no establishing POTEF have no installed power: NEWAVE reports
+    # ``GERACAO MAXIMA POR CLASSE TERMICA = 0`` for them every stage. Hold them
+    # out of service (step 4b) rather than falling back to the TERM.DAT
+    # registry capacity.
+    codes_expt_without_potef = set(expt_by_code) - codes_with_potef
+    if codes_expt_without_potef:
+        _LOG.info(
+            "Thermal plant(s) %s appear in EXPT.DAT without a POTEF entry; "
+            "treating as not installed (max generation 0), matching NEWAVE.",
+            sorted(codes_expt_without_potef),
+        )
+
     # ------------------------------------------------------------------
     # 3. Load MANUTT maintenance events.
     # ------------------------------------------------------------------
@@ -661,7 +689,10 @@ def convert_thermal_bounds(
                 state, overrides, ref_date, is_post_study, stage_dates[-1]
             )
             _step4b_apply_potef_availability(
-                state, potef_windows.get(newave_code), stage_date
+                state,
+                potef_windows.get(newave_code),
+                stage_date,
+                expt_without_potef=newave_code in codes_expt_without_potef,
             )
             _step5_apply_maint_reduction(
                 state, maint_reduction, stage_idx, maint_end_stage

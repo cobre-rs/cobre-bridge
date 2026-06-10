@@ -1325,21 +1325,38 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre per-stage immediate/future/thermal cost (mean across scenarios).
 
     Returns a DataFrame with columns ``stage_id`` (Int64),
-    ``immediate_cost`` (Float64, R$), ``future_cost`` (Float64, R$) and
-    ``thermal_cost`` (Float64, R$). All are raw, *undiscounted* stage values —
+    ``immediate_cost`` (Float64, R$), ``future_cost`` (Float64, R$),
+    ``thermal_cost`` (Float64, R$), ``anticipated_thermal_cost`` (Float64, R$)
+    and the derived ``thermal_cost_total`` (= ``thermal_cost`` +
+    ``anticipated_thermal_cost``). All are raw, *undiscounted* stage values —
     the counterparts of NEWAVE's MEDIAS-SIN ``COPER`` / ``CUSTO_FUTURO`` /
     ``CTERM`` (after the 10⁶ R$ unit conversion on the NEWAVE side).
 
+    ``anticipated_thermal_cost`` is the GNL forward-committed thermal fuel that
+    Cobre books on the decision-stage commitment column (part of
+    ``immediate_cost`` but excluded from ``thermal_cost``); it was added to
+    Cobre's costs schema after 0.8.0. ``thermal_cost_total`` is the
+    NEWAVE-comparable thermal generation cost (CTERM books GNL at delivery).
+    Pre-anticipation runs lack the column → it reads as 0 and
+    ``thermal_cost_total == thermal_cost``.
+
     Cobre's costs table is one row per ``(scenario_id, stage_id, block_id)``;
-    we sum block-level immediate_cost / thermal_cost within each (scenario,
-    stage) and keep the (scenario, stage) value of future_cost, then average
-    across scenarios.  ``future_cost`` is identical across blocks of the same
-    stage so a ``max`` (= any) collapse is safe.
+    we sum block-level immediate_cost / thermal_cost / anticipated_thermal_cost
+    within each (scenario, stage) and keep the (scenario, stage) value of
+    future_cost, then average across scenarios.  ``future_cost`` is identical
+    across blocks of the same stage so a ``max`` (= any) collapse is safe.
     """
-    _SUM_COLS = ("immediate_cost", "thermal_cost")
-    _ALL_COLS = ("immediate_cost", "future_cost", "thermal_cost")
+    _SUM_COLS = ("immediate_cost", "thermal_cost", "anticipated_thermal_cost")
+    _ALL_COLS = (
+        "immediate_cost",
+        "future_cost",
+        "thermal_cost",
+        "anticipated_thermal_cost",
+    )
+    # Output adds the derived NEWAVE-comparable thermal total.
+    _OUT_COLS = (*_ALL_COLS, "thermal_cost_total")
     empty = pl.DataFrame(
-        schema={"stage_id": pl.Int64, **{c: pl.Float64 for c in _ALL_COLS}}
+        schema={"stage_id": pl.Int64, **{c: pl.Float64 for c in _OUT_COLS}}
     )
 
     lf = _scan_simulation_entity(cobre_output_dir, "costs")
@@ -1370,12 +1387,21 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
             f"{cobre_output_dir / 'simulation' / 'costs'}"
         ) from exc
 
-    # Ensure all columns are present even if one was missing in the schema.
+    # Ensure all columns are present even if one was missing in the schema
+    # (e.g. anticipated_thermal_cost on pre-anticipation Cobre runs).
     for c in _ALL_COLS:
         if c not in df.columns:
             df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
-    return df.select(["stage_id", *_ALL_COLS]).cast(
-        {"stage_id": pl.Int64, **{c: pl.Float64 for c in _ALL_COLS}}
+    # Derived NEWAVE-comparable thermal total: live generation + anticipated
+    # (GNL forward-committed) fuel. Null anticipated (old runs) counts as 0.
+    df = df.with_columns(
+        (
+            pl.col("thermal_cost").fill_null(0.0)
+            + pl.col("anticipated_thermal_cost").fill_null(0.0)
+        ).alias("thermal_cost_total")
+    )
+    return df.select(["stage_id", *_OUT_COLS]).cast(
+        {"stage_id": pl.Int64, **{c: pl.Float64 for c in _OUT_COLS}}
     )
 
 

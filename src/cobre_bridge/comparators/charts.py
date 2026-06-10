@@ -32,8 +32,16 @@ _BAND_LINE = "rgba(255,255,255,0)"
 # operational violations, generic violations) and drives the legend order in
 # the stacked bar.
 _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
-    # Operational / generation costs
-    ("Thermal Generation", ["GERACAO TERMICA"], ["thermal_cost"], "#D97706"),
+    # Operational / generation costs. Cobre's anticipated_thermal_cost (GNL
+    # forward-committed fuel, booked on the decision column) is folded in here so
+    # the thermal category matches NEWAVE GERACAO TERMICA / CTERM, which books
+    # GNL fuel at delivery. Absent in pre-anticipation Cobre runs (summed as 0).
+    (
+        "Thermal Generation",
+        ["GERACAO TERMICA"],
+        ["thermal_cost", "anticipated_thermal_cost"],
+        "#D97706",
+    ),
     ("Deficit", ["DEFICIT"], ["deficit_cost"], "#DC2626"),
     ("Energy Excess", ["EXCESSO ENERGIA"], ["excess_cost"], "#F59E0B"),
     ("Exchange", ["INTERCAMBIO"], ["exchange_cost"], "#7C3AED"),
@@ -450,22 +458,24 @@ def thermal_cost_chart(
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
 ) -> str:
-    """Per-stage thermal cost: NEWAVE ``CTERM`` vs Cobre ``thermal_cost``.
+    """Per-stage thermal cost: NEWAVE ``CTERM`` vs Cobre thermal (incl. anticip.).
 
-    Unlike the immediate-cost chart (NEWAVE ``COPER``), CTERM is the live
-    thermal generation cost on both sides, so this is an apples-to-apples
-    comparison even in the post-study (where COPER is frozen — see
-    :func:`other_costs_chart`).
+    The Cobre side is ``thermal_cost_total`` = ``thermal_cost`` +
+    ``anticipated_thermal_cost`` (the GNL forward-committed fuel Cobre books on
+    the decision column), so it lines up with NEWAVE ``CTERM``, which carries
+    GNL fuel at delivery. Both are the live thermal generation cost, so this is
+    an apples-to-apples comparison even in the post-study (where COPER is frozen
+    — see :func:`other_costs_chart`).
     """
     return _stage_cost_subplot(
         nw_sin,
         cobre_stage_costs,
         nw_offset,
         nw_variable="CTERM",
-        cb_column="thermal_cost",
+        cb_column="thermal_cost_total",
         title="Thermal Cost — NEWAVE CTERM vs Cobre",
         nw_label="NEWAVE CTERM",
-        cb_label="Cobre thermal_cost",
+        cb_label="Cobre thermal (incl. anticipated)",
     )
 
 
@@ -476,18 +486,19 @@ def other_costs_chart(
 ) -> str:
     """Per-stage non-thermal operation cost: ``COPER − CTERM`` per stage.
 
-    NEWAVE: ``COPER − CTERM``. Cobre: ``immediate_cost − thermal_cost``. This
-    isolates everything in the immediate cost that is *not* thermal generation
-    (deficit, penalties, slacks). On the NEWAVE side it goes **negative** in the
-    post-study because COPER is frozen at the last study value while CTERM
-    tracks the live post-study thermal cost — so this chart surfaces that
-    frozen-COPER gap explicitly.
+    NEWAVE: ``COPER − CTERM``. Cobre: ``immediate_cost − thermal_cost_total``
+    (``thermal_cost_total`` = live + anticipated GNL fuel, matching the thermal
+    category). This isolates everything in the immediate cost that is *not*
+    thermal generation (deficit, penalties, slacks). On the NEWAVE side it goes
+    **negative** in the post-study because COPER is frozen at the last study
+    value while CTERM tracks the live post-study thermal cost — so this chart
+    surfaces that frozen-COPER gap explicitly.
     """
     _, nw_coper, cb_imm = _extract_stage_cost_series(
         nw_sin, cobre_stage_costs, nw_offset, "COPER", "immediate_cost"
     )
     _, nw_cterm, cb_therm = _extract_stage_cost_series(
-        nw_sin, cobre_stage_costs, nw_offset, "CTERM", "thermal_cost"
+        nw_sin, cobre_stage_costs, nw_offset, "CTERM", "thermal_cost_total"
     )
 
     nw_other = {s: nw_coper[s] - nw_cterm[s] for s in nw_coper if s in nw_cterm}
@@ -2282,10 +2293,12 @@ def overview_metrics(
     from cobre_bridge.ui.theme import COMPARISON_COLORS
 
     # Pull thermal-generation cost only (single-category NPV). NEWAVE
-    # parcela "GERACAO TERMICA" and Cobre "thermal_cost" are sourced
-    # straight from ``_COST_MAP``.
+    # parcela "GERACAO TERMICA" vs Cobre ``thermal_cost`` + the GNL
+    # ``anticipated_thermal_cost`` (matching the "Thermal Generation"
+    # ``_COST_MAP`` category; anticipated is 0 / absent on non-GNL runs).
     nw_thermal = (nw_costs or {}).get("GERACAO TERMICA", 0.0)
-    cb_thermal = (cobre_costs or {}).get("thermal_cost", 0.0)
+    _cb = cobre_costs or {}
+    cb_thermal = _cb.get("thermal_cost", 0.0) + _cb.get("anticipated_thermal_cost", 0.0)
     diff = cb_thermal - nw_thermal
     pct = (diff / nw_thermal * 100.0) if abs(nw_thermal) > 1e-6 else float("nan")
 

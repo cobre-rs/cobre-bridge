@@ -28,7 +28,9 @@ from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
     compute_per_stage_own_integrated_productivities,
 )
+from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
+from cobre_bridge.converters.temporal import _month_hours
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.plants import active_hydros
 from cobre_bridge.productivity import compute_productivity, stored_energy_productivity
@@ -39,6 +41,23 @@ _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
     "/book/src/schemas/generic_constraints.schema.json"
 )
+
+
+def _vminop_energy_factor(start_year: int, start_month: int, stage: int) -> float:
+    """Per-stage ``ρ_acum·hm³ → MWmonth`` divisor for the VminOP energy units.
+
+    ρ_acum is in MW/(m³/s), so ``ρ_acum · storage[hm³]`` overstates the true
+    stored energy (MWmonth) by the hm³↔(m³/s)·month factor. That factor scales
+    with the month's length, and cobre prices the VminOP slack with each stage's
+    **real** ``block_hours`` (672–744 h — actual calendar months), **not**
+    NEWAVE's fixed 730 h convention. Using the actual month length here makes the
+    effective slack penalty resolve to the intended R$/MWh on every stage; the
+    fixed ``C_M3S2HM3`` would leave a ±~9 % per-stage error (worst in February).
+    Equals ``C_M3S2HM3`` exactly for a 730 h month.
+    """
+    total = start_month - 1 + stage
+    hours = _month_hours(start_year + total // 12, total % 12 + 1)
+    return C_M3S2HM3 * hours / MONTH_HOURS
 
 
 class VminopResult(NamedTuple):
@@ -459,6 +478,30 @@ def convert_vminop_constraints(
     acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)
     per_stage_own_int = compute_per_stage_own_integrated_productivities(case)
     per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own_int)
+
+    # Convert ρ_acum from MW/(m³/s) to MWmonth/hm³ so the VminOP LHS
+    # (Σ ρ_acum · hydro_storage[hm³], and the matching RHS, both built from
+    # per_stage_acc) is the *true* stored energy in MWmonth rather than
+    # ρ_acum·hm³, which overstates it by the hm³↔(m³/s)·month factor (≈ 2.628).
+    # The VminOP slack penalty is a R$/MWh value (penalid.dat); without this
+    # conversion the slack is that factor too large, so the effective
+    # curve-violation cost rises above the deficit cost and the LP prefers
+    # deficit to violating the security curve — i.e. Cobre hoards water under
+    # scarcity instead of drawing it down like NEWAVE.
+    #
+    # The factor is applied *per stage* via :func:`_vminop_energy_factor`, which
+    # uses each stage's real month length (cobre prices the slack as
+    # ``penalty × block_hours`` with the actual 672–744 h durations, not the
+    # fixed 730 h). The factor cancels between LHS and RHS, so the binding
+    # storage level is unchanged; only the slack's energy units (and thus the
+    # effective R$/MWh penalty) are corrected.
+    per_stage_acc = {
+        code: [
+            v / _vminop_energy_factor(start_year, start_month, s)
+            for s, v in enumerate(values)
+        ]
+        for code, values in per_stage_acc.items()
+    }
 
     # Map hydros to REEs
     hydro_to_ree = _build_hydro_to_ree(confhd_df)

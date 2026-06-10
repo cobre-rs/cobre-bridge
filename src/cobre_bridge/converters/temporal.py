@@ -670,21 +670,22 @@ def convert_config(case: NewaveCase) -> dict:
         "estimation": estimation,
         "training": training_section,
         "modeling": {
-            # `method: "truncation_with_penalty"` clamps negative PAR(p) inflow
-            # draws to zero before LP patching *and* keeps the inflow-non-
-            # negativity slack columns enabled.  The clamp closes the
+            # `method: "truncation"` clamps negative PAR(p) inflow draws to
+            # zero before LP patching.  This is the real fix for the
             # "free water" exploit where the LP would otherwise route negative
-            # noise through the withdrawal-neg slack (cheaper than the
-            # non-negativity slack on the cobre-bridge calibration); the
-            # slack columns remain as a defensive backstop for any edge case
-            # the truncation misses.  The slack penalty itself still comes
-            # from `penalties.json::hydro.inflow_nonnegativity_cost`, which
-            # `convert_penalties` populates.  The legacy `penalty_cost` field
-            # in this block is *deprecated* (see cobre config schema docs)
-            # and ignored when penalties.json supplies the value, so we
-            # intentionally omit it here.
+            # inflow noise through a cheaper operational slack (e.g. the
+            # withdrawal-neg slack, cheaper than the non-negativity slack on
+            # the cobre-bridge calibration) — truncation removes the negative
+            # draw at the source rather than relying on the priced
+            # non-negativity slack columns kept by `truncation_with_penalty`.
+            # The inflow-non-negativity penalty value still comes from
+            # `penalties.json::hydro.inflow_nonnegativity_cost` (populated by
+            # `convert_penalties`) for any path that references it.  The legacy
+            # `penalty_cost` field in this block is *deprecated* (see cobre
+            # config schema docs) and ignored when penalties.json supplies the
+            # value, so we intentionally omit it here.
             "inflow_non_negativity": {
-                "method": "truncation_with_penalty",
+                "method": "truncation",
             },
         },
         "exports": {

@@ -50,6 +50,11 @@ COST_PARTITION_COLUMNS: frozenset[str] = frozenset(
 COBRE_COST_COMPONENT_COLUMNS: tuple[str, ...] = (
     # Generation / operational
     "thermal_cost",
+    # Anticipated (forward-committed, GNL) thermal fuel, booked on the
+    # decision-stage commitment column. Added to Cobre's costs schema after
+    # 0.8.0; absent in older runs (read as 0). Grouped with thermal generation
+    # so the thermal category matches NEWAVE CTERM (which books GNL at delivery).
+    "anticipated_thermal_cost",
     "deficit_cost",
     "excess_cost",
     "contract_cost",

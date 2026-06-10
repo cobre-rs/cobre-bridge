@@ -97,9 +97,24 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   with HM3_TO_MWH_PER_RHO = 1e6/3600 ≈ 277.78.
 #
 # NEWAVE's 730 h-per-month convention vs cobre's actual calendar block_hours
-# (672–744 h) introduces only a ±2% numerical drift in absolute LP cost. It
-# does not change merit order or LP decisions (all costs scale together).
-# The HM3 → MWh conversion is pure volumetric and the 730 cancels out.
+# (672–744 h) introduces only a ±2% numerical drift in absolute LP cost for the
+# Families above — *because each is converted consistently*: flow/power
+# penalties carry no fixed-month factor (cobre integrates them with the real
+# per-stage block_hours), and volume penalties carry no time multiplier (the
+# 730 cancels in the pure-volumetric HM3 → MWh conversion). When that holds, all
+# costs scale together and merit order is preserved.
+#
+# ⚠️ CAVEAT — the assumption fails for any energy/STOCK quantity that cobre then
+# prices *with* a `× block_hours` time multiplier. There the fixed 730 does NOT
+# cancel: the converted energy uses 730 while cobre integrates the slack with
+# the actual month hours, so the effective penalty drifts by block_hours/730 and
+# CAN flip merit order. This bit the VminOP generic constraint (security curve):
+# its LHS `Σ ρ_acum·storage` was left in ρ_acum·hm³ (≈ 2.628× the true MWmonth)
+# while cobre priced the slack `× block_hours`, pushing the effective curve
+# penalty above the deficit cost so cobre deficited instead of drawing down.
+# Fixed by converting ρ_acum to MWmonth/hm³ *per stage* — see
+# `converters/constraints.py:_vminop_energy_factor`. Any future LP constraint or
+# penalty on a stock (storage/energy) priced `× block_hours` must do the same.
 #
 # Merit order from NEWAVE micro-penalty values ("NEWAVE individualizado"
 # column, manual §3.24 p.88, v30 defaults):
@@ -614,6 +629,13 @@ def _hydro_penalty_costs(
     # cancels out — this is dimensional energy-equivalence, not a per-hour
     # rate. (Earlier versions used × C_M3S2HM3 here which was wrong by
     # the factor MONTH_HOURS = 730.)
+    #
+    # ⚠️ This volumetric (730-cancelling) form is correct ONLY because cobre
+    # prices these Family-D slots with NO time multiplier (`objective = penalty`).
+    # If they are ever wired into the LP with a `× block_hours` term (like the
+    # generic/VminOP slack), this conversion becomes wrong: the slack would then
+    # need per-stage hours, exactly like
+    # `constraints.py:_vminop_energy_factor`. Keep these two facts in lockstep.
     volmin_mwh = penalid_costs.get("VOLMIN")
     storage_below_cost = (
         volmin_mwh * rho_avg * HM3_TO_MWH_PER_RHO

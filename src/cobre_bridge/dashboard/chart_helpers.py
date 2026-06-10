@@ -41,8 +41,8 @@ except ImportError:  # pragma: no cover
 #: The ``"Other"`` key is intentionally absent — it is computed dynamically in
 #: :func:`group_costs` as all columns not claimed by the explicit groups.
 COST_GROUPS: dict[str, list[str]] = {
-    # Generation costs
-    "Thermal": ["thermal_cost"],
+    # Generation costs (anticipated = GNL forward-committed fuel, grouped here)
+    "Thermal": ["thermal_cost", "anticipated_thermal_cost"],
     "Deficit": ["deficit_cost"],
     "Energy Excess": ["excess_cost"],
     "Spillage": ["spillage_cost"],
