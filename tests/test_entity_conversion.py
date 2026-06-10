@@ -3681,6 +3681,41 @@ class TestConvertInitialConditions:
         result = convert_initial_conditions(_ic_case(tmp_path), self._make_id_map())
         assert result["filling_storage"] == []
 
+    def test_storage_uses_volmin_adjusted_min(self, tmp_path) -> None:
+        """Initial-% is of the operational useful (vol_max − VOLMIN), not raw.
+
+        A modif.dat VOLMIN override raises the operational minimum; NEWAVE takes
+        ``volume_inicial_percentual`` of the VOLMIN-adjusted useful range (verified
+        against pmo.dat "VOLUME ARMAZENADO INICIAL" for I. SOLTEIRA). The initial
+        storage must use the same min the bounds converter uses. Regression for
+        the I. Solteira initial-storage bug.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        # USINA_A (code 1): raw vol_min=100, vol_max=1000, pct=50%. A VOLMIN=400
+        # override makes the operational useful 1000−400 = 600.
+        volmin_rec = MagicMock()
+        type(volmin_rec).__name__ = "VOLMIN"
+        volmin_rec.volume = 400.0
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [volmin_rec]
+
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = _make_hidr_cadastro()
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        case = make_case(tmp_path, hidr=mock_hidr, confhd=mock_confhd, modif=mock_modif)
+
+        result = convert_initial_conditions(case, self._make_id_map())
+        storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
+        # operational base: 0.50 * (1000 − 400) + 400 = 700 (NOT the raw-min 550).
+        assert storage[0] == pytest.approx(700.0)
+
 
 def _ic_case(tmp_path, pct_b: float = 75.0):
     """Build a NewaveCase with hidr/confhd readers pre-cached for IC tests."""

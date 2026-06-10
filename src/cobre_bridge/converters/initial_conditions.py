@@ -8,6 +8,7 @@ import pandas as pd
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
+from cobre_bridge.converters.hydro import read_cadastro
 from cobre_bridge.converters.thermal import thermal_generation_bounds
 from cobre_bridge.id_map import NewaveIdMap
 
@@ -41,7 +42,13 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         If a hydro in ``confhd.dat`` references a code absent in
         ``hidr.dat``.
     """
-    cadastro = case.hidr.cadastro
+    # Apply permanent MODIF.DAT overrides (notably VOLMIN) so the initial-storage
+    # percentage is taken of the *operational* useful volume — the same min the
+    # bounds converter uses.  NEWAVE applies ``volume_inicial_percentual`` to the
+    # VOLMIN-adjusted useful range, not the raw hidr.dat one (verified against
+    # pmo.dat "VOLUME ARMAZENADO INICIAL": I. SOLTEIRA V.INIC 3940.9 hm³ @ 71.70%
+    # is 71.70% of (vmax − VOLMIN), not (vmax − raw_min)).
+    cadastro = read_cadastro(case)
 
     existing = case.active_hydros
 
