@@ -3168,6 +3168,57 @@ class TestThermalBoundStageSteps:
         )
         assert s_keep.potencia == 204.0
 
+    def test_step4c_drops_gtmin_outside_window(self) -> None:
+        """GTMIN applies only inside EXPT windows; outside it is 0 (capacity kept).
+
+        NEWAVE ignores the TERM.DAT GTMIN outside the EXPT GTMIN windows
+        (e.g. DO_ATLANTICO: window Sep-Oct, TERM.DAT 201.5 in Nov/Dec, but
+        NEWAVE GERACAO MINIMA = 0 there).
+        """
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import (
+            _step4c_apply_gtmin_availability,
+        )
+
+        windows = [(date(2024, 9, 1), date(2024, 10, 1))]
+        # Inside the window → minimum kept; capacity untouched.
+        s_in = self._state(potencia=235.0, gen_min=218.68)
+        _step4c_apply_gtmin_availability(s_in, windows, stage_date=date(2024, 9, 1))
+        assert s_in.gen_min == 218.68
+        assert s_in.potencia == 235.0
+        # Outside the window → minimum dropped to 0; capacity untouched.
+        s_out = self._state(potencia=235.0, gen_min=201.5)
+        _step4c_apply_gtmin_availability(s_out, windows, stage_date=date(2024, 11, 1))
+        assert s_out.gen_min == 0.0
+        assert s_out.potencia == 235.0
+
+    def test_step4c_drops_gtmin_for_expt_plant_without_gtmin(self) -> None:
+        """EXPT plant with no GTMIN entry has no minimum (TERM.DAT GTMIN ignored).
+
+        E.g. JARAQUI / MARLIM AZUL: in EXPT (POTEF/FCMAX) with a nonzero
+        TERM.DAT GTMIN but no GTMIN entry → NEWAVE GERACAO MINIMA = 0.
+        """
+        from datetime import date
+
+        from cobre_bridge.converters.thermal import (
+            _step4c_apply_gtmin_availability,
+        )
+
+        # No GTMIN window + flagged → minimum dropped, capacity untouched.
+        s = self._state(potencia=75.0, gen_min=62.99)
+        _step4c_apply_gtmin_availability(
+            s, None, stage_date=date(2024, 9, 1), expt_without_gtmin=True
+        )
+        assert s.gen_min == 0.0
+        assert s.potencia == 75.0
+        # No GTMIN window + NOT flagged (purely TERM.DAT plant) → untouched.
+        s_keep = self._state(potencia=75.0, gen_min=62.99)
+        _step4c_apply_gtmin_availability(
+            s_keep, None, stage_date=date(2024, 9, 1), expt_without_gtmin=False
+        )
+        assert s_keep.gen_min == 62.99
+
     def test_step5_subtracts_maint_reduction_before_maint_end(self) -> None:
         import numpy as np
 
