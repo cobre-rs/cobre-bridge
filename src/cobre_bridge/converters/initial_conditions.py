@@ -67,19 +67,25 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
-        # Daily-regulation ('D') plants are frozen at ``volume_referencia``
-        # by NEWAVE — the reservoir doesn't accumulate water across stages.
-        # Mirror that by anchoring initial storage to the reference volume
-        # so it stays consistent with the (collapsed) min/max bounds set in
-        # ``hydro.py``.
+        # Fio-d'água plants don't accumulate water across stages, so the
+        # bounds converter collapses their storage to a single point in
+        # ``hydro.py``.  Anchor the initial storage to that same point so the
+        # initial condition stays inside the (collapsed) [min, max] range:
+        #   * 'D' (daily) → ``volume_referencia`` (legacy, validated).
+        #   * 'S' (run-of-river) → ``volume_minimo`` (NEWAVE pins ITAIPU at
+        #     VARMPUH 0% = Vmin; matches the collapse in ``hydro.py``).
         tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
         vol_ref_raw = hreg.get("volume_referencia")
+        anchored: float | None = None
         if tipo_reg == "D" and vol_ref_raw is not None and not pd.isna(vol_ref_raw):
-            value_hm3 = float(vol_ref_raw)
+            anchored = float(vol_ref_raw)
+        elif tipo_reg == "S":
+            anchored = vol_min
+        if anchored is not None:
             storage.append(
                 {
                     "hydro_id": id_map.hydro_id(newave_code),
-                    "value_hm3": value_hm3,
+                    "value_hm3": anchored,
                 }
             )
             continue

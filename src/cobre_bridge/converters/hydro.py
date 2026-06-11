@@ -639,12 +639,23 @@ def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float,
         # equals h_op — the same value is reused intentionally.
         h_int = h_op
     else:
-        # Run-of-river / daily-regulated / S plants — no integration window;
-        # use machine-count-weighted nominal head for the kturb sum, and
-        # the full V_min..V_max integral for prodt.
-        h_op = sum_n_h / total_machines
-        h_int_gross = _mean_cota_over_volume(hreg, vol_min, vol_max) - cf
-        h_int = _apply_hydraulic_loss(h_int_gross, tipo_perda, perdas)
+        # Run-of-river ('S') and daily-regulated ('D') plants operate at a
+        # ~constant volume = the reference volume (``volume_referencia``).
+        # NEWAVE's operating head is the forebay cota AT vol_ref minus tailrace
+        # and losses, used for BOTH the turbine affinity ratio and prodt.  The
+        # previous code used the machine-weighted *nominal* head as ``h_op``,
+        # which made the affinity ratio ``h_op / h_nominal`` ≈ 1 (a silent
+        # no-op, leaving ``max_turbined = Σ(n·q)·availability`` uncorrected).
+        # Verified vs NEWAVE's ``(GHIDUH/QTURUH)/ρ_esp`` operating head to
+        # ~0.01 m across ~57 run-of-river plants incl. ITAIPU (113.37 m vs
+        # nominal 117 m → cap 11692.65 not 11878.58).
+        vol_ref_raw = hreg.get("volume_referencia")
+        if vol_ref_raw is None or is_na(vol_ref_raw) or float(vol_ref_raw) <= 0.0:
+            h_op_gross = _mean_cota_over_volume(hreg, vol_min, vol_max) - cf
+        else:
+            h_op_gross = _evaluate_cota_polynomial(hreg, float(vol_ref_raw)) - cf
+        h_op = _apply_hydraulic_loss(h_op_gross, tipo_perda, perdas)
+        h_int = h_op
 
     # Defensive: a negative or zero h_op means cota_jus is above the
     # forebay (data error or post-overhaul cota).  Fall back to the simple
@@ -768,10 +779,16 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
-        # NEWAVE treats Daily-regulation ('D') plants as having frozen
-        # storage at ``volume_referencia`` — they can't accumulate water
-        # across stages.  Collapse the active range to a single point so
-        # Cobre's LP mirrors the same behavior.
+        # NEWAVE treats Daily-regulation ('D') and run-of-river / fio-d'água
+        # ('S') plants as fio-d'água — they can't accumulate water across
+        # stages, so the useful volume is NOT a usable reservoir buffer.
+        # Collapse the active range to a single point so Cobre's LP mirrors
+        # that (otherwise Cobre stores the inflow excess in the phantom buffer
+        # and shifts it across stages, where NEWAVE simply spills it).
+        #   * 'D' → frozen at ``volume_referencia`` (legacy, validated).
+        #   * 'S' → pinned at ``volume_minimo``; verified against ITAIPU (the
+        #     only 'S' plant), which NEWAVE keeps at VARMPUH 0% = Vmin every
+        #     stage, spilling the turbine-excess inflow.
         tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
         if tipo_reg == "D":
             vol_ref_raw = hreg.get("volume_referencia")
@@ -779,6 +796,8 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 vol_ref = float(vol_ref_raw)
                 vol_min = vol_ref
                 vol_max = vol_ref
+        elif tipo_reg == "S":
+            vol_max = vol_min
 
         # Generation parameters. Productivity lives in
         # ``hydro_production_models.json`` on cobre HEAD; callers that need

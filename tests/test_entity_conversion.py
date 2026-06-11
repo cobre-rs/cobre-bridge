@@ -401,6 +401,29 @@ class TestConvertHydros:
             assert "generation" in h
             assert h["generation"]["model"] == "constant_productivity"
 
+    def test_run_of_river_S_storage_collapsed_to_vmin(self, tmp_path) -> None:
+        """``tipo_regulacao='S'`` (fio-d'água) collapses storage to Vmin.
+
+        NEWAVE treats 'S' plants as run-of-river with no usable buffer (ITAIPU,
+        the only 'S' plant, sits at VARMPUH 0% = Vmin every stage, spilling the
+        turbine-excess inflow).  The converter must pin min==max==Vmin so cobre
+        doesn't store and shift that surplus across stages.
+        """
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        cadastro = _make_hidr_cadastro()
+        cadastro.loc[1, "tipo_regulacao"] = "S"  # USINA_A: Vmin 100, Vmax 1000
+        case = _hydro_case(tmp_path, cadastro=cadastro)
+
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        assert hydro_a["reservoir"]["min_storage_hm3"] == 100.0
+        assert hydro_a["reservoir"]["max_storage_hm3"] == 100.0
+        # 'M' plant unchanged (keeps its full range).
+        hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
+        assert hydro_b["reservoir"]["min_storage_hm3"] == 50.0
+        assert hydro_b["reservoir"]["max_storage_hm3"] == 500.0
+
     def test_cascade_downstream_linkage(self, tmp_path) -> None:
         """Plant 2 (code=2) is downstream of plant 1 (code=1)."""
         case = _hydro_case(tmp_path)
@@ -3715,6 +3738,31 @@ class TestConvertInitialConditions:
         storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
         # operational base: 0.50 * (1000 − 400) + 400 = 700 (NOT the raw-min 550).
         assert storage[0] == pytest.approx(700.0)
+
+    def test_run_of_river_S_initial_anchored_to_vmin(self, tmp_path) -> None:
+        """``tipo_regulacao='S'`` initial storage is pinned to Vmin.
+
+        The bounds converter collapses 'S' (fio-d'água) storage to Vmin; the
+        initial condition must match so it stays inside the collapsed [min,max]
+        range (NEWAVE keeps ITAIPU at VARMPUH 0% = Vmin).  The
+        ``volume_inicial_percentual`` (50% here) is ignored for 'S' plants.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        cadastro = _make_hidr_cadastro()
+        cadastro.loc[1, "tipo_regulacao"] = "S"  # USINA_A: Vmin 100, Vmax 1000
+        mock_hidr = MagicMock()
+        mock_hidr.cadastro = cadastro
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = _make_confhd_df()
+        case = make_case(tmp_path, hidr=mock_hidr, confhd=mock_confhd)
+
+        result = convert_initial_conditions(case, self._make_id_map())
+        storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
+        # 'S' plant anchored to Vmin (100), NOT 0.50*(1000−100)+100 = 550.
+        assert storage[0] == pytest.approx(100.0)
 
 
 def _ic_case(tmp_path, pct_b: float = 75.0):
