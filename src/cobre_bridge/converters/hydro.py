@@ -17,6 +17,7 @@ from cobre_bridge.horizon import (
 )
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
+from cobre_bridge.plants import fictitious_codes
 from cobre_bridge.productivity import (
     compute_productivity,
     equivalent_productivity,
@@ -1807,25 +1808,24 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
     # NC withdrawals to the next real plant in the cascade, while FICT
     # entries are not propagated and are silently dropped.
     confhd_df = case.confhd.usinas
+    fict_set = fictitious_codes(confhd_df, case.hidr.cadastro)
     plant_downstream: dict[int, int] = {}
-    plant_is_fict: dict[int, bool] = {}
     for _, r in confhd_df.iterrows():
         code = int(r["codigo_usina"])
         jus = r["codigo_usina_jusante"]
         plant_downstream[code] = int(jus) if jus is not None and not pd.isna(jus) else 0
-        plant_is_fict[code] = str(r["nome_usina"]).strip().startswith("FICT.")
 
     def _resolve_to_hydro_id(start_code: int) -> int | None:
         """Walk downstream from *start_code* until reaching a plant present
-        in ``id_map``. FICT plants are never propagated. Returns the hydro_id
-        of the first reachable EX plant, or ``None`` if the chain hits a
-        terminus or a FICT node first.
+        in ``id_map``. Fictitious plants are never propagated. Returns the
+        hydro_id of the first reachable EX plant, or ``None`` if the chain hits
+        a terminus or a fictitious node first.
         """
         visited: set[int] = set()
         cur = start_code
         while cur and cur not in visited:
             visited.add(cur)
-            if plant_is_fict.get(cur, False):
+            if cur in fict_set:
                 return None
             try:
                 return id_map.hydro_id(cur)

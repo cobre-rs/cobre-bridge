@@ -205,34 +205,36 @@ class NewaveCase:
 
     @property
     def active_hydros(self) -> pd.DataFrame:
-        """The existing, non-fictitious hydro rows that enter the Cobre LP.
+        """The existing hydro rows that enter the Cobre LP.
 
-        The canonical "active hydro" set (``plants.active_hydros``). Recomputed
-        per access (not cached) — it's a cheap confhd filter and callers may hold
-        their own view, so a shared cached DataFrame could alias.
+        The canonical "active hydro" set (``plants.active_hydros``): existing
+        non-fictitious plants, plus any orphaned FICT reservoir kept as a
+        non-generating node (the hidr cadastro is passed so the storage test can
+        run). Recomputed per access (not cached) — it's a cheap filter and
+        callers may hold their own view, so a shared cached DataFrame could alias.
         """
         from cobre_bridge.plants import active_hydros
 
-        return active_hydros(self.confhd.usinas)
+        return active_hydros(self.confhd.usinas, self.hidr.cadastro)
 
     @property
     def active_hydro_codes(self) -> list[int]:
-        """``codigo_usina`` of the active hydros, in confhd declaration order."""
+        """``codigo_usina`` of the active hydros (real first, kept FICT last)."""
         from cobre_bridge.plants import active_hydro_codes
 
-        return active_hydro_codes(self.confhd.usinas)
+        return active_hydro_codes(self.confhd.usinas, self.hidr.cadastro)
 
     @cached_property
     def id_map(self) -> NewaveIdMap:
         """The canonical NEWAVE→Cobre :class:`NewaveIdMap` for this case.
 
-        Built from the cached ``confhd``/``conft``/``sistema``/``ree`` readers, so
-        it reuses parses already done rather than re-reading the four files (the
-        free ``id_map.build_id_map`` re-reads them for callers that only hold
+        Built from the cached ``confhd``/``conft``/``sistema``/``ree``/``hidr``
+        readers, so it reuses parses already done rather than re-reading the files
+        (the free ``id_map.build_id_map`` re-reads them for callers that only hold
         paths, e.g. the CLI compare commands).
         """
         from cobre_bridge.id_map import build_id_map_from_readers
 
         return build_id_map_from_readers(
-            self.confhd, self.conft, self.sistema, self.ree
+            self.confhd, self.conft, self.sistema, self.ree, self.hidr
         )

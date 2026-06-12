@@ -1983,17 +1983,43 @@ class TestProductivitySinMeans:
             {
                 1: {"produtibilidade_especifica": 0.009, "canal_fuga_medio": 250.0},
                 2: {"produtibilidade_especifica": 0.010, "canal_fuga_medio": 300.0},
-                3: {"produtibilidade_especifica": 0.008},  # FICT by name → excluded
-                # code 4 is EX/non-FICT but absent from cadastro → skipped
+                # code 3: ρ=0 sharing plant 1's posto → fictitious → excluded
+                3: {"produtibilidade_especifica": 0.0},
+                # code 4 is EX/non-fict but absent from cadastro → skipped
             }
         )
         confhd = self._confhd(
             [
-                {"codigo_usina": 1, "nome_usina": "PLANT A", "usina_existente": "EX"},
-                {"codigo_usina": 2, "nome_usina": "PLANT B", "usina_existente": "EX"},
-                {"codigo_usina": 3, "nome_usina": "FICT. X", "usina_existente": "EX"},
-                {"codigo_usina": 4, "nome_usina": "PLANT D", "usina_existente": "EX"},
-                {"codigo_usina": 5, "nome_usina": "PLANT E", "usina_existente": "NE"},
+                {
+                    "codigo_usina": 1,
+                    "nome_usina": "PLANT A",
+                    "posto": 1,
+                    "usina_existente": "EX",
+                },
+                {
+                    "codigo_usina": 2,
+                    "nome_usina": "PLANT B",
+                    "posto": 2,
+                    "usina_existente": "EX",
+                },
+                {
+                    "codigo_usina": 3,
+                    "nome_usina": "FICT TWIN",
+                    "posto": 1,
+                    "usina_existente": "EX",
+                },
+                {
+                    "codigo_usina": 4,
+                    "nome_usina": "PLANT D",
+                    "posto": 4,
+                    "usina_existente": "EX",
+                },
+                {
+                    "codigo_usina": 5,
+                    "nome_usina": "PLANT E",
+                    "posto": 5,
+                    "usina_existente": "NE",
+                },
             ]
         )
         case, overrides = self._case(tmp_path, cadastro, confhd)
@@ -2166,6 +2192,9 @@ class TestProductivitySinMeans:
         from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
 
         case = make_case(tmp_path)
+        # Drop the conftest default hidr so accessing ``case.hidr`` triggers the
+        # patched ``Hidr.read`` (this test exercises the read-error fallback).
+        case.__dict__.pop("hidr", None)
         with patch("cobre_bridge.case.Hidr") as mh:
             mh.read.side_effect = OSError("no file")
             assert compute_max_prodtacum_sin(case) is None
@@ -3988,12 +4017,17 @@ class TestCrossReferenceConsistency:
 
 
 def _make_confhd_df_with_fict() -> pd.DataFrame:
-    """Four plants: two real, two fictitious (names start with 'FICT.')."""
+    """Four plants: two real, two fictitious accounting twins.
+
+    Each fictitious plant (ρ=0) shares its real twin's posto — the structural
+    fictitious signature: ``FICT.SERRA M`` on posto 1 with ``USINA_A`` (ρ>0),
+    ``FICT.CAMPO G`` on posto 3 with ``USINA_B`` (ρ>0).
+    """
     return pd.DataFrame(
         {
             "codigo_usina": [1, 2, 3, 4],
             "nome_usina": ["USINA_A", "FICT.SERRA M", "USINA_B", "FICT.CAMPO G"],
-            "posto": [1, 2, 3, 4],
+            "posto": [1, 1, 3, 3],
             "codigo_usina_jusante": [pd.NA, pd.NA, 1, 2],
             "ree": [1, 1, 1, 1],
             "volume_inicial_percentual": [50.0, 60.0, 70.0, 80.0],
@@ -4003,9 +4037,18 @@ def _make_confhd_df_with_fict() -> pd.DataFrame:
     )
 
 
+def _fict_cadastro(rho: dict[int, float]) -> pd.DataFrame:
+    """Minimal Hidr.cadastro: produtibilidade_especifica per code (for the
+    structural fictitious test in id-map builds)."""
+    return pd.DataFrame(
+        [{"codigo_usina": c, "produtibilidade_especifica": r} for c, r in rho.items()]
+    ).set_index("codigo_usina")
+
+
 class TestBuildIdMap:
     """Unit tests for ``pipeline._build_id_map`` fictitious-plant filtering."""
 
+    @patch("inewave.newave.Hidr")
     @patch("inewave.newave.Ree")
     @patch("inewave.newave.Conft")
     @patch("inewave.newave.Sistema")
@@ -4016,6 +4059,7 @@ class TestBuildIdMap:
         mock_sistema_cls,
         mock_conft_cls,
         mock_ree_cls,
+        mock_hidr_cls,
         tmp_path,
     ) -> None:
         """FICT. plants must be absent from id_map.all_hydro_codes."""
@@ -4025,6 +4069,12 @@ class TestBuildIdMap:
         mock_confhd = MagicMock()
         mock_confhd.usinas = _make_confhd_df_with_fict()
         mock_confhd_cls.read.return_value = mock_confhd
+
+        # Real twins generate; FICT plants have ρ=0 and share their posto →
+        # structurally fictitious, so codes 2 and 4 are excluded.
+        mock_hidr_cls.read.return_value.cadastro = _fict_cadastro(
+            {1: 0.01, 2: 0.0, 3: 0.01, 4: 0.0}
+        )
 
         mock_conft = MagicMock()
         mock_conft.usinas = pd.DataFrame({"codigo_usina": []})
@@ -4049,6 +4099,7 @@ class TestBuildIdMap:
         assert 4 not in id_map.all_hydro_codes, "FICT.CAMPO G must be excluded"
         assert len(id_map.all_hydro_codes) == 2
 
+    @patch("inewave.newave.Hidr")
     @patch("inewave.newave.Ree")
     @patch("inewave.newave.Conft")
     @patch("inewave.newave.Sistema")
@@ -4059,21 +4110,32 @@ class TestBuildIdMap:
         mock_sistema_cls,
         mock_conft_cls,
         mock_ree_cls,
+        mock_hidr_cls,
         tmp_path,
     ) -> None:
-        """15 FICT plants among 160 existing -> 145 hydro codes in id_map."""
+        """15 fictitious twins among 160 existing -> 145 hydro codes in id_map.
+
+        Each fictitious plant (ρ=0) shares a real generator's posto; the real
+        plants get unique generating postos.
+        """
         for fname in ("confhd.dat", "conft.dat", "sistema.dat", "ree.dat"):
             (tmp_path / fname).touch()
 
         n_real, n_fict = 145, 15
+        rho: dict[int, float] = {}
         rows = []
         for i in range(1, n_real + n_fict + 1):
-            name = f"FICT.PLANT_{i}" if i > n_real else f"PLANT_{i}"
+            if i > n_real:
+                # Fictitious twin: ρ=0, shares the posto of real plant (i - n_real).
+                name, posto, r = f"FICT.PLANT_{i}", i - n_real, 0.0
+            else:
+                name, posto, r = f"PLANT_{i}", i, 0.01
+            rho[i] = r
             rows.append(
                 {
                     "codigo_usina": i,
                     "nome_usina": name,
-                    "posto": i,
+                    "posto": posto,
                     "codigo_usina_jusante": pd.NA,
                     "ree": 1,
                     "volume_inicial_percentual": 50.0,
@@ -4081,6 +4143,7 @@ class TestBuildIdMap:
                 }
             )
         confhd_df = pd.DataFrame(rows)
+        mock_hidr_cls.read.return_value.cadastro = _fict_cadastro(rho)
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = confhd_df
@@ -4103,6 +4166,7 @@ class TestBuildIdMap:
         id_map = _build_id_map(_make_nw_files(tmp_path))
         assert len(id_map.all_hydro_codes) == n_real
 
+    @patch("inewave.newave.Hidr")
     @patch("inewave.newave.Ree")
     @patch("inewave.newave.Conft")
     @patch("inewave.newave.Sistema")
@@ -4113,11 +4177,13 @@ class TestBuildIdMap:
         mock_sistema_cls,
         mock_conft_cls,
         mock_ree_cls,
+        mock_hidr_cls,
         tmp_path,
     ) -> None:
         """When no FICT. plants exist, all existing plants are included."""
         for fname in ("confhd.dat", "conft.dat", "sistema.dat", "ree.dat"):
             (tmp_path / fname).touch()
+        mock_hidr_cls.read.return_value.cadastro = pd.DataFrame()
 
         mock_confhd = MagicMock()
         mock_confhd.usinas = _make_confhd_df()  # standard two-plant fixture, no FICT.
@@ -4202,7 +4268,9 @@ class TestConvertHydrosDownstreamFict:
             {
                 "codigo_usina": [1, 2, 3],
                 "nome_usina": ["USINA_A", "FICT.USINA_A", "USINA_B"],
-                "posto": [1, 2, 3],
+                # FICT.USINA_A shares USINA_A's posto (1) — the structural
+                # fictitious-twin signature that drives the posto-based Rule 3.
+                "posto": [1, 1, 3],
                 "codigo_usina_jusante": [0, 3, 0],
                 "ree": [1, 1, 1],
                 "volume_inicial_percentual": [50.0, 50.0, 50.0],
@@ -4212,14 +4280,14 @@ class TestConvertHydrosDownstreamFict:
         )
 
         cadastro = _make_hidr_cadastro().copy()
-        # _make_hidr_cadastro has plants 1 and 2.  Promote plant 2 to a
-        # fictitious (zero-productivity placeholder) and add plant 3 as a
-        # second real plant cloned from plant 1.
+        # _make_hidr_cadastro has plants 1 and 2.  Make plant 2 the fictitious
+        # twin (ρ=0, sharing plant 1's posto) and add plant 3 as a second real
+        # plant cloned from plant 1.
         plant3 = cadastro.iloc[0:1].copy()
         plant3.index = [3]
         cadastro = pd.concat([cadastro, plant3])
-        # Zero out FICT's specific productivity so it contributes 0 ρ_eq —
-        # cleanly isolates the topological fix from any ρ_eq fold-in.
+        # Zero out the twin's specific productivity so it is classified
+        # fictitious (ρ=0 sharing a generating posto).
         cadastro.loc[2, "produtibilidade_especifica"] = 0.0
 
         case = _hydro_case(tmp_path, cadastro=cadastro, confhd=confhd_df)

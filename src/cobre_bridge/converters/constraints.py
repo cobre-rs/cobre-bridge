@@ -104,13 +104,12 @@ def _build_hydro_downstream_map(
     confhd_df:
         ``Confhd.usinas``.
     cadastro:
-        Optional ``Hidr.cadastro`` (with MODIF.DAT overrides applied).  Used
-        only to compute the ρ_eq of fictitious plants along the chain — the
-        cascade *topology* is independent of ρ_eq, so passing ``None`` still
-        returns a correct downstream map.  Callers that also need the FICT
-        ρ_eq contribution (e.g. :func:`compute_accumulated_productivities`)
-        must pass ``cadastro`` and read it via :func:`resolve_cascade`
-        directly.
+        ``Hidr.cadastro`` (with MODIF.DAT overrides applied).  Required for a
+        correct map: fictitious plants are now identified structurally from
+        productivity (:func:`plants.fictitious_codes`), so without it the
+        resolver cannot tell a fictitious accounting node from a real plant and
+        the cascade stops short.  Defaults to empty only for callers that
+        operate on FICT-free plant sets (e.g. unit tests).
     """
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
@@ -120,9 +119,11 @@ def _build_hydro_downstream_map(
     return {code: r.downstream_code for code, r in resolutions.items()}
 
 
-def _build_hydro_to_ree(confhd_df: pd.DataFrame) -> dict[int, int]:
+def _build_hydro_to_ree(
+    confhd_df: pd.DataFrame, cadastro: pd.DataFrame
+) -> dict[int, int]:
     """Return {plant_code: ree_code} for existing non-fictitious plants."""
-    non_fict = active_hydros(confhd_df)
+    non_fict = active_hydros(confhd_df, cadastro)
     return {int(r["codigo_usina"]): int(r["ree"]) for _, r in non_fict.iterrows()}
 
 
@@ -285,6 +286,7 @@ def compute_max_prodtacum_sin(case: NewaveCase) -> float | None:
 def compute_per_stage_acc_productivities(
     confhd_df: pd.DataFrame,
     per_stage_own: dict[int, list[float]],
+    cadastro: pd.DataFrame | None = None,
 ) -> dict[int, list[float]]:
     """Cascade-sum per-stage own productivities into per-stage ρ_acum lists.
 
@@ -310,7 +312,7 @@ def compute_per_stage_acc_productivities(
         ``{plant_code: [ρ_acum per stage]}`` for every plant present in both
         ``confhd_df`` (existing, non-fictitious) and ``per_stage_own``.
     """
-    downstream_map = _build_hydro_downstream_map(confhd_df)
+    downstream_map = _build_hydro_downstream_map(confhd_df, cadastro)
     if not per_stage_own:
         return {}
 
@@ -477,7 +479,9 @@ def convert_vminop_constraints(
     # the RHS by ~10% on plants with non-trivial head swing.
     acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)
     per_stage_own_int = compute_per_stage_own_integrated_productivities(case)
-    per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own_int)
+    per_stage_acc = compute_per_stage_acc_productivities(
+        confhd_df, per_stage_own_int, cadastro
+    )
 
     # Convert ρ_acum from MW/(m³/s) to MWmonth/hm³ so the VminOP LHS
     # (Σ ρ_acum · hydro_storage[hm³], and the matching RHS, both built from
@@ -504,7 +508,7 @@ def convert_vminop_constraints(
     }
 
     # Map hydros to REEs
-    hydro_to_ree = _build_hydro_to_ree(confhd_df)
+    hydro_to_ree = _build_hydro_to_ree(confhd_df, cadastro)
 
     # Group hydros by REE
     ree_hydros: dict[int, list[int]] = defaultdict(list)

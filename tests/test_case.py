@@ -107,15 +107,44 @@ def test_horizon_derives_from_dger_and_caches(tmp_path: Path) -> None:
 
 
 def test_active_hydros_excludes_non_existing_and_fictitious(tmp_path: Path) -> None:
+    # Code 2 (ρ=0 sharing USINA_A's posto 1) is structurally fictitious; code 3
+    # is non-existing (NE). Both are dropped from the active set.
     confhd = _confhd(
         [
-            {"codigo_usina": 1, "nome_usina": "USINA_A", "usina_existente": "EX"},
-            {"codigo_usina": 2, "nome_usina": "FICT.X", "usina_existente": "EX"},
-            {"codigo_usina": 3, "nome_usina": "USINA_C", "usina_existente": "NE"},
-            {"codigo_usina": 4, "nome_usina": "USINA_D", "usina_existente": "EX"},
+            {
+                "codigo_usina": 1,
+                "nome_usina": "USINA_A",
+                "posto": 1,
+                "usina_existente": "EX",
+            },
+            {
+                "codigo_usina": 2,
+                "nome_usina": "FICT.X",
+                "posto": 1,
+                "usina_existente": "EX",
+            },
+            {
+                "codigo_usina": 3,
+                "nome_usina": "USINA_C",
+                "posto": 3,
+                "usina_existente": "NE",
+            },
+            {
+                "codigo_usina": 4,
+                "nome_usina": "USINA_D",
+                "posto": 4,
+                "usina_existente": "EX",
+            },
         ]
     )
-    case = make_case(tmp_path, confhd=confhd)
+    hidr = MagicMock()
+    hidr.cadastro = pd.DataFrame(
+        [
+            {"codigo_usina": c, "produtibilidade_especifica": r}
+            for c, r in {1: 0.01, 2: 0.0, 4: 0.01}.items()
+        ]
+    ).set_index("codigo_usina")
+    case = make_case(tmp_path, confhd=confhd, hidr=hidr)
     assert case.active_hydro_codes == [1, 4]
     assert list(case.active_hydros["codigo_usina"]) == [1, 4]
 

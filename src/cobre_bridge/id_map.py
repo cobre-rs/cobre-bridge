@@ -10,10 +10,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cobre_bridge.plants import active_hydro_codes, fictitious_existing_names
+from cobre_bridge.plants import active_hydro_codes, fictitious_codes
 
 if TYPE_CHECKING:
-    from inewave.newave import Confhd, Conft, Ree, Sistema
+    from inewave.newave import Confhd, Conft, Hidr, Ree, Sistema
 
     from cobre_bridge.newave_files import NewaveFiles
 
@@ -116,13 +116,14 @@ def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
     both derive the NEWAVE→Cobre mapping the same way (it used to live as a
     private ``pipeline._build_id_map`` that the comparators reached into).
     """
-    from inewave.newave import Confhd, Conft, Ree, Sistema
+    from inewave.newave import Confhd, Conft, Hidr, Ree, Sistema
 
     confhd = Confhd.read(str(nw_files.confhd))
     conft = Conft.read(str(nw_files.conft))
     sistema = Sistema.read(str(nw_files.sistema))
     ree_file = Ree.read(str(nw_files.ree))
-    return build_id_map_from_readers(confhd, conft, sistema, ree_file)
+    hidr = Hidr.read(str(nw_files.hidr))
+    return build_id_map_from_readers(confhd, conft, sistema, ree_file, hidr)
 
 
 def build_id_map_from_readers(
@@ -130,22 +131,32 @@ def build_id_map_from_readers(
     conft: Conft,
     sistema: Sistema,
     ree_file: Ree,
+    hidr: Hidr,
 ) -> NewaveIdMap:
     """Build the canonical :class:`NewaveIdMap` from already-parsed readers.
 
     The core of :func:`build_id_map`, factored out so :attr:`NewaveCase.id_map`
-    can reuse the case's cached readers instead of re-parsing the four files.
+    can reuse the case's cached readers instead of re-parsing the files. ``hidr``
+    supplies the productivity used to identify fictitious accounting plants
+    structurally (see :func:`plants.fictitious_codes`).
     """
-    # Hydro codes from confhd — existing, non-fictitious plants only.
+    # Hydro codes from confhd — existing plants minus the fictitious accounting
+    # nodes (zero productivity sharing a generating plant's posto).
     confhd_df = confhd.usinas
-    fict_names = fictitious_existing_names(confhd_df)
-    if fict_names:
+    cadastro = hidr.cadastro
+    fict = fictitious_codes(confhd_df, cadastro)
+    if fict:
+        names = [
+            str(r["nome_usina"]).strip()
+            for _, r in confhd_df.iterrows()
+            if int(r["codigo_usina"]) in fict
+        ]
         _LOG.warning(
             "Excluding %d fictitious plant(s) from id_map: %s",
-            len(fict_names),
-            fict_names,
+            len(names),
+            names,
         )
-    hydro_codes = active_hydro_codes(confhd_df)
+    hydro_codes = active_hydro_codes(confhd_df, cadastro)
 
     # Thermal codes from conft.
     conft_df = conft.usinas

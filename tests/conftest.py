@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
+
+import pandas as pd
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.newave_files import NewaveFiles
@@ -81,4 +84,13 @@ def make_case(files_or_tmp: NewaveFiles | Path, **parsed: Any) -> NewaveCase:
     case = NewaveCase(files=files)
     for name, value in parsed.items():
         case.__dict__[name] = value
+    # ``case.active_hydros``/``case.id_map`` now consult the hidr cadastro to
+    # decide which orphaned FICT reservoirs to keep. Tests that don't exercise
+    # that path get a default empty-cadastro hidr so those accessors don't try
+    # to read a real binary hidr.dat (an empty cadastro keeps the historical
+    # "exclude all FICT" behavior). Tests needing real geometry pass ``hidr=``.
+    if "hidr" not in parsed:
+        default_hidr = MagicMock()
+        default_hidr.cadastro = pd.DataFrame()
+        case.__dict__["hidr"] = default_hidr
     return case
