@@ -1489,11 +1489,13 @@ def convert_ncs_factors(
         }
 
     # Columns: codigo_submercado, indice_bloco, data, patamar, valor
-    # Determine number of blocks from source.
-    all_blocks_set: set[int] = set()
-    for _, row in df.iterrows():
-        all_blocks_set.add(int(row["patamar"]) - 1)
-    num_blocks = max(all_blocks_set) + 1 if all_blocks_set else 1
+    # The ``patamar`` field is a GLOBAL running index across all NCS sources:
+    # source 1 -> patamares 1..P, source 2 -> P+1..2P, etc. (P = number of load
+    # blocks). The per-source block ordinal is therefore ``(patamar - 1) % P``,
+    # NOT ``patamar - 1`` — using the raw index parks every source past the first
+    # on out-of-range blocks, flattening its per-block NCS profile (so Cobre
+    # could not reshape per-block load the way NEWAVE does, the so_se divergence).
+    num_blocks = patamar_file.numero_patamares or 1
 
     # Build per-(sub_code, bloco, yr, cal_month, block_id) -> factor lookup.
     NcsKey = tuple  # (sub_code, bloco, yr, cal_month, block_id)
@@ -1502,7 +1504,7 @@ def convert_ncs_factors(
     for _, row in df.iterrows():
         sub_code = int(row["codigo_submercado"])
         bloco = int(row["indice_bloco"])
-        block_id = int(row["patamar"]) - 1
+        block_id = (int(row["patamar"]) - 1) % num_blocks
         val = float(row["valor"])
         dt = row["data"]
         yr = int(dt.year)
