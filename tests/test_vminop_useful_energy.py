@@ -1,12 +1,15 @@
 """Tests for the VminOP useful-energy rewrite in the results comparator.
 
 ``apply_vminop_useful_energy`` re-expresses VminOP generic-constraint rows as
-*useful* stored energy (MWmonth) so they compare like-for-like against NEWAVE's
-per-REE ``EARMF`` (MEDIAS-REE):
+*useful* stored energy (MWmonth) so they compare like-for-like — all three on the
+**linear** stored-energy convention the security-curve constraint binds on:
 
 - cobre LHS  = Σ override ρ_acum(stage) · (storage_final − Vmin)
-- NEWAVE LHS = ``EARMF`` for the constraint's REE
+- NEWAVE LHS = Σ override ρ_acum(stage) · VARMUH(plant, stage)   (MEDIAS-USIH)
 - bound      = original stored-bound − dead-energy (Σ ρ_acum · Vmin)
+
+The NEWAVE LHS is deliberately the *linear* per-plant ``VARMUH`` reconstruction,
+not the per-REE ``EARMF`` (which NEWAVE reports as the nonlinear ∫ρ dv energy).
 
 RE / AGRINT constraints (no ``@rho_acum``) must pass through untouched.
 """
@@ -24,6 +27,7 @@ from cobre_bridge.comparators.constraints_compare import (
     _is_vminop,
     apply_vminop_useful_energy,
 )
+from cobre_bridge.id_map import NewaveIdMap
 
 _GC_SCHEMA = {
     "constraint_id": pl.Int32,
@@ -114,16 +118,23 @@ def _bounds() -> pl.DataFrame:
     )
 
 
-def _nw_ree() -> pl.DataFrame:
-    # EARMF for REE 1 at MEDIAS stages 9 (=stage 0) and 10 (=stage 1).
+def _nw_hydro() -> pl.DataFrame:
+    # VARMUH (useful stored volume, hm³ above Vmin) for plant code 1 (→ cobre
+    # id 0) at MEDIAS stages 9 (=stage 0) and 10 (=stage 1).  With ρ_acum=2 the
+    # linear NEWAVE LHS is 2·475=950 and 2·290=580.
     return pl.DataFrame(
         {
             "newave_code": [1, 1],
             "stage": [9, 10],
-            "variable": ["EARMF", "EARMF"],
-            "value": [950.0, 580.0],
+            "variable": ["VARMUH", "VARMUH"],
+            "value": [475.0, 290.0],
         }
     )
+
+
+def _id_map() -> NewaveIdMap:
+    # NEWAVE plant code 1 → cobre hydro id 0 (enumerate order).
+    return NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
 
 
 def _cell(df: pl.DataFrame, cid: int, stage: int, col: str) -> float:
@@ -146,18 +157,36 @@ def test_cobre_lhs_is_useful_energy(tmp_path: Path) -> None:
     case, out = _build_case(tmp_path)
     nw_empty = pl.DataFrame(schema=_GC_SCHEMA)
     _, _, cb = apply_vminop_useful_energy(
-        [_vminop_constraint()], _bounds(), nw_empty, nw_empty, case, out, _nw_ree(), 9
+        [_vminop_constraint()],
+        _bounds(),
+        nw_empty,
+        nw_empty,
+        case,
+        out,
+        _nw_hydro(),
+        _id_map(),
+        9,
     )
     # ρ·(storage − Vmin): stage 0 → 2·(600−100)=1000; stage 1 → 2·(400−100)=600.
     assert _cell(cb, 0, 0, "lhs_value") == 1000.0
     assert _cell(cb, 0, 1, "lhs_value") == 600.0
 
 
-def test_newave_lhs_is_earmf(tmp_path: Path) -> None:
+def test_newave_lhs_is_linear_varmuh_energy(tmp_path: Path) -> None:
+    # NEWAVE LHS = Σ ρ_acum(stage) · VARMUH = 2·475=950 and 2·290=580 — the
+    # linear stored energy the curve binds on, NOT the per-REE EARMF.
     case, out = _build_case(tmp_path)
     nw_empty = pl.DataFrame(schema=_GC_SCHEMA)
     _, nw, _ = apply_vminop_useful_energy(
-        [_vminop_constraint()], _bounds(), nw_empty, nw_empty, case, out, _nw_ree(), 9
+        [_vminop_constraint()],
+        _bounds(),
+        nw_empty,
+        nw_empty,
+        case,
+        out,
+        _nw_hydro(),
+        _id_map(),
+        9,
     )
     assert _cell(nw, 0, 0, "lhs_value") == 950.0
     assert _cell(nw, 0, 1, "lhs_value") == 580.0
@@ -167,7 +196,15 @@ def test_bound_has_dead_energy_removed(tmp_path: Path) -> None:
     case, out = _build_case(tmp_path)
     nw_empty = pl.DataFrame(schema=_GC_SCHEMA)
     bounds_out, _, _ = apply_vminop_useful_energy(
-        [_vminop_constraint()], _bounds(), nw_empty, nw_empty, case, out, _nw_ree(), 9
+        [_vminop_constraint()],
+        _bounds(),
+        nw_empty,
+        nw_empty,
+        case,
+        out,
+        _nw_hydro(),
+        _id_map(),
+        9,
     )
     # dead = ρ·Vmin = 2·100 = 200; useful bound = stored bound − dead.
     assert _cell(bounds_out, 0, 0, "bound") == 800.0  # 1000 − 200
@@ -202,7 +239,7 @@ def test_re_agrint_rows_pass_through_untouched(tmp_path: Path) -> None:
     )
     nw_in = pl.DataFrame(schema=_GC_SCHEMA)
     bounds_out, nw_out, cb_out = apply_vminop_useful_energy(
-        [re_constraint], bounds, nw_in, cb_in, case, out, _nw_ree(), 9
+        [re_constraint], bounds, nw_in, cb_in, case, out, _nw_hydro(), _id_map(), 9
     )
     # No VminOP constraint → everything returned unchanged.
     assert _cell(bounds_out, 7, 0, "bound") == 500.0
@@ -222,7 +259,15 @@ def test_missing_inputs_degrade_gracefully(tmp_path: Path) -> None:
     )
     nw_in = pl.DataFrame(schema=_GC_SCHEMA)
     bounds_out, nw_out, cb_out = apply_vminop_useful_energy(
-        [_vminop_constraint()], bounds, nw_in, cb_in, empty_case, out, _nw_ree(), 9
+        [_vminop_constraint()],
+        bounds,
+        nw_in,
+        cb_in,
+        empty_case,
+        out,
+        _nw_hydro(),
+        _id_map(),
+        9,
     )
     assert cb_out.equals(cb_in)
     assert nw_out.equals(nw_in)

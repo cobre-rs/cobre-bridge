@@ -415,7 +415,6 @@ def per_stage_bounds(
 # where dead-energy = Σ override_ρ_acum(stage) · Vmin removes the absolute-vs-
 # relative-to-minimum offset (cobre stores absolute volume; NEWAVE EARM is
 # relative to the minimum operative volume).  RE / AGRINT rows are untouched.
-_VMINOP_REE_RE = re.compile(r"for REE (\d+)")
 _GC_SCHEMA = {
     "constraint_id": pl.Int32,
     "stage_id": pl.Int32,
@@ -489,7 +488,8 @@ def apply_vminop_useful_energy(
     gc_lhs_cb: pl.DataFrame,
     cobre_case_dir: Path,
     cobre_output_dir: Path,
-    nw_ree: pl.DataFrame,
+    nw_hydro: pl.DataFrame,
+    id_map: NewaveIdMap,
     nw_offset: int,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """Re-express VminOP rows as *useful* stored energy (MWmonth).
@@ -498,8 +498,19 @@ def apply_vminop_useful_energy(
     Constraints tab compares like-for-like useful stored energy:
 
     - cobre LHS  = Σ override ρ_acum(stage) · (storage_final − Vmin)
-    - NEWAVE LHS = ``EARMF`` (MEDIAS-REE) for the constraint's REE
+    - NEWAVE LHS = Σ override ρ_acum(stage) · VARMUH(plant, stage)
     - bound      = original stored-bound − dead-volume energy (= pct · useful)
+
+    The NEWAVE LHS uses the per-plant ``VARMUH`` (useful stored volume above the
+    minimum, MEDIAS-USIH) weighted by the *same* per-stage ρ_acum override as the
+    cobre LHS and the bound — i.e. the **linear** stored energy that NEWAVE's
+    security-curve constraint actually binds on.  This is deliberately **not**
+    the per-REE ``EARMF`` (MEDIAS-REE), which NEWAVE reports as the *nonlinear*
+    physical stored energy (∫ρ dv, head-dependent, up to ~4–5 % lower at mid
+    storage).  Comparing the nonlinear ``EARMF`` against the linear bound made
+    NEWAVE appear to sit below the curve with no penalty; the linear reconstruction
+    here reproduces NEWAVE's published ``VIOL_CAR`` to ~0.1 % and lands exactly on
+    the curve where NEWAVE holds it.
 
     RE / AGRINT rows pass through unchanged.  If any required input is missing
     (no scalar parameters, no min-storage, no simulation), the inputs are
@@ -531,12 +542,20 @@ def apply_vminop_useful_energy(
         for r in storage.iter_rows(named=True)
     }
 
-    earmf: dict[tuple[int, int], float] = {}
-    if not nw_ree.is_empty():
-        for r in nw_ree.filter(pl.col("variable") == "EARMF").iter_rows(named=True):
-            earmf[(int(r["newave_code"]), int(r["stage"]) - nw_offset)] = float(
-                r["value"]
-            )
+    # NEWAVE per-plant useful stored volume (VARMUH, hm³ above Vmin), keyed by
+    # cobre hydro id and 0-based stage — the linear-energy counterpart of the
+    # cobre ``storage_final − Vmin`` term.
+    varmuh: dict[tuple[int, int], float] = {}
+    if not nw_hydro.is_empty():
+        for r in nw_hydro.filter(pl.col("variable") == "VARMUH").iter_rows(named=True):
+            try:
+                cobre_id = id_map.hydro_id(int(r["newave_code"]))
+            except KeyError:
+                continue
+            stage_0based = int(r["stage"]) - nw_offset
+            if stage_0based < 0:
+                continue
+            varmuh[(cobre_id, stage_0based)] = float(r["value"])
 
     bounds_by_cs = per_stage_bounds(gc_bounds)
     cb_rows: list[dict] = []
@@ -549,12 +568,12 @@ def apply_vminop_useful_energy(
             for _, _, vtype, eid in parse_expression(c["expression"])
             if vtype == "hydro_storage"
         ]
-        ree_match = _VMINOP_REE_RE.search(str(c.get("description", "")))
-        ree_code = int(ree_match.group(1)) if ree_match else None
         for stage in sorted(bounds_by_cs.get(cid, {})):
             cb_useful = 0.0
             dead = 0.0
+            nw_useful = 0.0
             complete = True
+            nw_complete = True
             for hid in hydro_ids:
                 rho_s = rho.get(hid, {}).get(stage)
                 vm = vmin.get(hid)
@@ -564,19 +583,22 @@ def apply_vminop_useful_energy(
                     break
                 cb_useful += rho_s * (sf - vm)
                 dead += rho_s * vm
+                vu = varmuh.get((hid, stage))
+                if vu is None:
+                    nw_complete = False
+                else:
+                    nw_useful += rho_s * vu
             if not complete:
                 continue
             cb_rows.append(
                 {"constraint_id": cid, "stage_id": stage, "lhs_value": cb_useful}
             )
             dead_by_cs[(cid, stage)] = dead
-            if ree_code is not None and (ree_code, stage) in earmf:
+            # NEWAVE LHS = Σ ρ_acum(stage) · VARMUH — the linear stored energy the
+            # security curve binds on (NOT the nonlinear MEDIAS-REE EARMF).
+            if nw_complete:
                 nw_rows.append(
-                    {
-                        "constraint_id": cid,
-                        "stage_id": stage,
-                        "lhs_value": earmf[(ree_code, stage)],
-                    }
+                    {"constraint_id": cid, "stage_id": stage, "lhs_value": nw_useful}
                 )
 
     vminop_ids = [int(c["id"]) for c in vminop]

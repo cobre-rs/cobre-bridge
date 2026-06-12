@@ -1188,7 +1188,6 @@ def compare_results(
         _find_saidas_dir,
         read_medias_hydro,
         read_medias_market,
-        read_medias_ree,
         read_medias_sin,
         read_medias_system,
         read_medias_thermal,
@@ -1511,7 +1510,8 @@ def compare_results(
             gc_lhs_cb,
             cobre_case_dir,
             cobre_output_dir,
-            read_medias_ree(saidas_dir),
+            nw_hydro,
+            id_map,
             nw_offset,
         )
     else:
