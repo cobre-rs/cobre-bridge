@@ -470,9 +470,18 @@ def convert_load_factors(
         )
         return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": []}
 
-    # Columns: codigo_submercado, data (datetime), patamar (1-based), valor (float)
-    # Build lookup: {(subsystem_code, year, cal_month, patamar) -> factor}
-    # Also track {(subsystem_code, cal_month, patamar) -> factor} for post-study.
+    # ``carga_patamares`` numbers its ``patamar`` field as a GLOBAL running index
+    # across submarkets (submarket 1 -> patamares 1..P, submarket 2 -> P+1..2P,
+    # ...), exactly like ``usinas_nao_simuladas``.  Normalize it to a per-submarket
+    # 1-based block via ``(patamar - 1) % P + 1`` so every submarket's load profile
+    # lands on blocks 1..P (a no-op for decks that reset the index per submarket).
+    # Without this, only the first submarket's patamares fall in range and every
+    # other submarket's per-block load profile is silently flattened to 1.0.
+    num_patamares: int = patamar.numero_patamares or 1
+
+    # Columns: codigo_submercado, data (datetime), patamar (global), valor (float)
+    # Build lookup: {(subsystem_code, year, cal_month, block) -> factor}
+    # Also track {(subsystem_code, cal_month, block) -> factor} for post-study.
     study_lookup: dict[tuple[int, int, int, int], float] = {}
 
     for _, row in df_carga.iterrows():
@@ -480,9 +489,9 @@ def convert_load_factors(
         dt = row["data"]
         cal_month = int(dt.month)
         yr = int(dt.year)
-        pat = int(row["patamar"])
+        block = (int(row["patamar"]) - 1) % num_patamares + 1
         val = float(row["valor"])
-        study_lookup[(sub, yr, cal_month, pat)] = val
+        study_lookup[(sub, yr, cal_month, block)] = val
 
     # Build last-year lookup: for each (sub, cal_month, patamar), take the value
     # from the last study year that has data for that calendar month.
@@ -496,8 +505,7 @@ def convert_load_factors(
 
     last_year_lookup = {k: v for k, (_, v) in last_year_per_key.items()}
 
-    # Determine number of patamares and unique subsystem codes.
-    num_patamares: int = patamar.numero_patamares or 1
+    # Determine the unique subsystem codes (num_patamares computed above).
     subsystem_codes = sorted(df_carga["codigo_submercado"].unique())
 
     load_factors: list[dict] = []
