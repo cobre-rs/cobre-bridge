@@ -650,6 +650,253 @@ class TestCliInProcess:
         assert "60 stages" in stdout
 
 
+class TestCompareDatasetWiring:
+    """ticket-008: compare handlers sourced from the canonical dataset.
+
+    Patch the heavy readers (``NewaveCase``, alignment, ``compare_*``) so the
+    real dataset build + ``write_artifacts`` + dataset-driven printers run
+    without NEWAVE/Cobre I/O.
+    """
+
+    def _invoke_main(
+        self,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _results() -> object:
+        from cobre_bridge.comparators.results import ResultComparison
+
+        return [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=110.0,
+                abs_diff=10.0,
+                rel_diff=0.1,
+            ),
+        ]
+
+    @staticmethod
+    def _bounds(*, all_match: bool) -> object:
+        from cobre_bridge.comparators.bounds import BoundComparison
+
+        rows = [
+            BoundComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="storage_max",
+                newave_value=29000.0,
+                cobre_value=29000.0,
+                diff=0.0,
+                match=True,
+            ),
+        ]
+        if not all_match:
+            rows.append(
+                BoundComparison(
+                    entity_type="thermal",
+                    entity_name="ANGRA",
+                    newave_code=30,
+                    cobre_id=1,
+                    stage=0,
+                    variable="generation_max",
+                    newave_value=1350.0,
+                    cobre_value=1300.0,
+                    diff=50.0,
+                    match=False,
+                )
+            )
+        return rows
+
+    def _patch_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cobre_bridge.comparators.results import PercentileData
+
+        monkeypatch.setattr(
+            "cobre_bridge.case.NewaveCase.from_directory",
+            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._load_lines_json",
+            lambda _dir: [],
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            lambda **k: (self._results(), PercentileData()),
+        )
+
+    @staticmethod
+    def _make_cobre_dir_with_bounds(tmp_path: Path, name: str) -> Path:
+        """Create a Cobre output dir containing the required bounds.parquet stub.
+
+        The bounds handler validates ``training/dictionaries/bounds.parquet``
+        exists before running; the file content is unused here because
+        ``compare_bounds`` is patched.
+        """
+        import pyarrow.parquet as pq
+
+        cobre_dir = tmp_path / name
+        bounds_path = cobre_dir / "training" / "dictionaries" / "bounds.parquet"
+        bounds_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({"x": pa.array([0], pa.int32())}), bounds_path)
+        return cobre_dir
+
+    def _patch_bounds(
+        self, monkeypatch: pytest.MonkeyPatch, *, all_match: bool
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.case.NewaveCase.from_directory",
+            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._load_lines_json",
+            lambda _dir: [],
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.bounds.compare_bounds",
+            lambda **k: self._bounds(all_match=all_match),
+        )
+
+    def test_compare_results_emits_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        manifest_path = cobre_dir / "comparison_artifacts" / "comparison.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["command"] == "compare results"
+        assert "Artifacts written to" in stdout
+
+    def test_compare_bounds_emits_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_bounds(monkeypatch, all_match=True)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, _, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        manifest_path = cobre_dir / "comparison_artifacts" / "comparison.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["command"] == "compare bounds"
+
+    def test_compare_bounds_exit_code_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Full match -> exit 0.
+        self._patch_bounds(monkeypatch, all_match=True)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre_match")
+        code_match, _, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+        assert code_match == 0
+
+        # Any mismatch -> exit 1.
+        self._patch_bounds(monkeypatch, all_match=False)
+        cobre_dir2 = self._make_cobre_dir_with_bounds(tmp_path, "cobre_mismatch")
+        code_mismatch, _, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir2)],
+            monkeypatch,
+        )
+        assert code_mismatch == 1
+
+    def test_compare_results_html_tabs_intact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge.comparators.html_report import COMPARISON_TABS
+
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+        report_path = tmp_path / "report.html"
+
+        code, _, _ = self._invoke_main(
+            [
+                "compare",
+                "results",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "-o",
+                str(report_path),
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        assert report_path.exists()
+        html = report_path.read_text(encoding="utf-8")
+        for tab_id, _label in COMPARISON_TABS:
+            assert tab_id in html
+
+    def test_compare_results_artifact_oserror_does_not_change_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("cobre_bridge.comparators.export.write_artifacts", _boom)
+
+        code, _, stderr = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        assert "failed to write artifacts" in stderr
+
+
 # ---------------------------------------------------------------------------
 # Pipeline integration tests for inflow_history.parquet
 # ---------------------------------------------------------------------------

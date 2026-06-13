@@ -39,12 +39,13 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
     """Execute the compare bounds subcommand."""
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import build_entity_alignment
+    from cobre_bridge.comparators.analyze import build_bounds_dataset
     from cobre_bridge.comparators.bounds import compare_bounds
     from cobre_bridge.comparators.cobre_readers import CobreReadError
+    from cobre_bridge.comparators.export import write_artifacts
     from cobre_bridge.comparators.report import (
-        build_summary,
-        print_mismatches,
-        print_summary,
+        print_bounds_mismatches_from_dataset,
+        print_bounds_summary_from_dataset,
         write_report_parquet,
     )
 
@@ -90,26 +91,49 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
 
-    # Output.
-    summary = build_summary(results)
-    print_summary(summary, newave_dir, cobre_output_dir, tolerance)
+    # Build the canonical dataset once; console + artifacts derive from it.
+    dataset = build_bounds_dataset(results)
+
+    # Output (sourced from the dataset).
+    print_bounds_summary_from_dataset(dataset, newave_dir, cobre_output_dir, tolerance)
 
     if not args.summary:
-        print_mismatches(results)
+        print_bounds_mismatches_from_dataset(dataset)
 
+    # Machine-readable artifacts.  An artifact write failure must NOT change the
+    # comparison exit code, so an OSError here is warned and swallowed.
+    artifacts_dir = cobre_output_dir / "comparison_artifacts"
+    try:
+        write_artifacts(
+            dataset,
+            command="compare bounds",
+            newave_dir=newave_dir,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+            out_dir=artifacts_dir,
+            formats=["parquet", "json"],
+        )
+        print(f"Artifacts written to {artifacts_dir}")
+    except OSError as exc:
+        print(f"Warning: failed to write artifacts: {exc}", file=sys.stderr)
+
+    # Back-compat Parquet report (unchanged until epic-05).
     if args.output:
         write_report_parquet(results, args.output)
 
-    sys.exit(0 if summary.mismatches == 0 else 1)
+    mismatches = sum(1 for r in results if not r.match)
+    sys.exit(0 if mismatches == 0 else 1)
 
 
 def _run_results_comparison(args: argparse.Namespace) -> None:
     """Execute the compare results subcommand."""
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import build_entity_alignment
+    from cobre_bridge.comparators.analyze import build_results_dataset
     from cobre_bridge.comparators.cobre_readers import CobreReadError
-    from cobre_bridge.comparators.report import print_results_summary
-    from cobre_bridge.comparators.results import build_results_summary, compare_results
+    from cobre_bridge.comparators.export import write_artifacts
+    from cobre_bridge.comparators.report import print_results_summary_from_dataset
+    from cobre_bridge.comparators.results import compare_results
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -141,9 +165,28 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
 
-    # Print text summary.
-    summary = build_results_summary(results, tolerance)
-    print_results_summary(summary, newave_dir, cobre_output_dir)
+    # Build the canonical dataset once; console + artifacts derive from it.
+    dataset = build_results_dataset(results, pctiles, tolerance)
+
+    # Print text summary (sourced from the dataset).
+    print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
+
+    # Machine-readable artifacts.  An artifact write failure must NOT change the
+    # comparison exit code, so an OSError here is warned and swallowed.
+    artifacts_dir = cobre_output_dir / "comparison_artifacts"
+    try:
+        write_artifacts(
+            dataset,
+            command="compare results",
+            newave_dir=newave_dir,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+            out_dir=artifacts_dir,
+            formats=["parquet", "json"],
+        )
+        print(f"Artifacts written to {artifacts_dir}")
+    except OSError as exc:
+        print(f"Warning: failed to write artifacts: {exc}", file=sys.stderr)
 
     # HTML report.
     if args.output:
