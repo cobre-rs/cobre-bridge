@@ -25,7 +25,7 @@ from cobre_bridge.comparators.dataset import (
     TIDY_SCHEMA,
     ComparisonDataset,
 )
-from cobre_bridge.comparators.results import _smape, build_results_summary
+from cobre_bridge.comparators.results import build_results_summary, smape
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -397,7 +397,7 @@ def summary_frame_from_bounds(results: Sequence[BoundComparison]) -> pl.DataFram
     ``mean_abs_diff`` / ``max_abs_diff`` are the mean / max of ``abs(r.diff)``;
     ``within_tol_rate`` is the fraction of rows whose ``match`` is ``True``;
     ``mean_smape`` / ``max_smape`` are computed via the shared
-    :func:`cobre_bridge.comparators.results._smape` over
+    :func:`cobre_bridge.comparators.results.smape` over
     ``(r.newave_value, r.cobre_value)``; ``correlation`` is always null.
 
     Args:
@@ -426,7 +426,7 @@ def summary_frame_from_bounds(results: Sequence[BoundComparison]) -> pl.DataFram
 
     for variable, group in groups.items():
         abs_diffs = [abs(r.diff) for r in group]
-        smapes = [_smape(r.newave_value, r.cobre_value) for r in group]
+        smapes = [smape(r.newave_value, r.cobre_value) for r in group]
         n_match = sum(1 for r in group if r.match)
 
         variables.append(variable)

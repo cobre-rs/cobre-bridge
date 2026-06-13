@@ -10,8 +10,8 @@ workflow consumes: the tidy ``comparison.parquet`` frame, the per-variable
 
 It composes existing primitives only: it never recomputes diffs and adds no
 renderer dependencies (no import of ``charts.py`` / ``report.py``), so the HTML
-report and console paths are unaffected. It is callable but not yet wired into
-``cli.py`` (that is epic-05).
+report and console paths are unaffected. It is wired into ``cli.py`` via the
+shared ``_export_compare_artifacts`` helper used by both ``compare`` subcommands.
 """
 
 from __future__ import annotations

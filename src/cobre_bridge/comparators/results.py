@@ -181,7 +181,7 @@ def _compute_diff(nw_value: float, cobre_value: float) -> tuple[float, float | N
     return abs_diff, rel_diff
 
 
-def _smape(nw_value: float, cobre_value: float) -> float:
+def smape(nw_value: float, cobre_value: float) -> float:
     """Symmetric mean absolute percentage error for one pair, in [0, 2].
 
     Robust to a near-zero reference (unlike ``|d| / |nw|``): returns 0 when
@@ -1615,7 +1615,7 @@ def build_results_summary(
 
         # Bounded symmetric error (robust to near-zero references) and the
         # within-tolerance match rate.
-        smapes = [_smape(r.newave_value, r.cobre_value) for r in group]
+        smapes = [smape(r.newave_value, r.cobre_value) for r in group]
         stats.mean_smape = sum(smapes) / len(smapes) if smapes else 0.0
         stats.max_smape = max(smapes) if smapes else 0.0
         n_within = sum(

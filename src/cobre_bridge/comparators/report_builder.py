@@ -47,7 +47,12 @@ from cobre_bridge.comparators.html_report import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.comparators.results import ResultComparison, build_results_summary
+from cobre_bridge.comparators.report import _footer_counts
+from cobre_bridge.comparators.results import (
+    ResultComparison,
+    ResultsSummary,
+    ResultVariableStats,
+)
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
@@ -133,6 +138,39 @@ def _meta_list(metadata: dict[str, object], key: str) -> list[object]:
     return []
 
 
+def _results_summary_from_dataset(dataset: ComparisonDataset) -> ResultsSummary:
+    """Reconstruct a :class:`ResultsSummary` from the canonical dataset.
+
+    Rebuilds the summary object that ``overview_metrics`` consumes straight from
+    the already-computed ``dataset.summary`` rows (one
+    :class:`ResultVariableStats` per variable) and the ``footer_counts`` metadata
+    (``total`` + ``by_entity_type``), so no per-row statistic is recomputed. The
+    per-variable ``mean_rel_diff`` / ``max_rel_diff`` fields aren't carried in
+    ``SUMMARY_SCHEMA`` (and aren't read by ``overview_metrics``); they keep their
+    dataclass defaults of ``0.0``.
+    """
+    total, by_entity_type = _footer_counts(dataset)
+
+    by_variable: dict[str, ResultVariableStats] = {}
+    for row in dataset.summary.to_dicts():
+        correlation = row["correlation"]
+        by_variable[str(row["variable"])] = ResultVariableStats(
+            count=int(row["count"]),
+            mean_abs_diff=float(row["mean_abs_diff"]),
+            max_abs_diff=float(row["max_abs_diff"]),
+            within_tol_rate=float(row["within_tol_rate"]),
+            mean_smape=float(row["mean_smape"]),
+            max_smape=float(row["max_smape"]),
+            correlation=float(correlation) if correlation is not None else None,
+        )
+
+    return ResultsSummary(
+        total=total,
+        by_entity_type=by_entity_type,
+        by_variable=by_variable,
+    )
+
+
 def build_comparison_report(dataset: ComparisonDataset) -> str:
     """Build a complete HTML comparison report.
 
@@ -159,7 +197,11 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         for r in _meta_list(dataset.metadata, "results")
         if isinstance(r, ResultComparison)
     ]
-    summary = build_results_summary(results)
+    # Reconstruct the overview summary from the dataset's already-computed
+    # summary rows + footer counts rather than recomputing it from the raw
+    # ``results`` list — the chart functions below still consume ``results``
+    # directly, but ``overview_metrics`` reads only the reconstructed summary.
+    summary = _results_summary_from_dataset(dataset)
 
     tab_contents: dict[str, str] = {}
 

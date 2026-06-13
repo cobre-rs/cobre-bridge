@@ -235,7 +235,13 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
 
 
 def _run_results_comparison(args: argparse.Namespace) -> None:
-    """Execute the compare results subcommand."""
+    """Execute the compare results subcommand.
+
+    Intentionally always exits 0: ``compare results`` is informational (a
+    descriptive NEWAVE-vs-Cobre divergence report), so it never signals a
+    failure on divergence. This is asymmetric with ``compare bounds``, which
+    exits 1 on any mismatch — bounds are a strict equivalence check.
+    """
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.results import compare_results
@@ -541,6 +547,10 @@ def main() -> None:
     compare_res = compare_subparsers.add_parser(
         "results",
         help="Compare NEWAVE published results against Cobre simulation output.",
+        epilog=(
+            "compare results is informational and always exits 0; "
+            "compare bounds exits 1 on any mismatch."
+        ),
     )
     compare_res.add_argument(
         "newave_dir",
