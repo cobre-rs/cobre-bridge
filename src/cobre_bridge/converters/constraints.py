@@ -332,20 +332,22 @@ def compute_per_stage_acc_productivities(
     return result
 
 
-def _warn_if_fixed_penalization(configuracoes_penalizacao: list[Any] | None) -> bool:
-    """Warn when curva.dat selects FIXA penalization, which Cobre cannot model.
+def _warn_if_non_fixa_penalization(configuracoes_penalizacao: list[Any] | None) -> bool:
+    """Warn when curva.dat selects a *non-FIXA* security-curve penalization.
 
     The penalization-config line of curva.dat carries, as its first field, the
-    ``TIPO DE PENALIZACAO``: ``0`` = FIXA, ``1`` = MAXPEN (followed by the
-    ``MES PENALIZACAO`` and the pre/post seasonal flag).  Under **FIXA** NEWAVE
-    accumulates every VminOP (minimum stored energy) violation across the
-    horizon into a single calendar month — which presumes a stage *is* a
-    calendar month.  Cobre models the violation per stage (the MAXPEN
-    convention) and makes no stage-is-a-month assumption, so it does not (and is
-    unlikely to) support FIXA.
+    ``TIPO DE PENALIZACAO``: ``0`` = **FIXA** (a fixed per-violation penalty at
+    the curve cost), anything else = NEWAVE's iterative / variable penalization
+    (the ``ETAPA-2`` adjustment).
 
-    Emits a warning so the operator knows a VminOP-penalty difference is
-    expected.  Returns ``True`` when the warning fired (for testability).
+    Cobre-bridge models the **FIXA** convention: a per-stage VminOP (minimum
+    stored energy) slack penalized at the fixed curve cost.  This is the faithful
+    equivalent of NEWAVE FIXA, so a FIXA deck needs no warning.  It does **not**
+    reproduce the iterative / variable penalization, so a non-FIXA deck will show
+    an expected VminOP violation-penalty difference.
+
+    Emits an INFO confirmation for FIXA and a WARNING for non-FIXA.  Returns
+    ``True`` only when the (non-FIXA) warning fired (for testability).
     """
     if not configuracoes_penalizacao:
         return False
@@ -353,17 +355,20 @@ def _warn_if_fixed_penalization(configuracoes_penalizacao: list[Any] | None) -> 
         tipo = int(configuracoes_penalizacao[0])
     except (TypeError, ValueError, IndexError):
         return False
-    if tipo != 0:
+    if tipo == 0:
+        _LOG.info(
+            "curva.dat selects TIPO DE PENALIZACAO = 0 (FIXA): matches "
+            "cobre-bridge's VminOP modelling (a per-stage curve slack at the "
+            "fixed penalty), so no VminOP violation-penalty difference is "
+            "expected from the curve handling."
+        )
         return False
-    mes = configuracoes_penalizacao[1] if len(configuracoes_penalizacao) > 1 else "?"
     _LOG.warning(
-        "curva.dat selects TIPO DE PENALIZACAO = 0 (FIXA): NEWAVE accumulates "
-        "all VminOP (minimum stored energy) violations into a single calendar "
-        "month (MES PENALIZACAO = %s). Cobre does not support FIXA — it "
-        "penalizes VminOP violations per stage (the MAXPEN convention) and does "
-        "not assume a stage is a calendar month, so a difference in the VminOP "
-        "violation penalty is expected.",
-        mes,
+        "curva.dat selects TIPO DE PENALIZACAO = %s (non-FIXA): cobre-bridge "
+        "models the FIXA convention and does not reproduce NEWAVE's iterative / "
+        "variable curve penalization, so a VminOP violation-penalty difference "
+        "is expected.",
+        tipo,
     )
     return True
 
@@ -450,7 +455,7 @@ def convert_vminop_constraints(
 
     # NEWAVE's FIXA penalization (TIPO DE PENALIZACAO = 0) is not representable
     # in Cobre; warn so the VminOP-penalty difference is expected, not a bug.
-    _warn_if_fixed_penalization(curva.configuracoes_penalizacao)
+    _warn_if_non_fixa_penalization(curva.configuracoes_penalizacao)
 
     penalty_df = curva.custos_penalidades
     confhd = case.confhd

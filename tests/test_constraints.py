@@ -13,7 +13,7 @@ from cobre_bridge.converters.constraints import (
     _is_stored_energy_reservoir,
     _parse_formula,
     _vminop_energy_factor,
-    _warn_if_fixed_penalization,
+    _warn_if_non_fixa_penalization,
     compute_accumulated_integrated_productivities,
     compute_accumulated_productivities,
     convert_agrint_constraints,
@@ -102,30 +102,44 @@ class TestStoredEnergyReservoirFilter:
         assert _is_stored_energy_reservoir(self._cad("M", 100.0, 200.0), 999) is False
 
 
-class TestFixedPenalizationWarning:
-    """curva.dat TIPO DE PENALIZACAO = 0 (FIXA) is unsupported by Cobre; the
-    conversion must warn so the VminOP-penalty difference is expected."""
+class TestNonFixaPenalizationWarning:
+    """curva.dat TIPO DE PENALIZACAO = 0 (FIXA) matches cobre-bridge's VminOP
+    modelling and needs no warning; a non-FIXA (iterative/variable) penalization is
+    not reproduced, so the conversion warns that a VminOP-penalty difference is
+    expected."""
 
-    def test_fixa_emits_warning(self, caplog) -> None:
+    def test_fixa_does_not_warn(self, caplog) -> None:
         import logging
 
         with caplog.at_level(logging.WARNING):
-            fired = _warn_if_fixed_penalization([0, 11, 1])
-        assert fired is True
-        assert "FIXA" in caplog.text
-        assert "MES PENALIZACAO = 11" in caplog.text
+            fired = _warn_if_non_fixa_penalization([0, 11, 1])
+        assert fired is False
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
-    def test_maxpen_does_not_warn(self) -> None:
-        assert _warn_if_fixed_penalization([1, 11, 1]) is False
+    def test_fixa_logs_info_confirmation(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            _warn_if_non_fixa_penalization([0, 11, 1])
+        assert "FIXA" in caplog.text
+        assert "matches" in caplog.text
+
+    def test_non_fixa_emits_warning(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            fired = _warn_if_non_fixa_penalization([1, 11, 1])
+        assert fired is True
+        assert "non-FIXA" in caplog.text
 
     def test_none_does_not_warn(self) -> None:
-        assert _warn_if_fixed_penalization(None) is False
+        assert _warn_if_non_fixa_penalization(None) is False
 
     def test_empty_does_not_warn(self) -> None:
-        assert _warn_if_fixed_penalization([]) is False
+        assert _warn_if_non_fixa_penalization([]) is False
 
     def test_malformed_first_field_does_not_warn(self) -> None:
-        assert _warn_if_fixed_penalization(["x"]) is False
+        assert _warn_if_non_fixa_penalization(["x"]) is False
 
 
 class TestAccumulatedProductivity:
