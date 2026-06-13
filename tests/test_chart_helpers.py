@@ -6,6 +6,8 @@ make_chart_card, compute_npv_costs, group_costs, and compute_cost_summary.
 
 from __future__ import annotations
 
+import dataclasses
+import math
 import re
 from pathlib import Path
 
@@ -937,6 +939,70 @@ def test_hydro_slack_per_bus_chart_html_matches_golden(
     assert _strip_chart_id(html) == _strip_chart_id(golden)
 
 
+@pytest.fixture()
+def line_summary_results() -> list[ResultComparison]:
+    """Three lines over two stages -> 3 panels -> multi-row 2-col grid."""
+    rows: list[ResultComparison] = []
+    specs = [
+        (0, "L1", [(1, 100.0, 95.0), (2, 110.0, 104.0)]),
+        (1, "L2", [(1, -50.0, -48.0), (2, -55.0, -52.0)]),
+        (2, "L3", [(1, 20.0, 18.0), (2, 25.0, 23.0)]),
+    ]
+    for cid, name, pts in specs:
+        for stage, nw, cb in pts:
+            rows.append(_rc("line", name, cid, stage, "net_flow_mw", nw, cb))
+    return rows
+
+
+@pytest.fixture()
+def line_summary_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 0, 1, 1, 2, 2],
+            "stage_id": [1, 2, 1, 2, 1, 2],
+            "net_flow_mw_p10": [80.0, 90.0, -60.0, -65.0, 15.0, 20.0],
+            "net_flow_mw_p90": [120.0, 130.0, -40.0, -45.0, 25.0, 30.0],
+        }
+    )
+
+
+@pytest.fixture()
+def line_summary_bounds() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "line_id": [0, 0, 1, 1, 2, 2],
+            "stage_id": [1, 2, 1, 2, 1, 2],
+            "direct_mw": [200.0, 200.0, 150.0, 150.0, 100.0, 100.0],
+            "reverse_mw": [180.0, 180.0, 120.0, 120.0, 90.0, 90.0],
+        }
+    )
+
+
+@pytest.fixture()
+def line_summary_meta() -> list[dict]:
+    return [
+        {"id": 0, "capacity": {"direct_mw": 200.0, "reverse_mw": 180.0}},
+        {"id": 1, "capacity": {"direct_mw": 150.0, "reverse_mw": 120.0}},
+        {"id": 2, "capacity": {"direct_mw": 100.0, "reverse_mw": 90.0}},
+    ]
+
+
+def test_line_summary_chart_html_matches_golden(
+    line_summary_results: list[ResultComparison],
+    line_summary_pct: pl.DataFrame,
+    line_summary_bounds: pd.DataFrame,
+    line_summary_meta: list[dict],
+) -> None:
+    html = _cmp_charts.line_summary_chart(
+        line_summary_results,
+        line_summary_pct,
+        line_summary_bounds,
+        line_summary_meta,
+    )
+    golden = (_GOLDEN_DIR / "line_summary_chart.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
 def test_build_hydro_detail_tab_html_matches_golden(
     per_bus_results: list[ResultComparison],
     per_bus_hydro_pct: pl.DataFrame,
@@ -1530,3 +1596,98 @@ def test_meta_list_missing_key_returns_empty_list() -> None:
 
     assert _meta_list({}, "line_meta") == []
     assert _meta_list({"line_meta": 5}, "line_meta") == []
+
+
+# ---------------------------------------------------------------------------
+# ticket-017: facet_grid subplot-domain helper
+#
+# These tests pin the `facet_grid` / `FacetPanel` helper in
+# `cobre_bridge.ui.plotly_helpers` to the legacy gap-based subplot-domain
+# arithmetic hand-copied across `comparators.charts`. They assert the exact
+# domain pairs for the representative call sites (the 2-column grids, the
+# single-column spillage stack, and the unclamped performance stack including
+# the intentional `-0.0`), re-derive the legacy formula inline as an oracle for
+# `n` in range(1, 8), and confirm `FacetPanel` is immutable. This is a pure-add
+# guard: ticket-018 re-points the chart functions onto `facet_grid`.
+# ---------------------------------------------------------------------------
+
+
+def test_facet_grid_default_2col_n4() -> None:
+    """facet_grid(4) reproduces the 2-column grid domains panel-for-panel."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    panels = facet_grid(4)
+    assert len(panels) == 4
+    assert [(p.x_domain, p.y_domain) for p in panels] == [
+        ([0.0, 0.475], [0.53, 1.0]),
+        ([0.525, 1.0], [0.53, 1.0]),
+        ([0.0, 0.475], [0.0, 0.47]),
+        ([0.525, 1.0], [0.0, 0.47]),
+    ]
+
+
+def test_facet_grid_single_col_spillage() -> None:
+    """facet_grid(3, ncols=1, row_gap=0.05) matches the spillage layout."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    panels = facet_grid(3, ncols=1, row_gap=0.05)
+    assert all(p.x_domain == [0.0, 1.0] for p in panels)
+    assert [p.y_domain for p in panels] == [
+        [0.7, 1.0],
+        [0.35, 0.65],
+        [0.0, 0.3],
+    ]
+
+
+def test_facet_grid_single_col_unclamped_preserves_neg_zero() -> None:
+    """The unclamped performance stack preserves the legacy -0.0 y-domain low."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    panels = facet_grid(2, ncols=1, row_gap=0.10, min_row_h=0.0)
+    assert panels[0].y_domain == [0.55, 1.0]
+    assert panels[0].x_domain == [0.0, 1.0]
+    assert panels[1].y_domain == [-0.0, 0.45]
+    assert panels[1].x_domain == [0.0, 1.0]
+    # -0.0 == 0.0 is True, so confirm the SIGN explicitly via copysign.
+    assert math.copysign(1, panels[1].y_domain[0]) == -1.0
+
+
+@pytest.mark.parametrize("n", range(1, 8))
+def test_facet_grid_matches_inline_formula(n: int) -> None:
+    """facet_grid(n) matches the legacy inline formula panel-by-panel."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    ncols = 2
+    row_gap = 0.06
+    col_gap = 0.05
+    nrows = (n + ncols - 1) // ncols
+    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
+    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+
+    panels = facet_grid(n)
+    assert len(panels) == n
+    for idx, panel in enumerate(panels):
+        row_i = idx // ncols
+        col_i = idx % ncols
+        x0 = col_i * (col_w + col_gap)
+        x1 = x0 + col_w
+        y1 = 1.0 - row_i * (row_h + row_gap)
+        y0 = y1 - row_h
+        assert panel.x_domain == [round(x0, 3), round(x1, 3)]
+        assert panel.y_domain == [round(y0, 3), round(y1, 3)]
+
+
+def test_facet_grid_zero_returns_empty() -> None:
+    """facet_grid(0) returns [] per its contract and does not raise."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    assert facet_grid(0) == []
+
+
+def test_facet_panel_is_frozen() -> None:
+    """FacetPanel is immutable: assigning a field raises FrozenInstanceError."""
+    from cobre_bridge.ui.plotly_helpers import FacetPanel
+
+    panel = FacetPanel(row=0, col=0, x_domain=[0.0, 1.0], y_domain=[0.0, 1.0])
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        panel.row = 1  # type: ignore[misc]

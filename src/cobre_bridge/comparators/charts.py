@@ -21,6 +21,7 @@ from cobre_bridge.horizon import is_effectively_infinite
 from cobre_bridge.ui.html import escape_text, json_for_script
 from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS as _LEGEND
 from cobre_bridge.ui.plotly_helpers import MARGIN_DEFAULTS as _MARGIN
+from cobre_bridge.ui.plotly_helpers import facet_grid
 from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
 
 _BAND_FILL = "rgba(74,144,184,0.15)"
@@ -912,10 +913,7 @@ def hydro_per_bus_chart(
 
     ncols = 2
     nrows = (len(ordered) + ncols - 1) // ncols
-    row_gap = 0.06
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
-    col_gap = 0.05
-    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels = facet_grid(len(ordered), ncols=2)
 
     traces: list[dict] = []
     layout: dict = {"title": title}
@@ -928,26 +926,21 @@ def hydro_per_bus_chart(
         if not stages:
             continue
 
-        row_i = idx // ncols
-        col_i = idx % ncols
+        panel = panels[idx]
+        row_i = panel.row
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
-        x0 = col_i * (col_w + col_gap)
-        x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
-        y0 = y1 - row_h
-
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [round(x0, 3), round(x1, 3)],
+            "domain": panel.x_domain,
             "title": "Stage" if row_i == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": panel.y_domain,
             "title": bus_name,
             "anchor": xa,
         }
@@ -1180,10 +1173,7 @@ def hydro_slack_per_bus_chart(
 
     ncols = 2
     nrows = (len(ordered) + ncols - 1) // ncols
-    row_gap = 0.06
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
-    col_gap = 0.05
-    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels = facet_grid(len(ordered), ncols=2)
 
     traces: list[dict] = []
     layout: dict = {"title": title}
@@ -1196,26 +1186,21 @@ def hydro_slack_per_bus_chart(
         if not stages:
             continue
 
-        row_i = idx // ncols
-        col_i = idx % ncols
+        panel = panels[idx]
+        row_i = panel.row
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
-        x0 = col_i * (col_w + col_gap)
-        x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
-        y0 = y1 - row_h
-
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [round(x0, 3), round(x1, 3)],
+            "domain": panel.x_domain,
             "title": "Stage" if row_i == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": panel.y_domain,
             "title": bus_name,
             "anchor": xa,
         }
@@ -1382,10 +1367,7 @@ def line_summary_chart(
     # constant gap between rows. The previous fixed-stride formula
     # produced negative y-domains for nrows ≥ 3 (rendering the bottom
     # rows outside the chart area) which made bottom panels disappear.
-    row_gap = 0.06
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
-    col_gap = 0.05
-    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels = facet_grid(len(ordered_ids), ncols=2)
 
     traces: list[dict] = []
     layout: dict = {"title": "Net Line Flow (MW)"}
@@ -1393,26 +1375,21 @@ def line_summary_chart(
 
     for idx, lid in enumerate(ordered_ids):
         rows_list = sorted(by_line[lid], key=lambda r: r.stage)
-        row_i = idx // ncols
-        col_i = idx % ncols
+        panel = panels[idx]
+        row_i = panel.row
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
-        x0 = col_i * (col_w + col_gap)
-        x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
-        y0 = y1 - row_h
-
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [round(x0, 3), round(x1, 3)],
+            "domain": panel.x_domain,
             "title": "Stage" if row_i == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": panel.y_domain,
             "title": rows_list[0].entity_name if rows_list else f"line {lid}",
             "anchor": xa,
         }
@@ -1555,6 +1532,8 @@ def system_spillage_energy_chart(
         ("Reservoir cascades (VERTcont)", "spill_energy_reservoir_mw", "VERTcont"),
         ("Run-of-river (VERTfio)", "spill_energy_rorov_mw", "VERTfio"),
     ]
+    # Vertically stacked: y in [0.7,1.0], [0.35,0.65], [0.0,0.3]
+    facets = facet_grid(3, ncols=1, row_gap=0.05)
 
     traces: list[dict] = []
     layout: dict = {
@@ -1572,16 +1551,14 @@ def system_spillage_energy_chart(
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
 
-        # Vertically stacked: y in [0,0.3], [0.35,0.65], [0.7,1.0]
-        y1 = 1.0 - idx * 0.35
-        y0 = y1 - 0.30
+        facet = facets[idx]
         layout[xa_key] = {
-            "domain": [0.0, 1.0],
+            "domain": facet.x_domain,
             "anchor": ya,
             "title": "Stage" if idx == len(panels) - 1 else "",
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": facet.y_domain,
             "anchor": xa,
             "title": panel_title,
         }
@@ -1811,25 +1788,23 @@ def performance_fwd_bwd_split_chart(
         all_secs.extend(bw + fw)
 
     nrows = len(panels)
-    row_gap = 0.10
-    row_h = (1.0 - row_gap * (nrows - 1)) / nrows
+    facets = facet_grid(nrows, ncols=1, row_gap=0.10, min_row_h=0.0)
     traces: list[dict] = []
     layout: dict = {"title": "Forward / Backward Split per Iteration (seconds)"}
     for idx, (label, it, bw, fw) in enumerate(panels):
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
-        y1 = 1.0 - idx * (row_h + row_gap)
-        y0 = y1 - row_h
+        facet = facets[idx]
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [0.0, 1.0],
+            "domain": facet.x_domain,
             "title": "Iteration" if idx == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": facet.y_domain,
             "title": f"{label} (s)",
             "anchor": xa,
         }
@@ -2356,6 +2331,9 @@ def build_energy_balance_tab(
             xa = f"x{ax_idx}" if ax_idx > 1 else "x"
             ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
+            # Fixed-stride domains (0.52/0.47/0.44) — intentionally NOT
+            # facet_grid: its gap formula yields different col_w/row_h and
+            # would drift this chart's golden.
             x0 = col_i * 0.52
             x1 = x0 + 0.47
             y1 = 1.0 - row_i * 0.52
@@ -2498,6 +2476,9 @@ def system_per_bus_chart(
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
+        # Fixed-stride domains (0.52/0.47/0.44) — intentionally NOT facet_grid:
+        # its gap formula yields different col_w/row_h and would drift this
+        # chart's golden.
         x0 = col_i * 0.52
         x1 = x0 + 0.47
         y1 = 1.0 - row_i * 0.52
@@ -2575,18 +2556,6 @@ def system_per_bus_chart(
         first = False
 
     return _plotly_div(traces, layout, height=nrows * 300 + 80)
-
-
-def _subplot_domains(n: int) -> list[tuple[float, float]]:
-    """Compute non-overlapping y-axis domains for n subplots."""
-    gap = 0.05
-    h = (1.0 - gap * (n - 1)) / n
-    domains = []
-    for i in range(n):
-        bottom = i * (h + gap)
-        domains.append((round(bottom, 4), round(bottom + h, 4)))
-    domains.reverse()
-    return domains
 
 
 # -------------------------------------------------------------------
@@ -3252,10 +3221,7 @@ def constraints_comparison_chart(
 
     ncols = 2
     nrows = (len(renderable) + ncols - 1) // ncols
-    row_gap = 0.06
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
-    col_gap = 0.05
-    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels = facet_grid(len(renderable), ncols=2)
 
     traces: list[dict] = []
     layout: dict = {"title": "Generic Constraints — LHS vs Bound"}
@@ -3265,26 +3231,21 @@ def constraints_comparison_chart(
         cid = int(c["id"])
         name = c["name"]
         sense = c.get("sense", "<=")
-        row_i = idx // ncols
-        col_i = idx % ncols
+        panel = panels[idx]
+        row_i = panel.row
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
-        x0 = col_i * (col_w + col_gap)
-        x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
-        y0 = y1 - row_h
-
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [round(x0, 3), round(x1, 3)],
+            "domain": panel.x_domain,
             "title": "Stage" if row_i == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": panel.y_domain,
             "title": f"{name} ({sense})",
             "anchor": xa,
         }
