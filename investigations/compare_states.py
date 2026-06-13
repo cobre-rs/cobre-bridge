@@ -35,13 +35,16 @@ def _key(s: str) -> str:
     return str(s).strip().upper()
 
 
-def newave_useful_by_name() -> tuple[dict[int, pd.Series], dict[int, str], pd.Series]:
+def newave_useful_by_name() -> tuple[
+    dict[int, pd.Series], dict[int, str], pd.Series
+]:
     """Return (estudo_stage -> VARM useful by UHE code), code->name, vmin by code."""
     nw = NewaveFiles.from_directory(NEWAVE_DIR)
     hidr = _apply_permanent_overrides(Hidr.read(str(nw.hidr)).cadastro, nw)
     confhd = Confhd.read(str(nw.confhd)).usinas
     code_name = {
-        int(r["codigo_usina"]): _key(r["nome_usina"]) for _, r in confhd.iterrows()
+        int(r["codigo_usina"]): _key(r["nome_usina"])
+        for _, r in confhd.iterrows()
     }
     # Per stage, keep the converged trial point: highest construction iteration
     # with real (non-placeholder) content.
@@ -64,13 +67,11 @@ def compare_stage(cobre_stage: int) -> pd.DataFrame:
     if nw_stage not in by_stage:
         raise ValueError(f"no NEWAVE cortese state for estudo stage {nw_stage}")
     varm = by_stage[nw_stage]  # useful volume by UHE code
-    nw = pd.DataFrame(
-        {
-            "nome": [code_name.get(c, "") for c in varm.index],
-            "nw_useful": varm.to_numpy(),
-            "vmin": vmin.reindex(varm.index).to_numpy(),
-        }
-    )
+    nw = pd.DataFrame({
+        "nome": [code_name.get(c, "") for c in varm.index],
+        "nw_useful": varm.to_numpy(),
+        "vmin": vmin.reindex(varm.index).to_numpy(),
+    })
     nw["key"] = nw["nome"].map(_key)
 
     cob = cobre_states(COBRE_DIR, cobre_stage)

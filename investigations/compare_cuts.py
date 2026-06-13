@@ -77,7 +77,10 @@ def main() -> None:
     merged = merged.sort_values("abs_max", ascending=False)
 
     matched = (
-        merged[["water_value_newave", "water_value_cobre"]].notna().all(axis=1).sum()
+        merged[["water_value_newave", "water_value_cobre"]]
+        .notna()
+        .all(axis=1)
+        .sum()
     )
     print(
         f"\nreservatórios: NEWAVE={len(nw)} Cobre={len(cb)} casados_por_nome={matched}"
@@ -89,7 +92,11 @@ def main() -> None:
     print(f"\n{cols_hdr}")
     print("-" * 70)
     for _, r in merged.head(20).iterrows():
-        nwv, cbv, dv = r["water_value_newave"], r["water_value_cobre"], r["delta"]
+        nwv, cbv, dv = (
+            r["water_value_newave"],
+            r["water_value_cobre"],
+            r["delta"],
+        )
         nws = f"{nwv:>18.2f}" if pd.notna(nwv) else f"{'—':>18}"
         cbs = f"{cbv:>18.2f}" if pd.notna(cbv) else f"{'—':>18}"
         dvs = f"{dv:>18.2f}" if pd.notna(dv) else f"{'—':>18}"

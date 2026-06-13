@@ -83,7 +83,8 @@ def read_newave_cut_coefficients(
         )
 
     sel = ultimo[
-        (ultimo["tipo_estagio"] == tipo_estagio) & (ultimo["estagio"] == estagio)
+        (ultimo["tipo_estagio"] == tipo_estagio)
+        & (ultimo["estagio"] == estagio)
     ]
     if sel.empty or int(sel["indice_ultimo_corte"].iloc[0]) == 0:
         raise ValueError(f"no cuts for {tipo_estagio} stage {estagio}")
@@ -133,7 +134,9 @@ def newave_water_values(
     remain (no implicit averaging). Returns ``[codigo_usina, nome,
     water_value_newave]``; ``.attrs`` carries ``rhs`` and ``n_cuts``.
     """
-    df, codigos_uhes = read_newave_cut_coefficients(case_dir, tipo_estagio, estagio)
+    df, codigos_uhes = read_newave_cut_coefficients(
+        case_dir, tipo_estagio, estagio
+    )
     sel = df
     if iteration is not None:
         sel = sel[sel["iteracao_construcao"] == iteration]
@@ -144,17 +147,23 @@ def newave_water_values(
             f"no NEWAVE cut for iteration={iteration}, forward_pass={forward_pass} "
             f"at {tipo_estagio} stage {estagio}"
         )
-    if select == "oldest":  # first cut built (min indice_corte; NEWAVE placeholder)
+    if (
+        select == "oldest"
+    ):  # first cut built (min indice_corte; NEWAVE placeholder)
         sel = sel.loc[[sel["indice_corte"].idxmin()]]
     elif select == "newest":  # last cut built = latest iteration
         sel = sel.loc[[sel["indice_corte"].idxmax()]]
-    elif select == "first_real":  # skip the iteration-0 / forward-0 zero placeholder
+    elif (
+        select == "first_real"
+    ):  # skip the iteration-0 / forward-0 zero placeholder
         real = sel[sel["indice_forward"] >= 1]
         if real.empty:
             raise ValueError("no real NEWAVE cut (indice_forward>=1) found")
         sel = real.loc[[real["indice_corte"].idxmin()]]
     elif select is not None:
-        raise ValueError(f"unknown select={select!r} (use oldest|newest|first_real)")
+        raise ValueError(
+            f"unknown select={select!r} (use oldest|newest|first_real)"
+        )
     if len(sel) > 1 and reduce is None:
         raise ValueError(
             f"{len(sel)} NEWAVE cuts match; pass select=, reduce=, or filter "
@@ -164,16 +173,16 @@ def newave_water_values(
     used = [u for u in codigos_uhes if f"pi_varm_uhe{u}" in df.columns]
     cols = [f"pi_varm_uhe{u}" for u in used]
     coef = _reduce_rows(sel[cols].to_numpy(dtype=float), reduce or "first")
-    rhs = float(_reduce_rows(sel["rhs"].to_numpy(dtype=float), reduce or "first"))
+    rhs = float(
+        _reduce_rows(sel["rhs"].to_numpy(dtype=float), reduce or "first")
+    )
 
     names = uhe_code_to_name(case_dir)
-    out = pd.DataFrame(
-        {
-            "codigo_usina": used,
-            "nome": [names.get(u, "") for u in used],
-            "water_value_newave": coef * NEWAVE_MONETARY_UNIT_RS,
-        }
-    )
+    out = pd.DataFrame({
+        "codigo_usina": used,
+        "nome": [names.get(u, "") for u in used],
+        "water_value_newave": coef * NEWAVE_MONETARY_UNIT_RS,
+    })
     out.attrs["rhs"] = rhs * NEWAVE_MONETARY_UNIT_RS
     out.attrs["n_cuts"] = int(len(sel))
     return out
@@ -186,7 +195,9 @@ def _main() -> None:
         f"NEWAVE estudo stage 10, primeiro corte: {wv.attrs['n_cuts']} corte, "
         f"rhs={wv.attrs['rhs']:.4e} R$"
     )
-    top = wv.reindex(wv["water_value_newave"].abs().sort_values(ascending=False).index)
+    top = wv.reindex(
+        wv["water_value_newave"].abs().sort_values(ascending=False).index
+    )
     print("top 12 |pi_varm_uhe| (R$/hm³):")
     for _, r in top.head(12).iterrows():
         print(

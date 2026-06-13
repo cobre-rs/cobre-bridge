@@ -74,7 +74,9 @@ def _infer_record_size(file_size: int, cortesh: Cortesh) -> int:
     tam = int(getattr(cortesh, "tamanho_estado", 0) or 0)
     if tam > 0:
         return tam
-    n_slots = int(cortesh.ultimo_registro_cortes_estagio["indice_ultimo_corte"].max())
+    n_slots = int(
+        cortesh.ultimo_registro_cortes_estagio["indice_ultimo_corte"].max()
+    )
     if n_slots <= 0 or file_size % n_slots != 0:
         raise ValueError(
             f"cannot infer cortese record size: file={file_size}, slots={n_slots}"
@@ -110,7 +112,9 @@ class _CorteseReader:
         hdr = self.cortes[off : off + _CORTES_HEADER_BYTES]
         return int(np.frombuffer(hdr, dtype="<i4")[1])
 
-    def materialise(self, rec: int, tipo_estagio: str, estagio: int) -> CorteseState:
+    def materialise(
+        self, rec: int, tipo_estagio: str, estagio: int
+    ) -> CorteseState:
         base = rec * self.rec_size
         hdr = np.frombuffer(
             self.cortese[base : base + _CORTESE_HEADER_BYTES], dtype="<i4"
@@ -156,7 +160,9 @@ def read_cortese_stage(
     case_dir = Path(case_dir)
     r = _CorteseReader(case_dir)
     ult = r.cortesh.ultimo_registro_cortes_estagio
-    sel = ult[(ult["tipo_estagio"] == tipo_estagio) & (ult["estagio"] == estagio)]
+    sel = ult[
+        (ult["tipo_estagio"] == tipo_estagio) & (ult["estagio"] == estagio)
+    ]
     if sel.empty:
         raise ValueError(f"no cuts for {tipo_estagio} stage {estagio}")
     idx = int(sel["indice_ultimo_corte"].iloc[0])
@@ -181,7 +187,9 @@ def read_cortese(case_dir: Path | str) -> list[CorteseState]:
         if int(row.indice_ultimo_corte) <= 0:
             continue
         out.extend(
-            read_cortese_stage(case_dir, str(row.tipo_estagio), int(row.estagio))
+            read_cortese_stage(
+                case_dir, str(row.tipo_estagio), int(row.estagio)
+            )
         )
     return out
 
