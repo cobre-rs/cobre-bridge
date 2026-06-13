@@ -373,6 +373,22 @@ def _warn_if_non_fixa_penalization(configuracoes_penalizacao: list[Any] | None) 
     return True
 
 
+def _curve_seasonalizes(configuracoes_penalizacao: list[Any] | None) -> bool:
+    """Return whether the security curve is seasonalized in the post-study period.
+
+    The penalization-config line of ``curva.dat`` carries, as its **third** field,
+    the post-study (``Período Estático Final``) seasonalization flag for the
+    security curve: ``1`` repeats the last study year's monthly curve across the
+    static final period, anything else freezes December's value across the tail
+    (NEWAVE manual table, p.32-33). Returns ``False`` (freeze — the manual default)
+    when the field is absent or unparseable.
+    """
+    try:
+        return int(configuracoes_penalizacao[2]) == 1  # type: ignore[index]
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
 def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
     """True iff NEWAVE counts plant ``code``'s storage in a REE's stored energy.
 
@@ -453,9 +469,17 @@ def convert_vminop_constraints(
     if curva_df is None or curva_df.empty:
         return None
 
-    # NEWAVE's FIXA penalization (TIPO DE PENALIZACAO = 0) is not representable
-    # in Cobre; warn so the VminOP-penalty difference is expected, not a bug.
+    # Cobre's per-stage curve slack reproduces NEWAVE's FIXA penalization
+    # (TIPO DE PENALIZACAO = 0); warn only when the deck selects a non-FIXA mode,
+    # which the bridge does not reproduce.
     _warn_if_non_fixa_penalization(curva.configuracoes_penalizacao)
+
+    # curva.dat's penalization line carries, as its third field, the post-study
+    # seasonalization flag for the security curve (the "Período Estático Final"
+    # rule, manual p.32-33). When set, the static final period repeats the last
+    # study year's monthly curve; otherwise it freezes December's value across the
+    # whole tail. Default (parse failure / absent) is freeze, matching the manual.
+    seasonalize_curve_post_study = _curve_seasonalizes(curva.configuracoes_penalizacao)
 
     penalty_df = curva.custos_penalidades
     confhd = case.confhd
@@ -644,13 +668,19 @@ def convert_vminop_constraints(
         )
 
         # Build per-stage bounds from curva_df.
-        # curva.dat only covers the study period.  For post-study stages we
-        # extrapolate seasonally using the last year's percentages (the same
-        # approach used for RE constraints).
+        # curva.dat only covers the study period. Extend into the post-study
+        # ("Período Estático Final") per NEWAVE's rule (manual table p.32-33):
+        # seasonalize (repeat the last study year's monthly curve) when
+        # curva.dat's third penalization field is set, otherwise freeze December's
+        # value across the whole tail. ``seasonalize_curve_post_study`` carries the
+        # flag.
+        study_months = _horizon.study_months
         ree_curva = curva_df[curva_df["codigo_ree"] == ree_code].sort_values("data")
 
-        # First pass: collect bounds and build seasonal map for extrapolation
+        # First pass: emit in-study bounds; build the per-calendar-month seasonal
+        # map and a per-stage map (the latter supplies the freeze value).
         seasonal_pct: dict[int, float] = {}  # calendar_month -> last percentage
+        pct_by_stage: dict[int, float] = {}
         for _, crow in ree_curva.iterrows():
             dt: datetime = crow["data"]
             stage_id = (dt.year - start_year) * 12 + (dt.month - start_month)
@@ -664,23 +694,25 @@ def convert_vminop_constraints(
             bound_stage_ids.append(stage_id)
             bound_values.append(rhs)
 
-            # Track the percentage per calendar month (last value wins)
-            seasonal_pct[dt.month] = percentage
+            seasonal_pct[dt.month] = percentage  # last value wins
+            pct_by_stage[stage_id] = percentage
 
-        # Second pass: extrapolate to post-study stages using seasonal pattern
+        # Second pass: fill uncovered stages. In-study gaps (and the post-study
+        # tail when seasonalized) use the seasonal pattern; otherwise the tail
+        # freezes at the last in-study stage's percentage (December of the last
+        # study year, forward-filled if that exact stage had no explicit row).
         if seasonal_pct:
-            covered = {
-                (dt.year - start_year) * 12 + (dt.month - start_month)
-                for _, dt in ree_curva["data"].items()
-                if 0
-                <= (dt.year - start_year) * 12 + (dt.month - start_month)
-                < num_stages
-            }
+            covered = set(pct_by_stage)
+            in_study = [s for s in pct_by_stage if s < study_months]
+            freeze_pct = pct_by_stage[max(in_study)] if in_study else None
             for stage_id in range(num_stages):
                 if stage_id in covered:
                     continue
-                cal_month = ((start_month - 1 + stage_id) % 12) + 1
-                pct = seasonal_pct.get(cal_month)
+                if stage_id >= study_months and not seasonalize_curve_post_study:
+                    pct = freeze_pct
+                else:
+                    cal_month = ((start_month - 1 + stage_id) % 12) + 1
+                    pct = seasonal_pct.get(cal_month)
                 if pct is not None:
                     rhs = _rhs_at(stage_id, pct)
                     bound_constraint_ids.append(constraint_id)

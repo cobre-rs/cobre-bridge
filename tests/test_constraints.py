@@ -10,6 +10,7 @@ import pyarrow as pa
 import pytest
 
 from cobre_bridge.converters.constraints import (
+    _curve_seasonalizes,
     _is_stored_energy_reservoir,
     _parse_formula,
     _vminop_energy_factor,
@@ -140,6 +141,27 @@ class TestNonFixaPenalizationWarning:
 
     def test_malformed_first_field_does_not_warn(self) -> None:
         assert _warn_if_non_fixa_penalization(["x"]) is False
+
+
+class TestCurveSeasonalizes:
+    """curva.dat's third penalization field selects post-study seasonalization
+    of the security curve; absence/garbage defaults to freeze (manual p.32-33)."""
+
+    def test_flag_set_seasonalizes(self) -> None:
+        assert _curve_seasonalizes([0, 11, 1]) is True
+
+    def test_flag_clear_freezes(self) -> None:
+        assert _curve_seasonalizes([0, 11, 0]) is False
+
+    def test_missing_third_field_freezes(self) -> None:
+        assert _curve_seasonalizes([0, 11]) is False
+
+    def test_none_values_freeze(self) -> None:
+        assert _curve_seasonalizes([None, None, None]) is False
+
+    def test_none_and_empty_freeze(self) -> None:
+        assert _curve_seasonalizes(None) is False
+        assert _curve_seasonalizes([]) is False
 
 
 class TestAccumulatedProductivity:

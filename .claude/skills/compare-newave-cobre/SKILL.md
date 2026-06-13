@@ -156,8 +156,9 @@ After the cost comparison is exhausted, move to operation results, still
 - Classify each finding: **expected** (conversion semantics — cite the entry in
   `known-divergences.md`) vs **concerning** (likely bug — name the suspect
   converter/reader).
-- When a new root cause is confirmed, add it to `known-divergences.md`; if it is a
-  durable fact, also save a memory and link it.
+- When a new root cause is confirmed, record it **in `known-divergences.md`** — that
+  file is the canonical, self-contained home for comparison knowledge (a generic
+  pattern in the right bucket, not a run log). Don't rely on session memory for it.
 
 ## Reference files
 

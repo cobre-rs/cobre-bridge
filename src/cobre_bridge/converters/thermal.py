@@ -338,8 +338,9 @@ def _step4b_apply_potef_availability(
 ) -> None:
     """Step 4b: a POTEF schedule defines the *only* periods the plant is available.
 
-    Outside every window (tested against the ACTUAL stage date, not the frozen
-    ``ref_date``) the plant is out of service for that stage.
+    Outside every window (tested against the caller-supplied ``stage_date`` — the
+    actual stage date in-study, the frozen last-study-stage date in the post-study
+    tail) the plant is out of service for that stage.
 
     A plant referenced in EXPT.DAT with modifier-only entries (TEIFT/FCMAX/
     GTMIN/IPTER) but **no establishing POTEF** has no installed power: the
@@ -370,8 +371,9 @@ def _step4c_apply_gtmin_availability(
 
     NEWAVE takes the minimum generation from EXPT GTMIN windows and uses **0**
     outside them — it ignores the TERM.DAT "GTMIN PARA O PRIMEIRO ANO" column.
-    Outside every window (tested against the ACTUAL stage date) the plant's
-    minimum is dropped to 0.
+    Outside every window (tested against the caller-supplied ``stage_date`` — the
+    actual stage date in-study, the frozen last-study-stage date in the post-study
+    tail) the plant's minimum is dropped to 0.
 
     A plant configured via EXPT but with **no GTMIN entry** has no minimum at
     all (``expt_without_gtmin``); its TERM.DAT GTMIN must not leak in as a
@@ -384,6 +386,26 @@ def _step4c_apply_gtmin_availability(
         return
     if not any(ws <= stage_date <= we for ws, we in windows):
         state.gen_min = 0.0
+
+
+def _potef_online_at(
+    windows: list[tuple[date, date]] | None,
+    *,
+    expt_without_potef: bool,
+    when: date,
+) -> bool:
+    """Whether a plant has installed capacity at ``when`` per its POTEF schedule.
+
+    A plant with no POTEF schedule is always online (its capacity comes from the
+    TERM.DAT registry). A plant referenced in EXPT with no establishing POTEF has
+    no installed power. Otherwise it is online iff some POTEF window covers
+    ``when``. Used to pick the post-study freeze reference (see the loop).
+    """
+    if expt_without_potef:
+        return False
+    if not windows:
+        return True
+    return any(ws <= when <= we for ws, we in windows)
 
 
 def _step5_apply_maint_reduction(
@@ -711,17 +733,37 @@ def convert_thermal_bounds(
             effective = _apply_maint_to_capacity(base_cap, maint_rows, stage_dates)
             maint_reduction = np.maximum(0.0, base_cap - effective)
 
-        # NEWAVE freezes the post-study tail at the LAST STUDY STAGE's
-        # configuration: it re-uses neither the per-calendar-month base nor the
-        # per-month EXPT windows dated inside the tail.
-        # So for post-study stages we evaluate the
-        # base and windowed overrides at the last-study-stage date (``ref_date``),
-        # while open-ended overrides still apply across the tail and POTEF
-        # availability (step 4b) uses the ACTUAL stage date.
+        # NEWAVE's "período estático final" freezes the post-study tail at a single
+        # December snapshot (manual table, p.32-33): thermal min generation, max
+        # generation and cost are ALL frozen there, and maintenance is "não
+        # considerada". The freeze reference is December of the last STUDY year for
+        # a plant already online then; but a plant that comes online ONLY in the
+        # post-study (POTEF dated after the last study stage — e.g. AZULAO II/IV,
+        # MANAUS I) does not yet exist in that December, so NEWAVE instead freezes it
+        # at its *online* terminal configuration. We mirror this by picking the
+        # freeze reference per plant: the last study stage normally, or the last
+        # (terminal December) stage when the plant only switches on in the post-study
+        # tail. Every date-dependent input — base, windowed EXPT overrides,
+        # POTEF/GTMIN availability (4b/4c) and clast cost modifications — is then
+        # evaluated at that single reference date; using the ACTUAL stage date would
+        # re-apply the last year's seasonal on/off pattern across the tail (a real
+        # bug observed as Feb–May GTMIN dropouts repeating every post-study year).
         last_study_idx = study_months - 1
+        comes_online_in_post_study = not _potef_online_at(
+            potef_windows.get(newave_code),
+            expt_without_potef=newave_code in codes_expt_without_potef,
+            when=stage_dates[last_study_idx],
+        ) and _potef_online_at(
+            potef_windows.get(newave_code),
+            expt_without_potef=newave_code in codes_expt_without_potef,
+            when=stage_dates[-1],
+        )
+        freeze_idx = (
+            len(stage_dates) - 1 if comes_online_in_post_study else last_study_idx
+        )
         for stage_idx, stage_date in enumerate(stage_dates):
             is_post_study = stage_idx >= study_months
-            ref_date = stage_dates[last_study_idx] if is_post_study else stage_date
+            ref_date = stage_dates[freeze_idx] if is_post_study else stage_date
 
             cal_month = ref_date.month
             state = _StageInputs(**_base(newave_code, cal_month))
@@ -745,13 +787,13 @@ def convert_thermal_bounds(
             _step4b_apply_potef_availability(
                 state,
                 potef_windows.get(newave_code),
-                stage_date,
+                ref_date,
                 expt_without_potef=newave_code in codes_expt_without_potef,
             )
             _step4c_apply_gtmin_availability(
                 state,
                 gtmin_windows.get(newave_code),
-                stage_date,
+                ref_date,
                 expt_without_gtmin=newave_code in codes_expt_without_gtmin,
             )
             _step5_apply_maint_reduction(
@@ -768,7 +810,10 @@ def convert_thermal_bounds(
                 stage_cost = cost_by_code_year.get((newave_code, year_idx))
                 # Apply clast.modificacoes overrides in file order; later
                 # entries win when windows overlap, matching NEWAVE's
-                # sequential application of the modification block.
+                # sequential application of the modification block. Tested against
+                # ``ref_date`` so the post-study tail freezes at the last study
+                # stage's cost (December) instead of letting a future-dated
+                # modification leak into the static final period.
                 for modif in modif_by_code.get(newave_code, []):
                     mod_start = pd.Timestamp(modif["data_inicio"]).date()
                     mod_end_raw = modif["data_fim"]
@@ -776,7 +821,7 @@ def convert_thermal_bounds(
                         mod_end = stage_dates[-1]
                     else:
                         mod_end = pd.Timestamp(mod_end_raw).date()
-                    if mod_start <= stage_date <= mod_end:
+                    if mod_start <= ref_date <= mod_end:
                         stage_cost = modif["custo"]
 
             rows_thermal_id.append(thermal_id)

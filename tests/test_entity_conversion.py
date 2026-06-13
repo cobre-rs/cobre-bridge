@@ -3039,6 +3039,166 @@ class TestConvertThermalBoundsClastModificacoes:
         assert b_rows.iloc[6]["cost_per_mwh"] == pytest.approx(120.0)
         assert b_rows.iloc[11]["cost_per_mwh"] == pytest.approx(120.0)
 
+    def test_gtmin_availability_freezes_post_study_tail(self, tmp_path) -> None:
+        """The "período estático final" freezes thermal min generation at December
+        of the last study year (manual p.32-33). A seasonal GTMIN window must NOT
+        keep cycling its on/off pattern through the post-study tail."""
+        import datetime
+
+        conft, clast, term = _thermal_readers()
+
+        # POTEF gives capacity across the whole horizon. GTMIN is active only
+        # Jan-Apr and Sep-Dec 2023 (zero May-Aug). December — the freeze point —
+        # is active, so the entire post-study tail must hold GTMIN rather than
+        # re-dropping it in the post-study May-Aug months.
+        expt_df = pd.DataFrame(
+            {
+                "codigo_usina": [10, 10, 10],
+                "tipo": ["POTEF", "GTMIN", "GTMIN"],
+                "modificacao": [100.0, 30.0, 30.0],
+                "data_inicio": [
+                    datetime.datetime(2023, 1, 1),
+                    datetime.datetime(2023, 1, 1),
+                    datetime.datetime(2023, 9, 1),
+                ],
+                "data_fim": [
+                    pd.NaT,
+                    datetime.datetime(2023, 4, 1),
+                    datetime.datetime(2023, 12, 1),
+                ],
+            }
+        )
+        expt_obj = MagicMock()
+        expt_obj.expansoes = expt_df
+
+        dger = self._make_dger()
+        dger.num_anos_pos_estudo = 1  # 12 study + 12 post-study stages
+
+        nw = make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+        case = make_case(
+            nw, conft=conft, clast=clast, term=term, dger=dger, expt=expt_obj
+        )
+
+        from cobre_bridge.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(case, self._make_id_map())
+        assert table is not None
+        a_rows = (
+            table.to_pandas()
+            .query("thermal_id == @self._make_id_map().thermal_id(10)")
+            .sort_values("stage_id")
+            .reset_index(drop=True)
+        )
+        assert len(a_rows) == 24  # 12 study + 12 post-study
+
+        # In-study: active Jan-Apr (3) and Sep-Dec (11); zero May-Aug (6).
+        assert a_rows.loc[3, "min_generation_mw"] == pytest.approx(30.0)
+        assert a_rows.loc[6, "min_generation_mw"] == pytest.approx(0.0)
+        assert a_rows.loc[11, "min_generation_mw"] == pytest.approx(30.0)
+        # Post-study (12-23): frozen at December → 30 every month, INCLUDING the
+        # May (16) and Aug (19) 2024 stages the old actual-stage-date logic zeroed.
+        assert a_rows.loc[16, "min_generation_mw"] == pytest.approx(30.0)
+        assert a_rows.loc[19, "min_generation_mw"] == pytest.approx(30.0)
+        assert a_rows.loc[12:23, "min_generation_mw"].tolist() == pytest.approx(
+            [30.0] * 12
+        )
+
+    def test_cost_modificacao_does_not_leak_into_post_study(self, tmp_path) -> None:
+        """A clast cost change dated inside the post-study tail must not apply —
+        the static final period freezes cost at December of the last study year."""
+        import datetime
+
+        conft, clast, term = _thermal_readers()
+
+        # Future cost change starting Mar 2024 (a post-study stage). Frozen at
+        # December 2023, it must never take effect.
+        clast.modificacoes = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "nome_usina": ["TERMO_A"],
+                "data_inicio": [datetime.datetime(2024, 3, 1)],
+                "data_fim": [pd.NaT],
+                "custo": [999.0],
+            }
+        )
+        dger = self._make_dger()
+        dger.num_anos_pos_estudo = 1
+
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+
+        from cobre_bridge.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(case, self._make_id_map())
+        assert table is not None
+        a_rows = (
+            table.to_pandas()
+            .query("thermal_id == @self._make_id_map().thermal_id(10)")
+            .sort_values("stage_id")
+            .reset_index(drop=True)
+        )
+        # The year-1 base cost (50.0) holds through the whole post-study tail;
+        # the future 999.0 modification is frozen out.
+        assert a_rows.loc[11, "cost_per_mwh"] == pytest.approx(50.0)  # Dec 2023
+        assert a_rows.loc[14, "cost_per_mwh"] == pytest.approx(50.0)  # Mar 2024
+        assert a_rows.loc[12:23, "cost_per_mwh"].tolist() == pytest.approx([50.0] * 12)
+
+    def test_post_study_expansion_freezes_at_online_value(self, tmp_path) -> None:
+        """A plant that comes online only in the post-study (POTEF dated in the
+        first post-study month) freezes at its *online* terminal December value,
+        not at the last study stage (where it does not yet exist) and not at its
+        seasonal profile — mirroring NEWAVE's AZULAO II/IV and MANAUS I."""
+        import datetime
+
+        conft, clast, term = _thermal_readers()
+
+        # Plant exists only from 2024 (the post-study). GTMIN: a closed seasonal
+        # window Jan-May (30) plus an open-ended tail from Jun (80). NEWAVE freezes
+        # the whole tail at the terminal December value (the open tail, 80).
+        expt_df = pd.DataFrame(
+            {
+                "codigo_usina": [10, 10, 10],
+                "tipo": ["POTEF", "GTMIN", "GTMIN"],
+                "modificacao": [100.0, 30.0, 80.0],
+                "data_inicio": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 6, 1),
+                ],
+                "data_fim": [pd.NaT, datetime.datetime(2024, 5, 1), pd.NaT],
+            }
+        )
+        expt_obj = MagicMock()
+        expt_obj.expansoes = expt_df
+
+        dger = self._make_dger()
+        dger.num_anos_pos_estudo = 1  # study Jan-Dec 2023, post Jan-Dec 2024
+
+        nw = make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+        case = make_case(
+            nw, conft=conft, clast=clast, term=term, dger=dger, expt=expt_obj
+        )
+
+        from cobre_bridge.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(case, self._make_id_map())
+        assert table is not None
+        a = (
+            table.to_pandas()
+            .query("thermal_id == @self._make_id_map().thermal_id(10)")
+            .sort_values("stage_id")
+            .reset_index(drop=True)
+        )
+        assert len(a) == 24
+        # Study (0-11): plant offline → zero capacity and zero must-run.
+        assert a.loc[0, "max_generation_mw"] == pytest.approx(0.0)
+        assert a.loc[11, "min_generation_mw"] == pytest.approx(0.0)
+        # Post-study (12-23): frozen at the terminal open-ended GTMIN (80) and
+        # online — NOT the last-study-stage value (0) and NOT the seasonal Jan
+        # value (30). The whole tail is flat at 80.
+        assert a.loc[12, "min_generation_mw"] == pytest.approx(80.0)  # Jan 2024
+        assert a.loc[12, "max_generation_mw"] > 0.0  # online
+        assert a.loc[12:23, "min_generation_mw"].tolist() == pytest.approx([80.0] * 12)
+
 
 # ---------------------------------------------------------------------------
 # Thermal-bound per-stage steps (extracted from the convert_thermal_bounds loop)
