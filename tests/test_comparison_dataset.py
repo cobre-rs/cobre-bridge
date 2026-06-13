@@ -137,17 +137,21 @@ def test_roundtrip_tidy_and_summary_equal(tmp_path: Path) -> None:
 
 
 def test_roundtrip_polars_metadata_frame(tmp_path: Path) -> None:
-    """A ``pl.DataFrame`` stored in metadata survives the round-trip."""
-    line_bounds = pl.DataFrame({"line_id": [0, 1], "limit": [100.0, 200.0]})
+    """A ``pl.DataFrame`` stored in metadata survives the round-trip.
+
+    Uses a non-render-only key (``"summary_counts_frame"``) because keys in
+    :data:`RENDER_ONLY_METADATA_KEYS` are intentionally dropped on serialize.
+    """
+    frame = pl.DataFrame({"line_id": [0, 1], "limit": [100.0, 200.0]})
     dataset = ComparisonDataset(
         tidy=_one_row_tidy("cobre"),
         summary=_small_summary(),
-        metadata={"line_bounds": line_bounds},
+        metadata={"summary_counts_frame": frame},
     )
     reloaded = ComparisonDataset.from_dir(dataset.to_dir(tmp_path)[0].parent)
-    value = reloaded.metadata["line_bounds"]
+    value = reloaded.metadata["summary_counts_frame"]
     assert isinstance(value, pl.DataFrame)
-    assert_frame_equal(value, line_bounds)
+    assert_frame_equal(value, frame)
 
 
 def test_roundtrip_pandas_metadata_frame(tmp_path: Path) -> None:
@@ -218,9 +222,9 @@ def test_roundtrip_empty_polars_metadata_frame_preserves_schema() -> None:
     must restore the original columns and dtypes.
     """
     empty = pl.DataFrame(schema={"line_id": pl.Int64, "limit": pl.Float64})
-    view = _metadata_to_json({"line_bounds": empty})
+    view = _metadata_to_json({"bound_table": empty})
     reloaded = _metadata_from_json(view)
-    value = reloaded["line_bounds"]
+    value = reloaded["bound_table"]
     assert isinstance(value, pl.DataFrame)
     assert_frame_equal(value, empty)
 

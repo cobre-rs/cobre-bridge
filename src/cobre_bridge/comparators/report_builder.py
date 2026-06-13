@@ -6,6 +6,9 @@ self-contained report.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
+import pandas as pd  # type: ignore[import-untyped]  # pandas-stubs not installed
 import polars as pl
 
 from cobre_bridge.comparators.charts import (
@@ -44,39 +47,126 @@ from cobre_bridge.comparators.html_report import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.comparators.results import (
-    PercentileData,
-    ResultComparison,
-    build_results_summary,
-)
+from cobre_bridge.comparators.results import ResultComparison, build_results_summary
+
+if TYPE_CHECKING:
+    from cobre_bridge.comparators.dataset import ComparisonDataset
 
 
-def build_comparison_report(
-    results: list[ResultComparison],
-    pctiles: PercentileData | None = None,
-) -> str:
+# -------------------------------------------------------------------
+# Typed metadata accessors for the migrated tab blocks (ticket-013)
+#
+# Each isinstance-guards its named key and returns a safe default when the key
+# is absent or ill-typed, reproducing the legacy ``pct.<field> if pctiles else
+# <default>`` semantics for the empty ``PercentileData()`` case. Never raises.
+# -------------------------------------------------------------------
+
+
+def _meta_frame(metadata: dict[str, object], key: str) -> pl.DataFrame:
+    """Return ``metadata[key]`` as a ``pl.DataFrame`` (empty frame on miss)."""
+    value = metadata.get(key)
+    if isinstance(value, pl.DataFrame):
+        return value
+    return pl.DataFrame()
+
+
+def _meta_pd_frame(metadata: dict[str, object], key: str) -> pd.DataFrame:
+    """Return ``metadata[key]`` as a ``pd.DataFrame`` (empty frame on miss)."""
+    value = metadata.get(key)
+    if isinstance(value, pd.DataFrame):
+        return value
+    return pd.DataFrame()
+
+
+def _meta_int(metadata: dict[str, object], key: str) -> int:
+    """Return ``metadata[key]`` as an ``int`` (``0`` on miss/ill-typed).
+
+    ``bool`` is rejected so a stray boolean never masquerades as ``0``/``1``.
+    """
+    value = metadata.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return 0
+
+
+def _meta_opt_int(metadata: dict[str, object], key: str) -> int | None:
+    """Return ``metadata[key]`` as an ``int | None`` (``None`` on miss/ill-typed).
+
+    Mirrors :func:`_meta_int` but the safe default is ``None`` so the legacy
+    ``pct.nw_max_stage if pctiles else None`` semantics are reproduced — keeping
+    the downstream ``if gc_max_stage is not None:`` filter intact. ``bool`` is
+    rejected so a stray boolean never masquerades as an ``int``.
+    """
+    value = metadata.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _meta_float(metadata: dict[str, object], key: str) -> float:
+    """Return ``metadata[key]`` as a ``float`` (``0.0`` on miss/ill-typed).
+
+    Reproduces the legacy ``pct.cobre_training_seconds if pctiles else 0.0``
+    semantics. ``bool`` is rejected; ``int`` is accepted and widened to float.
+    """
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
+
+
+def _meta_dict(metadata: dict[str, object], key: str) -> dict[object, object]:
+    """Return ``metadata[key]`` as a ``dict`` (empty dict on miss/ill-typed)."""
+    value = metadata.get(key)
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _meta_list(metadata: dict[str, object], key: str) -> list[object]:
+    """Return ``metadata[key]`` as a ``list`` (empty list on miss/ill-typed)."""
+    value = metadata.get(key)
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def build_comparison_report(dataset: ComparisonDataset) -> str:
     """Build a complete HTML comparison report.
+
+    Every tab sources its inputs from ``dataset.metadata``: the migrated tabs
+    read their named frame/dict/list/int keys via the typed accessors, and the
+    chart functions that still take ``list[ResultComparison]`` directly read the
+    raw rows from the render-only ``metadata["results"]`` key.
 
     Parameters
     ----------
-    results:
-        List of all comparison results from ``compare_results``.
-    pctiles:
-        Cobre simulation percentile statistics (p10/p50/p90).
+    dataset:
+        The canonical comparison dataset. Its ``metadata`` carries every render
+        input (named per-tab keys plus the ``results`` list); these are
+        in-memory render-only carry-overs, excluded from the serialized
+        artifact (see ``RENDER_ONLY_METADATA_KEYS``).
 
     Returns
     -------
     str
         Complete HTML document string.
     """
+    results = [
+        r
+        for r in _meta_list(dataset.metadata, "results")
+        if isinstance(r, ResultComparison)
+    ]
     summary = build_results_summary(results)
 
     tab_contents: dict[str, str] = {}
 
     # --- Overview tab ---
     overview_parts: list[str] = []
-    nw_costs = pctiles.nw_costs if pctiles else {}
-    cobre_costs = pctiles.cobre_costs if pctiles else {}
+    nw_costs = cast("dict[str, float]", _meta_dict(dataset.metadata, "nw_costs"))
+    cobre_costs = cast("dict[str, float]", _meta_dict(dataset.metadata, "cobre_costs"))
     overview_parts.append(overview_metrics(summary, nw_costs, cobre_costs))
     overview_parts.append(section_title("Cost Breakdown"))
     overview_parts.append(
@@ -88,9 +178,9 @@ def build_comparison_report(
         )
     )
     overview_parts.append(section_title("Per-Stage Cost"))
-    nw_sin = pctiles.nw_sin if pctiles else pl.DataFrame()
-    cobre_stage_costs = pctiles.cobre_stage_costs if pctiles else pl.DataFrame()
-    nw_offset = pctiles.nw_offset if pctiles else 0
+    nw_sin = _meta_frame(dataset.metadata, "nw_sin")
+    cobre_stage_costs = _meta_frame(dataset.metadata, "cobre_stage_costs")
+    nw_offset = _meta_int(dataset.metadata, "nw_offset")
     # Two side-by-side charts — immediate and future cost have very
     # different scales (one is per-stage operating cost, the other is a
     # cumulative future expectation), so we don't share an axis.
@@ -115,8 +205,8 @@ def build_comparison_report(
     )
 
     overview_parts.append(section_title("Convergence"))
-    nw_conv = pctiles.nw_convergence if pctiles else pl.DataFrame()
-    cb_conv = pctiles.cobre_convergence if pctiles else pl.DataFrame()
+    nw_conv = _meta_frame(dataset.metadata, "nw_convergence")
+    cb_conv = _meta_frame(dataset.metadata, "cobre_convergence")
     overview_parts.append(
         chart_grid(
             [wrap_chart(convergence_chart(nw_conv, cb_conv))],
@@ -126,7 +216,7 @@ def build_comparison_report(
     tab_contents["tab-overview"] = "\n".join(overview_parts)
 
     # --- System tab ---
-    bus_pct = pctiles.bus if pctiles else None
+    bus_pct = _meta_frame(dataset.metadata, "bus")
     system_parts: list[str] = []
     system_parts.append(section_title("Spot Price by Bus"))
     system_parts.append(
@@ -154,42 +244,49 @@ def build_comparison_report(
 
     # --- Energy Balance tab ---
     balance_html = build_energy_balance_tab(
-        pctiles.nw_market if pctiles else pl.DataFrame(),
-        pctiles.bus_aggregates if pctiles else pl.DataFrame(),
-        pctiles.cobre_bus_meta if pctiles else {},
-        pctiles.nw_bus_names if pctiles else {},
-        nw_net_load=pctiles.nw_net_load if pctiles else pl.DataFrame(),
+        _meta_frame(dataset.metadata, "nw_market"),
+        _meta_frame(dataset.metadata, "bus_aggregates"),
+        cast(
+            "dict[int, dict[object, object]]",
+            _meta_dict(dataset.metadata, "cobre_bus_meta"),
+        ),
+        cast("dict[int, str]", _meta_dict(dataset.metadata, "nw_bus_names")),
+        nw_net_load=_meta_frame(dataset.metadata, "nw_net_load"),
     )
+    balance_cobre_hydro_means = _meta_frame(dataset.metadata, "cobre_hydro_means")
+    balance_hydro = _meta_frame(dataset.metadata, "hydro")
+    balance_nw_sin = _meta_frame(dataset.metadata, "nw_sin")
+    balance_nw_offset = _meta_int(dataset.metadata, "nw_offset")
     energy_balance_extra: list[str] = []
-    if pctiles is not None and not pctiles.cobre_hydro_means.is_empty():
+    if not balance_cobre_hydro_means.is_empty():
         energy_balance_extra.append(section_title("System Energy (EARM / ENA)"))
         energy_balance_extra.append(
             chart_grid(
                 [
                     wrap_chart(
                         cobre_aggregate_chart(
-                            pctiles.cobre_hydro_means,
+                            balance_cobre_hydro_means,
                             "stored_energy_final_mwh",
                             "System Stored Energy (EARM)",
                             "MWh",
-                            pctiles.hydro,
-                            nw_sin=pctiles.nw_sin,
+                            balance_hydro,
+                            nw_sin=balance_nw_sin,
                             nw_variable="EARMF",
                             nw_factor=730.0,
-                            nw_offset=pctiles.nw_offset,
+                            nw_offset=balance_nw_offset,
                         )
                     ),
                     wrap_chart(
                         cobre_aggregate_chart(
-                            pctiles.cobre_hydro_means,
+                            balance_cobre_hydro_means,
                             "incremental_inflow_energy_mw",
                             "System Natural Inflow Energy (ENA)",
                             "MW",
-                            pctiles.hydro,
-                            nw_sin=pctiles.nw_sin,
+                            balance_hydro,
+                            nw_sin=balance_nw_sin,
                             nw_variable="ENA",
                             nw_factor=1.0,
-                            nw_offset=pctiles.nw_offset,
+                            nw_offset=balance_nw_offset,
                         )
                     ),
                 ]
@@ -198,9 +295,11 @@ def build_comparison_report(
     tab_contents["tab-balance"] = balance_html + "\n" + "\n".join(energy_balance_extra)
 
     # --- Network tab ---
-    line_pct = pctiles.line if pctiles else None
-    line_bounds = pctiles.line_bounds if pctiles else None
-    line_meta = pctiles.line_meta if pctiles else []
+    line_pct = _meta_frame(dataset.metadata, "line")
+    line_bounds = _meta_pd_frame(dataset.metadata, "line_bounds")
+    line_meta = cast(
+        "list[dict[object, object]]", _meta_list(dataset.metadata, "line_meta")
+    )
     network_parts: list[str] = []
     network_parts.append(section_title("Line Net Flow"))
     network_parts.append(
@@ -217,11 +316,13 @@ def build_comparison_report(
     # scenarios and blocks from the simulation parquet. Bounds are taken
     # from constraints/generic_constraint_bounds.parquet (block 0
     # preferred when blocks disagree).
-    gc_constraints = pctiles.gc_constraints if pctiles else []
-    gc_bounds_df = pctiles.gc_bounds if pctiles else pl.DataFrame()
-    gc_lhs_nw = pctiles.gc_lhs_newave if pctiles else pl.DataFrame()
-    gc_lhs_cb = pctiles.gc_lhs_cobre if pctiles else pl.DataFrame()
-    gc_max_stage = pctiles.nw_max_stage if pctiles else None
+    gc_constraints = cast(
+        "list[dict[object, object]]", _meta_list(dataset.metadata, "gc_constraints")
+    )
+    gc_bounds_df = _meta_frame(dataset.metadata, "gc_bounds")
+    gc_lhs_nw = _meta_frame(dataset.metadata, "gc_lhs_newave")
+    gc_lhs_cb = _meta_frame(dataset.metadata, "gc_lhs_cobre")
+    gc_max_stage = _meta_opt_int(dataset.metadata, "nw_max_stage")
     bound_lookup = per_stage_bounds(gc_bounds_df, max_stage=gc_max_stage)
     if gc_max_stage is not None:
         gc_lhs_nw = (
@@ -251,14 +352,20 @@ def build_comparison_report(
     tab_contents["tab-constraints"] = "\n".join(constraints_parts)
 
     # --- Hydro Operation tab ---
-    hydro_pct = pctiles.hydro if pctiles else None
-    cobre_hydro_means = pctiles.cobre_hydro_means if pctiles else pl.DataFrame()
-    nw_sin = pctiles.nw_sin if pctiles else pl.DataFrame()
-    nw_offset = pctiles.nw_offset if pctiles else 0
+    hydro_pct = _meta_frame(dataset.metadata, "hydro")
+    cobre_hydro_means = _meta_frame(dataset.metadata, "cobre_hydro_means")
+    nw_sin = _meta_frame(dataset.metadata, "nw_sin")
+    nw_offset = _meta_int(dataset.metadata, "nw_offset")
     matched_hydro_ids = {r.cobre_id for r in results if r.entity_type == "hydro"}
 
-    hydro_meta = pctiles.cobre_hydro_meta if pctiles else {}
-    bus_meta = pctiles.cobre_bus_meta if pctiles else {}
+    hydro_meta = cast(
+        "dict[int, dict[object, object]]",
+        _meta_dict(dataset.metadata, "cobre_hydro_meta"),
+    )
+    bus_meta = cast(
+        "dict[int, dict[object, object]]",
+        _meta_dict(dataset.metadata, "cobre_bus_meta"),
+    )
     hydro_parts: list[str] = []
     for var, title in [
         ("storage_final_hm3", "Storage by Bus (hm³)"),
@@ -344,7 +451,7 @@ def build_comparison_report(
     # slacks).  The inflow non-negativity slack has no NEWAVE counterpart,
     # so its NEWAVE source is passed as None — the chart still renders the
     # Cobre Mean + p10/p90 band, just without an overlaid NEWAVE line.
-    nw_hydro_slacks = pctiles.nw_hydro_slacks if pctiles else pl.DataFrame()
+    nw_hydro_slacks = _meta_frame(dataset.metadata, "nw_hydro_slacks")
     # Withdrawal pos/neg are SWAPPED to follow NEWAVE's sign convention; the
     # ``_NW_HYDRO_SLACK_VARS`` mapping in ``results.py`` is correspondingly
     # swapped so each panel pairs the right Cobre column with the right
@@ -401,15 +508,18 @@ def build_comparison_report(
         results,
         hydro_pct,
         cobre_hydro_means,
-        cobre_hydro_meta=pctiles.cobre_hydro_meta if pctiles else {},
-        cobre_hydro_per_stage_bounds=(
-            pctiles.cobre_hydro_per_stage_bounds if pctiles else pl.DataFrame()
+        cobre_hydro_meta=cast(
+            "dict[int, dict[object, object]]",
+            _meta_dict(dataset.metadata, "cobre_hydro_meta"),
         ),
-        nw_hydro_slacks=(pctiles.nw_hydro_slacks if pctiles else pl.DataFrame()),
+        cobre_hydro_per_stage_bounds=_meta_frame(
+            dataset.metadata, "cobre_hydro_per_stage_bounds"
+        ),
+        nw_hydro_slacks=_meta_frame(dataset.metadata, "nw_hydro_slacks"),
     )
 
     # --- Thermal Operation tab ---
-    thermal_pct = pctiles.thermal if pctiles else None
+    thermal_pct = _meta_frame(dataset.metadata, "thermal")
     thermal_parts: list[str] = []
     thermal_parts.append(section_title("Thermal Generation Comparison"))
     thermal_parts.append(
@@ -424,7 +534,7 @@ def build_comparison_report(
     tab_contents["tab-thermal-detail"] = build_thermal_detail_tab(results, thermal_pct)
 
     # --- Productivity tab ---
-    prod_df = pctiles.productivity_detail if pctiles else pl.DataFrame()
+    prod_df = _meta_frame(dataset.metadata, "productivity_detail")
     prod_parts: list[str] = []
     static_title = (
         "Static productivity — pmo vs cobre-bridge conversion "
@@ -482,10 +592,12 @@ def build_comparison_report(
     tab_contents["tab-productivity"] = "\n".join(prod_parts)
 
     # --- Performance tab ---
-    nw_tim_iters = pctiles.nw_tim_iterations if pctiles else pl.DataFrame()
-    nw_tim_stages = pctiles.nw_tim_stages if pctiles else {}
-    cb_train_secs = pctiles.cobre_training_seconds if pctiles else 0.0
-    cb_conv_perf = pctiles.cobre_iteration_timing if pctiles else pl.DataFrame()
+    nw_tim_iters = _meta_frame(dataset.metadata, "nw_tim_iterations")
+    nw_tim_stages = cast(
+        "dict[str, float]", _meta_dict(dataset.metadata, "nw_tim_stages")
+    )
+    cb_train_secs = _meta_float(dataset.metadata, "cobre_training_seconds")
+    cb_conv_perf = _meta_frame(dataset.metadata, "cobre_iteration_timing")
     perf_parts: list[str] = []
     perf_parts.append(performance_metric_cards(nw_tim_stages, cb_train_secs))
     perf_parts.append(section_title("Time per Iteration"))

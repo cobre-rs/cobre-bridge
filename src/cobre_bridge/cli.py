@@ -129,7 +129,6 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     """Execute the compare results subcommand."""
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import build_entity_alignment
-    from cobre_bridge.comparators.analyze import build_results_dataset
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.export import write_artifacts
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
@@ -154,7 +153,7 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     # was unreadable/malformed — fail loudly (exit 2) rather than report a
     # false "no divergence" on data we could not actually read.
     try:
-        results, pctiles = compare_results(
+        dataset = compare_results(
             case=case,
             id_map=id_map,
             alignment=alignment,
@@ -164,9 +163,6 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     except CobreReadError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
-
-    # Build the canonical dataset once; console + artifacts derive from it.
-    dataset = build_results_dataset(results, pctiles, tolerance)
 
     # Print text summary (sourced from the dataset).
     print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
@@ -194,7 +190,7 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
             build_comparison_report,
         )
 
-        html = build_comparison_report(results, pctiles)
+        html = build_comparison_report(dataset)
         output_path: Path = args.output
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(html, encoding="utf-8")

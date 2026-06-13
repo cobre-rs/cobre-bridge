@@ -7,6 +7,7 @@ import io
 from pathlib import Path
 from typing import cast
 
+import pandas as pd
 import polars as pl
 
 from cobre_bridge.comparators.analyze import (
@@ -365,6 +366,103 @@ def test_build_results_dataset_empty_inputs_validate() -> None:
     dataset.validate()
     assert dataset.tidy.height == 0
     assert dataset.summary.height == 0
+
+
+def test_build_results_dataset_carries_render_only_keys_in_memory() -> None:
+    """The render-only keys (results + drained pct frames) live in metadata."""
+    results = _make_results()
+    pct = PercentileData(
+        thermal=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
+        nw_max_stage=12,
+        cobre_training_seconds=3.5,
+    )
+
+    dataset = build_results_dataset(results, pct, 1e-2)
+
+    assert dataset.metadata["results"] == list(results)
+    assert dataset.metadata["nw_max_stage"] == 12
+    assert dataset.metadata["cobre_training_seconds"] == 3.5
+    assert isinstance(dataset.metadata["thermal"], pl.DataFrame)
+    assert isinstance(dataset.metadata["gc_constraints"], list)
+
+
+def test_metadata_json_excludes_render_only_keys(tmp_path: Path) -> None:
+    """``to_dir`` writes a small metadata.json without the render-only inputs.
+
+    The bulky render inputs (``results`` plus the drained ``PercentileData``
+    frames) are in :data:`RENDER_ONLY_METADATA_KEYS`, so ``to_dir`` must NOT
+    serialize them — yet the genuine provenance key ``top_divergences`` is kept.
+    """
+    import json
+
+    from cobre_bridge.comparators.dataset import RENDER_ONLY_METADATA_KEYS
+
+    results = _make_results()
+    pct = PercentileData(
+        hydro=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
+        thermal=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
+        nw_costs={"deficit": 1.0},
+        nw_max_stage=5,
+    )
+    dataset = build_results_dataset(results, pct, 1e-2)
+
+    paths = dataset.to_dir(tmp_path)
+    metadata_path = paths[2]
+    written = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    # No render-only key leaked into the artifact.
+    for key in RENDER_ONLY_METADATA_KEYS:
+        assert key not in written, f"render-only key {key!r} leaked into metadata.json"
+    assert "results" not in written
+    assert "hydro" not in written
+    # Genuine provenance / JSON-native keys survive.
+    assert "top_divergences" in written
+    assert written["nw_costs"] == {"deficit": 1.0}
+
+
+def test_render_only_covers_all_frame_metadata_keys(tmp_path: Path) -> None:
+    """Every frame-valued metadata key must be listed in RENDER_ONLY_METADATA_KEYS.
+
+    Guards the sync invariant between :func:`build_results_dataset` and
+    :data:`RENDER_ONLY_METADATA_KEYS`: a contributor who adds a new frame-valued
+    metadata key but forgets to register it here would otherwise only discover it
+    as a runtime ``TypeError`` from :meth:`ComparisonDataset.to_dir` (which cannot
+    serialize a bare ``pl``/``pd`` frame unless it is skipped as render-only).
+    This asserts the containment up front, and round-trips through ``to_dir`` to
+    confirm no frame key leaks into ``metadata.json``.
+    """
+    import json
+
+    from cobre_bridge.comparators.dataset import RENDER_ONLY_METADATA_KEYS
+
+    results = _make_results()
+    pct = PercentileData(
+        hydro=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
+        thermal=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
+        line_bounds=pd.DataFrame({"line_id": [0], "value": [1.0]}),
+        nw_costs={"deficit": 1.0},
+    )
+
+    dataset = build_results_dataset(results, pct, 1e-2)
+
+    frame_keys = {
+        key
+        for key, value in dataset.metadata.items()
+        if isinstance(value, (pl.DataFrame, pd.DataFrame))
+    }
+    assert frame_keys, "expected at least one frame-valued metadata key in the fixture"
+    missing = frame_keys - RENDER_ONLY_METADATA_KEYS
+    assert not missing, (
+        f"frame-valued metadata keys {sorted(missing)} are not listed in "
+        f"RENDER_ONLY_METADATA_KEYS; add them or to_dir will raise a TypeError"
+    )
+
+    paths = dataset.to_dir(tmp_path)
+    written = json.loads(paths[2].read_text(encoding="utf-8"))
+    for key in frame_keys:
+        assert key not in written, (
+            f"frame metadata key {key!r} leaked into metadata.json"
+        )
 
 
 def _make_bounds() -> list[BoundComparison]:

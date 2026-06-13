@@ -15,7 +15,7 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators import charts as _cmp_charts
-from cobre_bridge.comparators.results import ResultComparison
+from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.dashboard.chart_helpers import (
     COST_GROUP_COLORS,
     COST_GROUPS,
@@ -1098,3 +1098,435 @@ def test_system_spillage_energy_chart_html_matches_golden(
         encoding="utf-8"
     )
     assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-012: build_comparison_report dataset-seam golden parity
+#
+# Guards that re-pointing ``build_comparison_report`` onto the
+# ``ComparisonDataset`` seam (it now takes the dataset plus explicit
+# ``results``/``pct`` keyword params) leaves the rendered HTML
+# character-for-character identical to the pre-change output.
+#
+# The golden ``tests/golden/build_comparison_report_full.html`` was captured
+# from the LEGACY ``build_comparison_report(results, pctiles)`` call on the
+# fixtures below; only the random ``chart-<hex>`` div id is normalised.
+# ---------------------------------------------------------------------------
+
+
+def _report_fixture_results() -> list[ResultComparison]:
+    """Representative comparison rows across entity types (golden fixture)."""
+    return [
+        ResultComparison(
+            entity_type="hydro",
+            entity_name="PLANT_A",
+            newave_code=1,
+            cobre_id=0,
+            stage=0,
+            variable="generation_mw",
+            newave_value=1200.0,
+            cobre_value=1195.0,
+            abs_diff=5.0,
+            rel_diff=0.004,
+        ),
+        ResultComparison(
+            entity_type="hydro",
+            entity_name="PLANT_A",
+            newave_code=1,
+            cobre_id=0,
+            stage=1,
+            variable="storage_final_hm3",
+            newave_value=4500.0,
+            cobre_value=4510.0,
+            abs_diff=10.0,
+            rel_diff=0.002,
+        ),
+        ResultComparison(
+            entity_type="thermal",
+            entity_name="GAS_A",
+            newave_code=10,
+            cobre_id=0,
+            stage=0,
+            variable="generation_mw",
+            newave_value=300.0,
+            cobre_value=298.0,
+            abs_diff=2.0,
+            rel_diff=0.007,
+        ),
+        ResultComparison(
+            entity_type="bus",
+            entity_name="SE",
+            newave_code=1,
+            cobre_id=0,
+            stage=0,
+            variable="spot_price",
+            newave_value=150.0,
+            cobre_value=152.0,
+            abs_diff=2.0,
+            rel_diff=0.013,
+        ),
+        ResultComparison(
+            entity_type="convergence",
+            entity_name="iteration_1",
+            newave_code=1,
+            cobre_id=1,
+            stage=1,
+            variable="lower_bound",
+            newave_value=50000.0,
+            cobre_value=50100.0,
+            abs_diff=100.0,
+            rel_diff=0.002,
+        ),
+    ]
+
+
+def _report_fixture_pct() -> PercentileData:
+    """PercentileData with non-empty hydro/thermal frames (golden fixture)."""
+    hydro_df = pl.DataFrame(
+        {
+            "entity_id": [0, 0, 0],
+            "stage_id": [0, 1, 2],
+            "generation_mw_p10": [1000.0, 1050.0, 1100.0],
+            "generation_mw_p50": [1200.0, 1250.0, 1300.0],
+            "generation_mw_p90": [1400.0, 1450.0, 1500.0],
+            "storage_final_hm3_p10": [4000.0, 4100.0, 4200.0],
+            "storage_final_hm3_p50": [4500.0, 4550.0, 4600.0],
+            "storage_final_hm3_p90": [5000.0, 5050.0, 5100.0],
+        }
+    )
+    thermal_df = pl.DataFrame(
+        {
+            "entity_id": [0, 0, 0],
+            "stage_id": [0, 1, 2],
+            "generation_mw_p10": [250.0, 260.0, 270.0],
+            "generation_mw_p50": [300.0, 310.0, 320.0],
+            "generation_mw_p90": [350.0, 360.0, 370.0],
+        }
+    )
+    return PercentileData(hydro=hydro_df, thermal=thermal_df)
+
+
+def test_build_comparison_report_dataset_golden() -> None:
+    """The dataset seam renders byte-identically to the legacy signature."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _report_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+
+    golden = (_GOLDEN_DIR / "build_comparison_report_full.html").read_text(
+        encoding="utf-8"
+    )
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-013: per-tab metadata-drain golden parity
+#
+# Guards that re-pointing the Overview / System / Energy-Balance / Network tab
+# blocks of ``build_comparison_report`` to read their frame/dict/list/int args
+# from ``dataset.metadata`` named keys (instead of the monolithic ``pct``
+# object) leaves each tab's rendered HTML character-for-character identical. The
+# golden files were captured from the LEGACY (pre-re-point) report_builder on
+# the shared ``_report_fixture_results`` / ``_report_fixture_pct`` fixtures; the
+# random ``chart-<hex>`` div id is normalised away by ``_strip_chart_id``.
+# ---------------------------------------------------------------------------
+
+
+def _extract_tab_content(html: str, tab_id: str) -> str:
+    """Return the inner HTML of the ``<section id="{tab_id}">`` (== tab_contents)."""
+    pat = re.compile(
+        r'<section id="' + re.escape(tab_id) + r'" class="tab-content[^"]*">\n'
+        r"(.*?)\n</section>",
+        re.DOTALL,
+    )
+    match = pat.search(html)
+    assert match is not None, f"tab section {tab_id} not found in report HTML"
+    return match.group(1)
+
+
+@pytest.mark.parametrize(
+    ("tab_id", "golden_name"),
+    [
+        ("tab-overview", "report_tab_overview.html"),
+        ("tab-system", "report_tab_system.html"),
+        ("tab-balance", "report_tab_balance.html"),
+        ("tab-network", "report_tab_network.html"),
+    ],
+)
+def test_report_tab_matches_golden(tab_id: str, golden_name: str) -> None:
+    """Each migrated tab renders byte-identically after the metadata drain."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _report_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, tab_id)
+
+    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
+    assert _strip_chart_id(content) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-014: Hydro Operation / Hydro Details metadata-drain golden parity
+#
+# Guards that re-pointing the Hydro Operation and Hydro Details tab blocks of
+# ``build_comparison_report`` to read their frame/dict/int args from
+# ``dataset.metadata`` named keys (instead of the monolithic ``pct`` object)
+# leaves each tab's rendered HTML character-for-character identical. The golden
+# files were captured from the LEGACY (pre-re-point) report_builder on the
+# shared ``_report_fixture_results`` / ``_report_fixture_pct`` fixtures; the
+# random ``chart-<hex>`` div id is normalised away by ``_strip_chart_id``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tab_id", "golden_name"),
+    [
+        ("tab-hydro", "report_tab_hydro.html"),
+        ("tab-hydro-detail", "report_tab_hydro_detail.html"),
+    ],
+)
+def test_report_hydro_tab_matches_golden(tab_id: str, golden_name: str) -> None:
+    """Each hydro tab renders byte-identically after the metadata drain."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _report_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, tab_id)
+
+    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
+    assert _strip_chart_id(content) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-021: Thermal Operation / Thermal Details / Productivity drain parity
+#
+# Guards that re-pointing the Thermal Operation, Thermal Details and
+# Productivity tab blocks of ``build_comparison_report`` to read their frame
+# args from ``dataset.metadata`` named keys (``thermal`` /
+# ``productivity_detail``) instead of the monolithic ``pct`` object leaves each
+# tab's rendered HTML character-for-character identical. The golden files were
+# captured from the LEGACY (pre-re-point) report_builder on the shared
+# ``_report_fixture_results`` / ``_report_fixture_pct`` fixtures; the random
+# ``chart-<hex>`` div id is normalised away by ``_strip_chart_id``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tab_id", "golden_name"),
+    [
+        ("tab-thermal", "report_tab_thermal.html"),
+        ("tab-thermal-detail", "report_tab_thermal_detail.html"),
+        ("tab-productivity", "report_tab_productivity.html"),
+    ],
+)
+def test_report_thermal_productivity_tab_matches_golden(
+    tab_id: str, golden_name: str
+) -> None:
+    """Each thermal/productivity tab renders byte-identically after the drain."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _report_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, tab_id)
+
+    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
+    assert _strip_chart_id(content) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-022: Constraints / Performance metadata-drain golden parity
+#
+# Guards that re-pointing the Constraints and Performance tab blocks of
+# ``build_comparison_report`` to read their frame/list/int/float/dict args from
+# ``dataset.metadata`` named keys (``gc_constraints`` / ``gc_bounds`` /
+# ``gc_lhs_newave`` / ``gc_lhs_cobre`` / ``nw_max_stage`` / ``nw_tim_iterations``
+# / ``nw_tim_stages`` / ``cobre_training_seconds`` / ``cobre_iteration_timing``)
+# instead of the monolithic ``pct`` object leaves each tab's rendered HTML
+# character-for-character identical. The goldens were captured from the LEGACY
+# (pre-re-point) report_builder on the ``_constraints_perf_fixture_pct`` fixture
+# below; the random ``chart-<hex>`` div id is normalised by ``_strip_chart_id``.
+# ---------------------------------------------------------------------------
+
+
+def _constraints_perf_fixture_pct() -> PercentileData:
+    """PercentileData with non-empty constraint + performance frames."""
+    gc_constraints = [
+        {"id": 0, "name": "RE_1", "sense": ">="},
+        {"id": 1, "name": "AGRINT_1", "sense": ">="},
+    ]
+    gc_bounds = pl.DataFrame(
+        {
+            "constraint_id": [0, 0, 1, 1],
+            "stage_id": [0, 1, 0, 1],
+            "block_id": [0, 0, 0, 0],
+            "bound": [500.0, 520.0, 300.0, 310.0],
+        }
+    )
+    gc_lhs_newave = pl.DataFrame(
+        {
+            "constraint_id": [0, 0, 1, 1],
+            "stage_id": [0, 1, 0, 1],
+            "lhs_value": [510.0, 525.0, 305.0, 312.0],
+        }
+    )
+    gc_lhs_cobre = pl.DataFrame(
+        {
+            "constraint_id": [0, 0, 1, 1],
+            "stage_id": [0, 1, 0, 1],
+            "lhs_value": [508.0, 523.0, 304.0, 311.0],
+        }
+    )
+    nw_tim_iterations = pl.DataFrame(
+        {
+            "iteration": [1, 2, 3],
+            "forward_seconds": [10.0, 9.0, 8.5],
+            "backward_seconds": [20.0, 18.0, 17.0],
+            "total_seconds": [30.0, 27.0, 25.5],
+        }
+    )
+    cobre_iteration_timing = pl.DataFrame(
+        {
+            "iteration": [1, 2, 3],
+            "time_total_ms": [25000.0, 24000.0, 23000.0],
+            "time_forward_ms": [10000.0, 9500.0, 9000.0],
+            "time_backward_ms": [15000.0, 14500.0, 14000.0],
+        }
+    )
+    return PercentileData(
+        gc_constraints=gc_constraints,
+        gc_bounds=gc_bounds,
+        gc_lhs_newave=gc_lhs_newave,
+        gc_lhs_cobre=gc_lhs_cobre,
+        nw_max_stage=1,
+        nw_tim_iterations=nw_tim_iterations,
+        nw_tim_stages={"Tempo Total": 120.0, "Calculo da Politica": 90.0},
+        cobre_training_seconds=72.0,
+        cobre_iteration_timing=cobre_iteration_timing,
+    )
+
+
+@pytest.mark.parametrize(
+    ("tab_id", "golden_name"),
+    [
+        ("tab-constraints", "report_tab_constraints.html"),
+        ("tab-performance", "report_tab_performance.html"),
+    ],
+)
+def test_report_constraints_performance_tab_matches_golden(
+    tab_id: str, golden_name: str
+) -> None:
+    """Constraints/Performance tabs render byte-identically after the drain."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _constraints_perf_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, tab_id)
+
+    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
+    assert _strip_chart_id(content) == _strip_chart_id(golden)
+
+
+def test_report_productivity_tab_empty_detail_renders_fallback() -> None:
+    """Empty ``productivity_detail`` renders the literal no-data fallback."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    # The shared fixture leaves ``productivity_detail`` empty by default.
+    pct = _report_fixture_pct()
+    assert pct.productivity_detail.is_empty()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, "tab-productivity")
+
+    assert "No productivity data available." in content
+
+
+def test_build_comparison_report_empty_dataset_has_all_tabs() -> None:
+    """An empty dataset/pct renders all 11 tab ids without raising."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.html_report import COMPARISON_TABS
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    dataset = build_results_dataset([], PercentileData(), 0.05)
+    html = build_comparison_report(dataset)
+
+    for tab_id, _ in COMPARISON_TABS:
+        assert f'id="{tab_id}"' in html
+
+
+# ---------------------------------------------------------------------------
+# ticket-013: typed metadata accessors — safe-default paths
+# ---------------------------------------------------------------------------
+
+
+def test_meta_frame_missing_key_returns_empty_polars() -> None:
+    """A missing key yields an empty ``pl.DataFrame`` (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_frame
+
+    result = _meta_frame({}, "line")
+    assert isinstance(result, pl.DataFrame)
+    assert result.is_empty()
+
+
+def test_meta_frame_ill_typed_returns_empty_polars() -> None:
+    """An ill-typed value yields the empty ``pl.DataFrame`` default."""
+    from cobre_bridge.comparators.report_builder import _meta_frame
+
+    result = _meta_frame({"line": 123}, "line")
+    assert isinstance(result, pl.DataFrame)
+    assert result.is_empty()
+
+
+def test_meta_pd_frame_missing_key_returns_empty_pandas() -> None:
+    """A missing key yields an empty ``pd.DataFrame`` (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_pd_frame
+
+    result = _meta_pd_frame({}, "line_bounds")
+    assert isinstance(result, pd.DataFrame)
+    assert result.empty
+
+
+def test_meta_int_missing_key_returns_zero() -> None:
+    """A missing key yields the int default ``0`` (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_int
+
+    assert _meta_int({}, "nw_offset") == 0
+    assert _meta_int({"nw_offset": "x"}, "nw_offset") == 0
+
+
+def test_meta_dict_missing_key_returns_empty_dict() -> None:
+    """A missing key yields the empty-dict default (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_dict
+
+    assert _meta_dict({}, "cobre_bus_meta") == {}
+    assert _meta_dict({"cobre_bus_meta": 5}, "cobre_bus_meta") == {}
+
+
+def test_meta_list_missing_key_returns_empty_list() -> None:
+    """A missing key yields the empty-list default (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_list
+
+    assert _meta_list({}, "line_meta") == []
+    assert _meta_list({"line_meta": 5}, "line_meta") == []

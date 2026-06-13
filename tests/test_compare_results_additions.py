@@ -211,6 +211,7 @@ class TestCompareLines:
 
 class TestHtmlReportNewSections:
     def test_renders_new_tab_and_sections(self) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
         )
@@ -310,7 +311,8 @@ class TestHtmlReportNewSections:
             ],
             line_bounds=pd.DataFrame(),
         )
-        html = build_comparison_report(results, pctiles)
+        dataset = build_results_dataset(results, pctiles, 0.05)
+        html = build_comparison_report(dataset)
         # New tab registered
         assert "tab-network" in html
         # Network tab content

@@ -278,7 +278,12 @@ def build_results_dataset(
     Combines the tidy frame from :func:`tidy_results_dataset`, the summary frame
     from :func:`summary_frame_from_results`, and a metadata side-table carrying
     the top divergences plus the non-tidy artifacts (cost dicts and entity-name
-    dicts from ``pct``) verbatim. Validates before returning.
+    dicts from ``pct``) verbatim. The raw ``results`` list and the per-tab render
+    inputs drained from ``pct`` (overview through constraints/performance) are
+    stored in-memory under their named keys but are excluded from the serialized
+    artifact via
+    :data:`cobre_bridge.comparators.dataset.RENDER_ONLY_METADATA_KEYS`.
+    Validates before returning.
 
     Args:
         results: The result comparisons (``newave``/``cobre`` rows + summary).
@@ -299,10 +304,62 @@ def build_results_dataset(
     metadata: dict[str, object] = {
         "top_divergences": top_divergences_from_results(results),
         "footer_counts": results_footer_counts(results),
+        # Raw comparison rows, threaded in-memory for the chart functions that
+        # still take ``list[ResultComparison]`` directly. Render-only: excluded
+        # from the serialized artifact (see RENDER_ONLY_METADATA_KEYS).
+        "results": list(results),
         "nw_costs": pct.nw_costs,
         "cobre_costs": pct.cobre_costs,
         "nw_bus_names": pct.nw_bus_names,
         "nw_hydro_names": pct.nw_hydro_names,
+        # --- ticket-013: Overview/System/Energy-Balance/Network tab inputs ---
+        # The four migrated tabs read these named keys (via report_builder's
+        # typed metadata accessors) instead of the monolithic ``pct`` object.
+        # Stored as the live objects: frames as pl/pd DataFrames, the dict/list/
+        # int carry-overs as-is. The seven un-migrated tabs still read ``pct``.
+        "nw_sin": pct.nw_sin,
+        "cobre_stage_costs": pct.cobre_stage_costs,
+        "nw_offset": pct.nw_offset,
+        "nw_convergence": pct.nw_convergence,
+        "cobre_convergence": pct.cobre_convergence,
+        "bus": pct.bus,
+        "nw_market": pct.nw_market,
+        "bus_aggregates": pct.bus_aggregates,
+        "cobre_bus_meta": pct.cobre_bus_meta,
+        "nw_net_load": pct.nw_net_load,
+        "cobre_hydro_means": pct.cobre_hydro_means,
+        "hydro": pct.hydro,
+        "line": pct.line,
+        "line_bounds": pct.line_bounds,
+        "line_meta": pct.line_meta,
+        # --- ticket-014: Hydro Operation / Hydro Details tab inputs ---
+        # The two hydro tabs read these named keys (via report_builder's typed
+        # metadata accessors). ``cobre_hydro_meta`` is a dict[int, dict];
+        # ``nw_hydro_slacks`` and ``cobre_hydro_per_stage_bounds`` are frames.
+        # The remaining un-migrated tabs still read ``pct``.
+        "cobre_hydro_meta": pct.cobre_hydro_meta,
+        "nw_hydro_slacks": pct.nw_hydro_slacks,
+        "cobre_hydro_per_stage_bounds": pct.cobre_hydro_per_stage_bounds,
+        # --- ticket-021: Thermal Operation / Thermal Details / Productivity ---
+        # The thermal tabs read ``thermal``; the Productivity tab reads
+        # ``productivity_detail``. Both are live ``pl.DataFrame`` objects.
+        "thermal": pct.thermal,
+        "productivity_detail": pct.productivity_detail,
+        # --- ticket-022: Constraints / Performance tab inputs ---
+        # The final two tabs read these named keys (via report_builder's typed
+        # metadata accessors). ``gc_constraints`` is a ``list[dict]``;
+        # ``nw_max_stage`` is ``int | None``; ``cobre_training_seconds`` is a
+        # ``float``; ``nw_tim_stages`` is a ``dict[str, float]``; the rest are
+        # frames. All are render-only carry-overs (excluded from the artifact).
+        "gc_constraints": pct.gc_constraints,
+        "gc_bounds": pct.gc_bounds,
+        "gc_lhs_newave": pct.gc_lhs_newave,
+        "gc_lhs_cobre": pct.gc_lhs_cobre,
+        "nw_max_stage": pct.nw_max_stage,
+        "nw_tim_iterations": pct.nw_tim_iterations,
+        "nw_tim_stages": pct.nw_tim_stages,
+        "cobre_training_seconds": pct.cobre_training_seconds,
+        "cobre_iteration_timing": pct.cobre_iteration_timing,
     }
 
     dataset = ComparisonDataset(tidy=tidy, summary=summary, metadata=metadata)

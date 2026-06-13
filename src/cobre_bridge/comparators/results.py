@@ -11,6 +11,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import polars as pl
@@ -19,6 +20,9 @@ from cobre_bridge.case import NewaveCase
 from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators.alignment import EntityAlignment
 from cobre_bridge.id_map import NewaveIdMap
+
+if TYPE_CHECKING:
+    from cobre_bridge.comparators.dataset import ComparisonDataset
 
 _LOG = logging.getLogger(__name__)
 
@@ -1132,17 +1136,22 @@ def compare_results(
     alignment: EntityAlignment,
     cobre_output_dir: Path,
     tolerance: float = 1e-2,
-) -> tuple[list[ResultComparison], PercentileData]:
+) -> ComparisonDataset:
     """Compare NEWAVE output results against Cobre simulation means.
 
     Entities are matched by **name** (case-insensitive) rather than by
     converter-assigned IDs, so the comparison works even when the Cobre
     case was built by a different tool.
 
+    Internally still builds the ``list[ResultComparison]`` and the
+    ``PercentileData`` producer struct, then assembles and returns the canonical
+    :class:`~cobre_bridge.comparators.dataset.ComparisonDataset` (the percentile
+    frames and raw rows live in the dataset's render-only metadata).
+
     Returns
     -------
-    tuple[list[ResultComparison], PercentileData]
-        Comparison results and Cobre simulation percentile statistics.
+    ComparisonDataset
+        The validated canonical comparison dataset.
 
     Parameters
     ----------
@@ -1567,7 +1576,9 @@ def compare_results(
     )
 
     _LOG.info("Results comparison: %d total comparisons", len(results))
-    return results, pctiles
+    from cobre_bridge.comparators.analyze import build_results_dataset
+
+    return build_results_dataset(results, pctiles, tolerance)
 
 
 def build_results_summary(

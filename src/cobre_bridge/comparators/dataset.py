@@ -55,6 +55,54 @@ TIDY_SCHEMA: dict[str, type[pl.DataType]] = {
 #: preserves the schema so empty frames keep their columns/dtypes on round-trip.
 _FRAME_SENTINEL: str = "__frame__"
 
+#: Transitional, render-only metadata keys that live IN-MEMORY (they are the
+#: bulky HTML-builder inputs threaded verbatim during the strangler migration:
+#: the drained ``PercentileData`` frames plus the raw ``results`` list) but are
+#: intentionally EXCLUDED from the serialized comparison artifact. They are NOT
+#: provenance — they are render inputs only — so :func:`_metadata_to_json` (and
+#: thus :meth:`ComparisonDataset.to_dir`) skips every key listed here, keeping
+#: ``metadata.json`` small. This set shrinks to empty once the charts source
+#: their inputs from ``dataset.tidy`` in a future epic; at that point it (and
+#: the in-memory carry-over) can be deleted outright.
+RENDER_ONLY_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        "results",
+        # NOTE: no "pct" key — the superseded ticket-012 design that stored the
+        # whole ``PercentileData`` under a single "pct" key was replaced by the
+        # individual per-field keys below (each ``PercentileData`` frame/attr is
+        # drained into its own named metadata key).
+        "nw_sin",
+        "cobre_stage_costs",
+        "nw_offset",
+        "nw_convergence",
+        "cobre_convergence",
+        "bus",
+        "nw_market",
+        "bus_aggregates",
+        "cobre_bus_meta",
+        "nw_net_load",
+        "cobre_hydro_means",
+        "hydro",
+        "line",
+        "line_bounds",
+        "line_meta",
+        "cobre_hydro_meta",
+        "nw_hydro_slacks",
+        "cobre_hydro_per_stage_bounds",
+        "thermal",
+        "productivity_detail",
+        "gc_constraints",
+        "gc_bounds",
+        "gc_lhs_newave",
+        "gc_lhs_cobre",
+        "nw_max_stage",
+        "nw_tim_iterations",
+        "nw_tim_stages",
+        "cobre_training_seconds",
+        "cobre_iteration_timing",
+    }
+)
+
 #: File names written/read by :meth:`ComparisonDataset.to_dir` /
 #: :meth:`ComparisonDataset.from_dir`, in their canonical order.
 _TIDY_FILE: str = "comparison.parquet"
@@ -234,13 +282,18 @@ class ComparisonDataset:
 def _metadata_to_json(meta: dict[str, object]) -> dict[str, object]:
     """Build the JSON-serializable view of a metadata dict.
 
-    JSON-native values (``str, int, float, bool, None`` and ``list``/``dict``
-    thereof) are passed through verbatim. ``pl.DataFrame`` and ``pd.DataFrame``
-    values are wrapped as ``{_FRAME_SENTINEL: "<polars|pandas>", "records":
-    [...], "columns": {name: dtype_name}}`` using the frame's native record
-    export. The ``columns`` map carries the schema so that an *empty* frame
-    (whose ``records`` list is ``[]``) keeps its column names and dtypes on
-    round-trip instead of collapsing to a zero-column frame.
+    Keys in :data:`RENDER_ONLY_METADATA_KEYS` are SKIPPED entirely — they are
+    transitional in-memory render inputs for the HTML builder, not provenance,
+    so they never reach the serialized artifact (this keeps ``metadata.json``
+    small even though those values are bulky frames / a ``results`` list).
+
+    Of the REMAINING keys: JSON-native values (``str, int, float, bool, None``
+    and ``list``/``dict`` thereof) are passed through verbatim. ``pl.DataFrame``
+    and ``pd.DataFrame`` values are wrapped as ``{_FRAME_SENTINEL:
+    "<polars|pandas>", "records": [...], "columns": {name: dtype_name}}`` using
+    the frame's native record export. The ``columns`` map carries the schema so
+    that an *empty* frame (whose ``records`` list is ``[]``) keeps its column
+    names and dtypes on round-trip instead of collapsing to a zero-column frame.
 
     Args:
         meta: The metadata side-table.
@@ -249,11 +302,13 @@ def _metadata_to_json(meta: dict[str, object]) -> dict[str, object]:
         A dict whose values are all JSON-serializable.
 
     Raises:
-        TypeError: If any value is neither JSON-native nor a supported frame;
-            the message names the offending key.
+        TypeError: If a non-render-only value is neither JSON-native nor a
+            supported frame; the message names the offending key.
     """
     view: dict[str, object] = {}
     for key, value in meta.items():
+        if key in RENDER_ONLY_METADATA_KEYS:
+            continue
         if isinstance(value, pl.DataFrame):
             columns = {name: str(dtype) for name, dtype in value.schema.items()}
             view[key] = {

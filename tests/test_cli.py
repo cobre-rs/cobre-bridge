@@ -736,6 +736,7 @@ class TestCompareDatasetWiring:
         return rows
 
     def _patch_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.results import PercentileData
 
         monkeypatch.setattr(
@@ -750,9 +751,11 @@ class TestCompareDatasetWiring:
             "cobre_bridge.cli._load_lines_json",
             lambda _dir: [],
         )
+        # ``compare_results`` now returns the canonical ``ComparisonDataset``;
+        # build it from the same fixture rows so the CLI path is exercised.
         monkeypatch.setattr(
             "cobre_bridge.comparators.results.compare_results",
-            lambda **k: (self._results(), PercentileData()),
+            lambda **k: build_results_dataset(self._results(), PercentileData(), 1e-2),
         )
 
     @staticmethod
@@ -808,6 +811,35 @@ class TestCompareDatasetWiring:
         assert manifest_path.exists()
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         assert manifest["command"] == "compare results"
+        assert "Artifacts written to" in stdout
+
+    def test_compare_results_artifacts_without_output_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`compare results` WITHOUT ``-o`` still writes artifacts and exits 0.
+
+        Guards the curated-serialization contract: the bulky render-only
+        metadata (``results`` and the drained ``PercentileData`` frames) IS
+        stored in ``dataset.metadata`` but is listed in
+        ``RENDER_ONLY_METADATA_KEYS``, so the SAME dataset's ``to_dir`` (invoked
+        by ``write_artifacts``) skips it and does not choke on a non-JSON-native
+        value.
+        """
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        artifacts_dir = cobre_dir / "comparison_artifacts"
+        assert (artifacts_dir / "comparison.json").exists()
+        # to_dir round-trip artifacts prove metadata serialized cleanly.
+        assert (artifacts_dir / "comparison.parquet").exists()
+        assert (artifacts_dir / "metadata.json").exists()
         assert "Artifacts written to" in stdout
 
     def test_compare_bounds_emits_artifacts(
