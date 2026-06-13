@@ -121,7 +121,9 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   p_INT (0.000273) < p_PFIO = p_EVERT (0.000300)
 #   < p_TURB (0.000333) < p_CORTEOL (0.000344) < p_EXC (0.000355)
 
-MONTH_HOURS: float = 730.0  # NEWAVE convention (manual §3.24, used in C_M3S2HM3)
+MONTH_HOURS: float = (
+    730.0  # NEWAVE convention (manual §3.24, used in C_M3S2HM3)
+)
 C_M3S2HM3: float = MONTH_HOURS * 3600.0 / 1e6  # = 2.628 hm³ / (m³/s · month)
 # HM3 × ρ_MW_per_m3s → MWh conversion (purely volumetric; 730 cancels here).
 HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
@@ -282,13 +284,11 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         )
         cost_raw = row["custo"]
         cost = float(cost_raw) if not is_na(cost_raw) else None
-        buses_by_code[code]["segments"].append(
-            {
-                "patamar": int(row["patamar_deficit"]),
-                "depth_mw": depth_mw,
-                "cost": cost,
-            }
-        )
+        buses_by_code[code]["segments"].append({
+            "patamar": int(row["patamar_deficit"]),
+            "depth_mw": depth_mw,
+            "cost": cost,
+        })
 
     # Find the reference deficit cost (first non-NaN, non-zero cost across
     # all subsystems) to use as a fallback for fictitious subsystems.
@@ -304,19 +304,19 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     buses: list[dict] = []
     for code, info in buses_by_code.items():
         segs = sorted(info["segments"], key=lambda s: s["patamar"])
-        active_segs = [s for s in segs if s["cost"] is not None and s["cost"] > 0]
+        active_segs = [
+            s for s in segs if s["cost"] is not None and s["cost"] > 0
+        ]
         if not active_segs:
             active_segs = [{"cost": fallback_cost, "depth_mw": None}]
 
         deficit_segments: list[dict] = []
         for i, seg in enumerate(active_segs):
             is_last = i == len(active_segs) - 1
-            deficit_segments.append(
-                {
-                    "depth_mw": None if is_last else seg["depth_mw"],
-                    "cost": seg["cost"],
-                }
-            )
+            deficit_segments.append({
+                "depth_mw": None if is_last else seg["depth_mw"],
+                "cost": seg["cost"],
+            })
 
         bus_entry: dict = {
             "id": id_map.bus_id(code),
@@ -358,12 +358,17 @@ def convert_bus_penalty_overrides(
     sistema = case.sistema
     deficit_df = sistema.custo_deficit
 
-    if deficit_df is None or deficit_df.empty or "ficticio" not in deficit_df.columns:
+    if (
+        deficit_df is None
+        or deficit_df.empty
+        or "ficticio" not in deficit_df.columns
+    ):
         return None
 
     fic_mask = deficit_df["ficticio"].fillna(False).astype(bool)
     fictitious_codes = {
-        int(code) for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
+        int(code)
+        for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
     }
     if not fictitious_codes:
         return None
@@ -399,13 +404,11 @@ def convert_bus_penalty_overrides(
     if not bus_ids:
         return None
 
-    schema = pa.schema(
-        [
-            pa.field("bus_id", pa.int32()),
-            pa.field("stage_id", pa.int32()),
-            pa.field("excess_cost", pa.float64()),
-        ]
-    )
+    schema = pa.schema([
+        pa.field("bus_id", pa.int32()),
+        pa.field("stage_id", pa.int32()),
+        pa.field("excess_cost", pa.float64()),
+    ])
     return pa.table(
         {
             "bus_id": pa.array(bus_ids, type=pa.int32()),
@@ -451,7 +454,8 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     ):
         fic_mask = deficit_df["ficticio"].fillna(False).astype(bool)
         fictitious_codes = {
-            int(code) for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
+            int(code)
+            for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
         }
 
     # Use the study start month from dger.dat as the reference for static
@@ -505,7 +509,9 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     canonical_map = _build_canonical_pair_to_line_id(case)
 
     lines: list[dict] = []
-    for (src, tgt), line_id in sorted(canonical_map.items(), key=lambda x: x[1]):
+    for (src, tgt), line_id in sorted(
+        canonical_map.items(), key=lambda x: x[1]
+    ):
         caps = pair_map.get((src, tgt), {"direct_mw": 0.0, "reverse_mw": 0.0})
         src_bus = id_map.bus_id(src)
         tgt_bus = id_map.bus_id(tgt)
@@ -544,7 +550,9 @@ def _read_penalid_costs(case: NewaveCase) -> dict[str, float]:
     try:
         penalid = case.penalid
     except (OSError, ValueError) as exc:
-        _LOG.warning("penalid.dat could not be parsed (%s); using defaults.", exc)
+        _LOG.warning(
+            "penalid.dat could not be parsed (%s); using defaults.", exc
+        )
         return {}
 
     pen_df = penalid.penalidades
@@ -553,7 +561,9 @@ def _read_penalid_costs(case: NewaveCase) -> dict[str, float]:
 
     out: dict[str, float] = {}
     for var in pen_df["variavel"].unique():
-        rows = pen_df[(pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()]
+        rows = pen_df[
+            (pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()
+        ]
         if not rows.empty:
             out[str(var).strip()] = float(rows.iloc[0]["valor_R$_MWh"])
     return out
@@ -606,11 +616,19 @@ def _hydro_penalty_costs(
 
     The returned dict preserves the exact key order of ``penalties.json:hydro``.
     """
-    desvio_mwh = penalid_costs.get("DESVIO", _EVAPORATION_MULT * max_deficit_cost)
-    vazmin_mwh = penalid_costs.get("VAZMIN", _EVAPORATION_MULT * max_deficit_cost)
+    desvio_mwh = penalid_costs.get(
+        "DESVIO", _EVAPORATION_MULT * max_deficit_cost
+    )
+    vazmin_mwh = penalid_costs.get(
+        "VAZMIN", _EVAPORATION_MULT * max_deficit_cost
+    )
     ghmin_mwh = penalid_costs.get("GHMIN", _EVAPORATION_MULT * max_deficit_cost)
-    turbmn_mwh = penalid_costs.get("TURBMN", _EVAPORATION_MULT * max_deficit_cost)
-    turbmx_mwh = penalid_costs.get("TURBMX", _EVAPORATION_MULT * max_deficit_cost)
+    turbmn_mwh = penalid_costs.get(
+        "TURBMN", _EVAPORATION_MULT * max_deficit_cost
+    )
+    turbmx_mwh = penalid_costs.get(
+        "TURBMX", _EVAPORATION_MULT * max_deficit_cost
+    )
 
     water_withdrawal_cost = desvio_mwh * rho_max_acum
     outflow_below_cost = vazmin_mwh * rho_avg
@@ -664,15 +682,10 @@ def _hydro_penalty_costs(
     # is somehow "absorbing water" the cascade can't account for) and
     # violating another flow constraint, we want it to *always* prefer fixing
     # the other constraint first. Anchor inflow non-negativity penalty to the
-    # withdrawal slack plus a 1 R$/m³/s tie-breaker. The inflow_nn slack
-    # physically *generates* water in the LP, so making it cheaper than the
-    # withdrawal slack would let the LP buy free water to dodge a withdrawal
-    # violation — an artefact with no real-world counterpart. Keeping it just
-    # above withdrawal preserves a strict ordering against the strictest
-    # operational flow slack without inflating the objective when this slack
-    # genuinely needs to fire. Real fix: switch
-    # ``modeling.inflow_non_negativity.method`` to ``truncation``.
-    inflow_nonnegativity_cost = water_withdrawal_cost + _INFLOW_NN_OFFSET_R_PER_M3S
+    # withdrawal slack plus a 1 R$/m³/s tie-breaker.
+    inflow_nonnegativity_cost = (
+        water_withdrawal_cost + _INFLOW_NN_OFFSET_R_PER_M3S
+    )
 
     return {
         "spillage_cost": spillage_cost,
@@ -760,12 +773,10 @@ def convert_penalties(
     primary_deficit_cost = 0.0
     max_deficit_cost = 0.0
     if deficit_df is not None and not deficit_df.empty:
-        first_sub = deficit_df.sort_values(
-            [
-                "codigo_submercado",
-                "patamar_deficit",
-            ]
-        )
+        first_sub = deficit_df.sort_values([
+            "codigo_submercado",
+            "patamar_deficit",
+        ])
         primary_deficit_cost = float(first_sub.iloc[0]["custo"])
         max_deficit_cost = float(deficit_df["custo"].max())
 
@@ -932,7 +943,9 @@ def convert_hydro_penalty_overrides(
         return None
 
     present_cols = [
-        c for c in _RHO_SCALED_HYDRO_COLUMNS if any(c in d for _, d in stage_overrides)
+        c
+        for c in _RHO_SCALED_HYDRO_COLUMNS
+        if any(c in d for _, d in stage_overrides)
     ]
 
     hydro_id_col: list[int] = []
@@ -992,14 +1005,12 @@ def convert_line_bounds(
     sistema = case.sistema
     limites_df: pd.DataFrame | None = sistema.limites_intercambio
 
-    _LINE_BOUNDS_SCHEMA = pa.schema(
-        [
-            pa.field("line_id", pa.int32()),
-            pa.field("stage_id", pa.int32()),
-            pa.field("direct_mw", pa.float64()),
-            pa.field("reverse_mw", pa.float64()),
-        ]
-    )
+    _LINE_BOUNDS_SCHEMA = pa.schema([
+        pa.field("line_id", pa.int32()),
+        pa.field("stage_id", pa.int32()),
+        pa.field("direct_mw", pa.float64()),
+        pa.field("reverse_mw", pa.float64()),
+    ])
 
     if limites_df is None or limites_df.empty:
         return pa.table(
@@ -1058,7 +1069,9 @@ def convert_line_bounds(
 
     # Build last-year lookup for post-study:
     # {(src, tgt, cal_month) -> {direct_mw, reverse_mw}} — use the latest year.
-    last_year_per_key: dict[tuple[int, int, int], tuple[int, dict[str, float]]] = {}
+    last_year_per_key: dict[
+        tuple[int, int, int], tuple[int, dict[str, float]]
+    ] = {}
     for (src, tgt, yr, cal_month), caps in date_lookup.items():
         key3 = (src, tgt, cal_month)
         existing = last_year_per_key.get(key3)
@@ -1081,7 +1094,12 @@ def convert_line_bounds(
 
     for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
         src, tgt = pair
-        freeze_caps = date_lookup.get((src, tgt, ls_y, ls_m)) or last_year_lookup.get(
+        freeze_caps = date_lookup.get((
+            src,
+            tgt,
+            ls_y,
+            ls_m,
+        )) or last_year_lookup.get(
             (src, tgt, ls_m), {"direct_mw": 0.0, "reverse_mw": 0.0}
         )
         y, m = start_year, start_month
@@ -1153,7 +1171,9 @@ def _build_ncs_group_to_id(
         return 0 <= stage_id < total_stages
 
     df_filtered = df_ncs[df_ncs["data"].apply(_in_horizon)].copy()
-    groups = df_filtered.groupby(["codigo_submercado", "indice_bloco"], sort=True)
+    groups = df_filtered.groupby(
+        ["codigo_submercado", "indice_bloco"], sort=True
+    )
 
     result: dict[tuple[int, int], int] = {}
     ncs_id = 0
@@ -1223,7 +1243,9 @@ def convert_non_controllable_sources(
     ncs_list: list[dict] = []
     ncs_id = 0
 
-    groups = df_filtered.groupby(["codigo_submercado", "indice_bloco"], sort=True)
+    groups = df_filtered.groupby(
+        ["codigo_submercado", "indice_bloco"], sort=True
+    )
 
     for (sub_code, bloco), group in groups:
         sub_code_int = int(sub_code)
@@ -1240,30 +1262,32 @@ def convert_non_controllable_sources(
 
         # fonte: use the first non-null value in the group.
         fonte_series = group["fonte"].dropna()
-        fonte = str(fonte_series.iloc[0]).strip() if not fonte_series.empty else "NCS"
+        fonte = (
+            str(fonte_series.iloc[0]).strip()
+            if not fonte_series.empty
+            else "NCS"
+        )
 
         # max_generation_mw: maximum non-NaN value across all rows in the group.
         valores = pd.to_numeric(group["valor"], errors="coerce")
         valid_vals = valores.dropna()
         max_gen = float(valid_vals.max()) if not valid_vals.empty else 0.0
 
-        ncs_list.append(
-            {
-                "id": ncs_id,
-                "name": f"{fonte}_{sub_code_int}",
-                "bus_id": bus_id,
-                "max_generation_mw": max_gen,
-                # NEWAVE pre-nets `geracao_usinas_nao_simuladas` from MERC
-                # before the dispatch LP runs, so the aggregate is implicitly
-                # must-run. Setting allow_curtailment=False instructs Cobre's
-                # LP to pin dispatch to the realized availability for every
-                # scenario; otherwise the LP discovers that curtailing NCS is
-                # one of the cheapest slacks and produces a +15 % hydro /
-                # -23 % spillage divergence vs NEWAVE on this case family.
-                # See docs/findings/ncs-must-run-treatment.md.
-                "allow_curtailment": False,
-            }
-        )
+        ncs_list.append({
+            "id": ncs_id,
+            "name": f"{fonte}_{sub_code_int}",
+            "bus_id": bus_id,
+            "max_generation_mw": max_gen,
+            # NEWAVE pre-nets `geracao_usinas_nao_simuladas` from MERC
+            # before the dispatch LP runs, so the aggregate is implicitly
+            # must-run. Setting allow_curtailment=False instructs Cobre's
+            # LP to pin dispatch to the realized availability for every
+            # scenario; otherwise the LP discovers that curtailing NCS is
+            # one of the cheapest slacks and produces a +15 % hydro /
+            # -23 % spillage divergence vs NEWAVE on this case family.
+            # See docs/findings/ncs-must-run-treatment.md.
+            "allow_curtailment": False,
+        })
         ncs_id += 1
 
     return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": ncs_list}
@@ -1401,21 +1425,17 @@ def convert_exchange_factors(
                         last_reverse.get((src, tgt, m, block_id), 1.0),
                     )
 
-                block_factors.append(
-                    {
-                        "block_id": block_id,
-                        "direct_factor": d_factor,
-                        "reverse_factor": r_factor,
-                    }
-                )
+                block_factors.append({
+                    "block_id": block_id,
+                    "direct_factor": d_factor,
+                    "reverse_factor": r_factor,
+                })
 
-            results.append(
-                {
-                    "line_id": line_id,
-                    "stage_id": stage_id,
-                    "block_factors": block_factors,
-                }
-            )
+            results.append({
+                "line_id": line_id,
+                "stage_id": stage_id,
+                "block_factors": block_factors,
+            })
 
             m += 1
             if m > 12:
@@ -1529,7 +1549,9 @@ def convert_ncs_factors(
 
     results: list[dict] = []
 
-    for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
+    for (sub_code, bloco), ncs_id in sorted(
+        ncs_group_map.items(), key=lambda x: x[1]
+    ):
         y, m = start_year, start_month
         for stage_id in range(total_stages):
             is_post_study = (y > study_end_year) or (
@@ -1539,26 +1561,24 @@ def convert_ncs_factors(
             block_factors: list[dict] = []
             for block_id in range(num_blocks):
                 if is_post_study:
-                    factor = last_factor.get((sub_code, bloco, m, block_id), 1.0)
+                    factor = last_factor.get(
+                        (sub_code, bloco, m, block_id), 1.0
+                    )
                 else:
                     factor = factor_map.get(
                         (sub_code, bloco, y, m, block_id),
                         last_factor.get((sub_code, bloco, m, block_id), 1.0),
                     )
-                block_factors.append(
-                    {
-                        "block_id": block_id,
-                        "factor": max(factor, 1e-6),
-                    }
-                )
+                block_factors.append({
+                    "block_id": block_id,
+                    "factor": max(factor, 1e-6),
+                })
 
-            results.append(
-                {
-                    "ncs_id": ncs_id,
-                    "stage_id": stage_id,
-                    "block_factors": block_factors,
-                }
-            )
+            results.append({
+                "ncs_id": ncs_id,
+                "stage_id": stage_id,
+                "block_factors": block_factors,
+            })
 
             m += 1
             if m > 12:
@@ -1597,14 +1617,12 @@ def convert_ncs_stats(
         Columns: ``ncs_id`` (INT32), ``stage_id`` (INT32),
         ``mean`` (DOUBLE), ``std`` (DOUBLE).
     """
-    _NCS_STATS_SCHEMA = pa.schema(
-        [
-            pa.field("ncs_id", pa.int32()),
-            pa.field("stage_id", pa.int32()),
-            pa.field("mean", pa.float64()),
-            pa.field("std", pa.float64()),
-        ]
-    )
+    _NCS_STATS_SCHEMA = pa.schema([
+        pa.field("ncs_id", pa.int32()),
+        pa.field("stage_id", pa.int32()),
+        pa.field("mean", pa.float64()),
+        pa.field("std", pa.float64()),
+    ])
 
     sistema = case.sistema
     df_raw: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
@@ -1680,7 +1698,9 @@ def convert_ncs_stats(
     rows_mean: list[float] = []
     rows_std: list[float] = []
 
-    for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
+    for (sub_code, bloco), ncs_id in sorted(
+        ncs_group_map.items(), key=lambda x: x[1]
+    ):
         max_gen = max_gen_per_ncs[ncs_id]
 
         y, m = start_year, start_month
