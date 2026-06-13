@@ -16,7 +16,7 @@ adapter emits the sentinel ``bus = -1`` / ``block = -1`` for every row.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import polars as pl
 
@@ -599,6 +599,560 @@ def _conform_summary(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.select(list(SUMMARY_SCHEMA)).cast(
         {col: dtype() for col, dtype in SUMMARY_SCHEMA.items()}
     )
+
+
+def aggregate_percentile_band(
+    pct_df: pl.DataFrame | None,
+    variable: str,
+    stages: list[int],
+    entity_ids: set[int] | None = None,
+) -> tuple[list[float], list[float]]:
+    """Sum ``{variable}_p10``/``{variable}_p90`` per stage into aligned lists.
+
+    Pure numeric core of ``charts._aggregate_percentile_traces``: it produces the
+    two per-stage envelope lists (p10, p90) the chart draws as a band, but emits
+    no traces. Percentiles are summed across (optionally filtered) entities per
+    ``stage_id``, then read back aligned to the explicit ``stages`` axis with the
+    legacy default-to-zero semantics (a stage absent from the aggregate yields
+    ``0.0``, never a ``KeyError``).
+
+    Args:
+        pct_df: A per-entity percentile frame with ``entity_id``, ``stage_id``
+            and ``{var}_p10``/``{var}_p90`` columns, or ``None``.
+        variable: The variable stem whose ``_p10``/``_p90`` columns are summed.
+        stages: The explicit, caller-sorted stage axis the lists align to.
+        entity_ids: Optional entity filter; when given, only rows whose
+            ``entity_id`` is in this set contribute to the sums.
+
+    Returns:
+        A ``(p10, p90)`` tuple of per-stage float lists, each ``len(stages)``
+        long. Returns ``([], [])`` when ``pct_df`` is ``None``/empty or either
+        ``{variable}_p10``/``{variable}_p90`` column is absent.
+    """
+    if pct_df is None or pct_df.is_empty():
+        return [], []
+
+    p10_col = f"{variable}_p10"
+    p90_col = f"{variable}_p90"
+    if p10_col not in pct_df.columns or p90_col not in pct_df.columns:
+        return [], []
+
+    filtered = pct_df
+    if entity_ids is not None:
+        filtered = pct_df.filter(pl.col("entity_id").is_in(list(entity_ids)))
+
+    agg = filtered.group_by("stage_id").agg(
+        pl.col(p10_col).sum(), pl.col(p90_col).sum()
+    )
+    lookup = {int(r["stage_id"]): r for r in agg.iter_rows(named=True)}
+
+    p10 = [float(lookup.get(s, {}).get(p10_col, 0)) for s in stages]
+    p90 = [float(lookup.get(s, {}).get(p90_col, 0)) for s in stages]
+    return p10, p90
+
+
+def per_stage_sum_from_results(
+    results: Sequence[ResultComparison],
+    entity_type: str,
+    variable: str,
+) -> tuple[dict[int, float], dict[int, float], set[int]]:
+    """Sum NEWAVE/Cobre values per stage for one entity type (and variable).
+
+    Pure numeric core of the inline per-stage accumulation loop repeated in
+    ``charts.system_comparison_chart`` / ``hydro_aggregate_chart`` /
+    ``thermal_generation_chart``. Rows are filtered to ``entity_type``; when
+    ``variable`` is non-empty they must also match ``variable`` (the
+    system/hydro case), and when ``variable == ""`` every variable of that
+    entity type is included (the ``thermal_generation_chart`` case, which keys
+    only on entity type). Each surviving row adds ``newave_value`` /
+    ``cobre_value`` into its stage bucket (both starting at ``0.0``).
+
+    Args:
+        results: The comparison rows; consumed verbatim (read-only).
+        entity_type: The ``entity_type`` to keep (e.g. ``"hydro"``,
+            ``"thermal"``, ``"bus"``).
+        variable: The ``variable`` to keep, or ``""`` to match every variable
+            of the entity type.
+
+    Returns:
+        ``(nw_by_stage, cb_by_stage, matched_ids)`` where the first two map
+        ``stage`` to the summed ``newave_value`` / ``cobre_value`` and
+        ``matched_ids`` is the set of ``cobre_id`` over the filtered rows.
+        Empty when no row matches.
+    """
+    filtered = [
+        r
+        for r in results
+        if r.entity_type == entity_type and (variable == "" or r.variable == variable)
+    ]
+
+    nw_by_stage: dict[int, float] = {}
+    cb_by_stage: dict[int, float] = {}
+    for r in filtered:
+        nw_by_stage[r.stage] = nw_by_stage.get(r.stage, 0.0) + r.newave_value
+        cb_by_stage[r.stage] = cb_by_stage.get(r.stage, 0.0) + r.cobre_value
+
+    matched_ids = {r.cobre_id for r in filtered}
+    return nw_by_stage, cb_by_stage, matched_ids
+
+
+def per_stage_sum_from_frame(
+    df: pl.DataFrame | None,
+    variable: str,
+    matched_ids: set[int] | None = None,
+) -> dict[int, float]:
+    """Sum ``variable`` across (matched) entities per ``stage_id``.
+
+    Pure numeric core of ``charts._hydro_per_stage_sum``: it collapses a
+    per-``(entity_id, stage_id)`` frame into a per-stage SIN total. Returns an
+    empty dict when the frame is missing/empty or the column is absent — never
+    raises.
+
+    Args:
+        df: A per-entity frame with ``entity_id``, ``stage_id`` and the
+            ``variable`` column, or ``None``.
+        variable: The column to sum.
+        matched_ids: Optional entity filter; when given, only rows whose
+            ``entity_id`` is in this set contribute.
+
+    Returns:
+        A ``{stage_id: sum}`` dict (sorted by ``stage_id``). Empty when ``df``
+        is ``None``/empty or ``variable`` is not a column of ``df``.
+    """
+    if df is None or df.is_empty() or variable not in df.columns:
+        return {}
+    filtered = df
+    if matched_ids is not None:
+        filtered = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
+    agg = (
+        filtered.group_by("stage_id")
+        .agg(pl.col(variable).sum().alias("v"))
+        .sort("stage_id")
+    )
+    return {int(r["stage_id"]): float(r["v"]) for r in agg.iter_rows(named=True)}
+
+
+#: Fictitious bus names skipped by the per-bus roll-up (mirrors charts.py).
+_FICTITIOUS_BUSES: frozenset[str] = frozenset({"NOFICT1", "NOFICT2", "NOFICT3"})
+
+
+def _bus_name_lookups(
+    hydro_meta: dict[int, dict[str, object]],
+    bus_meta: dict[int, dict[str, object]],
+) -> tuple[dict[int, str], dict[int, int]]:
+    """Build the ``bus_id -> name`` and ``plant -> bus_id`` lookups.
+
+    Shared helper for the per-bus roll-up: reproduces the two dict
+    comprehensions at ``charts.py:900-907`` / ``charts.py:1198-1205`` exactly.
+    ``bus_id_to_name`` maps each bus id to ``bus_meta[bid]["name"]`` (fallback
+    ``str(bid)``); ``hydro_to_bus`` maps each plant id to its ``bus_id``,
+    skipping plants whose ``bus_id`` is ``None``.
+
+    Args:
+        hydro_meta: Per-plant metadata carrying ``bus_id``; read-only.
+        bus_meta: Per-bus metadata carrying ``name``; read-only.
+
+    Returns:
+        ``(bus_id_to_name, hydro_to_bus)``.
+    """
+    bus_id_to_name: dict[int, str] = {
+        bid: cast("str", meta.get("name", str(bid))) for bid, meta in bus_meta.items()
+    }
+    hydro_to_bus: dict[int, int] = {
+        hid: cast("int", meta["bus_id"])
+        for hid, meta in hydro_meta.items()
+        if meta.get("bus_id") is not None
+    }
+    return bus_id_to_name, hydro_to_bus
+
+
+def per_bus_sums_from_results(
+    results: Sequence[ResultComparison],
+    variable: str,
+    hydro_meta: dict[int, dict[str, object]],
+    bus_meta: dict[int, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Roll hydro ``ResultComparison`` rows up to per-(bus, stage) sums.
+
+    Pure numeric core of the per-bus accumulation in
+    ``charts.hydro_per_bus_chart`` (``charts.py:904-939``). Rows are filtered to
+    ``entity_type == "hydro"`` and ``variable``; each plant is mapped to its
+    owning bus via ``hydro_meta[cobre_id]["bus_id"]`` (plants with no ``bus_id``
+    are skipped), the bus name is resolved via ``bus_meta[bus_id]["name"]``
+    (fallback ``str(bus_id)``) and upper-cased, and the fictitious buses
+    ``NOFICT1/2/3`` are dropped. Surviving rows accumulate ``newave_value`` /
+    ``cobre_value`` into their ``(bus, stage)`` bucket and add ``cobre_id`` to
+    the bus's id set.
+
+    Args:
+        results: The comparison rows; consumed verbatim (read-only).
+        variable: The ``variable`` to keep.
+        hydro_meta: Per-plant metadata carrying ``bus_id``; read-only.
+        bus_meta: Per-bus metadata carrying ``name``; read-only.
+
+    Returns:
+        A dict keyed by upper-cased ``bus_name``; each value is a dict with
+        ``"nw"`` (``dict[int, float]``), ``"cb"`` (``dict[int, float]``) and
+        ``"ids"`` (``set[int]``). Empty when no row maps to a non-fictitious bus.
+    """
+    bus_id_to_name, hydro_to_bus = _bus_name_lookups(hydro_meta, bus_meta)
+
+    per_bus_nw: dict[str, dict[int, float]] = {}
+    per_bus_cb: dict[str, dict[int, float]] = {}
+    per_bus_ids: dict[str, set[int]] = {}
+    for r in results:
+        if r.entity_type != "hydro" or r.variable != variable:
+            continue
+        bus_id = hydro_to_bus.get(r.cobre_id)
+        if bus_id is None:
+            continue
+        bus_name = bus_id_to_name.get(bus_id, str(bus_id)).upper()
+        if bus_name in _FICTITIOUS_BUSES:
+            continue
+        per_bus_nw.setdefault(bus_name, {})
+        per_bus_cb.setdefault(bus_name, {})
+        per_bus_nw[bus_name][r.stage] = (
+            per_bus_nw[bus_name].get(r.stage, 0.0) + r.newave_value
+        )
+        per_bus_cb[bus_name][r.stage] = (
+            per_bus_cb[bus_name].get(r.stage, 0.0) + r.cobre_value
+        )
+        per_bus_ids.setdefault(bus_name, set()).add(r.cobre_id)
+
+    return {
+        bus_name: {
+            "nw": per_bus_nw[bus_name],
+            "cb": per_bus_cb[bus_name],
+            "ids": per_bus_ids.get(bus_name, set()),
+        }
+        for bus_name in per_bus_nw
+    }
+
+
+def per_bus_sums_from_frame(
+    df: pl.DataFrame | None,
+    variable: str,
+    matched_ids: set[int] | None,
+    hydro_meta: dict[int, dict[str, object]],
+    bus_meta: dict[int, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Roll a per-(entity_id, stage_id) frame up to per-(bus, stage) sums.
+
+    Pure numeric core of the ``_per_bus_from_frame`` closure in
+    ``charts.hydro_slack_per_bus_chart`` (``charts.py:1207-1233``). Used for the
+    slack variables that are sourced from per-entity frames rather than
+    ``ResultComparison`` rows. Rows are optionally filtered to ``matched_ids``,
+    each entity is mapped to its owning bus (same resolution / fictitious-skip
+    as :func:`per_bus_sums_from_results`), and the ``variable`` value is summed
+    per ``(bus, stage)``. Rows whose ``variable`` value is ``None`` contribute
+    nothing.
+
+    Args:
+        df: A per-entity frame with ``entity_id``, ``stage_id`` and the
+            ``variable`` column, or ``None``.
+        variable: The column to sum.
+        matched_ids: Optional entity filter; when given, only rows whose
+            ``entity_id`` is in this set contribute.
+        hydro_meta: Per-plant metadata carrying ``bus_id``; read-only.
+        bus_meta: Per-bus metadata carrying ``name``; read-only.
+
+    Returns:
+        A dict keyed by upper-cased ``bus_name``; each value is a dict with
+        ``"sum"`` (``dict[int, float]`` per stage) and ``"ids"`` (``set[int]``).
+        Empty when ``df`` is ``None``/empty, ``variable`` is absent, or no row
+        maps to a non-fictitious bus.
+    """
+    if df is None or df.is_empty() or variable not in df.columns:
+        return {}
+
+    bus_id_to_name, hydro_to_bus = _bus_name_lookups(hydro_meta, bus_meta)
+
+    frame = df
+    if matched_ids is not None:
+        frame = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
+
+    per_bus_sum: dict[str, dict[int, float]] = {}
+    per_bus_ids: dict[str, set[int]] = {}
+    for row in frame.iter_rows(named=True):
+        eid = int(row["entity_id"])
+        bus_id = hydro_to_bus.get(eid)
+        if bus_id is None:
+            continue
+        bus_name = bus_id_to_name.get(bus_id, str(bus_id)).upper()
+        if bus_name in _FICTITIOUS_BUSES:
+            continue
+        sid = int(row["stage_id"])
+        val = row.get(variable)
+        if val is None:
+            continue
+        per_bus_sum.setdefault(bus_name, {})
+        per_bus_sum[bus_name][sid] = per_bus_sum[bus_name].get(sid, 0.0) + float(val)
+        per_bus_ids.setdefault(bus_name, set()).add(eid)
+
+    return {
+        bus_name: {"sum": stage_map, "ids": per_bus_ids.get(bus_name, set())}
+        for bus_name, stage_map in per_bus_sum.items()
+    }
+
+
+def per_bus_band_from_pct(
+    pct_df: pl.DataFrame | None,
+    variable: str,
+    per_bus_ids: dict[str, set[int]],
+) -> dict[str, dict[int, tuple[float, float]]]:
+    """Sum ``{variable}_p10``/``{variable}_p90`` per stage for each bus's plants.
+
+    Pure numeric core of the per-bus percentile-band roll-up in
+    ``charts.hydro_per_bus_chart`` (``charts.py:948-966``) and the parallel block
+    in ``charts.hydro_slack_per_bus_chart`` (``charts.py:1253-1264``). For each
+    ``bus_name -> ids`` it sums the percentile columns across ``ids`` per
+    ``stage_id`` and returns the per-stage ``(p10, p90)`` tuples. Buses with an
+    empty id set contribute no entry (mirroring the slack-chart ``if not ids``
+    skip; the result-sourced caller never passes an empty set).
+
+    Args:
+        pct_df: A per-entity percentile frame with ``entity_id``, ``stage_id``
+            and ``{var}_p10``/``{var}_p90`` columns, or ``None``.
+        variable: The variable stem whose ``_p10``/``_p90`` columns are summed.
+        per_bus_ids: Mapping of ``bus_name`` to the set of plant ``entity_id``
+            owned by that bus.
+
+    Returns:
+        A dict keyed by ``bus_name``; each value maps ``stage_id`` to the summed
+        ``(p10, p90)`` tuple. Empty when ``pct_df`` is ``None``/empty or either
+        ``{variable}_p10``/``{variable}_p90`` column is absent.
+    """
+    if pct_df is None or pct_df.is_empty():
+        return {}
+
+    p10_col = f"{variable}_p10"
+    p90_col = f"{variable}_p90"
+    if not {p10_col, p90_col}.issubset(pct_df.columns):
+        return {}
+
+    per_bus_pct: dict[str, dict[int, tuple[float, float]]] = {}
+    for bus_name, ids in per_bus_ids.items():
+        if not ids:
+            continue
+        agg = (
+            pct_df.filter(pl.col("entity_id").is_in(list(ids)))
+            .group_by("stage_id")
+            .agg(pl.col(p10_col).sum(), pl.col(p90_col).sum())
+        )
+        per_bus_pct[bus_name] = {
+            int(r["stage_id"]): (float(r[p10_col]), float(r[p90_col]))
+            for r in agg.iter_rows(named=True)
+        }
+    return per_bus_pct
+
+
+def plant_percentile_arrays(
+    pct_df: pl.DataFrame | None,
+    var_stages: Sequence[tuple[str, str, list[int]]],
+    plant_cobre_id: int,
+) -> dict[str, list[float]]:
+    """Extract one plant's per-stage ``{var}_p10``/``{var}_p90`` arrays.
+
+    Pure numeric core of the inner extraction in
+    ``charts._enrich_with_percentiles`` (``charts.py:2786-2799``). For the single
+    plant ``plant_cobre_id`` it filters ``pct_df`` to that entity **once**, then
+    for each ``(var_key, _, stages)`` triple whose ``{var}_p10``/``{var}_p90``
+    columns are present, reads the rounded per-stage values aligned to that
+    variable's own ``stages`` axis with the legacy ``round(float(... or 0), 2)``
+    semantics (a stage absent from the plant's frame yields ``0.0``). Each
+    variable carries its OWN stage axis, so the single per-plant filter is
+    reused across every variable. Variables whose columns are absent — and every
+    variable when the plant has no rows — contribute no entry. The in-place
+    ``js_plants`` mutation stays in ``charts.py``; this function only computes
+    the arrays.
+
+    Args:
+        pct_df: A per-entity percentile frame with ``entity_id``, ``stage_id``
+            and ``{var}_p10``/``{var}_p90`` columns, or ``None``.
+        var_stages: ``(var_key, label, stages)`` triples; only ``var_key`` and
+            ``stages`` (the per-variable stage axis the arrays align to) are
+            used.
+        plant_cobre_id: The ``entity_id`` to extract.
+
+    Returns:
+        A dict mapping ``{var}_p10``/``{var}_p90`` to the rounded per-stage float
+        lists for the plant. Empty when ``pct_df`` is ``None``/empty, the plant
+        has no rows, or no requested variable's columns are present.
+    """
+    if pct_df is None or pct_df.is_empty():
+        return {}
+
+    sub = pct_df.filter(pl.col("entity_id") == plant_cobre_id).sort("stage_id")
+    if sub.is_empty():
+        return {}
+
+    pct_map = {int(r["stage_id"]): r for r in sub.iter_rows(named=True)}
+    arrays: dict[str, list[float]] = {}
+    for var_key, _, stages in var_stages:
+        p10_col = f"{var_key}_p10"
+        p90_col = f"{var_key}_p90"
+        if p10_col in sub.columns and p90_col in sub.columns:
+            arrays[p10_col] = [
+                round(float(pct_map.get(s, {}).get(p10_col, 0) or 0), 2) for s in stages
+            ]
+            arrays[p90_col] = [
+                round(float(pct_map.get(s, {}).get(p90_col, 0) or 0), 2) for s in stages
+            ]
+    return arrays
+
+
+def cobre_sum_and_newave_sin(
+    cobre_hydro: pl.DataFrame,
+    variable: str,
+    nw_sin: pl.DataFrame | None,
+    nw_variable: str | None,
+    nw_factor: float,
+    nw_offset: int,
+    matched_ids: set[int] | None = None,
+) -> tuple[dict[int, float], dict[int, float]]:
+    """Roll a Cobre per-hydro variable and a NEWAVE-SIN long frame to per-stage totals.
+
+    Pure numeric core of ``charts.cobre_aggregate_chart`` (``charts.py:813-846``).
+    The Cobre side sums ``variable`` across (optionally ``matched_ids``-filtered)
+    plants per ``stage_id`` — delegated to :func:`per_stage_sum_from_frame` so the
+    grouping/sort/filter semantics stay identical. The NEWAVE side folds the long
+    ``nw_sin`` frame into a per-stage total: rows are filtered to
+    ``variable.strip().upper() == nw_variable``, then each surviving row adds
+    ``value * nw_factor`` into bucket ``stage - nw_offset``, skipping rows whose
+    ``stage`` or ``value`` is ``None``. Never raises.
+
+    Args:
+        cobre_hydro: Per-hydro Cobre means with ``entity_id``, ``stage_id`` and
+            the ``variable`` column.
+        variable: The column to sum on the Cobre side.
+        nw_sin: Long-format NEWAVE SIN frame with ``stage``, ``variable`` and
+            ``value`` columns, or ``None``.
+        nw_variable: The (already upper-cased) variable to keep in ``nw_sin``, or
+            ``None`` to skip the NEWAVE side entirely.
+        nw_factor: Multiplicative factor applied to each NEWAVE value (unit
+            alignment).
+        nw_offset: Subtracted from each NEWAVE ``stage`` to align with the Cobre
+            ``stage_id`` axis.
+        matched_ids: Optional Cobre entity filter forwarded to the Cobre sum.
+
+    Returns:
+        ``(cobre_by_stage, nw_by_stage)``. ``cobre_by_stage`` is empty when
+        ``cobre_hydro`` is empty or ``variable`` is absent; ``nw_by_stage`` is
+        empty when ``nw_sin``/``nw_variable`` is missing or ``nw_sin`` is empty.
+    """
+    if cobre_hydro.is_empty() or variable not in cobre_hydro.columns:
+        return {}, {}
+
+    cobre_by_stage = per_stage_sum_from_frame(cobre_hydro, variable, matched_ids)
+
+    nw_by_stage: dict[int, float] = {}
+    if nw_sin is not None and nw_variable is not None and not nw_sin.is_empty():
+        sin_df = nw_sin.filter(
+            pl.col("variable").str.strip_chars().str.to_uppercase() == nw_variable
+        )
+        for r in sin_df.iter_rows(named=True):
+            stage_raw = r.get("stage")
+            val = r.get("value")
+            if stage_raw is None or val is None:
+                continue
+            s = int(stage_raw) - nw_offset
+            nw_by_stage[s] = nw_by_stage.get(s, 0.0) + float(val) * nw_factor
+
+    return cobre_by_stage, nw_by_stage
+
+
+def bus_groups_and_pct(
+    results: Sequence[ResultComparison],
+    variable: str,
+    pct_df: pl.DataFrame | None,
+) -> tuple[dict[str, list[ResultComparison]], dict[int, dict[int, dict[str, object]]]]:
+    """Group ``bus`` rows by name and build the per-entity percentile lookup.
+
+    Pure numeric core of ``charts.system_per_bus_chart`` (``charts.py:2500-2523``).
+    Rows are filtered to ``entity_type == "bus"`` and ``variable`` and bucketed by
+    upper-cased ``entity_name`` (insertion order preserved). The percentile lookup
+    maps ``entity_id -> {stage_id -> row}`` over ``pct_df`` when both the
+    ``{var}_p10`` and ``{var}_p90`` columns are present; otherwise it is empty.
+    Never raises.
+
+    Args:
+        results: The comparison rows; consumed verbatim (read-only).
+        variable: The ``variable`` to keep.
+        pct_df: A per-entity percentile frame with ``entity_id``, ``stage_id`` and
+            ``{var}_p10``/``{var}_p90`` columns, or ``None``.
+
+    Returns:
+        ``(buses, pct_by_eid)`` where ``buses`` maps each upper-cased bus name to
+        its list of rows (in input order) and ``pct_by_eid`` maps
+        ``entity_id -> {stage_id -> percentile row}``. ``buses`` is empty when no
+        ``bus`` row matches; ``pct_by_eid`` is empty when ``pct_df`` is
+        ``None``/empty or the percentile columns are absent.
+    """
+    bus_data = [r for r in results if r.entity_type == "bus" and r.variable == variable]
+
+    buses: dict[str, list[ResultComparison]] = {}
+    for r in bus_data:
+        buses.setdefault(r.entity_name.upper(), []).append(r)
+
+    pct_by_eid: dict[int, dict[int, dict[str, object]]] = {}
+    p10_col = f"{variable}_p10"
+    p90_col = f"{variable}_p90"
+    if pct_df is not None and not pct_df.is_empty():
+        if p10_col in pct_df.columns and p90_col in pct_df.columns:
+            for row in pct_df.iter_rows(named=True):
+                eid = int(row["entity_id"])
+                sid = int(row["stage_id"])
+                pct_by_eid.setdefault(eid, {})[sid] = row
+
+    return buses, pct_by_eid
+
+
+def spillage_lookups(
+    results: Sequence[ResultComparison],
+    cobre_spill_energy: pl.DataFrame,
+) -> tuple[dict[str, dict[int, float]], dict[str, dict[int, float]]]:
+    """Build the NEWAVE and Cobre per-variable, per-stage spillage lookups.
+
+    Pure numeric core of ``charts.system_spillage_energy_chart``
+    (``charts.py:1565-1581``). The NEWAVE lookup is keyed by each
+    ``system_spillage`` row's ``variable`` (e.g. ``VERTOT``/``VERTcont``/
+    ``VERTfio``) then ``stage`` to ``newave_value``. The Cobre lookup maps the
+    ``cobre_spill_energy`` frame's ``total_mw``/``reservoir_mw``/``rorov_mw``
+    columns per ``stage_id`` under the keys ``spill_energy_total_mw`` /
+    ``spill_energy_reservoir_mw`` / ``spill_energy_rorov_mw``. Never raises.
+
+    Args:
+        results: The comparison rows; only ``entity_type == "system_spillage"``
+            rows contribute. Consumed verbatim (read-only).
+        cobre_spill_energy: A per-stage frame with ``stage_id``, ``total_mw``,
+            ``reservoir_mw`` and ``rorov_mw`` columns (may be empty).
+
+    Returns:
+        ``(nw_lookup, cb_lookup)``. ``nw_lookup`` is empty when no
+        ``system_spillage`` row is present; ``cb_lookup`` is empty when
+        ``cobre_spill_energy`` is empty.
+    """
+    nw_rows = [r for r in results if r.entity_type == "system_spillage"]
+
+    nw_lookup: dict[str, dict[int, float]] = {}
+    for r in nw_rows:
+        nw_lookup.setdefault(r.variable, {})[r.stage] = r.newave_value
+
+    cb_lookup: dict[str, dict[int, float]] = {}
+    if not cobre_spill_energy.is_empty():
+        for row in cobre_spill_energy.iter_rows(named=True):
+            sid = int(row["stage_id"])
+            cb_lookup.setdefault("spill_energy_total_mw", {})[sid] = float(
+                row["total_mw"]
+            )
+            cb_lookup.setdefault("spill_energy_reservoir_mw", {})[sid] = float(
+                row["reservoir_mw"]
+            )
+            cb_lookup.setdefault("spill_energy_rorov_mw", {})[sid] = float(
+                row["rorov_mw"]
+            )
+
+    return nw_lookup, cb_lookup
 
 
 def _tidy_one_percentile_frame(

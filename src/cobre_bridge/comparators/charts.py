@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pandas as pd
 import polars as pl
 
+from cobre_bridge.comparators import analyze
 from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
@@ -654,13 +657,9 @@ def system_comparison_chart(
     if not bus_data:
         return f"<p>No {variable} data available.</p>"
 
-    nw_by_stage: dict[int, float] = {}
-    cb_by_stage: dict[int, float] = {}
-    for r in bus_data:
-        nw_by_stage[r.stage] = nw_by_stage.get(r.stage, 0.0) + r.newave_value
-        cb_by_stage[r.stage] = cb_by_stage.get(r.stage, 0.0) + r.cobre_value
-
-    matched_ids = {r.cobre_id for r in bus_data}
+    nw_by_stage, cb_by_stage, matched_ids = analyze.per_stage_sum_from_results(
+        results, "bus", variable
+    )
     stages = sorted(set(nw_by_stage) | set(cb_by_stage))
     traces = _aggregate_percentile_traces(pct_df, variable, stages, matched_ids)
     traces.extend(
@@ -711,26 +710,19 @@ def _aggregate_percentile_traces(
     this keeps the band consistent with the mean line which only covers
     entities matched between NEWAVE and Cobre.
     """
+    # Guard mirrors the legacy early-return: no band when the percentile frame
+    # is missing/empty or lacks the variable's p10/p90 columns. ``stages`` being
+    # empty is NOT such a case — it still yields (empty) band traces, exactly as
+    # before, so the check is on the band source, not the returned lists.
     if pct_df is None or pct_df.is_empty():
         return []
-
-    p10_col = f"{variable}_p10"
-    p90_col = f"{variable}_p90"
-    if p10_col not in pct_df.columns or p90_col not in pct_df.columns:
+    if (
+        f"{variable}_p10" not in pct_df.columns
+        or f"{variable}_p90" not in pct_df.columns
+    ):
         return []
 
-    filtered = pct_df
-    if entity_ids is not None:
-        filtered = pct_df.filter(pl.col("entity_id").is_in(list(entity_ids)))
-
-    # Sum across entities per stage.
-    agg = filtered.group_by("stage_id").agg(
-        pl.col(p10_col).sum(), pl.col(p90_col).sum()
-    )
-    lookup = {int(r["stage_id"]): r for r in agg.iter_rows(named=True)}
-
-    p10 = [float(lookup.get(s, {}).get(p10_col, 0)) for s in stages]
-    p90 = [float(lookup.get(s, {}).get(p90_col, 0)) for s in stages]
+    p10, p90 = analyze.aggregate_percentile_band(pct_df, variable, stages, entity_ids)
 
     return [
         {
@@ -821,29 +813,15 @@ def cobre_aggregate_chart(
     if cobre_hydro.is_empty() or variable not in cobre_hydro.columns:
         return f"<p>No {variable} data available.</p>"
 
-    df = cobre_hydro
-    if matched_ids is not None:
-        df = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
-
-    cobre_agg = (
-        df.group_by("stage_id").agg(pl.col(variable).sum().alias("v")).sort("stage_id")
+    cobre_by_stage, nw_by_stage = analyze.cobre_sum_and_newave_sin(
+        cobre_hydro,
+        variable,
+        nw_sin,
+        nw_variable,
+        nw_factor,
+        nw_offset,
+        matched_ids,
     )
-    cobre_by_stage = {
-        int(r["stage_id"]): float(r["v"]) for r in cobre_agg.iter_rows(named=True)
-    }
-
-    nw_by_stage: dict[int, float] = {}
-    if nw_sin is not None and nw_variable is not None and not nw_sin.is_empty():
-        sin_df = nw_sin.filter(
-            pl.col("variable").str.strip_chars().str.to_uppercase() == nw_variable
-        )
-        for r in sin_df.iter_rows(named=True):
-            stage_raw = r.get("stage")
-            val = r.get("value")
-            if stage_raw is None or val is None:
-                continue
-            s = int(stage_raw) - nw_offset
-            nw_by_stage[s] = nw_by_stage.get(s, 0.0) + float(val) * nw_factor
 
     stages = sorted(set(cobre_by_stage) | set(nw_by_stage))
 
@@ -907,36 +885,20 @@ def hydro_per_bus_chart(
     if not hydro_data:
         return f"<p>No hydro {variable} data.</p>"
 
-    bus_id_to_name: dict[int, str] = {
-        bid: meta.get("name", str(bid)) for bid, meta in bus_meta.items()
+    # Per-(bus, stage) NEWAVE/Cobre sums (analyze owns the roll-up; the bus-name
+    # resolution and NOFICT skip live there).
+    per_bus = analyze.per_bus_sums_from_results(results, variable, hydro_meta, bus_meta)
+    per_bus_nw: dict[str, dict[int, float]] = {
+        bus_name: cast("dict[int, float]", agg["nw"])
+        for bus_name, agg in per_bus.items()
     }
-    hydro_to_bus: dict[int, int] = {
-        hid: meta["bus_id"]
-        for hid, meta in hydro_meta.items()
-        if meta.get("bus_id") is not None
+    per_bus_cb: dict[str, dict[int, float]] = {
+        bus_name: cast("dict[int, float]", agg["cb"])
+        for bus_name, agg in per_bus.items()
     }
-
-    # Aggregate per (bus_name, stage).
-    per_bus_nw: dict[str, dict[int, float]] = {}
-    per_bus_cb: dict[str, dict[int, float]] = {}
-    per_bus_ids: dict[str, set[int]] = {}
-    fictitious_skip = {"NOFICT1", "NOFICT2", "NOFICT3"}
-    for r in hydro_data:
-        bus_id = hydro_to_bus.get(r.cobre_id)
-        if bus_id is None:
-            continue
-        bus_name = bus_id_to_name.get(bus_id, str(bus_id)).upper()
-        if bus_name in fictitious_skip:
-            continue
-        per_bus_nw.setdefault(bus_name, {})
-        per_bus_cb.setdefault(bus_name, {})
-        per_bus_nw[bus_name][r.stage] = (
-            per_bus_nw[bus_name].get(r.stage, 0.0) + r.newave_value
-        )
-        per_bus_cb[bus_name][r.stage] = (
-            per_bus_cb[bus_name].get(r.stage, 0.0) + r.cobre_value
-        )
-        per_bus_ids.setdefault(bus_name, set()).add(r.cobre_id)
+    per_bus_ids: dict[str, set[int]] = {
+        bus_name: cast("set[int]", agg["ids"]) for bus_name, agg in per_bus.items()
+    }
 
     if not per_bus_nw:
         return f"<p>No hydro {variable} data mapped to buses.</p>"
@@ -946,24 +908,7 @@ def hydro_per_bus_chart(
     ordered += [b for b in sorted(per_bus_nw) if b not in ordered]
 
     # Build aggregate-percentile lookups per bus (sum of plant p10/p90).
-    p10_col = f"{variable}_p10"
-    p90_col = f"{variable}_p90"
-    per_bus_pct: dict[str, dict[int, tuple[float, float]]] = {}
-    if (
-        pct_df is not None
-        and not pct_df.is_empty()
-        and {p10_col, p90_col}.issubset(pct_df.columns)
-    ):
-        for bus_name, ids in per_bus_ids.items():
-            agg = (
-                pct_df.filter(pl.col("entity_id").is_in(list(ids)))
-                .group_by("stage_id")
-                .agg(pl.col(p10_col).sum(), pl.col(p90_col).sum())
-            )
-            per_bus_pct[bus_name] = {
-                int(r["stage_id"]): (float(r[p10_col]), float(r[p90_col]))
-                for r in agg.iter_rows(named=True)
-            }
+    per_bus_pct = analyze.per_bus_band_from_pct(pct_df, variable, per_bus_ids)
 
     ncols = 2
     nrows = (len(ordered) + ncols - 1) // ncols
@@ -1074,13 +1019,9 @@ def hydro_aggregate_chart(
     if not hydro_data:
         return f"<p>No hydro {variable} data.</p>"
 
-    nw_by_stage: dict[int, float] = {}
-    cb_by_stage: dict[int, float] = {}
-    for r in hydro_data:
-        nw_by_stage[r.stage] = nw_by_stage.get(r.stage, 0.0) + r.newave_value
-        cb_by_stage[r.stage] = cb_by_stage.get(r.stage, 0.0) + r.cobre_value
-
-    matched_ids = {r.cobre_id for r in hydro_data}
+    nw_by_stage, cb_by_stage, matched_ids = analyze.per_stage_sum_from_results(
+        results, "hydro", variable
+    )
     stages = sorted(set(nw_by_stage) | set(cb_by_stage))
 
     # Band traces first (rendered behind the lines).
@@ -1127,17 +1068,7 @@ def _hydro_per_stage_sum(
     absent.  Used by the slack-aggregate / slack-per-bus chart helpers to
     collapse per-(entity_id, stage_id) frames into a per-stage SIN total.
     """
-    if df is None or df.is_empty() or variable not in df.columns:
-        return {}
-    filtered = df
-    if matched_ids is not None:
-        filtered = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
-    agg = (
-        filtered.group_by("stage_id")
-        .agg(pl.col(variable).sum().alias("v"))
-        .sort("stage_id")
-    )
-    return {int(r["stage_id"]): float(r["v"]) for r in agg.iter_rows(named=True)}
+    return analyze.per_stage_sum_from_frame(df, variable, matched_ids)
 
 
 def hydro_slack_aggregate_chart(
@@ -1219,45 +1150,24 @@ def hydro_slack_per_bus_chart(
     if cobre_hydro.is_empty() or variable not in cobre_hydro.columns:
         return f"<p>No {variable} data available.</p>"
 
-    bus_id_to_name: dict[int, str] = {
-        bid: meta.get("name", str(bid)) for bid, meta in bus_meta.items()
+    # Frame-sourced per-(bus, stage) sums (analyze owns the roll-up and the
+    # bus-name resolution / NOFICT skip). The band's bus ids come from the
+    # Cobre frame, matching the legacy ``per_bus_cb, per_bus_ids`` pairing.
+    cb_agg = analyze.per_bus_sums_from_frame(
+        cobre_hydro, variable, matched_ids, hydro_meta, bus_meta
+    )
+    nw_agg = analyze.per_bus_sums_from_frame(
+        nw_slacks, variable, matched_ids, hydro_meta, bus_meta
+    )
+    per_bus_cb = {
+        bus_name: cast("dict[int, float]", a["sum"]) for bus_name, a in cb_agg.items()
     }
-    hydro_to_bus: dict[int, int] = {
-        hid: meta["bus_id"]
-        for hid, meta in hydro_meta.items()
-        if meta.get("bus_id") is not None
+    per_bus_ids = {
+        bus_name: cast("set[int]", a["ids"]) for bus_name, a in cb_agg.items()
     }
-
-    def _per_bus_from_frame(
-        df: pl.DataFrame | None,
-    ) -> tuple[dict[str, dict[int, float]], dict[str, set[int]]]:
-        out: dict[str, dict[int, float]] = {}
-        ids: dict[str, set[int]] = {}
-        if df is None or df.is_empty() or variable not in df.columns:
-            return out, ids
-        frame = df
-        if matched_ids is not None:
-            frame = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
-        fictitious_skip = {"NOFICT1", "NOFICT2", "NOFICT3"}
-        for row in frame.iter_rows(named=True):
-            eid = int(row["entity_id"])
-            bus_id = hydro_to_bus.get(eid)
-            if bus_id is None:
-                continue
-            bus_name = bus_id_to_name.get(bus_id, str(bus_id)).upper()
-            if bus_name in fictitious_skip:
-                continue
-            sid = int(row["stage_id"])
-            val = row.get(variable)
-            if val is None:
-                continue
-            out.setdefault(bus_name, {})
-            out[bus_name][sid] = out[bus_name].get(sid, 0.0) + float(val)
-            ids.setdefault(bus_name, set()).add(eid)
-        return out, ids
-
-    per_bus_cb, per_bus_ids = _per_bus_from_frame(cobre_hydro)
-    per_bus_nw, _ = _per_bus_from_frame(nw_slacks)
+    per_bus_nw = {
+        bus_name: cast("dict[int, float]", a["sum"]) for bus_name, a in nw_agg.items()
+    }
     if not per_bus_cb and not per_bus_nw:
         return f"<p>No {variable} data mapped to buses.</p>"
 
@@ -1266,26 +1176,7 @@ def hydro_slack_per_bus_chart(
         b for b in sorted(set(per_bus_cb) | set(per_bus_nw)) if b not in ordered
     ]
 
-    p10_col = f"{variable}_p10"
-    p90_col = f"{variable}_p90"
-    per_bus_pct: dict[str, dict[int, tuple[float, float]]] = {}
-    if (
-        pct_df is not None
-        and not pct_df.is_empty()
-        and {p10_col, p90_col}.issubset(pct_df.columns)
-    ):
-        for bus_name, ids in per_bus_ids.items():
-            if not ids:
-                continue
-            agg = (
-                pct_df.filter(pl.col("entity_id").is_in(list(ids)))
-                .group_by("stage_id")
-                .agg(pl.col(p10_col).sum(), pl.col(p90_col).sum())
-            )
-            per_bus_pct[bus_name] = {
-                int(r["stage_id"]): (float(r[p10_col]), float(r[p90_col]))
-                for r in agg.iter_rows(named=True)
-            }
+    per_bus_pct = analyze.per_bus_band_from_pct(pct_df, variable, per_bus_ids)
 
     ncols = 2
     nrows = (len(ordered) + ncols - 1) // ncols
@@ -1398,13 +1289,9 @@ def thermal_generation_chart(
     if not thermal_data:
         return "<p>No thermal generation data.</p>"
 
-    nw_by_stage: dict[int, float] = {}
-    cb_by_stage: dict[int, float] = {}
-    for r in thermal_data:
-        nw_by_stage[r.stage] = nw_by_stage.get(r.stage, 0.0) + r.newave_value
-        cb_by_stage[r.stage] = cb_by_stage.get(r.stage, 0.0) + r.cobre_value
-
-    matched_ids = {r.cobre_id for r in thermal_data}
+    nw_by_stage, cb_by_stage, matched_ids = analyze.per_stage_sum_from_results(
+        results, "thermal", ""
+    )
     stages = sorted(set(nw_by_stage) | set(cb_by_stage))
     traces = _aggregate_percentile_traces(pct_df, "generation_mw", stages, matched_ids)
     traces.extend(
@@ -1661,23 +1548,7 @@ def system_spillage_energy_chart(
     if not nw_rows and cobre_spill_energy.is_empty():
         return "<p>No system spillage data available.</p>"
 
-    nw_lookup: dict[str, dict[int, float]] = {}
-    for r in nw_rows:
-        nw_lookup.setdefault(r.variable, {})[r.stage] = r.newave_value
-
-    cb_lookup: dict[str, dict[int, float]] = {}
-    if not cobre_spill_energy.is_empty():
-        for row in cobre_spill_energy.iter_rows(named=True):
-            sid = int(row["stage_id"])
-            cb_lookup.setdefault("spill_energy_total_mw", {})[sid] = float(
-                row["total_mw"]
-            )
-            cb_lookup.setdefault("spill_energy_reservoir_mw", {})[sid] = float(
-                row["reservoir_mw"]
-            )
-            cb_lookup.setdefault("spill_energy_rorov_mw", {})[sid] = float(
-                row["rorov_mw"]
-            )
+    nw_lookup, cb_lookup = analyze.spillage_lookups(results, cobre_spill_energy)
 
     panels: list[tuple[str, str, str]] = [
         ("Total (VERTOT)", "spill_energy_total_mw", "VERTOT"),
@@ -2600,26 +2471,15 @@ def system_per_bus_chart(
     if not bus_data:
         return f"<p>No {variable} data available.</p>"
 
-    buses: dict[str, list[ResultComparison]] = {}
-    for r in bus_data:
-        buses.setdefault(r.entity_name.upper(), []).append(r)
+    buses, pct_by_eid = analyze.bus_groups_and_pct(results, variable, pct_df)
+    p10_col = f"{variable}_p10"
+    p90_col = f"{variable}_p90"
 
     # Order buses: preferred order first, then any remaining.
     ordered = [b for b in _BUS_ORDER if b in buses]
     ordered += [b for b in sorted(buses) if b not in ordered]
     if not ordered:
         return f"<p>No {variable} data available.</p>"
-
-    # Build per-bus p10/p90 lookups from percentile data.
-    pct_by_eid: dict[int, dict[int, dict]] = {}
-    p10_col = f"{variable}_p10"
-    p90_col = f"{variable}_p90"
-    if pct_df is not None and not pct_df.is_empty():
-        if p10_col in pct_df.columns and p90_col in pct_df.columns:
-            for r in pct_df.iter_rows(named=True):
-                eid = int(r["entity_id"])
-                sid = int(r["stage_id"])
-                pct_by_eid.setdefault(eid, {})[sid] = r
 
     # 2x2 grid using plotly subplots via xaxis/yaxis domains.
     n = len(ordered)
@@ -2800,7 +2660,14 @@ def _enrich_with_percentiles(
     pct_df: pl.DataFrame | None,
     cobre_id_key: str = "cobre_id",
 ) -> None:
-    """Add p10/p90 arrays to each plant entry from percentile data."""
+    """Add p10/p90 arrays to each plant entry from percentile data.
+
+    The in-place ``js_plants`` mutation lives here; the per-plant numeric
+    extraction (the rounded p10/p90 arrays, each aligned to its variable's own
+    stage axis) is delegated to :func:`analyze.plant_percentile_arrays`, which
+    filters ``pct_df`` ONCE per plant and reuses that subframe across every
+    variable.
+    """
     if pct_df is None or pct_df.is_empty():
         return
 
@@ -2808,23 +2675,11 @@ def _enrich_with_percentiles(
         cid = entry.get(cobre_id_key)
         if cid is None:
             continue
-        sub = pct_df.filter(pl.col("entity_id") == cid).sort("stage_id")
-        if sub.is_empty():
-            continue
-        pct_map = {int(r["stage_id"]): r for r in sub.iter_rows(named=True)}
-        for var_key, _ in variables:
-            stages = entry.get(f"{var_key}_stages", [])
-            p10_col = f"{var_key}_p10"
-            p90_col = f"{var_key}_p90"
-            if p10_col in sub.columns and p90_col in sub.columns:
-                entry[f"{var_key}_p10"] = [
-                    round(float(pct_map.get(s, {}).get(p10_col, 0) or 0), 2)
-                    for s in stages
-                ]
-                entry[f"{var_key}_p90"] = [
-                    round(float(pct_map.get(s, {}).get(p90_col, 0) or 0), 2)
-                    for s in stages
-                ]
+        var_stages = [
+            (var_key, var_label, entry.get(f"{var_key}_stages", []))
+            for var_key, var_label in variables
+        ]
+        entry.update(analyze.plant_percentile_arrays(pct_df, var_stages, cid))
 
 
 def _plant_max_reldiff_table(
