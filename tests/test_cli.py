@@ -880,6 +880,34 @@ class TestCompareDatasetWiring:
         )
         assert code_mismatch == 1
 
+    def test_load_compare_context_missing_newave_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ticket-015: bounds path gains FileNotFoundError -> exit 1 hardening.
+
+        A missing NEWAVE case directory now exits 1 with a clean stderr
+        message (via the shared ``_load_compare_context`` helper) instead of
+        surfacing an uncaught traceback. Results already had this; bounds gains
+        it in this refactor.
+        """
+
+        def _raise_missing(cls: object, _dir: Path) -> object:
+            raise FileNotFoundError("caso.dat not found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.case.NewaveCase.from_directory",
+            classmethod(_raise_missing),
+        )
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, _, stderr = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 1
+        assert "Error: caso.dat not found" in stderr
+
     def test_compare_results_html_tabs_intact(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -888,7 +916,6 @@ class TestCompareDatasetWiring:
         self._patch_results(monkeypatch)
         cobre_dir = tmp_path / "cobre"
         cobre_dir.mkdir()
-        report_path = tmp_path / "report.html"
 
         code, _, _ = self._invoke_main(
             [
@@ -896,17 +923,149 @@ class TestCompareDatasetWiring:
                 "results",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
-                "-o",
-                str(report_path),
+                "--format",
+                "html",
             ],
             monkeypatch,
         )
 
         assert code == 0
+        report_path = cobre_dir / "comparison_artifacts" / "report.html"
         assert report_path.exists()
         html = report_path.read_text(encoding="utf-8")
         for tab_id, _label in COMPARISON_TABS:
             assert tab_id in html
+
+    def test_compare_results_default_writes_parquet_no_html(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No ``--format``: default writes queryable artifacts, no HTML."""
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, _ = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        artifacts_dir = cobre_dir / "comparison_artifacts"
+        assert (artifacts_dir / "comparison.json").exists()
+        assert (artifacts_dir / "comparison.parquet").exists()
+        assert (artifacts_dir / "summary.json").exists()
+        assert not (artifacts_dir / "report.html").exists()
+
+    def test_compare_results_format_console_only_no_data(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--format console``: only the manifest is written (opt out of data)."""
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, _ = self._invoke_main(
+            [
+                "compare",
+                "results",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "console",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        artifacts_dir = cobre_dir / "comparison_artifacts"
+        assert (artifacts_dir / "comparison.json").exists()
+        assert not (artifacts_dir / "comparison.parquet").exists()
+
+    def test_compare_results_format_parquet_json_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--format parquet,json``: queryable artifacts present, exit 0."""
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, _ = self._invoke_main(
+            [
+                "compare",
+                "results",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "parquet,json",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        artifacts_dir = cobre_dir / "comparison_artifacts"
+        assert (artifacts_dir / "comparison.parquet").exists()
+        assert (artifacts_dir / "summary.json").exists()
+
+    def test_compare_bounds_html_warns_and_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--format html`` on bounds: stderr warns, no HTML, exit 0 on match."""
+        self._patch_bounds(monkeypatch, all_match=True)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, _, stderr = self._invoke_main(
+            [
+                "compare",
+                "bounds",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "html",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        assert "not supported for 'compare bounds'" in stderr
+        assert not (cobre_dir / "comparison_artifacts" / "report.html").exists()
+
+    def test_compare_unknown_format_exits_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--format bogus``: stderr names the bad token, exit 2."""
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, stderr = self._invoke_main(
+            [
+                "compare",
+                "results",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "bogus",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 2
+        assert "bogus" in stderr
+
+    def test_compare_results_help_omits_output_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``compare results --help`` lists --format/--out-dir, not --output/-o."""
+        code, stdout, _ = self._invoke_main(
+            ["compare", "results", "--help"],
+            monkeypatch,
+        )
+
+        assert code == 0
+        assert "--format" in stdout
+        assert "--out-dir" in stdout
+        assert "--output" not in stdout
+        assert "-o " not in stdout
 
     def test_compare_results_artifact_oserror_does_not_change_exit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -927,6 +1086,41 @@ class TestCompareDatasetWiring:
 
         assert code == 0
         assert "failed to write artifacts" in stderr
+
+
+class TestParseFormats:
+    """ticket-016: ``_parse_formats`` token parsing and validation."""
+
+    def test_parse_formats_default(self) -> None:
+        from cobre_bridge.cli import _parse_formats
+
+        assert _parse_formats(None) == {"console", "parquet", "json"}
+
+    def test_parse_formats_comma_and_repeat(self) -> None:
+        from cobre_bridge.cli import _parse_formats
+
+        assert _parse_formats(["csv,json", "parquet"]) == {
+            "csv",
+            "json",
+            "parquet",
+        }
+
+    def test_parse_formats_all_expands(self) -> None:
+        from cobre_bridge.cli import _parse_formats
+
+        assert _parse_formats(["all"]) == {
+            "console",
+            "html",
+            "csv",
+            "parquet",
+            "json",
+        }
+
+    def test_parse_formats_unknown_raises(self) -> None:
+        from cobre_bridge.cli import _parse_formats
+
+        with pytest.raises(ValueError, match="bogus"):
+            _parse_formats(["bogus"])
 
 
 # ---------------------------------------------------------------------------
