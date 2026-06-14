@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pandas as pd
 import polars as pl
 
+from cobre_bridge.comparators import analyze
 from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
@@ -13,10 +16,12 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     ResultsSummary,
 )
+from cobre_bridge.cost_categories import AGGREGATE_COST_COLUMNS
 from cobre_bridge.horizon import is_effectively_infinite
 from cobre_bridge.ui.html import escape_text, json_for_script
 from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS as _LEGEND
 from cobre_bridge.ui.plotly_helpers import MARGIN_DEFAULTS as _MARGIN
+from cobre_bridge.ui.plotly_helpers import facet_grid
 from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
 
 _BAND_FILL = "rgba(74,144,184,0.15)"
@@ -31,12 +36,22 @@ _BAND_LINE = "rgba(255,255,255,0)"
 # operational violations, generic violations) and drives the legend order in
 # the stacked bar.
 _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
-    # Operational / generation costs
-    ("Thermal Generation", ["GERACAO TERMICA"], ["thermal_cost"], "#D97706"),
+    # Operational / generation costs. Cobre's anticipated_thermal_cost (GNL
+    # forward-committed fuel, booked on the decision column) is folded in here so
+    # the thermal category matches NEWAVE GERACAO TERMICA / CTERM, which books
+    # GNL fuel at delivery. Absent in pre-anticipation Cobre runs (summed as 0).
+    (
+        "Thermal Generation",
+        ["GERACAO TERMICA"],
+        ["thermal_cost", "anticipated_thermal_cost"],
+        "#D97706",
+    ),
     ("Deficit", ["DEFICIT"], ["deficit_cost"], "#DC2626"),
     ("Energy Excess", ["EXCESSO ENERGIA"], ["excess_cost"], "#F59E0B"),
     ("Exchange", ["INTERCAMBIO"], ["exchange_cost"], "#7C3AED"),
     ("Pumping", [], ["pumping_cost"], "#0891B2"),
+    # Energy-contract cost — cobre-only column (no NEWAVE parcela analogue).
+    ("Contract", [], ["contract_cost"], "#0D9488"),
     # Regularisation costs (per-unit-flow charges, not violations)
     (
         "Spillage",
@@ -123,16 +138,8 @@ _COST_COLOR_DEFAULT = "#6B7280"  # for any unmapped residual category
 
 # Cobre cost-record fields that are aggregates / metadata and must not appear as
 # their own category in the breakdown (they would double-count or pollute the
-# chart). Mirrors the dashboard's `_NON_COST_COLS` exclusion set.
-_COBRE_NON_COST_KEYS: frozenset[str] = frozenset(
-    {
-        "total_cost",
-        "immediate_cost",
-        "future_cost",
-        "discount_factor",
-        "hydro_violation_cost",  # aggregate of the 6 hydro-violation components
-    }
-)
+# chart). Single-sourced with the dashboard via cost_categories.
+_COBRE_NON_COST_KEYS: frozenset[str] = AGGREGATE_COST_COLUMNS
 
 
 def _resolve_cost_categories(
@@ -455,22 +462,24 @@ def thermal_cost_chart(
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
 ) -> str:
-    """Per-stage thermal cost: NEWAVE ``CTERM`` vs Cobre ``thermal_cost``.
+    """Per-stage thermal cost: NEWAVE ``CTERM`` vs Cobre thermal (incl. anticip.).
 
-    Unlike the immediate-cost chart (NEWAVE ``COPER``), CTERM is the live
-    thermal generation cost on both sides, so this is an apples-to-apples
-    comparison even in the post-study (where COPER is frozen — see
-    :func:`other_costs_chart`).
+    The Cobre side is ``thermal_cost_total`` = ``thermal_cost`` +
+    ``anticipated_thermal_cost`` (the GNL forward-committed fuel Cobre books on
+    the decision column), so it lines up with NEWAVE ``CTERM``, which carries
+    GNL fuel at delivery. Both are the live thermal generation cost, so this is
+    an apples-to-apples comparison even in the post-study (where COPER is frozen
+    — see :func:`other_costs_chart`).
     """
     return _stage_cost_subplot(
         nw_sin,
         cobre_stage_costs,
         nw_offset,
         nw_variable="CTERM",
-        cb_column="thermal_cost",
+        cb_column="thermal_cost_total",
         title="Thermal Cost — NEWAVE CTERM vs Cobre",
         nw_label="NEWAVE CTERM",
-        cb_label="Cobre thermal_cost",
+        cb_label="Cobre thermal (incl. anticipated)",
     )
 
 
@@ -481,18 +490,19 @@ def other_costs_chart(
 ) -> str:
     """Per-stage non-thermal operation cost: ``COPER − CTERM`` per stage.
 
-    NEWAVE: ``COPER − CTERM``. Cobre: ``immediate_cost − thermal_cost``. This
-    isolates everything in the immediate cost that is *not* thermal generation
-    (deficit, penalties, slacks). On the NEWAVE side it goes **negative** in the
-    post-study because COPER is frozen at the last study value while CTERM
-    tracks the live post-study thermal cost — so this chart surfaces that
-    frozen-COPER gap explicitly.
+    NEWAVE: ``COPER − CTERM``. Cobre: ``immediate_cost − thermal_cost_total``
+    (``thermal_cost_total`` = live + anticipated GNL fuel, matching the thermal
+    category). This isolates everything in the immediate cost that is *not*
+    thermal generation (deficit, penalties, slacks). On the NEWAVE side it goes
+    **negative** in the post-study because COPER is frozen at the last study
+    value while CTERM tracks the live post-study thermal cost — so this chart
+    surfaces that frozen-COPER gap explicitly.
     """
     _, nw_coper, cb_imm = _extract_stage_cost_series(
         nw_sin, cobre_stage_costs, nw_offset, "COPER", "immediate_cost"
     )
     _, nw_cterm, cb_therm = _extract_stage_cost_series(
-        nw_sin, cobre_stage_costs, nw_offset, "CTERM", "thermal_cost"
+        nw_sin, cobre_stage_costs, nw_offset, "CTERM", "thermal_cost_total"
     )
 
     nw_other = {s: nw_coper[s] - nw_cterm[s] for s in nw_coper if s in nw_cterm}
@@ -648,13 +658,9 @@ def system_comparison_chart(
     if not bus_data:
         return f"<p>No {variable} data available.</p>"
 
-    nw_by_stage: dict[int, float] = {}
-    cb_by_stage: dict[int, float] = {}
-    for r in bus_data:
-        nw_by_stage[r.stage] = nw_by_stage.get(r.stage, 0.0) + r.newave_value
-        cb_by_stage[r.stage] = cb_by_stage.get(r.stage, 0.0) + r.cobre_value
-
-    matched_ids = {r.cobre_id for r in bus_data}
+    nw_by_stage, cb_by_stage, matched_ids = analyze.per_stage_sum_from_results(
+        results, "bus", variable
+    )
     stages = sorted(set(nw_by_stage) | set(cb_by_stage))
     traces = _aggregate_percentile_traces(pct_df, variable, stages, matched_ids)
     traces.extend(
@@ -705,26 +711,19 @@ def _aggregate_percentile_traces(
     this keeps the band consistent with the mean line which only covers
     entities matched between NEWAVE and Cobre.
     """
+    # Guard mirrors the legacy early-return: no band when the percentile frame
+    # is missing/empty or lacks the variable's p10/p90 columns. ``stages`` being
+    # empty is NOT such a case — it still yields (empty) band traces, exactly as
+    # before, so the check is on the band source, not the returned lists.
     if pct_df is None or pct_df.is_empty():
         return []
-
-    p10_col = f"{variable}_p10"
-    p90_col = f"{variable}_p90"
-    if p10_col not in pct_df.columns or p90_col not in pct_df.columns:
+    if (
+        f"{variable}_p10" not in pct_df.columns
+        or f"{variable}_p90" not in pct_df.columns
+    ):
         return []
 
-    filtered = pct_df
-    if entity_ids is not None:
-        filtered = pct_df.filter(pl.col("entity_id").is_in(list(entity_ids)))
-
-    # Sum across entities per stage.
-    agg = filtered.group_by("stage_id").agg(
-        pl.col(p10_col).sum(), pl.col(p90_col).sum()
-    )
-    lookup = {int(r["stage_id"]): r for r in agg.iter_rows(named=True)}
-
-    p10 = [float(lookup.get(s, {}).get(p10_col, 0)) for s in stages]
-    p90 = [float(lookup.get(s, {}).get(p90_col, 0)) for s in stages]
+    p10, p90 = analyze.aggregate_percentile_band(pct_df, variable, stages, entity_ids)
 
     return [
         {
@@ -815,29 +814,15 @@ def cobre_aggregate_chart(
     if cobre_hydro.is_empty() or variable not in cobre_hydro.columns:
         return f"<p>No {variable} data available.</p>"
 
-    df = cobre_hydro
-    if matched_ids is not None:
-        df = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
-
-    cobre_agg = (
-        df.group_by("stage_id").agg(pl.col(variable).sum().alias("v")).sort("stage_id")
+    cobre_by_stage, nw_by_stage = analyze.cobre_sum_and_newave_sin(
+        cobre_hydro,
+        variable,
+        nw_sin,
+        nw_variable,
+        nw_factor,
+        nw_offset,
+        matched_ids,
     )
-    cobre_by_stage = {
-        int(r["stage_id"]): float(r["v"]) for r in cobre_agg.iter_rows(named=True)
-    }
-
-    nw_by_stage: dict[int, float] = {}
-    if nw_sin is not None and nw_variable is not None and not nw_sin.is_empty():
-        sin_df = nw_sin.filter(
-            pl.col("variable").str.strip_chars().str.to_uppercase() == nw_variable
-        )
-        for r in sin_df.iter_rows(named=True):
-            stage_raw = r.get("stage")
-            val = r.get("value")
-            if stage_raw is None or val is None:
-                continue
-            s = int(stage_raw) - nw_offset
-            nw_by_stage[s] = nw_by_stage.get(s, 0.0) + float(val) * nw_factor
 
     stages = sorted(set(cobre_by_stage) | set(nw_by_stage))
 
@@ -901,36 +886,20 @@ def hydro_per_bus_chart(
     if not hydro_data:
         return f"<p>No hydro {variable} data.</p>"
 
-    bus_id_to_name: dict[int, str] = {
-        bid: meta.get("name", str(bid)) for bid, meta in bus_meta.items()
+    # Per-(bus, stage) NEWAVE/Cobre sums (analyze owns the roll-up; the bus-name
+    # resolution and NOFICT skip live there).
+    per_bus = analyze.per_bus_sums_from_results(results, variable, hydro_meta, bus_meta)
+    per_bus_nw: dict[str, dict[int, float]] = {
+        bus_name: cast("dict[int, float]", agg["nw"])
+        for bus_name, agg in per_bus.items()
     }
-    hydro_to_bus: dict[int, int] = {
-        hid: meta["bus_id"]
-        for hid, meta in hydro_meta.items()
-        if meta.get("bus_id") is not None
+    per_bus_cb: dict[str, dict[int, float]] = {
+        bus_name: cast("dict[int, float]", agg["cb"])
+        for bus_name, agg in per_bus.items()
     }
-
-    # Aggregate per (bus_name, stage).
-    per_bus_nw: dict[str, dict[int, float]] = {}
-    per_bus_cb: dict[str, dict[int, float]] = {}
-    per_bus_ids: dict[str, set[int]] = {}
-    fictitious_skip = {"NOFICT1", "NOFICT2", "NOFICT3"}
-    for r in hydro_data:
-        bus_id = hydro_to_bus.get(r.cobre_id)
-        if bus_id is None:
-            continue
-        bus_name = bus_id_to_name.get(bus_id, str(bus_id)).upper()
-        if bus_name in fictitious_skip:
-            continue
-        per_bus_nw.setdefault(bus_name, {})
-        per_bus_cb.setdefault(bus_name, {})
-        per_bus_nw[bus_name][r.stage] = (
-            per_bus_nw[bus_name].get(r.stage, 0.0) + r.newave_value
-        )
-        per_bus_cb[bus_name][r.stage] = (
-            per_bus_cb[bus_name].get(r.stage, 0.0) + r.cobre_value
-        )
-        per_bus_ids.setdefault(bus_name, set()).add(r.cobre_id)
+    per_bus_ids: dict[str, set[int]] = {
+        bus_name: cast("set[int]", agg["ids"]) for bus_name, agg in per_bus.items()
+    }
 
     if not per_bus_nw:
         return f"<p>No hydro {variable} data mapped to buses.</p>"
@@ -940,31 +909,11 @@ def hydro_per_bus_chart(
     ordered += [b for b in sorted(per_bus_nw) if b not in ordered]
 
     # Build aggregate-percentile lookups per bus (sum of plant p10/p90).
-    p10_col = f"{variable}_p10"
-    p90_col = f"{variable}_p90"
-    per_bus_pct: dict[str, dict[int, tuple[float, float]]] = {}
-    if (
-        pct_df is not None
-        and not pct_df.is_empty()
-        and {p10_col, p90_col}.issubset(pct_df.columns)
-    ):
-        for bus_name, ids in per_bus_ids.items():
-            agg = (
-                pct_df.filter(pl.col("entity_id").is_in(list(ids)))
-                .group_by("stage_id")
-                .agg(pl.col(p10_col).sum(), pl.col(p90_col).sum())
-            )
-            per_bus_pct[bus_name] = {
-                int(r["stage_id"]): (float(r[p10_col]), float(r[p90_col]))
-                for r in agg.iter_rows(named=True)
-            }
+    per_bus_pct = analyze.per_bus_band_from_pct(pct_df, variable, per_bus_ids)
 
     ncols = 2
     nrows = (len(ordered) + ncols - 1) // ncols
-    row_gap = 0.06
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
-    col_gap = 0.05
-    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels = facet_grid(len(ordered), ncols=2)
 
     traces: list[dict] = []
     layout: dict = {"title": title}
@@ -977,26 +926,21 @@ def hydro_per_bus_chart(
         if not stages:
             continue
 
-        row_i = idx // ncols
-        col_i = idx % ncols
+        panel = panels[idx]
+        row_i = panel.row
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
-        x0 = col_i * (col_w + col_gap)
-        x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
-        y0 = y1 - row_h
-
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [round(x0, 3), round(x1, 3)],
+            "domain": panel.x_domain,
             "title": "Stage" if row_i == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": panel.y_domain,
             "title": bus_name,
             "anchor": xa,
         }
@@ -1068,13 +1012,9 @@ def hydro_aggregate_chart(
     if not hydro_data:
         return f"<p>No hydro {variable} data.</p>"
 
-    nw_by_stage: dict[int, float] = {}
-    cb_by_stage: dict[int, float] = {}
-    for r in hydro_data:
-        nw_by_stage[r.stage] = nw_by_stage.get(r.stage, 0.0) + r.newave_value
-        cb_by_stage[r.stage] = cb_by_stage.get(r.stage, 0.0) + r.cobre_value
-
-    matched_ids = {r.cobre_id for r in hydro_data}
+    nw_by_stage, cb_by_stage, matched_ids = analyze.per_stage_sum_from_results(
+        results, "hydro", variable
+    )
     stages = sorted(set(nw_by_stage) | set(cb_by_stage))
 
     # Band traces first (rendered behind the lines).
@@ -1121,17 +1061,7 @@ def _hydro_per_stage_sum(
     absent.  Used by the slack-aggregate / slack-per-bus chart helpers to
     collapse per-(entity_id, stage_id) frames into a per-stage SIN total.
     """
-    if df is None or df.is_empty() or variable not in df.columns:
-        return {}
-    filtered = df
-    if matched_ids is not None:
-        filtered = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
-    agg = (
-        filtered.group_by("stage_id")
-        .agg(pl.col(variable).sum().alias("v"))
-        .sort("stage_id")
-    )
-    return {int(r["stage_id"]): float(r["v"]) for r in agg.iter_rows(named=True)}
+    return analyze.per_stage_sum_from_frame(df, variable, matched_ids)
 
 
 def hydro_slack_aggregate_chart(
@@ -1213,45 +1143,24 @@ def hydro_slack_per_bus_chart(
     if cobre_hydro.is_empty() or variable not in cobre_hydro.columns:
         return f"<p>No {variable} data available.</p>"
 
-    bus_id_to_name: dict[int, str] = {
-        bid: meta.get("name", str(bid)) for bid, meta in bus_meta.items()
+    # Frame-sourced per-(bus, stage) sums (analyze owns the roll-up and the
+    # bus-name resolution / NOFICT skip). The band's bus ids come from the
+    # Cobre frame, matching the legacy ``per_bus_cb, per_bus_ids`` pairing.
+    cb_agg = analyze.per_bus_sums_from_frame(
+        cobre_hydro, variable, matched_ids, hydro_meta, bus_meta
+    )
+    nw_agg = analyze.per_bus_sums_from_frame(
+        nw_slacks, variable, matched_ids, hydro_meta, bus_meta
+    )
+    per_bus_cb = {
+        bus_name: cast("dict[int, float]", a["sum"]) for bus_name, a in cb_agg.items()
     }
-    hydro_to_bus: dict[int, int] = {
-        hid: meta["bus_id"]
-        for hid, meta in hydro_meta.items()
-        if meta.get("bus_id") is not None
+    per_bus_ids = {
+        bus_name: cast("set[int]", a["ids"]) for bus_name, a in cb_agg.items()
     }
-
-    def _per_bus_from_frame(
-        df: pl.DataFrame | None,
-    ) -> tuple[dict[str, dict[int, float]], dict[str, set[int]]]:
-        out: dict[str, dict[int, float]] = {}
-        ids: dict[str, set[int]] = {}
-        if df is None or df.is_empty() or variable not in df.columns:
-            return out, ids
-        frame = df
-        if matched_ids is not None:
-            frame = df.filter(pl.col("entity_id").is_in(list(matched_ids)))
-        fictitious_skip = {"NOFICT1", "NOFICT2", "NOFICT3"}
-        for row in frame.iter_rows(named=True):
-            eid = int(row["entity_id"])
-            bus_id = hydro_to_bus.get(eid)
-            if bus_id is None:
-                continue
-            bus_name = bus_id_to_name.get(bus_id, str(bus_id)).upper()
-            if bus_name in fictitious_skip:
-                continue
-            sid = int(row["stage_id"])
-            val = row.get(variable)
-            if val is None:
-                continue
-            out.setdefault(bus_name, {})
-            out[bus_name][sid] = out[bus_name].get(sid, 0.0) + float(val)
-            ids.setdefault(bus_name, set()).add(eid)
-        return out, ids
-
-    per_bus_cb, per_bus_ids = _per_bus_from_frame(cobre_hydro)
-    per_bus_nw, _ = _per_bus_from_frame(nw_slacks)
+    per_bus_nw = {
+        bus_name: cast("dict[int, float]", a["sum"]) for bus_name, a in nw_agg.items()
+    }
     if not per_bus_cb and not per_bus_nw:
         return f"<p>No {variable} data mapped to buses.</p>"
 
@@ -1260,33 +1169,11 @@ def hydro_slack_per_bus_chart(
         b for b in sorted(set(per_bus_cb) | set(per_bus_nw)) if b not in ordered
     ]
 
-    p10_col = f"{variable}_p10"
-    p90_col = f"{variable}_p90"
-    per_bus_pct: dict[str, dict[int, tuple[float, float]]] = {}
-    if (
-        pct_df is not None
-        and not pct_df.is_empty()
-        and {p10_col, p90_col}.issubset(pct_df.columns)
-    ):
-        for bus_name, ids in per_bus_ids.items():
-            if not ids:
-                continue
-            agg = (
-                pct_df.filter(pl.col("entity_id").is_in(list(ids)))
-                .group_by("stage_id")
-                .agg(pl.col(p10_col).sum(), pl.col(p90_col).sum())
-            )
-            per_bus_pct[bus_name] = {
-                int(r["stage_id"]): (float(r[p10_col]), float(r[p90_col]))
-                for r in agg.iter_rows(named=True)
-            }
+    per_bus_pct = analyze.per_bus_band_from_pct(pct_df, variable, per_bus_ids)
 
     ncols = 2
     nrows = (len(ordered) + ncols - 1) // ncols
-    row_gap = 0.06
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
-    col_gap = 0.05
-    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels = facet_grid(len(ordered), ncols=2)
 
     traces: list[dict] = []
     layout: dict = {"title": title}
@@ -1299,26 +1186,21 @@ def hydro_slack_per_bus_chart(
         if not stages:
             continue
 
-        row_i = idx // ncols
-        col_i = idx % ncols
+        panel = panels[idx]
+        row_i = panel.row
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
-        x0 = col_i * (col_w + col_gap)
-        x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
-        y0 = y1 - row_h
-
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [round(x0, 3), round(x1, 3)],
+            "domain": panel.x_domain,
             "title": "Stage" if row_i == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": panel.y_domain,
             "title": bus_name,
             "anchor": xa,
         }
@@ -1392,13 +1274,9 @@ def thermal_generation_chart(
     if not thermal_data:
         return "<p>No thermal generation data.</p>"
 
-    nw_by_stage: dict[int, float] = {}
-    cb_by_stage: dict[int, float] = {}
-    for r in thermal_data:
-        nw_by_stage[r.stage] = nw_by_stage.get(r.stage, 0.0) + r.newave_value
-        cb_by_stage[r.stage] = cb_by_stage.get(r.stage, 0.0) + r.cobre_value
-
-    matched_ids = {r.cobre_id for r in thermal_data}
+    nw_by_stage, cb_by_stage, matched_ids = analyze.per_stage_sum_from_results(
+        results, "thermal", ""
+    )
     stages = sorted(set(nw_by_stage) | set(cb_by_stage))
     traces = _aggregate_percentile_traces(pct_df, "generation_mw", stages, matched_ids)
     traces.extend(
@@ -1489,10 +1367,7 @@ def line_summary_chart(
     # constant gap between rows. The previous fixed-stride formula
     # produced negative y-domains for nrows ≥ 3 (rendering the bottom
     # rows outside the chart area) which made bottom panels disappear.
-    row_gap = 0.06
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
-    col_gap = 0.05
-    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels = facet_grid(len(ordered_ids), ncols=2)
 
     traces: list[dict] = []
     layout: dict = {"title": "Net Line Flow (MW)"}
@@ -1500,26 +1375,21 @@ def line_summary_chart(
 
     for idx, lid in enumerate(ordered_ids):
         rows_list = sorted(by_line[lid], key=lambda r: r.stage)
-        row_i = idx // ncols
-        col_i = idx % ncols
+        panel = panels[idx]
+        row_i = panel.row
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
-        x0 = col_i * (col_w + col_gap)
-        x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
-        y0 = y1 - row_h
-
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [round(x0, 3), round(x1, 3)],
+            "domain": panel.x_domain,
             "title": "Stage" if row_i == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": panel.y_domain,
             "title": rows_list[0].entity_name if rows_list else f"line {lid}",
             "anchor": xa,
         }
@@ -1655,29 +1525,15 @@ def system_spillage_energy_chart(
     if not nw_rows and cobre_spill_energy.is_empty():
         return "<p>No system spillage data available.</p>"
 
-    nw_lookup: dict[str, dict[int, float]] = {}
-    for r in nw_rows:
-        nw_lookup.setdefault(r.variable, {})[r.stage] = r.newave_value
-
-    cb_lookup: dict[str, dict[int, float]] = {}
-    if not cobre_spill_energy.is_empty():
-        for row in cobre_spill_energy.iter_rows(named=True):
-            sid = int(row["stage_id"])
-            cb_lookup.setdefault("spill_energy_total_mw", {})[sid] = float(
-                row["total_mw"]
-            )
-            cb_lookup.setdefault("spill_energy_reservoir_mw", {})[sid] = float(
-                row["reservoir_mw"]
-            )
-            cb_lookup.setdefault("spill_energy_rorov_mw", {})[sid] = float(
-                row["rorov_mw"]
-            )
+    nw_lookup, cb_lookup = analyze.spillage_lookups(results, cobre_spill_energy)
 
     panels: list[tuple[str, str, str]] = [
         ("Total (VERTOT)", "spill_energy_total_mw", "VERTOT"),
         ("Reservoir cascades (VERTcont)", "spill_energy_reservoir_mw", "VERTcont"),
         ("Run-of-river (VERTfio)", "spill_energy_rorov_mw", "VERTfio"),
     ]
+    # Vertically stacked: y in [0.7,1.0], [0.35,0.65], [0.0,0.3]
+    facets = facet_grid(3, ncols=1, row_gap=0.05)
 
     traces: list[dict] = []
     layout: dict = {
@@ -1695,16 +1551,14 @@ def system_spillage_energy_chart(
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
 
-        # Vertically stacked: y in [0,0.3], [0.35,0.65], [0.7,1.0]
-        y1 = 1.0 - idx * 0.35
-        y0 = y1 - 0.30
+        facet = facets[idx]
         layout[xa_key] = {
-            "domain": [0.0, 1.0],
+            "domain": facet.x_domain,
             "anchor": ya,
             "title": "Stage" if idx == len(panels) - 1 else "",
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": facet.y_domain,
             "anchor": xa,
             "title": panel_title,
         }
@@ -1934,25 +1788,23 @@ def performance_fwd_bwd_split_chart(
         all_secs.extend(bw + fw)
 
     nrows = len(panels)
-    row_gap = 0.10
-    row_h = (1.0 - row_gap * (nrows - 1)) / nrows
+    facets = facet_grid(nrows, ncols=1, row_gap=0.10, min_row_h=0.0)
     traces: list[dict] = []
     layout: dict = {"title": "Forward / Backward Split per Iteration (seconds)"}
     for idx, (label, it, bw, fw) in enumerate(panels):
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
-        y1 = 1.0 - idx * (row_h + row_gap)
-        y0 = y1 - row_h
+        facet = facets[idx]
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [0.0, 1.0],
+            "domain": facet.x_domain,
             "title": "Iteration" if idx == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": facet.y_domain,
             "title": f"{label} (s)",
             "anchor": xa,
         }
@@ -2287,10 +2139,12 @@ def overview_metrics(
     from cobre_bridge.ui.theme import COMPARISON_COLORS
 
     # Pull thermal-generation cost only (single-category NPV). NEWAVE
-    # parcela "GERACAO TERMICA" and Cobre "thermal_cost" are sourced
-    # straight from ``_COST_MAP``.
+    # parcela "GERACAO TERMICA" vs Cobre ``thermal_cost`` + the GNL
+    # ``anticipated_thermal_cost`` (matching the "Thermal Generation"
+    # ``_COST_MAP`` category; anticipated is 0 / absent on non-GNL runs).
     nw_thermal = (nw_costs or {}).get("GERACAO TERMICA", 0.0)
-    cb_thermal = (cobre_costs or {}).get("thermal_cost", 0.0)
+    _cb = cobre_costs or {}
+    cb_thermal = _cb.get("thermal_cost", 0.0) + _cb.get("anticipated_thermal_cost", 0.0)
     diff = cb_thermal - nw_thermal
     pct = (diff / nw_thermal * 100.0) if abs(nw_thermal) > 1e-6 else float("nan")
 
@@ -2477,6 +2331,9 @@ def build_energy_balance_tab(
             xa = f"x{ax_idx}" if ax_idx > 1 else "x"
             ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
+            # Fixed-stride domains (0.52/0.47/0.44) — intentionally NOT
+            # facet_grid: its gap formula yields different col_w/row_h and
+            # would drift this chart's golden.
             x0 = col_i * 0.52
             x1 = x0 + 0.47
             y1 = 1.0 - row_i * 0.52
@@ -2592,26 +2449,15 @@ def system_per_bus_chart(
     if not bus_data:
         return f"<p>No {variable} data available.</p>"
 
-    buses: dict[str, list[ResultComparison]] = {}
-    for r in bus_data:
-        buses.setdefault(r.entity_name.upper(), []).append(r)
+    buses, pct_by_eid = analyze.bus_groups_and_pct(results, variable, pct_df)
+    p10_col = f"{variable}_p10"
+    p90_col = f"{variable}_p90"
 
     # Order buses: preferred order first, then any remaining.
     ordered = [b for b in _BUS_ORDER if b in buses]
     ordered += [b for b in sorted(buses) if b not in ordered]
     if not ordered:
         return f"<p>No {variable} data available.</p>"
-
-    # Build per-bus p10/p90 lookups from percentile data.
-    pct_by_eid: dict[int, dict[int, dict]] = {}
-    p10_col = f"{variable}_p10"
-    p90_col = f"{variable}_p90"
-    if pct_df is not None and not pct_df.is_empty():
-        if p10_col in pct_df.columns and p90_col in pct_df.columns:
-            for r in pct_df.iter_rows(named=True):
-                eid = int(r["entity_id"])
-                sid = int(r["stage_id"])
-                pct_by_eid.setdefault(eid, {})[sid] = r
 
     # 2x2 grid using plotly subplots via xaxis/yaxis domains.
     n = len(ordered)
@@ -2630,6 +2476,9 @@ def system_per_bus_chart(
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
+        # Fixed-stride domains (0.52/0.47/0.44) — intentionally NOT facet_grid:
+        # its gap formula yields different col_w/row_h and would drift this
+        # chart's golden.
         x0 = col_i * 0.52
         x1 = x0 + 0.47
         y1 = 1.0 - row_i * 0.52
@@ -2709,18 +2558,6 @@ def system_per_bus_chart(
     return _plotly_div(traces, layout, height=nrows * 300 + 80)
 
 
-def _subplot_domains(n: int) -> list[tuple[float, float]]:
-    """Compute non-overlapping y-axis domains for n subplots."""
-    gap = 0.05
-    h = (1.0 - gap * (n - 1)) / n
-    domains = []
-    for i in range(n):
-        bottom = i * (h + gap)
-        domains.append((round(bottom, 4), round(bottom + h, 4)))
-    domains.reverse()
-    return domains
-
-
 # -------------------------------------------------------------------
 # Interactive plant details
 # -------------------------------------------------------------------
@@ -2792,7 +2629,14 @@ def _enrich_with_percentiles(
     pct_df: pl.DataFrame | None,
     cobre_id_key: str = "cobre_id",
 ) -> None:
-    """Add p10/p90 arrays to each plant entry from percentile data."""
+    """Add p10/p90 arrays to each plant entry from percentile data.
+
+    The in-place ``js_plants`` mutation lives here; the per-plant numeric
+    extraction (the rounded p10/p90 arrays, each aligned to its variable's own
+    stage axis) is delegated to :func:`analyze.plant_percentile_arrays`, which
+    filters ``pct_df`` ONCE per plant and reuses that subframe across every
+    variable.
+    """
     if pct_df is None or pct_df.is_empty():
         return
 
@@ -2800,23 +2644,11 @@ def _enrich_with_percentiles(
         cid = entry.get(cobre_id_key)
         if cid is None:
             continue
-        sub = pct_df.filter(pl.col("entity_id") == cid).sort("stage_id")
-        if sub.is_empty():
-            continue
-        pct_map = {int(r["stage_id"]): r for r in sub.iter_rows(named=True)}
-        for var_key, _ in variables:
-            stages = entry.get(f"{var_key}_stages", [])
-            p10_col = f"{var_key}_p10"
-            p90_col = f"{var_key}_p90"
-            if p10_col in sub.columns and p90_col in sub.columns:
-                entry[f"{var_key}_p10"] = [
-                    round(float(pct_map.get(s, {}).get(p10_col, 0) or 0), 2)
-                    for s in stages
-                ]
-                entry[f"{var_key}_p90"] = [
-                    round(float(pct_map.get(s, {}).get(p90_col, 0) or 0), 2)
-                    for s in stages
-                ]
+        var_stages = [
+            (var_key, var_label, entry.get(f"{var_key}_stages", []))
+            for var_key, var_label in variables
+        ]
+        entry.update(analyze.plant_percentile_arrays(pct_df, var_stages, cid))
 
 
 def _plant_max_reldiff_table(
@@ -3389,10 +3221,7 @@ def constraints_comparison_chart(
 
     ncols = 2
     nrows = (len(renderable) + ncols - 1) // ncols
-    row_gap = 0.06
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
-    col_gap = 0.05
-    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels = facet_grid(len(renderable), ncols=2)
 
     traces: list[dict] = []
     layout: dict = {"title": "Generic Constraints — LHS vs Bound"}
@@ -3402,26 +3231,21 @@ def constraints_comparison_chart(
         cid = int(c["id"])
         name = c["name"]
         sense = c.get("sense", "<=")
-        row_i = idx // ncols
-        col_i = idx % ncols
+        panel = panels[idx]
+        row_i = panel.row
         ax_idx = idx + 1
         xa = f"x{ax_idx}" if ax_idx > 1 else "x"
         ya = f"y{ax_idx}" if ax_idx > 1 else "y"
 
-        x0 = col_i * (col_w + col_gap)
-        x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
-        y0 = y1 - row_h
-
         xa_key = f"xaxis{ax_idx}" if ax_idx > 1 else "xaxis"
         ya_key = f"yaxis{ax_idx}" if ax_idx > 1 else "yaxis"
         layout[xa_key] = {
-            "domain": [round(x0, 3), round(x1, 3)],
+            "domain": panel.x_domain,
             "title": "Stage" if row_i == nrows - 1 else "",
             "anchor": ya,
         }
         layout[ya_key] = {
-            "domain": [round(y0, 3), round(y1, 3)],
+            "domain": panel.y_domain,
             "title": f"{name} ({sense})",
             "anchor": xa,
         }

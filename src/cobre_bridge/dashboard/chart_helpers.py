@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import plotly.graph_objects as go
 
+from cobre_bridge.cost_categories import AGGREGATE_COST_COLUMNS, COST_PARTITION_COLUMNS
 from cobre_bridge.ui.html import wrap_chart
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS as _LEGEND,
@@ -40,9 +41,10 @@ except ImportError:  # pragma: no cover
 #: The ``"Other"`` key is intentionally absent — it is computed dynamically in
 #: :func:`group_costs` as all columns not claimed by the explicit groups.
 COST_GROUPS: dict[str, list[str]] = {
-    # Generation costs
-    "Thermal": ["thermal_cost"],
+    # Generation costs (anticipated = GNL forward-committed fuel, grouped here)
+    "Thermal": ["thermal_cost", "anticipated_thermal_cost"],
     "Deficit": ["deficit_cost"],
+    "Energy Excess": ["excess_cost"],
     "Spillage": ["spillage_cost"],
     "Turbined Reg.": ["turbined_cost"],
     "NCS Curtailment": ["curtailment_cost"],
@@ -72,6 +74,7 @@ COST_GROUP_COLORS: dict[str, str] = {
     # Generation — warm palette
     "Thermal": "#D97706",
     "Deficit": "#DC2626",
+    "Energy Excess": "#F59E0B",
     "Spillage": "#2563EB",
     # Regularisation — cool/teal palette to distinguish from violations
     "Turbined Reg.": "#0EA5E9",
@@ -377,23 +380,10 @@ def make_chart_card(
     return wrap_chart(inner_html)
 
 
-#: Non-cost metadata columns that are never treated as cost components.
-#: Includes aggregate/derived columns that would cause double-counting.
-_NON_COST_COLS: frozenset[str] = frozenset(
-    {
-        "scenario_id",
-        "stage_id",
-        "block_id",
-        "total_cost",
-        "immediate_cost",
-        "future_cost",
-        "discount_factor",
-        # hydro_violation_cost is the sum of the 6 individual hydro violation
-        # costs (evaporation, withdrawal, outflow min/max, turbining, generation)
-        # which are each tracked as separate groups — exclude to avoid double-counting.
-        "hydro_violation_cost",
-    }
-)
+#: Non-cost metadata columns that are never treated as cost components: the
+#: hive-partition/time keys plus the derived/aggregate cost roll-ups (the latter
+#: single-sourced with the comparator via cost_categories to avoid drift).
+_NON_COST_COLS: frozenset[str] = COST_PARTITION_COLUMNS | AGGREGATE_COST_COLUMNS
 
 
 def compute_npv_costs(

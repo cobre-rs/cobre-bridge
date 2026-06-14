@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pyarrow as pa
 import pytest
 
 from cobre_bridge.comparators.alignment import (
@@ -28,6 +29,7 @@ from cobre_bridge.comparators.results import (
     build_results_summary,
 )
 from cobre_bridge.id_map import NewaveIdMap
+from tests.conftest import make_case
 
 # -------------------------------------------------------------------
 # Bounds comparison unit tests
@@ -208,18 +210,24 @@ class TestHtmlReport:
         assert "<p>Hello</p>" in html
 
     def test_build_comparison_report_no_crash(self) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
         )
+        from cobre_bridge.comparators.results import PercentileData
 
-        html = build_comparison_report([])
+        pct = PercentileData()
+        dataset = build_results_dataset([], pct, 0.05)
+        html = build_comparison_report(dataset)
         assert "<!DOCTYPE html>" in html
         assert "Cobre vs NEWAVE" in html
 
     def test_build_comparison_report_with_data(self) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
         )
+        from cobre_bridge.comparators.results import PercentileData
 
         results = [
             ResultComparison(
@@ -235,7 +243,9 @@ class TestHtmlReport:
                 rel_diff=0.001,
             ),
         ]
-        html = build_comparison_report(results)
+        pct = PercentileData()
+        dataset = build_results_dataset(results, pct, 0.05)
+        html = build_comparison_report(dataset)
         assert "<!DOCTYPE html>" in html
         assert "Convergence" in html
 
@@ -246,51 +256,83 @@ class TestHtmlReport:
 
 
 class TestBoundsFromInputs:
-    def test_compute_hydro_bounds_no_modif(self) -> None:
-        """Empty dict when MODIF is absent."""
-        from cobre_bridge.comparators.bounds_from_inputs import (
-            compute_hydro_bounds,
-        )
+    """The bounds 'expected' side now delegates to the converters (ARCH-01).
 
-        nw_files = MagicMock()
-        nw_files.modif = None
-        id_map = MagicMock()
+    These verify the delegation + reshape into the comparison dict, not an
+    independent re-derivation (which drifted and caused false positives).
+    """
 
-        result = compute_hydro_bounds(nw_files, id_map)
-        assert result == {}
-
-    def test_compute_thermal_bounds_no_expt_no_manutt(
-        self,
+    def test_compute_hydro_bounds_reshapes_converter_table(
+        self, tmp_path: Path
     ) -> None:
-        """Empty dict when neither expt.dat nor manutt.dat present."""
-        from cobre_bridge.comparators.bounds_from_inputs import (
-            compute_thermal_bounds,
+        from cobre_bridge.comparators.bounds_from_inputs import compute_hydro_bounds
+
+        table = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], pa.int32()),
+                "stage_id": pa.array([0, 1], pa.int32()),
+                "min_storage_hm3": pa.array([10.0, None], pa.float64()),
+                "max_storage_hm3": pa.array([100.0, 110.0], pa.float64()),
+                "min_turbined_m3s": pa.array([None, None], pa.float64()),
+                "max_turbined_m3s": pa.array([None, None], pa.float64()),
+                "min_outflow_m3s": pa.array([5.0, None], pa.float64()),
+                "min_generation_mw": pa.array([7.0, 7.0], pa.float64()),
+            }
         )
+        case = make_case(tmp_path)
+        with patch(
+            "cobre_bridge.converters.hydro.convert_storage_bounds",
+            return_value=table,
+        ):
+            result = compute_hydro_bounds(case, MagicMock())
 
-        nw_files = MagicMock()
-        nw_files.expt = None
-        nw_files.manutt = None
-        id_map = MagicMock()
+        assert result[(0, 0, "storage_min")] == 10.0
+        assert result[(0, 0, "storage_max")] == 100.0
+        assert result[(0, 1, "storage_max")] == 110.0
+        assert result[(0, 0, "outflow_min")] == 5.0
+        # None cells are skipped; hydro generation (GHMIN) is intentionally
+        # not part of the bounds comparison.
+        assert (0, 1, "storage_min") not in result
+        assert not any(name == "generation_min" for (_, _, name) in result)
 
-        result = compute_thermal_bounds(nw_files, id_map)
-        assert result == {}
+    def test_compute_hydro_bounds_empty_when_converter_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.comparators.bounds_from_inputs import compute_hydro_bounds
 
-    def test_compute_line_bounds_no_limits(self) -> None:
-        """Empty dict when sistema has no interchange limits."""
-        from cobre_bridge.comparators.bounds_from_inputs import (
-            compute_line_bounds,
+        case = make_case(tmp_path)
+        with patch(
+            "cobre_bridge.converters.hydro.convert_storage_bounds", return_value=None
+        ):
+            assert compute_hydro_bounds(case, MagicMock()) == {}
+
+    def test_compute_thermal_bounds_no_expt_no_manutt(self, tmp_path: Path) -> None:
+        """Empty dict when neither expt.dat nor manutt.dat present (path guard)."""
+        from cobre_bridge.comparators.bounds_from_inputs import compute_thermal_bounds
+
+        case = make_case(tmp_path)  # expt/manutt default to None
+        assert compute_thermal_bounds(case, MagicMock()) == {}
+
+    def test_compute_line_bounds_reshapes_converter_table(self, tmp_path: Path) -> None:
+        from cobre_bridge.comparators.bounds_from_inputs import compute_line_bounds
+
+        table = pa.table(
+            {
+                "line_id": pa.array([0], pa.int32()),
+                "stage_id": pa.array([0], pa.int32()),
+                "direct_mw": pa.array([500.0], pa.float64()),
+                "reverse_mw": pa.array([300.0], pa.float64()),
+            }
         )
+        case = make_case(tmp_path)
+        with patch(
+            "cobre_bridge.converters.network.convert_line_bounds",
+            return_value=table,
+        ):
+            result = compute_line_bounds(case, MagicMock())
 
-        nw_files = MagicMock()
-        id_map = MagicMock()
-
-        with patch("inewave.newave.Sistema") as mock_sis:
-            mock_inst = MagicMock()
-            mock_inst.limites_intercambio = None
-            mock_sis.read.return_value = mock_inst
-            result = compute_line_bounds(nw_files, id_map)
-
-        assert result == {}
+        assert result[(0, 0, "direct_flow_max")] == 500.0
+        assert result[(0, 0, "reverse_flow_max")] == 300.0
 
 
 class TestCompareHydrosProductivity:
@@ -382,6 +424,8 @@ class TestOverviewCostCharts:
                 "immediate_cost": [150.0e6, 50.0e6],
                 "future_cost": [0.0, 0.0],
                 "thermal_cost": [110.0e6, 90.0e6],
+                "anticipated_thermal_cost": [0.0, 0.0],
+                "thermal_cost_total": [110.0e6, 90.0e6],
             }
         )
         return nw_sin, cobre
@@ -429,6 +473,65 @@ class TestOverviewCostCharts:
         row = df.filter(pl.col("stage_id") == 0).row(0, named=True)
         assert row["thermal_cost"] == pytest.approx(20.0)  # block sum 8 + 12
         assert row["immediate_cost"] == pytest.approx(30.0)  # 10 + 20
+        # Pre-anticipation run (no anticipated_thermal_cost column): the derived
+        # thermal_cost_total falls back to thermal_cost (anticipated read as 0).
+        assert "thermal_cost_total" in df.columns
+        assert row["thermal_cost_total"] == pytest.approx(20.0)
+
+    def test_stage_costs_reader_folds_anticipated_into_thermal_total(
+        self, tmp_path: Path
+    ) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.cobre_readers import read_cobre_stage_costs
+
+        d = tmp_path / "simulation" / "costs" / "scenario_id=0000"
+        d.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "scenario_id": [0],
+                "stage_id": [0],
+                "block_id": [0],
+                "immediate_cost": [30.0],
+                "future_cost": [5.0],
+                "thermal_cost": [8.0],
+                "anticipated_thermal_cost": [7.0],
+            }
+        ).write_parquet(d / "data.parquet")
+
+        row = read_cobre_stage_costs(tmp_path).row(0, named=True)
+        assert row["thermal_cost"] == pytest.approx(8.0)
+        assert row["anticipated_thermal_cost"] == pytest.approx(7.0)
+        # NEWAVE-comparable thermal total = live + anticipated GNL fuel.
+        assert row["thermal_cost_total"] == pytest.approx(15.0)
+
+    def test_thermal_cost_chart_includes_anticipated_in_cobre_series(self) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.charts import thermal_cost_chart
+
+        nw_sin = pl.DataFrame(
+            {
+                "newave_code": [0],
+                "stage": [0],
+                "variable": ["CTERM"],
+                "value": [100.0],
+            }
+        )
+        cobre = pl.DataFrame(
+            {
+                "stage_id": [0],
+                "immediate_cost": [150.0e6],
+                "future_cost": [0.0],
+                "thermal_cost": [90.0e6],
+                "anticipated_thermal_cost": [10.0e6],
+                "thermal_cost_total": [100.0e6],
+            }
+        )
+        html = thermal_cost_chart(nw_sin, cobre, nw_offset=0)
+        # Cobre series plots thermal_cost_total (90 + 10) = 100, not 90.
+        assert "100.0" in html
+        assert "anticipated" in html  # legend label
 
     def test_generic_violation_groups_all_newave_restriction_parcelas(self) -> None:
         from cobre_bridge.comparators.charts import _resolve_cost_categories
@@ -517,11 +620,15 @@ class TestEdgeCases:
 
     def test_html_report_with_empty_results(self) -> None:
         """HTML report renders without error on empty results."""
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
         )
+        from cobre_bridge.comparators.results import PercentileData
 
-        html = build_comparison_report([])
+        pct = PercentileData()
+        dataset = build_results_dataset([], pct, 0.05)
+        html = build_comparison_report(dataset)
         assert "<!DOCTYPE html>" in html
 
     def test_metric_card_html(self) -> None:
@@ -647,13 +754,15 @@ class TestComparisonReportIntegration:
 
     def test_comparison_report_full_pipeline(self) -> None:
         """Full pipeline: multi-entity data renders all 8 tab sections."""
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.html_report import COMPARISON_TABS
         from cobre_bridge.comparators.report_builder import build_comparison_report
 
         results = self._make_results()
         pctiles = self._make_percentile_data()
 
-        html = build_comparison_report(results, pctiles)
+        dataset = build_results_dataset(results, pctiles, 0.05)
+        html = build_comparison_report(dataset)
 
         assert "<!DOCTYPE html>" in html
         for tab_id, _label in COMPARISON_TABS:
@@ -661,14 +770,131 @@ class TestComparisonReportIntegration:
 
     def test_comparison_report_contains_plotly_chart(self) -> None:
         """Full pipeline with real data produces at least one Plotly chart."""
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report_builder import build_comparison_report
 
         results = self._make_results()
         pctiles = self._make_percentile_data()
 
-        html = build_comparison_report(results, pctiles)
+        dataset = build_results_dataset(results, pctiles, 0.05)
+        html = build_comparison_report(dataset)
 
         assert "Plotly.newPlot" in html
+
+
+class TestCompareResultsReturnsDataset:
+    """``compare_results`` returns a validated ``ComparisonDataset`` (ticket-022).
+
+    Drives the REAL ``compare_results`` with every reader patched to empty so the
+    return-type contract is exercised end-to-end without any case files: NEWAVE
+    saidas is absent (``_find_saidas_dir`` -> ``None``), every Cobre/NEWAVE reader
+    returns an empty frame/dict, and the generic-constraint loaders are empty.
+    """
+
+    @staticmethod
+    def _patch_all_readers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import polars as pl
+
+        cr = "cobre_bridge.comparators.cobre_readers."
+        nr = "cobre_bridge.comparators.newave_readers."
+        empty_pl = pl.DataFrame
+        empty_pd = lambda *a, **k: __import__("pandas").DataFrame()  # noqa: E731
+
+        # NEWAVE saidas absent -> all saidas-guarded branches are skipped.
+        monkeypatch.setattr(nr + "_find_saidas_dir", lambda _d: None)
+
+        # Frame-returning Cobre readers.
+        for name in (
+            "read_cobre_hydro_means",
+            "read_cobre_thermal_means",
+            "read_cobre_bus_means",
+            "read_cobre_hydro_percentiles",
+            "read_cobre_thermal_percentiles",
+            "read_cobre_bus_percentiles",
+            "read_cobre_line_means",
+            "read_cobre_line_percentiles",
+            "read_cobre_lp_max_generation",
+            "read_cobre_hydro_total_flows",
+            "read_cobre_hydro_withdrawal",
+            "read_cobre_hydro_per_stage_bounds",
+            "read_cobre_spillage_energy",
+            "read_cobre_stage_costs",
+            "read_cobre_bus_aggregates",
+            "read_cobre_convergence",
+            "read_cobre_iteration_timing",
+            "read_cobre_productivity_detail",
+        ):
+            monkeypatch.setattr(cr + name, lambda *a, **k: empty_pl())
+        # Dict / scalar Cobre readers.
+        monkeypatch.setattr(cr + "read_cobre_hydro_metadata", lambda *a, **k: {})
+        monkeypatch.setattr(cr + "read_cobre_thermal_metadata", lambda *a, **k: {})
+        monkeypatch.setattr(cr + "read_cobre_bus_metadata", lambda *a, **k: {})
+        monkeypatch.setattr(cr + "read_cobre_cost_breakdown", lambda *a, **k: {})
+        monkeypatch.setattr(cr + "read_cobre_training_duration", lambda *a, **k: 0.0)
+
+        # NEWAVE readers (only the non-saidas ones are reached).
+        monkeypatch.setattr(nr + "read_pmo_convergence", lambda *a, **k: empty_pl())
+        monkeypatch.setattr(
+            nr + "read_pmo_productivity_detail", lambda *a, **k: empty_pl()
+        )
+        monkeypatch.setattr(nr + "read_newave_net_load", lambda *a, **k: empty_pl())
+        monkeypatch.setattr(
+            nr + "read_newave_tim_iterations", lambda *a, **k: empty_pl()
+        )
+        monkeypatch.setattr(nr + "read_pmo_cost_breakdown", lambda *a, **k: {})
+        monkeypatch.setattr(nr + "read_newave_tim_stages", lambda *a, **k: {})
+
+        # Names / cadastro.
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.alignment.read_reference_names",
+            lambda _case: ({}, {}, {}),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.converters.hydro.read_cadastro", lambda _case: empty_pd()
+        )
+
+        # Generic-constraint loaders (case dir resolves under tmp_path).
+        monkeypatch.setattr("cobre_bridge.cobre_io.case_dir_for", lambda _d: tmp_path)
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.constraints_compare._load_generic_constraints",
+            lambda _d: [],
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.constraints_compare."
+            "_load_generic_constraint_bounds",
+            lambda _d: empty_pl(),
+        )
+
+    def test_compare_results_returns_validated_dataset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge.comparators.dataset import ComparisonDataset
+        from cobre_bridge.comparators.results import compare_results
+
+        self._patch_all_readers(monkeypatch, tmp_path)
+
+        case = MagicMock()
+        case.files.directory = tmp_path
+
+        out = compare_results(
+            case=case,
+            id_map=MagicMock(),
+            alignment=MagicMock(),
+            cobre_output_dir=tmp_path,
+            tolerance=0.05,
+        )
+
+        assert isinstance(out, ComparisonDataset)
+        out.validate()
+        # The render-only carry-overs are present in-memory but absent from
+        # the serialized artifact.
+        assert "results" in out.metadata
+        paths = out.to_dir(tmp_path / "artifacts")
+        import json
+
+        written = json.loads(paths[2].read_text(encoding="utf-8"))
+        assert "results" not in written
+        assert "top_divergences" in written
 
 
 class TestProductivityDetail:

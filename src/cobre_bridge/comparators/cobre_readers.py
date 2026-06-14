@@ -16,9 +16,9 @@ import polars as pl
 
 from cobre_bridge.cobre_io import (
     case_dir_for,
-    productivity_from_energy_parquet,
-    productivity_from_production_models,
+    resolve_hydro_productivities,
 )
+from cobre_bridge.cost_categories import COBRE_COST_COMPONENT_COLUMNS
 
 _LOG = logging.getLogger(__name__)
 
@@ -1280,27 +1280,10 @@ def read_cobre_cost_breakdown(
     if lf is None:
         return {}
 
-    cost_cols = [
-        "thermal_cost",
-        "deficit_cost",
-        "excess_cost",
-        "storage_violation_cost",
-        "filling_target_cost",
-        "hydro_violation_cost",
-        "outflow_violation_below_cost",
-        "outflow_violation_above_cost",
-        "turbined_violation_cost",
-        "generation_violation_cost",
-        "evaporation_violation_cost",
-        "withdrawal_violation_cost",
-        "inflow_penalty_cost",
-        "generic_violation_cost",
-        "spillage_cost",
-        "turbined_cost",
-        "curtailment_cost",
-        "exchange_cost",
-        "pumping_cost",
-    ]
+    # Sum every individual cost component (the canonical set, so no column is
+    # silently dropped — contract_cost used to be missing here). The aggregate
+    # roll-ups (hydro_violation_cost, total/immediate/future) are excluded.
+    cost_cols = list(COBRE_COST_COMPONENT_COLUMNS)
 
     available = set(lf.collect_schema().names())
     cols = [c for c in cost_cols if c in available]
@@ -1342,21 +1325,38 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre per-stage immediate/future/thermal cost (mean across scenarios).
 
     Returns a DataFrame with columns ``stage_id`` (Int64),
-    ``immediate_cost`` (Float64, R$), ``future_cost`` (Float64, R$) and
-    ``thermal_cost`` (Float64, R$). All are raw, *undiscounted* stage values —
+    ``immediate_cost`` (Float64, R$), ``future_cost`` (Float64, R$),
+    ``thermal_cost`` (Float64, R$), ``anticipated_thermal_cost`` (Float64, R$)
+    and the derived ``thermal_cost_total`` (= ``thermal_cost`` +
+    ``anticipated_thermal_cost``). All are raw, *undiscounted* stage values —
     the counterparts of NEWAVE's MEDIAS-SIN ``COPER`` / ``CUSTO_FUTURO`` /
     ``CTERM`` (after the 10⁶ R$ unit conversion on the NEWAVE side).
 
+    ``anticipated_thermal_cost`` is the GNL forward-committed thermal fuel that
+    Cobre books on the decision-stage commitment column (part of
+    ``immediate_cost`` but excluded from ``thermal_cost``); it was added to
+    Cobre's costs schema after 0.8.0. ``thermal_cost_total`` is the
+    NEWAVE-comparable thermal generation cost (CTERM books GNL at delivery).
+    Pre-anticipation runs lack the column → it reads as 0 and
+    ``thermal_cost_total == thermal_cost``.
+
     Cobre's costs table is one row per ``(scenario_id, stage_id, block_id)``;
-    we sum block-level immediate_cost / thermal_cost within each (scenario,
-    stage) and keep the (scenario, stage) value of future_cost, then average
-    across scenarios.  ``future_cost`` is identical across blocks of the same
-    stage so a ``max`` (= any) collapse is safe.
+    we sum block-level immediate_cost / thermal_cost / anticipated_thermal_cost
+    within each (scenario, stage) and keep the (scenario, stage) value of
+    future_cost, then average across scenarios.  ``future_cost`` is identical
+    across blocks of the same stage so a ``max`` (= any) collapse is safe.
     """
-    _SUM_COLS = ("immediate_cost", "thermal_cost")
-    _ALL_COLS = ("immediate_cost", "future_cost", "thermal_cost")
+    _SUM_COLS = ("immediate_cost", "thermal_cost", "anticipated_thermal_cost")
+    _ALL_COLS = (
+        "immediate_cost",
+        "future_cost",
+        "thermal_cost",
+        "anticipated_thermal_cost",
+    )
+    # Output adds the derived NEWAVE-comparable thermal total.
+    _OUT_COLS = (*_ALL_COLS, "thermal_cost_total")
     empty = pl.DataFrame(
-        schema={"stage_id": pl.Int64, **{c: pl.Float64 for c in _ALL_COLS}}
+        schema={"stage_id": pl.Int64, **{c: pl.Float64 for c in _OUT_COLS}}
     )
 
     lf = _scan_simulation_entity(cobre_output_dir, "costs")
@@ -1387,12 +1387,21 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
             f"{cobre_output_dir / 'simulation' / 'costs'}"
         ) from exc
 
-    # Ensure all columns are present even if one was missing in the schema.
+    # Ensure all columns are present even if one was missing in the schema
+    # (e.g. anticipated_thermal_cost on pre-anticipation Cobre runs).
     for c in _ALL_COLS:
         if c not in df.columns:
             df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
-    return df.select(["stage_id", *_ALL_COLS]).cast(
-        {"stage_id": pl.Int64, **{c: pl.Float64 for c in _ALL_COLS}}
+    # Derived NEWAVE-comparable thermal total: live generation + anticipated
+    # (GNL forward-committed) fuel. Null anticipated (old runs) counts as 0.
+    df = df.with_columns(
+        (
+            pl.col("thermal_cost").fill_null(0.0)
+            + pl.col("anticipated_thermal_cost").fill_null(0.0)
+        ).alias("thermal_cost_total")
+    )
+    return df.select(["stage_id", *_OUT_COLS]).cast(
+        {"stage_id": pl.Int64, **{c: pl.Float64 for c in _OUT_COLS}}
     )
 
 
@@ -1497,16 +1506,6 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
     return result
 
 
-def _resolve_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
-    """Locate a `system/<filename>` JSON near the Cobre output directory."""
-    case_dir = case_dir_for(cobre_output_dir)
-    for candidate in [case_dir, cobre_output_dir, case_dir.parent]:
-        p = candidate / "system" / filename
-        if p.exists():
-            return p
-    return None
-
-
 def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     """Read hydro metadata from Cobre system JSON files.
 
@@ -1519,7 +1518,7 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     Returns ``{entity_id: {"name": str, "productivity_mw_per_m3s": float | None,
     "min_storage_hm3": float, "bus_id": int | None}}``.
     """
-    hydros_path = _resolve_system_json(cobre_output_dir, "hydros.json")
+    hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
         _LOG.warning("hydros.json not found near %s", cobre_output_dir)
         return {}
@@ -1532,26 +1531,17 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         return {}
 
     case_dir = hydros_path.parent.parent
-    energy_productivity = productivity_from_energy_parquet(case_dir)
-    pm_productivity = productivity_from_production_models(case_dir)
+    # Productivity resolution is shared with the dashboard via the single
+    # canonical cascade in cobre_io so the two products never report a
+    # different ρ for the same plant (see resolve_hydro_productivities).
+    productivities = resolve_hydro_productivities(case_dir, data.get("hydros", []))
 
     result: dict[int, dict] = {}
     for hydro in data.get("hydros", []):
         entity_id = int(hydro["id"])
         name = str(hydro.get("name", f"hydro_{entity_id}"))
 
-        # Preferred source: hydro_energy_productivity.parquet (new contract).
-        # Fall back through hydro_production_models.json and the deprecated
-        # generation.productivity_mw_per_m3s embedded field for legacy outputs.
-        prod = energy_productivity.get(entity_id)
-        if prod is None:
-            prod = pm_productivity.get(entity_id)
-        if prod is None:
-            gen = hydro.get("generation", {})
-            if isinstance(gen, dict):
-                prod = gen.get("productivity_mw_per_m3s")
-        if prod is None:
-            prod = hydro.get("productivity_mw_per_m3s")
+        prod = productivities.get(entity_id)
 
         reservoir = hydro.get("reservoir", {}) or {}
         outflow = hydro.get("outflow", {}) or {}
@@ -1600,7 +1590,7 @@ def read_cobre_productivity_detail(cobre_output_dir: Path) -> dict[int, dict]:
     and the realized per-stage productivity comes from the simulation
     generation/turbined comparison rows.)
     """
-    hydros_path = _resolve_system_json(cobre_output_dir, "hydros.json")
+    hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
         _LOG.warning("hydros.json not found near %s", cobre_output_dir)
         return {}

@@ -1,9 +1,8 @@
 """Entity alignment between NEWAVE codes and Cobre IDs.
 
 Builds aligned entity pairs for hydros, thermals, and exchange lines
-using the same NewaveIdMap that the converter produces, plus NEWAVE
-input files (via ``NewaveFiles`` + inewave readers) for human-readable
-names and reservoir detection.
+using the same NewaveIdMap that the converter produces, plus the parsed
+``NewaveCase`` for human-readable names and reservoir detection.
 """
 
 from __future__ import annotations
@@ -11,9 +10,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from cobre_bridge.horizon import study_horizon
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 
@@ -74,32 +72,27 @@ class EntityAlignment:
 
 
 def read_reference_names(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
 ) -> tuple[dict[int, str], dict[int, str], dict[int, str]]:
     """Read entity names from NEWAVE input files via inewave.
 
     Returns (hydro_names, thermal_names, subsystem_names) dicts
     mapping NEWAVE codes to human-readable names.
     """
-    from inewave.newave import Confhd, Conft, Sistema
-
     hydro_names: dict[int, str] = {}
     thermal_names: dict[int, str] = {}
     subsystem_names: dict[int, str] = {}
 
     # Hydro names from confhd.dat
-    confhd = Confhd.read(str(nw_files.confhd))
-    for _, row in confhd.usinas.iterrows():
+    for _, row in case.confhd.usinas.iterrows():
         hydro_names[int(row["codigo_usina"])] = str(row["nome_usina"]).strip()
 
     # Thermal names from conft.dat
-    conft = Conft.read(str(nw_files.conft))
-    for _, row in conft.usinas.iterrows():
+    for _, row in case.conft.usinas.iterrows():
         thermal_names[int(row["codigo_usina"])] = str(row["nome_usina"]).strip()
 
     # Subsystem names from sistema.dat (deduplicate from custo_deficit rows)
-    sistema = Sistema.read(str(nw_files.sistema))
-    deficit_df = sistema.custo_deficit
+    deficit_df = case.sistema.custo_deficit
     if deficit_df is not None:
         seen: set[int] = set()
         for _, row in deficit_df.iterrows():
@@ -111,7 +104,7 @@ def read_reference_names(
     return hydro_names, thermal_names, subsystem_names
 
 
-def _detect_reservoir_plants(nw_files: NewaveFiles) -> set[int]:
+def _detect_reservoir_plants(case: NewaveCase) -> set[int]:
     """Return the set of NEWAVE hydro codes that have reservoirs.
 
     A plant has a reservoir when its ``volume_minimo != volume_maximo``
@@ -119,7 +112,7 @@ def _detect_reservoir_plants(nw_files: NewaveFiles) -> set[int]:
     """
     from cobre_bridge.converters.hydro import read_cadastro
 
-    cadastro = read_cadastro(nw_files)
+    cadastro = read_cadastro(case)
     reservoir_codes: set[int] = set()
     for code, row in cadastro.iterrows():
         vol_min = float(row["volume_minimo"])
@@ -129,42 +122,37 @@ def _detect_reservoir_plants(nw_files: NewaveFiles) -> set[int]:
     return reservoir_codes
 
 
-def _detect_newave_stages(nw_files: NewaveFiles) -> int:
+def _detect_newave_stages(case: NewaveCase) -> int:
     """Compute total number of NEWAVE stages from DGER parameters.
 
-    Delegates the horizon arithmetic to
-    :func:`cobre_bridge.horizon.study_horizon`; an empty study
+    Uses the case's cached :attr:`NewaveCase.horizon`; an empty study
     (``num_anos_estudo`` of 0/None) reports zero stages.
     """
-    from inewave.newave import Dger
-
-    dger = Dger.read(str(nw_files.dger))
-    if not dger.num_anos_estudo:
+    if not case.dger.num_anos_estudo:
         return 0
 
-    return study_horizon(dger).total_stages
+    return case.horizon.total_stages
 
 
 def build_entity_alignment(
     id_map: NewaveIdMap,
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     lines_json: list[dict],
 ) -> EntityAlignment:
-    """Build entity alignment from the ID map and NEWAVE input files.
+    """Build entity alignment from the ID map and the parsed NEWAVE case.
 
     Parameters
     ----------
     id_map:
         The same NewaveIdMap used by the converter.
-    nw_files:
-        Resolved NEWAVE input file paths (replaces the former
-        ``sintese_dir`` parameter).
+    case:
+        Parsed NEWAVE case.
     lines_json:
         The ``lines`` list from the converted Cobre ``lines.json``.
     """
-    hydro_names, thermal_names, subsystem_names = read_reference_names(nw_files)
-    reservoir_codes = _detect_reservoir_plants(nw_files)
-    num_stages = _detect_newave_stages(nw_files)
+    hydro_names, thermal_names, subsystem_names = read_reference_names(case)
+    reservoir_codes = _detect_reservoir_plants(case)
+    num_stages = _detect_newave_stages(case)
 
     alignment = EntityAlignment(num_newave_stages=num_stages)
 

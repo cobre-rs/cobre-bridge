@@ -46,6 +46,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 from matplotlib.figure import Figure
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.cli import _load_lines_json
 from cobre_bridge.comparators.alignment import build_entity_alignment
 from cobre_bridge.comparators.results import (
@@ -53,8 +54,6 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     compare_results,
 )
-from cobre_bridge.id_map import build_id_map
-from cobre_bridge.newave_files import NewaveFiles
 
 # --- Palette (consistent with the comparison HTML, ui/theme.py) -------------
 C_NEWAVE = "#F5A623"  # amber — the published reference
@@ -160,13 +159,11 @@ def load_comparison(
     newave_dir: Path, cobre_output_dir: Path, tolerance: float = 1e-2
 ) -> tuple[list[ResultComparison], PercentileData]:
     """Run the NEWAVE-vs-Cobre comparison and return its raw results."""
-    nw_files = NewaveFiles.from_directory(newave_dir)
-    id_map = build_id_map(nw_files)
-    alignment = build_entity_alignment(
-        id_map, nw_files, _load_lines_json(cobre_output_dir)
-    )
+    case = NewaveCase.from_directory(newave_dir)
+    id_map = case.id_map
+    alignment = build_entity_alignment(id_map, case, _load_lines_json(cobre_output_dir))
     return compare_results(
-        nw_files=nw_files,
+        case=case,
         id_map=id_map,
         alignment=alignment,
         cobre_output_dir=cobre_output_dir,
@@ -610,19 +607,19 @@ def main() -> None:
     parser.add_argument(
         "--newave",
         type=Path,
-        default=Path("example/newave_rodada"),
+        default=Path("example/newave_mai_26"),
         help="NEWAVE case dir (with saidas/).",
     )
     parser.add_argument(
         "--cobre",
         type=Path,
-        default=Path("example/cobre_rodada/output"),
+        default=Path("example/cobre_mai_26/output"),
         help="Cobre output dir (with simulation/, training/).",
     )
     parser.add_argument(
         "--outdir",
         type=Path,
-        default=Path("example/presentation"),
+        default=Path("example/presentation_mai_26"),
         help="Directory for the exported figures.",
     )
     parser.add_argument("--tolerance", type=float, default=1e-2)

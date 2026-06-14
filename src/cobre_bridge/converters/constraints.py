@@ -22,16 +22,16 @@ from typing import Any, NamedTuple
 
 import pandas as pd
 import pyarrow as pa
-from inewave.newave import Confhd, Curva, Dger, Hidr, Penalid, Ree, Sistema
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
     compute_per_stage_own_integrated_productivities,
 )
+from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
-from cobre_bridge.horizon import study_horizon
+from cobre_bridge.converters.temporal import _month_hours
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.plants import active_hydros
 from cobre_bridge.productivity import compute_productivity, stored_energy_productivity
 
@@ -41,6 +41,23 @@ _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
     "/book/src/schemas/generic_constraints.schema.json"
 )
+
+
+def _vminop_energy_factor(start_year: int, start_month: int, stage: int) -> float:
+    """Per-stage ``ρ_acum·hm³ → MWmonth`` divisor for the VminOP energy units.
+
+    ρ_acum is in MW/(m³/s), so ``ρ_acum · storage[hm³]`` overstates the true
+    stored energy (MWmonth) by the hm³↔(m³/s)·month factor. That factor scales
+    with the month's length, and cobre prices the VminOP slack with each stage's
+    **real** ``block_hours`` (672–744 h — actual calendar months), **not**
+    NEWAVE's fixed 730 h convention. Using the actual month length here makes the
+    effective slack penalty resolve to the intended R$/MWh on every stage; the
+    fixed ``C_M3S2HM3`` would leave a ±~9 % per-stage error (worst in February).
+    Equals ``C_M3S2HM3`` exactly for a 730 h month.
+    """
+    total = start_month - 1 + stage
+    hours = _month_hours(start_year + total // 12, total % 12 + 1)
+    return C_M3S2HM3 * hours / MONTH_HOURS
 
 
 class VminopResult(NamedTuple):
@@ -87,13 +104,12 @@ def _build_hydro_downstream_map(
     confhd_df:
         ``Confhd.usinas``.
     cadastro:
-        Optional ``Hidr.cadastro`` (with MODIF.DAT overrides applied).  Used
-        only to compute the ρ_eq of fictitious plants along the chain — the
-        cascade *topology* is independent of ρ_eq, so passing ``None`` still
-        returns a correct downstream map.  Callers that also need the FICT
-        ρ_eq contribution (e.g. :func:`compute_accumulated_productivities`)
-        must pass ``cadastro`` and read it via :func:`resolve_cascade`
-        directly.
+        ``Hidr.cadastro`` (with MODIF.DAT overrides applied).  Required for a
+        correct map: fictitious plants are now identified structurally from
+        productivity (:func:`plants.fictitious_codes`), so without it the
+        resolver cannot tell a fictitious accounting node from a real plant and
+        the cascade stops short.  Defaults to empty only for callers that
+        operate on FICT-free plant sets (e.g. unit tests).
     """
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
@@ -103,17 +119,26 @@ def _build_hydro_downstream_map(
     return {code: r.downstream_code for code, r in resolutions.items()}
 
 
-def _build_hydro_to_ree(confhd_df: pd.DataFrame) -> dict[int, int]:
+def _build_hydro_to_ree(
+    confhd_df: pd.DataFrame, cadastro: pd.DataFrame
+) -> dict[int, int]:
     """Return {plant_code: ree_code} for existing non-fictitious plants."""
-    non_fict = active_hydros(confhd_df)
+    non_fict = active_hydros(confhd_df, cadastro)
     return {int(r["codigo_usina"]): int(r["ree"]) for _, r in non_fict.iterrows()}
 
 
-def _compute_accumulated_integrated_productivities(
+def compute_accumulated_integrated_productivities(
     cadastro: pd.DataFrame,
     confhd_df: pd.DataFrame,
 ) -> dict[int, float]:
     """Cascade-sum of per-plant stored-energy (EARM) productivity.
+
+    Public, stable seam: the results comparator
+    (:mod:`cobre_bridge.comparators.results`) calls this to build its
+    productivity-detail tab, so the ``(cadastro, confhd_df) -> {code: rho}``
+    contract is shared across the converter↔comparator boundary. It is *not*
+    interchangeable with :func:`compute_accumulated_productivities` (which uses
+    the gen=ρ·Q point value); keep both distinct.
 
     Companion to :func:`compute_accumulated_productivities` but uses the
     EARM-flavored ρ that matches pmo.dat's
@@ -216,7 +241,7 @@ def _cascade_sum(
     return result
 
 
-def compute_max_prodtacum_sin(nw_files: NewaveFiles) -> float | None:
+def compute_max_prodtacum_sin(case: NewaveCase) -> float | None:
     """Return ``MAX_PRODTACUM_SIN`` = max accumulated productivity at altura máxima.
 
     NEWAVE converts the DESVIO ("outros usos da água" / water-withdrawal) and
@@ -235,9 +260,8 @@ def compute_max_prodtacum_sin(nw_files: NewaveFiles) -> float | None:
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
     try:
-        hidr = Hidr.read(str(nw_files.hidr))
-        cadastro = _apply_permanent_overrides(hidr.cadastro, nw_files)
-        confhd_df = Confhd.read(str(nw_files.confhd)).usinas
+        cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
+        confhd_df = case.confhd.usinas
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         return None
 
@@ -262,6 +286,7 @@ def compute_max_prodtacum_sin(nw_files: NewaveFiles) -> float | None:
 def compute_per_stage_acc_productivities(
     confhd_df: pd.DataFrame,
     per_stage_own: dict[int, list[float]],
+    cadastro: pd.DataFrame | None = None,
 ) -> dict[int, list[float]]:
     """Cascade-sum per-stage own productivities into per-stage ρ_acum lists.
 
@@ -287,7 +312,7 @@ def compute_per_stage_acc_productivities(
         ``{plant_code: [ρ_acum per stage]}`` for every plant present in both
         ``confhd_df`` (existing, non-fictitious) and ``per_stage_own``.
     """
-    downstream_map = _build_hydro_downstream_map(confhd_df)
+    downstream_map = _build_hydro_downstream_map(confhd_df, cadastro)
     if not per_stage_own:
         return {}
 
@@ -307,20 +332,22 @@ def compute_per_stage_acc_productivities(
     return result
 
 
-def _warn_if_fixed_penalization(configuracoes_penalizacao: list[Any] | None) -> bool:
-    """Warn when curva.dat selects FIXA penalization, which Cobre cannot model.
+def _warn_if_non_fixa_penalization(configuracoes_penalizacao: list[Any] | None) -> bool:
+    """Warn when curva.dat selects a *non-FIXA* security-curve penalization.
 
     The penalization-config line of curva.dat carries, as its first field, the
-    ``TIPO DE PENALIZACAO``: ``0`` = FIXA, ``1`` = MAXPEN (followed by the
-    ``MES PENALIZACAO`` and the pre/post seasonal flag).  Under **FIXA** NEWAVE
-    accumulates every VminOP (minimum stored energy) violation across the
-    horizon into a single calendar month — which presumes a stage *is* a
-    calendar month.  Cobre models the violation per stage (the MAXPEN
-    convention) and makes no stage-is-a-month assumption, so it does not (and is
-    unlikely to) support FIXA.
+    ``TIPO DE PENALIZACAO``: ``0`` = **FIXA** (a fixed per-violation penalty at
+    the curve cost), anything else = NEWAVE's iterative / variable penalization
+    (the ``ETAPA-2`` adjustment).
 
-    Emits a warning so the operator knows a VminOP-penalty difference is
-    expected.  Returns ``True`` when the warning fired (for testability).
+    Cobre-bridge models the **FIXA** convention: a per-stage VminOP (minimum
+    stored energy) slack penalized at the fixed curve cost.  This is the faithful
+    equivalent of NEWAVE FIXA, so a FIXA deck needs no warning.  It does **not**
+    reproduce the iterative / variable penalization, so a non-FIXA deck will show
+    an expected VminOP violation-penalty difference.
+
+    Emits an INFO confirmation for FIXA and a WARNING for non-FIXA.  Returns
+    ``True`` only when the (non-FIXA) warning fired (for testability).
     """
     if not configuracoes_penalizacao:
         return False
@@ -328,19 +355,38 @@ def _warn_if_fixed_penalization(configuracoes_penalizacao: list[Any] | None) -> 
         tipo = int(configuracoes_penalizacao[0])
     except (TypeError, ValueError, IndexError):
         return False
-    if tipo != 0:
+    if tipo == 0:
+        _LOG.info(
+            "curva.dat selects TIPO DE PENALIZACAO = 0 (FIXA): matches "
+            "cobre-bridge's VminOP modelling (a per-stage curve slack at the "
+            "fixed penalty), so no VminOP violation-penalty difference is "
+            "expected from the curve handling."
+        )
         return False
-    mes = configuracoes_penalizacao[1] if len(configuracoes_penalizacao) > 1 else "?"
     _LOG.warning(
-        "curva.dat selects TIPO DE PENALIZACAO = 0 (FIXA): NEWAVE accumulates "
-        "all VminOP (minimum stored energy) violations into a single calendar "
-        "month (MES PENALIZACAO = %s). Cobre does not support FIXA — it "
-        "penalizes VminOP violations per stage (the MAXPEN convention) and does "
-        "not assume a stage is a calendar month, so a difference in the VminOP "
-        "violation penalty is expected.",
-        mes,
+        "curva.dat selects TIPO DE PENALIZACAO = %s (non-FIXA): cobre-bridge "
+        "models the FIXA convention and does not reproduce NEWAVE's iterative / "
+        "variable curve penalization, so a VminOP violation-penalty difference "
+        "is expected.",
+        tipo,
     )
     return True
+
+
+def _curve_seasonalizes(configuracoes_penalizacao: list[Any] | None) -> bool:
+    """Return whether the security curve is seasonalized in the post-study period.
+
+    The penalization-config line of ``curva.dat`` carries, as its **third** field,
+    the post-study (``Período Estático Final``) seasonalization flag for the
+    security curve: ``1`` repeats the last study year's monthly curve across the
+    static final period, anything else freezes December's value across the tail
+    (NEWAVE manual table, p.32-33). Returns ``False`` (freeze — the manual default)
+    when the field is absent or unparseable.
+    """
+    try:
+        return int(configuracoes_penalizacao[2]) == 1  # type: ignore[index]
+    except (TypeError, ValueError, IndexError):
+        return False
 
 
 def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
@@ -368,7 +414,7 @@ def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
 
 
 def convert_vminop_constraints(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> VminopResult | None:
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
@@ -387,8 +433,8 @@ def convert_vminop_constraints(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID mapping.
 
@@ -401,7 +447,7 @@ def convert_vminop_constraints(
         integrated ρ_acum and is fed into ``build_scalar_parameters`` so
         the LP coefficient at ``@rho_acum_h{id}`` matches the RHS bound.
     """
-    if nw_files.curva is None:
+    if case.curva is None:
         _LOG.debug("curva.dat not found; skipping VminOP constraints.")
         return None
 
@@ -410,7 +456,7 @@ def convert_vminop_constraints(
     # Mirror that here so the converted cobre case matches NEWAVE's behavior.
     # When the field is absent (None), preserve historical behavior and emit
     # the constraints — only an explicit 0 disables them.
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
     if dger.curva_aversao == 0:
         _LOG.info(
             "dger.dat curva_aversao=0; NEWAVE disables the risk-aversion"
@@ -418,26 +464,34 @@ def convert_vminop_constraints(
         )
         return None
 
-    curva = Curva.read(str(nw_files.curva))
+    curva = case.curva
     curva_df = curva.curva_seguranca
     if curva_df is None or curva_df.empty:
         return None
 
-    # NEWAVE's FIXA penalization (TIPO DE PENALIZACAO = 0) is not representable
-    # in Cobre; warn so the VminOP-penalty difference is expected, not a bug.
-    _warn_if_fixed_penalization(curva.configuracoes_penalizacao)
+    # Cobre's per-stage curve slack reproduces NEWAVE's FIXA penalization
+    # (TIPO DE PENALIZACAO = 0); warn only when the deck selects a non-FIXA mode,
+    # which the bridge does not reproduce.
+    _warn_if_non_fixa_penalization(curva.configuracoes_penalizacao)
+
+    # curva.dat's penalization line carries, as its third field, the post-study
+    # seasonalization flag for the security curve (the "Período Estático Final"
+    # rule, manual p.32-33). When set, the static final period repeats the last
+    # study year's monthly curve; otherwise it freezes December's value across the
+    # whole tail. Default (parse failure / absent) is freeze, matching the manual.
+    seasonalize_curve_post_study = _curve_seasonalizes(curva.configuracoes_penalizacao)
 
     penalty_df = curva.custos_penalidades
-    confhd = Confhd.read(str(nw_files.confhd))
-    hidr = Hidr.read(str(nw_files.hidr))
-    ree_file = Ree.read(str(nw_files.ree))
+    confhd = case.confhd
+    hidr = case.hidr
+    ree_file = case.ree
 
     cadastro = hidr.cadastro
-    cadastro = _apply_permanent_overrides(cadastro, nw_files)
+    cadastro = _apply_permanent_overrides(cadastro, case)
     confhd_df = confhd.usinas
 
     # Study horizon parameters
-    _horizon = study_horizon(dger)
+    _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
     num_stages = _horizon.total_stages
@@ -452,12 +506,38 @@ def convert_vminop_constraints(
     # LP's constraint coefficient matches NEWAVE.  Without the override the
     # LHS would use cobre's default point ρ_acum and silently drift from
     # the RHS by ~10% on plants with non-trivial head swing.
-    acc_prod = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
-    per_stage_own_int = compute_per_stage_own_integrated_productivities(nw_files)
-    per_stage_acc = compute_per_stage_acc_productivities(confhd_df, per_stage_own_int)
+    acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)
+    per_stage_own_int = compute_per_stage_own_integrated_productivities(case)
+    per_stage_acc = compute_per_stage_acc_productivities(
+        confhd_df, per_stage_own_int, cadastro
+    )
+
+    # Convert ρ_acum from MW/(m³/s) to MWmonth/hm³ so the VminOP LHS
+    # (Σ ρ_acum · hydro_storage[hm³], and the matching RHS, both built from
+    # per_stage_acc) is the *true* stored energy in MWmonth rather than
+    # ρ_acum·hm³, which overstates it by the hm³↔(m³/s)·month factor (≈ 2.628).
+    # The VminOP slack penalty is a R$/MWh value (penalid.dat); without this
+    # conversion the slack is that factor too large, so the effective
+    # curve-violation cost rises above the deficit cost and the LP prefers
+    # deficit to violating the security curve — i.e. Cobre hoards water under
+    # scarcity instead of drawing it down like NEWAVE.
+    #
+    # The factor is applied *per stage* via :func:`_vminop_energy_factor`, which
+    # uses each stage's real month length (cobre prices the slack as
+    # ``penalty × block_hours`` with the actual 672–744 h durations, not the
+    # fixed 730 h). The factor cancels between LHS and RHS, so the binding
+    # storage level is unchanged; only the slack's energy units (and thus the
+    # effective R$/MWh penalty) are corrected.
+    per_stage_acc = {
+        code: [
+            v / _vminop_energy_factor(start_year, start_month, s)
+            for s, v in enumerate(values)
+        ]
+        for code, values in per_stage_acc.items()
+    }
 
     # Map hydros to REEs
-    hydro_to_ree = _build_hydro_to_ree(confhd_df)
+    hydro_to_ree = _build_hydro_to_ree(confhd_df, cadastro)
 
     # Group hydros by REE
     ree_hydros: dict[int, list[int]] = defaultdict(list)
@@ -588,13 +668,19 @@ def convert_vminop_constraints(
         )
 
         # Build per-stage bounds from curva_df.
-        # curva.dat only covers the study period.  For post-study stages we
-        # extrapolate seasonally using the last year's percentages (the same
-        # approach used for RE constraints).
+        # curva.dat only covers the study period. Extend into the post-study
+        # ("Período Estático Final") per NEWAVE's rule (manual table p.32-33):
+        # seasonalize (repeat the last study year's monthly curve) when
+        # curva.dat's third penalization field is set, otherwise freeze December's
+        # value across the whole tail. ``seasonalize_curve_post_study`` carries the
+        # flag.
+        study_months = _horizon.study_months
         ree_curva = curva_df[curva_df["codigo_ree"] == ree_code].sort_values("data")
 
-        # First pass: collect bounds and build seasonal map for extrapolation
+        # First pass: emit in-study bounds; build the per-calendar-month seasonal
+        # map and a per-stage map (the latter supplies the freeze value).
         seasonal_pct: dict[int, float] = {}  # calendar_month -> last percentage
+        pct_by_stage: dict[int, float] = {}
         for _, crow in ree_curva.iterrows():
             dt: datetime = crow["data"]
             stage_id = (dt.year - start_year) * 12 + (dt.month - start_month)
@@ -608,23 +694,25 @@ def convert_vminop_constraints(
             bound_stage_ids.append(stage_id)
             bound_values.append(rhs)
 
-            # Track the percentage per calendar month (last value wins)
-            seasonal_pct[dt.month] = percentage
+            seasonal_pct[dt.month] = percentage  # last value wins
+            pct_by_stage[stage_id] = percentage
 
-        # Second pass: extrapolate to post-study stages using seasonal pattern
+        # Second pass: fill uncovered stages. In-study gaps (and the post-study
+        # tail when seasonalized) use the seasonal pattern; otherwise the tail
+        # freezes at the last in-study stage's percentage (December of the last
+        # study year, forward-filled if that exact stage had no explicit row).
         if seasonal_pct:
-            covered = {
-                (dt.year - start_year) * 12 + (dt.month - start_month)
-                for _, dt in ree_curva["data"].items()
-                if 0
-                <= (dt.year - start_year) * 12 + (dt.month - start_month)
-                < num_stages
-            }
+            covered = set(pct_by_stage)
+            in_study = [s for s in pct_by_stage if s < study_months]
+            freeze_pct = pct_by_stage[max(in_study)] if in_study else None
             for stage_id in range(num_stages):
                 if stage_id in covered:
                     continue
-                cal_month = ((start_month - 1 + stage_id) % 12) + 1
-                pct = seasonal_pct.get(cal_month)
+                if stage_id >= study_months and not seasonalize_curve_post_study:
+                    pct = freeze_pct
+                else:
+                    cal_month = ((start_month - 1 + stage_id) % 12) + 1
+                    pct = seasonal_pct.get(cal_month)
                 if pct is not None:
                     rhs = _rhs_at(stage_id, pct)
                     bound_constraint_ids.append(constraint_id)
@@ -775,7 +863,7 @@ def _parse_restricao_eletrica(
     return expressions, horizons, bounds
 
 
-def _build_line_id_map(nw_files: NewaveFiles) -> dict[tuple[int, int], int]:
+def _build_line_id_map(case: NewaveCase) -> dict[tuple[int, int], int]:
     """Build the canonical (src, tgt) -> line_id mapping.
 
     Replicates the exact logic from ``convert_lines`` in network.py so that
@@ -787,7 +875,7 @@ def _build_line_id_map(nw_files: NewaveFiles) -> dict[tuple[int, int], int]:
         Maps canonical (smaller_subsystem, larger_subsystem) to 0-based
         line ID.  Only pairs from ``sistema.dat`` are included.
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     limites_df = sistema.limites_intercambio
 
     if limites_df is None or limites_df.empty:
@@ -795,7 +883,7 @@ def _build_line_id_map(nw_files: NewaveFiles) -> dict[tuple[int, int], int]:
 
     from datetime import datetime as _dt
 
-    dger = Dger.read(str(nw_files.dger))
+    dger = case.dger
     study_start_dt = _dt(dger.ano_inicio_estudo, dger.mes_inicio_estudo, 1)
     first_month = limites_df[limites_df["data"] == study_start_dt]
     if first_month.empty:
@@ -932,7 +1020,7 @@ _NO_INDIVIDUALIZADO_CUTOFF = 9999
 
 
 def _get_individualizado_cutoff(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     start_year: int,
     start_month: int,
 ) -> int:
@@ -950,7 +1038,7 @@ def _get_individualizado_cutoff(
     is captured into :attr:`ConversionReport.warnings`).
     """
     try:
-        ree_df = Ree.read(str(nw_files.ree)).rees
+        ree_df = case.ree.rees
         if ree_df is None or ree_df.empty:
             _LOG.warning(
                 "REE.DAT has no entries; the individualizado cutoff is unknown, "
@@ -971,7 +1059,7 @@ def _get_individualizado_cutoff(
 
 
 def _parse_re_dat(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     start_year: int,
     start_month: int,
     num_stages: int,
@@ -994,13 +1082,11 @@ def _parse_re_dat(
     conjuntos: dict[int, list[int]] = {}
     re_dat_bounds: dict[int, dict[tuple[int, int], float]] = {}
 
-    if nw_files.re_dat is None:
+    if case.files.re_dat is None:
         return conjuntos, re_dat_bounds
 
     try:
-        from inewave.newave import Re
-
-        re_file = Re.read(str(nw_files.re_dat))
+        re_file = case.re_dat
     except Exception:  # noqa: BLE001
         _LOG.warning("Could not parse RE.DAT; skipping RE constraints.")
         return conjuntos, re_dat_bounds
@@ -1076,7 +1162,7 @@ def _parse_re_dat(
 
 
 def convert_electric_constraints(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
     start_id: int = 0,
 ) -> GenericConstraintResult | None:
@@ -1089,8 +1175,8 @@ def convert_electric_constraints(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID mapping.
     start_id:
@@ -1106,8 +1192,8 @@ def convert_electric_constraints(
         bound: DOUBLE)``.
     """
     # Check for data sources before reading DGER.
-    re_path = _find_restricao_eletrica(nw_files.directory)
-    has_re_dat = nw_files.re_dat is not None
+    re_path = _find_restricao_eletrica(case.files.directory)
+    has_re_dat = case.files.re_dat is not None
 
     if re_path is None and not has_re_dat:
         _LOG.debug("No electric constraints found; skipping.")
@@ -1122,31 +1208,28 @@ def convert_electric_constraints(
         expressions, horizons, bounds_rows = _parse_restricao_eletrica(re_path)
 
     # Study horizon.
-    from inewave.newave import Patamar as _Patamar
-
-    dger = Dger.read(str(nw_files.dger))
-    _horizon = study_horizon(dger)
+    _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
     num_anos = _horizon.num_anos
     num_stages = _horizon.total_stages
 
-    patamar = _Patamar.read(str(nw_files.patamar))
+    patamar = case.patamar
     num_patamares: int = patamar.numero_patamares or 1
 
     # Individualised period cutoff.
-    cutoff = _get_individualizado_cutoff(nw_files, start_year, start_month)
+    cutoff = _get_individualizado_cutoff(case, start_year, start_month)
 
     # Parse RE.DAT (post-individualised bounds + plant sets).
     re_conjuntos, re_dat_bounds = _parse_re_dat(
-        nw_files, start_year, start_month, num_stages, num_patamares
+        case, start_year, start_month, num_stages, num_patamares
     )
 
     if not expressions and not re_conjuntos:
         _LOG.debug("No electric constraints found; skipping.")
         return None
 
-    line_id_map = _build_line_id_map(nw_files)
+    line_id_map = _build_line_id_map(case)
 
     # Read ELETRI penalty from PENALID.DAT for slack costs.
     # NEWAVE manual v29 §3.24: ELETRI is energy-domain (R$/MWh) and applies
@@ -1156,9 +1239,9 @@ def convert_electric_constraints(
     # (10 × MAX_DEFICIT, matching NEWAVE's evaporation/FPHA-folga magnitude)
     # so RE_* constraints stay soft but very expensive to violate.
     eletri_penalty: float | None = None
-    if nw_files.penalid is not None:
+    if case.files.penalid is not None:
         try:
-            penalid = Penalid.read(str(nw_files.penalid))
+            penalid = case.penalid
             df_pen = penalid.penalidades
             if df_pen is not None and not df_pen.empty:
                 eletri = df_pen[
@@ -1174,9 +1257,7 @@ def convert_electric_constraints(
     if eletri_penalty is None:
         # Fall back to 10 × MAX_DEFICIT (NEWAVE evaporation-folga convention).
         try:
-            from inewave.newave import Sistema as _Sistema
-
-            _sis = _Sistema.read(str(nw_files.sistema))
+            _sis = case.sistema
             _def_df = _sis.custo_deficit
             if _def_df is not None and not _def_df.empty:
                 eletri_penalty = 10.0 * float(_def_df["custo"].max())
@@ -1506,7 +1587,7 @@ def _parse_agrint(
 
 
 def convert_agrint_constraints(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
     start_id: int = 0,
 ) -> GenericConstraintResult | None:
@@ -1518,8 +1599,8 @@ def convert_agrint_constraints(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID mapping (used indirectly via ``_build_line_id_map``).
     start_id:
@@ -1534,28 +1615,25 @@ def convert_agrint_constraints(
         ``(constraint_id: INT32, stage_id: INT32, block_id: INT32,
         bound: DOUBLE)``.
     """
-    if nw_files.agrint is None:
+    if case.files.agrint is None:
         _LOG.debug("agrint.dat not found; skipping AGRINT constraints.")
         return None
 
-    from inewave.newave import Patamar as _Patamar_ag
-
-    patamar_ag = _Patamar_ag.read(str(nw_files.patamar))
+    patamar_ag = case.patamar
     num_patamares_ag: int = patamar_ag.numero_patamares or 1
 
-    groups, limits = _parse_agrint(nw_files.agrint, num_patamares_ag)
+    groups, limits = _parse_agrint(case.files.agrint, num_patamares_ag)
     if not groups or not limits:
         return None
 
     # Study horizon
-    dger = Dger.read(str(nw_files.dger))
-    _horizon = study_horizon(dger)
+    _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
     study_months = _horizon.study_months
     num_stages = _horizon.total_stages
 
-    line_id_map = _build_line_id_map(nw_files)
+    line_id_map = _build_line_id_map(case)
 
     constraints: list[dict] = []
     bound_constraint_ids: list[int] = []

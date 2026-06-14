@@ -44,10 +44,10 @@ def _resolve_schema_path() -> Path:
     if env:
         return Path(env)
     candidates = [
-        Path(os.environ["COBRE_REPO"]) / rel if "COBRE_REPO" in os.environ else None,
+        Path(os.environ["COBRE_REPO"]) / rel
+        if "COBRE_REPO" in os.environ
+        else None,
         Path.home() / "git" / "cobre" / rel,
-        Path("/home/rogerio/git/cobre") / rel,
-        Path("/home/rjalves/git/cobre") / rel,
     ]
     for c in candidates:
         if c is not None and c.exists():
@@ -76,7 +76,11 @@ def _reduce_rows(array: np.ndarray, reduce: str) -> np.ndarray:
 def decode_stage_cuts(case_dir: Path | str, stage_id: int) -> dict:
     """Decode ``policy/cuts/stage_NNN.bin`` (FlatBuffers) to a dict via ``flatc``."""
     bin_path = (
-        Path(case_dir) / "output" / "policy" / "cuts" / f"stage_{stage_id:03d}.bin"
+        Path(case_dir)
+        / "output"
+        / "policy"
+        / "cuts"
+        / f"stage_{stage_id:03d}.bin"
     )
     if not bin_path.exists():
         raise FileNotFoundError(f"cut file not found: {bin_path}")
@@ -104,14 +108,16 @@ def decode_stage_cuts(case_dir: Path | str, stage_id: int) -> dict:
             capture_output=True,
             text=True,
         )
-        return json.loads((Path(tmp) / f"stage_{stage_id:03d}.json").read_text())
+        return json.loads(
+            (Path(tmp) / f"stage_{stage_id:03d}.json").read_text()
+        )
 
 
 def hydro_id_to_name(case_dir: Path | str) -> dict[int, str]:
     """Map Cobre hydro id -> name (from system/hydros.json)."""
-    hydros = json.loads((Path(case_dir) / "system" / "hydros.json").read_text())[
-        "hydros"
-    ]
+    hydros = json.loads(
+        (Path(case_dir) / "system" / "hydros.json").read_text()
+    )["hydros"]
     return {h["id"]: h["name"] for h in hydros}
 
 
@@ -122,7 +128,11 @@ def decode_stage_states(case_dir: Path | str, stage_id: int) -> dict:
     ``count * state_dimension`` float array.
     """
     bin_path = (
-        Path(case_dir) / "output" / "policy" / "states" / f"stage_{stage_id:03d}.bin"
+        Path(case_dir)
+        / "output"
+        / "policy"
+        / "states"
+        / f"stage_{stage_id:03d}.bin"
     )
     if not bin_path.exists():
         raise FileNotFoundError(f"states file not found: {bin_path}")
@@ -147,7 +157,9 @@ def decode_stage_states(case_dir: Path | str, stage_id: int) -> dict:
             capture_output=True,
             text=True,
         )
-        return json.loads((Path(tmp) / f"stage_{stage_id:03d}.json").read_text())
+        return json.loads(
+            (Path(tmp) / f"stage_{stage_id:03d}.json").read_text()
+        )
 
 
 def cobre_states(case_dir: Path | str, stage_id: int) -> pd.DataFrame:
@@ -177,14 +189,12 @@ def cobre_states(case_dir: Path | str, stage_id: int) -> pd.DataFrame:
         for k in range(cnt):
             for j, sv in enumerate(state_vars):
                 eid = sv["entity_id"]
-                rows.append(
-                    {
-                        "trial_index": k,
-                        "entity_id": eid,
-                        "nome": names.get(eid, ""),
-                        "storage_hm3": float(mat[k, j]),
-                    }
-                )
+                rows.append({
+                    "trial_index": k,
+                    "entity_id": eid,
+                    "nome": names.get(eid, ""),
+                    "storage_hm3": float(mat[k, j]),
+                })
     out = pd.DataFrame(
         rows, columns=["trial_index", "entity_id", "nome", "storage_hm3"]
     )
@@ -241,12 +251,17 @@ def cobre_water_values(
             f"no Cobre cut for iteration={iteration}, forward_pass={forward_pass} "
             f"at stage {stage_id}"
         )
-    if select in ("oldest", "first_real"):  # min cut_id; Cobre has no placeholder
+    if select in (
+        "oldest",
+        "first_real",
+    ):  # min cut_id; Cobre has no placeholder
         sel = [min(sel, key=lambda c: c["cut_id"])]
     elif select == "newest":  # last cut built = latest iteration
         sel = [max(sel, key=lambda c: c["cut_id"])]
     elif select is not None:
-        raise ValueError(f"unknown select={select!r} (use oldest|newest|first_real)")
+        raise ValueError(
+            f"unknown select={select!r} (use oldest|newest|first_real)"
+        )
     if len(sel) > 1 and reduce is None:
         raise ValueError(
             f"{len(sel)} Cobre cuts match; pass reduce= or filter further "
@@ -254,21 +269,21 @@ def cobre_water_values(
         )
 
     coef = _reduce_rows(
-        np.array([c["coefficients"] for c in sel], dtype=float), reduce or "first"
+        np.array([c["coefficients"] for c in sel], dtype=float),
+        reduce or "first",
     )
     intercept = float(
         _reduce_rows(
-            np.array([c["intercept"] for c in sel], dtype=float), reduce or "first"
+            np.array([c["intercept"] for c in sel], dtype=float),
+            reduce or "first",
         )
     )
 
-    out = pd.DataFrame(
-        {
-            "entity_id": [sv["entity_id"] for sv in state_vars],
-            "nome": [names.get(sv["entity_id"], "") for sv in state_vars],
-            "water_value_cobre": coef * COBRE_MONETARY_UNIT_RS,
-        }
-    )
+    out = pd.DataFrame({
+        "entity_id": [sv["entity_id"] for sv in state_vars],
+        "nome": [names.get(sv["entity_id"], "") for sv in state_vars],
+        "water_value_cobre": coef * COBRE_MONETARY_UNIT_RS,
+    })
     out.attrs["intercept"] = intercept * COBRE_MONETARY_UNIT_RS
     out.attrs["n_cuts"] = int(len(sel))
     return out
@@ -281,7 +296,9 @@ def _main() -> None:
         f"Cobre stage 0, iteração 1: {wv.attrs['n_cuts']} corte, "
         f"intercept={wv.attrs['intercept']:.4e} R$"
     )
-    top = wv.reindex(wv["water_value_cobre"].abs().sort_values(ascending=False).index)
+    top = wv.reindex(
+        wv["water_value_cobre"].abs().sort_values(ascending=False).index
+    )
     print("top 12 |coef| (valor da água, R$/hm³):")
     for _, r in top.head(12).iterrows():
         print(

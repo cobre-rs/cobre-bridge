@@ -14,6 +14,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
 from cobre_bridge.converters import initial_conditions as ic_conv
@@ -23,7 +24,6 @@ from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
 from cobre_bridge.id_map import build_id_map
-from cobre_bridge.newave_files import NewaveFiles
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class _ConstraintIdAllocator:
         self.next_id += count
 
 
-def _compute_prod_media_sin_safe(nw_files: NewaveFiles) -> float | None:
+def _compute_prod_media_sin_safe(case: NewaveCase) -> float | None:
     """Return ``PROD_MEDIA_SIN`` (mean PRODT), or ``None`` on failure.
 
     NEWAVE converts the PENALID R$/MWh penalties (VAZMIN, TURBMN/TURBMX, …) with
@@ -98,13 +98,13 @@ def _compute_prod_media_sin_safe(nw_files: NewaveFiles) -> float | None:
     unit tests that mock the pipeline.
     """
     try:
-        return hydro_conv.compute_prodt_sin_mean(nw_files)
+        return hydro_conv.compute_prodt_sin_mean(case)
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         return None
 
 
 def _compute_per_stage_sin_productivities(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
 ) -> tuple[list[float], list[float]] | None:
     """Return ``(PROD_MEDIA_SIN[s], MAX_PRODTACUM_SIN[s])`` per stage, or None.
 
@@ -132,10 +132,10 @@ def _compute_per_stage_sin_productivities(
     Falls back to ``None`` when the NEWAVE files can't be read (mocked tests).
     """
     try:
-        rho_avg = hydro_conv.compute_per_stage_prodt_sin_mean(nw_files)
+        rho_avg = hydro_conv.compute_per_stage_prodt_sin_mean(case)
         if not rho_avg:
             return None
-        max_prodtacum = constraints_conv.compute_max_prodtacum_sin(nw_files)
+        max_prodtacum = constraints_conv.compute_max_prodtacum_sin(case)
         if max_prodtacum is None:
             return None
         rho_max_acum = [max_prodtacum] * len(rho_avg)
@@ -216,6 +216,16 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     pkg_logger.addHandler(collector)
     try:
         report = _convert_newave_case_impl(src, dst)
+    except BaseException:
+        # The write phase is a sequence of independent file writes with no
+        # rollback, so a failure partway through (disk full, a converter
+        # raising mid-write, an interrupt) can leave a subset of the output
+        # files behind. Remove the known pipeline outputs so a half-written
+        # case is never mistaken for a complete one and a plain (no --force)
+        # re-run is not refused as "destination not empty". Re-raise so the
+        # CLI still reports the original failure.
+        _clear_dst_contents(dst)
+        raise
     finally:
         pkg_logger.removeHandler(collector)
     # De-duplicate while preserving first-occurrence order: a warning emitted
@@ -233,35 +243,37 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # 1. Discover and validate all source files via caso.dat -> Arquivos.
     # ------------------------------------------------------------------
     logger.debug("Discovering NEWAVE files from %s", src)
-    nw_files = NewaveFiles.from_directory(src)
+    # Build the parsed-case object once; every converter reads its parsed inputs
+    # from ``case`` (each NEWAVE file parsed once and cached).
+    case = NewaveCase.from_directory(src)
 
     # ------------------------------------------------------------------
-    # 2. Build the entity ID map.
+    # 2. Build the entity ID map (from the case's cached readers).
     # ------------------------------------------------------------------
     logger.debug("Building NewaveIdMap from %s", src)
-    id_map = _build_id_map(nw_files)
+    id_map = case.id_map
 
     # ------------------------------------------------------------------
     # 3. Call all converters.
     # ------------------------------------------------------------------
     logger.debug("Converting hydros")
-    hydros_dict = hydro_conv.convert_hydros(nw_files, id_map)
+    hydros_dict = hydro_conv.convert_hydros(case, id_map)
 
     logger.debug("Computing base hydro productivities")
-    base_productivities = hydro_conv.compute_base_productivities(nw_files, id_map)
+    base_productivities = hydro_conv.compute_base_productivities(case, id_map)
 
     logger.debug("Generating hydro geometry")
-    cadastro = hydro_conv.read_cadastro(nw_files)
+    cadastro = hydro_conv.read_cadastro(case)
     geometry_table = hydro_conv.generate_hydro_geometry(cadastro, id_map)
 
     logger.debug("Converting thermals")
-    thermals_dict = thermal_conv.convert_thermals(nw_files, id_map)
+    thermals_dict = thermal_conv.convert_thermals(case, id_map)
 
     logger.debug("Converting buses")
-    buses_dict = network_conv.convert_buses(nw_files, id_map)
+    buses_dict = network_conv.convert_buses(case, id_map)
 
     logger.debug("Converting lines")
-    lines_dict = network_conv.convert_lines(nw_files, id_map)
+    lines_dict = network_conv.convert_lines(case, id_map)
 
     logger.debug("Converting penalties")
     # DESVIO ("outros usos") + evaporation use MAX_PRODTACUM_SIN (max accumulated
@@ -269,10 +281,10 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # PRODT, drifting per CFUGA/CMONT config). Both come from NEWAVE inputs and
     # return None when files are absent (mocked-pipeline tests), so convert_penalties
     # falls back to its own legacy approximation.
-    max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(nw_files)
-    prod_media_sin = _compute_prod_media_sin_safe(nw_files)
+    max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(case)
+    prod_media_sin = _compute_prod_media_sin_safe(case)
     penalties_dict = network_conv.convert_penalties(
-        nw_files,
+        case,
         hydros_dict,
         productivities=base_productivities,
         max_accumulated_productivity=max_prodtacum_sin,
@@ -280,33 +292,33 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     )
 
     logger.debug("Converting stages")
-    stages_dict = temporal_conv.convert_stages(nw_files, id_map)
+    stages_dict = temporal_conv.convert_stages(case, id_map)
 
     logger.debug("Converting config")
-    config_dict = temporal_conv.convert_config(nw_files)
+    config_dict = temporal_conv.convert_config(case)
 
     logger.debug("Converting initial conditions")
-    ic_dict = ic_conv.convert_initial_conditions(nw_files, id_map)
+    ic_dict = ic_conv.convert_initial_conditions(case, id_map)
 
     logger.debug("Extracting recent inflow lags from vazpast.dat")
-    past_inflow_lags = stochastic_conv.convert_recent_inflow_lags(nw_files, id_map)
+    past_inflow_lags = stochastic_conv.convert_recent_inflow_lags(case, id_map)
     if past_inflow_lags:
         ic_dict["past_inflows"] = past_inflow_lags
 
     logger.debug("Converting inflow stats")
-    inflow_table = stochastic_conv.convert_inflow_stats(nw_files, id_map)
+    inflow_table = stochastic_conv.convert_inflow_stats(case, id_map)
 
     logger.debug("Converting load stats")
-    load_table = stochastic_conv.convert_load_stats(nw_files, id_map)
+    load_table = stochastic_conv.convert_load_stats(case, id_map)
 
     logger.debug("Converting inflow history from vazoes.dat")
-    inflow_history_table = stochastic_conv.convert_inflow_history(nw_files, id_map)
+    inflow_history_table = stochastic_conv.convert_inflow_history(case, id_map)
 
     logger.debug("Converting water withdrawal")
-    withdrawal_table = hydro_conv.convert_water_withdrawal(nw_files, id_map)
+    withdrawal_table = hydro_conv.convert_water_withdrawal(case, id_map)
 
     logger.debug("Converting storage bounds from VMAXT/VMINT")
-    storage_bounds_table = hydro_conv.convert_storage_bounds(nw_files, id_map)
+    storage_bounds_table = hydro_conv.convert_storage_bounds(case, id_map)
 
     # Generic constraints (VminOP, electric, AGRINT) share one ID space; the
     # allocator hands each converter the next free start ID so the pipeline no
@@ -314,7 +326,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     constraint_ids = _ConstraintIdAllocator()
 
     logger.debug("Converting VminOP constraints")
-    vminop_result = constraints_conv.convert_vminop_constraints(nw_files, id_map)
+    vminop_result = constraints_conv.convert_vminop_constraints(case, id_map)
     vminop_referenced_ids: list[int] = []
     rho_acum_overrides: dict[int, list[float]] = {}
     if vminop_result is not None:
@@ -326,44 +338,44 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
 
     logger.debug("Converting electric constraints")
     electric_result = constraints_conv.convert_electric_constraints(
-        nw_files, id_map, start_id=constraint_ids.next_id
+        case, id_map, start_id=constraint_ids.next_id
     )
     if electric_result is not None:
         constraint_ids.advance(len(electric_result.constraints))
 
     logger.debug("Converting AGRINT group constraints")
     agrint_result = constraints_conv.convert_agrint_constraints(
-        nw_files, id_map, start_id=constraint_ids.next_id
+        case, id_map, start_id=constraint_ids.next_id
     )
 
     logger.debug("Converting load factors")
-    load_factors_dict = stochastic_conv.convert_load_factors(nw_files, id_map)
+    load_factors_dict = stochastic_conv.convert_load_factors(case, id_map)
 
     logger.debug("Converting line bounds")
-    line_bounds_table = network_conv.convert_line_bounds(nw_files, id_map)
+    line_bounds_table = network_conv.convert_line_bounds(case, id_map)
 
     logger.debug("Converting non-controllable sources")
-    ncs_dict = network_conv.convert_non_controllable_sources(nw_files, id_map)
+    ncs_dict = network_conv.convert_non_controllable_sources(case, id_map)
 
     logger.debug("Converting exchange factors")
-    exchange_factors_dict = network_conv.convert_exchange_factors(nw_files, id_map)
+    exchange_factors_dict = network_conv.convert_exchange_factors(case, id_map)
 
     logger.debug("Converting NCS block factors")
-    ncs_factors_dict = network_conv.convert_ncs_factors(nw_files, id_map)
+    ncs_factors_dict = network_conv.convert_ncs_factors(case, id_map)
 
     logger.debug("Converting NCS stats")
-    ncs_stats_table = network_conv.convert_ncs_stats(nw_files, id_map)
+    ncs_stats_table = network_conv.convert_ncs_stats(case, id_map)
 
     logger.debug("Converting production models")
-    production_models_dict = hydro_conv.convert_production_models(nw_files, id_map)
+    production_models_dict = hydro_conv.convert_production_models(case, id_map)
 
     logger.debug("Converting hydro energy productivity overrides")
     hydro_energy_productivity_table = hydro_conv.convert_hydro_energy_productivity(
-        nw_files, id_map
+        case, id_map
     )
 
     logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
-    thermal_bounds_table = thermal_conv.convert_thermal_bounds(nw_files, id_map)
+    thermal_bounds_table = thermal_conv.convert_thermal_bounds(case, id_map)
 
     # ------------------------------------------------------------------
     # 4. Create the output directory structure.
@@ -462,7 +474,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
 
     # Per-bus excess-cost override: forbid energy excess at fictitious
     # submarkets (pure transshipment nodes) by pricing it prohibitively.
-    bus_penalty_table = network_conv.convert_bus_penalty_overrides(nw_files, id_map)
+    bus_penalty_table = network_conv.convert_bus_penalty_overrides(case, id_map)
     if bus_penalty_table is not None:
         bus_penalty_path = constraints_dir / "penalty_overrides_bus.parquet"
         pq.write_table(bus_penalty_table, bus_penalty_path, compression="zstd")
@@ -474,12 +486,12 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # Emitted sparsely (only stages/columns that differ from penalties.json),
     # keeping the penalty conversion coherent with the per-stage ρ already
     # shipped in system/hydro_energy_productivity.parquet.
-    per_stage_sin = _compute_per_stage_sin_productivities(nw_files)
+    per_stage_sin = _compute_per_stage_sin_productivities(case)
     if per_stage_sin is not None:
         per_stage_rho_avg, per_stage_rho_max_acum = per_stage_sin
         hydro_ids = [int(h["id"]) for h in hydros_dict.get("hydros", []) if "id" in h]
         hydro_penalty_table = network_conv.convert_hydro_penalty_overrides(
-            nw_files,
+            case,
             hydro_ids,
             penalties_dict["hydro"],
             per_stage_rho_avg,

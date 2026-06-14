@@ -206,7 +206,7 @@ def evaluate_constraint_expressions(
         if not terms:
             continue
 
-        var_types = {t[1] for t in terms}
+        var_types = {t[2] for t in terms}
         storage_only = var_types == {"hydro_storage"}
 
         if storage_only:

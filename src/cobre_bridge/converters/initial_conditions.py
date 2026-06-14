@@ -5,13 +5,12 @@ from __future__ import annotations
 import logging
 
 import pandas as pd
-from inewave.newave import Confhd, Hidr
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
+from cobre_bridge.converters.hydro import read_cadastro
 from cobre_bridge.converters.thermal import thermal_generation_bounds
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
-from cobre_bridge.plants import active_hydros
 
 _LOG = logging.getLogger(__name__)
 
@@ -21,10 +20,10 @@ _SCHEMA_URL = (
 )
 
 
-def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
+def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE initial reservoir storage to a Cobre initial_conditions dict.
 
-    Reads ``hidr.dat`` and ``confhd.dat`` from *nw_files*.  Initial
+    Reads ``hidr.dat`` and ``confhd.dat`` from *case*.  Initial
     storage is derived from ``Confhd.usinas.volume_inicial_percentual``
     (a percentage of ``volume_maximo`` from Hidr).
 
@@ -32,8 +31,8 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Pre-built ID mapping for hydro IDs.
 
@@ -43,13 +42,15 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
         If a hydro in ``confhd.dat`` references a code absent in
         ``hidr.dat``.
     """
-    hidr = Hidr.read(str(nw_files.hidr))
-    confhd = Confhd.read(str(nw_files.confhd))
+    # Apply permanent MODIF.DAT overrides (notably VOLMIN) so the initial-storage
+    # percentage is taken of the *operational* useful volume — the same min the
+    # bounds converter uses.  NEWAVE applies ``volume_inicial_percentual`` to the
+    # VOLMIN-adjusted useful range, not the raw hidr.dat one (verified against
+    # pmo.dat "VOLUME ARMAZENADO INICIAL": I. SOLTEIRA V.INIC 3940.9 hm³ @ 71.70%
+    # is 71.70% of (vmax − VOLMIN), not (vmax − raw_min)).
+    cadastro = read_cadastro(case)
 
-    cadastro = hidr.cadastro
-    confhd_df = confhd.usinas
-
-    existing = active_hydros(confhd_df)
+    existing = case.active_hydros
 
     storage: list[dict] = []
     for _, row in existing.iterrows():
@@ -66,19 +67,25 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
-        # Daily-regulation ('D') plants are frozen at ``volume_referencia``
-        # by NEWAVE — the reservoir doesn't accumulate water across stages.
-        # Mirror that by anchoring initial storage to the reference volume
-        # so it stays consistent with the (collapsed) min/max bounds set in
-        # ``hydro.py``.
+        # Fio-d'água plants don't accumulate water across stages, so the
+        # bounds converter collapses their storage to a single point in
+        # ``hydro.py``.  Anchor the initial storage to that same point so the
+        # initial condition stays inside the (collapsed) [min, max] range:
+        #   * 'D' (daily) → ``volume_referencia`` (legacy, validated).
+        #   * 'S' (run-of-river) → ``volume_minimo`` (NEWAVE pins ITAIPU at
+        #     VARMPUH 0% = Vmin; matches the collapse in ``hydro.py``).
         tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
         vol_ref_raw = hreg.get("volume_referencia")
+        anchored: float | None = None
         if tipo_reg == "D" and vol_ref_raw is not None and not pd.isna(vol_ref_raw):
-            value_hm3 = float(vol_ref_raw)
+            anchored = float(vol_ref_raw)
+        elif tipo_reg == "S":
+            anchored = vol_min
+        if anchored is not None:
             storage.append(
                 {
                     "hydro_id": id_map.hydro_id(newave_code),
-                    "value_hm3": value_hm3,
+                    "value_hm3": anchored,
                 }
             )
             continue
@@ -117,8 +124,8 @@ def convert_initial_conditions(nw_files: NewaveFiles, id_map: NewaveIdMap) -> di
     # ``[min_mw, max_mw]`` (``thermals.json`` / ``cobre-io`` semantic validator);
     # an out-of-range seed makes that stage's fishing equality infeasible, so we
     # clamp into range and warn rather than emit a case cobre would reject.
-    anticipated = read_anticipated_dispatch(nw_files)
-    gen_bounds = thermal_generation_bounds(nw_files) if anticipated else {}
+    anticipated = read_anticipated_dispatch(case)
+    gen_bounds = thermal_generation_bounds(case) if anticipated else {}
     past_anticipated_commitments: list[dict] = []
     for newave_code, dispatch in anticipated.items():
         try:

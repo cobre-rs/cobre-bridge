@@ -8,11 +8,10 @@ from collections.abc import Mapping, Sequence
 
 import pandas as pd
 import pyarrow as pa
-from inewave.newave import Dger, Sistema
 
-from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
+from cobre_bridge.case import NewaveCase
+from cobre_bridge.horizon import POST_STUDY_YEAR
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.pandas_utils import is_na
 
 _LOG = logging.getLogger(__name__)
@@ -98,16 +97,33 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   with HM3_TO_MWH_PER_RHO = 1e6/3600 ≈ 277.78.
 #
 # NEWAVE's 730 h-per-month convention vs cobre's actual calendar block_hours
-# (672–744 h) introduces only a ±2% numerical drift in absolute LP cost. It
-# does not change merit order or LP decisions (all costs scale together).
-# The HM3 → MWh conversion is pure volumetric and the 730 cancels out.
+# (672–744 h) introduces only a ±2% numerical drift in absolute LP cost for the
+# Families above — *because each is converted consistently*: flow/power
+# penalties carry no fixed-month factor (cobre integrates them with the real
+# per-stage block_hours), and volume penalties carry no time multiplier (the
+# 730 cancels in the pure-volumetric HM3 → MWh conversion). When that holds, all
+# costs scale together and merit order is preserved.
+#
+# ⚠️ CAVEAT — the assumption fails for any energy/STOCK quantity that cobre then
+# prices *with* a `× block_hours` time multiplier. There the fixed 730 does NOT
+# cancel: the converted energy uses 730 while cobre integrates the slack with
+# the actual month hours, so the effective penalty drifts by block_hours/730 and
+# CAN flip merit order. This bit the VminOP generic constraint (security curve):
+# its LHS `Σ ρ_acum·storage` was left in ρ_acum·hm³ (≈ 2.628× the true MWmonth)
+# while cobre priced the slack `× block_hours`, pushing the effective curve
+# penalty above the deficit cost so cobre deficited instead of drawing down.
+# Fixed by converting ρ_acum to MWmonth/hm³ *per stage* — see
+# `converters/constraints.py:_vminop_energy_factor`. Any future LP constraint or
+# penalty on a stock (storage/energy) priced `× block_hours` must do the same.
 #
 # Merit order from NEWAVE micro-penalty values ("NEWAVE individualizado"
 # column, manual §3.24 p.88, v30 defaults):
 #   p_INT (0.000273) < p_PFIO = p_EVERT (0.000300)
 #   < p_TURB (0.000333) < p_CORTEOL (0.000344) < p_EXC (0.000355)
 
-MONTH_HOURS: float = 730.0  # NEWAVE convention (manual §3.24, used in C_M3S2HM3)
+MONTH_HOURS: float = (
+    730.0  # NEWAVE convention (manual §3.24, used in C_M3S2HM3)
+)
 C_M3S2HM3: float = MONTH_HOURS * 3600.0 / 1e6  # = 2.628 hm³ / (m³/s · month)
 # HM3 × ρ_MW_per_m3s → MWh conversion (purely volumetric; 730 cancels here).
 HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
@@ -200,7 +216,7 @@ _INFLOW_NN_OFFSET_R_PER_M3S = 1.0
 
 
 def _build_canonical_pair_to_line_id(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
 ) -> dict[tuple[int, int], int]:
     """Build the canonical (src, tgt) -> line_id mapping from sistema.dat.
 
@@ -209,7 +225,7 @@ def _build_canonical_pair_to_line_id(
     used by ``convert_lines``, ``convert_line_bounds``, and
     ``convert_exchange_factors`` to guarantee consistent line IDs.
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     limites_df = sistema.limites_intercambio
     if limites_df is None or limites_df.empty:
         return {}
@@ -224,21 +240,21 @@ def _build_canonical_pair_to_line_id(
     return {pair: lid for lid, pair in enumerate(sorted(all_pairs))}
 
 
-def convert_buses(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
+def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE subsystem data to a Cobre ``buses.json`` dict.
 
-    Reads ``sistema.dat`` from *nw_files*.  Each subsystem (including
+    Reads ``sistema.dat`` from *case*.  Each subsystem (including
     fictitious ones) becomes a bus.  Deficit segments are extracted from
     ``Sistema.custo_deficit``.
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Pre-built ID mapping for bus IDs.
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     deficit_df = sistema.custo_deficit
 
     if deficit_df is None:
@@ -268,13 +284,11 @@ def convert_buses(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
         )
         cost_raw = row["custo"]
         cost = float(cost_raw) if not is_na(cost_raw) else None
-        buses_by_code[code]["segments"].append(
-            {
-                "patamar": int(row["patamar_deficit"]),
-                "depth_mw": depth_mw,
-                "cost": cost,
-            }
-        )
+        buses_by_code[code]["segments"].append({
+            "patamar": int(row["patamar_deficit"]),
+            "depth_mw": depth_mw,
+            "cost": cost,
+        })
 
     # Find the reference deficit cost (first non-NaN, non-zero cost across
     # all subsystems) to use as a fallback for fictitious subsystems.
@@ -290,19 +304,19 @@ def convert_buses(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     buses: list[dict] = []
     for code, info in buses_by_code.items():
         segs = sorted(info["segments"], key=lambda s: s["patamar"])
-        active_segs = [s for s in segs if s["cost"] is not None and s["cost"] > 0]
+        active_segs = [
+            s for s in segs if s["cost"] is not None and s["cost"] > 0
+        ]
         if not active_segs:
             active_segs = [{"cost": fallback_cost, "depth_mw": None}]
 
         deficit_segments: list[dict] = []
         for i, seg in enumerate(active_segs):
             is_last = i == len(active_segs) - 1
-            deficit_segments.append(
-                {
-                    "depth_mw": None if is_last else seg["depth_mw"],
-                    "cost": seg["cost"],
-                }
-            )
+            deficit_segments.append({
+                "depth_mw": None if is_last else seg["depth_mw"],
+                "cost": seg["cost"],
+            })
 
         bus_entry: dict = {
             "id": id_map.bus_id(code),
@@ -320,7 +334,7 @@ def convert_buses(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
 
 
 def convert_bus_penalty_overrides(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> pa.Table | None:
     """Build ``constraints/penalty_overrides_bus.parquet`` for fictitious buses.
@@ -341,15 +355,20 @@ def convert_bus_penalty_overrides(
         Columns: ``bus_id`` (INT32), ``stage_id`` (INT32),
         ``excess_cost`` (DOUBLE) — one row per (fictitious bus, stage).
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     deficit_df = sistema.custo_deficit
 
-    if deficit_df is None or deficit_df.empty or "ficticio" not in deficit_df.columns:
+    if (
+        deficit_df is None
+        or deficit_df.empty
+        or "ficticio" not in deficit_df.columns
+    ):
         return None
 
     fic_mask = deficit_df["ficticio"].fillna(False).astype(bool)
     fictitious_codes = {
-        int(code) for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
+        int(code)
+        for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
     }
     if not fictitious_codes:
         return None
@@ -367,8 +386,7 @@ def convert_bus_penalty_overrides(
         return None
     excess_cost = deficit_costs[0]
 
-    dger = Dger.read(nw_files.dger)
-    total_stages = study_horizon(dger).total_stages
+    total_stages = case.horizon.total_stages
 
     bus_ids: list[int] = []
     stage_ids: list[int] = []
@@ -386,13 +404,11 @@ def convert_bus_penalty_overrides(
     if not bus_ids:
         return None
 
-    schema = pa.schema(
-        [
-            pa.field("bus_id", pa.int32()),
-            pa.field("stage_id", pa.int32()),
-            pa.field("excess_cost", pa.float64()),
-        ]
-    )
+    schema = pa.schema([
+        pa.field("bus_id", pa.int32()),
+        pa.field("stage_id", pa.int32()),
+        pa.field("excess_cost", pa.float64()),
+    ])
     return pa.table(
         {
             "bus_id": pa.array(bus_ids, type=pa.int32()),
@@ -403,21 +419,21 @@ def convert_bus_penalty_overrides(
     )
 
 
-def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
+def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert NEWAVE interchange limits to a Cobre ``lines.json`` dict.
 
-    Reads ``sistema.dat`` from *nw_files*.  Each directional interchange
+    Reads ``sistema.dat`` from *case*.  Each directional interchange
     pair becomes a line using the first study month's limits as static
     capacities.
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Pre-built ID mapping for bus IDs.
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     limites_df = sistema.limites_intercambio
 
     if limites_df is None or limites_df.empty:
@@ -438,7 +454,8 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     ):
         fic_mask = deficit_df["ficticio"].fillna(False).astype(bool)
         fictitious_codes = {
-            int(code) for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
+            int(code)
+            for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
         }
 
     # Use the study start month from dger.dat as the reference for static
@@ -446,7 +463,7 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     # pre-study months (before mes_inicio_estudo) may have NaN values.
     from datetime import datetime as _dt
 
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
     study_start_dt = _dt(dger.ano_inicio_estudo, dger.mes_inicio_estudo, 1)
     first_month = limites_df[limites_df["data"] == study_start_dt]
     if first_month.empty:
@@ -489,10 +506,12 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
                 pair_map[key]["direct_mw"] = valor
 
     # Use the shared canonical mapping for consistent line IDs.
-    canonical_map = _build_canonical_pair_to_line_id(nw_files)
+    canonical_map = _build_canonical_pair_to_line_id(case)
 
     lines: list[dict] = []
-    for (src, tgt), line_id in sorted(canonical_map.items(), key=lambda x: x[1]):
+    for (src, tgt), line_id in sorted(
+        canonical_map.items(), key=lambda x: x[1]
+    ):
         caps = pair_map.get((src, tgt), {"direct_mw": 0.0, "reverse_mw": 0.0})
         src_bus = id_map.bus_id(src)
         tgt_bus = id_map.bus_id(tgt)
@@ -518,7 +537,7 @@ def convert_lines(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:
     }
 
 
-def _read_penalid_costs(nw_files: NewaveFiles) -> dict[str, float]:
+def _read_penalid_costs(case: NewaveCase) -> dict[str, float]:
     """Pull ``{variable_name: first non-null R$/MWh value}`` from PENALID.DAT.
 
     Falls back to an empty dict if the file is absent or unparseable. Each
@@ -526,14 +545,14 @@ def _read_penalid_costs(nw_files: NewaveFiles) -> dict[str, float]:
     non-null R$/MWh entry as the global default the same way NEWAVE does for
     REE-aggregated penalty handling.
     """
-    from inewave.newave import Penalid
-
-    if nw_files.penalid is None:
+    if case.files.penalid is None:
         return {}
     try:
-        penalid = Penalid.read(str(nw_files.penalid))
+        penalid = case.penalid
     except (OSError, ValueError) as exc:
-        _LOG.warning("penalid.dat could not be parsed (%s); using defaults.", exc)
+        _LOG.warning(
+            "penalid.dat could not be parsed (%s); using defaults.", exc
+        )
         return {}
 
     pen_df = penalid.penalidades
@@ -542,7 +561,9 @@ def _read_penalid_costs(nw_files: NewaveFiles) -> dict[str, float]:
 
     out: dict[str, float] = {}
     for var in pen_df["variavel"].unique():
-        rows = pen_df[(pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()]
+        rows = pen_df[
+            (pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()
+        ]
         if not rows.empty:
             out[str(var).strip()] = float(rows.iloc[0]["valor_R$_MWh"])
     return out
@@ -595,11 +616,19 @@ def _hydro_penalty_costs(
 
     The returned dict preserves the exact key order of ``penalties.json:hydro``.
     """
-    desvio_mwh = penalid_costs.get("DESVIO", _EVAPORATION_MULT * max_deficit_cost)
-    vazmin_mwh = penalid_costs.get("VAZMIN", _EVAPORATION_MULT * max_deficit_cost)
+    desvio_mwh = penalid_costs.get(
+        "DESVIO", _EVAPORATION_MULT * max_deficit_cost
+    )
+    vazmin_mwh = penalid_costs.get(
+        "VAZMIN", _EVAPORATION_MULT * max_deficit_cost
+    )
     ghmin_mwh = penalid_costs.get("GHMIN", _EVAPORATION_MULT * max_deficit_cost)
-    turbmn_mwh = penalid_costs.get("TURBMN", _EVAPORATION_MULT * max_deficit_cost)
-    turbmx_mwh = penalid_costs.get("TURBMX", _EVAPORATION_MULT * max_deficit_cost)
+    turbmn_mwh = penalid_costs.get(
+        "TURBMN", _EVAPORATION_MULT * max_deficit_cost
+    )
+    turbmx_mwh = penalid_costs.get(
+        "TURBMX", _EVAPORATION_MULT * max_deficit_cost
+    )
 
     water_withdrawal_cost = desvio_mwh * rho_max_acum
     outflow_below_cost = vazmin_mwh * rho_avg
@@ -618,6 +647,13 @@ def _hydro_penalty_costs(
     # cancels out — this is dimensional energy-equivalence, not a per-hour
     # rate. (Earlier versions used × C_M3S2HM3 here which was wrong by
     # the factor MONTH_HOURS = 730.)
+    #
+    # ⚠️ This volumetric (730-cancelling) form is correct ONLY because cobre
+    # prices these Family-D slots with NO time multiplier (`objective = penalty`).
+    # If they are ever wired into the LP with a `× block_hours` term (like the
+    # generic/VminOP slack), this conversion becomes wrong: the slack would then
+    # need per-stage hours, exactly like
+    # `constraints.py:_vminop_energy_factor`. Keep these two facts in lockstep.
     volmin_mwh = penalid_costs.get("VOLMIN")
     storage_below_cost = (
         volmin_mwh * rho_avg * HM3_TO_MWH_PER_RHO
@@ -646,15 +682,10 @@ def _hydro_penalty_costs(
     # is somehow "absorbing water" the cascade can't account for) and
     # violating another flow constraint, we want it to *always* prefer fixing
     # the other constraint first. Anchor inflow non-negativity penalty to the
-    # withdrawal slack plus a 1 R$/m³/s tie-breaker. The inflow_nn slack
-    # physically *generates* water in the LP, so making it cheaper than the
-    # withdrawal slack would let the LP buy free water to dodge a withdrawal
-    # violation — an artefact with no real-world counterpart. Keeping it just
-    # above withdrawal preserves a strict ordering against the strictest
-    # operational flow slack without inflating the objective when this slack
-    # genuinely needs to fire. Real fix: switch
-    # ``modeling.inflow_non_negativity.method`` to ``truncation``.
-    inflow_nonnegativity_cost = water_withdrawal_cost + _INFLOW_NN_OFFSET_R_PER_M3S
+    # withdrawal slack plus a 1 R$/m³/s tie-breaker.
+    inflow_nonnegativity_cost = (
+        water_withdrawal_cost + _INFLOW_NN_OFFSET_R_PER_M3S
+    )
 
     return {
         "spillage_cost": spillage_cost,
@@ -693,7 +724,7 @@ _RHO_SCALED_HYDRO_COLUMNS: tuple[str, ...] = (
 
 
 def convert_penalties(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     hydros_dict: dict,
     productivities: dict[int, float] | None = None,
     *,
@@ -721,8 +752,8 @@ def convert_penalties(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     hydros_dict:
         The already-converted ``hydros.json`` dict (used for reservoir
         useful-volume weights and the productivity fallback).
@@ -735,23 +766,21 @@ def convert_penalties(
         ``max(productivities)`` — a coarse approximation; callers with
         access to the cascade DAG should pass the true accumulated max.
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     deficit_df = sistema.custo_deficit
 
     # Primary deficit cost: first subsystem, first patamar.
     primary_deficit_cost = 0.0
     max_deficit_cost = 0.0
     if deficit_df is not None and not deficit_df.empty:
-        first_sub = deficit_df.sort_values(
-            [
-                "codigo_submercado",
-                "patamar_deficit",
-            ]
-        )
+        first_sub = deficit_df.sort_values([
+            "codigo_submercado",
+            "patamar_deficit",
+        ])
         primary_deficit_cost = float(first_sub.iloc[0]["custo"])
         max_deficit_cost = float(deficit_df["custo"].max())
 
-    penalid_costs = _read_penalid_costs(nw_files)
+    penalid_costs = _read_penalid_costs(case)
     productivities = productivities or {}
 
     # ρ_avg = PROD_MEDIA_SIN: NEWAVE converts the PENALID R$/MWh penalties
@@ -820,7 +849,7 @@ def convert_penalties(
 
 
 def convert_hydro_penalty_overrides(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     hydro_ids: Sequence[int],
     base_hydro_penalties: Mapping[str, float],
     per_stage_rho_avg: Sequence[float],
@@ -849,8 +878,8 @@ def convert_hydro_penalty_overrides(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths (re-reads ``sistema`` for the max deficit
+    case:
+        Parsed NEWAVE case (re-reads ``sistema`` for the max deficit
         cost and PENALID for the violation-slack base rates).
     hydro_ids:
         Every Cobre hydro id the SIN-uniform override must cover. Sorted
@@ -880,14 +909,14 @@ def convert_hydro_penalty_overrides(
             f"length ({n_stages} vs {len(per_stage_rho_max_acum)})"
         )
 
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     deficit_df = sistema.custo_deficit
     max_deficit_cost = (
         float(deficit_df["custo"].max())
         if deficit_df is not None and not deficit_df.empty
         else 0.0
     )
-    penalid_costs = _read_penalid_costs(nw_files)
+    penalid_costs = _read_penalid_costs(case)
 
     # Recompute the full hydro penalty block per stage and keep only ρ-scaled
     # columns that differ from the global base (sparse-override contract).
@@ -914,7 +943,9 @@ def convert_hydro_penalty_overrides(
         return None
 
     present_cols = [
-        c for c in _RHO_SCALED_HYDRO_COLUMNS if any(c in d for _, d in stage_overrides)
+        c
+        for c in _RHO_SCALED_HYDRO_COLUMNS
+        if any(c in d for _, d in stage_overrides)
     ]
 
     hydro_id_col: list[int] = []
@@ -941,7 +972,7 @@ def convert_hydro_penalty_overrides(
 
 
 def convert_line_bounds(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> pa.Table:
     """Convert NEWAVE interchange limits to a Cobre ``line_bounds.parquet`` table.
@@ -958,8 +989,8 @@ def convert_line_bounds(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map.  Used to resolve subsystem codes to Cobre bus IDs
         (indirectly, via the same canonical-pair ordering used in
@@ -971,17 +1002,15 @@ def convert_line_bounds(
         Columns: ``line_id`` (INT32), ``stage_id`` (INT32),
         ``direct_mw`` (DOUBLE), ``reverse_mw`` (DOUBLE).
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     limites_df: pd.DataFrame | None = sistema.limites_intercambio
 
-    _LINE_BOUNDS_SCHEMA = pa.schema(
-        [
-            pa.field("line_id", pa.int32()),
-            pa.field("stage_id", pa.int32()),
-            pa.field("direct_mw", pa.float64()),
-            pa.field("reverse_mw", pa.float64()),
-        ]
-    )
+    _LINE_BOUNDS_SCHEMA = pa.schema([
+        pa.field("line_id", pa.int32()),
+        pa.field("stage_id", pa.int32()),
+        pa.field("direct_mw", pa.float64()),
+        pa.field("reverse_mw", pa.float64()),
+    ])
 
     if limites_df is None or limites_df.empty:
         return pa.table(
@@ -994,8 +1023,7 @@ def convert_line_bounds(
             schema=_LINE_BOUNDS_SCHEMA,
         )
 
-    dger = Dger.read(nw_files.dger)
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months
@@ -1005,7 +1033,7 @@ def convert_line_bounds(
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
 
-    pair_to_line_id = _build_canonical_pair_to_line_id(nw_files)
+    pair_to_line_id = _build_canonical_pair_to_line_id(case)
 
     # Build per-date lookup:
     # {(src, tgt, year, cal_month) -> {direct_mw, reverse_mw}}
@@ -1041,7 +1069,9 @@ def convert_line_bounds(
 
     # Build last-year lookup for post-study:
     # {(src, tgt, cal_month) -> {direct_mw, reverse_mw}} — use the latest year.
-    last_year_per_key: dict[tuple[int, int, int], tuple[int, dict[str, float]]] = {}
+    last_year_per_key: dict[
+        tuple[int, int, int], tuple[int, dict[str, float]]
+    ] = {}
     for (src, tgt, yr, cal_month), caps in date_lookup.items():
         key3 = (src, tgt, cal_month)
         existing = last_year_per_key.get(key3)
@@ -1064,7 +1094,12 @@ def convert_line_bounds(
 
     for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
         src, tgt = pair
-        freeze_caps = date_lookup.get((src, tgt, ls_y, ls_m)) or last_year_lookup.get(
+        freeze_caps = date_lookup.get((
+            src,
+            tgt,
+            ls_y,
+            ls_m,
+        )) or last_year_lookup.get(
             (src, tgt, ls_m), {"direct_mw": 0.0, "reverse_mw": 0.0}
         )
         y, m = start_year, start_month
@@ -1104,7 +1139,7 @@ def convert_line_bounds(
 
 
 def _build_ncs_group_to_id(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> dict[tuple[int, int], int]:
     """Build the canonical (codigo_submercado, indice_bloco) -> ncs_id mapping.
@@ -1114,13 +1149,12 @@ def _build_ncs_group_to_id(
     NCS group mapping shared by ``convert_ncs_factors`` and
     ``convert_ncs_stats``.
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     df_ncs: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
     if df_ncs is None or df_ncs.empty:
         return {}
 
-    dger = Dger.read(nw_files.dger)
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     total_stages = horizon.total_stages
@@ -1137,7 +1171,9 @@ def _build_ncs_group_to_id(
         return 0 <= stage_id < total_stages
 
     df_filtered = df_ncs[df_ncs["data"].apply(_in_horizon)].copy()
-    groups = df_filtered.groupby(["codigo_submercado", "indice_bloco"], sort=True)
+    groups = df_filtered.groupby(
+        ["codigo_submercado", "indice_bloco"], sort=True
+    )
 
     result: dict[tuple[int, int], int] = {}
     ncs_id = 0
@@ -1154,7 +1190,7 @@ def _build_ncs_group_to_id(
 
 
 def convert_non_controllable_sources(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> dict:
     """Convert NEWAVE non-simulated generation to a Cobre NCS entity JSON dict.
@@ -1164,8 +1200,8 @@ def convert_non_controllable_sources(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map.  Used to resolve subsystem codes to 0-based Cobre bus
         IDs.
@@ -1176,14 +1212,13 @@ def convert_non_controllable_sources(
         JSON-serializable dict with key ``"non_controllable_sources"``
         containing a list of NCS entity dicts.
     """
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     df_ncs: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
 
     if df_ncs is None or df_ncs.empty:
         return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": []}
 
-    dger = Dger.read(nw_files.dger)
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     total_stages = horizon.total_stages
@@ -1208,7 +1243,9 @@ def convert_non_controllable_sources(
     ncs_list: list[dict] = []
     ncs_id = 0
 
-    groups = df_filtered.groupby(["codigo_submercado", "indice_bloco"], sort=True)
+    groups = df_filtered.groupby(
+        ["codigo_submercado", "indice_bloco"], sort=True
+    )
 
     for (sub_code, bloco), group in groups:
         sub_code_int = int(sub_code)
@@ -1225,37 +1262,39 @@ def convert_non_controllable_sources(
 
         # fonte: use the first non-null value in the group.
         fonte_series = group["fonte"].dropna()
-        fonte = str(fonte_series.iloc[0]).strip() if not fonte_series.empty else "NCS"
+        fonte = (
+            str(fonte_series.iloc[0]).strip()
+            if not fonte_series.empty
+            else "NCS"
+        )
 
         # max_generation_mw: maximum non-NaN value across all rows in the group.
         valores = pd.to_numeric(group["valor"], errors="coerce")
         valid_vals = valores.dropna()
         max_gen = float(valid_vals.max()) if not valid_vals.empty else 0.0
 
-        ncs_list.append(
-            {
-                "id": ncs_id,
-                "name": f"{fonte}_{sub_code_int}",
-                "bus_id": bus_id,
-                "max_generation_mw": max_gen,
-                # NEWAVE pre-nets `geracao_usinas_nao_simuladas` from MERC
-                # before the dispatch LP runs, so the aggregate is implicitly
-                # must-run. Setting allow_curtailment=False instructs Cobre's
-                # LP to pin dispatch to the realized availability for every
-                # scenario; otherwise the LP discovers that curtailing NCS is
-                # one of the cheapest slacks and produces a +15 % hydro /
-                # -23 % spillage divergence vs NEWAVE on this case family.
-                # See docs/findings/ncs-must-run-treatment.md.
-                "allow_curtailment": False,
-            }
-        )
+        ncs_list.append({
+            "id": ncs_id,
+            "name": f"{fonte}_{sub_code_int}",
+            "bus_id": bus_id,
+            "max_generation_mw": max_gen,
+            # NEWAVE pre-nets `geracao_usinas_nao_simuladas` from MERC
+            # before the dispatch LP runs, so the aggregate is implicitly
+            # must-run. Setting allow_curtailment=False instructs Cobre's
+            # LP to pin dispatch to the realized availability for every
+            # scenario; otherwise the LP discovers that curtailing NCS is
+            # one of the cheapest slacks and produces a +15 % hydro /
+            # -23 % spillage divergence vs NEWAVE on this case family.
+            # See docs/findings/ncs-must-run-treatment.md.
+            "allow_curtailment": False,
+        })
         ncs_id += 1
 
     return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": ncs_list}
 
 
 def convert_exchange_factors(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> dict:
     """Convert patamar.dat exchange factors to a Cobre ``exchange_factors.json`` dict.
@@ -1276,8 +1315,8 @@ def convert_exchange_factors(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map (unused directly; kept for API consistency).
 
@@ -1286,16 +1325,13 @@ def convert_exchange_factors(
     dict
         JSON-serializable dict with key ``"exchange_factors"``.
     """
-    from inewave.newave import Dger, Patamar
-
-    patamar = Patamar.read(str(nw_files.patamar))
+    patamar = case.patamar
     df: pd.DataFrame | None = patamar.intercambio_patamares
 
     if df is None or df.empty:
         return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": []}
 
-    dger = Dger.read(nw_files.dger)
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months
@@ -1304,7 +1340,7 @@ def convert_exchange_factors(
     study_end_year = start_year + (start_month - 1 + study_months) // 12
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
 
-    pair_to_line_id = _build_canonical_pair_to_line_id(nw_files)
+    pair_to_line_id = _build_canonical_pair_to_line_id(case)
     if not pair_to_line_id:
         return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": []}
 
@@ -1389,21 +1425,17 @@ def convert_exchange_factors(
                         last_reverse.get((src, tgt, m, block_id), 1.0),
                     )
 
-                block_factors.append(
-                    {
-                        "block_id": block_id,
-                        "direct_factor": d_factor,
-                        "reverse_factor": r_factor,
-                    }
-                )
+                block_factors.append({
+                    "block_id": block_id,
+                    "direct_factor": d_factor,
+                    "reverse_factor": r_factor,
+                })
 
-            results.append(
-                {
-                    "line_id": line_id,
-                    "stage_id": stage_id,
-                    "block_factors": block_factors,
-                }
-            )
+            results.append({
+                "line_id": line_id,
+                "stage_id": stage_id,
+                "block_factors": block_factors,
+            })
 
             m += 1
             if m > 12:
@@ -1417,7 +1449,7 @@ def convert_exchange_factors(
 
 
 def convert_ncs_factors(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> dict:
     """Convert patamar.dat NCS block factors to a Cobre non_controllable_factors dict.
@@ -1428,8 +1460,8 @@ def convert_ncs_factors(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map.  Used for subsystem code validation.
 
@@ -1438,9 +1470,7 @@ def convert_ncs_factors(
     dict
         JSON-serializable dict with key ``"non_controllable_factors"``.
     """
-    from inewave.newave import Dger, Patamar
-
-    patamar_file = Patamar.read(str(nw_files.patamar))
+    patamar_file = case.patamar
     df: pd.DataFrame | None = patamar_file.usinas_nao_simuladas
 
     if df is None or df.empty:
@@ -1449,8 +1479,7 @@ def convert_ncs_factors(
             "non_controllable_factors": [],
         }
 
-    dger = Dger.read(nw_files.dger)
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months
@@ -1480,11 +1509,13 @@ def convert_ncs_factors(
         }
 
     # Columns: codigo_submercado, indice_bloco, data, patamar, valor
-    # Determine number of blocks from source.
-    all_blocks_set: set[int] = set()
-    for _, row in df.iterrows():
-        all_blocks_set.add(int(row["patamar"]) - 1)
-    num_blocks = max(all_blocks_set) + 1 if all_blocks_set else 1
+    # The ``patamar`` field is a GLOBAL running index across all NCS sources:
+    # source 1 -> patamares 1..P, source 2 -> P+1..2P, etc. (P = number of load
+    # blocks). The per-source block ordinal is therefore ``(patamar - 1) % P``,
+    # NOT ``patamar - 1`` — using the raw index parks every source past the first
+    # on out-of-range blocks, flattening its per-block NCS profile (so Cobre
+    # could not reshape per-block load the way NEWAVE does, the so_se divergence).
+    num_blocks = patamar_file.numero_patamares or 1
 
     # Build per-(sub_code, bloco, yr, cal_month, block_id) -> factor lookup.
     NcsKey = tuple  # (sub_code, bloco, yr, cal_month, block_id)
@@ -1493,7 +1524,7 @@ def convert_ncs_factors(
     for _, row in df.iterrows():
         sub_code = int(row["codigo_submercado"])
         bloco = int(row["indice_bloco"])
-        block_id = int(row["patamar"]) - 1
+        block_id = (int(row["patamar"]) - 1) % num_blocks
         val = float(row["valor"])
         dt = row["data"]
         yr = int(dt.year)
@@ -1514,11 +1545,13 @@ def convert_ncs_factors(
 
     # Use the shared canonical NCS group -> ID mapping to guarantee consistency
     # with convert_non_controllable_sources and convert_ncs_stats.
-    ncs_group_map = _build_ncs_group_to_id(nw_files, id_map)
+    ncs_group_map = _build_ncs_group_to_id(case, id_map)
 
     results: list[dict] = []
 
-    for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
+    for (sub_code, bloco), ncs_id in sorted(
+        ncs_group_map.items(), key=lambda x: x[1]
+    ):
         y, m = start_year, start_month
         for stage_id in range(total_stages):
             is_post_study = (y > study_end_year) or (
@@ -1528,26 +1561,24 @@ def convert_ncs_factors(
             block_factors: list[dict] = []
             for block_id in range(num_blocks):
                 if is_post_study:
-                    factor = last_factor.get((sub_code, bloco, m, block_id), 1.0)
+                    factor = last_factor.get(
+                        (sub_code, bloco, m, block_id), 1.0
+                    )
                 else:
                     factor = factor_map.get(
                         (sub_code, bloco, y, m, block_id),
                         last_factor.get((sub_code, bloco, m, block_id), 1.0),
                     )
-                block_factors.append(
-                    {
-                        "block_id": block_id,
-                        "factor": max(factor, 1e-6),
-                    }
-                )
+                block_factors.append({
+                    "block_id": block_id,
+                    "factor": max(factor, 1e-6),
+                })
 
-            results.append(
-                {
-                    "ncs_id": ncs_id,
-                    "stage_id": stage_id,
-                    "block_factors": block_factors,
-                }
-            )
+            results.append({
+                "ncs_id": ncs_id,
+                "stage_id": stage_id,
+                "block_factors": block_factors,
+            })
 
             m += 1
             if m > 12:
@@ -1561,7 +1592,7 @@ def convert_ncs_factors(
 
 
 def convert_ncs_stats(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> pa.Table:
     """Convert sistema.dat NCS generation to ``non_controllable_stats.parquet``.
@@ -1575,8 +1606,8 @@ def convert_ncs_stats(
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map (unused directly; kept for API consistency).
 
@@ -1586,18 +1617,14 @@ def convert_ncs_stats(
         Columns: ``ncs_id`` (INT32), ``stage_id`` (INT32),
         ``mean`` (DOUBLE), ``std`` (DOUBLE).
     """
-    from inewave.newave import Dger, Sistema
+    _NCS_STATS_SCHEMA = pa.schema([
+        pa.field("ncs_id", pa.int32()),
+        pa.field("stage_id", pa.int32()),
+        pa.field("mean", pa.float64()),
+        pa.field("std", pa.float64()),
+    ])
 
-    _NCS_STATS_SCHEMA = pa.schema(
-        [
-            pa.field("ncs_id", pa.int32()),
-            pa.field("stage_id", pa.int32()),
-            pa.field("mean", pa.float64()),
-            pa.field("std", pa.float64()),
-        ]
-    )
-
-    sistema = Sistema.read(str(nw_files.sistema))
+    sistema = case.sistema
     df_raw: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
 
     if df_raw is None or df_raw.empty:
@@ -1611,8 +1638,7 @@ def convert_ncs_stats(
             schema=_NCS_STATS_SCHEMA,
         )
 
-    dger = Dger.read(nw_files.dger)
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     start_month = horizon.start_month
     start_year = horizon.start_year
     study_months = horizon.study_months
@@ -1655,7 +1681,7 @@ def convert_ncs_stats(
     }
 
     # Use the shared canonical NCS group -> ID mapping.
-    ncs_group_map = _build_ncs_group_to_id(nw_files, id_map)
+    ncs_group_map = _build_ncs_group_to_id(case, id_map)
 
     # Compute max_generation_mw per NCS entity.
     max_gen_per_ncs: dict[int, float] = {}
@@ -1672,7 +1698,9 @@ def convert_ncs_stats(
     rows_mean: list[float] = []
     rows_std: list[float] = []
 
-    for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
+    for (sub_code, bloco), ncs_id in sorted(
+        ncs_group_map.items(), key=lambda x: x[1]
+    ):
         max_gen = max_gen_per_ncs[ncs_id]
 
         y, m = start_year, start_month

@@ -10,17 +10,21 @@ import pyarrow as pa
 import pytest
 
 from cobre_bridge.converters.constraints import (
-    _compute_accumulated_integrated_productivities,
+    _curve_seasonalizes,
     _is_stored_energy_reservoir,
     _parse_formula,
-    _warn_if_fixed_penalization,
+    _vminop_energy_factor,
+    _warn_if_non_fixa_penalization,
+    compute_accumulated_integrated_productivities,
     compute_accumulated_productivities,
     convert_agrint_constraints,
     convert_electric_constraints,
     convert_vminop_constraints,
 )
+from cobre_bridge.converters.network import C_M3S2HM3
 from cobre_bridge.converters.scalar_parameters import build_scalar_parameters
 from cobre_bridge.id_map import NewaveIdMap
+from tests.conftest import make_case, make_nw_files
 
 
 def _make_cadastro() -> pd.DataFrame:
@@ -99,30 +103,65 @@ class TestStoredEnergyReservoirFilter:
         assert _is_stored_energy_reservoir(self._cad("M", 100.0, 200.0), 999) is False
 
 
-class TestFixedPenalizationWarning:
-    """curva.dat TIPO DE PENALIZACAO = 0 (FIXA) is unsupported by Cobre; the
-    conversion must warn so the VminOP-penalty difference is expected."""
+class TestNonFixaPenalizationWarning:
+    """curva.dat TIPO DE PENALIZACAO = 0 (FIXA) matches cobre-bridge's VminOP
+    modelling and needs no warning; a non-FIXA (iterative/variable) penalization is
+    not reproduced, so the conversion warns that a VminOP-penalty difference is
+    expected."""
 
-    def test_fixa_emits_warning(self, caplog) -> None:
+    def test_fixa_does_not_warn(self, caplog) -> None:
         import logging
 
         with caplog.at_level(logging.WARNING):
-            fired = _warn_if_fixed_penalization([0, 11, 1])
-        assert fired is True
-        assert "FIXA" in caplog.text
-        assert "MES PENALIZACAO = 11" in caplog.text
+            fired = _warn_if_non_fixa_penalization([0, 11, 1])
+        assert fired is False
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
-    def test_maxpen_does_not_warn(self) -> None:
-        assert _warn_if_fixed_penalization([1, 11, 1]) is False
+    def test_fixa_logs_info_confirmation(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            _warn_if_non_fixa_penalization([0, 11, 1])
+        assert "FIXA" in caplog.text
+        assert "matches" in caplog.text
+
+    def test_non_fixa_emits_warning(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            fired = _warn_if_non_fixa_penalization([1, 11, 1])
+        assert fired is True
+        assert "non-FIXA" in caplog.text
 
     def test_none_does_not_warn(self) -> None:
-        assert _warn_if_fixed_penalization(None) is False
+        assert _warn_if_non_fixa_penalization(None) is False
 
     def test_empty_does_not_warn(self) -> None:
-        assert _warn_if_fixed_penalization([]) is False
+        assert _warn_if_non_fixa_penalization([]) is False
 
     def test_malformed_first_field_does_not_warn(self) -> None:
-        assert _warn_if_fixed_penalization(["x"]) is False
+        assert _warn_if_non_fixa_penalization(["x"]) is False
+
+
+class TestCurveSeasonalizes:
+    """curva.dat's third penalization field selects post-study seasonalization
+    of the security curve; absence/garbage defaults to freeze (manual p.32-33)."""
+
+    def test_flag_set_seasonalizes(self) -> None:
+        assert _curve_seasonalizes([0, 11, 1]) is True
+
+    def test_flag_clear_freezes(self) -> None:
+        assert _curve_seasonalizes([0, 11, 0]) is False
+
+    def test_missing_third_field_freezes(self) -> None:
+        assert _curve_seasonalizes([0, 11]) is False
+
+    def test_none_values_freeze(self) -> None:
+        assert _curve_seasonalizes([None, None, None]) is False
+
+    def test_none_and_empty_freeze(self) -> None:
+        assert _curve_seasonalizes(None) is False
+        assert _curve_seasonalizes([]) is False
 
 
 class TestAccumulatedProductivity:
@@ -248,7 +287,7 @@ class TestAccumulatedIntegratedProductivities:
         cadastro = _make_cadastro()
         cadastro["tipo_regulacao"] = "M"
         confhd_df = _make_confhd_df()
-        acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+        acc = compute_accumulated_integrated_productivities(cadastro, confhd_df)
         # PLANT_A: 0.01 · (300 + 0.1·550 − 200) = 0.01 · 155 = 1.55
         # PLANT_B: 0.02 · (400 + 0.05·(200+2000)/2 − 300) = 0.02 · 155 = 3.1
         # PLANT_C: 0.03 · (500 + 0.02·(300+3000)/2 − 400) = 0.03 · 133 = 3.99
@@ -264,7 +303,7 @@ class TestAccumulatedIntegratedProductivities:
         # volume_referencia, matching NEWAVE's EARM convention for them.
         cadastro = _make_cadastro()  # all tipo_regulacao == "D"
         confhd_df = _make_confhd_df()
-        acc = _compute_accumulated_integrated_productivities(cadastro, confhd_df)
+        acc = compute_accumulated_integrated_productivities(cadastro, confhd_df)
         # PLANT_A @vref=500: 0.01 · (300 + 0.1·500 − 200) = 0.01 · 150 = 1.5
         # PLANT_B @vref=1000: 0.02 · (400 + 0.05·1000 − 300) = 0.02 · 150 = 3.0
         # PLANT_C @vref=1500: 0.03 · (500 + 0.02·1500 − 400) = 0.03 · 130 = 3.9
@@ -443,86 +482,27 @@ class TestVminopRhsSeasonality:
 
 class TestConvertVminopConstraints:
     def test_returns_none_when_curva_absent(self, tmp_path) -> None:
-
-        from cobre_bridge.newave_files import NewaveFiles
-
-        nw = NewaveFiles(
-            directory=tmp_path,
-            dger=tmp_path / "d",
-            confhd=tmp_path / "c",
-            conft=tmp_path / "t",
-            sistema=tmp_path / "s",
-            clast=tmp_path / "cl",
-            term=tmp_path / "te",
-            ree=tmp_path / "r",
-            patamar=tmp_path / "p",
-            hidr=tmp_path / "h",
-            vazoes=tmp_path / "v",
-            modif=None,
-            ghmin=None,
-            penalid=None,
-            vazpast=None,
-            dsvagua=None,
-            curva=None,
-            expt=None,
-            manutt=None,
-            c_adic=None,
-            cvar=None,
-            agrint=None,
-            re_dat=None,
-            volref_saz=None,
-            shist=None,
-            adterm=None,
-        )
+        case = make_case(tmp_path, curva=None)
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
-        assert convert_vminop_constraints(nw, id_map) is None
+        assert convert_vminop_constraints(case, id_map) is None
 
     def test_returns_none_when_curva_aversao_zero(self, tmp_path) -> None:
         """dger.dat curva_aversao=0 means NEWAVE disabled the risk-aversion
         curve; cobre-bridge must skip VminOP constraints even when curva.dat
         is present on disk."""
-        from unittest.mock import MagicMock, patch
-
-        from cobre_bridge.newave_files import NewaveFiles
-
-        (tmp_path / "dger.dat").touch()
-        (tmp_path / "curva.dat").touch()
-
-        nw = NewaveFiles(
-            directory=tmp_path,
-            dger=tmp_path / "dger.dat",
-            confhd=tmp_path / "c",
-            conft=tmp_path / "t",
-            sistema=tmp_path / "s",
-            clast=tmp_path / "cl",
-            term=tmp_path / "te",
-            ree=tmp_path / "r",
-            patamar=tmp_path / "p",
-            hidr=tmp_path / "h",
-            vazoes=tmp_path / "v",
-            modif=None,
-            ghmin=None,
-            penalid=None,
-            vazpast=None,
-            dsvagua=None,
-            curva=tmp_path / "curva.dat",
-            expt=None,
-            manutt=None,
-            c_adic=None,
-            cvar=None,
-            agrint=None,
-            re_dat=None,
-            volref_saz=None,
-            shist=None,
-            adterm=None,
-        )
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
+        from unittest.mock import MagicMock
 
         mock_dger = MagicMock()
         mock_dger.curva_aversao = 0
-        with patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls:
-            mock_dger_cls.read.return_value = mock_dger
-            assert convert_vminop_constraints(nw, id_map) is None
+        # curva.dat is present (non-None reader), but curva_aversao=0 disables it.
+        case = make_case(
+            make_nw_files(tmp_path, curva=tmp_path / "curva.dat"),
+            curva=MagicMock(),
+            dger=mock_dger,
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
+
+        assert convert_vminop_constraints(case, id_map) is None
 
     def test_constraint_expression_uses_hydro_storage(self, tmp_path) -> None:
         """Integration test: verifies expression format against real example data."""
@@ -578,24 +558,24 @@ def _run_example_conversion():
     if not caso_path.exists():
         return None
 
-    from cobre_bridge.newave_files import NewaveFiles
+    from cobre_bridge.case import NewaveCase
 
-    nw_files = NewaveFiles.from_directory(example_dir)
-    if nw_files.curva is None:
+    case = NewaveCase.from_directory(example_dir)
+    if case.files.curva is None:
         return None
 
     from cobre_bridge.pipeline import _build_id_map
 
-    id_map = _build_id_map(nw_files)
-    result = convert_vminop_constraints(nw_files, id_map)
+    id_map = _build_id_map(case.files)
+    result = convert_vminop_constraints(case, id_map)
     if result is None:
         return None
     constraints_dict, bounds_table, _referenced, _rho_overrides = result
     return constraints_dict, bounds_table
 
 
-def _example_nw_files_and_id_map():
-    """Return (nw_files, id_map) for the example case, or None if unavailable."""
+def _example_case_and_id_map():
+    """Return (case, id_map) for the example case, or None if unavailable."""
     example_dir = Path("example/newave")
     if (
         not (example_dir / "CASO.DAT").exists()
@@ -603,12 +583,12 @@ def _example_nw_files_and_id_map():
     ):
         return None
 
-    from cobre_bridge.newave_files import NewaveFiles
+    from cobre_bridge.case import NewaveCase
     from cobre_bridge.pipeline import _build_id_map
 
-    nw_files = NewaveFiles.from_directory(example_dir)
-    id_map = _build_id_map(nw_files)
-    return nw_files, id_map
+    case = NewaveCase.from_directory(example_dir)
+    id_map = _build_id_map(case.files)
+    return case, id_map
 
 
 # ---------------------------------------------------------------------------
@@ -712,38 +692,9 @@ class TestParseFormula:
 class TestConvertElectricConstraints:
     def test_returns_none_when_no_indices_csv(self, tmp_path: Path) -> None:
         """Return None gracefully when indices.csv is absent."""
-        from cobre_bridge.newave_files import NewaveFiles
-
-        nw = NewaveFiles(
-            directory=tmp_path,
-            dger=tmp_path / "d",
-            confhd=tmp_path / "c",
-            conft=tmp_path / "t",
-            sistema=tmp_path / "s",
-            clast=tmp_path / "cl",
-            term=tmp_path / "te",
-            ree=tmp_path / "r",
-            patamar=tmp_path / "p",
-            hidr=tmp_path / "h",
-            vazoes=tmp_path / "v",
-            modif=None,
-            ghmin=None,
-            penalid=None,
-            vazpast=None,
-            dsvagua=None,
-            curva=None,
-            expt=None,
-            manutt=None,
-            c_adic=None,
-            cvar=None,
-            agrint=None,
-            re_dat=None,
-            volref_saz=None,
-            shist=None,
-            adterm=None,
-        )
+        case = make_case(tmp_path, re_dat=None)
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
-        assert convert_electric_constraints(nw, id_map) is None
+        assert convert_electric_constraints(case, id_map) is None
 
     def test_returns_none_when_re_file_missing(self, tmp_path: Path) -> None:
         """Return None when indices.csv exists but points to a missing file."""
@@ -752,57 +703,28 @@ class TestConvertElectricConstraints:
             "RESTRICAO-ELETRICA-ESPECIAL; ; does-not-exist.csv\n", encoding="latin-1"
         )
 
-        from cobre_bridge.newave_files import NewaveFiles
-
-        nw = NewaveFiles(
-            directory=tmp_path,
-            dger=tmp_path / "d",
-            confhd=tmp_path / "c",
-            conft=tmp_path / "t",
-            sistema=tmp_path / "s",
-            clast=tmp_path / "cl",
-            term=tmp_path / "te",
-            ree=tmp_path / "r",
-            patamar=tmp_path / "p",
-            hidr=tmp_path / "h",
-            vazoes=tmp_path / "v",
-            modif=None,
-            ghmin=None,
-            penalid=None,
-            vazpast=None,
-            dsvagua=None,
-            curva=None,
-            expt=None,
-            manutt=None,
-            c_adic=None,
-            cvar=None,
-            agrint=None,
-            re_dat=None,
-            volref_saz=None,
-            shist=None,
-            adterm=None,
-        )
+        case = make_case(tmp_path, re_dat=None)
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
-        assert convert_electric_constraints(nw, id_map) is None
+        assert convert_electric_constraints(case, id_map) is None
 
     def test_example_produces_constraints(self) -> None:
         """Integration test against the example case."""
-        pair = _example_nw_files_and_id_map()
+        pair = _example_case_and_id_map()
         if pair is None:
             pytest.skip("example/newave not available")
-        nw_files, id_map = pair
-        result = convert_electric_constraints(nw_files, id_map, start_id=0)
+        case, id_map = pair
+        result = convert_electric_constraints(case, id_map, start_id=0)
         assert result is not None
         constraints, bounds_table = result
         assert len(constraints) > 0
 
     def test_example_constraints_have_correct_format(self) -> None:
         """Each constraint must have required fields and slack disabled."""
-        pair = _example_nw_files_and_id_map()
+        pair = _example_case_and_id_map()
         if pair is None:
             pytest.skip("example/newave not available")
-        nw_files, id_map = pair
-        result = convert_electric_constraints(nw_files, id_map, start_id=0)
+        case, id_map = pair
+        result = convert_electric_constraints(case, id_map, start_id=0)
         assert result is not None
         constraints, _ = result
         for c in constraints:
@@ -818,11 +740,11 @@ class TestConvertElectricConstraints:
 
     def test_example_bounds_table_schema(self) -> None:
         """Bounds table must have the expected four columns."""
-        pair = _example_nw_files_and_id_map()
+        pair = _example_case_and_id_map()
         if pair is None:
             pytest.skip("example/newave not available")
-        nw_files, id_map = pair
-        result = convert_electric_constraints(nw_files, id_map, start_id=0)
+        case, id_map = pair
+        result = convert_electric_constraints(case, id_map, start_id=0)
         assert result is not None
         _, bounds_table = result
         assert isinstance(bounds_table, pa.Table)
@@ -839,12 +761,12 @@ class TestConvertElectricConstraints:
 
     def test_example_start_id_offset_applied(self) -> None:
         """start_id must be added as an offset to all constraint IDs."""
-        pair = _example_nw_files_and_id_map()
+        pair = _example_case_and_id_map()
         if pair is None:
             pytest.skip("example/newave not available")
-        nw_files, id_map = pair
-        result_0 = convert_electric_constraints(nw_files, id_map, start_id=0)
-        result_10 = convert_electric_constraints(nw_files, id_map, start_id=10)
+        case, id_map = pair
+        result_0 = convert_electric_constraints(case, id_map, start_id=0)
+        result_10 = convert_electric_constraints(case, id_map, start_id=10)
         assert result_0 is not None and result_10 is not None
         ids_0 = [c["id"] for c in result_0[0]]
         ids_10 = [c["id"] for c in result_10[0]]
@@ -852,11 +774,11 @@ class TestConvertElectricConstraints:
 
     def test_example_only_lim_inf_excluded(self) -> None:
         """All constraints in the example file use <= (lim_inf is -1.1e30)."""
-        pair = _example_nw_files_and_id_map()
+        pair = _example_case_and_id_map()
         if pair is None:
             pytest.skip("example/newave not available")
-        nw_files, id_map = pair
-        result = convert_electric_constraints(nw_files, id_map, start_id=0)
+        case, id_map = pair
+        result = convert_electric_constraints(case, id_map, start_id=0)
         assert result is not None
         constraints, _ = result
         # All example constraints have only upper bounds (LimInf = -1.1e30)
@@ -864,11 +786,11 @@ class TestConvertElectricConstraints:
 
     def test_example_block_ids_are_zero_based(self) -> None:
         """block_id must be 0-based (Pat=1 -> block_id=0)."""
-        pair = _example_nw_files_and_id_map()
+        pair = _example_case_and_id_map()
         if pair is None:
             pytest.skip("example/newave not available")
-        nw_files, id_map = pair
-        result = convert_electric_constraints(nw_files, id_map, start_id=0)
+        case, id_map = pair
+        result = convert_electric_constraints(case, id_map, start_id=0)
         assert result is not None
         _, bounds_table = result
         block_ids = bounds_table.column("block_id").to_pylist()
@@ -882,38 +804,24 @@ class TestConvertElectricConstraints:
 # ---------------------------------------------------------------------------
 
 
-def _make_minimal_nw_files(tmp_path: Path, *, agrint: Path | None = None) -> object:
-    """Return a NewaveFiles-like object with minimal fields set for AGRINT tests."""
-    from cobre_bridge.newave_files import NewaveFiles
+def _make_minimal_case(
+    tmp_path: Path,
+    *,
+    agrint: Path | None = None,
+    dger: object | None = None,
+):
+    """Return a ``NewaveCase`` with minimal inputs for AGRINT tests.
 
-    return NewaveFiles(
-        directory=tmp_path,
-        dger=tmp_path / "dger.dat",
-        confhd=tmp_path / "c",
-        conft=tmp_path / "t",
-        sistema=tmp_path / "s",
-        clast=tmp_path / "cl",
-        term=tmp_path / "te",
-        ree=tmp_path / "r",
-        patamar=tmp_path / "p",
-        hidr=tmp_path / "h",
-        vazoes=tmp_path / "v",
-        modif=None,
-        ghmin=None,
-        penalid=None,
-        vazpast=None,
-        dsvagua=None,
-        curva=None,
-        expt=None,
-        manutt=None,
-        c_adic=None,
-        cvar=None,
-        agrint=agrint,
-        re_dat=None,
-        volref_saz=None,
-        shist=None,
-        adterm=None,
-    )
+    ``patamar`` points to a missing path so ``case.patamar`` reads it via the
+    real ``Patamar.read`` and yields ``numero_patamares=None`` (→ 1 patamar),
+    matching the legacy ``NewaveFiles`` behaviour. A parsed ``dger`` reader can
+    be pre-injected so ``case.dger`` returns it without touching disk.
+    """
+    files = make_nw_files(tmp_path, agrint=agrint)
+    parsed: dict[str, object] = {}
+    if dger is not None:
+        parsed["dger"] = dger
+    return make_case(files, **parsed)
 
 
 _AGRINT_CONTENT = """\
@@ -947,9 +855,9 @@ def _make_dger_mock_for_agrint():
 class TestConvertAgrintConstraints:
     def test_returns_none_when_agrint_absent(self, tmp_path: Path) -> None:
         """Returns None when agrint path is None."""
-        nw = _make_minimal_nw_files(tmp_path, agrint=None)
+        case = _make_minimal_case(tmp_path, agrint=None)
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
-        assert convert_agrint_constraints(nw, id_map) is None  # type: ignore[arg-type]
+        assert convert_agrint_constraints(case, id_map) is None
 
     def test_produces_constraints_from_agrint_dat(self, tmp_path: Path) -> None:
         """Parses a minimal AGRINT file and produces one constraint per group."""
@@ -957,23 +865,19 @@ class TestConvertAgrintConstraints:
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
 
-        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        case = _make_minimal_case(
+            tmp_path, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
-
-        dger_mock = _make_dger_mock_for_agrint()
 
         # Line map: canonical (1,3) -> line_id=0
         fake_line_map = {(1, 3): 0}
 
-        with (
-            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
-            patch(
-                "cobre_bridge.converters.constraints._build_line_id_map",
-                return_value=fake_line_map,
-            ),
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value=fake_line_map,
         ):
-            mock_dger_cls.read.return_value = dger_mock
-            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+            result = convert_agrint_constraints(case, id_map, start_id=0)
 
         assert result is not None
         constraints, bounds_table = result
@@ -985,18 +889,16 @@ class TestConvertAgrintConstraints:
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
 
-        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        case = _make_minimal_case(
+            tmp_path, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
-        with (
-            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
-            patch(
-                "cobre_bridge.converters.constraints._build_line_id_map",
-                return_value={(1, 3): 0},
-            ),
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 3): 0},
         ):
-            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
-            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+            result = convert_agrint_constraints(case, id_map, start_id=0)
 
         assert result is not None
         for c in result[0]:
@@ -1009,20 +911,17 @@ class TestConvertAgrintConstraints:
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
 
-        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        case = _make_minimal_case(
+            tmp_path, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
-        with (
-            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
-            patch(
-                "cobre_bridge.converters.constraints._build_line_id_map",
-                return_value={(1, 3): 0},
-            ),
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 3): 0},
         ):
-            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
-            result_0 = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
-            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
-            result_5 = convert_agrint_constraints(nw, id_map, start_id=5)  # type: ignore[arg-type]
+            result_0 = convert_agrint_constraints(case, id_map, start_id=0)
+            result_5 = convert_agrint_constraints(case, id_map, start_id=5)
 
         assert result_0 is not None and result_5 is not None
         ids_0 = [c["id"] for c in result_0[0]]
@@ -1035,18 +934,16 @@ class TestConvertAgrintConstraints:
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
 
-        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        case = _make_minimal_case(
+            tmp_path, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
-        with (
-            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
-            patch(
-                "cobre_bridge.converters.constraints._build_line_id_map",
-                return_value={(1, 3): 0},
-            ),
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 3): 0},
         ):
-            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
-            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+            result = convert_agrint_constraints(case, id_map, start_id=0)
 
         assert result is not None
         _, bounds_table = result
@@ -1082,24 +979,20 @@ class TestConvertAgrintConstraints:
         agrint_path.write_text(content, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
 
-        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
-        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
-
         dger = MagicMock()
         dger.mes_inicio_estudo = 1
         dger.ano_inicio_estudo = 2020
         dger.num_anos_estudo = 1  # study_months = 12 (Jan–Dec 2020)
         dger.num_anos_pos_estudo = 1  # post-study 2021 → stages 12–23
 
-        with (
-            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
-            patch(
-                "cobre_bridge.converters.constraints._build_line_id_map",
-                return_value={(1, 3): 0},
-            ),
+        case = _make_minimal_case(tmp_path, agrint=agrint_path, dger=dger)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 3): 0},
         ):
-            mock_dger_cls.read.return_value = dger
-            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+            result = convert_agrint_constraints(case, id_map, start_id=0)
 
         assert result is not None
         _, bounds = result
@@ -1141,18 +1034,16 @@ class TestConvertAgrintConstraints:
         )
         (tmp_path / "dger.dat").touch()
 
-        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        case = _make_minimal_case(
+            tmp_path, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
         id_map = NewaveIdMap(subsystem_ids=[1, 3, 11], hydro_codes=[], thermal_codes=[])
 
-        with (
-            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
-            patch(
-                "cobre_bridge.converters.constraints._build_line_id_map",
-                return_value={(1, 11): 3, (3, 11): 4},
-            ),
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 11): 3, (3, 11): 4},
         ):
-            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
-            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+            result = convert_agrint_constraints(case, id_map, start_id=0)
 
         assert result is not None
         constraints, _ = result
@@ -1179,18 +1070,16 @@ class TestConvertAgrintConstraints:
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
 
-        nw = _make_minimal_nw_files(tmp_path, agrint=agrint_path)
+        case = _make_minimal_case(
+            tmp_path, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
-        with (
-            patch("cobre_bridge.converters.constraints.Dger") as mock_dger_cls,
-            patch(
-                "cobre_bridge.converters.constraints._build_line_id_map",
-                return_value={(1, 3): 0},
-            ),
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 3): 0},
         ):
-            mock_dger_cls.read.return_value = _make_dger_mock_for_agrint()
-            result = convert_agrint_constraints(nw, id_map, start_id=0)  # type: ignore[arg-type]
+            result = convert_agrint_constraints(case, id_map, start_id=0)
 
         assert result is not None
         # Group 1: flow(1->3), canonical (1,3) => line_direct, no leading '-'.
@@ -1207,14 +1096,14 @@ class TestConvertAgrintConstraints:
 
     def test_example_agrint_produces_constraints(self) -> None:
         """Integration test against the example AGRINT.DAT file."""
-        pair = _example_nw_files_and_id_map()
+        pair = _example_case_and_id_map()
         if pair is None:
             pytest.skip("example/newave not available")
-        nw_files, id_map = pair
-        if nw_files.agrint is None:
+        case, id_map = pair
+        if case.files.agrint is None:
             pytest.skip("AGRINT.DAT not present in example")
 
-        result = convert_agrint_constraints(nw_files, id_map, start_id=0)
+        result = convert_agrint_constraints(case, id_map, start_id=0)
         assert result is not None
         constraints, bounds_table = result
         assert len(constraints) > 0
@@ -1225,14 +1114,14 @@ class TestConvertAgrintConstraints:
 
     def test_example_agrint_bounds_are_positive(self) -> None:
         """All bounds emitted by the example AGRINT file must be non-negative."""
-        pair = _example_nw_files_and_id_map()
+        pair = _example_case_and_id_map()
         if pair is None:
             pytest.skip("example/newave not available")
-        nw_files, id_map = pair
-        if nw_files.agrint is None:
+        case, id_map = pair
+        if case.files.agrint is None:
             pytest.skip("AGRINT.DAT not present in example")
 
-        result = convert_agrint_constraints(nw_files, id_map, start_id=0)
+        result = convert_agrint_constraints(case, id_map, start_id=0)
         assert result is not None
         _, bounds_table = result
         bounds = bounds_table.column("bound").to_pylist()
@@ -1271,3 +1160,37 @@ class TestConstraintResultTypes:
         assert r.bounds is bounds
         constraints, b = r  # legacy unpack
         assert constraints == [{"id": 0}]
+
+
+class TestVminopEnergyFactor:
+    """Guard the VminOP unit conversion: ρ_acum·hm³ → MWmonth must use each
+    stage's *real* month length, not NEWAVE's fixed 730 h.
+
+    Regression for the security-curve bug: leaving the VminOP LHS in
+    ρ_acum·hm³ (≈ 2.628× true MWmonth) while cobre prices the slack
+    ``× block_hours`` made the effective curve-violation penalty exceed the
+    deficit cost, so cobre deficited instead of drawing reservoirs down.
+    """
+
+    def test_factor_matches_real_month_hours(self) -> None:
+        # Study starting Sep 2024 (the example horizon).
+        #   stage 0 = Sep 2024 (30 d = 720 h)
+        #   stage 3 = Dec 2024 (31 d = 744 h)
+        #   stage 5 = Feb 2025 (28 d = 672 h)
+        assert _vminop_energy_factor(2024, 9, 0) == pytest.approx(720 * 3600 / 1e6)
+        assert _vminop_energy_factor(2024, 9, 3) == pytest.approx(744 * 3600 / 1e6)
+        assert _vminop_energy_factor(2024, 9, 5) == pytest.approx(672 * 3600 / 1e6)
+
+    def test_factor_differs_from_fixed_constant_off_730(self) -> None:
+        # Short/long months must NOT use the fixed 730 h constant — that was the
+        # bug. February (672 h) is ~8% below C_M3S2HM3.
+        feb = _vminop_energy_factor(2024, 9, 5)
+        assert feb != pytest.approx(C_M3S2HM3)
+        assert feb / C_M3S2HM3 == pytest.approx(672 / 730)
+
+    def test_factor_equals_constant_for_730h_month(self) -> None:
+        # A hypothetical 730 h month (NEWAVE's convention) reproduces C_M3S2HM3.
+        # No real calendar month is 730 h, so assert the relationship holds via
+        # the month-hours ratio instead (April = 30 d = 720 h).
+        apr = _vminop_energy_factor(2025, 4, 0)
+        assert apr == pytest.approx(C_M3S2HM3 * 720 / 730)

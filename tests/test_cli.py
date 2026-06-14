@@ -216,13 +216,18 @@ _FAKE_HYDRO_ENERGY_PRODUCTIVITY_TABLE = pa.table(
 
 
 def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type-arg]
-    """Return patch context managers for all converter functions and _build_id_map."""
+    """Return patch context managers for all converter functions.
+
+    The parsed case is mocked at ``NewaveCase.from_directory``; its ``id_map``
+    is the supplied ``fake_id_map`` (the pipeline now reads ``case.id_map``).
+    """
+    fake_case = MagicMock()
+    fake_case.id_map = fake_id_map
     return [
         patch(
-            "cobre_bridge.pipeline.NewaveFiles.from_directory",
-            return_value=MagicMock(),
+            "cobre_bridge.pipeline.NewaveCase.from_directory",
+            return_value=fake_case,
         ),
-        patch("cobre_bridge.pipeline._build_id_map", return_value=fake_id_map),
         patch(
             "cobre_bridge.pipeline.hydro_conv.convert_hydros",
             return_value=_FAKE_HYDROS,
@@ -498,7 +503,7 @@ class TestConvertNewaweCasePipeline:
         dst = tmp_path / "cobre_case"
 
         with patch(
-            "cobre_bridge.pipeline.NewaveFiles.from_directory",
+            "cobre_bridge.pipeline.NewaveCase.from_directory",
             side_effect=FileNotFoundError(
                 f"Required NEWAVE file not found in {src}: hidr.dat"
             ),
@@ -545,6 +550,16 @@ class TestCliExitCodes:
         result = _run_cli_subprocess("convert", "newave", str(src), str(dst))
         assert result.returncode == 1
         assert "hidr.dat" in result.stderr
+
+    def test_convert_without_source_exits_nonzero(self) -> None:
+        """``convert`` with no SOURCE must error (exit 2), not silently succeed."""
+        result = _run_cli_subprocess("convert")
+        assert result.returncode == 2
+
+    def test_compare_without_source_exits_nonzero(self) -> None:
+        """``compare`` with no SOURCE must error (exit 2), not silently succeed."""
+        result = _run_cli_subprocess("compare")
+        assert result.returncode == 2
 
 
 class TestCliInProcess:
@@ -635,6 +650,479 @@ class TestCliInProcess:
         assert "60 stages" in stdout
 
 
+class TestCompareDatasetWiring:
+    """ticket-008: compare handlers sourced from the canonical dataset.
+
+    Patch the heavy readers (``NewaveCase``, alignment, ``compare_*``) so the
+    real dataset build + ``write_artifacts`` + dataset-driven printers run
+    without NEWAVE/Cobre I/O.
+    """
+
+    def _invoke_main(
+        self,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _results() -> object:
+        from cobre_bridge.comparators.results import ResultComparison
+
+        return [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=110.0,
+                abs_diff=10.0,
+                rel_diff=0.1,
+            ),
+        ]
+
+    @staticmethod
+    def _bounds(*, all_match: bool) -> object:
+        from cobre_bridge.comparators.bounds import BoundComparison
+
+        rows = [
+            BoundComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="storage_max",
+                newave_value=29000.0,
+                cobre_value=29000.0,
+                diff=0.0,
+                match=True,
+            ),
+        ]
+        if not all_match:
+            rows.append(
+                BoundComparison(
+                    entity_type="thermal",
+                    entity_name="ANGRA",
+                    newave_code=30,
+                    cobre_id=1,
+                    stage=0,
+                    variable="generation_max",
+                    newave_value=1350.0,
+                    cobre_value=1300.0,
+                    diff=50.0,
+                    match=False,
+                )
+            )
+        return rows
+
+    def _patch_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.results import PercentileData
+
+        monkeypatch.setattr(
+            "cobre_bridge.case.NewaveCase.from_directory",
+            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._load_lines_json",
+            lambda _dir: [],
+        )
+        # ``compare_results`` now returns the canonical ``ComparisonDataset``;
+        # build it from the same fixture rows so the CLI path is exercised.
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            lambda **k: build_results_dataset(self._results(), PercentileData(), 1e-2),
+        )
+
+    @staticmethod
+    def _make_cobre_dir_with_bounds(tmp_path: Path, name: str) -> Path:
+        """Create a Cobre output dir containing the required bounds.parquet stub.
+
+        The bounds handler validates ``training/dictionaries/bounds.parquet``
+        exists before running; the file content is unused here because
+        ``compare_bounds`` is patched.
+        """
+        import pyarrow.parquet as pq
+
+        cobre_dir = tmp_path / name
+        bounds_path = cobre_dir / "training" / "dictionaries" / "bounds.parquet"
+        bounds_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({"x": pa.array([0], pa.int32())}), bounds_path)
+        return cobre_dir
+
+    def _patch_bounds(
+        self, monkeypatch: pytest.MonkeyPatch, *, all_match: bool
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.case.NewaveCase.from_directory",
+            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._load_lines_json",
+            lambda _dir: [],
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.bounds.compare_bounds",
+            lambda **k: self._bounds(all_match=all_match),
+        )
+
+    def test_compare_results_emits_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        manifest_path = cobre_dir / "comparison_artifacts" / "comparison.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["command"] == "compare results"
+        assert "Artifacts written to" in stdout
+
+    def test_compare_results_artifacts_without_output_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`compare results` WITHOUT ``-o`` still writes artifacts and exits 0.
+
+        Guards the curated-serialization contract: the bulky render-only
+        metadata (``results`` and the drained ``PercentileData`` frames) IS
+        stored in ``dataset.metadata`` but is listed in
+        ``RENDER_ONLY_METADATA_KEYS``, so the SAME dataset's ``to_dir`` (invoked
+        by ``write_artifacts``) skips it and does not choke on a non-JSON-native
+        value.
+        """
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        artifacts_dir = cobre_dir / "comparison_artifacts"
+        assert (artifacts_dir / "comparison.json").exists()
+        # to_dir round-trip artifacts prove metadata serialized cleanly.
+        assert (artifacts_dir / "comparison.parquet").exists()
+        assert (artifacts_dir / "metadata.json").exists()
+        assert "Artifacts written to" in stdout
+
+    def test_compare_bounds_emits_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_bounds(monkeypatch, all_match=True)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, _, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        manifest_path = cobre_dir / "comparison_artifacts" / "comparison.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["command"] == "compare bounds"
+
+    def test_compare_bounds_exit_code_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Full match -> exit 0.
+        self._patch_bounds(monkeypatch, all_match=True)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre_match")
+        code_match, _, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+        assert code_match == 0
+
+        # Any mismatch -> exit 1.
+        self._patch_bounds(monkeypatch, all_match=False)
+        cobre_dir2 = self._make_cobre_dir_with_bounds(tmp_path, "cobre_mismatch")
+        code_mismatch, _, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir2)],
+            monkeypatch,
+        )
+        assert code_mismatch == 1
+
+    def test_load_compare_context_missing_newave_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ticket-015: bounds path gains FileNotFoundError -> exit 1 hardening.
+
+        A missing NEWAVE case directory now exits 1 with a clean stderr
+        message (via the shared ``_load_compare_context`` helper) instead of
+        surfacing an uncaught traceback. Results already had this; bounds gains
+        it in this refactor.
+        """
+
+        def _raise_missing(cls: object, _dir: Path) -> object:
+            raise FileNotFoundError("caso.dat not found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.case.NewaveCase.from_directory",
+            classmethod(_raise_missing),
+        )
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, _, stderr = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 1
+        assert "Error: caso.dat not found" in stderr
+
+    def test_compare_results_html_tabs_intact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge.comparators.html_report import COMPARISON_TABS
+
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, _ = self._invoke_main(
+            [
+                "compare",
+                "results",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "html",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        report_path = cobre_dir / "comparison_artifacts" / "report.html"
+        assert report_path.exists()
+        html = report_path.read_text(encoding="utf-8")
+        for tab_id, _label in COMPARISON_TABS:
+            assert tab_id in html
+
+    def test_compare_results_default_writes_parquet_no_html(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No ``--format``: default writes queryable artifacts, no HTML."""
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, _ = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        artifacts_dir = cobre_dir / "comparison_artifacts"
+        assert (artifacts_dir / "comparison.json").exists()
+        assert (artifacts_dir / "comparison.parquet").exists()
+        assert (artifacts_dir / "summary.json").exists()
+        assert not (artifacts_dir / "report.html").exists()
+
+    def test_compare_results_format_console_only_no_data(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--format console``: only the manifest is written (opt out of data)."""
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, _ = self._invoke_main(
+            [
+                "compare",
+                "results",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "console",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        artifacts_dir = cobre_dir / "comparison_artifacts"
+        assert (artifacts_dir / "comparison.json").exists()
+        assert not (artifacts_dir / "comparison.parquet").exists()
+
+    def test_compare_results_format_parquet_json_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--format parquet,json``: queryable artifacts present, exit 0."""
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, _ = self._invoke_main(
+            [
+                "compare",
+                "results",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "parquet,json",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        artifacts_dir = cobre_dir / "comparison_artifacts"
+        assert (artifacts_dir / "comparison.parquet").exists()
+        assert (artifacts_dir / "summary.json").exists()
+
+    def test_compare_bounds_html_warns_and_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--format html`` on bounds: stderr warns, no HTML, exit 0 on match."""
+        self._patch_bounds(monkeypatch, all_match=True)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, _, stderr = self._invoke_main(
+            [
+                "compare",
+                "bounds",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "html",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        assert "not supported for 'compare bounds'" in stderr
+        assert not (cobre_dir / "comparison_artifacts" / "report.html").exists()
+
+    def test_compare_unknown_format_exits_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--format bogus``: stderr names the bad token, exit 2."""
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, _, stderr = self._invoke_main(
+            [
+                "compare",
+                "results",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--format",
+                "bogus",
+            ],
+            monkeypatch,
+        )
+
+        assert code == 2
+        assert "bogus" in stderr
+
+    def test_compare_results_help_omits_output_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``compare results --help`` lists --format/--out-dir, not --output/-o."""
+        code, stdout, _ = self._invoke_main(
+            ["compare", "results", "--help"],
+            monkeypatch,
+        )
+
+        assert code == 0
+        assert "--format" in stdout
+        assert "--out-dir" in stdout
+        assert "--output" not in stdout
+        assert "-o " not in stdout
+
+    def test_compare_results_artifact_oserror_does_not_change_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_results(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("cobre_bridge.comparators.export.write_artifacts", _boom)
+
+        code, _, stderr = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        assert code == 0
+        assert "failed to write artifacts" in stderr
+
+
+class TestParseFormats:
+    """ticket-016: ``_parse_formats`` token parsing and validation."""
+
+    def test_parse_formats_default(self) -> None:
+        from cobre_bridge.cli import _parse_formats
+
+        assert _parse_formats(None) == {"console", "parquet", "json"}
+
+    def test_parse_formats_comma_and_repeat(self) -> None:
+        from cobre_bridge.cli import _parse_formats
+
+        assert _parse_formats(["csv,json", "parquet"]) == {
+            "csv",
+            "json",
+            "parquet",
+        }
+
+    def test_parse_formats_all_expands(self) -> None:
+        from cobre_bridge.cli import _parse_formats
+
+        assert _parse_formats(["all"]) == {
+            "console",
+            "html",
+            "csv",
+            "parquet",
+            "json",
+        }
+
+    def test_parse_formats_unknown_raises(self) -> None:
+        from cobre_bridge.cli import _parse_formats
+
+        with pytest.raises(ValueError, match="bogus"):
+            _parse_formats(["bogus"])
+
+
 # ---------------------------------------------------------------------------
 # Pipeline integration tests for inflow_history.parquet
 # ---------------------------------------------------------------------------
@@ -713,6 +1201,33 @@ class TestConversionWarningCapture:
         # The capture handler must be removed in the finally block, leaving the
         # package logger's handler list exactly as it was.
         assert pkg_logger.handlers == handlers_before
+
+    def test_partial_outputs_cleared_on_failure(self, tmp_path: Path) -> None:
+        """A failure partway through the write phase must not leave a partial,
+        valid-looking case behind: the known pipeline outputs are removed so a
+        plain (no --force) re-run is not refused as non-empty."""
+        from cobre_bridge import pipeline
+        from cobre_bridge.pipeline import convert_newave_case
+
+        dst = tmp_path / "dst"
+
+        def fake_impl(src: Path, d: Path) -> object:
+            # Simulate a write phase that got partway: a top-level JSON and a
+            # system/ subdir were written before the failure.
+            (d / "system").mkdir(parents=True, exist_ok=True)
+            (d / "config.json").write_text("{}")
+            (d / "system" / "hydros.json").write_text("{}")
+            raise RuntimeError("disk full mid-write")
+
+        with patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl):
+            with pytest.raises(RuntimeError, match="disk full"):
+                convert_newave_case(tmp_path, dst)
+
+        # No pipeline outputs survive — dst holds no half-written case.
+        assert not (dst / "config.json").exists()
+        assert not (dst / "system").exists()
+        # dst itself may remain but must be empty, so a no-force re-run proceeds.
+        assert not any(dst.iterdir())
 
 
 def test_constraint_id_allocator_advances_contiguously() -> None:

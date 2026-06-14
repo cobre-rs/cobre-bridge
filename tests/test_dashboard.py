@@ -1555,3 +1555,40 @@ def test_tab_registry_contains_all_modules() -> None:
         assert module.TAB_ID.startswith("tab-"), (
             f"{module}.TAB_ID = {module.TAB_ID!r} does not start with 'tab-'"
         )
+
+
+# ---------------------------------------------------------------------------
+# Section loaders — DashboardData.load is composed from cohesive, independently
+# callable loaders rather than one monolithic block.
+# ---------------------------------------------------------------------------
+
+
+class TestSectionLoaders:
+    def test_loaders_are_independently_callable(self, _v2_case: Path) -> None:
+        from cobre_bridge.dashboard.data import (
+            load_entity_metadata,
+            load_scenario_inputs,
+            load_temporal_context,
+        )
+
+        temporal = load_temporal_context(_v2_case)
+        assert temporal.stage_hours[0] == 420.0  # 120 + 300
+        assert temporal.discount_rate == 0.0
+
+        entities = load_entity_metadata(_v2_case)
+        assert isinstance(entities.names, dict)
+        assert isinstance(entities.hydro_meta, dict)
+
+        scenario = load_scenario_inputs(_v2_case)
+        assert isinstance(scenario.load_factors_list, list)
+
+    def test_loaders_compose_to_full_aggregate(self, _v2_case: Path) -> None:
+        from cobre_bridge.dashboard.data import DashboardData, load_temporal_context
+
+        data = DashboardData.load(_v2_case)
+        temporal = load_temporal_context(_v2_case)
+        # Aggregate temporal fields come straight from the section loader.
+        assert data.stage_hours == temporal.stage_hours
+        assert data.block_hours == temporal.block_hours
+        assert data.discount_rate == temporal.discount_rate
+        assert data.line_meta == temporal.line_meta

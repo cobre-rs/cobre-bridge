@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.8.0"
+version = "0.8.1"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -25,10 +25,12 @@ dev = [
     "ruff",
 ]
 validation = [
-    # >=0.8.0: tracks the cobre v0.8 schema line read by `convert --validate`.
+    # >=0.8.1,<0.9: paired with the cobre / cobre-python 0.8.1 line used to
+    # validate this release; the upper bound keeps `convert --validate` on the
+    # cobre v0.8 schema (a 0.9 schema bump must be opted into deliberately).
     # (>=0.7.0 first honoured non-zero anticipated-thermal pre-horizon seeds via
     # past_anticipated_commitments.values_mw in the LP fishing equality.)
-    "cobre-python>=0.8.0",
+    "cobre-python>=0.8.1,<0.9",
 ]
 
 [project.scripts]

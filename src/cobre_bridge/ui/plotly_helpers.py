@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import plotly.graph_objects as go
 
@@ -19,6 +20,72 @@ LEGEND_DEFAULTS: dict = dict(
 )
 
 MARGIN_DEFAULTS: dict = dict(l=60, r=30, t=60, b=50)
+
+
+@dataclass(frozen=True, slots=True)
+class FacetPanel:
+    """An immutable subplot-domain record for one facet of a small-multiples grid.
+
+    ``x_domain``/``y_domain`` are 2-element ``list[float]`` ``[lo, hi]`` Plotly
+    axis-domain fractions, rounded to the helper's ``ndigits``. They are lists
+    (not tuples) because ``list[float]`` matches the Plotly layout-dict
+    expectation and preserves type identity with the legacy inline
+    ``[round(x0, 3), round(x1, 3)]`` list literals fed into
+    ``layout["xaxis"]["domain"]`` (this is a type-identity concern, NOT a
+    JSON-serialization difference: ``json.dumps`` emits tuples and lists alike).
+    """
+
+    row: int
+    col: int
+    x_domain: list[float]
+    y_domain: list[float]
+
+
+def facet_grid(
+    n: int,
+    *,
+    ncols: int = 2,
+    row_gap: float = 0.06,
+    col_gap: float = 0.05,
+    min_row_h: float = 0.001,
+    ndigits: int = 3,
+) -> list[FacetPanel]:
+    """Compute Plotly subplot domains for an ``n``-panel faceted grid.
+
+    Reproduces the gap-based small-multiples layout arithmetic that the chart
+    functions in ``comparators.charts`` hand-copy: ``nrows`` rows of ``ncols``
+    columns, with ``row_gap``/``col_gap`` fractional gaps between panels and a
+    ``min_row_h`` floor on row height. Returns one :class:`FacetPanel` per panel
+    in index order (``0..n-1``); ``n == 0`` returns ``[]``.
+
+    The arithmetic and rounding are byte-identical to the legacy inline code:
+    intermediates are never rounded, only the final domain lists are rounded to
+    ``ndigits``, and the single ``max(..., min_row_h)`` clamp covers both the
+    clamped grids (``min_row_h=0.001``) and the unclamped vertical-stack chart
+    (``min_row_h=0.0``). The ``-0.0`` that ``round`` can yield is preserved.
+    """
+    if n == 0:
+        return []
+    nrows = (n + ncols - 1) // ncols
+    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, min_row_h)
+    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+    panels: list[FacetPanel] = []
+    for idx in range(n):
+        row_i = idx // ncols
+        col_i = idx % ncols
+        x0 = col_i * (col_w + col_gap)
+        x1 = x0 + col_w
+        y1 = 1.0 - row_i * (row_h + row_gap)
+        y0 = y1 - row_h
+        panels.append(
+            FacetPanel(
+                row=row_i,
+                col=col_i,
+                x_domain=[round(x0, ndigits), round(x1, ndigits)],
+                y_domain=[round(y0, ndigits), round(y1, ndigits)],
+            )
+        )
+    return panels
 
 
 def stage_x_labels(stage_ids: Sequence[int], labels: dict[int, str]) -> list[str]:

@@ -6,11 +6,18 @@ make_chart_card, compute_npv_costs, group_costs, and compute_cost_summary.
 
 from __future__ import annotations
 
+import dataclasses
+import math
+import re
+from pathlib import Path
+
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 import pytest
 
+from cobre_bridge.comparators import charts as _cmp_charts
+from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.dashboard.chart_helpers import (
     COST_GROUP_COLORS,
     COST_GROUPS,
@@ -630,3 +637,1057 @@ def test_cost_group_colors_keys() -> None:
         assert group_name in COST_GROUP_COLORS, (
             f"COST_GROUP_COLORS is missing an entry for group '{group_name}'"
         )
+
+
+# ---------------------------------------------------------------------------
+# ticket-009: comparators.charts golden-string parity
+#
+# These tests guard that re-pointing the per-stage / percentile-band
+# aggregation in ``cobre_bridge.comparators.charts`` onto the analyze-layer
+# primitives (``analyze.aggregate_percentile_band`` /
+# ``per_stage_sum_from_results`` / ``per_stage_sum_from_frame``) leaves the
+# rendered HTML character-for-character identical.
+#
+# The golden files under ``tests/golden/`` were captured from the LEGACY
+# (pre-re-point) ``charts.py`` on the fixtures below. The only non-deterministic
+# part of the output is the random ``chart-<hex>`` div id emitted by
+# ``plotly_div`` (a fresh uuid per render, unrelated to this ticket); it is
+# normalised away by ``_strip_chart_id`` before comparison so the assertion
+# tests the numeric/structural payload only.
+#
+# To REGENERATE the goldens (only when an intentional, reviewed output change is
+# made): check out the legacy ``charts.py`` (``git show HEAD:...`` or stash the
+# re-point), then for each chart below write
+# ``charts.<fn>(...).`` to ``tests/golden/<fn>.html`` and restore your edits.
+# Equivalently, since the re-point is behaviour-preserving, rendering with the
+# current code and writing the result reproduces byte-identical goldens.
+# ---------------------------------------------------------------------------
+
+_GOLDEN_DIR = Path(__file__).parent / "golden"
+
+
+def _strip_chart_id(html: str) -> str:
+    """Normalise the random ``chart-<hex>`` div id (uuid per render)."""
+    return re.sub(r"chart-[0-9a-f]+", "chart-XXXX", html)
+
+
+def _rc(
+    entity_type: str,
+    name: str,
+    cobre_id: int,
+    stage: int,
+    variable: str,
+    nw: float,
+    cb: float,
+) -> ResultComparison:
+    abs_diff = abs(nw - cb)
+    rel = abs_diff / abs(nw) if abs(nw) > 1e-10 else None
+    return ResultComparison(
+        entity_type=entity_type,
+        entity_name=name,
+        newave_code=cobre_id + 10,
+        cobre_id=cobre_id,
+        stage=stage,
+        variable=variable,
+        newave_value=nw,
+        cobre_value=cb,
+        abs_diff=abs_diff,
+        rel_diff=rel,
+    )
+
+
+@pytest.fixture()
+def parity_results() -> list[ResultComparison]:
+    """Hydro/thermal/bus comparison rows spanning two stages."""
+    return [
+        _rc("hydro", "H1", 0, 1, "storage_final_hm3", 100.0, 90.0),
+        _rc("hydro", "H2", 1, 1, "storage_final_hm3", 200.0, 180.0),
+        _rc("hydro", "H1", 0, 2, "storage_final_hm3", 110.0, 95.0),
+        _rc("hydro", "H2", 1, 2, "storage_final_hm3", 210.0, 185.0),
+        _rc("thermal", "T1", 5, 1, "generation_mw", 50.0, 45.0),
+        _rc("thermal", "T2", 6, 1, "generation_mw", 60.0, 55.0),
+        _rc("thermal", "T1", 5, 2, "generation_mw", 52.0, 47.0),
+        _rc("bus", "B1", 3, 1, "marginal_cost", 70.0, 65.0),
+        _rc("bus", "B2", 4, 1, "marginal_cost", 80.0, 75.0),
+        _rc("bus", "B1", 3, 2, "marginal_cost", 72.0, 67.0),
+    ]
+
+
+@pytest.fixture()
+def hydro_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1, 0, 1],
+            "stage_id": [1, 1, 2, 2],
+            "storage_final_hm3_p10": [80.0, 160.0, 85.0, 165.0],
+            "storage_final_hm3_p50": [90.0, 180.0, 95.0, 185.0],
+            "storage_final_hm3_p90": [100.0, 200.0, 105.0, 205.0],
+        }
+    )
+
+
+@pytest.fixture()
+def thermal_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [5, 6, 5],
+            "stage_id": [1, 1, 2],
+            "generation_mw_p10": [40.0, 50.0, 42.0],
+            "generation_mw_p50": [45.0, 55.0, 47.0],
+            "generation_mw_p90": [50.0, 60.0, 52.0],
+        }
+    )
+
+
+@pytest.fixture()
+def bus_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [3, 4, 3],
+            "stage_id": [1, 1, 2],
+            "marginal_cost_p10": [60.0, 70.0, 62.0],
+            "marginal_cost_p50": [65.0, 75.0, 67.0],
+            "marginal_cost_p90": [70.0, 80.0, 72.0],
+        }
+    )
+
+
+def test_thermal_generation_chart_html_matches_golden(
+    parity_results: list[ResultComparison],
+    thermal_pct: pl.DataFrame,
+) -> None:
+    html = _cmp_charts.thermal_generation_chart(parity_results, thermal_pct)
+    golden = (_GOLDEN_DIR / "thermal_generation_chart.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+def test_hydro_aggregate_chart_html_matches_golden(
+    parity_results: list[ResultComparison],
+    hydro_pct: pl.DataFrame,
+) -> None:
+    html = _cmp_charts.hydro_aggregate_chart(
+        parity_results, "storage_final_hm3", "Hydro Storage", hydro_pct
+    )
+    golden = (_GOLDEN_DIR / "hydro_aggregate_chart.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+def test_system_comparison_chart_html_matches_golden(
+    parity_results: list[ResultComparison],
+    bus_pct: pl.DataFrame,
+) -> None:
+    html = _cmp_charts.system_comparison_chart(
+        parity_results, "marginal_cost", "Bus Marginal Cost", bus_pct
+    )
+    golden = (_GOLDEN_DIR / "system_comparison_chart.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-010: per-bus roll-up + per-plant percentile golden-string parity
+#
+# Guards that re-pointing the per-bus aggregation (hydro_per_bus_chart,
+# hydro_slack_per_bus_chart) and the per-plant percentile extraction
+# (_enrich_with_percentiles, used by the hydro/thermal detail tabs) onto the
+# analyze-layer functions leaves the rendered HTML character-for-character
+# identical. The golden files were captured from the LEGACY (pre-re-point)
+# charts.py on the fixtures below; the random chart-<hex> div id is normalised
+# away by _strip_chart_id before comparison.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def per_bus_results() -> list[ResultComparison]:
+    """Hydro/thermal rows over two stages and two non-fictitious buses.
+
+    Plant id 2 (H3) is owned by a NOFICT bus so the roll-up must drop it.
+    """
+    return [
+        _rc("hydro", "H1", 0, 1, "storage_final_hm3", 100.0, 90.0),
+        _rc("hydro", "H2", 1, 1, "storage_final_hm3", 200.0, 180.0),
+        _rc("hydro", "H1", 0, 2, "storage_final_hm3", 110.0, 95.0),
+        _rc("hydro", "H2", 1, 2, "storage_final_hm3", 210.0, 185.0),
+        _rc("hydro", "H3", 2, 1, "storage_final_hm3", 50.0, 48.0),
+        _rc("hydro", "H3", 2, 2, "storage_final_hm3", 55.0, 52.0),
+        _rc("hydro", "H1", 0, 1, "generation_mw", 30.0, 28.0),
+        _rc("hydro", "H1", 0, 2, "generation_mw", 32.0, 29.0),
+        _rc("thermal", "T1", 5, 1, "generation_mw", 50.0, 45.0),
+        _rc("thermal", "T2", 6, 1, "generation_mw", 60.0, 55.0),
+        _rc("thermal", "T1", 5, 2, "generation_mw", 52.0, 47.0),
+    ]
+
+
+@pytest.fixture()
+def per_bus_hydro_meta() -> dict[int, dict]:
+    return {
+        0: {"bus_id": 100},
+        1: {"bus_id": 101},
+        2: {"bus_id": 199},  # NOFICT
+    }
+
+
+@pytest.fixture()
+def per_bus_bus_meta() -> dict[int, dict]:
+    return {
+        100: {"name": "SUDESTE"},
+        101: {"name": "SUL"},
+        199: {"name": "NOFICT1"},
+    }
+
+
+@pytest.fixture()
+def per_bus_hydro_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1, 0, 1],
+            "stage_id": [1, 1, 2, 2],
+            "storage_final_hm3_p10": [80.0, 160.0, 85.0, 165.0],
+            "storage_final_hm3_p50": [90.0, 180.0, 95.0, 185.0],
+            "storage_final_hm3_p90": [100.0, 200.0, 105.0, 205.0],
+            "generation_mw_p10": [25.0, 0.0, 26.0, 0.0],
+            "generation_mw_p50": [28.0, 0.0, 29.0, 0.0],
+            "generation_mw_p90": [31.0, 0.0, 33.0, 0.0],
+        }
+    )
+
+
+@pytest.fixture()
+def slack_cobre_hydro() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1, 0, 1, 2],
+            "stage_id": [1, 1, 2, 2, 1],
+            "water_withdrawal_violation_pos_m3s": [5.0, 3.0, 6.0, 4.0, 9.0],
+        }
+    )
+
+
+@pytest.fixture()
+def slack_nw() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1, 0, 1],
+            "stage_id": [1, 1, 2, 2],
+            "water_withdrawal_violation_pos_m3s": [4.5, 2.5, 5.5, 3.5],
+        }
+    )
+
+
+@pytest.fixture()
+def slack_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1, 0, 1],
+            "stage_id": [1, 1, 2, 2],
+            "water_withdrawal_violation_pos_m3s_p10": [3.0, 2.0, 4.0, 3.0],
+            "water_withdrawal_violation_pos_m3s_p90": [7.0, 5.0, 8.0, 6.0],
+        }
+    )
+
+
+@pytest.fixture()
+def detail_cobre_hydro() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 0, 1, 1],
+            "stage_id": [1, 2, 1, 2],
+            "stored_energy_initial_mwh": [1000.0, 1100.0, 2000.0, 2100.0],
+            "stored_energy_final_mwh": [900.0, 1000.0, 1900.0, 2000.0],
+            "water_withdrawal_violation_pos_m3s": [5.0, 6.0, 3.0, 4.0],
+        }
+    )
+
+
+def test_hydro_per_bus_chart_html_matches_golden(
+    per_bus_results: list[ResultComparison],
+    per_bus_hydro_pct: pl.DataFrame,
+    per_bus_hydro_meta: dict[int, dict],
+    per_bus_bus_meta: dict[int, dict],
+) -> None:
+    html = _cmp_charts.hydro_per_bus_chart(
+        per_bus_results,
+        "storage_final_hm3",
+        "Hydro Storage by Bus",
+        per_bus_hydro_pct,
+        per_bus_hydro_meta,
+        per_bus_bus_meta,
+    )
+    golden = (_GOLDEN_DIR / "hydro_per_bus_chart.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+def test_hydro_slack_per_bus_chart_html_matches_golden(
+    slack_cobre_hydro: pl.DataFrame,
+    slack_nw: pl.DataFrame,
+    slack_pct: pl.DataFrame,
+    per_bus_hydro_meta: dict[int, dict],
+    per_bus_bus_meta: dict[int, dict],
+) -> None:
+    html = _cmp_charts.hydro_slack_per_bus_chart(
+        slack_cobre_hydro,
+        slack_nw,
+        "water_withdrawal_violation_pos_m3s",
+        "Withdrawal Slack by Bus",
+        slack_pct,
+        per_bus_hydro_meta,
+        per_bus_bus_meta,
+        {0, 1, 2},
+    )
+    golden = (_GOLDEN_DIR / "hydro_slack_per_bus_chart.html").read_text(
+        encoding="utf-8"
+    )
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+@pytest.fixture()
+def line_summary_results() -> list[ResultComparison]:
+    """Three lines over two stages -> 3 panels -> multi-row 2-col grid."""
+    rows: list[ResultComparison] = []
+    specs = [
+        (0, "L1", [(1, 100.0, 95.0), (2, 110.0, 104.0)]),
+        (1, "L2", [(1, -50.0, -48.0), (2, -55.0, -52.0)]),
+        (2, "L3", [(1, 20.0, 18.0), (2, 25.0, 23.0)]),
+    ]
+    for cid, name, pts in specs:
+        for stage, nw, cb in pts:
+            rows.append(_rc("line", name, cid, stage, "net_flow_mw", nw, cb))
+    return rows
+
+
+@pytest.fixture()
+def line_summary_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 0, 1, 1, 2, 2],
+            "stage_id": [1, 2, 1, 2, 1, 2],
+            "net_flow_mw_p10": [80.0, 90.0, -60.0, -65.0, 15.0, 20.0],
+            "net_flow_mw_p90": [120.0, 130.0, -40.0, -45.0, 25.0, 30.0],
+        }
+    )
+
+
+@pytest.fixture()
+def line_summary_bounds() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "line_id": [0, 0, 1, 1, 2, 2],
+            "stage_id": [1, 2, 1, 2, 1, 2],
+            "direct_mw": [200.0, 200.0, 150.0, 150.0, 100.0, 100.0],
+            "reverse_mw": [180.0, 180.0, 120.0, 120.0, 90.0, 90.0],
+        }
+    )
+
+
+@pytest.fixture()
+def line_summary_meta() -> list[dict]:
+    return [
+        {"id": 0, "capacity": {"direct_mw": 200.0, "reverse_mw": 180.0}},
+        {"id": 1, "capacity": {"direct_mw": 150.0, "reverse_mw": 120.0}},
+        {"id": 2, "capacity": {"direct_mw": 100.0, "reverse_mw": 90.0}},
+    ]
+
+
+def test_line_summary_chart_html_matches_golden(
+    line_summary_results: list[ResultComparison],
+    line_summary_pct: pl.DataFrame,
+    line_summary_bounds: pd.DataFrame,
+    line_summary_meta: list[dict],
+) -> None:
+    html = _cmp_charts.line_summary_chart(
+        line_summary_results,
+        line_summary_pct,
+        line_summary_bounds,
+        line_summary_meta,
+    )
+    golden = (_GOLDEN_DIR / "line_summary_chart.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+def test_build_hydro_detail_tab_html_matches_golden(
+    per_bus_results: list[ResultComparison],
+    per_bus_hydro_pct: pl.DataFrame,
+    detail_cobre_hydro: pl.DataFrame,
+) -> None:
+    html = _cmp_charts.build_hydro_detail_tab(
+        per_bus_results,
+        per_bus_hydro_pct,
+        detail_cobre_hydro,
+    )
+    golden = (_GOLDEN_DIR / "build_hydro_detail_tab.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+def test_build_thermal_detail_tab_html_matches_golden(
+    per_bus_results: list[ResultComparison],
+    thermal_pct: pl.DataFrame,
+) -> None:
+    html = _cmp_charts.build_thermal_detail_tab(per_bus_results, thermal_pct)
+    golden = (_GOLDEN_DIR / "build_thermal_detail_tab.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-011: system/network draw-only golden-string parity
+#
+# Guards that re-pointing the Cobre-sum + NEWAVE-SIN fold (cobre_aggregate_chart),
+# the per-bus grouping + per-eid percentile lookup (system_per_bus_chart), and the
+# spillage nw/cb lookups (system_spillage_energy_chart) onto the analyze-layer
+# functions (cobre_sum_and_newave_sin / bus_groups_and_pct / spillage_lookups)
+# leaves the rendered HTML character-for-character identical. The golden files were
+# captured from the LEGACY (pre-re-point) charts.py on the fixtures below; the
+# random chart-<hex> div id is normalised away by _strip_chart_id.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def agg_cobre_hydro() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1, 0, 1],
+            "stage_id": [1, 1, 2, 2],
+            "stored_energy_final_mwh": [900.0, 1900.0, 1000.0, 2000.0],
+        }
+    )
+
+
+@pytest.fixture()
+def agg_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1, 0, 1],
+            "stage_id": [1, 1, 2, 2],
+            "stored_energy_final_mwh_p10": [850.0, 1850.0, 950.0, 1950.0],
+            "stored_energy_final_mwh_p90": [950.0, 1950.0, 1050.0, 2050.0],
+        }
+    )
+
+
+@pytest.fixture()
+def agg_nw_sin() -> pl.DataFrame:
+    # The middle row exercises the strip()/upper() filter on " earmf ".
+    return pl.DataFrame(
+        {
+            "newave_code": [0, 0, 0],
+            "stage": [2, 3, 4],
+            "variable": ["EARMF", " earmf ", "EARMF"],
+            "value": [3.0, 4.0, 5.0],
+        }
+    )
+
+
+def test_cobre_aggregate_chart_html_matches_golden(
+    agg_cobre_hydro: pl.DataFrame,
+    agg_pct: pl.DataFrame,
+    agg_nw_sin: pl.DataFrame,
+) -> None:
+    html = _cmp_charts.cobre_aggregate_chart(
+        agg_cobre_hydro,
+        "stored_energy_final_mwh",
+        "Stored Energy SIN",
+        "MWh",
+        agg_pct,
+        nw_sin=agg_nw_sin,
+        nw_variable="EARMF",
+        nw_factor=730.0,
+        nw_offset=1,
+        matched_ids=None,
+    )
+    golden = (_GOLDEN_DIR / "cobre_aggregate_chart.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+@pytest.fixture()
+def per_bus_system_results() -> list[ResultComparison]:
+    return [
+        _rc("bus", "SUDESTE", 0, 1, "deficit_mw", 10.0, 9.0),
+        _rc("bus", "SUDESTE", 0, 2, "deficit_mw", 12.0, 11.0),
+        _rc("bus", "SUL", 1, 1, "deficit_mw", 5.0, 4.0),
+        _rc("bus", "SUL", 1, 2, "deficit_mw", 6.0, 5.0),
+        _rc("bus", "NORTE", 2, 1, "deficit_mw", 3.0, 2.0),
+        _rc("bus", "NORTE", 2, 2, "deficit_mw", 4.0, 3.0),
+    ]
+
+
+@pytest.fixture()
+def per_bus_system_pct() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 0, 1, 1, 2, 2],
+            "stage_id": [1, 2, 1, 2, 1, 2],
+            "deficit_mw_p10": [8.0, 10.0, 4.0, 5.0, 2.0, 3.0],
+            "deficit_mw_p90": [11.0, 13.0, 6.0, 7.0, 4.0, 5.0],
+        }
+    )
+
+
+def test_system_per_bus_chart_html_matches_golden(
+    per_bus_system_results: list[ResultComparison],
+    per_bus_system_pct: pl.DataFrame,
+) -> None:
+    html = _cmp_charts.system_per_bus_chart(
+        per_bus_system_results, "deficit_mw", "Bus Deficit", per_bus_system_pct
+    )
+    golden = (_GOLDEN_DIR / "system_per_bus_chart.html").read_text(encoding="utf-8")
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+@pytest.fixture()
+def spill_results() -> list[ResultComparison]:
+    return [
+        _rc("system_spillage", "SIN", 0, 1, "VERTOT", 100.0, 95.0),
+        _rc("system_spillage", "SIN", 0, 2, "VERTOT", 110.0, 105.0),
+        _rc("system_spillage", "SIN", 0, 1, "VERTcont", 60.0, 58.0),
+        _rc("system_spillage", "SIN", 0, 2, "VERTcont", 65.0, 63.0),
+        _rc("system_spillage", "SIN", 0, 1, "VERTfio", 40.0, 37.0),
+        _rc("system_spillage", "SIN", 0, 2, "VERTfio", 45.0, 42.0),
+    ]
+
+
+@pytest.fixture()
+def cobre_spill_energy() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "stage_id": [1, 2],
+            "total_mw": [96.0, 106.0],
+            "reservoir_mw": [58.0, 63.0],
+            "rorov_mw": [38.0, 43.0],
+        }
+    )
+
+
+def test_system_spillage_energy_chart_html_matches_golden(
+    spill_results: list[ResultComparison],
+    cobre_spill_energy: pl.DataFrame,
+) -> None:
+    html = _cmp_charts.system_spillage_energy_chart(spill_results, cobre_spill_energy)
+    golden = (_GOLDEN_DIR / "system_spillage_energy_chart.html").read_text(
+        encoding="utf-8"
+    )
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-012: build_comparison_report dataset-seam golden parity
+#
+# Guards that re-pointing ``build_comparison_report`` onto the
+# ``ComparisonDataset`` seam (it now takes the dataset plus explicit
+# ``results``/``pct`` keyword params) leaves the rendered HTML
+# character-for-character identical to the pre-change output.
+#
+# The golden ``tests/golden/build_comparison_report_full.html`` was captured
+# from the LEGACY ``build_comparison_report(results, pctiles)`` call on the
+# fixtures below; only the random ``chart-<hex>`` div id is normalised.
+# ---------------------------------------------------------------------------
+
+
+def _report_fixture_results() -> list[ResultComparison]:
+    """Representative comparison rows across entity types (golden fixture)."""
+    return [
+        ResultComparison(
+            entity_type="hydro",
+            entity_name="PLANT_A",
+            newave_code=1,
+            cobre_id=0,
+            stage=0,
+            variable="generation_mw",
+            newave_value=1200.0,
+            cobre_value=1195.0,
+            abs_diff=5.0,
+            rel_diff=0.004,
+        ),
+        ResultComparison(
+            entity_type="hydro",
+            entity_name="PLANT_A",
+            newave_code=1,
+            cobre_id=0,
+            stage=1,
+            variable="storage_final_hm3",
+            newave_value=4500.0,
+            cobre_value=4510.0,
+            abs_diff=10.0,
+            rel_diff=0.002,
+        ),
+        ResultComparison(
+            entity_type="thermal",
+            entity_name="GAS_A",
+            newave_code=10,
+            cobre_id=0,
+            stage=0,
+            variable="generation_mw",
+            newave_value=300.0,
+            cobre_value=298.0,
+            abs_diff=2.0,
+            rel_diff=0.007,
+        ),
+        ResultComparison(
+            entity_type="bus",
+            entity_name="SE",
+            newave_code=1,
+            cobre_id=0,
+            stage=0,
+            variable="spot_price",
+            newave_value=150.0,
+            cobre_value=152.0,
+            abs_diff=2.0,
+            rel_diff=0.013,
+        ),
+        ResultComparison(
+            entity_type="convergence",
+            entity_name="iteration_1",
+            newave_code=1,
+            cobre_id=1,
+            stage=1,
+            variable="lower_bound",
+            newave_value=50000.0,
+            cobre_value=50100.0,
+            abs_diff=100.0,
+            rel_diff=0.002,
+        ),
+    ]
+
+
+def _report_fixture_pct() -> PercentileData:
+    """PercentileData with non-empty hydro/thermal frames (golden fixture)."""
+    hydro_df = pl.DataFrame(
+        {
+            "entity_id": [0, 0, 0],
+            "stage_id": [0, 1, 2],
+            "generation_mw_p10": [1000.0, 1050.0, 1100.0],
+            "generation_mw_p50": [1200.0, 1250.0, 1300.0],
+            "generation_mw_p90": [1400.0, 1450.0, 1500.0],
+            "storage_final_hm3_p10": [4000.0, 4100.0, 4200.0],
+            "storage_final_hm3_p50": [4500.0, 4550.0, 4600.0],
+            "storage_final_hm3_p90": [5000.0, 5050.0, 5100.0],
+        }
+    )
+    thermal_df = pl.DataFrame(
+        {
+            "entity_id": [0, 0, 0],
+            "stage_id": [0, 1, 2],
+            "generation_mw_p10": [250.0, 260.0, 270.0],
+            "generation_mw_p50": [300.0, 310.0, 320.0],
+            "generation_mw_p90": [350.0, 360.0, 370.0],
+        }
+    )
+    return PercentileData(hydro=hydro_df, thermal=thermal_df)
+
+
+def test_build_comparison_report_dataset_golden() -> None:
+    """The dataset seam renders byte-identically to the legacy signature."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _report_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+
+    golden = (_GOLDEN_DIR / "build_comparison_report_full.html").read_text(
+        encoding="utf-8"
+    )
+    assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-013: per-tab metadata-drain golden parity
+#
+# Guards that re-pointing the Overview / System / Energy-Balance / Network tab
+# blocks of ``build_comparison_report`` to read their frame/dict/list/int args
+# from ``dataset.metadata`` named keys (instead of the monolithic ``pct``
+# object) leaves each tab's rendered HTML character-for-character identical. The
+# golden files were captured from the LEGACY (pre-re-point) report_builder on
+# the shared ``_report_fixture_results`` / ``_report_fixture_pct`` fixtures; the
+# random ``chart-<hex>`` div id is normalised away by ``_strip_chart_id``.
+# ---------------------------------------------------------------------------
+
+
+def _extract_tab_content(html: str, tab_id: str) -> str:
+    """Return the inner HTML of the ``<section id="{tab_id}">`` (== tab_contents)."""
+    pat = re.compile(
+        r'<section id="' + re.escape(tab_id) + r'" class="tab-content[^"]*">\n'
+        r"(.*?)\n</section>",
+        re.DOTALL,
+    )
+    match = pat.search(html)
+    assert match is not None, f"tab section {tab_id} not found in report HTML"
+    return match.group(1)
+
+
+@pytest.mark.parametrize(
+    ("tab_id", "golden_name"),
+    [
+        ("tab-overview", "report_tab_overview.html"),
+        ("tab-system", "report_tab_system.html"),
+        ("tab-balance", "report_tab_balance.html"),
+        ("tab-network", "report_tab_network.html"),
+    ],
+)
+def test_report_tab_matches_golden(tab_id: str, golden_name: str) -> None:
+    """Each migrated tab renders byte-identically after the metadata drain."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _report_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, tab_id)
+
+    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
+    assert _strip_chart_id(content) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-014: Hydro Operation / Hydro Details metadata-drain golden parity
+#
+# Guards that re-pointing the Hydro Operation and Hydro Details tab blocks of
+# ``build_comparison_report`` to read their frame/dict/int args from
+# ``dataset.metadata`` named keys (instead of the monolithic ``pct`` object)
+# leaves each tab's rendered HTML character-for-character identical. The golden
+# files were captured from the LEGACY (pre-re-point) report_builder on the
+# shared ``_report_fixture_results`` / ``_report_fixture_pct`` fixtures; the
+# random ``chart-<hex>`` div id is normalised away by ``_strip_chart_id``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tab_id", "golden_name"),
+    [
+        ("tab-hydro", "report_tab_hydro.html"),
+        ("tab-hydro-detail", "report_tab_hydro_detail.html"),
+    ],
+)
+def test_report_hydro_tab_matches_golden(tab_id: str, golden_name: str) -> None:
+    """Each hydro tab renders byte-identically after the metadata drain."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _report_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, tab_id)
+
+    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
+    assert _strip_chart_id(content) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-021: Thermal Operation / Thermal Details / Productivity drain parity
+#
+# Guards that re-pointing the Thermal Operation, Thermal Details and
+# Productivity tab blocks of ``build_comparison_report`` to read their frame
+# args from ``dataset.metadata`` named keys (``thermal`` /
+# ``productivity_detail``) instead of the monolithic ``pct`` object leaves each
+# tab's rendered HTML character-for-character identical. The golden files were
+# captured from the LEGACY (pre-re-point) report_builder on the shared
+# ``_report_fixture_results`` / ``_report_fixture_pct`` fixtures; the random
+# ``chart-<hex>`` div id is normalised away by ``_strip_chart_id``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tab_id", "golden_name"),
+    [
+        ("tab-thermal", "report_tab_thermal.html"),
+        ("tab-thermal-detail", "report_tab_thermal_detail.html"),
+        ("tab-productivity", "report_tab_productivity.html"),
+    ],
+)
+def test_report_thermal_productivity_tab_matches_golden(
+    tab_id: str, golden_name: str
+) -> None:
+    """Each thermal/productivity tab renders byte-identically after the drain."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _report_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, tab_id)
+
+    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
+    assert _strip_chart_id(content) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-022: Constraints / Performance metadata-drain golden parity
+#
+# Guards that re-pointing the Constraints and Performance tab blocks of
+# ``build_comparison_report`` to read their frame/list/int/float/dict args from
+# ``dataset.metadata`` named keys (``gc_constraints`` / ``gc_bounds`` /
+# ``gc_lhs_newave`` / ``gc_lhs_cobre`` / ``nw_max_stage`` / ``nw_tim_iterations``
+# / ``nw_tim_stages`` / ``cobre_training_seconds`` / ``cobre_iteration_timing``)
+# instead of the monolithic ``pct`` object leaves each tab's rendered HTML
+# character-for-character identical. The goldens were captured from the LEGACY
+# (pre-re-point) report_builder on the ``_constraints_perf_fixture_pct`` fixture
+# below; the random ``chart-<hex>`` div id is normalised by ``_strip_chart_id``.
+# ---------------------------------------------------------------------------
+
+
+def _constraints_perf_fixture_pct() -> PercentileData:
+    """PercentileData with non-empty constraint + performance frames."""
+    gc_constraints = [
+        {"id": 0, "name": "RE_1", "sense": ">="},
+        {"id": 1, "name": "AGRINT_1", "sense": ">="},
+    ]
+    gc_bounds = pl.DataFrame(
+        {
+            "constraint_id": [0, 0, 1, 1],
+            "stage_id": [0, 1, 0, 1],
+            "block_id": [0, 0, 0, 0],
+            "bound": [500.0, 520.0, 300.0, 310.0],
+        }
+    )
+    gc_lhs_newave = pl.DataFrame(
+        {
+            "constraint_id": [0, 0, 1, 1],
+            "stage_id": [0, 1, 0, 1],
+            "lhs_value": [510.0, 525.0, 305.0, 312.0],
+        }
+    )
+    gc_lhs_cobre = pl.DataFrame(
+        {
+            "constraint_id": [0, 0, 1, 1],
+            "stage_id": [0, 1, 0, 1],
+            "lhs_value": [508.0, 523.0, 304.0, 311.0],
+        }
+    )
+    nw_tim_iterations = pl.DataFrame(
+        {
+            "iteration": [1, 2, 3],
+            "forward_seconds": [10.0, 9.0, 8.5],
+            "backward_seconds": [20.0, 18.0, 17.0],
+            "total_seconds": [30.0, 27.0, 25.5],
+        }
+    )
+    cobre_iteration_timing = pl.DataFrame(
+        {
+            "iteration": [1, 2, 3],
+            "time_total_ms": [25000.0, 24000.0, 23000.0],
+            "time_forward_ms": [10000.0, 9500.0, 9000.0],
+            "time_backward_ms": [15000.0, 14500.0, 14000.0],
+        }
+    )
+    return PercentileData(
+        gc_constraints=gc_constraints,
+        gc_bounds=gc_bounds,
+        gc_lhs_newave=gc_lhs_newave,
+        gc_lhs_cobre=gc_lhs_cobre,
+        nw_max_stage=1,
+        nw_tim_iterations=nw_tim_iterations,
+        nw_tim_stages={"Tempo Total": 120.0, "Calculo da Politica": 90.0},
+        cobre_training_seconds=72.0,
+        cobre_iteration_timing=cobre_iteration_timing,
+    )
+
+
+@pytest.mark.parametrize(
+    ("tab_id", "golden_name"),
+    [
+        ("tab-constraints", "report_tab_constraints.html"),
+        ("tab-performance", "report_tab_performance.html"),
+    ],
+)
+def test_report_constraints_performance_tab_matches_golden(
+    tab_id: str, golden_name: str
+) -> None:
+    """Constraints/Performance tabs render byte-identically after the drain."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    pct = _constraints_perf_fixture_pct()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, tab_id)
+
+    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
+    assert _strip_chart_id(content) == _strip_chart_id(golden)
+
+
+def test_report_productivity_tab_empty_detail_renders_fallback() -> None:
+    """Empty ``productivity_detail`` renders the literal no-data fallback."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    results = _report_fixture_results()
+    # The shared fixture leaves ``productivity_detail`` empty by default.
+    pct = _report_fixture_pct()
+    assert pct.productivity_detail.is_empty()
+
+    dataset = build_results_dataset(results, pct, 0.05)
+    html = build_comparison_report(dataset)
+    content = _extract_tab_content(html, "tab-productivity")
+
+    assert "No productivity data available." in content
+
+
+def test_build_comparison_report_empty_dataset_has_all_tabs() -> None:
+    """An empty dataset/pct renders all 11 tab ids without raising."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.comparators.html_report import COMPARISON_TABS
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    dataset = build_results_dataset([], PercentileData(), 0.05)
+    html = build_comparison_report(dataset)
+
+    for tab_id, _ in COMPARISON_TABS:
+        assert f'id="{tab_id}"' in html
+
+
+# ---------------------------------------------------------------------------
+# ticket-013: typed metadata accessors — safe-default paths
+# ---------------------------------------------------------------------------
+
+
+def test_meta_frame_missing_key_returns_empty_polars() -> None:
+    """A missing key yields an empty ``pl.DataFrame`` (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_frame
+
+    result = _meta_frame({}, "line")
+    assert isinstance(result, pl.DataFrame)
+    assert result.is_empty()
+
+
+def test_meta_frame_ill_typed_returns_empty_polars() -> None:
+    """An ill-typed value yields the empty ``pl.DataFrame`` default."""
+    from cobre_bridge.comparators.report_builder import _meta_frame
+
+    result = _meta_frame({"line": 123}, "line")
+    assert isinstance(result, pl.DataFrame)
+    assert result.is_empty()
+
+
+def test_meta_pd_frame_missing_key_returns_empty_pandas() -> None:
+    """A missing key yields an empty ``pd.DataFrame`` (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_pd_frame
+
+    result = _meta_pd_frame({}, "line_bounds")
+    assert isinstance(result, pd.DataFrame)
+    assert result.empty
+
+
+def test_meta_int_missing_key_returns_zero() -> None:
+    """A missing key yields the int default ``0`` (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_int
+
+    assert _meta_int({}, "nw_offset") == 0
+    assert _meta_int({"nw_offset": "x"}, "nw_offset") == 0
+
+
+def test_meta_dict_missing_key_returns_empty_dict() -> None:
+    """A missing key yields the empty-dict default (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_dict
+
+    assert _meta_dict({}, "cobre_bus_meta") == {}
+    assert _meta_dict({"cobre_bus_meta": 5}, "cobre_bus_meta") == {}
+
+
+def test_meta_list_missing_key_returns_empty_list() -> None:
+    """A missing key yields the empty-list default (never raises)."""
+    from cobre_bridge.comparators.report_builder import _meta_list
+
+    assert _meta_list({}, "line_meta") == []
+    assert _meta_list({"line_meta": 5}, "line_meta") == []
+
+
+# ---------------------------------------------------------------------------
+# ticket-017: facet_grid subplot-domain helper
+#
+# These tests pin the `facet_grid` / `FacetPanel` helper in
+# `cobre_bridge.ui.plotly_helpers` to the legacy gap-based subplot-domain
+# arithmetic hand-copied across `comparators.charts`. They assert the exact
+# domain pairs for the representative call sites (the 2-column grids, the
+# single-column spillage stack, and the unclamped performance stack including
+# the intentional `-0.0`), re-derive the legacy formula inline as an oracle for
+# `n` in range(1, 8), and confirm `FacetPanel` is immutable. This is a pure-add
+# guard: ticket-018 re-points the chart functions onto `facet_grid`.
+# ---------------------------------------------------------------------------
+
+
+def test_facet_grid_default_2col_n4() -> None:
+    """facet_grid(4) reproduces the 2-column grid domains panel-for-panel."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    panels = facet_grid(4)
+    assert len(panels) == 4
+    assert [(p.x_domain, p.y_domain) for p in panels] == [
+        ([0.0, 0.475], [0.53, 1.0]),
+        ([0.525, 1.0], [0.53, 1.0]),
+        ([0.0, 0.475], [0.0, 0.47]),
+        ([0.525, 1.0], [0.0, 0.47]),
+    ]
+
+
+def test_facet_grid_single_col_spillage() -> None:
+    """facet_grid(3, ncols=1, row_gap=0.05) matches the spillage layout."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    panels = facet_grid(3, ncols=1, row_gap=0.05)
+    assert all(p.x_domain == [0.0, 1.0] for p in panels)
+    assert [p.y_domain for p in panels] == [
+        [0.7, 1.0],
+        [0.35, 0.65],
+        [0.0, 0.3],
+    ]
+
+
+def test_facet_grid_single_col_unclamped_preserves_neg_zero() -> None:
+    """The unclamped performance stack preserves the legacy -0.0 y-domain low."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    panels = facet_grid(2, ncols=1, row_gap=0.10, min_row_h=0.0)
+    assert panels[0].y_domain == [0.55, 1.0]
+    assert panels[0].x_domain == [0.0, 1.0]
+    assert panels[1].y_domain == [-0.0, 0.45]
+    assert panels[1].x_domain == [0.0, 1.0]
+    # -0.0 == 0.0 is True, so confirm the SIGN explicitly via copysign.
+    assert math.copysign(1, panels[1].y_domain[0]) == -1.0
+
+
+@pytest.mark.parametrize("n", range(1, 8))
+def test_facet_grid_matches_inline_formula(n: int) -> None:
+    """facet_grid(n) matches the legacy inline formula panel-by-panel."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    ncols = 2
+    row_gap = 0.06
+    col_gap = 0.05
+    nrows = (n + ncols - 1) // ncols
+    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, 0.001)
+    col_w = (1.0 - col_gap * (ncols - 1)) / ncols
+
+    panels = facet_grid(n)
+    assert len(panels) == n
+    for idx, panel in enumerate(panels):
+        row_i = idx // ncols
+        col_i = idx % ncols
+        x0 = col_i * (col_w + col_gap)
+        x1 = x0 + col_w
+        y1 = 1.0 - row_i * (row_h + row_gap)
+        y0 = y1 - row_h
+        assert panel.x_domain == [round(x0, 3), round(x1, 3)]
+        assert panel.y_domain == [round(y0, 3), round(y1, 3)]
+
+
+def test_facet_grid_zero_returns_empty() -> None:
+    """facet_grid(0) returns [] per its contract and does not raise."""
+    from cobre_bridge.ui.plotly_helpers import facet_grid
+
+    assert facet_grid(0) == []
+
+
+def test_facet_panel_is_frozen() -> None:
+    """FacetPanel is immutable: assigning a field raises FrozenInstanceError."""
+    from cobre_bridge.ui.plotly_helpers import FacetPanel
+
+    panel = FacetPanel(row=0, col=0, x_domain=[0.0, 1.0], y_domain=[0.0, 1.0])
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        panel.row = 1  # type: ignore[misc]

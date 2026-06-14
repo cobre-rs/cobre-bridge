@@ -1,0 +1,22 @@
+[
+  {
+    "variable": "storage_max",
+    "count": 2,
+    "mean_abs_diff": 500.0,
+    "max_abs_diff": 1000.0,
+    "mean_smape": 0.010101010101010102,
+    "max_smape": 0.020202020202020204,
+    "within_tol_rate": 0.5,
+    "correlation": null
+  },
+  {
+    "variable": "generation_max",
+    "count": 2,
+    "mean_abs_diff": 25.0,
+    "max_abs_diff": 50.0,
+    "mean_smape": 0.05263157894736842,
+    "max_smape": 0.10526315789473684,
+    "within_tol_rate": 0.5,
+    "correlation": null
+  }
+]

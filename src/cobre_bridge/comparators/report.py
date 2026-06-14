@@ -17,6 +17,7 @@ import polars as pl
 from cobre_bridge.comparators.bounds import BoundComparison
 
 if TYPE_CHECKING:
+    from cobre_bridge.comparators.dataset import ComparisonDataset
     from cobre_bridge.comparators.results import ResultsSummary
 
 
@@ -252,3 +253,335 @@ def print_results_summary(
         f"\nSummary: {summary.total} comparisons across "
         f"{len(summary.by_entity_type)} entity types ({entity_str})\n\n"
     )
+
+
+# -------------------------------------------------------------------
+# Dataset-driven formatting (strangler migration: console off the
+# canonical ComparisonDataset). These mirror the legacy printers above
+# byte-for-byte, but source their numbers from dataset.summary rows and
+# dataset.metadata so the console and the artifacts derive from ONE analysis.
+# The legacy functions are intentionally retained for back-compat.
+# -------------------------------------------------------------------
+
+
+def print_results_summary_from_dataset(
+    dataset: ComparisonDataset,
+    newave_dir: Path,
+    cobre_output_dir: Path,
+) -> None:
+    """Print the results comparison summary from the canonical dataset.
+
+    Byte-identical to :func:`print_results_summary` for the same underlying
+    numbers: the per-variable table is read from ``dataset.summary`` rows and the
+    footer from ``dataset.metadata["footer_counts"]`` (``total`` /
+    ``by_entity_type``, populated by ``analyze.build_results_dataset``).
+
+    Parameters
+    ----------
+    dataset:
+        The canonical comparison dataset for the results subcommand.
+    newave_dir:
+        Path to the NEWAVE case directory.
+    cobre_output_dir:
+        Path to the Cobre output directory.
+    """
+    out = sys.stdout
+
+    out.write("\nCobre vs NEWAVE Results Comparison\n")
+    out.write("=" * 88 + "\n")
+    out.write(f"NEWAVE case:  {newave_dir}\n")
+    out.write(f"Cobre output: {cobre_output_dir}\n\n")
+
+    _W = 88
+    out.write(
+        f"{'Variable':<26} {'Count':>6} "
+        f"{'Mean|D|':>13} {'Max|D|':>13} "
+        f"{'WithinTol':>9} {'sMAPE':>8} "
+        f"{'r':>7}\n"
+    )
+    out.write("-" * _W + "\n")
+
+    summary_rows = {row["variable"]: row for row in dataset.summary.to_dicts()}
+    for var in sorted(summary_rows):
+        stats = summary_rows[var]
+        mean_d = _fmt_metric(float(stats["mean_abs_diff"]))
+        max_d = _fmt_metric(float(stats["max_abs_diff"]))
+        within = f"{float(stats['within_tol_rate']) * 100:.1f}%"
+        smape = f"{float(stats['mean_smape']) * 100:.1f}%"
+        correlation = stats["correlation"]
+        corr = f"{float(correlation):.4f}" if correlation is not None else "N/A"
+        out.write(
+            f"{var:<26} {int(stats['count']):>6} "
+            f"{mean_d:>13} {max_d:>13} "
+            f"{within:>9} {smape:>8} "
+            f"{corr:>7}\n"
+        )
+
+    out.write("-" * _W + "\n")
+
+    total, by_entity_type = _footer_counts(dataset)
+
+    entity_parts = []
+    for etype, count in sorted(by_entity_type.items()):
+        entity_parts.append(f"{count} {etype}")
+    entity_str = ", ".join(entity_parts) if entity_parts else "none"
+
+    out.write(
+        f"\nSummary: {total} comparisons across "
+        f"{len(by_entity_type)} entity types ({entity_str})\n\n"
+    )
+
+
+def print_bounds_summary_from_dataset(
+    dataset: ComparisonDataset,
+    newave_dir: Path,
+    cobre_output_dir: Path,
+    tolerance: float,
+) -> None:
+    """Print the bounds comparison summary from the canonical dataset.
+
+    Byte-identical to :func:`print_summary` for the same underlying numbers: the
+    by-entity-type and by-variable tables and the totals row are read from the
+    exact integer counts in ``dataset.metadata["summary_counts"]`` (populated by
+    ``analyze.build_bounds_dataset``).
+
+    Parameters
+    ----------
+    dataset:
+        The canonical comparison dataset for the bounds subcommand.
+    newave_dir:
+        Path to the NEWAVE case directory.
+    cobre_output_dir:
+        Path to the Cobre output directory.
+    tolerance:
+        Absolute tolerance used for the comparison (printed verbatim).
+    """
+    out = sys.stdout
+
+    (
+        total_all,
+        matches_all,
+        mismatches_all,
+        by_entity_type,
+        by_variable,
+    ) = _bounds_summary_counts(dataset)
+
+    out.write("\nCobre vs NEWAVE Bound Comparison\n")
+    out.write("=" * 64 + "\n")
+    out.write(f"NEWAVE case:  {newave_dir}\n")
+    out.write(f"Cobre output: {cobre_output_dir}\n")
+    out.write(f"Tolerance:    {tolerance}\n\n")
+
+    # --- By entity type ---
+    _W = 62
+    out.write(
+        f"{'Type':<12} {'Compared':>9} {'Match':>9} {'Mismatch':>9} {'Rate':>9}\n"
+    )
+    out.write("-" * _W + "\n")
+
+    for etype, (m, mm) in sorted(by_entity_type.items()):
+        total = m + mm
+        rate = m / total * 100 if total > 0 else 0.0
+        out.write(
+            f"{etype.capitalize():<12} {total:>9,} {m:>9,} {mm:>9,} {rate:>8.2f}%\n"
+        )
+
+    total = total_all
+    rate = matches_all / total * 100 if total > 0 else 0.0
+    out.write("-" * _W + "\n")
+    out.write(
+        f"{'Total':<12} {total:>9,} {matches_all:>9,}"
+        f" {mismatches_all:>9,} {rate:>8.2f}%\n"
+    )
+
+    # --- By variable ---
+    out.write("\n")
+    out.write(
+        f"{'Variable':<18} {'Compared':>9} {'Match':>9} {'Mismatch':>9} {'Rate':>9}\n"
+    )
+    out.write("-" * _W + "\n")
+
+    for var, (m, mm) in sorted(by_variable.items()):
+        total_v = m + mm
+        rate_v = m / total_v * 100 if total_v > 0 else 0.0
+        out.write(f"{var:<18} {total_v:>9,} {m:>9,} {mm:>9,} {rate_v:>8.2f}%\n")
+
+    out.write("\n")
+
+
+def print_bounds_mismatches_from_dataset(
+    dataset: ComparisonDataset,
+    max_rows: int = 50,
+) -> None:
+    """Print the bounds mismatch listing from the canonical dataset.
+
+    Byte-identical to :func:`print_mismatches`: it renders the raw-diff-sorted
+    rows carried in ``dataset.metadata["mismatch_listing"]`` (built by
+    ``analyze.build_bounds_dataset`` mirroring the legacy sort/cap) and uses its
+    ``total`` count for the header and the ``... and M more`` footer.
+
+    The stored rows are already capped at 50 (the CLI default); when ``max_rows``
+    is smaller, the rows are re-sliced and the "more" line recomputed from
+    ``total`` so the output stays correct.
+
+    Parameters
+    ----------
+    dataset:
+        The canonical comparison dataset for the bounds subcommand.
+    max_rows:
+        The maximum number of mismatch rows to print.
+    """
+    total, all_rows = _bounds_mismatch_listing(dataset)
+    if total == 0:
+        sys.stdout.write("No mismatches found.\n")
+        return
+
+    rows = all_rows[:max_rows]
+
+    sys.stdout.write(f"Top {len(rows)} mismatches (of {total} total):\n\n")
+
+    for r in rows:
+        entity_type = str(r["entity_type"])
+        sys.stdout.write(
+            f"  {entity_type.capitalize():<8} "
+            f'"{r["entity_name"]}" '
+            f"(code={r['newave_code']}, id={r['cobre_id']}) "
+            f"stage={r['stage']} "
+            f"{r['variable']}: "
+            f"NEWAVE={_as_float(r['newave_value']):.4f} "
+            f"Cobre={_as_float(r['cobre_value']):.4f} "
+            f"(d={_as_float(r['diff']):.4f})\n"
+        )
+
+    if total > max_rows:
+        sys.stdout.write(f"\n  ... and {total - max_rows} more.\n")
+
+    sys.stdout.write("\n")
+
+
+# -------------------------------------------------------------------
+# Metadata accessors for the dataset-driven printers
+# -------------------------------------------------------------------
+
+
+def _footer_counts(dataset: ComparisonDataset) -> tuple[int, dict[str, int]]:
+    """Return the results footer ``(total, by_entity_type)`` from metadata.
+
+    Args:
+        dataset: The results dataset built by ``build_results_dataset``.
+
+    Returns:
+        A pair of the total comparison count and the per-entity-type count map.
+        Missing/ill-typed metadata yields ``(0, {})``.
+    """
+    raw = dataset.metadata.get("footer_counts")
+    if not isinstance(raw, dict):
+        return 0, {}
+    total = raw.get("total", 0)
+    return (
+        int(total) if isinstance(total, int) else 0,
+        _as_int_counts(raw.get("by_entity_type")),
+    )
+
+
+def _bounds_summary_counts(
+    dataset: ComparisonDataset,
+) -> tuple[int, int, int, dict[str, tuple[int, int]], dict[str, tuple[int, int]]]:
+    """Return the bounds summary counts from metadata.
+
+    Args:
+        dataset: The bounds dataset built by ``build_bounds_dataset``.
+
+    Returns:
+        ``(total, matches, mismatches, by_entity_type, by_variable)`` where the
+        last two are ``[match, mismatch]`` pair maps. Missing/ill-typed metadata
+        yields all-empty counts.
+    """
+    raw = dataset.metadata.get("summary_counts")
+    if not isinstance(raw, dict):
+        return 0, 0, 0, {}, {}
+    total = raw.get("total", 0)
+    matches = raw.get("matches", 0)
+    mismatches = raw.get("mismatches", 0)
+    return (
+        int(total) if isinstance(total, int) else 0,
+        int(matches) if isinstance(matches, int) else 0,
+        int(mismatches) if isinstance(mismatches, int) else 0,
+        _as_count_pairs(raw.get("by_entity_type")),
+        _as_count_pairs(raw.get("by_variable")),
+    )
+
+
+def _bounds_mismatch_listing(
+    dataset: ComparisonDataset,
+) -> tuple[int, list[dict[str, object]]]:
+    """Return the bounds mismatch ``(total, rows)`` from metadata.
+
+    Args:
+        dataset: The bounds dataset built by ``build_bounds_dataset``.
+
+    Returns:
+        The full mismatch count and the (already raw-diff-sorted, ≤50) row
+        dicts. Missing/ill-typed metadata yields ``(0, [])``.
+    """
+    raw = dataset.metadata.get("mismatch_listing")
+    if not isinstance(raw, dict):
+        return 0, []
+    total = raw.get("total", 0)
+    return (
+        int(total) if isinstance(total, int) else 0,
+        _as_dict_rows(raw.get("rows")),
+    )
+
+
+def _as_float(value: object) -> float:
+    """Coerce a metadata scalar into ``float`` (the listing stores real numbers).
+
+    Args:
+        value: A row-dict value that ``bounds_mismatch_listing`` populated with a
+            ``BoundComparison`` float field.
+
+    Returns:
+        The value as ``float``.
+
+    Raises:
+        TypeError: If ``value`` is not numeric (a corrupted metadata payload).
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    msg = f"expected a numeric mismatch value, got {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _as_int_counts(value: object) -> dict[str, int]:
+    """Coerce a metadata mapping into a ``dict[str, int]`` (empty on mismatch)."""
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, count in value.items():
+        if isinstance(key, str) and isinstance(count, int):
+            result[key] = count
+    return result
+
+
+def _as_count_pairs(value: object) -> dict[str, tuple[int, int]]:
+    """Coerce a metadata mapping into a ``dict[str, (match, mismatch)]`` map."""
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, tuple[int, int]] = {}
+    for key, pair in value.items():
+        if (
+            isinstance(key, str)
+            and isinstance(pair, (list, tuple))
+            and len(pair) == 2
+            and all(isinstance(x, int) for x in pair)
+        ):
+            result[key] = (int(pair[0]), int(pair[1]))
+    return result
+
+
+def _as_dict_rows(value: object) -> list[dict[str, object]]:
+    """Coerce a metadata value into a ``list[dict[str, object]]`` of rows."""
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]

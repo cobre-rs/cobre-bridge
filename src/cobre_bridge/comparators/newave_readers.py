@@ -601,6 +601,20 @@ def read_medias_sin(saidas_dir: Path) -> pl.DataFrame:
     return _read_medias_csv(saidas_dir, "MEDIAS-SIN.CSV")
 
 
+def read_medias_ree(saidas_dir: Path) -> pl.DataFrame:
+    """Read MEDIAS-REE.CSV (per equivalent-energy-reservoir aggregate).
+
+    Returns DataFrame with columns ``newave_code`` (the REE code),
+    ``stage`` (1-based MEDIAS stage), ``variable``, ``value``.  The key
+    variable for VminOP validation is ``EARMF`` — the REE's final stored
+    energy in MWmes, measured *relative to the minimum operative volume*
+    (i.e. useful energy).  This is the physical quantity the VminOP
+    generic constraints bound, so it is the natural NEWAVE-side LHS for
+    those constraints.
+    """
+    return _read_medias_csv(saidas_dir, "MEDIAS-REE.CSV")
+
+
 _MERCL_FILE_RE = re.compile(r"mercl(\d+)\.out$", re.IGNORECASE)
 _MERCL_YEAR_RE = re.compile(r"ANO:\s*(\d{4})")
 _MERCL_VALUE_RE = re.compile(r"-?\d+\.\d*")
@@ -750,9 +764,9 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     cadical_path = _find_case_insensitive(newave_dir, "c_adic.dat")
     if cadical_path is not None:
         try:
-            from cobre_bridge.converters.stochastic import _parse_cadical
+            from cobre_bridge.converters.stochastic import parse_cadical
 
-            cadical = _parse_cadical(cadical_path)
+            cadical = parse_cadical(cadical_path)
             load_df = load_df.copy()
             load_df["valor"] = load_df.apply(
                 lambda row: (

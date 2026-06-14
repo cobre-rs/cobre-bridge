@@ -114,3 +114,46 @@ def productivity_from_production_models(case_dir: Path) -> dict[int, float]:
                 result[hydro_id] = float(prod)
                 break
     return result
+
+
+def resolve_hydro_productivities(
+    case_dir: Path, hydros: list[dict]
+) -> dict[int, float | None]:
+    """Resolve per-hydro ρ_eq using the single canonical fallback cascade.
+
+    For each hydro in ``hydros`` (the ``hydros.json`` ``"hydros"`` list), try in
+    order:
+
+    1. ``hydro_energy_productivity.parquet`` — the modern per-(hydro, stage)
+       contract (:func:`productivity_from_energy_parquet`);
+    2. ``hydro_production_models.json`` — legacy embedded productivity
+       (:func:`productivity_from_production_models`);
+    3. ``hydros.json`` ``generation.productivity_mw_per_m3s`` — deprecated
+       embedded field;
+    4. ``hydros.json`` top-level ``productivity_mw_per_m3s`` — oldest layout.
+
+    The cascade is **per hydro**, not whole-dict: a hydro absent from the
+    parquet still falls through to the next source even when other hydros do
+    have parquet rows. Returns ``{hydro_id: ρ or None}`` (``None`` when no
+    source has a value).
+
+    This is the one place the dashboard and the results comparator agree on
+    productivity for a converted case — both must call it so they never report
+    a different ρ for the same plant.
+    """
+    energy = productivity_from_energy_parquet(case_dir)
+    pm = productivity_from_production_models(case_dir)
+    result: dict[int, float | None] = {}
+    for hydro in hydros:
+        hid = int(hydro["id"])
+        prod = energy.get(hid)
+        if prod is None:
+            prod = pm.get(hid)
+        if prod is None:
+            gen = hydro.get("generation")
+            if isinstance(gen, dict):
+                prod = gen.get("productivity_mw_per_m3s")
+        if prod is None:
+            prod = hydro.get("productivity_mw_per_m3s")
+        result[hid] = float(prod) if prod is not None else None
+    return result

@@ -166,7 +166,7 @@ class TestExistingBehaviorPreserved:
                 _confhd_row(2, "B", 0, "EX"),
             ]
         )
-        res = resolve_cascade(confhd, empty_cadastro)
+        res = resolve_cascade(confhd, empty_cadastro, fictitious={99})
         assert res[1].downstream_code == 2
         assert res[1].fict_chain == (99,)
 
@@ -187,7 +187,7 @@ class TestMixedFictAndAbsent:
                 _confhd_row(3, "C", 0, "EX"),
             ]
         )
-        res = resolve_cascade(confhd, empty_cadastro)
+        res = resolve_cascade(confhd, empty_cadastro, fictitious={99})
         assert res[1].downstream_code == 3
         assert res[1].fict_chain == (99,)
 
@@ -204,6 +204,6 @@ class TestMixedFictAndAbsent:
                 _confhd_row(3, "C", 0, "EX"),
             ]
         )
-        res = resolve_cascade(confhd, empty_cadastro)
+        res = resolve_cascade(confhd, empty_cadastro, fictitious={99})
         assert res[1].downstream_code == 3
         assert res[1].fict_chain == (99,)

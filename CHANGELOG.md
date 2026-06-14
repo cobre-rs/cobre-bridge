@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-13
+
+Paired with **cobre 0.8.1** and **cobre-python 0.8.1** — the versions used to
+validate this release. `convert --validate` now requires `cobre-python>=0.8.1,<0.9`.
+
+### Added
+
+- **Three-layer architecture for the `compare` command.** `compare bounds` and
+  `compare results` now flow through READ → ANALYZE → RENDER, with a canonical,
+  serializable `ComparisonDataset` (a tidy/long value frame + per-variable summary
+  frame + a typed metadata side-table) and a `ComparisonManifest` provenance object
+  as the single source of truth. Console, HTML, and file export are all pure
+  consumers of one dataset, ending the historical console-vs-HTML two-path divergence.
+- **Machine-readable comparison artifacts.** Every `compare` run now emits queryable
+  data — `comparison.parquet` (tidy frame), `summary.parquet`/`summary.json`,
+  `top_divergences.json`, and a `comparison.json` provenance manifest (case paths,
+  tolerance, bridge/cobre versions, git sha, timestamp) — so downstream tools and
+  agents can query the comparison directly instead of scraping HTML.
+- **Per-REE EARM** added to the VminOP generic-constraint comparison.
+
+### Changed
+
+- **Unified `compare` output flags.** The overloaded `--output` (Parquet for
+  `bounds`, HTML for `results`) is **replaced** by `--format {console,html,csv,
+parquet,json,all}` + `--out-dir`, shared across both subcommands. A plain run
+  still writes the queryable data artifacts by default (`console,parquet,json`);
+  `--format html` builds the single self-contained report.
+  **Breaking:** scripts passing `--output`/`-o` to `compare` must migrate to
+  `--format`/`--out-dir`.
+- **`charts.py` slimmed.** Per-bus / SIN / percentile aggregation moved out of the
+  chart functions into the analyze layer; the duplicated subplot-domain math is now
+  a single tested `facet_grid` helper. The 11-tab HTML report renders identically.
+- **Converters read parsed inputs through `NewaveCase`** (id-map, horizon,
+  active-hydro, constraints, network, stochastic), and the Cobre cost taxonomy is
+  single-sourced.
+
+### Fixed
+
+- **Run-of-river `'S'` plants** treated as fio-d'água (storage collapsed to Vmin,
+  head-corrected turbine cap) instead of as reservoirs.
+- **Fictitious plants** identified structurally, keeping orphaned reservoirs.
+- **`modif.dat` VOLMIN override** now applied to the initial-storage base.
+- **Thermal GTMIN** follows EXPT maintenance windows rather than TERM.DAT, removing
+  spurious must-run; no-POTEF thermals and anticipated thermal cost handled.
+- **Patamar (block) index mapping** corrected for NCS per-source load blocks and for
+  load-factor per-submarket blocks (global → per-block indices).
+- **NEWAVE VminOP LHS** compared on linear stored energy (`ρ_int × VARMUH`).
+- **Inflow handling**: post-horizon truncation with penalty made the default.
+
 ## [0.8.0] - 2026-06-01
 
 ### Added

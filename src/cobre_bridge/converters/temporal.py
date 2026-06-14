@@ -10,11 +10,11 @@ import calendar
 import logging
 from datetime import date
 
-from inewave.newave import Cvar, Dger, Patamar, Shist
+from inewave.newave import Dger
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
 
 logger = logging.getLogger(__name__)
 
@@ -56,16 +56,16 @@ def _month_hours(year: int, month: int) -> float:
     return float(days_in_month * 24)
 
 
-def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa: ARG001
+def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG001
     """Convert NEWAVE temporal configuration to a Cobre ``stages.json`` dict.
 
-    Reads ``dger.dat`` and ``patamar.dat`` from *nw_files* and produces a
+    Reads ``dger.dat`` and ``patamar.dat`` from *case* and produces a
     dict that conforms to ``stages.schema.json``.
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
     id_map:
         Entity ID map (not used for temporal conversion, accepted for API
         consistency with the other converters).
@@ -80,9 +80,9 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     ValueError
         If ``num_anos_estudo`` is 0 or None.
     """
-    dger = Dger.read(nw_files.dger)
-    patamar = Patamar.read(nw_files.patamar)
-    deterministic = _is_deterministic_mode(nw_files, dger)
+    dger = case.dger
+    patamar = case.patamar
+    deterministic = _is_deterministic_mode(case, dger)
 
     num_anos = dger.num_anos_estudo
     if not num_anos:
@@ -104,10 +104,12 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     dger_cvar: int = int(_raw_cvar) if isinstance(_raw_cvar, int) else 0
 
     # Default: each stage uses "expectation"
-    _cvar_by_stage: dict[int, dict] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
+    _cvar_by_stage: dict[
+        int, dict
+    ] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
 
-    if dger_cvar in (1, 2) and nw_files.cvar is not None:
-        cvar_file = Cvar.read(str(nw_files.cvar))
+    if dger_cvar in (1, 2) and case.cvar is not None:
+        cvar_file = case.cvar
         const_values: list[float] = cvar_file.valores_constantes or [0.0, 0.0]
         const_alpha = const_values[0] / 100.0
         const_lambda = const_values[1] / 100.0
@@ -145,7 +147,7 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                         lambda_override[(y, m)] = (
                             val / 100.0 if val != 0.0 else const_lambda
                         )
-    elif dger_cvar in (1, 2) and nw_files.cvar is None:
+    elif dger_cvar in (1, 2) and case.cvar is None:
         logger.warning(
             "dger.cvar=%d requires cvar.dat but file is missing; "
             "falling back to expectation for all stages.",
@@ -214,7 +216,7 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
     stages: list[dict] = []
     transitions: list[dict] = []
 
-    horizon = study_horizon(dger)
+    horizon = case.horizon
     # Study runs from mes_inicio to December of (ano_inicio + num_anos - 1).
     study_months = horizon.study_months
     # Post-study adds num_anos_pos full calendar years after that.
@@ -244,13 +246,11 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
                     fraction,
                 )
             block_hours = fraction * total_hours
-            blocks.append(
-                {
-                    "id": pat_idx - 1,
-                    "name": names[pat_idx - 1],
-                    "hours": block_hours,
-                }
-            )
+            blocks.append({
+                "id": pat_idx - 1,
+                "name": names[pat_idx - 1],
+                "hours": block_hours,
+            })
 
         # Determine risk_measure for this stage.  Modes (mirrors the
         # top-of-function log message):
@@ -300,13 +300,11 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
         stages.append(stage_entry)
 
         if stage_id < total_months - 1:
-            transitions.append(
-                {
-                    "source_id": stage_id,
-                    "target_id": stage_id + 1,
-                    "probability": 1.0,
-                }
-            )
+            transitions.append({
+                "source_id": stage_id,
+                "target_id": stage_id + 1,
+                "probability": 1.0,
+            })
 
         month += 1
         if month > 12:
@@ -336,14 +334,12 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
 
         for offset, (py, pm) in enumerate(pre_dates):
             pre_id = -(num_pre_months - offset)
-            pre_study_stages.append(
-                {
-                    "id": pre_id,
-                    "start_date": _month_start_date(py, pm).isoformat(),
-                    "end_date": _month_end_date(py, pm).isoformat(),
-                    "season_id": pm - 1,  # 0-based calendar month index
-                }
-            )
+            pre_study_stages.append({
+                "id": pre_id,
+                "start_date": _month_start_date(py, pm).isoformat(),
+                "end_date": _month_end_date(py, pm).isoformat(),
+                "season_id": pm - 1,  # 0-based calendar month index
+            })
 
     policy_graph: dict = {
         "type": "finite_horizon",
@@ -390,7 +386,7 @@ def convert_stages(nw_files: NewaveFiles, id_map: NewaveIdMap) -> dict:  # noqa:
 
 
 def _is_deterministic_mode(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     dger: Dger,
 ) -> bool:
     """True when NEWAVE's hidden 'deterministic mode' is active.
@@ -415,9 +411,9 @@ def _is_deterministic_mode(
         return False
     if dger.tipo_simulacao_final != 2:
         return False
-    if nw_files.shist is None:
+    shist = case.shist
+    if shist is None:
         return False
-    shist = Shist.read(str(nw_files.shist))
     if shist.varredura != 0:
         return False
     years = shist.anos_inicio_simulacoes
@@ -425,7 +421,7 @@ def _is_deterministic_mode(
 
 
 def _historical_years_from_shist(
-    nw_files: NewaveFiles,
+    case: NewaveCase,
     dger: Dger,
 ) -> list[int] | dict[str, int]:
     """Build cobre's ``historical_years`` from ``shist.dat``.
@@ -452,12 +448,14 @@ def _historical_years_from_shist(
     num_anos = horizon.num_anos
     num_anos_pos = horizon.num_anos_pos
 
-    if nw_files.shist is None:
-        logger.debug("shist.dat not found; using legacy default historical range.")
+    shist = case.shist
+    if shist is None:
+        logger.debug(
+            "shist.dat not found; using legacy default historical range."
+        )
         ano_ini_hist: int = int(dger.ano_inicial_historico or 1931)
         return {"from": ano_ini_hist + 1, "to": ano_inicio - 1}
 
-    shist = Shist.read(str(nw_files.shist))
     if shist.varredura == 0:
         years_raw = shist.anos_inicio_simulacoes
         if not years_raw:
@@ -471,7 +469,9 @@ def _historical_years_from_shist(
     # varredura == 1 → range.  The most recent valid start year is
     # ano_inicio_estudo - horizon_years so the scenario fits in history.
     horizon_years = num_anos + num_anos_pos
-    range_from = int(shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931))
+    range_from = int(
+        shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931)
+    )
     range_to = ano_inicio - horizon_years
     if range_to < range_from:
         logger.warning(
@@ -493,26 +493,28 @@ def _count_historical_years(
     if isinstance(historical_years, list):
         return len(historical_years)
     # Range form: {"from": int, "to": int} — inclusive both ends.
-    return max(0, int(historical_years["to"]) - int(historical_years["from"]) + 1)
+    return max(
+        0, int(historical_years["to"]) - int(historical_years["from"]) + 1
+    )
 
 
-def convert_config(nw_files: NewaveFiles) -> dict:
+def convert_config(case: NewaveCase) -> dict:
     """Convert NEWAVE training parameters to a Cobre ``config.json`` dict.
 
-    Reads ``dger.dat`` from *nw_files* and produces a dict that conforms
+    Reads ``dger.dat`` from *case* and produces a dict that conforms
     to ``config.schema.json``.
 
     Parameters
     ----------
-    nw_files:
-        Resolved NEWAVE file paths for the case.
+    case:
+        Parsed NEWAVE case.
 
     Returns
     -------
     dict
         JSON-serializable dict conforming to ``config.schema.json``.
     """
-    dger = Dger.read(nw_files.dger)
+    dger = case.dger
 
     forward_passes: int = dger.num_forwards or 1
     max_iterations: int = dger.num_max_iteracoes or 200
@@ -544,9 +546,13 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             )
         order_selection = "pacf_annual"
 
-    tipo_execucao: int = dger.tipo_execucao if dger.tipo_execucao is not None else 1
+    tipo_execucao: int = (
+        dger.tipo_execucao if dger.tipo_execucao is not None else 1
+    )
     tipo_simulacao_final: int = (
-        dger.tipo_simulacao_final if dger.tipo_simulacao_final is not None else 1
+        dger.tipo_simulacao_final
+        if dger.tipo_simulacao_final is not None
+        else 1
     )
     considera_reamostragem: int = (
         dger.considera_reamostragem_cenarios
@@ -605,12 +611,12 @@ def convert_config(nw_files: NewaveFiles) -> dict:
 
     # Deterministic mode: training reuses the simulation's historical pool
     # (single year), so set the training scenario_source to mirror it.
-    deterministic = _is_deterministic_mode(nw_files, dger)
+    deterministic = _is_deterministic_mode(case, dger)
     if training_enabled and deterministic:
         training_section["scenario_source"] = {
             "seed": 42,
             "inflow": {"scheme": "historical"},
-            "historical_years": _historical_years_from_shist(nw_files, dger),
+            "historical_years": _historical_years_from_shist(case, dger),
         }
 
     # -- Simulation scenario source --
@@ -629,7 +635,7 @@ def convert_config(nw_files: NewaveFiles) -> dict:
             inflow_scheme = "in_sample"
         sim_source: dict = {"seed": 42, "inflow": {"scheme": inflow_scheme}}
         if inflow_scheme == "historical":
-            historical_years = _historical_years_from_shist(nw_files, dger)
+            historical_years = _historical_years_from_shist(case, dger)
             sim_source["historical_years"] = historical_years
             # In historical mode each scenario is one (start-year, member)
             # tuple; the number of scenarios is fully determined by the size
@@ -670,19 +676,6 @@ def convert_config(nw_files: NewaveFiles) -> dict:
         "estimation": estimation,
         "training": training_section,
         "modeling": {
-            # `method: "truncation_with_penalty"` clamps negative PAR(p) inflow
-            # draws to zero before LP patching *and* keeps the inflow-non-
-            # negativity slack columns enabled.  The clamp closes the
-            # "free water" exploit where the LP would otherwise route negative
-            # noise through the withdrawal-neg slack (cheaper than the
-            # non-negativity slack on the cobre-bridge calibration); the
-            # slack columns remain as a defensive backstop for any edge case
-            # the truncation misses.  The slack penalty itself still comes
-            # from `penalties.json::hydro.inflow_nonnegativity_cost`, which
-            # `convert_penalties` populates.  The legacy `penalty_cost` field
-            # in this block is *deprecated* (see cobre config schema docs)
-            # and ignored when penalties.json supplies the value, so we
-            # intentionally omit it here.
             "inflow_non_negativity": {
                 "method": "truncation_with_penalty",
             },
