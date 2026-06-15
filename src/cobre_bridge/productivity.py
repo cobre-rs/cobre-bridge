@@ -1,15 +1,15 @@
-"""NEWAVE hydro productivity functions (presentation-free domain module).
+"""The source model hydro productivity functions (presentation-free domain module).
 
-Three ways NEWAVE turns a plant's volume→cota polynomial and tailrace level into
-a MW/(m³/s) productivity, all **pure functions over a ``Hidr.cadastro`` row**
+Three ways the source model turns a plant's volume→cota polynomial and tailrace level
+into a MW/(m³/s) productivity, all **pure functions over a ``Hidr.cadastro`` row**
 (``hreg``):
 
 - :func:`compute_productivity` — point ρ at a single reference volume (the LP's
-  ``gen = ρ·Q`` coefficient); NEWAVE ``produtibilidade_altura_65``.
+  ``gen = ρ·Q`` coefficient); the source model ``produtibilidade_altura_65``.
 - :func:`equivalent_productivity` — PRODT, the mean head over ``[vmin, vmax]``
   (used to convert PENALID R$/MWh penalties to the flow domain).
 - :func:`integrated_productivity` — the volume-integrated ρ over the useful
-  range (NEWAVE's stored-energy / EARM convention, used by VminOP).
+  range (the source model's stored-energy / EARM convention, used by VminOP).
 
 These were private helpers in ``hydro.py`` that the constraint and FICT-cascade
 converters reached into across module boundaries; hosting them here gives them
@@ -47,7 +47,7 @@ def compute_productivity(
     1. ``useful_volume_override`` — explicit useful volume (hm³ above
        ``volume_minimo``): ``V = volume_minimo + useful_volume_override``.
     2. Monthly-regulated plants (``tipo_regulacao == "M"``) → 65% of useful
-       storage (``V = vmin + 0.65 × (vmax − vmin)``); matches NEWAVE's
+       storage (``V = vmin + 0.65 × (vmax − vmin)``); matches the source model's
        ``produtibilidade_altura_65`` convention.
     3. All other plant types → ``volume_referencia``.
 
@@ -119,7 +119,7 @@ def equivalent_productivity(
     canal_fuga_override: float | None = None,
     cmont_override: float | None = None,
 ) -> float:
-    """Compute NEWAVE's PRODT (``produtibilidade_equivalente_volmin_volmax``).
+    """Compute the source model's PRODT (``produtibilidade_equivalente_volmin_volmax``).
 
     PRODT is the *equivalent* productivity from the minimum to the maximum
     operative volume (pmo.dat: "PROD. EQUIVALENTE (DO VOL. MINIMO AO VOL.
@@ -134,8 +134,8 @@ def equivalent_productivity(
     productivity = ``produtibilidade_especifica × (h_eq − canal_fuga − perdas)``
     with the same loss model as :func:`compute_productivity`.
 
-    Run-of-river plants (``Vmax == Vmin``) fall back to the point head at
-    ``Vmin``; all-zero polynomials return 0 (matches NEWAVE).
+    Run-of-river plants (``Vmax == Vmin``) fall back to the point head at ``Vmin``;
+    all-zero polynomials return 0 (matches the source model).
 
     ``canal_fuga_override`` / ``cmont_override`` carry MODIF.DAT CFUGA / CMONT
     temporal overrides: CFUGA replaces the mean tailrace; CMONT pins the upstream
@@ -186,12 +186,12 @@ def integrated_productivity(
 ) -> float:
     """ρ_esp × ((1/useful) × ∫_vmin^vmax h(V) dV − cf − perdas).
 
-    Mirrors NEWAVE's ``produtibilidade_equivalente_volmin_volmax``: the
-    productivity averaged over the full useful storage range, used by NEWAVE to
-    convert reservoir volume to stored energy (EARM) and to evaluate VminOP
+    Mirrors the source model's ``produtibilidade_equivalente_volmin_volmax``: the
+    productivity averaged over the full useful storage range, used by the source model
+    to convert reservoir volume to stored energy (EARM) and to evaluate VminOP
     constraints.  Different from the point productivity at v_65 that
-    :func:`compute_productivity` returns and that the LP uses as the
-    ``gen = ρ·Q`` coefficient.
+    :func:`compute_productivity` returns and that the LP uses as the ``gen = ρ·Q``
+    coefficient.
 
     For a polynomial ``h(V) = a0 + a1·V + ... + a4·V⁴`` the integral has a closed
     form: ``F(V) = a0·V + a1·V²/2 + a2·V³/3 + a3·V⁴/4 + a4·V⁵/5``.  With
@@ -262,7 +262,8 @@ def stored_energy_productivity(
     canal_fuga_override: float | None = None,
     cmont_override: float | None = None,
 ) -> float:
-    """NEWAVE's ``produtibilidade_equivalente_volmin_volmax`` (stored-energy ρ).
+    """The source model's ``produtibilidade_equivalente_volmin_volmax`` (stored-energy
+    ρ).
 
     The upstream-level reference depends on the regulation type, matching the
     values pmo.dat prints in its ``produtibilidades_equivalentes`` table:
@@ -271,10 +272,10 @@ def stored_energy_productivity(
       volume-integrated mean head over ``[vmin, vmax]``
       (:func:`integrated_productivity`);
     - **run-of-river / special-regime plants** (``"D"`` / ``"S"``) use the
-      **point** productivity at ``volume_referencia``
-      (:func:`compute_productivity`) — NEWAVE does *not* integrate the operative
-      range for them, so the volmin→volmax integral over- or under-shoots by a
-      few percent on plants with head swing.
+      **point** productivity at ``volume_referencia`` (:func:`compute_productivity`) —
+      the source model does *not* integrate the operative range for them, so the
+      volmin→volmax integral over- or under-shoots by a few percent on plants with head
+      swing.
 
     CFUGA / CMONT MODIF overrides are threaded through to whichever primitive
     applies (a CMONT override pins the upstream level in both, collapsing the

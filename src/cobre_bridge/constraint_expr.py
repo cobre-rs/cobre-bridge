@@ -6,13 +6,12 @@ expression over LP variables, e.g.::
     "5.68 * hydro_storage(78)"
     "@rho_acum_h78 * hydro_storage(78) - line_exchange(4)"
 
-This module owns the *domain* logic for those expressions — the term parser,
-the scalar-parameter resolver, and the routine that evaluates the LHS from a
-Cobre simulation's parquet output. It has **no** presentation dependency, so it
-is the single shared home for both the dashboard (which renders the result) and
-the comparator (which checks it against NEWAVE). It deliberately lives at the
-package top level so neither consumer has to import across the comparator↔UI
-boundary.
+This module owns the *domain* logic for those expressions — the term parser, the
+scalar-parameter resolver, and the routine that evaluates the LHS from a Cobre
+simulation's parquet output. It has **no** presentation dependency, so it is the single
+shared home for both the dashboard (which renders the result) and the comparator (which
+checks it against the source model). It deliberately lives at the package top level so
+neither consumer has to import across the comparator↔UI boundary.
 """
 
 from __future__ import annotations

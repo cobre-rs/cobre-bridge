@@ -713,7 +713,7 @@ def per_stage_sum_from_results(
     entity_type: str,
     variable: str,
 ) -> tuple[dict[int, float], dict[int, float], set[int]]:
-    """Sum NEWAVE/Cobre values per stage for one entity type (and variable).
+    """Sum the source model/Cobre values per stage for one entity type (and variable).
 
     Pure numeric core of the inline per-stage accumulation loop repeated in
     ``charts.system_comparison_chart`` / ``hydro_aggregate_chart`` /
@@ -1067,28 +1067,29 @@ def cobre_sum_and_newave_sin(
     nw_offset: int,
     matched_ids: set[int] | None = None,
 ) -> tuple[dict[int, float], dict[int, float]]:
-    """Roll a Cobre per-hydro variable and a NEWAVE-SIN long frame to per-stage totals.
+    """Roll a Cobre per-hydro variable and a source-model-SIN long frame to per-stage
+    totals.
 
-    Pure numeric core of ``charts.cobre_aggregate_chart`` (``charts.py:813-846``).
-    The Cobre side sums ``variable`` across (optionally ``matched_ids``-filtered)
-    plants per ``stage_id`` — delegated to :func:`per_stage_sum_from_frame` so the
-    grouping/sort/filter semantics stay identical. The NEWAVE side folds the long
+    Pure numeric core of ``charts.cobre_aggregate_chart`` (``charts.py:813-846``). The
+    Cobre side sums ``variable`` across (optionally ``matched_ids``-filtered) plants per
+    ``stage_id`` — delegated to :func:`per_stage_sum_from_frame` so the
+    grouping/sort/filter semantics stay identical. The source model side folds the long
     ``nw_sin`` frame into a per-stage total: rows are filtered to
-    ``variable.strip().upper() == nw_variable``, then each surviving row adds
-    ``value * nw_factor`` into bucket ``stage - nw_offset``, skipping rows whose
-    ``stage`` or ``value`` is ``None``. Never raises.
+    ``variable.strip().upper() == nw_variable``, then each surviving row adds ``value *
+    nw_factor`` into bucket ``stage - nw_offset``, skipping rows whose ``stage`` or
+    ``value`` is ``None``. Never raises.
 
     Args:
         cobre_hydro: Per-hydro Cobre means with ``entity_id``, ``stage_id`` and
             the ``variable`` column.
         variable: The column to sum on the Cobre side.
-        nw_sin: Long-format NEWAVE SIN frame with ``stage``, ``variable`` and
+        nw_sin: Long-format the source model SIN frame with ``stage``, ``variable`` and
             ``value`` columns, or ``None``.
         nw_variable: The (already upper-cased) variable to keep in ``nw_sin``, or
-            ``None`` to skip the NEWAVE side entirely.
-        nw_factor: Multiplicative factor applied to each NEWAVE value (unit
+            ``None`` to skip the source model side entirely.
+        nw_factor: Multiplicative factor applied to each source-model value (unit
             alignment).
-        nw_offset: Subtracted from each NEWAVE ``stage`` to align with the Cobre
+        nw_offset: Subtracted from each source-model ``stage`` to align with the Cobre
             ``stage_id`` axis.
         matched_ids: Optional Cobre entity filter forwarded to the Cobre sum.
 
@@ -1168,15 +1169,15 @@ def spillage_lookups(
     results: Sequence[ResultComparison],
     cobre_spill_energy: pl.DataFrame,
 ) -> tuple[dict[str, dict[int, float]], dict[str, dict[int, float]]]:
-    """Build the NEWAVE and Cobre per-variable, per-stage spillage lookups.
+    """Build the source model and Cobre per-variable, per-stage spillage lookups.
 
     Pure numeric core of ``charts.system_spillage_energy_chart``
-    (``charts.py:1565-1581``). The NEWAVE lookup is keyed by each
-    ``system_spillage`` row's ``variable`` (e.g. ``VERTOT``/``VERTcont``/
-    ``VERTfio``) then ``stage`` to ``newave_value``. The Cobre lookup maps the
-    ``cobre_spill_energy`` frame's ``total_mw``/``reservoir_mw``/``rorov_mw``
-    columns per ``stage_id`` under the keys ``spill_energy_total_mw`` /
-    ``spill_energy_reservoir_mw`` / ``spill_energy_rorov_mw``. Never raises.
+    (``charts.py:1565-1581``). The source model lookup is keyed by each
+    ``system_spillage`` row's ``variable`` (e.g. ``VERTOT``/``VERTcont``/ ``VERTfio``)
+    then ``stage`` to ``newave_value``. The Cobre lookup maps the ``cobre_spill_energy``
+    frame's ``total_mw``/``reservoir_mw``/``rorov_mw`` columns per ``stage_id`` under
+    the keys ``spill_energy_total_mw`` / ``spill_energy_reservoir_mw`` /
+    ``spill_energy_rorov_mw``. Never raises.
 
     Args:
         results: The comparison rows; only ``entity_type == "system_spillage"``

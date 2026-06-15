@@ -234,9 +234,9 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
             ],
         )
     )
-    # Thermal-only (CTERM, live on both sides) and the non-thermal remainder
-    # (COPER − CTERM) — the latter goes negative for NEWAVE in the post-study
-    # because COPER is frozen at the last study value while CTERM stays live.
+    # Thermal-only (CTERM, live on both sides) and the non-thermal remainder (COPER −
+    # CTERM) — the latter goes negative for the source model in the post-study because
+    # COPER is frozen at the last study value while CTERM stays live.
     overview_parts.append(
         chart_grid(
             [
@@ -352,12 +352,11 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     )
     tab_contents["tab-network"] = "\n".join(network_parts)
 
-    # --- Constraints tab ---
-    # Per-constraint LHS comparison: NEWAVE-side LHS evaluated against
-    # MEDIAS-USIH / int*.out output, Cobre-side LHS as the mean across
-    # scenarios and blocks from the simulation parquet. Bounds are taken
-    # from constraints/generic_constraint_bounds.parquet (block 0
-    # preferred when blocks disagree).
+    # --- Constraints tab --- Per-constraint LHS comparison: The source-model-side LHS
+    # evaluated against MEDIAS-USIH / int*.out output, Cobre-side LHS as the mean across
+    # scenarios and blocks from the simulation parquet. Bounds are taken from
+    # constraints/generic_constraint_bounds.parquet (block 0 preferred when blocks
+    # disagree).
     gc_constraints = cast(
         "list[dict[object, object]]", _meta_list(dataset.metadata, "gc_constraints")
     )
@@ -431,10 +430,10 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
             )
         )
 
-    # System-level EARM and ENA (Cobre per-hydro aggregate vs NEWAVE SIN).
-    # NEWAVE EARMF is in MWmes (mean MW over a month); convert to MWh via
-    # the canonical 730 h/month factor used by NEWAVE.  ENA is already in
-    # MW (mean power) on both sides.
+    # System-level EARM and ENA (Cobre per-hydro aggregate vs the source model SIN). The
+    # source model EARMF is in MWmes (mean MW over a month); convert to MWh via the
+    # canonical 730 h/month factor used by the source model.  ENA is already in MW (mean
+    # power) on both sides.
     hydro_parts.append(section_title("Aggregate Energy Variables"))
     energy_charts = [
         wrap_chart(
@@ -468,10 +467,10 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     ]
     hydro_parts.append(chart_grid(energy_charts))
 
-    # System-aggregate (SIN) totals for each hydro variable. Sums Cobre
-    # plant values per stage and overlays the NEWAVE total. Mirrors the
-    # per-bus facet section but collapses across buses — useful as a
-    # one-glance global view alongside the per-bus disaggregation.
+    # System-aggregate (SIN) totals for each hydro variable. Sums Cobre plant values per
+    # stage and overlays the source model total. Mirrors the per-bus facet section but
+    # collapses across buses — useful as a one-glance global view alongside the per-bus
+    # disaggregation.
     hydro_parts.append(section_title("System Totals (SIN)"))
     aggregate_charts: list[str] = []
     for var, title in [
@@ -488,16 +487,16 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     hydro_parts.append(chart_grid(aggregate_charts))
 
     # Slack variables: same per-bus + SIN-total treatment as the operational
-    # variables above, but driven by the per-(entity_id, stage_id) Cobre
-    # frame and the NEWAVE slack frame (no ResultComparison rows exist for
-    # slacks).  The inflow non-negativity slack has no NEWAVE counterpart,
-    # so its NEWAVE source is passed as None — the chart still renders the
-    # Cobre Mean + p10/p90 band, just without an overlaid NEWAVE line.
+    # variables above, but driven by the per-(entity_id, stage_id) Cobre frame and the
+    # source model slack frame (no ResultComparison rows exist for slacks).  The inflow
+    # non-negativity slack has no source-model counterpart, so its the source model
+    # source is passed as None — the chart still renders the Cobre Mean + p10/p90 band,
+    # just without an overlaid the source model line.
     nw_hydro_slacks = _meta_frame(dataset.metadata, "nw_hydro_slacks")
-    # Withdrawal pos/neg are SWAPPED to follow NEWAVE's sign convention; the
-    # ``_NW_HYDRO_SLACK_VARS`` mapping in ``results.py`` is correspondingly
-    # swapped so each panel pairs the right Cobre column with the right
-    # NEWAVE series.  Evaporation pos/neg already share NEWAVE's convention.
+    # Withdrawal pos/neg are SWAPPED to follow the source model's sign convention; the
+    # ``_NW_HYDRO_SLACK_VARS`` mapping in ``results.py`` is correspondingly swapped so
+    # each panel pairs the right Cobre column with the right The source model series.
+    # Evaporation pos/neg already share the source model's convention.
     slack_specs: list[tuple[str, str, bool]] = [
         ("water_withdrawal_violation_neg_m3s", "Withdrawal Slack Pos (m³/s)", True),
         ("water_withdrawal_violation_pos_m3s", "Withdrawal Slack Neg (m³/s)", True),

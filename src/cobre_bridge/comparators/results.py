@@ -1,8 +1,9 @@
-"""Results comparison engine: aligns NEWAVE output with Cobre simulation means.
+"""Results comparison engine: aligns the source model output with Cobre simulation
+means.
 
-Reads NEWAVE MEDIAS / pmo.dat output and Cobre simulation parquets,
-aligns entities via ``EntityAlignment``, and computes per-variable
-absolute and relative differences.
+Reads the source model MEDIAS / pmo.dat output and Cobre simulation parquets, aligns
+entities via ``EntityAlignment``, and computes per-variable absolute and relative
+differences.
 """
 
 from __future__ import annotations
@@ -58,12 +59,11 @@ class PercentileData:
     nw_offset: int = 0
     nw_max_stage: int | None = None
 
-    # --- Epic 1: line interchange ---
-    # Cobre per-(line_id, stage_id) p10/p50/p90 of net_flow_mw across
-    # scenarios; bound table from constraints/line_bounds.parquet; metadata
-    # list straight from system/lines.json["lines"]. NEWAVE side: mean
-    # interchange per (line_id, stage_0based) read from int*.out NWLISTOP
-    # files and aligned via EntityAlignment.lines.
+    # --- Epic 1: line interchange --- Cobre per-(line_id, stage_id) p10/p50/p90 of
+    # net_flow_mw across scenarios; bound table from constraints/line_bounds.parquet;
+    # metadata list straight from system/lines.json["lines"]. The source model side:
+    # mean interchange per (line_id, stage_0based) read from int*.out NWLISTOP files and
+    # aligned via EntityAlignment.lines.
     line: pl.DataFrame = field(default_factory=pl.DataFrame)
     line_bounds: pd.DataFrame = field(default_factory=pd.DataFrame)
     line_meta: list[dict] = field(default_factory=list)
@@ -84,13 +84,13 @@ class PercentileData:
     # from ``hydros.json``" (carried by ``cobre_hydro_meta``).
     cobre_hydro_per_stage_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
 
-    # --- NEWAVE hydro slacks (VIOL_POS/NEG_VRETIRUH and VIOL_POS/NEG_EVAP) ---
-    # Per-(entity_id, stage_id) flow-domain values for the four NEWAVE hydro
-    # slack columns (water-withdrawal pos/neg and evaporation pos/neg),
-    # aligned to Cobre IDs and stage 0-base.  Used by the plant-detail tab
-    # to overlay NEWAVE on Cobre-only withdrawal slack panels and by the
-    # Hydro Operation tab to drive per-bus and SIN-total slack aggregates.
-    # Built by :func:`_compute_nw_hydro_slacks`.
+    # --- the source model hydro slacks (VIOL_POS/NEG_VRETIRUH and VIOL_POS/NEG_EVAP)
+    # --- Per-(entity_id, stage_id) flow-domain values for the four the source model
+    # hydro slack columns (water-withdrawal pos/neg and evaporation pos/neg), aligned to
+    # Cobre IDs and stage 0-base.  Used by the plant-detail tab to overlay the source
+    # model on Cobre-only withdrawal slack panels and by the Hydro Operation tab to
+    # drive per-bus and SIN-total slack aggregates. Built by
+    # :func:`_compute_nw_hydro_slacks`.
     nw_hydro_slacks: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     # --- Epic 3: system spillage in MWmes ---
@@ -99,34 +99,31 @@ class PercentileData:
     # ``max_storage_hm3 > 0`` discriminator.
     cobre_spillage_energy: pl.DataFrame = field(default_factory=pl.DataFrame)
 
-    # --- Performance / wall-clock timings ---
-    # NEWAVE per-iteration ``backward_seconds`` / ``forward_seconds`` /
-    # ``total_seconds`` from ``newave.tim``. NEWAVE stage labels (e.g.
-    # ``"Tempo Total"``, ``"Calculo da Politica"``) → seconds. Cobre
-    # total training duration in seconds from
+    # --- Performance / wall-clock timings --- The source model per-iteration
+    # ``backward_seconds`` / ``forward_seconds`` / ``total_seconds`` from
+    # ``newave.tim``. The source model stage labels (e.g. ``"Tempo Total"``, ``"Calculo
+    # da Politica"``) → seconds. Cobre total training duration in seconds from
     # ``output/training/metadata.json``.
     nw_tim_iterations: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_tim_stages: dict[str, float] = field(default_factory=dict)
     cobre_training_seconds: float = 0.0
     cobre_iteration_timing: pl.DataFrame = field(default_factory=pl.DataFrame)
 
-    # --- Generic constraints (RE, AGRINT, VminOP) — LHS comparison ---
-    # Constraint definitions and per-(stage, block) bound table read
-    # straight from the converted Cobre case. ``lhs_newave`` evaluates
-    # each constraint's LHS against NEWAVE outputs (MEDIAS-USIH GHIDUH +
-    # int*.out interchanges) at stage_0based granularity; ``lhs_cobre``
-    # does the same against Cobre simulation parquets, collapsed to
-    # mean across scenarios and blocks.
+    # --- Generic constraints (RE, AGRINT, VminOP) — LHS comparison --- Constraint
+    # definitions and per-(stage, block) bound table read straight from the converted
+    # Cobre case. ``lhs_newave`` evaluates each constraint's LHS against the source
+    # model outputs (MEDIAS-USIH GHIDUH + int*.out interchanges) at stage_0based
+    # granularity; ``lhs_cobre`` does the same against Cobre simulation parquets,
+    # collapsed to mean across scenarios and blocks.
     gc_constraints: list[dict] = field(default_factory=list)
     gc_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
     gc_lhs_newave: pl.DataFrame = field(default_factory=pl.DataFrame)
     gc_lhs_cobre: pl.DataFrame = field(default_factory=pl.DataFrame)
 
-    # --- Productivity detail (Productivity tab) ---
-    # One row per aligned hydro carrying NEWAVE's head-dependent
-    # productivities (altura min/65/max, equivalent, accumulated_earm) plus
-    # the HIDR cadastro building blocks (specific productivity, tailwater =
-    # canal_fuga_medio, losses, vmin, vmax), alongside Cobre's point /
+    # --- Productivity detail (Productivity tab) --- One row per aligned hydro carrying
+    # the source model's head-dependent productivities (altura min/65/max, equivalent,
+    # accumulated_earm) plus the HIDR cadastro building blocks (specific productivity,
+    # tailwater = canal_fuga_medio, losses, vmin, vmax), alongside Cobre's point /
     # equivalent / accumulated productivities and building blocks.  Built by
     # :func:`_build_productivity_detail`.
     productivity_detail: pl.DataFrame = field(default_factory=pl.DataFrame)
@@ -194,7 +191,7 @@ def smape(nw_value: float, cobre_value: float) -> float:
 
 
 def _within_tolerance(nw_value: float, cobre_value: float, tolerance: float) -> bool:
-    """True if Cobre is within ``tolerance`` (relative) of the NEWAVE reference.
+    """True if Cobre is within ``tolerance`` (relative) of the source model reference.
 
     When the reference is ~0, counts as a match only if Cobre is also ~0 (both
     effectively zero); otherwise uses ``|nw - cobre| <= tolerance * |nw|``.
@@ -265,11 +262,11 @@ _SYSTEM_VAR_MAP: dict[str, str] = {
 
 
 def _nw_stage_offset(nw_df: pl.DataFrame) -> int:
-    """Return the minimum stage number in a NEWAVE MEDIAS DataFrame.
+    """Return the minimum stage number in a source-model MEDIAS DataFrame.
 
-    NEWAVE v29+ MEDIAS columns are numbered from the study start month
-    (e.g. 3 for March).  We subtract this offset to convert to 0-based
-    stage indices matching Cobre convention.
+    The source model v29+ MEDIAS columns are numbered from the study start month (e.g. 3
+    for March).  We subtract this offset to convert to 0-based stage indices matching
+    Cobre convention.
     """
     stages = nw_df["stage"].drop_nulls()
     if stages.is_empty():
@@ -286,11 +283,10 @@ def _build_gen_max_overlay(
 ) -> pl.DataFrame:
     """Build per-(entity_id, stage_id) generation upper-bound overlay.
 
-    Returns columns ``entity_id``, ``stage_id``,
-    ``nw_ghmax_fphc_mw`` (NEWAVE constant-FPH max generation, MWmes
-    from MEDIAS-USIH), and ``cobre_lp_gen_max_mw`` (Cobre LP upper
-    bound at block 0). Either column may be null when the source side
-    is missing a value.
+    Returns columns ``entity_id``, ``stage_id``, ``nw_ghmax_fphc_mw`` (the source model
+    constant-FPH max generation, MWmes from MEDIAS-USIH), and ``cobre_lp_gen_max_mw``
+    (Cobre LP upper bound at block 0). Either column may be null when the source side is
+    missing a value.
     """
     empty = pl.DataFrame(
         schema={
@@ -303,7 +299,7 @@ def _build_gen_max_overlay(
     if cobre_lp_gen_max.is_empty() and nw_hydro.is_empty():
         return empty
 
-    # NEWAVE GHMAX_FPHC → (cobre_id, stage_0based) lookup via name match.
+    # The source model GHMAX_FPHC → (cobre_id, stage_0based) lookup via name match.
     cobre_by_name: dict[str, int] = {
         meta["name"].strip().upper(): eid for eid, meta in cobre_meta.items()
     }
@@ -360,23 +356,22 @@ def _build_gen_max_overlay(
     )
 
 
-# MEDIAS reports VIOL_POS_VRETIRUH / VIOL_NEG_VRETIRUH and VIOL_POS_EVAP /
-# VIOL_NEG_EVAP as monthly volumes in hm³ (same convention as VRETIRUH /
-# VEVAPUH).  Cobre emits the matching slacks in m³/s.  NEWAVE's internal
-# reports round the month-length factor to 2.63 (≈ 730 h × 3600 s / 1e6), so
-# dividing by 2.63 yields apples-to-apples flows matching what
-# ``_compare_hydros`` already does for the VEVAPUH / VRETIRUH realized series.
+# MEDIAS reports VIOL_POS_VRETIRUH / VIOL_NEG_VRETIRUH and VIOL_POS_EVAP / VIOL_NEG_EVAP
+# as monthly volumes in hm³ (same convention as VRETIRUH / VEVAPUH).  Cobre emits the
+# matching slacks in m³/s.  The source model's internal reports round the month-length
+# factor to 2.63 (≈ 730 h × 3600 s / 1e6), so dividing by 2.63 yields apples-to-apples
+# flows matching what ``_compare_hydros`` already does for the VEVAPUH / VRETIRUH
+# realized series.
 #
-# WITHDRAWAL pos/neg are SWAPPED on purpose: Cobre's sign convention for the
-# withdrawal slack is the inverse of NEWAVE's, so the column NEWAVE calls
+# WITHDRAWAL pos/neg are SWAPPED on purpose: Cobre's sign convention for the withdrawal
+# slack is the inverse of the source model's, so the column the source model calls
 # ``VIOL_POS_VRETIRUH`` lines up physically with Cobre's
-# ``water_withdrawal_violation_neg_m3s`` (and vice versa).  Mapping them this
-# way keeps the comparison HTML's "Withdrawal Slack Pos / Neg" panels
-# self-consistent under NEWAVE's labelling — the display labels in
-# ``_HYDRO_COBRE_ONLY_VARIABLES`` / ``report_builder.slack_specs`` are
-# correspondingly swapped so each panel shows the column that matches its
-# header.  Evaporation pos/neg share NEWAVE's convention and don't need the
-# swap.
+# ``water_withdrawal_violation_neg_m3s`` (and vice versa).  Mapping them this way keeps
+# the comparison HTML's "Withdrawal Slack Pos / Neg" panels self-consistent under the
+# source model's labelling — the display labels in ``_HYDRO_COBRE_ONLY_VARIABLES`` /
+# ``report_builder.slack_specs`` are correspondingly swapped so each panel shows the
+# column that matches its header.  Evaporation pos/neg share the source model's
+# convention and don't need the swap.
 _NW_HYDRO_SLACK_VARS: dict[str, str] = {
     "VIOL_POS_VRETIRUH": "water_withdrawal_violation_neg_m3s",
     "VIOL_NEG_VRETIRUH": "water_withdrawal_violation_pos_m3s",
@@ -391,16 +386,15 @@ def _compute_nw_hydro_slacks(
     nw_names: dict[int, str],
     cobre_meta: dict[int, dict],
 ) -> pl.DataFrame:
-    """Build a per-(entity_id, stage_id) frame of NEWAVE hydro slacks.
+    """Build a per-(entity_id, stage_id) frame of the source model hydro slacks.
 
-    Surfaces ``VIOL_POS_VRETIRUH`` / ``VIOL_NEG_VRETIRUH`` (water withdrawal)
-    and ``VIOL_POS_EVAP`` / ``VIOL_NEG_EVAP`` (evaporation) from MEDIAS-USIH
-    aligned to Cobre's ``entity_id`` and ``stage_id`` (0-based) conventions
-    and converted from hm³/month to m³/s with the same /2.63 factor used by
-    :func:`_compare_hydros` for the realized withdrawal / evaporation series.
-    The chart layer joins this against the matching Cobre slack columns so
-    the Hydro Operation tab can render NEWAVE alongside Cobre on per-bus and
-    SIN-total slack panels.
+    Surfaces ``VIOL_POS_VRETIRUH`` / ``VIOL_NEG_VRETIRUH`` (water withdrawal) and
+    ``VIOL_POS_EVAP`` / ``VIOL_NEG_EVAP`` (evaporation) from MEDIAS-USIH aligned to
+    Cobre's ``entity_id`` and ``stage_id`` (0-based) conventions and converted from
+    hm³/month to m³/s with the same /2.63 factor used by :func:`_compare_hydros` for the
+    realized withdrawal / evaporation series. The chart layer joins this against the
+    matching Cobre slack columns so the Hydro Operation tab can render the source model
+    alongside Cobre on per-bus and SIN-total slack panels.
     """
     empty = pl.DataFrame(
         schema={
@@ -488,7 +482,7 @@ def _compare_hydros(
         min_stor = meta.get("min_storage_hm3", 0.0)
         cobre_by_name[name_upper] = (eid, min_stor)
 
-    # Match NEWAVE codes to Cobre IDs by name.
+    # Match the source model codes to Cobre IDs by name.
     matched: dict[
         int, tuple[int, str, float]
     ] = {}  # nw_code→(cobre_id, name, min_stor)
@@ -498,7 +492,7 @@ def _compare_hydros(
         if hit is not None:
             matched[nw_code] = (hit[0], nw_name.strip(), hit[1])
 
-    # Build NEWAVE lookup: (nw_code, stage, variable) -> value
+    # Build the source model lookup: (nw_code, stage, variable) -> value
     nw_lookup: dict[tuple[int, int, str], float] = {}
     for row in nw_hydro.iter_rows(named=True):
         if row["value"] is None:
@@ -513,14 +507,13 @@ def _compare_hydros(
             continue
         nw_lookup[(code, stage, mapped)] = float(row["value"])
 
-    # Reconstruct realized evaporation and withdrawal from the NEWAVE LP
-    # slack columns. VEVAPUH/VRETIRUH are reported as the *scheduled*
-    # values; VIOL_POS_* / VIOL_NEG_* track over- and under-application
-    # respectively. Realized = scheduled + POS − NEG (same convention as
-    # Cobre's matrix.rs water-balance row). Reading the slacks directly
-    # from the long-format ``nw_hydro`` frame avoids adding them to
-    # ``_HYDRO_VAR_MAP`` (which would spuriously emit ResultComparison
-    # rows for the slacks themselves).
+    # Reconstruct realized evaporation and withdrawal from the source model LP slack
+    # columns. VEVAPUH/VRETIRUH are reported as the *scheduled* values; VIOL_POS_* /
+    # VIOL_NEG_* track over- and under-application respectively. Realized = scheduled +
+    # POS − NEG (same convention as Cobre's matrix.rs water-balance row). Reading the
+    # slacks directly from the long-format ``nw_hydro`` frame avoids adding them to
+    # ``_HYDRO_VAR_MAP`` (which would spuriously emit ResultComparison rows for the
+    # slacks themselves).
     nw_slacks: dict[tuple[int, int, str], float] = {}
     for row in nw_hydro.iter_rows(named=True):
         if row["value"] is None:
@@ -552,7 +545,7 @@ def _compare_hydros(
         neg = nw_slacks.get((code, stage, slack_vars[1]), 0.0)
         nw_lookup[key] = nw_lookup[key] + pos - neg
 
-    # Derive NEWAVE total outflow = turbined + spillage (no MEDIAS code).
+    # Derive the source model total outflow = turbined + spillage (no MEDIAS code).
     derived: dict[tuple[int, int, str], float] = {}
     for (code, stage, var), val in nw_lookup.items():
         if var != "turbined_m3s":
@@ -583,22 +576,20 @@ def _compare_hydros(
             if cobre_val is None:
                 continue
 
-            # NEWAVE reports useful storage (storage - vol_min).
-            # Add min_storage to align with Cobre absolute storage.
+            # The source model reports useful storage (storage - vol_min). Add
+            # min_storage to align with Cobre absolute storage.
             if var == "storage_final_hm3":
                 nw_val = nw_val + min_stor
             elif var in ("evaporation_m3s", "withdrawal_m3s"):
-                # MEDIAS-USIH VEVAPUH and VRETIRUH are reported as
-                # monthly *volume* in hm³, not flow. Cobre emits m³/s.
-                # NEWAVE rounds the month-length factor to 2.63 in its
-                # internal output reporting (≈ 730 h × 3600 s / 10⁶);
-                # using the same rounded constant here makes the
-                # comparison apples-to-apples. The converter side keeps
-                # the exact 2.628 (see network.py:C_M3S2HM3) because the
-                # input-data conversion has no analogous rounding.
-                # Handled per-variable rather than via a V*-prefix
-                # heuristic to avoid mis-scaling future MEDIAS columns
-                # that happen to start with V.
+                # MEDIAS-USIH VEVAPUH and VRETIRUH are reported as monthly *volume* in
+                # hm³, not flow. Cobre emits m³/s. The source model rounds the
+                # month-length factor to 2.63 in its internal output reporting (≈ 730 h
+                # × 3600 s / 10⁶); using the same rounded constant here makes the
+                # comparison apples-to-apples. The converter side keeps the exact 2.628
+                # (see network.py:C_M3S2HM3) because the input-data conversion has no
+                # analogous rounding. Handled per-variable rather than via a V*-prefix
+                # heuristic to avoid mis-scaling future MEDIAS columns that happen to
+                # start with V.
                 nw_val = nw_val / 2.63
 
             results.append(
@@ -836,18 +827,17 @@ def _compare_lines(
     alignment: EntityAlignment,
     nw_offset: int,
 ) -> list[ResultComparison]:
-    """Compare NEWAVE intercâmbio to Cobre net line flow.
+    """Compare the source model intercâmbio to Cobre net line flow.
 
-    NEWAVE NWLISTOP ``int*.out`` files report directional flow (mean MW
-    over the month) per (from, to) submarket pair. The ``alignment``
-    contains ``LineEntity`` objects already matched by submarket-pair to
-    Cobre line IDs (see ``build_entity_alignment``).
+    The source model NWLISTOP ``int*.out`` files report directional flow (mean MW over
+    the month) per (from, to) submarket pair. The ``alignment`` contains ``LineEntity``
+    objects already matched by submarket-pair to Cobre line IDs (see
+    ``build_entity_alignment``).
 
-    Pre-study int*.out stages (NEWAVE writes all absolute calendar
-    months, including those before the study horizon) are filtered out
-    by passing the MEDIAS-derived ``nw_offset`` — these rows would
-    otherwise misalign with Cobre's ``stage_id`` numbering, which
-    starts at the first study month.
+    Pre-study int*.out stages (the source model writes all absolute calendar months,
+    including those before the study horizon) are filtered out by passing the
+    MEDIAS-derived ``nw_offset`` — these rows would otherwise misalign with Cobre's
+    ``stage_id`` numbering, which starts at the first study month.
     """
     results: list[ResultComparison] = []
     if nw_intercambio.is_empty() or cobre_line.is_empty():
@@ -860,7 +850,7 @@ def _compare_lines(
     for ln in alignment.lines:
         matched[(ln.newave_de, ln.newave_para)] = (ln.cobre_line_id, ln.name)
 
-    # NEWAVE lookup: (cobre_line_id, stage_0based) -> mean MW.
+    # The source model lookup: (cobre_line_id, stage_0based) -> mean MW.
     nw_lookup: dict[tuple[int, int], float] = {}
     for row in nw_intercambio.iter_rows(named=True):
         if row["value"] is None:
@@ -924,12 +914,11 @@ def _compare_system_spillage(
     nw_sin: pl.DataFrame,
     cobre_spill_energy: pl.DataFrame,
 ) -> list[ResultComparison]:
-    """Compare system spillage in MWmes between NEWAVE SIN and Cobre.
+    """Compare system spillage in MWmes between the source model SIN and Cobre.
 
-    NEWAVE MEDIAS-SIN reports ``VERTOT`` (total), ``VERTcont``
-    (reservoir cascades), and ``VERTfio`` (run-of-river) — all in
-    MWmes (stage-mean MW). Cobre values come from
-    :func:`read_cobre_spillage_energy` which already produces
+    The source model MEDIAS-SIN reports ``VERTOT`` (total), ``VERTcont`` (reservoir
+    cascades), and ``VERTfio`` (run-of-river) — all in MWmes (stage-mean MW). Cobre
+    values come from :func:`read_cobre_spillage_energy` which already produces
     stage-mean MW per category.
     """
     results: list[ResultComparison] = []
@@ -938,7 +927,7 @@ def _compare_system_spillage(
 
     offset = _nw_stage_offset(nw_sin)
 
-    # NEWAVE side: (stage_0based, mapped_var) -> value.
+    # The source model side: (stage_0based, mapped_var) -> value.
     nw_lookup: dict[tuple[int, str], float] = {}
     for row in nw_sin.iter_rows(named=True):
         if row["value"] is None:
@@ -987,22 +976,22 @@ _PRODUCTIVITY_DETAIL_SCHEMA = {
     "plant_name": pl.Utf8,
     "newave_code": pl.Int64,
     "cobre_id": pl.Int64,
-    # NEWAVE pmo.dat head-dependent productivities (FPHA).
+    # The source model pmo.dat head-dependent productivities (FPHA).
     "nw_altura_min": pl.Float64,
     "nw_altura_65": pl.Float64,
     "nw_altura_max": pl.Float64,
     "nw_equivalent": pl.Float64,
     "nw_accumulated_earm": pl.Float64,
-    # NEWAVE HIDR cadastro building blocks.
+    # The source model HIDR cadastro building blocks.
     "nw_specific_productivity": pl.Float64,
     "nw_tailwater_m": pl.Float64,
     "nw_losses_m": pl.Float64,
     "nw_vmin_hm3": pl.Float64,
     "nw_vmax_hm3": pl.Float64,
-    # cobre-bridge side: the *static* productivities the converter computes
-    # from the NEWAVE inputs (HIDR cadastro + cascade), so the scatters are a
-    # conversion-fidelity check against the matching pmo column rather than a
-    # comparison against the per-stage simulation output.
+    # cobre-bridge side: the *static* productivities the converter computes from the
+    # source model inputs (HIDR cadastro + cascade), so the scatters are a
+    # conversion-fidelity check against the matching pmo column rather than a comparison
+    # against the per-stage simulation output.
     "cb_point": pl.Float64,
     "cb_equivalent": pl.Float64,
     "cb_accumulated": pl.Float64,
@@ -1024,17 +1013,16 @@ def _build_productivity_detail(
 ) -> pl.DataFrame:
     """Assemble the per-plant static productivity comparison frame.
 
-    One row per aligned hydro pair (``alignment.hydros``). The NEWAVE side
-    carries the pmo.dat head-dependent productivities (matched by plant name)
-    and the HIDR cadastro building blocks (matched by NEWAVE code). The
-    cobre-bridge side carries the *static* productivities the converter
-    computes from those same inputs — ``cb_point`` from
-    :func:`compute_productivity`, ``cb_equivalent`` from
-    :func:`stored_energy_productivity`, ``cb_accumulated`` from the cascade
-    accumulated map — plus the building blocks written into
-    ``system/hydros.json`` (``cobre_prod_detail``). Matching pmo and
-    cobre-bridge columns should land on ``y = x`` (validating the
-    conversion), since both are derived from the same NEWAVE inputs.
+    One row per aligned hydro pair (``alignment.hydros``). The source model side carries
+    the pmo.dat head-dependent productivities (matched by plant name) and the HIDR
+    cadastro building blocks (matched by the source model code). The cobre-bridge side
+    carries the *static* productivities the converter computes from those same inputs —
+    ``cb_point`` from :func:`compute_productivity`, ``cb_equivalent`` from
+    :func:`stored_energy_productivity`, ``cb_accumulated`` from the cascade accumulated
+    map — plus the building blocks written into ``system/hydros.json``
+    (``cobre_prod_detail``). Matching pmo and cobre-bridge columns should land on ``y =
+    x`` (validating the conversion), since both are derived from the same the source
+    model inputs.
 
     Returns an empty frame (with the full schema) when there are no aligned
     hydros.
@@ -1059,7 +1047,7 @@ def _build_productivity_detail(
         return f if f == f else None  # drop NaN
 
     def _nw_reservoir_bounds(code: int) -> tuple[float | None, float | None]:
-        """NEWAVE reservoir bounds as cobre-bridge models them.
+        """The source model reservoir bounds as cobre-bridge models them.
 
         Daily-regulation ('D') plants are frozen at ``volume_referencia`` by the
         converter (they can't store across stages), so compare like-for-like
@@ -1137,7 +1125,7 @@ def compare_results(
     cobre_output_dir: Path,
     tolerance: float = 1e-2,
 ) -> ComparisonDataset:
-    """Compare NEWAVE output results against Cobre simulation means.
+    """Compare the source model output results against Cobre simulation means.
 
     Entities are matched by **name** (case-insensitive) rather than by
     converter-assigned IDs, so the comparison works even when the Cobre
@@ -1156,7 +1144,7 @@ def compare_results(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case (for names, cadastro, and locating pmo.dat).
+        Parsed the source model case (for names, cadastro, and locating pmo.dat).
     id_map:
         Entity ID mapping (used only for productivity fallback).
     alignment:
@@ -1218,7 +1206,7 @@ def compare_results(
     cobre_thermal_meta = read_cobre_thermal_metadata(cobre_output_dir)
     cobre_bus_meta = read_cobre_bus_metadata(cobre_output_dir)
 
-    # Locate NEWAVE saidas directory.
+    # Locate the source model saidas directory.
     saidas_dir = _find_saidas_dir(case.files.directory)
 
     nw_offset = 0
@@ -1287,7 +1275,7 @@ def compare_results(
                 if max_val is not None:
                     nw_max_stage_1based = int(max_val)  # type: ignore[arg-type]
         if not cobre_hydro.is_empty():
-            # Generation upper-bound overlay (NEWAVE GHMAX_FPHC vs Cobre LP).
+            # Generation upper-bound overlay (the source model GHMAX_FPHC vs Cobre LP).
             gen_max_overlay = _build_gen_max_overlay(
                 nw_hydro,
                 read_cobre_lp_max_generation(cobre_output_dir),
@@ -1328,12 +1316,11 @@ def compare_results(
                 _compare_buses(nw_system, cobre_bus, nw_bus_names, cobre_bus_meta)
             )
 
-        # --- Line interchange comparison (NWLISTOP int*.out) ---
-        # nw_offset is the MEDIAS-derived study-start offset (e.g., 9 for
-        # a September-start study). int*.out files emit absolute NEWAVE
-        # stages including pre-study calendar months with all-zero
-        # values, so we reuse this offset to filter them out and align
-        # the remainder with Cobre's 0-based stage_id.
+        # --- Line interchange comparison (NWLISTOP int*.out) --- nw_offset is the
+        # MEDIAS-derived study-start offset (e.g., 9 for a September-start study).
+        # int*.out files emit absolute the source model stages including pre-study
+        # calendar months with all-zero values, so we reuse this offset to filter them
+        # out and align the remainder with Cobre's 0-based stage_id.
         nw_intercambio = read_nwlistop_intercambio(saidas_dir)
         cobre_line = read_cobre_line_means(cobre_output_dir)
         if not nw_intercambio.is_empty() and not cobre_line.is_empty():
@@ -1353,10 +1340,10 @@ def compare_results(
         _LOG.info("Comparing convergence data...")
         results.extend(_compare_convergence(nw_conv, cobre_conv))
 
-    # --- Productivity detail (static conversion-fidelity check) ---
-    # Per-plant NEWAVE pmo productivities vs the *static* productivities
-    # cobre-bridge computes from the same HIDR cadastro + cascade, plus the
-    # converted building blocks — assembled for the Productivity tab.
+    # --- Productivity detail (static conversion-fidelity check) --- Per-plant the
+    # source model pmo productivities vs the *static* productivities cobre-bridge
+    # computes from the same HIDR cadastro + cascade, plus the converted building blocks
+    # — assembled for the Productivity tab.
     _LOG.info("Building productivity detail...")
     nw_prod_detail = read_pmo_productivity_detail(case.files.directory)
     cobre_prod_detail = read_cobre_productivity_detail(cobre_output_dir)
@@ -1382,12 +1369,11 @@ def compare_results(
         alignment, nw_prod_detail, nw_cadastro, cobre_prod_detail, cb_accumulated
     )
 
-    # --- Cost breakdown ---
-    # NEWAVE typically runs a shorter horizon than Cobre.  Restrict
-    # Cobre's cost sum to NEWAVE's stage range so the totals compare like-
-    # for-like.  ``nw_max_stage_1based`` is the largest stage label
-    # appearing in MEDIAS files; convert to Cobre's 0-based stage_id by
-    # subtracting the NEWAVE start-month offset.
+    # --- Cost breakdown --- The source model typically runs a shorter horizon than
+    # Cobre.  Restrict Cobre's cost sum to the source model's stage range so the totals
+    # compare like- for-like.  ``nw_max_stage_1based`` is the largest stage label
+    # appearing in MEDIAS files; convert to Cobre's 0-based stage_id by subtracting the
+    # source model start-month offset.
     nw_max_stage_0based: int | None = None
     if nw_max_stage_1based is not None:
         nw_max_stage_0based = nw_max_stage_1based - nw_offset
@@ -1424,7 +1410,7 @@ def compare_results(
         nw_market = read_medias_market(saidas_dir)
         nw_sin = read_medias_sin(saidas_dir)
 
-    # --- NEWAVE deterministic net load (load - NCS from sistema.dat) ---
+    # --- the source model deterministic net load (load - NCS from sistema.dat) ---
     nw_net_load = read_newave_net_load(case.files.directory)
 
     # --- Percentile statistics ---
@@ -1453,11 +1439,11 @@ def compare_results(
         except Exception:  # noqa: BLE001
             _LOG.warning("Failed to read lines.json")
 
-    # NEWAVE typically reports a shorter horizon than Cobre.  Truncate all
-    # Cobre-side per-stage DataFrames to NEWAVE's max stage so the report's
-    # charts compare like-for-like across tabs (energy balance, hydro
-    # operation, plant details, etc.).  Truncation is a no-op when NEWAVE
-    # stage data was unavailable.
+    # The source model typically reports a shorter horizon than Cobre.  Truncate all
+    # Cobre-side per-stage DataFrames to the source model's max stage so the report's
+    # charts compare like-for-like across tabs (energy balance, hydro operation, plant
+    # details, etc.).  Truncation is a no-op when the source model stage data was
+    # unavailable.
     if nw_max_stage_0based is not None:
 
         def _truncate(df: pl.DataFrame) -> pl.DataFrame:
@@ -1509,9 +1495,9 @@ def compare_results(
             nw_offset,
         )
         gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
-        # VminOP constraints bound stored energy; re-express their LHS/bound as
-        # useful stored energy (MWmonth) so they compare like-for-like against
-        # NEWAVE's per-REE EARMF from MEDIAS-REE.CSV.  RE/AGRINT are untouched.
+        # VminOP constraints bound stored energy; re-express their LHS/bound as useful
+        # stored energy (MWmonth) so they compare like-for-like against The source
+        # model's per-REE EARMF from MEDIAS-REE.CSV.  RE/AGRINT are untouched.
         gc_bounds_df, gc_lhs_nw, gc_lhs_cb = apply_vminop_useful_energy(
             gc_constraints,
             gc_bounds_df,

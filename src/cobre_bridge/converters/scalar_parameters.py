@@ -13,11 +13,10 @@ For every non-fictitious hydro in the converted case we declare two
 - ``rho_eq_h{id}`` — :math:`\\rho_{eq}` (equivalent productivity)
 - ``rho_acum_h{id}`` — :math:`\\rho_{acum}` (accumulated cascade productivity)
 
-These two are the canonical NEWAVE-style productivities used by every
-hydro-storage / hydro-generation energy constraint we know of (VminOP,
-minimum cascade energy, EARM-based bounds, ...). The values themselves
-are derived by cobre from VHA geometry and ρ_esp at solve time — we only
-declare the names.
+These two are the canonical the source-model-style productivities used by every
+hydro-storage / hydro-generation energy constraint we know of (VminOP, minimum cascade
+energy, EARM-based bounds, ...). The values themselves are derived by cobre from VHA
+geometry and ρ_esp at solve time — we only declare the names.
 
 See ``book/src/schemas/scalar_parameters.schema.json`` and
 ``book/src/guide/scalar-parameters.md`` in the cobre repo for the on-disk
@@ -58,11 +57,11 @@ def build_scalar_parameters(
     every constraint referencing ``@rho_acum_h{id}`` uses the supplied
     numeric values instead of cobre's cascade-summed point productivity.
 
-    Used by the VminOP pathway to inject NEWAVE's stored-energy (EARM)
-    productivity convention — the cascade-summed integrated productivity
-    ``ρ_esp · (1/useful) · ∫_vmin^vmax h(V) dV`` — which differs from the
-    point productivity by up to ~10% on plants with non-trivial head swing
-    and is what NEWAVE itself uses to evaluate VminOP constraints.
+    Used by the VminOP pathway to inject the source model's stored-energy (EARM)
+    productivity convention — the cascade-summed integrated productivity ``ρ_esp ·
+    (1/useful) · ∫_vmin^vmax h(V) dV`` — which differs from the point productivity by up
+    to ~10% on plants with non-trivial head swing and is what the source model itself
+    uses to evaluate VminOP constraints.
     """
     unique_ids = sorted({int(h) for h in hydro_ids})
     overrides = (

@@ -1,9 +1,9 @@
-"""Resolve NEWAVE fictitious-plant cascade chains for real plants.
+"""Resolve the source model fictitious-plant cascade chains for real plants.
 
-NEWAVE's ``confhd.dat`` encodes the physical water-balance cascade via
-``codigo_usina_jusante``.  For some real plants this link is 0 (terminal)
-or points to a fictitious plant whose role is purely topological — an
-accounting entity used only for energy-cascade routing.
+The source model's ``confhd.dat`` encodes the physical water-balance cascade via
+``codigo_usina_jusante``.  For some real plants this link is 0 (terminal) or points to a
+fictitious plant whose role is purely topological — an accounting entity used only for
+energy-cascade routing.
 
 Fictitious plants are identified **structurally** (see
 :func:`plants.fictitious_codes`): zero productivity sharing a generating
@@ -42,18 +42,18 @@ class FictCascadeResolution:
     Attributes
     ----------
     downstream_code:
-        NEWAVE code of the next real plant in the cascade, or ``None`` when
+        The source model code of the next real plant in the cascade, or ``None`` when
         the chain terminates at the sea.
     fict_chain:
-        Ordered list of fictitious-plant NEWAVE codes traversed between the real
-        plant and ``downstream_code``.  Empty when no fictitious plants lie on
-        the path.
+        Ordered list of fictitious-plant the source model codes traversed between the
+        real plant and ``downstream_code``.  Empty when no fictitious plants lie on the
+        path.
     fict_rho_sum:
-        Cumulative ``ρ_eq`` of the fictitious plants in ``fict_chain``.  This
-        must be folded into the upstream real plant's effective ``ρ_eq`` so that
-        cobre's cascade sum reproduces NEWAVE's
-        ``produtibilidade_acumulada_calculo_earm``.  Fictitious plants have
-        ρ = 0 by definition, so this is zero in practice — kept for generality.
+        Cumulative ``ρ_eq`` of the fictitious plants in ``fict_chain``.  This must be
+        folded into the upstream real plant's effective ``ρ_eq`` so that cobre's cascade
+        sum reproduces the source model's ``produtibilidade_acumulada_calculo_earm``.
+        Fictitious plants have ρ = 0 by definition, so this is zero in practice — kept
+        for generality.
     """
 
     downstream_code: int | None
@@ -77,11 +77,11 @@ def resolve_cascade(
        further such plants until a real plant or terminal (0) is reached.
        Accumulate the ``ρ_eq`` of every fictitious plant traversed.
     3. If ``P.codigo_usina_jusante`` is 0 (physically terminal) but a
-       fictitious plant shares ``P``'s ``posto``, treat that fictitious plant
-       as the implicit downstream and walk its chain as in rule 2.  This is
-       NEWAVE's convention for energy-cascade accounting on plants that do not
-       physically flow to a downstream reservoir (e.g. ``MAUA`` →
-       ``FICT.MAUA`` → ``CAPIVARA``, all on posto 57).
+       fictitious plant shares ``P``'s ``posto``, treat that fictitious plant as the
+       implicit downstream and walk its chain as in rule 2.  This is the source model's
+       convention for energy-cascade accounting on plants that do not physically flow to
+       a downstream reservoir (e.g. ``MAUA`` → ``FICT.MAUA`` → ``CAPIVARA``, all on
+       posto 57).
     4. Otherwise the cascade terminates: ``downstream_code = None``.
 
     Parameters
@@ -148,12 +148,12 @@ def resolve_cascade(
     ) -> tuple[int | None, list[int], float]:
         """Walk transparently through fictitious and absent (NE/NC) plants.
 
-        Returns ``(real_downstream, fict_codes_traversed, rho_sum)``.
-        Stops when reaching a real plant (returned), terminal (None), an
-        unknown code, or when a cycle is detected (defensive — should not
-        occur in well-formed NEWAVE cases).  Fictitious plants accumulate their
-        ``ρ_eq`` into ``rho_sum`` and appear in ``fict_codes_traversed``;
-        NE/NC plants are skipped silently as topological pass-throughs.
+        Returns ``(real_downstream, fict_codes_traversed, rho_sum)``. Stops when
+        reaching a real plant (returned), terminal (None), an unknown code, or when a
+        cycle is detected (defensive — should not occur in well-formed the source model
+        cases).  Fictitious plants accumulate their ``ρ_eq`` into ``rho_sum`` and appear
+        in ``fict_codes_traversed``; NE/NC plants are skipped silently as topological
+        pass-throughs.
         """
         fict_codes: list[int] = []
         rho_sum = 0.0

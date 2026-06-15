@@ -9,9 +9,9 @@ import json
 def escape_text(value: object) -> str:
     """Escape *value* for use as HTML **text** content (e.g. inside ``<td>``).
 
-    Neutralises ``&``, ``<`` and ``>`` so NEWAVE-derived names (plant, line,
-    case names) cannot inject markup. Use :func:`escape_attr` for values placed
-    inside quoted attributes.
+    Neutralises ``&``, ``<`` and ``>`` so the source-model-derived names (plant, line,
+    case names) cannot inject markup. Use :func:`escape_attr` for values placed inside
+    quoted attributes.
     """
     return _html.escape(str(value), quote=False)
 
@@ -28,11 +28,11 @@ def escape_attr(value: object) -> str:
 def json_for_script(obj: object) -> str:
     """Serialise *obj* to JSON safe to embed inside an HTML ``<script>`` block.
 
-    ``json.dumps`` alone does not neutralise ``</script>`` or the JavaScript
-    line separators U+2028/U+2029, so a NEWAVE name containing ``</script>``
-    could break out of the script context. This escapes ``<``, ``>``, ``&`` and
-    the line separators as ``\\uXXXX`` sequences — valid JSON (round-trips via
-    ``json.loads``) but inert in HTML.  Output uses compact separators.
+    ``json.dumps`` alone does not neutralise ``</script>`` or the JavaScript line
+    separators U+2028/U+2029, so a source-model name containing ``</script>`` could
+    break out of the script context. This escapes ``<``, ``>``, ``&`` and the line
+    separators as ``\\uXXXX`` sequences — valid JSON (round-trips via ``json.loads``)
+    but inert in HTML.  Output uses compact separators.
     """
     return (
         json.dumps(obj, separators=(",", ":"))
@@ -252,8 +252,8 @@ def build_html(
     Returns:
         A complete ``<!DOCTYPE html>`` document string.
     """
-    # ``title`` carries the case-directory name (NEWAVE-derived) and tab labels
-    # are interpolated as text; escape both so a crafted name cannot inject HTML.
+    # ``title`` carries the case-directory name (the source-model-derived) and tab
+    # labels are interpolated as text; escape both so a crafted name cannot inject HTML.
     title = escape_text(title)
 
     nav_buttons: list[str] = []

@@ -1,4 +1,4 @@
-"""Initial conditions converter: maps NEWAVE initial storage to Cobre JSON."""
+"""Initial conditions converter: maps the source model initial storage to Cobre JSON."""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ _SCHEMA_URL = (
 
 
 def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
-    """Convert NEWAVE initial reservoir storage to a Cobre initial_conditions dict.
+    """Convert the source model initial reservoir storage to a Cobre initial_conditions
+    dict.
 
     Reads ``hidr.dat`` and ``confhd.dat`` from *case*.  Initial
     storage is derived from ``Confhd.usinas.volume_inicial_percentual``
@@ -32,7 +33,7 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Pre-built ID mapping for hydro IDs.
 
@@ -43,11 +44,11 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         ``hidr.dat``.
     """
     # Apply permanent MODIF.DAT overrides (notably VOLMIN) so the initial-storage
-    # percentage is taken of the *operational* useful volume — the same min the
-    # bounds converter uses.  NEWAVE applies ``volume_inicial_percentual`` to the
-    # VOLMIN-adjusted useful range, not the raw hidr.dat one (verified against
-    # pmo.dat "VOLUME ARMAZENADO INICIAL": I. SOLTEIRA V.INIC 3940.9 hm³ @ 71.70%
-    # is 71.70% of (vmax − VOLMIN), not (vmax − raw_min)).
+    # percentage is taken of the *operational* useful volume — the same min the bounds
+    # converter uses.  The source model applies ``volume_inicial_percentual`` to the
+    # VOLMIN-adjusted useful range, not the raw hidr.dat one (verified against pmo.dat
+    # "VOLUME ARMAZENADO INICIAL": I. SOLTEIRA V.INIC 3940.9 hm³ @ 71.70% is 71.70% of
+    # (vmax − VOLMIN), not (vmax − raw_min)).
     cadastro = read_cadastro(case)
 
     existing = case.active_hydros
@@ -72,7 +73,7 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         # ``hydro.py``.  Anchor the initial storage to that same point so the
         # initial condition stays inside the (collapsed) [min, max] range:
         #   * 'D' (daily) → ``volume_referencia`` (legacy, validated).
-        #   * 'S' (run-of-river) → ``volume_minimo`` (NEWAVE pins ITAIPU at
+        #   * 'S' (run-of-river) → ``volume_minimo`` (the source model pins ITAIPU at
         #     VARMPUH 0% = Vmin; matches the collapse in ``hydro.py``).
         tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
         vol_ref_raw = hreg.get("volume_referencia")
@@ -114,16 +115,16 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     storage.sort(key=lambda s: s["hydro_id"])
 
     # ── Past anticipated thermal commitments (from adterm.dat) ──────────
-    # Empty for non-GNL cases (despacho_antecipado_gnl=0 in dger.dat).
-    # Each entry maps a thermal's NEWAVE code to its cobre thermal_id.
+    # Empty for non-GNL cases (despacho_antecipado_gnl=0 in dger.dat). Each entry maps a
+    # thermal's the source model code to its cobre thermal_id.
     #
-    # Cobre (>= 0.7.0) honours non-zero pre-horizon seeds: the always-active
-    # anticipated "fishing" equality pins generation to the committed MW at
-    # each delivery stage, faithfully reproducing NEWAVE's pre-commitment.
-    # The committed value must lie within the plant's static generation bounds
-    # ``[min_mw, max_mw]`` (``thermals.json`` / ``cobre-io`` semantic validator);
-    # an out-of-range seed makes that stage's fishing equality infeasible, so we
-    # clamp into range and warn rather than emit a case cobre would reject.
+    # Cobre (>= 0.7.0) honours non-zero pre-horizon seeds: the always-active anticipated
+    # "fishing" equality pins generation to the committed MW at each delivery stage,
+    # faithfully reproducing the source model's pre-commitment. The committed value must
+    # lie within the plant's static generation bounds ``[min_mw, max_mw]``
+    # (``thermals.json`` / ``cobre-io`` semantic validator); an out-of-range seed makes
+    # that stage's fishing equality infeasible, so we clamp into range and warn rather
+    # than emit a case cobre would reject.
     anticipated = read_anticipated_dispatch(case)
     gen_bounds = thermal_generation_bounds(case) if anticipated else {}
     past_anticipated_commitments: list[dict] = []

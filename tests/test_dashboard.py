@@ -1530,7 +1530,8 @@ def test_correct_wall_times_noop_on_empty_timing() -> None:
 
 
 def test_correct_wall_times_partial_iteration_mapping() -> None:
-    """When conv covers only some iterations, unmatched rows keep their original value."""
+    """When conv covers only some iterations, unmatched rows keep their original
+    value."""
     timing_raw = _make_timing_raw_multiworker(n_iters=3, n_workers=2, fwd_per_worker=10)
     agg = _aggregate_timing_by_iteration(timing_raw)
     # Only provide conv for iteration 2.

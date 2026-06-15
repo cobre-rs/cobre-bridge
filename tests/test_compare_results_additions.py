@@ -1,8 +1,8 @@
 """Unit tests for the operative-data additions to ``compare results``.
 
-Covers Epic 2 (per-plant extras + bounds), Epic 3 (system spillage in
-MWmes), and Epic 1 (line interchange comparison) — without spinning up
-a real Cobre or NEWAVE case.
+Covers Epic 2 (per-plant extras + bounds), Epic 3 (system spillage in MWmes), and Epic 1
+(line interchange comparison) — without spinning up a real Cobre or the source model
+case.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ class TestCompareSystemSpillage:
 
 
 class TestGenMaxOverlay:
-    def test_joins_newave_ghmax_with_cobre_lp_max(self) -> None:
+    def test_joins_source_model_ghmax_with_cobre_lp_max(self) -> None:
         nw_hydro = pl.DataFrame(
             {
                 "newave_code": [1, 1, 2],
@@ -158,9 +158,9 @@ class TestCompareLines:
         assert all(r.variable == "net_flow_mw" for r in out)
         stages = sorted(r.stage for r in out)
         assert stages == [0, 1]
-        # The (2 → 1) NEWAVE row should NOT match since the alignment only
-        # contains (1 → 2) — directional match per the design.
-        # Confirm by checking newave values come from the (1 → 2) rows only.
+        # The (2 → 1) the source model row should NOT match since the alignment only
+        # contains (1 → 2) — directional match per the design. Confirm by checking
+        # newave values come from the (1 → 2) rows only.
         nw_vals = {r.stage: r.newave_value for r in out}
         assert nw_vals[0] == 100.0
         assert nw_vals[1] == -50.0

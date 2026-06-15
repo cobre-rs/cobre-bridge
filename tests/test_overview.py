@@ -533,7 +533,8 @@ def test_chart_training_mini_returns_figure_for_valid_conv() -> None:
     conv = _make_conv_df(10)
     fig = _chart_training_mini(conv)
     assert isinstance(fig, go.Figure)
-    # 2 band traces (upper/lower of ±1-std confidence band) + lower_bound + upper_bound_mean
+    # 2 band traces (upper/lower of ±1-std confidence band) + lower_bound +
+    # upper_bound_mean
     assert len(fig.data) == 4
 
 

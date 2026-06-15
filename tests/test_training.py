@@ -238,7 +238,8 @@ def test_chart_convergence_hero_button_labels() -> None:
 
 
 def test_render_with_empty_cut_selection() -> None:
-    """render() must not raise and must contain 'No cut selection data' when cut_selection is empty."""  # noqa: E501
+    """render() must not raise and must contain 'No cut selection data' when
+    cut_selection is empty."""  # noqa: E501
     data = _make_mock_data(
         conv=_make_conv(10),
         cut_selection=pd.DataFrame(),
@@ -254,7 +255,8 @@ def test_render_with_empty_cut_selection() -> None:
 
 
 def test_render_with_empty_timing() -> None:
-    """render() must not raise and must contain 'No timing data' when timing is empty."""  # noqa: E501
+    """render() must not raise and must contain 'No timing data' when timing is
+    empty."""  # noqa: E501
     data = _make_mock_data(
         conv=_make_conv(10),
         cut_selection=_make_cut_selection(),

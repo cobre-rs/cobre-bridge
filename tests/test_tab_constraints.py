@@ -552,7 +552,8 @@ _STUB_LHS_DF = pd.DataFrame(
 
 
 class _render_with_stubs_ctx:
-    """Context manager that calls render() with LazyFrame-dependent functions patched."""
+    """Context manager that calls render() with LazyFrame-dependent functions
+    patched."""
 
     def __init__(self, data: MagicMock) -> None:
         self._data = data
@@ -638,7 +639,8 @@ def test_render_returns_string() -> None:
 
 
 class TestParseExpression:
-    """``parse_expression`` recognises both legacy literal coefficients and the cobre HEAD ``@name`` sigil."""
+    """``parse_expression`` recognises both legacy literal coefficients and the cobre
+    HEAD ``@name`` sigil."""
 
     def _parse(self, expr: str) -> list[tuple]:
         from cobre_bridge.constraint_expr import parse_expression
@@ -689,7 +691,8 @@ class TestParseExpression:
 
 
 class TestResolveParamToColumn:
-    """``resolve_param_to_column`` maps cobre-bridge's per-hydro names to simulation columns."""
+    """``resolve_param_to_column`` maps cobre-bridge's per-hydro names to simulation
+    columns."""
 
     def _resolve(self, name: str):
         from cobre_bridge.constraint_expr import resolve_param_to_column
@@ -753,7 +756,8 @@ def _empty_exchanges_lf() -> pl.LazyFrame:
 
 
 class TestEvaluateAtName:
-    """``evaluate_constraint_expressions`` resolves ``@name`` against simulation columns."""
+    """``evaluate_constraint_expressions`` resolves ``@name`` against simulation
+    columns."""
 
     def _evaluate(self, expression: str, *, with_productivity: bool = True):
         from cobre_bridge.constraint_expr import evaluate_constraint_expressions

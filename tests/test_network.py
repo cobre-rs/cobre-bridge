@@ -338,7 +338,8 @@ def test_build_line_explorer_net_and_bound_keys() -> None:
 
 def test_build_line_explorer_bound_values() -> None:
     """upper_bound equals direct_capacity_mw and lower_bound equals -reverse_capacity_mw
-    when empty line_bounds are passed (falling back to static capacity from line_meta)."""
+    when empty line_bounds are passed (falling back to static capacity from
+    line_meta)."""
     import json
     import re
 

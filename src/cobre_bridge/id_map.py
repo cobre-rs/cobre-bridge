@@ -1,8 +1,8 @@
 """NewaveIdMap: deterministic 1-based-to-0-based entity ID remapping.
 
-Accepts sorted lists of NEWAVE entity IDs and provides 0-based lookups
-that are consistent across all entity files.  Tickets 010 and 011 import
-this class to share the same mapping produced during entity conversion.
+Accepts sorted lists of the source model entity IDs and provides 0-based lookups that
+are consistent across all entity files.  Tickets 010 and 011 import this class to share
+the same mapping produced during entity conversion.
 """
 
 from __future__ import annotations
@@ -21,25 +21,24 @@ _LOG = logging.getLogger(__name__)
 
 
 class NewaveIdMap:
-    """Bidirectional ID map from NEWAVE 1-based codes to Cobre 0-based IDs.
+    """Bidirectional ID map from the source model 1-based codes to Cobre 0-based IDs.
 
-    Subsystems and thermals are remapped deterministically by sorting the
-    input NEWAVE IDs ascending and assigning Cobre IDs 0, 1, 2, … in that
-    order.  Hydros are remapped in the order the codes are passed in,
-    which the pipeline supplies as the ``confhd.dat`` declaration order;
-    this preserves the upstream-to-downstream layout authors typically
-    encode in that file.
+    Subsystems and thermals are remapped deterministically by sorting the input the
+    source model IDs ascending and assigning Cobre IDs 0, 1, 2, … in that order.  Hydros
+    are remapped in the order the codes are passed in, which the pipeline supplies as
+    the ``confhd.dat`` declaration order; this preserves the upstream-to-downstream
+    layout authors typically encode in that file.
 
     Parameters
     ----------
     subsystem_ids:
-        Iterable of NEWAVE subsystem (submercado) codes to register,
-        including fictitious ones.  Each unique code maps to one bus ID.
+        Iterable of the source model subsystem (submercado) codes to register, including
+        fictitious ones.  Each unique code maps to one bus ID.
     hydro_codes:
-        NEWAVE hydro plant codes (``codigo_usina`` from ``confhd.dat``)
-        in declaration order.  Cobre hydro IDs are assigned in this order.
+        The source model hydro plant codes (``codigo_usina`` from ``confhd.dat``) in
+        declaration order.  Cobre hydro IDs are assigned in this order.
     thermal_codes:
-        Iterable of NEWAVE thermal plant codes (``codigo_usina`` from
+        Iterable of the source model thermal plant codes (``codigo_usina`` from
         ``conft.dat``).
     """
 
@@ -62,7 +61,7 @@ class NewaveIdMap:
         }
 
     def bus_id(self, newave_subsystem_id: int) -> int:
-        """Return the 0-based Cobre bus ID for a NEWAVE subsystem code.
+        """Return the 0-based Cobre bus ID for a source-model subsystem code.
 
         Raises
         ------
@@ -72,7 +71,7 @@ class NewaveIdMap:
         return self._bus[newave_subsystem_id]
 
     def hydro_id(self, newave_hydro_code: int) -> int:
-        """Return the 0-based Cobre hydro ID for a NEWAVE plant code.
+        """Return the 0-based Cobre hydro ID for a source-model plant code.
 
         Raises
         ------
@@ -82,7 +81,7 @@ class NewaveIdMap:
         return self._hydro[newave_hydro_code]
 
     def thermal_id(self, newave_thermal_code: int) -> int:
-        """Return the 0-based Cobre thermal ID for a NEWAVE plant code.
+        """Return the 0-based Cobre thermal ID for a source-model plant code.
 
         Raises
         ------
@@ -93,28 +92,29 @@ class NewaveIdMap:
 
     @property
     def all_bus_ids(self) -> list[int]:
-        """Sorted list of registered NEWAVE subsystem codes."""
+        """Sorted list of registered the source model subsystem codes."""
         return sorted(self._bus)
 
     @property
     def all_hydro_codes(self) -> list[int]:
-        """NEWAVE hydro codes in Cobre-ID order (confhd.dat declaration order)."""
+        """The source model hydro codes in Cobre-ID order (confhd.dat declaration
+        order)."""
         return list(self._hydro)
 
     @property
     def all_thermal_codes(self) -> list[int]:
-        """Sorted list of registered NEWAVE thermal codes."""
+        """Sorted list of registered the source model thermal codes."""
         return sorted(self._thermal)
 
 
 def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
-    """Build the canonical :class:`NewaveIdMap` from a case's NEWAVE inputs.
+    """Build the canonical :class:`NewaveIdMap` from a case's the source model inputs.
 
     Reads ``confhd.dat`` (hydros, existing non-fictitious only), ``conft.dat``
-    (thermals), ``sistema.dat`` + ``ree.dat`` (subsystems). This is the single
-    public entry point shared by the conversion pipeline and the comparators, so
-    both derive the NEWAVE→Cobre mapping the same way (it used to live as a
-    private ``pipeline._build_id_map`` that the comparators reached into).
+    (thermals), ``sistema.dat`` + ``ree.dat`` (subsystems). This is the single public
+    entry point shared by the conversion pipeline and the comparators, so both derive
+    the source model→Cobre mapping the same way (it used to live as a private
+    ``pipeline._build_id_map`` that the comparators reached into).
     """
     from inewave.newave import Confhd, Conft, Hidr, Ree, Sistema
 

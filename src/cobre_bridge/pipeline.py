@@ -1,6 +1,6 @@
 """Conversion pipeline: orchestrates entity and temporal/stochastic converters.
 
-Reads a NEWAVE case directory and writes a complete Cobre case directory.
+Reads a source-model case directory and writes a complete Cobre case directory.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversionReport:
-    """Summary of a completed NEWAVE-to-Cobre conversion."""
+    """Summary of a completed the source-model-to-Cobre conversion."""
 
     hydro_count: int = 0
     thermal_count: int = 0
@@ -90,13 +90,12 @@ class _ConstraintIdAllocator:
 def _compute_prod_media_sin_safe(case: NewaveCase) -> float | None:
     """Return ``PROD_MEDIA_SIN`` (mean PRODT), or ``None`` on failure.
 
-    NEWAVE converts the PENALID R$/MWh penalties (VAZMIN, TURBMN/TURBMX, …) with
-    the mean **PRODT** — the equivalent productivity from vol_min to vol_max —
-    over all existing plants including zeros. See
-    :func:`hydro.compute_prodt_sin_mean`; validated against pmo.dat's applied
-    penalty (0.6299 ↔ VAZMIN 821.78). Falls back to ``None`` (caller uses its
-    legacy point-reference mean) when the NEWAVE files cannot be read — e.g. in
-    unit tests that mock the pipeline.
+    The source model converts the PENALID R$/MWh penalties (VAZMIN, TURBMN/TURBMX, …)
+    with the mean **PRODT** — the equivalent productivity from vol_min to vol_max — over
+    all existing plants including zeros. See :func:`hydro.compute_prodt_sin_mean`;
+    validated against pmo.dat's applied penalty (0.6299 ↔ VAZMIN 821.78). Falls back to
+    ``None`` (caller uses its legacy point-reference mean) when the source model files
+    cannot be read — e.g. in unit tests that mock the pipeline.
     """
     try:
         return hydro_conv.compute_prodt_sin_mean(case)
@@ -109,28 +108,28 @@ def _compute_per_stage_sin_productivities(
 ) -> tuple[list[float], list[float]] | None:
     """Return ``(PROD_MEDIA_SIN[s], MAX_PRODTACUM_SIN[s])`` per stage, or None.
 
-    These SIN-aggregate productivity constants are what NEWAVE uses to convert
+    These SIN-aggregate productivity constants are what the source model uses to convert
     its flow-domain hydro penalties (manual §3.24 p.87).
 
     - ``PROD_MEDIA_SIN[s]`` = mean **PRODT** (equivalent ρ vol_min→vol_max) over
       the existing plants. PRODT is **structural** — it does *not* track the
       seasonal reference volume — so this is essentially **flat** across the
       horizon. pmo.dat confirms it: the applied VAZMIN/TURBMN/TURBMX penalties
-      vary only 0.15% over the whole study (= the per-config PRODT-mean spread),
-      not the ~2% that the old seasonal point-reference ρ implied. We therefore
-      emit a constant ``compute_prodt_sin_mean`` for every stage; the per-stage
-      penalty override then collapses to the base for the ρ_avg-scaled columns
-      (correct — NEWAVE does not seasonalise these penalties). The genuinely
-      seasonal per-plant ρ still ships in ``hydro_energy_productivity.parquet``
-      for the *generation* model — that is a separate concern from the penalty.
+      vary only 0.15% over the whole study (= the per-config PRODT-mean spread), not the
+      ~2% that the old seasonal point-reference ρ implied. We therefore emit a constant
+      ``compute_prodt_sin_mean`` for every stage; the per-stage penalty override then
+      collapses to the base for the ρ_avg-scaled columns (correct — the source model
+      does not seasonalise these penalties). The genuinely seasonal per-plant ρ still
+      ships in ``hydro_energy_productivity.parquet`` for the *generation* model — that
+      is a separate concern from the penalty.
     - ``MAX_PRODTACUM_SIN`` = max accumulated cascade ρ at **altura máxima**,
       **constant** over the horizon. It governs the DESVIO ("outros usos") and
       evaporation penalties, which pmo.dat reports as *fixed* — the max is
       ITAIPU's cascade, which carries no CFUGA/CMONT override, so it never moves.
       (See :func:`constraints.compute_max_prodtacum_sin`.)
 
-    Both lists span the full horizon (``_total_study_stages``, incl. post-study).
-    Falls back to ``None`` when the NEWAVE files can't be read (mocked tests).
+    Both lists span the full horizon (``_total_study_stages``, incl. post-study). Falls
+    back to ``None`` when the source model files can't be read (mocked tests).
     """
     try:
         rho_avg = hydro_conv.compute_per_stage_prodt_sin_mean(case)
@@ -187,13 +186,13 @@ def _merge_hydro_bounds(
 
 
 def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
-    """Convert a NEWAVE case directory to a Cobre case directory.
+    """Convert a source-model case directory to a Cobre case directory.
 
     Parameters
     ----------
     src:
-        Path to the NEWAVE case directory.  Must exist and contain all
-        required NEWAVE input files.
+        Path to the source model case directory.  Must exist and contain all required
+        the source model input files.
     dst:
         Path to the output Cobre case directory.  Must not exist or must be
         empty (call site is responsible for enforcing the --force contract
@@ -209,8 +208,8 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     Raises
     ------
     FileNotFoundError
-        If *src* does not exist, is not a directory, or a required NEWAVE
-        file is missing.
+        If *src* does not exist, is not a directory, or a required the source model file
+        is missing.
     """
     collector = _WarningCollector()
     pkg_logger = logging.getLogger("cobre_bridge")
@@ -244,8 +243,8 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # 1. Discover and validate all source files via caso.dat -> Arquivos.
     # ------------------------------------------------------------------
     logger.debug("Discovering NEWAVE files from %s", src)
-    # Build the parsed-case object once; every converter reads its parsed inputs
-    # from ``case`` (each NEWAVE file parsed once and cached).
+    # Build the parsed-case object once; every converter reads its parsed inputs from
+    # ``case`` (each source-model file parsed once and cached).
     case = NewaveCase.from_directory(src)
 
     # ------------------------------------------------------------------
@@ -277,9 +276,9 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     lines_dict = network_conv.convert_lines(case, id_map)
 
     logger.debug("Converting penalties")
-    # DESVIO ("outros usos") + evaporation use MAX_PRODTACUM_SIN (max accumulated
-    # ρ at altura máxima, constant); VAZMIN/TURBMN/TURBMX use PROD_MEDIA_SIN (mean
-    # PRODT, drifting per CFUGA/CMONT config). Both come from NEWAVE inputs and
+    # DESVIO ("outros usos") + evaporation use MAX_PRODTACUM_SIN (max accumulated ρ at
+    # altura máxima, constant); VAZMIN/TURBMN/TURBMX use PROD_MEDIA_SIN (mean PRODT,
+    # drifting per CFUGA/CMONT config). Both come from the source model inputs and
     # return None when files are absent (mocked-pipeline tests), so convert_penalties
     # falls back to its own legacy approximation.
     max_prodtacum_sin = constraints_conv.compute_max_prodtacum_sin(case)
@@ -490,12 +489,12 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
         pq.write_table(bus_penalty_table, bus_penalty_path, compression="zstd")
         logger.debug("Wrote %s", bus_penalty_path)
 
-    # Per-stage hydro penalty override: NEWAVE's PROD_MEDIA_SIN / MAX_PRODTACUM_SIN
-    # shift with seasonal (VOLREF_SAZ) and temporal (CFUGA/CMONT) productivity
-    # changes, so the ρ-scaled flow-domain hydro penalties are stage-varying.
-    # Emitted sparsely (only stages/columns that differ from penalties.json),
-    # keeping the penalty conversion coherent with the per-stage ρ already
-    # shipped in system/hydro_energy_productivity.parquet.
+    # Per-stage hydro penalty override: The source model's PROD_MEDIA_SIN /
+    # MAX_PRODTACUM_SIN shift with seasonal (VOLREF_SAZ) and temporal (CFUGA/CMONT)
+    # productivity changes, so the ρ-scaled flow-domain hydro penalties are
+    # stage-varying. Emitted sparsely (only stages/columns that differ from
+    # penalties.json), keeping the penalty conversion coherent with the per-stage ρ
+    # already shipped in system/hydro_energy_productivity.parquet.
     per_stage_sin = _compute_per_stage_sin_productivities(case)
     if per_stage_sin is not None:
         per_stage_rho_avg, per_stage_rho_max_acum = per_stage_sin

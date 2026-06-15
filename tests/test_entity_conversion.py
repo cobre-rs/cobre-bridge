@@ -1,8 +1,8 @@
-"""Unit tests for NEWAVE entity conversion functions.
+"""Unit tests for the source model entity conversion functions.
 
-All inewave I/O is mocked via ``unittest.mock.patch`` so no real NEWAVE
-files are required.  The tests use small synthetic DataFrames that cover
-the logic exercised by each converter.
+All inewave I/O is mocked via ``unittest.mock.patch`` so no real the source model files
+are required.  The tests use small synthetic DataFrames that cover the logic exercised
+by each converter.
 """
 
 from __future__ import annotations
@@ -154,8 +154,8 @@ def _make_hidr_cadastro() -> pd.DataFrame:
     zero) and ``canal_fuga_medio=50.0``.  With ``tipo_perda=1`` and
     ``perdas=0.0`` the loss model leaves the net drop unchanged.
 
-    For monthly-regulated plants the height is evaluated at 65% of useful
-    storage (``v_65 = vmin + 0.65 * (vmax - vmin)``), matching NEWAVE's
+    For monthly-regulated plants the height is evaluated at 65% of useful storage
+    (``v_65 = vmin + 0.65 * (vmax - vmin)``), matching the source model's
     ``produtibilidade_altura_65`` convention.
 
     USINA_A: [volume_minimo=100, volume_maximo=1000]
@@ -406,10 +406,10 @@ class TestConvertHydros:
     def test_run_of_river_S_storage_collapsed_to_vmin(self, tmp_path) -> None:
         """``tipo_regulacao='S'`` (fio-d'água) collapses storage to Vmin.
 
-        NEWAVE treats 'S' plants as run-of-river with no usable buffer (ITAIPU,
-        the only 'S' plant, sits at VARMPUH 0% = Vmin every stage, spilling the
-        turbine-excess inflow).  The converter must pin min==max==Vmin so cobre
-        doesn't store and shift that surplus across stages.
+        The source model treats 'S' plants as run-of-river with no usable buffer
+        (ITAIPU, the only 'S' plant, sits at VARMPUH 0% = Vmin every stage, spilling the
+        turbine-excess inflow).  The converter must pin min==max==Vmin so cobre doesn't
+        store and shift that surplus across stages.
         """
         from cobre_bridge.converters.hydro import convert_hydros
 
@@ -567,7 +567,7 @@ class TestConvertHydros:
     def test_evaporation_reference_volumes_absent_for_all_zero_row(
         self, tmp_path
     ) -> None:
-        """All-zero volref_saz row is NEWAVE's sentinel; cobre falls back to
+        """All-zero volref_saz row is the source model's sentinel; cobre falls back to
         its mid-storage default, so reference_volumes_hm3 is NOT emitted."""
         volref_df = pd.DataFrame(
             {
@@ -626,8 +626,16 @@ class TestConvertHydros:
         # Last three months hit the cap.
         assert ref_volumes[-3:] == [1000.0, 1000.0, 1000.0]
 
-    def test_teif_ip_derating_reduces_max_generation(self, tmp_path) -> None:
-        """TEIF=5%, IP=3% reduces max_generation by factor 0.95 * 0.97 = 0.9215."""
+    def test_teif_ip_derates_turbined_not_generation(self, tmp_path) -> None:
+        """TEIF/IP availability derates ``max_turbined`` but NOT ``max_generation``.
+
+        ``max_generation`` is the rated installed power ``Σ n·p_nom`` — the source
+        model's FPHA ``GHmax`` (verified TUCURUI 7445, QUEBRA QUEIX 120), independent of
+        the production function and *not* availability-derated. ``max_turbined`` is the
+        head-corrected engolimento, which an unavailable unit cannot pass, so it carries
+        the ``0.95 * 0.97`` availability factor (the source model's operational cap —
+        verified QUEBRA QUEIX 113.01 m³/s == head-corrected engolimento).
+        """
         cadastro = _make_hidr_cadastro().copy()
         # Override only USINA_A (code=1) with non-zero TEIF/IP.
         cadastro.loc[1, "teif"] = 5.0
@@ -639,12 +647,11 @@ class TestConvertHydros:
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
-        # USINA_A nominal: 4 machines * 200 MW = 800 MW
-        # Derating: 800 * 0.95 * 0.97 = 737.2
-        expected = 800.0 * 0.95 * 0.97
-        assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(expected)
-        # max_turbined_m3s is also derated — an unavailable unit can't pass
-        # water either, so NEWAVE applies the same availability factor to flow.
+        # max_generation = rated nameplate (4 machines * 200 MW = 800 MW), NOT
+        # availability-derated: The source model's GHmax is the installed capacity.
+        assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
+        # max_turbined IS derated — an unavailable unit can't pass water either,
+        # so the head-corrected engolimento carries the availability factor.
         assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(
             4 * 222.2 * 0.95 * 0.97
         )
@@ -1385,8 +1392,8 @@ class TestConvertHydrosGhmin:
 class TestPerStageProductivitiesSazonalCfugaCmont:
     """Verify that CFUGA/CMONT step-function carries vs. seasonal cycling.
 
-    NEWAVE's Dger ``sazonaliza_cfuga_cmont`` flag changes how
-    CFUGA/CMONT overrides are extended beyond their last explicit
+    The source model's Dger ``sazonaliza_cfuga_cmont`` flag changes how CFUGA/CMONT
+    overrides are extended beyond their last explicit
     entry: when ``0`` the last applied value carries forward
     indefinitely (pure step function); when ``1`` each calendar
     month picks up the value from the latest year that defined it
@@ -1582,7 +1589,7 @@ class TestComputeProductivity:
     """Unit tests for the ``_compute_productivity`` helper."""
 
     def test_monthly_regulated_linear_polynomial(self) -> None:
-        """tipo_regulacao='M': poly evaluated at 65% useful storage (NEWAVE
+        """tipo_regulacao='M': poly evaluated at 65% useful storage (the source model
         ``produtibilidade_altura_65`` convention)."""
         from cobre_bridge.converters.hydro import _compute_productivity
 
@@ -1878,7 +1885,7 @@ def _make_cmont_rec(month: int, year: int, nivel: float) -> MagicMock:
 
 
 class TestEquivalentProductivity:
-    """Unit tests for ``_equivalent_productivity`` (NEWAVE PRODT)."""
+    """Unit tests for ``_equivalent_productivity`` (the source model PRODT)."""
 
     def test_linear_polynomial_uses_mean_head(self) -> None:
         """h(v)=a0+a1·v → mean head over [vmin,vmax] = a0 + a1·(vmin+vmax)/2."""
@@ -2097,7 +2104,8 @@ class TestProductivitySinMeans:
     def test_per_stage_prodt_routes_overrides_and_averages_per_stage(
         self, tmp_path: Path
     ) -> None:
-        """A plant carrying a CFUGA override drifts; the SIN mean tracks it per stage."""
+        """A plant carrying a CFUGA override drifts; the SIN mean tracks it per
+        stage."""
         from cobre_bridge.converters.hydro import (
             _equivalent_productivity,
             compute_per_stage_prodt_sin_mean,
@@ -2190,7 +2198,8 @@ class TestProductivitySinMeans:
         assert result == pytest.approx(max(acc_a, own(2), own(3)))
 
     def test_max_prodtacum_sin_returns_none_on_read_error(self, tmp_path: Path) -> None:
-        """Unreadable NEWAVE inputs → None (soft fallback for mocked pipelines)."""
+        """Unreadable the source model inputs → None (soft fallback for mocked
+        pipelines)."""
         from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
 
         case = make_case(tmp_path)
@@ -2273,7 +2282,8 @@ class TestConvertProductionModels:
             assert "productivity_mw_per_m3s" not in ranges[0]
 
     def test_returns_all_hydros_when_no_cfuga_cmont(self, tmp_path: Path) -> None:
-        """MODIF.DAT present but only VAZMINT overrides -> per-hydro entries with single range."""
+        """MODIF.DAT present but only VAZMINT overrides -> per-hydro entries with single
+        range."""
         import datetime
 
         vazmint_rec = MagicMock()
@@ -2435,7 +2445,8 @@ class TestConvertProductionModels:
 
 
 class TestConvertHydroEnergyProductivity:
-    """Per-(hydro, stage) ρ_eq override parquet for the cobre productivity-resolution contract."""
+    """Per-(hydro, stage) ρ_eq override parquet for the cobre productivity-resolution
+    contract."""
 
     def _make_id_map(self) -> NewaveIdMap:
         return NewaveIdMap(
@@ -2486,7 +2497,8 @@ class TestConvertHydroEnergyProductivity:
         return make_case(make_nw_files(tmp_path, **file_overrides), **parsed)
 
     def test_null_stage_row_per_hydro_when_no_overrides(self, tmp_path: Path) -> None:
-        """Without CFUGA/CMONT: one NULL-stage_id row per hydro with base productivity."""
+        """Without CFUGA/CMONT: one NULL-stage_id row per hydro with base
+        productivity."""
         case = self._base_case(tmp_path)
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
@@ -2502,7 +2514,8 @@ class TestConvertHydroEnergyProductivity:
         assert prods[0] == pytest.approx(0.9 * 318.5)
 
     def test_per_stage_rows_for_cfuga_override(self, tmp_path: Path) -> None:
-        """CFUGA at stage 3 → per-stage rows for the full horizon; stages [0..2] use base."""
+        """CFUGA at stage 3 → per-stage rows for the full horizon; stages [0..2] use
+        base."""
         cfuga_rec = _make_cfuga_rec(month=4, year=2025, nivel=60.0)
         usina_rec = MagicMock()
         usina_rec.codigo = 1
@@ -2576,7 +2589,8 @@ class TestConvertHydroEnergyProductivity:
         assert len(b_rows) == 1
         assert b_rows[0]["stage_id"] is None
 
-        # USINA_A stage 0 = calendar month 1, useful=100, V=200, h(V)=320, drop=270, ρ=243.
+        # USINA_A stage 0 = calendar month 1, useful=100, V=200, h(V)=320, drop=270,
+        # ρ=243.
         by_stage = {
             r["stage_id"]: r["equivalent_productivity_mw_per_m3s"] for r in a_rows
         }
@@ -2589,7 +2603,8 @@ class TestConvertHydroEnergyProductivity:
     def test_seasonal_volref_all_zero_row_falls_back_to_legacy(
         self, tmp_path: Path
     ) -> None:
-        """All-zero volref_saz row is NEWAVE's "no seasonal reference" sentinel:
+        """All-zero volref_saz row is the source model's "no seasonal reference"
+        sentinel:
         emit a single null-stage row with the legacy altura_65 productivity."""
         volref_df = pd.DataFrame(
             {
@@ -2902,10 +2917,10 @@ class TestConvertThermalBoundsClastModificacoes:
 
     def test_chained_potef_finite_then_open_keeps_plant_alive(self, tmp_path) -> None:
         """Regression: two consecutive POTEF windows (finite then open-ended)
-        must keep the plant alive across both, matching NEWAVE.  Prior to the
-        fix, the first window's data_fim was treated as a decommission date,
-        zeroing capacity for every later stage even though a follow-up POTEF
-        re-activated the plant."""
+        must keep the plant alive across both, matching the source model.  Prior to the
+        fix, the first window's data_fim was treated as a decommission date, zeroing
+        capacity for every later stage even though a follow-up POTEF re-activated the
+        plant."""
         import datetime
 
         conft, clast, term = _thermal_readers()
@@ -3149,16 +3164,16 @@ class TestConvertThermalBoundsClastModificacoes:
         assert a_rows.loc[12:23, "cost_per_mwh"].tolist() == pytest.approx([50.0] * 12)
 
     def test_post_study_expansion_freezes_at_online_value(self, tmp_path) -> None:
-        """A plant that comes online only in the post-study (POTEF dated in the
-        first post-study month) freezes at its *online* terminal December value,
-        not at the last study stage (where it does not yet exist) and not at its
-        seasonal profile — mirroring NEWAVE's AZULAO II/IV and MANAUS I."""
+        """A plant that comes online only in the post-study (POTEF dated in the first
+        post-study month) freezes at its *online* terminal December value, not at the
+        last study stage (where it does not yet exist) and not at its seasonal profile —
+        mirroring the source model's AZULAO II/IV and MANAUS I."""
         import datetime
 
         conft, clast, term = _thermal_readers()
 
-        # Plant exists only from 2024 (the post-study). GTMIN: a closed seasonal
-        # window Jan-May (30) plus an open-ended tail from Jun (80). NEWAVE freezes
+        # Plant exists only from 2024 (the post-study). GTMIN: a closed seasonal window
+        # Jan-May (30) plus an open-ended tail from Jun (80). The source model freezes
         # the whole tail at the terminal December value (the open tail, 80).
         expt_df = pd.DataFrame(
             {
@@ -3361,9 +3376,9 @@ class TestThermalBoundStageSteps:
     def test_step4b_zeroes_expt_plant_without_potef(self) -> None:
         """EXPT plant with modifier-only entries (no POTEF) is not installed.
 
-        NEWAVE reports GERACAO MAXIMA = 0 for such a plant (e.g. LINHARES,
-        which carries only a TEIFT entry); without the flag it would fall back
-        to its TERM.DAT registry capacity.
+        The source model reports GERACAO MAXIMA = 0 for such a plant (e.g. LINHARES,
+        which carries only a TEIFT entry); without the flag it would fall back to its
+        TERM.DAT registry capacity.
         """
         from datetime import date
 
@@ -3389,9 +3404,9 @@ class TestThermalBoundStageSteps:
     def test_step4c_drops_gtmin_outside_window(self) -> None:
         """GTMIN applies only inside EXPT windows; outside it is 0 (capacity kept).
 
-        NEWAVE ignores the TERM.DAT GTMIN outside the EXPT GTMIN windows
-        (e.g. DO_ATLANTICO: window Sep-Oct, TERM.DAT 201.5 in Nov/Dec, but
-        NEWAVE GERACAO MINIMA = 0 there).
+        The source model ignores the TERM.DAT GTMIN outside the EXPT GTMIN windows (e.g.
+        DO_ATLANTICO: window Sep-Oct, TERM.DAT 201.5 in Nov/Dec, but the source model
+        GERACAO MINIMA = 0 there).
         """
         from datetime import date
 
@@ -3414,8 +3429,8 @@ class TestThermalBoundStageSteps:
     def test_step4c_drops_gtmin_for_expt_plant_without_gtmin(self) -> None:
         """EXPT plant with no GTMIN entry has no minimum (TERM.DAT GTMIN ignored).
 
-        E.g. JARAQUI / MARLIM AZUL: in EXPT (POTEF/FCMAX) with a nonzero
-        TERM.DAT GTMIN but no GTMIN entry → NEWAVE GERACAO MINIMA = 0.
+        E.g. JARAQUI / MARLIM AZUL: in EXPT (POTEF/FCMAX) with a nonzero TERM.DAT GTMIN
+        but no GTMIN entry → the source model GERACAO MINIMA = 0.
         """
         from datetime import date
 
@@ -3464,9 +3479,9 @@ class TestThermalBoundStageSteps:
         """GTMIN (the inflexible minimum) is honored even when it exceeds the
         FCMAX-derived capacity; the cap is lifted to keep the bound feasible.
 
-        Per NEWAVE, FCMAX and GTMIN are independent and NEWAVE rejects min > max.
-        Cobre formerly clamped min DOWN to max, forcing the plant below GTMIN;
-        now it honors GTMIN. (ANGRA-1-like numbers: capacity 420.88 < GTMIN
+        Per source-model, FCMAX and GTMIN are independent and the source model rejects
+        min > max. Cobre formerly clamped min DOWN to max, forcing the plant below
+        GTMIN; now it honors GTMIN. (ANGRA-1-like numbers: capacity 420.88 < GTMIN
         469.62 → bound [469.62, 469.62], not [420.88, 420.88].)
         """
         from cobre_bridge.converters.thermal import _step6_evaluate_bounds
@@ -3902,10 +3917,10 @@ class TestConvertInitialConditions:
     def test_storage_uses_volmin_adjusted_min(self, tmp_path) -> None:
         """Initial-% is of the operational useful (vol_max − VOLMIN), not raw.
 
-        A modif.dat VOLMIN override raises the operational minimum; NEWAVE takes
-        ``volume_inicial_percentual`` of the VOLMIN-adjusted useful range (verified
-        against pmo.dat "VOLUME ARMAZENADO INICIAL" for I. SOLTEIRA). The initial
-        storage must use the same min the bounds converter uses. Regression for
+        A modif.dat VOLMIN override raises the operational minimum; the source model
+        takes ``volume_inicial_percentual`` of the VOLMIN-adjusted useful range
+        (verified against pmo.dat "VOLUME ARMAZENADO INICIAL" for I. SOLTEIRA). The
+        initial storage must use the same min the bounds converter uses. Regression for
         the I. Solteira initial-storage bug.
         """
         from cobre_bridge.converters.initial_conditions import (
@@ -3937,9 +3952,9 @@ class TestConvertInitialConditions:
     def test_run_of_river_S_initial_anchored_to_vmin(self, tmp_path) -> None:
         """``tipo_regulacao='S'`` initial storage is pinned to Vmin.
 
-        The bounds converter collapses 'S' (fio-d'água) storage to Vmin; the
-        initial condition must match so it stays inside the collapsed [min,max]
-        range (NEWAVE keeps ITAIPU at VARMPUH 0% = Vmin).  The
+        The bounds converter collapses 'S' (fio-d'água) storage to Vmin; the initial
+        condition must match so it stays inside the collapsed [min,max] range (the
+        source model keeps ITAIPU at VARMPUH 0% = Vmin).  The
         ``volume_inicial_percentual`` (50% here) is ignored for 'S' plants.
         """
         from cobre_bridge.converters.initial_conditions import (
@@ -4914,7 +4929,7 @@ class TestWaterWithdrawalConversion:
     """Unit tests for ``convert_water_withdrawal`` in ``hydro.py``."""
 
     def _make_id_map(self) -> NewaveIdMap:
-        """Two hydros: NEWAVE codes 10 and 20 -> Cobre IDs 0 and 1."""
+        """Two hydros: The source model codes 10 and 20 -> Cobre IDs 0 and 1."""
         return NewaveIdMap(
             subsystem_ids=[1],
             hydro_codes=[10, 20],
@@ -5087,9 +5102,9 @@ class TestWaterWithdrawalConversion:
     def test_dger_outros_usos_da_agua_zero_skips_dsvagua(self, tmp_path: Path) -> None:
         """``dger.outros_usos_da_agua == 0`` short-circuits the conversion.
 
-        Mirrors NEWAVE's own behaviour — when the dger switch is 0 the
-        solver ignores ``dsvagua.dat`` regardless of its content, so the
-        converter must not emit any water-withdrawal rows.
+        Mirrors the source model's own behaviour — when the dger switch is 0 the solver
+        ignores ``dsvagua.dat`` regardless of its content, so the converter must not
+        emit any water-withdrawal rows.
         """
         from cobre_bridge.converters.hydro import convert_water_withdrawal
 

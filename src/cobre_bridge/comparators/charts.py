@@ -27,8 +27,9 @@ from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
 _BAND_FILL = "rgba(74,144,184,0.15)"
 _BAND_LINE = "rgba(255,255,255,0)"
 
-# Per-category mapping between NEWAVE pmo.dat `custo_operacao_series_simuladas`
-# `parcela` labels and cobre simulation cost-record columns.
+# Per-category mapping between the source model pmo.dat
+# `custo_operacao_series_simuladas` `parcela` labels and cobre simulation cost-record
+# columns.
 #
 # Tuple layout: (display_label, [newave_keys], [cobre_columns], hex_color).
 #
@@ -37,9 +38,9 @@ _BAND_LINE = "rgba(255,255,255,0)"
 # the stacked bar.
 _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
     # Operational / generation costs. Cobre's anticipated_thermal_cost (GNL
-    # forward-committed fuel, booked on the decision column) is folded in here so
-    # the thermal category matches NEWAVE GERACAO TERMICA / CTERM, which books
-    # GNL fuel at delivery. Absent in pre-anticipation Cobre runs (summed as 0).
+    # forward-committed fuel, booked on the decision column) is folded in here so the
+    # thermal category matches the source model GERACAO TERMICA / CTERM, which books GNL
+    # fuel at delivery. Absent in pre-anticipation Cobre runs (summed as 0).
     (
         "Thermal Generation",
         ["GERACAO TERMICA"],
@@ -50,7 +51,7 @@ _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
     ("Energy Excess", ["EXCESSO ENERGIA"], ["excess_cost"], "#F59E0B"),
     ("Exchange", ["INTERCAMBIO"], ["exchange_cost"], "#7C3AED"),
     ("Pumping", [], ["pumping_cost"], "#0891B2"),
-    # Energy-contract cost — cobre-only column (no NEWAVE parcela analogue).
+    # Energy-contract cost — cobre-only column (no source-model parcela analogue).
     ("Contract", [], ["contract_cost"], "#0D9488"),
     # Regularisation costs (per-unit-flow charges, not violations)
     (
@@ -105,16 +106,16 @@ _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
         ["evaporation_violation_cost"],
         "#9333EA",
     ),
-    # FPHA folga slack (NEWAVE) — cobre has no direct analogue; left as
-    # NEWAVE-only column so it shows up in the report rather than being hidden.
+    # FPHA folga slack (the source model) — cobre has no direct analogue; left as The
+    # source-model-only column so it shows up in the report rather than being hidden.
     ("FPHA Slack", ["VIOLACAO FPHA"], [], "#DB2777"),
     ("Inflow Non-Negativity", [], ["inflow_penalty_cost"], "#EA580C"),
-    # Generic constraint violations: NEWAVE reports the risk-aversion curve and
-    # surface (CAR/SAR), electric (RESTELETRICA), interchange-group
-    # (INTERC. MIN.), hydraulic (RHQ/RHV) and piecewise-linear (RLPP) restriction
-    # violations as separate parcelas, but cobre-bridge converts them all into
-    # Cobre generic constraints, so Cobre aggregates their slacks into a single
-    # `generic_violation_cost`. Sum the NEWAVE parcelas to compare like-for-like.
+    # Generic constraint violations: The source model reports the risk-aversion curve
+    # and surface (CAR/SAR), electric (RESTELETRICA), interchange-group (INTERC. MIN.),
+    # hydraulic (RHQ/RHV) and piecewise-linear (RLPP) restriction violations as separate
+    # parcelas, but cobre-bridge converts them all into Cobre generic constraints, so
+    # Cobre aggregates their slacks into a single `generic_violation_cost`. Sum the
+    # source model parcelas to compare like-for-like.
     (
         "Generic Constr. Viol.",
         [
@@ -146,12 +147,12 @@ def _resolve_cost_categories(
     nw_costs: dict[str, float],
     cobre_costs: dict[str, float],
 ) -> list[tuple[str, float, float, str]]:
-    """Resolve NEWAVE/Cobre cost dicts into a sorted list of categories.
+    """Resolve the source model/Cobre cost dicts into a sorted list of categories.
 
-    Each entry is ``(display_label, newave_sum, cobre_sum, color)``. Categories
-    with both sides ≤ 0.01 R$ are filtered out. Mapped entries from
-    :data:`_COST_MAP` come first (preserving its logical ordering); unmapped
-    NEWAVE/Cobre keys are appended at the end.
+    Each entry is ``(display_label, newave_sum, cobre_sum, color)``. Categories with
+    both sides ≤ 0.01 R$ are filtered out. Mapped entries from :data:`_COST_MAP` come
+    first (preserving its logical ordering); unmapped the source model/Cobre keys are
+    appended at the end.
     """
     categories: list[tuple[str, float, float, str]] = []
     for display_label, nw_keys, cb_keys, color in _COST_MAP:
@@ -182,7 +183,8 @@ def cost_breakdown_chart(
     nw_costs: dict[str, float],
     cobre_costs: dict[str, float],
 ) -> str:
-    """Stacked vertical bar comparing NEWAVE vs Cobre per cost category in NPV.
+    """Stacked vertical bar comparing the source model vs Cobre per cost category in
+    NPV.
 
     Bars are stacked with the largest-magnitude category at the bottom for
     readability; each category has its own distinct color drawn from
@@ -242,7 +244,7 @@ def cost_breakdown_table(
     nw_costs: dict[str, float],
     cobre_costs: dict[str, float],
 ) -> str:
-    """Per-category NPV diff table — NEWAVE, Cobre, Δ, Δ% — sorted by |Δ|.
+    """Per-category NPV diff table — the source model, Cobre, Δ, Δ% — sorted by |Δ|.
 
     Returns an HTML ``<table>`` styled to fit alongside
     :func:`cost_breakdown_chart` inside a 2-column ``chart_grid``. Color swatches
@@ -331,11 +333,11 @@ def _extract_stage_cost_series(
     nw_variable: str,
     cb_column: str,
 ) -> tuple[list[int], dict[int, float], dict[int, float]]:
-    """Pull aligned NEWAVE/Cobre per-stage cost series.
+    """Pull aligned the source model/Cobre per-stage cost series.
 
-    Returns the sorted list of 0-based stages present on either side, plus
-    ``{stage: R$}`` dicts for NEWAVE (from MEDIAS-SIN, converted from 10⁶ R$)
-    and Cobre (from the simulation costs parquet).
+    Returns the sorted list of 0-based stages present on either side, plus ``{stage:
+    R$}`` dicts for the source model (from MEDIAS-SIN, converted from 10⁶ R$) and Cobre
+    (from the simulation costs parquet).
     """
     nw_by_stage: dict[int, float] = {}
     if nw_sin is not None and not nw_sin.is_empty():
@@ -420,12 +422,13 @@ def immediate_cost_chart(
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
 ) -> str:
-    """Per-stage *immediate* cost: NEWAVE ``COPER`` vs Cobre ``immediate_cost``.
+    """Per-stage *immediate* cost: The source model ``COPER`` vs Cobre
+    ``immediate_cost``.
 
-    NEWAVE values come from MEDIAS-SIN in 10⁶ R$ (converted to R$ here by
-    multiplying by 1e6).  Stage numbering on the NEWAVE side starts at the
-    study's first calendar month — *nw_offset* (the minimum stage in
-    MEDIAS-SIN) is subtracted to align with Cobre's 0-based ``stage_id``.
+    The source model values come from MEDIAS-SIN in 10⁶ R$ (converted to R$ here by
+    multiplying by 1e6).  Stage numbering on the source model side starts at the study's
+    first calendar month — *nw_offset* (the minimum stage in MEDIAS-SIN) is subtracted
+    to align with Cobre's 0-based ``stage_id``.
     """
     return _stage_cost_subplot(
         nw_sin,
@@ -444,7 +447,8 @@ def future_cost_chart(
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
 ) -> str:
-    """Per-stage *future* cost: NEWAVE ``CUSTO_FUTURO`` vs Cobre ``future_cost``."""
+    """Per-stage *future* cost: The source model ``CUSTO_FUTURO`` vs Cobre
+    ``future_cost``."""
     return _stage_cost_subplot(
         nw_sin,
         cobre_stage_costs,
@@ -462,14 +466,15 @@ def thermal_cost_chart(
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
 ) -> str:
-    """Per-stage thermal cost: NEWAVE ``CTERM`` vs Cobre thermal (incl. anticip.).
+    """Per-stage thermal cost: The source model ``CTERM`` vs Cobre thermal (incl.
+    anticip.).
 
     The Cobre side is ``thermal_cost_total`` = ``thermal_cost`` +
-    ``anticipated_thermal_cost`` (the GNL forward-committed fuel Cobre books on
-    the decision column), so it lines up with NEWAVE ``CTERM``, which carries
-    GNL fuel at delivery. Both are the live thermal generation cost, so this is
-    an apples-to-apples comparison even in the post-study (where COPER is frozen
-    — see :func:`other_costs_chart`).
+    ``anticipated_thermal_cost`` (the GNL forward-committed fuel Cobre books on the
+    decision column), so it lines up with the source model ``CTERM``, which carries GNL
+    fuel at delivery. Both are the live thermal generation cost, so this is an
+    apples-to-apples comparison even in the post-study (where COPER is frozen — see
+    :func:`other_costs_chart`).
     """
     return _stage_cost_subplot(
         nw_sin,
@@ -490,13 +495,13 @@ def other_costs_chart(
 ) -> str:
     """Per-stage non-thermal operation cost: ``COPER − CTERM`` per stage.
 
-    NEWAVE: ``COPER − CTERM``. Cobre: ``immediate_cost − thermal_cost_total``
+    The source model: ``COPER − CTERM``. Cobre: ``immediate_cost − thermal_cost_total``
     (``thermal_cost_total`` = live + anticipated GNL fuel, matching the thermal
-    category). This isolates everything in the immediate cost that is *not*
-    thermal generation (deficit, penalties, slacks). On the NEWAVE side it goes
-    **negative** in the post-study because COPER is frozen at the last study
-    value while CTERM tracks the live post-study thermal cost — so this chart
-    surfaces that frozen-COPER gap explicitly.
+    category). This isolates everything in the immediate cost that is *not* thermal
+    generation (deficit, penalties, slacks). On the source model side it goes
+    **negative** in the post-study because COPER is frozen at the last study value while
+    CTERM tracks the live post-study thermal cost — so this chart surfaces that
+    frozen-COPER gap explicitly.
     """
     _, nw_coper, cb_imm = _extract_stage_cost_series(
         nw_sin, cobre_stage_costs, nw_offset, "COPER", "immediate_cost"
@@ -559,10 +564,10 @@ def convergence_chart(
     nw_conv: pl.DataFrame,
     cobre_conv: pl.DataFrame,
 ) -> str:
-    """Convergence overlay: NEWAVE vs Cobre lower/upper bounds.
+    """Convergence overlay: The source model vs Cobre lower/upper bounds.
 
-    Accepts raw convergence DataFrames directly so it can show NEWAVE
-    data even when Cobre convergence is empty.
+    Accepts raw convergence DataFrames directly so it can show the source model data
+    even when Cobre convergence is empty.
     """
     lb_nw: dict[int, float] = {}
     ub_nw: dict[int, float] = {}
@@ -706,10 +711,10 @@ def _aggregate_percentile_traces(
 ) -> list[dict]:
     """Build p10-p90 band + p10/p90 line traces from aggregate percentiles.
 
-    Sums percentiles across matched entities per stage (aggregate view).
-    When *entity_ids* is provided, only those entities are included —
-    this keeps the band consistent with the mean line which only covers
-    entities matched between NEWAVE and Cobre.
+    Sums percentiles across matched entities per stage (aggregate view). When
+    *entity_ids* is provided, only those entities are included — this keeps the band
+    consistent with the mean line which only covers entities matched between the source
+    model and Cobre.
     """
     # Guard mirrors the legacy early-return: no band when the percentile frame
     # is missing/empty or lacks the variable's p10/p90 columns. ``stages`` being
@@ -779,10 +784,9 @@ def cobre_aggregate_chart(
 ) -> str:
     """System-aggregate chart for a Cobre per-hydro variable.
 
-    Sums *variable* across all (or matched) hydros per stage to produce a
-    system-total mean line.  Adds a p10-p90 band from ``pct_df`` and an
-    optional NEWAVE SIN-level line from ``nw_sin`` (multiplied by
-    ``nw_factor`` for unit conversion).
+    Sums *variable* across all (or matched) hydros per stage to produce a system-total
+    mean line.  Adds a p10-p90 band from ``pct_df`` and an optional the source model
+    SIN-level line from ``nw_sin`` (multiplied by ``nw_factor`` for unit conversion).
 
     Parameters
     ----------
@@ -796,16 +800,16 @@ def cobre_aggregate_chart(
     pct_df:
         Per-hydro Cobre percentiles for the same variable.
     nw_sin:
-        Long-format NEWAVE SIN DataFrame (``newave_code``, ``stage``,
+        Long-format the source model SIN DataFrame (``newave_code``, ``stage``,
         ``variable``, ``value``) — typically read by ``read_medias_sin``.
     nw_variable:
         Variable name to filter in ``nw_sin`` (e.g. ``"EARMF"``).
     nw_factor:
-        Multiplicative factor applied to NEWAVE values for unit alignment
+        Multiplicative factor applied to the source model values for unit alignment
         (e.g. ``730`` to convert MWmes → MWh).
     nw_offset:
-        Subtracted from NEWAVE ``stage`` to align with Cobre ``stage_id``
-        (NEWAVE columns are numbered from the study start month).
+        Subtracted from the source model ``stage`` to align with Cobre ``stage_id`` (the
+        source model columns are numbered from the study start month).
     matched_ids:
         Optional subset of Cobre hydro IDs to include — keeps the
         aggregate consistent with comparisons that only cover matched
@@ -871,11 +875,11 @@ def hydro_per_bus_chart(
 ) -> str:
     """Per-bus faceted hydro comparison for *variable*.
 
-    Aggregates hydro-plant ResultComparison rows by the plant's owning
-    bus (taken from ``hydro_meta[cobre_id]["bus_id"]``), then renders a
-    small-multiples grid (one panel per non-fictitious bus, same layout
-    convention as ``line_summary_chart``) with NEWAVE + Cobre traces
-    and an optional Cobre P10–P90 band summed across each bus's plants.
+    Aggregates hydro-plant ResultComparison rows by the plant's owning bus (taken from
+    ``hydro_meta[cobre_id]["bus_id"]``), then renders a small-multiples grid (one panel
+    per non-fictitious bus, same layout convention as ``line_summary_chart``) with the
+    source model + Cobre traces and an optional Cobre P10–P90 band summed across each
+    bus's plants.
 
     Returns a short ``<p>`` fallback when the variable is absent on
     both sides or no plants can be mapped to buses.
@@ -886,8 +890,8 @@ def hydro_per_bus_chart(
     if not hydro_data:
         return f"<p>No hydro {variable} data.</p>"
 
-    # Per-(bus, stage) NEWAVE/Cobre sums (analyze owns the roll-up; the bus-name
-    # resolution and NOFICT skip live there).
+    # Per-(bus, stage) the source model/Cobre sums (analyze owns the roll-up; the
+    # bus-name resolution and NOFICT skip live there).
     per_bus = analyze.per_bus_sums_from_results(results, variable, hydro_meta, bus_meta)
     per_bus_nw: dict[str, dict[int, float]] = {
         bus_name: cast("dict[int, float]", agg["nw"])
@@ -1075,13 +1079,12 @@ def hydro_slack_aggregate_chart(
 ) -> str:
     """SIN-total slack chart from per-(entity_id, stage_id) frames.
 
-    Mirrors :func:`hydro_aggregate_chart` but reads both sides from
-    per-hydro frames instead of ``ResultComparison`` rows — the four hydro
-    slacks (water-withdrawal pos/neg + evaporation pos/neg) plus the
-    Cobre-only inflow non-negativity slack don't go through the comparison
-    pipeline, so the chart machinery has to consume Cobre's
-    ``cobre_hydro_means`` columns and the NEWAVE ``nw_hydro_slacks`` frame
-    (or ``None`` for slacks without a NEWAVE counterpart) directly.
+    Mirrors :func:`hydro_aggregate_chart` but reads both sides from per-hydro frames
+    instead of ``ResultComparison`` rows — the four hydro slacks (water-withdrawal
+    pos/neg + evaporation pos/neg) plus the Cobre-only inflow non-negativity slack don't
+    go through the comparison pipeline, so the chart machinery has to consume Cobre's
+    ``cobre_hydro_means`` columns and the source model ``nw_hydro_slacks`` frame (or
+    ``None`` for slacks without a source-model counterpart) directly.
     """
     cobre_by_stage = _hydro_per_stage_sum(cobre_hydro, variable, matched_ids)
     nw_by_stage = _hydro_per_stage_sum(nw_slacks, variable, matched_ids)
@@ -1132,13 +1135,13 @@ def hydro_slack_per_bus_chart(
 ) -> str:
     """Per-bus faceted slack chart from per-(entity_id, stage_id) frames.
 
-    Parallel to :func:`hydro_per_bus_chart` for the slack variables that
-    aren't surfaced through ``ResultComparison`` (no Cobre/NEWAVE comparison
-    row exists for them).  Plants are bucketed by their owning bus via
-    ``hydro_meta[cobre_id]["bus_id"]``; fictitious buses (``NOFICT*``) are
-    excluded, matching the existing per-bus charts.  When *nw_slacks* is
-    ``None`` or lacks the column, the NEWAVE trace is omitted (used for
-    ``inflow_nonnegativity_slack_m3s`` which has no NEWAVE counterpart).
+    Parallel to :func:`hydro_per_bus_chart` for the slack variables that aren't surfaced
+    through ``ResultComparison`` (no Cobre/the source model comparison row exists for
+    them).  Plants are bucketed by their owning bus via
+    ``hydro_meta[cobre_id]["bus_id"]``; fictitious buses (``NOFICT*``) are excluded,
+    matching the existing per-bus charts.  When *nw_slacks* is ``None`` or lacks the
+    column, the source model trace is omitted (used for
+    ``inflow_nonnegativity_slack_m3s`` which has no source-model counterpart).
     """
     if cobre_hydro.is_empty() or variable not in cobre_hydro.columns:
         return f"<p>No {variable} data available.</p>"
@@ -1320,11 +1323,11 @@ def line_summary_chart(
     line_bounds: pd.DataFrame | None,
     line_meta: list[dict],
 ) -> str:
-    """Per-line small-multiples comparing NEWAVE vs Cobre net flow.
+    """Per-line small-multiples comparing the source model vs Cobre net flow.
 
-    One panel per aligned line. Each panel shows the Cobre P10–P90
-    band, Cobre median, and NEWAVE mean, plus dashed upper/lower
-    capacity bounds (direct / −reverse).
+    One panel per aligned line. Each panel shows the Cobre P10–P90 band, Cobre median,
+    and the source model mean, plus dashed upper/lower capacity bounds (direct /
+    −reverse).
     """
     line_data = [r for r in results if r.entity_type == "line"]
     if not line_data:
@@ -1426,10 +1429,10 @@ def line_summary_chart(
                 }
             )
 
-        # Capacity bound lines. Skip when both directions are
-        # effectively infinite (NEWAVE big-M sentinel 99999 used for
-        # fictitious connections) — those bounds dwarf real flows
-        # and compress every other trace to a flat strip at zero.
+        # Capacity bound lines. Skip when both directions are effectively infinite (the
+        # source model big-M sentinel 99999 used for fictitious connections) — those
+        # bounds dwarf real flows and compress every other trace to a flat strip at
+        # zero.
         d_static, r_static = static_caps.get(lid, (0.0, 0.0))
         finite_upper: list[tuple[int, float]] = []
         finite_lower: list[tuple[int, float]] = []
@@ -1470,7 +1473,7 @@ def line_summary_chart(
                 }
             )
 
-        # NEWAVE + Cobre mean.
+        # The source model + Cobre mean.
         traces.append(
             {
                 "x": stages,
@@ -1516,10 +1519,9 @@ def system_spillage_energy_chart(
 ) -> str:
     """Three-panel chart of system spillage in MWmes.
 
-    Each panel pairs a NEWAVE trace (``VERTOT`` / ``VERTcont`` /
-    ``VERTfio``) against the matching Cobre aggregate (``total_mw`` /
-    ``reservoir_mw`` / ``rorov_mw``).  Both axes are stage-average MW
-    (MWmes).
+    Each panel pairs a source-model trace (``VERTOT`` / ``VERTcont`` / ``VERTfio``)
+    against the matching Cobre aggregate (``total_mw`` / ``reservoir_mw`` /
+    ``rorov_mw``).  Both axes are stage-average MW (MWmes).
     """
     nw_rows = [r for r in results if r.entity_type == "system_spillage"]
     if not nw_rows and cobre_spill_energy.is_empty():
@@ -1618,7 +1620,7 @@ def performance_metric_cards(
     nw_tim_stages: dict[str, float],
     cobre_training_seconds: float,
 ) -> str:
-    """Headline timing KPIs: NEWAVE total / training, Cobre total, speedup."""
+    """Headline timing KPIs: The source model total / training, Cobre total, speedup."""
     from cobre_bridge.comparators.html_report import metric_card, metrics_grid
     from cobre_bridge.ui.theme import COMPARISON_COLORS
 
@@ -1670,11 +1672,11 @@ def performance_iteration_chart(
 ) -> str:
     """Line chart of total seconds per training iteration.
 
-    NEWAVE total times come from ``newave.tim`` (already in seconds);
-    Cobre comes from ``training/convergence.parquet:time_total_ms``
-    converted to seconds. Iteration 1 carries clock-init garbage on
-    the NEWAVE side; we clip to a sensible max for the chart but show
-    the raw value in the tooltip via a textual hover.
+    The source model total times come from ``newave.tim`` (already in seconds); Cobre
+    comes from ``training/convergence.parquet:time_total_ms`` converted to seconds.
+    Iteration 1 carries clock-init garbage on the source model side; we clip to a
+    sensible max for the chart but show the raw value in the tooltip via a textual
+    hover.
     """
     has_nw = not nw_tim_iterations.is_empty()
     has_cb = (
@@ -1739,7 +1741,7 @@ def performance_iteration_chart(
         "xaxis": {"title": "Iteration"},
         "yaxis": {"title": "Total seconds"},
     }
-    # Clip the y-axis to actual data so NEWAVE iter-1's clock-init garbage
+    # Clip the y-axis to actual data so the source model iter-1's clock-init garbage
     # doesn't compress every other iteration into a flat line at zero.
     if all_seconds:
         ymax = max(all_seconds) * 1.15
@@ -1752,9 +1754,9 @@ def performance_fwd_bwd_split_chart(
     nw_tim_iterations: pl.DataFrame,
     cobre_convergence: pl.DataFrame,
 ) -> str:
-    """Stacked forward / backward split per iteration, NEWAVE vs Cobre.
+    """Stacked forward / backward split per iteration, the source model vs Cobre.
 
-    Two panels stacked vertically: top panel = NEWAVE (backward +
+    Two panels stacked vertically: top panel = the source model (backward +
     forward stacked bars in seconds), bottom panel = Cobre (same but
     converted from ms).
     """
@@ -1843,11 +1845,11 @@ def performance_fwd_bwd_split_chart(
 # Productivity tab charts
 # -------------------------------------------------------------------
 
-# kind -> (pmo column, cobre-bridge column, pmo label, cobre-bridge label).
-# Each productivity-comparison scatter is a *static* conversion-fidelity
-# check: the NEWAVE pmo.dat productivity against the value cobre-bridge
-# computes from the same HIDR cadastro inputs. Both sides live in the
-# ``productivity_detail`` frame built in results.py and should land on y = x.
+# kind -> (pmo column, cobre-bridge column, pmo label, cobre-bridge label). Each
+# productivity-comparison scatter is a *static* conversion-fidelity check: The source
+# model pmo.dat productivity against the value cobre-bridge computes from the same HIDR
+# cadastro inputs. Both sides live in the ``productivity_detail`` frame built in
+# results.py and should land on y = x.
 _PRODUCTIVITY_KINDS: dict[str, tuple[str, str, str, str]] = {
     "point": (
         "nw_altura_65",
@@ -1877,18 +1879,17 @@ def productivity_comparison_scatter(
 ) -> str:
     """Static conversion-fidelity scatter for one productivity *kind*.
 
-    *kind* selects the (pmo, cobre-bridge) column pair from
-    :data:`_PRODUCTIVITY_KINDS`: ``"point"`` (pmo ``produtibilidade_altura_65``
-    vs ``compute_productivity``), ``"equivalent"`` (pmo
-    ``produtibilidade_equivalente_volmin_volmax`` vs
+    *kind* selects the (pmo, cobre-bridge) column pair from :data:`_PRODUCTIVITY_KINDS`:
+    ``"point"`` (pmo ``produtibilidade_altura_65`` vs ``compute_productivity``),
+    ``"equivalent"`` (pmo ``produtibilidade_equivalente_volmin_volmax`` vs
     ``stored_energy_productivity``), ``"accumulated"`` (pmo
-    ``produtibilidade_acumulada_calculo_earm`` vs the cascade
-    accumulated-integrated value). Both sides are derived from the same
-    NEWAVE inputs, so the points should land on the ``y = x`` reference line —
-    this validates the conversion rather than comparing against the
-    per-stage simulation output. NEWAVE pmo is on x, cobre-bridge on y; rows
-    where either side is null are skipped. Annotated with mean & max relative
-    error ``|cobre-bridge − pmo| / pmo`` and the number of plants compared.
+    ``produtibilidade_acumulada_calculo_earm`` vs the cascade accumulated-integrated
+    value). Both sides are derived from the same the source model inputs, so the points
+    should land on the ``y = x`` reference line — this validates the conversion rather
+    than comparing against the per-stage simulation output. The source model pmo is on
+    x, cobre-bridge on y; rows where either side is null are skipped. Annotated with
+    mean & max relative error ``|cobre-bridge − pmo| / pmo`` and the number of plants
+    compared.
     """
     if kind not in _PRODUCTIVITY_KINDS:
         raise ValueError(f"Unknown productivity kind: {kind!r}")
@@ -1972,13 +1973,13 @@ def productivity_comparison_scatter(
 def productivity_per_stage_chart(results: list[ResultComparison]) -> str:
     """Per-plant realized productivity (generation / turbined) across stages.
 
-    Productivity is **constant within a stage but varies across stages** in
-    both models, tracking the reservoir head reached each stage. Reuses the
-    shared interactive per-plant widget (:func:`_build_interactive_detail_html`
-    — the same JS ``<select>`` dropdown the hydro/thermal detail tabs use), so
-    every reservoir is selectable one at a time (NEWAVE vs Cobre) rather than a
-    hand-picked subset. Driven by the per-stage ``productivity_mw_per_m3s``
-    hydro comparison rows already produced in results.py.
+    Productivity is **constant within a stage but varies across stages** in both models,
+    tracking the reservoir head reached each stage. Reuses the shared interactive
+    per-plant widget (:func:`_build_interactive_detail_html` — the same JS ``<select>``
+    dropdown the hydro/thermal detail tabs use), so every reservoir is selectable one at
+    a time (the source model vs Cobre) rather than a hand-picked subset. Driven by the
+    per-stage ``productivity_mw_per_m3s`` hydro comparison rows already produced in
+    results.py.
     """
     var_key = "productivity_mw_per_m3s"
     plants: dict[tuple[str, int], dict[int, tuple[float, float]]] = {}
@@ -2012,23 +2013,23 @@ def productivity_per_stage_chart(results: list[ResultComparison]) -> str:
 
 
 def _prod_blocks_pct(nw: float | None, cb: float | None) -> float | None:
-    """Relative diff (Cobre − NEWAVE)/NEWAVE in %, or None when NEWAVE ≈ 0."""
+    """Relative diff (Cobre − the source model)/the source model in %, or None when the
+    source model ≈ 0."""
     if nw is None or cb is None or abs(nw) <= 1e-12:
         return None
     return (cb - nw) / nw * 100.0
 
 
 def productivity_blocks_table(df: pl.DataFrame) -> str:
-    """Grouped building-blocks table — per metric: NEWAVE | Cobre | Δ%.
+    """Grouped building-blocks table — per metric: The source model | Cobre | Δ%.
 
-    One row per aligned hydro. The columns are organised into metric groups
-    (ρ_esp, tailwater, losses, vmin, vmax), each spanning three sub-columns —
-    NEWAVE, Cobre, Δ% — via a two-level header (``colspan`` on the top row).
-    Alternate metric groups get a subtle background tint across both header
-    and body cells and a stronger left border, so the 2-by-2 (3-by-3 with Δ%)
-    pairing is visually unmistakable. Δ% = (Cobre − NEWAVE)/NEWAVE (blank when
-    NEWAVE ≈ 0); cells with ``|Δ%| > 1%`` are highlighted. Reuses the
-    ``cost-breakdown-table`` styling.
+    One row per aligned hydro. The columns are organised into metric groups (ρ_esp,
+    tailwater, losses, vmin, vmax), each spanning three sub-columns — the source model,
+    Cobre, Δ% — via a two-level header (``colspan`` on the top row). Alternate metric
+    groups get a subtle background tint across both header and body cells and a stronger
+    left border, so the 2-by-2 (3-by-3 with Δ%) pairing is visually unmistakable. Δ% =
+    (Cobre − the source model)/the source model (blank when the source model ≈ 0); cells
+    with ``|Δ%| > 1%`` are highlighted. Reuses the ``cost-breakdown-table`` styling.
     """
     if df.is_empty():
         return "<p>No productivity data available.</p>"
@@ -2138,10 +2139,10 @@ def overview_metrics(
     )
     from cobre_bridge.ui.theme import COMPARISON_COLORS
 
-    # Pull thermal-generation cost only (single-category NPV). NEWAVE
-    # parcela "GERACAO TERMICA" vs Cobre ``thermal_cost`` + the GNL
-    # ``anticipated_thermal_cost`` (matching the "Thermal Generation"
-    # ``_COST_MAP`` category; anticipated is 0 / absent on non-GNL runs).
+    # Pull thermal-generation cost only (single-category NPV). The source model parcela
+    # "GERACAO TERMICA" vs Cobre ``thermal_cost`` + the GNL ``anticipated_thermal_cost``
+    # (matching the "Thermal Generation" ``_COST_MAP`` category; anticipated is 0 /
+    # absent on non-GNL runs).
     nw_thermal = (nw_costs or {}).get("GERACAO TERMICA", 0.0)
     _cb = cobre_costs or {}
     cb_thermal = _cb.get("thermal_cost", 0.0) + _cb.get("anticipated_thermal_cost", 0.0)
@@ -2207,7 +2208,7 @@ def overview_metrics(
 # Energy Balance tab charts
 # -------------------------------------------------------------------
 
-# NEWAVE MEDIAS-MERC variable → (display label, unit).
+# The source model MEDIAS-MERC variable → (display label, unit).
 _BALANCE_VARS: list[tuple[str, str, str, str]] = [
     # (display_label, newave_var, cobre_var, unit)
     ("Hydro Generation", "GHTOT", "hydro_gen_mw", "MW"),
@@ -2228,7 +2229,7 @@ def build_energy_balance_tab(
 ) -> str:
     """Build per-bus energy balance charts with p10/p90 bands.
 
-    One 2x2 faceted chart per variable, with NEWAVE mean + Cobre p10/p50/p90.
+    One 2x2 faceted chart per variable, with the source model mean + Cobre p10/p50/p90.
     """
     if bus_agg.is_empty() and nw_market.is_empty():
         return "<p>No energy balance data available.</p>"
@@ -2237,13 +2238,13 @@ def build_energy_balance_tab(
     if not nw_market.is_empty():
         nw_offset = int(nw_market["stage"].min())
 
-    # Merge NEWAVE net load into nw_market if available.
+    # Merge the source model net load into nw_market if available.
     if nw_net_load is not None and not nw_net_load.is_empty():
         nw_market = pl.concat([nw_market, nw_net_load], how="diagonal_relaxed")
         if nw_offset == 0:
             nw_offset = int(nw_net_load["stage"].min())
 
-    # Build Cobre bus_id → name and NEWAVE code → bus_id lookups.
+    # Build Cobre bus_id → name and the source model code → bus_id lookups.
     cobre_name_to_id: dict[str, int] = {
         m["name"].strip().upper(): eid for eid, m in bus_meta.items()
     }
@@ -2251,7 +2252,7 @@ def build_energy_balance_tab(
         code: name.strip().upper() for code, name in nw_bus_names.items()
     }
 
-    # Match NEWAVE bus codes to Cobre bus IDs by name.
+    # Match the source model bus codes to Cobre bus IDs by name.
     matched: dict[int, tuple[int, str]] = {}  # nw_code → (cobre_bus_id, name)
     for nw_code, nw_name in nw_code_to_name.items():
         cid = cobre_name_to_id.get(nw_name)
@@ -2277,7 +2278,7 @@ def build_energy_balance_tab(
     if not ordered_buses:
         return "<p>No matching buses found.</p>"
 
-    # Pre-index NEWAVE data: {(nw_code, var_upper): {stage_0based: value}}
+    # Pre-index the source model data: {(nw_code, var_upper): {stage_0based: value}}
     nw_lookup: dict[tuple[int, str], dict[int, float]] = {}
     for row in nw_market.iter_rows(named=True):
         if row["value"] is None:
@@ -2401,7 +2402,7 @@ def build_energy_balance_tab(
                     }
                 )
 
-            # NEWAVE mean line.
+            # The source model mean line.
             if has_newave and nw_data:
                 nw_y = [nw_data.get(s, 0) for s in all_stages]
                 traces.append(
@@ -2576,17 +2577,16 @@ _HYDRO_VARIABLES = [
     ("water_value_per_hm3", "Water Value (R$/hm³)"),
 ]
 
-# Cobre-only per-plant variables (NEWAVE has no per-plant equivalent).
+# Cobre-only per-plant variables (the source model has no per-plant equivalent).
 # Appended to the dropdown after the comparison variables.
 #
-# Withdrawal-slack ``pos`` / ``neg`` labels follow NEWAVE's convention, which
+# Withdrawal-slack ``pos`` / ``neg`` labels follow the source model's convention, which
 # is the *inverse* of Cobre's column-name convention — Cobre's
-# ``water_withdrawal_violation_pos_m3s`` is the physical equivalent of
-# NEWAVE's ``VIOL_NEG_VRETIRUH`` and vice versa.  The
-# ``_NW_HYDRO_SLACK_VARS`` mapping in ``results.py`` is correspondingly
-# swapped so each panel pairs the right Cobre column with the right NEWAVE
-# series under its NEWAVE-style label.  Evaporation slacks share NEWAVE's
-# convention so no swap is needed there.
+# ``water_withdrawal_violation_pos_m3s`` is the physical equivalent of The source
+# model's ``VIOL_NEG_VRETIRUH`` and vice versa.  The ``_NW_HYDRO_SLACK_VARS`` mapping in
+# ``results.py`` is correspondingly swapped so each panel pairs the right Cobre column
+# with the right the source model series under its the source-model-style label.
+# Evaporation slacks share the source model's convention so no swap is needed there.
 _HYDRO_COBRE_ONLY_VARIABLES = [
     ("stored_energy_initial_mwh", "Stored Energy Initial (MWh)"),
     ("stored_energy_final_mwh", "Stored Energy Final (MWh)"),
@@ -2660,12 +2660,11 @@ def _plant_max_reldiff_table(
 
     Rows: plants (sorted by overall worst max-rel-diff across all
     variables, worst first). Columns: one per variable in *variables*
-    (skipping variables for which no NEWAVE row exists).
+    (skipping variables for which no source-model row exists).
 
-    Cell value = ``max_stages |cobre − newave| / |newave| × 100``
-    (NEWAVE-relative, per the report convention). Stages with
-    ``|newave| ≈ 0`` are excluded — for any plant/variable that has no
-    eligible stage the cell shows "—".
+    Cell value = ``max_stages |cobre − newave| / |newave| × 100`` (the
+    source-model-relative, per the report convention). Stages with ``|newave| ≈ 0`` are
+    excluded — for any plant/variable that has no eligible stage the cell shows "—".
 
     Colour cues: ≤ 1 % green, ≤ 10 % amber, > 10 % red.
     """
@@ -2764,7 +2763,7 @@ def build_hydro_detail_tab(
 ) -> str:
     """Build interactive per-plant hydro detail with JS dropdown.
 
-    Comparison variables (NEWAVE + Cobre) are populated from ``results``.
+    Comparison variables (the source model + Cobre) are populated from ``results``.
     Cobre-only variables (EARM, ENA, plus the three operational slacks:
     withdrawal pos/neg and inflow non-negativity) are populated from
     ``cobre_hydro`` if provided — these display only the Cobre line and
@@ -2778,11 +2777,10 @@ def build_hydro_detail_tab(
     static value at the affected stages — matching what the LP
     actually saw.
 
-    When ``nw_hydro_slacks`` is supplied, the NEWAVE
-    ``VIOL_POS_VRETIRUH`` / ``VIOL_NEG_VRETIRUH`` series (converted to
-    m³/s) are rendered as a NEWAVE line on the two withdrawal-slack
-    panels alongside the existing Cobre Mean + p10/p90 band.  The
-    inflow-non-negativity slack stays Cobre-only because NEWAVE has no
+    When ``nw_hydro_slacks`` is supplied, the source model ``VIOL_POS_VRETIRUH`` /
+    ``VIOL_NEG_VRETIRUH`` series (converted to m³/s) are rendered as a source-model line
+    on the two withdrawal-slack panels alongside the existing Cobre Mean + p10/p90 band.
+    The inflow-non-negativity slack stays Cobre-only because the source model has no
     direct counterpart.
     """
     hydro_data = [r for r in results if r.entity_type == "hydro"]
@@ -2804,10 +2802,9 @@ def build_hydro_detail_tab(
 
     # Build cobre_id -> {var: {stage: value}} for cobre-only variables.
     cobre_only_lookup: dict[int, dict[str, dict[int, float]]] = {}
-    # Per-(cobre_id, stage_id) Cobre LP gen-max for the dashed overlay
-    # trace on the generation_mw chart. The NEWAVE GHMAX_FPHC trace was
-    # found to be unhelpful in practice and is intentionally not
-    # surfaced — see report notes.
+    # Per-(cobre_id, stage_id) Cobre LP gen-max for the dashed overlay trace on the
+    # generation_mw chart. The source model GHMAX_FPHC trace was found to be unhelpful
+    # in practice and is intentionally not surfaced — see report notes.
     gen_max_cb_lookup: dict[int, dict[int, float]] = {}
     cobre_only_vars = [v for v, _ in _HYDRO_COBRE_ONLY_VARIABLES]
     if cobre_hydro is not None and not cobre_hydro.is_empty():
@@ -2846,8 +2843,8 @@ def build_hydro_detail_tab(
 
     static_meta = cobre_hydro_meta or {}
 
-    # cobre_id -> {var: {stage_id: nw_value}} for the two withdrawal slacks.
-    # Drives the NEWAVE line on the matching cobre-only chart panels.
+    # cobre_id -> {var: {stage_id: nw_value}} for the two withdrawal slacks. Drives the
+    # source model line on the matching cobre-only chart panels.
     nw_slack_lookup: dict[int, dict[str, dict[int, float]]] = {}
     _NW_SLACK_VARS = (
         "water_withdrawal_violation_pos_m3s",
@@ -3153,8 +3150,8 @@ def _build_interactive_detail_html(
     """
 
 
-# -------------------------------------------------------------------
-# Generic constraints (RE, AGRINT, VminOP) — NEWAVE vs Cobre LHS
+# ------------------------------------------------------------------- Generic
+# constraints (RE, AGRINT, VminOP) — the source model vs Cobre LHS
 # -------------------------------------------------------------------
 
 
@@ -3164,14 +3161,13 @@ def constraints_comparison_chart(
     lhs_cobre: pl.DataFrame,
     bound_by_constraint: dict[int, dict[int, float]],
 ) -> str:
-    """Per-constraint small-multiples comparing NEWAVE vs Cobre LHS vs bound.
+    """Per-constraint small-multiples comparing the source model vs Cobre LHS vs bound.
 
-    One panel per constraint. Each panel shows the per-stage NEWAVE LHS
-    (mean evaluated from MEDIAS-USIH / int*.out outputs), the Cobre LHS
-    (mean across scenarios and blocks from simulation parquet), and the
-    constraint bound (dashed) overlaid as a horizontal-step series for
-    every stage where the bound is defined. Constraints with no LHS
-    data on either side are skipped silently.
+    One panel per constraint. Each panel shows the per-stage the source model LHS (mean
+    evaluated from MEDIAS-USIH / int*.out outputs), the Cobre LHS (mean across scenarios
+    and blocks from simulation parquet), and the constraint bound (dashed) overlaid as a
+    horizontal-step series for every stage where the bound is defined. Constraints with
+    no LHS data on either side are skipped silently.
 
     Parameters
     ----------
@@ -3250,7 +3246,7 @@ def constraints_comparison_chart(
             "anchor": xa,
         }
 
-        # Union of stages with any data (NEWAVE LHS, Cobre LHS, or bound).
+        # Union of stages with any data (the source model LHS, Cobre LHS, or bound).
         stages = sorted(
             set(nw_by_cid.get(cid, {}).keys())
             | set(cb_by_cid.get(cid, {}).keys())
@@ -3263,7 +3259,7 @@ def constraints_comparison_chart(
         cb_y = [cb_by_cid.get(cid, {}).get(s) for s in stages]
         bound_y = [bound_by_constraint.get(cid, {}).get(s) for s in stages]
 
-        # NEWAVE LHS line (only where defined).
+        # The source model LHS line (only where defined).
         nw_x_present = [s for s, v in zip(stages, nw_y) if v is not None]
         nw_v_present = [v for v in nw_y if v is not None]
         if nw_x_present:

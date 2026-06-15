@@ -1,4 +1,4 @@
-"""Tests for ``NewaveCase`` — the parse-once, cached NEWAVE case object."""
+"""Tests for ``NewaveCase`` — the parse-once, cached the source model case object."""
 
 from __future__ import annotations
 

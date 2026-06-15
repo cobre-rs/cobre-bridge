@@ -1,10 +1,11 @@
-"""Convert NEWAVE downstream-level curve families to ``tailrace_curves.parquet``.
+"""Convert the source model downstream-level curve families to
+``tailrace_curves.parquet``.
 
-NEWAVE's ``polinjus`` cadastro stores, per hydro plant, one or more *families* of
-downstream (tailrace) level curves ``h_jus(q_jus)``. Each family is keyed by a
+The source model's ``polinjus`` cadastro stores, per hydro plant, one or more *families*
+of downstream (tailrace) level curves ``h_jus(q_jus)``. Each family is keyed by a
 reference forebay level of the downstream plant (``HjusRef``) and is a piecewise
-polynomial in the total downstream flow (turbined + spilled + lateral). cobre's
-FPHA production model consumes these as ``system/tailrace_curves.parquet`` —
+polynomial in the total downstream flow (turbined + spilled + lateral). cobre's FPHA
+production model consumes these as ``system/tailrace_curves.parquet`` —
 piecewise-quartic backwater families — to evaluate the exact net head.
 
 The mapping is one-to-one with the ``inewave`` reader columns:
@@ -21,11 +22,11 @@ The mapping is one-to-one with the ``inewave`` reader columns:
 ``coeficiente_a0`` .. ``coeficiente_a4``    ``a_cf0`` .. ``a_cf4``
 ==========================================  =========================
 
-The family/segment indices are NEWAVE's 1-based sequential keys and are passed
+The family/segment indices are the source model's 1-based sequential keys and are passed
 through unchanged — cobre treats them as opaque per-plant grouping keys (the d31
-reference case likewise uses 1-based ``family_id``/``segment_id``). Only the
-plant code is remapped to cobre's dense 0-based id; plants absent from the id map
-(filtered fictitious plants, etc.) are skipped.
+reference case likewise uses 1-based ``family_id``/``segment_id``). Only the plant code
+is remapped to cobre's dense 0-based id; plants absent from the id map (filtered
+fictitious plants, etc.) are skipped.
 """
 
 from __future__ import annotations
@@ -62,15 +63,17 @@ _TAILRACE_SCHEMA = pa.schema(
 
 
 def convert_tailrace_curves(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table | None:
-    """Build ``system/tailrace_curves.parquet`` from NEWAVE's ``polinjus`` families.
+    """Build ``system/tailrace_curves.parquet`` from the source model's ``polinjus``
+    families.
 
     Parameters
     ----------
     case:
-        Parsed NEWAVE case. ``case.polinjus`` supplies the downstream-level
+        Parsed the source model case. ``case.polinjus`` supplies the downstream-level
         curve families (``None`` when the case ships no ``polinjus`` file).
     id_map:
-        Entity ID map translating NEWAVE plant codes to 0-based Cobre hydro IDs.
+        Entity ID map translating the source model plant codes to 0-based Cobre hydro
+        IDs.
 
     Returns
     -------

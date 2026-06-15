@@ -435,7 +435,8 @@ def test_chart_retry_histogram_color_coding() -> None:
 
 
 def test_render_full_sections() -> None:
-    """render() with all non-empty data must contain all section titles added by ticket-021."""
+    """render() with all non-empty data must contain all section titles added by
+    ticket-021."""
     scaling_report = {
         "stages": [
             {

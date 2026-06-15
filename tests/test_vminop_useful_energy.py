@@ -5,11 +5,12 @@
 **linear** stored-energy convention the security-curve constraint binds on:
 
 - cobre LHS  = Σ override ρ_acum(stage) · (storage_final − Vmin)
-- NEWAVE LHS = Σ override ρ_acum(stage) · VARMUH(plant, stage)   (MEDIAS-USIH)
+- the source model LHS = Σ override ρ_acum(stage) · VARMUH(plant, stage)   (MEDIAS-USIH)
 - bound      = original stored-bound − dead-energy (Σ ρ_acum · Vmin)
 
-The NEWAVE LHS is deliberately the *linear* per-plant ``VARMUH`` reconstruction,
-not the per-REE ``EARMF`` (which NEWAVE reports as the nonlinear ∫ρ dv energy).
+The source model LHS is deliberately the *linear* per-plant ``VARMUH`` reconstruction,
+not the per-REE ``EARMF`` (which the source model reports as the nonlinear ∫ρ dv
+energy).
 
 RE / AGRINT constraints (no ``@rho_acum``) must pass through untouched.
 """
@@ -119,9 +120,9 @@ def _bounds() -> pl.DataFrame:
 
 
 def _nw_hydro() -> pl.DataFrame:
-    # VARMUH (useful stored volume, hm³ above Vmin) for plant code 1 (→ cobre
-    # id 0) at MEDIAS stages 9 (=stage 0) and 10 (=stage 1).  With ρ_acum=2 the
-    # linear NEWAVE LHS is 2·475=950 and 2·290=580.
+    # VARMUH (useful stored volume, hm³ above Vmin) for plant code 1 (→ cobre id 0) at
+    # MEDIAS stages 9 (=stage 0) and 10 (=stage 1).  With ρ_acum=2 the linear the source
+    # model LHS is 2·475=950 and 2·290=580.
     return pl.DataFrame(
         {
             "newave_code": [1, 1],
@@ -133,7 +134,7 @@ def _nw_hydro() -> pl.DataFrame:
 
 
 def _id_map() -> NewaveIdMap:
-    # NEWAVE plant code 1 → cobre hydro id 0 (enumerate order).
+    # The source model plant code 1 → cobre hydro id 0 (enumerate order).
     return NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
 
 
@@ -172,8 +173,8 @@ def test_cobre_lhs_is_useful_energy(tmp_path: Path) -> None:
     assert _cell(cb, 0, 1, "lhs_value") == 600.0
 
 
-def test_newave_lhs_is_linear_varmuh_energy(tmp_path: Path) -> None:
-    # NEWAVE LHS = Σ ρ_acum(stage) · VARMUH = 2·475=950 and 2·290=580 — the
+def test_source_model_lhs_is_linear_varmuh_energy(tmp_path: Path) -> None:
+    # The source model LHS = Σ ρ_acum(stage) · VARMUH = 2·475=950 and 2·290=580 — the
     # linear stored energy the curve binds on, NOT the per-REE EARMF.
     case, out = _build_case(tmp_path)
     nw_empty = pl.DataFrame(schema=_GC_SCHEMA)

@@ -1,8 +1,9 @@
-"""Core bounds comparison between NEWAVE input-derived bounds and Cobre bounds.parquet.
+"""Core bounds comparison between the source model input-derived bounds and Cobre
+bounds.parquet.
 
-Computes NEWAVE bounds from input files via ``bounds_from_inputs`` and
-compares them against Cobre's ``bounds.parquet``, producing a list of
-BoundComparison results for every (entity, stage, variable) triple.
+Computes the source model bounds from input files via ``bounds_from_inputs`` and
+compares them against Cobre's ``bounds.parquet``, producing a list of BoundComparison
+results for every (entity, stage, variable) triple.
 """
 
 from __future__ import annotations
@@ -150,7 +151,7 @@ def _compare_hydros(
     tolerance: float,
     variables: set[str] | None,
 ) -> list[BoundComparison]:
-    """Compare hydro bounds using computed NEWAVE bounds."""
+    """Compare hydro bounds using computed the source model bounds."""
     results: list[BoundComparison] = []
 
     for (hydro_id, stage_id, bound_name), nw_value in sorted(computed.items()):
@@ -196,7 +197,7 @@ def _compare_thermals(
     tolerance: float,
     variables: set[str] | None,
 ) -> list[BoundComparison]:
-    """Compare thermal bounds using computed NEWAVE bounds."""
+    """Compare thermal bounds using computed the source model bounds."""
     results: list[BoundComparison] = []
 
     for (thermal_id, stage_id, bound_name), nw_value in sorted(computed.items()):
@@ -269,7 +270,7 @@ def _compare_lines(
     tolerance: float,
     variables: set[str] | None,
 ) -> list[BoundComparison]:
-    """Compare line flow bounds using computed NEWAVE bounds.
+    """Compare line flow bounds using computed the source model bounds.
 
     Compares against the converter's ``line_bounds.parquet`` directly
     (not the Cobre solver's ``bounds.parquet``, which may represent
@@ -316,19 +317,19 @@ def compare_bounds(
     tolerance: float = 1e-3,
     variables: set[str] | None = None,
 ) -> list[BoundComparison]:
-    """Compare LP variable bounds between NEWAVE and Cobre.
+    """Compare LP variable bounds between the source model and Cobre.
 
-    Computes NEWAVE bounds from input files (via ``bounds_from_inputs``)
-    and compares them against Cobre's ``bounds.parquet``.
+    Computes the source model bounds from input files (via ``bounds_from_inputs``) and
+    compares them against Cobre's ``bounds.parquet``.
 
     Parameters
     ----------
     alignment:
         Pre-built entity alignment.
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
-        Entity ID mapping (NEWAVE codes to Cobre IDs).
+        Entity ID mapping (the source model codes to Cobre IDs).
     cobre_output_dir:
         Path to Cobre output directory.
     tolerance:
@@ -356,7 +357,7 @@ def compare_bounds(
         tolerance,
     )
 
-    # Compute NEWAVE bounds from input files.
+    # Compute the source model bounds from input files.
     _LOG.info("Computing NEWAVE bounds from input files...")
     computed_hydro = compute_hydro_bounds(case, id_map)
     computed_thermal = compute_thermal_bounds(case, id_map)

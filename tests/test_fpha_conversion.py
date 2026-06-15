@@ -1,9 +1,9 @@
 """Tests for FPHA emission in the hydro converters.
 
-FPHA is gated on NEWAVE's ``dger`` ``funcao_producao_uhe == 0``
-(:attr:`NewaveCase.fpha_enabled`). When on, reservoir plants with storage swing
-are emitted as ``model: "fpha"`` so cobre fits the production function; when off,
-every plant stays on the constant-productivity path (regression-preserving).
+FPHA is gated on the source model's ``dger`` ``funcao_producao_uhe == 0``
+(:attr:`NewaveCase.fpha_enabled`). When on, reservoir plants with storage swing are
+emitted as ``model: "fpha"`` so cobre fits the production function; when off, every
+plant stays on the constant-productivity path (regression-preserving).
 """
 
 from __future__ import annotations

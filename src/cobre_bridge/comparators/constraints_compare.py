@@ -1,19 +1,18 @@
-"""Generic constraint LHS evaluation from NEWAVE and Cobre simulation outputs.
+"""Generic constraint LHS evaluation from the source model and Cobre simulation outputs.
 
 Reads the converted Cobre case's ``constraints/generic_constraints.json``
 and ``constraints/generic_constraint_bounds.parquet`` and evaluates each
 constraint's LHS using both:
 
-- NEWAVE outputs — ``MEDIAS-USIH.CSV`` (``GHIDUH``, ``VARMUH`` per plant
+- the source model outputs — ``MEDIAS-USIH.CSV`` (``GHIDUH``, ``VARMUH`` per plant
   per stage) and ``int*.out`` (per-line per-stage interchange).
 - Cobre simulation outputs — per-(scenario, stage, block) hydro and
   exchange data, collapsed to one value per (constraint, stage) by
   averaging across scenarios and blocks.
 
-The output is consumed by the compare-results report's Constraints tab,
-mirroring the dashboard's per-constraint LHS-vs-Bound visualisation with a
-NEWAVE overlay so the user can see whether a binding constraint matches
-across the two solvers.
+The output is consumed by the compare-results report's Constraints tab, mirroring the
+dashboard's per-constraint LHS-vs-Bound visualisation with a the source model overlay so
+the user can see whether a binding constraint matches across the two solvers.
 """
 
 from __future__ import annotations
@@ -78,17 +77,16 @@ def evaluate_lhs_newave(
     id_map: NewaveIdMap,
     nw_offset: int,
 ) -> pl.DataFrame:
-    """Evaluate each constraint's LHS from NEWAVE simulation outputs.
+    """Evaluate each constraint's LHS from the source model simulation outputs.
 
-    The constraint expressions reference Cobre entity IDs. We translate
-    via ``id_map`` (hydro Cobre id → NEWAVE code) and
-    ``alignment.lines`` (Cobre line id → NEWAVE submarket pair) before
-    looking values up in the NEWAVE data.
+    The constraint expressions reference Cobre entity IDs. We translate via ``id_map``
+    (hydro Cobre id → the source model code) and ``alignment.lines`` (Cobre line id →
+    the source model submarket pair) before looking values up in the source model data.
 
-    NEWAVE outputs are stage-level (block-collapsed) — MEDIAS values are
-    monthly means and ``int*.out`` ``TOTAL`` rows already average over
-    blocks weighted by their duration. The result therefore has one value
-    per (constraint, stage_0based) pair.
+    The source model outputs are stage-level (block-collapsed) — MEDIAS values are
+    monthly means and ``int*.out`` ``TOTAL`` rows already average over blocks weighted
+    by their duration. The result therefore has one value per (constraint, stage_0based)
+    pair.
 
     Parameters
     ----------
@@ -110,19 +108,18 @@ def evaluate_lhs_newave(
         Pre-built entity alignment.  Provides Cobre-line → (newave_de,
         newave_para) mappings and the ``reversed`` flag.
     id_map:
-        Used to translate Cobre hydro IDs back to NEWAVE plant codes.
+        Used to translate Cobre hydro IDs back to the source model plant codes.
     nw_offset:
-        MEDIAS stage offset (e.g. 9 for a September-start study).  Used
-        to convert NEWAVE 1-based MEDIAS stages to Cobre 0-based.
+        MEDIAS stage offset (e.g. 9 for a September-start study).  Used to convert the
+        source model 1-based MEDIAS stages to Cobre 0-based.
 
     Returns
     -------
     polars.DataFrame
         Columns: ``constraint_id`` (Int32), ``stage_id`` (Int32, 0-based),
-        ``lhs_value`` (Float64).  One row per (constraint, stage) pair
-        that has at least one resolvable term.  Stages with missing
-        variables produce no row (rather than a zero); this avoids
-        misrepresenting "no NEWAVE data" as "LHS = 0".
+        ``lhs_value`` (Float64).  One row per (constraint, stage) pair that has at least
+        one resolvable term.  Stages with missing variables produce no row (rather than
+        a zero); this avoids misrepresenting "no source-model data" as "LHS = 0".
     """
     if not constraints:
         return pl.DataFrame(
@@ -164,11 +161,11 @@ def evaluate_lhs_newave(
                 continue
             hydro_storage[(cobre_id, stage_0based)] = float(row["value"])
 
-    # --- Build line exchange lookup: (cobre_line_id, stage_0based) -> MW
-    # Aligned via EntityAlignment.lines: each Cobre line records the NEWAVE
-    # directional pair (newave_de → newave_para), which matches the Cobre
-    # (source, target) orientation by construction.  NWLISTOP rows for the
-    # opposite (para, de) ordering carry the opposite sign, so they are negated.
+    # --- Build line exchange lookup: (cobre_line_id, stage_0based) -> MW Aligned via
+    # EntityAlignment.lines: each Cobre line records the source model directional pair
+    # (newave_de → newave_para), which matches the Cobre (source, target) orientation by
+    # construction.  NWLISTOP rows for the opposite (para, de) ordering carry the
+    # opposite sign, so they are negated.
     line_flow: dict[tuple[int, int], float] = {}
     if not nw_line_means.is_empty() and alignment.lines:
         # Build (de, para, stage_0based) -> value for both directions.
@@ -206,9 +203,9 @@ def evaluate_lhs_newave(
         terms = parse_expression(c["expression"])
         if not terms:
             continue
-        # Determine the set of stages we can evaluate for this
-        # constraint: a stage is evaluable iff every referenced variable
-        # has a NEWAVE value at that stage.
+        # Determine the set of stages we can evaluate for this constraint: a stage is
+        # evaluable iff every referenced variable has a source-model value at that
+        # stage.
         per_stage: dict[int, float] = {}
         all_stages: set[int] = set()
         for _, _, vtype, eid in terms:
@@ -234,12 +231,11 @@ def evaluate_lhs_newave(
                 elif vtype == "hydro_generation":
                     val = hydro_gen.get((eid, stage))
                 elif vtype == "line_direct":
-                    # ``line_direct`` is the non-negative flow in the
-                    # canonical (src<tgt) direction. NEWAVE int*.out
-                    # gives a single signed value per (stage, pair); we
-                    # take its positive part as the stage-mean
-                    # approximation. Per-block decomposition would
-                    # require parsing the per-patamar rows separately.
+                    # ``line_direct`` is the non-negative flow in the canonical
+                    # (src<tgt) direction. The source model int*.out gives a single
+                    # signed value per (stage, pair); we take its positive part as the
+                    # stage-mean approximation. Per-block decomposition would require
+                    # parsing the per-patamar rows separately.
                     signed = line_flow.get((eid, stage))
                     val = max(0.0, signed) if signed is not None else None
                 elif vtype == "line_reverse":
@@ -250,13 +246,12 @@ def evaluate_lhs_newave(
                 if val is None:
                     stage_complete = False
                     break
-                # @rho_eq / @rho_acum parameters scale the coefficient at
-                # solve time in Cobre.  We don't have NEWAVE-side
-                # productivity per (hydro, stage) handy here, so skip
-                # constraints with such parameters by treating them as
-                # missing on this side — the chart will simply lack a
-                # NEWAVE trace.  This affects VminOP only; RE/AGRINT
-                # never reference @-parameters.
+                # @rho_eq / @rho_acum parameters scale the coefficient at solve time in
+                # Cobre.  We don't have the source-model-side productivity per (hydro,
+                # stage) handy here, so skip constraints with such parameters by
+                # treating them as missing on this side — the chart will simply lack a
+                # The source model trace.  This affects VminOP only; RE/AGRINT never
+                # reference @-parameters.
                 if param_name is not None:
                     resolved = resolve_param_to_column(param_name)
                     if resolved is not None:
@@ -398,22 +393,22 @@ def per_stage_bounds(
 
 # --- VminOP useful-energy rewrite -------------------------------------------
 #
-# VminOP (security-curve) constraints bound *stored energy*: their expression
-# is ``Σ @rho_acum_h{id} * hydro_storage(id) >= bound``.  The generic LHS
-# evaluator above resolves ``@rho_acum`` to cobre's *default* point
-# productivity ``accumulated_productivity_mw_per_m3s`` (MW/(m³/s)), which is the
-# energy-per-volume coefficient over-scaled by the hm³↔(m³/s)·month factor
-# (≈ 2.628) relative to the *override* the LP actually uses (energy-scaled,
-# MWmonth/hm³).  That makes the raw VminOP LHS incomparable to its own bound and
-# to NEWAVE.  This rewrite re-expresses VminOP rows as **useful stored energy
-# in MWmonth** so they line up with NEWAVE's per-REE ``EARMF`` (MEDIAS-REE):
+# VminOP (security-curve) constraints bound *stored energy*: their expression is ``Σ
+# @rho_acum_h{id} * hydro_storage(id) >= bound``.  The generic LHS evaluator above
+# resolves ``@rho_acum`` to cobre's *default* point productivity
+# ``accumulated_productivity_mw_per_m3s`` (MW/(m³/s)), which is the energy-per-volume
+# coefficient over-scaled by the hm³↔(m³/s)·month factor (≈ 2.628) relative to the
+# *override* the LP actually uses (energy-scaled, MWmonth/hm³).  That makes the raw
+# VminOP LHS incomparable to its own bound and to the source model.  This rewrite
+# re-expresses VminOP rows as **useful stored energy
+# in MWmonth** so they line up with the source model's per-REE ``EARMF`` (MEDIAS-REE):
 #
-#   cobre LHS  = Σ override_ρ_acum(stage) · (storage_final − Vmin)   [useful]
-#   NEWAVE LHS = EARMF for the constraint's REE                       [useful]
-#   bound      = stored-bound − dead-energy (= pct · useful EARMX)    [useful]
+# cobre LHS  = Σ override_ρ_acum(stage) · (storage_final − Vmin)   [useful] The source
+# model LHS = EARMF for the constraint's REE                       [useful] bound      =
+# stored-bound − dead-energy (= pct · useful EARMX)    [useful]
 #
 # where dead-energy = Σ override_ρ_acum(stage) · Vmin removes the absolute-vs-
-# relative-to-minimum offset (cobre stores absolute volume; NEWAVE EARM is
+# relative-to-minimum offset (cobre stores absolute volume; the source model EARM is
 # relative to the minimum operative volume).  RE / AGRINT rows are untouched.
 _GC_SCHEMA = {
     "constraint_id": pl.Int32,
@@ -498,19 +493,19 @@ def apply_vminop_useful_energy(
     Constraints tab compares like-for-like useful stored energy:
 
     - cobre LHS  = Σ override ρ_acum(stage) · (storage_final − Vmin)
-    - NEWAVE LHS = Σ override ρ_acum(stage) · VARMUH(plant, stage)
+    - the source model LHS = Σ override ρ_acum(stage) · VARMUH(plant, stage)
     - bound      = original stored-bound − dead-volume energy (= pct · useful)
 
-    The NEWAVE LHS uses the per-plant ``VARMUH`` (useful stored volume above the
-    minimum, MEDIAS-USIH) weighted by the *same* per-stage ρ_acum override as the
-    cobre LHS and the bound — i.e. the **linear** stored energy that NEWAVE's
-    security-curve constraint actually binds on.  This is deliberately **not**
-    the per-REE ``EARMF`` (MEDIAS-REE), which NEWAVE reports as the *nonlinear*
-    physical stored energy (∫ρ dv, head-dependent, up to ~4–5 % lower at mid
-    storage).  Comparing the nonlinear ``EARMF`` against the linear bound made
-    NEWAVE appear to sit below the curve with no penalty; the linear reconstruction
-    here reproduces NEWAVE's published ``VIOL_CAR`` to ~0.1 % and lands exactly on
-    the curve where NEWAVE holds it.
+    The source model LHS uses the per-plant ``VARMUH`` (useful stored volume above the
+    minimum, MEDIAS-USIH) weighted by the *same* per-stage ρ_acum override as the cobre
+    LHS and the bound — i.e. the **linear** stored energy that source-model's
+    security-curve constraint actually binds on.  This is deliberately **not** the
+    per-REE ``EARMF`` (MEDIAS-REE), which the source model reports as the *nonlinear*
+    physical stored energy (∫ρ dv, head-dependent, up to ~4–5 % lower at mid storage).
+    Comparing the nonlinear ``EARMF`` against the linear bound made the source model
+    appear to sit below the curve with no penalty; the linear reconstruction here
+    reproduces the source model's published ``VIOL_CAR`` to ~0.1 % and lands exactly on
+    the curve where the source model holds it.
 
     RE / AGRINT rows pass through unchanged.  If any required input is missing
     (no scalar parameters, no min-storage, no simulation), the inputs are
@@ -542,9 +537,9 @@ def apply_vminop_useful_energy(
         for r in storage.iter_rows(named=True)
     }
 
-    # NEWAVE per-plant useful stored volume (VARMUH, hm³ above Vmin), keyed by
-    # cobre hydro id and 0-based stage — the linear-energy counterpart of the
-    # cobre ``storage_final − Vmin`` term.
+    # The source model per-plant useful stored volume (VARMUH, hm³ above Vmin), keyed by
+    # cobre hydro id and 0-based stage — the linear-energy counterpart of the cobre
+    # ``storage_final − Vmin`` term.
     varmuh: dict[tuple[int, int], float] = {}
     if not nw_hydro.is_empty():
         for r in nw_hydro.filter(pl.col("variable") == "VARMUH").iter_rows(named=True):
@@ -594,8 +589,8 @@ def apply_vminop_useful_energy(
                 {"constraint_id": cid, "stage_id": stage, "lhs_value": cb_useful}
             )
             dead_by_cs[(cid, stage)] = dead
-            # NEWAVE LHS = Σ ρ_acum(stage) · VARMUH — the linear stored energy the
-            # security curve binds on (NOT the nonlinear MEDIAS-REE EARMF).
+            # The source model LHS = Σ ρ_acum(stage) · VARMUH — the linear stored energy
+            # the security curve binds on (NOT the nonlinear MEDIAS-REE EARMF).
             if nw_complete:
                 nw_rows.append(
                     {"constraint_id": cid, "stage_id": stage, "lhs_value": nw_useful}
@@ -612,8 +607,8 @@ def apply_vminop_useful_energy(
     cb_new = pl.DataFrame(cb_rows, schema=_GC_SCHEMA)
     gc_lhs_cb_out = pl.concat([cb_keep, cb_new]) if cb_rows else gc_lhs_cb
 
-    # Add NEWAVE VminOP LHS rows (none existed before — the generic evaluator
-    # skips @rho_acum constraints on the NEWAVE side).
+    # Add the source model VminOP LHS rows (none existed before — the generic evaluator
+    # skips @rho_acum constraints on the source model side).
     nw_new = pl.DataFrame(nw_rows, schema=_GC_SCHEMA)
     gc_lhs_nw_out = pl.concat([gc_lhs_nw, nw_new]) if nw_rows else gc_lhs_nw
 

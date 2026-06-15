@@ -1,8 +1,7 @@
 """Unit tests for temporal and stochastic conversion functions.
 
-All inewave I/O is mocked via ``unittest.mock.patch`` so no real NEWAVE
-files are required.  Synthetic DataFrames exercise the core logic of each
-converter.
+All inewave I/O is mocked via ``unittest.mock.patch`` so no real the source model files
+are required.  Synthetic DataFrames exercise the core logic of each converter.
 """
 
 from __future__ import annotations
@@ -1018,7 +1017,8 @@ class TestConvertConfig:
     # -- consideracao_media_anual_afluencias / estimation.order_selection --
 
     def test_order_selection_omitted_when_field_absent(self, tmp_path) -> None:
-        """Old NEWAVE files lacking the field → omit order_selection (cobre default)."""
+        """Old the source model files lacking the field → omit order_selection (cobre
+        default)."""
         dger = _make_dger_mock(consideracao_media_anual_afluencias=None)
         case = make_case(tmp_path, dger=dger)
 

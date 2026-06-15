@@ -1,14 +1,13 @@
-"""Dynamic NEWAVE file discovery via caso.dat -> Arquivos.
+"""Dynamic the source model file discovery via caso.dat -> Arquivos.
 
-Provides ``NewaveFiles``, a frozen dataclass whose ``from_directory``
-constructor resolves all NEWAVE input file paths by reading the two fixed
-entry points — ``caso.dat`` (case-insensitive) and the ``Arquivos`` file it
-references.  Binary files that are not listed in Arquivos (``hidr.dat`` and
-``vazoes.dat``) are discovered via a case-insensitive directory scan.
-Optional files (``modif.dat``, ``ghmin.dat``, ``penalid.dat``,
-``vazpast.dat``, ``dsvagua.dat``, ``expt.dat``, ``manutt.dat``,
-``c_adic.dat``, ``cvar.dat``, ``agrint.dat``, ``volref_saz.dat``)
-are returned as ``Path | None``.
+Provides ``NewaveFiles``, a frozen dataclass whose ``from_directory`` constructor
+resolves all the source model input file paths by reading the two fixed entry points —
+``caso.dat`` (case-insensitive) and the ``Arquivos`` file it references.  Binary files
+that are not listed in Arquivos (``hidr.dat`` and ``vazoes.dat``) are discovered via a
+case-insensitive directory scan. Optional files (``modif.dat``, ``ghmin.dat``,
+``penalid.dat``, ``vazpast.dat``, ``dsvagua.dat``, ``expt.dat``, ``manutt.dat``,
+``c_adic.dat``, ``cvar.dat``, ``agrint.dat``, ``volref_saz.dat``) are returned as ``Path
+| None``.
 """
 
 from __future__ import annotations
@@ -41,9 +40,9 @@ def _find_file_case_insensitive(directory: Path, filename: str) -> Path | None:
 def _find_first(directory: Path, filenames: tuple[str, ...]) -> Path | None:
     """Return the first of *filenames* that exists in *directory* (case-insensitive).
 
-    Used for fixed-name "libs" cadastro files (``polinjus``, ``tratamento-fpha``)
-    that NEWAVE does not list in ``arquivos.dat``; we probe the conventional
-    names directly. Returns ``None`` when none are present.
+    Used for fixed-name "libs" cadastro files (``polinjus``, ``tratamento-fpha``) that
+    source-model does not list in ``arquivos.dat``; we probe the conventional names
+    directly. Returns ``None`` when none are present.
     """
     for filename in filenames:
         path = _find_file_case_insensitive(directory, filename)
@@ -58,7 +57,7 @@ def _resolve_required(directory: Path, filename: str) -> Path:
     Parameters
     ----------
     directory:
-        The NEWAVE case directory to search in.
+        The source model case directory to search in.
     filename:
         The expected filename (case-insensitive match).
 
@@ -77,7 +76,7 @@ def _resolve_required(directory: Path, filename: str) -> Path:
 
 @dataclass(frozen=True)
 class NewaveFiles:
-    """Resolved file paths for a NEWAVE case, discovered via caso.dat -> Arquivos.
+    """Resolved file paths for a source-model case, discovered via caso.dat -> Arquivos.
 
     All required file paths are validated at construction time — a
     ``FileNotFoundError`` is raised immediately if any required file is
@@ -124,12 +123,12 @@ class NewaveFiles:
 
     @classmethod
     def from_directory(cls, directory: Path) -> NewaveFiles:
-        """Discover all NEWAVE files from caso.dat -> Arquivos.
+        """Discover all the source model files from caso.dat -> Arquivos.
 
         Parameters
         ----------
         directory:
-            Path to the NEWAVE case directory.  Must exist and contain
+            Path to the source model case directory.  Must exist and contain
             ``caso.dat`` (case-insensitive).
 
         Returns

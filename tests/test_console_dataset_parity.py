@@ -21,8 +21,9 @@ tests in ``tests/test_analyze.py``) lives here too, so the parity fence is enfor
 in one place: it fails if anyone reintroduces a second computation path that drifts
 from the legacy printer.
 
-Fixtures are hermetic synthetic in-memory data (NO real NEWAVE case, NO ``inewave``
-I/O), copied from ``tests/test_analyze.py`` and ``tests/test_golden_dataset.py``.
+Fixtures are hermetic synthetic in-memory data (NO real the source model case, NO
+``inewave`` I/O), copied from ``tests/test_analyze.py`` and
+``tests/test_golden_dataset.py``.
 """
 
 from __future__ import annotations
@@ -334,7 +335,7 @@ def _parse_mismatch_header(text: str) -> tuple[int, int]:
 
 
 def _count_mismatch_detail_lines(text: str) -> int:
-    """Count the printed mismatch detail lines (indented, NEWAVE=...)."""
+    """Count the printed mismatch detail lines (indented, the source model=...)."""
     return sum(
         1
         for line in text.splitlines()

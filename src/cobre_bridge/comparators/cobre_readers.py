@@ -1,9 +1,8 @@
 """Cobre simulation output readers for results comparison.
 
-Reads Cobre simulation parquets using Polars lazy scanning and
-streaming aggregation to compute scenario means matching the NEWAVE
-MEDIAS aggregation level.  Also reads convergence data and hydro
-metadata.
+Reads Cobre simulation parquets using Polars lazy scanning and streaming aggregation to
+compute scenario means matching the source model MEDIAS aggregation level.  Also reads
+convergence data and hydro metadata.
 """
 
 from __future__ import annotations
@@ -263,9 +262,9 @@ def read_cobre_hydro_total_flows(
     cobre_output_dir: Path,
     cobre_hydro_means: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Compute per-(entity_id, stage_id) NEWAVE-equivalent total inflow.
+    """Compute per-(entity_id, stage_id) the source-model-equivalent total inflow.
 
-    ``QAFLUH`` in NEWAVE is the *total* inflow arriving at a hydro
+    ``QAFLUH`` in the source model is the *total* inflow arriving at a hydro
     plant: the local incremental inflow plus the outflow (turbined +
     spilled) of every immediate upstream plant. Cobre emits the
     components separately; this helper sums them via the
@@ -505,10 +504,10 @@ def read_cobre_iteration_timing(cobre_output_dir: Path) -> pl.DataFrame:
     """Return per-iteration wall-clock from ``training/convergence.parquet``.
 
     Columns: ``iteration`` (Int64), ``time_forward_ms``,
-    ``time_backward_ms``, ``time_total_ms`` (Float64). Missing timing
-    columns are filled with nulls; empty DataFrame when the parquet is
-    absent. Separate from :func:`read_cobre_convergence` which only
-    surfaces the bound columns NEWAVE pmo.dat can be compared against.
+    ``time_backward_ms``, ``time_total_ms`` (Float64). Missing timing columns are filled
+    with nulls; empty DataFrame when the parquet is absent. Separate from
+    :func:`read_cobre_convergence` which only surfaces the bound columns the source
+    model pmo.dat can be compared against.
     """
     empty = pl.DataFrame(
         schema={
@@ -682,13 +681,11 @@ def read_cobre_lp_max_generation(cobre_output_dir: Path) -> pl.DataFrame:
 def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
     """Return per-(hydro_id, stage_id) input water-withdrawal target.
 
-    Cobre does not emit realized water withdrawal as a per-stage
-    simulation result; instead the target lives in
-    ``constraints/hydro_bounds.parquet`` as ``water_withdrawal_m3s``
-    (one value per hydro-stage). Comparison against NEWAVE ``VRETIRUH``
-    therefore matches the *input* target — discrepancies beyond the
-    post-study horizon are expected (see ``hydro.py:1083`` converter
-    note).
+    Cobre does not emit realized water withdrawal as a per-stage simulation result;
+    instead the target lives in ``constraints/hydro_bounds.parquet`` as
+    ``water_withdrawal_m3s`` (one value per hydro-stage). Comparison against the source
+    model ``VRETIRUH`` therefore matches the *input* target — discrepancies beyond the
+    post-study horizon are expected (see ``hydro.py:1083`` converter note).
 
     Returns columns: ``entity_id``, ``stage_id``, ``withdrawal_m3s``.
     Empty frame if the parquet is missing or lacks the column.
@@ -1272,9 +1269,9 @@ def read_cobre_cost_breakdown(
     cobre_output_dir:
         Path to the Cobre ``output/`` directory.
     max_stage_id:
-        If provided, only include stages with ``stage_id <= max_stage_id``.
-        Used to make the cost breakdown comparable to NEWAVE, which usually
-        reports a shorter horizon than Cobre.
+        If provided, only include stages with ``stage_id <= max_stage_id``. Used to make
+        the cost breakdown comparable to the source model, which usually reports a
+        shorter horizon than Cobre.
     """
     lf = _scan_simulation_entity(cobre_output_dir, "costs")
     if lf is None:
@@ -1324,21 +1321,20 @@ def read_cobre_cost_breakdown(
 def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre per-stage immediate/future/thermal cost (mean across scenarios).
 
-    Returns a DataFrame with columns ``stage_id`` (Int64),
-    ``immediate_cost`` (Float64, R$), ``future_cost`` (Float64, R$),
-    ``thermal_cost`` (Float64, R$), ``anticipated_thermal_cost`` (Float64, R$)
-    and the derived ``thermal_cost_total`` (= ``thermal_cost`` +
-    ``anticipated_thermal_cost``). All are raw, *undiscounted* stage values —
-    the counterparts of NEWAVE's MEDIAS-SIN ``COPER`` / ``CUSTO_FUTURO`` /
-    ``CTERM`` (after the 10⁶ R$ unit conversion on the NEWAVE side).
+    Returns a DataFrame with columns ``stage_id`` (Int64), ``immediate_cost`` (Float64,
+    R$), ``future_cost`` (Float64, R$), ``thermal_cost`` (Float64, R$),
+    ``anticipated_thermal_cost`` (Float64, R$) and the derived ``thermal_cost_total`` (=
+    ``thermal_cost`` + ``anticipated_thermal_cost``). All are raw, *undiscounted* stage
+    values — the counterparts of the source model's MEDIAS-SIN ``COPER`` /
+    ``CUSTO_FUTURO`` / ``CTERM`` (after the 10⁶ R$ unit conversion on the source model
+    side).
 
-    ``anticipated_thermal_cost`` is the GNL forward-committed thermal fuel that
-    Cobre books on the decision-stage commitment column (part of
-    ``immediate_cost`` but excluded from ``thermal_cost``); it was added to
-    Cobre's costs schema after 0.8.0. ``thermal_cost_total`` is the
-    NEWAVE-comparable thermal generation cost (CTERM books GNL at delivery).
-    Pre-anticipation runs lack the column → it reads as 0 and
-    ``thermal_cost_total == thermal_cost``.
+    ``anticipated_thermal_cost`` is the GNL forward-committed thermal fuel that Cobre
+    books on the decision-stage commitment column (part of ``immediate_cost`` but
+    excluded from ``thermal_cost``); it was added to Cobre's costs schema after 0.8.0.
+    ``thermal_cost_total`` is the the source-model-comparable thermal generation cost
+    (CTERM books GNL at delivery). Pre-anticipation runs lack the column → it reads as 0
+    and ``thermal_cost_total == thermal_cost``.
 
     Cobre's costs table is one row per ``(scenario_id, stage_id, block_id)``;
     we sum block-level immediate_cost / thermal_cost / anticipated_thermal_cost
@@ -1353,7 +1349,7 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
         "thermal_cost",
         "anticipated_thermal_cost",
     )
-    # Output adds the derived NEWAVE-comparable thermal total.
+    # Output adds the derived the source-model-comparable thermal total.
     _OUT_COLS = (*_ALL_COLS, "thermal_cost_total")
     empty = pl.DataFrame(
         schema={"stage_id": pl.Int64, **{c: pl.Float64 for c in _OUT_COLS}}
@@ -1392,7 +1388,7 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
     for c in _ALL_COLS:
         if c not in df.columns:
             df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(c))
-    # Derived NEWAVE-comparable thermal total: live generation + anticipated
+    # Derived the source-model-comparable thermal total: live generation + anticipated
     # (GNL forward-committed) fuel. Null anticipated (old runs) counts as 0.
     df = df.with_columns(
         (
@@ -1576,19 +1572,18 @@ def read_cobre_productivity_detail(cobre_output_dir: Path) -> dict[int, dict]:
 
     Surfaces the productivity building blocks cobre-bridge wrote into
     ``system/hydros.json`` so the Building-Blocks table can show them next to
-    the NEWAVE HIDR cadastro values: ``specific_productivity``
+    the source model HIDR cadastro values: ``specific_productivity``
     (``specific_productivity_mw_per_m3s_per_m``), ``tailwater_m`` (constant
     ``tailrace.coefficients[0]``), ``losses_m`` (constant
     ``hydraulic_losses.value_m``), ``vmin_hm3`` / ``vmax_hm3``.
 
-    Returns ``{hydro_id: {"name", "specific_productivity", "tailwater_m",
-    "losses_m", "vmin_hm3", "vmax_hm3"}}``; per-field values are ``None``
-    when absent.  Returns an empty dict when ``hydros.json`` cannot be
-    located.  (The point/equivalent/accumulated productivities are *not*
-    read from Cobre here — the Productivity-tab scatters validate the
-    conversion against what cobre-bridge computes from the NEWAVE inputs,
-    and the realized per-stage productivity comes from the simulation
-    generation/turbined comparison rows.)
+    Returns ``{hydro_id: {"name", "specific_productivity", "tailwater_m", "losses_m",
+    "vmin_hm3", "vmax_hm3"}}``; per-field values are ``None`` when absent.  Returns an
+    empty dict when ``hydros.json`` cannot be located.  (The
+    point/equivalent/accumulated productivities are *not* read from Cobre here — the
+    Productivity-tab scatters validate the conversion against what cobre-bridge computes
+    from the source model inputs, and the realized per-stage productivity comes from the
+    simulation generation/turbined comparison rows.)
     """
     hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:

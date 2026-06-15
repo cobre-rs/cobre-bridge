@@ -1,7 +1,7 @@
 """Tests for the cobre-bridge CLI and conversion pipeline.
 
-Pipeline unit tests use ``unittest.mock.patch`` to replace the converter
-functions with canned return values so no real NEWAVE files are needed.
+Pipeline unit tests use ``unittest.mock.patch`` to replace the converter functions with
+canned return values so no real the source model files are needed.
 
 CLI integration tests use two strategies:
 - Error-path tests invoke ``cobre-bridge`` as a subprocess (no mocking needed
@@ -652,9 +652,9 @@ class TestCliInProcess:
 class TestCompareDatasetWiring:
     """ticket-008: compare handlers sourced from the canonical dataset.
 
-    Patch the heavy readers (``NewaveCase``, alignment, ``compare_*``) so the
-    real dataset build + ``write_artifacts`` + dataset-driven printers run
-    without NEWAVE/Cobre I/O.
+    Patch the heavy readers (``NewaveCase``, alignment, ``compare_*``) so the real
+    dataset build + ``write_artifacts`` + dataset-driven printers run without the source
+    model/Cobre I/O.
     """
 
     def _invoke_main(
@@ -879,15 +879,15 @@ class TestCompareDatasetWiring:
         )
         assert code_mismatch == 1
 
-    def test_load_compare_context_missing_newave_exits_1(
+    def test_load_compare_context_missing_source_model_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """ticket-015: bounds path gains FileNotFoundError -> exit 1 hardening.
 
-        A missing NEWAVE case directory now exits 1 with a clean stderr
-        message (via the shared ``_load_compare_context`` helper) instead of
-        surfacing an uncaught traceback. Results already had this; bounds gains
-        it in this refactor.
+        A missing the source model case directory now exits 1 with a clean stderr
+        message (via the shared ``_load_compare_context`` helper) instead of surfacing
+        an uncaught traceback. Results already had this; bounds gains it in this
+        refactor.
         """
 
         def _raise_missing(cls: object, _dir: Path) -> object:

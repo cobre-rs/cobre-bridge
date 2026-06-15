@@ -1,9 +1,9 @@
 """XSS / HTML-injection regression tests for the dashboard and compare report.
 
-NEWAVE-derived strings (plant/line/case names) flow into the generated HTML and
-into ``<script>`` data blobs. These tests pin the escaping primitives and the
-chokepoints that consume untrusted strings, so a crafted name cannot inject
-markup or break out of a script context.
+The source-model-derived strings (plant/line/case names) flow into the generated HTML
+and into ``<script>`` data blobs. These tests pin the escaping primitives and the
+chokepoints that consume untrusted strings, so a crafted name cannot inject markup or
+break out of a script context.
 """
 
 from __future__ import annotations
