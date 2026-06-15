@@ -104,9 +104,7 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
     dger_cvar: int = int(_raw_cvar) if isinstance(_raw_cvar, int) else 0
 
     # Default: each stage uses "expectation"
-    _cvar_by_stage: dict[
-        int, dict
-    ] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
+    _cvar_by_stage: dict[int, dict] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
 
     if dger_cvar in (1, 2) and case.cvar is not None:
         cvar_file = case.cvar
@@ -246,11 +244,13 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
                     fraction,
                 )
             block_hours = fraction * total_hours
-            blocks.append({
-                "id": pat_idx - 1,
-                "name": names[pat_idx - 1],
-                "hours": block_hours,
-            })
+            blocks.append(
+                {
+                    "id": pat_idx - 1,
+                    "name": names[pat_idx - 1],
+                    "hours": block_hours,
+                }
+            )
 
         # Determine risk_measure for this stage.  Modes (mirrors the
         # top-of-function log message):
@@ -300,11 +300,13 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
         stages.append(stage_entry)
 
         if stage_id < total_months - 1:
-            transitions.append({
-                "source_id": stage_id,
-                "target_id": stage_id + 1,
-                "probability": 1.0,
-            })
+            transitions.append(
+                {
+                    "source_id": stage_id,
+                    "target_id": stage_id + 1,
+                    "probability": 1.0,
+                }
+            )
 
         month += 1
         if month > 12:
@@ -334,12 +336,14 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
 
         for offset, (py, pm) in enumerate(pre_dates):
             pre_id = -(num_pre_months - offset)
-            pre_study_stages.append({
-                "id": pre_id,
-                "start_date": _month_start_date(py, pm).isoformat(),
-                "end_date": _month_end_date(py, pm).isoformat(),
-                "season_id": pm - 1,  # 0-based calendar month index
-            })
+            pre_study_stages.append(
+                {
+                    "id": pre_id,
+                    "start_date": _month_start_date(py, pm).isoformat(),
+                    "end_date": _month_end_date(py, pm).isoformat(),
+                    "season_id": pm - 1,  # 0-based calendar month index
+                }
+            )
 
     policy_graph: dict = {
         "type": "finite_horizon",
@@ -450,9 +454,7 @@ def _historical_years_from_shist(
 
     shist = case.shist
     if shist is None:
-        logger.debug(
-            "shist.dat not found; using legacy default historical range."
-        )
+        logger.debug("shist.dat not found; using legacy default historical range.")
         ano_ini_hist: int = int(dger.ano_inicial_historico or 1931)
         return {"from": ano_ini_hist + 1, "to": ano_inicio - 1}
 
@@ -469,9 +471,7 @@ def _historical_years_from_shist(
     # varredura == 1 → range.  The most recent valid start year is
     # ano_inicio_estudo - horizon_years so the scenario fits in history.
     horizon_years = num_anos + num_anos_pos
-    range_from = int(
-        shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931)
-    )
+    range_from = int(shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931))
     range_to = ano_inicio - horizon_years
     if range_to < range_from:
         logger.warning(
@@ -493,9 +493,7 @@ def _count_historical_years(
     if isinstance(historical_years, list):
         return len(historical_years)
     # Range form: {"from": int, "to": int} — inclusive both ends.
-    return max(
-        0, int(historical_years["to"]) - int(historical_years["from"]) + 1
-    )
+    return max(0, int(historical_years["to"]) - int(historical_years["from"]) + 1)
 
 
 def convert_config(case: NewaveCase) -> dict:
@@ -546,13 +544,9 @@ def convert_config(case: NewaveCase) -> dict:
             )
         order_selection = "pacf_annual"
 
-    tipo_execucao: int = (
-        dger.tipo_execucao if dger.tipo_execucao is not None else 1
-    )
+    tipo_execucao: int = dger.tipo_execucao if dger.tipo_execucao is not None else 1
     tipo_simulacao_final: int = (
-        dger.tipo_simulacao_final
-        if dger.tipo_simulacao_final is not None
-        else 1
+        dger.tipo_simulacao_final if dger.tipo_simulacao_final is not None else 1
     )
     considera_reamostragem: int = (
         dger.considera_reamostragem_cenarios
@@ -587,19 +581,26 @@ def convert_config(case: NewaveCase) -> dict:
     backward_sel: int = dger.selecao_de_cortes_backward or 0
     cut_selection_enabled: bool = (forward_sel == 1) or (backward_sel == 1)
 
+    # cobre's `training.cut_selection` keeps two always-on knobs at the top level
+    # plus a tagged `selection` object that names the method and carries only that
+    # method's parameters; omitting `selection` disables row selection. We mirror
+    # NEWAVE's limited-memory Level-1 selection with `method = "lml1"`. The new
+    # lml1 is value-based (`tie_tolerance`, default 1e-10), so NEWAVE's old
+    # memory-window knob has no equivalent and is intentionally dropped.
+    cut_selection: dict = {"row_activity_tolerance": 1e-6}
+    if cut_selection_enabled:
+        cut_selection["selection"] = {
+            "method": "lml1",
+            "check_frequency": 1,
+        }
+
     # -- Training scenario source --
     training_section: dict = {
         "forward_passes": forward_passes,
         "stopping_rules": [
             {"type": "iteration_limit", "limit": max_iterations},
         ],
-        "cut_selection": {
-            "check_frequency": 1,
-            "cut_activity_tolerance": 1e-6,
-            "enabled": cut_selection_enabled,
-            "method": "lml1",
-            "memory_window": 0,
-        },
+        "cut_selection": cut_selection,
     }
     if not training_enabled:
         training_section["enabled"] = False

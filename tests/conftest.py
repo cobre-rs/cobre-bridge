@@ -48,6 +48,8 @@ _OPTIONAL = (
     "volref_saz",
     "shist",
     "adterm",
+    "polinjus",
+    "tratamento_fpha",
 )
 
 

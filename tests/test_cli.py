@@ -206,7 +206,6 @@ _FAKE_HYDRO_ENERGY_PRODUCTIVITY_TABLE = pa.table(
         "hydro_id": pa.array([0, 1], type=pa.int32()),
         "stage_id": pa.array([None, None], type=pa.int32()),
         "equivalent_productivity_mw_per_m3s": pa.array([0.5, 0.6], type=pa.float64()),
-        "reference_volume_hm3": pa.array([None, None], type=pa.float64()),
         "reference_outflow_m3s": pa.array([None, None], type=pa.float64()),
         "specific_productivity_mw_per_m3s_per_m": pa.array(
             [None, None], type=pa.float64()

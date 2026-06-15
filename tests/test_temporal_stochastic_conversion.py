@@ -754,7 +754,11 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is True
+        cs = result["training"]["cut_selection"]
+        assert cs["selection"]["method"] == "lml1"
+        assert cs["selection"]["check_frequency"] == 1
+        assert cs["row_activity_tolerance"] == 1e-6
+        assert "enabled" not in cs
 
     def test_cut_selection_only_forward_enables(self, tmp_path) -> None:
         dger = _make_dger_mock(
@@ -765,7 +769,11 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is True
+        cs = result["training"]["cut_selection"]
+        assert cs["selection"]["method"] == "lml1"
+        assert cs["selection"]["check_frequency"] == 1
+        assert cs["row_activity_tolerance"] == 1e-6
+        assert "enabled" not in cs
 
     def test_cut_selection_only_backward_enables(self, tmp_path) -> None:
         dger = _make_dger_mock(
@@ -776,7 +784,11 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is True
+        cs = result["training"]["cut_selection"]
+        assert cs["selection"]["method"] == "lml1"
+        assert cs["selection"]["check_frequency"] == 1
+        assert cs["row_activity_tolerance"] == 1e-6
+        assert "enabled" not in cs
 
     def test_cut_selection_both_zero_disables(self, tmp_path) -> None:
         dger = _make_dger_mock(
@@ -787,7 +799,9 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is False
+        cs = result["training"]["cut_selection"]
+        assert "selection" not in cs
+        assert cs["row_activity_tolerance"] == 1e-6
 
     def test_cut_selection_none_treated_as_zero(self, tmp_path) -> None:
         """When the dger.dat field is absent (None), treat as 0 so the
@@ -800,7 +814,9 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is False
+        cs = result["training"]["cut_selection"]
+        assert "selection" not in cs
+        assert cs["row_activity_tolerance"] == 1e-6
 
     # -- Shist-driven historical_years (tipo_simulacao_final == 2) --
 

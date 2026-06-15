@@ -70,6 +70,8 @@ def _make_nw_files(
         volref_saz=volref_saz,
         shist=shist,
         adterm=None,
+        polinjus=None,
+        tratamento_fpha=None,
     )
 
 
@@ -2709,15 +2711,19 @@ class TestConvertHydroEnergyProductivity:
         assert by_stage[11] == pytest.approx(post)
 
     def test_other_override_columns_are_null(self, tmp_path: Path) -> None:
-        """reference_volume_hm3 / reference_outflow_m3s / ρ_esp columns remain NULL."""
+        """reference_outflow_m3s / ρ_esp columns remain NULL.
+
+        The retired ``reference_volume_hm3`` column must no longer be emitted;
+        V_ref now lives in ``hydro_production_models.json``.
+        """
         case = self._base_case(tmp_path)
 
         from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
 
         table = convert_hydro_energy_productivity(case, self._make_id_map())
 
+        assert "reference_volume_hm3" not in table.column_names
         for col in (
-            "reference_volume_hm3",
             "reference_outflow_m3s",
             "specific_productivity_mw_per_m3s_per_m",
         ):

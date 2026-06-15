@@ -21,6 +21,7 @@ from cobre_bridge.converters import initial_conditions as ic_conv
 from cobre_bridge.converters import network as network_conv
 from cobre_bridge.converters import scalar_parameters as scalar_params_conv
 from cobre_bridge.converters import stochastic as stochastic_conv
+from cobre_bridge.converters import tailrace as tailrace_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
 from cobre_bridge.id_map import build_id_map
@@ -374,6 +375,9 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
         case, id_map
     )
 
+    logger.debug("Converting tailrace curves from polinjus")
+    tailrace_table = tailrace_conv.convert_tailrace_curves(case, id_map)
+
     logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(case, id_map)
 
@@ -438,6 +442,12 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
         hep_path = dst / "system" / "hydro_energy_productivity.parquet"
         pq.write_table(hydro_energy_productivity_table, hep_path, compression="zstd")
         logger.debug("Wrote %s", hep_path)
+
+    # Optional tailrace curves (polinjus) — only written when the case ships them.
+    if tailrace_table is not None and tailrace_table.num_rows > 0:
+        tailrace_path = dst / "system" / "tailrace_curves.parquet"
+        pq.write_table(tailrace_table, tailrace_path, compression="zstd")
+        logger.debug("Wrote %s", tailrace_path)
 
     inflow_path = dst / "scenarios" / "inflow_seasonal_stats.parquet"
     pq.write_table(inflow_table, inflow_path, compression="zstd")

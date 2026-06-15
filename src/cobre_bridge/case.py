@@ -27,8 +27,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from inewave.libs.usinas_hidreletricas import UsinasHidreletricas
 from inewave.newave import (
     Adterm,
     Cadic,
@@ -190,7 +191,32 @@ class NewaveCase:
         path = self.files.adterm
         return Adterm.read(str(path)) if path is not None else None
 
+    @cached_property
+    def polinjus(self) -> UsinasHidreletricas | None:
+        """Downstream-level curve families (``polinjus``), or ``None`` if absent.
+
+        The ``inewave.libs.UsinasHidreletricas`` reader exposes the tailrace
+        ``h_jus(q_jus)`` families consumed by cobre's FPHA production model — see
+        :func:`cobre_bridge.converters.tailrace.convert_tailrace_curves`.
+        """
+        path = self.files.polinjus
+        if path is None:
+            return None
+        return cast(UsinasHidreletricas, UsinasHidreletricas.read(str(path)))
+
     # --- Derived state ---------------------------------------------------------
+
+    @property
+    def fpha_enabled(self) -> bool:
+        """Whether NEWAVE evaluates hydro generation via FPHA (``dger.dat`` line 96).
+
+        The ``dger.dat`` line reads ``FUNCAO DE PROD. UHE … (=0 FPHA, =1 LINEAR
+        GH=rho*Q``, so ``funcao_producao_uhe == 0`` selects FPHA (the convex-hull
+        hydro production function) and ``== 1`` selects the linear model
+        (``GH = rho·Q``) — the bridge's constant-productivity path. Absent/``None``
+        ⇒ linear, the safe default for older cases without the field.
+        """
+        return self.dger.funcao_producao_uhe == 0
 
     @cached_property
     def horizon(self) -> StudyHorizon:

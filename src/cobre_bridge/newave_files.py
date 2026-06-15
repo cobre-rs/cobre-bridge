@@ -38,6 +38,20 @@ def _find_file_case_insensitive(directory: Path, filename: str) -> Path | None:
     return None
 
 
+def _find_first(directory: Path, filenames: tuple[str, ...]) -> Path | None:
+    """Return the first of *filenames* that exists in *directory* (case-insensitive).
+
+    Used for fixed-name "libs" cadastro files (``polinjus``, ``tratamento-fpha``)
+    that NEWAVE does not list in ``arquivos.dat``; we probe the conventional
+    names directly. Returns ``None`` when none are present.
+    """
+    for filename in filenames:
+        path = _find_file_case_insensitive(directory, filename)
+        if path is not None:
+            return path
+    return None
+
+
 def _resolve_required(directory: Path, filename: str) -> Path:
     """Return the case-insensitive path for a required file, or raise.
 
@@ -104,6 +118,9 @@ class NewaveFiles:
     volref_saz: Path | None
     shist: Path | None
     adterm: Path | None
+    # FPHA libs files — fixed names, not listed in Arquivos (None when absent)
+    polinjus: Path | None
+    tratamento_fpha: Path | None
 
     @classmethod
     def from_directory(cls, directory: Path) -> NewaveFiles:
@@ -166,6 +183,13 @@ class NewaveFiles:
         hidr = _resolve_required(directory, "hidr.dat")
         vazoes = _resolve_required(directory, "vazoes.dat")
 
+        # --- Step 4b: FPHA libs files (fixed names, not in Arquivos, optional) --
+        polinjus = _find_first(directory, ("polinjus.csv", "polinjus.dat"))
+        tratamento_fpha = _find_first(
+            directory,
+            ("tratamento-fpha.csv", "tratamento_fpha.csv", "tratamento-fpha.dat"),
+        )
+
         # --- Step 5: optional files from Arquivos ------------------------------
         def _opt(attr: str) -> Path | None:
             """Resolve an optional Arquivos attribute, returning None if absent."""
@@ -220,4 +244,6 @@ class NewaveFiles:
             volref_saz=volref_saz,
             shist=shist,
             adterm=adterm,
+            polinjus=polinjus,
+            tratamento_fpha=tratamento_fpha,
         )
