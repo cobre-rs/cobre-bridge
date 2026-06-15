@@ -957,3 +957,153 @@ def read_newave_tim_stages(newave_dir: Path) -> dict[str, float]:
         tdelta = row["tempo"]
         out[name] = float(tdelta.total_seconds())
     return out
+
+
+def _find_fpha_report(newave_dir: Path, filename: str) -> Path | None:
+    """Locate a production-function report under ``<newave_dir>/fpha`` (or root).
+
+    The source model writes the production-function (FPHA) reports into an
+    ``fpha`` subdirectory; some cases keep them at the case root. Search both,
+    ignoring case, and return the first match or ``None`` when absent.
+    """
+    for candidate_dir in (newave_dir / "fpha", newave_dir):
+        if candidate_dir.is_dir():
+            hit = _find_case_insensitive(candidate_dir, filename)
+            if hit is not None:
+                return hit
+    return None
+
+
+#: Rename map for :func:`read_fpha_planes`: the ``inewave`` source column ->
+#: the descriptive coefficient name. The source model bounds generation by
+#: ``GH <= fator_correcao * (gamma_0 + gamma_v * useful_volume + gamma_q *
+#: turbined + gamma_s * spilled + gamma_lat * lateral)``, one plane per row.
+_FPHA_PLANE_COLUMNS: dict[str, str] = {
+    "codigo_usina": "newave_code",
+    "periodo": "periodo",
+    "indice_corte": "plane_id",
+    "fator_correcao": "fator_correcao",
+    "rhs_energia": "gamma_0",
+    "coeficiente_volume_util_MW_hm3": "gamma_v",
+    "coeficiente_vazao_turbinada_MW_m3s": "gamma_q",
+    "coeficiente_vazao_vertida_MW_m3s": "gamma_s",
+    "coeficiente_vazao_lateral_MW_m3s": "gamma_lat",
+}
+
+_FPHA_PLANE_SCHEMA: dict[str, type[pl.DataType]] = {
+    "newave_code": pl.Int64,
+    "periodo": pl.Int64,
+    "plane_id": pl.Int64,
+    "fator_correcao": pl.Float64,
+    "gamma_0": pl.Float64,
+    "gamma_v": pl.Float64,
+    "gamma_q": pl.Float64,
+    "gamma_s": pl.Float64,
+    "gamma_lat": pl.Float64,
+}
+
+
+def read_fpha_planes(newave_dir: Path) -> pl.DataFrame | None:
+    """Read the source model's fitted production hyperplanes (``fpha_cortes``).
+
+    Each plant/period carries a set of hyperplanes whose lower envelope (the
+    minimum over planes) is the production surface the operating model consumes.
+    This reader surfaces those coefficients for the production-model comparison.
+    The ``gamma_v`` coefficient multiplies *useful* volume (storage above the
+    plant minimum); ``fator_correcao`` scales the whole plane.
+
+    Parameters
+    ----------
+    newave_dir:
+        The source model case directory (the report lives in an ``fpha``
+        subdirectory).
+
+    Returns
+    -------
+    polars.DataFrame | None
+        One row per (plant, period, plane) conforming to
+        :data:`_FPHA_PLANE_SCHEMA`, or ``None`` when the case ships no
+        ``fpha_cortes`` report (or it is empty / malformed).
+    """
+    path = _find_fpha_report(newave_dir, "fpha_cortes.csv")
+    if path is None:
+        return None
+    from inewave.newave import FphaCortes
+
+    table = FphaCortes.read(str(path)).tabela
+    if table is None or table.empty:
+        return None
+    missing = set(_FPHA_PLANE_COLUMNS) - set(table.columns)
+    if missing:
+        _LOG.warning("fpha_cortes is missing columns %s; skipping", sorted(missing))
+        return None
+    frame = pl.from_pandas(table[list(_FPHA_PLANE_COLUMNS)]).rename(_FPHA_PLANE_COLUMNS)
+    return frame.cast(_FPHA_PLANE_SCHEMA)
+
+
+#: Rename map for :func:`read_fpha_grid`: the ``inewave`` source column -> the
+#: descriptive fitting-grid name. The grid defines, per plant/period, the
+#: volume/turbined domain (and point counts) over which the planes were fitted.
+_FPHA_GRID_COLUMNS: dict[str, str] = {
+    "codigo_usina": "newave_code",
+    "periodo": "periodo",
+    "volume_armazenado_minimo": "v_min_hm3",
+    "volume_armazenado_maximo": "v_max_hm3",
+    "numero_pontos_volume_armazenado": "n_v",
+    "vazao_turbinada_minima": "q_min_m3s",
+    "vazao_turbinada_maxima": "q_max_m3s",
+    "numero_pontos_vazao_turbinada": "n_q",
+    "geracao_minima": "gh_min_mw",
+    "geracao_maxima": "gh_max_mw",
+    "tipo": "tipo",
+}
+
+_FPHA_GRID_SCHEMA: dict[str, type[pl.DataType]] = {
+    "newave_code": pl.Int64,
+    "periodo": pl.Int64,
+    "v_min_hm3": pl.Float64,
+    "v_max_hm3": pl.Float64,
+    "n_v": pl.Int64,
+    "q_min_m3s": pl.Float64,
+    "q_max_m3s": pl.Float64,
+    "n_q": pl.Int64,
+    "gh_min_mw": pl.Float64,
+    "gh_max_mw": pl.Float64,
+    "tipo": pl.Int64,
+}
+
+
+def read_fpha_grid(newave_dir: Path) -> pl.DataFrame | None:
+    """Read the source model's production-function fitting grid (``fpha_eco``).
+
+    Supplies, per (plant, period), the volume/turbined domain the planes were
+    fitted over plus the discretization point counts. The volume minimum doubles
+    as the useful-volume reference for :func:`read_fpha_planes` (its ``gamma_v``
+    multiplies storage above that minimum).
+
+    Parameters
+    ----------
+    newave_dir:
+        The source model case directory.
+
+    Returns
+    -------
+    polars.DataFrame | None
+        One row per (plant, period) conforming to :data:`_FPHA_GRID_SCHEMA`, or
+        ``None`` when the case ships no ``fpha_eco`` report (or it is empty /
+        malformed).
+    """
+    path = _find_fpha_report(newave_dir, "fpha_eco.csv")
+    if path is None:
+        return None
+    from inewave.newave import FphaEco
+
+    table = FphaEco.read(str(path)).tabela
+    if table is None or table.empty:
+        return None
+    missing = set(_FPHA_GRID_COLUMNS) - set(table.columns)
+    if missing:
+        _LOG.warning("fpha_eco is missing columns %s; skipping", sorted(missing))
+        return None
+    frame = pl.from_pandas(table[list(_FPHA_GRID_COLUMNS)]).rename(_FPHA_GRID_COLUMNS)
+    return frame.cast(_FPHA_GRID_SCHEMA)

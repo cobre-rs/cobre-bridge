@@ -1970,26 +1970,30 @@ def productivity_comparison_scatter(
     return _plotly_div(traces, layout)
 
 
-def productivity_per_stage_chart(results: list[ResultComparison]) -> str:
+def productivity_per_stage_chart(per_stage: pl.DataFrame) -> str:
     """Per-plant realized productivity (generation / turbined) across stages.
 
     Productivity is **constant within a stage but varies across stages** in both models,
     tracking the reservoir head reached each stage. Reuses the shared interactive
     per-plant widget (:func:`_build_interactive_detail_html` — the same JS ``<select>``
     dropdown the hydro/thermal detail tabs use), so every reservoir is selectable one at
-    a time (the source model vs Cobre) rather than a hand-picked subset. Driven by the
-    per-stage ``productivity_mw_per_m3s`` hydro comparison rows already produced in
-    results.py.
+    a time (the source model vs Cobre) rather than a hand-picked subset. Consumes the
+    per-(plant, stage) frame from
+    :func:`cobre_bridge.comparators.analyze.productivity_per_stage_frame`.
     """
     var_key = "productivity_mw_per_m3s"
+    if per_stage.is_empty():
+        return "<p>No per-stage productivity data available.</p>"
+
     plants: dict[tuple[str, int], dict[int, tuple[float, float]]] = {}
     cobre_ids: dict[tuple[str, int], int] = {}
-    for r in results:
-        if r.entity_type != "hydro" or r.variable != var_key:
-            continue
-        key = (r.entity_name, r.newave_code)
-        plants.setdefault(key, {})[r.stage] = (r.newave_value, r.cobre_value)
-        cobre_ids[key] = r.cobre_id
+    for row in per_stage.iter_rows(named=True):
+        key = (row["plant_name"], row["newave_code"])
+        plants.setdefault(key, {})[row["stage"]] = (
+            row["newave_value"],
+            row["cobre_value"],
+        )
+        cobre_ids[key] = row["cobre_id"]
 
     if not plants:
         return "<p>No per-stage productivity data available.</p>"
@@ -2114,6 +2118,301 @@ def productivity_blocks_table(df: pl.DataFrame) -> str:
         + body
         + "</table>"
     )
+
+
+# -------------------------------------------------------------------
+# Production-function (FPHA) comparison charts
+# -------------------------------------------------------------------
+
+
+def fpha_metrics_table(metrics: pl.DataFrame) -> str:
+    """Per-plant fitted-production-function fidelity table.
+
+    Aggregates the per-(plant, stage) metrics into one row per plant: the mean and
+    worst surface NMAE (as a % of the plant's max generation), the mean bias, the
+    GHmax-ratio range across stages, and the plane counts. Sorted worst-NMAE
+    first so the most divergent plants surface at the top; rows whose worst NMAE
+    exceeds 5% are tinted. Reuses the ``cost-breakdown-table`` styling.
+    """
+    if metrics.is_empty():
+        return "<p>No production-function (FPHA) data available.</p>"
+
+    agg = (
+        metrics.group_by("cobre_id")
+        .agg(
+            pl.col("plant_name").first().alias("plant_name"),
+            pl.col("n_v").first().alias("n_v"),
+            pl.col("n_planes_newave").max().alias("planes_nw"),
+            pl.col("n_planes_cobre").max().alias("planes_cb"),
+            (pl.col("nmae").mean() * 100.0).alias("mean_nmae"),
+            (pl.col("nmae").max() * 100.0).alias("worst_nmae"),
+            (pl.col("bias").mean() * 100.0).alias("mean_bias"),
+            pl.col("gh_max_ratio").min().alias("ghr_min"),
+            pl.col("gh_max_ratio").max().alias("ghr_max"),
+        )
+        .sort("worst_nmae", descending=True, nulls_last=True)
+    )
+
+    def _fmt(value: float | None, decimals: int = 2) -> str:
+        return "—" if value is None else f"{value:.{decimals}f}"
+
+    rows_html: list[str] = []
+    for r in agg.iter_rows(named=True):
+        worst = r["worst_nmae"]
+        tint = (
+            ' style="background:#FEF3C7"' if worst is not None and worst > 5.0 else ""
+        )
+        kind = "reservoir" if (r["n_v"] or 0) > 1 else "run-of-river"
+        rows_html.append(
+            f"<tr{tint}>"
+            f'<td class="cb-cat">{escape_text(str(r["plant_name"]))}</td>'
+            f"<td>{kind}</td>"
+            f"<td>{r['planes_nw']}/{r['planes_cb']}</td>"
+            f"<td>{_fmt(r['mean_nmae'])}%</td>"
+            f"<td>{_fmt(worst)}%</td>"
+            f"<td>{_fmt(r['mean_bias'])}%</td>"
+            f"<td>{_fmt(r['ghr_min'], 3)}–{_fmt(r['ghr_max'], 3)}</td>"
+            f"</tr>"
+        )
+
+    head = (
+        "<thead><tr>"
+        "<th>Plant</th><th>Type</th><th>Planes nw/cb</th>"
+        "<th>Mean NMAE</th><th>Worst NMAE</th><th>Mean bias</th>"
+        "<th>GHmax ratio (min–max)</th>"
+        "</tr></thead>"
+    )
+    caption = (
+        "<caption>Fitted production surface — Cobre vs NEWAVE "
+        '<span class="cb-caption-note">— NMAE / bias as % of each plant\'s '
+        "max generation; GHmax ratio = Cobre / NEWAVE at the max V/Q corner"
+        "</span></caption>"
+    )
+    return (
+        '<table class="cost-breakdown-table fpha-metrics-table">'
+        + caption
+        + head
+        + "<tbody>"
+        + "".join(rows_html)
+        + "</tbody></table>"
+    )
+
+
+def _fpha_widget_data(
+    surface: pl.DataFrame, spill: pl.DataFrame
+) -> dict[str, dict[str, object]]:
+    """Pivot the FPHA surface/spill frames into the per-plant widget payload.
+
+    Per plant, per stage, the dense ``(V, Q)`` grid is reshaped into the ``z``
+    matrix the heatmap needs (volume-major, turbined-minor — the order the
+    surface frame is already sorted in), plus the spillage slice. Coordinates are
+    rounded to keep the embedded JSON compact.
+    """
+
+    def _round(values: list[float], decimals: int) -> list[float]:
+        return [round(float(v), decimals) for v in values]
+
+    plants: dict[int, dict[str, object]] = {}
+    for (cid, stage, source), sub in surface.partition_by(
+        "cobre_id", "stage", "source", as_dict=True
+    ).items():
+        v_axis = _round(sub["v_hm3"].unique(maintain_order=True).to_list(), 1)
+        n_v = len(v_axis)
+        gh = _round(sub["gh_mw"].to_list(), 1)
+        n_q = len(gh) // n_v if n_v else 0
+        if n_q == 0:
+            continue
+        q_axis = _round(sub["q_m3s"][:n_q].to_list(), 1)
+        z = [gh[i * n_q : (i + 1) * n_q] for i in range(n_v)]
+        plant = plants.setdefault(
+            int(cid),
+            {"name": str(sub["plant_name"][0]), "n_v": n_v, "by_stage": {}},
+        )
+        plant["n_v"] = max(int(plant["n_v"]), n_v)  # type: ignore[arg-type]
+        by_stage = cast("dict[str, dict]", plant["by_stage"])
+        entry = by_stage.setdefault(str(int(stage)), {})
+        entry["v"] = v_axis
+        entry["q"] = q_axis
+        entry["znw" if source == "newave" else "zcb"] = z
+
+    for (cid, stage, source), sub in spill.partition_by(
+        "cobre_id", "stage", "source", as_dict=True
+    ).items():
+        plant = plants.get(int(cid))
+        if plant is None:
+            continue
+        by_stage = cast("dict[str, dict]", plant["by_stage"])
+        entry = by_stage.get(str(int(stage)))
+        if entry is None:
+            continue
+        entry["ss"] = _round(sub["s_m3s"].to_list(), 1)
+        entry["spnw" if source == "newave" else "spcb"] = _round(
+            sub["gh_mw"].to_list(), 2
+        )
+
+    out: dict[str, dict[str, object]] = {}
+    for cid, plant in plants.items():
+        by_stage = cast("dict[str, dict]", plant["by_stage"])
+        out[str(cid)] = {
+            "name": plant["name"],
+            "n_v": plant["n_v"],
+            "stages": sorted(int(s) for s in by_stage),
+            "byStage": by_stage,
+        }
+    return out
+
+
+def fpha_detail_chart(surface: pl.DataFrame, spill: pl.DataFrame) -> str:
+    """Interactive per-plant FPHA surface comparison (heatmaps + spillage slice).
+
+    A plant ``<select>`` (every plant fitted on both sides) drives a stage
+    ``<select>``. For a reservoir plant the selected (plant, stage) renders one
+    full-width rotatable 3D view of the production surface ``GH(V, Q)`` (sampled
+    at the fitting-grid nodes at ``S = 0``) with NEWAVE / Cobre / Both / Difference
+    toggle buttons — the two surfaces nearly coincide at ``S = 0``, so toggling
+    isolates each and the difference rather than reading a muddy overlay.
+    Run-of-river plants (single volume) render an overlaid ``GH`` vs
+    turbined-flow curve instead. A further panel shows ``GH`` vs spilled flow at
+    the max V/Q corner, exposing the spillage-coefficient behaviour the ``(V, Q)``
+    grid holds fixed. Consumes the
+    :func:`cobre_bridge.comparators.analyze.build_fpha_comparison` surface/spill
+    frames.
+    """
+    if surface.is_empty():
+        return "<p>No production-function (FPHA) data available.</p>"
+
+    data = _fpha_widget_data(surface, spill)
+    if not data:
+        return "<p>No production-function (FPHA) data available.</p>"
+
+    data_json = json_for_script(data)
+    options = "".join(
+        f'<option value="{cid}">{escape_text(str(entry["name"]))}</option>'
+        for cid, entry in sorted(data.items(), key=lambda kv: str(kv[1]["name"]))
+    )
+
+    js = f"""
+    var fphaData = {data_json};
+    var fphaNw = '{COLOR_NEWAVE}';
+    var fphaCb = '{COLOR_COBRE}';
+    function fphaShow(id, on) {{
+        var el = document.getElementById(id);
+        if (el) el.style.display = on ? 'block' : 'none';
+    }}
+    function fphaPopulateStages() {{
+        var p = fphaData[document.getElementById('fpha-plant').value];
+        var ssel = document.getElementById('fpha-stage');
+        var prev = ssel.value;
+        ssel.innerHTML = '';
+        (p.stages || []).forEach(function(s) {{
+            var o = document.createElement('option');
+            o.value = s; o.text = 'Stage ' + s; ssel.appendChild(o);
+        }});
+        if (prev && p.byStage[prev]) ssel.value = prev;
+    }}
+    function fphaUpdate() {{
+        var p = fphaData[document.getElementById('fpha-plant').value];
+        if (!p) return;
+        var d = p.byStage[document.getElementById('fpha-stage').value];
+        if (!d) return;
+        var lay = {{margin: {json_for_script(_MARGIN)}, template: 'plotly_white',
+            height: 360}};
+        var reservoir = p.n_v > 1;
+        fphaShow('fpha-surf-card', reservoir);
+        fphaShow('fpha-line-card', !reservoir);
+        if (reservoir) {{
+            // One full-width 3D view; NEWAVE/Cobre/Both/Difference toggle buttons
+            // switch which surface(s) show (the two nearly coincide at S=0, so an
+            // always-on overlay reads as a blob — toggling isolates the signal).
+            var zdiff = d.zcb.map(function(row, i) {{
+                return row.map(function(val, j) {{ return val - d.znw[i][j]; }});
+            }});
+            var traces = [
+                {{z: d.znw, x: d.q, y: d.v, type: 'surface', name: 'NEWAVE',
+                    visible: true, colorscale: 'Viridis', colorbar: {{title: 'MW'}},
+                    hovertemplate: 'NEWAVE<br>Q=%{{x}}<br>V=%{{y}}' +
+                        '<br>GH=%{{z}} MW<extra></extra>'}},
+                {{z: d.zcb, x: d.q, y: d.v, type: 'surface', name: 'Cobre',
+                    visible: true, showscale: false, opacity: 0.9,
+                    colorscale: [[0, fphaCb], [1, fphaCb]],
+                    hovertemplate: 'Cobre<br>Q=%{{x}}<br>V=%{{y}}' +
+                        '<br>GH=%{{z}} MW<extra></extra>'}},
+                {{z: zdiff, x: d.q, y: d.v, type: 'surface', name: 'Difference',
+                    visible: false, colorscale: 'RdBu', reversescale: true,
+                    cmid: 0, colorbar: {{title: 'ΔMW'}},
+                    hovertemplate: 'Q=%{{x}}<br>V=%{{y}}<br>' +
+                        'Δ=%{{z}} MW<extra></extra>'}}];
+            function fphaBtn(label, vis, ztitle, ttl) {{
+                return {{label: label, method: 'update', args: [{{visible: vis}},
+                    {{'title.text': ttl, 'scene.zaxis.title.text': ztitle,
+                        'scene.zaxis.autorange': true}}]}};
+            }}
+            Plotly.react('fpha-surf', traces, {{
+                title: {{text: 'GH(V,Q): NEWAVE (color) + Cobre (orange)'}},
+                height: 600, margin: {{l: 0, r: 0, t: 80, b: 0}},
+                template: 'plotly_white',
+                scene: {{xaxis: {{title: 'Turbined (m³/s)'}},
+                    yaxis: {{title: 'Volume (hm³)'}},
+                    zaxis: {{title: 'GH (MW)', autorange: true}},
+                    aspectmode: 'cube', camera: {{eye: {{x: 1.7, y: 1.7, z: 0.9}}}}}},
+                updatemenus: [{{type: 'buttons', direction: 'right',
+                    showactive: true, active: 2, x: 0, xanchor: 'left',
+                    y: 1.06, yanchor: 'bottom', buttons: [
+                    fphaBtn('NEWAVE', [true, false, false], 'GH (MW)',
+                        'NEWAVE GH(V,Q)'),
+                    fphaBtn('Cobre', [false, true, false], 'GH (MW)',
+                        'Cobre GH(V,Q)'),
+                    fphaBtn('Both', [true, true, false], 'GH (MW)',
+                        'GH(V,Q): NEWAVE (color) + Cobre (orange)'),
+                    fphaBtn('Difference', [false, false, true], 'Δ MW',
+                        'Cobre − NEWAVE (MW)')]}}]
+            }}, {{responsive: true}});
+        }} else {{
+            Plotly.react('fpha-line', [
+                {{x: d.q, y: d.znw[0], name: 'NEWAVE', type: 'scatter',
+                    mode: 'lines', line: {{color: fphaNw, width: 2}}}},
+                {{x: d.q, y: d.zcb[0], name: 'Cobre', type: 'scatter',
+                    mode: 'lines', line: {{color: fphaCb, width: 2}}}}],
+                Object.assign({{title: 'GH vs turbined flow',
+                    xaxis: {{title: 'Turbined (m³/s)'}},
+                    yaxis: {{title: 'GH (MW)'}}, hovermode: 'x unified'}}, lay),
+                {{responsive: true}});
+        }}
+        Plotly.react('fpha-spill', [
+            {{x: d.ss, y: d.spnw, name: 'NEWAVE', type: 'scatter',
+                mode: 'lines', line: {{color: fphaNw, width: 2}}}},
+            {{x: d.ss, y: d.spcb, name: 'Cobre', type: 'scatter',
+                mode: 'lines', line: {{color: fphaCb, width: 2}}}}],
+            Object.assign({{title: 'GH vs spilled flow (at max V/Q)',
+                xaxis: {{title: 'Spilled (m³/s)'}},
+                yaxis: {{title: 'GH (MW)'}}, hovermode: 'x unified'}}, lay),
+            {{responsive: true}});
+    }}
+    document.addEventListener('DOMContentLoaded', function() {{
+        var psel = document.getElementById('fpha-plant');
+        if (psel && psel.options.length > 0) {{ fphaPopulateStages(); fphaUpdate(); }}
+    }});
+    """
+
+    return f"""
+    <div class="plant-selector">
+        <label for="fpha-plant">Plant:</label>
+        <select id="fpha-plant"
+                onchange="fphaPopulateStages(); fphaUpdate()">{options}</select>
+        <label for="fpha-stage" style="margin-left:12px">Stage:</label>
+        <select id="fpha-stage" onchange="fphaUpdate()"></select>
+    </div>
+    <div id="fpha-surf-card" class="chart-card" style="display:none">
+        <div id="fpha-surf" style="width:100%;height:600px;"></div>
+    </div>
+    <div id="fpha-line-card" class="chart-card" style="display:none">
+        <div id="fpha-line" style="width:100%;height:360px;"></div>
+    </div>
+    <div class="chart-card">
+        <div id="fpha-spill" style="width:100%;height:360px;"></div>
+    </div>
+    <script>{js}</script>
+    """
 
 
 # -------------------------------------------------------------------

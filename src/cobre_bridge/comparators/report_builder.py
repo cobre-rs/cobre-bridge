@@ -20,6 +20,8 @@ from cobre_bridge.comparators.charts import (
     convergence_chart,
     cost_breakdown_chart,
     cost_breakdown_table,
+    fpha_detail_chart,
+    fpha_metrics_table,
     future_cost_chart,
     hydro_aggregate_chart,
     hydro_per_bus_chart,
@@ -576,6 +578,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
 
     # --- Productivity tab ---
     prod_df = _meta_frame(dataset.metadata, "productivity_detail")
+    per_stage_df = _meta_frame(dataset.metadata, "productivity_per_stage")
     prod_parts: list[str] = []
     static_title = (
         "Static productivity — pmo vs cobre-bridge conversion "
@@ -622,7 +625,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         )
         # Reuses the shared per-plant dropdown widget (same as the hydro/thermal
         # detail tabs), so every reservoir is selectable — not a fixed subset.
-        prod_parts.append(productivity_per_stage_chart(results))
+        prod_parts.append(productivity_per_stage_chart(per_stage_df))
         prod_parts.append(section_title("Productivity Building Blocks"))
         prod_parts.append(
             chart_grid(
@@ -630,6 +633,30 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                 single=True,
             )
         )
+
+    # --- Fitted production functions (FPHA) --- Present only when both sides
+    # fitted FPHA hyperplanes; compares the production surfaces GH(V, Q) the two
+    # solvers fit, on a shared grid (run-of-river plants reduce to a Q-curve).
+    fpha_metrics = _meta_frame(dataset.metadata, "fpha_metrics")
+    if not fpha_metrics.is_empty():
+        fpha_surface = _meta_frame(dataset.metadata, "fpha_surface")
+        fpha_spill = _meta_frame(dataset.metadata, "fpha_spill")
+        prod_parts.append(section_title("Fitted production functions (FPHA)"))
+        prod_parts.append(
+            '<p style="color:#64748B;margin:-8px 0 12px">Both solvers fit the'
+            " hydro production surface GH(V, Q, S) as a set of hyperplanes; this"
+            " compares the resulting surfaces at the fitting-grid nodes. Use the"
+            " NEWAVE / Cobre / Both / Difference buttons to isolate each surface"
+            " or their difference (Cobre − NEWAVE, MW); they nearly coincide at"
+            " S = 0. Spillage (S) is shown separately at the max V/Q corner."
+            " Pick a plant and stage.</p>"
+        )
+        prod_parts.append(fpha_detail_chart(fpha_surface, fpha_spill))
+        prod_parts.append(section_title("FPHA surface fidelity by plant"))
+        prod_parts.append(
+            chart_grid([wrap_chart(fpha_metrics_table(fpha_metrics))], single=True)
+        )
+
     tab_contents["tab-productivity"] = "\n".join(prod_parts)
 
     # --- Performance tab ---

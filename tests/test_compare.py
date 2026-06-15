@@ -533,7 +533,9 @@ class TestOverviewCostCharts:
         assert "100.0" in html
         assert "anticipated" in html  # legend label
 
-    def test_generic_violation_groups_all_source_model_restriction_parcelas(self) -> None:
+    def test_generic_violation_groups_all_source_model_restriction_parcelas(
+        self,
+    ) -> None:
         from cobre_bridge.comparators.charts import _resolve_cost_categories
 
         # cobre-bridge converts the risk-aversion curve/surface (CAR/SAR), electric
@@ -1006,7 +1008,7 @@ class TestProductivityDetail:
         """
         import polars as pl
 
-        from cobre_bridge.comparators.results import _PRODUCTIVITY_DETAIL_SCHEMA
+        from cobre_bridge.comparators.analyze import _PRODUCTIVITY_DETAIL_SCHEMA
 
         return pl.DataFrame(
             {
@@ -1043,7 +1045,7 @@ class TestProductivityDetail:
             EntityAlignment,
             HydroEntity,
         )
-        from cobre_bridge.comparators.results import _build_productivity_detail
+        from cobre_bridge.comparators.analyze import build_productivity_detail
         from cobre_bridge.productivity import compute_productivity
 
         alignment = EntityAlignment(
@@ -1096,7 +1098,7 @@ class TestProductivityDetail:
             }
         }
         cb_accumulated = {6: 12.34}
-        df = _build_productivity_detail(
+        df = build_productivity_detail(
             alignment, nw_detail, cadastro, cobre_detail, cb_accumulated
         )
         assert df.height == 1
@@ -1126,7 +1128,7 @@ class TestProductivityDetail:
             EntityAlignment,
             HydroEntity,
         )
-        from cobre_bridge.comparators.results import _build_productivity_detail
+        from cobre_bridge.comparators.analyze import build_productivity_detail
 
         alignment = EntityAlignment(
             hydros=[
@@ -1143,7 +1145,7 @@ class TestProductivityDetail:
             index=pd.Index([4], name="codigo_usina"),
         )
         cobre_detail = {7: {"name": "ROR", "vmin_hm3": 265.9, "vmax_hm3": 265.9}}
-        df = _build_productivity_detail(
+        df = build_productivity_detail(
             alignment, pl.DataFrame({"plant_name": ["ROR"]}), cadastro, cobre_detail, {}
         )
         row = df.row(0, named=True)
@@ -1219,9 +1221,12 @@ class TestProductivityDetail:
         return rows
 
     def test_per_stage_chart_reuses_shared_per_plant_dropdown(self) -> None:
+        from cobre_bridge.comparators.analyze import productivity_per_stage_frame
         from cobre_bridge.comparators.charts import productivity_per_stage_chart
 
-        html = productivity_per_stage_chart(self._per_stage_results())
+        html = productivity_per_stage_chart(
+            productivity_per_stage_frame(self._per_stage_results())
+        )
         # Reuses the shared interactive per-plant <select> dropdown widget
         # (same as the hydro/thermal detail tabs) — every plant is selectable.
         assert "<select" in html
@@ -1233,9 +1238,11 @@ class TestProductivityDetail:
         assert "productivity_mw_per_m3s_cb" in html
 
     def test_per_stage_chart_no_rows(self) -> None:
+        from cobre_bridge.comparators.analyze import productivity_per_stage_frame
         from cobre_bridge.comparators.charts import productivity_per_stage_chart
 
-        assert "No per-stage productivity data" in productivity_per_stage_chart([])
+        empty = productivity_per_stage_frame([])
+        assert "No per-stage productivity data" in productivity_per_stage_chart(empty)
 
     def test_blocks_table_grouped_header_and_highlight(self) -> None:
         from cobre_bridge.comparators.charts import productivity_blocks_table

@@ -1680,3 +1680,26 @@ def read_cobre_bus_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         int(b["id"]): {"name": str(b.get("name", f"bus_{b['id']}"))}
         for b in data.get("buses", [])
     }
+
+
+def read_cobre_fpha_planes(cobre_output_dir: Path) -> pl.DataFrame | None:
+    """Read Cobre's fitted production hyperplanes (``hydro_models``).
+
+    Cobre fits, per hydro and per stage, the FPHA hyperplanes it consumes —
+    ``GH <= kappa * (gamma_0 + gamma_v * volume + gamma_q * turbined + gamma_s *
+    spilled)`` — and exports them to ``hydro_models/fpha_hyperplanes.parquet``
+    after training. The ``gamma_v`` coefficient multiplies *absolute* volume.
+
+    Returns ``None`` when the parquet is absent (the case used constant
+    productivity); that ``None`` gates the production-model comparison off. A
+    present-but-unreadable parquet raises :class:`CobreReadError`.
+    """
+    path = cobre_output_dir / "hydro_models" / "fpha_hyperplanes.parquet"
+    if not path.exists():
+        return None
+    try:
+        df = pl.read_parquet(path)
+    except Exception as err:  # noqa: BLE001
+        msg = f"Failed to read {path}"
+        raise CobreReadError(msg) from err
+    return None if df.is_empty() else df

@@ -125,8 +125,18 @@ class PercentileData:
     # accumulated_earm) plus the HIDR cadastro building blocks (specific productivity,
     # tailwater = canal_fuga_medio, losses, vmin, vmax), alongside Cobre's point /
     # equivalent / accumulated productivities and building blocks.  Built by
-    # :func:`_build_productivity_detail`.
+    # :func:`cobre_bridge.comparators.analyze.build_productivity_detail`.
     productivity_detail: pl.DataFrame = field(default_factory=pl.DataFrame)
+
+    # --- Production-function (FPHA) comparison (Productivity tab) --- The
+    # per-(plant, stage) fidelity metrics plus the dense (V, Q) surfaces and
+    # spillage slices both solvers' fitted hyperplanes evaluate to. ``None`` when
+    # either side used constant productivity. Built by
+    # :func:`cobre_bridge.comparators.analyze.build_fpha_comparison`; render-only
+    # (excluded from the serialized artifact — the dense surface is large).
+    fpha_metrics: pl.DataFrame | None = None
+    fpha_surface: pl.DataFrame | None = None
+    fpha_spill: pl.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -972,152 +982,6 @@ def _compare_system_spillage(
     return results
 
 
-_PRODUCTIVITY_DETAIL_SCHEMA = {
-    "plant_name": pl.Utf8,
-    "newave_code": pl.Int64,
-    "cobre_id": pl.Int64,
-    # The source model pmo.dat head-dependent productivities (FPHA).
-    "nw_altura_min": pl.Float64,
-    "nw_altura_65": pl.Float64,
-    "nw_altura_max": pl.Float64,
-    "nw_equivalent": pl.Float64,
-    "nw_accumulated_earm": pl.Float64,
-    # The source model HIDR cadastro building blocks.
-    "nw_specific_productivity": pl.Float64,
-    "nw_tailwater_m": pl.Float64,
-    "nw_losses_m": pl.Float64,
-    "nw_vmin_hm3": pl.Float64,
-    "nw_vmax_hm3": pl.Float64,
-    # cobre-bridge side: the *static* productivities the converter computes from the
-    # source model inputs (HIDR cadastro + cascade), so the scatters are a
-    # conversion-fidelity check against the matching pmo column rather than a comparison
-    # against the per-stage simulation output.
-    "cb_point": pl.Float64,
-    "cb_equivalent": pl.Float64,
-    "cb_accumulated": pl.Float64,
-    # cobre-bridge converted building blocks (from system/hydros.json).
-    "cb_specific_productivity": pl.Float64,
-    "cb_tailwater_m": pl.Float64,
-    "cb_losses_m": pl.Float64,
-    "cb_vmin_hm3": pl.Float64,
-    "cb_vmax_hm3": pl.Float64,
-}
-
-
-def _build_productivity_detail(
-    alignment: EntityAlignment,
-    nw_prod_detail: pl.DataFrame,
-    nw_cadastro: pd.DataFrame,
-    cobre_prod_detail: dict[int, dict],
-    cb_accumulated: dict[int, float],
-) -> pl.DataFrame:
-    """Assemble the per-plant static productivity comparison frame.
-
-    One row per aligned hydro pair (``alignment.hydros``). The source model side carries
-    the pmo.dat head-dependent productivities (matched by plant name) and the HIDR
-    cadastro building blocks (matched by the source model code). The cobre-bridge side
-    carries the *static* productivities the converter computes from those same inputs —
-    ``cb_point`` from :func:`compute_productivity`, ``cb_equivalent`` from
-    :func:`stored_energy_productivity`, ``cb_accumulated`` from the cascade accumulated
-    map — plus the building blocks written into ``system/hydros.json``
-    (``cobre_prod_detail``). Matching pmo and cobre-bridge columns should land on ``y =
-    x`` (validating the conversion), since both are derived from the same the source
-    model inputs.
-
-    Returns an empty frame (with the full schema) when there are no aligned
-    hydros.
-    """
-    from cobre_bridge.productivity import (
-        compute_productivity,
-        stored_energy_productivity,
-    )
-
-    nw_by_name: dict[str, dict] = {}
-    for row in nw_prod_detail.iter_rows(named=True):
-        nw_by_name[str(row["plant_name"]).strip().upper()] = row
-
-    def _cad_float(code: int, column: str) -> float | None:
-        if code not in nw_cadastro.index or column not in nw_cadastro.columns:
-            return None
-        value = nw_cadastro.loc[code, column]
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            return None
-        return f if f == f else None  # drop NaN
-
-    def _nw_reservoir_bounds(code: int) -> tuple[float | None, float | None]:
-        """The source model reservoir bounds as cobre-bridge models them.
-
-        Daily-regulation ('D') plants are frozen at ``volume_referencia`` by the
-        converter (they can't store across stages), so compare like-for-like
-        against Cobre's reservoir rather than the dead-storage
-        ``volume_minimo``/``volume_maximo``. Otherwise every run-of-river plant
-        shows a spurious Vmin/Vmax delta in the building-blocks table.
-        """
-        if code in nw_cadastro.index and "tipo_regulacao" in nw_cadastro.columns:
-            reg = str(nw_cadastro.loc[code, "tipo_regulacao"]).strip()
-            if reg == "D":
-                vref = _cad_float(code, "volume_referencia")
-                if vref is not None:
-                    return vref, vref
-        return (
-            _cad_float(code, "volume_minimo"),
-            _cad_float(code, "volume_maximo"),
-        )
-
-    def _cb_static(code: int) -> tuple[float | None, float | None, float | None]:
-        """cobre-bridge (point, equivalent, accumulated) computed from inputs."""
-        if code not in nw_cadastro.index:
-            return None, None, None
-        hreg = nw_cadastro.loc[code]
-        try:
-            point = float(compute_productivity(hreg))
-            equiv = float(stored_energy_productivity(hreg))
-        except (KeyError, ValueError, TypeError):
-            point = equiv = None  # type: ignore[assignment]
-        acc = cb_accumulated.get(code)
-        return point, equiv, (float(acc) if acc is not None else None)
-
-    rows: list[dict] = []
-    for hydro in alignment.hydros:
-        nw_prod = nw_by_name.get(hydro.name.strip().upper(), {})
-        cb = cobre_prod_detail.get(hydro.cobre_id, {})
-        cb_point, cb_equiv, cb_acc = _cb_static(hydro.newave_code)
-        nw_vmin, nw_vmax = _nw_reservoir_bounds(hydro.newave_code)
-        rows.append(
-            {
-                "plant_name": hydro.name,
-                "newave_code": hydro.newave_code,
-                "cobre_id": hydro.cobre_id,
-                "nw_altura_min": nw_prod.get("altura_min"),
-                "nw_altura_65": nw_prod.get("altura_65"),
-                "nw_altura_max": nw_prod.get("altura_max"),
-                "nw_equivalent": nw_prod.get("equivalent"),
-                "nw_accumulated_earm": nw_prod.get("accumulated_earm"),
-                "nw_specific_productivity": _cad_float(
-                    hydro.newave_code, "produtibilidade_especifica"
-                ),
-                "nw_tailwater_m": _cad_float(hydro.newave_code, "canal_fuga_medio"),
-                "nw_losses_m": _cad_float(hydro.newave_code, "perdas"),
-                "nw_vmin_hm3": nw_vmin,
-                "nw_vmax_hm3": nw_vmax,
-                "cb_point": cb_point,
-                "cb_equivalent": cb_equiv,
-                "cb_accumulated": cb_acc,
-                "cb_specific_productivity": cb.get("specific_productivity"),
-                "cb_tailwater_m": cb.get("tailwater_m"),
-                "cb_losses_m": cb.get("losses_m"),
-                "cb_vmin_hm3": cb.get("vmin_hm3"),
-                "cb_vmax_hm3": cb.get("vmax_hm3"),
-            }
-        )
-
-    if not rows:
-        return pl.DataFrame(schema=_PRODUCTIVITY_DETAIL_SCHEMA)
-    return pl.DataFrame(rows, schema=_PRODUCTIVITY_DETAIL_SCHEMA)
-
-
 def compare_results(
     case: NewaveCase,
     id_map: NewaveIdMap,
@@ -1163,6 +1027,7 @@ def compare_results(
         read_cobre_bus_percentiles,
         read_cobre_convergence,
         read_cobre_cost_breakdown,
+        read_cobre_fpha_planes,
         read_cobre_hydro_means,
         read_cobre_hydro_metadata,
         read_cobre_hydro_per_stage_bounds,
@@ -1183,6 +1048,8 @@ def compare_results(
     )
     from cobre_bridge.comparators.newave_readers import (
         _find_saidas_dir,
+        read_fpha_grid,
+        read_fpha_planes,
         read_medias_hydro,
         read_medias_market,
         read_medias_sin,
@@ -1365,9 +1232,32 @@ def compare_results(
             )
         except Exception:  # noqa: BLE001
             _LOG.warning("Failed to compute accumulated productivities for the tab")
-    productivity_detail = _build_productivity_detail(
+    from cobre_bridge.comparators.analyze import build_productivity_detail
+
+    productivity_detail = build_productivity_detail(
         alignment, nw_prod_detail, nw_cadastro, cobre_prod_detail, cb_accumulated
     )
+
+    # --- Production-function (FPHA) comparison --- Both solvers' fitted
+    # generation hyperplanes, evaluated on a shared (V, Q) grid. Populated only
+    # when both sides fitted FPHA planes; otherwise the three frames stay None
+    # and the Productivity tab shows only the constant-productivity content.
+    fpha_metrics: pl.DataFrame | None = None
+    fpha_surface: pl.DataFrame | None = None
+    fpha_spill: pl.DataFrame | None = None
+    cb_fpha = read_cobre_fpha_planes(cobre_output_dir)
+    if cb_fpha is not None:
+        nw_fpha = read_fpha_planes(case.files.directory)
+        nw_fpha_grid = read_fpha_grid(case.files.directory)
+        if nw_fpha is not None and nw_fpha_grid is not None:
+            _LOG.info("Comparing fitted production functions (FPHA)...")
+            from cobre_bridge.comparators.analyze import build_fpha_comparison
+
+            # Surfaces are sampled at the source model's own (V, Q) fitting-grid
+            # nodes (light + faithful to the model's resolution).
+            fpha_metrics, fpha_surface, fpha_spill = build_fpha_comparison(
+                nw_fpha, nw_fpha_grid, cb_fpha, alignment.hydros
+            )
 
     # --- Cost breakdown --- The source model typically runs a shorter horizon than
     # Cobre.  Restrict Cobre's cost sum to the source model's stage range so the totals
@@ -1559,6 +1449,9 @@ def compare_results(
         gc_lhs_newave=gc_lhs_nw,
         gc_lhs_cobre=gc_lhs_cb,
         productivity_detail=productivity_detail,
+        fpha_metrics=fpha_metrics,
+        fpha_surface=fpha_surface,
+        fpha_spill=fpha_spill,
     )
 
     _LOG.info("Results comparison: %d total comparisons", len(results))
