@@ -114,20 +114,21 @@ def test_schema_matches_cobre_contract() -> None:
     assert fields == {
         "hydro_id": ("int32", False),
         "family_id": ("int32", False),
-        "href_jus_m": ("double", True),
+        "downstream_reference_level_m": ("double", True),
         "segment_id": ("int32", False),
-        "q_jus_inf_m3s": ("double", False),
-        "q_jus_sup_m3s": ("double", False),
-        "a_cf0": ("double", False),
-        "a_cf1": ("double", False),
-        "a_cf2": ("double", False),
-        "a_cf3": ("double", False),
-        "a_cf4": ("double", False),
+        "outflow_min_m3s": ("double", False),
+        "outflow_max_m3s": ("double", False),
+        "coefficient_0": ("double", False),
+        "coefficient_1": ("double", False),
+        "coefficient_2": ("double", False),
+        "coefficient_3": ("double", False),
+        "coefficient_4": ("double", False),
     }
 
 
-def test_remaps_codes_joins_href_and_sorts() -> None:
-    # Two plants, families with distinct HjusRef; segments supplied scrambled.
+def test_remaps_codes_joins_downstream_level_and_sorts() -> None:
+    # Two plants, families with distinct downstream reference levels; segments
+    # supplied scrambled.
     families = pd.DataFrame(
         [
             {
@@ -165,8 +166,8 @@ def test_remaps_codes_joins_href_and_sorts() -> None:
     assert out["hydro_id"] == [0, 0, 1, 1]
     assert out["family_id"] == [1, 1, 1, 2]
     assert out["segment_id"] == [1, 2, 1, 1]
-    assert out["href_jus_m"] == [500.0, 500.0, 700.0, 705.0]
-    assert out["a_cf0"] == [500.0, 510.0, 700.0, 705.0]
+    assert out["downstream_reference_level_m"] == [500.0, 500.0, 700.0, 705.0]
+    assert out["coefficient_0"] == [500.0, 510.0, 700.0, 705.0]
 
 
 def test_skips_codes_absent_from_id_map() -> None:
@@ -222,7 +223,7 @@ def test_nan_href_coerced_to_null() -> None:
 
     table = convert_tailrace_curves(case, _id_map([10]))  # type: ignore[arg-type]
     assert table is not None
-    assert table.to_pydict()["href_jus_m"] == [None]
+    assert table.to_pydict()["downstream_reference_level_m"] == [None]
 
 
 @pytest.mark.parametrize("missing", ["families", "segments"])
