@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.8.1"
+version = "0.8.2"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -25,12 +25,16 @@ dev = [
     "ruff",
 ]
 validation = [
-    # >=0.8.1,<0.9: paired with the cobre / cobre-python 0.8.1 line used to
-    # validate this release; the upper bound keeps `convert --validate` on the
-    # cobre v0.8 schema (a 0.9 schema bump must be opted into deliberately).
+    # >=0.8.2,<0.9: paired with the cobre / cobre-python 0.8.2 line used to
+    # validate this release. cobre 0.8.2 carries BREAKING config changes — the
+    # top-level `energy` section is removed in favour of a per-production-model
+    # `reference_volume`, and `training.cut_selection` is restructured into a
+    # tagged `selection` object — so `convert newave` output loads only on cobre
+    # >=0.8.2. The upper bound keeps `convert --validate` on the cobre v0.8
+    # schema (a 0.9 schema bump must be opted into deliberately).
     # (>=0.7.0 first honoured non-zero anticipated-thermal pre-horizon seeds via
     # past_anticipated_commitments.values_mw in the LP fishing equality.)
-    "cobre-python>=0.8.1,<0.9",
+    "cobre-python>=0.8.2,<0.9",
 ]
 
 [project.scripts]
