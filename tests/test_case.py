@@ -1,4 +1,4 @@
-"""Tests for ``NewaveCase`` — the parse-once, cached NEWAVE case object."""
+"""Tests for ``NewaveCase`` — the parse-once, cached the source model case object."""
 
 from __future__ import annotations
 
@@ -46,6 +46,37 @@ def test_optional_reader_is_none_when_file_absent(tmp_path: Path) -> None:
     with patch("cobre_bridge.case.Modif") as mock_modif:
         assert case.modif is None
     mock_modif.read.assert_not_called()
+
+
+def test_polinjus_is_none_when_file_absent(tmp_path: Path) -> None:
+    case = NewaveCase(files=make_nw_files(tmp_path))  # polinjus defaults to None
+    with patch("cobre_bridge.case.UsinasHidreletricas") as mock_uh:
+        assert case.polinjus is None
+    mock_uh.read.assert_not_called()
+
+
+def test_polinjus_parses_when_file_present(tmp_path: Path) -> None:
+    polinjus_path = tmp_path / "polinjus.csv"
+    case = NewaveCase(files=make_nw_files(tmp_path, polinjus=polinjus_path))
+    with patch("cobre_bridge.case.UsinasHidreletricas") as mock_uh:
+        sentinel = object()
+        mock_uh.read.return_value = sentinel
+        assert case.polinjus is sentinel
+        assert case.polinjus is sentinel  # cached
+    mock_uh.read.assert_called_once_with(str(polinjus_path))
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"),
+    [(0, True), (1, False), (2, False), (None, False)],
+)
+def test_fpha_enabled_reflects_dger_flag(
+    tmp_path: Path, flag: int | None, expected: bool
+) -> None:
+    dger = MagicMock()
+    dger.funcao_producao_uhe = flag
+    case = make_case(tmp_path, dger=dger)
+    assert case.fpha_enabled is expected
 
 
 def test_optional_reader_parses_when_file_present(tmp_path: Path) -> None:

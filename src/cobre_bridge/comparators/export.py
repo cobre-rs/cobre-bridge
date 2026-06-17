@@ -78,7 +78,7 @@ def write_artifacts(
     Args:
         dataset: The validated canonical dataset to export.
         command: The originating command label (e.g. ``"compare results"``).
-        newave_dir: The NEWAVE case directory (recorded in the manifest).
+        newave_dir: The source model case directory (recorded in the manifest).
         cobre_output_dir: The Cobre output directory (recorded in the manifest
             and probed for the Cobre version).
         tolerance: The comparison tolerance (recorded in the manifest).

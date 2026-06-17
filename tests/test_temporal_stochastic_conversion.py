@@ -1,8 +1,7 @@
 """Unit tests for temporal and stochastic conversion functions.
 
-All inewave I/O is mocked via ``unittest.mock.patch`` so no real NEWAVE
-files are required.  Synthetic DataFrames exercise the core logic of each
-converter.
+All inewave I/O is mocked via ``unittest.mock.patch`` so no real the source model files
+are required.  Synthetic DataFrames exercise the core logic of each converter.
 """
 
 from __future__ import annotations
@@ -754,7 +753,11 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is True
+        cs = result["training"]["cut_selection"]
+        assert cs["selection"]["method"] == "lml1"
+        assert cs["selection"]["check_frequency"] == 1
+        assert cs["row_activity_tolerance"] == 1e-6
+        assert "enabled" not in cs
 
     def test_cut_selection_only_forward_enables(self, tmp_path) -> None:
         dger = _make_dger_mock(
@@ -765,7 +768,11 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is True
+        cs = result["training"]["cut_selection"]
+        assert cs["selection"]["method"] == "lml1"
+        assert cs["selection"]["check_frequency"] == 1
+        assert cs["row_activity_tolerance"] == 1e-6
+        assert "enabled" not in cs
 
     def test_cut_selection_only_backward_enables(self, tmp_path) -> None:
         dger = _make_dger_mock(
@@ -776,7 +783,11 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is True
+        cs = result["training"]["cut_selection"]
+        assert cs["selection"]["method"] == "lml1"
+        assert cs["selection"]["check_frequency"] == 1
+        assert cs["row_activity_tolerance"] == 1e-6
+        assert "enabled" not in cs
 
     def test_cut_selection_both_zero_disables(self, tmp_path) -> None:
         dger = _make_dger_mock(
@@ -787,7 +798,9 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is False
+        cs = result["training"]["cut_selection"]
+        assert "selection" not in cs
+        assert cs["row_activity_tolerance"] == 1e-6
 
     def test_cut_selection_none_treated_as_zero(self, tmp_path) -> None:
         """When the dger.dat field is absent (None), treat as 0 so the
@@ -800,7 +813,9 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["cut_selection"]["enabled"] is False
+        cs = result["training"]["cut_selection"]
+        assert "selection" not in cs
+        assert cs["row_activity_tolerance"] == 1e-6
 
     # -- Shist-driven historical_years (tipo_simulacao_final == 2) --
 
@@ -1002,7 +1017,8 @@ class TestConvertConfig:
     # -- consideracao_media_anual_afluencias / estimation.order_selection --
 
     def test_order_selection_omitted_when_field_absent(self, tmp_path) -> None:
-        """Old NEWAVE files lacking the field → omit order_selection (cobre default)."""
+        """Old the source model files lacking the field → omit order_selection (cobre
+        default)."""
         dger = _make_dger_mock(consideracao_media_anual_afluencias=None)
         case = make_case(tmp_path, dger=dger)
 

@@ -1,9 +1,9 @@
-"""Parsed NEWAVE case — read each input file once, cache the result.
+"""Parsed the source model case — read each input file once, cache the result.
 
-``NewaveFiles`` resolves the *paths* of a NEWAVE case; this module adds the
-parsing layer on top. Converters used to take ``NewaveFiles`` and each re-parse
-the files they needed, so a single conversion re-read ``dger.dat`` ~26×,
-``confhd.dat`` ~27×, ``hidr.dat`` ~18×, and so on.
+``NewaveFiles`` resolves the *paths* of a source-model case; this module adds the
+parsing layer on top. Converters used to take ``NewaveFiles`` and each re-parse the
+files they needed, so a single conversion re-read ``dger.dat`` ~26×, ``confhd.dat``
+~27×, ``hidr.dat`` ~18×, and so on.
 
 :class:`NewaveCase` wraps a :class:`~cobre_bridge.newave_files.NewaveFiles` and
 exposes one :func:`functools.cached_property` per input file. The first access
@@ -27,8 +27,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from inewave.libs.usinas_hidreletricas import UsinasHidreletricas
 from inewave.newave import (
     Adterm,
     Cadic,
@@ -66,7 +67,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class NewaveCase:
-    """A NEWAVE case with each input file parsed once and cached.
+    """A source-model case with each input file parsed once and cached.
 
     Construct via :meth:`from_directory` in production code. Each property below
     parses the matching file on first access through its ``inewave`` reader and
@@ -77,7 +78,7 @@ class NewaveCase:
 
     @classmethod
     def from_directory(cls, directory: Path) -> NewaveCase:
-        """Discover and bind the NEWAVE files in *directory* (no parsing yet)."""
+        """Discover and bind the source model files in *directory* (no parsing yet)."""
         return cls(files=NewaveFiles.from_directory(directory))
 
     # --- Required files --------------------------------------------------------
@@ -190,7 +191,33 @@ class NewaveCase:
         path = self.files.adterm
         return Adterm.read(str(path)) if path is not None else None
 
+    @cached_property
+    def polinjus(self) -> UsinasHidreletricas | None:
+        """Downstream-level curve families (``polinjus``), or ``None`` if absent.
+
+        The ``inewave.libs.UsinasHidreletricas`` reader exposes the tailrace
+        ``h_jus(q_jus)`` families consumed by cobre's FPHA production model — see
+        :func:`cobre_bridge.converters.tailrace.convert_tailrace_curves`.
+        """
+        path = self.files.polinjus
+        if path is None:
+            return None
+        return cast(UsinasHidreletricas, UsinasHidreletricas.read(str(path)))
+
     # --- Derived state ---------------------------------------------------------
+
+    @property
+    def fpha_enabled(self) -> bool:
+        """Whether the source model evaluates hydro generation via FPHA (``dger.dat``
+        line 96).
+
+        The ``dger.dat`` line reads ``FUNCAO DE PROD. UHE … (=0 FPHA, =1 LINEAR
+        GH=rho*Q``, so ``funcao_producao_uhe == 0`` selects FPHA (the convex-hull
+        hydro production function) and ``== 1`` selects the linear model
+        (``GH = rho·Q``) — the bridge's constant-productivity path. Absent/``None``
+        ⇒ linear, the safe default for older cases without the field.
+        """
+        return self.dger.funcao_producao_uhe == 0
 
     @cached_property
     def horizon(self) -> StudyHorizon:
@@ -226,7 +253,7 @@ class NewaveCase:
 
     @cached_property
     def id_map(self) -> NewaveIdMap:
-        """The canonical NEWAVE→Cobre :class:`NewaveIdMap` for this case.
+        """The canonical the source model→Cobre :class:`NewaveIdMap` for this case.
 
         Built from the cached ``confhd``/``conft``/``sistema``/``ree``/``hidr``
         readers, so it reuses parses already done rather than re-reading the files

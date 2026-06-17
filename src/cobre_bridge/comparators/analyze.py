@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, cast
 
+import numpy as np
 import polars as pl
 
 from cobre_bridge.comparators.dataset import (
@@ -30,6 +31,9 @@ from cobre_bridge.comparators.results import build_results_summary, smape
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import pandas as pd
+
+    from cobre_bridge.comparators.alignment import EntityAlignment, HydroEntity
     from cobre_bridge.comparators.bounds import BoundComparison
     from cobre_bridge.comparators.results import PercentileData, ResultComparison
 
@@ -345,6 +349,17 @@ def build_results_dataset(
         # ``productivity_detail``. Both are live ``pl.DataFrame`` objects.
         "thermal": pct.thermal,
         "productivity_detail": pct.productivity_detail,
+        # Per-(plant, stage) realized productivity, derived from the result rows
+        # here in the analyze layer so the chart consumes a frame, not raw rows.
+        "productivity_per_stage": productivity_per_stage_frame(results),
+        # --- Production-function (FPHA) comparison --- The Productivity tab's
+        # FPHA section reads these. ``fpha_metrics`` is the per-(plant, stage)
+        # fidelity conclusion; ``fpha_surface``/``fpha_spill`` are the dense
+        # render substrate. All three are ``None`` for constant-productivity
+        # cases. Render-only (excluded from the serialized artifact).
+        "fpha_metrics": pct.fpha_metrics,
+        "fpha_surface": pct.fpha_surface,
+        "fpha_spill": pct.fpha_spill,
         # --- ticket-022: Constraints / Performance tab inputs ---
         # The final two tabs read these named keys (via report_builder's typed
         # metadata accessors). ``gc_constraints`` is a ``list[dict]``;
@@ -713,7 +728,7 @@ def per_stage_sum_from_results(
     entity_type: str,
     variable: str,
 ) -> tuple[dict[int, float], dict[int, float], set[int]]:
-    """Sum NEWAVE/Cobre values per stage for one entity type (and variable).
+    """Sum the source model/Cobre values per stage for one entity type (and variable).
 
     Pure numeric core of the inline per-stage accumulation loop repeated in
     ``charts.system_comparison_chart`` / ``hydro_aggregate_chart`` /
@@ -1067,28 +1082,29 @@ def cobre_sum_and_newave_sin(
     nw_offset: int,
     matched_ids: set[int] | None = None,
 ) -> tuple[dict[int, float], dict[int, float]]:
-    """Roll a Cobre per-hydro variable and a NEWAVE-SIN long frame to per-stage totals.
+    """Roll a Cobre per-hydro variable and a source-model-SIN long frame to per-stage
+    totals.
 
-    Pure numeric core of ``charts.cobre_aggregate_chart`` (``charts.py:813-846``).
-    The Cobre side sums ``variable`` across (optionally ``matched_ids``-filtered)
-    plants per ``stage_id`` — delegated to :func:`per_stage_sum_from_frame` so the
-    grouping/sort/filter semantics stay identical. The NEWAVE side folds the long
+    Pure numeric core of ``charts.cobre_aggregate_chart`` (``charts.py:813-846``). The
+    Cobre side sums ``variable`` across (optionally ``matched_ids``-filtered) plants per
+    ``stage_id`` — delegated to :func:`per_stage_sum_from_frame` so the
+    grouping/sort/filter semantics stay identical. The source model side folds the long
     ``nw_sin`` frame into a per-stage total: rows are filtered to
-    ``variable.strip().upper() == nw_variable``, then each surviving row adds
-    ``value * nw_factor`` into bucket ``stage - nw_offset``, skipping rows whose
-    ``stage`` or ``value`` is ``None``. Never raises.
+    ``variable.strip().upper() == nw_variable``, then each surviving row adds ``value *
+    nw_factor`` into bucket ``stage - nw_offset``, skipping rows whose ``stage`` or
+    ``value`` is ``None``. Never raises.
 
     Args:
         cobre_hydro: Per-hydro Cobre means with ``entity_id``, ``stage_id`` and
             the ``variable`` column.
         variable: The column to sum on the Cobre side.
-        nw_sin: Long-format NEWAVE SIN frame with ``stage``, ``variable`` and
+        nw_sin: Long-format the source model SIN frame with ``stage``, ``variable`` and
             ``value`` columns, or ``None``.
         nw_variable: The (already upper-cased) variable to keep in ``nw_sin``, or
-            ``None`` to skip the NEWAVE side entirely.
-        nw_factor: Multiplicative factor applied to each NEWAVE value (unit
+            ``None`` to skip the source model side entirely.
+        nw_factor: Multiplicative factor applied to each source-model value (unit
             alignment).
-        nw_offset: Subtracted from each NEWAVE ``stage`` to align with the Cobre
+        nw_offset: Subtracted from each source-model ``stage`` to align with the Cobre
             ``stage_id`` axis.
         matched_ids: Optional Cobre entity filter forwarded to the Cobre sum.
 
@@ -1168,15 +1184,15 @@ def spillage_lookups(
     results: Sequence[ResultComparison],
     cobre_spill_energy: pl.DataFrame,
 ) -> tuple[dict[str, dict[int, float]], dict[str, dict[int, float]]]:
-    """Build the NEWAVE and Cobre per-variable, per-stage spillage lookups.
+    """Build the source model and Cobre per-variable, per-stage spillage lookups.
 
     Pure numeric core of ``charts.system_spillage_energy_chart``
-    (``charts.py:1565-1581``). The NEWAVE lookup is keyed by each
-    ``system_spillage`` row's ``variable`` (e.g. ``VERTOT``/``VERTcont``/
-    ``VERTfio``) then ``stage`` to ``newave_value``. The Cobre lookup maps the
-    ``cobre_spill_energy`` frame's ``total_mw``/``reservoir_mw``/``rorov_mw``
-    columns per ``stage_id`` under the keys ``spill_energy_total_mw`` /
-    ``spill_energy_reservoir_mw`` / ``spill_energy_rorov_mw``. Never raises.
+    (``charts.py:1565-1581``). The source model lookup is keyed by each
+    ``system_spillage`` row's ``variable`` (e.g. ``VERTOT``/``VERTcont``/ ``VERTfio``)
+    then ``stage`` to ``newave_value``. The Cobre lookup maps the ``cobre_spill_energy``
+    frame's ``total_mw``/``reservoir_mw``/``rorov_mw`` columns per ``stage_id`` under
+    the keys ``spill_energy_total_mw`` / ``spill_energy_reservoir_mw`` /
+    ``spill_energy_rorov_mw``. Never raises.
 
     Args:
         results: The comparison rows; only ``entity_type == "system_spillage"``
@@ -1345,3 +1361,532 @@ def _conform(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.select(list(TIDY_SCHEMA)).cast(
         {col: dtype() for col, dtype in TIDY_SCHEMA.items()}
     )
+
+
+# ---------------------------------------------------------------------------
+# Production-function (FPHA) comparison
+#
+# Both solvers fit a piecewise-linear production surface GH(V, Q, S) as a set of
+# hyperplanes whose lower envelope (the minimum over planes) is what the LP
+# consumes. The two fits use different plane counts and philosophies, so they
+# are NOT comparable plane-by-plane; instead both envelopes are evaluated on a
+# shared (V, Q) grid (at S = 0) and the resulting surfaces are compared. A
+# separate spillage slice (GH vs S at the max corner) covers the S dimension the
+# (V, Q) grid holds fixed.
+# ---------------------------------------------------------------------------
+
+#: Output schema of the per-(plant, stage) FPHA fidelity metrics frame (the
+#: comparison conclusion: how close Cobre's fitted surface is to the source
+#: model's, normalized to the plant's max generation).
+_FPHA_METRICS_SCHEMA: dict[str, type[pl.DataType]] = {
+    "cobre_id": pl.Int64,
+    "plant_name": pl.Utf8,
+    "stage": pl.Int64,
+    "n_planes_newave": pl.Int64,
+    "n_planes_cobre": pl.Int64,
+    "n_v": pl.Int64,
+    "nmae": pl.Float64,
+    "bias": pl.Float64,
+    "max_abs_dev": pl.Float64,
+    "gh_max_ratio": pl.Float64,
+}
+
+#: Output schema of the dense (V, Q) production-surface frame (the render
+#: substrate for the heatmaps; one row per grid point per source).
+_FPHA_SURFACE_SCHEMA: dict[str, type[pl.DataType]] = {
+    "cobre_id": pl.Int64,
+    "plant_name": pl.Utf8,
+    "stage": pl.Int64,
+    "v_hm3": pl.Float64,
+    "q_m3s": pl.Float64,
+    "source": pl.Utf8,
+    "gh_mw": pl.Float64,
+}
+
+#: Output schema of the spillage-slice frame (GH vs spill at the max V/Q corner).
+_FPHA_SPILL_SCHEMA: dict[str, type[pl.DataType]] = {
+    "cobre_id": pl.Int64,
+    "plant_name": pl.Utf8,
+    "stage": pl.Int64,
+    "s_m3s": pl.Float64,
+    "source": pl.Utf8,
+    "gh_mw": pl.Float64,
+}
+
+
+def _evaluate_fpha_envelope(
+    gamma_0: np.ndarray,
+    gamma_v: np.ndarray,
+    gamma_q: np.ndarray,
+    gamma_s: np.ndarray,
+    multiplier: np.ndarray,
+    v: np.ndarray,
+    q: np.ndarray,
+    s: np.ndarray,
+    *,
+    volume_offset: float = 0.0,
+) -> np.ndarray:
+    """Evaluate a min-over-planes FPHA envelope on a grid of operating points.
+
+    Each plane contributes ``multiplier * (gamma_0 + gamma_v * (v -
+    volume_offset) + gamma_q * q + gamma_s * s)``; the envelope is the minimum
+    across planes — the value the operating model's LP consumes. ``v``, ``q``,
+    ``s`` are broadcast together, so passing a meshgrid evaluates a whole
+    surface in one call.
+
+    ``volume_offset`` subtracts the plant minimum storage so a useful-volume
+    coefficient is applied to absolute volume; pass ``0.0`` for a coefficient
+    that already multiplies absolute volume. ``multiplier`` is the per-plane
+    correction (the source model's ``fator_correcao``, Cobre's ``kappa``).
+
+    Args:
+        gamma_0: Per-plane constant term, shape ``(P,)``.
+        gamma_v: Per-plane volume coefficient, shape ``(P,)``.
+        gamma_q: Per-plane turbined-flow coefficient, shape ``(P,)``.
+        gamma_s: Per-plane spilled-flow coefficient, shape ``(P,)``.
+        multiplier: Per-plane scalar multiplier, shape ``(P,)``.
+        v: Volume coordinate(s), broadcastable with ``q`` and ``s``.
+        q: Turbined-flow coordinate(s), broadcastable with ``v`` and ``s``.
+        s: Spilled-flow coordinate(s), broadcastable with ``v`` and ``q``.
+        volume_offset: Storage subtracted from ``v`` before applying ``gamma_v``.
+
+    Returns:
+        The envelope generation, shaped like the broadcast of ``v``/``q``/``s``.
+    """
+    shape = np.broadcast_shapes(np.shape(v), np.shape(q), np.shape(s))
+    vv = np.broadcast_to(v, shape).reshape(-1)
+    qq = np.broadcast_to(q, shape).reshape(-1)
+    ss = np.broadcast_to(s, shape).reshape(-1)
+    useful_v = vv - volume_offset
+    planes = multiplier[:, None] * (
+        gamma_0[:, None]
+        + gamma_v[:, None] * useful_v[None, :]
+        + gamma_q[:, None] * qq[None, :]
+        + gamma_s[:, None] * ss[None, :]
+    )
+    return planes.min(axis=0).reshape(shape)
+
+
+def _plane_arrays(
+    sub: pl.DataFrame, multiplier_col: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extract ``(gamma_0, gamma_v, gamma_q, gamma_s, multiplier)`` as arrays."""
+    return (
+        sub.get_column("gamma_0").to_numpy(),
+        sub.get_column("gamma_v").to_numpy(),
+        sub.get_column("gamma_q").to_numpy(),
+        sub.get_column("gamma_s").to_numpy(),
+        sub.get_column(multiplier_col).to_numpy(),
+    )
+
+
+def build_fpha_comparison(
+    nw_planes: pl.DataFrame | None,
+    nw_grid: pl.DataFrame | None,
+    cb_planes: pl.DataFrame | None,
+    hydros: Sequence[HydroEntity],
+    *,
+    spill_n: int = 15,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """Compare both solvers' fitted production functions on a shared grid.
+
+    For every hydro fitted on BOTH sides, each (plant, stage) pair is evaluated at
+    the source model's own ``(V, Q)`` fitting-grid nodes (``Npt_V × Npt_Q`` from
+    ``fpha_eco``, at ``S = 0``); single-volume (run-of-river) plants collapse the
+    ``V`` axis to one point, leaving a ``Q`` curve. Both envelopes are evaluated at
+    the same nodes — the model's real resolution, not a synthetic densification.
+    The source model's k-th period aligns to Cobre stage ``k``.
+
+    Args:
+        nw_planes: The source model's planes (from ``read_fpha_planes``), or
+            ``None``.
+        nw_grid: The source model's fitting grid (from ``read_fpha_grid``), or
+            ``None`` — supplies the ``(V, Q)`` nodes and the useful-volume
+            reference.
+        cb_planes: Cobre's planes (from ``read_cobre_fpha_planes``), or ``None``.
+        hydros: Aligned hydro entities pairing source codes to Cobre ids/names.
+        spill_n: Sample count for the spillage slice (a synthetic ``S`` sweep,
+            independent of the ``(V, Q)`` fitting grid).
+
+    Returns:
+        ``(metrics, surface, spill)`` frames conforming to
+        :data:`_FPHA_METRICS_SCHEMA`, :data:`_FPHA_SURFACE_SCHEMA`, and
+        :data:`_FPHA_SPILL_SCHEMA`. All three are empty (but typed) when either
+        side lacks fitted planes or no plant is fitted on both sides.
+    """
+    empty = (
+        pl.DataFrame(schema=_FPHA_METRICS_SCHEMA),
+        pl.DataFrame(schema=_FPHA_SURFACE_SCHEMA),
+        pl.DataFrame(schema=_FPHA_SPILL_SCHEMA),
+    )
+    if (
+        nw_planes is None
+        or nw_grid is None
+        or cb_planes is None
+        or nw_planes.is_empty()
+        or nw_grid.is_empty()
+        or cb_planes.is_empty()
+    ):
+        return empty
+
+    code_to_cobre = {h.newave_code: h.cobre_id for h in hydros}
+    name_of = {h.cobre_id: h.name for h in hydros}
+
+    periods = sorted({int(p) for p in nw_planes.get_column("periodo").to_list()})
+    stage_of = {p: i for i, p in enumerate(periods)}
+
+    def _key2(
+        frame: pl.DataFrame, a: str, b: str
+    ) -> dict[tuple[int, int], pl.DataFrame]:
+        parts = frame.partition_by([a, b], as_dict=True)
+        return {(int(k[0]), int(k[1])): v for k, v in parts.items()}
+
+    nw_lookup = _key2(nw_planes, "newave_code", "periodo")
+    grid_lookup = _key2(nw_grid, "newave_code", "periodo")
+    cb_lookup = _key2(cb_planes, "hydro_id", "stage_id")
+
+    geo_cid: list[np.ndarray] = []
+    geo_stage: list[np.ndarray] = []
+    geo_v: list[np.ndarray] = []
+    geo_q: list[np.ndarray] = []
+    gh_nw: list[np.ndarray] = []
+    gh_cb: list[np.ndarray] = []
+
+    sp_cid: list[np.ndarray] = []
+    sp_stage: list[np.ndarray] = []
+    sp_s: list[np.ndarray] = []
+    sp_gh_nw: list[np.ndarray] = []
+    sp_gh_cb: list[np.ndarray] = []
+
+    metric_rows: list[dict[str, object]] = []
+
+    for (code, periodo), nw_sub in nw_lookup.items():
+        cobre_id = code_to_cobre.get(code)
+        stage = stage_of.get(periodo)
+        if cobre_id is None or stage is None:
+            continue
+        cb_sub = cb_lookup.get((cobre_id, stage))
+        grid_row = grid_lookup.get((code, periodo))
+        if cb_sub is None or grid_row is None:
+            continue
+
+        g = grid_row.row(0, named=True)
+        v_min = float(g["v_min_hm3"])
+        v_max = float(g["v_max_hm3"])
+        q_min = float(g["q_min_m3s"])
+        q_max = float(g["q_max_m3s"])
+        n_v = int(g["n_v"])
+
+        # Sample at the source model's own fitting-grid nodes (Npt_V x Npt_Q).
+        if n_v <= 1 or v_max <= v_min:
+            v_axis = np.array([v_min], dtype=float)
+        else:
+            v_axis = np.linspace(v_min, v_max, n_v)
+        q_axis = np.linspace(q_min, q_max, max(int(g["n_q"]), 2))
+        vv, qq = np.meshgrid(v_axis, q_axis, indexing="ij")
+        ss = np.zeros_like(vv)
+
+        nw_arr = _plane_arrays(nw_sub, "fator_correcao")
+        cb_arr = _plane_arrays(cb_sub, "kappa")
+        nw_gh = _evaluate_fpha_envelope(*nw_arr, vv, qq, ss, volume_offset=v_min)
+        cb_gh = _evaluate_fpha_envelope(*cb_arr, vv, qq, ss, volume_offset=0.0)
+
+        flat_v = vv.reshape(-1)
+        n = flat_v.size
+        geo_cid.append(np.full(n, cobre_id, dtype=np.int64))
+        geo_stage.append(np.full(n, stage, dtype=np.int64))
+        geo_v.append(flat_v)
+        geo_q.append(qq.reshape(-1))
+        gh_nw.append(nw_gh.reshape(-1))
+        gh_cb.append(cb_gh.reshape(-1))
+
+        # Spillage slice at the max V/Q corner: GH vs spill up to ~2x q_max.
+        s_axis = (
+            np.linspace(0.0, 2.0 * q_max, max(spill_n, 2))
+            if q_max > 0.0
+            else np.array([0.0], dtype=float)
+        )
+        v_fix = np.full_like(s_axis, v_max)
+        q_fix = np.full_like(s_axis, q_max)
+        nw_sp = _evaluate_fpha_envelope(
+            *nw_arr, v_fix, q_fix, s_axis, volume_offset=v_min
+        )
+        cb_sp = _evaluate_fpha_envelope(
+            *cb_arr, v_fix, q_fix, s_axis, volume_offset=0.0
+        )
+        ns = s_axis.size
+        sp_cid.append(np.full(ns, cobre_id, dtype=np.int64))
+        sp_stage.append(np.full(ns, stage, dtype=np.int64))
+        sp_s.append(s_axis)
+        sp_gh_nw.append(nw_sp)
+        sp_gh_cb.append(cb_sp)
+
+        # Fidelity metrics, normalized to the plant's max generation (the corner
+        # value v_max/q_max, which the grid includes as its last point).
+        gh_max_nw = float(nw_gh[-1, -1])
+        gh_max_cb = float(cb_gh[-1, -1])
+        diff = cb_gh - nw_gh
+        denom = abs(gh_max_nw)
+        scaled = denom > 1e-9
+        metric_rows.append(
+            {
+                "cobre_id": cobre_id,
+                "plant_name": name_of.get(cobre_id, f"hydro_{cobre_id}"),
+                "stage": stage,
+                "n_planes_newave": nw_sub.height,
+                "n_planes_cobre": cb_sub.height,
+                "n_v": n_v,
+                "nmae": float(np.mean(np.abs(diff)) / denom) if scaled else None,
+                "bias": float(np.mean(diff) / denom) if scaled else None,
+                "max_abs_dev": float(np.max(np.abs(diff))),
+                "gh_max_ratio": (gh_max_cb / gh_max_nw) if scaled else None,
+            }
+        )
+
+    if not geo_cid:
+        return empty
+
+    names = pl.DataFrame(
+        {
+            "cobre_id": list(name_of.keys()),
+            "plant_name": list(name_of.values()),
+        },
+        schema={"cobre_id": pl.Int64, "plant_name": pl.Utf8},
+    )
+
+    def _stack_surface(gh: list[np.ndarray], source: str) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "cobre_id": np.concatenate(geo_cid),
+                "stage": np.concatenate(geo_stage),
+                "v_hm3": np.concatenate(geo_v),
+                "q_m3s": np.concatenate(geo_q),
+                "gh_mw": np.concatenate(gh),
+            }
+        ).with_columns(pl.lit(source).alias("source"))
+
+    surface = (
+        pl.concat([_stack_surface(gh_nw, "newave"), _stack_surface(gh_cb, "cobre")])
+        .join(names, on="cobre_id", how="left")
+        .select(list(_FPHA_SURFACE_SCHEMA))
+        .cast({col: dtype() for col, dtype in _FPHA_SURFACE_SCHEMA.items()})
+        .sort(["cobre_id", "stage", "source", "v_hm3", "q_m3s"])
+    )
+
+    def _stack_spill(gh: list[np.ndarray], source: str) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "cobre_id": np.concatenate(sp_cid),
+                "stage": np.concatenate(sp_stage),
+                "s_m3s": np.concatenate(sp_s),
+                "gh_mw": np.concatenate(gh),
+            }
+        ).with_columns(pl.lit(source).alias("source"))
+
+    spill = (
+        pl.concat([_stack_spill(sp_gh_nw, "newave"), _stack_spill(sp_gh_cb, "cobre")])
+        .join(names, on="cobre_id", how="left")
+        .select(list(_FPHA_SPILL_SCHEMA))
+        .cast({col: dtype() for col, dtype in _FPHA_SPILL_SCHEMA.items()})
+        .sort(["cobre_id", "stage", "source", "s_m3s"])
+    )
+
+    metrics = pl.DataFrame(metric_rows, schema=_FPHA_METRICS_SCHEMA).sort(
+        ["cobre_id", "stage"]
+    )
+    return metrics, surface, spill
+
+
+# ---------------------------------------------------------------------------
+# Productivity (single-value-per-plant/stage) analysis
+# ---------------------------------------------------------------------------
+
+_PRODUCTIVITY_DETAIL_SCHEMA: dict[str, type[pl.DataType]] = {
+    "plant_name": pl.Utf8,
+    "newave_code": pl.Int64,
+    "cobre_id": pl.Int64,
+    # The source model pmo.dat head-dependent productivities (FPHA).
+    "nw_altura_min": pl.Float64,
+    "nw_altura_65": pl.Float64,
+    "nw_altura_max": pl.Float64,
+    "nw_equivalent": pl.Float64,
+    "nw_accumulated_earm": pl.Float64,
+    # The source model HIDR cadastro building blocks.
+    "nw_specific_productivity": pl.Float64,
+    "nw_tailwater_m": pl.Float64,
+    "nw_losses_m": pl.Float64,
+    "nw_vmin_hm3": pl.Float64,
+    "nw_vmax_hm3": pl.Float64,
+    # cobre-bridge side: the *static* productivities the converter computes from the
+    # source model inputs (HIDR cadastro + cascade), so the scatters are a
+    # conversion-fidelity check against the matching pmo column rather than a comparison
+    # against the per-stage simulation output.
+    "cb_point": pl.Float64,
+    "cb_equivalent": pl.Float64,
+    "cb_accumulated": pl.Float64,
+    # cobre-bridge converted building blocks (from system/hydros.json).
+    "cb_specific_productivity": pl.Float64,
+    "cb_tailwater_m": pl.Float64,
+    "cb_losses_m": pl.Float64,
+    "cb_vmin_hm3": pl.Float64,
+    "cb_vmax_hm3": pl.Float64,
+}
+
+
+def build_productivity_detail(
+    alignment: EntityAlignment,
+    nw_prod_detail: pl.DataFrame,
+    nw_cadastro: pd.DataFrame,
+    cobre_prod_detail: dict[int, dict],
+    cb_accumulated: dict[int, float],
+) -> pl.DataFrame:
+    """Assemble the per-plant static productivity comparison frame.
+
+    One row per aligned hydro pair (``alignment.hydros``). The source model side carries
+    the pmo.dat head-dependent productivities (matched by plant name) and the HIDR
+    cadastro building blocks (matched by the source model code). The cobre-bridge side
+    carries the *static* productivities the converter computes from those same inputs —
+    ``cb_point`` from :func:`compute_productivity`, ``cb_equivalent`` from
+    :func:`stored_energy_productivity`, ``cb_accumulated`` from the cascade accumulated
+    map — plus the building blocks written into ``system/hydros.json``
+    (``cobre_prod_detail``). Matching pmo and cobre-bridge columns should land on ``y =
+    x`` (validating the conversion), since both are derived from the same the source
+    model inputs.
+
+    Returns an empty frame (with the full schema) when there are no aligned
+    hydros.
+    """
+    from cobre_bridge.productivity import (
+        compute_productivity,
+        stored_energy_productivity,
+    )
+
+    nw_by_name: dict[str, dict] = {}
+    for row in nw_prod_detail.iter_rows(named=True):
+        nw_by_name[str(row["plant_name"]).strip().upper()] = row
+
+    def _cad_float(code: int, column: str) -> float | None:
+        if code not in nw_cadastro.index or column not in nw_cadastro.columns:
+            return None
+        value = nw_cadastro.loc[code, column]
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f else None  # drop NaN
+
+    def _nw_reservoir_bounds(code: int) -> tuple[float | None, float | None]:
+        """The source model reservoir bounds as cobre-bridge models them.
+
+        Daily-regulation ('D') plants are frozen at ``volume_referencia`` by the
+        converter (they can't store across stages), so compare like-for-like
+        against Cobre's reservoir rather than the dead-storage
+        ``volume_minimo``/``volume_maximo``. Otherwise every run-of-river plant
+        shows a spurious Vmin/Vmax delta in the building-blocks table.
+        """
+        if code in nw_cadastro.index and "tipo_regulacao" in nw_cadastro.columns:
+            reg = str(nw_cadastro.loc[code, "tipo_regulacao"]).strip()
+            if reg == "D":
+                vref = _cad_float(code, "volume_referencia")
+                if vref is not None:
+                    return vref, vref
+        return (
+            _cad_float(code, "volume_minimo"),
+            _cad_float(code, "volume_maximo"),
+        )
+
+    def _cb_static(code: int) -> tuple[float | None, float | None, float | None]:
+        """cobre-bridge (point, equivalent, accumulated) computed from inputs."""
+        if code not in nw_cadastro.index:
+            return None, None, None
+        hreg = nw_cadastro.loc[code]
+        try:
+            point = float(compute_productivity(hreg))
+            equiv = float(stored_energy_productivity(hreg))
+        except (KeyError, ValueError, TypeError):
+            point = equiv = None  # type: ignore[assignment]
+        acc = cb_accumulated.get(code)
+        return point, equiv, (float(acc) if acc is not None else None)
+
+    rows: list[dict] = []
+    for hydro in alignment.hydros:
+        nw_prod = nw_by_name.get(hydro.name.strip().upper(), {})
+        cb = cobre_prod_detail.get(hydro.cobre_id, {})
+        cb_point, cb_equiv, cb_acc = _cb_static(hydro.newave_code)
+        nw_vmin, nw_vmax = _nw_reservoir_bounds(hydro.newave_code)
+        rows.append(
+            {
+                "plant_name": hydro.name,
+                "newave_code": hydro.newave_code,
+                "cobre_id": hydro.cobre_id,
+                "nw_altura_min": nw_prod.get("altura_min"),
+                "nw_altura_65": nw_prod.get("altura_65"),
+                "nw_altura_max": nw_prod.get("altura_max"),
+                "nw_equivalent": nw_prod.get("equivalent"),
+                "nw_accumulated_earm": nw_prod.get("accumulated_earm"),
+                "nw_specific_productivity": _cad_float(
+                    hydro.newave_code, "produtibilidade_especifica"
+                ),
+                "nw_tailwater_m": _cad_float(hydro.newave_code, "canal_fuga_medio"),
+                "nw_losses_m": _cad_float(hydro.newave_code, "perdas"),
+                "nw_vmin_hm3": nw_vmin,
+                "nw_vmax_hm3": nw_vmax,
+                "cb_point": cb_point,
+                "cb_equivalent": cb_equiv,
+                "cb_accumulated": cb_acc,
+                "cb_specific_productivity": cb.get("specific_productivity"),
+                "cb_tailwater_m": cb.get("tailwater_m"),
+                "cb_losses_m": cb.get("losses_m"),
+                "cb_vmin_hm3": cb.get("vmin_hm3"),
+                "cb_vmax_hm3": cb.get("vmax_hm3"),
+            }
+        )
+
+    if not rows:
+        return pl.DataFrame(schema=_PRODUCTIVITY_DETAIL_SCHEMA)
+    return pl.DataFrame(rows, schema=_PRODUCTIVITY_DETAIL_SCHEMA)
+
+
+#: Output schema of the per-(plant, stage) realized-productivity frame consumed by
+#: the per-stage productivity chart.
+_PRODUCTIVITY_PER_STAGE_SCHEMA: dict[str, type[pl.DataType]] = {
+    "plant_name": pl.Utf8,
+    "newave_code": pl.Int64,
+    "cobre_id": pl.Int64,
+    "stage": pl.Int64,
+    "newave_value": pl.Float64,
+    "cobre_value": pl.Float64,
+}
+
+
+def productivity_per_stage_frame(results: Sequence[ResultComparison]) -> pl.DataFrame:
+    """Per-(plant, stage) realized productivity rows for the Productivity tab.
+
+    Extracts the hydro ``productivity_mw_per_m3s`` comparisons (productivity is
+    constant within a stage but varies across stages, tracking the reservoir head
+    reached each stage) into a frame the per-stage chart renders directly — so the
+    result-row filtering lives in the analyze layer, not the chart.
+
+    Args:
+        results: The result comparisons; only hydro ``productivity_mw_per_m3s``
+            rows are kept.
+
+    Returns:
+        A frame conforming to :data:`_PRODUCTIVITY_PER_STAGE_SCHEMA`, one row per
+        (plant, stage). Empty (but typed) when no such rows exist.
+    """
+    rows = [
+        {
+            "plant_name": r.entity_name,
+            "newave_code": r.newave_code,
+            "cobre_id": r.cobre_id,
+            "stage": r.stage,
+            "newave_value": r.newave_value,
+            "cobre_value": r.cobre_value,
+        }
+        for r in results
+        if r.entity_type == "hydro" and r.variable == "productivity_mw_per_m3s"
+    ]
+    if not rows:
+        return pl.DataFrame(schema=_PRODUCTIVITY_PER_STAGE_SCHEMA)
+    return pl.DataFrame(rows, schema=_PRODUCTIVITY_PER_STAGE_SCHEMA)

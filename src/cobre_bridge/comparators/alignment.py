@@ -1,4 +1,4 @@
-"""Entity alignment between NEWAVE codes and Cobre IDs.
+"""Entity alignment between the source model codes and Cobre IDs.
 
 Builds aligned entity pairs for hydros, thermals, and exchange lines
 using the same NewaveIdMap that the converter produces, plus the parsed
@@ -39,16 +39,16 @@ class ThermalEntity:
 class LineEntity:
     """Aligned exchange line pair.
 
-    NEWAVE models exchange as bidirectional flow between subsystem pairs.
-    Cobre models each normalized pair as a single line where positive flow
-    goes from source_bus to target_bus.
+    The source model models exchange as bidirectional flow between subsystem pairs.
+    Cobre models each normalized pair as a single line where positive flow goes from
+    source_bus to target_bus.
 
-    ``newave_de`` / ``newave_para`` are the NEWAVE subsystem codes of the Cobre
-    line's ``source_bus_id`` / ``target_bus_id``, so the Cobre orientation
-    ``(source, target)`` always corresponds to NEWAVE ``(de, para)`` by
-    construction.  NEWAVE result files (NWLISTOP) may list a pair in either
-    ``(de, para)`` or ``(para, de)`` order; that file-ordering is handled where
-    the rows are read (sign-flipped on the reverse-ordered match), not here.
+    ``newave_de`` / ``newave_para`` are the source model subsystem codes of the Cobre
+    line's ``source_bus_id`` / ``target_bus_id``, so the Cobre orientation ``(source,
+    target)`` always corresponds to the source model ``(de, para)`` by construction.
+    The source model result files (NWLISTOP) may list a pair in either ``(de, para)`` or
+    ``(para, de)`` order; that file-ordering is handled where the rows are read
+    (sign-flipped on the reverse-ordered match), not here.
     """
 
     cobre_line_id: int
@@ -61,7 +61,7 @@ class LineEntity:
 
 @dataclass
 class EntityAlignment:
-    """Complete entity alignment between NEWAVE and Cobre."""
+    """Complete entity alignment between the source model and Cobre."""
 
     hydros: list[HydroEntity] = field(default_factory=list)
     thermals: list[ThermalEntity] = field(default_factory=list)
@@ -74,10 +74,10 @@ class EntityAlignment:
 def read_reference_names(
     case: NewaveCase,
 ) -> tuple[dict[int, str], dict[int, str], dict[int, str]]:
-    """Read entity names from NEWAVE input files via inewave.
+    """Read entity names from the source model input files via inewave.
 
-    Returns (hydro_names, thermal_names, subsystem_names) dicts
-    mapping NEWAVE codes to human-readable names.
+    Returns (hydro_names, thermal_names, subsystem_names) dicts mapping the source model
+    codes to human-readable names.
     """
     hydro_names: dict[int, str] = {}
     thermal_names: dict[int, str] = {}
@@ -105,7 +105,7 @@ def read_reference_names(
 
 
 def _detect_reservoir_plants(case: NewaveCase) -> set[int]:
-    """Return the set of NEWAVE hydro codes that have reservoirs.
+    """Return the set of the source model hydro codes that have reservoirs.
 
     A plant has a reservoir when its ``volume_minimo != volume_maximo``
     in the HIDR cadastro (with permanent MODIF overrides applied).
@@ -123,7 +123,7 @@ def _detect_reservoir_plants(case: NewaveCase) -> set[int]:
 
 
 def _detect_newave_stages(case: NewaveCase) -> int:
-    """Compute total number of NEWAVE stages from DGER parameters.
+    """Compute total number of the source model stages from DGER parameters.
 
     Uses the case's cached :attr:`NewaveCase.horizon`; an empty study
     (``num_anos_estudo`` of 0/None) reports zero stages.
@@ -139,14 +139,14 @@ def build_entity_alignment(
     case: NewaveCase,
     lines_json: list[dict],
 ) -> EntityAlignment:
-    """Build entity alignment from the ID map and the parsed NEWAVE case.
+    """Build entity alignment from the ID map and the parsed the source model case.
 
     Parameters
     ----------
     id_map:
         The same NewaveIdMap used by the converter.
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     lines_json:
         The ``lines`` list from the converted Cobre ``lines.json``.
     """
@@ -204,7 +204,7 @@ def build_entity_alignment(
     for nw_code in id_map.all_bus_ids:
         bus_id_to_nw[id_map.bus_id(nw_code)] = nw_code
 
-    # For each Cobre line, find the matching NEWAVE subsystem pair
+    # For each Cobre line, find the matching the source model subsystem pair
     for line in lines_json:
         line_id = int(line["id"])
         src_bus = int(line["source_bus_id"])

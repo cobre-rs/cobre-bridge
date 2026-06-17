@@ -19,7 +19,8 @@ def build_constraints_summary_table(
 ) -> str:
     """HTML summary table of all generic constraints.
 
-    Columns: Name, Type, Sense, Active Stages, Bound Range, Slack, Penalty, Has Violations
+    Columns: Name, Type, Sense, Active Stages, Bound Range, Slack, Penalty, Has
+    Violations
     Rows are colour-coded by constraint type.
     """
     type_colors = {

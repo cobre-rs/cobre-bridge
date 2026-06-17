@@ -955,7 +955,8 @@ def _chart_ar_order_distribution(
         hydro_meta: Mapping ``hydro_id -> {"name": str, ...}``.
 
     Returns:
-        A :class:`plotly.graph_objects.Figure` with one :class:`~plotly.graph_objects.Bar`
+        A :class:`plotly.graph_objects.Figure` with one
+        :class:`~plotly.graph_objects.Bar`
         trace.
     """
     hydros_data: dict = fitting_report.get("hydros", {})

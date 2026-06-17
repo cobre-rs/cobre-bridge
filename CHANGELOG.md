@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-06-17
+
+Paired with **cobre 0.8.2** and **cobre-python 0.8.2** — the versions used to
+validate this release. `convert --validate` now requires `cobre-python>=0.8.2,<0.9`.
+
+cobre 0.8.2 ships **breaking config changes**: the top-level `energy` section is
+removed in favour of a per-production-model `reference_volume`, and
+`training.cut_selection` is restructured into a tagged `selection` object.
+`convert newave` now emits the v0.8.2 schema, so **converted cases load only on
+cobre / cobre-python >= 0.8.2**.
+
+### Added
+
+- **Computed-FPHA production models.** In FPHA cases (`dger`
+  `funcao_producao_uhe == 0`), reservoir plants are emitted with `model: "fpha"`
+  and `fpha_config: { source: "computed" }` plus a per-plant volume fitting
+  window, so cobre fits the production function from geometry + tailrace.
+  Run-of-river and non-FPHA plants keep `constant_productivity`.
+- **`system/tailrace_curves.parquet`.** The source model's `polinjus`
+  downstream-level curve families are converted into cobre's exact
+  piecewise-quartic tailrace curves (eleven descriptive columns —
+  `downstream_reference_level_m`, `outflow_min_m3s`/`outflow_max_m3s`,
+  `coefficient_0`..`coefficient_4`, keyed by `hydro_id`/`family_id`/`segment_id`).
+  Drives the v0.8.2 exact-tailrace FPHA fit; omitted (and inert) when the case
+  ships no `polinjus`.
+- **`fpha_plane_reduction` config.** `tratamento-fpha` is parsed into cobre's
+  file-level `fpha_plane_reduction` block on `hydro_production_models.json`
+  (`angle` → `tolerance_deg`, or `distance` → `tolerance_pct` + `n_samples`).
+- **Per-model `reference_volume`.** The FPHA reference volume (V_ref) is now
+  declared per production model: seasonal references from `volref_saz.dat` are
+  emitted as `selection_mode: "seasonal"` with one absolute `reference_volume`
+  per season; plants without a seasonal row fall back to `percentile 0.65`. This
+  replaces reliance on cobre's removed top-level `energy.reference_volume_fraction`
+  default.
+- **FPHA production-function comparison** in `compare results` (Productivity
+  tab). Evaluates each model's lower-envelope production surface
+  `GH = min_k(g0 + gv·V + gq·Q + gs·S)` on the source model's own (V, Q) fitting
+  grid at S = 0 and compares the surfaces — per-plant fidelity metrics (NMAE /
+  bias / GHmax-ratio) plus a rotatable 3D NEWAVE/Cobre/Difference view (and a
+  Q-curve for run-of-river plants).
+
+### Changed
+
+- **`training.cut_selection` migrated to the v0.8.2 tagged `selection` object.**
+  The emitted block keeps the always-on `row_activity_tolerance` at the top level
+  and nests the method under `selection` (`{ "method": "lml1", "check_frequency":
+1 }`); `selection` is omitted (disabling row selection) when the source model
+  turns cut selection off in both passes.
+- **Hydro turbined/generation bounds unified** and computed independently of the
+  production function: `max_turbined` is the head-corrected swallowing capacity
+  (the operational dispatch cap that binds in the LP) and `max_generation` is the
+  rated installed power (Σ n·p_nom). Corrects FPHA reservoirs whose turbined cap
+  previously overshot.
+- **Source-model-neutral prose.** Comments, docstrings, and descriptive test
+  names drop explicit NEWAVE/CEPEL mentions in favour of "the source model";
+  identifiers, the `convert newave` CLI, the `source: "newave"` comparison label,
+  and user-facing display labels are intentionally unchanged.
+
 ## [0.8.1] - 2026-06-13
 
 Paired with **cobre 0.8.1** and **cobre-python 0.8.1** — the versions used to

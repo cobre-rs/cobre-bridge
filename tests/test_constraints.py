@@ -68,7 +68,7 @@ def _make_confhd_df() -> pd.DataFrame:
 
 
 class TestStoredEnergyReservoirFilter:
-    """VminOP includes only NEWAVE's EARM plant set: monthly-regulating
+    """VminOP includes only the source model's EARM plant set: monthly-regulating
     reservoirs with usable storage (matching pmo.dat's
     ``produtibilidade_acumulada_calculo_earm``)."""
 
@@ -281,8 +281,8 @@ class TestAccumulatedIntegratedProductivities:
     override and the per-stage RHS."""
 
     def test_cascade_uses_integral_for_monthly_reservoir(self) -> None:
-        # Monthly-regulating ('M') reservoirs use the volmin→volmax integral
-        # (NEWAVE's produtibilidade_equivalente_volmin_volmax), NOT h at
+        # Monthly-regulating ('M') reservoirs use the volmin→volmax integral (the source
+        # model's produtibilidade_equivalente_volmin_volmax), NOT h at
         # volume_referencia.
         cadastro = _make_cadastro()
         cadastro["tipo_regulacao"] = "M"
@@ -299,8 +299,8 @@ class TestAccumulatedIntegratedProductivities:
         assert acc[1] == pytest.approx(own_a + own_b + own_c)
 
     def test_cascade_uses_point_at_vref_for_run_of_river(self) -> None:
-        # Run-of-river ('D') plants use the point productivity at
-        # volume_referencia, matching NEWAVE's EARM convention for them.
+        # Run-of-river ('D') plants use the point productivity at volume_referencia,
+        # matching the source model's EARM convention for them.
         cadastro = _make_cadastro()  # all tipo_regulacao == "D"
         confhd_df = _make_confhd_df()
         acc = compute_accumulated_integrated_productivities(cadastro, confhd_df)
@@ -359,7 +359,8 @@ class TestPerStageAccumulatedProductivities:
     """Per-stage cascade-sum of own ρ_eq for the VminOP RHS bound."""
 
     def test_no_overrides_yields_flat_lists(self) -> None:
-        """Without CFUGA/CMONT inputs every plant has a constant ρ_acum across stages."""
+        """Without CFUGA/CMONT inputs every plant has a constant ρ_acum across
+        stages."""
         from cobre_bridge.converters.constraints import (
             compute_per_stage_acc_productivities,
         )
@@ -433,9 +434,9 @@ class TestPerStageAccumulatedProductivities:
 class TestVminopRhsSeasonality:
     """Integration check that the VminOP RHS picks up per-stage ρ_acum.
 
-    Uses the example NEWAVE case (which has plants with CFUGA overrides) and
-    asserts at least one constraint produces stage-varying RHS values for the
-    same percentage.
+    Uses the example the source model case (which has plants with CFUGA overrides) and
+    asserts at least one constraint produces stage-varying RHS values for the same
+    percentage.
     """
 
     def test_rhs_varies_across_stages_for_overridden_cascades(self) -> None:
@@ -487,9 +488,9 @@ class TestConvertVminopConstraints:
         assert convert_vminop_constraints(case, id_map) is None
 
     def test_returns_none_when_curva_aversao_zero(self, tmp_path) -> None:
-        """dger.dat curva_aversao=0 means NEWAVE disabled the risk-aversion
-        curve; cobre-bridge must skip VminOP constraints even when curva.dat
-        is present on disk."""
+        """dger.dat curva_aversao=0 means the source model disabled the risk-aversion
+        curve; cobre-bridge must skip VminOP constraints even when curva.dat is present
+        on disk."""
         from unittest.mock import MagicMock
 
         mock_dger = MagicMock()
@@ -640,9 +641,9 @@ class TestParseFormula:
     def test_ener_interc_canonical_direction(self) -> None:
         """ener_interc(A,B) with A<B (canonical) emits ``line_direct``.
 
-        NEWAVE's directional interchange is non-negative, so the converter
-        chooses between ``line_direct`` and ``line_reverse`` based on the
-        flow direction; the literal coefficient stays positive.
+        The source model's directional interchange is non-negative, so the converter
+        chooses between ``line_direct`` and ``line_reverse`` based on the flow
+        direction; the literal coefficient stays positive.
         """
         id_map = self._id_map()
         line_map = self._line_map()
@@ -826,13 +827,13 @@ def _make_minimal_case(
 
 _AGRINT_CONTENT = """\
 AGRUPAMENTOS DE INTERCAMBIO
- #AG A   B   COEF
+ # AG A   B   COEF
  XXX XXX XXX XX.XXXX
    1   1   3  1.0000
    2   3   1  1.0000
  999
 LIMITES POR GRUPO
-  #AG MI ANOI MF ANOF LIM_P1  LIM_P2  LIM_P3
+  # AG MI ANOI MF ANOF LIM_P1  LIM_P2  LIM_P3
  XXX  XX XXXX XX XXXX XXXXXX. XXXXXX. XXXXXX.
    1   1 2020  2 2020  10000.  10000.  10000.
    2   1 2020  1 2020   5000.   5000.   5000.
@@ -956,10 +957,10 @@ class TestConvertAgrintConstraints:
         }
 
     def test_post_study_freezes_at_last_study_value(self, tmp_path: Path) -> None:
-        """Post-study AGRINT limits freeze at the last study stage value and
-        ignore future-dated agrint.dat entries (NEWAVE convention — the pmo.dat
-        "LIMITES DOS AGRUPAMENTOS DE INTERCAMBIO" POS row is flat at the last
-        study December value)."""
+        """Post-study AGRINT limits freeze at the last study stage value and ignore
+        future-dated agrint.dat entries (the source model convention — the pmo.dat
+        "LIMITES DOS AGRUPAMENTOS DE INTERCAMBIO" POS row is flat at the last study
+        December value)."""
         from unittest.mock import MagicMock
 
         content = (
@@ -1008,14 +1009,13 @@ class TestConvertAgrintConstraints:
         """Mixed direction terms (typical of NOFICT1 hubs) each pick the right
         variable.
 
-        This pins the NEWAVE Group 4 case (``Interc(11→1) + Interc(11→3) ≤
-        8000``) — both terms target a fictitious bus from subsystems with
-        smaller codes, so canonically the lines are (1,11) and (3,11) but
-        the directional flow we care about is the reverse one on each.
-        The converter must emit ``line_reverse(line_1_11) +
-        line_reverse(line_3_11)``, not signed ``-line_exchange`` terms,
-        otherwise the constraint silently allows extra flow when one of
-        the lines runs in its canonical (direct) direction.
+        This pins the source model Group 4 case (``Interc(11→1) + Interc(11→3) ≤ 8000``)
+        — both terms target a fictitious bus from subsystems with smaller codes, so
+        canonically the lines are (1,11) and (3,11) but the directional flow we care
+        about is the reverse one on each. The converter must emit
+        ``line_reverse(line_1_11) + line_reverse(line_3_11)``, not signed
+        ``-line_exchange`` terms, otherwise the constraint silently allows extra flow
+        when one of the lines runs in its canonical (direct) direction.
         """
         agrint_path = tmp_path / "agrint.dat"
         agrint_path.write_text(
@@ -1060,11 +1060,11 @@ class TestConvertAgrintConstraints:
     def test_reversed_direction_uses_line_reverse(self, tmp_path: Path) -> None:
         """Flow A->B where A>B emits ``line_reverse``; canonical uses ``line_direct``.
 
-        NEWAVE's ``Interc(A→B)`` is a non-negative directional flow, so the
-        converter picks ``line_direct`` (canonical A<B) or ``line_reverse``
-        (reversed A>B) instead of a signed ``line_exchange`` with a negated
-        coefficient.  This keeps the constraint tight at fictitious hubs
-        where one flow can be in its non-canonical direction.
+        The source model's ``Interc(A→B)`` is a non-negative directional flow, so the
+        converter picks ``line_direct`` (canonical A<B) or ``line_reverse`` (reversed
+        A>B) instead of a signed ``line_exchange`` with a negated coefficient.  This
+        keeps the constraint tight at fictitious hubs where one flow can be in its
+        non-canonical direction.
         """
         agrint_path = tmp_path / "agrint.dat"
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
@@ -1164,7 +1164,7 @@ class TestConstraintResultTypes:
 
 class TestVminopEnergyFactor:
     """Guard the VminOP unit conversion: ρ_acum·hm³ → MWmonth must use each
-    stage's *real* month length, not NEWAVE's fixed 730 h.
+    stage's *real* month length, not the source model's fixed 730 h.
 
     Regression for the security-curve bug: leaving the VminOP LHS in
     ρ_acum·hm³ (≈ 2.628× true MWmonth) while cobre prices the slack
@@ -1189,8 +1189,8 @@ class TestVminopEnergyFactor:
         assert feb / C_M3S2HM3 == pytest.approx(672 / 730)
 
     def test_factor_equals_constant_for_730h_month(self) -> None:
-        # A hypothetical 730 h month (NEWAVE's convention) reproduces C_M3S2HM3.
-        # No real calendar month is 730 h, so assert the relationship holds via
-        # the month-hours ratio instead (April = 30 d = 720 h).
+        # A hypothetical 730 h month (the source model's convention) reproduces
+        # C_M3S2HM3. No real calendar month is 730 h, so assert the relationship holds
+        # via the month-hours ratio instead (April = 30 d = 720 h).
         apr = _vminop_energy_factor(2025, 4, 0)
         assert apr == pytest.approx(C_M3S2HM3 * 720 / 730)

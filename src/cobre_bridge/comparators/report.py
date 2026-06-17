@@ -205,7 +205,7 @@ def print_results_summary(
     summary:
         Aggregate results comparison statistics.
     newave_dir:
-        Path to the NEWAVE case directory.
+        Path to the source model case directory.
     cobre_output_dir:
         Path to the Cobre output directory.
     """
@@ -216,8 +216,8 @@ def print_results_summary(
     out.write(f"NEWAVE case:  {newave_dir}\n")
     out.write(f"Cobre output: {cobre_output_dir}\n\n")
 
-    # Per-variable table. WithinTol = share within the (relative) tolerance;
-    # sMAPE = mean symmetric error (robust to near-zero NEWAVE references).
+    # Per-variable table. WithinTol = share within the (relative) tolerance; sMAPE =
+    # mean symmetric error (robust to near-zero the source model references).
     _W = 88
     out.write(
         f"{'Variable':<26} {'Count':>6} "
@@ -281,7 +281,7 @@ def print_results_summary_from_dataset(
     dataset:
         The canonical comparison dataset for the results subcommand.
     newave_dir:
-        Path to the NEWAVE case directory.
+        Path to the source model case directory.
     cobre_output_dir:
         Path to the Cobre output directory.
     """
@@ -350,7 +350,7 @@ def print_bounds_summary_from_dataset(
     dataset:
         The canonical comparison dataset for the bounds subcommand.
     newave_dir:
-        Path to the NEWAVE case directory.
+        Path to the source model case directory.
     cobre_output_dir:
         Path to the Cobre output directory.
     tolerance:

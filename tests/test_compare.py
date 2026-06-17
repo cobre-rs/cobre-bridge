@@ -385,7 +385,7 @@ class TestCompareHydrosProductivity:
 
 
 class TestReconstructedCost:
-    """Reconstruct NEWAVE live immediate cost from MEDIAS × our penalties."""
+    """Reconstruct the source model live immediate cost from MEDIAS × our penalties."""
 
     def test_read_converted_penalties(self, tmp_path: Path) -> None:
         from cobre_bridge.comparators.cobre_readers import read_converted_penalties
@@ -444,7 +444,7 @@ class TestOverviewCostCharts:
 
         html = other_costs_chart(*self._data(), nw_offset=0)
         assert "No COPER" not in html
-        # NEWAVE COPER − CTERM: 137−100 = 37, 70−95 = −25 (negative, like the
+        # The source model COPER − CTERM: 137−100 = 37, 70−95 = −25 (negative, like the
         # frozen-COPER post-study gap).
         assert "37.0" in html and "-25.0" in html
         # Cobre immediate − thermal: 150−110 = 40, 50−90 = −40.
@@ -502,7 +502,7 @@ class TestOverviewCostCharts:
         row = read_cobre_stage_costs(tmp_path).row(0, named=True)
         assert row["thermal_cost"] == pytest.approx(8.0)
         assert row["anticipated_thermal_cost"] == pytest.approx(7.0)
-        # NEWAVE-comparable thermal total = live + anticipated GNL fuel.
+        # The source-model-comparable thermal total = live + anticipated GNL fuel.
         assert row["thermal_cost_total"] == pytest.approx(15.0)
 
     def test_thermal_cost_chart_includes_anticipated_in_cobre_series(self) -> None:
@@ -533,15 +533,16 @@ class TestOverviewCostCharts:
         assert "100.0" in html
         assert "anticipated" in html  # legend label
 
-    def test_generic_violation_groups_all_newave_restriction_parcelas(self) -> None:
+    def test_generic_violation_groups_all_source_model_restriction_parcelas(
+        self,
+    ) -> None:
         from cobre_bridge.comparators.charts import _resolve_cost_categories
 
-        # cobre-bridge converts the risk-aversion curve/surface (CAR/SAR),
-        # electric (RESTELETRICA), interchange (INTERC. MIN.), hydraulic
-        # (RHQ/RHV) and piecewise-linear (RLPP) restrictions ALL into generic
-        # constraints, so NEWAVE's separate parcelas must sum into the single
-        # "Generic Constr. Viol." row to compare against Cobre's aggregated
-        # generic_violation_cost.
+        # cobre-bridge converts the risk-aversion curve/surface (CAR/SAR), electric
+        # (RESTELETRICA), interchange (INTERC. MIN.), hydraulic (RHQ/RHV) and
+        # piecewise-linear (RLPP) restrictions ALL into generic constraints, so the
+        # source model's separate parcelas must sum into the single "Generic Constr.
+        # Viol." row to compare against Cobre's aggregated generic_violation_cost.
         nw_costs = {
             "VIOLACAO CAR": 1.0e7,
             "VIOLACAO SAR": 2.0e7,
@@ -563,9 +564,9 @@ class TestOverviewCostCharts:
             label: (nw, cb)
             for label, nw, cb, _ in _resolve_cost_categories(nw_costs, cobre_costs)
         }
-        # All 10 NEWAVE parcelas land in one row, equal to Cobre's aggregate.
+        # All 10 the source model parcelas land in one row, equal to Cobre's aggregate.
         assert cats["Generic Constr. Viol."] == pytest.approx((5.5e8, 5.5e8))
-        # CAR/SAR no longer pollute the storage-bounds row (NEWAVE side empty;
+        # CAR/SAR no longer pollute the storage-bounds row (the source model side empty;
         # the row is now Cobre-only, carrying the individual-reservoir slack).
         assert cats["Storage Bounds Viol."][0] == pytest.approx(0.0)
         assert cats["Storage Bounds Viol."][1] == pytest.approx(1.0e7)
@@ -580,7 +581,7 @@ class TestEdgeCases:
     """Test graceful handling of missing/empty data."""
 
     def test_newave_readers_missing_dir(self, tmp_path: Path) -> None:
-        """NEWAVE readers return empty DataFrames when dir missing."""
+        """The source model readers return empty DataFrames when dir missing."""
         from cobre_bridge.comparators.newave_readers import (
             read_medias_hydro,
             read_medias_system,
@@ -786,9 +787,10 @@ class TestCompareResultsReturnsDataset:
     """``compare_results`` returns a validated ``ComparisonDataset`` (ticket-022).
 
     Drives the REAL ``compare_results`` with every reader patched to empty so the
-    return-type contract is exercised end-to-end without any case files: NEWAVE
-    saidas is absent (``_find_saidas_dir`` -> ``None``), every Cobre/NEWAVE reader
-    returns an empty frame/dict, and the generic-constraint loaders are empty.
+    return-type contract is exercised end-to-end without any case files: The source
+    model saidas is absent (``_find_saidas_dir`` -> ``None``), every Cobre/the source
+    model reader returns an empty frame/dict, and the generic-constraint loaders are
+    empty.
     """
 
     @staticmethod
@@ -800,7 +802,7 @@ class TestCompareResultsReturnsDataset:
         empty_pl = pl.DataFrame
         empty_pd = lambda *a, **k: __import__("pandas").DataFrame()  # noqa: E731
 
-        # NEWAVE saidas absent -> all saidas-guarded branches are skipped.
+        # The source model saidas absent -> all saidas-guarded branches are skipped.
         monkeypatch.setattr(nr + "_find_saidas_dir", lambda _d: None)
 
         # Frame-returning Cobre readers.
@@ -832,7 +834,7 @@ class TestCompareResultsReturnsDataset:
         monkeypatch.setattr(cr + "read_cobre_cost_breakdown", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_training_duration", lambda *a, **k: 0.0)
 
-        # NEWAVE readers (only the non-saidas ones are reached).
+        # The source model readers (only the non-saidas ones are reached).
         monkeypatch.setattr(nr + "read_pmo_convergence", lambda *a, **k: empty_pl())
         monkeypatch.setattr(
             nr + "read_pmo_productivity_detail", lambda *a, **k: empty_pl()
@@ -900,10 +902,9 @@ class TestCompareResultsReturnsDataset:
 class TestProductivityDetail:
     """Productivity-tab readers, assembly, and charts (no example/ deps).
 
-    The Productivity tab is a *static* conversion-fidelity check: NEWAVE pmo
-    productivities vs what cobre-bridge computes from the same HIDR cadastro,
-    plus a per-stage realized-productivity line chart and a grouped
-    building-blocks table.
+    The Productivity tab is a *static* conversion-fidelity check: The source model pmo
+    productivities vs what cobre-bridge computes from the same HIDR cadastro, plus a
+    per-stage realized-productivity line chart and a grouped building-blocks table.
     """
 
     @staticmethod
@@ -1007,7 +1008,7 @@ class TestProductivityDetail:
         """
         import polars as pl
 
-        from cobre_bridge.comparators.results import _PRODUCTIVITY_DETAIL_SCHEMA
+        from cobre_bridge.comparators.analyze import _PRODUCTIVITY_DETAIL_SCHEMA
 
         return pl.DataFrame(
             {
@@ -1044,7 +1045,7 @@ class TestProductivityDetail:
             EntityAlignment,
             HydroEntity,
         )
-        from cobre_bridge.comparators.results import _build_productivity_detail
+        from cobre_bridge.comparators.analyze import build_productivity_detail
         from cobre_bridge.productivity import compute_productivity
 
         alignment = EntityAlignment(
@@ -1097,12 +1098,12 @@ class TestProductivityDetail:
             }
         }
         cb_accumulated = {6: 12.34}
-        df = _build_productivity_detail(
+        df = build_productivity_detail(
             alignment, nw_detail, cadastro, cobre_detail, cb_accumulated
         )
         assert df.height == 1
         row = df.row(0, named=True)
-        # NEWAVE pmo side carried through.
+        # The source model pmo side carried through.
         assert row["nw_altura_65"] == pytest.approx(0.813)
         assert row["nw_equivalent"] == pytest.approx(0.7865)
         assert row["nw_accumulated_earm"] == pytest.approx(5.3517)
@@ -1127,7 +1128,7 @@ class TestProductivityDetail:
             EntityAlignment,
             HydroEntity,
         )
-        from cobre_bridge.comparators.results import _build_productivity_detail
+        from cobre_bridge.comparators.analyze import build_productivity_detail
 
         alignment = EntityAlignment(
             hydros=[
@@ -1144,11 +1145,11 @@ class TestProductivityDetail:
             index=pd.Index([4], name="codigo_usina"),
         )
         cobre_detail = {7: {"name": "ROR", "vmin_hm3": 265.9, "vmax_hm3": 265.9}}
-        df = _build_productivity_detail(
+        df = build_productivity_detail(
             alignment, pl.DataFrame({"plant_name": ["ROR"]}), cadastro, cobre_detail, {}
         )
         row = df.row(0, named=True)
-        # NEWAVE side uses volume_referencia (265.9), matching Cobre — no
+        # The source model side uses volume_referencia (265.9), matching Cobre — no
         # spurious delta vs the cadastro volume_minimo/maximo (304).
         assert row["nw_vmin_hm3"] == pytest.approx(265.9)
         assert row["nw_vmax_hm3"] == pytest.approx(265.9)
@@ -1220,23 +1221,28 @@ class TestProductivityDetail:
         return rows
 
     def test_per_stage_chart_reuses_shared_per_plant_dropdown(self) -> None:
+        from cobre_bridge.comparators.analyze import productivity_per_stage_frame
         from cobre_bridge.comparators.charts import productivity_per_stage_chart
 
-        html = productivity_per_stage_chart(self._per_stage_results())
+        html = productivity_per_stage_chart(
+            productivity_per_stage_frame(self._per_stage_results())
+        )
         # Reuses the shared interactive per-plant <select> dropdown widget
         # (same as the hydro/thermal detail tabs) — every plant is selectable.
         assert "<select" in html
         assert "ALPHA (1)" in html and "BETA (2)" in html
         assert "prodstage-chart-productivity-mw-per-m3s" in html
         assert "Realized productivity" in html
-        # Per-stage NEWAVE + Cobre arrays embedded for the JS to plot.
+        # Per-stage the source model + Cobre arrays embedded for the JS to plot.
         assert "productivity_mw_per_m3s_nw" in html
         assert "productivity_mw_per_m3s_cb" in html
 
     def test_per_stage_chart_no_rows(self) -> None:
+        from cobre_bridge.comparators.analyze import productivity_per_stage_frame
         from cobre_bridge.comparators.charts import productivity_per_stage_chart
 
-        assert "No per-stage productivity data" in productivity_per_stage_chart([])
+        empty = productivity_per_stage_frame([])
+        assert "No per-stage productivity data" in productivity_per_stage_chart(empty)
 
     def test_blocks_table_grouped_header_and_highlight(self) -> None:
         from cobre_bridge.comparators.charts import productivity_blocks_table

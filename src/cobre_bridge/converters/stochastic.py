@@ -1,4 +1,5 @@
-"""Stochastic data converter: maps NEWAVE inflow and load data to Cobre Parquet.
+"""Stochastic data converter: maps the source model inflow and load data to Cobre
+Parquet.
 
 Converts ``vazoes.dat`` (historical inflow series), ``vazpast.dat`` (recent
 past inflows), ``sistema.dat`` (load demand), ``patamar.dat`` (load block
@@ -300,7 +301,8 @@ def convert_inflow_history(
 
 
 def convert_inflow_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
-    """Convert NEWAVE historical inflow data to Cobre inflow seasonal statistics.
+    """Convert the source model historical inflow data to Cobre inflow seasonal
+    statistics.
 
     For each hydro plant and each study stage (calendar month), computes the
     mean and standard deviation of historical monthly inflows across all
@@ -310,10 +312,10 @@ def convert_inflow_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
-        Entity ID map produced during entity conversion.  Used to resolve
-        NEWAVE hydro codes to 0-based Cobre hydro IDs.
+        Entity ID map produced during entity conversion.  Used to resolve the source
+        model hydro codes to 0-based Cobre hydro IDs.
 
     Returns
     -------
@@ -427,7 +429,8 @@ def convert_load_factors(
     case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> dict:
-    """Convert NEWAVE patamar load factors to a Cobre ``load_factors.json`` dict.
+    """Convert the source model patamar load factors to a Cobre ``load_factors.json``
+    dict.
 
     Reads ``patamar.dat::carga_patamares`` and ``dger.dat`` to produce one
     entry per (bus, stage) pair containing a ``block_factors`` list with one
@@ -439,9 +442,9 @@ def convert_load_factors(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
-        Entity ID map.  Used to resolve NEWAVE subsystem codes to 0-based
+        Entity ID map.  Used to resolve the source model subsystem codes to 0-based
         Cobre bus IDs.
 
     Returns
@@ -580,17 +583,16 @@ def parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
     """Parse a C_ADIC.DAT file into a lookup of added load values.
 
     Public, stable parsing seam: both this converter and the results
-    comparator (:mod:`cobre_bridge.comparators.newave_readers`) reconstruct
-    NEWAVE load from C_ADIC via this function, so its signature and the
-    ``(subsystem_code, year, cal_month) -> total_mw`` return shape are part of
-    the shared contract — change them in lockstep with both callers.
+    comparator (:mod:`cobre_bridge.comparators.newave_readers`) reconstruct the source
+    model load from C_ADIC via this function, so its signature and the
+    ``(subsystem_code, year, cal_month) -> total_mw`` return shape are part of the
+    shared contract — change them in lockstep with both callers.
 
-    Delegates the fixed-width parsing to inewave's
-    :class:`~inewave.newave.Cadic` reader. C_ADIC.DAT contains must-take energy
-    (in average MW) that NEWAVE adds to the bus load, broken down by *razão*
-    (reason) per subsystem per month. All razões for the same
-    ``(subsystem_code, year, cal_month)`` are summed so the caller receives a
-    single additive contribution.
+    Delegates the fixed-width parsing to inewave's :class:`~inewave.newave.Cadic`
+    reader. C_ADIC.DAT contains must-take energy (in average MW) that source-model adds
+    to the bus load, broken down by *razão* (reason) per subsystem per month. All razões
+    for the same ``(subsystem_code, year, cal_month)`` are summed so the caller receives
+    a single additive contribution.
 
     Post-study ("POS") rows carry inewave's sentinel year ``9999`` (PRE rows use
     ``1``), consistent with the convention in :func:`convert_load_stats`; PRE
@@ -623,7 +625,7 @@ def parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
 
 
 def convert_load_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
-    """Convert NEWAVE subsystem load data to Cobre load seasonal statistics.
+    """Convert the source model subsystem load data to Cobre load seasonal statistics.
 
     Reads ``sistema.dat`` and converts the ``mercado_energia`` DataFrame
     (load demand per subsystem per month) into a PyArrow Table.  When a
@@ -637,9 +639,9 @@ def convert_load_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
-        Entity ID map.  Used to resolve NEWAVE subsystem codes to 0-based
+        Entity ID map.  Used to resolve the source model subsystem codes to 0-based
         Cobre bus IDs.
 
     Returns

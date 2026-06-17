@@ -1,4 +1,5 @@
-"""Network entity converter: maps NEWAVE bus and line data to Cobre network JSON."""
+"""Network entity converter: maps the source model bus and line data to Cobre network
+JSON."""
 
 from __future__ import annotations
 
@@ -45,7 +46,8 @@ _NCS_FACTORS_SCHEMA_URL = (
 # Penalty conversion constants
 # --------------------------------------------------------------------------
 #
-# Source: NEWAVE User Manual v30 (CEPEL/ONS, 2023), section 3.24 "Penalidades
+# Source: The source model User Manual v30 (the source model/ONS, 2023), section 3.24
+# "Penalidades
 # (Ex.: Penalid.dat)" and the internal-default tables on pages 87–88.
 #
 # Time-aspect summary (re-derived from cobre/crates/cobre-sddp/src/lp_builder/
@@ -61,13 +63,13 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   Cobre: `objective[col] = penalty × block_hours`
 #   Cost  = (penalty × block_h) × MW = penalty × MWh → penalty unit R$/MWh.
 #   Affected: bus.deficit_segments[].cost, bus.excess_cost, line.exchange_cost,
-#   ncs.curtailment_cost, hydro.generation_violation_below_cost.
-#   → Conversion from NEWAVE R$/MWh: **direct** (no productivity factor).
+# ncs.curtailment_cost, hydro.generation_violation_below_cost. → Conversion from the
+# source model R$/MWh: **direct** (no productivity factor).
 #
 # Family B — Flow columns (m³/s), per block. Variable carries m³/s for one block.
 #   Cobre: `objective[col] = penalty × block_hours`
-#   Cost  = (penalty × block_h) × m³/s.  For this to equal R$ the penalty
-#   must be R$/(m³/s · h). NEWAVE supplies R$/MWh; the per-flow-per-hour
+# Cost  = (penalty × block_h) × m³/s.  For this to equal R$ the penalty must be R$/(m³/s
+# · h). The source model supplies R$/MWh; the per-flow-per-hour
 #   form requires multiplying by ρ [MW/(m³/s)]:
 #     R$/MWh × MW/(m³/s) = R$/(m³/s · h).
 #   Affected: hydro.spillage_cost, hydro.turbined_cost, hydro.diversion_cost,
@@ -78,13 +80,12 @@ _NCS_FACTORS_SCHEMA_URL = (
 # `total_stage_hours` instead of `block_hours`.
 #   Affected: hydro.water_withdrawal_violation_(pos|neg)_cost,
 #   hydro.evaporation_violation_(pos|neg)_cost,
-#   hydro.inflow_nonnegativity_cost.
-#   Cobre's docstring on evaporation_violation_cost says "$/mm" but the
-#   actual LP column (matrix.rs:346-347) reads f_evap_plus/minus as flow rates
-#   in m³/s — same unit as withdrawal. The "_m3s" suffix in the simulation
-#   output `evaporation_violation_pos_m3s` confirms this.
-#   → Conversion: **× ρ_max_acum** (`MAX_PRODTACUM_SIN`) for DESVIO and
-#     evaporation (per NEWAVE manual p.87); **× ρ_avg** for the others.
+# hydro.inflow_nonnegativity_cost. Cobre's docstring on evaporation_violation_cost says
+# "$/mm" but the actual LP column (matrix.rs:346-347) reads f_evap_plus/minus as flow
+# rates in m³/s — same unit as withdrawal. The "_m3s" suffix in the simulation output
+# `evaporation_violation_pos_m3s` confirms this. → Conversion: **× ρ_max_acum**
+# (`MAX_PRODTACUM_SIN`) for DESVIO and evaporation (per source-model manual p.87); **×
+# ρ_avg** for the others.
 #
 # Family D — Volume columns (hm³), per stage. Variable carries hm³ once per stage.
 #   Cobre: `objective[col] = penalty` (no time multiplier).
@@ -93,16 +94,16 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   (both currently NOT wired into the LP — slot is dormant).
 #   Conversion: 1 hm³ × ρ → MWh of energy-equivalent is `(1e6 m³ / 3600 s/h) × ρ`
 #   = 277.78 × ρ MWh (purely volumetric — 730h convention cancels). So
-#     cobre_coef [R$/hm³] = NEWAVE_R$/MWh × ρ × HM3_TO_MWH_PER_RHO
+#     cobre_coef [R$/hm³] = source_R$/MWh × ρ × HM3_TO_MWH_PER_RHO
 #   with HM3_TO_MWH_PER_RHO = 1e6/3600 ≈ 277.78.
 #
-# NEWAVE's 730 h-per-month convention vs cobre's actual calendar block_hours
-# (672–744 h) introduces only a ±2% numerical drift in absolute LP cost for the
-# Families above — *because each is converted consistently*: flow/power
-# penalties carry no fixed-month factor (cobre integrates them with the real
-# per-stage block_hours), and volume penalties carry no time multiplier (the
-# 730 cancels in the pure-volumetric HM3 → MWh conversion). When that holds, all
-# costs scale together and merit order is preserved.
+# The source model's 730 h-per-month convention vs cobre's actual calendar block_hours
+# (672–744 h) introduces only a ±2% numerical drift in absolute LP cost for the Families
+# above — *because each is converted consistently*: flow/power penalties carry no
+# fixed-month factor (cobre integrates them with the real per-stage block_hours), and
+# volume penalties carry no time multiplier (the 730 cancels in the pure-volumetric HM3
+# → MWh conversion). When that holds, all costs scale together and merit order is
+# preserved.
 #
 # ⚠️ CAVEAT — the assumption fails for any energy/STOCK quantity that cobre then
 # prices *with* a `× block_hours` time multiplier. There the fixed 730 does NOT
@@ -116,82 +117,82 @@ _NCS_FACTORS_SCHEMA_URL = (
 # `converters/constraints.py:_vminop_energy_factor`. Any future LP constraint or
 # penalty on a stock (storage/energy) priced `× block_hours` must do the same.
 #
-# Merit order from NEWAVE micro-penalty values ("NEWAVE individualizado"
+# Merit order from the source model micro-penalty values ("the source model
+# individualizado"
 # column, manual §3.24 p.88, v30 defaults):
 #   p_INT (0.000273) < p_PFIO = p_EVERT (0.000300)
 #   < p_TURB (0.000333) < p_CORTEOL (0.000344) < p_EXC (0.000355)
 
 MONTH_HOURS: float = (
-    730.0  # NEWAVE convention (manual §3.24, used in C_M3S2HM3)
+    730.0  # The source model convention (manual §3.24, used in C_M3S2HM3)
 )
 C_M3S2HM3: float = MONTH_HOURS * 3600.0 / 1e6  # = 2.628 hm³ / (m³/s · month)
 # HM3 × ρ_MW_per_m3s → MWh conversion (purely volumetric; 730 cancels here).
 HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
 
-# --- NEWAVE micro-penalties (page 88, current v30) -------------------------
-# Energy-domain (R$/MWh) — passed through to cobre without conversion.
-# Flow-domain (multiplied by ρ_avg before emission) — see `_PEVERT` group.
+# --- the source model micro-penalties (page 88, current v30) -------------------------
+# Energy-domain (R$/MWh) — passed through to cobre without conversion. Flow-domain
+# (multiplied by ρ_avg before emission) — see `_PEVERT` group.
 #
-# These are NEWAVE's v30 values verbatim: tiny (~1e-4 R$/MWh) regularization
-# costs whose only role is to break LP ties in a fixed merit order
-# (exchange < spillage < … < excess), well below any operational or deterrent
-# cost. An earlier revision multiplied them by a uniform uplift factor to widen
-# the HiGHS coefficient range; that factor was reverted to 1.0 (a no-op) and is
-# now dropped — the bare NEWAVE values condition fine at cobre's case scale.
+# These are the source model's v30 values verbatim: tiny (~1e-4 R$/MWh) regularization
+# costs whose only role is to break LP ties in a fixed merit order (exchange < spillage
+# < … < excess), well below any operational or deterrent cost. An earlier revision
+# multiplied them by a uniform uplift factor to widen the HiGHS coefficient range; that
+# factor was reverted to 1.0 (a no-op) and is now dropped — the bare the source model
+# values condition fine at cobre's case scale.
 _PINT = 0.000273  # intercâmbio  → line.exchange_cost
 
-# NEWAVE halves the intercâmbio penalty on lines that touch a fictitious
-# submercado (e.g. NOFICT1). Rationale: a fictitious node is a routing-only
-# hop with no demand or generation of its own, so a real → fict → real path
-# would otherwise accumulate twice the penalty of an equivalent direct
-# real → real link. The 0.5 discount restores cost-parity between the two
-# topologies.  Emitted as the per-line `exchange_cost` override defined in
-# lines.schema.json; absence falls back to the global `_PINT` value.
+# The source model halves the intercâmbio penalty on lines that touch a fictitious
+# submercado (e.g. NOFICT1). Rationale: a fictitious node is a routing-only hop with no
+# demand or generation of its own, so a real → fict → real path would otherwise
+# accumulate twice the penalty of an equivalent direct real → real link. The 0.5
+# discount restores cost-parity between the two topologies.  Emitted as the per-line
+# `exchange_cost` override defined in lines.schema.json; absence falls back to the
+# global `_PINT` value.
 _PINT_FICTITIOUS_DISCOUNT = 0.5
 _PCORTEOL = 0.000344  # corte geração eólica → ncs.curtailment_cost
 _PEXC = 0.000355  # excesso de energia → bus.excess_cost
 
-# Flow-domain (R$/MWh equivalent, multiplied by ρ_avg before emission).
-# Cobre's `hydro.spillage_cost` covers ALL spillage (reservoir + run-of-river).
-# In the *individualized* model (manual §3.24, p.88, "NEWAVE individualizado"
-# column) BOTH controllable (pEVERT) and run-of-river (pPFIO) spillage use the
-# same base 0.000300 — only the REE-aggregated ("NEWAVE equivalente") column
-# raises pEVERT to 0.000327. Cobre cases are individualized, so anchor on 0.000300.
+# Flow-domain (R$/MWh equivalent, multiplied by ρ_avg before emission). Cobre's
+# `hydro.spillage_cost` covers ALL spillage (reservoir + run-of-river). In the
+# *individualized* model (manual §3.24, p.88, "the source model individualizado" column)
+# BOTH controllable (pEVERT) and run-of-river (pPFIO) spillage use the same base
+# 0.000300 — only the REE-aggregated ("the source model equivalente") column raises
+# pEVERT to 0.000327. Cobre cases are individualized, so anchor on 0.000300.
 _PEVERT = 0.000300  # vertimento controlável → hydro.spillage_cost
 _PTURB = 0.000333  # turbinamento → hydro.turbined_cost (applied to every hydro)
 _PCDESV = 0.000300  # volume desviado → hydro.diversion_cost
 
-# --- NEWAVE hard-coded internal defaults (no user input via PENALID) -------
-# Page 87: evaporation and FPHA folga both derive from MAX_CUSTO_DEFICIT, and
-# NEWAVE's manual prescribes a 10× multiplier — the evap/FPHA folga slack is
-# ~10× more expensive per MWh-equivalent than the deficit cost, putting these
-# physical-law constraints (water-cycle physics, water-supply requirements) at
-# the top of the merit order so the LP violates them only as a last resort.
-# We apply that 10× faithfully (it doubles as the PENALID fallback below, and
-# `_ELETRI_HIGH_MULT` reuses the same magnitude). Earlier revisions trialled
-# softer factors (1.1×, 2×) to tame HiGHS's coefficient range, but the bare
-# 10× conditions acceptably at cobre's case scale and stays NEWAVE-faithful.
+# --- the source model hard-coded internal defaults (no user input via PENALID) -------
+# Page 87: evaporation and FPHA folga both derive from MAX_CUSTO_DEFICIT, and The source
+# model's manual prescribes a 10× multiplier — the evap/FPHA folga slack is ~10× more
+# expensive per MWh-equivalent than the deficit cost, putting these physical-law
+# constraints (water-cycle physics, water-supply requirements) at the top of the merit
+# order so the LP violates them only as a last resort. We apply that 10× faithfully (it
+# doubles as the PENALID fallback below, and `_ELETRI_HIGH_MULT` reuses the same
+# magnitude). Earlier revisions trialled softer factors (1.1×, 2×) to tame HiGHS's
+# coefficient range, but the bare 10× conditions acceptably at cobre's case scale and
+# stays the source-model-faithful.
 _EVAPORATION_MULT = 10.0
 
 # NOTE: when PENALID supplies TURBMN, VAZMIN, TURBMX with the same R$/MWh value
-# (typical NEWAVE convention), the resulting turbined/outflow-below/outflow-above
-# slack costs share an LP coefficient (ρ_avg cancels nothing). An earlier
-# revision multiplied each by a ~1 % "tie-break" factor to break that
-# degeneracy; the factors were all reverted to 1.00 (no-op) and have been
-# dropped. Reintroduce distinct spacing here if HiGHS degeneracy resurfaces.
-# --- Cobre fields not yet wired into the LP --------------------------------
-# Storage and filling-target violation costs are declared on cobre's schema
-# but `lp_builder/matrix.rs` does NOT use them in the objective (all 0.0
-# at build time). We still emit sensible values so the case is ready for
-# the day cobre wires these in.
+# (typical the source model convention), the resulting
+# turbined/outflow-below/outflow-above slack costs share an LP coefficient (ρ_avg
+# cancels nothing). An earlier revision multiplied each by a ~1 % "tie-break" factor to
+# break that degeneracy; the factors were all reverted to 1.00 (no-op) and have been
+# dropped. Reintroduce distinct spacing here if HiGHS degeneracy resurfaces. --- Cobre
+# fields not yet wired into the LP -------------------------------- Storage and
+# filling-target violation costs are declared on cobre's schema but
+# `lp_builder/matrix.rs` does NOT use them in the objective (all 0.0 at build time). We
+# still emit sensible values so the case is ready for the day cobre wires these in.
 _DEFAULT_STORAGE_VIOLATION_BELOW_COST = 1.0e6  # R$/hm³ (dormant in cobre LP)
 _DEFAULT_FILLING_TARGET_VIOLATION_COST = 1.0e7  # R$/hm³ (dormant in cobre LP)
 
-# --- Soft fallback for ELETRI when PENALID is silent -----------------------
-# NEWAVE's behaviour when ELETRI is absent: use the constraint only in final
-# simulation, not in policy. Cobre can't represent that nuance, so we keep
-# the slack enabled with a high penalty (10 × MAX_DEFICIT, matching
-# NEWAVE's evaporation/FPHA default magnitude).
+# --- Soft fallback for ELETRI when PENALID is silent ----------------------- The source
+# model's behaviour when ELETRI is absent: use the constraint only in final simulation,
+# not in policy. Cobre can't represent that nuance, so we keep the slack enabled with a
+# high penalty (10 × MAX_DEFICIT, matching The source model's evaporation/FPHA default
+# magnitude).
 _ELETRI_HIGH_MULT = 10.0
 
 # --- Inflow non-negativity penalty anchor ---------------------------------
@@ -241,7 +242,7 @@ def _build_canonical_pair_to_line_id(
 
 
 def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
-    """Convert NEWAVE subsystem data to a Cobre ``buses.json`` dict.
+    """Convert the source model subsystem data to a Cobre ``buses.json`` dict.
 
     Reads ``sistema.dat`` from *case*.  Each subsystem (including
     fictitious ones) becomes a bus.  Deficit segments are extracted from
@@ -250,7 +251,7 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Pre-built ID mapping for bus IDs.
     """
@@ -284,11 +285,13 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         )
         cost_raw = row["custo"]
         cost = float(cost_raw) if not is_na(cost_raw) else None
-        buses_by_code[code]["segments"].append({
-            "patamar": int(row["patamar_deficit"]),
-            "depth_mw": depth_mw,
-            "cost": cost,
-        })
+        buses_by_code[code]["segments"].append(
+            {
+                "patamar": int(row["patamar_deficit"]),
+                "depth_mw": depth_mw,
+                "cost": cost,
+            }
+        )
 
     # Find the reference deficit cost (first non-NaN, non-zero cost across
     # all subsystems) to use as a fallback for fictitious subsystems.
@@ -304,19 +307,19 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     buses: list[dict] = []
     for code, info in buses_by_code.items():
         segs = sorted(info["segments"], key=lambda s: s["patamar"])
-        active_segs = [
-            s for s in segs if s["cost"] is not None and s["cost"] > 0
-        ]
+        active_segs = [s for s in segs if s["cost"] is not None and s["cost"] > 0]
         if not active_segs:
             active_segs = [{"cost": fallback_cost, "depth_mw": None}]
 
         deficit_segments: list[dict] = []
         for i, seg in enumerate(active_segs):
             is_last = i == len(active_segs) - 1
-            deficit_segments.append({
-                "depth_mw": None if is_last else seg["depth_mw"],
-                "cost": seg["cost"],
-            })
+            deficit_segments.append(
+                {
+                    "depth_mw": None if is_last else seg["depth_mw"],
+                    "cost": seg["cost"],
+                }
+            )
 
         bus_entry: dict = {
             "id": id_map.bus_id(code),
@@ -339,8 +342,8 @@ def convert_bus_penalty_overrides(
 ) -> pa.Table | None:
     """Build ``constraints/penalty_overrides_bus.parquet`` for fictitious buses.
 
-    NEWAVE fictitious submarkets (``custo_deficit.ficticio``) are pure
-    transshipment nodes: no real load/generation, and NEWAVE forbids energy
+    The source model fictitious submarkets (``custo_deficit.ficticio``) are pure
+    transshipment nodes: no real load/generation, and the source model forbids energy
     excess there.  Cobre has no hard per-bus "no excess" flag, so we override the
     per-bus ``excess_cost`` (sparse, per stage) to the deficit cost — symmetric
     with unserved energy — without which Cobre dumps surplus energy at the
@@ -358,17 +361,12 @@ def convert_bus_penalty_overrides(
     sistema = case.sistema
     deficit_df = sistema.custo_deficit
 
-    if (
-        deficit_df is None
-        or deficit_df.empty
-        or "ficticio" not in deficit_df.columns
-    ):
+    if deficit_df is None or deficit_df.empty or "ficticio" not in deficit_df.columns:
         return None
 
     fic_mask = deficit_df["ficticio"].fillna(False).astype(bool)
     fictitious_codes = {
-        int(code)
-        for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
+        int(code) for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
     }
     if not fictitious_codes:
         return None
@@ -404,11 +402,13 @@ def convert_bus_penalty_overrides(
     if not bus_ids:
         return None
 
-    schema = pa.schema([
-        pa.field("bus_id", pa.int32()),
-        pa.field("stage_id", pa.int32()),
-        pa.field("excess_cost", pa.float64()),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("bus_id", pa.int32()),
+            pa.field("stage_id", pa.int32()),
+            pa.field("excess_cost", pa.float64()),
+        ]
+    )
     return pa.table(
         {
             "bus_id": pa.array(bus_ids, type=pa.int32()),
@@ -420,7 +420,7 @@ def convert_bus_penalty_overrides(
 
 
 def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
-    """Convert NEWAVE interchange limits to a Cobre ``lines.json`` dict.
+    """Convert the source model interchange limits to a Cobre ``lines.json`` dict.
 
     Reads ``sistema.dat`` from *case*.  Each directional interchange
     pair becomes a line using the first study month's limits as static
@@ -429,7 +429,7 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Pre-built ID mapping for bus IDs.
     """
@@ -442,9 +442,9 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             "lines": [],
         }
 
-    # Set of NEWAVE codes flagged as fictitious in sistema.custo_deficit.
-    # Used below to halve the exchange penalty on lines that touch a
-    # fictitious bus (see `_PINT_FICTITIOUS_DISCOUNT`).
+    # Set of the source model codes flagged as fictitious in sistema.custo_deficit. Used
+    # below to halve the exchange penalty on lines that touch a fictitious bus (see
+    # `_PINT_FICTITIOUS_DISCOUNT`).
     fictitious_codes: set[int] = set()
     deficit_df = sistema.custo_deficit
     if (
@@ -454,8 +454,7 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     ):
         fic_mask = deficit_df["ficticio"].fillna(False).astype(bool)
         fictitious_codes = {
-            int(code)
-            for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
+            int(code) for code in deficit_df.loc[fic_mask, "codigo_submercado"].unique()
         }
 
     # Use the study start month from dger.dat as the reference for static
@@ -509,9 +508,7 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     canonical_map = _build_canonical_pair_to_line_id(case)
 
     lines: list[dict] = []
-    for (src, tgt), line_id in sorted(
-        canonical_map.items(), key=lambda x: x[1]
-    ):
+    for (src, tgt), line_id in sorted(canonical_map.items(), key=lambda x: x[1]):
         caps = pair_map.get((src, tgt), {"direct_mw": 0.0, "reverse_mw": 0.0})
         src_bus = id_map.bus_id(src)
         tgt_bus = id_map.bus_id(tgt)
@@ -540,19 +537,17 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 def _read_penalid_costs(case: NewaveCase) -> dict[str, float]:
     """Pull ``{variable_name: first non-null R$/MWh value}`` from PENALID.DAT.
 
-    Falls back to an empty dict if the file is absent or unparseable. Each
-    PENALID variable can have per-REE / per-patamar values; we pick the first
-    non-null R$/MWh entry as the global default the same way NEWAVE does for
-    REE-aggregated penalty handling.
+    Falls back to an empty dict if the file is absent or unparseable. Each PENALID
+    variable can have per-REE / per-patamar values; we pick the first non-null R$/MWh
+    entry as the global default the same way the source model does for REE-aggregated
+    penalty handling.
     """
     if case.files.penalid is None:
         return {}
     try:
         penalid = case.penalid
     except (OSError, ValueError) as exc:
-        _LOG.warning(
-            "penalid.dat could not be parsed (%s); using defaults.", exc
-        )
+        _LOG.warning("penalid.dat could not be parsed (%s); using defaults.", exc)
         return {}
 
     pen_df = penalid.penalidades
@@ -561,9 +556,7 @@ def _read_penalid_costs(case: NewaveCase) -> dict[str, float]:
 
     out: dict[str, float] = {}
     for var in pen_df["variavel"].unique():
-        rows = pen_df[
-            (pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()
-        ]
+        rows = pen_df[(pen_df["variavel"] == var) & pen_df["valor_R$_MWh"].notna()]
         if not rows.empty:
             out[str(var).strip()] = float(rows.iloc[0]["valor_R$_MWh"])
     return out
@@ -607,7 +600,7 @@ def _hydro_penalty_costs(
     single formula site guarantees the two paths never drift: the override is
     exactly the base recomputed with a different productivity pair.
 
-    Convention from NEWAVE manual p.87:
+    Convention from the source model manual p.87:
 
     - ``DESVIO`` → ``× MAX_PRODTACUM_SIN`` (water withdrawal).
     - ``VAZMIN`` / ``TURBMN`` / ``TURBMX`` / ``VOLMIN`` → ``× PROD_MEDIA_SIN``.
@@ -616,19 +609,11 @@ def _hydro_penalty_costs(
 
     The returned dict preserves the exact key order of ``penalties.json:hydro``.
     """
-    desvio_mwh = penalid_costs.get(
-        "DESVIO", _EVAPORATION_MULT * max_deficit_cost
-    )
-    vazmin_mwh = penalid_costs.get(
-        "VAZMIN", _EVAPORATION_MULT * max_deficit_cost
-    )
+    desvio_mwh = penalid_costs.get("DESVIO", _EVAPORATION_MULT * max_deficit_cost)
+    vazmin_mwh = penalid_costs.get("VAZMIN", _EVAPORATION_MULT * max_deficit_cost)
     ghmin_mwh = penalid_costs.get("GHMIN", _EVAPORATION_MULT * max_deficit_cost)
-    turbmn_mwh = penalid_costs.get(
-        "TURBMN", _EVAPORATION_MULT * max_deficit_cost
-    )
-    turbmx_mwh = penalid_costs.get(
-        "TURBMX", _EVAPORATION_MULT * max_deficit_cost
-    )
+    turbmn_mwh = penalid_costs.get("TURBMN", _EVAPORATION_MULT * max_deficit_cost)
+    turbmx_mwh = penalid_costs.get("TURBMX", _EVAPORATION_MULT * max_deficit_cost)
 
     water_withdrawal_cost = desvio_mwh * rho_max_acum
     outflow_below_cost = vazmin_mwh * rho_avg
@@ -640,7 +625,7 @@ def _hydro_penalty_costs(
     # we still populate them. VOLMIN comes from PENALID when set; otherwise
     # use a high default.
     #
-    # Conversion from NEWAVE R$/MWh to cobre R$/hm³ is purely volumetric:
+    # Conversion from the source model R$/MWh to cobre R$/hm³ is purely volumetric:
     # 1 hm³ of stored water released through the cascade yields
     #   1e6 m³ × ρ MW/(m³/s) × 1/3600 s/h = (1e6/3600) × ρ MWh
     # so cobre_coef = P_R$_MWh × ρ × (1e6/3600). The 730h/month assumption
@@ -661,31 +646,28 @@ def _hydro_penalty_costs(
         else _DEFAULT_STORAGE_VIOLATION_BELOW_COST
     )
 
-    # Evaporation violation: no PENALID variable. NEWAVE manual p.87 prescribes
-    # `(K × MAX_CUSTO_DEFICIT × MAX_PRODTACUM_SIN) / C_M3S2HM3` with K=10, which
-    # we apply faithfully (K == `_EVAPORATION_MULT`) so the deterrent magnitude
+    # Evaporation violation: no PENALID variable. The source model manual p.87
+    # prescribes `(K × MAX_CUSTO_DEFICIT × MAX_PRODTACUM_SIN) / C_M3S2HM3` with K=10,
+    # which we apply faithfully (K == `_EVAPORATION_MULT`) so the deterrent magnitude
     # sits above the PENALID-sourced operational slacks (typically
-    # water_withdrawal_violation_cost). The /C_M3S2HM3 step is dropped (only
-    # needed for NEWAVE's per-hm³ slot).
+    # water_withdrawal_violation_cost). The /C_M3S2HM3 step is dropped (only needed for
+    # the source model's per-hm³ slot).
     evaporation_cost = _EVAPORATION_MULT * max_deficit_cost * rho_max_acum
 
-    # Flow-domain micro-penalties (× ρ_avg per NEWAVE individualized conversion).
+    # Flow-domain micro-penalties (× ρ_avg per source-model individualized conversion).
     spillage_cost = _PEVERT * rho_avg
     turbined_cost = _PTURB * rho_avg
     diversion_cost = _PCDESV * rho_avg
 
-    # Inflow non-negativity: NEWAVE has no PENALID variable for this. Cobre's
-    # default is 1000 R$/(m³/s · h), which is far below the operationally-
-    # significant flow-domain slacks above (turbined / outflow / evaporation /
-    # water-withdrawal). When the LP can choose between letting incremental
-    # natural inflow go negative (a non-physical phenomenon — implies upstream
-    # is somehow "absorbing water" the cascade can't account for) and
-    # violating another flow constraint, we want it to *always* prefer fixing
-    # the other constraint first. Anchor inflow non-negativity penalty to the
-    # withdrawal slack plus a 1 R$/m³/s tie-breaker.
-    inflow_nonnegativity_cost = (
-        water_withdrawal_cost + _INFLOW_NN_OFFSET_R_PER_M3S
-    )
+    # Inflow non-negativity: The source model has no PENALID variable for this. Cobre's
+    # default is 1000 R$/(m³/s · h), which is far below the operationally- significant
+    # flow-domain slacks above (turbined / outflow / evaporation / water-withdrawal).
+    # When the LP can choose between letting incremental natural inflow go negative (a
+    # non-physical phenomenon — implies upstream is somehow "absorbing water" the
+    # cascade can't account for) and violating another flow constraint, we want it to
+    # *always* prefer fixing the other constraint first. Anchor inflow non-negativity
+    # penalty to the withdrawal slack plus a 1 R$/m³/s tie-breaker.
+    inflow_nonnegativity_cost = water_withdrawal_cost + _INFLOW_NN_OFFSET_R_PER_M3S
 
     return {
         "spillage_cost": spillage_cost,
@@ -731,20 +713,19 @@ def convert_penalties(
     max_accumulated_productivity: float | None = None,
     prod_media_sin: float | None = None,
 ) -> dict:
-    """Generate a Cobre ``penalties.json`` dict from NEWAVE data.
+    """Generate a Cobre ``penalties.json`` dict from the source model data.
 
-    Faithful to NEWAVE User Manual v30 section 3.24:
+    Faithful to the source model User Manual v30 section 3.24:
 
     - Bus deficit segments come from ``sistema.custo_deficit`` directly
       (R$/MWh on both sides, no conversion).
     - PENALID-sourced flow-domain penalties are converted to cobre's
       coefficient slot via ``× ρ`` (where ρ is ``PROD_MEDIA_SIN`` or
-      ``MAX_PRODTACUM_SIN`` per the NEWAVE conversion table on page 87).
+      ``MAX_PRODTACUM_SIN`` per source-model conversion table on page 87).
     - The micro-penalties (``pINT``, ``pEVERT``, ``pTURB``, ``pCORTEOL``,
-      ``pEXC``, ``pCDESV``) are NEWAVE's hard-coded internal defaults
-      (page 88, current v30 values). They are written directly to cobre
-      and preserve NEWAVE's merit order: exchange < spillage < FPHA <
-      curtailment < excess.
+      ``pEXC``, ``pCDESV``) are the source model's hard-coded internal defaults (page
+      88, current v30 values). They are written directly to cobre and preserve the
+      source model's merit order: exchange < spillage < FPHA < curtailment < excess.
     - Evaporation and storage-violation slots without a PENALID source
       fall back to ``10 × MAX_CUSTO_DEFICIT × ρ_max_acum`` (evaporation,
       per the manual) or ``1e6`` (storage/filling — dormant in cobre's LP
@@ -753,7 +734,7 @@ def convert_penalties(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     hydros_dict:
         The already-converted ``hydros.json`` dict (used for reservoir
         useful-volume weights and the productivity fallback).
@@ -773,23 +754,25 @@ def convert_penalties(
     primary_deficit_cost = 0.0
     max_deficit_cost = 0.0
     if deficit_df is not None and not deficit_df.empty:
-        first_sub = deficit_df.sort_values([
-            "codigo_submercado",
-            "patamar_deficit",
-        ])
+        first_sub = deficit_df.sort_values(
+            [
+                "codigo_submercado",
+                "patamar_deficit",
+            ]
+        )
         primary_deficit_cost = float(first_sub.iloc[0]["custo"])
         max_deficit_cost = float(deficit_df["custo"].max())
 
     penalid_costs = _read_penalid_costs(case)
     productivities = productivities or {}
 
-    # ρ_avg = PROD_MEDIA_SIN: NEWAVE converts the PENALID R$/MWh penalties
+    # ρ_avg = PROD_MEDIA_SIN: The source model converts the PENALID R$/MWh penalties
     # (VAZMIN, TURBMN, TURBMX, VOLMIN — manual table p.87) with the mean **PRODT**
     # (equivalent productivity vol_min→vol_max) over ALL existing plants including
-    # zeros. Validated against pmo.dat's applied penalties (0.6299 ↔ penalty
-    # 821.78). Pass it in via ``prod_media_sin`` (see ``hydro.compute_prodt_sin_mean``).
-    # The legacy fallback — mean of the 65%-reference own ρ, ρ>0 only — is ~4%
-    # high; kept only for callers/tests that don't supply ``prod_media_sin``.
+    # zeros. Validated against pmo.dat's applied penalties (0.6299 ↔ penalty 821.78).
+    # Pass it in via ``prod_media_sin`` (see ``hydro.compute_prodt_sin_mean``). The
+    # legacy fallback — mean of the 65%-reference own ρ, ρ>0 only — is ~4% high; kept
+    # only for callers/tests that don't supply ``prod_media_sin``.
     own_prods = _own_productivities(hydros_dict, productivities)
     rho_avg = (
         prod_media_sin
@@ -797,10 +780,10 @@ def convert_penalties(
         else (sum(own_prods) / len(own_prods) if own_prods else 1.0)
     )
 
-    # ρ_max_acum = MAX_PRODTACUM_SIN: used by NEWAVE for DESVIO and the
-    # evaporation default. When the caller doesn't supply the true cascade
-    # accumulated max we approximate by `max(own_prods)`; the caller in
-    # `pipeline.py` passes the real value computed from the cascade DAG.
+    # ρ_max_acum = MAX_PRODTACUM_SIN: used by the source model for DESVIO and the
+    # evaporation default. When the caller doesn't supply the true cascade accumulated
+    # max we approximate by `max(own_prods)`; the caller in `pipeline.py` passes the
+    # real value computed from the cascade DAG.
     rho_max_acum = (
         max_accumulated_productivity
         if max_accumulated_productivity is not None
@@ -818,10 +801,10 @@ def convert_penalties(
         max_deficit_cost=max_deficit_cost,
     )
 
-    # --------------------------------------------------------------------
-    # NEWAVE micro-penalty defaults (page 88, current v30) — energy-domain
-    # (R$/MWh), pass through directly (no productivity multiplier, hence not
-    # stage-varying and not part of the hydro override).
+    # -------------------------------------------------------------------- The source
+    # model micro-penalty defaults (page 88, current v30) — energy-domain (R$/MWh), pass
+    # through directly (no productivity multiplier, hence not stage-varying and not part
+    # of the hydro override).
     # --------------------------------------------------------------------
     excess_cost = _PEXC
     exchange_cost = _PINT
@@ -857,9 +840,9 @@ def convert_hydro_penalty_overrides(
 ) -> pa.Table | None:
     """Build ``constraints/penalty_overrides_hydro.parquet`` (per-stage ρ).
 
-    NEWAVE converts its flow-domain hydro penalties (spillage, turbined,
-    diversion, the outflow/turbined/storage/withdrawal/evaporation slacks)
-    using the **SIN-aggregate** productivity constants ``PROD_MEDIA_SIN`` and
+    The source model converts its flow-domain hydro penalties (spillage, turbined,
+    diversion, the outflow/turbined/storage/withdrawal/evaporation slacks) using the
+    **SIN-aggregate** productivity constants ``PROD_MEDIA_SIN`` and
     ``MAX_PRODTACUM_SIN``. Those constants are *not* fixed across the horizon:
     each plant's equivalent productivity tracks its seasonal reference volume
     (VOLREF_SAZ) and any CFUGA/CMONT tailrace/forebay overrides, so the SIN
@@ -868,19 +851,19 @@ def convert_hydro_penalty_overrides(
     override makes the **penalty** conversion use the same per-stage ρ, instead
     of a single static fleet mean — keeping the two coherent.
 
-    The override is SIN-uniform (one value per stage, applied to every hydro,
-    matching NEWAVE's use of a single SIN constant) and **sparse**: a row is
-    emitted only for ``(hydro, stage)`` pairs and columns whose value actually
-    differs from the global ``penalties.json`` default. ρ-independent slots
-    (``generation_violation_below_cost``, ``filling_target_violation_cost``,
-    and ``storage_violation_below_cost`` when VOLMIN is unset) never differ and
-    are never emitted.
+    The override is SIN-uniform (one value per stage, applied to every hydro, matching
+    the source model's use of a single SIN constant) and **sparse**: a row is emitted
+    only for ``(hydro, stage)`` pairs and columns whose value actually differs from the
+    global ``penalties.json`` default. ρ-independent slots
+    (``generation_violation_below_cost``, ``filling_target_violation_cost``, and
+    ``storage_violation_below_cost`` when VOLMIN is unset) never differ and are never
+    emitted.
 
     Parameters
     ----------
     case:
-        Parsed NEWAVE case (re-reads ``sistema`` for the max deficit
-        cost and PENALID for the violation-slack base rates).
+        Parsed the source model case (re-reads ``sistema`` for the max deficit cost and
+        PENALID for the violation-slack base rates).
     hydro_ids:
         Every Cobre hydro id the SIN-uniform override must cover. Sorted
         ascending internally so output obeys the ``(hydro_id, stage_id)``
@@ -943,9 +926,7 @@ def convert_hydro_penalty_overrides(
         return None
 
     present_cols = [
-        c
-        for c in _RHO_SCALED_HYDRO_COLUMNS
-        if any(c in d for _, d in stage_overrides)
+        c for c in _RHO_SCALED_HYDRO_COLUMNS if any(c in d for _, d in stage_overrides)
     ]
 
     hydro_id_col: list[int] = []
@@ -975,7 +956,8 @@ def convert_line_bounds(
     case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> pa.Table:
-    """Convert NEWAVE interchange limits to a Cobre ``line_bounds.parquet`` table.
+    """Convert the source model interchange limits to a Cobre ``line_bounds.parquet``
+    table.
 
     Reads ``sistema.dat::limites_intercambio`` and ``dger.dat`` to produce one
     row per (line, stage) pair with direct and reverse MW bounds.
@@ -990,7 +972,7 @@ def convert_line_bounds(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID map.  Used to resolve subsystem codes to Cobre bus IDs
         (indirectly, via the same canonical-pair ordering used in
@@ -1005,12 +987,14 @@ def convert_line_bounds(
     sistema = case.sistema
     limites_df: pd.DataFrame | None = sistema.limites_intercambio
 
-    _LINE_BOUNDS_SCHEMA = pa.schema([
-        pa.field("line_id", pa.int32()),
-        pa.field("stage_id", pa.int32()),
-        pa.field("direct_mw", pa.float64()),
-        pa.field("reverse_mw", pa.float64()),
-    ])
+    _LINE_BOUNDS_SCHEMA = pa.schema(
+        [
+            pa.field("line_id", pa.int32()),
+            pa.field("stage_id", pa.int32()),
+            pa.field("direct_mw", pa.float64()),
+            pa.field("reverse_mw", pa.float64()),
+        ]
+    )
 
     if limites_df is None or limites_df.empty:
         return pa.table(
@@ -1069,9 +1053,7 @@ def convert_line_bounds(
 
     # Build last-year lookup for post-study:
     # {(src, tgt, cal_month) -> {direct_mw, reverse_mw}} — use the latest year.
-    last_year_per_key: dict[
-        tuple[int, int, int], tuple[int, dict[str, float]]
-    ] = {}
+    last_year_per_key: dict[tuple[int, int, int], tuple[int, dict[str, float]]] = {}
     for (src, tgt, yr, cal_month), caps in date_lookup.items():
         key3 = (src, tgt, cal_month)
         existing = last_year_per_key.get(key3)
@@ -1094,12 +1076,14 @@ def convert_line_bounds(
 
     for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
         src, tgt = pair
-        freeze_caps = date_lookup.get((
-            src,
-            tgt,
-            ls_y,
-            ls_m,
-        )) or last_year_lookup.get(
+        freeze_caps = date_lookup.get(
+            (
+                src,
+                tgt,
+                ls_y,
+                ls_m,
+            )
+        ) or last_year_lookup.get(
             (src, tgt, ls_m), {"direct_mw": 0.0, "reverse_mw": 0.0}
         )
         y, m = start_year, start_month
@@ -1171,9 +1155,7 @@ def _build_ncs_group_to_id(
         return 0 <= stage_id < total_stages
 
     df_filtered = df_ncs[df_ncs["data"].apply(_in_horizon)].copy()
-    groups = df_filtered.groupby(
-        ["codigo_submercado", "indice_bloco"], sort=True
-    )
+    groups = df_filtered.groupby(["codigo_submercado", "indice_bloco"], sort=True)
 
     result: dict[tuple[int, int], int] = {}
     ncs_id = 0
@@ -1193,7 +1175,8 @@ def convert_non_controllable_sources(
     case: NewaveCase,
     id_map: NewaveIdMap,
 ) -> dict:
-    """Convert NEWAVE non-simulated generation to a Cobre NCS entity JSON dict.
+    """Convert the source model non-simulated generation to a Cobre NCS entity JSON
+    dict.
 
     Reads ``sistema.dat::geracao_usinas_nao_simuladas``.  Each unique
     ``(codigo_submercado, indice_bloco)`` pair becomes one NCS entity.
@@ -1201,7 +1184,7 @@ def convert_non_controllable_sources(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID map.  Used to resolve subsystem codes to 0-based Cobre bus
         IDs.
@@ -1243,9 +1226,7 @@ def convert_non_controllable_sources(
     ncs_list: list[dict] = []
     ncs_id = 0
 
-    groups = df_filtered.groupby(
-        ["codigo_submercado", "indice_bloco"], sort=True
-    )
+    groups = df_filtered.groupby(["codigo_submercado", "indice_bloco"], sort=True)
 
     for (sub_code, bloco), group in groups:
         sub_code_int = int(sub_code)
@@ -1262,32 +1243,29 @@ def convert_non_controllable_sources(
 
         # fonte: use the first non-null value in the group.
         fonte_series = group["fonte"].dropna()
-        fonte = (
-            str(fonte_series.iloc[0]).strip()
-            if not fonte_series.empty
-            else "NCS"
-        )
+        fonte = str(fonte_series.iloc[0]).strip() if not fonte_series.empty else "NCS"
 
         # max_generation_mw: maximum non-NaN value across all rows in the group.
         valores = pd.to_numeric(group["valor"], errors="coerce")
         valid_vals = valores.dropna()
         max_gen = float(valid_vals.max()) if not valid_vals.empty else 0.0
 
-        ncs_list.append({
-            "id": ncs_id,
-            "name": f"{fonte}_{sub_code_int}",
-            "bus_id": bus_id,
-            "max_generation_mw": max_gen,
-            # NEWAVE pre-nets `geracao_usinas_nao_simuladas` from MERC
-            # before the dispatch LP runs, so the aggregate is implicitly
-            # must-run. Setting allow_curtailment=False instructs Cobre's
-            # LP to pin dispatch to the realized availability for every
-            # scenario; otherwise the LP discovers that curtailing NCS is
-            # one of the cheapest slacks and produces a +15 % hydro /
-            # -23 % spillage divergence vs NEWAVE on this case family.
-            # See docs/findings/ncs-must-run-treatment.md.
-            "allow_curtailment": False,
-        })
+        ncs_list.append(
+            {
+                "id": ncs_id,
+                "name": f"{fonte}_{sub_code_int}",
+                "bus_id": bus_id,
+                "max_generation_mw": max_gen,
+                # The source model pre-nets `geracao_usinas_nao_simuladas` from MERC
+                # before the dispatch LP runs, so the aggregate is implicitly must-run.
+                # Setting allow_curtailment=False instructs Cobre's LP to pin dispatch
+                # to the realized availability for every scenario; otherwise the LP
+                # discovers that curtailing NCS is one of the cheapest slacks and
+                # produces a +15 % hydro / -23 % spillage divergence vs the source model
+                # on this case family. See docs/findings/ncs-must-run-treatment.md.
+                "allow_curtailment": False,
+            }
+        )
         ncs_id += 1
 
     return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": ncs_list}
@@ -1316,7 +1294,7 @@ def convert_exchange_factors(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID map (unused directly; kept for API consistency).
 
@@ -1425,17 +1403,21 @@ def convert_exchange_factors(
                         last_reverse.get((src, tgt, m, block_id), 1.0),
                     )
 
-                block_factors.append({
-                    "block_id": block_id,
-                    "direct_factor": d_factor,
-                    "reverse_factor": r_factor,
-                })
+                block_factors.append(
+                    {
+                        "block_id": block_id,
+                        "direct_factor": d_factor,
+                        "reverse_factor": r_factor,
+                    }
+                )
 
-            results.append({
-                "line_id": line_id,
-                "stage_id": stage_id,
-                "block_factors": block_factors,
-            })
+            results.append(
+                {
+                    "line_id": line_id,
+                    "stage_id": stage_id,
+                    "block_factors": block_factors,
+                }
+            )
 
             m += 1
             if m > 12:
@@ -1461,7 +1443,7 @@ def convert_ncs_factors(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID map.  Used for subsystem code validation.
 
@@ -1510,11 +1492,11 @@ def convert_ncs_factors(
 
     # Columns: codigo_submercado, indice_bloco, data, patamar, valor
     # The ``patamar`` field is a GLOBAL running index across all NCS sources:
-    # source 1 -> patamares 1..P, source 2 -> P+1..2P, etc. (P = number of load
-    # blocks). The per-source block ordinal is therefore ``(patamar - 1) % P``,
-    # NOT ``patamar - 1`` — using the raw index parks every source past the first
-    # on out-of-range blocks, flattening its per-block NCS profile (so Cobre
-    # could not reshape per-block load the way NEWAVE does, the so_se divergence).
+    # source 1 -> patamares 1..P, source 2 -> P+1..2P, etc. (P = number of load blocks).
+    # The per-source block ordinal is therefore ``(patamar - 1) % P``, NOT ``patamar -
+    # 1`` — using the raw index parks every source past the first on out-of-range
+    # blocks, flattening its per-block NCS profile (so Cobre could not reshape per-block
+    # load the way the source model does, the so_se divergence).
     num_blocks = patamar_file.numero_patamares or 1
 
     # Build per-(sub_code, bloco, yr, cal_month, block_id) -> factor lookup.
@@ -1549,9 +1531,7 @@ def convert_ncs_factors(
 
     results: list[dict] = []
 
-    for (sub_code, bloco), ncs_id in sorted(
-        ncs_group_map.items(), key=lambda x: x[1]
-    ):
+    for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
         y, m = start_year, start_month
         for stage_id in range(total_stages):
             is_post_study = (y > study_end_year) or (
@@ -1561,24 +1541,26 @@ def convert_ncs_factors(
             block_factors: list[dict] = []
             for block_id in range(num_blocks):
                 if is_post_study:
-                    factor = last_factor.get(
-                        (sub_code, bloco, m, block_id), 1.0
-                    )
+                    factor = last_factor.get((sub_code, bloco, m, block_id), 1.0)
                 else:
                     factor = factor_map.get(
                         (sub_code, bloco, y, m, block_id),
                         last_factor.get((sub_code, bloco, m, block_id), 1.0),
                     )
-                block_factors.append({
-                    "block_id": block_id,
-                    "factor": max(factor, 1e-6),
-                })
+                block_factors.append(
+                    {
+                        "block_id": block_id,
+                        "factor": max(factor, 1e-6),
+                    }
+                )
 
-            results.append({
-                "ncs_id": ncs_id,
-                "stage_id": stage_id,
-                "block_factors": block_factors,
-            })
+            results.append(
+                {
+                    "ncs_id": ncs_id,
+                    "stage_id": stage_id,
+                    "block_factors": block_factors,
+                }
+            )
 
             m += 1
             if m > 12:
@@ -1597,9 +1579,9 @@ def convert_ncs_stats(
 ) -> pa.Table:
     """Convert sistema.dat NCS generation to ``non_controllable_stats.parquet``.
 
-    Produces the stochastic availability model for each NCS entity.  Since
-    NEWAVE NCS generation is deterministic, ``std`` is always 0.0 and
-    ``mean`` is the availability factor: ``available_mw / max_generation_mw``.
+    Produces the stochastic availability model for each NCS entity.  Since the source
+    model NCS generation is deterministic, ``std`` is always 0.0 and ``mean`` is the
+    availability factor: ``available_mw / max_generation_mw``.
 
     NCS IDs are assigned using the same ``(codigo_submercado, indice_bloco)``
     sorted grouping as ``convert_non_controllable_sources``.
@@ -1607,7 +1589,7 @@ def convert_ncs_stats(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID map (unused directly; kept for API consistency).
 
@@ -1617,12 +1599,14 @@ def convert_ncs_stats(
         Columns: ``ncs_id`` (INT32), ``stage_id`` (INT32),
         ``mean`` (DOUBLE), ``std`` (DOUBLE).
     """
-    _NCS_STATS_SCHEMA = pa.schema([
-        pa.field("ncs_id", pa.int32()),
-        pa.field("stage_id", pa.int32()),
-        pa.field("mean", pa.float64()),
-        pa.field("std", pa.float64()),
-    ])
+    _NCS_STATS_SCHEMA = pa.schema(
+        [
+            pa.field("ncs_id", pa.int32()),
+            pa.field("stage_id", pa.int32()),
+            pa.field("mean", pa.float64()),
+            pa.field("std", pa.float64()),
+        ]
+    )
 
     sistema = case.sistema
     df_raw: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
@@ -1698,9 +1682,7 @@ def convert_ncs_stats(
     rows_mean: list[float] = []
     rows_std: list[float] = []
 
-    for (sub_code, bloco), ncs_id in sorted(
-        ncs_group_map.items(), key=lambda x: x[1]
-    ):
+    for (sub_code, bloco), ncs_id in sorted(ncs_group_map.items(), key=lambda x: x[1]):
         max_gen = max_gen_per_ncs[ncs_id]
 
         y, m = start_year, start_month

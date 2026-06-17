@@ -1,4 +1,4 @@
-"""NEWAVE output file readers for results comparison.
+"""The source model output file readers for results comparison.
 
 Reads MEDIAS CSV files (hydro, thermal, system) from the ``saidas/``
 directory and pmo.dat convergence/productivity data.
@@ -45,7 +45,7 @@ def _find_saidas_dir(newave_dir: Path) -> Path | None:
 
 
 def _find_pmo(newave_dir: Path) -> Path | None:
-    """Locate ``pmo.dat`` in the NEWAVE directory or its ``saidas/`` subdir."""
+    """Locate ``pmo.dat`` in the source model directory or its ``saidas/`` subdir."""
     # Try root first, then saidas/.
     result = _find_case_insensitive(newave_dir, "pmo.dat")
     if result is not None:
@@ -96,7 +96,7 @@ def _read_medias_csv(
         _LOG.warning("%s not found in %s", filename, saidas_dir)
         return empty
 
-    # Try comma first (NEWAVE v29+ format), fall back to semicolon.
+    # Try comma first (the source model v29+ format), fall back to semicolon.
     for sep in (",", ";"):
         try:
             df = pl.read_csv(
@@ -119,7 +119,7 @@ def _read_medias_csv(
     # Identify entity column, variable column, patamar column, and stage
     # value columns.
     #
-    # NEWAVE MEDIAS files come in two layouts:
+    # The source model MEDIAS files come in two layouts:
     #   v29+:  USIH_ext, VAR, 3, 4, 5, ...   (comma-sep, no PATAMAR/SERIE)
     #   older: SERIE; USINA; PATAMAR; EST001; EST002; ...  (semicolon-sep)
     entity_col: str | None = None
@@ -276,7 +276,7 @@ def read_medias_system(saidas_dir: Path) -> pl.DataFrame:
 
 # Match one data row of the pmo.dat convergence table:
 #   iter   LIM.INF   ZINF   LIM.SUP   ZSUP   DZINF   ZSUP_ITER   [tempo]
-# Column semantics (NEWAVE manual):
+# Column semantics (the source model manual):
 #   - ZINF        = cuts-based lower bound at end of iteration (SDDP LB)
 #   - ZSUP        = mean forward-simulation cost (SDDP UB)
 #   - LIM.INF/SUP = lower/upper confidence-interval brackets on ZSUP; collapse
@@ -302,11 +302,10 @@ _PMO_CONV_ROW = re.compile(
 def _parse_pmo_convergence_text(text: str) -> dict[int, tuple[float, float]]:
     """Extract the iteration table from raw pmo.dat text.
 
-    Returns ``{iteration: (zinf, zsup)}`` keyed on iteration number,
-    taking the LAST occurrence per iteration (NEWAVE writes two lines
-    per iteration; only the second carries DZINF and ZSUP_ITER, which
-    the regex requires, so this naturally selects the post-backward
-    summary line).
+    Returns ``{iteration: (zinf, zsup)}`` keyed on iteration number, taking the LAST
+    occurrence per iteration (the source model writes two lines per iteration; only the
+    second carries DZINF and ZSUP_ITER, which the regex requires, so this naturally
+    selects the post-backward summary line).
     """
     out: dict[int, tuple[float, float]] = {}
     for match in _PMO_CONV_ROW.finditer(text):
@@ -323,13 +322,12 @@ def read_pmo_convergence(newave_dir: Path) -> pl.DataFrame:
     Returns DataFrame with columns: ``iteration`` (Int64),
     ``lower_bound`` (Float64), ``upper_bound_mean`` (Float64).
 
-    The bound columns come from NEWAVE's ``ZINF`` (cuts-based lower
-    bound) and ``ZSUP`` (mean forward-simulation cost) fields, parsed
-    directly from the pmo.dat iteration table via regex. inewave's
-    tabular parser misaligns the high-precision columns on real-world
-    pmo.dat layouts (truncates ``LIM.INF`` to 3 decimals, drops the
-    leading digit of ``LIM.SUP``, and frequently returns ``NaN`` for
-    ``ZINF``), so we cannot use ``Pmo.convergencia`` here.
+    The bound columns come from the source model's ``ZINF`` (cuts-based lower bound) and
+    ``ZSUP`` (mean forward-simulation cost) fields, parsed directly from the pmo.dat
+    iteration table via regex. inewave's tabular parser misaligns the high-precision
+    columns on real-world pmo.dat layouts (truncates ``LIM.INF`` to 3 decimals, drops
+    the leading digit of ``LIM.SUP``, and frequently returns ``NaN`` for ``ZINF``), so
+    we cannot use ``Pmo.convergencia`` here.
 
     Returns empty DataFrame if pmo.dat is not found or the iteration
     table cannot be located.
@@ -377,21 +375,20 @@ def read_pmo_convergence(newave_dir: Path) -> pl.DataFrame:
         },
     )
 
-    # NEWAVE pmo.dat exports convergence values in 10^6 R$.
-    # Multiply by 1e6 to convert to R$ (matching Cobre convention).
+    # The source model pmo.dat exports convergence values in 10^6 R$. Multiply by 1e6 to
+    # convert to R$ (matching Cobre convention).
     return result.with_columns(
         pl.col("lower_bound") * 1e6,
         pl.col("upper_bound_mean") * 1e6,
     )
 
 
-# pmo.dat ``produtibilidades_equivalentes`` source columns → output names.
-# These are the per-plant productivities NEWAVE's FPHA produces at different
-# heads (altura min/65/max), the equivalent productivity between min/max
-# volume, and the accumulated productivity used for EARM. Many run-of-river
-# plants leave the altura_* / acumulada columns NaN — preserved as null so the
-# per-comparison drop-NaN logic in the report keeps them out of each scatter
-# without crashing.
+# pmo.dat ``produtibilidades_equivalentes`` source columns → output names. These are the
+# per-plant productivities the source model's FPHA produces at different heads (altura
+# min/65/max), the equivalent productivity between min/max volume, and the accumulated
+# productivity used for EARM. Many run-of-river plants leave the altura_* / acumulada
+# columns NaN — preserved as null so the per-comparison drop-NaN logic in the report
+# keeps them out of each scatter without crashing.
 _PMO_PROD_COLUMNS: dict[str, str] = {
     "produtibilidade_altura_minima": "altura_min",
     "produtibilidade_altura_65": "altura_65",
@@ -404,9 +401,9 @@ _PMO_PROD_COLUMNS: dict[str, str] = {
 def read_pmo_productivity_detail(newave_dir: Path) -> pl.DataFrame:
     """Read the per-plant productivity breakdown from pmo.dat.
 
-    Pulls ``pmo.produtibilidades_equivalentes`` (filtered to the first
-    configuration, ``configuracao == min``) and surfaces the head-dependent
-    productivities NEWAVE's FPHA computes.
+    Pulls ``pmo.produtibilidades_equivalentes`` (filtered to the first configuration,
+    ``configuracao == min``) and surfaces the head-dependent productivities the source
+    model's FPHA computes.
 
     Returns DataFrame with columns: ``plant_name`` (Utf8), ``altura_min``,
     ``altura_65``, ``altura_max``, ``equivalent``, ``accumulated_earm``
@@ -493,12 +490,11 @@ def read_nwlistop_intercambio(saidas_dir: Path) -> pl.DataFrame:
     compare against Cobre's ``net_flow_mw``.
 
     Stage numbering follows the MEDIAS convention: 1 = first calendar
-    month of the file (typically January of NEWAVE's first study
-    year), 9 = September year 1, 21 = September year 2, etc. This
-    matches MEDIAS column headers (which start at the first study
-    month, e.g. 9 for a September-start study) so the existing
-    ``_nw_stage_offset`` logic translates both consistently into
-    Cobre's 0-based ``stage_id``.
+    month of the file (typically January of the source model's first study year), 9 =
+    September year 1, 21 = September year 2, etc. This matches MEDIAS column headers
+    (which start at the first study month, e.g. 9 for a September-start study) so the
+    existing ``_nw_stage_offset`` logic translates both consistently into Cobre's
+    0-based ``stage_id``.
 
     Returns columns ``from_submarket_code`` (Int64),
     ``to_submarket_code`` (Int64), ``from_name`` (Utf8),
@@ -604,12 +600,11 @@ def read_medias_sin(saidas_dir: Path) -> pl.DataFrame:
 def read_medias_ree(saidas_dir: Path) -> pl.DataFrame:
     """Read MEDIAS-REE.CSV (per equivalent-energy-reservoir aggregate).
 
-    Returns DataFrame with columns ``newave_code`` (the REE code),
-    ``stage`` (1-based MEDIAS stage), ``variable``, ``value``.  The key
-    variable for VminOP validation is ``EARMF`` — the REE's final stored
-    energy in MWmes, measured *relative to the minimum operative volume*
-    (i.e. useful energy).  This is the physical quantity the VminOP
-    generic constraints bound, so it is the natural NEWAVE-side LHS for
+    Returns DataFrame with columns ``newave_code`` (the REE code), ``stage`` (1-based
+    MEDIAS stage), ``variable``, ``value``.  The key variable for VminOP validation is
+    ``EARMF`` — the REE's final stored energy in MWmes, measured *relative to the
+    minimum operative volume* (i.e. useful energy).  This is the physical quantity the
+    VminOP generic constraints bound, so it is the natural the source-model-side LHS for
     those constraints.
     """
     return _read_medias_csv(saidas_dir, "MEDIAS-REE.CSV")
@@ -691,7 +686,7 @@ def read_newave_net_load_nwlistop(newave_dir: Path) -> pl.DataFrame:
     rows: list[tuple[int, int, str, float]] = []
     for code, months in parsed.items():
         for (year, month), value in months.items():
-            # Drop the pre-study calendar months NEWAVE writes as 0.
+            # Drop the pre-study calendar months the source model writes as 0.
             if value == 0.0:
                 continue
             stage = (year - base_year) * 12 + month
@@ -716,7 +711,7 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     Returns a DataFrame compatible with the ``nw_market`` schema used in
     the energy balance charts:
 
-    - ``newave_code`` (Int64): NEWAVE submarket code
+    - ``newave_code`` (Int64): The source model submarket code
     - ``stage`` (Int64): stage number (aligned with MEDIAS column naming)
     - ``variable`` (Utf8): always ``"NET_LOAD"``
     - ``value`` (Float64): net load in MW·med
@@ -883,7 +878,7 @@ def read_newave_tim_iterations(newave_dir: Path) -> pl.DataFrame:
     ``backward_seconds``, ``forward_seconds``, ``total_seconds``
     (Float64). Empty when the file is missing.
 
-    Note: NEWAVE's first iteration row carries clock-initialisation
+    Note: The source model's first iteration row carries clock-initialisation
     garbage on the Backward / Forward fields (sometimes hundreds of
     hours). Values are returned as-is so the caller can decide how to
     surface them (e.g. annotate the chart but keep the data).
@@ -939,9 +934,9 @@ def read_newave_tim_iterations(newave_dir: Path) -> pl.DataFrame:
 def read_newave_tim_stages(newave_dir: Path) -> dict[str, float]:
     """Read stage timings from ``newave.tim`` via ``inewave.Newavetim``.
 
-    Returns ``{etapa_name: seconds}`` keyed on the Portuguese stage
-    labels NEWAVE emits (e.g. ``"Tempo Total"``, ``"Calculo da
-    Politica"``, ``"Simulacao Final"``). Empty dict on parse failure.
+    Returns ``{etapa_name: seconds}`` keyed on the Portuguese stage labels the source
+    model emits (e.g. ``"Tempo Total"``, ``"Calculo da Politica"``, ``"Simulacao
+    Final"``). Empty dict on parse failure.
     """
     tim_path = _find_case_insensitive(newave_dir, "newave.tim")
     if tim_path is None:
@@ -962,3 +957,153 @@ def read_newave_tim_stages(newave_dir: Path) -> dict[str, float]:
         tdelta = row["tempo"]
         out[name] = float(tdelta.total_seconds())
     return out
+
+
+def _find_fpha_report(newave_dir: Path, filename: str) -> Path | None:
+    """Locate a production-function report under ``<newave_dir>/fpha`` (or root).
+
+    The source model writes the production-function (FPHA) reports into an
+    ``fpha`` subdirectory; some cases keep them at the case root. Search both,
+    ignoring case, and return the first match or ``None`` when absent.
+    """
+    for candidate_dir in (newave_dir / "fpha", newave_dir):
+        if candidate_dir.is_dir():
+            hit = _find_case_insensitive(candidate_dir, filename)
+            if hit is not None:
+                return hit
+    return None
+
+
+#: Rename map for :func:`read_fpha_planes`: the ``inewave`` source column ->
+#: the descriptive coefficient name. The source model bounds generation by
+#: ``GH <= fator_correcao * (gamma_0 + gamma_v * useful_volume + gamma_q *
+#: turbined + gamma_s * spilled + gamma_lat * lateral)``, one plane per row.
+_FPHA_PLANE_COLUMNS: dict[str, str] = {
+    "codigo_usina": "newave_code",
+    "periodo": "periodo",
+    "indice_corte": "plane_id",
+    "fator_correcao": "fator_correcao",
+    "rhs_energia": "gamma_0",
+    "coeficiente_volume_util_MW_hm3": "gamma_v",
+    "coeficiente_vazao_turbinada_MW_m3s": "gamma_q",
+    "coeficiente_vazao_vertida_MW_m3s": "gamma_s",
+    "coeficiente_vazao_lateral_MW_m3s": "gamma_lat",
+}
+
+_FPHA_PLANE_SCHEMA: dict[str, type[pl.DataType]] = {
+    "newave_code": pl.Int64,
+    "periodo": pl.Int64,
+    "plane_id": pl.Int64,
+    "fator_correcao": pl.Float64,
+    "gamma_0": pl.Float64,
+    "gamma_v": pl.Float64,
+    "gamma_q": pl.Float64,
+    "gamma_s": pl.Float64,
+    "gamma_lat": pl.Float64,
+}
+
+
+def read_fpha_planes(newave_dir: Path) -> pl.DataFrame | None:
+    """Read the source model's fitted production hyperplanes (``fpha_cortes``).
+
+    Each plant/period carries a set of hyperplanes whose lower envelope (the
+    minimum over planes) is the production surface the operating model consumes.
+    This reader surfaces those coefficients for the production-model comparison.
+    The ``gamma_v`` coefficient multiplies *useful* volume (storage above the
+    plant minimum); ``fator_correcao`` scales the whole plane.
+
+    Parameters
+    ----------
+    newave_dir:
+        The source model case directory (the report lives in an ``fpha``
+        subdirectory).
+
+    Returns
+    -------
+    polars.DataFrame | None
+        One row per (plant, period, plane) conforming to
+        :data:`_FPHA_PLANE_SCHEMA`, or ``None`` when the case ships no
+        ``fpha_cortes`` report (or it is empty / malformed).
+    """
+    path = _find_fpha_report(newave_dir, "fpha_cortes.csv")
+    if path is None:
+        return None
+    from inewave.newave import FphaCortes
+
+    table = FphaCortes.read(str(path)).tabela
+    if table is None or table.empty:
+        return None
+    missing = set(_FPHA_PLANE_COLUMNS) - set(table.columns)
+    if missing:
+        _LOG.warning("fpha_cortes is missing columns %s; skipping", sorted(missing))
+        return None
+    frame = pl.from_pandas(table[list(_FPHA_PLANE_COLUMNS)]).rename(_FPHA_PLANE_COLUMNS)
+    return frame.cast(_FPHA_PLANE_SCHEMA)
+
+
+#: Rename map for :func:`read_fpha_grid`: the ``inewave`` source column -> the
+#: descriptive fitting-grid name. The grid defines, per plant/period, the
+#: volume/turbined domain (and point counts) over which the planes were fitted.
+_FPHA_GRID_COLUMNS: dict[str, str] = {
+    "codigo_usina": "newave_code",
+    "periodo": "periodo",
+    "volume_armazenado_minimo": "v_min_hm3",
+    "volume_armazenado_maximo": "v_max_hm3",
+    "numero_pontos_volume_armazenado": "n_v",
+    "vazao_turbinada_minima": "q_min_m3s",
+    "vazao_turbinada_maxima": "q_max_m3s",
+    "numero_pontos_vazao_turbinada": "n_q",
+    "geracao_minima": "gh_min_mw",
+    "geracao_maxima": "gh_max_mw",
+    "tipo": "tipo",
+}
+
+_FPHA_GRID_SCHEMA: dict[str, type[pl.DataType]] = {
+    "newave_code": pl.Int64,
+    "periodo": pl.Int64,
+    "v_min_hm3": pl.Float64,
+    "v_max_hm3": pl.Float64,
+    "n_v": pl.Int64,
+    "q_min_m3s": pl.Float64,
+    "q_max_m3s": pl.Float64,
+    "n_q": pl.Int64,
+    "gh_min_mw": pl.Float64,
+    "gh_max_mw": pl.Float64,
+    "tipo": pl.Int64,
+}
+
+
+def read_fpha_grid(newave_dir: Path) -> pl.DataFrame | None:
+    """Read the source model's production-function fitting grid (``fpha_eco``).
+
+    Supplies, per (plant, period), the volume/turbined domain the planes were
+    fitted over plus the discretization point counts. The volume minimum doubles
+    as the useful-volume reference for :func:`read_fpha_planes` (its ``gamma_v``
+    multiplies storage above that minimum).
+
+    Parameters
+    ----------
+    newave_dir:
+        The source model case directory.
+
+    Returns
+    -------
+    polars.DataFrame | None
+        One row per (plant, period) conforming to :data:`_FPHA_GRID_SCHEMA`, or
+        ``None`` when the case ships no ``fpha_eco`` report (or it is empty /
+        malformed).
+    """
+    path = _find_fpha_report(newave_dir, "fpha_eco.csv")
+    if path is None:
+        return None
+    from inewave.newave import FphaEco
+
+    table = FphaEco.read(str(path)).tabela
+    if table is None or table.empty:
+        return None
+    missing = set(_FPHA_GRID_COLUMNS) - set(table.columns)
+    if missing:
+        _LOG.warning("fpha_eco is missing columns %s; skipping", sorted(missing))
+        return None
+    frame = pl.from_pandas(table[list(_FPHA_GRID_COLUMNS)]).rename(_FPHA_GRID_COLUMNS)
+    return frame.cast(_FPHA_GRID_SCHEMA)

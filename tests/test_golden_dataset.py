@@ -2,7 +2,7 @@
 
 These tests snapshot the canonical ``ComparisonDataset`` numbers for both the
 ``compare results`` and ``compare bounds`` subcommands, built from synthetic
-in-memory fixtures (NO real NEWAVE case, NO ``inewave`` I/O). They pin:
+in-memory fixtures (NO real the source model case, NO ``inewave`` I/O). They pin:
 
 - the canonical tidy frame (``dataset.tidy``) for results and bounds,
 - the per-variable summary frame (``dataset.summary``) for results and bounds,

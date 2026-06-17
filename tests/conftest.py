@@ -1,4 +1,4 @@
-"""Shared test helpers for building NEWAVE case inputs without real file I/O.
+"""Shared test helpers for building the source model case inputs without real file I/O.
 
 ``make_nw_files`` constructs a :class:`~cobre_bridge.newave_files.NewaveFiles`
 with paths under a tmp dir (no filesystem access). ``make_case`` wraps it in a
@@ -48,6 +48,8 @@ _OPTIONAL = (
     "volref_saz",
     "shist",
     "adterm",
+    "polinjus",
+    "tratamento_fpha",
 )
 
 

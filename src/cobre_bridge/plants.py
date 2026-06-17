@@ -1,20 +1,19 @@
 """Canonical definition of "which hydro plants are in the Cobre case".
 
-NEWAVE's ``confhd.dat`` lists every hydro the study knows about, tagged by
-``usina_existente`` (``EX`` = existing/in-operation, ``NE``/``NC`` = not yet
-built) and including *fictitious* accounting plants. Only the existing,
-non-fictitious plants become LP variables in Cobre.
+The source model's ``confhd.dat`` lists every hydro the study knows about, tagged by
+``usina_existente`` (``EX`` = existing/in-operation, ``NE``/``NC`` = not yet built) and
+including *fictitious* accounting plants. Only the existing, non-fictitious plants
+become LP variables in Cobre.
 
 A plant is identified as **fictitious structurally**, not by the ``FICT.`` name
 prefix: a fictitious accounting twin shares its inflow gauge (``posto``) with a
-real generating plant and itself has zero productivity
-(``produtibilidade_especifica == 0``). In NEWAVE's full decks each ``FICT.*``
-plant pairs with its real twin on the same posto, so the structural rule flags
-exactly the same plants as the prefix — but it is robust to the naming
-convention and, crucially, a plant orphaned by a REE/subsystem reduction (no
-generating posto-mate left) is **not** fictitious and stays in the LP as a ρ=0
-routing/regulation reservoir. This unifies "is it fictitious" with "should we
-keep an orphaned twin" into one rule.
+real generating plant and itself has zero productivity (``produtibilidade_especifica ==
+0``). In the source model's full decks each ``FICT.*`` plant pairs with its real twin on
+the same posto, so the structural rule flags exactly the same plants as the prefix — but
+it is robust to the naming convention and, crucially, a plant orphaned by a
+REE/subsystem reduction (no generating posto-mate left) is **not** fictitious and stays
+in the LP as a ρ=0 routing/regulation reservoir. This unifies "is it fictitious" with
+"should we keep an orphaned twin" into one rule.
 
 These helpers are the one home for that filter (historically copy-pasted at ~13
 sites). They are pure functions over an already-read ``Confhd.usinas`` DataFrame
@@ -26,7 +25,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-# Productivity at or below this is treated as "no generation" (NEWAVE FICT
+# Productivity at or below this is treated as "no generation" (the source model FICT
 # accounting plants carry produtibilidade_especifica == 0 exactly).
 _RHO_COL = "produtibilidade_especifica"
 
@@ -44,10 +43,10 @@ def fictitious_codes(confhd_df: pd.DataFrame, cadastro: pd.DataFrame) -> set[int
     another existing plant that does generate (ρ > 0). The generating twin owns
     the inflow; the ρ=0 twin is the accounting node.
 
-    A ρ=0 plant whose posto carries no generator is **not** fictitious — it is a
-    real regulation reservoir (NEWAVE has these, e.g. GUARAPIRANGA/BILLINGS) or a
-    twin orphaned by a reduction (e.g. ``FICT.MAUA`` once ``MAUA`` is filtered
-    out), and it stays in the LP.
+    A ρ=0 plant whose posto carries no generator is **not** fictitious — it is a real
+    regulation reservoir (the source model has these, e.g. GUARAPIRANGA/BILLINGS) or a
+    twin orphaned by a reduction (e.g. ``FICT.MAUA`` once ``MAUA`` is filtered out), and
+    it stays in the LP.
 
     Returns an empty set when the productivity (``cadastro``) or ``posto`` data
     needed for the test is unavailable.

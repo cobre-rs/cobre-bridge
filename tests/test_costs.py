@@ -643,7 +643,8 @@ def test_render_spot_price_is_default_collapsed() -> None:
 
 
 def test_render_violations_zero_costs_returns_no_violation_text() -> None:
-    """_render_violations with all-zero violation costs must return 'No violation costs'.
+    """_render_violations with all-zero violation costs must return 'No violation
+    costs'.
 
     Acceptance criterion from ticket-015.
     """
@@ -654,7 +655,8 @@ def test_render_violations_zero_costs_returns_no_violation_text() -> None:
 
 
 def test_render_violations_nonzero_costs_returns_collapsible_section() -> None:
-    """_render_violations with non-zero generic_violation_cost returns collapsible-section.
+    """_render_violations with non-zero generic_violation_cost returns
+    collapsible-section.
 
     Acceptance criterion from ticket-015: the result contains 'collapsible-section'
     and a bar chart.

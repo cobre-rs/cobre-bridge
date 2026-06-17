@@ -82,13 +82,13 @@ def _load_compare_context(
     newave_dir: Path,
     cobre_output_dir: Path,
 ) -> tuple[NewaveCase, NewaveIdMap, EntityAlignment, list[dict[str, object]]]:
-    """Load the NEWAVE case, id-map, entity alignment, and lines.json.
+    """Load the source model case, id-map, entity alignment, and lines.json.
 
     Shared setup for `compare bounds` and `compare results`. Builds the parsed
     case once (so the id-map reuses its cached readers), loads lines.json, and
     builds the entity alignment.
 
-    Exits the process with code 1 (clean stderr message) if the NEWAVE case
+    Exits the process with code 1 (clean stderr message) if the source model case
     directory is missing (FileNotFoundError from NewaveCase.from_directory).
     """
     from cobre_bridge.case import NewaveCase
@@ -238,9 +238,9 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     """Execute the compare results subcommand.
 
     Intentionally always exits 0: ``compare results`` is informational (a
-    descriptive NEWAVE-vs-Cobre divergence report), so it never signals a
-    failure on divergence. This is asymmetric with ``compare bounds``, which
-    exits 1 on any mismatch — bounds are a strict equivalence check.
+    descriptive the source-model-vs-Cobre divergence report), so it never signals a
+    failure on divergence. This is asymmetric with ``compare bounds``, which exits 1 on
+    any mismatch — bounds are a strict equivalence check.
     """
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset

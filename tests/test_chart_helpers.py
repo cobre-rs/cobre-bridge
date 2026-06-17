@@ -1029,13 +1029,13 @@ def test_build_thermal_detail_tab_html_matches_golden(
 # ---------------------------------------------------------------------------
 # ticket-011: system/network draw-only golden-string parity
 #
-# Guards that re-pointing the Cobre-sum + NEWAVE-SIN fold (cobre_aggregate_chart),
-# the per-bus grouping + per-eid percentile lookup (system_per_bus_chart), and the
-# spillage nw/cb lookups (system_spillage_energy_chart) onto the analyze-layer
-# functions (cobre_sum_and_newave_sin / bus_groups_and_pct / spillage_lookups)
-# leaves the rendered HTML character-for-character identical. The golden files were
-# captured from the LEGACY (pre-re-point) charts.py on the fixtures below; the
-# random chart-<hex> div id is normalised away by _strip_chart_id.
+# Guards that re-pointing the Cobre-sum + the source-model-SIN fold
+# (cobre_aggregate_chart), the per-bus grouping + per-eid percentile lookup
+# (system_per_bus_chart), and the spillage nw/cb lookups (system_spillage_energy_chart)
+# onto the analyze-layer functions (cobre_sum_and_newave_sin / bus_groups_and_pct /
+# spillage_lookups) leaves the rendered HTML character-for-character identical. The
+# golden files were captured from the LEGACY (pre-re-point) charts.py on the fixtures
+# below; the random chart-<hex> div id is normalised away by _strip_chart_id.
 # ---------------------------------------------------------------------------
 
 

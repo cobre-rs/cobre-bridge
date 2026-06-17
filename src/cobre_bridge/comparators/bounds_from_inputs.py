@@ -1,10 +1,10 @@
-"""NEWAVE-derived bounds for the ``compare bounds`` engine — via the converters.
+"""The source-model-derived bounds for the ``compare bounds`` engine — via the
+converters.
 
-Each function here delegates to the matching converter (the single definition of
-how a bound is built from NEWAVE inputs) and reshapes its ``pa.Table`` output into
-the flat ``dict[tuple[int, int, str], float]`` lookup keyed by
-``(cobre_entity_id, stage_id, bound_name)`` that :mod:`comparators.bounds`
-consumes.
+Each function here delegates to the matching converter (the single definition of how a
+bound is built from the source model inputs) and reshapes its ``pa.Table`` output into
+the flat ``dict[tuple[int, int, str], float]`` lookup keyed by ``(cobre_entity_id,
+stage_id, bound_name)`` that :mod:`comparators.bounds` consumes.
 
 These used to be hand-maintained re-derivations of the converter logic. They
 drifted and produced false positives (the ``sentido`` line-direction bug and the

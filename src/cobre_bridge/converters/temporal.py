@@ -1,4 +1,5 @@
-"""Temporal data converter: maps NEWAVE study horizon configuration to Cobre JSON.
+"""Temporal data converter: maps the source model study horizon configuration to Cobre
+JSON.
 
 Converts ``dger.dat`` and ``patamar.dat`` into the ``stages.json`` and
 ``config.json`` formats expected by the Cobre solver.
@@ -57,7 +58,7 @@ def _month_hours(year: int, month: int) -> float:
 
 
 def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG001
-    """Convert NEWAVE temporal configuration to a Cobre ``stages.json`` dict.
+    """Convert the source model temporal configuration to a Cobre ``stages.json`` dict.
 
     Reads ``dger.dat`` and ``patamar.dat`` from *case* and produces a
     dict that conforms to ``stages.schema.json``.
@@ -65,7 +66,7 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID map (not used for temporal conversion, accepted for API
         consistency with the other converters).
@@ -104,9 +105,7 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
     dger_cvar: int = int(_raw_cvar) if isinstance(_raw_cvar, int) else 0
 
     # Default: each stage uses "expectation"
-    _cvar_by_stage: dict[
-        int, dict
-    ] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
+    _cvar_by_stage: dict[int, dict] = {}  # stage_id -> {"alpha": ..., "lambda": ...}
 
     if dger_cvar in (1, 2) and case.cvar is not None:
         cvar_file = case.cvar
@@ -246,11 +245,13 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
                     fraction,
                 )
             block_hours = fraction * total_hours
-            blocks.append({
-                "id": pat_idx - 1,
-                "name": names[pat_idx - 1],
-                "hours": block_hours,
-            })
+            blocks.append(
+                {
+                    "id": pat_idx - 1,
+                    "name": names[pat_idx - 1],
+                    "hours": block_hours,
+                }
+            )
 
         # Determine risk_measure for this stage.  Modes (mirrors the
         # top-of-function log message):
@@ -293,18 +294,20 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
             },
         }
         if deterministic:
-            # NEWAVE's deterministic mode: each stage samples its inflow
-            # residual directly from the (single) historical scenario instead
-            # of drawing from the synthetic PAR(p) distribution.
+            # The source model's deterministic mode: each stage samples its inflow
+            # residual directly from the (single) historical scenario instead of drawing
+            # from the synthetic PAR(p) distribution.
             stage_entry["sampling_method"] = "historical_residuals"
         stages.append(stage_entry)
 
         if stage_id < total_months - 1:
-            transitions.append({
-                "source_id": stage_id,
-                "target_id": stage_id + 1,
-                "probability": 1.0,
-            })
+            transitions.append(
+                {
+                    "source_id": stage_id,
+                    "target_id": stage_id + 1,
+                    "probability": 1.0,
+                }
+            )
 
         month += 1
         if month > 12:
@@ -334,12 +337,14 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
 
         for offset, (py, pm) in enumerate(pre_dates):
             pre_id = -(num_pre_months - offset)
-            pre_study_stages.append({
-                "id": pre_id,
-                "start_date": _month_start_date(py, pm).isoformat(),
-                "end_date": _month_end_date(py, pm).isoformat(),
-                "season_id": pm - 1,  # 0-based calendar month index
-            })
+            pre_study_stages.append(
+                {
+                    "id": pre_id,
+                    "start_date": _month_start_date(py, pm).isoformat(),
+                    "end_date": _month_end_date(py, pm).isoformat(),
+                    "season_id": pm - 1,  # 0-based calendar month index
+                }
+            )
 
     policy_graph: dict = {
         "type": "finite_horizon",
@@ -389,7 +394,7 @@ def _is_deterministic_mode(
     case: NewaveCase,
     dger: Dger,
 ) -> bool:
-    """True when NEWAVE's hidden 'deterministic mode' is active.
+    """True when the source model's hidden 'deterministic mode' is active.
 
     Triggered by the combination of:
 
@@ -399,11 +404,11 @@ def _is_deterministic_mode(
     - ``shist.varredura == 0`` (explicit historical years)
     - ``shist.anos_inicio_simulacoes`` has exactly one entry
 
-    When all five hold, NEWAVE drops the stochastic machinery: training
-    and simulation both replay the same single historical scenario and
-    each stage samples residuals directly off the history instead of
-    drawing from a synthetic distribution.  Mirror the same configuration
-    here so the converted cobre case reproduces NEWAVE's behavior.
+    When all five hold, the source model drops the stochastic machinery: training
+    and simulation both replay the same single historical scenario and each stage
+    samples residuals directly off the history instead of drawing from a synthetic
+    distribution.  Mirror the same configuration here so the converted cobre case
+    reproduces the source model's behavior.
     """
     if (dger.num_forwards or 0) != 1:
         return False
@@ -426,7 +431,7 @@ def _historical_years_from_shist(
 ) -> list[int] | dict[str, int]:
     """Build cobre's ``historical_years`` from ``shist.dat``.
 
-    NEWAVE's ``shist.dat`` controls which historical years drive the final
+    The source model's ``shist.dat`` controls which historical years drive the final
     simulation when ``dger.tipo_simulacao_final == 2``:
 
     - ``shist.varredura == 0`` — explicit list in ``anos_inicio_simulacoes``;
@@ -450,9 +455,7 @@ def _historical_years_from_shist(
 
     shist = case.shist
     if shist is None:
-        logger.debug(
-            "shist.dat not found; using legacy default historical range."
-        )
+        logger.debug("shist.dat not found; using legacy default historical range.")
         ano_ini_hist: int = int(dger.ano_inicial_historico or 1931)
         return {"from": ano_ini_hist + 1, "to": ano_inicio - 1}
 
@@ -469,9 +472,7 @@ def _historical_years_from_shist(
     # varredura == 1 → range.  The most recent valid start year is
     # ano_inicio_estudo - horizon_years so the scenario fits in history.
     horizon_years = num_anos + num_anos_pos
-    range_from = int(
-        shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931)
-    )
+    range_from = int(shist.ano_inicio_varredura or (dger.ano_inicial_historico or 1931))
     range_to = ano_inicio - horizon_years
     if range_to < range_from:
         logger.warning(
@@ -488,18 +489,16 @@ def _historical_years_from_shist(
 def _count_historical_years(
     historical_years: list[int] | dict[str, int],
 ) -> int:
-    """Return how many distinct start-years are covered by a historical_years
-    spec — equivalently the number of simulation scenarios NEWAVE will run."""
+    """Return how many distinct start-years are covered by a historical_years spec —
+    equivalently the number of simulation scenarios the source model will run."""
     if isinstance(historical_years, list):
         return len(historical_years)
     # Range form: {"from": int, "to": int} — inclusive both ends.
-    return max(
-        0, int(historical_years["to"]) - int(historical_years["from"]) + 1
-    )
+    return max(0, int(historical_years["to"]) - int(historical_years["from"]) + 1)
 
 
 def convert_config(case: NewaveCase) -> dict:
-    """Convert NEWAVE training parameters to a Cobre ``config.json`` dict.
+    """Convert the source model training parameters to a Cobre ``config.json`` dict.
 
     Reads ``dger.dat`` from *case* and produces a dict that conforms
     to ``config.schema.json``.
@@ -507,7 +506,7 @@ def convert_config(case: NewaveCase) -> dict:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
 
     Returns
     -------
@@ -522,9 +521,8 @@ def convert_config(case: NewaveCase) -> dict:
     max_order: int = dger.ordem_maxima_parp or 6
 
     # consideracao_media_anual_afluencias (dger.dat line 83):
-    #   0 → classical PAR(p), maps to Cobre "pacf"
-    #   1, 2, 3 → PAR(p)-A variants; Cobre implements the exact PDDE form
-    #             (NEWAVE option 3) under "pacf_annual".
+    # 0 → classical PAR(p), maps to Cobre "pacf" 1, 2, 3 → PAR(p)-A variants; Cobre
+    # implements the exact PDDE form (the source model option 3) under "pacf_annual".
     consideracao_anual: int | None = dger.consideracao_media_anual_afluencias
     if consideracao_anual is None:
         order_selection: str | None = None
@@ -546,13 +544,9 @@ def convert_config(case: NewaveCase) -> dict:
             )
         order_selection = "pacf_annual"
 
-    tipo_execucao: int = (
-        dger.tipo_execucao if dger.tipo_execucao is not None else 1
-    )
+    tipo_execucao: int = dger.tipo_execucao if dger.tipo_execucao is not None else 1
     tipo_simulacao_final: int = (
-        dger.tipo_simulacao_final
-        if dger.tipo_simulacao_final is not None
-        else 1
+        dger.tipo_simulacao_final if dger.tipo_simulacao_final is not None else 1
     )
     considera_reamostragem: int = (
         dger.considera_reamostragem_cenarios
@@ -560,11 +554,11 @@ def convert_config(case: NewaveCase) -> dict:
         else 0
     )
 
-    # impressao_estados_geracao_cortes (dger.dat line 90): when 0, NEWAVE
-    # writes the visited cut-generation states (the per-stage cortese*.dat
-    # files).  Mirror that on the Cobre side via `exports.states` so the two
-    # models' visited forward-pass trial points can be compared.  A None or
-    # non-zero value leaves the Cobre default (states export off).
+    # impressao_estados_geracao_cortes (dger.dat line 90): when 0, the source model
+    # writes the visited cut-generation states (the per-stage cortese*.dat files).
+    # Mirror that on the Cobre side via `exports.states` so the two models' visited
+    # forward-pass trial points can be compared.  A None or non-zero value leaves the
+    # Cobre default (states export off).
     export_states: bool = dger.impressao_estados_geracao_cortes == 0
 
     # tipo_execucao: 0 = simulation only, 1 = training (+ simulation).
@@ -577,15 +571,27 @@ def convert_config(case: NewaveCase) -> dict:
     else:
         simulation_enabled = tipo_simulacao_final != 0
 
-    # -- Cut selection --
-    # NEWAVE's cut-selection knobs are independent for the forward and backward
-    # passes (`selecao_de_cortes_forward` / `selecao_de_cortes_backward`);
-    # cobre's training pipeline applies a single toggle to both passes.  Mirror
-    # the union: cut selection is enabled if NEWAVE turned it on for at least
-    # one direction, and only disabled when both flags are 0.
+    # -- Cut selection -- The source model's cut-selection knobs are independent for the
+    # forward and backward passes (`selecao_de_cortes_forward` /
+    # `selecao_de_cortes_backward`); cobre's training pipeline applies a single toggle
+    # to both passes.  Mirror the union: cut selection is enabled if the source model
+    # turned it on for at least one direction, and only disabled when both flags are 0.
     forward_sel: int = dger.selecao_de_cortes_forward or 0
     backward_sel: int = dger.selecao_de_cortes_backward or 0
     cut_selection_enabled: bool = (forward_sel == 1) or (backward_sel == 1)
+
+    # cobre's `training.cut_selection` keeps two always-on knobs at the top level plus a
+    # tagged `selection` object that names the method and carries only that method's
+    # parameters; omitting `selection` disables row selection. We mirror The source
+    # model's limited-memory Level-1 selection with `method = "lml1"`. The new lml1 is
+    # value-based (`tie_tolerance`, default 1e-10), so the source model's old
+    # memory-window knob has no equivalent and is intentionally dropped.
+    cut_selection: dict = {"row_activity_tolerance": 1e-6}
+    if cut_selection_enabled:
+        cut_selection["selection"] = {
+            "method": "lml1",
+            "check_frequency": 1,
+        }
 
     # -- Training scenario source --
     training_section: dict = {
@@ -593,13 +599,7 @@ def convert_config(case: NewaveCase) -> dict:
         "stopping_rules": [
             {"type": "iteration_limit", "limit": max_iterations},
         ],
-        "cut_selection": {
-            "check_frequency": 1,
-            "cut_activity_tolerance": 1e-6,
-            "enabled": cut_selection_enabled,
-            "method": "lml1",
-            "memory_window": 0,
-        },
+        "cut_selection": cut_selection,
     }
     if not training_enabled:
         training_section["enabled"] = False
@@ -637,10 +637,10 @@ def convert_config(case: NewaveCase) -> dict:
         if inflow_scheme == "historical":
             historical_years = _historical_years_from_shist(case, dger)
             sim_source["historical_years"] = historical_years
-            # In historical mode each scenario is one (start-year, member)
-            # tuple; the number of scenarios is fully determined by the size
-            # of the historical pool.  Override num_series_sinteticas so the
-            # cobre case doesn't request more scenarios than NEWAVE generates.
+            # In historical mode each scenario is one (start-year, member) tuple; the
+            # number of scenarios is fully determined by the size of the historical
+            # pool.  Override num_series_sinteticas so the cobre case doesn't request
+            # more scenarios than the source model generates.
             simulation_section["num_scenarios"] = _count_historical_years(
                 historical_years
             )

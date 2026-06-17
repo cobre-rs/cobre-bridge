@@ -48,10 +48,10 @@ _FLOW_VARS: list[str] = [
     "turbined_m3s",
     "spillage_m3s",
     "evaporation_m3s",
-    # Operational slack columns surfaced as cobre-only series so the user
-    # can see at a glance which constraints the LP had to relax.  These
-    # have no NEWAVE counterpart — they're plotted with the standard
-    # p10/p50/p90 band like any other flow variable.
+    # Operational slack columns surfaced as cobre-only series so the user can see at a
+    # glance which constraints the LP had to relax.  These have no source-model
+    # counterpart — they're plotted with the standard p10/p50/p90 band like any other
+    # flow variable.
     "water_withdrawal_violation_pos_m3s",
     "water_withdrawal_violation_neg_m3s",
     "inflow_nonnegativity_slack_m3s",

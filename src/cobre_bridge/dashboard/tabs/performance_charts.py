@@ -408,7 +408,8 @@ def chart_simulation_scenario_times(solver_sim: pd.DataFrame) -> str:
 
 
 def chart_basis_reuse(solver_train: pd.DataFrame) -> str:
-    """Line chart of basis reuse rate per stage (backward phase, averaged over iterations)."""
+    """Line chart of basis reuse rate per stage (backward phase, averaged over
+    iterations)."""
     if solver_train.empty:
         return "<p>No solver data available.</p>"
 
@@ -559,7 +560,8 @@ def chart_forward_vs_backward_per_iter(solver_train: pd.DataFrame) -> str:
 
 
 def chart_set_bounds_by_stage(solver_train: pd.DataFrame) -> str:
-    """Per-stage avg set_bounds_time_ms for backward phase — often a hidden bottleneck."""
+    """Per-stage avg set_bounds_time_ms for backward phase — often a hidden
+    bottleneck."""
     if solver_train.empty or "set_bounds_time_ms" not in solver_train.columns:
         return "<p>No set_bounds data.</p>"
     bw = solver_train[solver_train["phase"] == "backward"]
@@ -584,7 +586,8 @@ def chart_set_bounds_by_stage(solver_train: pd.DataFrame) -> str:
 
 
 def chart_cost_per_simplex_iter(solver_train: pd.DataFrame) -> str:
-    """Line chart: average microseconds per simplex iteration by stage (backward pass)."""
+    """Line chart: average microseconds per simplex iteration by stage (backward
+    pass)."""
     if solver_train.empty:
         return "<p>No solver data available.</p>"
 
@@ -1412,7 +1415,8 @@ def _per_stage_metric_multi_iter(
 
 
 def chart_lp_difficulty_multi_iter(solver_train: pd.DataFrame) -> str:
-    """Avg simplex iterations per LP, per stage, overlaid for 3 iterations (backward)."""
+    """Avg simplex iterations per LP, per stage, overlaid for 3 iterations
+    (backward)."""
     fig = _per_stage_metric_multi_iter(
         solver_train, "simplex_iterations", agg="mean", phase="backward"
     )

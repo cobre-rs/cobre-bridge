@@ -1,10 +1,10 @@
 """Generic constraints converter: VminOP (minimum stored energy) from curva.dat
 and electric constraints from restricao-eletrica.csv.
 
-Converts NEWAVE minimum stored energy constraints into Cobre generic constraints.
-Each REE with entries in ``curva.dat`` becomes one generic constraint whose
-expression is a weighted sum of ``hydro_storage`` variables, with weights equal
-to the accumulated cascade productivities.
+Converts the source model minimum stored energy constraints into Cobre generic
+constraints. Each REE with entries in ``curva.dat`` becomes one generic constraint whose
+expression is a weighted sum of ``hydro_storage`` variables, with weights equal to the
+accumulated cascade productivities.
 
 Electric constraints from ``restricao-eletrica.csv`` (discovered via
 ``indices.csv``) are converted into Cobre generic constraints with
@@ -46,14 +46,14 @@ _SCHEMA_URL = (
 def _vminop_energy_factor(start_year: int, start_month: int, stage: int) -> float:
     """Per-stage ``ρ_acum·hm³ → MWmonth`` divisor for the VminOP energy units.
 
-    ρ_acum is in MW/(m³/s), so ``ρ_acum · storage[hm³]`` overstates the true
-    stored energy (MWmonth) by the hm³↔(m³/s)·month factor. That factor scales
-    with the month's length, and cobre prices the VminOP slack with each stage's
-    **real** ``block_hours`` (672–744 h — actual calendar months), **not**
-    NEWAVE's fixed 730 h convention. Using the actual month length here makes the
-    effective slack penalty resolve to the intended R$/MWh on every stage; the
-    fixed ``C_M3S2HM3`` would leave a ±~9 % per-stage error (worst in February).
-    Equals ``C_M3S2HM3`` exactly for a 730 h month.
+    ρ_acum is in MW/(m³/s), so ``ρ_acum · storage[hm³]`` overstates the true stored
+    energy (MWmonth) by the hm³↔(m³/s)·month factor. That factor scales with the month's
+    length, and cobre prices the VminOP slack with each stage's **real** ``block_hours``
+    (672–744 h — actual calendar months), **not** the source model's fixed 730 h
+    convention. Using the actual month length here makes the effective slack penalty
+    resolve to the intended R$/MWh on every stage; the fixed ``C_M3S2HM3`` would leave a
+    ±~9 % per-stage error (worst in February). Equals ``C_M3S2HM3`` exactly for a 730 h
+    month.
     """
     total = start_month - 1 + stage
     hours = _month_hours(start_year + total // 12, total % 12 + 1)
@@ -183,7 +183,7 @@ def compute_accumulated_productivities(
     fictitious plants between a real plant and its next real downstream are
     collapsed: the FICTs' ρ_eq is folded into the upstream real plant's own
     ρ_eq and the next real plant becomes the direct downstream.  This makes
-    cobre-bridge's accumulated productivity reproduce NEWAVE's
+    cobre-bridge's accumulated productivity reproduce the source model's
     ``produtibilidade_acumulada_calculo_earm`` from ``pmo.dat``.
 
     Parameters
@@ -244,18 +244,17 @@ def _cascade_sum(
 def compute_max_prodtacum_sin(case: NewaveCase) -> float | None:
     """Return ``MAX_PRODTACUM_SIN`` = max accumulated productivity at altura máxima.
 
-    NEWAVE converts the DESVIO ("outros usos da água" / water-withdrawal) and
-    evaporation penalties with the **maximum accumulated cascade productivity**
-    (manual §3.24). pmo.dat shows these penalties are **fixed** over the whole
-    study — the max is ITAIPU's cascade, which carries no CFUGA/CMONT temporal
-    override, so it never moves — and the per-plant productivity is taken at the
-    **maximum height** (vol_max), i.e. NEWAVE's
-    ``produtibilidade_acumulada_calculo_altura_maxima``. On the example case this
-    returns ≈ 6.4458, matching pmo's "PENALIDADE POR VIOLACAO DOS OUTROS USOS"
-    (19 149.55 → implied 6.4371) and Pmo's 6.4420; the legacy 65%-reference
+    The source model converts the DESVIO ("outros usos da água" / water-withdrawal) and
+    evaporation penalties with the **maximum accumulated cascade productivity** (manual
+    §3.24). pmo.dat shows these penalties are **fixed** over the whole study — the max
+    is ITAIPU's cascade, which carries no CFUGA/CMONT temporal override, so it never
+    moves — and the per-plant productivity is taken at the **maximum height** (vol_max),
+    i.e. The source model's ``produtibilidade_acumulada_calculo_altura_maxima``. On the
+    example case this returns ≈ 6.4458, matching pmo's "PENALIDADE POR VIOLACAO DOS
+    OUTROS USOS" (19 149.55 → implied 6.4371) and Pmo's 6.4420; the legacy 65%-reference
     accumulated max was 6.3542 (~1.4% low).
 
-    Falls back to ``None`` when the NEWAVE files cannot be read (mocked tests).
+    Falls back to ``None`` when the source model files cannot be read (mocked tests).
     """
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
@@ -335,16 +334,16 @@ def compute_per_stage_acc_productivities(
 def _warn_if_non_fixa_penalization(configuracoes_penalizacao: list[Any] | None) -> bool:
     """Warn when curva.dat selects a *non-FIXA* security-curve penalization.
 
-    The penalization-config line of curva.dat carries, as its first field, the
-    ``TIPO DE PENALIZACAO``: ``0`` = **FIXA** (a fixed per-violation penalty at
-    the curve cost), anything else = NEWAVE's iterative / variable penalization
-    (the ``ETAPA-2`` adjustment).
+    The penalization-config line of curva.dat carries, as its first field, the ``TIPO DE
+    PENALIZACAO``: ``0`` = **FIXA** (a fixed per-violation penalty at the curve cost),
+    anything else = the source model's iterative / variable penalization (the
+    ``ETAPA-2`` adjustment).
 
-    Cobre-bridge models the **FIXA** convention: a per-stage VminOP (minimum
-    stored energy) slack penalized at the fixed curve cost.  This is the faithful
-    equivalent of NEWAVE FIXA, so a FIXA deck needs no warning.  It does **not**
-    reproduce the iterative / variable penalization, so a non-FIXA deck will show
-    an expected VminOP violation-penalty difference.
+    Cobre-bridge models the **FIXA** convention: a per-stage VminOP (minimum stored
+    energy) slack penalized at the fixed curve cost.  This is the faithful equivalent of
+    the source model FIXA, so a FIXA deck needs no warning.  It does **not** reproduce
+    the iterative / variable penalization, so a non-FIXA deck will show an expected
+    VminOP violation-penalty difference.
 
     Emits an INFO confirmation for FIXA and a WARNING for non-FIXA.  Returns
     ``True`` only when the (non-FIXA) warning fired (for testability).
@@ -379,8 +378,8 @@ def _curve_seasonalizes(configuracoes_penalizacao: list[Any] | None) -> bool:
     The penalization-config line of ``curva.dat`` carries, as its **third** field,
     the post-study (``Período Estático Final``) seasonalization flag for the
     security curve: ``1`` repeats the last study year's monthly curve across the
-    static final period, anything else freezes December's value across the tail
-    (NEWAVE manual table, p.32-33). Returns ``False`` (freeze — the manual default)
+    static final period, anything else freezes December's value across the tail (the
+    source model manual table, p.32-33). Returns ``False`` (freeze — the manual default)
     when the field is absent or unparseable.
     """
     try:
@@ -390,16 +389,16 @@ def _curve_seasonalizes(configuracoes_penalizacao: list[Any] | None) -> bool:
 
 
 def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
-    """True iff NEWAVE counts plant ``code``'s storage in a REE's stored energy.
+    """True iff the source model counts plant ``code``'s storage in a REE's stored
+    energy.
 
-    NEWAVE's stored-energy (EARM) and VminOP accounting include **only
-    monthly-regulating reservoirs** (``tipo_regulacao == "M"``) that have usable
-    storage (``volume_maximo > volume_minimo``).  Run-of-river (``"D"``) and
-    special-regime (``"S"``) plants are excluded even when their *accumulated*
-    cascade productivity is positive from downstream powerhouses — e.g. ITAIPU
-    (``"S"``) and JIRAU (``"D"``) carry storage but are not part of NEWAVE's
-    stored energy.  This reproduces the plant set of pmo.dat's
-    ``produtibilidade_acumulada_calculo_earm`` column.
+    The source model's stored-energy (EARM) and VminOP accounting include **only
+    monthly-regulating reservoirs** (``tipo_regulacao == "M"``) that have usable storage
+    (``volume_maximo > volume_minimo``).  Run-of-river (``"D"``) and special-regime
+    (``"S"``) plants are excluded even when their *accumulated* cascade productivity is
+    positive from downstream powerhouses — e.g. ITAIPU (``"S"``) and JIRAU (``"D"``)
+    carry storage but are not part of the source model's stored energy.  This reproduces
+    the plant set of pmo.dat's ``produtibilidade_acumulada_calculo_earm`` column.
 
     Distinct from ``alignment._detect_reservoir_plants`` (useful-volume only):
     that set is broader because it does not gate on ``tipo_regulacao``.
@@ -420,21 +419,21 @@ def convert_vminop_constraints(
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
 
     Expressions are emitted using the cobre HEAD ``@name`` sigil, with one
-    ``@rho_acum_h{hydro_id}`` per hydro term.  The accumulated productivity
-    used both for the per-stage RHS bound and (via the fourth return value)
-    for the ``@rho_acum_h{id}`` override is the cascade-summed *integrated*
-    productivity — NEWAVE's stored-energy / EARM convention — which differs
-    from cobre's default point ρ_acum (gen = ρ·Q coefficient) by up to ~10%
-    on plants with non-trivial head swing.
+    ``@rho_acum_h{hydro_id}`` per hydro term.  The accumulated productivity used both
+    for the per-stage RHS bound and (via the fourth return value) for the
+    ``@rho_acum_h{id}`` override is the cascade-summed *integrated* productivity — the
+    source model's stored-energy / EARM convention — which differs from cobre's default
+    point ρ_acum (gen = ρ·Q coefficient) by up to ~10% on plants with non-trivial head
+    swing.
 
-    Only monthly-regulating reservoirs with usable storage participate in a
-    REE's expression (see :func:`_is_stored_energy_reservoir`); run-of-river and
-    special-regime plants are excluded to match NEWAVE's EARM plant set.
+    Only monthly-regulating reservoirs with usable storage participate in a REE's
+    expression (see :func:`_is_stored_energy_reservoir`); run-of-river and
+    special-regime plants are excluded to match the source model's EARM plant set.
 
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID mapping.
 
@@ -451,11 +450,11 @@ def convert_vminop_constraints(
         _LOG.debug("curva.dat not found; skipping VminOP constraints.")
         return None
 
-    # Honor dger.dat's `curva_aversao` switch: NEWAVE itself disables the
-    # risk-aversion curve when this flag is 0, even if curva.dat is on disk.
-    # Mirror that here so the converted cobre case matches NEWAVE's behavior.
-    # When the field is absent (None), preserve historical behavior and emit
-    # the constraints — only an explicit 0 disables them.
+    # Honor dger.dat's `curva_aversao` switch: The source model itself disables the
+    # risk-aversion curve when this flag is 0, even if curva.dat is on disk. Mirror that
+    # here so the converted cobre case matches the source model's behavior. When the
+    # field is absent (None), preserve historical behavior and emit the constraints —
+    # only an explicit 0 disables them.
     dger = case.dger
     if dger.curva_aversao == 0:
         _LOG.info(
@@ -469,9 +468,9 @@ def convert_vminop_constraints(
     if curva_df is None or curva_df.empty:
         return None
 
-    # Cobre's per-stage curve slack reproduces NEWAVE's FIXA penalization
-    # (TIPO DE PENALIZACAO = 0); warn only when the deck selects a non-FIXA mode,
-    # which the bridge does not reproduce.
+    # Cobre's per-stage curve slack reproduces the source model's FIXA penalization
+    # (TIPO DE PENALIZACAO = 0); warn only when the deck selects a non-FIXA mode, which
+    # the bridge does not reproduce.
     _warn_if_non_fixa_penalization(curva.configuracoes_penalizacao)
 
     # curva.dat's penalization line carries, as its third field, the post-study
@@ -496,31 +495,29 @@ def convert_vminop_constraints(
     start_year = _horizon.start_year
     num_stages = _horizon.total_stages
 
-    # NEWAVE uses the *integrated* productivity (ρ_esp · (1/useful) ·
+    # The source model uses the *integrated* productivity (ρ_esp · (1/useful) ·
     # ∫_vmin^vmax h(V) dV) to evaluate stored energy / VminOP, which is the
-    # `produtibilidade_acumulada_calculo_earm` column in pmo.dat — different
-    # from the gen = ρ·Q point productivity at v_65 that the LP uses.  We
-    # compute that integrated cascade here and use it both for the per-stage
-    # RHS bound *and* (via the return value) to override the
-    # `@rho_acum_h{id}` scalar parameter in scalar_parameters.json so the
-    # LP's constraint coefficient matches NEWAVE.  Without the override the
-    # LHS would use cobre's default point ρ_acum and silently drift from
-    # the RHS by ~10% on plants with non-trivial head swing.
+    # `produtibilidade_acumulada_calculo_earm` column in pmo.dat — different from the
+    # gen = ρ·Q point productivity at v_65 that the LP uses.  We compute that integrated
+    # cascade here and use it both for the per-stage RHS bound *and* (via the return
+    # value) to override the `@rho_acum_h{id}` scalar parameter in
+    # scalar_parameters.json so the LP's constraint coefficient matches the source
+    # model.  Without the override the LHS would use cobre's default point ρ_acum and
+    # silently drift from the RHS by ~10% on plants with non-trivial head swing.
     acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)
     per_stage_own_int = compute_per_stage_own_integrated_productivities(case)
     per_stage_acc = compute_per_stage_acc_productivities(
         confhd_df, per_stage_own_int, cadastro
     )
 
-    # Convert ρ_acum from MW/(m³/s) to MWmonth/hm³ so the VminOP LHS
-    # (Σ ρ_acum · hydro_storage[hm³], and the matching RHS, both built from
-    # per_stage_acc) is the *true* stored energy in MWmonth rather than
-    # ρ_acum·hm³, which overstates it by the hm³↔(m³/s)·month factor (≈ 2.628).
-    # The VminOP slack penalty is a R$/MWh value (penalid.dat); without this
-    # conversion the slack is that factor too large, so the effective
-    # curve-violation cost rises above the deficit cost and the LP prefers
-    # deficit to violating the security curve — i.e. Cobre hoards water under
-    # scarcity instead of drawing it down like NEWAVE.
+    # Convert ρ_acum from MW/(m³/s) to MWmonth/hm³ so the VminOP LHS (Σ ρ_acum ·
+    # hydro_storage[hm³], and the matching RHS, both built from per_stage_acc) is the
+    # *true* stored energy in MWmonth rather than ρ_acum·hm³, which overstates it by the
+    # hm³↔(m³/s)·month factor (≈ 2.628). The VminOP slack penalty is a R$/MWh value
+    # (penalid.dat); without this conversion the slack is that factor too large, so the
+    # effective curve-violation cost rises above the deficit cost and the LP prefers
+    # deficit to violating the security curve — i.e. Cobre hoards water under scarcity
+    # instead of drawing it down like the source model.
     #
     # The factor is applied *per stage* via :func:`_vminop_energy_factor`, which
     # uses each stage's real month length (cobre prices the slack as
@@ -587,12 +584,12 @@ def convert_vminop_constraints(
         referenced_ids: list[int] = []
 
         for plant_code in sorted(hydros_in_ree):
-            # NEWAVE's stored energy (EARM) — and thus the VminOP expression —
-            # counts only monthly-regulating reservoirs with usable storage.
-            # Gate on that, not on ``acc_prod > 0`` alone: run-of-river /
-            # special-regime plants such as ITAIPU and JIRAU carry a positive
-            # *accumulated* productivity from downstream powerhouses yet are not
-            # part of NEWAVE's stored energy.
+            # The source model's stored energy (EARM) — and thus the VminOP expression —
+            # counts only monthly-regulating reservoirs with usable storage. Gate on
+            # that, not on ``acc_prod > 0`` alone: run-of-river / special-regime plants
+            # such as ITAIPU and JIRAU carry a positive *accumulated* productivity from
+            # downstream powerhouses yet are not part of the source model's stored
+            # energy.
             if not _is_stored_energy_reservoir(cadastro, plant_code):
                 continue
             if acc_prod.get(plant_code, 0.0) <= 0.0:
@@ -669,7 +666,7 @@ def convert_vminop_constraints(
 
         # Build per-stage bounds from curva_df.
         # curva.dat only covers the study period. Extend into the post-study
-        # ("Período Estático Final") per NEWAVE's rule (manual table p.32-33):
+        # ("Período Estático Final") per source-model's rule (manual table p.32-33):
         # seasonalize (repeat the last study year's monthly curve) when
         # curva.dat's third penalization field is set, otherwise freeze December's
         # value across the whole tail. ``seasonalize_curve_post_study`` carries the
@@ -914,7 +911,7 @@ def _parse_formula(
     id_map: NewaveIdMap,
     line_id_map: dict[tuple[int, int], int],
 ) -> str | None:
-    """Translate a NEWAVE RE formula into a Cobre expression string.
+    """Translate a source-model RE formula into a Cobre expression string.
 
     Unknown plant codes or interchange pairs are skipped with a warning.
     Returns ``None`` if no valid terms remain after translation.
@@ -970,14 +967,12 @@ def _parse_formula(
                 )
                 continue
 
-            # NEWAVE's ``ener_interc(A, B)`` is the directional flow from
-            # A to B as a non-negative variable.  Map to Cobre's
-            # ``line_direct``/``line_reverse`` so the sign is encoded by
-            # the variable choice rather than by negating the coefficient
-            # (the latter would dilute the bound when LP solutions route
-            # in the non-canonical direction).  See
-            # ``convert_agrint_constraints`` for the same rule applied to
-            # AGRINT terms.
+            # The source model's ``ener_interc(A, B)`` is the directional flow from A to
+            # B as a non-negative variable.  Map to Cobre's
+            # ``line_direct``/``line_reverse`` so the sign is encoded by the variable
+            # choice rather than by negating the coefficient (the latter would dilute
+            # the bound when LP solutions route in the non-canonical direction).  See
+            # ``convert_agrint_constraints`` for the same rule applied to AGRINT terms.
             var = (
                 f"line_direct({line_id})"
                 if from_sys < to_sys
@@ -1073,7 +1068,7 @@ def _parse_re_dat(
     Returns
     -------
     conjuntos : dict[int, list[int]]
-        Mapping from constraint code to list of NEWAVE plant codes.
+        Mapping from constraint code to list of the source model plant codes.
     re_dat_bounds : dict[int, dict[tuple[int, int], float]]
         ``{constraint_code: {(stage_id, block_id): upper_bound}}``.
         ``patamar=0`` in RE.DAT is expanded to all 3 blocks.
@@ -1176,7 +1171,7 @@ def convert_electric_constraints(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID mapping.
     start_id:
@@ -1231,13 +1226,13 @@ def convert_electric_constraints(
 
     line_id_map = _build_line_id_map(case)
 
-    # Read ELETRI penalty from PENALID.DAT for slack costs.
-    # NEWAVE manual v29 §3.24: ELETRI is energy-domain (R$/MWh) and applies
-    # only in individualized periods. When absent in PENALID.DAT, NEWAVE
-    # considers the constraint only in the final simulation — cobre has no
-    # equivalent nuance, so we keep the slack enabled with a high default
-    # (10 × MAX_DEFICIT, matching NEWAVE's evaporation/FPHA-folga magnitude)
-    # so RE_* constraints stay soft but very expensive to violate.
+    # Read ELETRI penalty from PENALID.DAT for slack costs. The source model manual v29
+    # §3.24: ELETRI is energy-domain (R$/MWh) and applies only in individualized
+    # periods. When absent in PENALID.DAT, the source model considers the constraint
+    # only in the final simulation — cobre has no equivalent nuance, so we keep the
+    # slack enabled with a high default (10 × MAX_DEFICIT, matching the source model's
+    # evaporation/FPHA-folga magnitude) so RE_* constraints stay soft but very expensive
+    # to violate.
     eletri_penalty: float | None = None
     if case.files.penalid is not None:
         try:
@@ -1255,7 +1250,7 @@ def convert_electric_constraints(
             _LOG.warning("Could not read ELETRI penalty from PENALID.DAT (%s).", exc)
 
     if eletri_penalty is None:
-        # Fall back to 10 × MAX_DEFICIT (NEWAVE evaporation-folga convention).
+        # Fall back to 10 × MAX_DEFICIT (the source model evaporation-folga convention).
         try:
             _sis = case.sistema
             _def_df = _sis.custo_deficit
@@ -1600,7 +1595,7 @@ def convert_agrint_constraints(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Entity ID mapping (used indirectly via ``_build_line_id_map``).
     start_id:
@@ -1645,12 +1640,11 @@ def convert_agrint_constraints(
         terms_raw = groups[group_id]
 
         # Build expression: each (A, B, coeff) -> directional flow term.
-        # NEWAVE's ``Interc(A→B)`` is the *non-negative directional* flow
-        # from A to B (zero whenever physical flow goes B→A).  Cobre's
-        # ``line_direct(id)`` / ``line_reverse(id)`` are the matching
-        # non-negative LP variables: ``line_direct`` is the flow in the
-        # canonical (src<tgt) direction, ``line_reverse`` the flow in
-        # the opposite direction.
+        # The source model's ``Interc(A→B)`` is the *non-negative directional* flow from
+        # A to B (zero whenever physical flow goes B→A).  Cobre's ``line_direct(id)`` /
+        # ``line_reverse(id)`` are the matching non-negative LP variables:
+        # ``line_direct`` is the flow in the canonical (src<tgt) direction,
+        # ``line_reverse`` the flow in the opposite direction.
         #
         # The naive substitution ``-line_exchange`` (signed net flow,
         # negated when reversed) would let the LHS go negative when one
@@ -1703,13 +1697,13 @@ def convert_agrint_constraints(
             }
         )
 
-        # Collect study-period limit rows for this group, keyed by
-        # (stage, block). AGRINT has no seasonalize flag: NEWAVE freezes its
-        # post-study limits at the last study stage value and ignores any
-        # post-study-dated agrint.dat entries (planned future expansion). The
-        # pmo.dat "LIMITES DOS AGRUPAMENTOS DE INTERCAMBIO (MWmedio)" block
-        # confirms this — its POS row is flat at the last study (December)
-        # value. So clamp to the study period here, then freeze the tail.
+        # Collect study-period limit rows for this group, keyed by (stage, block).
+        # AGRINT has no seasonalize flag: The source model freezes its post-study limits
+        # at the last study stage value and ignores any post-study-dated agrint.dat
+        # entries (planned future expansion). The pmo.dat "LIMITES DOS AGRUPAMENTOS DE
+        # INTERCAMBIO (MWmedio)" block confirms this — its POS row is flat at the last
+        # study (December) value. So clamp to the study period here, then freeze the
+        # tail.
         group_bounds: dict[tuple[int, int], float] = {}
         for grp, mi, anoi, mf, anof, lims in limits:
             if grp != group_id:

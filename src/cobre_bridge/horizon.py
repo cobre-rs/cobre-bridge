@@ -1,4 +1,4 @@
-"""Canonical NEWAVE study-horizon arithmetic — the single source of truth.
+"""Canonical the source model study-horizon arithmetic — the single source of truth.
 
 Every per-stage table the pipeline emits (inflows, loads, bounds, penalties,
 constraints) is sized against the study horizon, and the study/post-study
@@ -6,7 +6,7 @@ boundary drives post-study extrapolation. That arithmetic used to be hand-copied
 at ~25 sites across the converters and comparators; this module owns it so all of
 them agree by construction.
 
-NEWAVE conventions encoded here:
+The source model conventions encoded here:
 
 - The study runs from ``mes_inicio_estudo`` of ``ano_inicio_estudo`` through
   December of ``ano_inicio_estudo + num_anos_estudo - 1`` — i.e.
@@ -15,7 +15,7 @@ NEWAVE conventions encoded here:
   post-study stages, for ``total_stages`` in all.
 - Seasonal records for the post-study (static final) period are tagged with the
   sentinel year ``9999`` (:data:`POST_STUDY_YEAR`).
-- ``99990`` and above is NEWAVE's "big-M" sentinel meaning "no limit / restore
+- ``99990`` and above is the source model's "big-M" sentinel meaning "no limit / restore
   default" in bound records (:data:`BIG_M`).
 """
 
@@ -28,10 +28,10 @@ from datetime import date
 
 from inewave.newave import Dger
 
-# NEWAVE tags post-study (static final period) seasonal data with year 9999.
+# The source model tags post-study (static final period) seasonal data with year 9999.
 POST_STUDY_YEAR = 9999
 
-# NEWAVE bound records use 99999 as a "big-M" sentinel meaning "no limit".
+# The source model bound records use 99999 as a "big-M" sentinel meaning "no limit".
 # Compare with >= this threshold to catch the family of 9999x sentinels.
 BIG_M = 99990.0
 
@@ -39,17 +39,16 @@ BIG_M = 99990.0
 def is_effectively_infinite(value: float) -> bool:
     """Return True if *value* represents an unbounded bound.
 
-    Catches both IEEE infinity and NEWAVE's big-M sentinel (``abs(value) >=
-    BIG_M`` — the 99999 family meaning "no limit"). Shared by the bounds
-    comparator and the chart layer so the "is this bound unbounded?" test has
-    one definition.
+    Catches both IEEE infinity and the source model's big-M sentinel (``abs(value) >=
+    BIG_M`` — the 99999 family meaning "no limit"). Shared by the bounds comparator and
+    the chart layer so the "is this bound unbounded?" test has one definition.
     """
     return math.isinf(value) or abs(value) >= BIG_M
 
 
 @dataclass(frozen=True)
 class StudyHorizon:
-    """Resolved study-horizon dimensions for a NEWAVE case.
+    """Resolved study-horizon dimensions for a source-model case.
 
     Build with :func:`study_horizon`; every field is a plain count/index so the
     object is cheap to pass around and compare.
@@ -144,7 +143,7 @@ def seasonal_step_function(
     clears the fill ("restore default"). Returns ``{stage_id: transform(value)}``
     for every stage that has an active value.
 
-    Post-study extrapolation follows NEWAVE's rule, selected by *seasonalize*:
+    Post-study extrapolation follows the source model's rule, selected by *seasonalize*:
 
     - ``True`` (e.g. VMINT/VMAXT with their ``sazonaliza_*`` flag set): repeat the
       last study year's monthly pattern, so a genuinely seasonal constraint keeps

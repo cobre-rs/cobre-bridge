@@ -1,4 +1,5 @@
-"""Hydro entity converter: maps NEWAVE hydro plant data to Cobre hydro JSON."""
+"""Hydro entity converter: maps the source model hydro plant data to Cobre hydro
+JSON."""
 
 from __future__ import annotations
 
@@ -45,6 +46,136 @@ _PRODUCTION_MODELS_SCHEMA_URL = (
     "/book/src/schemas/production_models.schema.json"
 )
 
+# --- FPHA (hydro production function) emission ---------------------------------
+#
+# When the source model evaluates generation via FPHA (``dger.dat`` line 96,
+# ``funcao_producao_uhe == 0``; see :attr:`NewaveCase.fpha_enabled`), reservoir plants
+# are emitted with cobre's ``model: "fpha"`` so cobre fits the production function from
+# the plant geometry + tailrace families instead of the bridge pre-baking a single
+# constant productivity.
+
+# cobre's FPHA production function is ``phi = K · eta · q · h_net`` (MW), with ``K = g /
+# 1000`` and ``eta`` the dimensionless turbine efficiency in (0, 1]. The source model
+# instead carries the *specific* productivity ``rho_esp`` (MW/((m³/s)·m)), which already
+# folds in ``K · eta``. So the efficiency cobre needs is ``eta = rho_esp / K`` — the
+# value that makes cobre's ``phi`` reproduce the source model's ``rho_esp · q · h_liq``.
+_GRAVITY_MW_FACTOR = 9.81e-3
+# The source model's tratamento-fpha distance method carries only a tolerance; cobre
+# also requires a sample count for the mean-squared-distance estimate. The source model
+# does not specify one, so we supply a reasonable default.
+_FPHA_DISTANCE_N_SAMPLES = 100
+
+
+def _is_fpha_eligible(hreg: pd.Series) -> bool:
+    """Whether a hydro plant can be fit by cobre's *computed* FPHA.
+
+    Requires a non-degenerate volume→cota polynomial (the forebay curve) and a
+    positive specific productivity ``rho_esp`` (needed to derive the
+    dimensionless turbine efficiency). Storage swing is **not** required:
+    run-of-river / zero-storage plants (``vmax == vmin``) emit a single VHA geometry row
+    and cobre fits them through the single-volume FPHA path (γ_V = 0), matching the
+    source model, which fits these plants with ``Npt_V = 1``.
+    """
+    coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+    if all(c == 0.0 for c in coeffs):
+        return False
+    rho_esp_raw = hreg.get("produtibilidade_especifica")
+    if rho_esp_raw is None:
+        return False
+    rho_esp = float(rho_esp_raw)
+    return not math.isnan(rho_esp) and rho_esp > 0.0
+
+
+def fpha_eligible_codes(case: NewaveCase) -> set[int]:
+    """The source model plant codes emitted as ``model: "fpha"`` for this case.
+
+    Empty unless :attr:`NewaveCase.fpha_enabled`. The single source of truth for
+    FPHA eligibility, shared by :func:`convert_hydros`,
+    :func:`convert_production_models`, and :func:`convert_hydro_energy_productivity`
+    so the three files agree on which plants are FPHA. Uses the same
+    permanent-override cadastro the converters use, so eligibility is consistent.
+    """
+    if not case.fpha_enabled:
+        return set()
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
+    eligible: set[int] = set()
+    for _, row in case.active_hydros.iterrows():
+        code = int(row["codigo_usina"])
+        if code in cadastro.index and _is_fpha_eligible(cadastro.loc[code]):
+            eligible.add(code)
+    return eligible
+
+
+def _fpha_efficiency(rho_esp: float, name: str) -> float:
+    """Dimensionless turbine efficiency ``eta = rho_esp / K`` for cobre's FPHA.
+
+    Clamped to ``1.0`` if the source ``rho_esp`` implies ``eta > 1`` (unphysical
+    in the input data), with a warning.
+    """
+    eta = rho_esp / _GRAVITY_MW_FACTOR
+    if eta > 1.0:
+        _LOG.warning(
+            "FPHA turbine efficiency for plant %s implied by rho_esp is %.4f "
+            "(> 1.0); clamping to 1.0.",
+            name,
+            eta,
+        )
+        return 1.0
+    return eta
+
+
+def _parse_fpha_plane_reduction(case: NewaveCase) -> dict | None:
+    """Parse ``tratamento-fpha`` into a cobre ``fpha_plane_reduction`` block.
+
+    The source model's treatment file carries one active line (``&``-prefixed lines are
+    comments) selecting either the angle or the distance plane-reduction method::
+
+        HIDRELETRICA-FPHA-METODO-REDUCAO-CORTES-ANGULO-PADRAO; 1.0
+        HIDRELETRICA-FPHA-METODO-REDUCAO-CORTES-DISTANCIA-PADRAO; 0.002
+
+    Returns ``{"method": "angle", "tolerance_deg": v}`` or
+    ``{"method": "distance", "tolerance_pct": v, "n_samples": N}``, or ``None``
+    when no treatment file is present or no method line is active.
+    """
+    path = case.files.tratamento_fpha
+    if path is None:
+        return None
+
+    methods: list[dict] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("&"):
+            continue
+        parts = [part.strip() for part in line.split(";")]
+        if len(parts) < 2:
+            continue
+        token = parts[0].upper()
+        try:
+            value = float(parts[1])
+        except ValueError:
+            continue
+        if token.endswith("ANGULO-PADRAO"):
+            methods.append({"method": "angle", "tolerance_deg": value})
+        elif token.endswith("DISTANCIA-PADRAO"):
+            methods.append(
+                {
+                    "method": "distance",
+                    "tolerance_pct": value,
+                    "n_samples": _FPHA_DISTANCE_N_SAMPLES,
+                }
+            )
+
+    if not methods:
+        return None
+    if len(methods) > 1:
+        _LOG.warning(
+            "Multiple active FPHA plane-reduction methods in %s; using the first (%s).",
+            path.name,
+            methods[0]["method"],
+        )
+    return methods[0]
+
+
 _EVAP_MONTHS = [
     "JAN",
     "FEV",
@@ -81,7 +212,7 @@ def _apply_permanent_overrides(
     cadastro:
         The ``Hidr.cadastro`` DataFrame indexed by ``codigo_usina``.
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
 
     Returns
     -------
@@ -195,7 +326,7 @@ def _extract_temporal_overrides(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     confhd_codes:
         List of plant codes present in the study (from confhd.dat).  Records
         for plants not in this list are excluded.
@@ -268,14 +399,13 @@ def _read_ghmin_per_stage(
 ) -> dict[int, dict[int, float]]:
     """Read GHMIN.DAT and expand into ``{plant_code: {stage_0based: min_gen_mw}}``.
 
-    GHMIN values are time-varying minimum-generation requirements in
-    MWmes that NEWAVE enforces per plant per stage.  Each (plant,
-    month, year) record sets the value from that stage forward until
-    the next record overrides it (step function).  Records with
-    ``year == 9999`` are post-study seasonal entries: each calendar
-    month they appear for becomes the value used in every post-study
-    stage with that calendar month, falling back to a seasonal repeat
-    of the last study year for unspecified months.
+    GHMIN values are time-varying minimum-generation requirements in MWmes that
+    source-model enforces per plant per stage.  Each (plant, month, year) record sets
+    the value from that stage forward until the next record overrides it (step
+    function).  Records with ``year == 9999`` are post-study seasonal entries: each
+    calendar month they appear for becomes the value used in every post-study stage with
+    that calendar month, falling back to a seasonal repeat of the last study year for
+    unspecified months.
 
     Only ``patamar == 0`` rows are used — they represent the all-blocks
     mean, which matches the per-stage granularity of
@@ -286,7 +416,7 @@ def _read_ghmin_per_stage(
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     start_year, start_month:
         Study start (Cobre stage 0 corresponds to this calendar month).
     study_months:
@@ -386,7 +516,7 @@ def _read_penalid(case: NewaveCase) -> dict[int, dict[str, float]]:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
 
     Returns
     -------
@@ -433,11 +563,11 @@ def _read_penalid(case: NewaveCase) -> dict[int, dict[str, float]]:
     return result
 
 
-# Turbine type code -> kturb exponent used in the head-correction formula.
-# NEWAVE codes: 1 = Francis, 2 = Kaplan, 3 = Pelton.  Francis and Pelton
-# share the kturb = 0.5 exponent (square-root flow/head response); Kaplan
-# uses 0.2 (gentler response thanks to adjustable blades).  Code 0 (= not
-# specified in hidr.dat) falls back to Francis.
+# Turbine type code -> kturb exponent used in the head-correction formula. The source
+# model codes: 1 = Francis, 2 = Kaplan, 3 = Pelton.  Francis and Pelton share the kturb
+# = 0.5 exponent (square-root flow/head response); Kaplan uses 0.2 (gentler response
+# thanks to adjustable blades).  Code 0 (= not specified in hidr.dat) falls back to
+# Francis.
 _KTURB_BY_TIPO_TURBINA: dict[int, float] = {0: 0.5, 1: 0.5, 2: 0.2, 3: 0.5}
 
 
@@ -470,10 +600,10 @@ def _compute_max_turbined_simple(hreg: pd.Series, name: str) -> tuple[float, flo
     power, both derated by the combined TEIF/IP availability factor.
 
     This is **live code on two paths**: it is the fallback
-    :func:`_compute_max_turbined_hypothesis` calls whenever a plant lacks the
+    :func:`_compute_max_turbined_head_corrected` calls whenever a plant lacks the
     head data (``queda_nominal_conjunto_*`` / cota polynomial) the corrected
     formula needs, and it is the v0.6.x formulation the top-level caller can be
-    switched back to if the head-corrected hypothesis proves wrong.
+    switched back to if the head-corrected formula proves wrong.
     """
     n_sets = int(hreg["numero_conjuntos_maquinas"])
     max_turbined = 0.0
@@ -491,6 +621,29 @@ def _compute_max_turbined_simple(hreg: pd.Series, name: str) -> tuple[float, flo
     return max_turbined * availability, max_generation * availability
 
 
+def _compute_max_turbined_rated(hreg: pd.Series) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` as the rated nameplate capacity:
+    ``Σ_c (n_c · q_nom_c)`` for flow and ``Σ_c (n_c · p_nom_c)`` for power, with
+    **no** TEIF/IP availability derating and no head correction.
+
+    ``convert_hydros`` emits the power value ``[1]`` as every plant's ``max_generation``
+    (independent of the production function): it equals the source model's
+    installed-capacity ceiling / FPHA ``GHmax`` exactly (verified TUCURUI 7445, QUEBRA
+    QUEIX 120). The flow value ``[0]`` (``Σ n·q_nom``) is the source model's
+    fitting-grid ``Qmax``, **not** the operational turbined cap — the emitted
+    ``max_turbined`` comes from :func:`_compute_max_turbined_head_corrected` instead
+    (the head-corrected engolimento that actually binds in dispatch).
+    """
+    n_sets = int(hreg["numero_conjuntos_maquinas"])
+    max_turbined = 0.0
+    max_generation = 0.0
+    for i in range(1, n_sets + 1):
+        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
+        max_turbined += float(hreg[f"vazao_nominal_conjunto_{i}"]) * n_machines
+        max_generation += float(hreg[f"potencia_nominal_conjunto_{i}"]) * n_machines
+    return max_turbined, max_generation
+
+
 def _evaluate_cota_polynomial(hreg: pd.Series, volume_hm3: float) -> float:
     """Evaluate the upstream cota polynomial ``cota(V) = Σ a_i · V^i`` at *V*."""
     a = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
@@ -501,8 +654,8 @@ def _evaluate_cota_polynomial(hreg: pd.Series, volume_hm3: float) -> float:
 def _mean_cota_over_volume(hreg: pd.Series, v_lo: float, v_hi: float) -> float:
     """Return the volume-averaged upstream cota over ``[v_lo, v_hi]``.
 
-    Computed analytically from the integral of the quartic polynomial — the
-    same shape NEWAVE uses to derive ``prodt_eq`` for reservoir plants.
+    Computed analytically from the integral of the quartic polynomial — the same shape
+    the source model uses to derive ``prodt_eq`` for reservoir plants.
     """
     if v_hi <= v_lo:
         return _evaluate_cota_polynomial(hreg, v_lo)
@@ -536,9 +689,20 @@ def _apply_hydraulic_loss(h_gross: float, tipo_perda: int, perdas: float) -> flo
     return h_gross
 
 
-def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float, float]:
-    """Return ``(max_turbined, max_generation)`` using the head-corrected
-    NEWAVE-style cap.
+def _compute_max_turbined_head_corrected(
+    hreg: pd.Series, name: str
+) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` using the head-corrected the
+    source-model-style cap.
+
+    This is the source model's **operational turbined cap** — the maximum turbinable
+    flow (engolimento) at the plant's operating head, which is what binds in the
+    dispatch LP. Verified against the source model on QUEBRA QUEIX, whose cap binds:
+    head-corrected 113.006 m³/s == the source model's realized 113.01 (the rated ``Σ
+    n·q_nom`` = 117.0 overshoots it by 3.5%). ``convert_hydros`` emits the flow value
+    ``[0]`` as ``max_turbined``; the ``[1]`` it returns is the availability-derated
+    power and is no longer used for the emitted ``max_generation`` (that comes from
+    :func:`_compute_max_turbined_rated`).
 
     For each machine set *c* with nominal head ``h_nom_c``, nominal flow
     ``q_nom_c`` and number of units ``n_c``, the effective rated flow at
@@ -555,11 +719,11 @@ def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float,
 
     * the volume-integrated net head from ``V_min`` to ``V_65``, i.e.
       ``mean_cota(V_min, V_65) - cota_jus - perdas``, for reservoir plants
-      (``tipo_regulacao == 'M'``).  This is the NEWAVE ``h^{65%}`` symbol —
-      despite the name, it is a *mean over the operating range* rather than
-      the snapshot at V = V_65.  Reproduces NEWAVE's actual cap exactly on
-      the diagnostic case (M. DE MORAES) and matches the equivalent
-      productivity ``prodt^M`` denominator;
+      (``tipo_regulacao == 'M'``).  This is the source model ``h^{65%}`` symbol —
+      despite the name, it is a *mean over the operating range* rather than the snapshot
+      at V = V_65.  Reproduces the source model's actual cap exactly on the diagnostic
+      case (M. DE MORAES) and matches the equivalent productivity ``prodt^M``
+      denominator;
     * the machine-count-weighted average of nominal heads, for run-of-river /
       daily plants — they don't have a meaningful "operating volume".
 
@@ -598,8 +762,8 @@ def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float,
     ip = _clamp_outage_pct(float(hreg.get("ip", 0.0) or 0.0), "ip", name)
     availability = _availability(teif, ip)
 
-    # Generation cap mirrors the legacy behavior — NEWAVE caps power at
-    # rated installed capacity, derated by availability.
+    # Generation cap mirrors the legacy behavior — the source model caps power at rated
+    # installed capacity, derated by availability.
     max_generation = sum_n_p * availability
 
     # Inputs needed for head correction.
@@ -630,26 +794,25 @@ def _compute_max_turbined_hypothesis(hreg: pd.Series, name: str) -> tuple[float,
 
     if tipo_reg == "M":
         v65 = vol_min + 0.65 * (vol_max - vol_min)
-        # NEWAVE's ``h^{65%}`` is the *integrated* net head over [V_min, V_65],
-        # not the snapshot at V = V_65.  Verified against M. DE MORAES (the
-        # diagnostic case): with this interpretation the formula reproduces
-        # the observed NEWAVE cap of 1084.95 m³/s exactly.
+        # The source model's ``h^{65%}`` is the *integrated* net head over [V_min,
+        # V_65], not the snapshot at V = V_65.  Verified against M. DE MORAES (the
+        # diagnostic case): with this interpretation the formula reproduces the observed
+        # the source model cap of 1084.95 m³/s exactly.
         h_int_gross = _mean_cota_over_volume(hreg, vol_min, v65) - cf
         h_op = _apply_hydraulic_loss(h_int_gross, tipo_perda, perdas)
         # For M plants ``prodt^M`` integrates over the same range, so h_int
         # equals h_op — the same value is reused intentionally.
         h_int = h_op
     else:
-        # Run-of-river ('S') and daily-regulated ('D') plants operate at a
-        # ~constant volume = the reference volume (``volume_referencia``).
-        # NEWAVE's operating head is the forebay cota AT vol_ref minus tailrace
-        # and losses, used for BOTH the turbine affinity ratio and prodt.  The
-        # previous code used the machine-weighted *nominal* head as ``h_op``,
-        # which made the affinity ratio ``h_op / h_nominal`` ≈ 1 (a silent
-        # no-op, leaving ``max_turbined = Σ(n·q)·availability`` uncorrected).
-        # Verified vs NEWAVE's ``(GHIDUH/QTURUH)/ρ_esp`` operating head to
-        # ~0.01 m across ~57 run-of-river plants incl. ITAIPU (113.37 m vs
-        # nominal 117 m → cap 11692.65 not 11878.58).
+        # Run-of-river ('S') and daily-regulated ('D') plants operate at a ~constant
+        # volume = the reference volume (``volume_referencia``). The source model's
+        # operating head is the forebay cota AT vol_ref minus tailrace and losses, used
+        # for BOTH the turbine affinity ratio and prodt.  The previous code used the
+        # machine-weighted *nominal* head as ``h_op``, which made the affinity ratio
+        # ``h_op / h_nominal`` ≈ 1 (a silent no-op, leaving ``max_turbined =
+        # Σ(n·q)·availability`` uncorrected). Verified vs the source model's
+        # ``(GHIDUH/QTURUH)/ρ_esp`` operating head to ~0.01 m across ~57 run-of-river
+        # plants incl. ITAIPU (113.37 m vs nominal 117 m → cap 11692.65 not 11878.58).
         vol_ref_raw = hreg.get("volume_referencia")
         if vol_ref_raw is None or is_na(vol_ref_raw) or float(vol_ref_raw) <= 0.0:
             h_op_gross = _mean_cota_over_volume(hreg, vol_min, vol_max) - cf
@@ -692,7 +855,7 @@ def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
 
     Returns
     -------
@@ -706,7 +869,7 @@ def read_cadastro(case: NewaveCase) -> pd.DataFrame:
 
 
 def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
-    """Convert NEWAVE hydro plant data to a Cobre ``hydros.json`` dict.
+    """Convert the source model hydro plant data to a Cobre ``hydros.json`` dict.
 
     Reads ``hidr.dat``, ``confhd.dat``, and ``ree.dat`` from *case*.
     Returns a dict with a ``"hydros"`` key containing a list of hydro
@@ -720,7 +883,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Pre-built ID mapping used for bus and downstream-hydro cross-
         references.
@@ -742,9 +905,9 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # Apply MODIF.DAT permanent overrides before the main conversion loop.
     cadastro = _apply_permanent_overrides(cadastro, case)
 
-    # Seasonal reference volumes per plant — when present, fed back into the
-    # evaporation block as ``reference_volumes_hm3`` so cobre's evaporation
-    # linearization matches the per-month reference NEWAVE itself uses.
+    # Seasonal reference volumes per plant — when present, fed back into the evaporation
+    # block as ``reference_volumes_hm3`` so cobre's evaporation linearization matches
+    # the per-month reference the source model itself uses.
     seasonal_volref = _read_volref_saz(case)
 
     # Resolve the FICT-cascade for every real plant.  Provides the effective
@@ -763,6 +926,9 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         for _, row in ree_df.iterrows():
             ree_to_submercado[int(row["codigo"])] = int(row["submercado"])
 
+    # Plants emitted as FPHA (empty unless dger funcao_producao_uhe == 0).
+    fpha_codes = fpha_eligible_codes(case)
+
     hydros: list[dict] = []
     for _, row in existing.iterrows():
         newave_code = int(row["codigo_usina"])
@@ -780,16 +946,16 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
 
-        # NEWAVE treats Daily-regulation ('D') and run-of-river / fio-d'água
-        # ('S') plants as fio-d'água — they can't accumulate water across
-        # stages, so the useful volume is NOT a usable reservoir buffer.
-        # Collapse the active range to a single point so Cobre's LP mirrors
-        # that (otherwise Cobre stores the inflow excess in the phantom buffer
-        # and shifts it across stages, where NEWAVE simply spills it).
+        # The source model treats Daily-regulation ('D') and run-of-river / fio-d'água
+        # ('S') plants as fio-d'água — they can't accumulate water across stages, so the
+        # useful volume is NOT a usable reservoir buffer. Collapse the active range to a
+        # single point so Cobre's LP mirrors that (otherwise Cobre stores the inflow
+        # excess in the phantom buffer and shifts it across stages, where the source
+        # model simply spills it).
         #   * 'D' → frozen at ``volume_referencia`` (legacy, validated).
         #   * 'S' → pinned at ``volume_minimo``; verified against ITAIPU (the
-        #     only 'S' plant), which NEWAVE keeps at VARMPUH 0% = Vmin every
-        #     stage, spilling the turbine-excess inflow.
+        # only 'S' plant), which the source model keeps at VARMPUH 0% = Vmin every
+        # stage, spilling the turbine-excess inflow.
         tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
         if tipo_reg == "D":
             vol_ref_raw = hreg.get("volume_referencia")
@@ -803,13 +969,20 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         # Generation parameters. Productivity lives in
         # ``hydro_production_models.json`` on cobre HEAD; callers that need
         # the per-hydro base value call ``compute_base_productivities``.
-        #
-        # The cap uses the head-corrected NEWAVE-style formula
-        # (see ``_compute_max_turbined_hypothesis``).  The previous simple
-        # Σ(n_c · q_nom_c) formulation lives in
-        # ``_compute_max_turbined_simple`` and can be reinstated by
-        # swapping the call below.
-        max_turbined, max_generation = _compute_max_turbined_hypothesis(hreg, name)
+        is_fpha = newave_code in fpha_codes
+        # Turbined and generation caps are independent of the production
+        # function:
+        #   * turbined cap = head-corrected engolimento at the operating head —
+        #     the operational dispatch cap. Verified on QUEBRA QUEIX, whose cap
+        #     binds: 113.006 == its realized 113.01 m³/s, while rated
+        #     Σ n·q_nom = 117.0 overshoots by 3.5%.
+        #   * generation cap = rated installed power Σ n·p_nom — the FPHA GHmax
+        #     (verified TUCURUI 7445.0, QUEBRA QUEIX 120.0; the availability-
+        #     derated power undershoots it). This loose ceiling never binds
+        #     before the head-corrected turbined cap, so a plant reaches its
+        #     turbined limit, not nameplate power.
+        max_turbined = _compute_max_turbined_head_corrected(hreg, name)[0]
+        max_generation = _compute_max_turbined_rated(hreg)[1]
 
         # Minimum outflow from historical minimum (may have been overridden by MODIF).
         vazao_min_hist = hreg.get("vazao_minima_historica")
@@ -871,13 +1044,12 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         evap_coeffs = [float(hreg[f"evaporacao_{m}"]) for m in _EVAP_MONTHS]
         has_evaporation = any(v != 0.0 for v in evap_coeffs)
 
-        # Evaporation linearization points: when the plant has a seasonal
-        # row in volref_saz.dat, emit one absolute hm³ value per calendar
-        # month (vmin + useful_volume).  Missing months default to vmin
-        # (matching NEWAVE's "operate at vmin" semantics for zero entries).
-        # Clamped into [min_storage_hm3, max_storage_hm3] so cobre's
-        # dimensional validator accepts every value even if a permanent
-        # VOLMIN override raised vmin above what the file was written for.
+        # Evaporation linearization points: when the plant has a seasonal row in
+        # volref_saz.dat, emit one absolute hm³ value per calendar month (vmin +
+        # useful_volume).  Missing months default to vmin (matching the source model's
+        # "operate at vmin" semantics for zero entries). Clamped into [min_storage_hm3,
+        # max_storage_hm3] so cobre's dimensional validator accepts every value even if
+        # a permanent VOLMIN override raised vmin above what the file was written for.
         plant_seasonal_for_evap = seasonal_volref.get(newave_code)
         evap_reference_volumes: list[float] | None = None
         if has_evaporation and plant_seasonal_for_evap:
@@ -920,9 +1092,22 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             if not math.isnan(rho_esp_f) and rho_esp_f > 0.0:
                 rho_esp = rho_esp_f
 
-        # Tailrace as a zero-order polynomial = canal_fuga_medio (constant).
-        # Cobre subtracts the tailrace level from the upstream head when
-        # deriving ρ_eq; without this NEWAVE's productivity will not match.
+        # FPHA reservoirs: cobre fits the production function from geometry +
+        # tailrace, so hand it the dimensionless turbine efficiency
+        # (eta = rho_esp / K) and select the "fpha" generation model. Eligibility
+        # guarantees rho_esp is present. Non-eligible plants (run-of-river, or
+        # non-FPHA cases) keep the constant-productivity path with no efficiency.
+        # ``is_fpha`` was computed above for the capacity-cap branch.
+        efficiency: dict | None = None
+        if is_fpha and rho_esp is not None:
+            efficiency = {
+                "type": "constant",
+                "value": _fpha_efficiency(rho_esp, name),
+            }
+
+        # Tailrace as a zero-order polynomial = canal_fuga_medio (constant). Cobre
+        # subtracts the tailrace level from the upstream head when deriving ρ_eq;
+        # without this source-model's productivity will not match.
         cf_raw = hreg.get("canal_fuga_medio")
         tailrace: dict | None = None
         if cf_raw is not None:
@@ -944,7 +1129,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 "max_outflow_m3s": None,
             },
             "generation": {
-                "model": "constant_productivity",
+                "model": "fpha" if is_fpha else "constant_productivity",
                 "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": max_turbined,
                 "min_generation_mw": min_generation,
@@ -966,7 +1151,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             "tailrace": tailrace,
             "diversion": None,
             "filling": None,
-            "efficiency": None,
+            "efficiency": efficiency,
             "hydraulic_losses": hydraulic_losses,
             "penalties": penalties,
             "entry_stage_id": None,
@@ -983,9 +1168,9 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 
 
 def compute_prodt_sin_mean(case: NewaveCase) -> float:
-    """Return ``PROD_MEDIA_SIN`` = mean PRODT over existing plants (NEWAVE).
+    """Return ``PROD_MEDIA_SIN`` = mean PRODT over existing plants (the source model).
 
-    This is the system-average productivity NEWAVE uses to convert the PENALID
+    This is the system-average productivity the source model uses to convert the PENALID
     R$/MWh penalties to the flow/volume domain (pmo.dat "PENALIDADE POR VIOLACAO
     DE VAZAO MINIMA" etc.). Two conventions matter and are matched here:
 
@@ -1054,26 +1239,105 @@ def compute_per_stage_prodt_sin_mean(case: NewaveCase) -> list[float]:
     return [v / count for v in stage_sum] if count else []
 
 
+def _fpha_computed_config(hreg: pd.Series) -> dict:
+    """``fpha_config`` for a computed-FPHA plant, with the source model's fitting
+    window.
+
+    The source model fits the FPHA volume axis over the *operative* storage range, which
+    depends on the regulation type:
+
+    - ``tipo_regulacao == "M"`` (monthly reservoir) → multi-volume over
+      ``[volume_minimo, volume_maximo]``.
+    - ``"D"`` / ``"S"`` (daily / run-of-river) → single-volume at
+      ``volume_referencia`` (the reference operating volume).
+
+    Passing this as ``fitting_window`` makes cobre fit the same volume grid. Without it
+    cobre falls back to the full geometry span, which fits the "D" plants that carry a
+    cadastro storage range (e.g. ITAIPU, JIRAU) as multi-volume even though the source
+    model collapses them to a single volume.
+    """
+    reg = str(hreg["tipo_regulacao"]).strip()
+    if reg == "M":
+        vlo = float(hreg["volume_minimo"])
+        vhi = float(hreg["volume_maximo"])
+    else:
+        vref = float(hreg["volume_referencia"])
+        vlo = vhi = vref
+    return {
+        "source": "computed",
+        "fitting_window": {"volume_min_hm3": vlo, "volume_max_hm3": vhi},
+    }
+
+
+def _seasonal_reference_volume(
+    monthly_useful: dict[int, float],
+    vmin: float,
+    vmax: float,
+    *,
+    is_fpha: bool,
+    fpha_config: dict | None = None,
+) -> list[dict]:
+    """Build 12 seasonal ``reference_volume`` entries from a volref_saz row.
+
+    ``season_id = calendar_month - 1`` (matching the ``stages.json`` season map). The
+    source model stores the seasonal reference as *useful* storage above ``vmin``, so
+    the absolute reference volume is ``clamp(vmin + useful, vmin, vmax)`` (a missing or
+    zero month means "operate at vmin"). FPHA seasons additionally carry ``fpha_config``
+    (see :func:`_fpha_computed_config`); non-FPHA seasons declare only the reference
+    volume (their productivity comes from ``hydro_energy_productivity.parquet``), so the
+    value serves purely as the backwater reference for the upstream FPHA plant.
+    """
+    seasons: list[dict] = []
+    for month in range(1, 13):
+        useful = monthly_useful.get(month, 0.0)
+        abs_vol = max(vmin, min(vmax, vmin + useful))
+        season: dict = {
+            "season_id": month - 1,
+            "model": "fpha" if is_fpha else "constant_productivity",
+            "reference_volume": {"volume_hm3": abs_vol},
+        }
+        if is_fpha and fpha_config is not None:
+            season["fpha_config"] = fpha_config
+        seasons.append(season)
+    return seasons
+
+
 def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
-    """Build ``hydro_production_models.json`` with model selection only.
+    """Build ``hydro_production_models.json`` with per-hydro model selection.
 
-    After the cobre productivity-resolution-rules plan, ``productivity_mw_per_m3s``
-    is **optional** in this file: the value is supplied per-(hydro, stage) in
-    ``hydro_energy_productivity.parquet`` (see
-    :func:`convert_hydro_energy_productivity`). We therefore emit only the model
-    selection here — one ``stage_ranges`` entry per hydro spanning the whole
-    horizon, carrying ``model: "constant_productivity"`` with no numeric value.
+    - **Non-FPHA cases (and run-of-river plants in FPHA cases):** a single
+      ``stage_ranges`` entry with ``model: "constant_productivity"`` and no
+      numeric value; ``productivity_mw_per_m3s`` is supplied per-(hydro, stage)
+      in ``hydro_energy_productivity.parquet`` (see
+      :func:`convert_hydro_energy_productivity`). Cross-file validation in cobre
+      rejects double-supply (JSON + parquet) and coverage gaps, so keeping
+      productivity strictly in the parquet eliminates the conflict surface.
+    - **FPHA reservoirs** (``dger`` ``funcao_producao_uhe == 0`` and the plant
+      has storage swing — see :func:`fpha_eligible_codes`): ``model: "fpha"``
+      with ``fpha_config: {source: "computed"}``; cobre fits the production
+      function from geometry + tailrace families, so no parquet productivity is
+      emitted for these plants.
 
-    Cross-file validation in cobre rejects double-supply (JSON + parquet) and
-    coverage gaps; keeping productivity strictly in the parquet eliminates the
-    conflict surface.
+    **Reference volume.** In FPHA cases, ``reference_volume`` (V_ref) sets the FPHA
+    backwater / tailrace level and the ρ_eq reference. The source model's per-month
+    seasonal reference comes from ``volref_saz.dat``: a plant with a seasonal row is
+    emitted in ``seasonal`` mode with one absolute ``reference_volume`` per season
+    (``clamp(vmin + useful, vmin, vmax)``); a plant without one falls back to
+    ``percentile 0.65`` (= cobre's default, the source model's altura_65). This is
+    emitted for FPHA reservoirs **and** for any non-FPHA plant that has a seasonal row,
+    because cobre reads a plant's *downstream* ``reference_volume`` (via
+    ``downstream_id``) to set that plant's backwater — so each plant must be a correct
+    reference for its upstream FPHA neighbour.
+
+    When FPHA is active, a file-level ``fpha_plane_reduction`` block parsed from
+    ``tratamento-fpha`` is added (see :func:`_parse_fpha_plane_reduction`).
 
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
-        Pre-built entity ID map used to translate NEWAVE plant codes to
+        Pre-built entity ID map used to translate the source model plant codes to
         0-based Cobre hydro IDs.
 
     Returns
@@ -1084,6 +1348,23 @@ def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """
     existing = case.active_hydros
     confhd_codes = [int(r["codigo_usina"]) for _, r in existing.iterrows()]
+    fpha_codes = fpha_eligible_codes(case)
+
+    # Seasonal reference volumes (volref_saz.dat) drive the FPHA reference volume V_ref
+    # — only relevant in FPHA cases. V_ref feeds both a plant's own rho_eq AND, via
+    # cobre's downstream lookup (`downstream_id`), the backwater / tailrace level of the
+    # plant ABOVE it. So we emit reference_volume for every plant that has a volref_saz
+    # row (FPHA or not), so each plant is a correct backwater reference for its upstream
+    # FPHA neighbour. Plants without a row fall through to cobre's 0.65 default fraction
+    # (= the source model's altura_65).
+    seasonal_volref = _read_volref_saz(case) if case.fpha_enabled else {}
+    # Load the cadastro whenever per-plant volume info is needed — for the FPHA
+    # fitting window (every FPHA plant) or the seasonal reference volumes.
+    cadastro = (
+        _apply_permanent_overrides(case.hidr.cadastro, case)
+        if (seasonal_volref or fpha_codes)
+        else None
+    )
 
     production_models: list[dict] = []
     for newave_code in confhd_codes:
@@ -1092,25 +1373,78 @@ def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         except KeyError:
             continue
 
-        production_models.append(
-            {
-                "hydro_id": hydro_id,
-                "selection_mode": "stage_ranges",
-                "stage_ranges": [
-                    {
-                        "start_stage_id": 0,
-                        "end_stage_id": None,
-                        "model": "constant_productivity",
-                    }
-                ],
-            }
+        is_fpha = newave_code in fpha_codes
+        monthly_useful = seasonal_volref.get(newave_code)
+        hreg = (
+            cadastro.loc[newave_code]
+            if cadastro is not None and newave_code in cadastro.index
+            else None
+        )
+        fpha_config = (
+            _fpha_computed_config(hreg) if (is_fpha and hreg is not None) else None
         )
 
+        if monthly_useful and hreg is not None:
+            production_models.append(
+                {
+                    "hydro_id": hydro_id,
+                    "selection_mode": "seasonal",
+                    # All 12 seasons are listed below, so the default is never
+                    # consulted; a config-less model keeps it valid.
+                    "default_model": "constant_productivity",
+                    "seasons": _seasonal_reference_volume(
+                        monthly_useful,
+                        float(hreg["volume_minimo"]),
+                        float(hreg["volume_maximo"]),
+                        is_fpha=is_fpha,
+                        fpha_config=fpha_config,
+                    ),
+                }
+            )
+        elif is_fpha:
+            # FPHA reservoir with no seasonal reference: fall back to V_65 (percentile
+            # 0.65 = the source model's altura_65, and cobre's own default).
+            production_models.append(
+                {
+                    "hydro_id": hydro_id,
+                    "selection_mode": "stage_ranges",
+                    "stage_ranges": [
+                        {
+                            "start_stage_id": 0,
+                            "end_stage_id": None,
+                            "model": "fpha",
+                            "fpha_config": fpha_config or {"source": "computed"},
+                            "reference_volume": {"percentile": 0.65},
+                        }
+                    ],
+                }
+            )
+        else:
+            production_models.append(
+                {
+                    "hydro_id": hydro_id,
+                    "selection_mode": "stage_ranges",
+                    "stage_ranges": [
+                        {
+                            "start_stage_id": 0,
+                            "end_stage_id": None,
+                            "model": "constant_productivity",
+                        }
+                    ],
+                }
+            )
+
     production_models.sort(key=lambda m: m["hydro_id"])
-    return {
-        "$schema": _PRODUCTION_MODELS_SCHEMA_URL,
-        "production_models": production_models,
-    }
+
+    result: dict = {"$schema": _PRODUCTION_MODELS_SCHEMA_URL}
+    # File-level FPHA plane reduction (tratamento-fpha), applied to every FPHA
+    # plant. Only meaningful when there is at least one FPHA plant.
+    if fpha_codes:
+        plane_reduction = _parse_fpha_plane_reduction(case)
+        if plane_reduction is not None:
+            result["fpha_plane_reduction"] = plane_reduction
+    result["production_models"] = production_models
+    return result
 
 
 def _total_study_stages(case: NewaveCase) -> int:
@@ -1155,17 +1489,15 @@ def compute_per_stage_own_integrated_productivities(
 
     Companion to :func:`compute_per_stage_own_productivities` but with the
     EARM convention: ρ is the volume-integrated productivity (matching
-    NEWAVE's ``produtibilidade_equivalente_volmin_volmax``), not the
-    point productivity at v_65.  Used by VminOP to override the
-    ``rho_acum_h{id}`` scalar parameter so the constraint coefficient
-    matches NEWAVE's stored-energy accounting rather than the LP's
-    gen = ρ·Q point coefficient.
+    the source model's ``produtibilidade_equivalente_volmin_volmax``), not the point
+    productivity at v_65.  Used by VminOP to override the ``rho_acum_h{id}`` scalar
+    parameter so the constraint coefficient matches the source model's stored-energy
+    accounting rather than the LP's gen = ρ·Q point coefficient.
 
-    CFUGA/CMONT temporal overrides shift the integrand at every stage
-    from the override's effective stage forward; FICT-cascade contribution
-    is folded into the upstream real plant's own value so cascade
-    traversal in NEWAVE-code space matches the rewired ``downstream_id``
-    in ``hydros.json``.
+    CFUGA/CMONT temporal overrides shift the integrand at every stage from the
+    override's effective stage forward; FICT-cascade contribution is folded into the
+    upstream real plant's own value so cascade traversal in the source-model-code space
+    matches the rewired ``downstream_id`` in ``hydros.json``.
     """
     total_stages = _total_study_stages(case)
     if total_stages <= 0:
@@ -1207,10 +1539,10 @@ def compute_per_stage_own_integrated_productivities(
 def _read_volref_saz(case: NewaveCase) -> dict[int, dict[int, float]]:
     """Read ``volref_saz.dat`` into ``{plant_code: {calendar_month: useful_vol_hm3}}``.
 
-    NEWAVE uses two distinct conventions inside this file:
+    The source model uses two distinct conventions inside this file:
 
     - **Row of all-zeros** — sentinel meaning "no seasonal reference for this
-      plant"; NEWAVE falls back to its altura_65 / volume_referencia default.
+      plant"; the source model falls back to its altura_65 / volume_referencia default.
       We mirror this by *excluding* the plant from the returned mapping.
     - **Row with at least one non-zero value** — real seasonal reference.
       Individual zero months in such a row mean "operate at exactly
@@ -1280,8 +1612,8 @@ def _per_stage_drop_overrides(
                 (None, float(override["value"]))
             )
 
-    # sazonaliza_cfuga_cmont == 1: after the last explicit entry NEWAVE repeats
-    # the seasonal pattern from the latest year defining each calendar month.
+    # sazonaliza_cfuga_cmont == 1: after the last explicit entry the source model
+    # repeats the seasonal pattern from the latest year defining each calendar month.
     seasonal_cfuga: dict[int, float] = {}
     seasonal_cmont: dict[int, float] = {}
     if seasonalize:
@@ -1369,7 +1701,7 @@ def _per_stage_productivities(
 
     1. Determine calendar month ``m = ((start_month − 1 + s) mod 12) + 1``.
     2. Pick reference useful volume: ``seasonal_volref_by_month[m]`` when
-       present and positive, else fall back to NEWAVE's altura_65 /
+       present and positive, else fall back to the source model's altura_65 /
        volume_referencia convention (i.e. use *base_productivity*).
     3. Apply any active CFUGA/CMONT temporal override (step-function from its
        stage of effect forward until the next event of the same type).
@@ -1403,36 +1735,36 @@ def _per_stage_productivities(
                 )
             )
 
-    # Post-study tail continues the seasonal cycle: VOLREF_SAZ is an always-
-    # seasonal monthly reference volume, and CFUGA/CMONT repeat seasonally when
-    # ``sazonaliza_cfuga_cmont == 1`` (handled above). NEWAVE re-applies these
-    # seasonal patterns every year, including post-study — only the quantities
-    # without a seasonalize flag (outflow / turbined bounds) freeze.
+    # Post-study tail continues the seasonal cycle: VOLREF_SAZ is an always- seasonal
+    # monthly reference volume, and CFUGA/CMONT repeat seasonally when
+    # ``sazonaliza_cfuga_cmont == 1`` (handled above). The source model re-applies these
+    # seasonal patterns every year, including post-study — only the quantities without a
+    # seasonalize flag (outflow / turbined bounds) freeze.
     return values
 
 
 def convert_hydro_energy_productivity(
     case: NewaveCase, id_map: NewaveIdMap
 ) -> pa.Table:
-    """Build the per-(hydro, stage) ρ_eq override parquet table.
+    """Build the per-(hydro, stage) equivalent-productivity (ρ_eq) parquet table.
 
-    After cobre's productivity-resolution-rules plan, every non-FPHA
-    ``(hydro, stage)`` pair must be supplied by exactly one source. Since
-    `convert_production_models` no longer emits a numeric productivity, this
-    parquet must cover **every** (hydro, stage).
+    **Every** plant gets an ``equivalent_productivity_mw_per_m3s`` value here,
+    FPHA and non-FPHA alike. `convert_production_models` emits no numeric
+    productivity, so this parquet is the single ρ_eq source. Plants without
+    CFUGA/CMONT/seasonal overrides emit one ``stage_id = NULL`` default row;
+    plants with overrides emit one row per study stage.
 
-    Layout:
+    FPHA plants are **not** excluded: cobre's energy-conversion build derives
+    their ρ_eq from this parquet override, because ``build_energy_and_templates``
+    feeds the alternative "VHA geometry + ρ_esp" derivation path an *empty*
+    geometry map — so the parquet override is the only working source. (The FPHA
+    production function φ itself is fit separately by cobre from geometry +
+    tailrace + efficiency.) Excluding FPHA plants makes cobre fail at load with
+    "FPHA hydro '…' cannot derive ρ_eq".
 
-    - Plants without CFUGA/CMONT overrides emit a single row with
-      ``stage_id = NULL``: the per-hydro default. Resolution falls through to
-      that default for every stage.
-    - Plants with CFUGA/CMONT overrides emit one row per study stage so that
-      cobre's per-stage lookup always finds an exact match (no ambiguity from
-      mixing default + per-stage rows).
-
-    Other override columns (``reference_volume_hm3``, ``reference_outflow_m3s``,
-    ``specific_productivity_mw_per_m3s_per_m``) are left NULL — NEWAVE does not
-    provide per-stage values for them.
+    ``reference_outflow_m3s`` and ``specific_productivity_mw_per_m3s_per_m`` are
+    left NULL. The reference volume V_ref is declared in
+    ``hydro_production_models.json`` — see :func:`convert_production_models`.
     """
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
 
@@ -1452,14 +1784,14 @@ def convert_hydro_energy_productivity(
     needs_per_stage = bool(plants_with_drop_overrides) or bool(seasonal_volref)
     total_stages = _total_study_stages(case) if needs_per_stage else 0
 
-    # FICT-cascade: when a real plant's energy-cascade traverses fictitious
-    # plants, fold those FICTs' ρ_eq into the upstream real plant's own ρ_eq
-    # so that cobre's per-plant cascade sum (computed at solve time from
+    # FICT-cascade: when a real plant's energy-cascade traverses fictitious plants, fold
+    # those FICTs' ρ_eq into the upstream real plant's own ρ_eq so that cobre's
+    # per-plant cascade sum (computed at solve time from
     # ``hydro_energy_productivity.parquet`` plus the rewired ``downstream_id``)
-    # reproduces NEWAVE's ``produtibilidade_acumulada_calculo_earm``.  In
-    # NEWAVE's bundled cases FICT plants have ρ_esp = 0 so this is a no-op
-    # numerically; the fix is purely structural.  The helper is robust to
-    # non-zero FICT productivities (uncommon but possible).
+    # reproduces the source model's ``produtibilidade_acumulada_calculo_earm``.  In The
+    # source model's bundled cases FICT plants have ρ_esp = 0 so this is a no-op
+    # numerically; the fix is purely structural.  The helper is robust to non-zero FICT
+    # productivities (uncommon but possible).
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro)
@@ -1508,7 +1840,6 @@ def convert_hydro_energy_productivity(
             "equivalent_productivity_mw_per_m3s": pa.array(
                 equiv_prods, type=pa.float64()
             ),
-            "reference_volume_hm3": pa.array(nulls, type=pa.float64()),
             "reference_outflow_m3s": pa.array(nulls, type=pa.float64()),
             "specific_productivity_mw_per_m3s_per_m": pa.array(
                 nulls, type=pa.float64()
@@ -1535,8 +1866,8 @@ def compute_per_stage_own_productivities(
     the constraint silently drifts at every stage where overrides apply
     or for any plant upstream of an overridden plant in the cascade.
 
-    Keys are NEWAVE plant codes (not Cobre ids) since cascade traversal in
-    ``compute_accumulated_productivities`` works in NEWAVE-code space.
+    Keys are the source model plant codes (not Cobre ids) since cascade traversal in
+    ``compute_accumulated_productivities`` works in the source-model-code space.
     """
     total_stages = _total_study_stages(case)
     if total_stages <= 0:
@@ -1747,24 +2078,23 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
 
 
 def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table | None:
-    """Convert NEWAVE water withdrawal data to a hydro_bounds Parquet table.
+    """Convert the source model water withdrawal data to a hydro_bounds Parquet table.
 
     Reads ``dsvagua.dat`` (optional) from *case* and produces a
     ``pa.Table`` with columns ``(hydro_id: INT32, stage_id: INT32,
     water_withdrawal_m3s: DOUBLE)`` suitable for writing to
     ``constraints/hydro_bounds.parquet``.
 
-    The ``codigo_usina`` field in ``dsvagua.dat`` is a NEWAVE 1-based
-    *plant* code (matching ``confhd``), not a posto. Each plant may
-    contribute multiple rows per stage (one per consumptive-use or
-    remaining-flow component) which are summed before the sign is
-    negated to convert NEWAVE's "withdrawal = negative valor" convention
-    into Cobre's positive ``water_withdrawal_m3s``.
+    The ``codigo_usina`` field in ``dsvagua.dat`` is a source-model 1-based *plant* code
+    (matching ``confhd``), not a posto. Each plant may contribute multiple rows per
+    stage (one per consumptive-use or remaining-flow component) which are summed before
+    the sign is negated to convert the source model's "withdrawal = negative valor"
+    convention into Cobre's positive ``water_withdrawal_m3s``.
 
     Parameters
     ----------
     case:
-        Parsed NEWAVE case.
+        Parsed the source model case.
     id_map:
         Pre-built entity ID map.
 
@@ -1780,10 +2110,10 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
         _LOG.debug("dsvagua.dat not found; no water withdrawal.")
         return None
 
-    # Read dger upfront so the ``outros_usos_da_agua`` switch can
-    # short-circuit before any dsvagua I/O. NEWAVE treats 0 as "ignore
-    # dsvagua.dat" — mirror that here so Cobre's hydro_bounds match
-    # NEWAVE's actual run instead of the file contents.
+    # Read dger upfront so the ``outros_usos_da_agua`` switch can short-circuit before
+    # any dsvagua I/O. The source model treats 0 as "ignore dsvagua.dat" — mirror that
+    # here so Cobre's hydro_bounds match The source model's actual run instead of the
+    # file contents.
     dger = case.dger
     if int(getattr(dger, "outros_usos_da_agua", 1) or 0) == 0:
         _LOG.info("dger.outros_usos_da_agua == 0; skipping dsvagua.dat conversion.")
@@ -1803,10 +2133,10 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
     num_post_study_stages = horizon.pos_months
     num_total_stages = horizon.total_stages
 
-    # Build a cascade map so NC (Não Construída) plant dsvagua entries can
-    # be propagated to the immediately downstream EX plant — NEWAVE applies
-    # NC withdrawals to the next real plant in the cascade, while FICT
-    # entries are not propagated and are silently dropped.
+    # Build a cascade map so NC (Não Construída) plant dsvagua entries can be propagated
+    # to the immediately downstream EX plant — the source model applies NC withdrawals
+    # to the next real plant in the cascade, while FICT entries are not propagated and
+    # are silently dropped.
     confhd_df = case.confhd.usinas
     fict_set = fictitious_codes(confhd_df, case.hidr.cadastro)
     plant_downstream: dict[int, int] = {}
@@ -1852,7 +2182,8 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
         if stage_id < 0 or stage_id >= num_study_stages:
             continue
 
-        # Negate: NEWAVE negative valor = withdrawal; Cobre positive = withdrawal.
+        # Negate: The source model negative valor = withdrawal; Cobre positive =
+        # withdrawal.
         withdrawal = -float(row["valor"])
         key = (hydro_id, stage_id)
         accumulated[key] = accumulated.get(key, 0.0) + withdrawal

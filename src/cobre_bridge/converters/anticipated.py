@@ -1,33 +1,32 @@
-"""NEWAVE anticipated thermal dispatch (``adterm.dat``) reader.
+"""The source model anticipated thermal dispatch (``adterm.dat``) reader.
 
-Maps NEWAVE's per-(thermal, lag, patamar) MW dispatch table into the
-single-MW-per-delivery-stage form Cobre's anticipated thermal model
-expects.
+Maps the source model's per-(thermal, lag, patamar) MW dispatch table into the
+single-MW-per-delivery-stage form Cobre's anticipated thermal model expects.
 
-NEWAVE side
+The source model side
 -----------
 ``adterm.dat`` records dispatch already committed for the first few
 study stages on GNL / fuel-constrained thermals.  The :class:`Adterm`
 ``despachos`` DataFrame has columns:
 
-* ``codigo_usina`` — NEWAVE thermal code
+* ``codigo_usina`` — the source model thermal code
 * ``nome_usina`` — plant name (informational)
 * ``lag`` — 1-based stage offset.  ``lag=1`` delivers at the first study
   stage (Cobre stage 0), ``lag=2`` at stage 1, etc.
 * ``patamar`` — 1-based block index within the delivery stage
 * ``valor`` — committed MW for that block
 
-Activation is gated by ``dger.despacho_antecipado_gnl``: when the flag
-is 0 (or absent) NEWAVE ignores adterm.dat entirely; cobre-bridge
-mirrors that by treating every thermal as non-anticipated.
+Activation is gated by ``dger.despacho_antecipado_gnl``: when the flag is 0 (or absent)
+the source model ignores adterm.dat entirely; cobre-bridge mirrors that by treating
+every thermal as non-anticipated.
 
 Cobre side
 ----------
-For each anticipated thermal the LP needs a single MW value per
-delivery stage (``InitialConditions.past_anticipated_commitments`` —
-see plans/anticipated-thermals epic-02 ticket-008/009).  The MW is
-held *uniformly across blocks* of the delivery stage by the fishing
-row, so the right aggregation from NEWAVE's per-block values is the
+For each anticipated thermal the LP needs a single MW value per delivery stage
+(``InitialConditions.past_anticipated_commitments`` — see plans/anticipated-thermals
+epic-02 ticket-008/009).  The MW is held *uniformly across blocks* of the delivery stage
+by the fishing row, so the right aggregation from the source model's per-block values is
+the
 block-duration-weighted mean:
 
     MW_eq = Σ_b f_b · MW_b
@@ -38,15 +37,13 @@ respecting the cobre LP's constant-MW-per-stage convention.
 
 **Cobre seeding (>= 0.7.0).**  Cobre honours non-zero pre-horizon
 seeds: the always-active anticipated "fishing" equality pins
-generation to the committed MW at each delivery stage (``slot 0`` may
-hold a non-zero seed at stage 0), so passing the true committed MW
-through reproduces NEWAVE's pre-commitment.  The semantic validator
-only rejects a committed value outside the plant's static generation
-bounds ``[min_mw, max_mw]``.  ``convert_initial_conditions`` therefore
-writes these block-weighted MWs directly, clamping into the bounds (with
-a warning) on the rare out-of-range value; this module just returns the
-*true* block-weighted MWs — the bounds policy lives at the conversion
-site, not here.
+generation to the committed MW at each delivery stage (``slot 0`` may hold a non-zero
+seed at stage 0), so passing the true committed MW through reproduces the source model's
+pre-commitment.  The semantic validator only rejects a committed value outside the
+plant's static generation bounds ``[min_mw, max_mw]``.  ``convert_initial_conditions``
+therefore writes these block-weighted MWs directly, clamping into the bounds (with a
+warning) on the rare out-of-range value; this module just returns the *true*
+block-weighted MWs — the bounds policy lives at the conversion site, not here.
 """
 
 from __future__ import annotations
@@ -75,9 +72,9 @@ class AnticipatedDispatch:
         Number of future study stages with a pre-committed dispatch.
         Equals the maximum ``lag`` observed for this plant in adterm.dat.
     values_mw:
-        Block-duration-weighted mean MW per delivery stage.  Index ``k``
-        (0-based) corresponds to delivery stage ``k`` (Cobre 0-based),
-        i.e. NEWAVE ``lag = k + 1``.  Length equals ``lead_stages``.
+        Block-duration-weighted mean MW per delivery stage.  Index ``k`` (0-based)
+        corresponds to delivery stage ``k`` (Cobre 0-based), i.e. The source model ``lag
+        = k + 1``.  Length equals ``lead_stages``.
     """
 
     lead_stages: int
@@ -87,10 +84,10 @@ class AnticipatedDispatch:
 def is_anticipated_dispatch_enabled(dger: Dger) -> bool:
     """Return True when ``dger.despacho_antecipado_gnl`` activates adterm.
 
-    NEWAVE treats the field as a boolean flag (``0`` = ignore adterm.dat,
-    any non-zero value = honour it).  When the attribute is missing or
-    ``None`` we default to ``False`` (safer; matches the historical
-    cobre-bridge behaviour of producing no ``anticipated_config``).
+    The source model treats the field as a boolean flag (``0`` = ignore adterm.dat, any
+    non-zero value = honour it).  When the attribute is missing or ``None`` we default
+    to ``False`` (safer; matches the historical cobre-bridge behaviour of producing no
+    ``anticipated_config``).
     """
     raw = getattr(dger, "despacho_antecipado_gnl", None)
     if raw is None:
@@ -153,14 +150,14 @@ def read_anticipated_dispatch(
     Returns an empty dict when:
 
     * ``dger.despacho_antecipado_gnl`` is ``0`` / absent / unparseable
-      (NEWAVE ignores adterm in this case);
+      (the source model ignores adterm in this case);
     * ``adterm.dat`` is not present in the case directory;
     * adterm.dat exists but contains no rows.
 
-    Each thermal's ``lead_stages`` equals the maximum ``lag`` seen for
-    that plant; entries with ``valor`` all zero are still included
-    (NEWAVE may commit a literal zero MW), so the caller cannot use
-    "has an adterm row" as a proxy for "has non-trivial dispatch".
+    Each thermal's ``lead_stages`` equals the maximum ``lag`` seen for that plant;
+    entries with ``valor`` all zero are still included (the source model may commit a
+    literal zero MW), so the caller cannot use "has an adterm row" as a proxy for "has
+    non-trivial dispatch".
 
     The MW per delivery stage is block-duration-weighted (see module
     docstring).  Plants whose maximum lag exceeds the study horizon are
