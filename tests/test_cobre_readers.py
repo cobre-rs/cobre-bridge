@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
+import typer
 
 from cobre_bridge.comparators.cobre_readers import (
     CobreReadError,
@@ -189,6 +190,8 @@ class TestCliExitCodeTwoOnCobreReadError:
             summary=True,
             variables=None,
             verbose=False,
+            no_color=False,
+            quiet=False,
         )
 
     def test_bounds_cli_exits_2_when_reader_raises(
@@ -216,10 +219,10 @@ class TestCliExitCodeTwoOnCobreReadError:
                 side_effect=_raise,
             ),
         ):
-            with pytest.raises(SystemExit) as excinfo:
+            with pytest.raises(typer.Exit) as excinfo:
                 cli._run_bounds_comparison(args)
 
-        assert excinfo.value.code == 2
+        assert excinfo.value.exit_code == 2
         err = capsys.readouterr().err
         assert "ERROR:" in err
         assert "bounds.parquet" in err
@@ -235,6 +238,8 @@ class TestCliExitCodeTwoOnCobreReadError:
             tolerance=1e-2,
             output=None,
             verbose=False,
+            no_color=False,
+            quiet=False,
         )
 
         def _raise(**_kwargs: object) -> object:
@@ -255,10 +260,10 @@ class TestCliExitCodeTwoOnCobreReadError:
                 side_effect=_raise,
             ),
         ):
-            with pytest.raises(SystemExit) as excinfo:
+            with pytest.raises(typer.Exit) as excinfo:
                 cli._run_results_comparison(args)
 
-        assert excinfo.value.code == 2
+        assert excinfo.value.exit_code == 2
         err = capsys.readouterr().err
         assert "ERROR:" in err
         assert "hydro simulation data" in err

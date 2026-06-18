@@ -32,6 +32,19 @@ cobre-bridge convert newave <SRC> <DST>
 cobre-bridge compare bounds <NEWAVE_DIR> <COBRE_OUTPUT_DIR>
 cobre-bridge compare results <NEWAVE_DIR> <COBRE_OUTPUT_DIR>
 cobre-bridge dashboard <CASE_DIR>
+
+# Flags shared by every subcommand: --verbose, --no-color, --quiet
+# convert newave also accepts --diagnostics-json <PATH> (machine-readable findings)
+
+# Shell completion (Typer): install for your shell, or print the script
+cobre-bridge --install-completion
+cobre-bridge --show-completion
+```
+
+`convert` / `compare` / `dashboard` show a live Rich progress bar / spinner on an
+interactive terminal; it is automatically suppressed off-TTY and under
+`--verbose` / `--quiet`.
+
 ```
 
 ## CI
@@ -52,6 +65,15 @@ cobre-bridge dashboard <CASE_DIR>
 | `compare bounds`  | `comparators/bounds.py`  | Compare LP bounds between NEWAVE and Cobre  |
 | `compare results` | `comparators/results.py` | Compare simulation results with HTML report |
 | `dashboard`       | `dashboard.py`           | Generate interactive Plotly dashboard       |
+
+`cli.py` defines a Typer `app` with sub-apps `convert` (command `newave`) and
+`compare` (commands `bounds`, `results`), plus a root `dashboard` command. The
+four `_run_*` handlers hold the behaviour; each Typer command builds a
+`SimpleNamespace` and calls its handler, and `main()` is a thin wrapper around
+`app()` that restores the `cobre_bridge` logger's `propagate` flag. Subcommands
+raise `typer.Exit(code=...)` to set exit codes (convert 0/1/2, compare bounds
+0/1/2, compare results always-0, validation 2).
+
 
 ### Core Modules
 
@@ -81,6 +103,12 @@ src/cobre_bridge/
     report.py               #   Summary reporting
     cobre_readers.py        #   Read Cobre output Parquet files
     newave_readers.py       #   Read NEWAVE result files
+  diagnostics.py            # Structured Diagnostic model + emit()/collect() sink
+  ui/
+    console.py              # Rich terminal rendering (diagnostics, summary, tables)
+  pipeline.py               # convert_newave_case(..., on_phase=cb) reports ~6
+                            #   phases (CONVERSION_PHASE_LABELS) to drive the CLI bar
+  ui/console.py             # + conversion_progress() / spinner() (TTY-gated, stderr)
 ```
 
 ### Conversion Pipeline
@@ -109,6 +137,31 @@ output/
 This matches the Cobre input format documented in the
 [Cobre book](https://github.com/cobre-rs/cobre/tree/main/book).
 
+### User-facing output (CLI UX)
+
+Terminal output is rendered with [Rich](https://github.com/Textualize/rich).
+Presentation is decoupled from data:
+
+- **`diagnostics.py`** — the structured `Diagnostic` model (`code`, `severity`,
+  `category`, `title`, `summary`, an optional per-entity/per-stage detail
+  `DiagnosticTable`, and a remediation hint) plus a context-local sink
+  (`collect()` / `emit()`). Converters describe a degraded input as a
+  `Diagnostic` instead of a flat log string, so plant names, the stages
+  involved, and the values are preserved. With no active sink (e.g. a converter
+  called directly in a test) `emit()` degrades to a single log record on the
+  caller's logger.
+- **`ui/console.py`** — the only place that uses Rich. Renders diagnostics
+  (grouped, severity-coloured panels with detail tables), the conversion
+  summary, errors, and the compare summary tables. Two consoles keep the
+  stdout(results)/stderr(diagnostics) contract. Colour auto-disables on a
+  non-TTY and honours `NO_COLOR`; `--no-color` forces it off.
+
+During `convert newave`, the pipeline runs converters inside a diagnostics
+`collect()` block; any warning from a site **not** yet migrated to `emit()` is
+still captured (`_WarningCollector`) and rendered as a generic panel, so every
+warning surfaces through one path. `--diagnostics-json <PATH>` dumps the counts
++ findings for automation (it is NOT written into the Cobre case dir).
+
 ---
 
 ## Key Dependencies
@@ -121,6 +174,8 @@ This matches the Cobre input format documented in the
 | `polars`       | DataFrames in comparators                                |
 | `plotly`       | Charts and interactive dashboards                        |
 | `cobre-python` | Optional validation of converted output                  |
+| `rich`         | Terminal rendering (diagnostics panels, summary, compare tables) |
+| `typer`        | CLI framework (commands, completion, Rich help)         |
 
 ---
 
@@ -132,6 +187,11 @@ This matches the Cobre input format documented in the
 - CLI error-path tests run as subprocess to verify exit codes
 - Example data in `example/newave/` and `example/convertido/`
 
+CLI exit codes are guarded by subprocess tests; Typer behaviour (version, help,
+completion, exit codes) is covered via `typer.testing.CliRunner`. An autouse
+fixture in `tests/conftest.py` snapshots/restores the `cobre_bridge` logger so a
+CliRunner invocation can't leak logging state into a later `caplog` test.
+
 ---
 
 ## Coding Conventions
@@ -141,6 +201,10 @@ This matches the Cobre input format documented in the
 - `dashboard.py` is exempt from E501 (line length) due to embedded HTML/JS
 - Follow the Python rules in `~/.claude/rules/python.md` (type hints, pathlib,
   no bare except, no mutable defaults, etc.)
+- User-facing terminal output goes through `cobre_bridge.ui.console`; converters
+  emit structured `cobre_bridge.diagnostics.Diagnostic` objects rather than
+  formatting warning strings. Keep "the source model" in prose/comments; NEWAVE
+  file names and codes are fine in user-facing CLI labels.
 
 ---
 

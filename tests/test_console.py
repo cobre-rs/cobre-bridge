@@ -10,9 +10,12 @@ from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
 from cobre_bridge.pipeline import ConversionReport
 from cobre_bridge.ui.console import (
     MAX_TABLE_ROWS,
+    _progress_enabled,
+    conversion_progress,
     render_conversion_summary,
     render_diagnostics,
     render_error,
+    spinner,
 )
 
 
@@ -120,3 +123,30 @@ class TestRenderDiagnostics:
         assert "5 more" in text  # overflow summarised
         assert "P0" in text
         assert f"P{MAX_TABLE_ROWS + 4}" not in text  # last row not printed
+
+
+class TestProgressGating:
+    def test_enabled_only_on_interactive_non_verbose_non_quiet(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stderr.isatty", lambda: True, raising=False)
+        assert _progress_enabled(verbose=False, quiet=False) is True
+        assert _progress_enabled(verbose=True, quiet=False) is False
+        assert _progress_enabled(verbose=False, quiet=True) is False
+
+    def test_disabled_off_tty(self, monkeypatch) -> None:
+        monkeypatch.setattr("sys.stderr.isatty", lambda: False, raising=False)
+        assert _progress_enabled(verbose=False, quiet=False) is False
+
+    def test_conversion_progress_noop_off_tty(self, capsys) -> None:
+        # Under pytest stderr is captured (not a TTY): the bar is suppressed and the
+        # yielded callback is a harmless no-op, so output stays deterministic.
+        with conversion_progress(6) as step:
+            step("Discovering files")
+            step("Writing Parquet")
+        assert capsys.readouterr().err == ""
+
+    def test_spinner_noop_off_tty(self, capsys) -> None:
+        with spinner("Comparing…"):
+            pass
+        assert capsys.readouterr().err == ""

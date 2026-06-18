@@ -9,14 +9,37 @@ parsing files. Import them with ``from tests.conftest import make_case``.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pandas as pd
+import pytest
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.newave_files import NewaveFiles
+
+
+@pytest.fixture(autouse=True)
+def _restore_cobre_bridge_logger() -> Iterator[None]:
+    """Snapshot/restore the ``cobre_bridge`` logger around every test.
+
+    ``cli._configure_logging`` flips ``propagate``/level for a run, and the CLI's
+    Typer ``CliRunner`` tests invoke the app directly (bypassing ``main``'s restore),
+    so without this fixture that state would leak into a later ``caplog``-by-logger
+    test in the same interpreter and silently swallow its records.
+    """
+    pkg = logging.getLogger("cobre_bridge")
+    prior_propagate = pkg.propagate
+    prior_level = pkg.level
+    try:
+        yield
+    finally:
+        pkg.propagate = prior_propagate
+        pkg.setLevel(prior_level)
+
 
 # Required NewaveFiles attributes get a default path under tmp_path; optional
 # ones default to None. Callers override any of them via keyword.

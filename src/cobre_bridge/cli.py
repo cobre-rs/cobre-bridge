@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
-import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Annotated
+
+import typer
 
 from cobre_bridge import __version__
 from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.ui.console import (
+    conversion_progress,
     get_console,
     print_status,
     render_conversion_summary,
     render_diagnostics,
     render_error,
+    spinner,
 )
 
 if TYPE_CHECKING:
@@ -109,7 +112,7 @@ def _load_compare_context(
         case = NewaveCase.from_directory(newave_dir)
     except FileNotFoundError as exc:
         render_error(str(exc))
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     id_map = case.id_map
     lines_json = _load_lines_json(cobre_output_dir)
@@ -143,7 +146,7 @@ def _export_compare_artifacts(
         formats = _parse_formats(raw_formats)
     except ValueError as exc:
         render_error(str(exc))
-        sys.exit(2)
+        raise typer.Exit(code=2)
 
     out_dir: Path = out_dir_arg or (cobre_output_dir / "comparison_artifacts")
     export_formats = formats & {"csv", "parquet", "json"}
@@ -169,7 +172,7 @@ def _export_compare_artifacts(
     return formats, out_dir
 
 
-def _run_bounds_comparison(args: argparse.Namespace) -> None:
+def _run_bounds_comparison(args: SimpleNamespace) -> None:
     """Execute the compare bounds subcommand."""
     from cobre_bridge.comparators.analyze import build_bounds_dataset
     from cobre_bridge.comparators.bounds import compare_bounds
@@ -190,7 +193,7 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
             f"bounds.parquet not found at {bounds_path}. "
             "Run cobre with --output first.",
         )
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     case, id_map, alignment, _lines_json = _load_compare_context(
         newave_dir, cobre_output_dir
@@ -204,19 +207,25 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
     # was unreadable/malformed — fail loudly (exit 2) rather than report a
     # false "no divergence" on data we could not actually read.
     try:
-        results = compare_bounds(
-            alignment=alignment,
-            case=case,
-            id_map=id_map,
-            cobre_output_dir=cobre_output_dir,
-            tolerance=tolerance,
-            variables=variables,
-        )
+        with spinner(
+            "Comparing bounds…",
+            verbose=args.verbose,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ):
+            results = compare_bounds(
+                alignment=alignment,
+                case=case,
+                id_map=id_map,
+                cobre_output_dir=cobre_output_dir,
+                tolerance=tolerance,
+                variables=variables,
+            )
     except CobreReadError as exc:
         print_status(
             f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
         )
-        sys.exit(2)
+        raise typer.Exit(code=2)
 
     # Build the canonical dataset once; console + artifacts derive from it.
     dataset = build_bounds_dataset(results)
@@ -247,10 +256,11 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
         )
 
     mismatches = sum(1 for r in results if not r.match)
-    sys.exit(0 if mismatches == 0 else 1)
+    if mismatches:
+        raise typer.Exit(code=1)
 
 
-def _run_results_comparison(args: argparse.Namespace) -> None:
+def _run_results_comparison(args: SimpleNamespace) -> None:
     """Execute the compare results subcommand.
 
     Intentionally always exits 0: ``compare results`` is informational (a
@@ -274,18 +284,24 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     # was unreadable/malformed — fail loudly (exit 2) rather than report a
     # false "no divergence" on data we could not actually read.
     try:
-        dataset = compare_results(
-            case=case,
-            id_map=id_map,
-            alignment=alignment,
-            cobre_output_dir=cobre_output_dir,
-            tolerance=tolerance,
-        )
+        with spinner(
+            "Comparing results…",
+            verbose=args.verbose,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ):
+            dataset = compare_results(
+                case=case,
+                id_map=id_map,
+                alignment=alignment,
+                cobre_output_dir=cobre_output_dir,
+                tolerance=tolerance,
+            )
     except CobreReadError as exc:
         print_status(
             f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
         )
-        sys.exit(2)
+        raise typer.Exit(code=2)
 
     # Print text summary (sourced from the dataset).
     print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
@@ -312,30 +328,37 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
         report_path.write_text(html, encoding="utf-8")
         print_status(f"HTML report written to {report_path}")
 
-    sys.exit(0)
+    return
 
 
-def _run_dashboard(args: argparse.Namespace) -> None:
+def _run_dashboard(args: SimpleNamespace) -> None:
     """Execute the dashboard subcommand."""
     from cobre_bridge.dashboard import build_dashboard
 
     case_dir: Path = args.case_dir.resolve()
     if not (case_dir / "output" / "simulation").exists():
         render_error(f"no simulation output found in {case_dir}")
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     output_path: Path = args.output or (case_dir / "dashboard.html")
     print_status(f"Building dashboard from {case_dir} ...")
-    build_dashboard(case_dir, output_path)
+    with spinner(
+        "Building dashboard…",
+        verbose=args.verbose,
+        quiet=args.quiet,
+        no_color=args.no_color,
+    ):
+        build_dashboard(case_dir, output_path)
     size_kb = output_path.stat().st_size / 1024
     print_status(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
-    sys.exit(0)
+    return
 
 
-def _run_newave_conversion(args: argparse.Namespace) -> None:
+def _run_newave_conversion(args: SimpleNamespace) -> None:
     """Execute the convert newave subcommand."""
     # Import here so the module-level import of pipeline is deferred.
     from cobre_bridge.pipeline import (
+        CONVERSION_PHASE_LABELS,
         _clear_dst_contents,
         convert_newave_case,
     )
@@ -351,7 +374,7 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     if not src.exists() or not src.is_dir():
         render_error(f"source directory '{src}' does not exist", console=err_console)
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     # ------------------------------------------------------------------
     # Destination validation.
@@ -363,7 +386,7 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
                 " Use --force to overwrite.",
                 console=err_console,
             )
-            sys.exit(1)
+            raise typer.Exit(code=1)
         # --force: remove previous pipeline outputs before converting.
         _clear_dst_contents(dst)
 
@@ -373,16 +396,22 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
     # Run conversion pipeline.
     # ------------------------------------------------------------------
     try:
-        report: ConversionReport = convert_newave_case(src, dst)
+        with conversion_progress(
+            len(CONVERSION_PHASE_LABELS),
+            verbose=args.verbose,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ) as step:
+            report: ConversionReport = convert_newave_case(src, dst, on_phase=step)
     except FileNotFoundError as exc:
         missing = str(exc)
         render_error(
             f"required file '{missing}' not found in {src}", console=err_console
         )
-        sys.exit(1)
+        raise typer.Exit(code=1)
     except Exception as exc:  # noqa: BLE001
         render_error(f"conversion failed: {exc}", console=err_console)
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     if not args.quiet:
         render_conversion_summary(report, console=out_console)
@@ -403,7 +432,7 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
                 console=err_console,
                 style="#F5A623",
             )
-            sys.exit(0)
+            return
 
         try:
             # cobre v0.6.x: cobre.io.validate is a function returning a
@@ -411,7 +440,7 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
             result = cobre.io.validate(str(dst))
         except Exception as exc:  # noqa: BLE001
             render_error(f"Validation error: {exc}", console=err_console)
-            sys.exit(2)
+            raise typer.Exit(code=2)
 
         def _msg(item: object) -> object:
             return item.get("message", item) if isinstance(item, dict) else item
@@ -432,9 +461,9 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
             print_status(
                 "Validation failed.", console=err_console, style="bold #DC4C4C"
             )
-            sys.exit(2)
+            raise typer.Exit(code=2)
 
-    sys.exit(0)
+    return
 
 
 def _write_diagnostics_json(
@@ -500,244 +529,258 @@ def _configure_logging(verbose: bool) -> None:
         pkg.propagate = False
 
 
-def main() -> None:
-    """Entry point for the cobre-bridge CLI."""
-    parser = argparse.ArgumentParser(
-        prog="cobre-bridge",
-        description="Convert power system data to Cobre input format.",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
-    )
+# ---------------------------------------------------------------------------
+# Typer application
+# ---------------------------------------------------------------------------
 
-    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
-
-    # Flags shared by every leaf subcommand, attached via ``parents=``.
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable detailed logging output.",
-    )
-    common.add_argument(
+# Shared flags reused across the leaf commands (kept *after* the subcommand,
+# matching the previous argparse UX).
+_VerboseOpt = Annotated[
+    bool, typer.Option("--verbose", help="Enable detailed logging output.")
+]
+_NoColorOpt = Annotated[
+    bool,
+    typer.Option(
         "--no-color",
-        action="store_true",
         help="Disable coloured output (also honoured via the NO_COLOR env var).",
-    )
-    common.add_argument(
+    ),
+]
+_QuietOpt = Annotated[
+    bool,
+    typer.Option(
         "--quiet",
-        action="store_true",
         help="Suppress the summary and info notes; warnings/errors still show.",
-    )
-
-    # convert subcommand
-    convert_parser = subparsers.add_parser(
-        "convert",
-        help="Convert data from a source format to Cobre JSON.",
-    )
-    convert_subparsers = convert_parser.add_subparsers(
-        dest="source",
-        metavar="SOURCE",
-        required=True,
-    )
-
-    # convert newave sub-subcommand
-    newave_parser = convert_subparsers.add_parser(
-        "newave",
-        parents=[common],
-        help="Convert a NEWAVE case directory to a Cobre case directory.",
-    )
-    newave_parser.add_argument(
-        "src",
-        metavar="SRC",
-        type=Path,
-        help="Path to the NEWAVE case directory.",
-    )
-    newave_parser.add_argument(
-        "dst",
-        metavar="DST",
-        type=Path,
-        help="Path to the output Cobre case directory.",
-    )
-    newave_parser.add_argument(
-        "--validate",
-        action="store_true",
-        help="After conversion, validate the output with the cobre package.",
-    )
-    newave_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite destination directory if it already contains files.",
-    )
-    newave_parser.add_argument(
-        "--diagnostics-json",
-        type=Path,
-        default=None,
-        metavar="PATH",
-        help="Also write the conversion diagnostics (counts + findings) as JSON.",
-    )
-
-    # compare subcommand
-    compare_parser = subparsers.add_parser(
-        "compare",
-        help="Compare LP bounds between source model and Cobre output.",
-    )
-    compare_subparsers = compare_parser.add_subparsers(
-        dest="compare_source",
-        metavar="SOURCE",
-        required=True,
-    )
-
-    # compare bounds sub-subcommand
-    compare_nw = compare_subparsers.add_parser(
-        "bounds",
-        parents=[common],
-        help="Compare LP bounds computed from NEWAVE inputs against Cobre bounds.",
-    )
-    compare_nw.add_argument(
-        "newave_dir",
-        type=Path,
-        help="Path to the NEWAVE case directory.",
-    )
-    compare_nw.add_argument(
-        "cobre_output_dir",
-        type=Path,
-        help="Path to the Cobre output directory (contains bounds.parquet).",
-    )
-    compare_nw.add_argument(
-        "--tolerance",
-        type=float,
-        default=1e-3,
-        help="Absolute tolerance for bound comparison (default: 1e-3).",
-    )
-    compare_nw.add_argument(
+    ),
+]
+_FormatOpt = Annotated[
+    list[str] | None,
+    typer.Option(
         "--format",
-        action="append",
-        default=None,
         metavar="FORMAT",
         help=(
             "Output format(s): console,html,csv,parquet,json,all. "
             "Comma-separated and/or repeatable. (default: console,parquet,json)"
         ),
-    )
-    compare_nw.add_argument(
+    ),
+]
+_OutDirOpt = Annotated[
+    Path | None,
+    typer.Option(
         "--out-dir",
-        type=Path,
-        default=None,
         help=(
             "Directory for file artifacts "
             "(default: <cobre_output_dir>/comparison_artifacts)."
         ),
-    )
-    compare_nw.add_argument(
-        "--summary",
-        action="store_true",
-        help="Print only summary counts, not individual mismatches.",
-    )
-    compare_nw.add_argument(
-        "--variables",
-        type=str,
-        default=None,
-        help="Comma-separated variables to compare (e.g., storage_min,turbined_max).",
-    )
+    ),
+]
 
-    # compare results sub-subcommand
-    compare_res = compare_subparsers.add_parser(
-        "results",
-        parents=[common],
-        help="Compare NEWAVE published results against Cobre simulation output.",
-        epilog=(
-            "compare results is informational and always exits 0; "
-            "compare bounds exits 1 on any mismatch."
+app = typer.Typer(
+    name="cobre-bridge",
+    help="Convert power system data to Cobre input format.",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+    add_completion=True,
+)
+convert_app = typer.Typer(help="Convert data from a source format to Cobre JSON.")
+compare_app = typer.Typer(help="Compare source model inputs/results against Cobre.")
+app.add_typer(convert_app, name="convert")
+app.add_typer(compare_app, name="compare")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        print_status(f"cobre-bridge {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the version and exit.",
         ),
-    )
-    compare_res.add_argument(
-        "newave_dir",
-        type=Path,
-        help="Path to the NEWAVE case directory (must contain saidas/).",
-    )
-    compare_res.add_argument(
-        "cobre_output_dir",
-        type=Path,
-        help="Path to the Cobre output directory.",
-    )
-    compare_res.add_argument(
-        "--format",
-        action="append",
-        default=None,
-        metavar="FORMAT",
-        help=(
-            "Output format(s): console,html,csv,parquet,json,all. "
-            "Comma-separated and/or repeatable. (default: console,parquet,json)"
+    ] = False,
+) -> None:
+    """Convert power system data to Cobre input format."""
+
+
+@convert_app.command("newave")
+def _convert_newave(
+    src: Annotated[Path, typer.Argument(help="Path to the NEWAVE case directory.")],
+    dst: Annotated[
+        Path, typer.Argument(help="Path to the output Cobre case directory.")
+    ],
+    validate: Annotated[
+        bool,
+        typer.Option(
+            "--validate",
+            help="After conversion, validate the output with the cobre package.",
         ),
-    )
-    compare_res.add_argument(
-        "--out-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for file artifacts "
-            "(default: <cobre_output_dir>/comparison_artifacts)."
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Overwrite destination directory if it already contains files.",
         ),
-    )
-    compare_res.add_argument(
-        "--tolerance",
-        type=float,
-        default=1e-2,
-        help="Relative tolerance for results comparison (default: 1e-2).",
+    ] = False,
+    diagnostics_json: Annotated[
+        Path | None,
+        typer.Option(
+            "--diagnostics-json",
+            metavar="PATH",
+            help="Also write the conversion diagnostics (counts + findings) as JSON.",
+        ),
+    ] = None,
+    verbose: _VerboseOpt = False,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Convert a NEWAVE case directory to a Cobre case directory."""
+    _configure_logging(verbose)
+    _run_newave_conversion(
+        SimpleNamespace(
+            src=src,
+            dst=dst,
+            validate=validate,
+            force=force,
+            diagnostics_json=diagnostics_json,
+            verbose=verbose,
+            no_color=no_color,
+            quiet=quiet,
+        )
     )
 
-    # dashboard subcommand
-    dashboard_parser = subparsers.add_parser(
-        "dashboard",
-        parents=[common],
-        help="Generate an interactive HTML dashboard from Cobre simulation results.",
-    )
-    dashboard_parser.add_argument(
-        "case_dir",
-        type=Path,
-        help="Path to the Cobre case directory.",
-    )
-    dashboard_parser.add_argument(
-        "--output",
-        "-o",
-        type=Path,
-        default=None,
-        help="Output HTML file path (default: <case_dir>/dashboard.html).",
+
+@compare_app.command("bounds")
+def _compare_bounds(
+    newave_dir: Annotated[
+        Path, typer.Argument(help="Path to the NEWAVE case directory.")
+    ],
+    cobre_output_dir: Annotated[
+        Path,
+        typer.Argument(help="Path to the Cobre output directory (has bounds.parquet)."),
+    ],
+    tolerance: Annotated[
+        float, typer.Option(help="Absolute tolerance for bound comparison.")
+    ] = 1e-3,
+    fmt: _FormatOpt = None,
+    out_dir: _OutDirOpt = None,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary", help="Print only summary counts, not individual mismatches."
+        ),
+    ] = False,
+    variables: Annotated[
+        str | None,
+        typer.Option(
+            "--variables",
+            help="Comma-separated variables to compare (e.g. storage_min,turbined).",
+        ),
+    ] = None,
+    verbose: _VerboseOpt = False,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Compare LP bounds computed from NEWAVE inputs against Cobre bounds."""
+    _configure_logging(verbose)
+    _run_bounds_comparison(
+        SimpleNamespace(
+            newave_dir=newave_dir,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+            format=fmt,
+            out_dir=out_dir,
+            summary=summary,
+            variables=variables,
+            verbose=verbose,
+            no_color=no_color,
+            quiet=quiet,
+        )
     )
 
-    args = parser.parse_args()
 
+@compare_app.command("results")
+def _compare_results(
+    newave_dir: Annotated[
+        Path, typer.Argument(help="Path to the NEWAVE case directory (has saidas/).")
+    ],
+    cobre_output_dir: Annotated[
+        Path, typer.Argument(help="Path to the Cobre output directory.")
+    ],
+    tolerance: Annotated[
+        float, typer.Option(help="Relative tolerance for results comparison.")
+    ] = 1e-2,
+    fmt: _FormatOpt = None,
+    out_dir: _OutDirOpt = None,
+    verbose: _VerboseOpt = False,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Compare NEWAVE published results against Cobre simulation output.
+
+    Informational: always exits 0, whereas 'compare bounds' exits 1 on any mismatch.
+    """
+    _configure_logging(verbose)
+    _run_results_comparison(
+        SimpleNamespace(
+            newave_dir=newave_dir,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+            format=fmt,
+            out_dir=out_dir,
+            verbose=verbose,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+@app.command("dashboard")
+def _dashboard(
+    case_dir: Annotated[Path, typer.Argument(help="Path to the Cobre case directory.")],
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output HTML file path (default: <case_dir>/dashboard.html).",
+        ),
+    ] = None,
+    verbose: _VerboseOpt = False,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Generate an interactive HTML dashboard from Cobre simulation results."""
+    _configure_logging(verbose)
+    _run_dashboard(
+        SimpleNamespace(
+            case_dir=case_dir,
+            output=output,
+            verbose=verbose,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+def main() -> None:
+    """Console entry point: run the Typer app, restoring the logger afterwards.
+
+    The thin wrapper restores the ``cobre_bridge`` logger ``propagate`` flag that
+    ``_configure_logging`` flips, so a real CLI run never leaks logging state.
+    """
     pkg_logger = logging.getLogger("cobre_bridge")
     prior_propagate = pkg_logger.propagate
-    _configure_logging(getattr(args, "verbose", False))
     try:
-        if args.command == "convert" and args.source == "newave":
-            _run_newave_conversion(args)
-            return
-
-        if args.command == "compare" and args.compare_source == "bounds":
-            _run_bounds_comparison(args)
-            return
-
-        if args.command == "compare" and args.compare_source == "results":
-            _run_results_comparison(args)
-            return
-
-        if args.command == "dashboard":
-            _run_dashboard(args)
-            return
+        app()
     finally:
-        # Restore propagation so the package logger is left as we found it — the
-        # handlers (e.g. SystemExit from a subcommand) run through here, and this
-        # keeps an in-process CLI call from leaking ``propagate=False`` into a
-        # later caplog-based test in the same interpreter.
         pkg_logger.propagate = prior_propagate
-
-    parser.print_help()
-    sys.exit(0)
 
 
 if __name__ == "__main__":

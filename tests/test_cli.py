@@ -1152,7 +1152,9 @@ class TestConversionWarningCapture:
 
         log = logging.getLogger("cobre_bridge.converters.fake")
 
-        def fake_impl(src: Path, dst: Path) -> ConversionReport:
+        def fake_impl(
+            src: Path, dst: Path, on_phase: object = None
+        ) -> ConversionReport:
             log.warning("vazpast.dat unreadable; using empty tendency")
             log.warning("vazpast.dat unreadable; using empty tendency")  # duplicate
             log.info("informational, not a degradation")  # below WARNING → ignored
@@ -1210,7 +1212,7 @@ class TestConversionWarningCapture:
 
         dst = tmp_path / "dst"
 
-        def fake_impl(src: Path, d: Path) -> object:
+        def fake_impl(src: Path, d: Path, on_phase: object = None) -> object:
             # Simulate a write phase that got partway: a top-level JSON and a
             # system/ subdir were written before the failure.
             (d / "system").mkdir(parents=True, exist_ok=True)
@@ -1347,3 +1349,66 @@ class TestConversionDiagnosticsRendering:
         assert payload["summary"]["hydros"] == 1
         codes = [d["code"] for d in payload["diagnostics"]]
         assert "thermal-gtmin-above-capacity" in codes
+
+
+class TestTyperApp:
+    """Typer-app behaviours via the idiomatic CliRunner invocation path."""
+
+    @staticmethod
+    def _invoke(argv: list[str]):
+        from typer.testing import CliRunner
+
+        from cobre_bridge.cli import app
+
+        return CliRunner().invoke(app, argv)
+
+    def test_version_exit_zero(self) -> None:
+        result = self._invoke(["--version"])
+        assert result.exit_code == 0
+        assert "cobre-bridge" in result.stdout
+
+    def test_help_lists_subcommands(self) -> None:
+        result = self._invoke(["--help"])
+        assert result.exit_code == 0
+        assert "convert" in result.stdout
+        assert "compare" in result.stdout
+        assert "dashboard" in result.stdout
+
+    def test_help_exposes_shell_completion(self) -> None:
+        result = self._invoke(["--help"])
+        assert "install-completion" in result.stdout
+
+    def test_convert_missing_subcommand_exits_two(self) -> None:
+        assert self._invoke(["convert"]).exit_code == 2
+
+    def test_compare_missing_subcommand_exits_two(self) -> None:
+        assert self._invoke(["compare"]).exit_code == 2
+
+    def test_convert_newave_happy_path(self, tmp_path: Path) -> None:
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "out"
+        report = ConversionReport(hydro_count=7, stage_count=12)
+        with patch("cobre_bridge.pipeline.convert_newave_case", return_value=report):
+            result = self._invoke(["convert", "newave", str(src), str(dst)])
+        assert result.exit_code == 0
+        assert "7 hydros" in result.stdout
+
+
+def test_convert_newave_case_threads_on_phase(tmp_path: Path) -> None:
+    """``convert_newave_case`` forwards its ``on_phase`` callback to the impl."""
+    from cobre_bridge import pipeline
+    from cobre_bridge.pipeline import ConversionReport, convert_newave_case
+
+    received: list[str] = []
+
+    def fake_impl(src: Path, dst: Path, on_phase: object = None) -> ConversionReport:
+        if on_phase is not None:
+            on_phase("Discovering files")  # type: ignore[operator]
+        return ConversionReport()
+
+    with patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl):
+        convert_newave_case(tmp_path, tmp_path, on_phase=received.append)
+
+    assert received == ["Discovering files"]

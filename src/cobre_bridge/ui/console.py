@@ -21,11 +21,19 @@ stay greppable; only the genuinely tabular output changes shape.
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from rich.box import SIMPLE_HEAVY
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+)
 from rich.table import Table
 from rich.text import Text
 
@@ -33,7 +41,7 @@ from cobre_bridge.diagnostics import Diagnostic, Severity
 from cobre_bridge.ui.theme import COPPER_ACCENT
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from cobre_bridge.pipeline import ConversionReport
 
@@ -242,3 +250,73 @@ def _diagnostic_panel(diag: Diagnostic) -> Panel:
     return Panel(
         body, title=title, title_align="left", border_style=style, expand=False
     )
+
+
+# ---------------------------------------------------------------------------
+# Live progress (TTY-only)
+# ---------------------------------------------------------------------------
+
+
+def _progress_enabled(*, verbose: bool, quiet: bool) -> bool:
+    """Live progress shows only on an interactive stderr, off under --verbose/--quiet.
+
+    Disabling it off-TTY keeps piped/captured output (tests, redirects) clean and
+    deterministic, and ``--verbose`` would otherwise interleave DEBUG logs with the
+    live region.
+    """
+    return sys.stderr.isatty() and not verbose and not quiet
+
+
+@contextmanager
+def conversion_progress(
+    total_steps: int,
+    *,
+    verbose: bool = False,
+    quiet: bool = False,
+    no_color: bool = False,
+) -> Iterator[Callable[[str], None]]:
+    """Yield a ``step(label)`` callback that advances a transient progress bar.
+
+    The bar (spinner + label + percentage) renders on stderr while a conversion
+    runs; each ``step(label)`` updates the description and advances one tick. When
+    progress is disabled (non-TTY / ``--verbose`` / ``--quiet``) the yielded
+    callback is a no-op, so headless runs and tests are unaffected.
+    """
+    if not _progress_enabled(verbose=verbose, quiet=quiet):
+        yield lambda _label: None
+        return
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=get_console(stderr=True, no_color=no_color),
+        transient=True,
+    )
+    with progress:
+        task = progress.add_task("Converting", total=total_steps)
+
+        def step(label: str) -> None:
+            progress.update(task, description=label, advance=1)
+
+        yield step
+
+
+@contextmanager
+def spinner(
+    message: str,
+    *,
+    verbose: bool = False,
+    quiet: bool = False,
+    no_color: bool = False,
+) -> Iterator[None]:
+    """Show an indeterminate stderr spinner for the duration of a whole operation.
+
+    No-op when progress is disabled (non-TTY / ``--verbose`` / ``--quiet``).
+    """
+    if not _progress_enabled(verbose=verbose, quiet=quiet):
+        yield
+        return
+    with get_console(stderr=True, no_color=no_color).status(message, spinner="dots"):
+        yield

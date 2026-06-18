@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +29,18 @@ from cobre_bridge.converters import thermal as thermal_conv
 from cobre_bridge.id_map import build_id_map
 
 logger = logging.getLogger(__name__)
+
+#: Coarse conversion phases reported to an optional ``on_phase`` callback (drives the
+#: CLI progress bar). The order matches the boundaries in
+#: :func:`_convert_newave_case_impl`; the count is the progress-bar total.
+CONVERSION_PHASE_LABELS: tuple[str, ...] = (
+    "Discovering files",
+    "Converting entities",
+    "Converting temporal & stochastic",
+    "Converting constraints",
+    "Writing JSON",
+    "Writing Parquet",
+)
 
 
 @dataclass
@@ -191,7 +204,12 @@ def _merge_hydro_bounds(
     return merged.to_arrow()
 
 
-def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
+def convert_newave_case(
+    src: Path,
+    dst: Path,
+    *,
+    on_phase: Callable[[str], None] | None = None,
+) -> ConversionReport:
     """Convert a source-model case directory to a Cobre case directory.
 
     Parameters
@@ -225,7 +243,7 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         # remaining ``logger.warning`` strings (sites not yet migrated) are picked
         # up by ``collector`` and bridged below, so every warning still surfaces.
         with dx.collect() as collected:
-            report = _convert_newave_case_impl(src, dst)
+            report = _convert_newave_case_impl(src, dst, on_phase)
     except BaseException:
         # The write phase is a sequence of independent file writes with no
         # rollback, so a failure partway through (disk full, a converter
@@ -278,13 +296,22 @@ def _finalize_diagnostics(
     return result
 
 
-def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
-    """Run the conversion pipeline (warning capture handled by the wrapper)."""
+def _convert_newave_case_impl(
+    src: Path, dst: Path, on_phase: Callable[[str], None] | None = None
+) -> ConversionReport:
+    """Run the conversion pipeline (warning capture handled by the wrapper).
+
+    ``on_phase`` (when given) is called once at each boundary in
+    :data:`CONVERSION_PHASE_LABELS`, so the CLI can advance a progress bar without
+    the pipeline knowing anything about rendering.
+    """
     report = ConversionReport()
+    step = on_phase if on_phase is not None else (lambda _label: None)
 
     # ------------------------------------------------------------------
     # 1. Discover and validate all source files via caso.dat -> Arquivos.
     # ------------------------------------------------------------------
+    step("Discovering files")
     logger.debug("Discovering NEWAVE files from %s", src)
     # Build the parsed-case object once; every converter reads its parsed inputs from
     # ``case`` (each source-model file parsed once and cached).
@@ -299,6 +326,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # ------------------------------------------------------------------
     # 3. Call all converters.
     # ------------------------------------------------------------------
+    step("Converting entities")
     logger.debug("Converting hydros")
     hydros_dict = hydro_conv.convert_hydros(case, id_map)
 
@@ -334,6 +362,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
         prod_media_sin=prod_media_sin,
     )
 
+    step("Converting temporal & stochastic")
     logger.debug("Converting stages")
     stages_dict = temporal_conv.convert_stages(case, id_map)
 
@@ -368,6 +397,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # longer threads `start_id = vminop_count + electric_count` by hand.
     constraint_ids = _ConstraintIdAllocator()
 
+    step("Converting constraints")
     logger.debug("Converting VminOP constraints")
     vminop_result = constraints_conv.convert_vminop_constraints(case, id_map)
     vminop_referenced_ids: list[int] = []
@@ -438,6 +468,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
             json.dump(data, f, indent=2, ensure_ascii=False)
         logger.debug("Wrote %s", path)
 
+    step("Writing JSON")
     _write_json(dst / "config.json", config_dict)
     _write_json(dst / "stages.json", stages_dict)
     _write_json(dst / "penalties.json", penalties_dict)
@@ -476,6 +507,7 @@ def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:
     # ------------------------------------------------------------------
     # 6. Write Parquet files.
     # ------------------------------------------------------------------
+    step("Writing Parquet")
     geometry_path = dst / "system" / "hydro_geometry.parquet"
     pq.write_table(geometry_table, geometry_path, compression="zstd")
     logger.debug("Wrote %s", geometry_path)
