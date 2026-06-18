@@ -38,12 +38,14 @@ from rich.table import Table
 from rich.text import Text
 
 from cobre_bridge.diagnostics import Diagnostic, Severity
+from cobre_bridge.preflight import PreflightVerdict
 from cobre_bridge.ui.theme import COPPER_ACCENT
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from cobre_bridge.pipeline import ConversionReport
+    from cobre_bridge.preflight import PreflightResult
 
 #: Width used when the output is not a real terminal (tests, pipes), so rendered
 #: tables and panels are deterministic instead of wrapping at Rich's 80-col default.
@@ -66,6 +68,27 @@ _SEVERITY_GLYPH: dict[Severity, str] = {
     Severity.INFO: "ℹ",
     Severity.WARNING: "⚠",
     Severity.ERROR: "✖",
+}
+
+#: Success style reused for the ✓ summary banner and passing checklist lines.
+_SUCCESS_STYLE = "bold #4A8B6F"
+
+#: Verdict → (glyph, style, headline text) for the preflight checklist headline.
+#: Reuses the existing severity glyphs/colours: ⚠/✖ and the amber/red styles
+#: track :data:`_SEVERITY_GLYPH` / :data:`_SEVERITY_STYLE`, and ``✓`` + the green
+#: style match :func:`render_conversion_summary`.
+_VERDICT_HEADLINE: dict[PreflightVerdict, tuple[str, str, str]] = {
+    PreflightVerdict.OK: ("✓", _SUCCESS_STYLE, "Ready to convert"),
+    PreflightVerdict.WARNINGS: (
+        _SEVERITY_GLYPH[Severity.WARNING],
+        _SEVERITY_STYLE[Severity.WARNING],
+        "Ready with warnings",
+    ),
+    PreflightVerdict.WILL_NOT_CONVERT: (
+        _SEVERITY_GLYPH[Severity.ERROR],
+        _SEVERITY_STYLE[Severity.ERROR],
+        "Will not convert",
+    ),
 }
 
 
@@ -157,7 +180,46 @@ def render_conversion_summary(
         f"{report.line_count} lines · "
         f"{report.stage_count} stages"
     )
-    target.print(f"✓ {summary}", style="bold #4A8B6F", soft_wrap=True)
+    target.print(f"✓ {summary}", style=_SUCCESS_STYLE, soft_wrap=True)
+
+
+def render_checklist(
+    result: PreflightResult,
+    *,
+    console: Console | None = None,
+    quiet: bool = False,
+) -> None:
+    """Render a :class:`~cobre_bridge.preflight.PreflightResult` as a ✓/✗ checklist.
+
+    The headline (``✓ Ready to convert`` / ``⚠ Ready with warnings`` / ``✖ Will not
+    convert``) and one ✓/✗ line per :class:`~cobre_bridge.preflight.CheckItem` are the
+    primary result of ``check`` and go to **stdout** (the given *console* or
+    :func:`get_console`). The verdict is taken verbatim from ``result.verdict`` — it is
+    never recomputed here.
+
+    Each passing check renders as ``✓ <label>`` (green) and each failed check as
+    ``✖ <label>`` (red); a non-empty ``detail`` is appended as ``— <detail>`` (dim).
+    With *quiet* set, passing ``✓`` lines are suppressed but the headline and failed
+    ``✖`` lines are still shown. The diagnostics are then delegated to
+    :func:`render_diagnostics` so warnings/errors render through the same panels (and,
+    when *console* is ``None``, on its default stderr console).
+    """
+    target = console or get_console()
+
+    glyph, style, headline = _VERDICT_HEADLINE[result.verdict]
+    target.print(f"{glyph} {headline}", style=style, soft_wrap=True)
+
+    for check in result.checks:
+        if quiet and check.passed:
+            continue
+        item_glyph = "✓" if check.passed else _SEVERITY_GLYPH[Severity.ERROR]
+        item_style = _SUCCESS_STYLE if check.passed else _SEVERITY_STYLE[Severity.ERROR]
+        line = Text(f"{item_glyph} {check.label}", style=item_style)
+        if check.detail:
+            line.append(f" — {check.detail}", style="dim")
+        target.print(line, soft_wrap=True)
+
+    render_diagnostics(result.diagnostics, console=console, quiet=quiet)
 
 
 def render_diagnostics(

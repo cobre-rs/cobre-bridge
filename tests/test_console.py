@@ -8,10 +8,12 @@ from rich.console import Console
 
 from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
 from cobre_bridge.pipeline import ConversionReport
+from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
 from cobre_bridge.ui.console import (
     MAX_TABLE_ROWS,
     _progress_enabled,
     conversion_progress,
+    render_checklist,
     render_conversion_summary,
     render_diagnostics,
     render_error,
@@ -123,6 +125,79 @@ class TestRenderDiagnostics:
         assert "5 more" in text  # overflow summarised
         assert "P0" in text
         assert f"P{MAX_TABLE_ROWS + 4}" not in text  # last row not printed
+
+
+class TestRenderChecklist:
+    def test_render_checklist_ok_headline_and_items(self) -> None:
+        console, buf = _console()
+        result = PreflightResult(
+            verdict=PreflightVerdict.OK,
+            diagnostics=[],
+            checks=[
+                CheckItem(label="Required files present", passed=True),
+                CheckItem(label="Source path is a directory", passed=True),
+                CheckItem(label="caso.dat resolved", passed=True),
+            ],
+        )
+        render_checklist(result, console=console)
+        text = buf.getvalue()
+        assert "✓ Ready to convert" in text
+        assert text.count("✓") == 4  # headline + three passing items
+
+    def test_render_checklist_will_not_convert_shows_failed(self) -> None:
+        console, buf = _console()
+        result = PreflightResult(
+            verdict=PreflightVerdict.WILL_NOT_CONVERT,
+            diagnostics=[],
+            checks=[
+                CheckItem(
+                    label="File discovery (caso.dat → arquivos.dat)",
+                    passed=False,
+                    detail="caso.dat not found",
+                ),
+            ],
+        )
+        render_checklist(result, console=console)
+        text = buf.getvalue()
+        assert "✖ Will not convert" in text
+        assert "✖ File discovery (caso.dat → arquivos.dat)" in text
+        assert "caso.dat not found" in text  # detail appended
+
+    def test_render_checklist_quiet_suppresses_passing(self) -> None:
+        console, buf = _console()
+        result = PreflightResult(
+            verdict=PreflightVerdict.OK,
+            diagnostics=[],
+            checks=[
+                CheckItem(label="Required files present", passed=True),
+                CheckItem(label="caso.dat resolved", passed=True),
+            ],
+        )
+        render_checklist(result, console=console, quiet=True)
+        text = buf.getvalue()
+        assert "✓ Ready to convert" in text  # headline still shown
+        assert "Required files present" not in text  # passing item suppressed
+        assert "caso.dat resolved" not in text
+
+    def test_render_checklist_delegates_diagnostics(self) -> None:
+        console, buf = _console()
+        warning = Diagnostic(
+            code="optional-file-absent",
+            severity=Severity.WARNING,
+            category="Preflight",
+            title="Optional input absent",
+            summary="Optional input 'modif' was not found.",
+        )
+        result = PreflightResult(
+            verdict=PreflightVerdict.WARNINGS,
+            diagnostics=[warning],
+            checks=[CheckItem(label="Required files present", passed=True)],
+        )
+        render_checklist(result, console=console)
+        text = buf.getvalue()
+        assert "⚠ Ready with warnings" in text  # warning headline
+        assert "Optional input absent" in text  # delegated diagnostics panel
+        assert "modif" in text
 
 
 class TestProgressGating:

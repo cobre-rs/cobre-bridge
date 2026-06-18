@@ -1652,6 +1652,227 @@ class TestTyperApp:
         assert "7 hydros" in result.stdout
 
 
+class TestCheckCommand:
+    """ticket-007: the ``check newave`` preflight command (exit 0/1/2 + --json)."""
+
+    def _invoke_main(
+        self,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        """Run cli.main() in-process, capturing stdout/stderr and exit code."""
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _result(verdict: object) -> object:
+        """Build a small ``PreflightResult`` with the given verdict.
+
+        Warnings carry one ``WARNING`` diagnostic so the JSON/headline paths see a
+        realistic payload; the verdict itself is taken verbatim by the handler and
+        renderer (never recomputed from the checks/diagnostics here).
+        """
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.preflight import (
+            CheckItem,
+            PreflightResult,
+            PreflightVerdict,
+        )
+
+        if verdict is PreflightVerdict.WILL_NOT_CONVERT:
+            return PreflightResult(
+                verdict=PreflightVerdict.WILL_NOT_CONVERT,
+                diagnostics=[
+                    Diagnostic(
+                        code="source-file-error",
+                        severity=Severity.ERROR,
+                        category="Preflight",
+                        title="Required input missing",
+                        summary="caso.dat not found",
+                    )
+                ],
+                checks=[
+                    CheckItem(
+                        label="File discovery (caso.dat → arquivos.dat)",
+                        passed=False,
+                        detail="caso.dat not found",
+                    )
+                ],
+            )
+        if verdict is PreflightVerdict.WARNINGS:
+            return PreflightResult(
+                verdict=PreflightVerdict.WARNINGS,
+                diagnostics=[
+                    Diagnostic(
+                        code="optional-file-absent",
+                        severity=Severity.WARNING,
+                        category="Preflight",
+                        title="Optional input absent",
+                        summary="Optional input 'modif' was not found.",
+                    )
+                ],
+                checks=[
+                    CheckItem(label="Required files present", passed=True),
+                    CheckItem(
+                        label="Optional: modif",
+                        passed=True,
+                        detail="absent (will use defaults)",
+                    ),
+                ],
+            )
+        return PreflightResult(
+            verdict=PreflightVerdict.OK,
+            diagnostics=[],
+            checks=[CheckItem(label="Required files present", passed=True)],
+        )
+
+    # -- Unit tests ---------------------------------------------------------
+
+    def test_check_json_document_shape(self) -> None:
+        """``_check_json_document`` builds the verdict schema with fixed order."""
+        from cobre_bridge.cli import _check_json_document
+        from cobre_bridge.preflight import PreflightVerdict
+
+        result = self._result(PreflightVerdict.WILL_NOT_CONVERT)
+        doc = _check_json_document(result)  # type: ignore[arg-type]
+
+        assert list(doc.keys()) == ["command", "status", "checks", "diagnostics"]
+        assert doc["command"] == "check newave"
+        assert doc["status"] == "will-not-convert"
+        assert doc["checks"] == [
+            {
+                "label": "File discovery (caso.dat → arquivos.dat)",
+                "passed": False,
+                "detail": "caso.dat not found",
+            }
+        ]
+        assert doc["diagnostics"][0]["severity"] == "error"  # type: ignore[index]
+
+    def test_verdict_to_exit_code_mapping(self) -> None:
+        """The 0/1/2 mapping is exactly OK/WARNINGS/WILL_NOT_CONVERT (2 = severe)."""
+        from cobre_bridge.cli import _VERDICT_EXIT_CODE
+        from cobre_bridge.preflight import PreflightVerdict
+
+        assert _VERDICT_EXIT_CODE == {
+            PreflightVerdict.OK: 0,
+            PreflightVerdict.WARNINGS: 1,
+            PreflightVerdict.WILL_NOT_CONVERT: 2,
+        }
+
+    # -- Integration tests (in-process, patched run_preflight) --------------
+
+    def test_check_ok_exits_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge.preflight import PreflightVerdict
+
+        result = self._result(PreflightVerdict.OK)
+        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+            code, stdout, _ = self._invoke_main(
+                ["check", "newave", str(tmp_path / "case")],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "✓ Ready to convert" in stdout
+
+    def test_check_warnings_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge.preflight import PreflightVerdict
+
+        result = self._result(PreflightVerdict.WARNINGS)
+        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+            code, stdout, _ = self._invoke_main(
+                ["check", "newave", str(tmp_path / "case")],
+                monkeypatch,
+            )
+
+        assert code == 1
+        assert "Ready with warnings" in stdout
+
+    def test_check_will_not_convert_exits_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge.preflight import PreflightVerdict
+
+        result = self._result(PreflightVerdict.WILL_NOT_CONVERT)
+        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+            code, stdout, _ = self._invoke_main(
+                ["check", "newave", str(tmp_path / "case")],
+                monkeypatch,
+            )
+
+        assert code == 2
+        assert "✖ Will not convert" in stdout
+
+    def test_check_json_emits_stdout_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--json`` on a WILL_NOT_CONVERT result emits JSON to stdout; exit 2."""
+        from cobre_bridge.preflight import PreflightVerdict
+
+        result = self._result(PreflightVerdict.WILL_NOT_CONVERT)
+        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+            code, stdout, stderr = self._invoke_main(
+                ["check", "newave", str(tmp_path / "case"), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 2
+        doc = json.loads(stdout)
+        assert doc["command"] == "check newave"
+        assert doc["status"] == "will-not-convert"
+        assert doc["checks"][0]["passed"] is False
+        # No Rich checklist leaked onto either stream.
+        assert "✖ Will not convert" not in stdout
+        assert stderr == ""
+
+    def test_check_writes_no_files_under_src(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``check`` must not write anything under the source directory."""
+        from cobre_bridge.preflight import PreflightVerdict
+
+        src = _make_fake_newave_dir(tmp_path)
+        before = sorted(p.name for p in src.iterdir())
+
+        result = self._result(PreflightVerdict.OK)
+        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+            code, _, _ = self._invoke_main(
+                ["check", "newave", str(src)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert sorted(p.name for p in src.iterdir()) == before
+
+    # -- E2E test (real discovery failure via subprocess) -------------------
+
+    def test_check_missing_caso_subprocess_exits_2(self, tmp_path: Path) -> None:
+        """A real discovery failure (no caso.dat) exits 2 with the ✖ headline."""
+        result = _run_cli_subprocess("check", "newave", str(tmp_path / "nonexistent"))
+
+        assert result.returncode == 2
+        combined = result.stdout + result.stderr
+        assert "✖ Will not convert" in combined
+
+
 def test_convert_newave_case_threads_on_phase(tmp_path: Path) -> None:
     """``convert_newave_case`` forwards its ``on_phase`` callback to the impl."""
     from cobre_bridge import pipeline

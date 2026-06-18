@@ -15,10 +15,12 @@ from cobre_bridge import __version__
 from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.errors import diagnostic_from_exception
+from cobre_bridge.preflight import PreflightVerdict
 from cobre_bridge.ui.console import (
     conversion_progress,
     get_console,
     print_status,
+    render_checklist,
     render_conversion_summary,
     render_diagnostics,
     render_error,
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
     from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
     from cobre_bridge.pipeline import ConversionReport
+    from cobre_bridge.preflight import PreflightResult
 
 
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
@@ -358,6 +361,71 @@ def _run_dashboard(args: SimpleNamespace) -> None:
     return
 
 
+#: Preflight verdict → process exit code. The contract is fixed by the epic
+#: overview: ``OK`` is clean (0), ``WARNINGS`` is advisory (1), and
+#: ``WILL_NOT_CONVERT`` is the most severe (2). Kept as data so the mapping is
+#: directly unit-testable and impossible to drift from in the handler.
+_VERDICT_EXIT_CODE: dict[PreflightVerdict, int] = {
+    PreflightVerdict.OK: 0,
+    PreflightVerdict.WARNINGS: 1,
+    PreflightVerdict.WILL_NOT_CONVERT: 2,
+}
+
+
+def _check_json_document(result: PreflightResult) -> dict[str, object]:
+    """Build the ``--json`` verdict document for ``check newave``.
+
+    Mirrors the ``_convert_json_document`` shape from the convert stub so Epic 07
+    can later generalize both: a fixed-order ``{"command", "status", "checks",
+    "diagnostics"}`` mapping. ``status`` is taken verbatim from the preflight
+    ``verdict.value`` (it is never recomputed here), each :class:`CheckItem`
+    becomes a ``{"label", "passed", "detail"}`` object, and each diagnostic is
+    serialized via its own ``to_dict``.
+
+    The document carries no timestamps and no paths beyond what the diagnostics
+    already hold, so the serialized form is deterministic across runs.
+    """
+    return {
+        "command": "check newave",
+        "status": result.verdict.value,
+        "checks": [
+            {"label": check.label, "passed": check.passed, "detail": check.detail}
+            for check in result.checks
+        ],
+        "diagnostics": [d.to_dict() for d in result.diagnostics],
+    }
+
+
+def _run_check(args: SimpleNamespace) -> None:
+    """Execute the check newave subcommand.
+
+    Runs :func:`run_preflight` (which already captures every discovery/parse
+    failure as a ``WILL_NOT_CONVERT`` verdict, so no ``try/except`` is needed),
+    renders the ✓/✗ checklist (or, with ``--json``, emits one machine-readable
+    verdict to stdout instead of any Rich output), and exits per the verdict:
+    ``OK`` → 0, ``WARNINGS`` → 1, ``WILL_NOT_CONVERT`` → 2. Writes no files and
+    never calls the conversion pipeline.
+    """
+    from cobre_bridge.preflight import run_preflight
+
+    src: Path = args.src
+    result = run_preflight(src)
+
+    if args.json_output:
+        # --json: one machine-readable verdict to stdout, no Rich on either stream.
+        _emit_convert_json(_check_json_document(result))
+    else:
+        # Default consoles: the ✓/✗ checklist goes to stdout while render_checklist
+        # delegates its diagnostics block to render_diagnostics (stderr default),
+        # preserving the stdout(results)/stderr(diagnostics) split.
+        render_checklist(result, quiet=args.quiet)
+
+    exit_code = _VERDICT_EXIT_CODE[result.verdict]
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+    return
+
+
 def _run_newave_conversion(args: SimpleNamespace) -> None:
     """Execute the convert newave subcommand."""
     # Import here so the module-level import of pipeline is deferred.
@@ -636,8 +704,10 @@ app = typer.Typer(
 )
 convert_app = typer.Typer(help="Convert data from a source format to Cobre JSON.")
 compare_app = typer.Typer(help="Compare source model inputs/results against Cobre.")
+check_app = typer.Typer(help="Validate source-model inputs without converting.")
 app.add_typer(convert_app, name="convert")
 app.add_typer(compare_app, name="compare")
+app.add_typer(check_app, name="check")
 
 
 def _version_callback(value: bool) -> None:
@@ -798,6 +868,36 @@ def _compare_results(
             tolerance=tolerance,
             format=fmt,
             out_dir=out_dir,
+            verbose=verbose,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+@check_app.command("newave")
+def _check_newave(
+    src: Annotated[Path, typer.Argument(help="Path to the NEWAVE case directory.")],
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) checklist."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = False,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Validate a NEWAVE case directory without converting or writing any files."""
+    _configure_logging(verbose)
+    _run_check(
+        SimpleNamespace(
+            src=src,
+            json_output=json_output,
             verbose=verbose,
             no_color=no_color,
             quiet=quiet,
