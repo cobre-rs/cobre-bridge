@@ -33,8 +33,17 @@ from cobre_bridge.ui.console import (
     render_error,
     spinner,
 )
+from cobre_bridge.verdict import (
+    build_verdict,
+    check_summary,
+    compare_summary,
+    convert_summary,
+    dashboard_summary,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from rich.console import Console
 
     from cobre_bridge.case import NewaveCase
@@ -43,7 +52,6 @@ if TYPE_CHECKING:
     from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
     from cobre_bridge.pipeline import ConversionReport
-    from cobre_bridge.preflight import PreflightResult
 
 
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
@@ -143,6 +151,7 @@ def _export_compare_artifacts(
     cobre_output_dir: Path,
     tolerance: float,
     out_dir_arg: Path | None,
+    quiet_status: bool = False,
 ) -> tuple[set[str], Path]:
     """Resolve ``--format`` and write the machine-readable comparison artifacts.
 
@@ -153,6 +162,10 @@ def _export_compare_artifacts(
     An invalid ``--format`` token exits 2 (clean stderr). A write failure must
     NOT change the comparison exit code, so an ``OSError`` is warned and
     swallowed.
+
+    *quiet_status* (set by ``--json``) gates ONLY the ``Artifacts written to …``
+    stdout status line so stdout stays pure JSON; the file export still runs and
+    the ``OSError`` write-failure warning still reaches stderr.
     """
     from cobre_bridge.comparators.export import write_artifacts
 
@@ -175,7 +188,8 @@ def _export_compare_artifacts(
             out_dir=out_dir,
             formats=sorted(export_formats),
         )
-        print_status(f"Artifacts written to {out_dir}")
+        if not quiet_status:
+            print_status(f"Artifacts written to {out_dir}")
     except OSError as exc:
         print_status(
             f"Warning: failed to write artifacts: {exc}",
@@ -249,6 +263,7 @@ def _run_bounds_comparison(args: SimpleNamespace) -> None:
         print_bounds_mismatches_from_dataset,
         print_bounds_summary_from_dataset,
     )
+    from cobre_bridge.comparators.verdict import build_compare_verdict
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -298,11 +313,22 @@ def _run_bounds_comparison(args: SimpleNamespace) -> None:
     # Build the canonical dataset once; console + artifacts derive from it.
     dataset = build_bounds_dataset(results)
 
-    # Output (sourced from the dataset).
-    print_bounds_summary_from_dataset(dataset, newave_dir, cobre_output_dir, tolerance)
+    # The mismatch count drives the exit code (1 on any mismatch). Compute it
+    # before any rendering. The --json verdict ``status`` is derived separately
+    # from the verdict's ``all_within_tol`` (below) so it stays self-consistent
+    # with ``summary`` even on an empty result, where ``mismatches`` is 0 but
+    # ``all_within_tol`` is False (nothing was compared).
+    mismatches = sum(1 for r in results if not r.match)
 
-    if not args.summary:
-        print_bounds_mismatches_from_dataset(dataset)
+    # Output (sourced from the dataset). Under --json the Rich tables are
+    # suppressed in favour of a single machine-readable verdict on stdout.
+    if not args.json_output:
+        print_bounds_summary_from_dataset(
+            dataset, newave_dir, cobre_output_dir, tolerance
+        )
+
+        if not args.summary:
+            print_bounds_mismatches_from_dataset(dataset)
 
     formats, _out_dir = _export_compare_artifacts(
         dataset,
@@ -312,6 +338,7 @@ def _run_bounds_comparison(args: SimpleNamespace) -> None:
         cobre_output_dir=cobre_output_dir,
         tolerance=tolerance,
         out_dir_arg=args.out_dir,
+        quiet_status=args.json_output,
     )
 
     # Bounds has no HTML report; honor --format html with an ignore-warning.
@@ -323,7 +350,16 @@ def _run_bounds_comparison(args: SimpleNamespace) -> None:
             style="#F5A623",
         )
 
-    mismatches = sum(1 for r in results if not r.match)
+    if args.json_output:
+        # Compare has no diagnostics (default ``()`` → ``[]``). ``status`` reflects
+        # divergence via the same verdict ``summary`` is built from (uniform with
+        # ``compare results``), so it can never contradict ``all_within_tol``; the
+        # exit code is governed separately by ``mismatches``.
+        verdict = build_compare_verdict(dataset)
+        summary = compare_summary(verdict)
+        status = "mismatch" if not verdict.all_within_tol else "ok"
+        _emit_convert_json(build_verdict("compare bounds", status, summary))
+
     if mismatches:
         raise typer.Exit(code=1)
 
@@ -341,6 +377,7 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.results import compare_results
+    from cobre_bridge.comparators.verdict import build_compare_verdict
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -373,8 +410,10 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
         )
         raise typer.Exit(code=2)
 
-    # Print text summary (sourced from the dataset).
-    print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
+    # Print text summary (sourced from the dataset). Under --json the Rich tables
+    # are suppressed in favour of a single machine-readable verdict on stdout.
+    if not args.json_output:
+        print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
 
     formats, out_dir = _export_compare_artifacts(
         dataset,
@@ -384,9 +423,12 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
         cobre_output_dir=cobre_output_dir,
         tolerance=tolerance,
         out_dir_arg=args.out_dir,
+        quiet_status=args.json_output,
     )
 
-    # HTML report (opt-in via --format html / all).
+    # HTML report (opt-in via --format html / all). The file is still written
+    # under --json (it is a --format artifact); only its stdout advisory is
+    # routed to stderr so stdout stays pure JSON.
     if "html" in formats:
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
@@ -396,7 +438,21 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
         report_path = out_dir / "report.html"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(html, encoding="utf-8")
-        print_status(f"HTML report written to {report_path}")
+        print_status(
+            f"HTML report written to {report_path}",
+            console=get_console(stderr=True) if args.json_output else None,
+        )
+
+    if args.json_output:
+        # ``status`` REFLECTS divergence (so it is self-consistent with
+        # ``summary`` and uniform with ``compare bounds``), but the results exit
+        # code is DECOUPLED from it — this command always exits 0. An empty
+        # dataset → ``all_within_tol`` False → ``status`` "mismatch".
+        verdict = build_compare_verdict(dataset)
+        status = "mismatch" if not verdict.all_within_tol else "ok"
+        _emit_convert_json(
+            build_verdict("compare results", status, compare_summary(verdict))
+        )
 
     return
 
@@ -411,7 +467,8 @@ def _run_dashboard(args: SimpleNamespace) -> None:
         raise typer.Exit(code=1)
 
     output_path: Path = args.output or (case_dir / "dashboard.html")
-    print_status(f"Building dashboard from {case_dir} ...")
+    if not args.json_output:
+        print_status(f"Building dashboard from {case_dir} ...")
     with spinner(
         "Building dashboard…",
         verbose=args.verbose > 0,
@@ -420,11 +477,25 @@ def _run_dashboard(args: SimpleNamespace) -> None:
     ):
         build_dashboard(case_dir, output_path)
     size_kb = output_path.stat().st_size / 1024
-    print_status(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
+    if not args.json_output:
+        print_status(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
 
-    # NOTE: when dashboard --json lands in epic-07 (ticket-021), keep this
-    # --open advisory off the stdout --json payload; it already goes to stderr,
-    # so the two compose cleanly.
+    if args.json_output:
+        # --json: one machine-readable verdict to stdout. Emitted BEFORE the
+        # --open block so the stdout JSON flushes regardless of browser outcome;
+        # a built dashboard is always a success (the only failure path exits 1
+        # before the build). ``size_kb`` keeps the precise float — only the
+        # human line above rounds it with ``:.0f``.
+        _emit_convert_json(
+            build_verdict(
+                "dashboard",
+                "ok",
+                dashboard_summary(str(output_path), size_kb),
+            )
+        )
+
+    # The --open advisory stays off the stdout --json payload; it already goes to
+    # stderr (err_console below), so the two compose cleanly.
     if args.open_browser:
         err_console = get_console(stderr=True, no_color=args.no_color)
         try:
@@ -451,30 +522,6 @@ _VERDICT_EXIT_CODE: dict[PreflightVerdict, int] = {
 }
 
 
-def _check_json_document(result: PreflightResult) -> dict[str, object]:
-    """Build the ``--json`` verdict document for ``check newave``.
-
-    Mirrors the ``_convert_json_document`` shape from the convert stub so Epic 07
-    can later generalize both: a fixed-order ``{"command", "status", "checks",
-    "diagnostics"}`` mapping. ``status`` is taken verbatim from the preflight
-    ``verdict.value`` (it is never recomputed here), each :class:`CheckItem`
-    becomes a ``{"label", "passed", "detail"}`` object, and each diagnostic is
-    serialized via its own ``to_dict``.
-
-    The document carries no timestamps and no paths beyond what the diagnostics
-    already hold, so the serialized form is deterministic across runs.
-    """
-    return {
-        "command": "check newave",
-        "status": result.verdict.value,
-        "checks": [
-            {"label": check.label, "passed": check.passed, "detail": check.detail}
-            for check in result.checks
-        ],
-        "diagnostics": [d.to_dict() for d in result.diagnostics],
-    }
-
-
 def _run_check(args: SimpleNamespace) -> None:
     """Execute the check newave subcommand.
 
@@ -492,7 +539,20 @@ def _run_check(args: SimpleNamespace) -> None:
 
     if args.json_output:
         # --json: one machine-readable verdict to stdout, no Rich on either stream.
-        _emit_convert_json(_check_json_document(result))
+        # The command-specific payload (the checklist) lives under ``summary`` per
+        # the unified verdict envelope; ``status`` passes through the preflight
+        # verdict verbatim and never recomputes it.
+        summary = check_summary(
+            [
+                {"label": check.label, "passed": check.passed, "detail": check.detail}
+                for check in result.checks
+            ]
+        )
+        _emit_convert_json(
+            build_verdict(
+                "check newave", result.verdict.value, summary, result.diagnostics
+            )
+        )
     else:
         # Default consoles: the ✓/✗ checklist goes to stdout while render_checklist
         # delegates its diagnostics block to render_diagnostics (stderr default),
@@ -563,12 +623,19 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     except Exception as exc:  # noqa: BLE001
         diag = diagnostic_from_exception(exc, context="Conversion")
         if args.json_output:
-            document = (
-                _convert_dry_run_json_document(None, dst, [diag])
-                if args.dry_run
-                else _convert_json_document(None, [diag])
+            # Pipeline failure: ``report`` is None, so counts are zeroed and the
+            # dry-run path has an empty would-write listing. ``status`` is "error"
+            # because ``diagnostic_from_exception`` yields an ERROR-severity diag.
+            diagnostics = [diag]
+            summary = _convert_verdict_summary(None)
+            if args.dry_run:
+                summary["would_write"] = []
+                status = _convert_status(diagnostics, success="dry-run")
+            else:
+                status = _convert_status(diagnostics, success="ok")
+            _emit_convert_json(
+                build_verdict("convert newave", status, summary, diagnostics)
             )
-            _emit_convert_json(document)
         else:
             render_diagnostics([diag], console=err_console, quiet=args.quiet)
         raise typer.Exit(code=1)
@@ -577,8 +644,16 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
         # Dry run: report the would-write listing only; touch nothing on disk
         # (no diagnostics-json sidecar, no manifest, no validation).
         if args.json_output:
+            # The would-write listing moves UNDER ``summary`` (dst-relative,
+            # forward-slash, sorted) so the only top-level keys are the five
+            # envelope keys.
+            summary = _convert_verdict_summary(report)
+            summary["would_write"] = sorted(
+                Path(p).relative_to(dst).as_posix() for p in report.would_write_paths
+            )
+            status = _convert_status(report.diagnostics, success="dry-run")
             _emit_convert_json(
-                _convert_dry_run_json_document(report, dst, report.diagnostics)
+                build_verdict("convert newave", status, summary, report.diagnostics)
             )
         else:
             if not args.quiet:
@@ -595,10 +670,14 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
             )
         return
 
-    if args.json_output:
-        # --json: one machine-readable verdict to stdout, no Rich on either stream.
-        _emit_convert_json(_convert_json_document(report, report.diagnostics))
-    else:
+    # Build the convert ``summary`` + ``status`` up front; ``--validate`` may
+    # later append a ``summary["validation"]`` sub-object (under --json), and the
+    # verdict is emitted to stdout only after validation has run so that block is
+    # populated. ``status`` is diagnostics-only and is NOT touched by validation.
+    summary = _convert_verdict_summary(report)
+    status = _convert_status(report.diagnostics, success="ok")
+
+    if not args.json_output:
         if not args.quiet:
             render_conversion_summary(report, console=out_console)
         render_diagnostics(report.diagnostics, console=err_console, quiet=args.quiet)
@@ -614,10 +693,12 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     # ------------------------------------------------------------------
     # Optional post-conversion validation.
     # ------------------------------------------------------------------
-    # NOTE: --validate is out of scope for the --json stub in this ticket. When
-    # --validate and --json are combined, validation messages render as today
-    # (Rich on stderr, exit 2 on failure); Epic 7 unifies validation into the
-    # JSON verdict.
+    # When --validate and --json are combined, the human validation messages stay
+    # on err_console (stderr) exactly as without --json, and the machine-readable
+    # outcome is folded UNDER ``summary`` as a ``validation`` sub-object. The
+    # verdict is emitted (below) only AFTER this block so ``validation`` is
+    # populated; validation failure flips the exit code, never the status.
+    validation_failed = False
     if args.validate:
         try:
             import cobre.io  # type: ignore[import-untyped]
@@ -627,6 +708,18 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
                 console=err_console,
                 style="#F5A623",
             )
+            if args.json_output:
+                # Validation was requested but could not run; record that it was
+                # skipped so the absence of a real outcome is explicit.
+                summary["validation"] = {
+                    "ran": False,
+                    "valid": None,
+                    "warnings": 0,
+                    "errors": 0,
+                }
+                _emit_convert_json(
+                    build_verdict("convert newave", status, summary, report.diagnostics)
+                )
             return
 
         try:
@@ -640,14 +733,18 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
         def _msg(item: object) -> object:
             return item.get("message", item) if isinstance(item, dict) else item
 
-        for warning in result.get("warnings", []):
+        warnings = result.get("warnings", [])
+        errors = result.get("errors", [])
+        valid = bool(result.get("valid", False))
+
+        for warning in warnings:
             print_status(
                 f"Validation warning: {_msg(warning)}",
                 console=err_console,
                 style="#F5A623",
             )
-        if not result.get("valid", False):
-            for err in result.get("errors", []):
+        if not valid:
+            for err in errors:
                 print_status(
                     f"Validation error: {_msg(err)}",
                     console=err_console,
@@ -656,80 +753,61 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
             print_status(
                 "Validation failed.", console=err_console, style="bold #DC4C4C"
             )
-            raise typer.Exit(code=2)
+            validation_failed = True
+
+        if args.json_output:
+            # The machine-readable outcome under ``summary``; ``status`` stays
+            # derived from diagnostics only (validation never flips it).
+            summary["validation"] = {
+                "ran": True,
+                "valid": valid,
+                "warnings": len(warnings),
+                "errors": len(errors),
+            }
+
+    # Emit the --json verdict now (after validation has populated ``summary``).
+    if args.json_output:
+        _emit_convert_json(
+            build_verdict("convert newave", status, summary, report.diagnostics)
+        )
+
+    if validation_failed:
+        raise typer.Exit(code=2)
 
     return
 
 
-def _convert_json_document(
-    report: ConversionReport | None,
-    diagnostics: list[Diagnostic],
-) -> dict[str, object]:
-    """Build the ``--json`` verdict document for ``convert newave``.
+def _convert_verdict_summary(report: ConversionReport | None) -> dict[str, object]:
+    """The convert ``summary`` block — entity counts, zeroed when *report* is None.
 
-    Reuses the ``{"summary": {...}, "diagnostics": [...]}`` payload shape from
-    :func:`_write_diagnostics_json`, adding the ``command`` and ``status`` keys
-    that make it a self-contained machine-readable verdict. ``report`` is ``None``
-    on the failure path, where the summary counts are all zero. ``status`` is
-    ``"error"`` when any diagnostic has ``ERROR`` severity, else ``"ok"``.
-
-    The returned dict has a fixed insertion order and carries no timestamps or
-    paths beyond what the diagnostics already hold, so the serialized form is
-    deterministic across runs.
+    A thin wrapper over :func:`cobre_bridge.verdict.convert_summary` that supplies
+    the five counts from a :class:`ConversionReport` (or all zeros on the failure
+    path, where ``report`` is ``None``). Keeping the count plumbing here lets the
+    real-run, failure, and dry-run call sites share one source of truth while the
+    key order itself stays owned by ``verdict.convert_summary``.
     """
-    status = "error" if any(d.severity is Severity.ERROR for d in diagnostics) else "ok"
-    return {
-        "command": "convert newave",
-        "status": status,
-        "summary": {
-            "hydros": report.hydro_count if report is not None else 0,
-            "thermals": report.thermal_count if report is not None else 0,
-            "buses": report.bus_count if report is not None else 0,
-            "lines": report.line_count if report is not None else 0,
-            "stages": report.stage_count if report is not None else 0,
-        },
-        "diagnostics": [d.to_dict() for d in diagnostics],
-    }
+    if report is None:
+        return convert_summary(0, 0, 0, 0, 0)
+    return convert_summary(
+        report.hydro_count,
+        report.thermal_count,
+        report.bus_count,
+        report.line_count,
+        report.stage_count,
+    )
 
 
-def _convert_dry_run_json_document(
-    report: ConversionReport | None,
-    dst: Path,
-    diagnostics: list[Diagnostic],
-) -> dict[str, object]:
-    """Build the ``--dry-run --json`` document for ``convert newave``.
+def _convert_status(diagnostics: Sequence[Diagnostic], *, success: str) -> str:
+    """Derive the convert verdict ``status`` from diagnostic severity ONLY.
 
-    Mirrors :func:`_convert_json_document` (fixed insertion order, ``"error"``
-    status when any diagnostic is ``ERROR``), but reports the would-write listing
-    instead of a real-run verdict. ``status`` is ``"dry-run"`` on a clean run.
-    ``report`` is ``None`` on the failure path (no would-write listing).
-
-    ``would_write`` lists every would-write path made relative to *dst* with
-    forward-slash separators, sorted, so the document is path-stable regardless of
-    where *dst* lives and byte-deterministic across runs. No timestamps or
-    provenance are included.
+    Returns ``"error"`` when any diagnostic has ``ERROR`` severity, otherwise the
+    caller's *success* token (``"ok"`` for a real run, ``"dry-run"`` for a dry
+    run). Validation outcome never enters here — it lands in ``summary.validation``
+    and the exit code, keeping ``status`` a pure diagnostics signal.
     """
-    status = (
-        "error" if any(d.severity is Severity.ERROR for d in diagnostics) else "dry-run"
-    )
-    would_write = (
-        sorted(Path(p).relative_to(dst).as_posix() for p in report.would_write_paths)
-        if report is not None
-        else []
-    )
-    return {
-        "command": "convert newave",
-        "status": status,
-        "summary": {
-            "hydros": report.hydro_count if report is not None else 0,
-            "thermals": report.thermal_count if report is not None else 0,
-            "buses": report.bus_count if report is not None else 0,
-            "lines": report.line_count if report is not None else 0,
-            "stages": report.stage_count if report is not None else 0,
-        },
-        "would_write": would_write,
-        "diagnostics": [d.to_dict() for d in diagnostics],
-    }
+    if any(d.severity is Severity.ERROR for d in diagnostics):
+        return "error"
+    return success
 
 
 def _render_dry_run_summary(
@@ -1143,6 +1221,16 @@ def _compare_bounds(
             help="Comma-separated variables to compare (e.g. storage_min,turbined).",
         ),
     ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) tables."
+            ),
+        ),
+    ] = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1159,6 +1247,7 @@ def _compare_bounds(
             out_dir=out_dir,
             summary=summary,
             variables=variables,
+            json_output=json_output,
             verbose=verbose,
             log_file=log_file,
             no_color=no_color,
@@ -1187,6 +1276,16 @@ def _compare_results(
     ] = None,
     fmt: _FormatOpt = None,
     out_dir: _OutDirOpt = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) tables."
+            ),
+        ),
+    ] = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1204,6 +1303,7 @@ def _compare_results(
             tolerance=tolerance,
             format=fmt,
             out_dir=out_dir,
+            json_output=json_output,
             verbose=verbose,
             log_file=log_file,
             no_color=no_color,
@@ -1265,6 +1365,16 @@ def _dashboard(
             ),
         ),
     ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) status lines."
+            ),
+        ),
+    ] = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1277,6 +1387,7 @@ def _dashboard(
             case_dir=case_dir,
             output=output,
             open_browser=open_browser,
+            json_output=json_output,
             verbose=verbose,
             log_file=log_file,
             no_color=no_color,

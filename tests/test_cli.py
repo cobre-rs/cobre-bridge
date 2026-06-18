@@ -606,6 +606,7 @@ class TestCliExitCodes:
 
         assert result.returncode == 1
         doc = json.loads(result.stdout)
+        assert doc["schema_version"] == 1
         assert doc["command"] == "convert newave"
         assert doc["status"] == "error"
         assert doc["summary"]["hydros"] == 0
@@ -734,11 +735,12 @@ class TestCliInProcess:
         assert "boom" in stderr
         assert "boom" not in stdout
 
-    def test_convert_json_document_shape(self) -> None:
-        """``_convert_json_document`` builds the verdict schema with fixed order."""
-        from cobre_bridge.cli import _convert_json_document
+    def test_convert_verdict_shape(self) -> None:
+        """The convert ``summary``+``status`` helpers feed the unified envelope."""
+        from cobre_bridge.cli import _convert_status, _convert_verdict_summary
         from cobre_bridge.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
+        from cobre_bridge.verdict import build_verdict
 
         report = ConversionReport(
             hydro_count=10,
@@ -755,9 +757,18 @@ class TestCliInProcess:
             summary="just so",
         )
 
-        doc = _convert_json_document(report, [info])
+        summary = _convert_verdict_summary(report)
+        status = _convert_status([info], success="ok")
+        doc = build_verdict("convert newave", status, summary, [info])
 
-        assert list(doc.keys()) == ["command", "status", "summary", "diagnostics"]
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["schema_version"] == 1
         assert doc["command"] == "convert newave"
         # No ERROR diagnostic → status is "ok".
         assert doc["status"] == "ok"
@@ -770,10 +781,11 @@ class TestCliInProcess:
         }
         assert doc["diagnostics"] == [info.to_dict()]
 
-    def test_convert_json_document_error_status_on_error_diagnostic(self) -> None:
+    def test_convert_verdict_error_status_on_error_diagnostic(self) -> None:
         """Any ERROR-severity diagnostic flips ``status`` to ``"error"``."""
-        from cobre_bridge.cli import _convert_json_document
+        from cobre_bridge.cli import _convert_status, _convert_verdict_summary
         from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.verdict import build_verdict
 
         error = Diagnostic(
             code="boom-code",
@@ -783,8 +795,11 @@ class TestCliInProcess:
             summary="boom",
         )
 
-        doc = _convert_json_document(None, [error])
+        summary = _convert_verdict_summary(None)
+        status = _convert_status([error], success="ok")
+        doc = build_verdict("convert newave", status, summary, [error])
 
+        assert doc["schema_version"] == 1
         assert doc["status"] == "error"
         # Failure path → zero counts.
         assert doc["summary"] == {
@@ -824,9 +839,19 @@ class TestCliInProcess:
 
         assert code == 0
         doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["schema_version"] == 1
         assert doc["command"] == "convert newave"
         assert doc["status"] == "ok"
         assert doc["summary"]["hydros"] == 10
+        # --validate not requested → no validation sub-object.
+        assert "validation" not in doc["summary"]
         # No Rich human summary leaked onto stdout.
         assert "Converted" not in stdout
         # The only thing on stderr is the always-on conversion-manifest note,
@@ -852,8 +877,18 @@ class TestCliInProcess:
 
         assert code == 1
         doc = json.loads(stdout)
+        assert doc["schema_version"] == 1
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
         assert doc["status"] == "error"
         assert doc["summary"]["hydros"] == 0
+        # Failure path never requested validation.
+        assert "validation" not in doc["summary"]
         assert len(doc["diagnostics"]) == 1
         assert doc["diagnostics"][0]["summary"] == "boom"
         # The Rich diagnostic block must not also render.
@@ -895,8 +930,9 @@ class TestCliInProcess:
             )
 
         assert code == 0
-        # stdout is the JSON verdict (carries command/status).
+        # stdout is the JSON verdict (carries schema_version/command/status).
         verdict = json.loads(stdout)
+        assert verdict["schema_version"] == 1
         assert verdict["command"] == "convert newave"
         assert verdict["status"] == "ok"
         # The sidecar was also written (its payload has no command/status keys).
@@ -1007,11 +1043,115 @@ class TestCliInProcess:
 
         assert code == 0
         doc = json.loads(stdout)
-        # Only the deterministic verdict keys — no manifest timestamp leaks in.
-        assert list(doc.keys()) == ["command", "status", "summary", "diagnostics"]
+        # Only the deterministic envelope keys — no manifest timestamp leaks in.
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
         assert "timestamp" not in doc
         # The manifest still exists separately on disk.
         assert (dst / "conversion_manifest.json").exists()
+
+    def test_convert_json_validate_folds_into_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--json --validate`` folds the validation outcome under ``summary``.
+
+        The machine outcome lands in ``summary["validation"]`` (status stays
+        diagnostics-derived), stdout is pure JSON, and a failed validation still
+        exits 2.
+        """
+        import types
+
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+
+        # Inject a fake ``cobre.io`` whose ``validate`` reports a failure with one
+        # warning and two errors; the real ``cobre`` package is not installed.
+        cobre_pkg = types.ModuleType("cobre")
+        cobre_io = types.ModuleType("cobre.io")
+        cobre_io.validate = lambda _dst: {  # type: ignore[attr-defined]
+            "valid": False,
+            "warnings": ["w"],
+            "errors": ["e1", "e2"],
+        }
+        cobre_pkg.io = cobre_io  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "cobre", cobre_pkg)
+        monkeypatch.setitem(sys.modules, "cobre.io", cobre_io)
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json", "--validate"],
+                monkeypatch,
+            )
+
+        # Validation failure flips the exit code, never the verdict status.
+        assert code == 2
+        doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        # status is still diagnostics-derived ("ok"), NOT flipped by validation.
+        assert doc["status"] == "ok"
+        assert doc["summary"]["validation"] == {
+            "ran": True,
+            "valid": False,
+            "warnings": 1,
+            "errors": 2,
+        }
+        # No validation text leaked onto stdout; the human messages stay on stderr.
+        assert "Validation" not in stdout
+        assert "Validation failed." in stderr
+
+    def test_convert_json_without_validate_has_no_validation_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``--validate`` the convert ``summary`` carries no validation key."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _ = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert "validation" not in doc["summary"]
 
     def test_manifest_records_diagnostics(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1192,13 +1332,16 @@ class TestCliInProcess:
 
         assert code == 0
         doc = json.loads(stdout)
+        # would_write moves UNDER summary; only the five envelope keys at the top.
         assert list(doc.keys()) == [
+            "schema_version",
             "command",
             "status",
             "summary",
-            "would_write",
             "diagnostics",
         ]
+        assert "would_write" not in doc
+        assert doc["schema_version"] == 1
         assert doc["command"] == "convert newave"
         assert doc["status"] == "dry-run"
         assert doc["summary"] == {
@@ -1207,9 +1350,9 @@ class TestCliInProcess:
             "buses": 4,
             "lines": 3,
             "stages": 60,
+            # dst-relative, forward-slash, sorted.
+            "would_write": ["config.json", "system/hydros.json"],
         }
-        # dst-relative, forward-slash, sorted.
-        assert doc["would_write"] == ["config.json", "system/hydros.json"]
         assert "timestamp" not in doc
 
     def test_dry_run_nonempty_dst_without_force_exits_one_and_preserves_dst(
@@ -1733,6 +1876,345 @@ class TestCompareDatasetWiring:
         assert "failed to write artifacts" in stderr
 
 
+class TestCompareJson:
+    """ticket-020: ``compare bounds``/``compare results`` ``--json`` verdict.
+
+    Patches the heavy readers (``NewaveCase``, alignment, ``compare_*``) so the
+    real dataset build + verdict derivation run without source-model/Cobre I/O,
+    then asserts the unified envelope on stdout, the exit-code contract, and the
+    no-Rich-on-stdout property.
+    """
+
+    #: Rich glyphs / box-drawing that must NEVER appear on a ``--json`` stdout.
+    _RICH_GLYPHS = ("✓", "⚠", "─", "━", "│", "┃")
+
+    def _invoke_main(
+        self,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _bounds(*, all_match: bool) -> object:
+        from cobre_bridge.comparators.bounds import BoundComparison
+
+        rows = [
+            BoundComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="storage_max",
+                newave_value=29000.0,
+                cobre_value=29000.0,
+                diff=0.0,
+                match=True,
+            ),
+        ]
+        if not all_match:
+            rows.append(
+                BoundComparison(
+                    entity_type="thermal",
+                    entity_name="ANGRA",
+                    newave_code=30,
+                    cobre_id=1,
+                    stage=0,
+                    variable="generation_max",
+                    newave_value=1350.0,
+                    cobre_value=1300.0,
+                    diff=50.0,
+                    match=False,
+                )
+            )
+        return rows
+
+    @staticmethod
+    def _results(*, within_tol: bool) -> object:
+        """Build result rows that are fully within tol (matched) or divergent.
+
+        With ``within_tol`` the cobre value equals the newave value, so the
+        derived ``within_tol_rate`` is ``1.0`` and ``all_within_tol`` is True.
+        Otherwise the cobre value diverges past the default ``1e-2`` tolerance.
+        """
+        from cobre_bridge.comparators.results import ResultComparison
+
+        cobre_value = 100.0 if within_tol else 110.0
+        abs_diff = 0.0 if within_tol else 10.0
+        rel_diff = 0.0 if within_tol else 0.1
+        return [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=cobre_value,
+                abs_diff=abs_diff,
+                rel_diff=rel_diff,
+            ),
+        ]
+
+    @staticmethod
+    def _make_cobre_dir_with_bounds(tmp_path: Path, name: str) -> Path:
+        """Create a Cobre output dir containing the required bounds.parquet stub.
+
+        The bounds handler validates ``training/dictionaries/bounds.parquet``
+        exists before running; the content is unused because ``compare_bounds``
+        is patched.
+        """
+        import pyarrow.parquet as pq
+
+        cobre_dir = tmp_path / name
+        bounds_path = cobre_dir / "training" / "dictionaries" / "bounds.parquet"
+        bounds_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({"x": pa.array([0], pa.int32())}), bounds_path)
+        return cobre_dir
+
+    def _patch_common(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch the shared context loaders (case, alignment, lines.json)."""
+        monkeypatch.setattr(
+            "cobre_bridge.case.NewaveCase.from_directory",
+            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._load_lines_json",
+            lambda _dir: [],
+        )
+
+    def _patch_bounds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        all_match: bool,
+    ) -> None:
+        self._patch_common(monkeypatch)
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.bounds.compare_bounds",
+            lambda **k: self._bounds(all_match=all_match),
+        )
+
+    def _patch_results(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        within_tol: bool,
+    ) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.results import PercentileData
+
+        self._patch_common(monkeypatch)
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            lambda **k: build_results_dataset(
+                self._results(within_tol=within_tol), PercentileData(), 1e-2
+            ),
+        )
+
+    def _assert_no_rich_stdout(self, stdout: str) -> None:
+        for glyph in self._RICH_GLYPHS:
+            assert glyph not in stdout
+        assert "Artifacts written to" not in stdout
+        assert "HTML report written to" not in stdout
+
+    def test_compare_bounds_json_all_within_tol_exits_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1: a fully-matching bounds run emits ``status="ok"`` and exits 0."""
+        self._patch_bounds(monkeypatch, all_match=True)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            monkeypatch,
+        )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert list(doc) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["command"] == "compare bounds"
+        assert doc["status"] == "ok"
+        assert doc["summary"]["all_within_tol"] is True
+        assert doc["summary"]["worst_variable"] is None
+        assert doc["diagnostics"] == []
+        self._assert_no_rich_stdout(stdout)
+
+    def test_compare_bounds_json_mismatch_status_and_exit_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: any mismatch → ``status="mismatch"``, worst populated, exit 1."""
+        self._patch_bounds(monkeypatch, all_match=False)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            monkeypatch,
+        )
+
+        assert code == 1
+        doc = json.loads(stdout)
+        assert doc["status"] == "mismatch"
+        assert doc["summary"]["all_within_tol"] is False
+        assert isinstance(doc["summary"]["worst_variable"], str)
+        self._assert_no_rich_stdout(stdout)
+
+    def test_compare_bounds_json_empty_results_status_consistent_exit_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty bounds result keeps ``status`` consistent with ``summary``.
+
+        With zero compared rows ``mismatches`` is 0 (so the command exits 0), but
+        ``all_within_tol`` is False (nothing was verified). ``status`` must track
+        ``all_within_tol`` — never report ``"ok"`` over an empty/False summary.
+        """
+        self._patch_common(monkeypatch)
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.bounds.compare_bounds",
+            lambda **k: [],
+        )
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            monkeypatch,
+        )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert doc["summary"]["all_within_tol"] is False
+        assert doc["status"] == "mismatch"
+        self._assert_no_rich_stdout(stdout)
+
+    def test_compare_results_json_divergent_status_mismatch_exit_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3: divergent results → ``status="mismatch"`` but always exit 0."""
+        self._patch_results(monkeypatch, within_tol=False)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            monkeypatch,
+        )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert doc["command"] == "compare results"
+        assert doc["status"] == "mismatch"
+        assert doc["summary"]["all_within_tol"] is False
+        assert doc["summary"]["within_tol"] < doc["summary"]["total"]
+        self._assert_no_rich_stdout(stdout)
+
+    def test_compare_results_json_within_tol_status_ok_exit_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4: fully-within-tol results → ``status="ok"`` and exit 0."""
+        self._patch_results(monkeypatch, within_tol=True)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, stdout, _ = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            monkeypatch,
+        )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert doc["status"] == "ok"
+        assert doc["summary"]["all_within_tol"] is True
+        self._assert_no_rich_stdout(stdout)
+
+    def test_compare_bounds_json_coexists_with_format_json_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5: ``--json`` and ``--format json`` coexist — stdout verdict + file."""
+        self._patch_bounds(monkeypatch, all_match=True)
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+        out_dir = tmp_path / "artifacts"
+
+        code, stdout, _ = self._invoke_main(
+            [
+                "compare",
+                "bounds",
+                str(tmp_path / "nw"),
+                str(cobre_dir),
+                "--json",
+                "--format",
+                "json",
+                "--out-dir",
+                str(out_dir),
+            ],
+            monkeypatch,
+        )
+
+        assert code == 0
+        # stdout parses as exactly one JSON verdict, with no status line leaking.
+        doc = json.loads(stdout)
+        assert doc["command"] == "compare bounds"
+        assert "Artifacts written to" not in stdout
+        # The --format json FILE export still ran: the always-on provenance
+        # manifest plus the json-format-specific summary projection both landed.
+        assert (out_dir / "comparison.json").exists()
+        assert (out_dir / "summary.json").exists()
+
+    def test_compare_bounds_json_cobre_read_error_exit_2_no_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: a CobreReadError exits 2 with stderr only — no stdout JSON."""
+        from cobre_bridge.comparators.cobre_readers import CobreReadError
+
+        self._patch_common(monkeypatch)
+
+        def _raise(**_k: object) -> object:
+            raise CobreReadError("bad parquet")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.bounds.compare_bounds",
+            _raise,
+        )
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, stdout, stderr = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            monkeypatch,
+        )
+
+        assert code == 2
+        assert stdout == ""
+        assert "ERROR:" in stderr
+        assert "bad parquet" in stderr
+
+
 class TestParseFormats:
     """ticket-016: ``_parse_formats`` token parsing and validation."""
 
@@ -2143,18 +2625,35 @@ class TestCheckCommand:
 
     # -- Unit tests ---------------------------------------------------------
 
-    def test_check_json_document_shape(self) -> None:
-        """``_check_json_document`` builds the verdict schema with fixed order."""
-        from cobre_bridge.cli import _check_json_document
+    def test_check_verdict_shape(self) -> None:
+        """The check ``summary`` helper feeds the unified envelope (checks nested)."""
         from cobre_bridge.preflight import PreflightVerdict
+        from cobre_bridge.verdict import build_verdict, check_summary
 
         result = self._result(PreflightVerdict.WILL_NOT_CONVERT)
-        doc = _check_json_document(result)  # type: ignore[arg-type]
+        summary = check_summary(
+            [
+                {"label": c.label, "passed": c.passed, "detail": c.detail}
+                for c in result.checks
+            ]
+        )
+        doc = build_verdict(
+            "check newave", result.verdict.value, summary, result.diagnostics
+        )
 
-        assert list(doc.keys()) == ["command", "status", "checks", "diagnostics"]
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["schema_version"] == 1
         assert doc["command"] == "check newave"
         assert doc["status"] == "will-not-convert"
-        assert doc["checks"] == [
+        # The checklist moves UNDER summary.
+        assert "checks" not in doc
+        assert doc["summary"]["checks"] == [  # type: ignore[index]
             {
                 "label": "File discovery (caso.dat → arquivos.dat)",
                 "passed": False,
@@ -2236,9 +2735,19 @@ class TestCheckCommand:
 
         assert code == 2
         doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["schema_version"] == 1
         assert doc["command"] == "check newave"
         assert doc["status"] == "will-not-convert"
-        assert doc["checks"][0]["passed"] is False
+        # The checklist lives under summary now, not at the top level.
+        assert "checks" not in doc
+        assert doc["summary"]["checks"][0]["passed"] is False
         # No Rich checklist leaked onto either stream.
         assert "✖ Will not convert" not in stdout
         assert stderr == ""
@@ -2915,6 +3424,148 @@ class TestDashboardOpen:
 
         assert exit_code == 0
         assert "could not open a browser" in stderr
+
+
+class TestDashboardJson:
+    """ticket-021: ``dashboard --json`` emits the unified verdict envelope.
+
+    Reuses ``TestDashboardOpen``'s in-process driver and build stub: the real
+    dashboard build is replaced by a stub that writes a tiny file at the output
+    path (so ``output_path.stat()`` succeeds), the CLI runs via ``cli.main`` with
+    ``sys.stdout``/``sys.stderr`` captured, and the stdout is parsed as JSON. The
+    file is STILL built under ``--json``; only the two Rich status lines are
+    suppressed.
+    """
+
+    def _invoke_main(
+        self,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _make_case_dir(tmp_path: Path) -> Path:
+        """Create a case dir whose ``output/simulation`` path exists."""
+        case_dir = tmp_path / "case"
+        (case_dir / "output" / "simulation").mkdir(parents=True)
+        return case_dir
+
+    @staticmethod
+    def _stub_build_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stub ``build_dashboard`` to write a tiny file at the output path."""
+
+        def _fake_build(_case_dir: Path, output_path: Path) -> None:
+            output_path.write_text("x", encoding="utf-8")
+
+        monkeypatch.setattr("cobre_bridge.dashboard.build_dashboard", _fake_build)
+
+    def test_dashboard_json_success_shape_and_exit_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        exit_code, stdout, _stderr = self._invoke_main(
+            ["dashboard", str(case_dir), "--json"], monkeypatch
+        )
+
+        assert exit_code == 0
+        document = json.loads(stdout)
+        assert list(document.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert document["command"] == "dashboard"
+        assert document["status"] == "ok"
+        assert document["summary"]["output"].endswith("dashboard.html")
+        assert isinstance(document["summary"]["size_kb"], (int, float))
+        assert document["diagnostics"] == []
+
+    def test_dashboard_json_suppresses_status_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        exit_code, stdout, _stderr = self._invoke_main(
+            ["dashboard", str(case_dir), "--json"], monkeypatch
+        )
+
+        assert exit_code == 0
+        assert "Building dashboard from" not in stdout
+        assert "Dashboard written to" not in stdout
+        # stdout parses as exactly one JSON object.
+        assert json.loads(stdout)["command"] == "dashboard"
+
+    def test_dashboard_json_no_simulation_exits_1_no_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A case dir WITHOUT output/simulation fires the exit-1 guard FIRST, so no
+        # build and no verdict happen; stdout stays empty.
+        case_dir = tmp_path / "case"
+        case_dir.mkdir()
+        self._stub_build_dashboard(monkeypatch)
+
+        exit_code, stdout, stderr = self._invoke_main(
+            ["dashboard", str(case_dir), "--json"], monkeypatch
+        )
+
+        assert exit_code == 1
+        assert stdout == ""
+        assert "no simulation output found" in stderr
+
+    def test_dashboard_json_open_advisory_stays_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        with patch("cobre_bridge.cli.webbrowser.open", return_value=False):
+            exit_code, stdout, stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "--json", "--open"], monkeypatch
+            )
+
+        assert exit_code == 0
+        # stdout is exactly one verdict — no browser advisory leaked onto it.
+        document = json.loads(stdout)
+        assert document["command"] == "dashboard"
+        assert "could not open a browser" not in stdout
+        assert "could not open a browser" in stderr
+
+    def test_dashboard_json_custom_output_path_in_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+        out_path = tmp_path / "OUT.html"
+
+        exit_code, stdout, _stderr = self._invoke_main(
+            ["dashboard", str(case_dir), "-o", str(out_path), "--json"], monkeypatch
+        )
+
+        assert exit_code == 0
+        document = json.loads(stdout)
+        assert document["summary"]["output"] == str(out_path)
 
 
 class TestVerbosityAndLogFile:
