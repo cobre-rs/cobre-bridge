@@ -13,9 +13,11 @@ CLI integration tests use two strategies:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -512,6 +514,33 @@ class TestConvertNewaweCasePipeline:
             with pytest.raises(FileNotFoundError) as exc_info:
                 convert_newave_case(src, dst)
         assert "hidr.dat" in str(exc_info.value)
+
+    def test_dry_run_does_not_call_write_table(self, tmp_path: Path) -> None:
+        """``dry_run=True`` writes nothing yet records the would-write paths."""
+        from cobre_bridge.pipeline import ConversionReport, convert_newave_case
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+
+        fake_id_map = MagicMock()
+        patches = _all_converter_patches(fake_id_map)
+        with patch("cobre_bridge.pipeline.pq.write_table") as write_table:
+            for p in patches:
+                p.__enter__()
+            try:
+                report = convert_newave_case(src, dst, dry_run=True)
+            finally:
+                for p in patches:
+                    p.__exit__(None, None, None)
+
+        assert isinstance(report, ConversionReport)
+        # No Parquet table is written and no destination directory is created.
+        assert write_table.call_count == 0
+        assert not dst.exists() or list(dst.iterdir()) == []
+        # The would-write listing is still populated (covers JSON and Parquet).
+        assert report.would_write_paths
+        assert str(dst / "config.json") in report.would_write_paths
+        assert str(dst / "system" / "hydros.json") in report.would_write_paths
 
 
 # ---------------------------------------------------------------------------
@@ -1076,6 +1105,195 @@ class TestCliInProcess:
         assert code == 0
         assert "failed to write conversion manifest" in stderr
 
+    def test_dry_run_writes_nothing_to_dst(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run`` into an empty dst writes nothing and exits 0."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--dry-run"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        # No destination directory is created and nothing is written.
+        assert not dst.exists() or list(dst.iterdir()) == []
+        assert "Dry run — no files written" in stdout
+        assert "config.json" in stdout
+
+    def test_dry_run_converter_error_exits_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A converter error under ``--dry-run`` exits 1 and names the failure."""
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            side_effect=ValueError("boom"),
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--dry-run"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        assert "Conversion failed" in stderr
+        assert "boom" in stderr
+        assert "boom" not in stdout
+
+    def test_dry_run_json_document_is_deterministic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --json`` emits a sorted, dst-relative would-write document."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        # Deliberately unsorted absolute paths under dst.
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+            would_write_paths=[
+                str(dst / "system" / "hydros.json"),
+                str(dst / "config.json"),
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--dry-run", "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "command",
+            "status",
+            "summary",
+            "would_write",
+            "diagnostics",
+        ]
+        assert doc["command"] == "convert newave"
+        assert doc["status"] == "dry-run"
+        assert doc["summary"] == {
+            "hydros": 10,
+            "thermals": 5,
+            "buses": 4,
+            "lines": 3,
+            "stages": 60,
+        }
+        # dst-relative, forward-slash, sorted.
+        assert doc["would_write"] == ["config.json", "system/hydros.json"]
+        assert "timestamp" not in doc
+
+    def test_dry_run_nonempty_dst_without_force_exits_one_and_preserves_dst(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-empty dst without ``--force`` is refused even under ``--dry-run``."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        existing = dst / "existing.txt"
+        existing.write_text("keep me", encoding="utf-8")
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=12,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ) as convert:
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--dry-run"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        assert "Use --force" in stderr
+        # The destination is untouched: the guard fired before the pipeline ran.
+        assert convert.call_count == 0
+        assert existing.read_text(encoding="utf-8") == "keep me"
+        assert list(dst.iterdir()) == [existing]
+
+    def test_dry_run_with_validate_emits_note_and_skips_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --validate`` skips validation and notes it on stderr."""
+        import builtins
+
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=12,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        real_import = builtins.__import__
+
+        def _guard_import(name: str, *args: object, **kwargs: object) -> object:
+            # No cobre validation import may be attempted under --dry-run.
+            if name == "cobre.io" or name.startswith("cobre.io"):
+                raise AssertionError("validation must not import cobre under --dry-run")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch(
+                "cobre_bridge.pipeline.convert_newave_case",
+                return_value=fake_report,
+            ),
+            patch.object(builtins, "__import__", _guard_import),
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--dry-run", "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "--validate is ignored under --dry-run" in stderr
+        # No validation output of any kind reached stderr.
+        assert "Validation" not in stderr
+
 
 class TestCompareDatasetWiring:
     """ticket-008: compare handlers sourced from the canonical dataset.
@@ -1581,7 +1799,11 @@ class TestConversionWarningCapture:
         log = logging.getLogger("cobre_bridge.converters.fake")
 
         def fake_impl(
-            src: Path, dst: Path, on_phase: object = None
+            src: Path,
+            dst: Path,
+            on_phase: object = None,
+            *,
+            dry_run: bool = False,
         ) -> ConversionReport:
             log.warning("vazpast.dat unreadable; using empty tendency")
             log.warning("vazpast.dat unreadable; using empty tendency")  # duplicate
@@ -1640,7 +1862,13 @@ class TestConversionWarningCapture:
 
         dst = tmp_path / "dst"
 
-        def fake_impl(src: Path, d: Path, on_phase: object = None) -> object:
+        def fake_impl(
+            src: Path,
+            d: Path,
+            on_phase: object = None,
+            *,
+            dry_run: bool = False,
+        ) -> object:
             # Simulate a write phase that got partway: a top-level JSON and a
             # system/ subdir were written before the failure.
             (d / "system").mkdir(parents=True, exist_ok=True)
@@ -2052,7 +2280,13 @@ def test_convert_newave_case_threads_on_phase(tmp_path: Path) -> None:
 
     received: list[str] = []
 
-    def fake_impl(src: Path, dst: Path, on_phase: object = None) -> ConversionReport:
+    def fake_impl(
+        src: Path,
+        dst: Path,
+        on_phase: object = None,
+        *,
+        dry_run: bool = False,
+    ) -> ConversionReport:
         if on_phase is not None:
             on_phase("Discovering files")  # type: ignore[operator]
         return ConversionReport()
@@ -2567,3 +2801,353 @@ class TestCompareConfigEnvPrecedence:
 
         assert result.returncode == 1
         assert "bounds.parquet not found" in (result.stdout + result.stderr)
+
+
+class TestDashboardOpen:
+    """ticket-016: ``dashboard --open`` launches the written HTML in a browser.
+
+    Runs ``dashboard`` in-process via ``cli.main`` with the real dashboard build
+    stubbed (``cobre_bridge.dashboard.build_dashboard``) so it only writes a tiny
+    file at the output path — enough for the ``output_path.stat()`` size line to
+    succeed without building a real dashboard. ``webbrowser.open`` is patched at
+    its ``cobre_bridge.cli`` import site so no actual browser is launched.
+    """
+
+    def _invoke_main(
+        self,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _make_case_dir(tmp_path: Path) -> Path:
+        """Create a case dir whose ``output/simulation`` path exists."""
+        case_dir = tmp_path / "case"
+        (case_dir / "output" / "simulation").mkdir(parents=True)
+        return case_dir
+
+    @staticmethod
+    def _stub_build_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stub ``build_dashboard`` to write a tiny file at the output path.
+
+        The real build is skipped; a 1-byte file keeps the ``stat()`` size line
+        in ``_run_dashboard`` from raising.
+        """
+
+        def _fake_build(_case_dir: Path, output_path: Path) -> None:
+            output_path.write_text("x", encoding="utf-8")
+
+        monkeypatch.setattr("cobre_bridge.dashboard.build_dashboard", _fake_build)
+
+    def test_dashboard_open_calls_webbrowser_with_file_uri(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+        expected_uri = (case_dir / "dashboard.html").resolve().as_uri()
+
+        with patch("cobre_bridge.cli.webbrowser.open", return_value=True) as mock_open:
+            exit_code, _stdout, _stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "--open"], monkeypatch
+            )
+
+        assert exit_code == 0
+        mock_open.assert_called_once_with(expected_uri)
+
+    def test_dashboard_without_open_does_not_call_webbrowser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        with patch("cobre_bridge.cli.webbrowser.open") as mock_open:
+            exit_code, _stdout, _stderr = self._invoke_main(
+                ["dashboard", str(case_dir)], monkeypatch
+            )
+
+        assert exit_code == 0
+        mock_open.assert_not_called()
+
+    def test_dashboard_open_swallows_webbrowser_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        with patch(
+            "cobre_bridge.cli.webbrowser.open",
+            side_effect=webbrowser.Error("no browser"),
+        ):
+            exit_code, _stdout, stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "--open"], monkeypatch
+            )
+
+        assert exit_code == 0
+        assert "could not open a browser" in stderr
+
+    def test_dashboard_open_swallows_false_return(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        with patch("cobre_bridge.cli.webbrowser.open", return_value=False):
+            exit_code, _stdout, stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "--open"], monkeypatch
+            )
+
+        assert exit_code == 0
+        assert "could not open a browser" in stderr
+
+
+class TestVerbosityAndLogFile:
+    """ticket-017: graduated ``-v/-vv`` verbosity and the shared ``--log-file``.
+
+    Drives ``cli.main`` in-process (NOT the Typer ``CliRunner``) so the ``main``
+    ``finally`` teardown that removes the ``--log-file`` ``FileHandler`` actually
+    runs, and so the progress gate sees a real (patchable) ``sys.stderr.isatty``.
+    """
+
+    @staticmethod
+    def _invoke_main(
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        tty: bool = False,
+    ) -> tuple[int, str, str]:
+        """Run ``cli.main()`` in-process, capturing stdout/stderr and exit code.
+
+        When *tty* is ``True`` the captured stderr buffer reports
+        ``isatty() == True`` so the live-progress gate takes its interactive branch
+        (otherwise a ``StringIO`` buffer is never a TTY and progress is always off).
+        """
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        if tty:
+            stderr_buf.isatty = lambda: True  # type: ignore[method-assign]
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _file_handlers() -> list[logging.FileHandler]:
+        """Return the ``FileHandler``s currently attached to the package logger."""
+        pkg = logging.getLogger("cobre_bridge")
+        return [h for h in pkg.handlers if isinstance(h, logging.FileHandler)]
+
+    def test_configure_logging_levels(self) -> None:
+        """The count maps 0 → warnings-only, 1 → INFO, 2 → DEBUG."""
+        from cobre_bridge.cli import _NULL_HANDLER, _configure_logging
+
+        pkg = logging.getLogger("cobre_bridge")
+
+        _configure_logging(2, None)
+        assert pkg.getEffectiveLevel() == logging.DEBUG
+
+        _configure_logging(1, None)
+        assert pkg.getEffectiveLevel() == logging.INFO
+
+        _configure_logging(0, None)
+        assert pkg.propagate is False
+        assert _NULL_HANDLER in pkg.handlers
+
+    def test_log_file_captures_debug_and_handler_removed_after_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--log-file`` writes the full DEBUG trace; the handler is gone after."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        log_path = tmp_path / "run.log"
+
+        def _fake_convert(*_args: object, **_kwargs: object) -> ConversionReport:
+            logging.getLogger("cobre_bridge.pipeline").debug("converting widgets")
+            return ConversionReport(hydro_count=1, stage_count=12)
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            side_effect=_fake_convert,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--log-file", str(log_path)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert log_path.exists()
+        contents = log_path.read_text(encoding="utf-8")
+        assert "DEBUG cobre_bridge.pipeline: converting widgets" in contents
+        # The FileHandler was removed + closed in main()'s finally.
+        assert self._file_handlers() == []
+
+    def test_consecutive_log_file_runs_leave_no_handler(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two ``--log-file`` runs leave zero ``FileHandler``s (no leak)."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        report = ConversionReport(hydro_count=1, stage_count=12)
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=report,
+        ):
+            for run in ("a", "b"):
+                code, _stdout, _stderr = self._invoke_main(
+                    [
+                        "convert",
+                        "newave",
+                        str(src),
+                        str(tmp_path / f"dst_{run}"),
+                        "--log-file",
+                        str(tmp_path / f"run_{run}.log"),
+                    ],
+                    monkeypatch,
+                )
+                assert code == 0
+
+        assert self._file_handlers() == []
+
+    def test_log_file_without_verbose_keeps_progress_on_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On a TTY, ``--log-file`` with no ``-v`` still shows live progress.
+
+        Spies on ``ui.console._progress_enabled`` to assert it is consulted with
+        ``verbose=False`` (progress NOT suppressed) and returns ``True``.
+        """
+        from cobre_bridge import ui
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        log_path = tmp_path / "run.log"
+        report = ConversionReport(hydro_count=1, stage_count=12)
+
+        real_progress_enabled = ui.console._progress_enabled
+        # Record (verbose-flag, gate-result) pairs as they happen during the run,
+        # so the TTY-dependent result is captured inside the patched context.
+        calls: list[tuple[bool, bool]] = []
+
+        def _spy(*, verbose: bool, quiet: bool) -> bool:
+            result = real_progress_enabled(verbose=verbose, quiet=quiet)
+            calls.append((verbose, result))
+            return result
+
+        with (
+            patch("cobre_bridge.pipeline.convert_newave_case", return_value=report),
+            patch.object(ui.console, "_progress_enabled", _spy),
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--log-file", str(log_path)],
+                monkeypatch,
+                tty=True,
+            )
+
+        assert code == 0
+        # conversion_progress consulted the gate with verbose=False (not suppressed)
+        # and, on the simulated TTY, the gate returned True (progress shown).
+        assert calls == [(False, True)]
+
+    def test_vv_threads_int_and_suppresses_progress(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``dashboard -vv`` threads the int (2) and suppresses the spinner.
+
+        Spies on ``_configure_logging`` (asserting it sees ``verbose=2``) and on
+        ``ui.console._progress_enabled`` (asserting it is consulted with
+        ``verbose=True`` — the ``> 0`` conversion of the count 2 — and returns
+        ``False`` so the spinner is suppressed even on a TTY).
+        """
+        from cobre_bridge import cli, ui
+
+        case_dir = tmp_path / "case"
+        (case_dir / "output" / "simulation").mkdir(parents=True)
+
+        def _fake_build(_case_dir: Path, output_path: Path) -> None:
+            output_path.write_text("x", encoding="utf-8")
+
+        monkeypatch.setattr("cobre_bridge.dashboard.build_dashboard", _fake_build)
+
+        real_configure = cli._configure_logging
+        configure_calls: list[int] = []
+
+        def _configure_spy(verbose: int, log_file: Path | None) -> None:
+            configure_calls.append(verbose)
+            real_configure(verbose, log_file)
+
+        progress_calls: list[bool] = []
+
+        def _progress_spy(*, verbose: bool, quiet: bool) -> bool:
+            progress_calls.append(verbose)
+            return False
+
+        with (
+            patch.object(cli, "_configure_logging", _configure_spy),
+            patch.object(ui.console, "_progress_enabled", _progress_spy),
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "-vv"],
+                monkeypatch,
+                tty=True,
+            )
+
+        assert code == 0
+        # The int count threaded through unchanged.
+        assert configure_calls == [2]
+        # The spinner consulted the gate with verbose=True (count 2 → > 0) and the
+        # gate (here forced False) suppressed it.
+        assert progress_calls == [True]
+
+    def test_vv_accepted_via_subprocess(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Smoke: ``-vv`` is accepted on the real CLI and exits cleanly (code 0)."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        report = ConversionReport(hydro_count=1, stage_count=12)
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "-vv"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "1 hydros" in stdout

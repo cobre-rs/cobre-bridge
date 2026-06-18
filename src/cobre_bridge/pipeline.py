@@ -58,6 +58,10 @@ class ConversionReport:
     #: Flat WARNING-severity summary strings, kept for backward-compatible consumers
     #: (derived from :attr:`diagnostics`).
     warnings: list[str] = field(default_factory=list)
+    #: Absolute output paths the conversion produced (real run) or would produce
+    #: (dry run), in write order. Optional Parquet tables that were skipped are
+    #: absent. Populated by :func:`_convert_newave_case_impl`.
+    would_write_paths: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
         return (
@@ -209,6 +213,7 @@ def convert_newave_case(
     dst: Path,
     *,
     on_phase: Callable[[str], None] | None = None,
+    dry_run: bool = False,
 ) -> ConversionReport:
     """Convert a source-model case directory to a Cobre case directory.
 
@@ -221,6 +226,10 @@ def convert_newave_case(
         Path to the output Cobre case directory.  Must not exist or must be
         empty (call site is responsible for enforcing the --force contract
         before calling this function).
+    dry_run:
+        When ``True``, run the full in-memory conversion but write nothing to
+        *dst* (no files, no subdirectories). The would-write paths are still
+        recorded in :attr:`ConversionReport.would_write_paths`.
 
     Returns
     -------
@@ -243,7 +252,7 @@ def convert_newave_case(
         # remaining ``logger.warning`` strings (sites not yet migrated) are picked
         # up by ``collector`` and bridged below, so every warning still surfaces.
         with dx.collect() as collected:
-            report = _convert_newave_case_impl(src, dst, on_phase)
+            report = _convert_newave_case_impl(src, dst, on_phase, dry_run=dry_run)
     except BaseException:
         # The write phase is a sequence of independent file writes with no
         # rollback, so a failure partway through (disk full, a converter
@@ -297,13 +306,21 @@ def _finalize_diagnostics(
 
 
 def _convert_newave_case_impl(
-    src: Path, dst: Path, on_phase: Callable[[str], None] | None = None
+    src: Path,
+    dst: Path,
+    on_phase: Callable[[str], None] | None = None,
+    *,
+    dry_run: bool = False,
 ) -> ConversionReport:
     """Run the conversion pipeline (warning capture handled by the wrapper).
 
     ``on_phase`` (when given) is called once at each boundary in
     :data:`CONVERSION_PHASE_LABELS`, so the CLI can advance a progress bar without
     the pipeline knowing anything about rendering.
+
+    When ``dry_run`` is ``True``, the build phases run exactly as for a real run,
+    but the write phase creates no directories and writes no files; the paths that
+    would have been written are still accumulated and recorded on the report.
     """
     report = ConversionReport()
     step = on_phase if on_phase is not None else (lambda _label: None)
@@ -456,16 +473,34 @@ def _convert_newave_case_impl(
     # ------------------------------------------------------------------
     # 4. Create the output directory structure.
     # ------------------------------------------------------------------
-    (dst / "system").mkdir(parents=True, exist_ok=True)
-    (dst / "scenarios").mkdir(parents=True, exist_ok=True)
-    (dst / "constraints").mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        (dst / "system").mkdir(parents=True, exist_ok=True)
+        (dst / "scenarios").mkdir(parents=True, exist_ok=True)
+        (dst / "constraints").mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # 5. Write JSON files.
     # ------------------------------------------------------------------
+    # Every output path is routed through ``_write_json`` / ``_write_parquet`` so
+    # the would-write listing and the dry-run gate live in exactly one place each,
+    # rather than guarding ~30 individual write sites.
+    would_write: list[Path] = []
+
     def _write_json(path: Path, data: dict) -> None:
+        would_write.append(path)
+        if dry_run:
+            logger.debug("Would write %s", path)
+            return
         with path.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        logger.debug("Wrote %s", path)
+
+    def _write_parquet(table: pa.Table, path: Path) -> None:
+        would_write.append(path)
+        if dry_run:
+            logger.debug("Would write %s", path)
+            return
+        pq.write_table(table, path, compression="zstd")
         logger.debug("Wrote %s", path)
 
     step("Writing JSON")
@@ -509,60 +544,50 @@ def _convert_newave_case_impl(
     # ------------------------------------------------------------------
     step("Writing Parquet")
     geometry_path = dst / "system" / "hydro_geometry.parquet"
-    pq.write_table(geometry_table, geometry_path, compression="zstd")
-    logger.debug("Wrote %s", geometry_path)
+    _write_parquet(geometry_table, geometry_path)
 
     if hydro_energy_productivity_table.num_rows > 0:
         hep_path = dst / "system" / "hydro_energy_productivity.parquet"
-        pq.write_table(hydro_energy_productivity_table, hep_path, compression="zstd")
-        logger.debug("Wrote %s", hep_path)
+        _write_parquet(hydro_energy_productivity_table, hep_path)
 
     # Optional tailrace curves (polinjus) — only written when the case ships them.
     if tailrace_table is not None and tailrace_table.num_rows > 0:
         tailrace_path = dst / "system" / "tailrace_curves.parquet"
-        pq.write_table(tailrace_table, tailrace_path, compression="zstd")
-        logger.debug("Wrote %s", tailrace_path)
+        _write_parquet(tailrace_table, tailrace_path)
 
     inflow_path = dst / "scenarios" / "inflow_seasonal_stats.parquet"
-    pq.write_table(inflow_table, inflow_path, compression="zstd")
-    logger.debug("Wrote %s", inflow_path)
+    _write_parquet(inflow_table, inflow_path)
 
     load_path = dst / "scenarios" / "load_seasonal_stats.parquet"
-    pq.write_table(load_table, load_path, compression="zstd")
-    logger.debug("Wrote %s", load_path)
+    _write_parquet(load_table, load_path)
 
     history_path = dst / "scenarios" / "inflow_history.parquet"
-    pq.write_table(inflow_history_table, history_path, compression="zstd")
-    logger.debug("Wrote %s", history_path)
+    _write_parquet(inflow_history_table, history_path)
 
     constraints_dir = dst / "constraints"
-    constraints_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        constraints_dir.mkdir(parents=True, exist_ok=True)
     line_bounds_path = constraints_dir / "line_bounds.parquet"
-    pq.write_table(line_bounds_table, line_bounds_path, compression="zstd")
-    logger.debug("Wrote %s", line_bounds_path)
+    _write_parquet(line_bounds_table, line_bounds_path)
 
     ncs_stats_path = dst / "scenarios" / "non_controllable_stats.parquet"
-    pq.write_table(ncs_stats_table, ncs_stats_path, compression="zstd")
-    logger.debug("Wrote %s", ncs_stats_path)
+    _write_parquet(ncs_stats_table, ncs_stats_path)
 
     hydro_bounds_table = _merge_hydro_bounds(withdrawal_table, storage_bounds_table)
     if hydro_bounds_table is not None:
         hydro_bounds_path = constraints_dir / "hydro_bounds.parquet"
-        pq.write_table(hydro_bounds_table, hydro_bounds_path, compression="zstd")
-        logger.debug("Wrote %s", hydro_bounds_path)
+        _write_parquet(hydro_bounds_table, hydro_bounds_path)
 
     if thermal_bounds_table is not None:
         thermal_bounds_path = constraints_dir / "thermal_bounds.parquet"
-        pq.write_table(thermal_bounds_table, thermal_bounds_path, compression="zstd")
-        logger.debug("Wrote %s", thermal_bounds_path)
+        _write_parquet(thermal_bounds_table, thermal_bounds_path)
 
     # Per-bus excess-cost override: forbid energy excess at fictitious
     # submarkets (pure transshipment nodes) by pricing it prohibitively.
     bus_penalty_table = network_conv.convert_bus_penalty_overrides(case, id_map)
     if bus_penalty_table is not None:
         bus_penalty_path = constraints_dir / "penalty_overrides_bus.parquet"
-        pq.write_table(bus_penalty_table, bus_penalty_path, compression="zstd")
-        logger.debug("Wrote %s", bus_penalty_path)
+        _write_parquet(bus_penalty_table, bus_penalty_path)
 
     # Per-stage hydro penalty override: The source model's PROD_MEDIA_SIN /
     # MAX_PRODTACUM_SIN shift with seasonal (VOLREF_SAZ) and temporal (CFUGA/CMONT)
@@ -583,8 +608,7 @@ def _convert_newave_case_impl(
         )
         if hydro_penalty_table is not None:
             hydro_penalty_path = constraints_dir / "penalty_overrides_hydro.parquet"
-            pq.write_table(hydro_penalty_table, hydro_penalty_path, compression="zstd")
-            logger.debug("Wrote %s", hydro_penalty_path)
+            _write_parquet(hydro_penalty_table, hydro_penalty_path)
 
     # Merge VminOP and electric constraints into a single output.
     all_constraints: list[dict] = []
@@ -626,8 +650,7 @@ def _convert_newave_case_impl(
         if bounds_tables:
             merged_bounds = pa.concat_tables(bounds_tables)
             gc_bounds_path = constraints_dir / "generic_constraint_bounds.parquet"
-            pq.write_table(merged_bounds, gc_bounds_path, compression="zstd")
-            logger.debug("Wrote %s", gc_bounds_path)
+            _write_parquet(merged_bounds, gc_bounds_path)
 
     # ------------------------------------------------------------------
     # 7. Populate the report.
@@ -637,6 +660,7 @@ def _convert_newave_case_impl(
     report.bus_count = len(buses_dict.get("buses", []))
     report.line_count = len(lines_dict.get("lines", []))
     report.stage_count = len(stages_dict.get("stages", []))
+    report.would_write_paths = [str(p) for p in would_write]
 
     return report
 

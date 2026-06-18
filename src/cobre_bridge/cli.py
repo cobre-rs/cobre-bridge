@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import webbrowser
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated
@@ -24,6 +25,7 @@ from cobre_bridge.preflight import PreflightVerdict
 from cobre_bridge.ui.console import (
     conversion_progress,
     get_console,
+    make_table,
     print_status,
     render_checklist,
     render_conversion_summary,
@@ -275,7 +277,7 @@ def _run_bounds_comparison(args: SimpleNamespace) -> None:
     try:
         with spinner(
             "Comparing bounds…",
-            verbose=args.verbose,
+            verbose=args.verbose > 0,
             quiet=args.quiet,
             no_color=args.no_color,
         ):
@@ -354,7 +356,7 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
     try:
         with spinner(
             "Comparing results…",
-            verbose=args.verbose,
+            verbose=args.verbose > 0,
             quiet=args.quiet,
             no_color=args.no_color,
         ):
@@ -412,13 +414,29 @@ def _run_dashboard(args: SimpleNamespace) -> None:
     print_status(f"Building dashboard from {case_dir} ...")
     with spinner(
         "Building dashboard…",
-        verbose=args.verbose,
+        verbose=args.verbose > 0,
         quiet=args.quiet,
         no_color=args.no_color,
     ):
         build_dashboard(case_dir, output_path)
     size_kb = output_path.stat().st_size / 1024
     print_status(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
+
+    # NOTE: when dashboard --json lands in epic-07 (ticket-021), keep this
+    # --open advisory off the stdout --json payload; it already goes to stderr,
+    # so the two compose cleanly.
+    if args.open_browser:
+        err_console = get_console(stderr=True, no_color=args.no_color)
+        try:
+            opened = webbrowser.open(output_path.resolve().as_uri())
+        except (webbrowser.Error, OSError):
+            opened = False
+        if not opened:
+            print_status(
+                f"Note: could not open a browser for {output_path}; open it manually.",
+                console=err_console,
+                style="#F5A623",
+            )
     return
 
 
@@ -520,10 +538,14 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
                 console=err_console,
             )
             raise typer.Exit(code=1)
-        # --force: remove previous pipeline outputs before converting.
-        _clear_dst_contents(dst)
+        # --force: remove previous pipeline outputs before converting. A dry run
+        # never mutates the destination, so the clear is skipped even with --force.
+        if not args.dry_run:
+            _clear_dst_contents(dst)
 
-    dst.mkdir(parents=True, exist_ok=True)
+    # A dry run creates no destination directory; the pipeline writes nothing.
+    if not args.dry_run:
+        dst.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Run conversion pipeline.
@@ -531,18 +553,47 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     try:
         with conversion_progress(
             len(CONVERSION_PHASE_LABELS),
-            verbose=args.verbose,
+            verbose=args.verbose > 0,
             quiet=args.quiet,
             no_color=args.no_color,
         ) as step:
-            report: ConversionReport = convert_newave_case(src, dst, on_phase=step)
+            report: ConversionReport = convert_newave_case(
+                src, dst, on_phase=step, dry_run=args.dry_run
+            )
     except Exception as exc:  # noqa: BLE001
         diag = diagnostic_from_exception(exc, context="Conversion")
         if args.json_output:
-            _emit_convert_json(_convert_json_document(None, [diag]))
+            document = (
+                _convert_dry_run_json_document(None, dst, [diag])
+                if args.dry_run
+                else _convert_json_document(None, [diag])
+            )
+            _emit_convert_json(document)
         else:
             render_diagnostics([diag], console=err_console, quiet=args.quiet)
         raise typer.Exit(code=1)
+
+    if args.dry_run:
+        # Dry run: report the would-write listing only; touch nothing on disk
+        # (no diagnostics-json sidecar, no manifest, no validation).
+        if args.json_output:
+            _emit_convert_json(
+                _convert_dry_run_json_document(report, dst, report.diagnostics)
+            )
+        else:
+            if not args.quiet:
+                _render_dry_run_summary(report, console=out_console)
+            render_diagnostics(
+                report.diagnostics, console=err_console, quiet=args.quiet
+            )
+        if args.validate:
+            print_status(
+                "Note: --validate is ignored under --dry-run"
+                " (nothing was written to validate).",
+                console=err_console,
+                style="#F5A623",
+            )
+        return
 
     if args.json_output:
         # --json: one machine-readable verdict to stdout, no Rich on either stream.
@@ -639,6 +690,76 @@ def _convert_json_document(
         },
         "diagnostics": [d.to_dict() for d in diagnostics],
     }
+
+
+def _convert_dry_run_json_document(
+    report: ConversionReport | None,
+    dst: Path,
+    diagnostics: list[Diagnostic],
+) -> dict[str, object]:
+    """Build the ``--dry-run --json`` document for ``convert newave``.
+
+    Mirrors :func:`_convert_json_document` (fixed insertion order, ``"error"``
+    status when any diagnostic is ``ERROR``), but reports the would-write listing
+    instead of a real-run verdict. ``status`` is ``"dry-run"`` on a clean run.
+    ``report`` is ``None`` on the failure path (no would-write listing).
+
+    ``would_write`` lists every would-write path made relative to *dst* with
+    forward-slash separators, sorted, so the document is path-stable regardless of
+    where *dst* lives and byte-deterministic across runs. No timestamps or
+    provenance are included.
+    """
+    status = (
+        "error" if any(d.severity is Severity.ERROR for d in diagnostics) else "dry-run"
+    )
+    would_write = (
+        sorted(Path(p).relative_to(dst).as_posix() for p in report.would_write_paths)
+        if report is not None
+        else []
+    )
+    return {
+        "command": "convert newave",
+        "status": status,
+        "summary": {
+            "hydros": report.hydro_count if report is not None else 0,
+            "thermals": report.thermal_count if report is not None else 0,
+            "buses": report.bus_count if report is not None else 0,
+            "lines": report.line_count if report is not None else 0,
+            "stages": report.stage_count if report is not None else 0,
+        },
+        "would_write": would_write,
+        "diagnostics": [d.to_dict() for d in diagnostics],
+    }
+
+
+def _render_dry_run_summary(
+    report: ConversionReport, *, console: Console | None = None
+) -> None:
+    """Render the dry-run would-write listing to stdout as a primary result.
+
+    Prints a clear "Dry run — no files written" banner, the entity summary, and a
+    table of every path the conversion would have written. Diagnostics are
+    rendered separately on stderr.
+    """
+    target = console or get_console()
+    print_status(
+        "Dry run — no files written.",
+        console=target,
+        style="bold #F5A623",
+    )
+    render_conversion_summary(report, console=target)
+
+    # Human output lists the ABSOLUTE paths (easy to copy-paste / inspect on
+    # disk); the ``--dry-run --json`` document instead emits dst-relative sorted
+    # paths for byte-stable, location-independent automation. The divergence is
+    # intentional — keep the two representations separate.
+    rows: list[list[object]] = [[path] for path in report.would_write_paths]
+    table = make_table(
+        ["Would write"],
+        rows,
+        title=f"{len(rows)} output files",
+    )
+    target.print(table)
 
 
 def _emit_convert_json(document: dict[str, object]) -> None:
@@ -750,30 +871,70 @@ def _write_conversion_manifest(
 #: otherwise echo it to stderr, defeating the suppression).
 _NULL_HANDLER = logging.NullHandler()
 
+#: The ``--log-file`` DEBUG ``FileHandler`` attached to the package logger for the
+#: duration of a run, or ``None`` when no ``--log-file`` was given. ``main`` removes
+#: and closes it in its ``finally`` so it never leaks across in-process invocations
+#: (the autouse test fixture restores ``propagate``/level but NOT handlers).
+_LOG_FILE_HANDLER: logging.FileHandler | None = None
 
-def _configure_logging(verbose: bool) -> None:
+
+def _configure_logging(verbose: int, log_file: Path | None) -> None:
     """Configure logging for a CLI run.
 
-    With ``--verbose``, everything down to DEBUG is logged live (power-user mode).
-    Without it, ``cobre_bridge`` warnings are still recorded — the diagnostics
-    collector and ``--diagnostics-json`` rely on them — but kept off the live
-    console so the Rich diagnostics block is the single user-facing surface, and so
-    warnings are not printed twice. ``main`` restores ``propagate`` afterwards.
+    *verbose* is a graduated count selecting the live console level:
+    ``0`` keeps ``cobre_bridge`` warnings recorded — the diagnostics collector and
+    ``--diagnostics-json`` rely on them — but off the live console (the Rich
+    diagnostics block is the single user-facing surface, and warnings are not
+    printed twice); ``1`` (``-v`` / ``--verbose``) raises the console to INFO; and
+    ``2`` or more (``-vv``) raises it to DEBUG.
+
+    This is a behavior change from the previous boolean ``--verbose``: a bare
+    ``--verbose`` used to mean DEBUG and now means INFO; ``-vv`` is required for the
+    full DEBUG firehose. ``--log-file`` (below) gives the complete DEBUG trace to
+    anyone who needs it regardless of the console level.
+
+    When *log_file* is not ``None``, a DEBUG ``FileHandler`` is attached to the
+    ``cobre_bridge`` logger and the package logger level is lowered to DEBUG, so the
+    file always captures the full trace even at console verbose ``0`` (the console
+    output stays at the ladder level — it is driven by ``basicConfig``/root, while
+    ``_NULL_HANDLER`` keeps suppressed records off ``logging.lastResort``). The
+    created handler is stored in the module-level ``_LOG_FILE_HANDLER`` so ``main``
+    can remove and close it; ``main`` also restores ``propagate`` afterwards.
     """
+    global _LOG_FILE_HANDLER
+
     pkg = logging.getLogger("cobre_bridge")
-    if verbose:
+    if verbose >= 1:
+        level = logging.DEBUG if verbose >= 2 else logging.INFO
         logging.basicConfig(
-            level=logging.DEBUG,
+            level=level,
             format="%(levelname)s %(name)s: %(message)s",
         )
-        pkg.setLevel(logging.DEBUG)
+        pkg.setLevel(level)
         pkg.propagate = True
+        # Symmetric with the suppress branch below: drop the null handler so a
+        # verbose run after a suppressed one in the same process leaves the
+        # package logger in a clean state (removeHandler is a no-op if absent).
+        pkg.removeHandler(_NULL_HANDLER)
     else:
         # Leave the package logger level untouched (root's default WARNING already
         # records warnings for the collector); just keep them off the live console.
         if _NULL_HANDLER not in pkg.handlers:
             pkg.addHandler(_NULL_HANDLER)
         pkg.propagate = False
+
+    if log_file is not None:
+        # An unwritable path raises OSError here; it is deliberately not swallowed —
+        # an unwritable --log-file is a user error that should fail loudly through
+        # the per-command CLI boundary.
+        handler = logging.FileHandler(log_file, encoding="utf-8")
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        pkg.addHandler(handler)
+        # Lower the logger threshold so DEBUG records reach the file handler even
+        # when the console ladder leaves it at verbose 0.
+        pkg.setLevel(logging.DEBUG)
+        _LOG_FILE_HANDLER = handler
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +944,21 @@ def _configure_logging(verbose: bool) -> None:
 # Shared flags reused across the leaf commands (kept *after* the subcommand,
 # matching the previous argparse UX).
 _VerboseOpt = Annotated[
-    bool, typer.Option("--verbose", help="Enable detailed logging output.")
+    int,
+    typer.Option(
+        "--verbose",
+        "-v",
+        count=True,
+        help="Increase console log verbosity (-v INFO, -vv DEBUG).",
+    ),
+]
+_LogFileOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--log-file",
+        metavar="PATH",
+        help="Write the full DEBUG log to PATH (the console verbosity is unaffected).",
+    ),
 ]
 _NoColorOpt = Annotated[
     bool,
@@ -900,12 +1075,23 @@ def _convert_newave(
             ),
         ),
     ] = False,
-    verbose: _VerboseOpt = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Run the full conversion in memory and report what would be "
+                "written, without creating or modifying the destination directory."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
     quiet: _QuietOpt = False,
 ) -> None:
     """Convert a NEWAVE case directory to a Cobre case directory."""
-    _configure_logging(verbose)
+    _configure_logging(verbose, log_file)
     _run_newave_conversion(
         SimpleNamespace(
             src=src,
@@ -914,7 +1100,9 @@ def _convert_newave(
             force=force,
             diagnostics_json=diagnostics_json,
             json_output=json_output,
+            dry_run=dry_run,
             verbose=verbose,
+            log_file=log_file,
             no_color=no_color,
             quiet=quiet,
         )
@@ -955,12 +1143,13 @@ def _compare_bounds(
             help="Comma-separated variables to compare (e.g. storage_min,turbined).",
         ),
     ] = None,
-    verbose: _VerboseOpt = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
     quiet: _QuietOpt = False,
 ) -> None:
     """Compare LP bounds computed from NEWAVE inputs against Cobre bounds."""
-    _configure_logging(verbose)
+    _configure_logging(verbose, log_file)
     _run_bounds_comparison(
         SimpleNamespace(
             newave_dir=newave_dir,
@@ -971,6 +1160,7 @@ def _compare_bounds(
             summary=summary,
             variables=variables,
             verbose=verbose,
+            log_file=log_file,
             no_color=no_color,
             quiet=quiet,
         )
@@ -997,7 +1187,8 @@ def _compare_results(
     ] = None,
     fmt: _FormatOpt = None,
     out_dir: _OutDirOpt = None,
-    verbose: _VerboseOpt = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
     quiet: _QuietOpt = False,
 ) -> None:
@@ -1005,7 +1196,7 @@ def _compare_results(
 
     Informational: always exits 0, whereas 'compare bounds' exits 1 on any mismatch.
     """
-    _configure_logging(verbose)
+    _configure_logging(verbose, log_file)
     _run_results_comparison(
         SimpleNamespace(
             newave_dir=newave_dir,
@@ -1014,6 +1205,7 @@ def _compare_results(
             format=fmt,
             out_dir=out_dir,
             verbose=verbose,
+            log_file=log_file,
             no_color=no_color,
             quiet=quiet,
         )
@@ -1033,17 +1225,19 @@ def _check_newave(
             ),
         ),
     ] = False,
-    verbose: _VerboseOpt = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
     quiet: _QuietOpt = False,
 ) -> None:
     """Validate a NEWAVE case directory without converting or writing any files."""
-    _configure_logging(verbose)
+    _configure_logging(verbose, log_file)
     _run_check(
         SimpleNamespace(
             src=src,
             json_output=json_output,
             verbose=verbose,
+            log_file=log_file,
             no_color=no_color,
             quiet=quiet,
         )
@@ -1061,17 +1255,30 @@ def _dashboard(
             help="Output HTML file path (default: <case_dir>/dashboard.html).",
         ),
     ] = None,
-    verbose: _VerboseOpt = False,
+    open_browser: Annotated[
+        bool,
+        typer.Option(
+            "--open",
+            help=(
+                "Open the generated dashboard in the default web browser "
+                "after writing it."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
     quiet: _QuietOpt = False,
 ) -> None:
     """Generate an interactive HTML dashboard from Cobre simulation results."""
-    _configure_logging(verbose)
+    _configure_logging(verbose, log_file)
     _run_dashboard(
         SimpleNamespace(
             case_dir=case_dir,
             output=output,
+            open_browser=open_browser,
             verbose=verbose,
+            log_file=log_file,
             no_color=no_color,
             quiet=quiet,
         )
@@ -1082,14 +1289,21 @@ def main() -> None:
     """Console entry point: run the Typer app, restoring the logger afterwards.
 
     The thin wrapper restores the ``cobre_bridge`` logger ``propagate`` flag that
-    ``_configure_logging`` flips, so a real CLI run never leaks logging state.
+    ``_configure_logging`` flips, and removes + closes any ``--log-file``
+    ``FileHandler`` it attached, so a real CLI run never leaks logging state.
     """
+    global _LOG_FILE_HANDLER
+
     pkg_logger = logging.getLogger("cobre_bridge")
     prior_propagate = pkg_logger.propagate
     try:
         app()
     finally:
         pkg_logger.propagate = prior_propagate
+        if _LOG_FILE_HANDLER is not None:
+            pkg_logger.removeHandler(_LOG_FILE_HANDLER)
+            _LOG_FILE_HANDLER.close()
+            _LOG_FILE_HANDLER = None
 
 
 if __name__ == "__main__":
