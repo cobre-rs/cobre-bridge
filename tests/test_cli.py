@@ -1241,3 +1241,109 @@ def test_constraint_id_allocator_advances_contiguously() -> None:
     assert alloc.next_id == 3  # AGRINT still starts at 3
     alloc.advance(2)
     assert alloc.next_id == 5
+
+
+class TestConversionDiagnosticsRendering:
+    """The convert subcommand renders structured diagnostics (names/stages/values)."""
+
+    def _invoke_main(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[int, str, str]:
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    def _report_with_gtmin(self):
+        from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        diag = Diagnostic(
+            code="thermal-gtmin-above-capacity",
+            severity=Severity.WARNING,
+            category="Thermal bounds",
+            title="GTMIN exceeds available capacity (1 plant(s))",
+            summary="one plant affected",
+            table=DiagnosticTable(
+                columns=["Plant", "Code", "Stages", "GTMIN MW", "Cap MW"],
+                rows=[["ANGRA 2", 13, "2-3", 481.3, 423.4]],
+            ),
+            remediation="Check EXPT FCMAX/GTMIN and MANUTT for these plants.",
+        )
+        return ConversionReport(hydro_count=1, diagnostics=[diag])
+
+    def test_structured_diagnostic_shows_name_stages_values(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=self._report_with_gtmin(),
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst)], monkeypatch
+            )
+        assert code == 0
+        assert "1 hydros" in stdout  # summary on stdout
+        # The named pain: plant name, the stages, and the values are all surfaced.
+        assert "ANGRA 2" in stderr
+        assert "2-3" in stderr
+        assert "481.3" in stderr
+        assert "423.4" in stderr
+
+    def test_quiet_suppresses_summary_but_keeps_warnings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=self._report_with_gtmin(),
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--quiet"], monkeypatch
+            )
+        assert code == 0
+        assert "Converted" not in stdout  # summary suppressed
+        assert "ANGRA 2" in stderr  # warnings still shown
+
+    def test_diagnostics_json_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=self._report_with_gtmin(),
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "newave",
+                    str(src),
+                    str(dst),
+                    "--diagnostics-json",
+                    str(json_path),
+                ],
+                monkeypatch,
+            )
+        assert code == 0
+        assert json_path.exists()
+        payload = json.loads(json_path.read_text())
+        assert payload["summary"]["hydros"] == 1
+        codes = [d["code"] for d in payload["diagnostics"]]
+        assert "thermal-gtmin-above-capacity" in codes

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.plants import active_hydro_codes, fictitious_codes
 
 if TYPE_CHECKING:
@@ -146,15 +147,31 @@ def build_id_map_from_readers(
     cadastro = hidr.cadastro
     fict = fictitious_codes(confhd_df, cadastro)
     if fict:
-        names = [
-            str(r["nome_usina"]).strip()
-            for _, r in confhd_df.iterrows()
-            if int(r["codigo_usina"]) in fict
-        ]
-        _LOG.warning(
-            "Excluding %d fictitious plant(s) from id_map: %s",
-            len(names),
-            names,
+        rows = sorted(
+            (
+                (int(r["codigo_usina"]), str(r["nome_usina"]).strip())
+                for _, r in confhd_df.iterrows()
+                if int(r["codigo_usina"]) in fict
+            ),
+            key=lambda pair: pair[0],
+        )
+        emit(
+            Diagnostic(
+                code="fictitious-plants-excluded",
+                severity=Severity.INFO,
+                category="Entity exclusion",
+                title=f"Fictitious plants excluded ({len(rows)})",
+                summary=(
+                    f"Excluded {len(rows)} fictitious accounting plant(s) from the "
+                    "id map (zero-productivity nodes sharing a real plant's posto)."
+                ),
+                table=DiagnosticTable(
+                    columns=["Code", "Name"],
+                    rows=[[code, name] for code, name in rows],
+                    justify=["right", "left"],
+                ),
+            ),
+            logger=_LOG,
         )
     hydro_codes = active_hydro_codes(confhd_df, cadastro)
 

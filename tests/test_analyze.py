@@ -43,11 +43,7 @@ from cobre_bridge.comparators.dataset import (
 from cobre_bridge.comparators.report import (
     build_summary,
     print_bounds_mismatches_from_dataset,
-    print_bounds_summary_from_dataset,
     print_mismatches,
-    print_results_summary,
-    print_results_summary_from_dataset,
-    print_summary,
 )
 from cobre_bridge.comparators.results import (
     PercentileData,
@@ -675,58 +671,6 @@ def _capture(func: object, *args: object) -> str:
     with contextlib.redirect_stdout(buffer):
         func(*args)  # type: ignore[operator]
     return buffer.getvalue()
-
-
-def test_print_results_summary_from_dataset_matches_legacy() -> None:
-    results = _make_results()
-    nw, cobre = Path("/fake/nw"), Path("/fake/cobre")
-
-    legacy_summary = build_results_summary(results, 1e-2)
-    dataset = build_results_dataset(results, PercentileData(), 1e-2)
-
-    legacy_out = _capture(print_results_summary, legacy_summary, nw, cobre)
-    dataset_out = _capture(print_results_summary_from_dataset, dataset, nw, cobre)
-
-    assert dataset_out == legacy_out
-
-
-def test_print_results_summary_from_dataset_matches_legacy_empty() -> None:
-    nw, cobre = Path("/fake/nw"), Path("/fake/cobre")
-
-    legacy_summary = build_results_summary([], 1e-2)
-    dataset = build_results_dataset([], PercentileData(), 1e-2)
-
-    legacy_out = _capture(print_results_summary, legacy_summary, nw, cobre)
-    dataset_out = _capture(print_results_summary_from_dataset, dataset, nw, cobre)
-
-    assert dataset_out == legacy_out
-
-
-def test_print_bounds_summary_from_dataset_matches_legacy() -> None:
-    results = _make_bounds()
-    nw, cobre = Path("/fake/nw"), Path("/fake/cobre")
-    tol = 1e-3
-
-    legacy_summary = build_summary(results)
-    dataset = build_bounds_dataset(results)
-
-    legacy_out = _capture(print_summary, legacy_summary, nw, cobre, tol)
-    dataset_out = _capture(print_bounds_summary_from_dataset, dataset, nw, cobre, tol)
-
-    assert dataset_out == legacy_out
-
-
-def test_print_bounds_summary_from_dataset_matches_legacy_empty() -> None:
-    nw, cobre = Path("/fake/nw"), Path("/fake/cobre")
-    tol = 1e-3
-
-    legacy_summary = build_summary([])
-    dataset = build_bounds_dataset([])
-
-    legacy_out = _capture(print_summary, legacy_summary, nw, cobre, tol)
-    dataset_out = _capture(print_bounds_summary_from_dataset, dataset, nw, cobre, tol)
-
-    assert dataset_out == legacy_out
 
 
 def test_print_bounds_mismatches_from_dataset_matches_legacy() -> None:

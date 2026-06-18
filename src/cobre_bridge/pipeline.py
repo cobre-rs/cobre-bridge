@@ -14,6 +14,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from cobre_bridge import diagnostics as dx
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
@@ -38,6 +39,11 @@ class ConversionReport:
     bus_count: int = 0
     line_count: int = 0
     stage_count: int = 0
+    #: Structured findings (rich tables, severities, remediation) for the CLI to
+    #: render. Populated by :func:`convert_newave_case`.
+    diagnostics: list[dx.Diagnostic] = field(default_factory=list)
+    #: Flat WARNING-severity summary strings, kept for backward-compatible consumers
+    #: (derived from :attr:`diagnostics`).
     warnings: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
@@ -215,7 +221,11 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
     pkg_logger = logging.getLogger("cobre_bridge")
     pkg_logger.addHandler(collector)
     try:
-        report = _convert_newave_case_impl(src, dst)
+        # Structured diagnostics emitted by converters land in ``collected``; any
+        # remaining ``logger.warning`` strings (sites not yet migrated) are picked
+        # up by ``collector`` and bridged below, so every warning still surfaces.
+        with dx.collect() as collected:
+            report = _convert_newave_case_impl(src, dst)
     except BaseException:
         # The write phase is a sequence of independent file writes with no
         # rollback, so a failure partway through (disk full, a converter
@@ -228,11 +238,44 @@ def convert_newave_case(src: Path, dst: Path) -> ConversionReport:
         raise
     finally:
         pkg_logger.removeHandler(collector)
-    # De-duplicate while preserving first-occurrence order: a warning emitted
-    # once per repeated parse (e.g. the fictitious-plant exclusion) should
-    # surface once, not N times.
-    report.warnings = list(dict.fromkeys(collector.messages))
+    report.diagnostics = _finalize_diagnostics(collected, collector.messages)
+    # Backward-compatible flat WARNING strings derived from the diagnostics.
+    report.warnings = [
+        d.summary for d in report.diagnostics if d.severity is dx.Severity.WARNING
+    ]
     return report
+
+
+def _finalize_diagnostics(
+    collected: list[dx.Diagnostic], legacy_messages: list[str]
+) -> list[dx.Diagnostic]:
+    """Combine structured diagnostics with bridged legacy ``logger.warning`` strings.
+
+    Structured diagnostics are de-duplicated by ``(code, summary)`` (a converter run
+    more than once should surface a finding only once). Each remaining captured
+    warning string — emitted by a site not yet migrated to :func:`diagnostics.emit` —
+    is wrapped in a generic WARNING diagnostic so it still renders through the same
+    pipeline, with first-occurrence order preserved.
+    """
+    result: list[dx.Diagnostic] = []
+    seen: set[tuple[str, str]] = set()
+    for diag in collected:
+        key = (diag.code, diag.summary)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(diag)
+    for message in dict.fromkeys(legacy_messages):
+        result.append(
+            dx.Diagnostic(
+                code="legacy-warning",
+                severity=dx.Severity.WARNING,
+                category="Other warnings",
+                title="Conversion warning",
+                summary=message,
+            )
+        )
+    return result
 
 
 def _convert_newave_case_impl(src: Path, dst: Path) -> ConversionReport:

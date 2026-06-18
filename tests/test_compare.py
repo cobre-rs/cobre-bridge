@@ -25,7 +25,6 @@ from cobre_bridge.comparators.bounds import (
 from cobre_bridge.comparators.results import (
     PercentileData,
     ResultComparison,
-    ResultsSummary,
     build_results_summary,
 )
 from cobre_bridge.id_map import NewaveIdMap
@@ -150,43 +149,62 @@ class TestReportFormatting:
     def test_print_results_summary_no_crash(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report import (
-            print_results_summary,
+            print_results_summary_from_dataset,
         )
+        from cobre_bridge.comparators.results import PercentileData
 
-        summary = ResultsSummary(total=0)
-        print_results_summary(summary, Path("/fake/nw"), Path("/fake/cobre"))
+        dataset = build_results_dataset([], PercentileData(), 1e-2)
+        print_results_summary_from_dataset(
+            dataset, Path("/fake/nw"), Path("/fake/cobre")
+        )
         out = capsys.readouterr().out
         assert "Results Comparison" in out
 
     def test_print_results_summary_with_data(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report import (
-            print_results_summary,
+            print_results_summary_from_dataset,
         )
         from cobre_bridge.comparators.results import (
-            ResultVariableStats,
+            PercentileData,
+            ResultComparison,
         )
 
-        summary = ResultsSummary(
-            total=100,
-            by_entity_type={"hydro": 80, "thermal": 20},
-            by_variable={
-                "generation_mw": ResultVariableStats(
-                    count=100,
-                    mean_abs_diff=0.5,
-                    max_abs_diff=3.0,
-                    mean_rel_diff=0.01,
-                    max_rel_diff=0.05,
-                    correlation=0.9998,
-                ),
-            },
-        )
-        print_results_summary(summary, Path("/nw"), Path("/cobre"))
+        results = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=110.0,
+                abs_diff=10.0,
+                rel_diff=0.1,
+            ),
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="TUCURUI",
+                newave_code=20,
+                cobre_id=1,
+                stage=1,
+                variable="generation_mw",
+                newave_value=50.0,
+                cobre_value=40.0,
+                abs_diff=10.0,
+                rel_diff=0.2,
+            ),
+        ]
+        dataset = build_results_dataset(results, PercentileData(), 1e-2)
+        print_results_summary_from_dataset(dataset, Path("/nw"), Path("/cobre"))
         out = capsys.readouterr().out
         assert "generation_mw" in out
-        assert "100" in out
+        assert "2" in out  # the per-variable Count cell
 
 
 # -------------------------------------------------------------------

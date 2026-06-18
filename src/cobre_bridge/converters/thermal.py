@@ -18,6 +18,13 @@ import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
+from cobre_bridge.diagnostics import (
+    Diagnostic,
+    DiagnosticTable,
+    Severity,
+    emit,
+    format_stage_ranges,
+)
 from cobre_bridge.horizon import build_stage_dates
 from cobre_bridge.id_map import NewaveIdMap
 
@@ -439,18 +446,101 @@ def _step6_evaluate_bounds(state: _StageInputs) -> tuple[float, float, bool]:
     condition. The former code instead clamped ``min_mw`` DOWN to ``capacity_max``,
     silently forcing the plant below its GTMIN.
     """
+    capacity_max = _capacity_max(state)
+    min_mw = max(0.0, state.gen_min)
+    gtmin_above_capacity = min_mw > capacity_max
+    max_mw = max(capacity_max, min_mw)
+    return min_mw, max_mw, gtmin_above_capacity
+
+
+def _capacity_max(state: _StageInputs) -> float:
+    """Available maximum generation: ``potencia·(fcmax)·(100-ip)·(100-teif)`` (MW).
+
+    Extracted from :func:`_step6_evaluate_bounds` so the GTMIN-above-capacity
+    diagnostic can recover the capacity it was compared against, per stage, without
+    changing that function's (unit-tested) return signature.
+    """
     potencia = max(0.0, state.potencia)
-    capacity_max = max(
+    return max(
         0.0,
         potencia
         * (state.fcmax / 100.0)
         * ((100.0 - state.ip) / 100.0)
         * ((100.0 - state.teif) / 100.0),
     )
-    min_mw = max(0.0, state.gen_min)
-    gtmin_above_capacity = min_mw > capacity_max
-    max_mw = max(capacity_max, min_mw)
-    return min_mw, max_mw, gtmin_above_capacity
+
+
+@dataclass
+class _GtminRecord:
+    """One stage where a thermal plant's GTMIN exceeded its available capacity."""
+
+    code: int
+    stage_id: int
+    gtmin_mw: float
+    capacity_mw: float
+
+
+def _thermal_names(case: NewaveCase) -> dict[int, str]:
+    """Map thermal codes to plant names from conft.dat (empty on any read failure)."""
+    try:
+        usinas = case.conft.usinas
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return {}
+    return {
+        int(row["codigo_usina"]): str(row["nome_usina"]).strip()
+        for _, row in usinas.iterrows()
+    }
+
+
+def _emit_gtmin_above_capacity(records: list[_GtminRecord], case: NewaveCase) -> None:
+    """Emit the per-plant GTMIN-above-capacity diagnostic from the captured records.
+
+    One row per plant: the stages it occurred on (collapsed to ranges) and the worst
+    GTMIN vs the lowest available capacity across those stages — so the user sees the
+    plant, where, and by how much, instead of a bare code list.
+    """
+    names = _thermal_names(case)
+    by_code: dict[int, list[_GtminRecord]] = {}
+    for record in records:
+        by_code.setdefault(record.code, []).append(record)
+
+    rows: list[list[object]] = []
+    for code in sorted(by_code):
+        recs = by_code[code]
+        rows.append(
+            [
+                names.get(code, "?"),
+                code,
+                format_stage_ranges(r.stage_id for r in recs),
+                round(max(r.gtmin_mw for r in recs), 1),
+                round(min(r.capacity_mw for r in recs), 1),
+            ]
+        )
+
+    plant_count = len(by_code)
+    emit(
+        Diagnostic(
+            code="thermal-gtmin-above-capacity",
+            severity=Severity.WARNING,
+            category="Thermal bounds",
+            title=f"GTMIN exceeds available capacity ({plant_count} plant(s))",
+            summary=(
+                f"GTMIN exceeds the FCMAX-derived capacity for {plant_count} thermal "
+                "plant(s) in at least one stage; honoring GTMIN to keep the LP "
+                "feasible."
+            ),
+            table=DiagnosticTable(
+                columns=["Plant", "Code", "Stages", "GTMIN MW", "Cap MW"],
+                rows=rows,
+                justify=["left", "right", "left", "right", "right"],
+                caption=(
+                    "GTMIN = max, Cap = min available capacity across the listed stages"
+                ),
+            ),
+            remediation="Check EXPT FCMAX/GTMIN and MANUTT for these plants.",
+        ),
+        logger=_LOG,
+    )
 
 
 def convert_thermal_bounds(
@@ -672,10 +762,28 @@ def convert_thermal_bounds(
     # service (step 4b) rather than falling back to the TERM.DAT registry capacity.
     codes_expt_without_potef = set(expt_by_code) - codes_with_potef
     if codes_expt_without_potef:
-        _LOG.info(
-            "Thermal plant(s) %s appear in EXPT.DAT without a POTEF entry; "
-            "treating as not installed (max generation 0), matching NEWAVE.",
-            sorted(codes_expt_without_potef),
+        names = _thermal_names(case)
+        emit(
+            Diagnostic(
+                code="thermal-expt-without-potef",
+                severity=Severity.INFO,
+                category="Thermal bounds",
+                title=f"EXPT entries without POTEF ({len(codes_expt_without_potef)})",
+                summary=(
+                    f"{len(codes_expt_without_potef)} thermal plant(s) appear in "
+                    "EXPT.DAT without a POTEF entry; treated as not installed "
+                    "(max generation 0), matching NEWAVE."
+                ),
+                table=DiagnosticTable(
+                    columns=["Plant", "Code"],
+                    rows=[
+                        [names.get(code, "?"), code]
+                        for code in sorted(codes_expt_without_potef)
+                    ],
+                    justify=["left", "right"],
+                ),
+            ),
+            logger=_LOG,
         )
 
     # The same authority applies to the minimum generation: The source model takes GTMIN
@@ -710,8 +818,9 @@ def convert_thermal_bounds(
     rows_min: list[float] = []
     rows_max: list[float] = []
     rows_cost: list[float | None] = []
-    # Plants where GTMIN exceeded the FCMAX-derived capacity (warned once each).
-    gtmin_above_capacity_codes: set[int] = set()
+    # Per-stage records where GTMIN exceeded the FCMAX-derived capacity, kept so the
+    # diagnostic can name the plant, the stages, and the GTMIN-vs-capacity values.
+    gtmin_records: list[_GtminRecord] = []
 
     for newave_code in sorted(all_codes):
         try:
@@ -800,7 +909,14 @@ def convert_thermal_bounds(
             )
             min_mw, max_mw, gtmin_above_capacity = _step6_evaluate_bounds(state)
             if gtmin_above_capacity:
-                gtmin_above_capacity_codes.add(newave_code)
+                gtmin_records.append(
+                    _GtminRecord(
+                        code=newave_code,
+                        stage_id=stage_idx,
+                        gtmin_mw=min_mw,
+                        capacity_mw=_capacity_max(state),
+                    )
+                )
 
             # Per-stage cost override from CLAST (only for varying-cost thermals).
             stage_cost: float | None = None
@@ -829,15 +945,8 @@ def convert_thermal_bounds(
             rows_max.append(max_mw)
             rows_cost.append(stage_cost)
 
-    if gtmin_above_capacity_codes:
-        _LOG.warning(
-            "GTMIN exceeds the FCMAX-derived capacity for %d thermal plant(s) "
-            "%s in at least one stage; honoring GTMIN (NEWAVE rejects such "
-            "min > max inputs). Check EXPT FCMAX/GTMIN and MANUTT for these "
-            "plants.",
-            len(gtmin_above_capacity_codes),
-            sorted(gtmin_above_capacity_codes),
-        )
+    if gtmin_records:
+        _emit_gtmin_above_capacity(gtmin_records, case)
 
     if not rows_thermal_id:
         return None
