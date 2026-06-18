@@ -17,7 +17,7 @@ from cobre_bridge.conversion_manifest import (
     hash_input_files,
     summarize_diagnostics,
 )
-from cobre_bridge.conversion_manifest import _git_sha as conversion_git_sha
+from cobre_bridge.conversion_manifest import git_sha as conversion_git_sha
 from cobre_bridge.diagnostics import Diagnostic, Severity
 from tests.conftest import make_nw_files
 
@@ -245,8 +245,10 @@ def test_create_git_sha_in_repo() -> None:
     assert re.fullmatch(r"[0-9a-f]{7,}", manifest.git_sha) is not None
 
 
-def test_git_sha_is_reused_from_comparison_manifest() -> None:
-    """The git helper is imported from the comparison manifest, not duplicated."""
-    from cobre_bridge.comparators.manifest import _git_sha as comparison_git_sha
+def test_git_sha_is_shared_not_duplicated() -> None:
+    """Both manifests use the one shared git helper, never a duplicate."""
+    from cobre_bridge._git import git_sha as shared_git_sha
+    from cobre_bridge.comparators.manifest import git_sha as comparison_git_sha
 
-    assert conversion_git_sha is comparison_git_sha
+    assert conversion_git_sha is shared_git_sha
+    assert comparison_git_sha is shared_git_sha

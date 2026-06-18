@@ -6,8 +6,8 @@ bridge version, git state, source-model case directory, and input files produced
 a given conversion, plus the entity counts and the diagnostics raised during the
 run. It mirrors :mod:`cobre_bridge.comparators.manifest`.
 
-The reused :func:`_git_sha` runs the git subprocess only inside
-:meth:`ConversionManifest.create`, never at import time.
+The shared :func:`cobre_bridge._git.git_sha` runs the git subprocess only
+inside :meth:`ConversionManifest.create`, never at import time.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import cobre_bridge
-from cobre_bridge.comparators.manifest import _git_sha
+from cobre_bridge._git import git_sha
 from cobre_bridge.newave_files import NewaveFiles
 
 if TYPE_CHECKING:
@@ -68,7 +68,8 @@ class ConversionManifest:
 
         ``bridge_version`` is taken from :data:`cobre_bridge.__version__`,
         ``timestamp`` from :func:`datetime.now` in UTC (ISO 8601) — the only
-        non-deterministic field — and ``git_sha`` from :func:`_git_sha`. The
+        non-deterministic field — and ``git_sha`` from
+        :func:`cobre_bridge._git.git_sha`. The
         ``source_dir`` / ``output_dir`` paths are stringified via ``str(...)``.
         The remaining data fields are caller-supplied.
         """
@@ -77,7 +78,7 @@ class ConversionManifest:
             source_dir=str(source_dir),
             output_dir=str(output_dir),
             bridge_version=cobre_bridge.__version__,
-            git_sha=_git_sha(),
+            git_sha=git_sha(),
             timestamp=datetime.now(tz=UTC).isoformat(),
             entity_counts=entity_counts,
             input_files=input_files,
