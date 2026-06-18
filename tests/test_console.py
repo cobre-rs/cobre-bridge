@@ -10,9 +10,9 @@ from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
 from cobre_bridge.pipeline import ConversionReport
 from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
 from cobre_bridge.ui.console import (
+    _SUCCESS_STYLE,
     MAX_TABLE_ROWS,
     _progress_enabled,
-    _SUCCESS_STYLE,
     compare_row_style,
     conversion_progress,
     make_table,

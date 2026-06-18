@@ -13,6 +13,11 @@ import typer
 
 from cobre_bridge import __version__
 from cobre_bridge.cobre_io import case_dir_for
+from cobre_bridge.config_resolution import (
+    BOUNDS_TOLERANCE_DEFAULT,
+    RESULTS_TOLERANCE_DEFAULT,
+    load_config,
+)
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.errors import diagnostic_from_exception
 from cobre_bridge.preflight import PreflightVerdict
@@ -179,8 +184,62 @@ def _export_compare_artifacts(
     return formats, out_dir
 
 
+def _resolve_compare_settings(args: SimpleNamespace, *, bounds: bool) -> None:
+    """Fill tolerance/format/out_dir from config when flag+env left them ``None``.
+
+    Implements the bottom two rungs of the precedence chain
+    **CLI flag > env var > config file > built-in default**: Typer has already
+    resolved flag-or-env into ``args`` (a non-``None`` value means the flag or
+    env var supplied it), so this fills in the config-file value, then the
+    built-in default, for whatever is still ``None``. Mutates *args* in place;
+    *bounds* selects the bounds- vs results-tolerance keys.
+
+    Loads the config once via :func:`load_config` (discovery from cwd) and emits
+    one stderr WARNING note per load warning (e.g. a malformed config file). It
+    never raises and never changes the exit code; config provenance stays off
+    stdout so a ``--json``-style payload remains deterministic.
+    """
+    cfg = load_config()
+
+    # Tolerance: flag/env, else the config value, else the built-in default.
+    config_tolerance = cfg.bounds_tolerance if bounds else cfg.results_tolerance
+    builtin_tolerance = (
+        BOUNDS_TOLERANCE_DEFAULT if bounds else RESULTS_TOLERANCE_DEFAULT
+    )
+    if args.tolerance is not None:
+        resolved_tolerance = args.tolerance
+    elif config_tolerance is not None:
+        resolved_tolerance = config_tolerance
+    else:
+        resolved_tolerance = builtin_tolerance
+    args.tolerance = resolved_tolerance
+
+    # Format: only consult config when neither flag nor env supplied it. Leave
+    # ``None`` (rather than pre-expanding) so ``_parse_formats`` stays the single
+    # validator/expander downstream.
+    if args.format is None and cfg.formats is not None:
+        args.format = list(cfg.formats)
+
+    # Out-dir: only consult config when neither flag nor env supplied it. The
+    # config value may itself be ``None``, which keeps the derived
+    # ``<cobre_output_dir>/comparison_artifacts`` default downstream.
+    if args.out_dir is None:
+        args.out_dir = cfg.out_dir
+
+    # Surface any config-load warnings on stderr only (never stdout), matching
+    # the side-file advisory pattern used by ``_export_compare_artifacts``.
+    for warning in cfg.warnings:
+        print_status(
+            warning,
+            console=get_console(stderr=True),
+            style="#F5A623",
+        )
+
+
 def _run_bounds_comparison(args: SimpleNamespace) -> None:
     """Execute the compare bounds subcommand."""
+    _resolve_compare_settings(args, bounds=True)
+
     from cobre_bridge.comparators.analyze import build_bounds_dataset
     from cobre_bridge.comparators.bounds import compare_bounds
     from cobre_bridge.comparators.cobre_readers import CobreReadError
@@ -275,6 +334,8 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
     failure on divergence. This is asymmetric with ``compare bounds``, which exits 1 on
     any mismatch — bounds are a strict equivalence check.
     """
+    _resolve_compare_settings(args, bounds=False)
+
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.results import compare_results
@@ -743,9 +804,12 @@ _FormatOpt = Annotated[
     typer.Option(
         "--format",
         metavar="FORMAT",
+        envvar="COBRE_BRIDGE_FORMAT",
         help=(
             "Output format(s): console,html,csv,parquet,json,all. "
-            "Comma-separated and/or repeatable. (default: console,parquet,json)"
+            "Comma-separated and/or repeatable. Overridable via "
+            "COBRE_BRIDGE_FORMAT or cobre-bridge.toml. "
+            "(default: console,parquet,json)"
         ),
     ),
 ]
@@ -753,8 +817,10 @@ _OutDirOpt = Annotated[
     Path | None,
     typer.Option(
         "--out-dir",
+        envvar="COBRE_BRIDGE_OUT_DIR",
         help=(
-            "Directory for file artifacts "
+            "Directory for file artifacts. Overridable via COBRE_BRIDGE_OUT_DIR "
+            "or cobre-bridge.toml. "
             "(default: <cobre_output_dir>/comparison_artifacts)."
         ),
     ),
@@ -865,8 +931,15 @@ def _compare_bounds(
         typer.Argument(help="Path to the Cobre output directory (has bounds.parquet)."),
     ],
     tolerance: Annotated[
-        float, typer.Option(help="Absolute tolerance for bound comparison.")
-    ] = 1e-3,
+        float | None,
+        typer.Option(
+            envvar="COBRE_BRIDGE_BOUNDS_TOLERANCE",
+            help=(
+                "Absolute tolerance for bound comparison (default 1e-3; "
+                "overridable via COBRE_BRIDGE_BOUNDS_TOLERANCE or cobre-bridge.toml)."
+            ),
+        ),
+    ] = None,
     fmt: _FormatOpt = None,
     out_dir: _OutDirOpt = None,
     summary: Annotated[
@@ -913,8 +986,15 @@ def _compare_results(
         Path, typer.Argument(help="Path to the Cobre output directory.")
     ],
     tolerance: Annotated[
-        float, typer.Option(help="Relative tolerance for results comparison.")
-    ] = 1e-2,
+        float | None,
+        typer.Option(
+            envvar="COBRE_BRIDGE_RESULTS_TOLERANCE",
+            help=(
+                "Relative tolerance for results comparison (default 1e-2; "
+                "overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or cobre-bridge.toml)."
+            ),
+        ),
+    ] = None,
     fmt: _FormatOpt = None,
     out_dir: _OutDirOpt = None,
     verbose: _VerboseOpt = False,
