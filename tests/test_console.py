@@ -12,7 +12,10 @@ from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
 from cobre_bridge.ui.console import (
     MAX_TABLE_ROWS,
     _progress_enabled,
+    _SUCCESS_STYLE,
+    compare_row_style,
     conversion_progress,
+    make_table,
     render_checklist,
     render_conversion_summary,
     render_diagnostics,
@@ -198,6 +201,77 @@ class TestRenderChecklist:
         assert "⚠ Ready with warnings" in text  # warning headline
         assert "Optional input absent" in text  # delegated diagnostics panel
         assert "modif" in text
+
+
+class TestMakeTableRowStyles:
+    """``make_table``'s optional per-row style is style-only and tolerant."""
+
+    @staticmethod
+    def _ansi(table_rows: list[list[object]], styles: list[str | None]) -> str:
+        """Render a table to a forced-terminal, truecolor buffer and return ANSI."""
+        buf = io.StringIO()
+        console = Console(
+            file=buf,
+            force_terminal=True,
+            color_system="truecolor",
+            width=40,
+            highlight=False,
+            emoji=False,
+        )
+        console.print(make_table(["A"], table_rows, row_styles=styles))
+        return buf.getvalue()
+
+    def test_make_table_row_styles_applies_per_row_style(self) -> None:
+        table = make_table(["A"], [["x"], ["y"]], row_styles=[_SUCCESS_STYLE, None])
+        # Direct assertion: the Table carries the style on the styled row only.
+        assert table.rows[0].style == _SUCCESS_STYLE
+        assert table.rows[1].style is None
+
+        # ANSI assertion: the green truecolor escape (74;139;111 == #4A8B6F) wraps
+        # the first row's cell text and is absent from the second.
+        ansi = self._ansi([["x"], ["y"]], [_SUCCESS_STYLE, None])
+        assert "x" in ansi  # cell text unchanged
+        assert "y" in ansi
+        # The green #4A8B6F truecolor escape (38;2;74;139;111) wraps the styled
+        # row's cell glyph and is wholly absent from the unstyled row.
+        assert "38;2;74;139;111mx" in ansi  # green row carries the colour
+        assert "38;2;74;139;111my" not in ansi  # unstyled row does not
+
+    def test_make_table_row_styles_none_is_backward_compatible(self) -> None:
+        columns = ["A", "B"]
+        rows: list[list[object]] = [["x", 1], ["y", 2]]
+
+        def _render(table: object) -> str:
+            buf = io.StringIO()
+            console = Console(
+                file=buf, width=100, no_color=True, highlight=False, emoji=False
+            )
+            console.print(table)
+            return buf.getvalue()
+
+        default = _render(make_table(columns, rows))
+        explicit_none = _render(make_table(columns, rows, row_styles=None))
+        assert default == explicit_none
+
+    def test_make_table_row_styles_shorter_than_rows_no_error(self) -> None:
+        # row_styles shorter than rows: trailing rows are unstyled, no IndexError.
+        table = make_table(["A"], [["x"], ["y"], ["z"]], row_styles=[_SUCCESS_STYLE])
+        assert table.rows[0].style == _SUCCESS_STYLE
+        assert table.rows[1].style is None
+        assert table.rows[2].style is None
+
+
+class TestCompareRowStyle:
+    """``compare_row_style`` returns the existing green/red palette, no new colour."""
+
+    def test_within_tol_returns_success_style(self) -> None:
+        assert compare_row_style(within_tol=True) == _SUCCESS_STYLE
+
+    def test_not_within_tol_returns_error_style(self) -> None:
+        from cobre_bridge.diagnostics import Severity
+        from cobre_bridge.ui.console import _SEVERITY_STYLE
+
+        assert compare_row_style(within_tol=False) == _SEVERITY_STYLE[Severity.ERROR]
 
 
 class TestProgressGating:

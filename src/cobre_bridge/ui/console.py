@@ -44,6 +44,7 @@ from cobre_bridge.ui.theme import COPPER_ACCENT
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
+    from cobre_bridge.comparators.verdict import CompareVerdict
     from cobre_bridge.pipeline import ConversionReport
     from cobre_bridge.preflight import PreflightResult
 
@@ -142,17 +143,41 @@ def make_table(
     title: str | None = None,
     justify: Sequence[str] | None = None,
     caption: str | None = None,
+    row_styles: Sequence[str | None] | None = None,
 ) -> Table:
-    """Build a styled Rich table from columns + rows (cells coerced to ``str``)."""
+    """Build a styled Rich table from columns + rows (cells coerced to ``str``).
+
+    ``row_styles`` is an optional per-row Rich style aligned to *rows* by index:
+    ``row_styles[i]`` styles ``rows[i]`` (a ``None`` entry, or an index past the
+    end of a shorter ``row_styles``, leaves that row unstyled). The default of
+    ``None`` is byte-identical to passing no row styles — colour is style-only and
+    never changes cell text, column count, or justification.
+    """
     table = Table(title=title, box=SIMPLE_HEAVY, caption=caption, title_style="bold")
     for index, name in enumerate(columns):
         align = (
             justify[index] if justify is not None and index < len(justify) else "left"
         )
         table.add_column(name, justify=align, no_wrap=False)
-    for row in rows:
-        table.add_row(*(_cell(value) for value in row))
+    for index, row in enumerate(rows):
+        style = (
+            row_styles[index]
+            if row_styles is not None and index < len(row_styles)
+            else None
+        )
+        table.add_row(*(_cell(value) for value in row), style=style)
     return table
+
+
+def compare_row_style(*, within_tol: bool) -> str:
+    """Return the per-row Rich style for a compare table row.
+
+    Green (:data:`_SUCCESS_STYLE`) when the row is fully within tolerance,
+    otherwise the red error style (:data:`_SEVERITY_STYLE`). Reuses the existing
+    pass/fail palette so the compare summaries match the checklist colours — no
+    new colour value is introduced.
+    """
+    return _SUCCESS_STYLE if within_tol else _SEVERITY_STYLE[Severity.ERROR]
 
 
 def _cell(value: object) -> str:
@@ -181,6 +206,42 @@ def render_conversion_summary(
         f"{report.stage_count} stages"
     )
     target.print(f"✓ {summary}", style=_SUCCESS_STYLE, soft_wrap=True)
+
+
+def render_compare_verdict(
+    verdict: CompareVerdict, *, console: Console | None = None
+) -> None:
+    """Render the one-line compare headline on stdout (green ✓ / amber ⚠ on a TTY).
+
+    Leads ``compare bounds`` / ``compare results`` so the user gets the answer
+    first: ``✓ N/M variables within tol`` when every variable is within tolerance,
+    or ``⚠ N/M variables within tol — worst: <var> sMAPE <pct>%`` otherwise. An
+    empty dataset renders ``⚠ no variables compared`` with no worst clause. The
+    glyphs/styles reuse :data:`_SUCCESS_STYLE` and the amber
+    :data:`_SEVERITY_STYLE` / :data:`_SEVERITY_GLYPH` (no new colour). As a primary
+    result it goes to **stdout** (the given *console* or :func:`get_console`), with
+    ``print_status``-style soft-wrap so the exact text stays greppable.
+    """
+    target = console or get_console()
+    warn_glyph = _SEVERITY_GLYPH[Severity.WARNING]
+    warn_style = _SEVERITY_STYLE[Severity.WARNING]
+    if verdict.total == 0:
+        target.print(
+            f"{warn_glyph} no variables compared", style=warn_style, soft_wrap=True
+        )
+        return
+    if verdict.all_within_tol:
+        glyph, style = "✓", _SUCCESS_STYLE
+    else:
+        glyph, style = warn_glyph, warn_style
+    line = f"{glyph} {verdict.within_tol}/{verdict.total} variables within tol"
+    # The all_within_tol guard suppresses the meaningless "worst: … sMAPE 0%" on a
+    # perfect match, keeping that line exactly "✓ N/N variables within tol".
+    if verdict.worst_variable is not None and not verdict.all_within_tol:
+        line += (
+            f" — worst: {verdict.worst_variable} sMAPE {verdict.worst_smape * 100:.0f}%"
+        )
+    target.print(line, style=style, soft_wrap=True)
 
 
 def render_checklist(

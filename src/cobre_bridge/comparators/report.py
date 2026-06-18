@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING
 import polars as pl
 
 from cobre_bridge.comparators.bounds import BoundComparison
-from cobre_bridge.ui.console import get_console, make_table
+from cobre_bridge.comparators.verdict import build_compare_verdict
+from cobre_bridge.ui.console import (
+    compare_row_style,
+    get_console,
+    make_table,
+    render_compare_verdict,
+)
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
@@ -141,12 +147,9 @@ def _fmt_metric(x: float) -> str:
     return f"{x:,.3f}"
 
 
-# -------------------------------------------------------------------
-# Dataset-driven formatting: the console renders off the canonical
-# ComparisonDataset. Numbers are single-sourced from dataset.summary rows and
-# dataset.metadata so the console and the file artifacts derive from ONE
+# Dataset-driven formatting: numbers are single-sourced from dataset.summary rows
+# and dataset.metadata so the console and the file artifacts derive from ONE
 # analysis; the Rich tables only restyle those same numbers.
-# -------------------------------------------------------------------
 
 
 def print_results_summary_from_dataset(
@@ -172,17 +175,18 @@ def print_results_summary_from_dataset(
     """
     out = sys.stdout
 
+    render_compare_verdict(build_compare_verdict(dataset))
+
     out.write("\nCobre vs NEWAVE Results Comparison\n")
     out.write("=" * 88 + "\n")
     out.write(f"NEWAVE case:  {newave_dir}\n")
     out.write(f"Cobre output: {cobre_output_dir}\n")
 
     # Per-variable table. WithinTol = share within the (relative) tolerance; sMAPE =
-    # mean symmetric error (robust to near-zero source-model references). Cells are
-    # formatted here from dataset.summary so the console and artifacts share ONE
-    # analysis; the Rich table only restyles those same numbers.
+    # mean symmetric error (robust to near-zero source-model references).
     summary_rows = {row["variable"]: row for row in dataset.summary.to_dicts()}
     rows: list[list[str]] = []
+    row_styles: list[str | None] = []
     for var in sorted(summary_rows):
         stats = summary_rows[var]
         correlation = stats["correlation"]
@@ -198,12 +202,18 @@ def print_results_summary_from_dataset(
                 corr,
             ]
         )
+        # Style-only colour (never alters cell text): green iff every comparison
+        # for this variable is within tolerance.
+        row_styles.append(
+            compare_row_style(within_tol=float(stats["within_tol_rate"]) == 1.0)
+        )
 
     get_console().print(
         make_table(
             ["Variable", "Count", "Mean|D|", "Max|D|", "WithinTol", "sMAPE", "r"],
             rows,
             justify=["left", "right", "right", "right", "right", "right", "right"],
+            row_styles=row_styles,
         )
     )
 
@@ -246,6 +256,8 @@ def print_bounds_summary_from_dataset(
     """
     out = sys.stdout
 
+    render_compare_verdict(build_compare_verdict(dataset))
+
     (
         total_all,
         matches_all,
@@ -263,13 +275,17 @@ def print_bounds_summary_from_dataset(
     console = get_console()
 
     # --- By entity type (with a Total row) ---
+    # Green when a type has zero mismatches, red otherwise; styles are appended in
+    # lockstep with type_rows so the trailing Total row keeps its own colour.
     type_rows: list[list[str]] = []
+    type_styles: list[str | None] = []
     for etype, (m, mm) in sorted(by_entity_type.items()):
         total = m + mm
         rate = m / total * 100 if total > 0 else 0.0
         type_rows.append(
             [etype.capitalize(), f"{total:,}", f"{m:,}", f"{mm:,}", f"{rate:.2f}%"]
         )
+        type_styles.append(compare_row_style(within_tol=mm == 0))
     rate_all = matches_all / total_all * 100 if total_all > 0 else 0.0
     type_rows.append(
         [
@@ -280,27 +296,33 @@ def print_bounds_summary_from_dataset(
             f"{rate_all:.2f}%",
         ]
     )
+    type_styles.append(compare_row_style(within_tol=mismatches_all == 0))
     console.print(
         make_table(
             ["Type", "Compared", "Match", "Mismatch", "Rate"],
             type_rows,
             justify=["left", "right", "right", "right", "right"],
+            row_styles=type_styles,
         )
     )
 
     out.write("\n")
 
     # --- By variable ---
+    # Green when a variable has zero mismatches, red otherwise (style-only).
     var_rows: list[list[str]] = []
+    var_styles: list[str | None] = []
     for var, (m, mm) in sorted(by_variable.items()):
         total_v = m + mm
         rate_v = m / total_v * 100 if total_v > 0 else 0.0
         var_rows.append([var, f"{total_v:,}", f"{m:,}", f"{mm:,}", f"{rate_v:.2f}%"])
+        var_styles.append(compare_row_style(within_tol=mm == 0))
     console.print(
         make_table(
             ["Variable", "Compared", "Match", "Mismatch", "Rate"],
             var_rows,
             justify=["left", "right", "right", "right", "right"],
+            row_styles=var_styles,
         )
     )
 

@@ -236,6 +236,8 @@ def _parse_results_table(text: str) -> dict[str, list[str]]:
         line = raw.strip()
         if not line:
             continue
+        if line.startswith(("✓ ", "⚠ ")):  # leading compare verdict line
+            continue
         if line.startswith(("Cobre vs", "NEWAVE case:", "Cobre output:")):
             continue
         if line.startswith("Summary:"):
@@ -293,6 +295,8 @@ def _parse_bounds_section(
         if not line:
             if in_section:
                 break
+            continue
+        if line.startswith(("✓ ", "⚠ ")):  # leading compare verdict line
             continue
         if set(line) <= {"=", "-", "━", "─"}:  # text underline or Rich table rule
             continue
