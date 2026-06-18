@@ -550,6 +550,38 @@ class TestCliExitCodes:
         assert result.returncode == 1
         assert "hidr.dat" in result.stderr
 
+    def test_convert_missing_file_renders_error_diagnostic_subprocess(
+        self, tmp_path: Path
+    ) -> None:
+        """A real discovery failure renders an ERROR diagnostic (✖) naming the file."""
+        src = _make_fake_newave_dir(tmp_path)
+        (src / "hidr.dat").unlink()
+        dst = tmp_path / "dst"
+
+        result = _run_cli_subprocess("convert", "newave", str(src), str(dst))
+        assert result.returncode == 1
+        assert "✖" in result.stderr
+        assert "hidr.dat" in result.stderr
+
+    def test_convert_json_missing_source_emits_error_json_subprocess(
+        self, tmp_path: Path
+    ) -> None:
+        """``--json`` on a source missing a required file emits error JSON to stdout."""
+        src = _make_fake_newave_dir(tmp_path)
+        (src / "hidr.dat").unlink()
+        dst = tmp_path / "dst"
+
+        result = _run_cli_subprocess("convert", "newave", str(src), str(dst), "--json")
+
+        assert result.returncode == 1
+        doc = json.loads(result.stdout)
+        assert doc["command"] == "convert newave"
+        assert doc["status"] == "error"
+        assert doc["summary"]["hydros"] == 0
+        assert doc["diagnostics"]
+        # The Rich diagnostic block must not also render on stderr.
+        assert "✖" not in result.stderr
+
     def test_convert_without_source_exits_nonzero(self) -> None:
         """``convert`` with no SOURCE must error (exit 2), not silently succeed."""
         result = _run_cli_subprocess("convert")
@@ -647,6 +679,230 @@ class TestCliInProcess:
         assert "10 hydros" in stdout
         assert "5 thermals" in stdout
         assert "60 stages" in stdout
+
+    def test_convert_failure_renders_error_diagnostic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pipeline exception renders an ERROR diagnostic on stderr; exit 1."""
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            side_effect=ValueError("boom"),
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 1
+        # The failure is an ERROR-styled diagnostic on stderr, not stdout.
+        assert "✖" in stderr
+        assert "Conversion failed" in stderr
+        assert "boom" in stderr
+        assert "boom" not in stdout
+
+    def test_convert_json_document_shape(self) -> None:
+        """``_convert_json_document`` builds the verdict schema with fixed order."""
+        from cobre_bridge.cli import _convert_json_document
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+        info = Diagnostic(
+            code="some-info",
+            severity=Severity.INFO,
+            category="Conversion",
+            title="An info",
+            summary="just so",
+        )
+
+        doc = _convert_json_document(report, [info])
+
+        assert list(doc.keys()) == ["command", "status", "summary", "diagnostics"]
+        assert doc["command"] == "convert newave"
+        # No ERROR diagnostic → status is "ok".
+        assert doc["status"] == "ok"
+        assert doc["summary"] == {
+            "hydros": 10,
+            "thermals": 5,
+            "buses": 4,
+            "lines": 3,
+            "stages": 60,
+        }
+        assert doc["diagnostics"] == [info.to_dict()]
+
+    def test_convert_json_document_error_status_on_error_diagnostic(self) -> None:
+        """Any ERROR-severity diagnostic flips ``status`` to ``"error"``."""
+        from cobre_bridge.cli import _convert_json_document
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+
+        error = Diagnostic(
+            code="boom-code",
+            severity=Severity.ERROR,
+            category="Conversion failure",
+            title="Conversion failed",
+            summary="boom",
+        )
+
+        doc = _convert_json_document(None, [error])
+
+        assert doc["status"] == "error"
+        # Failure path → zero counts.
+        assert doc["summary"] == {
+            "hydros": 0,
+            "thermals": 0,
+            "buses": 0,
+            "lines": 0,
+            "stages": 0,
+        }
+        assert doc["diagnostics"] == [error.to_dict()]
+
+    def test_convert_json_success_emits_stdout_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--json`` on a successful conversion emits one JSON verdict to stdout."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert doc["command"] == "convert newave"
+        assert doc["status"] == "ok"
+        assert doc["summary"]["hydros"] == 10
+        # No Rich human summary leaked onto stdout.
+        assert "Converted" not in stdout
+        # Nothing on stderr on the success/diagnostics path.
+        assert stderr == ""
+
+    def test_convert_json_failure_emits_error_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--json`` on a pipeline failure emits ``status == "error"``; exit 1."""
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            side_effect=ValueError("boom"),
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        doc = json.loads(stdout)
+        assert doc["status"] == "error"
+        assert doc["summary"]["hydros"] == 0
+        assert len(doc["diagnostics"]) == 1
+        assert doc["diagnostics"][0]["summary"] == "boom"
+        # The Rich diagnostic block must not also render.
+        assert "✖" not in stderr
+
+    def test_convert_json_coexists_with_diagnostics_json_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--json`` and ``--diagnostics-json PATH`` both produce output."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        sidecar = tmp_path / "out.json"
+
+        fake_report = ConversionReport(
+            hydro_count=2,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=12,
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _ = self._invoke_main(
+                [
+                    "convert",
+                    "newave",
+                    str(src),
+                    str(dst),
+                    "--json",
+                    "--diagnostics-json",
+                    str(sidecar),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        # stdout is the JSON verdict (carries command/status).
+        verdict = json.loads(stdout)
+        assert verdict["command"] == "convert newave"
+        assert verdict["status"] == "ok"
+        # The sidecar was also written (its payload has no command/status keys).
+        assert sidecar.exists()
+        sidecar_doc = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert sidecar_doc["summary"]["hydros"] == 2
+        assert "command" not in sidecar_doc
+
+    def test_convert_without_json_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``--json`` the human ``✓ Converted ...`` summary still prints."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _ = self._invoke_main(
+                ["convert", "newave", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "Converted" in stdout
+        # The default path emits no JSON document.
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(stdout)
 
 
 class TestCompareDatasetWiring:

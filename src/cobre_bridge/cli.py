@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated
@@ -12,6 +13,8 @@ import typer
 
 from cobre_bridge import __version__
 from cobre_bridge.cobre_io import case_dir_for
+from cobre_bridge.diagnostics import Severity
+from cobre_bridge.errors import diagnostic_from_exception
 from cobre_bridge.ui.console import (
     conversion_progress,
     get_console,
@@ -28,6 +31,7 @@ if TYPE_CHECKING:
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
     from cobre_bridge.pipeline import ConversionReport
 
@@ -403,26 +407,33 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
             no_color=args.no_color,
         ) as step:
             report: ConversionReport = convert_newave_case(src, dst, on_phase=step)
-    except FileNotFoundError as exc:
-        missing = str(exc)
-        render_error(
-            f"required file '{missing}' not found in {src}", console=err_console
-        )
-        raise typer.Exit(code=1)
     except Exception as exc:  # noqa: BLE001
-        render_error(f"conversion failed: {exc}", console=err_console)
+        diag = diagnostic_from_exception(exc, context="Conversion")
+        if args.json_output:
+            _emit_convert_json(_convert_json_document(None, [diag]))
+        else:
+            render_diagnostics([diag], console=err_console, quiet=args.quiet)
         raise typer.Exit(code=1)
 
-    if not args.quiet:
-        render_conversion_summary(report, console=out_console)
-    render_diagnostics(report.diagnostics, console=err_console, quiet=args.quiet)
+    if args.json_output:
+        # --json: one machine-readable verdict to stdout, no Rich on either stream.
+        _emit_convert_json(_convert_json_document(report, report.diagnostics))
+    else:
+        if not args.quiet:
+            render_conversion_summary(report, console=out_console)
+        render_diagnostics(report.diagnostics, console=err_console, quiet=args.quiet)
 
     if args.diagnostics_json is not None:
+        # The --diagnostics-json sidecar coexists with --json (both can be set).
         _write_diagnostics_json(report, args.diagnostics_json, console=err_console)
 
     # ------------------------------------------------------------------
     # Optional post-conversion validation.
     # ------------------------------------------------------------------
+    # NOTE: --validate is out of scope for the --json stub in this ticket. When
+    # --validate and --json are combined, validation messages render as today
+    # (Rich on stderr, exit 2 on failure); Epic 7 unifies validation into the
+    # JSON verdict.
     if args.validate:
         try:
             import cobre.io  # type: ignore[import-untyped]
@@ -464,6 +475,48 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
             raise typer.Exit(code=2)
 
     return
+
+
+def _convert_json_document(
+    report: ConversionReport | None,
+    diagnostics: list[Diagnostic],
+) -> dict[str, object]:
+    """Build the ``--json`` verdict document for ``convert newave``.
+
+    Reuses the ``{"summary": {...}, "diagnostics": [...]}`` payload shape from
+    :func:`_write_diagnostics_json`, adding the ``command`` and ``status`` keys
+    that make it a self-contained machine-readable verdict. ``report`` is ``None``
+    on the failure path, where the summary counts are all zero. ``status`` is
+    ``"error"`` when any diagnostic has ``ERROR`` severity, else ``"ok"``.
+
+    The returned dict has a fixed insertion order and carries no timestamps or
+    paths beyond what the diagnostics already hold, so the serialized form is
+    deterministic across runs.
+    """
+    status = "error" if any(d.severity is Severity.ERROR for d in diagnostics) else "ok"
+    return {
+        "command": "convert newave",
+        "status": status,
+        "summary": {
+            "hydros": report.hydro_count if report is not None else 0,
+            "thermals": report.thermal_count if report is not None else 0,
+            "buses": report.bus_count if report is not None else 0,
+            "lines": report.line_count if report is not None else 0,
+            "stages": report.stage_count if report is not None else 0,
+        },
+        "diagnostics": [d.to_dict() for d in diagnostics],
+    }
+
+
+def _emit_convert_json(document: dict[str, object]) -> None:
+    """Write the ``--json`` verdict *document* to stdout as one JSON object.
+
+    Writes directly to ``sys.stdout`` (NOT through the Rich console, which may
+    inject styling/wrapping), with a trailing newline. A fixed insertion order is
+    preserved (``sort_keys=False``) so the output is byte-stable.
+    """
+    json.dump(document, sys.stdout, indent=2, ensure_ascii=False, sort_keys=False)
+    sys.stdout.write("\n")
 
 
 def _write_diagnostics_json(
@@ -636,6 +689,16 @@ def _convert_newave(
             help="Also write the conversion diagnostics (counts + findings) as JSON.",
         ),
     ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) rendering."
+            ),
+        ),
+    ] = False,
     verbose: _VerboseOpt = False,
     no_color: _NoColorOpt = False,
     quiet: _QuietOpt = False,
@@ -649,6 +712,7 @@ def _convert_newave(
             validate=validate,
             force=force,
             diagnostics_json=diagnostics_json,
+            json_output=json_output,
             verbose=verbose,
             no_color=no_color,
             quiet=quiet,

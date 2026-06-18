@@ -16,6 +16,8 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from cobre_bridge.errors import SourceFileError
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -68,8 +70,10 @@ def _resolve_required(directory: Path, filename: str) -> Path:
     """
     path = _find_file_case_insensitive(directory, filename)
     if path is None:
-        raise FileNotFoundError(
-            f"Required NEWAVE file not found in {directory}: {filename}"
+        raise SourceFileError(
+            f"Required NEWAVE file not found in {directory}: {filename}",
+            path=str(directory),
+            field=filename,
         )
     return path
 
@@ -147,7 +151,11 @@ class NewaveFiles:
         # --- Step 1: read caso.dat (case-insensitive) --------------------------
         caso_path = _find_file_case_insensitive(directory, "caso.dat")
         if caso_path is None:
-            raise FileNotFoundError(f"caso.dat not found in {directory}")
+            raise SourceFileError(
+                f"caso.dat not found in {directory}",
+                path=str(directory),
+                field="caso.dat",
+            )
 
         caso = Caso.read(str(caso_path))
         arq_filename: str = caso.arquivos
@@ -156,9 +164,11 @@ class NewaveFiles:
         # --- Step 2: read the Arquivos file ------------------------------------
         arq_path = _find_file_case_insensitive(directory, arq_filename)
         if arq_path is None:
-            raise FileNotFoundError(
+            raise SourceFileError(
                 f"Arquivos file '{arq_filename}' referenced by caso.dat "
-                f"not found in {directory}"
+                f"not found in {directory}",
+                path=str(directory),
+                field=arq_filename,
             )
 
         arq = Arquivos.read(str(arq_path))
