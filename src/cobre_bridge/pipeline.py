@@ -658,6 +658,7 @@ def _clear_dst_contents(dst: Path) -> None:
         "stages.json",
         "penalties.json",
         "initial_conditions.json",
+        "conversion_manifest.json",
     ):
         path = dst / filename
         if path.exists():

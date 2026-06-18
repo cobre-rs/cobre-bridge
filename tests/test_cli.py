@@ -798,8 +798,10 @@ class TestCliInProcess:
         assert doc["summary"]["hydros"] == 10
         # No Rich human summary leaked onto stdout.
         assert "Converted" not in stdout
-        # Nothing on stderr on the success/diagnostics path.
-        assert stderr == ""
+        # The only thing on stderr is the always-on conversion-manifest note,
+        # which is intentionally routed to stderr to keep stdout byte-clean.
+        assert "Conversion manifest written" in stderr
+        assert "Converted" not in stderr
 
     def test_convert_json_failure_emits_error_status(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -903,6 +905,174 @@ class TestCliInProcess:
         # The default path emits no JSON document.
         with pytest.raises(json.JSONDecodeError):
             json.loads(stdout)
+
+    def test_conversion_manifest_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful conversion leaves a valid provenance manifest in dst."""
+        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        manifest_path = dst / "conversion_manifest.json"
+        assert manifest_path.exists()
+        manifest = ConversionManifest.from_json(manifest_path)
+        assert manifest.entity_counts == {
+            "hydros": 10,
+            "thermals": 5,
+            "buses": 4,
+            "lines": 3,
+            "stages": 60,
+        }
+        assert manifest.command == "convert newave"
+        # The fake source dir's stub files were discovered and hashed.
+        assert manifest.input_files
+
+    def test_manifest_not_in_json_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--json`` stdout is the convert verdict; the manifest is a side file."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        # Only the deterministic verdict keys — no manifest timestamp leaks in.
+        assert list(doc.keys()) == ["command", "status", "summary", "diagnostics"]
+        assert "timestamp" not in doc
+        # The manifest still exists separately on disk.
+        assert (dst / "conversion_manifest.json").exists()
+
+    def test_manifest_records_diagnostics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manifest carries the conversion's diagnostics + their summary."""
+        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        warning = Diagnostic(
+            code="some-warning",
+            severity=Severity.WARNING,
+            category="Conversion",
+            title="A warning",
+            summary="heads up",
+        )
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=12,
+            diagnostics=[warning],
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        manifest = ConversionManifest.from_json(dst / "conversion_manifest.json")
+        assert manifest.diagnostics_summary == {"warning": 1}
+        assert len(manifest.diagnostics) == 1
+
+    def test_clear_dst_removes_manifest(self, tmp_path: Path) -> None:
+        """``_clear_dst_contents`` removes a stale top-level manifest on --force."""
+        from cobre_bridge.pipeline import _clear_dst_contents
+
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        manifest_path = dst / "conversion_manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+
+        _clear_dst_contents(dst)
+
+        assert not manifest_path.exists()
+
+    def test_manifest_write_failure_does_not_fail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A manifest write OSError is warned-and-swallowed; exit stays 0."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=12,
+        )
+
+        def _raise(self: object, path: Path) -> None:
+            raise OSError("disk full")
+
+        with (
+            patch(
+                "cobre_bridge.pipeline.convert_newave_case",
+                return_value=fake_report,
+            ),
+            patch(
+                "cobre_bridge.conversion_manifest.ConversionManifest.to_json",
+                _raise,
+            ),
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "failed to write conversion manifest" in stderr
 
 
 class TestCompareDatasetWiring:

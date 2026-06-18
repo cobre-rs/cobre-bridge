@@ -495,6 +495,10 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
         # The --diagnostics-json sidecar coexists with --json (both can be set).
         _write_diagnostics_json(report, args.diagnostics_json, console=err_console)
 
+    # Provenance manifest, always written on a successful conversion. Notes go
+    # to err_console (stderr) so the --json stdout verdict stays byte-deterministic.
+    _write_conversion_manifest(report, src, dst, console=err_console)
+
     # ------------------------------------------------------------------
     # Optional post-conversion validation.
     # ------------------------------------------------------------------
@@ -617,6 +621,67 @@ def _write_diagnostics_json(
         )
     else:
         print_status(f"Diagnostics written to {path}", console=console)
+
+
+def _write_conversion_manifest(
+    report: ConversionReport, src: Path, dst: Path, *, console: Console
+) -> None:
+    """Write the conversion provenance manifest into ``dst`` as JSON.
+
+    Rediscovers the source-model input files to hash, builds a
+    :class:`ConversionManifest` from the bridge version/git SHA, the entity
+    counts in *report*, and its diagnostics, then writes it to
+    ``dst / "conversion_manifest.json"``.
+
+    Both a discovery failure and a write failure are reported as warnings and
+    swallowed — the conversion itself already succeeded, so neither changes the
+    exit code.
+    """
+    from cobre_bridge.conversion_manifest import (
+        ConversionManifest,
+        hash_input_files,
+        summarize_diagnostics,
+    )
+    from cobre_bridge.newave_files import NewaveFiles
+
+    try:
+        files = NewaveFiles.from_directory(src)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to discover source files for conversion manifest: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+        return
+
+    entity_counts = {
+        "hydros": report.hydro_count,
+        "thermals": report.thermal_count,
+        "buses": report.bus_count,
+        "lines": report.line_count,
+        "stages": report.stage_count,
+    }
+    manifest = ConversionManifest.create(
+        "convert newave",
+        src,
+        dst,
+        entity_counts=entity_counts,
+        input_files=hash_input_files(files),
+        diagnostics_summary=summarize_diagnostics(report.diagnostics),
+        diagnostics=[d.to_dict() for d in report.diagnostics],
+    )
+
+    path = dst / "conversion_manifest.json"
+    try:
+        manifest.to_json(path)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to write conversion manifest: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+    else:
+        print_status(f"Conversion manifest written to {path}", console=console)
 
 
 #: A no-op handler parked on the package logger when warnings are suppressed, so a
