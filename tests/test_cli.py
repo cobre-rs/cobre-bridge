@@ -1123,6 +1123,68 @@ class TestCliInProcess:
         assert "Validation" not in stdout
         assert "Validation failed." in stderr
 
+    def test_convert_json_validate_raising_still_emits_one_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising ``cobre.io.validate`` under ``--json`` still emits one verdict.
+
+        The conversion succeeded, so stdout must still carry exactly one JSON
+        object (the --json contract) even though validation crashed and the
+        command exits 2; ``summary.validation`` records the failure.
+        """
+        import types
+
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+
+        def _raise(_dst: str) -> dict[str, object]:
+            raise RuntimeError("validator blew up")
+
+        cobre_pkg = types.ModuleType("cobre")
+        cobre_io = types.ModuleType("cobre.io")
+        cobre_io.validate = _raise  # type: ignore[attr-defined]
+        cobre_pkg.io = cobre_io  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "cobre", cobre_pkg)
+        monkeypatch.setitem(sys.modules, "cobre.io", cobre_io)
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json", "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 2
+        doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["status"] == "ok"
+        assert doc["summary"]["validation"] == {
+            "ran": False,
+            "valid": None,
+            "warnings": 0,
+            "errors": 1,
+        }
+        assert "validator blew up" in stderr
+        assert "validator blew up" not in stdout
+
     def test_convert_json_without_validate_has_no_validation_key(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

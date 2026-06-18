@@ -728,6 +728,20 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
             result = cobre.io.validate(str(dst))
         except Exception as exc:  # noqa: BLE001
             render_error(f"Validation error: {exc}", console=err_console)
+            if args.json_output:
+                # Validation raised unexpectedly; still emit one JSON object so
+                # the --json contract (exactly one verdict on stdout) holds on
+                # this exit-2 path too. The conversion itself succeeded, so the
+                # summary is intact; only the validation outcome is an error.
+                summary["validation"] = {
+                    "ran": False,
+                    "valid": None,
+                    "warnings": 0,
+                    "errors": 1,
+                }
+                _emit_convert_json(
+                    build_verdict("convert newave", status, summary, report.diagnostics)
+                )
             raise typer.Exit(code=2)
 
         def _msg(item: object) -> object:
