@@ -189,7 +189,7 @@ def newave_water_values(
 
 
 def _main() -> None:
-    case_dir = Path("./example/newave_rodada")
+    case_dir = Path("./example/newave")
     wv = newave_water_values(case_dir, "estudo", 10, select="oldest")
     print(
         f"NEWAVE estudo stage 10, primeiro corte: {wv.attrs['n_cuts']} corte, "

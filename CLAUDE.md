@@ -206,7 +206,6 @@ warning surfaces through one path. `--diagnostics-json <PATH>` dumps the counts
 - Test directory: `tests/`
 - Pipeline tests use `unittest.mock.patch` to avoid requiring real NEWAVE files
 - CLI error-path tests run as subprocess to verify exit codes
-- Example data in `example/newave_rodada/` and `example/cobre_rodada/`
 
 CLI exit codes are guarded by subprocess tests; Typer behaviour (version, help,
 completion, exit codes) is covered via `typer.testing.CliRunner`. An autouse
@@ -260,10 +259,10 @@ JSON for structured data and Parquet for time-series/stage-varying data, with
 
 ```bash
 # Convert the example NEWAVE case
-cobre-bridge convert newave example/newave_rodada example/convertido --force
+cobre-bridge convert newave example/newave example/convertido --force
 
 # Compare bounds (requires both NEWAVE and Cobre output)
-cobre-bridge compare bounds example/newave_rodada example/cobre_rodada
+cobre-bridge compare bounds example/newave example/cobre
 
 # Generate dashboard from Cobre results
 cobre-bridge dashboard <cobre_output_dir>
