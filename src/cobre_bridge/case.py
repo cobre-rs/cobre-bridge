@@ -243,19 +243,30 @@ class NewaveCase:
         The canonical "active hydro" set (``plants.active_hydros``): existing
         non-fictitious plants, plus any orphaned FICT reservoir kept as a
         non-generating node (the hidr cadastro is passed so the storage test can
-        run). Recomputed per access (not cached) — it's a cheap filter and
-        callers may hold their own view, so a shared cached DataFrame could alias.
+        run), plus any ``NE`` plant carrying an ``exph`` dead-volume filling row
+        (the ``exph`` expansions are threaded so the live case admits filling
+        plants; a direct ``plants`` caller without ``exph`` admits none). Recomputed
+        per access (not cached) — it's a cheap filter and callers may hold their own
+        view, so a shared cached DataFrame could alias.
         """
         from cobre_bridge.plants import active_hydros
 
-        return active_hydros(self.confhd.usinas, self.hidr.cadastro)
+        return active_hydros(
+            self.confhd.usinas,
+            self.hidr.cadastro,
+            self.exph.expansoes if self.exph is not None else None,
+        )
 
     @property
     def active_hydro_codes(self) -> list[int]:
-        """``codigo_usina`` of the active hydros (real first, kept FICT last)."""
+        """``codigo_usina`` of the active hydros (in confhd declaration order)."""
         from cobre_bridge.plants import active_hydro_codes
 
-        return active_hydro_codes(self.confhd.usinas, self.hidr.cadastro)
+        return active_hydro_codes(
+            self.confhd.usinas,
+            self.hidr.cadastro,
+            self.exph.expansoes if self.exph is not None else None,
+        )
 
     @cached_property
     def id_map(self) -> NewaveIdMap:
@@ -265,9 +276,18 @@ class NewaveCase:
         readers, so it reuses parses already done rather than re-reading the files
         (the free ``id_map.build_id_map`` re-reads them for callers that only hold
         paths, e.g. the CLI compare commands).
+
+        The case's ``exph`` reader is threaded through, so any ``NE`` plant carrying a
+        dead-volume filling row is admitted at its confhd declaration position. The
+        path-only ``build_id_map`` keeps the ``EX``-only enumeration (``exph=None``).
         """
         from cobre_bridge.id_map import build_id_map_from_readers
 
         return build_id_map_from_readers(
-            self.confhd, self.conft, self.sistema, self.ree, self.hidr
+            self.confhd,
+            self.conft,
+            self.sistema,
+            self.ree,
+            self.hidr,
+            exph=self.exph,
         )

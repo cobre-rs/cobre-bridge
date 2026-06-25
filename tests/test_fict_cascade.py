@@ -7,10 +7,15 @@ plants keep a valid downstream link.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
+from inewave.newave import Confhd, Hidr
 
 from cobre_bridge.converters.fict_cascade import resolve_cascade
+
+_RODADA_2000 = Path("example/newave_rodada_2000_completo")
 
 
 def _confhd_row(
@@ -169,6 +174,78 @@ class TestExistingBehaviorPreserved:
         res = resolve_cascade(confhd, empty_cadastro, fictitious={99})
         assert res[1].downstream_code == 2
         assert res[1].fict_chain == (99,)
+
+
+class TestFillingPlantAdmission:
+    """``NE``-with-filling plants are real cobre nodes, not pass-throughs."""
+
+    def test_cascade_filling_plant_is_real_downstream(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A (EX) -> 309 (NE-with-filling) -> C (EX). With 309 promoted to a
+        # real node, A's downstream stops at 309 instead of walking through it.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 309, "EX"),
+                _confhd_row(309, "JURUENA", 3, "NE"),
+                _confhd_row(3, "C", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro, filling_codes={309})
+        assert res[1].downstream_code == 309
+        assert res[1].fict_chain == ()
+        assert res[1].fict_rho_sum == 0.0
+
+    def test_cascade_without_filling_codes_unchanged(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # Same topology, but no filling set: 309 is an ordinary NE plant and is
+        # walked through, so A rewires to the next EX plant (3) — today's
+        # behaviour, i.e. not 309.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 309, "EX"),
+                _confhd_row(309, "JURUENA", 3, "NE"),
+                _confhd_row(3, "C", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 3
+        assert res[1].downstream_code != 309
+        # 309 stays absent — no resolution entry of its own.
+        assert 309 not in res
+
+    def test_cascade_filling_plant_has_own_entry(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A promoted filling plant gets its own resolution row, with its
+        # downstream resolved per the usual rules (here, terminal at the sea).
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 309, "EX"),
+                _confhd_row(309, "JURUENA", 0, "NE"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro, filling_codes={309})
+        assert 309 in res
+        assert res[309].downstream_code is None
+        assert res[309].fict_chain == ()
+        assert res[1].downstream_code == 309
+
+    def test_cascade_2000_completo_parity(self) -> None:
+        # newave_rodada_2000_completo has no NE-with-filling plants, so the new
+        # parameter must be inert: filling_codes=set() and the default None must
+        # produce byte-identical resolution dicts.
+        if not (_RODADA_2000 / "confhd.dat").exists():
+            pytest.skip("example/newave_rodada_2000_completo not available")
+        confhd_df = Confhd.read(str(_RODADA_2000 / "confhd.dat")).usinas
+        cadastro = Hidr.read(str(_RODADA_2000 / "hidr.dat")).cadastro
+        res_none = resolve_cascade(confhd_df, cadastro)
+        res_empty = resolve_cascade(confhd_df, cadastro, filling_codes=set())
+        assert res_empty == res_none
 
 
 class TestMixedFictAndAbsent:

@@ -71,7 +71,46 @@ def fictitious_codes(confhd_df: pd.DataFrame, cadastro: pd.DataFrame) -> set[int
     return {c for c, r in rho.items() if r == 0.0 and posto[c] in generating_postos}
 
 
-def active_hydros(confhd_df: pd.DataFrame, cadastro: pd.DataFrame) -> pd.DataFrame:
+def filling_hydro_codes(
+    confhd_df: pd.DataFrame, exph_df: pd.DataFrame | None
+) -> set[int]:
+    """Return codes of ``NE`` plants that carry an ``exph`` dead-volume filling row.
+
+    A future (``usina_existente == "NE"``) plant is *admitted* into the Cobre LP iff
+    its ``codigo_usina`` appears in *exph_df* with a non-null
+    ``data_inicio_enchimento`` — the filling schedule lives on the first ``exph`` row
+    per plant, while unit rows carry ``NaT`` there. ``NC`` plants and bare ``NE``
+    plants (no filling row) are **not** admitted.
+
+    Returns an empty set when *exph_df* is ``None``/empty or when the columns needed
+    for the test (``usina_existente`` on confhd, ``codigo_usina`` /
+    ``data_inicio_enchimento`` on exph) are unavailable — never raises, mirroring
+    :func:`fictitious_codes`'s defensive empty-set behaviour.
+    """
+    if (
+        exph_df is None
+        or exph_df.empty
+        or "usina_existente" not in confhd_df.columns
+        or "codigo_usina" not in exph_df.columns
+        or "data_inicio_enchimento" not in exph_df.columns
+    ):
+        return set()
+    ne_codes = {
+        int(code)
+        for code in confhd_df.loc[confhd_df["usina_existente"] == "NE", "codigo_usina"]
+    }
+    filling_rows = exph_df.loc[
+        exph_df["data_inicio_enchimento"].notna(), "codigo_usina"
+    ]
+    filling = {int(code) for code in filling_rows}
+    return ne_codes & filling
+
+
+def active_hydros(
+    confhd_df: pd.DataFrame,
+    cadastro: pd.DataFrame,
+    exph_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Return the existing, non-fictitious hydro rows that enter the Cobre LP.
 
     ``usina_existente == "EX"`` minus :func:`fictitious_codes`, in confhd
@@ -79,14 +118,30 @@ def active_hydros(confhd_df: pd.DataFrame, cadastro: pd.DataFrame) -> pd.DataFra
     hydro IDs). *cadastro* (``Hidr.cadastro``) is required for the structural
     fictitious test; with the data unavailable, no plant is classified
     fictitious and all existing plants are returned.
+
+    When *exph_df* (``Exph().expansoes`` or ``None``) is supplied, the ``NE`` plants
+    that carry a dead-volume filling row (:func:`filling_hydro_codes`) are also
+    admitted, each kept at its **confhd declaration position** (a single boolean mask
+    over *confhd_df*, never a concat/append, so id assignment stays deterministic).
+    With ``exph_df is None`` the result is byte-identical to the EX-only set — no
+    ``NE`` plant is admitted.
     """
-    existing = existing_hydros(confhd_df)
     fict = fictitious_codes(confhd_df, cadastro)
-    if not fict:
-        return existing
-    return existing[~existing["codigo_usina"].isin(fict)]
+    is_ex = confhd_df["usina_existente"] == "EX"
+    if fict:
+        is_ex = is_ex & ~confhd_df["codigo_usina"].isin(fict)
+    filling = filling_hydro_codes(confhd_df, exph_df)
+    keep = is_ex | confhd_df["codigo_usina"].isin(filling)
+    return confhd_df[keep]
 
 
-def active_hydro_codes(confhd_df: pd.DataFrame, cadastro: pd.DataFrame) -> list[int]:
+def active_hydro_codes(
+    confhd_df: pd.DataFrame,
+    cadastro: pd.DataFrame,
+    exph_df: pd.DataFrame | None = None,
+) -> list[int]:
     """Return ``codigo_usina`` of the active hydros in declaration order."""
-    return [int(code) for code in active_hydros(confhd_df, cadastro)["codigo_usina"]]
+    return [
+        int(code)
+        for code in active_hydros(confhd_df, cadastro, exph_df)["codigo_usina"]
+    ]

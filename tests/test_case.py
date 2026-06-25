@@ -67,6 +67,8 @@ def test_polinjus_parses_when_file_present(tmp_path: Path) -> None:
 
 
 def test_newave_case_exph_parses() -> None:
+    if not (Path("example/newave_rodada_2001") / "confhd.dat").exists():
+        pytest.skip("example/newave_rodada_2001 not available")
     case = NewaveCase.from_directory(Path("example/newave_rodada_2001"))
     exph = case.exph
     assert exph is not None
@@ -195,6 +197,23 @@ def test_active_hydros_excludes_non_existing_and_fictitious(tmp_path: Path) -> N
     case = make_case(tmp_path, confhd=confhd, hidr=hidr)
     assert case.active_hydro_codes == [1, 4]
     assert list(case.active_hydros["codigo_usina"]) == [1, 4]
+
+
+def test_case_active_hydro_codes_includes_juruena() -> None:
+    # The live case threads exph.expansoes into active_hydro_codes, so the lone
+    # NE-with-filling plant (JURUENA, 309) is admitted in confhd declaration order.
+    if not (Path("example/newave_rodada_2001") / "confhd.dat").exists():
+        pytest.skip("example/newave_rodada_2001 not available")
+    case = NewaveCase.from_directory(Path("example/newave_rodada_2001"))
+    codes = case.active_hydro_codes
+    assert 309 in codes
+    # It sits at its confhd declaration position (not appended at the end): the
+    # active list must be a subsequence of the confhd declaration order.
+    declaration = [int(c) for c in case.confhd.usinas["codigo_usina"]]
+    positions = [declaration.index(c) for c in codes]
+    # The ascending-positions check proves declaration-order placement (admission
+    # at the confhd position, not appended at the end).
+    assert positions == sorted(positions)
 
 
 def test_id_map_built_from_cached_readers(tmp_path: Path) -> None:
