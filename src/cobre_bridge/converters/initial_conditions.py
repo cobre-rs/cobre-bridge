@@ -116,7 +116,10 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             filling_storage.append(
                 {
                     "hydro_id": id_map.hydro_id(newave_code),
-                    "volume_hm3": (morto / 100.0) * vol_min,
+                    # cobre-io's ``RawHydroStorage`` keys both ``storage`` and
+                    # ``filling_storage`` on ``value_hm3``; this must match the
+                    # ``storage`` entries' key below or cobre fails to deserialize.
+                    "value_hm3": (morto / 100.0) * vol_min,
                 }
             )
             continue

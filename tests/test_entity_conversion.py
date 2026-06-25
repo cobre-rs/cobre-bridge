@@ -1719,10 +1719,10 @@ class TestConvertStorageBoundsMaxGenColumn:
         """ticket-011 populates the column for JURUENA's ramp rows.
 
         ticket-010 introduced the column all-null; ticket-011's ramp branch now
-        emits explicit ``0.0`` caps for JURUENA's pre-online stages (2, 3) while
+        emits explicit ``0.0`` caps for JURUENA's pre-operating stages (0–3) while
         the non-ramp GHMIN row (EX plant 1) keeps ``max_generation_mw`` null. So
         the column is no longer all-null: exactly the GHMIN row is null and the
-        two JURUENA ramp rows carry ``0.0``.
+        JURUENA ramp rows carry ``0.0``.
         """
         tbl = self._run_filling(tmp_path)
         assert tbl is not None
@@ -1737,12 +1737,15 @@ class TestConvertStorageBoundsRamp:
     """ticket-011: the filling-plant unit-ramp branch in ``convert_storage_bounds``.
 
     A ``NE``-with-filling plant (JURUENA, code 309) operates from its
-    ``entry_stage_id`` but its turbine / generation capacity over the ramp window
-    ``[entry_sid, full_online_sid)`` is whatever generating units are online. Under
-    the Sep-2024 3-year horizon JURUENA's filling completes at ``entry_sid == 2``
-    and both units enter Jan 2025 (stage 4), so stages 2 and 3 have zero online
-    machines (explicit ``0.0`` caps) and there is no override row at stage 4+ (the
-    base ``hydros.json`` caps apply).
+    ``entry_stage_id`` but its turbine / generation capacity is whatever
+    generating units are online. The branch exports EXPLICIT 0/reduced caps over
+    the full pre-operating window ``[0, full_online_sid)`` (clamped to the
+    horizon) so the parquet carries the true 0→full profile for plottability;
+    this matches cobre's internal PreFilling/Filling forcing and leaves the
+    simulation unchanged. Under the Sep-2024 3-year horizon JURUENA's filling
+    completes at ``entry_sid == 2`` and both units enter Jan 2025 (stage 4), so
+    stages 0–3 have zero online machines (explicit ``0.0`` caps) and there is no
+    override row at stage 4+ (the base ``hydros.json`` caps apply).
     """
 
     def _run_juruena(self, tmp_path, *, duracao: int = 1):
@@ -1768,15 +1771,22 @@ class TestConvertStorageBoundsRamp:
             tbl = convert_storage_bounds(case, id_map)
         return tbl, id_map.hydro_id(309)
 
-    def test_juruena_emits_zero_cap_ramp_rows_stages_2_3(self, tmp_path) -> None:
-        """JURUENA emits exactly two ramp rows (stages 2, 3) with all caps ``0.0``."""
+    def test_juruena_emits_zero_cap_ramp_rows_through_filling_and_idle(
+        self, tmp_path
+    ) -> None:
+        """JURUENA emits 0-cap rows for the whole pre-operating window (stages 0–3).
+
+        The full pre-operating window ``[0, full_online_sid)`` covers PreFilling/
+        Filling (stages 0, 1) and the operating-but-idle ramp (stages 2, 3); every
+        row has all caps ``0.0`` (no units online before stage 4).
+        """
         tbl, juruena_id = self._run_juruena(tmp_path)
         assert tbl is not None
         df = tbl.to_pandas()
         jur = df[df["hydro_id"] == juruena_id].sort_values("stage_id")
-        assert list(jur["stage_id"]) == [2, 3]
+        assert list(jur["stage_id"]) == [0, 1, 2, 3]
         for col in ("max_turbined_m3s", "max_generation_mw", "min_generation_mw"):
-            assert list(jur[col]) == [0.0, 0.0], col
+            assert list(jur[col]) == [0.0, 0.0, 0.0, 0.0], col
 
     def test_juruena_no_ramp_row_at_full_online_stage(self, tmp_path) -> None:
         """No JURUENA ramp row at stage 4+ (both units online ⇒ base caps apply)."""
@@ -1787,7 +1797,7 @@ class TestConvertStorageBoundsRamp:
         assert not (jur["stage_id"] >= 4).any()
 
     def test_juruena_ramp_rows_have_null_storage_and_outflow(self, tmp_path) -> None:
-        """JURUENA ramp rows leave storage / min-turbined / outflow columns null."""
+        """JURUENA ramp rows (stages 0–3) leave storage/turbined/outflow null."""
         tbl, juruena_id = self._run_juruena(tmp_path)
         assert tbl is not None
         df = tbl.to_pandas()
@@ -1800,13 +1810,18 @@ class TestConvertStorageBoundsRamp:
         ):
             assert jur[col].isna().all(), col
 
-    def test_filling_past_horizon_emits_no_ramp_rows(self, tmp_path) -> None:
-        """A plant whose ``entry_sid >= total_stages`` emits no ramp rows, no crash.
+    def test_filling_past_horizon_emits_zero_caps_all_in_study_stages(
+        self, tmp_path
+    ) -> None:
+        """A plant entering at/after the horizon emits 0 caps for ALL in-study stages.
 
         Mirrors ``test_ne_plant_filling_past_horizon_no_crash``: a 3-stage horizon
         (Oct 2024 start) with ``duracao=6`` pushes ``entry_sid == 6 > total_stages
-        (3)``, so the clamped ramp range is empty. With no GHMIN/MODIF rows either,
-        the table is ``None``.
+        (3)`` — the plant never operates in-study, so the full pre-operating window
+        ``[0, full_online_sid)`` clamps to ``[0, total_stages)`` and every in-study
+        stage (0, 1, 2) gets an explicit ``0.0``-cap row. No row is emitted at/past
+        the horizon (no stage_id ≥ 3) and the clamp prevents the epic-03
+        IndexError.
         """
         from cobre_bridge.converters.hydro import convert_storage_bounds
 
@@ -1830,10 +1845,17 @@ class TestConvertStorageBoundsRamp:
                 return_value={},
             ),
         ):
-            # Must not raise the epic-03 IndexError; no in-study operating stage
-            # ⇒ no ramp rows ⇒ no table.
+            # Must not raise the epic-03 IndexError; the clamp keeps every emitted
+            # stage in-study.
             tbl = convert_storage_bounds(case, id_map)
-        assert tbl is None
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == id_map.hydro_id(309)].sort_values("stage_id")
+        # total_stages == 3 ⇒ explicit 0-cap rows for stages 0, 1, 2; none ≥ 3.
+        assert list(jur["stage_id"]) == [0, 1, 2]
+        for col in ("max_turbined_m3s", "max_generation_mw", "min_generation_mw"):
+            assert list(jur[col]) == [0.0, 0.0, 0.0], col
+        assert not (df["stage_id"] >= 3).any()
 
     def test_reduced_caps_partial_online(self) -> None:
         """``_reduced_caps`` rises monotonically as machine groups come online.
@@ -1940,9 +1962,10 @@ class TestConvertStorageBoundsRamp:
         assert tbl is not None
         df = tbl.to_pandas()
         jur = df[df["hydro_id"] == id_map.hydro_id(309)].sort_values("stage_id")
-        # The single valid unit row (stage 4) still drives full_online_sid, so
-        # the ramp window is [2, 4) → stages 2 and 3, exactly as the all-valid mock.
-        assert list(jur["stage_id"]) == [2, 3]
+        # The single valid unit row (stage 4) still drives full_online_sid, so the
+        # pre-operating window is [0, 4) → stages 0, 1, 2, 3, exactly as the
+        # all-valid mock.
+        assert list(jur["stage_id"]) == [0, 1, 2, 3]
 
     def test_ramp_row_wins_over_modif_at_same_stage(self, tmp_path) -> None:
         """A ramp row wins over a colliding GHMIN row at the same (hydro, stage).
@@ -4697,7 +4720,7 @@ class TestConvertInitialConditions:
         result = convert_initial_conditions(
             self._ne_filling_ic_case(tmp_path), _ne_filling_id_map()
         )
-        assert result["filling_storage"] == [{"hydro_id": 2, "volume_hm3": 0.0}]
+        assert result["filling_storage"] == [{"hydro_id": 2, "value_hm3": 0.0}]
 
     def test_ne_plant_excluded_from_storage(self, tmp_path) -> None:
         """The filling plant must NOT appear in ``storage`` (cobre rejects in-both).
@@ -4730,7 +4753,7 @@ class TestConvertInitialConditions:
             self._ne_filling_ic_case(tmp_path, volume_morto=50.0),
             _ne_filling_id_map(),
         )
-        seed = {s["hydro_id"]: s["volume_hm3"] for s in result["filling_storage"]}
+        seed = {s["hydro_id"]: s["value_hm3"] for s in result["filling_storage"]}
         assert seed[2] == pytest.approx(1.465)
 
     def test_volume_morto_out_of_range_clamped(self, tmp_path, caplog) -> None:
@@ -4748,7 +4771,7 @@ class TestConvertInitialConditions:
                 self._ne_filling_ic_case(tmp_path, volume_morto=150.0),
                 _ne_filling_id_map(),
             )
-        seed = {s["hydro_id"]: s["volume_hm3"] for s in result["filling_storage"]}
+        seed = {s["hydro_id"]: s["value_hm3"] for s in result["filling_storage"]}
         assert seed[2] == pytest.approx(2.93)
         assert any("volume_morto" in rec.message for rec in caplog.records)
 

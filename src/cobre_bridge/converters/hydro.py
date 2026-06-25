@@ -2652,10 +2652,20 @@ def convert_storage_bounds(
     # Filling-plant unit-ramp branch (ticket-011, design §4.2/§5): a
     # ``NE``-with-filling plant operates from ``entry_sid`` but its turbine /
     # generation capacity at each stage is whatever generating units are online.
-    # cobre forces capacity to 0 during PreFilling/Filling, so we only emit
-    # overrides over the half-open ramp window ``[entry_sid, full_online_sid)``,
-    # clamped to the in-study horizon; once every unit is online the base
-    # ``hydros.json`` caps apply and no further rows are needed. A filling plant
+    # We export EXPLICIT 0/reduced caps over the FULL pre-operating window
+    # ``[0, full_online_sid)`` (clamped to the in-study horizon) so the parquet
+    # carries the true 0→full capacity profile from study start through the ramp,
+    # for plottability and bounds comparison. ``online_machines`` clamps every
+    # unit's online stage up to ``entry_sid``, so stages ``[0, entry_sid)`` (the
+    # PreFilling/Filling window) get explicit ``(0, 0)`` caps; the ramp window
+    # ``[entry_sid, full_online_sid)`` gets reduced caps; from ``full_online_sid``
+    # the base ``hydros.json`` caps apply and no further rows are needed. These
+    # pre-entry rows match cobre's internal PreFilling/Filling forcing (capacity
+    # is already 0 there): cobre's ``hydro_bounds`` reader is a sparse override
+    # table with NO stage-window validation, so a ``max=0`` row during
+    # PreFilling/Filling is inert to / consistent-with its internal forcing — the
+    # simulation result is UNCHANGED, only the exported data gains the explicit
+    # 0-cap stages. A filling plant
     # may in principle also carry MODIF/GHMIN rows at a stage INSIDE its ramp
     # window; this branch appends SEPARATE rows tagged ``is_ramp=True``, and the
     # de-dup pass below resolves any ``(hydro_id, stage_id)`` collision in favour
@@ -2708,12 +2718,14 @@ def convert_storage_bounds(
             if not unit_rows:
                 continue
 
-            # All-units-online stage: the ramp window is [entry_sid,
-            # full_online_sid). Clamp the upper bound to total_stages so a plant
-            # entering at/after the horizon end emits no rows (epic-03 IndexError
-            # lesson). If entry_sid >= total_stages the range is empty.
+            # All-units-online stage: the exported pre-operating window is
+            # [0, full_online_sid). Clamp the upper bound to total_stages so the
+            # loop never indexes past the horizon (epic-03 IndexError lesson). A
+            # plant whose entry is at/after the horizon end still emits explicit
+            # 0-cap rows for every in-study stage [0, total_stages) — it never
+            # operates in-study, so every stage is pre-operating.
             full_online_sid = max(max(usid, entry_sid) for _c, usid in unit_rows)
-            for s in range(entry_sid, min(full_online_sid, total_stages)):
+            for s in range(0, min(full_online_sid, total_stages)):
                 online = online_machines(unit_rows, entry_sid, s)
                 mt, mg = _reduced_caps(hreg, online, name)
                 hydro_ids.append(hydro_id)

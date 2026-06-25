@@ -119,10 +119,11 @@ Relevant `hydros.json` fields (cobre-io `RawHydro` / `RawFillingConfig`):
 ```
 
 `initial_conditions.json` — a filling hydro is seeded via **`filling_storage`**,
-**not** `storage` (cobre validation: exactly one of the two per hydro):
+**not** `storage` (cobre validation: exactly one of the two per hydro). cobre-io's
+`RawHydroStorage` keys **both** `storage` and `filling_storage` on `value_hm3`:
 
 ```jsonc
-{ "filling_storage": [{ "hydro_id": 0, "volume_hm3": 0.0 }] }
+{ "filling_storage": [{ "hydro_id": 0, "value_hm3": 0.0 }] }
 ```
 
 Stage-varying capacity is expressed via `constraints/hydro_bounds.parquet`
@@ -143,17 +144,17 @@ rate-of-change constraint — it is just a series of per-stage ceilings.
 
 ### 4.1 Subsystem A — dead-volume filling (from the exph _filling_ row)
 
-| cobre field                       | NEWAVE source                                   | Formula                                                          |
-| --------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------- |
-| `filling.start_stage_id`          | `data_inicio_enchimento`                        | `stage_id(data_inicio_enchimento)` (clamp to 0 if ≤ study start) |
-| `entry_stage_id`                  | `data_inicio_enchimento` + `duracao_enchimento` | `stage_id(data_inicio) + duracao_enchimento`                     |
-| `reservoir.min_storage_hm3`       | `hidr.volume_minimo`                            | dead volume = the floor the reservoir must reach                 |
-| `filling.filling_min_rate_m3s`    | dead vol, `volume_morto`, window ζ              | `remaining / Σ_{t∈[start,entry)} ζ_t` (see below)                |
-| `filling_storage.volume_hm3` (IC) | `volume_morto`                                  | `(volume_morto/100) × min_storage_hm3`                           |
+| cobre field                      | NEWAVE source                                   | Formula                                                          |
+| -------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------- |
+| `filling.start_stage_id`         | `data_inicio_enchimento`                        | `stage_id(data_inicio_enchimento)` (clamp to 0 if ≤ study start) |
+| `entry_stage_id`                 | `data_inicio_enchimento` + `duracao_enchimento` | `stage_id(data_inicio) + duracao_enchimento`                     |
+| `reservoir.min_storage_hm3`      | `hidr.volume_minimo`                            | dead volume = the floor the reservoir must reach                 |
+| `filling.filling_min_rate_m3s`   | dead vol, `volume_morto`, window ζ              | `remaining / Σ_{t∈[start,entry)} ζ_t` (see below)                |
+| `filling_storage.value_hm3` (IC) | `volume_morto`                                  | `(volume_morto/100) × min_storage_hm3`                           |
 
 where:
 
-- `remaining = min_storage_hm3 − filling_storage.volume_hm3 = min_storage_hm3 × (1 − volume_morto/100)`
+- `remaining = min_storage_hm3 − filling_storage.value_hm3 = min_storage_hm3 × (1 − volume_morto/100)`
 - `ζ_t` (hm³ per m³/s for stage `t`) `= _month_hours(year_t, month_t) × 3600 / 1e6`
   (same calendar-hours basis as `temporal._month_hours`)
 
@@ -169,7 +170,9 @@ is pinned to `min_storage_hm3` regardless of rate.
 The plant **exists as an operating reservoir node** from `entry_stage_id`
 (Subsystem A), but its turbine/generation capacity is whatever **units are
 online** at each stage. cobre already forces capacity to 0 during Filling/
-PreFilling, so Subsystem B only emits overrides for `stage ≥ entry_stage_id`.
+PreFilling; we nonetheless **export** explicit 0/reduced caps over the **full
+pre-operating window** so the exported bounds are plottable (see "Override rows"
+below).
 
 For each operating stage `s` and each machine group `c`:
 
@@ -187,11 +190,19 @@ with the reduced machine counts** (reusing `_compute_max_turbined_head_corrected
 - `max_generation_mw[s] = Σ_c online_machines(c,s) · p_nom(c)`
 - `min_generation_mw[s] = 0` while capacity is below full (cannot force generation)
 
-Override rows are emitted only for the **ramp window** `[entry_stage_id,
-all-units-online stage)`. Once every unit is online the base `hydros.json` caps
-(full count) apply, so no further rows are needed. (`max_generation_mw` is a
-**new column** in our `hydro_bounds.parquet`; today we emit only
-`min_generation_mw`.)
+Override rows are emitted for the **full pre-operating window** `[0,
+all-units-online stage)`. `online_machines` clamps every unit's online stage up
+to `entry_stage_id`, so the PreFilling/Filling stages `[0, entry_stage_id)` get
+explicit `(0, 0)` caps, the ramp stages `[entry_stage_id, all-units-online)` get
+reduced caps, and from the all-units-online stage the base `hydros.json` caps
+(full count) apply, so no further rows are needed. The pre-entry 0-cap rows are
+**for observability only** — a bounds plot reads the parquet directly and would
+otherwise show NaN for the filling/pre-entry stages. They match cobre's internal
+PreFilling/Filling forcing (capacity is already 0 there); cobre's `hydro_bounds`
+reader is a **sparse override table with no stage-window validation**, so a
+`max=0` row during PreFilling/Filling is inert to its internal forcing and the
+**simulation result is unchanged**. (`max_generation_mw` is a **new column** in
+our `hydro_bounds.parquet`; today we emit only `min_generation_mw`.)
 
 ---
 
@@ -218,15 +229,19 @@ Emitted:
 // ζ(Oct 2024, 31d) = 744·3600/1e6 = 2.6784
 
 // initial_conditions.json
-"filling_storage": [ { "hydro_id": <id>, "volume_hm3": 0.0 } ]   // volume_morto = 0%
+"filling_storage": [ { "hydro_id": <id>, "value_hm3": 0.0 } ]   // volume_morto = 0%
 ```
 
 ```
-# hydro_bounds.parquet (ramp window only)
+# hydro_bounds.parquet (full pre-operating window [0, full_online) = [0, 4))
 hydro_id stage_id max_turbined_m3s max_generation_mw min_generation_mw
-<id>     2        0.0              0.0               0.0     # operating, 0 units online
+<id>     0        0.0              0.0               0.0     # PreFilling, 0 units online
+<id>     1        0.0              0.0               0.0     # Filling, 0 units online
+<id>     2        0.0              0.0               0.0     # operating-but-idle, 0 units
 <id>     3        0.0              0.0               0.0
 # stage 4+ : 2 units online ⇒ base caps apply, no override needed
+# (stages 0–1 mirror cobre's internal PreFilling/Filling forcing — exported for
+#  plottability; cobre ignores them as a sparse override, result unchanged)
 ```
 
 Resulting phases: PreFilling = stage 0 (dam absent, inflow → downstream),
@@ -284,7 +299,9 @@ reaches beyond `hydro.py`:
 - **Unit `data_entrada_operacao` < `entry_stage_id`**: clamp the unit's online
   stage up to `entry_stage_id` — no turbining before the reservoir is filled.
 - **`entry_stage_id` ≥ horizon**: plant fills but never operates within the
-  study; still emitted (cobre handles a never-operating filling plant).
+  study; still emitted (cobre handles a never-operating filling plant). The
+  pre-operating window clamps to `[0, total_stages)`, so every in-study stage
+  carries an explicit `0`-cap row.
 - **Fictitious detection** (`plants.fictitious_codes`) requires `EX`; `NE`
   plants are never fictitious — no interaction, but re-confirm the filter ignores
   them.
@@ -336,8 +353,9 @@ to confirm at plan time.)
 - **Unit:** stage-math helper (date → stage_id); filling-rate formula; online-
   unit accumulation per `(conjunto, stage)`; reduced-count bound computation.
 - **Converter:** `convert_hydros` emits correct `filling` + `entry_stage_id` for
-  JURUENA; `convert_storage_bounds` emits the 0-capacity ramp rows for stages
-  2–3; `initial_conditions` routes JURUENA to `filling_storage`.
+  JURUENA; `convert_storage_bounds` emits the 0-capacity rows for the full
+  pre-operating window (stages 0–3); `initial_conditions` routes JURUENA to
+  `filling_storage`.
 - **Pipeline / golden:** full `convert newave example/newave_rodada_2001` →
   snapshot `hydros.json`, `initial_conditions.json`, `hydro_bounds.parquet` for
   plant 309.
