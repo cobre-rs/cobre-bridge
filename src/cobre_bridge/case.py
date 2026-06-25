@@ -40,6 +40,7 @@ from inewave.newave import (
     Cvar,
     Dger,
     Dsvagua,
+    Exph,
     Expt,
     Ghmin,
     Hidr,
@@ -155,6 +156,11 @@ class NewaveCase:
     def expt(self) -> Expt | None:
         path = self.files.expt
         return Expt.read(str(path)) if path is not None else None
+
+    @cached_property
+    def exph(self) -> Exph | None:
+        path = self.files.exph
+        return Exph.read(str(path)) if path is not None else None
 
     @cached_property
     def manutt(self) -> Manutt | None:

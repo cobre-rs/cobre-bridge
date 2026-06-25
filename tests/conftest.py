@@ -63,6 +63,7 @@ _OPTIONAL = (
     "dsvagua",
     "curva",
     "expt",
+    "exph",
     "manutt",
     "c_adic",
     "cvar",

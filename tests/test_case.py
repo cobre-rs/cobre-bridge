@@ -66,6 +66,23 @@ def test_polinjus_parses_when_file_present(tmp_path: Path) -> None:
     mock_uh.read.assert_called_once_with(str(polinjus_path))
 
 
+def test_newave_case_exph_parses() -> None:
+    case = NewaveCase.from_directory(Path("example/newave_rodada_2001"))
+    exph = case.exph
+    assert exph is not None
+    expansoes = exph.expansoes
+    assert isinstance(expansoes, pd.DataFrame)
+    assert not expansoes.empty
+    assert "codigo_usina" in expansoes.columns
+
+
+def test_newave_case_exph_none_when_absent(tmp_path: Path) -> None:
+    case = NewaveCase(files=make_nw_files(tmp_path))  # exph defaults to None
+    with patch("cobre_bridge.case.Exph") as mock_exph:
+        assert case.exph is None
+    mock_exph.read.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("flag", "expected"),
     [(0, True), (1, False), (2, False), (None, False)],

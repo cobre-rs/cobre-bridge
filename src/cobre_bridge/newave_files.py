@@ -113,6 +113,7 @@ class NewaveFiles:
     dsvagua: Path | None
     curva: Path | None
     expt: Path | None
+    exph: Path | None
     manutt: Path | None
     c_adic: Path | None
     cvar: Path | None
@@ -217,6 +218,7 @@ class NewaveFiles:
         dsvagua = _opt("dsvagua")
         curva = _opt("curva")
         expt = _opt("expt")
+        exph = _opt("exph")
         manutt = _opt("manutt")
         c_adic = _opt("c_adic")
         cvar = _opt("cvar")
@@ -245,6 +247,7 @@ class NewaveFiles:
             dsvagua=dsvagua,
             curva=curva,
             expt=expt,
+            exph=exph,
             manutt=manutt,
             c_adic=c_adic,
             cvar=cvar,

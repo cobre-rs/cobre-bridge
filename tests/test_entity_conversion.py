@@ -62,6 +62,7 @@ def _make_nw_files(
         dsvagua=dsvagua,
         curva=curva,
         expt=expt,
+        exph=None,
         manutt=manutt,
         c_adic=c_adic,
         cvar=cvar,
