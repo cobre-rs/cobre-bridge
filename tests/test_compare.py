@@ -1407,7 +1407,7 @@ class TestCompareResultsReturnsDataset:
 
 
 class TestProductivityDetail:
-    """Productivity-tab readers, assembly, and charts (no example/ deps).
+    """Productivity-tab readers, assembly, and charts.
 
     The Productivity tab is a *static* conversion-fidelity check: The source model pmo
     productivities vs what cobre-bridge computes from the same HIDR cadastro, plus a

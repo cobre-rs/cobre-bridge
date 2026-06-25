@@ -7,15 +7,10 @@ plants keep a valid downstream link.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 import pytest
-from inewave.newave import Confhd, Hidr
 
 from cobre_bridge.converters.fict_cascade import resolve_cascade
-
-_RODADA_2000 = Path("example/newave_rodada_2000_completo")
 
 
 def _confhd_row(
@@ -234,18 +229,6 @@ class TestFillingPlantAdmission:
         assert res[309].downstream_code is None
         assert res[309].fict_chain == ()
         assert res[1].downstream_code == 309
-
-    def test_cascade_2000_completo_parity(self) -> None:
-        # newave_rodada_2000_completo has no NE-with-filling plants, so the new
-        # parameter must be inert: filling_codes=set() and the default None must
-        # produce byte-identical resolution dicts.
-        if not (_RODADA_2000 / "confhd.dat").exists():
-            pytest.skip("example/newave_rodada_2000_completo not available")
-        confhd_df = Confhd.read(str(_RODADA_2000 / "confhd.dat")).usinas
-        cadastro = Hidr.read(str(_RODADA_2000 / "hidr.dat")).cadastro
-        res_none = resolve_cascade(confhd_df, cadastro)
-        res_empty = resolve_cascade(confhd_df, cadastro, filling_codes=set())
-        assert res_empty == res_none
 
 
 class TestMixedFictAndAbsent:

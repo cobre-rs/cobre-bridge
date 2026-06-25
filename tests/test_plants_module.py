@@ -6,11 +6,7 @@ gauge (``posto``) with a generating plant. No name-prefix involved.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
-import pytest
-from inewave.newave import Confhd, Exph
 
 from cobre_bridge.plants import (
     active_hydro_codes,
@@ -171,35 +167,12 @@ def test_empty_confhd_yields_empty_active_set() -> None:
 
 # --- Dead-volume filling admission (ticket-004) ------------------------------
 
-# JURUENA (309) is the lone NE plant in newave_rodada_2001; its first exph row
-# carries data_inicio_enchimento (2024-10-01) and the unit rows carry NaT.
-_RODADA_2001 = Path("example/newave_rodada_2001")
-_RODADA_2000 = Path("example/newave_rodada_2000_completo")
-
 
 def _exph(rows: list[dict]) -> pd.DataFrame:
     """Build an exph-like expansoes DataFrame with datetime fill-start column."""
     df = pd.DataFrame(rows)
     df["data_inicio_enchimento"] = pd.to_datetime(df["data_inicio_enchimento"])
     return df
-
-
-def test_filling_hydro_codes_juruena() -> None:
-    # The real case: 309 is the only NE-with-filling plant.
-    if not (_RODADA_2001 / "confhd.dat").exists():
-        pytest.skip("example/newave_rodada_2001 not available")
-    confhd_df = Confhd.read(str(_RODADA_2001 / "confhd.dat")).usinas
-    exph_df = Exph.read(str(_RODADA_2001 / "exph.dat")).expansoes
-    assert filling_hydro_codes(confhd_df, exph_df) == {309}
-
-
-def test_filling_hydro_codes_empty_for_2000() -> None:
-    # newave_rodada_2000_completo has no NE plants -> empty filling set.
-    if not (_RODADA_2000 / "confhd.dat").exists():
-        pytest.skip("example/newave_rodada_2000_completo not available")
-    confhd_df = Confhd.read(str(_RODADA_2000 / "confhd.dat")).usinas
-    exph_df = Exph.read(str(_RODADA_2000 / "exph.dat")).expansoes
-    assert filling_hydro_codes(confhd_df, exph_df) == set()
 
 
 def test_filling_hydro_codes_excludes_nc() -> None:

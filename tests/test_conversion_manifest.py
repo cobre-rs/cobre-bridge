@@ -252,3 +252,54 @@ def test_git_sha_is_shared_not_duplicated() -> None:
 
     assert conversion_git_sha is shared_git_sha
     assert comparison_git_sha is shared_git_sha
+
+
+def test_min_cobre_version_round_trip(tmp_path: Path) -> None:
+    """``min_cobre_version`` survives a ``to_json`` / ``from_json`` round trip."""
+    manifest = ConversionManifest.create(
+        "convert newave",
+        tmp_path,
+        tmp_path,
+        entity_counts={},
+        input_files=[],
+        diagnostics_summary={},
+        diagnostics=[],
+        min_cobre_version="0.9.0",
+    )
+
+    path = tmp_path / "conversion_manifest.json"
+    manifest.to_json(path)
+    restored = ConversionManifest.from_json(path)
+
+    assert restored.min_cobre_version == "0.9.0"
+
+
+def test_min_cobre_version_defaults_none() -> None:
+    """``create`` without the kwarg leaves ``min_cobre_version`` ``None`` (EX-only)."""
+    manifest = ConversionManifest.create(
+        "convert newave",
+        Path("src"),
+        Path("dst"),
+        entity_counts={},
+        input_files=[],
+        diagnostics_summary={},
+        diagnostics=[],
+    )
+
+    assert manifest.min_cobre_version is None
+
+
+def test_from_json_missing_min_cobre_version(tmp_path: Path) -> None:
+    """An older manifest lacking ``min_cobre_version`` reads back as ``None``.
+
+    Backward compatibility: a manifest written before the field existed loads
+    without raising and defaults the field to ``None``.
+    """
+    data = _base_manifest_data()
+    assert "min_cobre_version" not in data
+    path = tmp_path / "conversion_manifest.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    manifest = ConversionManifest.from_json(path)
+
+    assert manifest.min_cobre_version is None

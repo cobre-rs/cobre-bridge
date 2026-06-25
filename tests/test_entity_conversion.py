@@ -15,6 +15,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.diagnostics import Severity
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 from tests.conftest import make_case, make_nw_files
@@ -885,6 +887,47 @@ class TestConvertHydros:
         rate = filling["filling_min_rate_m3s"]
         assert math.isfinite(rate)
         assert rate >= 0.0
+
+    def test_ne_plant_emits_filling_diagnostic(self, tmp_path) -> None:
+        """A NE filling plant emits exactly one INFO ``ne-filling-plant`` finding.
+
+        Run under a ``collect()`` sink (as the pipeline does) so the diagnostic
+        is captured instead of logged.
+        """
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        with dx.collect() as collected:
+            convert_hydros(_ne_filling_case(tmp_path), _ne_filling_id_map())
+
+        filling = [d for d in collected if d.code == "ne-filling-plant"]
+        assert len(filling) == 1
+        assert filling[0].severity is Severity.INFO
+
+    def test_ne_filling_diagnostic_table_row(self, tmp_path) -> None:
+        """JURUENA's row carries its code, window 1→2, vol. morto 0.0, and ramp."""
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        with dx.collect() as collected:
+            convert_hydros(_ne_filling_case(tmp_path), _ne_filling_id_map())
+
+        diag = next(d for d in collected if d.code == "ne-filling-plant")
+        assert diag.table is not None
+        rows = [dict(zip(diag.table.columns, row)) for row in diag.table.rows]
+
+        juruena = next(r for r in rows if r["Code"] == 309)
+        assert juruena["Fill start"] == 1
+        assert juruena["Operates from"] == 2
+        assert juruena["Vol. morto %"] == "0.0"
+        assert "stage 4" in juruena["Unit ramp"]
+
+    def test_ex_only_emits_no_filling_diagnostic(self, tmp_path) -> None:
+        """An EX-only case emits no ``ne-filling-plant`` diagnostic."""
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        with dx.collect() as collected:
+            convert_hydros(_hydro_case(tmp_path), self._make_id_map())
+
+        assert not any(d.code == "ne-filling-plant" for d in collected)
 
 
 def _make_hydro_dger_mock(
@@ -4627,6 +4670,87 @@ class TestConvertInitialConditions:
         storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
         # 'S' plant anchored to Vmin (100), NOT 0.50*(1000−100)+100 = 550.
         assert storage[0] == pytest.approx(100.0)
+
+    def _ne_filling_ic_case(self, tmp_path, *, volume_morto: float = 0.0):
+        """A ``NewaveCase`` with JURUENA (NE+filling) for IC routing tests.
+
+        Two EX plants (codes 1, 2) plus JURUENA (code 309, ``NE``,
+        ``volume_minimo == 2.93``) admitted via its exph filling row.
+        """
+        return make_case(
+            tmp_path,
+            hidr=MagicMock(cadastro=_make_ne_cadastro()),
+            confhd=MagicMock(usinas=_make_ne_confhd_df()),
+            exph=_make_ne_exph_mock(volume_morto=volume_morto),
+        )
+
+    def test_ne_plant_routed_to_filling_storage(self, tmp_path) -> None:
+        """A filling ``NE`` plant is seeded into ``filling_storage``, not ``storage``.
+
+        JURUENA (code 309 → cobre id 2) has ``volume_morto == 0`` and
+        ``volume_minimo == 2.93``, so its seed is ``0.00 × 2.93 == 0.0``.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        result = convert_initial_conditions(
+            self._ne_filling_ic_case(tmp_path), _ne_filling_id_map()
+        )
+        assert result["filling_storage"] == [{"hydro_id": 2, "volume_hm3": 0.0}]
+
+    def test_ne_plant_excluded_from_storage(self, tmp_path) -> None:
+        """The filling plant must NOT appear in ``storage`` (cobre rejects in-both).
+
+        The two EX plants (cobre ids 0, 1) stay in ``storage``; JURUENA (id 2) is
+        absent from it.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        result = convert_initial_conditions(
+            self._ne_filling_ic_case(tmp_path), _ne_filling_id_map()
+        )
+        storage_ids = {s["hydro_id"] for s in result["storage"]}
+        assert 2 not in storage_ids
+        assert {0, 1} <= storage_ids
+
+    def test_filling_seed_scales_with_volume_morto(self, tmp_path) -> None:
+        """The seed is ``(volume_morto / 100) × volume_minimo``.
+
+        With a synthetic ``volume_morto == 50`` and ``volume_minimo == 2.93``,
+        the seed is ``0.50 × 2.93 == 1.465`` hm³.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        result = convert_initial_conditions(
+            self._ne_filling_ic_case(tmp_path, volume_morto=50.0),
+            _ne_filling_id_map(),
+        )
+        seed = {s["hydro_id"]: s["volume_hm3"] for s in result["filling_storage"]}
+        assert seed[2] == pytest.approx(1.465)
+
+    def test_volume_morto_out_of_range_clamped(self, tmp_path, caplog) -> None:
+        """A ``volume_morto`` above 100 is clamped to 100% with a warning.
+
+        Synthetic ``volume_morto == 150`` clamps to 100%, giving the full
+        ``volume_minimo == 2.93`` hm³ seed, and logs a clamp warning.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = convert_initial_conditions(
+                self._ne_filling_ic_case(tmp_path, volume_morto=150.0),
+                _ne_filling_id_map(),
+            )
+        seed = {s["hydro_id"]: s["volume_hm3"] for s in result["filling_storage"]}
+        assert seed[2] == pytest.approx(2.93)
+        assert any("volume_morto" in rec.message for rec in caplog.records)
 
 
 def _ic_case(tmp_path, pct_b: float = 75.0):

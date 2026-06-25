@@ -1499,6 +1499,163 @@ class TestCliInProcess:
         # No validation output of any kind reached stderr.
         assert "Validation" not in stderr
 
+    @staticmethod
+    def _inject_cobre_io(
+        monkeypatch: pytest.MonkeyPatch, validate: MagicMock
+    ) -> MagicMock:
+        """Inject a fake ``cobre`` / ``cobre.io`` whose ``validate`` is *validate*.
+
+        Mirrors the established pattern in the other ``--validate`` tests so the
+        real (unreleased-schema) cobre package is never touched. Returns the
+        ``validate`` mock so the test can assert on its call count.
+        """
+        import types
+
+        cobre_pkg = types.ModuleType("cobre")
+        cobre_io = types.ModuleType("cobre.io")
+        cobre_io.validate = validate  # type: ignore[attr-defined]
+        cobre_pkg.io = cobre_io  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "cobre", cobre_pkg)
+        monkeypatch.setitem(sys.modules, "cobre.io", cobre_io)
+        return validate
+
+    def test_validate_skipped_for_filling_case(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A filling case skips ``cobre.io.validate`` entirely and exits 0."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
+        )
+        validate = self._inject_cobre_io(monkeypatch, MagicMock())
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        validate.assert_not_called()
+
+    def test_validate_skip_json_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The filling skip records the explicit reason under ``summary.validation``."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
+        )
+        validate = self._inject_cobre_io(monkeypatch, MagicMock())
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json", "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        validate.assert_not_called()
+        doc = json.loads(stdout)
+        # status stays diagnostics-derived; the skip lands only under summary.
+        assert doc["status"] == "ok"
+        assert doc["summary"]["validation"] == {
+            "ran": False,
+            "valid": None,
+            "warnings": 0,
+            "errors": 0,
+            "skipped_reason": "filling-schema-unreleased",
+        }
+        assert doc["summary"]["validation"]["ran"] is False
+        assert (
+            doc["summary"]["validation"]["skipped_reason"]
+            == "filling-schema-unreleased"
+        )
+
+    def test_validate_skip_human_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The filling skip note lands on stderr with the version + skip phrasing."""
+        from cobre_bridge.cli import MIN_COBRE_FILLING_VERSION
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
+        )
+        validate = self._inject_cobre_io(monkeypatch, MagicMock())
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        validate.assert_not_called()
+        assert "skipping cobre-python validation" in stderr
+        assert MIN_COBRE_FILLING_VERSION in stderr
+
+    def test_validate_runs_for_ex_only_case(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ``EX``-only case validates as today — the gate does not fire."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._case_has_filling_plants", lambda _src: False
+        )
+        validate = self._inject_cobre_io(
+            monkeypatch,
+            MagicMock(return_value={"valid": True, "warnings": [], "errors": []}),
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        validate.assert_called_once()
+
 
 class TestCompareDatasetWiring:
     """ticket-008: compare handlers sourced from the canonical dataset.

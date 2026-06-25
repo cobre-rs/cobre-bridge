@@ -12,6 +12,7 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.filling import (
     filling_min_rate_m3s,
     filling_schedule,
@@ -900,6 +901,46 @@ def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     return _apply_permanent_overrides(cadastro, case)
 
 
+def _unit_ramp_summary(
+    exph_df: pd.DataFrame,
+    newave_code: int,
+    start_year: int,
+    start_month: int,
+) -> str:
+    """One-line summary of the units coming online for a filling plant.
+
+    Reads the plant's exph unit rows — a unit row is defined by its
+    ``data_entrada_operacao`` (the online date), with
+    ``conjunto_maquina_entrada`` naming the machine group — maps each online
+    date to a stage via :func:`filling_stage_id`, groups by ``conjunto``,
+    counts the units, and renders ``"conj <c>: <n> unit(s) @ stage <s>"`` parts
+    (``<s>`` = the stage at which the conjunto is fully online) joined by
+    ``"; "``. Returns ``"—"`` when the plant has no parsable unit rows.
+
+    The epic-04 field-independence guards (``data_entrada_operacao.notna()`` +
+    a ``pd.isna(conjunto)`` skip) keep a malformed exph row — a set conjunto
+    with a ``NaT`` date, or the inverse — from crashing the cast.
+    """
+    rows = exph_df.loc[exph_df["codigo_usina"] == newave_code]
+    unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
+    by_conjunto: dict[int, list[int]] = {}
+    for _, ur in unit_df.iterrows():
+        conjunto = ur["conjunto_maquina_entrada"]
+        if pd.isna(conjunto):
+            continue
+        ud = ur["data_entrada_operacao"]
+        usid = filling_stage_id(ud.year, ud.month, start_year, start_month)
+        by_conjunto.setdefault(int(conjunto), []).append(usid)
+    if not by_conjunto:
+        return "—"
+    parts = [
+        f"conj {c}: {len(stages)} unit{'s' if len(stages) != 1 else ''} "
+        f"@ stage {max(stages)}"
+        for c, stages in sorted(by_conjunto.items())
+    ]
+    return "; ".join(parts)
+
+
 def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert the source model hydro plant data to a Cobre ``hydros.json`` dict.
 
@@ -986,6 +1027,10 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     fpha_codes = fpha_eligible_codes(case)
 
     hydros: list[dict] = []
+    # One diagnostic row per admitted filling plant, accumulated in the loop and
+    # emitted as a single INFO Diagnostic after it (empty for EX-only cases, so
+    # nothing new is emitted there).
+    filling_diag_rows: list[list[object]] = []
     for _, row in existing.iterrows():
         newave_code = int(row["codigo_usina"])
         name = str(row["nome_usina"]).strip()
@@ -1039,10 +1084,30 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             ].iloc[0]
             ts = filling_row["data_inicio_enchimento"]
             duracao = int(filling_row["duracao_enchimento"])
+            volume_morto = float(filling_row["volume_morto"])
             start_sid, entry_sid = filling_schedule(
                 ts.year, ts.month, duracao, horizon.start_year, horizon.start_month
             )
             entry_stage_id = entry_sid
+            # One INFO-diagnostic row per filling plant (rendered after the loop):
+            # its filling window, seeded dead volume, and unit-ramp summary. Built
+            # for every filling plant, including the ``duracao == 0`` (no-filling-
+            # block) case, so the user always sees the admitted plant.
+            filling_diag_rows.append(
+                [
+                    name,
+                    newave_code,
+                    start_sid,
+                    entry_sid,
+                    f"{volume_morto:.1f}",
+                    _unit_ramp_summary(
+                        exph_df,
+                        newave_code,
+                        horizon.start_year,
+                        horizon.start_month,
+                    ),
+                ]
+            )
             if entry_sid > start_sid:
                 # JURUENA's single-stage window is anchor-insensitive: the soft
                 # target is pinned to ``min_storage_hm3`` regardless of the rate,
@@ -1065,7 +1130,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 rate_entry = min(entry_sid, horizon.total_stages)
                 rate = filling_min_rate_m3s(
                     vol_min,
-                    float(filling_row["volume_morto"]),
+                    volume_morto,
                     start_sid,
                     rate_entry,
                     stage_year_month,
@@ -1272,6 +1337,45 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         hydros.append(hydro_entry)
 
     hydros.sort(key=lambda h: h["id"])
+
+    # Surface the admitted dead-volume filling plants as a single INFO
+    # Diagnostic with one table row per plant (the thermal-bounds diagnostic
+    # shape). Emitted only when at least one filling plant was seen, so EX-only
+    # cases add nothing. The de-dup in ``_finalize_diagnostics`` keys on
+    # ``(code, summary)``, so the per-plant detail must ride on the table, not on
+    # N separate diagnostics.
+    if filling_diag_rows:
+        emit(
+            Diagnostic(
+                code="ne-filling-plant",
+                severity=Severity.INFO,
+                category="Filling plants",
+                title=(
+                    f"Dead-volume filling plants admitted ({len(filling_diag_rows)})"
+                ),
+                summary=(
+                    f"{len(filling_diag_rows)} NE plant(s) admitted with a "
+                    "dead-volume filling schedule; each fills before operating "
+                    "and ramps capacity as units come online."
+                ),
+                table=DiagnosticTable(
+                    columns=[
+                        "Plant",
+                        "Code",
+                        "Fill start",
+                        "Operates from",
+                        "Vol. morto %",
+                        "Unit ramp",
+                    ],
+                    rows=filling_diag_rows,
+                    justify=["left", "right", "right", "right", "right", "left"],
+                    caption=(
+                        "Stage ids are 0-based; capacity is 0 until 'Operates from'."
+                    ),
+                ),
+            ),
+            logger=_LOG,
+        )
 
     return {
         "$schema": _SCHEMA_URL,

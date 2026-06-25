@@ -54,6 +54,12 @@ if TYPE_CHECKING:
     from cobre_bridge.pipeline import ConversionReport
 
 
+#: Minimum cobre / cobre-python version that ships the dead-volume filling schema.
+#: ticket-014 imports this same constant for the manifest note (single source of
+#: truth).
+MIN_COBRE_FILLING_VERSION = "0.9.0"
+
+
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
     """Load lines.json from the Cobre case directory.
 
@@ -565,6 +571,26 @@ def _run_check(args: SimpleNamespace) -> None:
     return
 
 
+def _case_has_filling_plants(src: Path) -> bool:
+    """Return whether *src* has ``NE``-with-filling plants (best-effort, never raises).
+
+    Re-reads the case via :meth:`NewaveCase.from_directory` — the same constructor
+    the pipeline and manifest writer use — and evaluates the single-source-of-truth
+    predicate :func:`filling_hydro_codes`. A read failure (``OSError``/``ValueError``)
+    degrades to ``False`` so a ``--validate`` skip is a convenience, never a hard
+    failure.
+    """
+    from cobre_bridge.case import NewaveCase
+    from cobre_bridge.plants import filling_hydro_codes
+
+    try:
+        case = NewaveCase.from_directory(src)
+        exph_df = case.exph.expansoes if case.exph is not None else None
+        return bool(filling_hydro_codes(case.confhd.usinas, exph_df))
+    except (OSError, ValueError):
+        return False
+
+
 def _run_newave_conversion(args: SimpleNamespace) -> None:
     """Execute the convert newave subcommand."""
     # Import here so the module-level import of pipeline is deferred.
@@ -700,6 +726,32 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     # populated; validation failure flips the exit code, never the status.
     validation_failed = False
     if args.validate:
+        # The filling schema this feature emits is unreleased: the installed
+        # cobre-python does not know the new fields, so validating a filling case
+        # would reject correct output and force exit 2. Skip validation (success,
+        # exit 0) when the case has NE-with-filling plants, recording why on stderr
+        # (human) and under summary["validation"] (machine) — never flipping status.
+        if _case_has_filling_plants(src):
+            print_status(
+                f"Note: dead-volume filling output requires cobre-python >= "
+                f"{MIN_COBRE_FILLING_VERSION} (the filling schema is unreleased; "
+                f"installed cobre-python lacks it); skipping cobre-python validation.",
+                console=err_console,
+                style="#F5A623",
+            )
+            if args.json_output:
+                summary["validation"] = {
+                    "ran": False,
+                    "valid": None,
+                    "warnings": 0,
+                    "errors": 0,
+                    "skipped_reason": "filling-schema-unreleased",
+                }
+                _emit_convert_json(
+                    build_verdict("convert newave", status, summary, report.diagnostics)
+                )
+            return
+
         try:
             import cobre.io  # type: ignore[import-untyped]
         except ImportError:
@@ -935,6 +987,11 @@ def _write_conversion_manifest(
         "lines": report.line_count,
         "stages": report.stage_count,
     }
+    # Record the minimum cobre version the output requires: a case with
+    # NE-with-filling plants emits the unreleased filling schema, so its output
+    # is only loadable by cobre >= MIN_COBRE_FILLING_VERSION. EX-only cases stay
+    # None (loadable by any released cobre-python).
+    has_filling = _case_has_filling_plants(src)
     manifest = ConversionManifest.create(
         "convert newave",
         src,
@@ -943,6 +1000,7 @@ def _write_conversion_manifest(
         input_files=hash_input_files(files),
         diagnostics_summary=summarize_diagnostics(report.diagnostics),
         diagnostics=[d.to_dict() for d in report.diagnostics],
+        min_cobre_version=MIN_COBRE_FILLING_VERSION if has_filling else None,
     )
 
     path = dst / "conversion_manifest.json"

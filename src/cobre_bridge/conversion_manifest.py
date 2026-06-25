@@ -51,6 +51,12 @@ class ConversionManifest:
     input_files: list[dict[str, object]] = field(default_factory=list)
     diagnostics_summary: dict[str, int] = field(default_factory=dict)
     diagnostics: list[dict[str, object]] = field(default_factory=list)
+    # Minimum cobre version the converted output requires, or ``None`` when the
+    # output is loadable by any released cobre-python. Set only for cases that
+    # emit the unreleased dead-volume filling schema (``NE``-with-filling
+    # plants); ``None`` for EX-only cases. Appended last so existing positional
+    # and ``from_json`` round-tripping stay unchanged.
+    min_cobre_version: str | None = None
 
     @classmethod
     def create(
@@ -63,6 +69,7 @@ class ConversionManifest:
         input_files: list[dict[str, object]],
         diagnostics_summary: dict[str, int],
         diagnostics: list[dict[str, object]],
+        min_cobre_version: str | None = None,
     ) -> ConversionManifest:
         """Build a manifest, capturing bridge version, git SHA, and UTC time.
 
@@ -71,7 +78,9 @@ class ConversionManifest:
         non-deterministic field — and ``git_sha`` from
         :func:`cobre_bridge._git.git_sha`. The
         ``source_dir`` / ``output_dir`` paths are stringified via ``str(...)``.
-        The remaining data fields are caller-supplied.
+        ``min_cobre_version`` records the minimum cobre version the output
+        requires (``None`` for EX-only cases). The remaining data fields are
+        caller-supplied.
         """
         return cls(
             command=command,
@@ -84,6 +93,7 @@ class ConversionManifest:
             input_files=input_files,
             diagnostics_summary=diagnostics_summary,
             diagnostics=diagnostics,
+            min_cobre_version=min_cobre_version,
         )
 
     def to_json(self, path: Path) -> None:

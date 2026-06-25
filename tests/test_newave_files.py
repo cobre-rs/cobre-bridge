@@ -43,9 +43,3 @@ def test_resolve_required_missing_carries_path_and_field(tmp_path: Path) -> None
 def test_missing_caso_message_is_preserved(tmp_path: Path) -> None:
     with pytest.raises(SourceFileError, match=f"caso.dat not found in {tmp_path}"):
         NewaveFiles.from_directory(tmp_path)
-
-
-def test_newave_files_discovers_exph() -> None:
-    files = NewaveFiles.from_directory(Path("example/newave_rodada_2001"))
-    assert files.exph is not None
-    assert files.exph.name.lower() == "exph.dat"
