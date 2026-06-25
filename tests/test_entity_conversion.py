@@ -4497,6 +4497,118 @@ class TestHydroPenaltyCosts:
         # spillage (rho_avg only) is unaffected by rho_max_acum.
         assert high["spillage_cost"] == pytest.approx(low["spillage_cost"])
 
+    def test_storage_floor_derived_from_deficit_at_evaporation_tier(self) -> None:
+        from cobre_bridge.converters.network import (
+            _STORAGE_VIOLATION_DEFICIT_MULT,
+            HM3_TO_MWH_PER_RHO,
+            _hydro_penalty_costs,
+        )
+
+        max_deficit_cost, rho_max_acum = 100.0, 2.0
+        costs = _hydro_penalty_costs(
+            rho_avg=1.0,
+            rho_max_acum=rho_max_acum,
+            penalid_costs={},
+            max_deficit_cost=max_deficit_cost,
+        )
+        # storage == 10 × max_deficit × rho_max_acum × 277.78 (energy-equivalent).
+        expected = (
+            _STORAGE_VIOLATION_DEFICIT_MULT
+            * max_deficit_cost
+            * rho_max_acum
+            * HM3_TO_MWH_PER_RHO
+        )
+        assert costs["storage_violation_below_cost"] == pytest.approx(expected)
+        # ... which is exactly the evaporation energy-equivalent.
+        assert costs["storage_violation_below_cost"] == pytest.approx(
+            costs["evaporation_violation_cost"] * HM3_TO_MWH_PER_RHO
+        )
+
+    def test_filling_target_derived_a_little_below_deficit(self) -> None:
+        from cobre_bridge.converters.network import (
+            _FILLING_TARGET_DEFICIT_FRACTION,
+            HM3_TO_MWH_PER_RHO,
+            _hydro_penalty_costs,
+        )
+
+        max_deficit_cost, rho_max_acum = 100.0, 2.0
+        costs = _hydro_penalty_costs(
+            rho_avg=1.0,
+            rho_max_acum=rho_max_acum,
+            penalid_costs={},
+            max_deficit_cost=max_deficit_cost,
+        )
+        expected = (
+            _FILLING_TARGET_DEFICIT_FRACTION
+            * max_deficit_cost
+            * rho_max_acum
+            * HM3_TO_MWH_PER_RHO
+        )
+        assert costs["filling_target_violation_cost"] == pytest.approx(expected)
+
+    def test_storage_floor_is_the_largest_hydro_penalty(self) -> None:
+        from cobre_bridge.converters.network import (
+            HM3_TO_MWH_PER_RHO,
+            _hydro_penalty_costs,
+        )
+
+        costs = _hydro_penalty_costs(
+            rho_avg=1.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        storage = costs["storage_violation_below_cost"]
+        # The storage floor is the strictest deterrent: it dominates every other
+        # hydro penalty, including the evaporation energy-equivalent it is derived
+        # from and the (cheaper) filling target.
+        others = [v for k, v in costs.items() if k != "storage_violation_below_cost"]
+        assert storage == pytest.approx(max(costs.values()))
+        assert all(storage > v for v in others)
+        assert storage > costs["evaporation_violation_cost"]
+        assert storage > costs["filling_target_violation_cost"]
+        # Sanity: the ordering above is the energy-equiv blow-up (×277.78), not a
+        # coincidence of the chosen ρ.
+        assert storage == pytest.approx(
+            costs["evaporation_violation_cost"] * HM3_TO_MWH_PER_RHO
+        )
+
+    def test_storage_penalid_volmin_uses_rho_max_acum(self) -> None:
+        from cobre_bridge.converters.network import (
+            HM3_TO_MWH_PER_RHO,
+            _hydro_penalty_costs,
+        )
+
+        volmin_rate = 5.0
+        penalid = {"VOLMIN": volmin_rate}
+        # rho_avg deliberately != rho_max_acum so the two are distinguishable.
+        costs = _hydro_penalty_costs(
+            rho_avg=1.0,
+            rho_max_acum=2.0,
+            penalid_costs=penalid,
+            max_deficit_cost=100.0,
+        )
+        assert costs["storage_violation_below_cost"] == pytest.approx(
+            volmin_rate * 2.0 * HM3_TO_MWH_PER_RHO
+        )
+        # Changing rho_avg alone must NOT move the storage floor (rho_max_acum-only).
+        moved_rho_avg = _hydro_penalty_costs(
+            rho_avg=9.0,
+            rho_max_acum=2.0,
+            penalid_costs=penalid,
+            max_deficit_cost=100.0,
+        )
+        assert moved_rho_avg["storage_violation_below_cost"] == pytest.approx(
+            costs["storage_violation_below_cost"]
+        )
+        # Doubling rho_max_acum doubles the storage floor.
+        doubled = _hydro_penalty_costs(
+            rho_avg=1.0,
+            rho_max_acum=4.0,
+            penalid_costs=penalid,
+            max_deficit_cost=100.0,
+        )
+        assert doubled["storage_violation_below_cost"] == pytest.approx(
+            2.0 * costs["storage_violation_below_cost"]
+        )
+
 
 class TestConvertHydroPenaltyOverrides:
     """Per-stage, SIN-uniform hydro penalty override parquet."""

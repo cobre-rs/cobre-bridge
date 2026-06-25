@@ -96,6 +96,12 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   = 277.78 × ρ MWh (purely volumetric — 730h convention cancels). So
 #     cobre_coef [R$/hm³] = source_R$/MWh × ρ × HM3_TO_MWH_PER_RHO
 #   with HM3_TO_MWH_PER_RHO = 1e6/3600 ≈ 277.78.
+#   Both slots are now DERIVED from the deficit cost via ρ_max_acum, not
+#   hard-coded: storage_violation_below_cost = 10 × MAX_CUSTO_DEFICIT × ρ_max_acum
+#   × HM3_TO_MWH_PER_RHO (the evaporation level, i.e. the greatest hydro penalty —
+#   it equals evaporation_cost × HM3_TO_MWH_PER_RHO); filling_target_violation_cost
+#   = 0.9 × MAX_CUSTO_DEFICIT × ρ_max_acum × HM3_TO_MWH_PER_RHO (a little below the
+#   deficit cost). Neither is a hard-coded placeholder any more.
 #
 # The source model's 730 h-per-month convention vs cobre's actual calendar block_hours
 # (672–744 h) introduces only a ±2% numerical drift in absolute LP cost for the Families
@@ -180,13 +186,27 @@ _EVAPORATION_MULT = 10.0
 # turbined/outflow-below/outflow-above slack costs share an LP coefficient (ρ_avg
 # cancels nothing). An earlier revision multiplied each by a ~1 % "tie-break" factor to
 # break that degeneracy; the factors were all reverted to 1.00 (no-op) and have been
-# dropped. Reintroduce distinct spacing here if HiGHS degeneracy resurfaces. --- Cobre
-# fields not yet wired into the LP -------------------------------- Storage and
-# filling-target violation costs are declared on cobre's schema but
-# `lp_builder/matrix.rs` does NOT use them in the objective (all 0.0 at build time). We
-# still emit sensible values so the case is ready for the day cobre wires these in.
-_DEFAULT_STORAGE_VIOLATION_BELOW_COST = 1.0e6  # R$/hm³ (dormant in cobre LP)
-_DEFAULT_FILLING_TARGET_VIOLATION_COST = 1.0e7  # R$/hm³ (dormant in cobre LP)
+# dropped. Reintroduce distinct spacing here if HiGHS degeneracy resurfaces.
+
+# --- Cobre Family-D fields not yet wired into the LP -----------------------
+# Storage-floor and filling-target violation costs are declared on cobre's schema
+# but `lp_builder/matrix.rs` does NOT use them in the objective (all 0.0 at build
+# time). We still emit faithful values so the case is ready for the day cobre
+# wires them in — DERIVED from the deficit cost via ρ_max_acum (energy-equivalent,
+# × HM3_TO_MWH_PER_RHO), exactly like `evaporation_violation_cost`, rather than
+# hard-coded placeholders.
+#
+# storage_violation_below_cost is priced at the evaporation / FPHA-folga tier —
+# the manual p.87 hard-physical-violation level, 10 × MAX_CUSTO_DEFICIT — so its
+# converted R$/hm³ slot equals the evaporation energy-equivalent
+# (evaporation_cost × HM3_TO_MWH_PER_RHO). That makes the storage floor the most
+# expensive hydro penalty: the LP draws a reservoir below its floor only as a
+# last resort.
+_STORAGE_VIOLATION_DEFICIT_MULT = 10.0
+# filling_target_violation_cost sits a little below the deficit cost
+# (energy-equivalent): missing a filling target is undesirable but cheaper than
+# load deficit, hence 0.9 × MAX_CUSTO_DEFICIT.
+_FILLING_TARGET_DEFICIT_FRACTION = 0.9
 
 # --- Soft fallback for ELETRI when PENALID is silent ----------------------- The source
 # model's behaviour when ELETRI is absent: use the constraint only in final simulation,
@@ -602,8 +622,9 @@ def _hydro_penalty_costs(
 
     Convention from the source model manual p.87:
 
-    - ``DESVIO`` → ``× MAX_PRODTACUM_SIN`` (water withdrawal).
-    - ``VAZMIN`` / ``TURBMN`` / ``TURBMX`` / ``VOLMIN`` → ``× PROD_MEDIA_SIN``.
+    - ``DESVIO`` / ``VOLMIN`` → ``× MAX_PRODTACUM_SIN`` (water withdrawal,
+      storage floor — the agreed criterion, matching evaporation).
+    - ``VAZMIN`` / ``TURBMN`` / ``TURBMX`` → ``× PROD_MEDIA_SIN``.
     - ``GHMIN`` → energy-domain slack, no productivity multiplier.
     - Micro-penalties ``pEVERT`` / ``pTURB`` / ``pCDESV`` → ``× PROD_MEDIA_SIN``.
 
@@ -621,17 +642,19 @@ def _hydro_penalty_costs(
     turbined_below_cost = turbmn_mwh * rho_avg
     generation_below_cost = ghmin_mwh  # energy-domain, no productivity factor
 
-    # Storage / filling target: cobre slots are dormant in the LP today but
-    # we still populate them. VOLMIN comes from PENALID when set; otherwise
-    # use a high default.
+    # Storage floor / filling target: cobre's Family-D slots are dormant in the
+    # LP today (priced 0.0) but we still populate them with faithful, DERIVED
+    # values so the case is ready when cobre wires them in.
     #
     # Conversion from the source model R$/MWh to cobre R$/hm³ is purely volumetric:
     # 1 hm³ of stored water released through the cascade yields
     #   1e6 m³ × ρ MW/(m³/s) × 1/3600 s/h = (1e6/3600) × ρ MWh
-    # so cobre_coef = P_R$_MWh × ρ × (1e6/3600). The 730h/month assumption
-    # cancels out — this is dimensional energy-equivalence, not a per-hour
-    # rate. (Earlier versions used × C_M3S2HM3 here which was wrong by
-    # the factor MONTH_HOURS = 730.)
+    # so cobre_coef = P_R$_MWh × ρ × HM3_TO_MWH_PER_RHO. The 730h/month assumption
+    # cancels out — this is dimensional energy-equivalence, not a per-hour rate.
+    # ρ here is ρ_max_acum (MAX_PRODTACUM_SIN), per the agreed criterion and
+    # matching the evaporation / water-withdrawal slacks (manual p.87). (Earlier
+    # versions used × C_M3S2HM3 here which was wrong by the factor
+    # MONTH_HOURS = 730.)
     #
     # ⚠️ This volumetric (730-cancelling) form is correct ONLY because cobre
     # prices these Family-D slots with NO time multiplier (`objective = penalty`).
@@ -639,11 +662,20 @@ def _hydro_penalty_costs(
     # generic/VminOP slack), this conversion becomes wrong: the slack would then
     # need per-stage hours, exactly like
     # `constraints.py:_vminop_energy_factor`. Keep these two facts in lockstep.
+    #
+    # storage_violation_below_cost is priced at the evaporation tier
+    # (10 × MAX_CUSTO_DEFICIT) — the greatest hydro penalty. With no PENALID
+    # VOLMIN the default equals evaporation_cost × HM3_TO_MWH_PER_RHO; a PENALID
+    # VOLMIN rate overrides the 10× multiplier but keeps the same ρ_max_acum
+    # treatment.
     volmin_mwh = penalid_costs.get("VOLMIN")
     storage_below_cost = (
-        volmin_mwh * rho_avg * HM3_TO_MWH_PER_RHO
+        volmin_mwh * rho_max_acum * HM3_TO_MWH_PER_RHO
         if volmin_mwh is not None
-        else _DEFAULT_STORAGE_VIOLATION_BELOW_COST
+        else _STORAGE_VIOLATION_DEFICIT_MULT
+        * max_deficit_cost
+        * rho_max_acum
+        * HM3_TO_MWH_PER_RHO
     )
 
     # Evaporation violation: no PENALID variable. The source model manual p.87
@@ -653,6 +685,16 @@ def _hydro_penalty_costs(
     # water_withdrawal_violation_cost). The /C_M3S2HM3 step is dropped (only needed for
     # the source model's per-hm³ slot).
     evaporation_cost = _EVAPORATION_MULT * max_deficit_cost * rho_max_acum
+
+    # filling_target_violation_cost: no PENALID source — always derived. Same
+    # volumetric ρ_max_acum × HM3_TO_MWH_PER_RHO form as the storage floor, but a
+    # little below the deficit cost (0.9×) rather than at the evaporation tier.
+    filling_target_cost = (
+        _FILLING_TARGET_DEFICIT_FRACTION
+        * max_deficit_cost
+        * rho_max_acum
+        * HM3_TO_MWH_PER_RHO
+    )
 
     # Flow-domain micro-penalties (× ρ_avg per source-model individualized conversion).
     spillage_cost = _PEVERT * rho_avg
@@ -674,7 +716,7 @@ def _hydro_penalty_costs(
         "turbined_cost": turbined_cost,
         "diversion_cost": diversion_cost,
         "storage_violation_below_cost": storage_below_cost,
-        "filling_target_violation_cost": _DEFAULT_FILLING_TARGET_VIOLATION_COST,
+        "filling_target_violation_cost": filling_target_cost,
         "turbined_violation_below_cost": turbined_below_cost,
         "outflow_violation_below_cost": outflow_below_cost,
         "outflow_violation_above_cost": outflow_above_cost,
@@ -686,11 +728,13 @@ def _hydro_penalty_costs(
 
 
 # Hydro penalty columns whose value scales with productivity (ρ_avg or
-# ρ_max_acum) and is therefore stage-varying. Energy-domain slots
-# (``generation_violation_below_cost``) and ρ-independent defaults
-# (``filling_target_violation_cost``, and ``storage_violation_below_cost`` when
-# VOLMIN is unset) are intentionally excluded — they never differ per stage so
-# the sparse override never emits them.
+# ρ_max_acum) and is therefore stage-varying. ``generation_violation_below_cost``
+# (energy-domain) never differs per stage and is excluded. After the
+# deficit-derived rewrite ``storage_violation_below_cost`` always scales with
+# ρ_max_acum (both the VOLMIN and default paths), so it is included.
+# ``filling_target_violation_cost`` now also scales with ρ_max_acum, but is
+# deliberately kept OUT of the per-stage override: its LP slot is dormant, so it
+# is populated once from the base ρ_max_acum rather than re-emitted per stage.
 _RHO_SCALED_HYDRO_COLUMNS: tuple[str, ...] = (
     "spillage_cost",
     "turbined_cost",
@@ -726,10 +770,13 @@ def convert_penalties(
       ``pEXC``, ``pCDESV``) are the source model's hard-coded internal defaults (page
       88, current v30 values). They are written directly to cobre and preserve the
       source model's merit order: exchange < spillage < FPHA < curtailment < excess.
-    - Evaporation and storage-violation slots without a PENALID source
-      fall back to ``10 × MAX_CUSTO_DEFICIT × ρ_max_acum`` (evaporation,
-      per the manual) or ``1e6`` (storage/filling — dormant in cobre's LP
-      today but emitted so the file is ready when cobre wires them in).
+    - Evaporation, storage-floor and filling-target slots without a PENALID
+      source are DERIVED from the deficit cost via ``ρ_max_acum``: evaporation and
+      storage at ``10 × MAX_CUSTO_DEFICIT × ρ_max_acum`` (the manual p.87 level;
+      storage additionally ``× HM3_TO_MWH_PER_RHO`` for its R$/hm³ slot) and
+      filling at ``0.9 × MAX_CUSTO_DEFICIT × ρ_max_acum × HM3_TO_MWH_PER_RHO``. The
+      storage and filling slots are dormant in cobre's LP today but emitted so the
+      file is ready when cobre wires them in.
 
     Parameters
     ----------
@@ -854,10 +901,10 @@ def convert_hydro_penalty_overrides(
     The override is SIN-uniform (one value per stage, applied to every hydro, matching
     the source model's use of a single SIN constant) and **sparse**: a row is emitted
     only for ``(hydro, stage)`` pairs and columns whose value actually differs from the
-    global ``penalties.json`` default. ρ-independent slots
-    (``generation_violation_below_cost``, ``filling_target_violation_cost``, and
-    ``storage_violation_below_cost`` when VOLMIN is unset) never differ and are never
-    emitted.
+    global ``penalties.json`` default. ``generation_violation_below_cost``
+    (energy-domain, ρ-independent) and ``filling_target_violation_cost``
+    (ρ_max_acum-derived but deliberately excluded from the per-stage override —
+    its LP slot is dormant) are never emitted.
 
     Parameters
     ----------
