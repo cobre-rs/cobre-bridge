@@ -403,24 +403,35 @@ def _make_ne_cadastro() -> pd.DataFrame:
 def _make_ne_exph_mock(*, duracao: int = 1, volume_morto: float = 0.0) -> MagicMock:
     """An ``exph`` reader mock whose ``expansoes`` carries JURUENA's filling row.
 
-    The schedule row (non-null ``data_inicio_enchimento``) is what
-    ``filling_hydro_codes`` selects; a trailing unit row with ``NaT`` mirrors the
-    real exph layout (one schedule row + one row per generating unit).
+    Mirrors the real ``exph.dat`` layout (verified on JURUENA): one schedule row
+    (non-null ``data_inicio_enchimento``) — what ``filling_hydro_codes`` selects
+    and the epic-03 ``convert_hydros`` filling tests read via ``.iloc[0]`` — then
+    one row **per generating unit** with ``data_entrada_operacao`` /
+    ``conjunto_maquina_entrada`` / ``maquina_entrada`` populated (epic-04). JURUENA
+    has two machines, both entering Jan 2025 in machine group 1 (so under the
+    Sep-2024 horizon their online stage is 4). The schedule row keeps a non-null
+    ``data_entrada_operacao`` (per the epic-03 mock) but a NULL
+    ``conjunto_maquina_entrada``, so the ramp branch — which filters unit rows on
+    ``conjunto_maquina_entrada`` — never treats it as a generating unit.
     """
     expansoes = pd.DataFrame(
         {
-            "codigo_usina": [309, 309],
-            "nome_usina": ["JURUENA", "JURUENA"],
+            "codigo_usina": [309, 309, 309],
+            "nome_usina": ["JURUENA", "JURUENA", "JURUENA"],
             "data_inicio_enchimento": [
                 pd.Timestamp("2024-10-01"),
                 pd.NaT,
+                pd.NaT,
             ],
-            "duracao_enchimento": [duracao, 0],
-            "volume_morto": [volume_morto, 0.0],
+            "duracao_enchimento": [duracao, 0, 0],
+            "volume_morto": [volume_morto, 0.0, 0.0],
             "data_entrada_operacao": [
                 pd.Timestamp("2024-11-01"),
-                pd.Timestamp("2024-11-01"),
+                pd.Timestamp("2025-01-01"),
+                pd.Timestamp("2025-01-01"),
             ],
+            "conjunto_maquina_entrada": [pd.NA, 1, 1],
+            "maquina_entrada": [pd.NA, 1, 2],
         }
     )
     exph = MagicMock()
@@ -1554,6 +1565,419 @@ class TestConvertStorageBoundsPostStudy:
         # Post-study frozen at Dec=80, NOT seasonal Jan=50.
         assert df.loc[12, "max_storage_hm3"] == pytest.approx(80.0)
         assert df.loc[23, "max_storage_hm3"] == pytest.approx(80.0)
+
+
+class TestConvertStorageBoundsMaxGenColumn:
+    """ticket-010: the ``max_generation_mw`` column is gated on filling plants.
+
+    EX-only cases (no ``NE``-with-filling plant) keep the existing 8-column
+    schema byte-identical; a case with a filling plant gains a 9th
+    ``max_generation_mw`` float64 column that is all-null until ticket-011
+    populates the per-stage ramp caps.
+    """
+
+    _EXPECTED_8_COLUMNS = [
+        "hydro_id",
+        "stage_id",
+        "min_storage_hm3",
+        "max_storage_hm3",
+        "min_turbined_m3s",
+        "max_turbined_m3s",
+        "min_outflow_m3s",
+        "min_generation_mw",
+    ]
+
+    def _run_ex_only(self, tmp_path):
+        """An EX-only case (no exph) with one GHMIN row, mirroring ``_run``."""
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = 2024
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 1
+        mock_dger.num_anos_pos_estudo = 0
+        mock_dger.sazonaliza_vmaxt = 1
+        mock_dger.sazonaliza_vmint = 1
+
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "usina_existente": ["EX"],
+                "nome_usina": ["TEST"],
+            }
+        )
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        cadastro = pd.DataFrame(
+            {"volume_minimo": [0.0], "volume_maximo": [100.0]}, index=[10]
+        )
+        id_map = MagicMock()
+        id_map.hydro_id = lambda c: 0
+
+        case = make_case(
+            make_nw_files(tmp_path),
+            dger=mock_dger,
+            confhd=mock_confhd,
+            exph=None,
+        )
+        with (
+            patch("cobre_bridge.converters.hydro.read_cadastro", return_value=cadastro),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={10: {0: 100.0}},
+            ),
+        ):
+            return convert_storage_bounds(case, id_map)
+
+    def _run_filling(self, tmp_path):
+        """A filling case (JURUENA via exph) with one GHMIN row on an EX plant.
+
+        ``convert_storage_bounds`` needs at least one per-stage override/GHMIN
+        row to emit any table, so a synthetic GHMIN entry for EX plant 1 is
+        supplied. The non-empty ``filling_codes`` (309) is what gates the
+        column on.
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        case = _ne_filling_case(tmp_path)
+        id_map = _ne_filling_id_map()
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={1: {0: 100.0}},
+            ),
+        ):
+            return convert_storage_bounds(case, id_map)
+
+    def test_ex_only_case_omits_max_generation_column(self, tmp_path) -> None:
+        """EX-only case keeps exactly the 8 existing columns, no max_generation."""
+        tbl = self._run_ex_only(tmp_path)
+        assert tbl is not None
+        assert tbl.column_names == self._EXPECTED_8_COLUMNS
+        assert "max_generation_mw" not in tbl.column_names
+
+    def test_filling_case_includes_max_generation_column(self, tmp_path) -> None:
+        """A filling plant adds a float64 max_generation_mw column after min_gen."""
+        import pyarrow as pa
+
+        tbl = self._run_filling(tmp_path)
+        assert tbl is not None
+        assert "max_generation_mw" in tbl.column_names
+        assert tbl.schema.field("max_generation_mw").type == pa.float64()
+        # Positioned immediately after min_generation_mw.
+        names = tbl.column_names
+        assert names[names.index("min_generation_mw") + 1] == "max_generation_mw"
+
+    def test_max_generation_populated_for_filling_ramp_rows(self, tmp_path) -> None:
+        """ticket-011 populates the column for JURUENA's ramp rows.
+
+        ticket-010 introduced the column all-null; ticket-011's ramp branch now
+        emits explicit ``0.0`` caps for JURUENA's pre-online stages (2, 3) while
+        the non-ramp GHMIN row (EX plant 1) keeps ``max_generation_mw`` null. So
+        the column is no longer all-null: exactly the GHMIN row is null and the
+        two JURUENA ramp rows carry ``0.0``.
+        """
+        tbl = self._run_filling(tmp_path)
+        assert tbl is not None
+        assert tbl.num_rows > 0
+        col = tbl.column("max_generation_mw")
+        # Only the single non-ramp GHMIN row is null; the rest are populated.
+        assert col.null_count == 1
+        assert col.null_count < tbl.num_rows
+
+
+class TestConvertStorageBoundsRamp:
+    """ticket-011: the filling-plant unit-ramp branch in ``convert_storage_bounds``.
+
+    A ``NE``-with-filling plant (JURUENA, code 309) operates from its
+    ``entry_stage_id`` but its turbine / generation capacity over the ramp window
+    ``[entry_sid, full_online_sid)`` is whatever generating units are online. Under
+    the Sep-2024 3-year horizon JURUENA's filling completes at ``entry_sid == 2``
+    and both units enter Jan 2025 (stage 4), so stages 2 and 3 have zero online
+    machines (explicit ``0.0`` caps) and there is no override row at stage 4+ (the
+    base ``hydros.json`` caps apply).
+    """
+
+    def _run_juruena(self, tmp_path, *, duracao: int = 1):
+        """Run ``convert_storage_bounds`` for the JURUENA filling case.
+
+        ``_read_ghmin_per_stage`` is patched to ``{}`` so the table contains only
+        the ramp rows (no GHMIN/MODIF rows to filter past).
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        case = _ne_filling_case(tmp_path, duracao=duracao)
+        id_map = _ne_filling_id_map()
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={},
+            ),
+        ):
+            tbl = convert_storage_bounds(case, id_map)
+        return tbl, id_map.hydro_id(309)
+
+    def test_juruena_emits_zero_cap_ramp_rows_stages_2_3(self, tmp_path) -> None:
+        """JURUENA emits exactly two ramp rows (stages 2, 3) with all caps ``0.0``."""
+        tbl, juruena_id = self._run_juruena(tmp_path)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == juruena_id].sort_values("stage_id")
+        assert list(jur["stage_id"]) == [2, 3]
+        for col in ("max_turbined_m3s", "max_generation_mw", "min_generation_mw"):
+            assert list(jur[col]) == [0.0, 0.0], col
+
+    def test_juruena_no_ramp_row_at_full_online_stage(self, tmp_path) -> None:
+        """No JURUENA ramp row at stage 4+ (both units online ⇒ base caps apply)."""
+        tbl, juruena_id = self._run_juruena(tmp_path)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == juruena_id]
+        assert not (jur["stage_id"] >= 4).any()
+
+    def test_juruena_ramp_rows_have_null_storage_and_outflow(self, tmp_path) -> None:
+        """JURUENA ramp rows leave storage / min-turbined / outflow columns null."""
+        tbl, juruena_id = self._run_juruena(tmp_path)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == juruena_id]
+        for col in (
+            "min_storage_hm3",
+            "max_storage_hm3",
+            "min_turbined_m3s",
+            "min_outflow_m3s",
+        ):
+            assert jur[col].isna().all(), col
+
+    def test_filling_past_horizon_emits_no_ramp_rows(self, tmp_path) -> None:
+        """A plant whose ``entry_sid >= total_stages`` emits no ramp rows, no crash.
+
+        Mirrors ``test_ne_plant_filling_past_horizon_no_crash``: a 3-stage horizon
+        (Oct 2024 start) with ``duracao=6`` pushes ``entry_sid == 6 > total_stages
+        (3)``, so the clamped ramp range is empty. With no GHMIN/MODIF rows either,
+        the table is ``None``.
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        case = _hydro_case(
+            tmp_path,
+            cadastro=_make_ne_cadastro(),
+            confhd=_make_ne_confhd_df(),
+            dger=_make_hydro_dger_mock(
+                start_year=2024, start_month=10, num_anos=1, num_anos_pos=0
+            ),
+            exph=_make_ne_exph_mock(duracao=6, volume_morto=0.0),
+        )
+        id_map = _ne_filling_id_map()
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={},
+            ),
+        ):
+            # Must not raise the epic-03 IndexError; no in-study operating stage
+            # ⇒ no ramp rows ⇒ no table.
+            tbl = convert_storage_bounds(case, id_map)
+        assert tbl is None
+
+    def test_reduced_caps_partial_online(self) -> None:
+        """``_reduced_caps`` rises monotonically as machine groups come online.
+
+        A 2-conjunto cadastro with the head columns absent forces the simple
+        ``Σ n·p_nom`` / ``Σ n·q_nom`` fallback (no head correction, no
+        availability derating with ``teif == ip == 0``), giving hand-computable
+        caps: conjunto 1 = 2 units × (50 m³/s, 100 MW); conjunto 2 = 3 units ×
+        (80 m³/s, 200 MW).
+        """
+        from cobre_bridge.converters.hydro import _reduced_caps
+
+        hreg = pd.Series(
+            {
+                "numero_conjuntos_maquinas": 2,
+                "maquinas_conjunto_1": 2,
+                "maquinas_conjunto_2": 3,
+                "potencia_nominal_conjunto_1": 100.0,
+                "potencia_nominal_conjunto_2": 200.0,
+                "vazao_nominal_conjunto_1": 50.0,
+                "vazao_nominal_conjunto_2": 80.0,
+                "teif": 0.0,
+                "ip": 0.0,
+            }
+        )
+        # No machines online ⇒ both caps are an explicit zero.
+        assert _reduced_caps(hreg, {}, "X") == (0.0, 0.0)
+        # Only conjunto 1 online: 2×50 = 100 m³/s, 2×100 = 200 MW.
+        assert _reduced_caps(hreg, {1: 2}, "X") == (100.0, 200.0)
+        # Both groups online: 100 + 3×80 = 340 m³/s, 200 + 3×200 = 800 MW.
+        assert _reduced_caps(hreg, {1: 2, 2: 3}, "X") == (340.0, 800.0)
+        # Generation cap rises monotonically as units come online.
+        mgs = [
+            _reduced_caps(hreg, online, "X")[1] for online in ({}, {1: 2}, {1: 2, 2: 3})
+        ]
+        assert mgs == sorted(mgs)
+        assert mgs[0] < mgs[1] < mgs[2]
+
+    def test_ramp_branch_skips_unit_row_with_missing_date(self, tmp_path) -> None:
+        """A unit row with a conjunto but a BLANK online date is skipped, not crashed.
+
+        inewave parses ``conjunto_maquina_entrada`` and ``data_entrada_operacao``
+        independently, so a malformed exph can carry a unit row that has a machine
+        group set but a ``NaT`` online date. Filtering on the date (the defining
+        field of a unit row) and skipping a ``NaN`` conjunto means that row never
+        reaches ``filling_stage_id`` with a ``NaT`` (which would yield ``nan`` and
+        raise ``TypeError`` in ``range(...)``). The remaining valid unit row still
+        drives ``full_online_sid``, so JURUENA still emits its ramp rows.
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        # JURUENA exph: schedule row + ONE malformed unit row (conjunto 1 set,
+        # date NaT) ORDERED BEFORE the valid unit row (conjunto 1, Jan-2025 →
+        # stage 4). The malformed row is placed first deliberately: the old
+        # conjunto-based filter kept it, and its ``NaT`` → ``nan`` stage made the
+        # running ``max(...)`` for ``full_online_sid`` collapse to ``nan`` (nan
+        # comparisons are always False, so a leading nan is never displaced),
+        # crashing ``range(...)`` with a TypeError. The date filter + NaN-conjunto
+        # guard drop it so only the valid stage-4 row survives.
+        expansoes = pd.DataFrame(
+            {
+                "codigo_usina": [309, 309, 309],
+                "nome_usina": ["JURUENA", "JURUENA", "JURUENA"],
+                "data_inicio_enchimento": [
+                    pd.Timestamp("2024-10-01"),
+                    pd.NaT,
+                    pd.NaT,
+                ],
+                "duracao_enchimento": [1, 0, 0],
+                "volume_morto": [0.0, 0.0, 0.0],
+                "data_entrada_operacao": [
+                    pd.Timestamp("2024-11-01"),
+                    pd.NaT,  # malformed: conjunto set but no online date
+                    pd.Timestamp("2025-01-01"),
+                ],
+                "conjunto_maquina_entrada": [pd.NA, 1, 1],
+                "maquina_entrada": [pd.NA, 2, 1],
+            }
+        )
+        exph = MagicMock()
+        exph.expansoes = expansoes
+        case = _hydro_case(
+            tmp_path,
+            cadastro=_make_ne_cadastro(),
+            confhd=_make_ne_confhd_df(),
+            dger=_make_hydro_dger_mock(
+                start_year=2024, start_month=9, num_anos=3, num_anos_pos=0
+            ),
+            exph=exph,
+        )
+        id_map = _ne_filling_id_map()
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={},
+            ),
+        ):
+            # Must not raise TypeError from a NaT-derived nan range bound.
+            tbl = convert_storage_bounds(case, id_map)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == id_map.hydro_id(309)].sort_values("stage_id")
+        # The single valid unit row (stage 4) still drives full_online_sid, so
+        # the ramp window is [2, 4) → stages 2 and 3, exactly as the all-valid mock.
+        assert list(jur["stage_id"]) == [2, 3]
+
+    def test_ramp_row_wins_over_modif_at_same_stage(self, tmp_path) -> None:
+        """A ramp row wins over a colliding GHMIN row at the same (hydro, stage).
+
+        JURUENA's ramp window is stages 2 and 3. Injecting a GHMIN override for
+        JURUENA (309) at stage 2 creates a duplicate ``(hydro_id, stage_id)``
+        pair. Per the ramp-wins rule the ramp row is kept and the GHMIN row is
+        dropped: exactly one row remains at that key, with all caps ``0.0`` and a
+        null ``min_generation`` ramp signature — the GHMIN minimum is gone.
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        case = _ne_filling_case(tmp_path)
+        id_map = _ne_filling_id_map()
+        juruena_id = id_map.hydro_id(309)
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            # GHMIN for JURUENA (309) at stage 2 — inside the ramp window [2, 4).
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={309: {2: 123.0}},
+            ),
+        ):
+            tbl = convert_storage_bounds(case, id_map)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        at_stage_2 = df[(df["hydro_id"] == juruena_id) & (df["stage_id"] == 2)]
+        # Exactly one row survives at the colliding key.
+        assert len(at_stage_2) == 1
+        row = at_stage_2.iloc[0]
+        # It is the ramp row: zero caps, not the GHMIN minimum of 123.0.
+        assert row["max_turbined_m3s"] == 0.0
+        assert row["max_generation_mw"] == 0.0
+        assert row["min_generation_mw"] == 0.0
+        # Stage 3 (no GHMIN collision) keeps its ramp row too.
+        at_stage_3 = df[(df["hydro_id"] == juruena_id) & (df["stage_id"] == 3)]
+        assert len(at_stage_3) == 1
+        assert at_stage_3.iloc[0]["max_generation_mw"] == 0.0
+
+
+class TestMergeHydroBoundsMaxGenColumn:
+    """ticket-010 C4: ``_merge_hydro_bounds`` carries ``max_generation_mw``.
+
+    The storage-side bounds table may include a ``max_generation_mw`` column
+    (added for filling plants). The polars ``how="full"`` join in
+    ``_merge_hydro_bounds`` must preserve that storage-only column in the
+    merged result, since it has no counterpart on the withdrawal side.
+    """
+
+    def test_storage_side_max_generation_column_survives_full_join(self) -> None:
+        """A storage-only max_generation_mw column appears in the merged table."""
+        import pyarrow as pa
+
+        from cobre_bridge.pipeline import _merge_hydro_bounds
+
+        withdrawal = pa.table(
+            {
+                "hydro_id": pa.array([0, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                "water_withdrawal_m3s": pa.array([1.5, 2.5], type=pa.float64()),
+            }
+        )
+        storage = pa.table(
+            {
+                "hydro_id": pa.array([0, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                "min_generation_mw": pa.array([10.0, 20.0], type=pa.float64()),
+                "max_generation_mw": pa.array([100.0, None], type=pa.float64()),
+            }
+        )
+
+        result = _merge_hydro_bounds(withdrawal, storage)
+
+        assert result is not None
+        assert "max_generation_mw" in result.column_names
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,12 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
-from cobre_bridge.filling import filling_min_rate_m3s, filling_schedule
+from cobre_bridge.filling import (
+    filling_min_rate_m3s,
+    filling_schedule,
+    online_machines,
+)
+from cobre_bridge.filling import stage_id as filling_stage_id
 from cobre_bridge.horizon import (
     POST_STUDY_YEAR,
     build_stage_dates,
@@ -848,6 +853,31 @@ def _compute_max_turbined_head_corrected(
     cap_pinst = sum_n_p / prodt_eq if prodt_eq > 0.0 else math.inf
 
     max_turbined = min(sum_kt, cap_pinst) * availability
+    return max_turbined, max_generation
+
+
+def _reduced_caps(
+    hreg: pd.Series, online: dict[int, int], name: str
+) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` over the online machine subset.
+
+    Computes the head-corrected turbined cap and the rated generation cap for a
+    filling plant at a ramp stage where only ``online`` of its machines are in
+    service. Rather than threading an override count through the load-bearing
+    shared helpers, it copies the cadastro ``hreg`` Series and rewrites each
+    ``maquinas_conjunto_{c}`` (for ``c`` in ``1..numero_conjuntos_maquinas``) to
+    the online count (``0`` for any group absent from the dict), then re-runs the
+    exact full-capacity helpers — so the all-online stage equals the base
+    ``hydros.json`` cap by construction. With an empty ``online`` dict every
+    count is ``0`` and both caps are ``0.0`` (an explicit zero-capacity stage, not
+    a skip).
+    """
+    n_sets = int(hreg["numero_conjuntos_maquinas"])
+    hreg_copy = hreg.copy()
+    for c in range(1, n_sets + 1):
+        hreg_copy[f"maquinas_conjunto_{c}"] = int(online.get(c, 0))
+    max_turbined = _compute_max_turbined_head_corrected(hreg_copy, name)[0]
+    max_generation = _compute_max_turbined_rated(hreg_copy)[1]
     return max_turbined, max_generation
 
 
@@ -2383,6 +2413,12 @@ def convert_storage_bounds(
     # Read confhd for the list of active plant codes.
     confhd_codes = case.active_hydro_codes
 
+    # Determine whether the case has any NE-with-filling plant (epic-02
+    # admission predicate). The max_generation_mw column is gated on this:
+    # EX-only cases keep the byte-identical 8-column schema.
+    exph_df = case.exph.expansoes if case.exph is not None else None
+    filling_codes = filling_hydro_codes(case.confhd.usinas, exph_df)
+
     # Extract temporal overrides — empty dict when MODIF.DAT is absent,
     # which is fine because GHMIN.DAT alone can still produce per-stage
     # rows.
@@ -2427,6 +2463,10 @@ def convert_storage_bounds(
     max_turbined_vals: list[float | None] = []
     min_outflow_vals: list[float | None] = []
     min_generation_vals: list[float | None] = []
+    max_generation_vals: list[float | None] = []
+    # Per-row origin tag: True for a filling-plant ramp row, False for a
+    # MODIF/GHMIN row. Drives the ramp-wins de-dup pass before the table build.
+    is_ramp_vals: list[bool] = []
 
     plant_codes_with_data = set(temporal_overrides) | set(ghmin_by_plant_stage)
     for newave_code in sorted(plant_codes_with_data):
@@ -2500,19 +2540,130 @@ def convert_storage_bounds(
             min_turbined_vals.append(turbmint_by_stage.get(stage_id))
             min_outflow_vals.append(vazmint_by_stage.get(stage_id))
             min_generation_vals.append(ghmin_by_stage.get(stage_id))
+            # ticket-010 adds the column but no values; ticket-011 populates
+            # per-stage ramp caps. None mirrors min_generation null handling.
+            max_generation_vals.append(None)
+            is_ramp_vals.append(False)
+
+    # Filling-plant unit-ramp branch (ticket-011, design §4.2/§5): a
+    # ``NE``-with-filling plant operates from ``entry_sid`` but its turbine /
+    # generation capacity at each stage is whatever generating units are online.
+    # cobre forces capacity to 0 during PreFilling/Filling, so we only emit
+    # overrides over the half-open ramp window ``[entry_sid, full_online_sid)``,
+    # clamped to the in-study horizon; once every unit is online the base
+    # ``hydros.json`` caps apply and no further rows are needed. A filling plant
+    # may in principle also carry MODIF/GHMIN rows at a stage INSIDE its ramp
+    # window; this branch appends SEPARATE rows tagged ``is_ramp=True``, and the
+    # de-dup pass below resolves any ``(hydro_id, stage_id)`` collision in favour
+    # of the ramp row (ramp wins: the explicit 0-cap during PreFilling/Filling
+    # overrides a colliding MODIF/GHMIN minimum). cobre defers duplicate-pair
+    # handling (bounds.rs ~84), so the bridge resolves it here. JURUENA itself
+    # carries no MODIF/GHMIN, so for it the de-dup is a no-op.
+    if filling_codes and case.exph is not None:
+        exph_df = case.exph.expansoes
+        for code in sorted(filling_codes):
+            try:
+                hydro_id = id_map.hydro_id(code)
+            except KeyError:
+                continue
+            if code not in cadastro.index:
+                continue
+            hreg = cadastro.loc[code]
+            name = str(hreg.get("nome_usina", "")).strip() or str(code)
+
+            rows = exph_df.loc[exph_df["codigo_usina"] == code]
+            fill_row = rows.loc[rows["data_inicio_enchimento"].notna()].iloc[0]
+            ts = fill_row["data_inicio_enchimento"]
+            duracao = int(fill_row["duracao_enchimento"])
+            _start_sid, entry_sid = filling_schedule(
+                ts.year,
+                ts.month,
+                duracao,
+                start_year,
+                start_month,
+            )
+
+            # A generating-unit row is defined by its ``data_entrada_operacao``
+            # (the online date); ``conjunto_maquina_entrada`` names the machine
+            # group. Filter on ``data_entrada_operacao`` — the defining field —
+            # because inewave parses the two columns independently, so a unit row
+            # can carry a conjunto with a BLANK date (``NaT``), which would make
+            # ``ud.year``/``ud.month`` NaN and crash ``range(...)`` downstream. A
+            # row missing the online date cannot define an online stage, and one
+            # missing the conjunto cannot be counted into a machine group, so
+            # either way it is skipped, not crashed.
+            unit_rows: list[tuple[int, int]] = []
+            unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
+            for _, ur in unit_df.iterrows():
+                conjunto = ur["conjunto_maquina_entrada"]
+                if pd.isna(conjunto):
+                    continue
+                ud = ur["data_entrada_operacao"]
+                usid = filling_stage_id(ud.year, ud.month, start_year, start_month)
+                unit_rows.append((int(conjunto), usid))
+            if not unit_rows:
+                continue
+
+            # All-units-online stage: the ramp window is [entry_sid,
+            # full_online_sid). Clamp the upper bound to total_stages so a plant
+            # entering at/after the horizon end emits no rows (epic-03 IndexError
+            # lesson). If entry_sid >= total_stages the range is empty.
+            full_online_sid = max(max(usid, entry_sid) for _c, usid in unit_rows)
+            for s in range(entry_sid, min(full_online_sid, total_stages)):
+                online = online_machines(unit_rows, entry_sid, s)
+                mt, mg = _reduced_caps(hreg, online, name)
+                hydro_ids.append(hydro_id)
+                stage_ids.append(s)
+                min_storage_vals.append(None)
+                max_storage_vals.append(None)
+                min_turbined_vals.append(None)
+                max_turbined_vals.append(mt)
+                min_outflow_vals.append(None)
+                min_generation_vals.append(0.0)
+                max_generation_vals.append(mg)
+                is_ramp_vals.append(True)
 
     if not hydro_ids:
         return None
 
-    return pa.table(
-        {
-            "hydro_id": pa.array(hydro_ids, type=pa.int32()),
-            "stage_id": pa.array(stage_ids, type=pa.int32()),
-            "min_storage_hm3": pa.array(min_storage_vals, type=pa.float64()),
-            "max_storage_hm3": pa.array(max_storage_vals, type=pa.float64()),
-            "min_turbined_m3s": pa.array(min_turbined_vals, type=pa.float64()),
-            "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
-            "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
-            "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
-        }
-    ).sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
+    # Resolve duplicate ``(hydro_id, stage_id)`` pairs: a ramp row wins over a
+    # MODIF/GHMIN row at the same key (the explicit 0-cap during filling must not
+    # be undercut by a MODIF/GHMIN minimum). EX-only cases produce no ramp rows
+    # (``is_ramp_vals`` all False), so every key is unique and this is a no-op,
+    # keeping the regression-guard output byte-identical.
+    chosen: dict[tuple[int, int], int] = {}
+    for i, (h, s, ramp) in enumerate(zip(hydro_ids, stage_ids, is_ramp_vals)):
+        key = (h, s)
+        if key not in chosen or ramp:  # ramp overrides an earlier MODIF/GHMIN row
+            chosen[key] = i
+    keep = sorted(chosen.values())
+    if len(keep) != len(hydro_ids):
+        hydro_ids = [hydro_ids[i] for i in keep]
+        stage_ids = [stage_ids[i] for i in keep]
+        min_storage_vals = [min_storage_vals[i] for i in keep]
+        max_storage_vals = [max_storage_vals[i] for i in keep]
+        min_turbined_vals = [min_turbined_vals[i] for i in keep]
+        max_turbined_vals = [max_turbined_vals[i] for i in keep]
+        min_outflow_vals = [min_outflow_vals[i] for i in keep]
+        min_generation_vals = [min_generation_vals[i] for i in keep]
+        max_generation_vals = [max_generation_vals[i] for i in keep]
+        is_ramp_vals = [is_ramp_vals[i] for i in keep]
+
+    columns = {
+        "hydro_id": pa.array(hydro_ids, type=pa.int32()),
+        "stage_id": pa.array(stage_ids, type=pa.int32()),
+        "min_storage_hm3": pa.array(min_storage_vals, type=pa.float64()),
+        "max_storage_hm3": pa.array(max_storage_vals, type=pa.float64()),
+        "min_turbined_m3s": pa.array(min_turbined_vals, type=pa.float64()),
+        "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
+        "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
+        "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
+    }
+    # Gate the column on filling-plant presence: EX-only cases keep the
+    # existing 8-column schema byte-identical (the regression guard depends
+    # on this); cobre's parse_hydro_bounds tolerates the absent column.
+    if filling_codes:
+        columns["max_generation_mw"] = pa.array(max_generation_vals, type=pa.float64())
+    return pa.table(columns).sort_by(
+        [("hydro_id", "ascending"), ("stage_id", "ascending")]
+    )
