@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from cobre_bridge.filling import (
     filling_min_rate_m3s,
+    filling_schedule,
     online_machines,
     stage_id,
     zeta,
@@ -53,6 +54,27 @@ def test_fill_rate_nonzero_volume_morto() -> None:
     # 50% dead volume halves remaining: (2.93 * 0.5) / 2.6784.
     result = filling_min_rate_m3s(2.93, 50.0, 1, 2, lambda t: (2024, 10))
     assert abs(result - (2.93 * 0.5) / 2.6784) < 1e-6
+
+
+def test_filling_schedule_juruena() -> None:
+    # JURUENA: Oct 2024 start, duracao 1, study start Sep 2024 -> (1, 2) (§5).
+    assert filling_schedule(2024, 10, 1, 2024, 9) == (1, 2)
+
+
+def test_filling_schedule_pre_start_clamp() -> None:
+    # Start before study start (raw_start = -2): start clamps to 0,
+    # entry = raw_start + duracao = -2 + 3 = 1 (design §8 pre-start clamp).
+    assert filling_schedule(2024, 7, 3, 2024, 9) == (0, 1)
+
+
+def test_filling_schedule_zero_duration_equal_pair() -> None:
+    # duracao 0: equal pair, the empty-window "no Filling phase" signal (§8).
+    assert filling_schedule(2024, 10, 0, 2024, 9) == (1, 1)
+
+
+def test_filling_schedule_multi_month_window() -> None:
+    # Jan 2025 start (raw_start = 4), duracao 6 -> entry = 4 + 6 = 10.
+    assert filling_schedule(2025, 1, 6, 2024, 9) == (4, 10)
 
 
 def test_online_machines_none_before_unit_entry() -> None:

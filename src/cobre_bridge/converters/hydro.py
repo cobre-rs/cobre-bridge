@@ -12,13 +12,15 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.filling import filling_min_rate_m3s, filling_schedule
 from cobre_bridge.horizon import (
     POST_STUDY_YEAR,
+    build_stage_dates,
     seasonal_step_function,
 )
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
-from cobre_bridge.plants import fictitious_codes
+from cobre_bridge.plants import fictitious_codes, filling_hydro_codes
 from cobre_bridge.productivity import (
     compute_productivity,
     equivalent_productivity,
@@ -910,16 +912,40 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # the per-month reference the source model itself uses.
     seasonal_volref = _read_volref_saz(case)
 
+    # NE plants carrying an exph dead-volume filling row are admitted as real
+    # downstream nodes (epic-2 admission predicate, single source of truth). The
+    # set is computed once here and threaded into the cascade walker so upstream
+    # plants resolve to the filling plant; it also drives each filling plant's
+    # FILLING contract below. Empty (byte-identical to the no-arg call) when the
+    # case has no exph or no NE-with-filling plant.
+    filling_codes = filling_hydro_codes(
+        confhd_df, case.exph.expansoes if case.exph is not None else None
+    )
+
     # Resolve the FICT-cascade for every real plant.  Provides the effective
     # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
     # be folded back into the upstream real plant's effective ρ_eq.  See
     # ``cobre_bridge.converters.fict_cascade`` for the resolution rules.
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
-    fict_cascade = resolve_cascade(confhd_df, cadastro)
+    fict_cascade = resolve_cascade(confhd_df, cadastro, filling_codes=filling_codes)
 
     # Collect study plant codes for temporal override extraction.
     existing = case.active_hydros
+
+    # Per-stage (year, month) closure over the study horizon, built once (epic-1
+    # guidance) and passed into ``filling_min_rate_m3s`` for each filling plant.
+    # The exph DataFrame is only consulted when ``filling_codes`` is non-empty,
+    # which guarantees ``case.exph`` is not None there.
+    horizon = case.horizon
+    stage_dates = build_stage_dates(
+        horizon.start_year, horizon.start_month, horizon.total_stages
+    )
+
+    def stage_year_month(t: int) -> tuple[int, int]:
+        d = stage_dates[t]
+        return d.year, d.month
+
     # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
     if ree_df is not None:
@@ -965,6 +991,62 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 vol_max = vol_ref
         elif tipo_reg == "S":
             vol_max = vol_min
+
+        # FILLING phase (design §3/§4.1): an admitted NE plant fills its dead
+        # volume from its seeded storage up to ``min_storage_hm3`` over the
+        # half-open window ``[start_sid, entry_sid)``, then enters operation at
+        # ``entry_sid``. EX plants never enter this branch (filling_codes is the
+        # NE-with-exph set), so their entry/exit/filling stay None.
+        entry_stage_id: int | None = None
+        filling: dict | None = None
+        if newave_code in filling_codes:
+            # filling_codes is non-empty here ⇒ case.exph is not None (the
+            # admission predicate required exph), so .expansoes is safe.
+            exph_df = case.exph.expansoes
+            filling_row = exph_df.loc[
+                (exph_df["codigo_usina"] == newave_code)
+                & exph_df["data_inicio_enchimento"].notna()
+            ].iloc[0]
+            ts = filling_row["data_inicio_enchimento"]
+            duracao = int(filling_row["duracao_enchimento"])
+            start_sid, entry_sid = filling_schedule(
+                ts.year, ts.month, duracao, horizon.start_year, horizon.start_month
+            )
+            entry_stage_id = entry_sid
+            if entry_sid > start_sid:
+                # JURUENA's single-stage window is anchor-insensitive: the soft
+                # target is pinned to ``min_storage_hm3`` regardless of the rate,
+                # so the exact per-stage ζ anchor (ζ_t vs ζ_{t+1}) does not matter.
+                # TODO(epic-04+): verify the multi-stage anchor against
+                # ``cobre/crates/cobre-core/src/lp/builder/layout.rs`` before
+                # shipping a non-trivial (multi-stage) filling rate.
+                #
+                # Rate clamp (design §8): a plant whose filling completes past the
+                # study horizon (``entry_sid > horizon.total_stages``) is a VALID
+                # case — it fills but never operates within the study, yet is still
+                # emitted with its true ``entry_stage_id``. The rate is summed only
+                # over in-horizon stages, so clamp the entry passed to
+                # ``filling_min_rate_m3s`` to the horizon: post-study stages have no
+                # ``stage_dates`` entry (and thus no ζ to sum), and cobre handles the
+                # remaining out-of-horizon fill. The true (unclamped) ``entry_sid``
+                # stays on the hydro record below. If ``start_sid >= total_stages``
+                # too, ``rate_entry`` collapses to ``start_sid``, giving an empty
+                # window → ``filling_min_rate_m3s`` returns 0.0 (no crash).
+                rate_entry = min(entry_sid, horizon.total_stages)
+                rate = filling_min_rate_m3s(
+                    vol_min,
+                    float(filling_row["volume_morto"]),
+                    start_sid,
+                    rate_entry,
+                    stage_year_month,
+                )
+                filling = {
+                    "start_stage_id": start_sid,
+                    "filling_min_rate_m3s": rate,
+                }
+            # entry_sid == start_sid (duracao 0): keep filling None but still set
+            # entry_stage_id — cobre rejects start_stage_id >= entry_stage_id, so
+            # no degenerate filling block is emitted (design §8).
 
         # Generation parameters. Productivity lives in
         # ``hydro_production_models.json`` on cobre HEAD; callers that need
@@ -1150,11 +1232,11 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             ),
             "tailrace": tailrace,
             "diversion": None,
-            "filling": None,
+            "filling": filling,
             "efficiency": efficiency,
             "hydraulic_losses": hydraulic_losses,
             "penalties": penalties,
-            "entry_stage_id": None,
+            "entry_stage_id": entry_stage_id,
             "exit_stage_id": None,
         }
         hydros.append(hydro_entry)

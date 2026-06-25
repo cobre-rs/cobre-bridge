@@ -54,6 +54,52 @@ def stage_id(year: int, month: int, start_year: int, start_month: int) -> int:
     return (year - start_year) * 12 + (month - start_month)
 
 
+def filling_schedule(
+    start_year: int,
+    start_month: int,
+    duracao_months: int,
+    horizon_start_year: int,
+    horizon_start_month: int,
+) -> tuple[int, int]:
+    """Return ``(start_stage_id, entry_stage_id)`` for one ``exph`` filling row.
+
+    Maps a plant's declared filling schedule — its start month
+    (``start_year``/``start_month``, from ``data_inicio_enchimento``) and its
+    duration in months (``duracao_months``, from ``duracao_enchimento``) — onto
+    the half-open Cobre stage window ``[start_stage_id, entry_stage_id)``, with
+    the design §8 edge clamps applied.
+
+    The raw start is :func:`stage_id` (unclamped, may be negative for a pre-study
+    start). Two clamps then run:
+
+    * **Pre-start clamp (§8)**: ``start_stage_id = max(0, raw_start)`` — a filling
+      start at or before the study start clamps to stage 0 (no PreFilling phase).
+    * **Entry formula (§4.1)**: ``entry = raw_start + duracao_months``, anchored on
+      the *raw* (unclamped) start so the window always spans ``duracao_months``
+      calendar months from the declared start even when ``raw_start < 0``. It is
+      then floored at ``start_stage_id`` so ``entry_stage_id >= start_stage_id``
+      always holds:
+      ``entry_stage_id = max(start_stage_id, raw_start + duracao_months)``.
+
+    When ``duracao_months == 0`` the result is the equal pair
+    ``entry_stage_id == start_stage_id`` — the empty half-open window, i.e. the
+    "no Filling phase" signal (§8). This function does not branch on it; the caller
+    decides to omit ``filling``.
+
+    For JURUENA (Oct 2024 start, ``duracao_months == 1``, study start Sep 2024):
+    ``raw_start == 1``, so the result is ``(1, 2)`` (design §5).
+
+    This helper trusts its inputs: the ``Timestamp`` guarantees a valid month, so
+    no month-range validation is performed here.
+    """
+    raw_start = stage_id(
+        start_year, start_month, horizon_start_year, horizon_start_month
+    )
+    start = max(0, raw_start)
+    entry = max(start, raw_start + duracao_months)
+    return start, entry
+
+
 def filling_min_rate_m3s(
     min_storage_hm3: float,
     volume_morto_pct: float,

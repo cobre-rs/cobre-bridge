@@ -8,6 +8,7 @@ by each converter.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -357,6 +358,103 @@ def _make_intercambio_df() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------
+# NE-with-filling fixtures (ticket-009): a JURUENA-shaped run-of-river ('S')
+# plant (code 309) admitted into the active set by its exph dead-volume row.
+# ---------------------------------------------------------------------------
+
+
+def _make_ne_confhd_df() -> pd.DataFrame:
+    """Two EX plants (1, 2) plus one NE filling plant (309 JURUENA)."""
+    return pd.DataFrame(
+        {
+            "codigo_usina": [1, 2, 309],
+            "nome_usina": ["USINA_A", "USINA_B", "JURUENA"],
+            "posto": [1, 2, 226],
+            "codigo_usina_jusante": [pd.NA, 1, pd.NA],
+            "ree": [1, 1, 1],
+            "volume_inicial_percentual": [50.0, 75.0, 0.0],
+            "usina_existente": ["EX", "EX", "NE"],
+            "usina_modificada": [0, 0, 0],
+        }
+    )
+
+
+def _make_ne_cadastro() -> pd.DataFrame:
+    """Two-plant synthetic cadastro extended with JURUENA (code 309).
+
+    JURUENA is run-of-river (``tipo_regulacao='S'``) with
+    ``volume_minimo == volume_maximo == 2.93`` so its reservoir block already
+    collapses to the single point 2.93 hm³ via the existing 'S' path.
+    """
+    base = _make_hidr_cadastro()
+    juruena = base.loc[[1]].copy()
+    juruena.index = pd.Index([309], name="codigo_usina")
+    juruena["nome_usina"] = "JURUENA"
+    juruena["posto"] = 226
+    juruena["codigo_usina_jusante"] = pd.NA
+    juruena["volume_minimo"] = 2.93
+    juruena["volume_maximo"] = 2.93
+    juruena["volume_referencia"] = 2.93
+    juruena["tipo_regulacao"] = "S"
+    return pd.concat([base, juruena])
+
+
+def _make_ne_exph_mock(*, duracao: int = 1, volume_morto: float = 0.0) -> MagicMock:
+    """An ``exph`` reader mock whose ``expansoes`` carries JURUENA's filling row.
+
+    The schedule row (non-null ``data_inicio_enchimento``) is what
+    ``filling_hydro_codes`` selects; a trailing unit row with ``NaT`` mirrors the
+    real exph layout (one schedule row + one row per generating unit).
+    """
+    expansoes = pd.DataFrame(
+        {
+            "codigo_usina": [309, 309],
+            "nome_usina": ["JURUENA", "JURUENA"],
+            "data_inicio_enchimento": [
+                pd.Timestamp("2024-10-01"),
+                pd.NaT,
+            ],
+            "duracao_enchimento": [duracao, 0],
+            "volume_morto": [volume_morto, 0.0],
+            "data_entrada_operacao": [
+                pd.Timestamp("2024-11-01"),
+                pd.Timestamp("2024-11-01"),
+            ],
+        }
+    )
+    exph = MagicMock()
+    exph.expansoes = expansoes
+    return exph
+
+
+def _ne_filling_case(tmp_path, *, duracao: int = 1, volume_morto: float = 0.0):
+    """A ``NewaveCase`` with JURUENA (NE+filling) under a Sep-2024 3-year horizon.
+
+    Study start Sep 2024 ⇒ stage 0 = Sep, stage 1 = Oct, stage 2 = Nov. JURUENA's
+    Oct-2024 filling start maps to ``start_sid == 1``; with ``duracao == 1`` the
+    entry is ``entry_sid == 2`` (design §5).
+    """
+    return _hydro_case(
+        tmp_path,
+        cadastro=_make_ne_cadastro(),
+        confhd=_make_ne_confhd_df(),
+        dger=_make_hydro_dger_mock(
+            start_year=2024, start_month=9, num_anos=3, num_anos_pos=0
+        ),
+        exph=_make_ne_exph_mock(duracao=duracao, volume_morto=volume_morto),
+    )
+
+
+def _ne_filling_id_map() -> NewaveIdMap:
+    """Id-map including JURUENA (309) so ``hydro_id(309)`` resolves."""
+    return NewaveIdMap(
+        subsystem_ids=[1],
+        hydro_codes=[1, 2, 309],
+        thermal_codes=[],
+    )
+
+
 class TestConvertHydros:
     def _make_id_map(self) -> NewaveIdMap:
         return NewaveIdMap(
@@ -684,6 +782,124 @@ class TestConvertHydros:
         # NaN treated as 0 -> factor = 1.0 -> no change from nominal 800 MW
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
 
+    # --- FILLING phase emission (ticket-009) -------------------------------
+
+    def test_ne_plant_emits_filling_block(self, tmp_path) -> None:
+        """An admitted NE plant emits its entry stage + filling contract.
+
+        JURUENA (code 309) fills Oct 2024 (start_sid=1) and enters Nov 2024
+        (entry_sid=2); the single-stage rate is ``2.93 / ζ_Oct`` with
+        ``ζ_Oct = 744 * 3600 / 1e6 = 2.6784`` (design §5).
+        """
+        case = _ne_filling_case(tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, _ne_filling_id_map())
+        juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
+        assert juruena["entry_stage_id"] == 2
+        assert juruena["exit_stage_id"] is None
+        assert juruena["filling"] == {
+            "start_stage_id": 1,
+            "filling_min_rate_m3s": pytest.approx(2.93 / 2.6784, rel=1e-6),
+        }
+        # Reservoir still collapses to the 'S' single point (no new branch).
+        assert juruena["reservoir"]["min_storage_hm3"] == pytest.approx(2.93)
+        assert juruena["reservoir"]["max_storage_hm3"] == pytest.approx(2.93)
+
+    def test_ex_plants_keep_none_filling(self, tmp_path) -> None:
+        """EX plants in the same case keep entry/exit/filling all None."""
+        case = _ne_filling_case(tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, _ne_filling_id_map())
+        for name in ("USINA_A", "USINA_B"):
+            hydro = next(h for h in result["hydros"] if h["name"] == name)
+            assert hydro["entry_stage_id"] is None
+            assert hydro["exit_stage_id"] is None
+            assert hydro["filling"] is None
+
+    def test_ne_plant_zero_duration_omits_filling(self, tmp_path) -> None:
+        """``duracao_enchimento == 0`` ⇒ entry == start, no filling block.
+
+        cobre rejects ``start_stage_id >= entry_stage_id``, so the empty window
+        emits ``entry_stage_id`` only and keeps ``filling`` None (design §8).
+        """
+        case = _ne_filling_case(tmp_path, duracao=0)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, _ne_filling_id_map())
+        juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
+        # Oct-2024 start under Sep-2024 horizon ⇒ start_sid == 1; duracao 0 ⇒
+        # entry_sid == start_sid == 1.
+        assert juruena["entry_stage_id"] == 1
+        assert juruena["filling"] is None
+
+    def test_ne_plant_filling_past_horizon_no_crash(self, tmp_path) -> None:
+        """An NE plant whose filling completes past the horizon converts cleanly.
+
+        Under a SHORT 3-stage horizon (Oct–Dec 2024) JURUENA's Oct-2024 filling
+        start maps to ``start_sid == 0`` and a 6-month ``duracao`` pushes the
+        entry to ``entry_sid == 6 > total_stages (3)`` — a valid case (design §8):
+        the plant fills but never operates within the study, yet is still emitted.
+        The rate is summed only over the in-horizon stages (the clamp in the
+        caller), so ``convert_hydros`` must NOT raise ``IndexError`` indexing the
+        per-stage date list, and the true unclamped ``entry_stage_id`` is emitted.
+        """
+        case = _hydro_case(
+            tmp_path,
+            cadastro=_make_ne_cadastro(),
+            confhd=_make_ne_confhd_df(),
+            # 3-stage horizon: Oct 2024 start, 1 study year, 0 post ⇒
+            # study_months = (13 - 10) = 3; stages 0=Oct, 1=Nov, 2=Dec 2024.
+            dger=_make_hydro_dger_mock(
+                start_year=2024, start_month=10, num_anos=1, num_anos_pos=0
+            ),
+            # duracao 6: Oct-2024 start ⇒ start_sid == 0, entry_sid == 6 > 3.
+            exph=_make_ne_exph_mock(duracao=6, volume_morto=0.0),
+        )
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        # Must not raise (the IndexError this fix guards against).
+        result = convert_hydros(case, _ne_filling_id_map())
+        juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
+
+        # True, unclamped filling-complete stage is emitted (≥ total_stages == 3).
+        assert juruena["entry_stage_id"] == 6
+        assert juruena["entry_stage_id"] >= case.horizon.total_stages
+
+        # entry_sid (6) > start_sid (0) ⇒ a filling block is emitted; its rate is
+        # finite and non-negative (summed only over the in-horizon stages 0..2).
+        filling = juruena["filling"]
+        assert filling is not None
+        rate = filling["filling_min_rate_m3s"]
+        assert math.isfinite(rate)
+        assert rate >= 0.0
+
+
+def _make_hydro_dger_mock(
+    *,
+    start_year: int = 2024,
+    start_month: int = 1,
+    num_anos: int = 1,
+    num_anos_pos: int = 0,
+) -> MagicMock:
+    """A ``dger`` mock that yields a concrete study horizon for ``convert_hydros``.
+
+    ``convert_hydros`` builds the per-stage date list from ``case.horizon``
+    (which reads these four ``dger`` fields) once, unconditionally, before the
+    plant loop — so every ``_hydro_case`` needs a ``dger`` that resolves all four
+    horizon fields (the module's other ``_make_dger_mock`` leaves
+    ``num_anos_pos_estudo`` unset). ``funcao_producao_uhe = 1`` selects the linear
+    (constant-productivity) generation model, matching the synthetic plants.
+    """
+    dger = MagicMock()
+    dger.ano_inicio_estudo = start_year
+    dger.mes_inicio_estudo = start_month
+    dger.num_anos_estudo = num_anos
+    dger.num_anos_pos_estudo = num_anos_pos
+    dger.funcao_producao_uhe = 1
+    return dger
+
 
 def _hydro_case(
     tmp_path,
@@ -696,6 +912,8 @@ def _hydro_case(
     ghmin=None,
     penalid=None,
     dsvagua=None,
+    dger=None,
+    exph=None,
     **file_overrides,
 ):
     """Build a ``NewaveCase`` with mock hydro readers pre-cached.
@@ -706,6 +924,11 @@ def _hydro_case(
     passed as already-built mock reader objects; for those guarded behind a
     ``case.files.X`` path check, set the matching path via ``file_overrides``
     (e.g. ``volref_saz=tmp_path / "volref_saz.dat"``).
+
+    ``dger`` defaults to :func:`_make_hydro_dger_mock` (a Jan-2024 one-year horizon) so
+    ``case.horizon`` always resolves; pass a custom ``dger`` mock to drive a
+    different horizon. ``exph`` is the dead-volume filling reader mock (``None``
+    by default — EX-only cases admit no filling plant).
     """
     mock_hidr = MagicMock()
     mock_hidr.cadastro = _make_hidr_cadastro() if cadastro is None else cadastro
@@ -716,7 +939,13 @@ def _hydro_case(
     mock_ree = MagicMock()
     mock_ree.rees = _make_ree_df() if rees is None else rees
 
-    parsed: dict = {"hidr": mock_hidr, "confhd": mock_confhd, "ree": mock_ree}
+    parsed: dict = {
+        "hidr": mock_hidr,
+        "confhd": mock_confhd,
+        "ree": mock_ree,
+        "dger": _make_hydro_dger_mock() if dger is None else dger,
+        "exph": exph,
+    }
 
     if volref_volumes is not None:
         mock_volref = MagicMock()
