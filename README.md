@@ -36,6 +36,12 @@ adds `--open`. `compare` adds `--tolerance`, `--format`, `--out-dir` (and
 
 See [docs/cli.md](docs/cli.md) for the full per-command reference.
 
+> **Future (`NE`) hydro plants.** `convert newave` now converts NEWAVE `NE`
+> (future, will-be-built) plants using cobre's dead-volume **filling** schema.
+> A converted case containing `NE` plants requires **cobre >= 0.9.0**; EX-only
+> cases still load on cobre >= 0.8.2. `convert --validate` skips validation for
+> `NE`-with-filling cases until a `cobre-python` 0.9.0 release ships the schema.
+
 ## Configuration
 
 Defaults for compare `tolerance`, `format`, and `out_dir` can be set in a

@@ -5,10 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - unreleased
+
+This release adds first-class support for NEWAVE `NE` (future, will-be-built)
+hydro plants via cobre's dead-volume **filling** schema, and lands a broad CLI
+overhaul (preflight `check`, unified `--json` verdicts, config-file defaults,
+and provenance manifests).
+
+The filling schema is new in **cobre 0.9.0**. EX-only conversions are unchanged
+on the wire and still load on cobre >= 0.8.2; only cases containing `NE` plants
+require cobre >= 0.9.0. The `validation` extra remains pinned to
+`cobre-python>=0.8.2,<0.9` until cobre-python 0.9.0 ships the schema — in the
+meantime `convert --validate` automatically **skips** validation for
+`NE`-with-filling cases (an informational diagnostic, never a failure).
 
 ### Added
 
+- **`NE` (dead-volume-filling) hydro support.** `NE` plants — future units with
+  a dead-volume filling schedule and gradual generating-unit entry — were
+  previously dropped (and had to be hand-rewritten to `NC`). They are now
+  admitted as real cobre nodes that carry a dead-volume **filling** contract and
+  per-unit entry schedule read from `exph.dat`. The new
+  `example/newave_rodada_2001_completo` case exercises this with one `NE` plant
+  (309 JURUENA).
+- **`filling{}` + `entry_stage_id` emitted in `convert_hydros`.** Each `NE` plant
+  declares its filling window (start stage from `data_inicio_enchimento`, length
+  from `duracao_enchimento`) with `entry_stage_id` set to the fill-complete
+  stage, matching cobre's filling/entry-stage contract.
+- **Per-stage unit-ramp capacity bounds.** A `max_generation_mw` column is added
+  and per-stage generation caps ramp capacity in over the unit-entry schedule
+  (`data_entrada_operacao` rows in `exph.dat`) instead of switching the full
+  plant on at once.
+- **`filling_storage` initial condition.** `NE` plants are seeded into
+  `filling_storage` (from the `volume_morto` fraction impounded at filling start)
+  rather than `storage`.
+- **`min_cobre_version` in `conversion_manifest.json`** plus a per-`NE`
+  `Diagnostic`, both recording the cobre >= 0.9.0 requirement for cases that emit
+  the filling schema (`null` / absent for EX-only cases).
 - **`check newave` preflight command.** Validates NEWAVE inputs without
   writing any output files — surfaces the same diagnostics as `convert`
   but exits before the write phase, so authors can audit a case without
@@ -42,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Storage / filling penalties derived from deficit × productivity.**
+  `storage_violation_below_cost` and `filling_target_violation_cost` were
+  hard-coded placeholders (`1e6`, `1e7`). They are now derived on the same
+  energy-equivalent basis as the other hydro penalties (deficit cost ×
+  ρ_max_acum, in $/hm³ with no time weighting, matching cobre's LP): the
+  storage-below tier at 10× the deficit cost (the greatest hydro penalty) and
+  the filling-target tier just below it. The `PENALID`/`VOLMIN` path now also
+  uses ρ_max_acum.
 - **`-v/--verbose` now raises the console log level to INFO** (`-vv` for
   DEBUG). Previously a single `--verbose` went straight to DEBUG, making
   it impractical as a routine "show progress" flag. Scripts that relied

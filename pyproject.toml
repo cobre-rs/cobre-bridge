@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.8.2"
+version = "0.9.0"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -13,30 +13,21 @@ dependencies = [
     "inewave>=1.14.0",
     "pyarrow>=24.0.0",
     "pandas>=3.0.3",
-    "plotly>=6.7.0",
-    "polars>=1.41.2",
+    "plotly>=6.8.0",
+    "polars>=1.42.0",
     "rich>=15.0.0",
     "typer>=0.12",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.1.0",
-    "ty>=0.0.50",
+    "pytest>=9.1.1",
+    "ty>=0.0.54",
     "pytest-cov",
     "ruff",
 ]
 validation = [
-    # >=0.8.2,<0.9: paired with the cobre / cobre-python 0.8.2 line used to
-    # validate this release. cobre 0.8.2 carries BREAKING config changes — the
-    # top-level `energy` section is removed in favour of a per-production-model
-    # `reference_volume`, and `training.cut_selection` is restructured into a
-    # tagged `selection` object — so `convert newave` output loads only on cobre
-    # >=0.8.2. The upper bound keeps `convert --validate` on the cobre v0.8
-    # schema (a 0.9 schema bump must be opted into deliberately).
-    # (>=0.7.0 first honoured non-zero anticipated-thermal pre-horizon seeds via
-    # past_anticipated_commitments.values_mw in the LP fishing equality.)
-    "cobre-python>=0.8.2,<0.9",
+    "cobre-python>=0.9.0,<0.10",
 ]
 
 [project.scripts]
