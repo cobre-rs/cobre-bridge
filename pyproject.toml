@@ -16,13 +16,13 @@ dependencies = [
     "plotly>=6.8.0",
     "polars>=1.42.0",
     "rich>=15.0.0",
-    "typer>=0.26",
+    "typer>=0.26.8",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=9.1.1",
-    "ty>=0.0.54",
+    "ty>=0.0.55",
     "pytest-cov",
     "ruff",
 ]
