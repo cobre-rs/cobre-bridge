@@ -2143,7 +2143,7 @@ class TestCompareDatasetWiring:
         assert "bogus" in stderr
 
     def test_compare_results_help_omits_output_flag(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, dumb_terminal: None
     ) -> None:
         """``compare results --help`` lists --format/--out-dir, not --output/-o."""
         code, stdout, _ = self._invoke_main(
@@ -2807,14 +2807,14 @@ class TestTyperApp:
         assert result.exit_code == 0
         assert "cobre-bridge" in result.stdout
 
-    def test_help_lists_subcommands(self) -> None:
+    def test_help_lists_subcommands(self, dumb_terminal: None) -> None:
         result = self._invoke(["--help"])
         assert result.exit_code == 0
         assert "convert" in result.stdout
         assert "compare" in result.stdout
         assert "dashboard" in result.stdout
 
-    def test_help_exposes_shell_completion(self) -> None:
+    def test_help_exposes_shell_completion(self, dumb_terminal: None) -> None:
         result = self._invoke(["--help"])
         assert "install-completion" in result.stdout
 

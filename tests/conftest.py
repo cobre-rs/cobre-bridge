@@ -22,18 +22,23 @@ from cobre_bridge.case import NewaveCase
 from cobre_bridge.newave_files import NewaveFiles
 
 
-@pytest.fixture(autouse=True)
-def _deterministic_terminal_width(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin a terminal width so Rich-rendered Typer ``--help`` is deterministic.
+@pytest.fixture
+def dumb_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force a plain, fixed-width terminal for Typer ``--help`` content tests.
 
-    Typer's Rich help (``rich_markup_mode="rich"``) lays its options/commands out
-    in a Rich table. Inside ``CliRunner`` (no real terminal) when BOTH ``TERM``
-    and ``COLUMNS`` are unset — as on CI — Rich cannot size the table and renders
-    an empty box, so ``--help`` content-presence assertions fail while passing in
-    a normal shell. Exporting a fixed ``COLUMNS`` makes width detection
-    deterministic everywhere; the real CLI (writing to a normal stdout) is
-    unaffected either way.
+    Typer's Rich help (``rich_markup_mode="rich"``) renders its options table
+    from the detected terminal. On CI, GitHub Actions sets
+    ``GITHUB_ACTIONS``/``FORCE_COLOR``, pushing Rich into "force terminal" mode;
+    inside Typer's ``CliRunner`` (whose captured stream is not a real tty) that
+    path renders an *empty* options box, so option-presence assertions pass
+    locally but fail on CI. ``TERM=dumb`` makes Rich treat the captured output as
+    a plain, fixed-width stream and emit the help content deterministically.
+
+    Only the ``--help`` content tests opt in (via this fixture) so the fixed
+    width does not perturb width-sensitive rendering in the rest of the suite.
+    The real CLI, writing to a normal stdout, is unaffected.
     """
+    monkeypatch.setenv("TERM", "dumb")
     monkeypatch.setenv("COLUMNS", "80")
 
 
