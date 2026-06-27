@@ -698,10 +698,18 @@ def _apply_hydraulic_loss(h_gross: float, tipo_perda: int, perdas: float) -> flo
 
 
 def _compute_max_turbined_head_corrected(
-    hreg: pd.Series, name: str
+    hreg: pd.Series, name: str, *, h_op_override: float | None = None
 ) -> tuple[float, float]:
     """Return ``(max_turbined, max_generation)`` using the head-corrected the
     source-model-style cap.
+
+    ``h_op_override`` supplies the per-stage operating head directly (in metres),
+    bypassing the static base-data head derivation below. It is the head that
+    produces the stage's equivalent productivity (``ρ_eq / ρ_esp``), so the
+    engolimento and the ``p_inst/prodt_eq`` cap track the per-stage CFUGA/CMONT
+    overrides in lockstep with :func:`convert_hydro_energy_productivity`. Used by
+    :func:`convert_turbined_bounds_head_corrected` to emit a per-stage
+    ``max_turbined`` instead of a single static cap.
 
     This is the source model's **operational turbined cap** — the maximum turbinable
     flow (engolimento) at the plant's operating head, which is what binds in the
@@ -800,7 +808,13 @@ def _compute_max_turbined_head_corrected(
     rho_esp = float(rho_esp_raw)
     kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
 
-    if tipo_reg == "M":
+    if h_op_override is not None:
+        # Per-stage caller supplies the operating head directly (= ρ_eq / ρ_esp for
+        # the stage), so the cap tracks the per-stage CFUGA/CMONT head. h_int == h_op
+        # holds in every branch below, so reuse it for the prodt_eq cap too.
+        h_op = h_op_override
+        h_int = h_op_override
+    elif tipo_reg == "M":
         v65 = vol_min + 0.65 * (vol_max - vol_min)
         # The source model's ``h^{65%}`` is the *integrated* net head over [V_min,
         # V_65], not the snapshot at V = V_65.  Verified against M. DE MORAES (the
@@ -2060,6 +2074,96 @@ def convert_hydro_energy_productivity(
             "specific_productivity_mw_per_m3s_per_m": pa.array(
                 nulls, type=pa.float64()
             ),
+        }
+    )
+
+
+def convert_turbined_bounds_head_corrected(
+    case: NewaveCase, id_map: NewaveIdMap
+) -> pa.Table | None:
+    """Per-stage ``max_turbined_m3s`` for plants whose operating head varies by stage.
+
+    The engolimento (max turbinable flow) depends on the operating head — both via
+    the turbine affinity ratio and the ``p_inst / prodt_eq`` installed-power cap. For
+    plants carrying MODIF.DAT CFUGA/CMONT temporal overrides (or a seasonal V_ref),
+    that head changes stage-to-stage, exactly as the per-stage equivalent
+    productivity does (:func:`convert_hydro_energy_productivity`). The static
+    per-plant cap in ``hydros.json`` is computed at a single reference head, so at
+    high-flow/low-head stages it under-caps turbining and forces spill (lost hydro →
+    extra thermal). This emits a per-(hydro, stage) ``max_turbined`` override using
+    the SAME per-stage head (``h = ρ_eq / ρ_esp``) that drives productivity, so the
+    two stay consistent.
+
+    Returns a ``(hydro_id, stage_id, max_turbined_m3s)`` table for the affected
+    plants/stages, or ``None`` when no plant has a per-stage head.
+    """
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
+    confhd_codes = [int(r["codigo_usina"]) for _, r in case.active_hydros.iterrows()]
+
+    temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
+    drop_overrides = {
+        code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
+        for code, overrides in temporal_overrides.items()
+        if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
+    }
+    seasonal_volref = _read_volref_saz(case)
+    if not drop_overrides and not seasonal_volref:
+        return None
+
+    total_stages = _total_study_stages(case)
+    if total_stages <= 0:
+        return None
+
+    hydro_ids: list[int] = []
+    stage_ids: list[int] = []
+    max_turbined_vals: list[float] = []
+
+    for newave_code in sorted(confhd_codes):
+        overrides = drop_overrides.get(newave_code, [])
+        plant_seasonal = seasonal_volref.get(newave_code)
+        if not overrides and not plant_seasonal:
+            continue
+        if newave_code not in cadastro.index:
+            continue
+        try:
+            hydro_id = id_map.hydro_id(newave_code)
+        except KeyError:
+            continue
+        hreg = cadastro.loc[newave_code]
+        rho_esp_raw = hreg.get("produtibilidade_especifica")
+        if rho_esp_raw is None or is_na(rho_esp_raw) or float(rho_esp_raw) <= 0.0:
+            continue
+        rho_esp = float(rho_esp_raw)
+        name = str(hreg.get("nome_usina", newave_code))
+
+        legacy_base = _compute_productivity(hreg)
+        per_stage_prod = _per_stage_productivities(
+            hreg,
+            legacy_base,
+            overrides,
+            case,
+            total_stages,
+            seasonal_volref_by_month=plant_seasonal,
+        )
+        for stage_id, prod in enumerate(per_stage_prod):
+            if prod <= 0.0:
+                continue
+            h_op = prod / rho_esp
+            max_turbined = _compute_max_turbined_head_corrected(
+                hreg, name, h_op_override=h_op
+            )[0]
+            hydro_ids.append(hydro_id)
+            stage_ids.append(stage_id)
+            max_turbined_vals.append(max_turbined)
+
+    if not hydro_ids:
+        return None
+
+    return pa.table(
+        {
+            "hydro_id": pa.array(hydro_ids, type=pa.int32()),
+            "stage_id": pa.array(stage_ids, type=pa.int32()),
+            "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
         }
     )
 

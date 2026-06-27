@@ -208,6 +208,40 @@ def _merge_hydro_bounds(
     return merged.to_arrow()
 
 
+def _fold_head_turbined_bounds(
+    base: pa.Table | None,
+    head_turbined: pa.Table | None,
+) -> pa.Table | None:
+    """Fold per-stage head-corrected ``max_turbined_m3s`` into the hydro bounds.
+
+    ``head_turbined`` carries the per-(hydro, stage) engolimento cap derived from
+    the per-stage operating head. An explicit TURBMAXT override already present in
+    ``base`` (from ``convert_storage_bounds``) takes precedence — it is a deliberate
+    operational limit — so the head-derived value only fills cells TURBMAXT leaves
+    empty (the common case: plants with CFUGA/CMONT but no TURBMAXT).
+    """
+    if head_turbined is None:
+        return base
+
+    import polars as pl
+
+    h = pl.from_arrow(head_turbined)
+    if base is None:
+        return h.sort("hydro_id", "stage_id").to_arrow()
+
+    b = pl.from_arrow(base)
+    merged = b.join(h, on=["hydro_id", "stage_id"], how="full", coalesce=True)
+    if "max_turbined_m3s_right" in merged.columns:
+        # Explicit TURBMAXT (left) wins; head-derived (right) fills the rest.
+        merged = merged.with_columns(
+            pl.coalesce(["max_turbined_m3s", "max_turbined_m3s_right"]).alias(
+                "max_turbined_m3s"
+            )
+        ).drop("max_turbined_m3s_right")
+    merged = merged.sort("hydro_id", "stage_id")
+    return merged.to_arrow()
+
+
 def convert_newave_case(
     src: Path,
     dst: Path,
@@ -409,6 +443,11 @@ def _convert_newave_case_impl(
     logger.debug("Converting storage bounds from VMAXT/VMINT")
     storage_bounds_table = hydro_conv.convert_storage_bounds(case, id_map)
 
+    logger.debug("Converting per-stage head-corrected turbined caps")
+    head_turbined_table = hydro_conv.convert_turbined_bounds_head_corrected(
+        case, id_map
+    )
+
     # Generic constraints (VminOP, electric, AGRINT) share one ID space; the
     # allocator hands each converter the next free start ID so the pipeline no
     # longer threads `start_id = vminop_count + electric_count` by hand.
@@ -574,6 +613,9 @@ def _convert_newave_case_impl(
     _write_parquet(ncs_stats_table, ncs_stats_path)
 
     hydro_bounds_table = _merge_hydro_bounds(withdrawal_table, storage_bounds_table)
+    hydro_bounds_table = _fold_head_turbined_bounds(
+        hydro_bounds_table, head_turbined_table
+    )
     if hydro_bounds_table is not None:
         hydro_bounds_path = constraints_dir / "hydro_bounds.parquet"
         _write_parquet(hydro_bounds_table, hydro_bounds_path)
