@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 import cobre_bridge
-from cobre_bridge.comparators.manifest import ComparisonManifest, _git_sha
+from cobre_bridge._git import git_sha
+from cobre_bridge.comparators.manifest import ComparisonManifest
 
 
 def _in_git_checkout() -> bool:
@@ -80,7 +81,7 @@ def test_git_sha_returns_none_when_git_missing(
 
     monkeypatch.setattr(subprocess, "run", _raise)
 
-    assert _git_sha() is None
+    assert git_sha() is None
 
 
 def test_git_sha_returns_none_on_nonzero_returncode(
@@ -95,7 +96,7 @@ def test_git_sha_returns_none_on_nonzero_returncode(
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
 
-    assert _git_sha() is None
+    assert git_sha() is None
 
 
 def test_manifest_json_roundtrip(tmp_path: Path) -> None:

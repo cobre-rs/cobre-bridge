@@ -25,8 +25,8 @@ import pandas as pd
 from cobre_cut_investigation import cobre_water_values
 from newave_cut_investigation import newave_water_values
 
-NEWAVE_DIR = Path("./example/newave_rodada")
-COBRE_DIR = Path("./example/cobre_rodada")
+NEWAVE_DIR = Path("./example/newave")
+COBRE_DIR = Path("./example/cobre")
 COBRE_STAGE = 0  # which Cobre study stage's cost-to-go to compare
 # Case-dependent stage alignment (defaults are for the repo's example case):
 NEWAVE_ESTUDO_OFFSET = 10  # Cobre stage s <-> NEWAVE estudo (s + offset)

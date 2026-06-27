@@ -65,6 +65,7 @@ def resolve_cascade(
     confhd_df: pd.DataFrame,
     cadastro: pd.DataFrame,
     fictitious: set[int] | None = None,
+    filling_codes: set[int] | None = None,
 ) -> dict[int, FictCascadeResolution]:
     """Resolve the effective cascade downstream of every real (existing) plant.
 
@@ -99,6 +100,13 @@ def resolve_cascade(
         is :func:`plants.fictitious_codes`).  Defaults to computing it from
         *confhd_df* + *cadastro* — pass it explicitly to decouple the
         classification (e.g. in tests).
+    filling_codes:
+        Pre-computed set of ``NE``-with-filling plant codes (the single source
+        of truth is :attr:`plants.filling_hydro_codes`).  Such plants are
+        admitted as real cobre nodes: the walker stops at them and upstream
+        plants resolve their ``downstream_code`` to them.  Defaults to ``None``
+        (treated as the empty set), which preserves byte-identical output for
+        ``EX``-only cases.
 
     Returns
     -------
@@ -109,6 +117,9 @@ def resolve_cascade(
         from cobre_bridge.plants import fictitious_codes
 
         fictitious = fictitious_codes(confhd_df, cadastro)
+
+    if filling_codes is None:
+        filling_codes = set()
 
     # Classify every row. ``NE``/``NC`` ("não existirá"/"não considerada")
     # plants are out-of-LP topological pass-throughs; fictitious plants are
@@ -124,6 +135,12 @@ def resolve_cascade(
         code = int(row["codigo_usina"])
         status = str(row["usina_existente"]).strip()
         row_by_code[code] = row
+        if code in filling_codes:
+            # ``NE``-with-filling plants are admitted as real cobre nodes: the
+            # walker must stop at them and upstream plants resolve to them.
+            # They are neither absent (topological pass-through) nor fictitious.
+            real_codes.add(code)
+            continue
         if status != "EX":
             absent_codes.add(code)
             continue

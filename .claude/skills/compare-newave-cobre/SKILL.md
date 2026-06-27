@@ -27,9 +27,9 @@ how to report findings.
 Parse from the request; ask only if a path is genuinely unknown.
 
 - `newave_dir` — NEWAVE case dir (must contain `saidas/` for results compare).
-  Example: `example/newave_rodada`.
+  Example: `example/newave`.
 - `cobre_output_dir` — Cobre **output** dir containing
-  `training/dictionaries/bounds.parquet`. Example: `example/cobre_rodada/output`.
+  `training/dictionaries/bounds.parquet`. Example: `example/cobre/output`.
 - `--what` — `bounds`, `results`, or `both` (default: both).
 - `--focus` — narrow to a variable/entity (e.g. `storage_min`, a specific REE/hydro).
 

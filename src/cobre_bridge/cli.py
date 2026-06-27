@@ -2,21 +2,103 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import sys
+import webbrowser
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Annotated
+
+import typer
 
 from cobre_bridge import __version__
 from cobre_bridge.cobre_io import case_dir_for
+from cobre_bridge.config_resolution import (
+    BOUNDS_TOLERANCE_DEFAULT,
+    RESULTS_TOLERANCE_DEFAULT,
+    load_config,
+)
+from cobre_bridge.diagnostics import Severity
+from cobre_bridge.errors import diagnostic_from_exception
+from cobre_bridge.preflight import PreflightVerdict
+from cobre_bridge.ui.console import (
+    conversion_progress,
+    get_console,
+    make_table,
+    print_status,
+    render_checklist,
+    render_conversion_summary,
+    render_diagnostics,
+    render_error,
+    spinner,
+)
+from cobre_bridge.verdict import (
+    build_verdict,
+    check_summary,
+    compare_summary,
+    convert_summary,
+    dashboard_summary,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from rich.console import Console
+
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
+    from cobre_bridge.pipeline import ConversionReport
+
+
+#: Minimum cobre / cobre-python version required for the dead-volume filling
+#: schema. ticket-014 imports this same constant for the manifest note (single
+#: source of truth); the ``--validate`` gate uses it to decide whether the
+#: installed cobre-python is new enough to validate a filling case.
+MIN_COBRE_FILLING_VERSION = "0.9.1"
+
+
+def _installed_cobre_python_version() -> str | None:
+    """Return the installed ``cobre-python`` distribution version, or ``None``.
+
+    The package imports as ``cobre`` but is distributed as ``cobre-python``;
+    this reads the distribution metadata. Returns ``None`` when it is not
+    installed, so the caller falls through to the generic "not installed" skip.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _dist_version
+
+    try:
+        return _dist_version("cobre-python")
+    except PackageNotFoundError:
+        return None
+
+
+def _cobre_python_supports_filling(installed: str) -> bool:
+    """Whether an installed cobre-python *version* knows the filling schema.
+
+    ``True`` when *installed* is at least :data:`MIN_COBRE_FILLING_VERSION` by a
+    numeric release-segment comparison (so ``"0.9.1"`` and ``"0.10.0"`` qualify,
+    ``"0.9.0"`` does not). A non-numeric pre-release suffix on a segment is
+    ignored (``"0.9.1rc1"`` reads as ``0.9.1``); the gate only guards against an
+    obviously-older install, so the leniency is deliberate.
+    """
+
+    def _release(value: str) -> tuple[int, ...]:
+        parts: list[int] = []
+        for segment in value.split("."):
+            digits = ""
+            for char in segment:
+                if not char.isdigit():
+                    break
+                digits += char
+            parts.append(int(digits) if digits else 0)
+        return tuple(parts)
+
+    return _release(installed) >= _release(MIN_COBRE_FILLING_VERSION)
 
 
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
@@ -98,8 +180,8 @@ def _load_compare_context(
     try:
         case = NewaveCase.from_directory(newave_dir)
     except FileNotFoundError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+        render_error(str(exc))
+        raise typer.Exit(code=1)
 
     id_map = case.id_map
     lines_json = _load_lines_json(cobre_output_dir)
@@ -116,6 +198,7 @@ def _export_compare_artifacts(
     cobre_output_dir: Path,
     tolerance: float,
     out_dir_arg: Path | None,
+    quiet_status: bool = False,
 ) -> tuple[set[str], Path]:
     """Resolve ``--format`` and write the machine-readable comparison artifacts.
 
@@ -126,14 +209,18 @@ def _export_compare_artifacts(
     An invalid ``--format`` token exits 2 (clean stderr). A write failure must
     NOT change the comparison exit code, so an ``OSError`` is warned and
     swallowed.
+
+    *quiet_status* (set by ``--json``) gates ONLY the ``Artifacts written to …``
+    stdout status line so stdout stays pure JSON; the file export still runs and
+    the ``OSError`` write-failure warning still reaches stderr.
     """
     from cobre_bridge.comparators.export import write_artifacts
 
     try:
         formats = _parse_formats(raw_formats)
     except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(2)
+        render_error(str(exc))
+        raise typer.Exit(code=2)
 
     out_dir: Path = out_dir_arg or (cobre_output_dir / "comparison_artifacts")
     export_formats = formats & {"csv", "parquet", "json"}
@@ -148,15 +235,74 @@ def _export_compare_artifacts(
             out_dir=out_dir,
             formats=sorted(export_formats),
         )
-        print(f"Artifacts written to {out_dir}")
+        if not quiet_status:
+            print_status(f"Artifacts written to {out_dir}")
     except OSError as exc:
-        print(f"Warning: failed to write artifacts: {exc}", file=sys.stderr)
+        print_status(
+            f"Warning: failed to write artifacts: {exc}",
+            console=get_console(stderr=True),
+            style="#F5A623",
+        )
 
     return formats, out_dir
 
 
-def _run_bounds_comparison(args: argparse.Namespace) -> None:
+def _resolve_compare_settings(args: SimpleNamespace, *, bounds: bool) -> None:
+    """Fill tolerance/format/out_dir from config when flag+env left them ``None``.
+
+    Implements the bottom two rungs of the precedence chain
+    **CLI flag > env var > config file > built-in default**: Typer has already
+    resolved flag-or-env into ``args`` (a non-``None`` value means the flag or
+    env var supplied it), so this fills in the config-file value, then the
+    built-in default, for whatever is still ``None``. Mutates *args* in place;
+    *bounds* selects the bounds- vs results-tolerance keys.
+
+    Loads the config once via :func:`load_config` (discovery from cwd) and emits
+    one stderr WARNING note per load warning (e.g. a malformed config file). It
+    never raises and never changes the exit code; config provenance stays off
+    stdout so a ``--json``-style payload remains deterministic.
+    """
+    cfg = load_config()
+
+    # Tolerance: flag/env, else the config value, else the built-in default.
+    config_tolerance = cfg.bounds_tolerance if bounds else cfg.results_tolerance
+    builtin_tolerance = (
+        BOUNDS_TOLERANCE_DEFAULT if bounds else RESULTS_TOLERANCE_DEFAULT
+    )
+    if args.tolerance is not None:
+        resolved_tolerance = args.tolerance
+    elif config_tolerance is not None:
+        resolved_tolerance = config_tolerance
+    else:
+        resolved_tolerance = builtin_tolerance
+    args.tolerance = resolved_tolerance
+
+    # Format: only consult config when neither flag nor env supplied it. Leave
+    # ``None`` (rather than pre-expanding) so ``_parse_formats`` stays the single
+    # validator/expander downstream.
+    if args.format is None and cfg.formats is not None:
+        args.format = list(cfg.formats)
+
+    # Out-dir: only consult config when neither flag nor env supplied it. The
+    # config value may itself be ``None``, which keeps the derived
+    # ``<cobre_output_dir>/comparison_artifacts`` default downstream.
+    if args.out_dir is None:
+        args.out_dir = cfg.out_dir
+
+    # Surface any config-load warnings on stderr only (never stdout), matching
+    # the side-file advisory pattern used by ``_export_compare_artifacts``.
+    for warning in cfg.warnings:
+        print_status(
+            warning,
+            console=get_console(stderr=True),
+            style="#F5A623",
+        )
+
+
+def _run_bounds_comparison(args: SimpleNamespace) -> None:
     """Execute the compare bounds subcommand."""
+    _resolve_compare_settings(args, bounds=True)
+
     from cobre_bridge.comparators.analyze import build_bounds_dataset
     from cobre_bridge.comparators.bounds import compare_bounds
     from cobre_bridge.comparators.cobre_readers import CobreReadError
@@ -164,6 +310,7 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
         print_bounds_mismatches_from_dataset,
         print_bounds_summary_from_dataset,
     )
+    from cobre_bridge.comparators.verdict import build_compare_verdict
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -172,12 +319,11 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
     # Validate paths.
     bounds_path = cobre_output_dir / "training" / "dictionaries" / "bounds.parquet"
     if not bounds_path.exists():
-        print(
-            f"Error: bounds.parquet not found at {bounds_path}. "
+        render_error(
+            f"bounds.parquet not found at {bounds_path}. "
             "Run cobre with --output first.",
-            file=sys.stderr,
         )
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     case, id_map, alignment, _lines_json = _load_compare_context(
         newave_dir, cobre_output_dir
@@ -191,26 +337,45 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
     # was unreadable/malformed — fail loudly (exit 2) rather than report a
     # false "no divergence" on data we could not actually read.
     try:
-        results = compare_bounds(
-            alignment=alignment,
-            case=case,
-            id_map=id_map,
-            cobre_output_dir=cobre_output_dir,
-            tolerance=tolerance,
-            variables=variables,
-        )
+        with spinner(
+            "Comparing bounds…",
+            verbose=args.verbose > 0,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ):
+            results = compare_bounds(
+                alignment=alignment,
+                case=case,
+                id_map=id_map,
+                cobre_output_dir=cobre_output_dir,
+                tolerance=tolerance,
+                variables=variables,
+            )
     except CobreReadError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(2)
+        print_status(
+            f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
+        )
+        raise typer.Exit(code=2)
 
     # Build the canonical dataset once; console + artifacts derive from it.
     dataset = build_bounds_dataset(results)
 
-    # Output (sourced from the dataset).
-    print_bounds_summary_from_dataset(dataset, newave_dir, cobre_output_dir, tolerance)
+    # The mismatch count drives the exit code (1 on any mismatch). Compute it
+    # before any rendering. The --json verdict ``status`` is derived separately
+    # from the verdict's ``all_within_tol`` (below) so it stays self-consistent
+    # with ``summary`` even on an empty result, where ``mismatches`` is 0 but
+    # ``all_within_tol`` is False (nothing was compared).
+    mismatches = sum(1 for r in results if not r.match)
 
-    if not args.summary:
-        print_bounds_mismatches_from_dataset(dataset)
+    # Output (sourced from the dataset). Under --json the Rich tables are
+    # suppressed in favour of a single machine-readable verdict on stdout.
+    if not args.json_output:
+        print_bounds_summary_from_dataset(
+            dataset, newave_dir, cobre_output_dir, tolerance
+        )
+
+        if not args.summary:
+            print_bounds_mismatches_from_dataset(dataset)
 
     formats, _out_dir = _export_compare_artifacts(
         dataset,
@@ -220,21 +385,33 @@ def _run_bounds_comparison(args: argparse.Namespace) -> None:
         cobre_output_dir=cobre_output_dir,
         tolerance=tolerance,
         out_dir_arg=args.out_dir,
+        quiet_status=args.json_output,
     )
 
     # Bounds has no HTML report; honor --format html with an ignore-warning.
     if "html" in formats:
-        print(
+        print_status(
             "Warning: --format html is not supported for 'compare bounds' "
             "(no HTML report); ignoring.",
-            file=sys.stderr,
+            console=get_console(stderr=True),
+            style="#F5A623",
         )
 
-    mismatches = sum(1 for r in results if not r.match)
-    sys.exit(0 if mismatches == 0 else 1)
+    if args.json_output:
+        # Compare has no diagnostics (default ``()`` → ``[]``). ``status`` reflects
+        # divergence via the same verdict ``summary`` is built from (uniform with
+        # ``compare results``), so it can never contradict ``all_within_tol``; the
+        # exit code is governed separately by ``mismatches``.
+        verdict = build_compare_verdict(dataset)
+        summary = compare_summary(verdict)
+        status = "mismatch" if not verdict.all_within_tol else "ok"
+        _emit_convert_json(build_verdict("compare bounds", status, summary))
+
+    if mismatches:
+        raise typer.Exit(code=1)
 
 
-def _run_results_comparison(args: argparse.Namespace) -> None:
+def _run_results_comparison(args: SimpleNamespace) -> None:
     """Execute the compare results subcommand.
 
     Intentionally always exits 0: ``compare results`` is informational (a
@@ -242,9 +419,12 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     failure on divergence. This is asymmetric with ``compare bounds``, which exits 1 on
     any mismatch — bounds are a strict equivalence check.
     """
+    _resolve_compare_settings(args, bounds=False)
+
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.results import compare_results
+    from cobre_bridge.comparators.verdict import build_compare_verdict
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -258,19 +438,29 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
     # was unreadable/malformed — fail loudly (exit 2) rather than report a
     # false "no divergence" on data we could not actually read.
     try:
-        dataset = compare_results(
-            case=case,
-            id_map=id_map,
-            alignment=alignment,
-            cobre_output_dir=cobre_output_dir,
-            tolerance=tolerance,
-        )
+        with spinner(
+            "Comparing results…",
+            verbose=args.verbose > 0,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ):
+            dataset = compare_results(
+                case=case,
+                id_map=id_map,
+                alignment=alignment,
+                cobre_output_dir=cobre_output_dir,
+                tolerance=tolerance,
+            )
     except CobreReadError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(2)
+        print_status(
+            f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
+        )
+        raise typer.Exit(code=2)
 
-    # Print text summary (sourced from the dataset).
-    print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
+    # Print text summary (sourced from the dataset). Under --json the Rich tables
+    # are suppressed in favour of a single machine-readable verdict on stdout.
+    if not args.json_output:
+        print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
 
     formats, out_dir = _export_compare_artifacts(
         dataset,
@@ -280,9 +470,12 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
         cobre_output_dir=cobre_output_dir,
         tolerance=tolerance,
         out_dir_arg=args.out_dir,
+        quiet_status=args.json_output,
     )
 
-    # HTML report (opt-in via --format html / all).
+    # HTML report (opt-in via --format html / all). The file is still written
+    # under --json (it is a --format artifact); only its stdout advisory is
+    # routed to stderr so stdout stays pure JSON.
     if "html" in formats:
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
@@ -292,36 +485,158 @@ def _run_results_comparison(args: argparse.Namespace) -> None:
         report_path = out_dir / "report.html"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(html, encoding="utf-8")
-        print(f"HTML report written to {report_path}")
+        print_status(
+            f"HTML report written to {report_path}",
+            console=get_console(stderr=True) if args.json_output else None,
+        )
 
-    sys.exit(0)
+    if args.json_output:
+        # ``status`` REFLECTS divergence (so it is self-consistent with
+        # ``summary`` and uniform with ``compare bounds``), but the results exit
+        # code is DECOUPLED from it — this command always exits 0. An empty
+        # dataset → ``all_within_tol`` False → ``status`` "mismatch".
+        verdict = build_compare_verdict(dataset)
+        status = "mismatch" if not verdict.all_within_tol else "ok"
+        _emit_convert_json(
+            build_verdict("compare results", status, compare_summary(verdict))
+        )
+
+    return
 
 
-def _run_dashboard(args: argparse.Namespace) -> None:
+def _run_dashboard(args: SimpleNamespace) -> None:
     """Execute the dashboard subcommand."""
     from cobre_bridge.dashboard import build_dashboard
 
     case_dir: Path = args.case_dir.resolve()
     if not (case_dir / "output" / "simulation").exists():
-        print(
-            f"Error: no simulation output found in {case_dir}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        render_error(f"no simulation output found in {case_dir}")
+        raise typer.Exit(code=1)
 
     output_path: Path = args.output or (case_dir / "dashboard.html")
-    print(f"Building dashboard from {case_dir} ...")
-    build_dashboard(case_dir, output_path)
+    if not args.json_output:
+        print_status(f"Building dashboard from {case_dir} ...")
+    with spinner(
+        "Building dashboard…",
+        verbose=args.verbose > 0,
+        quiet=args.quiet,
+        no_color=args.no_color,
+    ):
+        build_dashboard(case_dir, output_path)
     size_kb = output_path.stat().st_size / 1024
-    print(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
-    sys.exit(0)
+    if not args.json_output:
+        print_status(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
+
+    if args.json_output:
+        # --json: one machine-readable verdict to stdout. Emitted BEFORE the
+        # --open block so the stdout JSON flushes regardless of browser outcome;
+        # a built dashboard is always a success (the only failure path exits 1
+        # before the build). ``size_kb`` keeps the precise float — only the
+        # human line above rounds it with ``:.0f``.
+        _emit_convert_json(
+            build_verdict(
+                "dashboard",
+                "ok",
+                dashboard_summary(str(output_path), size_kb),
+            )
+        )
+
+    # The --open advisory stays off the stdout --json payload; it already goes to
+    # stderr (err_console below), so the two compose cleanly.
+    if args.open_browser:
+        err_console = get_console(stderr=True, no_color=args.no_color)
+        try:
+            opened = webbrowser.open(output_path.resolve().as_uri())
+        except (webbrowser.Error, OSError):
+            opened = False
+        if not opened:
+            print_status(
+                f"Note: could not open a browser for {output_path}; open it manually.",
+                console=err_console,
+                style="#F5A623",
+            )
+    return
 
 
-def _run_newave_conversion(args: argparse.Namespace) -> None:
+#: Preflight verdict → process exit code. The contract is fixed by the epic
+#: overview: ``OK`` is clean (0), ``WARNINGS`` is advisory (1), and
+#: ``WILL_NOT_CONVERT`` is the most severe (2). Kept as data so the mapping is
+#: directly unit-testable and impossible to drift from in the handler.
+_VERDICT_EXIT_CODE: dict[PreflightVerdict, int] = {
+    PreflightVerdict.OK: 0,
+    PreflightVerdict.WARNINGS: 1,
+    PreflightVerdict.WILL_NOT_CONVERT: 2,
+}
+
+
+def _run_check(args: SimpleNamespace) -> None:
+    """Execute the check newave subcommand.
+
+    Runs :func:`run_preflight` (which already captures every discovery/parse
+    failure as a ``WILL_NOT_CONVERT`` verdict, so no ``try/except`` is needed),
+    renders the ✓/✗ checklist (or, with ``--json``, emits one machine-readable
+    verdict to stdout instead of any Rich output), and exits per the verdict:
+    ``OK`` → 0, ``WARNINGS`` → 1, ``WILL_NOT_CONVERT`` → 2. Writes no files and
+    never calls the conversion pipeline.
+    """
+    from cobre_bridge.preflight import run_preflight
+
+    src: Path = args.src
+    result = run_preflight(src)
+
+    if args.json_output:
+        # --json: one machine-readable verdict to stdout, no Rich on either stream.
+        # The command-specific payload (the checklist) lives under ``summary`` per
+        # the unified verdict envelope; ``status`` passes through the preflight
+        # verdict verbatim and never recomputes it.
+        summary = check_summary(
+            [
+                {"label": check.label, "passed": check.passed, "detail": check.detail}
+                for check in result.checks
+            ]
+        )
+        _emit_convert_json(
+            build_verdict(
+                "check newave", result.verdict.value, summary, result.diagnostics
+            )
+        )
+    else:
+        # Default consoles: the ✓/✗ checklist goes to stdout while render_checklist
+        # delegates its diagnostics block to render_diagnostics (stderr default),
+        # preserving the stdout(results)/stderr(diagnostics) split.
+        render_checklist(result, quiet=args.quiet)
+
+    exit_code = _VERDICT_EXIT_CODE[result.verdict]
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+    return
+
+
+def _case_has_filling_plants(src: Path) -> bool:
+    """Return whether *src* has ``NE``-with-filling plants (best-effort, never raises).
+
+    Re-reads the case via :meth:`NewaveCase.from_directory` — the same constructor
+    the pipeline and manifest writer use — and evaluates the single-source-of-truth
+    predicate :func:`filling_hydro_codes`. A read failure (``OSError``/``ValueError``)
+    degrades to ``False`` so a ``--validate`` skip is a convenience, never a hard
+    failure.
+    """
+    from cobre_bridge.case import NewaveCase
+    from cobre_bridge.plants import filling_hydro_codes
+
+    try:
+        case = NewaveCase.from_directory(src)
+        exph_df = case.exph.expansoes if case.exph is not None else None
+        return bool(filling_hydro_codes(case.confhd.usinas, exph_df))
+    except (OSError, ValueError):
+        return False
+
+
+def _run_newave_conversion(args: SimpleNamespace) -> None:
     """Execute the convert newave subcommand."""
     # Import here so the module-level import of pipeline is deferred.
     from cobre_bridge.pipeline import (
-        ConversionReport,
+        CONVERSION_PHASE_LABELS,
         _clear_dst_contents,
         convert_newave_case,
     )
@@ -329,322 +644,897 @@ def _run_newave_conversion(args: argparse.Namespace) -> None:
     src: Path = args.src
     dst: Path = args.dst
 
+    out_console = get_console(no_color=args.no_color)
+    err_console = get_console(stderr=True, no_color=args.no_color)
+
     # ------------------------------------------------------------------
     # Source validation.
     # ------------------------------------------------------------------
     if not src.exists() or not src.is_dir():
-        print(
-            f"Error: source directory '{src}' does not exist",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        render_error(f"source directory '{src}' does not exist", console=err_console)
+        raise typer.Exit(code=1)
 
     # ------------------------------------------------------------------
     # Destination validation.
     # ------------------------------------------------------------------
     if dst.exists() and any(dst.iterdir()):
         if not args.force:
-            print(
-                f"Error: destination directory '{dst}' is not empty."
+            render_error(
+                f"destination directory '{dst}' is not empty."
                 " Use --force to overwrite.",
-                file=sys.stderr,
+                console=err_console,
             )
-            sys.exit(1)
-        # --force: remove previous pipeline outputs before converting.
-        _clear_dst_contents(dst)
+            raise typer.Exit(code=1)
+        # --force: remove previous pipeline outputs before converting. A dry run
+        # never mutates the destination, so the clear is skipped even with --force.
+        if not args.dry_run:
+            _clear_dst_contents(dst)
 
-    dst.mkdir(parents=True, exist_ok=True)
+    # A dry run creates no destination directory; the pipeline writes nothing.
+    if not args.dry_run:
+        dst.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Run conversion pipeline.
     # ------------------------------------------------------------------
     try:
-        report: ConversionReport = convert_newave_case(src, dst)
-    except FileNotFoundError as exc:
-        missing = str(exc)
-        print(
-            f"Error: required file '{missing}' not found in {src}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        with conversion_progress(
+            len(CONVERSION_PHASE_LABELS),
+            verbose=args.verbose > 0,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ) as step:
+            report: ConversionReport = convert_newave_case(
+                src, dst, on_phase=step, dry_run=args.dry_run
+            )
     except Exception as exc:  # noqa: BLE001
-        print(f"Error: conversion failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+        diag = diagnostic_from_exception(exc, context="Conversion")
+        if args.json_output:
+            # Pipeline failure: ``report`` is None, so counts are zeroed and the
+            # dry-run path has an empty would-write listing. ``status`` is "error"
+            # because ``diagnostic_from_exception`` yields an ERROR-severity diag.
+            diagnostics = [diag]
+            summary = _convert_verdict_summary(None)
+            if args.dry_run:
+                summary["would_write"] = []
+                status = _convert_status(diagnostics, success="dry-run")
+            else:
+                status = _convert_status(diagnostics, success="ok")
+            _emit_convert_json(
+                build_verdict("convert newave", status, summary, diagnostics)
+            )
+        else:
+            render_diagnostics([diag], console=err_console, quiet=args.quiet)
+        raise typer.Exit(code=1)
 
-    print(str(report))
+    if args.dry_run:
+        # Dry run: report the would-write listing only; touch nothing on disk
+        # (no diagnostics-json sidecar, no manifest, no validation).
+        if args.json_output:
+            # The would-write listing moves UNDER ``summary`` (dst-relative,
+            # forward-slash, sorted) so the only top-level keys are the five
+            # envelope keys.
+            summary = _convert_verdict_summary(report)
+            summary["would_write"] = sorted(
+                Path(p).relative_to(dst).as_posix() for p in report.would_write_paths
+            )
+            status = _convert_status(report.diagnostics, success="dry-run")
+            _emit_convert_json(
+                build_verdict("convert newave", status, summary, report.diagnostics)
+            )
+        else:
+            if not args.quiet:
+                _render_dry_run_summary(report, console=out_console)
+            render_diagnostics(
+                report.diagnostics, console=err_console, quiet=args.quiet
+            )
+        if args.validate:
+            print_status(
+                "Note: --validate is ignored under --dry-run"
+                " (nothing was written to validate).",
+                console=err_console,
+                style="#F5A623",
+            )
+        return
 
-    if report.warnings:
-        print(
-            f"\nCompleted with {len(report.warnings)} warning(s) — "
-            "some sections may be degraded or skipped:",
-            file=sys.stderr,
-        )
-        for warning in report.warnings:
-            print(f"  - {warning}", file=sys.stderr)
+    # Build the convert ``summary`` + ``status`` up front; ``--validate`` may
+    # later append a ``summary["validation"]`` sub-object (under --json), and the
+    # verdict is emitted to stdout only after validation has run so that block is
+    # populated. ``status`` is diagnostics-only and is NOT touched by validation.
+    summary = _convert_verdict_summary(report)
+    status = _convert_status(report.diagnostics, success="ok")
+
+    if not args.json_output:
+        if not args.quiet:
+            render_conversion_summary(report, console=out_console)
+        render_diagnostics(report.diagnostics, console=err_console, quiet=args.quiet)
+
+    if args.diagnostics_json is not None:
+        # The --diagnostics-json sidecar coexists with --json (both can be set).
+        _write_diagnostics_json(report, args.diagnostics_json, console=err_console)
+
+    # Provenance manifest, always written on a successful conversion. Notes go
+    # to err_console (stderr) so the --json stdout verdict stays byte-deterministic.
+    _write_conversion_manifest(report, src, dst, console=err_console)
 
     # ------------------------------------------------------------------
     # Optional post-conversion validation.
     # ------------------------------------------------------------------
+    # When --validate and --json are combined, the human validation messages stay
+    # on err_console (stderr) exactly as without --json, and the machine-readable
+    # outcome is folded UNDER ``summary`` as a ``validation`` sub-object. The
+    # verdict is emitted (below) only AFTER this block so ``validation`` is
+    # populated; validation failure flips the exit code, never the status.
+    validation_failed = False
     if args.validate:
+        # A case with NE-with-filling plants emits the dead-volume filling schema,
+        # which cobre-python learned in MIN_COBRE_FILLING_VERSION. Validating such a
+        # case against an OLDER cobre-python would reject correct output and force
+        # exit 2, so skip validation (success, exit 0) when the installed
+        # cobre-python predates the schema — recording why on stderr (human) and
+        # under summary["validation"] (machine), never flipping status. A
+        # cobre-python that knows the schema validates the case normally below; an
+        # absent cobre-python falls through to the generic "not installed" skip.
+        if _case_has_filling_plants(src):
+            installed = _installed_cobre_python_version()
+            if installed is not None and not _cobre_python_supports_filling(installed):
+                print_status(
+                    f"Note: dead-volume filling output requires cobre-python >= "
+                    f"{MIN_COBRE_FILLING_VERSION} (installed cobre-python {installed} "
+                    f"predates the filling schema); skipping cobre-python validation.",
+                    console=err_console,
+                    style="#F5A623",
+                )
+                if args.json_output:
+                    summary["validation"] = {
+                        "ran": False,
+                        "valid": None,
+                        "warnings": 0,
+                        "errors": 0,
+                        "skipped_reason": "cobre-python-predates-filling-schema",
+                    }
+                    _emit_convert_json(
+                        build_verdict(
+                            "convert newave", status, summary, report.diagnostics
+                        )
+                    )
+                return
+
         try:
             import cobre.io  # type: ignore[import-untyped]
         except ImportError:
-            print(
+            print_status(
                 "Warning: cobre package not installed, skipping validation",
-                file=sys.stderr,
+                console=err_console,
+                style="#F5A623",
             )
-            sys.exit(0)
+            if args.json_output:
+                # Validation was requested but could not run; record that it was
+                # skipped so the absence of a real outcome is explicit.
+                summary["validation"] = {
+                    "ran": False,
+                    "valid": None,
+                    "warnings": 0,
+                    "errors": 0,
+                }
+                _emit_convert_json(
+                    build_verdict("convert newave", status, summary, report.diagnostics)
+                )
+            return
 
         try:
             # cobre v0.6.x: cobre.io.validate is a function returning a
             # report dict; it never raises (errors are surfaced as data).
             result = cobre.io.validate(str(dst))
         except Exception as exc:  # noqa: BLE001
-            print(f"Validation error: {exc}", file=sys.stderr)
-            sys.exit(2)
+            render_error(f"Validation error: {exc}", console=err_console)
+            if args.json_output:
+                # Validation raised unexpectedly; still emit one JSON object so
+                # the --json contract (exactly one verdict on stdout) holds on
+                # this exit-2 path too. The conversion itself succeeded, so the
+                # summary is intact; only the validation outcome is an error.
+                summary["validation"] = {
+                    "ran": False,
+                    "valid": None,
+                    "warnings": 0,
+                    "errors": 1,
+                }
+                _emit_convert_json(
+                    build_verdict("convert newave", status, summary, report.diagnostics)
+                )
+            raise typer.Exit(code=2)
 
         def _msg(item: object) -> object:
             return item.get("message", item) if isinstance(item, dict) else item
 
-        for warning in result.get("warnings", []):
-            print(f"Validation warning: {_msg(warning)}", file=sys.stderr)
-        if not result.get("valid", False):
-            for err in result.get("errors", []):
-                print(f"Validation error: {_msg(err)}", file=sys.stderr)
-            print("Validation failed.", file=sys.stderr)
-            sys.exit(2)
+        warnings = result.get("warnings", [])
+        errors = result.get("errors", [])
+        valid = bool(result.get("valid", False))
 
-    sys.exit(0)
+        for warning in warnings:
+            print_status(
+                f"Validation warning: {_msg(warning)}",
+                console=err_console,
+                style="#F5A623",
+            )
+        if not valid:
+            for err in errors:
+                print_status(
+                    f"Validation error: {_msg(err)}",
+                    console=err_console,
+                    style="bold #DC4C4C",
+                )
+            print_status(
+                "Validation failed.", console=err_console, style="bold #DC4C4C"
+            )
+            validation_failed = True
+
+        if args.json_output:
+            # The machine-readable outcome under ``summary``; ``status`` stays
+            # derived from diagnostics only (validation never flips it).
+            summary["validation"] = {
+                "ran": True,
+                "valid": valid,
+                "warnings": len(warnings),
+                "errors": len(errors),
+            }
+
+    # Emit the --json verdict now (after validation has populated ``summary``).
+    if args.json_output:
+        _emit_convert_json(
+            build_verdict("convert newave", status, summary, report.diagnostics)
+        )
+
+    if validation_failed:
+        raise typer.Exit(code=2)
+
+    return
+
+
+def _convert_verdict_summary(report: ConversionReport | None) -> dict[str, object]:
+    """The convert ``summary`` block — entity counts, zeroed when *report* is None.
+
+    A thin wrapper over :func:`cobre_bridge.verdict.convert_summary` that supplies
+    the five counts from a :class:`ConversionReport` (or all zeros on the failure
+    path, where ``report`` is ``None``). Keeping the count plumbing here lets the
+    real-run, failure, and dry-run call sites share one source of truth while the
+    key order itself stays owned by ``verdict.convert_summary``.
+    """
+    if report is None:
+        return convert_summary(0, 0, 0, 0, 0)
+    return convert_summary(
+        report.hydro_count,
+        report.thermal_count,
+        report.bus_count,
+        report.line_count,
+        report.stage_count,
+    )
+
+
+def _convert_status(diagnostics: Sequence[Diagnostic], *, success: str) -> str:
+    """Derive the convert verdict ``status`` from diagnostic severity ONLY.
+
+    Returns ``"error"`` when any diagnostic has ``ERROR`` severity, otherwise the
+    caller's *success* token (``"ok"`` for a real run, ``"dry-run"`` for a dry
+    run). Validation outcome never enters here — it lands in ``summary.validation``
+    and the exit code, keeping ``status`` a pure diagnostics signal.
+    """
+    if any(d.severity is Severity.ERROR for d in diagnostics):
+        return "error"
+    return success
+
+
+def _render_dry_run_summary(
+    report: ConversionReport, *, console: Console | None = None
+) -> None:
+    """Render the dry-run would-write listing to stdout as a primary result.
+
+    Prints a clear "Dry run — no files written" banner, the entity summary, and a
+    table of every path the conversion would have written. Diagnostics are
+    rendered separately on stderr.
+    """
+    target = console or get_console()
+    print_status(
+        "Dry run — no files written.",
+        console=target,
+        style="bold #F5A623",
+    )
+    render_conversion_summary(report, console=target)
+
+    # Human output lists the ABSOLUTE paths (easy to copy-paste / inspect on
+    # disk); the ``--dry-run --json`` document instead emits dst-relative sorted
+    # paths for byte-stable, location-independent automation. The divergence is
+    # intentional — keep the two representations separate.
+    rows: list[list[object]] = [[path] for path in report.would_write_paths]
+    table = make_table(
+        ["Would write"],
+        rows,
+        title=f"{len(rows)} output files",
+    )
+    target.print(table)
+
+
+def _emit_convert_json(document: dict[str, object]) -> None:
+    """Write the ``--json`` verdict *document* to stdout as one JSON object.
+
+    Writes directly to ``sys.stdout`` (NOT through the Rich console, which may
+    inject styling/wrapping), with a trailing newline. A fixed insertion order is
+    preserved (``sort_keys=False``) so the output is byte-stable.
+    """
+    json.dump(document, sys.stdout, indent=2, ensure_ascii=False, sort_keys=False)
+    sys.stdout.write("\n")
+
+
+def _write_diagnostics_json(
+    report: ConversionReport, path: Path, *, console: Console
+) -> None:
+    """Write the conversion counts + diagnostics to *path* as JSON.
+
+    A write failure is reported but does not change the exit code — the conversion
+    itself already succeeded.
+    """
+    payload = {
+        "summary": {
+            "hydros": report.hydro_count,
+            "thermals": report.thermal_count,
+            "buses": report.bus_count,
+            "lines": report.line_count,
+            "stages": report.stage_count,
+        },
+        "diagnostics": [d.to_dict() for d in report.diagnostics],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to write diagnostics JSON: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+    else:
+        print_status(f"Diagnostics written to {path}", console=console)
+
+
+def _write_conversion_manifest(
+    report: ConversionReport, src: Path, dst: Path, *, console: Console
+) -> None:
+    """Write the conversion provenance manifest into ``dst`` as JSON.
+
+    Rediscovers the source-model input files to hash, builds a
+    :class:`ConversionManifest` from the bridge version/git SHA, the entity
+    counts in *report*, and its diagnostics, then writes it to
+    ``dst / "conversion_manifest.json"``.
+
+    Both a discovery failure and a write failure are reported as warnings and
+    swallowed — the conversion itself already succeeded, so neither changes the
+    exit code.
+    """
+    from cobre_bridge.conversion_manifest import (
+        ConversionManifest,
+        hash_input_files,
+        summarize_diagnostics,
+    )
+    from cobre_bridge.newave_files import NewaveFiles
+
+    try:
+        files = NewaveFiles.from_directory(src)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to discover source files for conversion manifest: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+        return
+
+    entity_counts = {
+        "hydros": report.hydro_count,
+        "thermals": report.thermal_count,
+        "buses": report.bus_count,
+        "lines": report.line_count,
+        "stages": report.stage_count,
+    }
+    # Record the minimum cobre version the output requires: a case with
+    # NE-with-filling plants emits the unreleased filling schema, so its output
+    # is only loadable by cobre >= MIN_COBRE_FILLING_VERSION. EX-only cases stay
+    # None (loadable by any released cobre-python).
+    has_filling = _case_has_filling_plants(src)
+    manifest = ConversionManifest.create(
+        "convert newave",
+        src,
+        dst,
+        entity_counts=entity_counts,
+        input_files=hash_input_files(files),
+        diagnostics_summary=summarize_diagnostics(report.diagnostics),
+        diagnostics=[d.to_dict() for d in report.diagnostics],
+        min_cobre_version=MIN_COBRE_FILLING_VERSION if has_filling else None,
+    )
+
+    path = dst / "conversion_manifest.json"
+    try:
+        manifest.to_json(path)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to write conversion manifest: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+    else:
+        print_status(f"Conversion manifest written to {path}", console=console)
+
+
+#: A no-op handler parked on the package logger when warnings are suppressed, so a
+#: suppressed record does not fall through to ``logging.lastResort`` (which would
+#: otherwise echo it to stderr, defeating the suppression).
+_NULL_HANDLER = logging.NullHandler()
+
+#: The ``--log-file`` DEBUG ``FileHandler`` attached to the package logger for the
+#: duration of a run, or ``None`` when no ``--log-file`` was given. ``main`` removes
+#: and closes it in its ``finally`` so it never leaks across in-process invocations
+#: (the autouse test fixture restores ``propagate``/level but NOT handlers).
+_LOG_FILE_HANDLER: logging.FileHandler | None = None
+
+
+def _configure_logging(verbose: int, log_file: Path | None) -> None:
+    """Configure logging for a CLI run.
+
+    *verbose* is a graduated count selecting the live console level:
+    ``0`` keeps ``cobre_bridge`` warnings recorded — the diagnostics collector and
+    ``--diagnostics-json`` rely on them — but off the live console (the Rich
+    diagnostics block is the single user-facing surface, and warnings are not
+    printed twice); ``1`` (``-v`` / ``--verbose``) raises the console to INFO; and
+    ``2`` or more (``-vv``) raises it to DEBUG.
+
+    This is a behavior change from the previous boolean ``--verbose``: a bare
+    ``--verbose`` used to mean DEBUG and now means INFO; ``-vv`` is required for the
+    full DEBUG firehose. ``--log-file`` (below) gives the complete DEBUG trace to
+    anyone who needs it regardless of the console level.
+
+    When *log_file* is not ``None``, a DEBUG ``FileHandler`` is attached to the
+    ``cobre_bridge`` logger and the package logger level is lowered to DEBUG, so the
+    file always captures the full trace even at console verbose ``0`` (the console
+    output stays at the ladder level — it is driven by ``basicConfig``/root, while
+    ``_NULL_HANDLER`` keeps suppressed records off ``logging.lastResort``). The
+    created handler is stored in the module-level ``_LOG_FILE_HANDLER`` so ``main``
+    can remove and close it; ``main`` also restores ``propagate`` afterwards.
+    """
+    global _LOG_FILE_HANDLER
+
+    pkg = logging.getLogger("cobre_bridge")
+    if verbose >= 1:
+        level = logging.DEBUG if verbose >= 2 else logging.INFO
+        logging.basicConfig(
+            level=level,
+            format="%(levelname)s %(name)s: %(message)s",
+        )
+        pkg.setLevel(level)
+        pkg.propagate = True
+        # Symmetric with the suppress branch below: drop the null handler so a
+        # verbose run after a suppressed one in the same process leaves the
+        # package logger in a clean state (removeHandler is a no-op if absent).
+        pkg.removeHandler(_NULL_HANDLER)
+    else:
+        # Leave the package logger level untouched (root's default WARNING already
+        # records warnings for the collector); just keep them off the live console.
+        if _NULL_HANDLER not in pkg.handlers:
+            pkg.addHandler(_NULL_HANDLER)
+        pkg.propagate = False
+
+    if log_file is not None:
+        # An unwritable path raises OSError here; it is deliberately not swallowed —
+        # an unwritable --log-file is a user error that should fail loudly through
+        # the per-command CLI boundary.
+        handler = logging.FileHandler(log_file, encoding="utf-8")
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        pkg.addHandler(handler)
+        # Lower the logger threshold so DEBUG records reach the file handler even
+        # when the console ladder leaves it at verbose 0.
+        pkg.setLevel(logging.DEBUG)
+        _LOG_FILE_HANDLER = handler
+
+
+# ---------------------------------------------------------------------------
+# Typer application
+# ---------------------------------------------------------------------------
+
+# Shared flags reused across the leaf commands (kept *after* the subcommand,
+# matching the previous argparse UX).
+_VerboseOpt = Annotated[
+    int,
+    typer.Option(
+        "--verbose",
+        "-v",
+        count=True,
+        help="Increase console log verbosity (-v INFO, -vv DEBUG).",
+    ),
+]
+_LogFileOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--log-file",
+        metavar="PATH",
+        help="Write the full DEBUG log to PATH (the console verbosity is unaffected).",
+    ),
+]
+_NoColorOpt = Annotated[
+    bool,
+    typer.Option(
+        "--no-color",
+        help="Disable coloured output (also honoured via the NO_COLOR env var).",
+    ),
+]
+_QuietOpt = Annotated[
+    bool,
+    typer.Option(
+        "--quiet",
+        help="Suppress the summary and info notes; warnings/errors still show.",
+    ),
+]
+_FormatOpt = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--format",
+        metavar="FORMAT",
+        envvar="COBRE_BRIDGE_FORMAT",
+        help=(
+            "Output format(s): console,html,csv,parquet,json,all. "
+            "Comma-separated and/or repeatable. Overridable via "
+            "COBRE_BRIDGE_FORMAT or cobre-bridge.toml. "
+            "(default: console,parquet,json)"
+        ),
+    ),
+]
+_OutDirOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--out-dir",
+        envvar="COBRE_BRIDGE_OUT_DIR",
+        help=(
+            "Directory for file artifacts. Overridable via COBRE_BRIDGE_OUT_DIR "
+            "or cobre-bridge.toml. "
+            "(default: <cobre_output_dir>/comparison_artifacts)."
+        ),
+    ),
+]
+
+app = typer.Typer(
+    name="cobre-bridge",
+    help="Convert power system data to Cobre input format.",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+    add_completion=True,
+)
+convert_app = typer.Typer(help="Convert data from a source format to Cobre JSON.")
+compare_app = typer.Typer(help="Compare source model inputs/results against Cobre.")
+check_app = typer.Typer(help="Validate source-model inputs without converting.")
+app.add_typer(convert_app, name="convert")
+app.add_typer(compare_app, name="compare")
+app.add_typer(check_app, name="check")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        print_status(f"cobre-bridge {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Convert power system data to Cobre input format."""
+
+
+@convert_app.command("newave")
+def _convert_newave(
+    src: Annotated[Path, typer.Argument(help="Path to the NEWAVE case directory.")],
+    dst: Annotated[
+        Path, typer.Argument(help="Path to the output Cobre case directory.")
+    ],
+    validate: Annotated[
+        bool,
+        typer.Option(
+            "--validate",
+            help="After conversion, validate the output with the cobre package.",
+        ),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Overwrite destination directory if it already contains files.",
+        ),
+    ] = False,
+    diagnostics_json: Annotated[
+        Path | None,
+        typer.Option(
+            "--diagnostics-json",
+            metavar="PATH",
+            help="Also write the conversion diagnostics (counts + findings) as JSON.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) rendering."
+            ),
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Run the full conversion in memory and report what would be "
+                "written, without creating or modifying the destination directory."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Convert a NEWAVE case directory to a Cobre case directory."""
+    _configure_logging(verbose, log_file)
+    _run_newave_conversion(
+        SimpleNamespace(
+            src=src,
+            dst=dst,
+            validate=validate,
+            force=force,
+            diagnostics_json=diagnostics_json,
+            json_output=json_output,
+            dry_run=dry_run,
+            verbose=verbose,
+            log_file=log_file,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+@compare_app.command("bounds")
+def _compare_bounds(
+    newave_dir: Annotated[
+        Path, typer.Argument(help="Path to the NEWAVE case directory.")
+    ],
+    cobre_output_dir: Annotated[
+        Path,
+        typer.Argument(help="Path to the Cobre output directory (has bounds.parquet)."),
+    ],
+    tolerance: Annotated[
+        float | None,
+        typer.Option(
+            envvar="COBRE_BRIDGE_BOUNDS_TOLERANCE",
+            help=(
+                "Absolute tolerance for bound comparison (default 1e-3; "
+                "overridable via COBRE_BRIDGE_BOUNDS_TOLERANCE or cobre-bridge.toml)."
+            ),
+        ),
+    ] = None,
+    fmt: _FormatOpt = None,
+    out_dir: _OutDirOpt = None,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary", help="Print only summary counts, not individual mismatches."
+        ),
+    ] = False,
+    variables: Annotated[
+        str | None,
+        typer.Option(
+            "--variables",
+            help="Comma-separated variables to compare (e.g. storage_min,turbined).",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) tables."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Compare LP bounds computed from NEWAVE inputs against Cobre bounds."""
+    _configure_logging(verbose, log_file)
+    _run_bounds_comparison(
+        SimpleNamespace(
+            newave_dir=newave_dir,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+            format=fmt,
+            out_dir=out_dir,
+            summary=summary,
+            variables=variables,
+            json_output=json_output,
+            verbose=verbose,
+            log_file=log_file,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+@compare_app.command("results")
+def _compare_results(
+    newave_dir: Annotated[
+        Path, typer.Argument(help="Path to the NEWAVE case directory (has saidas/).")
+    ],
+    cobre_output_dir: Annotated[
+        Path, typer.Argument(help="Path to the Cobre output directory.")
+    ],
+    tolerance: Annotated[
+        float | None,
+        typer.Option(
+            envvar="COBRE_BRIDGE_RESULTS_TOLERANCE",
+            help=(
+                "Relative tolerance for results comparison (default 1e-2; "
+                "overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or cobre-bridge.toml)."
+            ),
+        ),
+    ] = None,
+    fmt: _FormatOpt = None,
+    out_dir: _OutDirOpt = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) tables."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Compare NEWAVE published results against Cobre simulation output.
+
+    Informational: always exits 0, whereas 'compare bounds' exits 1 on any mismatch.
+    """
+    _configure_logging(verbose, log_file)
+    _run_results_comparison(
+        SimpleNamespace(
+            newave_dir=newave_dir,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+            format=fmt,
+            out_dir=out_dir,
+            json_output=json_output,
+            verbose=verbose,
+            log_file=log_file,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+@check_app.command("newave")
+def _check_newave(
+    src: Annotated[Path, typer.Argument(help="Path to the NEWAVE case directory.")],
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) checklist."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Validate a NEWAVE case directory without converting or writing any files."""
+    _configure_logging(verbose, log_file)
+    _run_check(
+        SimpleNamespace(
+            src=src,
+            json_output=json_output,
+            verbose=verbose,
+            log_file=log_file,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+@app.command("dashboard")
+def _dashboard(
+    case_dir: Annotated[Path, typer.Argument(help="Path to the Cobre case directory.")],
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output HTML file path (default: <case_dir>/dashboard.html).",
+        ),
+    ] = None,
+    open_browser: Annotated[
+        bool,
+        typer.Option(
+            "--open",
+            help=(
+                "Open the generated dashboard in the default web browser "
+                "after writing it."
+            ),
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) status lines."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Generate an interactive HTML dashboard from Cobre simulation results."""
+    _configure_logging(verbose, log_file)
+    _run_dashboard(
+        SimpleNamespace(
+            case_dir=case_dir,
+            output=output,
+            open_browser=open_browser,
+            json_output=json_output,
+            verbose=verbose,
+            log_file=log_file,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
 
 
 def main() -> None:
-    """Entry point for the cobre-bridge CLI."""
-    parser = argparse.ArgumentParser(
-        prog="cobre-bridge",
-        description="Convert power system data to Cobre input format.",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
-    )
+    """Console entry point: run the Typer app, restoring the logger afterwards.
 
-    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+    The thin wrapper restores the ``cobre_bridge`` logger ``propagate`` flag that
+    ``_configure_logging`` flips, and removes + closes any ``--log-file``
+    ``FileHandler`` it attached, so a real CLI run never leaks logging state.
+    """
+    global _LOG_FILE_HANDLER
 
-    # convert subcommand
-    convert_parser = subparsers.add_parser(
-        "convert",
-        help="Convert data from a source format to Cobre JSON.",
-    )
-    convert_subparsers = convert_parser.add_subparsers(
-        dest="source",
-        metavar="SOURCE",
-        required=True,
-    )
-
-    # convert newave sub-subcommand
-    newave_parser = convert_subparsers.add_parser(
-        "newave",
-        help="Convert a NEWAVE case directory to a Cobre case directory.",
-    )
-    newave_parser.add_argument(
-        "src",
-        metavar="SRC",
-        type=Path,
-        help="Path to the NEWAVE case directory.",
-    )
-    newave_parser.add_argument(
-        "dst",
-        metavar="DST",
-        type=Path,
-        help="Path to the output Cobre case directory.",
-    )
-    newave_parser.add_argument(
-        "--validate",
-        action="store_true",
-        help="After conversion, validate the output with the cobre package.",
-    )
-    newave_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite destination directory if it already contains files.",
-    )
-    newave_parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable detailed logging output.",
-    )
-
-    # compare subcommand
-    compare_parser = subparsers.add_parser(
-        "compare",
-        help="Compare LP bounds between source model and Cobre output.",
-    )
-    compare_subparsers = compare_parser.add_subparsers(
-        dest="compare_source",
-        metavar="SOURCE",
-        required=True,
-    )
-
-    # compare bounds sub-subcommand
-    compare_nw = compare_subparsers.add_parser(
-        "bounds",
-        help="Compare LP bounds computed from NEWAVE inputs against Cobre bounds.",
-    )
-    compare_nw.add_argument(
-        "newave_dir",
-        type=Path,
-        help="Path to the NEWAVE case directory.",
-    )
-    compare_nw.add_argument(
-        "cobre_output_dir",
-        type=Path,
-        help="Path to the Cobre output directory (contains bounds.parquet).",
-    )
-    compare_nw.add_argument(
-        "--tolerance",
-        type=float,
-        default=1e-3,
-        help="Absolute tolerance for bound comparison (default: 1e-3).",
-    )
-    compare_nw.add_argument(
-        "--format",
-        action="append",
-        default=None,
-        metavar="FORMAT",
-        help=(
-            "Output format(s): console,html,csv,parquet,json,all. "
-            "Comma-separated and/or repeatable. (default: console,parquet,json)"
-        ),
-    )
-    compare_nw.add_argument(
-        "--out-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for file artifacts "
-            "(default: <cobre_output_dir>/comparison_artifacts)."
-        ),
-    )
-    compare_nw.add_argument(
-        "--summary",
-        action="store_true",
-        help="Print only summary counts, not individual mismatches.",
-    )
-    compare_nw.add_argument(
-        "--variables",
-        type=str,
-        default=None,
-        help="Comma-separated variables to compare (e.g., storage_min,turbined_max).",
-    )
-    compare_nw.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable detailed logging output.",
-    )
-
-    # compare results sub-subcommand
-    compare_res = compare_subparsers.add_parser(
-        "results",
-        help="Compare NEWAVE published results against Cobre simulation output.",
-        epilog=(
-            "compare results is informational and always exits 0; "
-            "compare bounds exits 1 on any mismatch."
-        ),
-    )
-    compare_res.add_argument(
-        "newave_dir",
-        type=Path,
-        help="Path to the NEWAVE case directory (must contain saidas/).",
-    )
-    compare_res.add_argument(
-        "cobre_output_dir",
-        type=Path,
-        help="Path to the Cobre output directory.",
-    )
-    compare_res.add_argument(
-        "--format",
-        action="append",
-        default=None,
-        metavar="FORMAT",
-        help=(
-            "Output format(s): console,html,csv,parquet,json,all. "
-            "Comma-separated and/or repeatable. (default: console,parquet,json)"
-        ),
-    )
-    compare_res.add_argument(
-        "--out-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for file artifacts "
-            "(default: <cobre_output_dir>/comparison_artifacts)."
-        ),
-    )
-    compare_res.add_argument(
-        "--tolerance",
-        type=float,
-        default=1e-2,
-        help="Relative tolerance for results comparison (default: 1e-2).",
-    )
-    compare_res.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable detailed logging output.",
-    )
-
-    # dashboard subcommand
-    dashboard_parser = subparsers.add_parser(
-        "dashboard",
-        help="Generate an interactive HTML dashboard from Cobre simulation results.",
-    )
-    dashboard_parser.add_argument(
-        "case_dir",
-        type=Path,
-        help="Path to the Cobre case directory.",
-    )
-    dashboard_parser.add_argument(
-        "--output",
-        "-o",
-        type=Path,
-        default=None,
-        help="Output HTML file path (default: <case_dir>/dashboard.html).",
-    )
-    dashboard_parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable detailed logging output.",
-    )
-
-    args = parser.parse_args()
-
-    # Configure logging based on --verbose.
-    if getattr(args, "verbose", False):
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(levelname)s %(name)s: %(message)s",
-        )
-    else:
-        logging.basicConfig(level=logging.WARNING)
-
-    if args.command == "convert" and args.source == "newave":
-        _run_newave_conversion(args)
-        return
-
-    if args.command == "compare" and args.compare_source == "bounds":
-        _run_bounds_comparison(args)
-        return
-
-    if args.command == "compare" and args.compare_source == "results":
-        _run_results_comparison(args)
-        return
-
-    if args.command == "dashboard":
-        _run_dashboard(args)
-        return
-
-    parser.print_help()
-    sys.exit(0)
+    pkg_logger = logging.getLogger("cobre_bridge")
+    prior_propagate = pkg_logger.propagate
+    try:
+        app()
+    finally:
+        pkg_logger.propagate = prior_propagate
+        if _LOG_FILE_HANDLER is not None:
+            pkg_logger.removeHandler(_LOG_FILE_HANDLER)
+            _LOG_FILE_HANDLER.close()
+            _LOG_FILE_HANDLER = None
 
 
 if __name__ == "__main__":

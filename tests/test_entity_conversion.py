@@ -8,12 +8,15 @@ by each converter.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.diagnostics import Severity
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 from tests.conftest import make_case, make_nw_files
@@ -62,6 +65,7 @@ def _make_nw_files(
         dsvagua=dsvagua,
         curva=curva,
         expt=expt,
+        exph=None,
         manutt=manutt,
         c_adic=c_adic,
         cvar=cvar,
@@ -354,6 +358,114 @@ def _make_intercambio_df() -> pd.DataFrame:
         },
     ]
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# NE-with-filling fixtures (ticket-009): a JURUENA-shaped run-of-river ('S')
+# plant (code 309) admitted into the active set by its exph dead-volume row.
+# ---------------------------------------------------------------------------
+
+
+def _make_ne_confhd_df() -> pd.DataFrame:
+    """Two EX plants (1, 2) plus one NE filling plant (309 JURUENA)."""
+    return pd.DataFrame(
+        {
+            "codigo_usina": [1, 2, 309],
+            "nome_usina": ["USINA_A", "USINA_B", "JURUENA"],
+            "posto": [1, 2, 226],
+            "codigo_usina_jusante": [pd.NA, 1, pd.NA],
+            "ree": [1, 1, 1],
+            "volume_inicial_percentual": [50.0, 75.0, 0.0],
+            "usina_existente": ["EX", "EX", "NE"],
+            "usina_modificada": [0, 0, 0],
+        }
+    )
+
+
+def _make_ne_cadastro() -> pd.DataFrame:
+    """Two-plant synthetic cadastro extended with JURUENA (code 309).
+
+    JURUENA is run-of-river (``tipo_regulacao='S'``) with
+    ``volume_minimo == volume_maximo == 2.93`` so its reservoir block already
+    collapses to the single point 2.93 hm³ via the existing 'S' path.
+    """
+    base = _make_hidr_cadastro()
+    juruena = base.loc[[1]].copy()
+    juruena.index = pd.Index([309], name="codigo_usina")
+    juruena["nome_usina"] = "JURUENA"
+    juruena["posto"] = 226
+    juruena["codigo_usina_jusante"] = pd.NA
+    juruena["volume_minimo"] = 2.93
+    juruena["volume_maximo"] = 2.93
+    juruena["volume_referencia"] = 2.93
+    juruena["tipo_regulacao"] = "S"
+    return pd.concat([base, juruena])
+
+
+def _make_ne_exph_mock(*, duracao: int = 1, volume_morto: float = 0.0) -> MagicMock:
+    """An ``exph`` reader mock whose ``expansoes`` carries JURUENA's filling row.
+
+    Mirrors the real ``exph.dat`` layout (verified on JURUENA): one schedule row
+    (non-null ``data_inicio_enchimento``) — what ``filling_hydro_codes`` selects
+    and the epic-03 ``convert_hydros`` filling tests read via ``.iloc[0]`` — then
+    one row **per generating unit** with ``data_entrada_operacao`` /
+    ``conjunto_maquina_entrada`` / ``maquina_entrada`` populated (epic-04). JURUENA
+    has two machines, both entering Jan 2025 in machine group 1 (so under the
+    Sep-2024 horizon their online stage is 4). The schedule row keeps a non-null
+    ``data_entrada_operacao`` (per the epic-03 mock) but a NULL
+    ``conjunto_maquina_entrada``, so the ramp branch — which filters unit rows on
+    ``conjunto_maquina_entrada`` — never treats it as a generating unit.
+    """
+    expansoes = pd.DataFrame(
+        {
+            "codigo_usina": [309, 309, 309],
+            "nome_usina": ["JURUENA", "JURUENA", "JURUENA"],
+            "data_inicio_enchimento": [
+                pd.Timestamp("2024-10-01"),
+                pd.NaT,
+                pd.NaT,
+            ],
+            "duracao_enchimento": [duracao, 0, 0],
+            "volume_morto": [volume_morto, 0.0, 0.0],
+            "data_entrada_operacao": [
+                pd.Timestamp("2024-11-01"),
+                pd.Timestamp("2025-01-01"),
+                pd.Timestamp("2025-01-01"),
+            ],
+            "conjunto_maquina_entrada": [pd.NA, 1, 1],
+            "maquina_entrada": [pd.NA, 1, 2],
+        }
+    )
+    exph = MagicMock()
+    exph.expansoes = expansoes
+    return exph
+
+
+def _ne_filling_case(tmp_path, *, duracao: int = 1, volume_morto: float = 0.0):
+    """A ``NewaveCase`` with JURUENA (NE+filling) under a Sep-2024 3-year horizon.
+
+    Study start Sep 2024 ⇒ stage 0 = Sep, stage 1 = Oct, stage 2 = Nov. JURUENA's
+    Oct-2024 filling start maps to ``start_sid == 1``; with ``duracao == 1`` the
+    entry is ``entry_sid == 2`` (design §5).
+    """
+    return _hydro_case(
+        tmp_path,
+        cadastro=_make_ne_cadastro(),
+        confhd=_make_ne_confhd_df(),
+        dger=_make_hydro_dger_mock(
+            start_year=2024, start_month=9, num_anos=3, num_anos_pos=0
+        ),
+        exph=_make_ne_exph_mock(duracao=duracao, volume_morto=volume_morto),
+    )
+
+
+def _ne_filling_id_map() -> NewaveIdMap:
+    """Id-map including JURUENA (309) so ``hydro_id(309)`` resolves."""
+    return NewaveIdMap(
+        subsystem_ids=[1],
+        hydro_codes=[1, 2, 309],
+        thermal_codes=[],
+    )
 
 
 class TestConvertHydros:
@@ -683,6 +795,165 @@ class TestConvertHydros:
         # NaN treated as 0 -> factor = 1.0 -> no change from nominal 800 MW
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
 
+    # --- FILLING phase emission (ticket-009) -------------------------------
+
+    def test_ne_plant_emits_filling_block(self, tmp_path) -> None:
+        """An admitted NE plant emits its entry stage + filling contract.
+
+        JURUENA (code 309) fills Oct 2024 (start_sid=1) and enters Nov 2024
+        (entry_sid=2); the single-stage rate is ``2.93 / ζ_Oct`` with
+        ``ζ_Oct = 744 * 3600 / 1e6 = 2.6784`` (design §5).
+        """
+        case = _ne_filling_case(tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, _ne_filling_id_map())
+        juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
+        assert juruena["entry_stage_id"] == 2
+        assert juruena["exit_stage_id"] is None
+        assert juruena["filling"] == {
+            "start_stage_id": 1,
+            "filling_min_rate_m3s": pytest.approx(2.93 / 2.6784, rel=1e-6),
+        }
+        # Reservoir still collapses to the 'S' single point (no new branch).
+        assert juruena["reservoir"]["min_storage_hm3"] == pytest.approx(2.93)
+        assert juruena["reservoir"]["max_storage_hm3"] == pytest.approx(2.93)
+
+    def test_ex_plants_keep_none_filling(self, tmp_path) -> None:
+        """EX plants in the same case keep entry/exit/filling all None."""
+        case = _ne_filling_case(tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, _ne_filling_id_map())
+        for name in ("USINA_A", "USINA_B"):
+            hydro = next(h for h in result["hydros"] if h["name"] == name)
+            assert hydro["entry_stage_id"] is None
+            assert hydro["exit_stage_id"] is None
+            assert hydro["filling"] is None
+
+    def test_ne_plant_zero_duration_omits_filling(self, tmp_path) -> None:
+        """``duracao_enchimento == 0`` ⇒ entry == start, no filling block.
+
+        cobre rejects ``start_stage_id >= entry_stage_id``, so the empty window
+        emits ``entry_stage_id`` only and keeps ``filling`` None (design §8).
+        """
+        case = _ne_filling_case(tmp_path, duracao=0)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, _ne_filling_id_map())
+        juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
+        # Oct-2024 start under Sep-2024 horizon ⇒ start_sid == 1; duracao 0 ⇒
+        # entry_sid == start_sid == 1.
+        assert juruena["entry_stage_id"] == 1
+        assert juruena["filling"] is None
+
+    def test_ne_plant_filling_past_horizon_no_crash(self, tmp_path) -> None:
+        """An NE plant whose filling completes past the horizon converts cleanly.
+
+        Under a SHORT 3-stage horizon (Oct–Dec 2024) JURUENA's Oct-2024 filling
+        start maps to ``start_sid == 0`` and a 6-month ``duracao`` pushes the
+        entry to ``entry_sid == 6 > total_stages (3)`` — a valid case (design §8):
+        the plant fills but never operates within the study, yet is still emitted.
+        The rate is summed only over the in-horizon stages (the clamp in the
+        caller), so ``convert_hydros`` must NOT raise ``IndexError`` indexing the
+        per-stage date list, and the true unclamped ``entry_stage_id`` is emitted.
+        """
+        case = _hydro_case(
+            tmp_path,
+            cadastro=_make_ne_cadastro(),
+            confhd=_make_ne_confhd_df(),
+            # 3-stage horizon: Oct 2024 start, 1 study year, 0 post ⇒
+            # study_months = (13 - 10) = 3; stages 0=Oct, 1=Nov, 2=Dec 2024.
+            dger=_make_hydro_dger_mock(
+                start_year=2024, start_month=10, num_anos=1, num_anos_pos=0
+            ),
+            # duracao 6: Oct-2024 start ⇒ start_sid == 0, entry_sid == 6 > 3.
+            exph=_make_ne_exph_mock(duracao=6, volume_morto=0.0),
+        )
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        # Must not raise (the IndexError this fix guards against).
+        result = convert_hydros(case, _ne_filling_id_map())
+        juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
+
+        # True, unclamped filling-complete stage is emitted (≥ total_stages == 3).
+        assert juruena["entry_stage_id"] == 6
+        assert juruena["entry_stage_id"] >= case.horizon.total_stages
+
+        # entry_sid (6) > start_sid (0) ⇒ a filling block is emitted; its rate is
+        # finite and non-negative (summed only over the in-horizon stages 0..2).
+        filling = juruena["filling"]
+        assert filling is not None
+        rate = filling["filling_min_rate_m3s"]
+        assert math.isfinite(rate)
+        assert rate >= 0.0
+
+    def test_ne_plant_emits_filling_diagnostic(self, tmp_path) -> None:
+        """A NE filling plant emits exactly one INFO ``ne-filling-plant`` finding.
+
+        Run under a ``collect()`` sink (as the pipeline does) so the diagnostic
+        is captured instead of logged.
+        """
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        with dx.collect() as collected:
+            convert_hydros(_ne_filling_case(tmp_path), _ne_filling_id_map())
+
+        filling = [d for d in collected if d.code == "ne-filling-plant"]
+        assert len(filling) == 1
+        assert filling[0].severity is Severity.INFO
+
+    def test_ne_filling_diagnostic_table_row(self, tmp_path) -> None:
+        """JURUENA's row carries its code, window 1→2, vol. morto 0.0, and ramp."""
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        with dx.collect() as collected:
+            convert_hydros(_ne_filling_case(tmp_path), _ne_filling_id_map())
+
+        diag = next(d for d in collected if d.code == "ne-filling-plant")
+        assert diag.table is not None
+        rows = [dict(zip(diag.table.columns, row)) for row in diag.table.rows]
+
+        juruena = next(r for r in rows if r["Code"] == 309)
+        assert juruena["Fill start"] == 1
+        assert juruena["Operates from"] == 2
+        assert juruena["Vol. morto %"] == "0.0"
+        assert "stage 4" in juruena["Unit ramp"]
+
+    def test_ex_only_emits_no_filling_diagnostic(self, tmp_path) -> None:
+        """An EX-only case emits no ``ne-filling-plant`` diagnostic."""
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        with dx.collect() as collected:
+            convert_hydros(_hydro_case(tmp_path), self._make_id_map())
+
+        assert not any(d.code == "ne-filling-plant" for d in collected)
+
+
+def _make_hydro_dger_mock(
+    *,
+    start_year: int = 2024,
+    start_month: int = 1,
+    num_anos: int = 1,
+    num_anos_pos: int = 0,
+) -> MagicMock:
+    """A ``dger`` mock that yields a concrete study horizon for ``convert_hydros``.
+
+    ``convert_hydros`` builds the per-stage date list from ``case.horizon``
+    (which reads these four ``dger`` fields) once, unconditionally, before the
+    plant loop — so every ``_hydro_case`` needs a ``dger`` that resolves all four
+    horizon fields (the module's other ``_make_dger_mock`` leaves
+    ``num_anos_pos_estudo`` unset). ``funcao_producao_uhe = 1`` selects the linear
+    (constant-productivity) generation model, matching the synthetic plants.
+    """
+    dger = MagicMock()
+    dger.ano_inicio_estudo = start_year
+    dger.mes_inicio_estudo = start_month
+    dger.num_anos_estudo = num_anos
+    dger.num_anos_pos_estudo = num_anos_pos
+    dger.funcao_producao_uhe = 1
+    return dger
+
 
 def _hydro_case(
     tmp_path,
@@ -695,6 +966,8 @@ def _hydro_case(
     ghmin=None,
     penalid=None,
     dsvagua=None,
+    dger=None,
+    exph=None,
     **file_overrides,
 ):
     """Build a ``NewaveCase`` with mock hydro readers pre-cached.
@@ -705,6 +978,11 @@ def _hydro_case(
     passed as already-built mock reader objects; for those guarded behind a
     ``case.files.X`` path check, set the matching path via ``file_overrides``
     (e.g. ``volref_saz=tmp_path / "volref_saz.dat"``).
+
+    ``dger`` defaults to :func:`_make_hydro_dger_mock` (a Jan-2024 one-year horizon) so
+    ``case.horizon`` always resolves; pass a custom ``dger`` mock to drive a
+    different horizon. ``exph`` is the dead-volume filling reader mock (``None``
+    by default — EX-only cases admit no filling plant).
     """
     mock_hidr = MagicMock()
     mock_hidr.cadastro = _make_hidr_cadastro() if cadastro is None else cadastro
@@ -715,7 +993,13 @@ def _hydro_case(
     mock_ree = MagicMock()
     mock_ree.rees = _make_ree_df() if rees is None else rees
 
-    parsed: dict = {"hidr": mock_hidr, "confhd": mock_confhd, "ree": mock_ree}
+    parsed: dict = {
+        "hidr": mock_hidr,
+        "confhd": mock_confhd,
+        "ree": mock_ree,
+        "dger": _make_hydro_dger_mock() if dger is None else dger,
+        "exph": exph,
+    }
 
     if volref_volumes is not None:
         mock_volref = MagicMock()
@@ -1324,6 +1608,442 @@ class TestConvertStorageBoundsPostStudy:
         # Post-study frozen at Dec=80, NOT seasonal Jan=50.
         assert df.loc[12, "max_storage_hm3"] == pytest.approx(80.0)
         assert df.loc[23, "max_storage_hm3"] == pytest.approx(80.0)
+
+
+class TestConvertStorageBoundsMaxGenColumn:
+    """ticket-010: the ``max_generation_mw`` column is gated on filling plants.
+
+    EX-only cases (no ``NE``-with-filling plant) keep the existing 8-column
+    schema byte-identical; a case with a filling plant gains a 9th
+    ``max_generation_mw`` float64 column that is all-null until ticket-011
+    populates the per-stage ramp caps.
+    """
+
+    _EXPECTED_8_COLUMNS = [
+        "hydro_id",
+        "stage_id",
+        "min_storage_hm3",
+        "max_storage_hm3",
+        "min_turbined_m3s",
+        "max_turbined_m3s",
+        "min_outflow_m3s",
+        "min_generation_mw",
+    ]
+
+    def _run_ex_only(self, tmp_path):
+        """An EX-only case (no exph) with one GHMIN row, mirroring ``_run``."""
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        mock_dger = MagicMock()
+        mock_dger.ano_inicio_estudo = 2024
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 1
+        mock_dger.num_anos_pos_estudo = 0
+        mock_dger.sazonaliza_vmaxt = 1
+        mock_dger.sazonaliza_vmint = 1
+
+        confhd_df = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "usina_existente": ["EX"],
+                "nome_usina": ["TEST"],
+            }
+        )
+        mock_confhd = MagicMock()
+        mock_confhd.usinas = confhd_df
+        cadastro = pd.DataFrame(
+            {"volume_minimo": [0.0], "volume_maximo": [100.0]}, index=[10]
+        )
+        id_map = MagicMock()
+        id_map.hydro_id = lambda c: 0
+
+        case = make_case(
+            make_nw_files(tmp_path),
+            dger=mock_dger,
+            confhd=mock_confhd,
+            exph=None,
+        )
+        with (
+            patch("cobre_bridge.converters.hydro.read_cadastro", return_value=cadastro),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={10: {0: 100.0}},
+            ),
+        ):
+            return convert_storage_bounds(case, id_map)
+
+    def _run_filling(self, tmp_path):
+        """A filling case (JURUENA via exph) with one GHMIN row on an EX plant.
+
+        ``convert_storage_bounds`` needs at least one per-stage override/GHMIN
+        row to emit any table, so a synthetic GHMIN entry for EX plant 1 is
+        supplied. The non-empty ``filling_codes`` (309) is what gates the
+        column on.
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        case = _ne_filling_case(tmp_path)
+        id_map = _ne_filling_id_map()
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={1: {0: 100.0}},
+            ),
+        ):
+            return convert_storage_bounds(case, id_map)
+
+    def test_ex_only_case_omits_max_generation_column(self, tmp_path) -> None:
+        """EX-only case keeps exactly the 8 existing columns, no max_generation."""
+        tbl = self._run_ex_only(tmp_path)
+        assert tbl is not None
+        assert tbl.column_names == self._EXPECTED_8_COLUMNS
+        assert "max_generation_mw" not in tbl.column_names
+
+    def test_filling_case_includes_max_generation_column(self, tmp_path) -> None:
+        """A filling plant adds a float64 max_generation_mw column after min_gen."""
+        import pyarrow as pa
+
+        tbl = self._run_filling(tmp_path)
+        assert tbl is not None
+        assert "max_generation_mw" in tbl.column_names
+        assert tbl.schema.field("max_generation_mw").type == pa.float64()
+        # Positioned immediately after min_generation_mw.
+        names = tbl.column_names
+        assert names[names.index("min_generation_mw") + 1] == "max_generation_mw"
+
+    def test_max_generation_populated_for_filling_ramp_rows(self, tmp_path) -> None:
+        """ticket-011 populates the column for JURUENA's ramp rows.
+
+        ticket-010 introduced the column all-null; ticket-011's ramp branch now
+        emits explicit ``0.0`` caps for JURUENA's pre-operating stages (0–3) while
+        the non-ramp GHMIN row (EX plant 1) keeps ``max_generation_mw`` null. So
+        the column is no longer all-null: exactly the GHMIN row is null and the
+        JURUENA ramp rows carry ``0.0``.
+        """
+        tbl = self._run_filling(tmp_path)
+        assert tbl is not None
+        assert tbl.num_rows > 0
+        col = tbl.column("max_generation_mw")
+        # Only the single non-ramp GHMIN row is null; the rest are populated.
+        assert col.null_count == 1
+        assert col.null_count < tbl.num_rows
+
+
+class TestConvertStorageBoundsRamp:
+    """ticket-011: the filling-plant unit-ramp branch in ``convert_storage_bounds``.
+
+    A ``NE``-with-filling plant (JURUENA, code 309) operates from its
+    ``entry_stage_id`` but its turbine / generation capacity is whatever
+    generating units are online. The branch exports EXPLICIT 0/reduced caps over
+    the full pre-operating window ``[0, full_online_sid)`` (clamped to the
+    horizon) so the parquet carries the true 0→full profile for plottability;
+    this matches cobre's internal PreFilling/Filling forcing and leaves the
+    simulation unchanged. Under the Sep-2024 3-year horizon JURUENA's filling
+    completes at ``entry_sid == 2`` and both units enter Jan 2025 (stage 4), so
+    stages 0–3 have zero online machines (explicit ``0.0`` caps) and there is no
+    override row at stage 4+ (the base ``hydros.json`` caps apply).
+    """
+
+    def _run_juruena(self, tmp_path, *, duracao: int = 1):
+        """Run ``convert_storage_bounds`` for the JURUENA filling case.
+
+        ``_read_ghmin_per_stage`` is patched to ``{}`` so the table contains only
+        the ramp rows (no GHMIN/MODIF rows to filter past).
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        case = _ne_filling_case(tmp_path, duracao=duracao)
+        id_map = _ne_filling_id_map()
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={},
+            ),
+        ):
+            tbl = convert_storage_bounds(case, id_map)
+        return tbl, id_map.hydro_id(309)
+
+    def test_juruena_emits_zero_cap_ramp_rows_through_filling_and_idle(
+        self, tmp_path
+    ) -> None:
+        """JURUENA emits 0-cap rows for the whole pre-operating window (stages 0–3).
+
+        The full pre-operating window ``[0, full_online_sid)`` covers PreFilling/
+        Filling (stages 0, 1) and the operating-but-idle ramp (stages 2, 3); every
+        row has all caps ``0.0`` (no units online before stage 4).
+        """
+        tbl, juruena_id = self._run_juruena(tmp_path)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == juruena_id].sort_values("stage_id")
+        assert list(jur["stage_id"]) == [0, 1, 2, 3]
+        for col in ("max_turbined_m3s", "max_generation_mw", "min_generation_mw"):
+            assert list(jur[col]) == [0.0, 0.0, 0.0, 0.0], col
+
+    def test_juruena_no_ramp_row_at_full_online_stage(self, tmp_path) -> None:
+        """No JURUENA ramp row at stage 4+ (both units online ⇒ base caps apply)."""
+        tbl, juruena_id = self._run_juruena(tmp_path)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == juruena_id]
+        assert not (jur["stage_id"] >= 4).any()
+
+    def test_juruena_ramp_rows_have_null_storage_and_outflow(self, tmp_path) -> None:
+        """JURUENA ramp rows (stages 0–3) leave storage/turbined/outflow null."""
+        tbl, juruena_id = self._run_juruena(tmp_path)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == juruena_id]
+        for col in (
+            "min_storage_hm3",
+            "max_storage_hm3",
+            "min_turbined_m3s",
+            "min_outflow_m3s",
+        ):
+            assert jur[col].isna().all(), col
+
+    def test_filling_past_horizon_emits_zero_caps_all_in_study_stages(
+        self, tmp_path
+    ) -> None:
+        """A plant entering at/after the horizon emits 0 caps for ALL in-study stages.
+
+        Mirrors ``test_ne_plant_filling_past_horizon_no_crash``: a 3-stage horizon
+        (Oct 2024 start) with ``duracao=6`` pushes ``entry_sid == 6 > total_stages
+        (3)`` — the plant never operates in-study, so the full pre-operating window
+        ``[0, full_online_sid)`` clamps to ``[0, total_stages)`` and every in-study
+        stage (0, 1, 2) gets an explicit ``0.0``-cap row. No row is emitted at/past
+        the horizon (no stage_id ≥ 3) and the clamp prevents the epic-03
+        IndexError.
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        case = _hydro_case(
+            tmp_path,
+            cadastro=_make_ne_cadastro(),
+            confhd=_make_ne_confhd_df(),
+            dger=_make_hydro_dger_mock(
+                start_year=2024, start_month=10, num_anos=1, num_anos_pos=0
+            ),
+            exph=_make_ne_exph_mock(duracao=6, volume_morto=0.0),
+        )
+        id_map = _ne_filling_id_map()
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={},
+            ),
+        ):
+            # Must not raise the epic-03 IndexError; the clamp keeps every emitted
+            # stage in-study.
+            tbl = convert_storage_bounds(case, id_map)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == id_map.hydro_id(309)].sort_values("stage_id")
+        # total_stages == 3 ⇒ explicit 0-cap rows for stages 0, 1, 2; none ≥ 3.
+        assert list(jur["stage_id"]) == [0, 1, 2]
+        for col in ("max_turbined_m3s", "max_generation_mw", "min_generation_mw"):
+            assert list(jur[col]) == [0.0, 0.0, 0.0], col
+        assert not (df["stage_id"] >= 3).any()
+
+    def test_reduced_caps_partial_online(self) -> None:
+        """``_reduced_caps`` rises monotonically as machine groups come online.
+
+        A 2-conjunto cadastro with the head columns absent forces the simple
+        ``Σ n·p_nom`` / ``Σ n·q_nom`` fallback (no head correction, no
+        availability derating with ``teif == ip == 0``), giving hand-computable
+        caps: conjunto 1 = 2 units × (50 m³/s, 100 MW); conjunto 2 = 3 units ×
+        (80 m³/s, 200 MW).
+        """
+        from cobre_bridge.converters.hydro import _reduced_caps
+
+        hreg = pd.Series(
+            {
+                "numero_conjuntos_maquinas": 2,
+                "maquinas_conjunto_1": 2,
+                "maquinas_conjunto_2": 3,
+                "potencia_nominal_conjunto_1": 100.0,
+                "potencia_nominal_conjunto_2": 200.0,
+                "vazao_nominal_conjunto_1": 50.0,
+                "vazao_nominal_conjunto_2": 80.0,
+                "teif": 0.0,
+                "ip": 0.0,
+            }
+        )
+        # No machines online ⇒ both caps are an explicit zero.
+        assert _reduced_caps(hreg, {}, "X") == (0.0, 0.0)
+        # Only conjunto 1 online: 2×50 = 100 m³/s, 2×100 = 200 MW.
+        assert _reduced_caps(hreg, {1: 2}, "X") == (100.0, 200.0)
+        # Both groups online: 100 + 3×80 = 340 m³/s, 200 + 3×200 = 800 MW.
+        assert _reduced_caps(hreg, {1: 2, 2: 3}, "X") == (340.0, 800.0)
+        # Generation cap rises monotonically as units come online.
+        mgs = [
+            _reduced_caps(hreg, online, "X")[1] for online in ({}, {1: 2}, {1: 2, 2: 3})
+        ]
+        assert mgs == sorted(mgs)
+        assert mgs[0] < mgs[1] < mgs[2]
+
+    def test_ramp_branch_skips_unit_row_with_missing_date(self, tmp_path) -> None:
+        """A unit row with a conjunto but a BLANK online date is skipped, not crashed.
+
+        inewave parses ``conjunto_maquina_entrada`` and ``data_entrada_operacao``
+        independently, so a malformed exph can carry a unit row that has a machine
+        group set but a ``NaT`` online date. Filtering on the date (the defining
+        field of a unit row) and skipping a ``NaN`` conjunto means that row never
+        reaches ``filling_stage_id`` with a ``NaT`` (which would yield ``nan`` and
+        raise ``TypeError`` in ``range(...)``). The remaining valid unit row still
+        drives ``full_online_sid``, so JURUENA still emits its ramp rows.
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        # JURUENA exph: schedule row + ONE malformed unit row (conjunto 1 set,
+        # date NaT) ORDERED BEFORE the valid unit row (conjunto 1, Jan-2025 →
+        # stage 4). The malformed row is placed first deliberately: the old
+        # conjunto-based filter kept it, and its ``NaT`` → ``nan`` stage made the
+        # running ``max(...)`` for ``full_online_sid`` collapse to ``nan`` (nan
+        # comparisons are always False, so a leading nan is never displaced),
+        # crashing ``range(...)`` with a TypeError. The date filter + NaN-conjunto
+        # guard drop it so only the valid stage-4 row survives.
+        expansoes = pd.DataFrame(
+            {
+                "codigo_usina": [309, 309, 309],
+                "nome_usina": ["JURUENA", "JURUENA", "JURUENA"],
+                "data_inicio_enchimento": [
+                    pd.Timestamp("2024-10-01"),
+                    pd.NaT,
+                    pd.NaT,
+                ],
+                "duracao_enchimento": [1, 0, 0],
+                "volume_morto": [0.0, 0.0, 0.0],
+                "data_entrada_operacao": [
+                    pd.Timestamp("2024-11-01"),
+                    pd.NaT,  # malformed: conjunto set but no online date
+                    pd.Timestamp("2025-01-01"),
+                ],
+                "conjunto_maquina_entrada": [pd.NA, 1, 1],
+                "maquina_entrada": [pd.NA, 2, 1],
+            }
+        )
+        exph = MagicMock()
+        exph.expansoes = expansoes
+        case = _hydro_case(
+            tmp_path,
+            cadastro=_make_ne_cadastro(),
+            confhd=_make_ne_confhd_df(),
+            dger=_make_hydro_dger_mock(
+                start_year=2024, start_month=9, num_anos=3, num_anos_pos=0
+            ),
+            exph=exph,
+        )
+        id_map = _ne_filling_id_map()
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={},
+            ),
+        ):
+            # Must not raise TypeError from a NaT-derived nan range bound.
+            tbl = convert_storage_bounds(case, id_map)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        jur = df[df["hydro_id"] == id_map.hydro_id(309)].sort_values("stage_id")
+        # The single valid unit row (stage 4) still drives full_online_sid, so the
+        # pre-operating window is [0, 4) → stages 0, 1, 2, 3, exactly as the
+        # all-valid mock.
+        assert list(jur["stage_id"]) == [0, 1, 2, 3]
+
+    def test_ramp_row_wins_over_modif_at_same_stage(self, tmp_path) -> None:
+        """A ramp row wins over a colliding GHMIN row at the same (hydro, stage).
+
+        JURUENA's ramp window is stages 2 and 3. Injecting a GHMIN override for
+        JURUENA (309) at stage 2 creates a duplicate ``(hydro_id, stage_id)``
+        pair. Per the ramp-wins rule the ramp row is kept and the GHMIN row is
+        dropped: exactly one row remains at that key, with all caps ``0.0`` and a
+        null ``min_generation`` ramp signature — the GHMIN minimum is gone.
+        """
+        from cobre_bridge.converters.hydro import convert_storage_bounds
+
+        case = _ne_filling_case(tmp_path)
+        id_map = _ne_filling_id_map()
+        juruena_id = id_map.hydro_id(309)
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.read_cadastro",
+                return_value=_make_ne_cadastro(),
+            ),
+            # GHMIN for JURUENA (309) at stage 2 — inside the ramp window [2, 4).
+            patch(
+                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                return_value={309: {2: 123.0}},
+            ),
+        ):
+            tbl = convert_storage_bounds(case, id_map)
+        assert tbl is not None
+        df = tbl.to_pandas()
+        at_stage_2 = df[(df["hydro_id"] == juruena_id) & (df["stage_id"] == 2)]
+        # Exactly one row survives at the colliding key.
+        assert len(at_stage_2) == 1
+        row = at_stage_2.iloc[0]
+        # It is the ramp row: zero caps, not the GHMIN minimum of 123.0.
+        assert row["max_turbined_m3s"] == 0.0
+        assert row["max_generation_mw"] == 0.0
+        assert row["min_generation_mw"] == 0.0
+        # Stage 3 (no GHMIN collision) keeps its ramp row too.
+        at_stage_3 = df[(df["hydro_id"] == juruena_id) & (df["stage_id"] == 3)]
+        assert len(at_stage_3) == 1
+        assert at_stage_3.iloc[0]["max_generation_mw"] == 0.0
+
+
+class TestMergeHydroBoundsMaxGenColumn:
+    """ticket-010 C4: ``_merge_hydro_bounds`` carries ``max_generation_mw``.
+
+    The storage-side bounds table may include a ``max_generation_mw`` column
+    (added for filling plants). The polars ``how="full"`` join in
+    ``_merge_hydro_bounds`` must preserve that storage-only column in the
+    merged result, since it has no counterpart on the withdrawal side.
+    """
+
+    def test_storage_side_max_generation_column_survives_full_join(self) -> None:
+        """A storage-only max_generation_mw column appears in the merged table."""
+        import pyarrow as pa
+
+        from cobre_bridge.pipeline import _merge_hydro_bounds
+
+        withdrawal = pa.table(
+            {
+                "hydro_id": pa.array([0, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                "water_withdrawal_m3s": pa.array([1.5, 2.5], type=pa.float64()),
+            }
+        )
+        storage = pa.table(
+            {
+                "hydro_id": pa.array([0, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                "min_generation_mw": pa.array([10.0, 20.0], type=pa.float64()),
+                "max_generation_mw": pa.array([100.0, None], type=pa.float64()),
+            }
+        )
+
+        result = _merge_hydro_bounds(withdrawal, storage)
+
+        assert result is not None
+        assert "max_generation_mw" in result.column_names
 
 
 # ---------------------------------------------------------------------------
@@ -3777,6 +4497,118 @@ class TestHydroPenaltyCosts:
         # spillage (rho_avg only) is unaffected by rho_max_acum.
         assert high["spillage_cost"] == pytest.approx(low["spillage_cost"])
 
+    def test_storage_floor_derived_from_deficit_at_evaporation_tier(self) -> None:
+        from cobre_bridge.converters.network import (
+            _STORAGE_VIOLATION_DEFICIT_MULT,
+            HM3_TO_MWH_PER_RHO,
+            _hydro_penalty_costs,
+        )
+
+        max_deficit_cost, rho_max_acum = 100.0, 2.0
+        costs = _hydro_penalty_costs(
+            rho_avg=1.0,
+            rho_max_acum=rho_max_acum,
+            penalid_costs={},
+            max_deficit_cost=max_deficit_cost,
+        )
+        # storage == 10 × max_deficit × rho_max_acum × 277.78 (energy-equivalent).
+        expected = (
+            _STORAGE_VIOLATION_DEFICIT_MULT
+            * max_deficit_cost
+            * rho_max_acum
+            * HM3_TO_MWH_PER_RHO
+        )
+        assert costs["storage_violation_below_cost"] == pytest.approx(expected)
+        # ... which is exactly the evaporation energy-equivalent.
+        assert costs["storage_violation_below_cost"] == pytest.approx(
+            costs["evaporation_violation_cost"] * HM3_TO_MWH_PER_RHO
+        )
+
+    def test_filling_target_derived_a_little_below_deficit(self) -> None:
+        from cobre_bridge.converters.network import (
+            _FILLING_TARGET_DEFICIT_FRACTION,
+            HM3_TO_MWH_PER_RHO,
+            _hydro_penalty_costs,
+        )
+
+        max_deficit_cost, rho_max_acum = 100.0, 2.0
+        costs = _hydro_penalty_costs(
+            rho_avg=1.0,
+            rho_max_acum=rho_max_acum,
+            penalid_costs={},
+            max_deficit_cost=max_deficit_cost,
+        )
+        expected = (
+            _FILLING_TARGET_DEFICIT_FRACTION
+            * max_deficit_cost
+            * rho_max_acum
+            * HM3_TO_MWH_PER_RHO
+        )
+        assert costs["filling_target_violation_cost"] == pytest.approx(expected)
+
+    def test_storage_floor_is_the_largest_hydro_penalty(self) -> None:
+        from cobre_bridge.converters.network import (
+            HM3_TO_MWH_PER_RHO,
+            _hydro_penalty_costs,
+        )
+
+        costs = _hydro_penalty_costs(
+            rho_avg=1.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
+        )
+        storage = costs["storage_violation_below_cost"]
+        # The storage floor is the strictest deterrent: it dominates every other
+        # hydro penalty, including the evaporation energy-equivalent it is derived
+        # from and the (cheaper) filling target.
+        others = [v for k, v in costs.items() if k != "storage_violation_below_cost"]
+        assert storage == pytest.approx(max(costs.values()))
+        assert all(storage > v for v in others)
+        assert storage > costs["evaporation_violation_cost"]
+        assert storage > costs["filling_target_violation_cost"]
+        # Sanity: the ordering above is the energy-equiv blow-up (×277.78), not a
+        # coincidence of the chosen ρ.
+        assert storage == pytest.approx(
+            costs["evaporation_violation_cost"] * HM3_TO_MWH_PER_RHO
+        )
+
+    def test_storage_penalid_volmin_uses_rho_max_acum(self) -> None:
+        from cobre_bridge.converters.network import (
+            HM3_TO_MWH_PER_RHO,
+            _hydro_penalty_costs,
+        )
+
+        volmin_rate = 5.0
+        penalid = {"VOLMIN": volmin_rate}
+        # rho_avg deliberately != rho_max_acum so the two are distinguishable.
+        costs = _hydro_penalty_costs(
+            rho_avg=1.0,
+            rho_max_acum=2.0,
+            penalid_costs=penalid,
+            max_deficit_cost=100.0,
+        )
+        assert costs["storage_violation_below_cost"] == pytest.approx(
+            volmin_rate * 2.0 * HM3_TO_MWH_PER_RHO
+        )
+        # Changing rho_avg alone must NOT move the storage floor (rho_max_acum-only).
+        moved_rho_avg = _hydro_penalty_costs(
+            rho_avg=9.0,
+            rho_max_acum=2.0,
+            penalid_costs=penalid,
+            max_deficit_cost=100.0,
+        )
+        assert moved_rho_avg["storage_violation_below_cost"] == pytest.approx(
+            costs["storage_violation_below_cost"]
+        )
+        # Doubling rho_max_acum doubles the storage floor.
+        doubled = _hydro_penalty_costs(
+            rho_avg=1.0,
+            rho_max_acum=4.0,
+            penalid_costs=penalid,
+            max_deficit_cost=100.0,
+        )
+        assert doubled["storage_violation_below_cost"] == pytest.approx(
+            2.0 * costs["storage_violation_below_cost"]
+        )
+
 
 class TestConvertHydroPenaltyOverrides:
     """Per-stage, SIN-uniform hydro penalty override parquet."""
@@ -3973,6 +4805,87 @@ class TestConvertInitialConditions:
         storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
         # 'S' plant anchored to Vmin (100), NOT 0.50*(1000−100)+100 = 550.
         assert storage[0] == pytest.approx(100.0)
+
+    def _ne_filling_ic_case(self, tmp_path, *, volume_morto: float = 0.0):
+        """A ``NewaveCase`` with JURUENA (NE+filling) for IC routing tests.
+
+        Two EX plants (codes 1, 2) plus JURUENA (code 309, ``NE``,
+        ``volume_minimo == 2.93``) admitted via its exph filling row.
+        """
+        return make_case(
+            tmp_path,
+            hidr=MagicMock(cadastro=_make_ne_cadastro()),
+            confhd=MagicMock(usinas=_make_ne_confhd_df()),
+            exph=_make_ne_exph_mock(volume_morto=volume_morto),
+        )
+
+    def test_ne_plant_routed_to_filling_storage(self, tmp_path) -> None:
+        """A filling ``NE`` plant is seeded into ``filling_storage``, not ``storage``.
+
+        JURUENA (code 309 → cobre id 2) has ``volume_morto == 0`` and
+        ``volume_minimo == 2.93``, so its seed is ``0.00 × 2.93 == 0.0``.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        result = convert_initial_conditions(
+            self._ne_filling_ic_case(tmp_path), _ne_filling_id_map()
+        )
+        assert result["filling_storage"] == [{"hydro_id": 2, "value_hm3": 0.0}]
+
+    def test_ne_plant_excluded_from_storage(self, tmp_path) -> None:
+        """The filling plant must NOT appear in ``storage`` (cobre rejects in-both).
+
+        The two EX plants (cobre ids 0, 1) stay in ``storage``; JURUENA (id 2) is
+        absent from it.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        result = convert_initial_conditions(
+            self._ne_filling_ic_case(tmp_path), _ne_filling_id_map()
+        )
+        storage_ids = {s["hydro_id"] for s in result["storage"]}
+        assert 2 not in storage_ids
+        assert {0, 1} <= storage_ids
+
+    def test_filling_seed_scales_with_volume_morto(self, tmp_path) -> None:
+        """The seed is ``(volume_morto / 100) × volume_minimo``.
+
+        With a synthetic ``volume_morto == 50`` and ``volume_minimo == 2.93``,
+        the seed is ``0.50 × 2.93 == 1.465`` hm³.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        result = convert_initial_conditions(
+            self._ne_filling_ic_case(tmp_path, volume_morto=50.0),
+            _ne_filling_id_map(),
+        )
+        seed = {s["hydro_id"]: s["value_hm3"] for s in result["filling_storage"]}
+        assert seed[2] == pytest.approx(1.465)
+
+    def test_volume_morto_out_of_range_clamped(self, tmp_path, caplog) -> None:
+        """A ``volume_morto`` above 100 is clamped to 100% with a warning.
+
+        Synthetic ``volume_morto == 150`` clamps to 100%, giving the full
+        ``volume_minimo == 2.93`` hm³ seed, and logs a clamp warning.
+        """
+        from cobre_bridge.converters.initial_conditions import (
+            convert_initial_conditions,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = convert_initial_conditions(
+                self._ne_filling_ic_case(tmp_path, volume_morto=150.0),
+                _ne_filling_id_map(),
+            )
+        seed = {s["hydro_id"]: s["value_hm3"] for s in result["filling_storage"]}
+        assert seed[2] == pytest.approx(2.93)
+        assert any("volume_morto" in rec.message for rec in caplog.records)
 
 
 def _ic_case(tmp_path, pct_b: float = 75.0):

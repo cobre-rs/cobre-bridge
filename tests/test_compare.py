@@ -19,13 +19,13 @@ from cobre_bridge.comparators.alignment import (
     ThermalEntity,
 )
 from cobre_bridge.comparators.bounds import (
+    BoundComparison,
     _bounds_match,
     _is_effectively_infinite,
 )
 from cobre_bridge.comparators.results import (
     PercentileData,
     ResultComparison,
-    ResultsSummary,
     build_results_summary,
 )
 from cobre_bridge.id_map import NewaveIdMap
@@ -150,43 +150,550 @@ class TestReportFormatting:
     def test_print_results_summary_no_crash(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report import (
-            print_results_summary,
+            print_results_summary_from_dataset,
         )
+        from cobre_bridge.comparators.results import PercentileData
 
-        summary = ResultsSummary(total=0)
-        print_results_summary(summary, Path("/fake/nw"), Path("/fake/cobre"))
+        dataset = build_results_dataset([], PercentileData(), 1e-2)
+        print_results_summary_from_dataset(
+            dataset, Path("/fake/nw"), Path("/fake/cobre")
+        )
         out = capsys.readouterr().out
         assert "Results Comparison" in out
 
     def test_print_results_summary_with_data(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.report import (
-            print_results_summary,
+            print_results_summary_from_dataset,
         )
         from cobre_bridge.comparators.results import (
-            ResultVariableStats,
+            PercentileData,
+            ResultComparison,
         )
 
-        summary = ResultsSummary(
-            total=100,
-            by_entity_type={"hydro": 80, "thermal": 20},
-            by_variable={
-                "generation_mw": ResultVariableStats(
-                    count=100,
-                    mean_abs_diff=0.5,
-                    max_abs_diff=3.0,
-                    mean_rel_diff=0.01,
-                    max_rel_diff=0.05,
-                    correlation=0.9998,
-                ),
-            },
-        )
-        print_results_summary(summary, Path("/nw"), Path("/cobre"))
+        results = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=110.0,
+                abs_diff=10.0,
+                rel_diff=0.1,
+            ),
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="TUCURUI",
+                newave_code=20,
+                cobre_id=1,
+                stage=1,
+                variable="generation_mw",
+                newave_value=50.0,
+                cobre_value=40.0,
+                abs_diff=10.0,
+                rel_diff=0.2,
+            ),
+        ]
+        dataset = build_results_dataset(results, PercentileData(), 1e-2)
+        print_results_summary_from_dataset(dataset, Path("/nw"), Path("/cobre"))
         out = capsys.readouterr().out
         assert "generation_mw" in out
-        assert "100" in out
+        assert "2" in out  # the per-variable Count cell
+
+
+# -------------------------------------------------------------------
+# Tolerance row-colouring tests (epic-03, ticket-010)
+# -------------------------------------------------------------------
+
+
+def _make_bounds_for_colour() -> list[BoundComparison]:
+    """Four bound comparisons across two variables, mixing match/mismatch.
+
+    ``storage_max`` and ``generation_max`` each carry one match and one mismatch,
+    so both variable rows — and the Total — are expected red.
+    """
+    return [
+        BoundComparison(
+            entity_type="hydro",
+            entity_name="ITAIPU",
+            newave_code=10,
+            cobre_id=0,
+            stage=0,
+            variable="storage_max",
+            newave_value=29000.0,
+            cobre_value=29000.0,
+            diff=0.0,
+            match=True,
+        ),
+        BoundComparison(
+            entity_type="hydro",
+            entity_name="TUCURUI",
+            newave_code=20,
+            cobre_id=1,
+            stage=0,
+            variable="storage_max",
+            newave_value=50000.0,
+            cobre_value=49000.0,
+            diff=1000.0,
+            match=False,
+        ),
+        BoundComparison(
+            entity_type="thermal",
+            entity_name="ANGRA",
+            newave_code=30,
+            cobre_id=2,
+            stage=0,
+            variable="generation_max",
+            newave_value=1350.0,
+            cobre_value=1350.0,
+            diff=0.0,
+            match=True,
+        ),
+        BoundComparison(
+            entity_type="thermal",
+            entity_name="CUIABA",
+            newave_code=40,
+            cobre_id=3,
+            stage=1,
+            variable="generation_max",
+            newave_value=500.0,
+            cobre_value=450.0,
+            diff=50.0,
+            match=False,
+        ),
+    ]
+
+
+class _MakeTableSpy:
+    """Spy that records every ``make_table`` call and delegates to the real one.
+
+    Patched in as ``make_table``'s ``side_effect`` so the printer still renders a
+    genuine table (keeping the parity contract honest) while the test inspects the
+    ``row_styles`` kwarg passed to each call.
+    """
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        from cobre_bridge.ui.console import make_table
+
+        self.records.append(dict(kwargs))
+        return make_table(*args, **kwargs)  # type: ignore[arg-type]
+
+
+def _spy_make_table() -> _MakeTableSpy:
+    """Return a fresh :class:`_MakeTableSpy` for a single printer invocation."""
+    return _MakeTableSpy()
+
+
+class TestToleranceRowColouring:
+    """Compare summary table rows are coloured green/red by tolerance."""
+
+    def test_results_row_colour_green_for_within_tol_red_otherwise(self) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.report import (
+            print_results_summary_from_dataset,
+        )
+        from cobre_bridge.ui.console import compare_row_style
+
+        # gen_within is fully within tol (rel_diff under 1e-2); gen_diverge is not.
+        results = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="gen_within",
+                newave_value=100.0,
+                cobre_value=100.0,
+                abs_diff=0.0,
+                rel_diff=0.0,
+            ),
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="TUCURUI",
+                newave_code=20,
+                cobre_id=1,
+                stage=0,
+                variable="gen_diverge",
+                newave_value=100.0,
+                cobre_value=150.0,
+                abs_diff=50.0,
+                rel_diff=0.5,
+            ),
+        ]
+        dataset = build_results_dataset(results, PercentileData(), 1e-2)
+
+        spy = _spy_make_table()
+        with patch("cobre_bridge.comparators.report.make_table", side_effect=spy):
+            print_results_summary_from_dataset(dataset, Path("/nw"), Path("/cobre"))
+
+        # Rows are sorted by variable; derive the expected colour FROM the dataset
+        # summary (never recompute tolerance) so the source-of-truth stays single.
+        summary = {row["variable"]: row for row in dataset.summary.to_dicts()}
+        expected = [
+            compare_row_style(within_tol=float(summary[var]["within_tol_rate"]) == 1.0)
+            for var in sorted(summary)
+        ]
+        assert spy.records[0]["row_styles"] == expected
+        # gen_diverge sorts before gen_within: red then green.
+        assert expected[0] == compare_row_style(within_tol=False)  # gen_diverge
+        assert expected[1] == compare_row_style(within_tol=True)  # gen_within
+
+    def test_bounds_row_colour_total_row_red_on_mismatch(self) -> None:
+        from cobre_bridge.comparators.analyze import build_bounds_dataset
+        from cobre_bridge.comparators.report import (
+            print_bounds_summary_from_dataset,
+        )
+        from cobre_bridge.ui.console import compare_row_style
+
+        dataset = build_bounds_dataset(_make_bounds_for_colour())
+
+        spy = _spy_make_table()
+        with patch("cobre_bridge.comparators.report.make_table", side_effect=spy):
+            print_bounds_summary_from_dataset(
+                dataset, Path("/nw"), Path("/cobre"), 1e-3
+            )
+
+        # Two make_table calls: by-entity-type (with Total) then by-variable.
+        type_styles = spy.records[0]["row_styles"]
+        var_styles = spy.records[1]["row_styles"]
+
+        counts = dataset.metadata["summary_counts"]
+        assert isinstance(counts, dict)
+        mismatches_all = counts["mismatches"]
+        by_entity_type = counts["by_entity_type"]
+        by_variable = counts["by_variable"]
+        assert isinstance(by_entity_type, dict)
+        assert isinstance(by_variable, dict)
+
+        # By-type styles: one per type (sorted) + the trailing Total row.
+        expected_type = [
+            compare_row_style(within_tol=by_entity_type[etype][1] == 0)
+            for etype in sorted(by_entity_type)
+        ]
+        expected_type.append(compare_row_style(within_tol=mismatches_all == 0))
+        assert type_styles == expected_type
+
+        # The Total row (last entry) is red: the fixture has mismatches.
+        assert type_styles[-1] == compare_row_style(within_tol=False)
+        assert mismatches_all != 0
+
+        # By-variable styles derived from summary_counts mismatch flags.
+        expected_var = [
+            compare_row_style(within_tol=by_variable[var][1] == 0)
+            for var in sorted(by_variable)
+        ]
+        assert var_styles == expected_var
+        # Both fixture variables have a mismatch -> both red.
+        assert all(s == compare_row_style(within_tol=False) for s in var_styles)
+
+
+# -------------------------------------------------------------------
+# Compare verdict line tests (epic-03, ticket-009)
+# -------------------------------------------------------------------
+
+
+def _first_nonempty_line(text: str) -> str:
+    """Return the first non-blank line of *text*, stripped."""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line:
+            return line
+    raise AssertionError("no non-empty output line")
+
+
+class TestCompareVerdictLine:
+    """The verdict headline leads both compare summary printers (stdout)."""
+
+    def test_verdict_line_leads_bounds_with_worst_clause(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from cobre_bridge.comparators.analyze import build_bounds_dataset
+        from cobre_bridge.comparators.bounds import BoundComparison
+        from cobre_bridge.comparators.report import (
+            print_bounds_summary_from_dataset,
+        )
+
+        # Two variables, both with at least one mismatch -> 0/2 within tol.
+        results = [
+            BoundComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="storage_max",
+                newave_value=29000.0,
+                cobre_value=29000.0,
+                diff=0.0,
+                match=True,
+            ),
+            BoundComparison(
+                entity_type="hydro",
+                entity_name="TUCURUI",
+                newave_code=20,
+                cobre_id=1,
+                stage=0,
+                variable="storage_max",
+                newave_value=50000.0,
+                cobre_value=49000.0,
+                diff=1000.0,
+                match=False,
+            ),
+            BoundComparison(
+                entity_type="thermal",
+                entity_name="ANGRA",
+                newave_code=30,
+                cobre_id=2,
+                stage=0,
+                variable="generation_max",
+                newave_value=1350.0,
+                cobre_value=1350.0,
+                diff=0.0,
+                match=True,
+            ),
+            BoundComparison(
+                entity_type="thermal",
+                entity_name="CUIABA",
+                newave_code=40,
+                cobre_id=3,
+                stage=1,
+                variable="generation_max",
+                newave_value=500.0,
+                cobre_value=450.0,
+                diff=50.0,
+                match=False,
+            ),
+        ]
+        dataset = build_bounds_dataset(results)
+
+        print_bounds_summary_from_dataset(
+            dataset, Path("/fake/nw"), Path("/fake/cobre"), 1e-3
+        )
+
+        first = _first_nonempty_line(capsys.readouterr().out)
+        assert first.startswith("⚠ ")
+        assert "0/2 variables within tol" in first
+        assert "worst:" in first
+
+    def test_verdict_line_all_within_tol_no_worst_clause(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from cobre_bridge.comparators.analyze import build_bounds_dataset
+        from cobre_bridge.comparators.bounds import BoundComparison
+        from cobre_bridge.comparators.report import (
+            print_bounds_summary_from_dataset,
+        )
+
+        # Every comparison matches -> all variables within tol, no worst clause.
+        results = [
+            BoundComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="storage_max",
+                newave_value=29000.0,
+                cobre_value=29000.0,
+                diff=0.0,
+                match=True,
+            ),
+            BoundComparison(
+                entity_type="thermal",
+                entity_name="ANGRA",
+                newave_code=30,
+                cobre_id=1,
+                stage=0,
+                variable="generation_max",
+                newave_value=1350.0,
+                cobre_value=1350.0,
+                diff=0.0,
+                match=True,
+            ),
+        ]
+        dataset = build_bounds_dataset(results)
+        variable_count = dataset.summary.height
+
+        print_bounds_summary_from_dataset(
+            dataset, Path("/fake/nw"), Path("/fake/cobre"), 1e-3
+        )
+
+        first = _first_nonempty_line(capsys.readouterr().out)
+        assert first.startswith("✓ ")
+        assert first == f"✓ {variable_count}/{variable_count} variables within tol"
+        assert "worst:" not in first
+
+    def test_render_compare_verdict_empty_dataset(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from cobre_bridge.comparators.verdict import CompareVerdict
+        from cobre_bridge.ui.console import render_compare_verdict
+
+        render_compare_verdict(
+            CompareVerdict(
+                within_tol=0,
+                total=0,
+                worst_variable=None,
+                worst_smape=0.0,
+                all_within_tol=False,
+            )
+        )
+
+        assert (
+            _first_nonempty_line(capsys.readouterr().out) == "⚠ no variables compared"
+        )
+
+
+class TestCompareVerdictExitCodes:
+    """The verdict line does not change the compare exit-code contract."""
+
+    @staticmethod
+    def _invoke_main(
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        import io
+        import sys
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.case.NewaveCase.from_directory",
+            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._load_lines_json",
+            lambda _dir: [],
+        )
+
+    @staticmethod
+    def _make_cobre_dir_with_bounds(tmp_path: Path, name: str) -> Path:
+        import pyarrow.parquet as pq
+
+        cobre_dir = tmp_path / name
+        bounds_path = cobre_dir / "training" / "dictionaries" / "bounds.parquet"
+        bounds_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({"x": pa.array([0], pa.int32())}), bounds_path)
+        return cobre_dir
+
+    def test_verdict_results_exit_zero_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
+
+        self._patch_compare_context(monkeypatch)
+        results = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=110.0,
+                abs_diff=10.0,
+                rel_diff=0.1,
+            ),
+        ]
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            lambda **k: build_results_dataset(results, PercentileData(), 1e-2),
+        )
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        code, stdout, stderr = self._invoke_main(
+            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        # compare results is informational -> always exits 0.
+        assert code == 0
+        # The verdict line is a primary result: on stdout, not stderr.
+        verdict_line = _first_nonempty_line(stdout)
+        assert verdict_line.startswith(("✓ ", "⚠ "))
+        assert "variables within tol" in verdict_line
+        assert "variables within tol" not in stderr
+
+    def test_verdict_bounds_exit_one_on_mismatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_compare_context(monkeypatch)
+        results = [
+            BoundComparison(
+                entity_type="hydro",
+                entity_name="ITAIPU",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="storage_max",
+                newave_value=29000.0,
+                cobre_value=29000.0,
+                diff=0.0,
+                match=True,
+            ),
+            BoundComparison(
+                entity_type="thermal",
+                entity_name="ANGRA",
+                newave_code=30,
+                cobre_id=1,
+                stage=0,
+                variable="generation_max",
+                newave_value=1350.0,
+                cobre_value=1300.0,
+                diff=50.0,
+                match=False,
+            ),
+        ]
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.bounds.compare_bounds",
+            lambda **k: results,
+        )
+        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+
+        code, stdout, stderr = self._invoke_main(
+            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            monkeypatch,
+        )
+
+        # Any mismatch -> exit 1 (contract preserved).
+        assert code == 1
+        verdict_line = _first_nonempty_line(stdout)
+        assert verdict_line.startswith("⚠ ")
+        assert "variables within tol" in verdict_line
+        assert "variables within tol" not in stderr
 
 
 # -------------------------------------------------------------------
@@ -900,7 +1407,7 @@ class TestCompareResultsReturnsDataset:
 
 
 class TestProductivityDetail:
-    """Productivity-tab readers, assembly, and charts (no example/ deps).
+    """Productivity-tab readers, assembly, and charts.
 
     The Productivity tab is a *static* conversion-fidelity check: The source model pmo
     productivities vs what cobre-bridge computes from the same HIDR cadastro, plus a

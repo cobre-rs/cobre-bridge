@@ -11,6 +11,7 @@ from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.converters.hydro import read_cadastro
 from cobre_bridge.converters.thermal import thermal_generation_bounds
 from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.plants import filling_hydro_codes
 
 _LOG = logging.getLogger(__name__)
 
@@ -18,6 +19,21 @@ _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
     "/book/src/schemas/initial_conditions.schema.json"
 )
+
+
+def _filling_row(exph_df: pd.DataFrame, code: int) -> pd.Series:
+    """Return the first ``exph`` schedule row for *code* (the filling-start row).
+
+    Mirrors the selector ``convert_hydros`` uses (``hydro.py`` lines 1036-1039):
+    the filling schedule lives on the first ``exph`` row per plant, identified by
+    a non-null ``data_inicio_enchimento`` (unit rows carry ``NaT`` there). Callers
+    must only invoke this for a ``code`` already admitted by
+    :func:`cobre_bridge.plants.filling_hydro_codes`, which guarantees the predicate
+    selects at least one row (so ``.iloc[0]`` never raises).
+    """
+    return exph_df.loc[
+        (exph_df["codigo_usina"] == code) & exph_df["data_inicio_enchimento"].notna()
+    ].iloc[0]
 
 
 def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
@@ -53,7 +69,16 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 
     existing = case.active_hydros
 
+    # ``NE`` plants carrying an exph dead-volume filling row are seeded into the
+    # separate ``filling_storage`` list, never ``storage`` — cobre's IC reader
+    # rejects a hydro that appears in both arrays.  Computed once here from the same
+    # admission predicate ``case.active_hydros`` uses; ``set()`` when there is no
+    # exph (EX-only case), so the in-loop guard below never fires.
+    exph_df = case.exph.expansoes if case.exph is not None else None
+    filling = filling_hydro_codes(case.confhd.usinas, exph_df)
+
     storage: list[dict] = []
+    filling_storage: list[dict] = []
     for _, row in existing.iterrows():
         newave_code = int(row["codigo_usina"])
         name = str(row["nome_usina"]).strip()
@@ -67,6 +92,37 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         hreg = cadastro.loc[newave_code]
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
+
+        # ``NE``-with-filling plant: seed ``filling_storage`` (never ``storage``)
+        # with the already-impounded fraction of the dead volume at filling start.
+        # ``volume_morto`` (a percentage) lives on the plant's exph schedule row;
+        # the seed is that fraction of the hidr ``volume_minimo`` floor.  Routed
+        # here *before* the 'S'/'D' anchored branch so a run-of-river filling plant
+        # (JURUENA) does not also land in ``storage``.  ``exph_df`` is non-None
+        # because ``newave_code in filling`` implies the admission predicate had
+        # an exph row to admit it.
+        if newave_code in filling:
+            assert exph_df is not None  # filling membership implies exph present
+            morto = float(_filling_row(exph_df, newave_code)["volume_morto"])
+            if morto < 0.0 or morto > 100.0:
+                _LOG.warning(
+                    "volume_morto for plant '%s' (code %d) is %.2f"
+                    " — clamping to [0, 100]",
+                    name,
+                    newave_code,
+                    morto,
+                )
+                morto = max(0.0, min(100.0, morto))
+            filling_storage.append(
+                {
+                    "hydro_id": id_map.hydro_id(newave_code),
+                    # cobre-io's ``RawHydroStorage`` keys both ``storage`` and
+                    # ``filling_storage`` on ``value_hm3``; this must match the
+                    # ``storage`` entries' key below or cobre fails to deserialize.
+                    "value_hm3": (morto / 100.0) * vol_min,
+                }
+            )
+            continue
 
         # Fio-d'água plants don't accumulate water across stages, so the
         # bounds converter collapses their storage to a single point in
@@ -113,6 +169,7 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         )
 
     storage.sort(key=lambda s: s["hydro_id"])
+    filling_storage.sort(key=lambda s: s["hydro_id"])
 
     # ── Past anticipated thermal commitments (from adterm.dat) ──────────
     # Empty for non-GNL cases (despacho_antecipado_gnl=0 in dger.dat). Each entry maps a
@@ -162,7 +219,7 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     result: dict = {
         "$schema": _SCHEMA_URL,
         "storage": storage,
-        "filling_storage": [],
+        "filling_storage": filling_storage,
     }
     if past_anticipated_commitments:
         result["past_anticipated_commitments"] = past_anticipated_commitments

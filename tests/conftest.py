@@ -9,14 +9,57 @@ parsing files. Import them with ``from tests.conftest import make_case``.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pandas as pd
+import pytest
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.newave_files import NewaveFiles
+
+
+@pytest.fixture
+def dumb_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force a plain, fixed-width terminal for Typer ``--help`` content tests.
+
+    Typer's Rich help (``rich_markup_mode="rich"``) renders its options table
+    from the detected terminal. On CI, GitHub Actions sets
+    ``GITHUB_ACTIONS``/``FORCE_COLOR``, pushing Rich into "force terminal" mode;
+    inside Typer's ``CliRunner`` (whose captured stream is not a real tty) that
+    path renders an *empty* options box, so option-presence assertions pass
+    locally but fail on CI. ``TERM=dumb`` makes Rich treat the captured output as
+    a plain, fixed-width stream and emit the help content deterministically.
+
+    Only the ``--help`` content tests opt in (via this fixture) so the fixed
+    width does not perturb width-sensitive rendering in the rest of the suite.
+    The real CLI, writing to a normal stdout, is unaffected.
+    """
+    monkeypatch.setenv("TERM", "dumb")
+    monkeypatch.setenv("COLUMNS", "80")
+
+
+@pytest.fixture(autouse=True)
+def _restore_cobre_bridge_logger() -> Iterator[None]:
+    """Snapshot/restore the ``cobre_bridge`` logger around every test.
+
+    ``cli._configure_logging`` flips ``propagate``/level for a run, and the CLI's
+    Typer ``CliRunner`` tests invoke the app directly (bypassing ``main``'s restore),
+    so without this fixture that state would leak into a later ``caplog``-by-logger
+    test in the same interpreter and silently swallow its records.
+    """
+    pkg = logging.getLogger("cobre_bridge")
+    prior_propagate = pkg.propagate
+    prior_level = pkg.level
+    try:
+        yield
+    finally:
+        pkg.propagate = prior_propagate
+        pkg.setLevel(prior_level)
+
 
 # Required NewaveFiles attributes get a default path under tmp_path; optional
 # ones default to None. Callers override any of them via keyword.
@@ -40,6 +83,7 @@ _OPTIONAL = (
     "dsvagua",
     "curva",
     "expt",
+    "exph",
     "manutt",
     "c_adic",
     "cvar",

@@ -1,12 +1,12 @@
 # Comparison Commands
 
 Copy-paste commands for comparing cases. Paths below are **verified against this
-repo**: NEWAVE results live in `example/newave_rodada/` (has `saidas/`); the
-converted-and-run Cobre case is `example/cobre_rodada/`, whose bounds dictionary
+repo**: NEWAVE results live in `example/newave/` (has `saidas/`); the
+converted-and-run Cobre case is `example/cobre/`, whose bounds dictionary
 is at `output/training/dictionaries/bounds.parquet`.
 
 > Prerequisite: the Cobre case must already be **converted and run** so that
-> `output/` exists (`training/`, `simulation/`, …). `example/cobre_rodada` already
+> `output/` exists (`training/`, `simulation/`, …). `example/cobre` already
 > satisfies this. To produce a fresh case, see `convert newave` in the project
 > `CLAUDE.md` — convert into a *new* directory and run Cobre before comparing, so
 > you don't clobber an existing run's `output/`.
@@ -16,21 +16,21 @@ is at `output/training/dictionaries/bounds.parquet`.
 ```bash
 # Compare LP bounds — absolute tolerance, default 1e-3.
 # exit 0 = no mismatch, exit 1 = mismatches.
-cobre-bridge compare bounds example/newave_rodada example/cobre_rodada/output
+cobre-bridge compare bounds example/newave example/cobre/output
 
 # ...summary counts only:
-cobre-bridge compare bounds example/newave_rodada example/cobre_rodada/output --summary
+cobre-bridge compare bounds example/newave example/cobre/output --summary
 
 # ...focus on specific variables and dump a Parquet diff:
-cobre-bridge compare bounds example/newave_rodada example/cobre_rodada/output \
+cobre-bridge compare bounds example/newave example/cobre/output \
     --variables storage_min,turbined_max --output bounds_diff.parquet
 
 # Compare results — relative tolerance, default 1e-2; writes the HTML report.
-cobre-bridge compare results example/newave_rodada example/cobre_rodada/output \
+cobre-bridge compare results example/newave example/cobre/output \
     -o example/comparacao.html
 
 # Interactive dashboard from Cobre simulation output.
-cobre-bridge dashboard example/cobre_rodada
+cobre-bridge dashboard example/cobre
 ```
 
 ## Production case (template)

@@ -26,8 +26,8 @@ from inewave.newave.hidr import Hidr
 from cobre_bridge.converters.hydro import _apply_permanent_overrides
 from cobre_bridge.newave_files import NewaveFiles
 
-NEWAVE_DIR = Path("./example/newave_rodada")
-COBRE_DIR = Path("./example/cobre_rodada")
+NEWAVE_DIR = Path("./example/newave")
+COBRE_DIR = Path("./example/cobre")
 NW_OFFSET = 10  # Cobre stage k <-> NEWAVE estudo (k + NW_OFFSET)
 
 

@@ -12,34 +12,12 @@ never runs the git subprocess at import time.
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 
 import cobre_bridge
-
-
-def _git_sha() -> str | None:
-    """Return the short git SHA of HEAD, or ``None`` outside a git checkout.
-
-    Runs ``git rev-parse --short HEAD`` with ``check=False`` so a non-git
-    directory (non-zero return code) yields ``None`` rather than raising.
-    Only :class:`FileNotFoundError` / :class:`OSError` (git binary missing or
-    not executable) are caught; all other errors propagate.
-    """
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except (FileNotFoundError, OSError):
-        return None
-    if completed.returncode != 0:
-        return None
-    return completed.stdout.strip()
+from cobre_bridge._git import git_sha
 
 
 @dataclass
@@ -77,9 +55,9 @@ class ComparisonManifest:
 
         ``bridge_version`` is taken from :data:`cobre_bridge.__version__`,
         ``timestamp`` from :func:`datetime.now` in UTC (ISO 8601), and
-        ``git_sha`` from :func:`_git_sha`. ``cobre_version`` / ``newave_version``
-        remain caller-supplied (default ``None``); deriving them is out of scope
-        for this module.
+        ``git_sha`` from :func:`cobre_bridge._git.git_sha`. ``cobre_version`` /
+        ``newave_version`` remain caller-supplied (default ``None``); deriving
+        them is out of scope for this module.
         """
         return cls(
             command=command,
@@ -87,7 +65,7 @@ class ComparisonManifest:
             cobre_output_dir=str(cobre_output_dir),
             tolerance=tolerance,
             bridge_version=cobre_bridge.__version__,
-            git_sha=_git_sha(),
+            git_sha=git_sha(),
             timestamp=datetime.now(tz=UTC).isoformat(),
             cobre_version=cobre_version,
             newave_version=newave_version,

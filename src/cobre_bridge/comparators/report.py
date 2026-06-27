@@ -15,10 +15,16 @@ from typing import TYPE_CHECKING
 import polars as pl
 
 from cobre_bridge.comparators.bounds import BoundComparison
+from cobre_bridge.comparators.verdict import build_compare_verdict
+from cobre_bridge.ui.console import (
+    compare_row_style,
+    get_console,
+    make_table,
+    render_compare_verdict,
+)
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
-    from cobre_bridge.comparators.results import ResultsSummary
 
 
 @dataclass
@@ -60,58 +66,6 @@ def build_summary(results: list[BoundComparison]) -> ComparisonSummary:
         summary.by_variable[v] = (var_matches.get(v, 0), var_mismatches.get(v, 0))
 
     return summary
-
-
-def print_summary(
-    summary: ComparisonSummary,
-    newave_dir: Path,
-    cobre_output_dir: Path,
-    tolerance: float,
-) -> None:
-    """Print the terminal summary table."""
-    out = sys.stdout
-
-    out.write("\nCobre vs NEWAVE Bound Comparison\n")
-    out.write("=" * 64 + "\n")
-    out.write(f"NEWAVE case:  {newave_dir}\n")
-    out.write(f"Cobre output: {cobre_output_dir}\n")
-    out.write(f"Tolerance:    {tolerance}\n\n")
-
-    # --- By entity type ---
-    _W = 62
-    out.write(
-        f"{'Type':<12} {'Compared':>9} {'Match':>9} {'Mismatch':>9} {'Rate':>9}\n"
-    )
-    out.write("-" * _W + "\n")
-
-    for etype, (m, mm) in sorted(summary.by_entity_type.items()):
-        total = m + mm
-        rate = m / total * 100 if total > 0 else 0.0
-        out.write(
-            f"{etype.capitalize():<12} {total:>9,} {m:>9,} {mm:>9,} {rate:>8.2f}%\n"
-        )
-
-    total = summary.total
-    rate = summary.matches / total * 100 if total > 0 else 0.0
-    out.write("-" * _W + "\n")
-    out.write(
-        f"{'Total':<12} {total:>9,} {summary.matches:>9,}"
-        f" {summary.mismatches:>9,} {rate:>8.2f}%\n"
-    )
-
-    # --- By variable ---
-    out.write("\n")
-    out.write(
-        f"{'Variable':<18} {'Compared':>9} {'Match':>9} {'Mismatch':>9} {'Rate':>9}\n"
-    )
-    out.write("-" * _W + "\n")
-
-    for var, (m, mm) in sorted(summary.by_variable.items()):
-        total_v = m + mm
-        rate_v = m / total_v * 100 if total_v > 0 else 0.0
-        out.write(f"{var:<18} {total_v:>9,} {m:>9,} {mm:>9,} {rate_v:>8.2f}%\n")
-
-    out.write("\n")
 
 
 def print_mismatches(
@@ -193,75 +147,9 @@ def _fmt_metric(x: float) -> str:
     return f"{x:,.3f}"
 
 
-def print_results_summary(
-    summary: ResultsSummary,
-    newave_dir: Path,
-    cobre_output_dir: Path,
-) -> None:
-    """Print the results comparison text summary.
-
-    Parameters
-    ----------
-    summary:
-        Aggregate results comparison statistics.
-    newave_dir:
-        Path to the source model case directory.
-    cobre_output_dir:
-        Path to the Cobre output directory.
-    """
-    out = sys.stdout
-
-    out.write("\nCobre vs NEWAVE Results Comparison\n")
-    out.write("=" * 88 + "\n")
-    out.write(f"NEWAVE case:  {newave_dir}\n")
-    out.write(f"Cobre output: {cobre_output_dir}\n\n")
-
-    # Per-variable table. WithinTol = share within the (relative) tolerance; sMAPE =
-    # mean symmetric error (robust to near-zero the source model references).
-    _W = 88
-    out.write(
-        f"{'Variable':<26} {'Count':>6} "
-        f"{'Mean|D|':>13} {'Max|D|':>13} "
-        f"{'WithinTol':>9} {'sMAPE':>8} "
-        f"{'r':>7}\n"
-    )
-    out.write("-" * _W + "\n")
-
-    for var in sorted(summary.by_variable):
-        stats = summary.by_variable[var]
-        mean_d = _fmt_metric(stats.mean_abs_diff)
-        max_d = _fmt_metric(stats.max_abs_diff)
-        within = f"{stats.within_tol_rate * 100:.1f}%"
-        smape = f"{stats.mean_smape * 100:.1f}%"
-        corr = f"{stats.correlation:.4f}" if stats.correlation is not None else "N/A"
-        out.write(
-            f"{var:<26} {stats.count:>6} "
-            f"{mean_d:>13} {max_d:>13} "
-            f"{within:>9} {smape:>8} "
-            f"{corr:>7}\n"
-        )
-
-    out.write("-" * _W + "\n")
-
-    # Entity type totals.
-    entity_parts = []
-    for etype, count in sorted(summary.by_entity_type.items()):
-        entity_parts.append(f"{count} {etype}")
-    entity_str = ", ".join(entity_parts) if entity_parts else "none"
-
-    out.write(
-        f"\nSummary: {summary.total} comparisons across "
-        f"{len(summary.by_entity_type)} entity types ({entity_str})\n\n"
-    )
-
-
-# -------------------------------------------------------------------
-# Dataset-driven formatting (strangler migration: console off the
-# canonical ComparisonDataset). These mirror the legacy printers above
-# byte-for-byte, but source their numbers from dataset.summary rows and
-# dataset.metadata so the console and the artifacts derive from ONE analysis.
-# The legacy functions are intentionally retained for back-compat.
-# -------------------------------------------------------------------
+# Dataset-driven formatting: numbers are single-sourced from dataset.summary rows
+# and dataset.metadata so the console and the file artifacts derive from ONE
+# analysis; the Rich tables only restyle those same numbers.
 
 
 def print_results_summary_from_dataset(
@@ -269,12 +157,12 @@ def print_results_summary_from_dataset(
     newave_dir: Path,
     cobre_output_dir: Path,
 ) -> None:
-    """Print the results comparison summary from the canonical dataset.
+    """Print the results comparison summary (Rich table) from the canonical dataset.
 
-    Byte-identical to :func:`print_results_summary` for the same underlying
-    numbers: the per-variable table is read from ``dataset.summary`` rows and the
-    footer from ``dataset.metadata["footer_counts"]`` (``total`` /
-    ``by_entity_type``, populated by ``analyze.build_results_dataset``).
+    The per-variable table is read from ``dataset.summary`` rows and the footer
+    from ``dataset.metadata["footer_counts"]`` (``total`` / ``by_entity_type``,
+    populated by ``analyze.build_results_dataset``), so every number traces back to
+    a single analysis.
 
     Parameters
     ----------
@@ -287,37 +175,47 @@ def print_results_summary_from_dataset(
     """
     out = sys.stdout
 
+    render_compare_verdict(build_compare_verdict(dataset))
+
     out.write("\nCobre vs NEWAVE Results Comparison\n")
     out.write("=" * 88 + "\n")
     out.write(f"NEWAVE case:  {newave_dir}\n")
-    out.write(f"Cobre output: {cobre_output_dir}\n\n")
+    out.write(f"Cobre output: {cobre_output_dir}\n")
 
-    _W = 88
-    out.write(
-        f"{'Variable':<26} {'Count':>6} "
-        f"{'Mean|D|':>13} {'Max|D|':>13} "
-        f"{'WithinTol':>9} {'sMAPE':>8} "
-        f"{'r':>7}\n"
-    )
-    out.write("-" * _W + "\n")
-
+    # Per-variable table. WithinTol = share within the (relative) tolerance; sMAPE =
+    # mean symmetric error (robust to near-zero source-model references).
     summary_rows = {row["variable"]: row for row in dataset.summary.to_dicts()}
+    rows: list[list[str]] = []
+    row_styles: list[str | None] = []
     for var in sorted(summary_rows):
         stats = summary_rows[var]
-        mean_d = _fmt_metric(float(stats["mean_abs_diff"]))
-        max_d = _fmt_metric(float(stats["max_abs_diff"]))
-        within = f"{float(stats['within_tol_rate']) * 100:.1f}%"
-        smape = f"{float(stats['mean_smape']) * 100:.1f}%"
         correlation = stats["correlation"]
         corr = f"{float(correlation):.4f}" if correlation is not None else "N/A"
-        out.write(
-            f"{var:<26} {int(stats['count']):>6} "
-            f"{mean_d:>13} {max_d:>13} "
-            f"{within:>9} {smape:>8} "
-            f"{corr:>7}\n"
+        rows.append(
+            [
+                var,
+                str(int(stats["count"])),
+                _fmt_metric(float(stats["mean_abs_diff"])),
+                _fmt_metric(float(stats["max_abs_diff"])),
+                f"{float(stats['within_tol_rate']) * 100:.1f}%",
+                f"{float(stats['mean_smape']) * 100:.1f}%",
+                corr,
+            ]
+        )
+        # Style-only colour (never alters cell text): green iff every comparison
+        # for this variable is within tolerance.
+        row_styles.append(
+            compare_row_style(within_tol=float(stats["within_tol_rate"]) == 1.0)
         )
 
-    out.write("-" * _W + "\n")
+    get_console().print(
+        make_table(
+            ["Variable", "Count", "Mean|D|", "Max|D|", "WithinTol", "sMAPE", "r"],
+            rows,
+            justify=["left", "right", "right", "right", "right", "right", "right"],
+            row_styles=row_styles,
+        )
+    )
 
     total, by_entity_type = _footer_counts(dataset)
 
@@ -338,12 +236,12 @@ def print_bounds_summary_from_dataset(
     cobre_output_dir: Path,
     tolerance: float,
 ) -> None:
-    """Print the bounds comparison summary from the canonical dataset.
+    """Print the bounds comparison summary (Rich tables) from the canonical dataset.
 
-    Byte-identical to :func:`print_summary` for the same underlying numbers: the
-    by-entity-type and by-variable tables and the totals row are read from the
+    The by-entity-type and by-variable tables and the totals row are read from the
     exact integer counts in ``dataset.metadata["summary_counts"]`` (populated by
-    ``analyze.build_bounds_dataset``).
+    ``analyze.build_bounds_dataset``), so every number traces back to a single
+    analysis.
 
     Parameters
     ----------
@@ -358,6 +256,8 @@ def print_bounds_summary_from_dataset(
     """
     out = sys.stdout
 
+    render_compare_verdict(build_compare_verdict(dataset))
+
     (
         total_all,
         matches_all,
@@ -370,41 +270,61 @@ def print_bounds_summary_from_dataset(
     out.write("=" * 64 + "\n")
     out.write(f"NEWAVE case:  {newave_dir}\n")
     out.write(f"Cobre output: {cobre_output_dir}\n")
-    out.write(f"Tolerance:    {tolerance}\n\n")
+    out.write(f"Tolerance:    {tolerance}\n")
 
-    # --- By entity type ---
-    _W = 62
-    out.write(
-        f"{'Type':<12} {'Compared':>9} {'Match':>9} {'Mismatch':>9} {'Rate':>9}\n"
-    )
-    out.write("-" * _W + "\n")
+    console = get_console()
 
+    # --- By entity type (with a Total row) ---
+    # Green when a type has zero mismatches, red otherwise; styles are appended in
+    # lockstep with type_rows so the trailing Total row keeps its own colour.
+    type_rows: list[list[str]] = []
+    type_styles: list[str | None] = []
     for etype, (m, mm) in sorted(by_entity_type.items()):
         total = m + mm
         rate = m / total * 100 if total > 0 else 0.0
-        out.write(
-            f"{etype.capitalize():<12} {total:>9,} {m:>9,} {mm:>9,} {rate:>8.2f}%\n"
+        type_rows.append(
+            [etype.capitalize(), f"{total:,}", f"{m:,}", f"{mm:,}", f"{rate:.2f}%"]
         )
-
-    total = total_all
-    rate = matches_all / total * 100 if total > 0 else 0.0
-    out.write("-" * _W + "\n")
-    out.write(
-        f"{'Total':<12} {total:>9,} {matches_all:>9,}"
-        f" {mismatches_all:>9,} {rate:>8.2f}%\n"
+        type_styles.append(compare_row_style(within_tol=mm == 0))
+    rate_all = matches_all / total_all * 100 if total_all > 0 else 0.0
+    type_rows.append(
+        [
+            "Total",
+            f"{total_all:,}",
+            f"{matches_all:,}",
+            f"{mismatches_all:,}",
+            f"{rate_all:.2f}%",
+        ]
     )
+    type_styles.append(compare_row_style(within_tol=mismatches_all == 0))
+    console.print(
+        make_table(
+            ["Type", "Compared", "Match", "Mismatch", "Rate"],
+            type_rows,
+            justify=["left", "right", "right", "right", "right"],
+            row_styles=type_styles,
+        )
+    )
+
+    out.write("\n")
 
     # --- By variable ---
-    out.write("\n")
-    out.write(
-        f"{'Variable':<18} {'Compared':>9} {'Match':>9} {'Mismatch':>9} {'Rate':>9}\n"
-    )
-    out.write("-" * _W + "\n")
-
+    # Green when a variable has zero mismatches, red otherwise (style-only).
+    var_rows: list[list[str]] = []
+    var_styles: list[str | None] = []
     for var, (m, mm) in sorted(by_variable.items()):
         total_v = m + mm
         rate_v = m / total_v * 100 if total_v > 0 else 0.0
-        out.write(f"{var:<18} {total_v:>9,} {m:>9,} {mm:>9,} {rate_v:>8.2f}%\n")
+        var_rows.append([var, f"{total_v:,}", f"{m:,}", f"{mm:,}", f"{rate_v:.2f}%"])
+        var_styles.append(compare_row_style(within_tol=mm == 0))
+    console.print(
+        make_table(
+            ["Variable", "Compared", "Match", "Mismatch", "Rate"],
+            var_rows,
+            justify=["left", "right", "right", "right", "right"],
+            row_styles=var_styles,
+        )
+    )
 
     out.write("\n")
 

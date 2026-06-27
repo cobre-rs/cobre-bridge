@@ -16,10 +16,10 @@ every expected cell is derived FROM the dataset, never recomputed from raw
 recompute a statistic instead of reading the dataset, the parsed cells diverge
 from the dataset-derived expected cells and the test fails.
 
-A third group of byte-identical legacy-vs-dataset guards (mirroring the ticket-008
-tests in ``tests/test_analyze.py``) lives here too, so the parity fence is enforced
-in one place: it fails if anyone reintroduces a second computation path that drifts
-from the legacy printer.
+The summary printers now render Rich tables, so their single-source invariant is
+enforced solely by the parse-vs-dataset tests above. The mismatch listing is still
+plain text, so one byte-identical legacy-vs-dataset guard remains for it (mirroring
+the surviving ticket-008 guard in ``tests/test_analyze.py``).
 
 Fixtures are hermetic synthetic in-memory data (NO real the source model case, NO
 ``inewave`` I/O), copied from ``tests/test_analyze.py`` and
@@ -41,18 +41,14 @@ from cobre_bridge.comparators.analyze import (
 from cobre_bridge.comparators.bounds import BoundComparison
 from cobre_bridge.comparators.report import (
     _fmt_metric,
-    build_summary,
     print_bounds_mismatches_from_dataset,
     print_bounds_summary_from_dataset,
     print_mismatches,
-    print_results_summary,
     print_results_summary_from_dataset,
-    print_summary,
 )
 from cobre_bridge.comparators.results import (
     PercentileData,
     ResultComparison,
-    build_results_summary,
 )
 
 _NW = Path("/fake/nw")
@@ -240,11 +236,13 @@ def _parse_results_table(text: str) -> dict[str, list[str]]:
         line = raw.strip()
         if not line:
             continue
+        if line.startswith(("✓ ", "⚠ ")):  # leading compare verdict line
+            continue
         if line.startswith(("Cobre vs", "NEWAVE case:", "Cobre output:")):
             continue
         if line.startswith("Summary:"):
             continue
-        if set(line) <= {"=", "-"}:
+        if set(line) <= {"=", "-", "━", "─"}:  # text underline or Rich table rule
             continue
         tokens = line.split()
         if tokens[0] == "Variable":
@@ -298,7 +296,9 @@ def _parse_bounds_section(
             if in_section:
                 break
             continue
-        if set(line) <= {"=", "-"}:
+        if line.startswith(("✓ ", "⚠ ")):  # leading compare verdict line
+            continue
+        if set(line) <= {"=", "-", "━", "─"}:  # text underline or Rich table rule
             continue
         tokens = line.split()
         if tokens[0] == header_token:
@@ -496,32 +496,13 @@ def test_bounds_mismatch_truncation_footer_from_listing() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Group 3: legacy-vs-dataset byte-identical guard (regression fence)
+# Group 3: legacy-vs-dataset byte-identical guard (regression fence).
+#
+# The results- and bounds-summary printers now render Rich tables (no longer
+# byte-identical to a legacy text printer, which was removed). The single-source
+# invariant for those is instead enforced by the parse-vs-dataset tests above.
+# The mismatch listing is still plain text, so its byte-identical guard remains.
 # ---------------------------------------------------------------------------
-
-
-def test_results_summary_byte_identical_to_legacy() -> None:
-    results = _make_results()
-    legacy_summary = build_results_summary(results, _RESULTS_TOL)
-    dataset = build_results_dataset(results, PercentileData(), _RESULTS_TOL)
-
-    legacy_out = _capture(print_results_summary, legacy_summary, _NW, _COBRE)
-    dataset_out = _capture(print_results_summary_from_dataset, dataset, _NW, _COBRE)
-
-    assert dataset_out == legacy_out
-
-
-def test_bounds_summary_byte_identical_to_legacy() -> None:
-    results = _make_bounds()
-    legacy_summary = build_summary(results)
-    dataset = build_bounds_dataset(results)
-
-    legacy_out = _capture(print_summary, legacy_summary, _NW, _COBRE, _BOUNDS_TOL)
-    dataset_out = _capture(
-        print_bounds_summary_from_dataset, dataset, _NW, _COBRE, _BOUNDS_TOL
-    )
-
-    assert dataset_out == legacy_out
 
 
 def test_bounds_mismatches_byte_identical_to_legacy() -> None:

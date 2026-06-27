@@ -12,13 +12,21 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.filling import (
+    filling_min_rate_m3s,
+    filling_schedule,
+    online_machines,
+)
+from cobre_bridge.filling import stage_id as filling_stage_id
 from cobre_bridge.horizon import (
     POST_STUDY_YEAR,
+    build_stage_dates,
     seasonal_step_function,
 )
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
-from cobre_bridge.plants import fictitious_codes
+from cobre_bridge.plants import fictitious_codes, filling_hydro_codes
 from cobre_bridge.productivity import (
     compute_productivity,
     equivalent_productivity,
@@ -690,10 +698,18 @@ def _apply_hydraulic_loss(h_gross: float, tipo_perda: int, perdas: float) -> flo
 
 
 def _compute_max_turbined_head_corrected(
-    hreg: pd.Series, name: str
+    hreg: pd.Series, name: str, *, h_op_override: float | None = None
 ) -> tuple[float, float]:
     """Return ``(max_turbined, max_generation)`` using the head-corrected the
     source-model-style cap.
+
+    ``h_op_override`` supplies the per-stage operating head directly (in metres),
+    bypassing the static base-data head derivation below. It is the head that
+    produces the stage's equivalent productivity (``ρ_eq / ρ_esp``), so the
+    engolimento and the ``p_inst/prodt_eq`` cap track the per-stage CFUGA/CMONT
+    overrides in lockstep with :func:`convert_hydro_energy_productivity`. Used by
+    :func:`convert_turbined_bounds_head_corrected` to emit a per-stage
+    ``max_turbined`` instead of a single static cap.
 
     This is the source model's **operational turbined cap** — the maximum turbinable
     flow (engolimento) at the plant's operating head, which is what binds in the
@@ -792,7 +808,13 @@ def _compute_max_turbined_head_corrected(
     rho_esp = float(rho_esp_raw)
     kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
 
-    if tipo_reg == "M":
+    if h_op_override is not None:
+        # Per-stage caller supplies the operating head directly (= ρ_eq / ρ_esp for
+        # the stage), so the cap tracks the per-stage CFUGA/CMONT head. h_int == h_op
+        # holds in every branch below, so reuse it for the prodt_eq cap too.
+        h_op = h_op_override
+        h_int = h_op_override
+    elif tipo_reg == "M":
         v65 = vol_min + 0.65 * (vol_max - vol_min)
         # The source model's ``h^{65%}`` is the *integrated* net head over [V_min,
         # V_65], not the snapshot at V = V_65.  Verified against M. DE MORAES (the
@@ -849,6 +871,31 @@ def _compute_max_turbined_head_corrected(
     return max_turbined, max_generation
 
 
+def _reduced_caps(
+    hreg: pd.Series, online: dict[int, int], name: str
+) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` over the online machine subset.
+
+    Computes the head-corrected turbined cap and the rated generation cap for a
+    filling plant at a ramp stage where only ``online`` of its machines are in
+    service. Rather than threading an override count through the load-bearing
+    shared helpers, it copies the cadastro ``hreg`` Series and rewrites each
+    ``maquinas_conjunto_{c}`` (for ``c`` in ``1..numero_conjuntos_maquinas``) to
+    the online count (``0`` for any group absent from the dict), then re-runs the
+    exact full-capacity helpers — so the all-online stage equals the base
+    ``hydros.json`` cap by construction. With an empty ``online`` dict every
+    count is ``0`` and both caps are ``0.0`` (an explicit zero-capacity stage, not
+    a skip).
+    """
+    n_sets = int(hreg["numero_conjuntos_maquinas"])
+    hreg_copy = hreg.copy()
+    for c in range(1, n_sets + 1):
+        hreg_copy[f"maquinas_conjunto_{c}"] = int(online.get(c, 0))
+    max_turbined = _compute_max_turbined_head_corrected(hreg_copy, name)[0]
+    max_generation = _compute_max_turbined_rated(hreg_copy)[1]
+    return max_turbined, max_generation
+
+
 def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     """Read ``hidr.dat`` and apply permanent MODIF.DAT overrides.
 
@@ -866,6 +913,46 @@ def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     """
     cadastro = case.hidr.cadastro
     return _apply_permanent_overrides(cadastro, case)
+
+
+def _unit_ramp_summary(
+    exph_df: pd.DataFrame,
+    newave_code: int,
+    start_year: int,
+    start_month: int,
+) -> str:
+    """One-line summary of the units coming online for a filling plant.
+
+    Reads the plant's exph unit rows — a unit row is defined by its
+    ``data_entrada_operacao`` (the online date), with
+    ``conjunto_maquina_entrada`` naming the machine group — maps each online
+    date to a stage via :func:`filling_stage_id`, groups by ``conjunto``,
+    counts the units, and renders ``"conj <c>: <n> unit(s) @ stage <s>"`` parts
+    (``<s>`` = the stage at which the conjunto is fully online) joined by
+    ``"; "``. Returns ``"—"`` when the plant has no parsable unit rows.
+
+    The epic-04 field-independence guards (``data_entrada_operacao.notna()`` +
+    a ``pd.isna(conjunto)`` skip) keep a malformed exph row — a set conjunto
+    with a ``NaT`` date, or the inverse — from crashing the cast.
+    """
+    rows = exph_df.loc[exph_df["codigo_usina"] == newave_code]
+    unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
+    by_conjunto: dict[int, list[int]] = {}
+    for _, ur in unit_df.iterrows():
+        conjunto = ur["conjunto_maquina_entrada"]
+        if pd.isna(conjunto):
+            continue
+        ud = ur["data_entrada_operacao"]
+        usid = filling_stage_id(ud.year, ud.month, start_year, start_month)
+        by_conjunto.setdefault(int(conjunto), []).append(usid)
+    if not by_conjunto:
+        return "—"
+    parts = [
+        f"conj {c}: {len(stages)} unit{'s' if len(stages) != 1 else ''} "
+        f"@ stage {max(stages)}"
+        for c, stages in sorted(by_conjunto.items())
+    ]
+    return "; ".join(parts)
 
 
 def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
@@ -910,16 +997,40 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # the per-month reference the source model itself uses.
     seasonal_volref = _read_volref_saz(case)
 
+    # NE plants carrying an exph dead-volume filling row are admitted as real
+    # downstream nodes (epic-2 admission predicate, single source of truth). The
+    # set is computed once here and threaded into the cascade walker so upstream
+    # plants resolve to the filling plant; it also drives each filling plant's
+    # FILLING contract below. Empty (byte-identical to the no-arg call) when the
+    # case has no exph or no NE-with-filling plant.
+    filling_codes = filling_hydro_codes(
+        confhd_df, case.exph.expansoes if case.exph is not None else None
+    )
+
     # Resolve the FICT-cascade for every real plant.  Provides the effective
     # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
     # be folded back into the upstream real plant's effective ρ_eq.  See
     # ``cobre_bridge.converters.fict_cascade`` for the resolution rules.
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
-    fict_cascade = resolve_cascade(confhd_df, cadastro)
+    fict_cascade = resolve_cascade(confhd_df, cadastro, filling_codes=filling_codes)
 
     # Collect study plant codes for temporal override extraction.
     existing = case.active_hydros
+
+    # Per-stage (year, month) closure over the study horizon, built once (epic-1
+    # guidance) and passed into ``filling_min_rate_m3s`` for each filling plant.
+    # The exph DataFrame is only consulted when ``filling_codes`` is non-empty,
+    # which guarantees ``case.exph`` is not None there.
+    horizon = case.horizon
+    stage_dates = build_stage_dates(
+        horizon.start_year, horizon.start_month, horizon.total_stages
+    )
+
+    def stage_year_month(t: int) -> tuple[int, int]:
+        d = stage_dates[t]
+        return d.year, d.month
+
     # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
     if ree_df is not None:
@@ -930,6 +1041,10 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     fpha_codes = fpha_eligible_codes(case)
 
     hydros: list[dict] = []
+    # One diagnostic row per admitted filling plant, accumulated in the loop and
+    # emitted as a single INFO Diagnostic after it (empty for EX-only cases, so
+    # nothing new is emitted there).
+    filling_diag_rows: list[list[object]] = []
     for _, row in existing.iterrows():
         newave_code = int(row["codigo_usina"])
         name = str(row["nome_usina"]).strip()
@@ -965,6 +1080,82 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 vol_max = vol_ref
         elif tipo_reg == "S":
             vol_max = vol_min
+
+        # FILLING phase (design §3/§4.1): an admitted NE plant fills its dead
+        # volume from its seeded storage up to ``min_storage_hm3`` over the
+        # half-open window ``[start_sid, entry_sid)``, then enters operation at
+        # ``entry_sid``. EX plants never enter this branch (filling_codes is the
+        # NE-with-exph set), so their entry/exit/filling stay None.
+        entry_stage_id: int | None = None
+        filling: dict | None = None
+        if newave_code in filling_codes:
+            # filling_codes is non-empty here ⇒ case.exph is not None (the
+            # admission predicate required exph), so .expansoes is safe.
+            exph_df = case.exph.expansoes
+            filling_row = exph_df.loc[
+                (exph_df["codigo_usina"] == newave_code)
+                & exph_df["data_inicio_enchimento"].notna()
+            ].iloc[0]
+            ts = filling_row["data_inicio_enchimento"]
+            duracao = int(filling_row["duracao_enchimento"])
+            volume_morto = float(filling_row["volume_morto"])
+            start_sid, entry_sid = filling_schedule(
+                ts.year, ts.month, duracao, horizon.start_year, horizon.start_month
+            )
+            entry_stage_id = entry_sid
+            # One INFO-diagnostic row per filling plant (rendered after the loop):
+            # its filling window, seeded dead volume, and unit-ramp summary. Built
+            # for every filling plant, including the ``duracao == 0`` (no-filling-
+            # block) case, so the user always sees the admitted plant.
+            filling_diag_rows.append(
+                [
+                    name,
+                    newave_code,
+                    start_sid,
+                    entry_sid,
+                    f"{volume_morto:.1f}",
+                    _unit_ramp_summary(
+                        exph_df,
+                        newave_code,
+                        horizon.start_year,
+                        horizon.start_month,
+                    ),
+                ]
+            )
+            if entry_sid > start_sid:
+                # JURUENA's single-stage window is anchor-insensitive: the soft
+                # target is pinned to ``min_storage_hm3`` regardless of the rate,
+                # so the exact per-stage ζ anchor (ζ_t vs ζ_{t+1}) does not matter.
+                # TODO(epic-04+): verify the multi-stage anchor against
+                # ``cobre/crates/cobre-core/src/lp/builder/layout.rs`` before
+                # shipping a non-trivial (multi-stage) filling rate.
+                #
+                # Rate clamp (design §8): a plant whose filling completes past the
+                # study horizon (``entry_sid > horizon.total_stages``) is a VALID
+                # case — it fills but never operates within the study, yet is still
+                # emitted with its true ``entry_stage_id``. The rate is summed only
+                # over in-horizon stages, so clamp the entry passed to
+                # ``filling_min_rate_m3s`` to the horizon: post-study stages have no
+                # ``stage_dates`` entry (and thus no ζ to sum), and cobre handles the
+                # remaining out-of-horizon fill. The true (unclamped) ``entry_sid``
+                # stays on the hydro record below. If ``start_sid >= total_stages``
+                # too, ``rate_entry`` collapses to ``start_sid``, giving an empty
+                # window → ``filling_min_rate_m3s`` returns 0.0 (no crash).
+                rate_entry = min(entry_sid, horizon.total_stages)
+                rate = filling_min_rate_m3s(
+                    vol_min,
+                    volume_morto,
+                    start_sid,
+                    rate_entry,
+                    stage_year_month,
+                )
+                filling = {
+                    "start_stage_id": start_sid,
+                    "filling_min_rate_m3s": rate,
+                }
+            # entry_sid == start_sid (duracao 0): keep filling None but still set
+            # entry_stage_id — cobre rejects start_stage_id >= entry_stage_id, so
+            # no degenerate filling block is emitted (design §8).
 
         # Generation parameters. Productivity lives in
         # ``hydro_production_models.json`` on cobre HEAD; callers that need
@@ -1150,16 +1341,55 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             ),
             "tailrace": tailrace,
             "diversion": None,
-            "filling": None,
+            "filling": filling,
             "efficiency": efficiency,
             "hydraulic_losses": hydraulic_losses,
             "penalties": penalties,
-            "entry_stage_id": None,
+            "entry_stage_id": entry_stage_id,
             "exit_stage_id": None,
         }
         hydros.append(hydro_entry)
 
     hydros.sort(key=lambda h: h["id"])
+
+    # Surface the admitted dead-volume filling plants as a single INFO
+    # Diagnostic with one table row per plant (the thermal-bounds diagnostic
+    # shape). Emitted only when at least one filling plant was seen, so EX-only
+    # cases add nothing. The de-dup in ``_finalize_diagnostics`` keys on
+    # ``(code, summary)``, so the per-plant detail must ride on the table, not on
+    # N separate diagnostics.
+    if filling_diag_rows:
+        emit(
+            Diagnostic(
+                code="ne-filling-plant",
+                severity=Severity.INFO,
+                category="Filling plants",
+                title=(
+                    f"Dead-volume filling plants admitted ({len(filling_diag_rows)})"
+                ),
+                summary=(
+                    f"{len(filling_diag_rows)} NE plant(s) admitted with a "
+                    "dead-volume filling schedule; each fills before operating "
+                    "and ramps capacity as units come online."
+                ),
+                table=DiagnosticTable(
+                    columns=[
+                        "Plant",
+                        "Code",
+                        "Fill start",
+                        "Operates from",
+                        "Vol. morto %",
+                        "Unit ramp",
+                    ],
+                    rows=filling_diag_rows,
+                    justify=["left", "right", "right", "right", "right", "left"],
+                    caption=(
+                        "Stage ids are 0-based; capacity is 0 until 'Operates from'."
+                    ),
+                ),
+            ),
+            logger=_LOG,
+        )
 
     return {
         "$schema": _SCHEMA_URL,
@@ -1848,6 +2078,96 @@ def convert_hydro_energy_productivity(
     )
 
 
+def convert_turbined_bounds_head_corrected(
+    case: NewaveCase, id_map: NewaveIdMap
+) -> pa.Table | None:
+    """Per-stage ``max_turbined_m3s`` for plants whose operating head varies by stage.
+
+    The engolimento (max turbinable flow) depends on the operating head — both via
+    the turbine affinity ratio and the ``p_inst / prodt_eq`` installed-power cap. For
+    plants carrying MODIF.DAT CFUGA/CMONT temporal overrides (or a seasonal V_ref),
+    that head changes stage-to-stage, exactly as the per-stage equivalent
+    productivity does (:func:`convert_hydro_energy_productivity`). The static
+    per-plant cap in ``hydros.json`` is computed at a single reference head, so at
+    high-flow/low-head stages it under-caps turbining and forces spill (lost hydro →
+    extra thermal). This emits a per-(hydro, stage) ``max_turbined`` override using
+    the SAME per-stage head (``h = ρ_eq / ρ_esp``) that drives productivity, so the
+    two stay consistent.
+
+    Returns a ``(hydro_id, stage_id, max_turbined_m3s)`` table for the affected
+    plants/stages, or ``None`` when no plant has a per-stage head.
+    """
+    cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
+    confhd_codes = [int(r["codigo_usina"]) for _, r in case.active_hydros.iterrows()]
+
+    temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
+    drop_overrides = {
+        code: [o for o in overrides if o["type"] in ("CFUGA", "CMONT")]
+        for code, overrides in temporal_overrides.items()
+        if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
+    }
+    seasonal_volref = _read_volref_saz(case)
+    if not drop_overrides and not seasonal_volref:
+        return None
+
+    total_stages = _total_study_stages(case)
+    if total_stages <= 0:
+        return None
+
+    hydro_ids: list[int] = []
+    stage_ids: list[int] = []
+    max_turbined_vals: list[float] = []
+
+    for newave_code in sorted(confhd_codes):
+        overrides = drop_overrides.get(newave_code, [])
+        plant_seasonal = seasonal_volref.get(newave_code)
+        if not overrides and not plant_seasonal:
+            continue
+        if newave_code not in cadastro.index:
+            continue
+        try:
+            hydro_id = id_map.hydro_id(newave_code)
+        except KeyError:
+            continue
+        hreg = cadastro.loc[newave_code]
+        rho_esp_raw = hreg.get("produtibilidade_especifica")
+        if rho_esp_raw is None or is_na(rho_esp_raw) or float(rho_esp_raw) <= 0.0:
+            continue
+        rho_esp = float(rho_esp_raw)
+        name = str(hreg.get("nome_usina", newave_code))
+
+        legacy_base = _compute_productivity(hreg)
+        per_stage_prod = _per_stage_productivities(
+            hreg,
+            legacy_base,
+            overrides,
+            case,
+            total_stages,
+            seasonal_volref_by_month=plant_seasonal,
+        )
+        for stage_id, prod in enumerate(per_stage_prod):
+            if prod <= 0.0:
+                continue
+            h_op = prod / rho_esp
+            max_turbined = _compute_max_turbined_head_corrected(
+                hreg, name, h_op_override=h_op
+            )[0]
+            hydro_ids.append(hydro_id)
+            stage_ids.append(stage_id)
+            max_turbined_vals.append(max_turbined)
+
+    if not hydro_ids:
+        return None
+
+    return pa.table(
+        {
+            "hydro_id": pa.array(hydro_ids, type=pa.int32()),
+            "stage_id": pa.array(stage_ids, type=pa.int32()),
+            "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
+        }
+    )
+
+
 def compute_per_stage_own_productivities(
     case: NewaveCase,
 ) -> dict[int, list[float]]:
@@ -2301,6 +2621,12 @@ def convert_storage_bounds(
     # Read confhd for the list of active plant codes.
     confhd_codes = case.active_hydro_codes
 
+    # Determine whether the case has any NE-with-filling plant (epic-02
+    # admission predicate). The max_generation_mw column is gated on this:
+    # EX-only cases keep the byte-identical 8-column schema.
+    exph_df = case.exph.expansoes if case.exph is not None else None
+    filling_codes = filling_hydro_codes(case.confhd.usinas, exph_df)
+
     # Extract temporal overrides — empty dict when MODIF.DAT is absent,
     # which is fine because GHMIN.DAT alone can still produce per-stage
     # rows.
@@ -2345,6 +2671,10 @@ def convert_storage_bounds(
     max_turbined_vals: list[float | None] = []
     min_outflow_vals: list[float | None] = []
     min_generation_vals: list[float | None] = []
+    max_generation_vals: list[float | None] = []
+    # Per-row origin tag: True for a filling-plant ramp row, False for a
+    # MODIF/GHMIN row. Drives the ramp-wins de-dup pass before the table build.
+    is_ramp_vals: list[bool] = []
 
     plant_codes_with_data = set(temporal_overrides) | set(ghmin_by_plant_stage)
     for newave_code in sorted(plant_codes_with_data):
@@ -2418,19 +2748,142 @@ def convert_storage_bounds(
             min_turbined_vals.append(turbmint_by_stage.get(stage_id))
             min_outflow_vals.append(vazmint_by_stage.get(stage_id))
             min_generation_vals.append(ghmin_by_stage.get(stage_id))
+            # ticket-010 adds the column but no values; ticket-011 populates
+            # per-stage ramp caps. None mirrors min_generation null handling.
+            max_generation_vals.append(None)
+            is_ramp_vals.append(False)
+
+    # Filling-plant unit-ramp branch (ticket-011, design §4.2/§5): a
+    # ``NE``-with-filling plant operates from ``entry_sid`` but its turbine /
+    # generation capacity at each stage is whatever generating units are online.
+    # We export EXPLICIT 0/reduced caps over the FULL pre-operating window
+    # ``[0, full_online_sid)`` (clamped to the in-study horizon) so the parquet
+    # carries the true 0→full capacity profile from study start through the ramp,
+    # for plottability and bounds comparison. ``online_machines`` clamps every
+    # unit's online stage up to ``entry_sid``, so stages ``[0, entry_sid)`` (the
+    # PreFilling/Filling window) get explicit ``(0, 0)`` caps; the ramp window
+    # ``[entry_sid, full_online_sid)`` gets reduced caps; from ``full_online_sid``
+    # the base ``hydros.json`` caps apply and no further rows are needed. These
+    # pre-entry rows match cobre's internal PreFilling/Filling forcing (capacity
+    # is already 0 there): cobre's ``hydro_bounds`` reader is a sparse override
+    # table with NO stage-window validation, so a ``max=0`` row during
+    # PreFilling/Filling is inert to / consistent-with its internal forcing — the
+    # simulation result is UNCHANGED, only the exported data gains the explicit
+    # 0-cap stages. A filling plant
+    # may in principle also carry MODIF/GHMIN rows at a stage INSIDE its ramp
+    # window; this branch appends SEPARATE rows tagged ``is_ramp=True``, and the
+    # de-dup pass below resolves any ``(hydro_id, stage_id)`` collision in favour
+    # of the ramp row (ramp wins: the explicit 0-cap during PreFilling/Filling
+    # overrides a colliding MODIF/GHMIN minimum). cobre defers duplicate-pair
+    # handling (bounds.rs ~84), so the bridge resolves it here. JURUENA itself
+    # carries no MODIF/GHMIN, so for it the de-dup is a no-op.
+    if filling_codes and case.exph is not None:
+        exph_df = case.exph.expansoes
+        for code in sorted(filling_codes):
+            try:
+                hydro_id = id_map.hydro_id(code)
+            except KeyError:
+                continue
+            if code not in cadastro.index:
+                continue
+            hreg = cadastro.loc[code]
+            name = str(hreg.get("nome_usina", "")).strip() or str(code)
+
+            rows = exph_df.loc[exph_df["codigo_usina"] == code]
+            fill_row = rows.loc[rows["data_inicio_enchimento"].notna()].iloc[0]
+            ts = fill_row["data_inicio_enchimento"]
+            duracao = int(fill_row["duracao_enchimento"])
+            _start_sid, entry_sid = filling_schedule(
+                ts.year,
+                ts.month,
+                duracao,
+                start_year,
+                start_month,
+            )
+
+            # A generating-unit row is defined by its ``data_entrada_operacao``
+            # (the online date); ``conjunto_maquina_entrada`` names the machine
+            # group. Filter on ``data_entrada_operacao`` — the defining field —
+            # because inewave parses the two columns independently, so a unit row
+            # can carry a conjunto with a BLANK date (``NaT``), which would make
+            # ``ud.year``/``ud.month`` NaN and crash ``range(...)`` downstream. A
+            # row missing the online date cannot define an online stage, and one
+            # missing the conjunto cannot be counted into a machine group, so
+            # either way it is skipped, not crashed.
+            unit_rows: list[tuple[int, int]] = []
+            unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
+            for _, ur in unit_df.iterrows():
+                conjunto = ur["conjunto_maquina_entrada"]
+                if pd.isna(conjunto):
+                    continue
+                ud = ur["data_entrada_operacao"]
+                usid = filling_stage_id(ud.year, ud.month, start_year, start_month)
+                unit_rows.append((int(conjunto), usid))
+            if not unit_rows:
+                continue
+
+            # All-units-online stage: the exported pre-operating window is
+            # [0, full_online_sid). Clamp the upper bound to total_stages so the
+            # loop never indexes past the horizon (epic-03 IndexError lesson). A
+            # plant whose entry is at/after the horizon end still emits explicit
+            # 0-cap rows for every in-study stage [0, total_stages) — it never
+            # operates in-study, so every stage is pre-operating.
+            full_online_sid = max(max(usid, entry_sid) for _c, usid in unit_rows)
+            for s in range(0, min(full_online_sid, total_stages)):
+                online = online_machines(unit_rows, entry_sid, s)
+                mt, mg = _reduced_caps(hreg, online, name)
+                hydro_ids.append(hydro_id)
+                stage_ids.append(s)
+                min_storage_vals.append(None)
+                max_storage_vals.append(None)
+                min_turbined_vals.append(None)
+                max_turbined_vals.append(mt)
+                min_outflow_vals.append(None)
+                min_generation_vals.append(0.0)
+                max_generation_vals.append(mg)
+                is_ramp_vals.append(True)
 
     if not hydro_ids:
         return None
 
-    return pa.table(
-        {
-            "hydro_id": pa.array(hydro_ids, type=pa.int32()),
-            "stage_id": pa.array(stage_ids, type=pa.int32()),
-            "min_storage_hm3": pa.array(min_storage_vals, type=pa.float64()),
-            "max_storage_hm3": pa.array(max_storage_vals, type=pa.float64()),
-            "min_turbined_m3s": pa.array(min_turbined_vals, type=pa.float64()),
-            "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
-            "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
-            "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
-        }
-    ).sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
+    # Resolve duplicate ``(hydro_id, stage_id)`` pairs: a ramp row wins over a
+    # MODIF/GHMIN row at the same key (the explicit 0-cap during filling must not
+    # be undercut by a MODIF/GHMIN minimum). EX-only cases produce no ramp rows
+    # (``is_ramp_vals`` all False), so every key is unique and this is a no-op,
+    # keeping the regression-guard output byte-identical.
+    chosen: dict[tuple[int, int], int] = {}
+    for i, (h, s, ramp) in enumerate(zip(hydro_ids, stage_ids, is_ramp_vals)):
+        key = (h, s)
+        if key not in chosen or ramp:  # ramp overrides an earlier MODIF/GHMIN row
+            chosen[key] = i
+    keep = sorted(chosen.values())
+    if len(keep) != len(hydro_ids):
+        hydro_ids = [hydro_ids[i] for i in keep]
+        stage_ids = [stage_ids[i] for i in keep]
+        min_storage_vals = [min_storage_vals[i] for i in keep]
+        max_storage_vals = [max_storage_vals[i] for i in keep]
+        min_turbined_vals = [min_turbined_vals[i] for i in keep]
+        max_turbined_vals = [max_turbined_vals[i] for i in keep]
+        min_outflow_vals = [min_outflow_vals[i] for i in keep]
+        min_generation_vals = [min_generation_vals[i] for i in keep]
+        max_generation_vals = [max_generation_vals[i] for i in keep]
+        is_ramp_vals = [is_ramp_vals[i] for i in keep]
+
+    columns = {
+        "hydro_id": pa.array(hydro_ids, type=pa.int32()),
+        "stage_id": pa.array(stage_ids, type=pa.int32()),
+        "min_storage_hm3": pa.array(min_storage_vals, type=pa.float64()),
+        "max_storage_hm3": pa.array(max_storage_vals, type=pa.float64()),
+        "min_turbined_m3s": pa.array(min_turbined_vals, type=pa.float64()),
+        "max_turbined_m3s": pa.array(max_turbined_vals, type=pa.float64()),
+        "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
+        "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
+    }
+    # Gate the column on filling-plant presence: EX-only cases keep the
+    # existing 8-column schema byte-identical (the regression guard depends
+    # on this); cobre's parse_hydro_bounds tolerates the absent column.
+    if filling_codes:
+        columns["max_generation_mw"] = pa.array(max_generation_vals, type=pa.float64())
+    return pa.table(columns).sort_by(
+        [("hydro_id", "ascending"), ("stage_id", "ascending")]
+    )

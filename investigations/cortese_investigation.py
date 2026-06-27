@@ -195,7 +195,7 @@ def read_cortese(case_dir: Path | str) -> list[CorteseState]:
 
 
 def _main() -> None:
-    states = read_cortese_stage("./example/newave_rodada", "estudo", 10)
+    states = read_cortese_stage("./example/newave", "estudo", 10)
     print(f"estudo stage 10: {len(states)} visited states")
     for s in states:
         nz = int((s.varm.abs() > 1e-6).sum())

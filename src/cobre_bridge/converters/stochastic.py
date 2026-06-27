@@ -19,6 +19,7 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Cadic, Dger, Vazoes
 
+from cobre_bridge import plants
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
@@ -31,7 +32,11 @@ _LOAD_FACTORS_SCHEMA_URL = (
 )
 
 
-def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
+def _build_upstream_postos(
+    confhd_df: pd.DataFrame,
+    *,
+    filling_codes: set[int] | None = None,
+) -> dict[int, list[int]]:
     """Return ``{posto: [upstream_posto, ...]}`` for the hydro cascade.
 
     Builds a DAG in **posto space** from the full confhd cascade.  Multiple
@@ -54,7 +59,22 @@ def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
 
     Because FICT plants share postos with real plants, and their cascade
     edges resolve to the same posto-level edges, no duplicates arise.
+
+    Parameters
+    ----------
+    confhd_df:
+        The full ``Confhd.usinas`` cascade.
+    filling_codes:
+        Codes of admitted ``NE``-with-filling plants
+        (:func:`cobre_bridge.plants.filling_hydro_codes`).  Such a plant
+        *receives* inflow during filling and operation, so its posto enters
+        the map as a real node rather than being walked through: an upstream
+        plant forms a posto edge **to** the filling plant instead of stepping
+        past it.  ``None`` (the default) is normalised to the empty set, in
+        which case behaviour is byte-identical to the ``EX``-only map.
     """
+    filling: set[int] = filling_codes if filling_codes is not None else set()
+
     # Index every row so the cascade walker can step through NE/NC plants
     # without losing the link to the next EX plant downstream.
     row_by_code: dict[int, pd.Series] = {}
@@ -62,8 +82,14 @@ def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
     for _, row in confhd_df.iterrows():
         code = int(row["codigo_usina"])
         row_by_code[code] = row
-        if str(row["usina_existente"]).strip() == "EX":
-            code_to_posto[code] = int(row["posto"])
+        # An EX plant — or an admitted NE-with-filling plant — is a real
+        # inflow node.  A filling plant whose posto is NaN is skipped (same
+        # guard the EX path relies on, since posto is always present there).
+        if str(row["usina_existente"]).strip() == "EX" or code in filling:
+            posto_raw = row["posto"]
+            if pd.isna(posto_raw):
+                continue
+            code_to_posto[code] = int(posto_raw)
 
     def _walk_to_next_ex(start_code: int) -> int | None:
         """Follow the cascade through NE/NC plants until an EX plant is found.
@@ -106,6 +132,21 @@ def _build_upstream_postos(confhd_df: pd.DataFrame) -> dict[int, list[int]]:
         upstream.setdefault(dst, []).append(src)
 
     return upstream
+
+
+def _case_filling_codes(case: NewaveCase) -> set[int]:
+    """Return the admitted ``NE``-with-filling codes for *case*.
+
+    Reads the filling set from ``case`` exactly once via
+    :func:`cobre_bridge.plants.filling_hydro_codes`, tolerating an absent
+    ``exph.dat`` (``case.exph is None`` → empty set).  The result is passed
+    to :func:`_build_upstream_postos` so admitted filling postos enter the
+    inflow map as real nodes.
+    """
+    return plants.filling_hydro_codes(
+        case.confhd.usinas,
+        case.exph.expansoes if case.exph is not None else None,
+    )
 
 
 # Parquet schema for inflow seasonal statistics.
@@ -196,7 +237,9 @@ def convert_recent_inflow_lags(
         natural[posto] = month_vals
 
     # Convert natural → incremental: subtract each upstream posto's values.
-    upstream_map = _build_upstream_postos(confhd_df)
+    upstream_map = _build_upstream_postos(
+        confhd_df, filling_codes=_case_filling_codes(case)
+    )
 
     result: list[dict] = []
     for posto, nat_vals in natural.items():
@@ -268,7 +311,9 @@ def convert_inflow_history(
             natural_by_posto[posto] = df_vazoes[col].to_numpy(dtype=float)[:n_rows]
 
     # Convert natural → incremental: subtract upstream postos' series.
-    upstream_map = _build_upstream_postos(confhd_df)
+    upstream_map = _build_upstream_postos(
+        confhd_df, filling_codes=_case_filling_codes(case)
+    )
     incremental_by_posto: dict[int, np.ndarray] = {}
     for posto, nat in natural_by_posto.items():
         inc = nat.copy()
@@ -371,7 +416,9 @@ def convert_inflow_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
         natural_by_posto[posto] = df_vazoes[col].to_numpy(dtype=float)[:n_rows]
 
     # Convert natural → incremental.
-    upstream_map = _build_upstream_postos(confhd_df)
+    upstream_map = _build_upstream_postos(
+        confhd_df, filling_codes=_case_filling_codes(case)
+    )
     incremental_by_posto: dict[int, np.ndarray] = {}
     for posto, nat in natural_by_posto.items():
         inc = nat.copy()

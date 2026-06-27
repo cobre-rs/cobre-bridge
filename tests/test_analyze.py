@@ -43,16 +43,16 @@ from cobre_bridge.comparators.dataset import (
 from cobre_bridge.comparators.report import (
     build_summary,
     print_bounds_mismatches_from_dataset,
-    print_bounds_summary_from_dataset,
     print_mismatches,
-    print_results_summary,
-    print_results_summary_from_dataset,
-    print_summary,
 )
 from cobre_bridge.comparators.results import (
     PercentileData,
     ResultComparison,
     build_results_summary,
+)
+from cobre_bridge.comparators.verdict import (
+    CompareVerdict,
+    build_compare_verdict,
 )
 
 
@@ -675,58 +675,6 @@ def _capture(func: object, *args: object) -> str:
     with contextlib.redirect_stdout(buffer):
         func(*args)  # type: ignore[operator]
     return buffer.getvalue()
-
-
-def test_print_results_summary_from_dataset_matches_legacy() -> None:
-    results = _make_results()
-    nw, cobre = Path("/fake/nw"), Path("/fake/cobre")
-
-    legacy_summary = build_results_summary(results, 1e-2)
-    dataset = build_results_dataset(results, PercentileData(), 1e-2)
-
-    legacy_out = _capture(print_results_summary, legacy_summary, nw, cobre)
-    dataset_out = _capture(print_results_summary_from_dataset, dataset, nw, cobre)
-
-    assert dataset_out == legacy_out
-
-
-def test_print_results_summary_from_dataset_matches_legacy_empty() -> None:
-    nw, cobre = Path("/fake/nw"), Path("/fake/cobre")
-
-    legacy_summary = build_results_summary([], 1e-2)
-    dataset = build_results_dataset([], PercentileData(), 1e-2)
-
-    legacy_out = _capture(print_results_summary, legacy_summary, nw, cobre)
-    dataset_out = _capture(print_results_summary_from_dataset, dataset, nw, cobre)
-
-    assert dataset_out == legacy_out
-
-
-def test_print_bounds_summary_from_dataset_matches_legacy() -> None:
-    results = _make_bounds()
-    nw, cobre = Path("/fake/nw"), Path("/fake/cobre")
-    tol = 1e-3
-
-    legacy_summary = build_summary(results)
-    dataset = build_bounds_dataset(results)
-
-    legacy_out = _capture(print_summary, legacy_summary, nw, cobre, tol)
-    dataset_out = _capture(print_bounds_summary_from_dataset, dataset, nw, cobre, tol)
-
-    assert dataset_out == legacy_out
-
-
-def test_print_bounds_summary_from_dataset_matches_legacy_empty() -> None:
-    nw, cobre = Path("/fake/nw"), Path("/fake/cobre")
-    tol = 1e-3
-
-    legacy_summary = build_summary([])
-    dataset = build_bounds_dataset([])
-
-    legacy_out = _capture(print_summary, legacy_summary, nw, cobre, tol)
-    dataset_out = _capture(print_bounds_summary_from_dataset, dataset, nw, cobre, tol)
-
-    assert dataset_out == legacy_out
 
 
 def test_print_bounds_mismatches_from_dataset_matches_legacy() -> None:
@@ -1376,3 +1324,118 @@ def test_spillage_lookups_empty_returns_empty() -> None:
     nw_lookup, cb_lookup = spillage_lookups([], empty)
     assert nw_lookup == {}
     assert cb_lookup == {}
+
+
+# -------------------------------------------------------------------
+# ticket-008 (epic-03): compare verdict builder
+# -------------------------------------------------------------------
+
+
+def _summary_dataset(rows: list[dict[str, object]]) -> ComparisonDataset:
+    """A dataset with an empty tidy frame and a hand-built summary frame.
+
+    The summary frame conforms to ``SUMMARY_SCHEMA``; ``tidy`` is empty so the
+    dataset validates while exercising only the summary-driven verdict path.
+    """
+    summary = pl.DataFrame(rows, schema=SUMMARY_SCHEMA)
+    dataset = ComparisonDataset(
+        tidy=pl.DataFrame(schema=TIDY_SCHEMA),
+        summary=summary,
+    )
+    dataset.validate()
+    return dataset
+
+
+class TestCompareVerdict:
+    """Tests for ``build_compare_verdict`` reading only ``dataset.summary``."""
+
+    def test_verdict_bounds_fixture_counts_variables_and_worst(self) -> None:
+        results = _make_bounds()
+        dataset = build_bounds_dataset(results)
+
+        verdict = build_compare_verdict(dataset)
+
+        rows = dataset.summary.to_dicts()
+        assert verdict.total == 2
+        assert verdict.within_tol == 0
+        assert verdict.all_within_tol is False
+        # Derive the expected winner FROM the summary, never recompute sMAPE.
+        expected = min(rows, key=lambda r: (-float(r["max_smape"]), str(r["variable"])))
+        assert verdict.worst_variable == expected["variable"]
+        assert verdict.worst_smape == expected["max_smape"]
+
+    def test_verdict_empty_dataset_returns_zeroed_verdict(self) -> None:
+        dataset = build_results_dataset([], PercentileData(), 1e-2)
+
+        verdict = build_compare_verdict(dataset)
+
+        assert verdict == CompareVerdict(
+            within_tol=0,
+            total=0,
+            worst_variable=None,
+            worst_smape=0.0,
+            all_within_tol=False,
+        )
+
+    def test_verdict_all_within_tol_true_when_every_variable_perfect(self) -> None:
+        dataset = _summary_dataset(
+            [
+                {
+                    "variable": "storage_max",
+                    "count": 3,
+                    "mean_abs_diff": 0.0,
+                    "max_abs_diff": 0.0,
+                    "mean_smape": 0.0,
+                    "max_smape": 0.0,
+                    "within_tol_rate": 1.0,
+                    "correlation": None,
+                },
+                {
+                    "variable": "generation_max",
+                    "count": 2,
+                    "mean_abs_diff": 0.0,
+                    "max_abs_diff": 0.0,
+                    "mean_smape": 0.01,
+                    "max_smape": 0.02,
+                    "within_tol_rate": 1.0,
+                    "correlation": None,
+                },
+            ]
+        )
+
+        verdict = build_compare_verdict(dataset)
+
+        assert verdict.within_tol == 2
+        assert verdict.total == 2
+        assert verdict.all_within_tol is True
+
+    def test_verdict_tie_break_picks_lexicographically_first_variable(self) -> None:
+        dataset = _summary_dataset(
+            [
+                {
+                    "variable": "b_var",
+                    "count": 1,
+                    "mean_abs_diff": 1.0,
+                    "max_abs_diff": 1.0,
+                    "mean_smape": 0.1,
+                    "max_smape": 0.5,
+                    "within_tol_rate": 0.0,
+                    "correlation": None,
+                },
+                {
+                    "variable": "a_var",
+                    "count": 1,
+                    "mean_abs_diff": 1.0,
+                    "max_abs_diff": 1.0,
+                    "mean_smape": 0.1,
+                    "max_smape": 0.5,
+                    "within_tol_rate": 0.0,
+                    "correlation": None,
+                },
+            ]
+        )
+
+        verdict = build_compare_verdict(dataset)
+
+        assert verdict.worst_variable == "a_var"
+        assert verdict.worst_smape == 0.5

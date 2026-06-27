@@ -1847,3 +1847,79 @@ class TestBuildUpstreamPostosNonExistingBypass:
         )
         upstream = _build_upstream_postos(confhd)
         assert upstream.get(200) == [100]
+
+
+class TestBuildUpstreamPostosFillingAdmission:
+    """An admitted ``NE``-with-filling plant *receives* inflow, so its posto
+    must enter the map as a real node — an upstream plant forms a posto edge
+    **to** the filling plant instead of walking through it.  The JURUENA case
+    (code 309, posto 226, ``NE``) is the live exemplar."""
+
+    def test_posto_map_includes_filling_node(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        # Upstream EX (posto 100) -> JURUENA code 309 (NE, posto 226) -> 0.
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 309, "EX"),
+                _confhd_row(309, 226, 0, "NE"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd, filling_codes={309})
+        # 226 is now a real node: it appears as an edge endpoint.
+        assert 226 in upstream
+
+    def test_posto_map_unchanged_without_filling_codes(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        # Same cascade: with the NE plant walked through, the EX upstream has
+        # no downstream EX node, so no edge survives.
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 309, "EX"),
+                _confhd_row(309, 226, 0, "NE"),
+            ]
+        )
+        baseline = _build_upstream_postos(confhd)
+        # filling_codes=None must be byte-identical to the EX-only result, and
+        # the empty set must match too (None is normalised to set()).
+        assert _build_upstream_postos(confhd, filling_codes=None) == baseline
+        assert _build_upstream_postos(confhd, filling_codes=set()) == baseline
+        # The NE posto 226 is NOT a node in the EX-only map.
+        assert 226 not in baseline
+
+    def test_posto_edge_to_filling_plant(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        # Upstream EX (posto 100) -> JURUENA code 309 (NE-filling, posto 226).
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 309, "EX"),
+                _confhd_row(309, 226, 0, "NE"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd, filling_codes={309})
+        # The upstream EX (posto 100) forms an edge TO JURUENA's posto 226.
+        assert upstream.get(226) == [100]
+
+    def test_filling_plant_with_nan_posto_is_skipped(self) -> None:
+        from cobre_bridge.converters.stochastic import _build_upstream_postos
+
+        # JURUENA admitted but its posto is NaN — same pd.isna guard as the
+        # EX path: it is skipped, so the upstream edge does not resolve to it.
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 309, "EX"),
+                {
+                    "codigo_usina": 309,
+                    "nome_usina": "JURUENA",
+                    "posto": float("nan"),
+                    "codigo_usina_jusante": 0,
+                    "usina_existente": "NE",
+                },
+            ]
+        )
+        upstream = _build_upstream_postos(confhd, filling_codes={309})
+        assert 226 not in upstream
+        # Walk-through finds no downstream EX, so no edge survives.
+        assert upstream == {}
