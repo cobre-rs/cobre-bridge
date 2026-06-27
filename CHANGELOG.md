@@ -5,19 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.0] - unreleased
+## [0.9.1] - unreleased
 
-This release adds first-class support for NEWAVE `NE` (future, will-be-built)
-hydro plants via cobre's dead-volume **filling** schema, and lands a broad CLI
-overhaul (preflight `check`, unified `--json` verdicts, config-file defaults,
-and provenance manifests).
+First release of the `NE` (future, will-be-built) hydro feature line: it adds
+first-class support for NEWAVE `NE` plants via cobre's dead-volume **filling**
+schema, and lands a broad CLI overhaul (preflight `check`, unified `--json`
+verdicts, config-file defaults, and provenance manifests). The planned 0.9.0
+was never released; 0.9.1 supersedes it.
 
-The filling schema is new in **cobre 0.9.0**. EX-only conversions are unchanged
-on the wire and still load on cobre >= 0.8.2; only cases containing `NE` plants
-require cobre >= 0.9.0. The `validation` extra remains pinned to
-`cobre-python>=0.8.2,<0.9` until cobre-python 0.9.0 ships the schema — in the
-meantime `convert --validate` automatically **skips** validation for
-`NE`-with-filling cases (an informational diagnostic, never a failure).
+Paired with **cobre 0.9.1** and **cobre-python 0.9.1** — the versions used to
+validate this release — which fix a future-cost discounting bug in cobre's LP
+(the discount rate was not applied to the future-cost term). `convert
+--validate` now requires `cobre-python>=0.9.1,<0.10`.
+
+The filling schema requires **cobre >= 0.9.1**; EX-only conversions are
+unchanged on the wire and still load on cobre >= 0.8.2. With
+`cobre-python >= 0.9.1` installed, `convert --validate` validates
+`NE`-with-filling cases; an older cobre-python that predates the filling schema
+is skipped gracefully (an informational diagnostic, never a failure).
 
 ### Added
 
@@ -40,7 +45,7 @@ meantime `convert --validate` automatically **skips** validation for
   `filling_storage` (from the `volume_morto` fraction impounded at filling start)
   rather than `storage`.
 - **`min_cobre_version` in `conversion_manifest.json`** plus a per-`NE`
-  `Diagnostic`, both recording the cobre >= 0.9.0 requirement for cases that emit
+  `Diagnostic`, both recording the cobre >= 0.9.1 requirement for cases that emit
   the filling schema (`null` / absent for EX-only cases).
 - **`check newave` preflight command.** Validates NEWAVE inputs without
   writing any output files — surfaces the same diagnostics as `convert`
@@ -87,6 +92,15 @@ meantime `convert --validate` automatically **skips** validation for
   DEBUG). Previously a single `--verbose` went straight to DEBUG, making
   it impractical as a routine "show progress" flag. Scripts that relied
   on DEBUG output from a single `-v` must add a second `-v`.
+
+### Fixed
+
+- **Per-stage head in the max-turbined (swallowing) cap.** `max_turbined` is now
+  evaluated with per-stage tailrace/forebay head, honouring temporal `CFUGA` /
+  `CMONT` overrides, instead of a single static head. Run-of-river plants whose
+  head varies by stage (e.g. STO. ANTÔNIO, JIRAU) were previously under-capped,
+  so cobre spilled flow the source model turbines (inflating thermal dispatch);
+  the cap is now emitted per stage in `constraints/hydro_bounds.parquet`.
 
 ## [0.8.2] - 2026-06-17
 

@@ -1519,10 +1519,10 @@ class TestCliInProcess:
         monkeypatch.setitem(sys.modules, "cobre.io", cobre_io)
         return validate
 
-    def test_validate_skipped_for_filling_case(
+    def test_validate_skipped_for_filling_case_when_cobre_python_old(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A filling case skips ``cobre.io.validate`` entirely and exits 0."""
+        """A filling case + too-old cobre-python skips ``validate`` and exits 0."""
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1533,6 +1533,9 @@ class TestCliInProcess:
 
         monkeypatch.setattr(
             "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -1563,6 +1566,9 @@ class TestCliInProcess:
         monkeypatch.setattr(
             "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
         )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
+        )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
         with patch(
@@ -1584,12 +1590,12 @@ class TestCliInProcess:
             "valid": None,
             "warnings": 0,
             "errors": 0,
-            "skipped_reason": "filling-schema-unreleased",
+            "skipped_reason": "cobre-python-predates-filling-schema",
         }
         assert doc["summary"]["validation"]["ran"] is False
         assert (
             doc["summary"]["validation"]["skipped_reason"]
-            == "filling-schema-unreleased"
+            == "cobre-python-predates-filling-schema"
         )
 
     def test_validate_skip_human_message(
@@ -1608,6 +1614,9 @@ class TestCliInProcess:
         monkeypatch.setattr(
             "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
         )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
+        )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
         with patch(
@@ -1623,6 +1632,80 @@ class TestCliInProcess:
         validate.assert_not_called()
         assert "skipping cobre-python validation" in stderr
         assert MIN_COBRE_FILLING_VERSION in stderr
+
+    def test_validate_runs_for_filling_case_when_cobre_python_supports_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A filling case validates when the installed cobre-python knows the schema."""
+        from cobre_bridge.cli import MIN_COBRE_FILLING_VERSION
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version",
+            lambda: MIN_COBRE_FILLING_VERSION,
+        )
+        validate = self._inject_cobre_io(
+            monkeypatch,
+            MagicMock(return_value={"valid": True, "warnings": [], "errors": []}),
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        validate.assert_called_once()
+
+    def test_validate_filling_case_falls_through_when_cobre_python_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No installed cobre-python → the filling gate defers to the generic skip."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version", lambda: None
+        )
+        # Force ``import cobre.io`` to raise regardless of whether the real
+        # cobre-python is installed in this environment (a ``None`` entry in
+        # sys.modules makes the import fail), so the generic "not installed"
+        # branch runs rather than the filling-version gate.
+        monkeypatch.setitem(sys.modules, "cobre", None)
+        monkeypatch.setitem(sys.modules, "cobre.io", None)
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "cobre package not installed" in stderr
 
     def test_validate_runs_for_ex_only_case(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

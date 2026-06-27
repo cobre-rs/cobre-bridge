@@ -54,10 +54,51 @@ if TYPE_CHECKING:
     from cobre_bridge.pipeline import ConversionReport
 
 
-#: Minimum cobre / cobre-python version that ships the dead-volume filling schema.
-#: ticket-014 imports this same constant for the manifest note (single source of
-#: truth).
-MIN_COBRE_FILLING_VERSION = "0.9.0"
+#: Minimum cobre / cobre-python version required for the dead-volume filling
+#: schema. ticket-014 imports this same constant for the manifest note (single
+#: source of truth); the ``--validate`` gate uses it to decide whether the
+#: installed cobre-python is new enough to validate a filling case.
+MIN_COBRE_FILLING_VERSION = "0.9.1"
+
+
+def _installed_cobre_python_version() -> str | None:
+    """Return the installed ``cobre-python`` distribution version, or ``None``.
+
+    The package imports as ``cobre`` but is distributed as ``cobre-python``;
+    this reads the distribution metadata. Returns ``None`` when it is not
+    installed, so the caller falls through to the generic "not installed" skip.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _dist_version
+
+    try:
+        return _dist_version("cobre-python")
+    except PackageNotFoundError:
+        return None
+
+
+def _cobre_python_supports_filling(installed: str) -> bool:
+    """Whether an installed cobre-python *version* knows the filling schema.
+
+    ``True`` when *installed* is at least :data:`MIN_COBRE_FILLING_VERSION` by a
+    numeric release-segment comparison (so ``"0.9.1"`` and ``"0.10.0"`` qualify,
+    ``"0.9.0"`` does not). A non-numeric pre-release suffix on a segment is
+    ignored (``"0.9.1rc1"`` reads as ``0.9.1``); the gate only guards against an
+    obviously-older install, so the leniency is deliberate.
+    """
+
+    def _release(value: str) -> tuple[int, ...]:
+        parts: list[int] = []
+        for segment in value.split("."):
+            digits = ""
+            for char in segment:
+                if not char.isdigit():
+                    break
+                digits += char
+            parts.append(int(digits) if digits else 0)
+        return tuple(parts)
+
+    return _release(installed) >= _release(MIN_COBRE_FILLING_VERSION)
 
 
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
@@ -726,31 +767,38 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     # populated; validation failure flips the exit code, never the status.
     validation_failed = False
     if args.validate:
-        # The filling schema this feature emits is unreleased: the installed
-        # cobre-python does not know the new fields, so validating a filling case
-        # would reject correct output and force exit 2. Skip validation (success,
-        # exit 0) when the case has NE-with-filling plants, recording why on stderr
-        # (human) and under summary["validation"] (machine) — never flipping status.
+        # A case with NE-with-filling plants emits the dead-volume filling schema,
+        # which cobre-python learned in MIN_COBRE_FILLING_VERSION. Validating such a
+        # case against an OLDER cobre-python would reject correct output and force
+        # exit 2, so skip validation (success, exit 0) when the installed
+        # cobre-python predates the schema — recording why on stderr (human) and
+        # under summary["validation"] (machine), never flipping status. A
+        # cobre-python that knows the schema validates the case normally below; an
+        # absent cobre-python falls through to the generic "not installed" skip.
         if _case_has_filling_plants(src):
-            print_status(
-                f"Note: dead-volume filling output requires cobre-python >= "
-                f"{MIN_COBRE_FILLING_VERSION} (the filling schema is unreleased; "
-                f"installed cobre-python lacks it); skipping cobre-python validation.",
-                console=err_console,
-                style="#F5A623",
-            )
-            if args.json_output:
-                summary["validation"] = {
-                    "ran": False,
-                    "valid": None,
-                    "warnings": 0,
-                    "errors": 0,
-                    "skipped_reason": "filling-schema-unreleased",
-                }
-                _emit_convert_json(
-                    build_verdict("convert newave", status, summary, report.diagnostics)
+            installed = _installed_cobre_python_version()
+            if installed is not None and not _cobre_python_supports_filling(installed):
+                print_status(
+                    f"Note: dead-volume filling output requires cobre-python >= "
+                    f"{MIN_COBRE_FILLING_VERSION} (installed cobre-python {installed} "
+                    f"predates the filling schema); skipping cobre-python validation.",
+                    console=err_console,
+                    style="#F5A623",
                 )
-            return
+                if args.json_output:
+                    summary["validation"] = {
+                        "ran": False,
+                        "valid": None,
+                        "warnings": 0,
+                        "errors": 0,
+                        "skipped_reason": "cobre-python-predates-filling-schema",
+                    }
+                    _emit_convert_json(
+                        build_verdict(
+                            "convert newave", status, summary, report.diagnostics
+                        )
+                    )
+                return
 
         try:
             import cobre.io  # type: ignore[import-untyped]

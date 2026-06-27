@@ -264,14 +264,14 @@ def test_min_cobre_version_round_trip(tmp_path: Path) -> None:
         input_files=[],
         diagnostics_summary={},
         diagnostics=[],
-        min_cobre_version="0.9.0",
+        min_cobre_version="0.9.1",
     )
 
     path = tmp_path / "conversion_manifest.json"
     manifest.to_json(path)
     restored = ConversionManifest.from_json(path)
 
-    assert restored.min_cobre_version == "0.9.0"
+    assert restored.min_cobre_version == "0.9.1"
 
 
 def test_min_cobre_version_defaults_none() -> None:
