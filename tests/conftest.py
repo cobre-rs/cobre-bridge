@@ -23,6 +23,21 @@ from cobre_bridge.newave_files import NewaveFiles
 
 
 @pytest.fixture(autouse=True)
+def _deterministic_terminal_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin a terminal width so Rich-rendered Typer ``--help`` is deterministic.
+
+    Typer's Rich help (``rich_markup_mode="rich"``) lays its options/commands out
+    in a Rich table. Inside ``CliRunner`` (no real terminal) when BOTH ``TERM``
+    and ``COLUMNS`` are unset — as on CI — Rich cannot size the table and renders
+    an empty box, so ``--help`` content-presence assertions fail while passing in
+    a normal shell. Exporting a fixed ``COLUMNS`` makes width detection
+    deterministic everywhere; the real CLI (writing to a normal stdout) is
+    unaffected either way.
+    """
+    monkeypatch.setenv("COLUMNS", "80")
+
+
+@pytest.fixture(autouse=True)
 def _restore_cobre_bridge_logger() -> Iterator[None]:
     """Snapshot/restore the ``cobre_bridge`` logger around every test.
 
