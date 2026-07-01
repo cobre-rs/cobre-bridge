@@ -17,6 +17,7 @@ from __future__ import annotations
 import calendar
 from collections import Counter
 from collections.abc import Callable, Sequence
+from datetime import date
 
 
 def month_hours(year: int, month: int) -> float:
@@ -98,6 +99,25 @@ def filling_schedule(
     start = max(0, raw_start)
     entry = max(start, raw_start + duracao_months)
     return start, entry
+
+
+def filling_completion_date(
+    start_year: int, start_month: int, duracao_months: int
+) -> date:
+    """First-of-month calendar date when a dead-volume filling plant enters service.
+
+    A filling plant's operational start is the month it finishes filling and
+    begins operating: ``duracao_months`` calendar months after its filling start
+    (``data_inicio_enchimento`` + ``duracao_enchimento``). Computed straight from
+    the raw ``exph`` schedule, so the date stays truthful even when filling
+    completes before or after the study horizon — unlike the horizon-clamped stage
+    index from :func:`filling_schedule`.
+
+    For JURUENA (Oct 2024 start, ``duracao_months == 1``): November 2024 →
+    ``date(2024, 11, 1)``.
+    """
+    total = start_year * 12 + (start_month - 1) + duracao_months
+    return date(total // 12, total % 12 + 1, 1)
 
 
 def filling_min_rate_m3s(

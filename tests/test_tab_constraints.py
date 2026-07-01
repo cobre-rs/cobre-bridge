@@ -664,6 +664,21 @@ class TestParseExpression:
         terms = self._parse("@rho_acum_h78 * hydro_storage(78)")
         assert terms == [(1.0, "rho_acum_h78", "hydro_storage", 78)]
 
+    def test_hydro_storage_final_normalised_to_hydro_storage(self) -> None:
+        """The converter emits ``hydro_storage_final``; it is the end-of-stage volume
+        Sᴷ, identical to the legacy ``hydro_storage`` and normalised to it so
+        downstream storage-only detection and column lookup stay unchanged."""
+        terms = self._parse("@rho_acum_h3 * hydro_storage_final(3)")
+        assert terms == [(1.0, "rho_acum_h3", "hydro_storage", 3)]
+
+    def test_hydro_storage_final_and_legacy_alias_coexist(self) -> None:
+        """A mix of the new and legacy names both collapse to ``hydro_storage``."""
+        terms = self._parse("hydro_storage_final(0) + hydro_storage(1)")
+        assert terms == [
+            (1.0, None, "hydro_storage", 0),
+            (1.0, None, "hydro_storage", 1),
+        ]
+
     def test_at_name_with_literal_scale(self) -> None:
         """``0.5 * @rho_eq_h12 * hydro_generation(12)`` keeps both."""
         terms = self._parse("0.5 * @rho_eq_h12 * hydro_generation(12)")

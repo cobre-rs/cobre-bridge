@@ -23,14 +23,20 @@ import polars as pl
 
 # Matches terms like: [+/-] [coeff *] [@name *] variable_type(id)
 # Examples:
-#   "5.68 * hydro_storage(78)"             — literal coefficient
+#   "5.68 * hydro_storage_final(78)"       — literal coefficient
 #   "hydro_generation(145)"                — implicit 1.0
 #   "- line_exchange(4)"                   — implicit -1.0
-#   "@rho_acum_h78 * hydro_storage(78)"    — @name coefficient (cobre HEAD sigil)
+#   "@rho_acum_h78 * hydro_storage_final(78)"  — @name coefficient (cobre sigil)
 #   "0.5 * @rho_eq_h47 * hydro_generation(47)"  — literal × @name scale
+#
+# ``hydro_storage_final`` (cobre's end-of-stage stored volume Sᴷ) is what the
+# converter emits for VminOP; the bare ``hydro_storage`` alias is still accepted
+# for older cobre cases and normalised to it in :func:`parse_expression`. The
+# longer name is listed first so the alternation matches it before the prefix.
 _TERM_RE = re.compile(
     r"([+-]?\s*\d*\.?\d*)\s*\*?\s*(?:@([A-Za-z_][A-Za-z0-9_]*)\s*\*\s*)?"
-    r"(hydro_storage|hydro_generation|line_exchange|line_direct|line_reverse)"
+    r"(hydro_storage_final|hydro_storage|hydro_generation"
+    r"|line_exchange|line_direct|line_reverse)"
     r"\((\d+)\)"
 )
 
@@ -80,6 +86,11 @@ def parse_expression(expr: str) -> list[tuple[float, str | None, str, int]]:
         raw_coeff = m.group(1).replace(" ", "")
         param_name = m.group(2)
         var_type = m.group(3)
+        # Bare ``hydro_storage_final`` is the end-of-stage volume Sᴷ, identical to
+        # the legacy ``hydro_storage``; collapse to one vtype so every downstream
+        # consumer (storage-only detection, column lookup) stays unchanged.
+        if var_type == "hydro_storage_final":
+            var_type = "hydro_storage"
         entity_id = int(m.group(4))
         if raw_coeff in ("", "+"):
             coeff = 1.0
@@ -98,7 +109,8 @@ def evaluate_constraint_expressions(
 ) -> pd.DataFrame:
     """Evaluate LHS of all generic constraints from simulation output.
 
-    Variable lookups:
+    Variable lookups (``hydro_storage_final`` is normalised to ``hydro_storage``
+    by :func:`parse_expression`, so both map to the same column):
     - ``hydro_storage(id)``    → ``storage_final_hm3`` where hydro_id=id, block_id=0
     - ``hydro_generation(id)`` → ``generation_mw``     where hydro_id=id  (per block)
     - ``line_exchange(id)``    → ``net_flow_mw``        where line_id=id   (per block)

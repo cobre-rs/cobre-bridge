@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from cobre_bridge.filling import (
+    filling_completion_date,
     filling_min_rate_m3s,
     filling_schedule,
     online_machines,
     stage_id,
     zeta,
 )
+
+
+def test_filling_completion_date_adds_duration_months() -> None:
+    # JURUENA: Oct 2024 start + 1 month filling -> enters service Nov 2024.
+    assert filling_completion_date(2024, 10, 1) == date(2024, 11, 1)
+
+
+def test_filling_completion_date_wraps_across_year_boundary() -> None:
+    # Nov 2024 + 3 months -> Feb 2025.
+    assert filling_completion_date(2024, 11, 3) == date(2025, 2, 1)
+
+
+def test_filling_completion_date_zero_duration_is_start_month() -> None:
+    # A degenerate (no-filling) window completes in its own start month.
+    assert filling_completion_date(2025, 6, 0) == date(2025, 6, 1)
 
 
 def test_stage_id_study_start_is_zero() -> None:
