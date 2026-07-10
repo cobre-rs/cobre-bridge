@@ -54,11 +54,13 @@ if TYPE_CHECKING:
     from cobre_bridge.pipeline import ConversionReport
 
 
-#: Minimum cobre / cobre-python version required for the dead-volume filling
-#: schema. ticket-014 imports this same constant for the manifest note (single
-#: source of truth); the ``--validate`` gate uses it to decide whether the
-#: installed cobre-python is new enough to validate a filling case.
-MIN_COBRE_FILLING_VERSION = "0.9.1"
+#: Minimum cobre / cobre-python version that can load the bridge's converted
+#: output. Since cobre 0.10.0 every ``system/*.json`` entity carries a required
+#: ``operational_start_date`` (absent in 0.9.x), so *all* converted cases — not
+#: only ``NE``-with-filling ones — require cobre >= this version. The manifest
+#: records it (single source of truth) and the ``--validate`` gate uses it to
+#: decide whether the installed cobre-python is new enough to validate the output.
+MIN_COBRE_VERSION = "0.10.0"
 
 
 def _installed_cobre_python_version() -> str | None:
@@ -77,13 +79,13 @@ def _installed_cobre_python_version() -> str | None:
         return None
 
 
-def _cobre_python_supports_filling(installed: str) -> bool:
-    """Whether an installed cobre-python *version* knows the filling schema.
+def _cobre_python_supports_output(installed: str) -> bool:
+    """Whether an installed cobre-python *version* can load the bridge's output.
 
-    ``True`` when *installed* is at least :data:`MIN_COBRE_FILLING_VERSION` by a
-    numeric release-segment comparison (so ``"0.9.1"`` and ``"0.10.0"`` qualify,
-    ``"0.9.0"`` does not). A non-numeric pre-release suffix on a segment is
-    ignored (``"0.9.1rc1"`` reads as ``0.9.1``); the gate only guards against an
+    ``True`` when *installed* is at least :data:`MIN_COBRE_VERSION` by a numeric
+    release-segment comparison (so ``"0.10.0"`` and ``"0.11.2"`` qualify,
+    ``"0.9.1"`` does not). A non-numeric pre-release suffix on a segment is
+    ignored (``"0.10.0rc1"`` reads as ``0.10.0``); the gate only guards against an
     obviously-older install, so the leniency is deliberate.
     """
 
@@ -98,7 +100,7 @@ def _cobre_python_supports_filling(installed: str) -> bool:
             parts.append(int(digits) if digits else 0)
         return tuple(parts)
 
-    return _release(installed) >= _release(MIN_COBRE_FILLING_VERSION)
+    return _release(installed) >= _release(MIN_COBRE_VERSION)
 
 
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
@@ -612,26 +614,6 @@ def _run_check(args: SimpleNamespace) -> None:
     return
 
 
-def _case_has_filling_plants(src: Path) -> bool:
-    """Return whether *src* has ``NE``-with-filling plants (best-effort, never raises).
-
-    Re-reads the case via :meth:`NewaveCase.from_directory` — the same constructor
-    the pipeline and manifest writer use — and evaluates the single-source-of-truth
-    predicate :func:`filling_hydro_codes`. A read failure (``OSError``/``ValueError``)
-    degrades to ``False`` so a ``--validate`` skip is a convenience, never a hard
-    failure.
-    """
-    from cobre_bridge.case import NewaveCase
-    from cobre_bridge.plants import filling_hydro_codes
-
-    try:
-        case = NewaveCase.from_directory(src)
-        exph_df = case.exph.expansoes if case.exph is not None else None
-        return bool(filling_hydro_codes(case.confhd.usinas, exph_df))
-    except (OSError, ValueError):
-        return False
-
-
 def _run_newave_conversion(args: SimpleNamespace) -> None:
     """Execute the convert newave subcommand."""
     # Import here so the module-level import of pipeline is deferred.
@@ -767,38 +749,35 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     # populated; validation failure flips the exit code, never the status.
     validation_failed = False
     if args.validate:
-        # A case with NE-with-filling plants emits the dead-volume filling schema,
-        # which cobre-python learned in MIN_COBRE_FILLING_VERSION. Validating such a
-        # case against an OLDER cobre-python would reject correct output and force
-        # exit 2, so skip validation (success, exit 0) when the installed
-        # cobre-python predates the schema — recording why on stderr (human) and
-        # under summary["validation"] (machine), never flipping status. A
-        # cobre-python that knows the schema validates the case normally below; an
-        # absent cobre-python falls through to the generic "not installed" skip.
-        if _case_has_filling_plants(src):
-            installed = _installed_cobre_python_version()
-            if installed is not None and not _cobre_python_supports_filling(installed):
-                print_status(
-                    f"Note: dead-volume filling output requires cobre-python >= "
-                    f"{MIN_COBRE_FILLING_VERSION} (installed cobre-python {installed} "
-                    f"predates the filling schema); skipping cobre-python validation.",
-                    console=err_console,
-                    style="#F5A623",
+        # Every converted case now emits ``operational_start_date`` on all system
+        # entities (cobre 0.10.0+), so validating against an OLDER cobre-python
+        # would reject correct output and force exit 2. Skip validation (success,
+        # exit 0) when the installed cobre-python predates MIN_COBRE_VERSION —
+        # recording why on stderr (human) and under summary["validation"]
+        # (machine), never flipping status. A cobre-python that knows the schema
+        # validates the case normally below; an absent cobre-python (no metadata)
+        # falls through to the generic "not installed" skip.
+        installed = _installed_cobre_python_version()
+        if installed is not None and not _cobre_python_supports_output(installed):
+            print_status(
+                f"Note: converted output requires cobre-python >= "
+                f"{MIN_COBRE_VERSION} (installed cobre-python {installed} is "
+                f"older); skipping cobre-python validation.",
+                console=err_console,
+                style="#F5A623",
+            )
+            if args.json_output:
+                summary["validation"] = {
+                    "ran": False,
+                    "valid": None,
+                    "warnings": 0,
+                    "errors": 0,
+                    "skipped_reason": "cobre-python-too-old",
+                }
+                _emit_convert_json(
+                    build_verdict("convert newave", status, summary, report.diagnostics)
                 )
-                if args.json_output:
-                    summary["validation"] = {
-                        "ran": False,
-                        "valid": None,
-                        "warnings": 0,
-                        "errors": 0,
-                        "skipped_reason": "cobre-python-predates-filling-schema",
-                    }
-                    _emit_convert_json(
-                        build_verdict(
-                            "convert newave", status, summary, report.diagnostics
-                        )
-                    )
-                return
+            return
 
         try:
             import cobre.io  # type: ignore[import-untyped]
@@ -1035,11 +1014,10 @@ def _write_conversion_manifest(
         "lines": report.line_count,
         "stages": report.stage_count,
     }
-    # Record the minimum cobre version the output requires: a case with
-    # NE-with-filling plants emits the unreleased filling schema, so its output
-    # is only loadable by cobre >= MIN_COBRE_FILLING_VERSION. EX-only cases stay
-    # None (loadable by any released cobre-python).
-    has_filling = _case_has_filling_plants(src)
+    # Record the minimum cobre version the output requires. Every converted case
+    # now emits ``operational_start_date`` on all system entities (cobre 0.10.0+),
+    # so the output is only loadable by cobre >= MIN_COBRE_VERSION regardless of
+    # whether it contains NE-with-filling plants.
     manifest = ConversionManifest.create(
         "convert newave",
         src,
@@ -1048,7 +1026,7 @@ def _write_conversion_manifest(
         input_files=hash_input_files(files),
         diagnostics_summary=summarize_diagnostics(report.diagnostics),
         diagnostics=[d.to_dict() for d in report.diagnostics],
-        min_cobre_version=MIN_COBRE_FILLING_VERSION if has_filling else None,
+        min_cobre_version=MIN_COBRE_VERSION,
     )
 
     path = dst / "conversion_manifest.json"
