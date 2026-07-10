@@ -40,7 +40,7 @@ _LOG = logging.getLogger(__name__)
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/generic_constraints.schema.json"
+    "/schemas/generic_constraints.schema.json"
 )
 
 

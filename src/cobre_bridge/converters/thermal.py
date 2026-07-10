@@ -43,7 +43,7 @@ _THERMAL_BOUNDS_SCHEMA = pa.schema(
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/thermals.schema.json"
+    "/schemas/thermals.schema.json"
 )
 
 

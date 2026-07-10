@@ -49,11 +49,11 @@ _stored_energy_productivity = stored_energy_productivity
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/hydros.schema.json"
+    "/schemas/hydros.schema.json"
 )
 _PRODUCTION_MODELS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/production_models.schema.json"
+    "/schemas/production_models.schema.json"
 )
 
 # --- FPHA (hydro production function) emission ---------------------------------

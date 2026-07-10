@@ -19,27 +19,27 @@ _LOG = logging.getLogger(__name__)
 
 _BUSES_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/buses.schema.json"
+    "/schemas/buses.schema.json"
 )
 _LINES_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/lines.schema.json"
+    "/schemas/lines.schema.json"
 )
 _PENALTIES_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/penalties.schema.json"
+    "/schemas/penalties.schema.json"
 )
 _NCS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/non_controllable_sources.schema.json"
+    "/schemas/non_controllable_sources.schema.json"
 )
 _EXCHANGE_FACTORS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/exchange_factors.schema.json"
+    "/schemas/exchange_factors.schema.json"
 )
 _NCS_FACTORS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/non_controllable_factors.schema.json"
+    "/schemas/non_controllable_factors.schema.json"
 )
 
 # --------------------------------------------------------------------------

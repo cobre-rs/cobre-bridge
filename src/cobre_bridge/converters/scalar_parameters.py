@@ -18,9 +18,8 @@ hydro-storage / hydro-generation energy constraint we know of (VminOP, minimum c
 energy, EARM-based bounds, ...). The values themselves are derived by cobre from VHA
 geometry and ρ_esp at solve time — we only declare the names.
 
-See ``book/src/schemas/scalar_parameters.schema.json`` and
-``book/src/guide/scalar-parameters.md`` in the cobre repo for the on-disk
-shape and the seven valid ``computed_spec.tag`` variants.
+See ``schemas/scalar_parameters.schema.json`` in the cobre repo for the
+on-disk shape and the seven valid ``computed_spec.tag`` variants.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from collections.abc import Iterable, Mapping, Sequence
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/scalar_parameters.schema.json"
+    "/schemas/scalar_parameters.schema.json"
 )
 
 

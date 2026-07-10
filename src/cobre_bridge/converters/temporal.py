@@ -378,7 +378,7 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
     result: dict = {
         "$schema": (
             "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-            "/book/src/schemas/stages.schema.json"
+            "/schemas/stages.schema.json"
         ),
         "season_definitions": season_definitions,
         "policy_graph": policy_graph,
@@ -671,7 +671,7 @@ def convert_config(case: NewaveCase) -> dict:
     config: dict = {
         "$schema": (
             "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-            "/book/src/schemas/config.schema.json"
+            "/schemas/config.schema.json"
         ),
         "estimation": estimation,
         "training": training_section,
