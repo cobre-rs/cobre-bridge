@@ -625,7 +625,7 @@ class TestCompareVerdictExitCodes:
         cobre_dir.mkdir()
 
         code, stdout, stderr = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 

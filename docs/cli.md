@@ -109,9 +109,9 @@ $ cobre-bridge compare [OPTIONS] COMMAND [ARGS]...
 
 **Commands**:
 
-* `results`: Compare NEWAVE published results against...
+* `newave`: Compare NEWAVE published results against...
 
-### `cobre-bridge compare results`
+### `cobre-bridge compare newave`
 
 Compare NEWAVE published results against Cobre simulation output.
 
@@ -120,7 +120,7 @@ Informational: always exits 0, reporting divergences without failing.
 **Usage**:
 
 ```console
-$ cobre-bridge compare results [OPTIONS] NEWAVE_DIR COBRE_OUTPUT_DIR
+$ cobre-bridge compare newave [OPTIONS] NEWAVE_DIR COBRE_OUTPUT_DIR
 ```
 
 **Arguments**:

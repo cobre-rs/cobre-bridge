@@ -1802,7 +1802,7 @@ class TestCompareDatasetWiring:
         cobre_dir.mkdir()
 
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -1810,7 +1810,7 @@ class TestCompareDatasetWiring:
         manifest_path = cobre_dir / "comparison_artifacts" / "comparison.json"
         assert manifest_path.exists()
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert manifest["command"] == "compare results"
+        assert manifest["command"] == "compare newave"
         assert "Artifacts written to" in stdout
 
     def test_compare_results_artifacts_without_output_flag(
@@ -1830,7 +1830,7 @@ class TestCompareDatasetWiring:
         cobre_dir.mkdir()
 
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -1863,7 +1863,7 @@ class TestCompareDatasetWiring:
         cobre_dir.mkdir()
 
         code, _, stderr = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -1882,7 +1882,7 @@ class TestCompareDatasetWiring:
         code, _, _ = self._invoke_main(
             [
                 "compare",
-                "results",
+                "newave",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
                 "--format",
@@ -1907,7 +1907,7 @@ class TestCompareDatasetWiring:
         cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -1929,7 +1929,7 @@ class TestCompareDatasetWiring:
         code, _, _ = self._invoke_main(
             [
                 "compare",
-                "results",
+                "newave",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
                 "--format",
@@ -1954,7 +1954,7 @@ class TestCompareDatasetWiring:
         code, _, _ = self._invoke_main(
             [
                 "compare",
-                "results",
+                "newave",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
                 "--format",
@@ -1979,7 +1979,7 @@ class TestCompareDatasetWiring:
         code, _, stderr = self._invoke_main(
             [
                 "compare",
-                "results",
+                "newave",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
                 "--format",
@@ -1996,7 +1996,7 @@ class TestCompareDatasetWiring:
     ) -> None:
         """``compare results --help`` lists --format/--out-dir, not --output/-o."""
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", "--help"],
+            ["compare", "newave", "--help"],
             monkeypatch,
         )
 
@@ -2019,7 +2019,7 @@ class TestCompareDatasetWiring:
         monkeypatch.setattr("cobre_bridge.comparators.export.write_artifacts", _boom)
 
         code, _, stderr = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -2137,13 +2137,13 @@ class TestCompareJson:
         cobre_dir.mkdir()
 
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
             monkeypatch,
         )
 
         assert code == 0
         doc = json.loads(stdout)
-        assert doc["command"] == "compare results"
+        assert doc["command"] == "compare newave"
         assert doc["status"] == "mismatch"
         assert doc["summary"]["all_within_tol"] is False
         assert doc["summary"]["within_tol"] < doc["summary"]["total"]
@@ -2158,7 +2158,7 @@ class TestCompareJson:
         cobre_dir.mkdir()
 
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
             monkeypatch,
         )
 
@@ -2187,7 +2187,7 @@ class TestCompareJson:
         cobre_dir.mkdir()
 
         code, stdout, stderr = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
             monkeypatch,
         )
 
@@ -2991,7 +2991,7 @@ class TestCompareConfigEnvPrecedence:
         cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -3015,7 +3015,7 @@ class TestCompareConfigEnvPrecedence:
         cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -3038,7 +3038,7 @@ class TestCompareConfigEnvPrecedence:
         cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -3067,7 +3067,7 @@ class TestCompareConfigEnvPrecedence:
         cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -3090,7 +3090,7 @@ class TestCompareConfigEnvPrecedence:
         cobre_dir.mkdir()
 
         code, stdout, stderr = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 

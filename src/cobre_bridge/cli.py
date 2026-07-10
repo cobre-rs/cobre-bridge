@@ -167,7 +167,7 @@ def _load_compare_context(
 ) -> tuple[NewaveCase, NewaveIdMap, EntityAlignment, list[dict[str, object]]]:
     """Load the source model case, id-map, entity alignment, and lines.json.
 
-    Setup for `compare results`. Builds the parsed
+    Setup for `compare newave`. Builds the parsed
     case once (so the id-map reuses its cached readers), loads lines.json, and
     builds the entity alignment.
 
@@ -203,7 +203,7 @@ def _export_compare_artifacts(
 ) -> tuple[set[str], Path]:
     """Resolve ``--format`` and write the machine-readable comparison artifacts.
 
-    Used by `compare results`. Returns the requested
+    Used by `compare newave`. Returns the requested
     formats and the resolved out_dir so the handler can run its own HTML branch
     and exit-code logic.
 
@@ -295,11 +295,11 @@ def _resolve_compare_settings(args: SimpleNamespace) -> None:
         )
 
 
-def _run_results_comparison(args: SimpleNamespace) -> None:
-    """Execute the compare results subcommand.
+def _run_newave_comparison(args: SimpleNamespace) -> None:
+    """Execute the compare newave subcommand.
 
-    Intentionally always exits 0: ``compare results`` is informational (a
-    descriptive the source-model-vs-Cobre divergence report), so it never signals a
+    Intentionally always exits 0: ``compare newave`` is informational (a
+    descriptive NEWAVE-vs-Cobre divergence report), so it never signals a
     failure on divergence.
     """
     _resolve_compare_settings(args)
@@ -347,7 +347,7 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
 
     formats, out_dir = _export_compare_artifacts(
         dataset,
-        command="compare results",
+        command="compare newave",
         raw_formats=args.format,
         newave_dir=newave_dir,
         cobre_output_dir=cobre_output_dir,
@@ -381,7 +381,7 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
         verdict = build_compare_verdict(dataset)
         status = "mismatch" if not verdict.all_within_tol else "ok"
         _emit_convert_json(
-            build_verdict("compare results", status, compare_summary(verdict))
+            build_verdict("compare newave", status, compare_summary(verdict))
         )
 
     return
@@ -1166,8 +1166,8 @@ def _convert_newave(
     )
 
 
-@compare_app.command("results")
-def _compare_results(
+@compare_app.command("newave")
+def _compare_newave(
     newave_dir: Annotated[
         Path, typer.Argument(help="Path to the NEWAVE case directory (has saidas/).")
     ],
@@ -1206,7 +1206,7 @@ def _compare_results(
     Informational: always exits 0, reporting divergences without failing.
     """
     _configure_logging(verbose, log_file)
-    _run_results_comparison(
+    _run_newave_comparison(
         SimpleNamespace(
             newave_dir=newave_dir,
             cobre_output_dir=cobre_output_dir,

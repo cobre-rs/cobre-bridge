@@ -239,7 +239,7 @@ def test_golden_results_summary_json_on_disk(tmp_path: Path) -> None:
 
     export.write_artifacts(
         dataset,
-        command="compare results",
+        command="compare newave",
         newave_dir=Path("/fake/nw"),
         cobre_output_dir=Path("/fake/cobre"),
         tolerance=1e-2,

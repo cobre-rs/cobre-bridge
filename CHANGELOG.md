@@ -40,11 +40,16 @@ blocks).
   `skipped_reason: "cobre-python-too-old"`) — previously that skip fired only for
   `NE`-with-filling cases, so an EX-only case validated against an older
   cobre-python would have produced a false failure.
+- **`compare results` is renamed to `compare newave`.** The comparison subcommand
+  now names its source model, mirroring `convert newave` / `check newave`, so the
+  `convert` and `compare` interfaces are uniform and ready for a future
+  `compare decomp`. The `--json` verdict and provenance-manifest `command` field is
+  now `"compare newave"`; the command's options and behavior are otherwise unchanged.
 
 ### Removed
 
 - **The `compare bounds` command is removed.** The workflow standardized on
-  `compare results` (the modelling-divergence tool), so the round-trip LP-bounds
+  `compare newave` (the modelling-divergence tool), so the round-trip LP-bounds
   check is no longer exposed as a CLI command. Its `--summary` / `--variables`
   flags, the `[compare.bounds]` config table, and the
   `COBRE_BRIDGE_BOUNDS_TOLERANCE` environment variable are gone with it. The

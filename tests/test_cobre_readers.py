@@ -212,7 +212,7 @@ class TestCliExitCodeTwoOnCobreReadError:
             ),
         ):
             with pytest.raises(typer.Exit) as excinfo:
-                cli._run_results_comparison(args)
+                cli._run_newave_comparison(args)
 
         assert excinfo.value.exit_code == 2
         err = capsys.readouterr().err
