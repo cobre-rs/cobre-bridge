@@ -24,11 +24,12 @@ _LOG = logging.getLogger(__name__)
 class NewaveIdMap:
     """Bidirectional ID map from the source model 1-based codes to Cobre 0-based IDs.
 
-    Subsystems and thermals are remapped deterministically by sorting the input the
-    source model IDs ascending and assigning Cobre IDs 0, 1, 2, … in that order.  Hydros
-    are remapped in the order the codes are passed in, which the pipeline supplies as
-    the ``confhd.dat`` declaration order; this preserves the upstream-to-downstream
-    layout authors typically encode in that file.
+    Subsystems, thermals, and hydros are all remapped deterministically by sorting
+    the source model IDs (``codigo_usina``) ascending and assigning Cobre IDs
+    0, 1, 2, … in that order.  Sorting hydros by code — rather than by the
+    ``confhd.dat`` declaration order — makes the Cobre hydro id follow the
+    ``hidr.dat`` registry order and keeps the mapping independent of how a
+    particular deck happens to order ``confhd.dat``.
 
     Parameters
     ----------
@@ -36,8 +37,9 @@ class NewaveIdMap:
         Iterable of the source model subsystem (submercado) codes to register, including
         fictitious ones.  Each unique code maps to one bus ID.
     hydro_codes:
-        The source model hydro plant codes (``codigo_usina`` from ``confhd.dat``) in
-        declaration order.  Cobre hydro IDs are assigned in this order.
+        The source model hydro plant codes (``codigo_usina`` from ``confhd.dat``).
+        Cobre hydro IDs are assigned in ascending code order (the codes are sorted
+        here), so the caller need not pre-sort them.
     thermal_codes:
         Iterable of the source model thermal plant codes (``codigo_usina`` from
         ``conft.dat``).
@@ -54,7 +56,8 @@ class NewaveIdMap:
             for cobre_id, newave_id in enumerate(sorted(subsystem_ids))
         }
         self._hydro: dict[int, int] = {
-            newave_id: cobre_id for cobre_id, newave_id in enumerate(hydro_codes)
+            newave_id: cobre_id
+            for cobre_id, newave_id in enumerate(sorted(hydro_codes))
         }
         self._thermal: dict[int, int] = {
             newave_id: cobre_id
@@ -98,8 +101,8 @@ class NewaveIdMap:
 
     @property
     def all_hydro_codes(self) -> list[int]:
-        """The source model hydro codes in Cobre-ID order (confhd.dat declaration
-        order)."""
+        """The source model hydro codes in Cobre-ID order (ascending ``codigo_usina``,
+        matching ``hidr.dat`` registry order)."""
         return list(self._hydro)
 
     @property

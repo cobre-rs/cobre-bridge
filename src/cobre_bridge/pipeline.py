@@ -683,7 +683,7 @@ def _convert_newave_case_impl(
         merged_dict = {
             "$schema": (
                 "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-                "/book/src/schemas/generic_constraints.schema.json"
+                "/schemas/generic_constraints.schema.json"
             ),
             "constraints": all_constraints,
         }

@@ -597,16 +597,6 @@ class TestCompareVerdictExitCodes:
             lambda _dir: [],
         )
 
-    @staticmethod
-    def _make_cobre_dir_with_bounds(tmp_path: Path, name: str) -> Path:
-        import pyarrow.parquet as pq
-
-        cobre_dir = tmp_path / name
-        bounds_path = cobre_dir / "training" / "dictionaries" / "bounds.parquet"
-        bounds_path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.table({"x": pa.array([0], pa.int32())}), bounds_path)
-        return cobre_dir
-
     def test_verdict_results_exit_zero_stdout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -635,7 +625,7 @@ class TestCompareVerdictExitCodes:
         cobre_dir.mkdir()
 
         code, stdout, stderr = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -644,54 +634,6 @@ class TestCompareVerdictExitCodes:
         # The verdict line is a primary result: on stdout, not stderr.
         verdict_line = _first_nonempty_line(stdout)
         assert verdict_line.startswith(("✓ ", "⚠ "))
-        assert "variables within tol" in verdict_line
-        assert "variables within tol" not in stderr
-
-    def test_verdict_bounds_exit_one_on_mismatch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._patch_compare_context(monkeypatch)
-        results = [
-            BoundComparison(
-                entity_type="hydro",
-                entity_name="ITAIPU",
-                newave_code=10,
-                cobre_id=0,
-                stage=0,
-                variable="storage_max",
-                newave_value=29000.0,
-                cobre_value=29000.0,
-                diff=0.0,
-                match=True,
-            ),
-            BoundComparison(
-                entity_type="thermal",
-                entity_name="ANGRA",
-                newave_code=30,
-                cobre_id=1,
-                stage=0,
-                variable="generation_max",
-                newave_value=1350.0,
-                cobre_value=1300.0,
-                diff=50.0,
-                match=False,
-            ),
-        ]
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.bounds.compare_bounds",
-            lambda **k: results,
-        )
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, stdout, stderr = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
-            monkeypatch,
-        )
-
-        # Any mismatch -> exit 1 (contract preserved).
-        assert code == 1
-        verdict_line = _first_nonempty_line(stdout)
-        assert verdict_line.startswith("⚠ ")
         assert "variables within tol" in verdict_line
         assert "variables within tol" not in stderr
 

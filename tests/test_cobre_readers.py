@@ -177,57 +177,6 @@ class TestSoftMetadataReadersStaySoft:
 
 
 class TestCliExitCodeTwoOnCobreReadError:
-    def _bounds_args(self, tmp_path: Path) -> argparse.Namespace:
-        out = tmp_path / "output"
-        # _run_bounds_comparison requires bounds.parquet to *exist* before it
-        # reaches the comparison call we are exercising.
-        _write_corrupt_parquet(out / "training" / "dictionaries" / "bounds.parquet")
-        return argparse.Namespace(
-            newave_dir=tmp_path / "newave",
-            cobre_output_dir=out,
-            tolerance=1e-3,
-            format=None,
-            out_dir=None,
-            summary=True,
-            variables=None,
-            verbose=False,
-            no_color=False,
-            quiet=False,
-        )
-
-    def test_bounds_cli_exits_2_when_reader_raises(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from cobre_bridge import cli
-
-        args = self._bounds_args(tmp_path)
-
-        def _raise(**_kwargs: object) -> object:
-            raise CobreReadError("Failed to read bounds.parquet: /x/bounds.parquet")
-
-        with (
-            patch("cobre_bridge.cli._load_lines_json", return_value=[]),
-            patch(
-                "cobre_bridge.case.NewaveCase.from_directory",
-                return_value=MagicMock(),
-            ),
-            patch(
-                "cobre_bridge.comparators.alignment.build_entity_alignment",
-                return_value=object(),
-            ),
-            patch(
-                "cobre_bridge.comparators.bounds.compare_bounds",
-                side_effect=_raise,
-            ),
-        ):
-            with pytest.raises(typer.Exit) as excinfo:
-                cli._run_bounds_comparison(args)
-
-        assert excinfo.value.exit_code == 2
-        err = capsys.readouterr().err
-        assert "ERROR:" in err
-        assert "bounds.parquet" in err
-
     def test_results_cli_exits_2_when_reader_raises(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -263,7 +212,7 @@ class TestCliExitCodeTwoOnCobreReadError:
             ),
         ):
             with pytest.raises(typer.Exit) as excinfo:
-                cli._run_results_comparison(args)
+                cli._run_newave_comparison(args)
 
         assert excinfo.value.exit_code == 2
         err = capsys.readouterr().err

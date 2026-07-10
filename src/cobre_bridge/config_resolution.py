@@ -25,7 +25,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-BOUNDS_TOLERANCE_DEFAULT: float = 1e-3
 RESULTS_TOLERANCE_DEFAULT: float = 1e-2
 FORMAT_DEFAULT: tuple[str, ...] = ("console", "parquet", "json")
 # out-dir has no fixed default (it derives from <cobre_output_dir>); the config
@@ -45,7 +44,6 @@ class BridgeConfig:
     ``None``.
 
     Attributes:
-        bounds_tolerance: ``[compare.bounds] tolerance`` (absolute), or ``None``.
         results_tolerance: ``[compare.results] tolerance`` (relative), or ``None``.
         formats: ``[compare] format`` normalised to the raw token tuple, or
             ``None``. Token names are NOT validated here.
@@ -55,7 +53,6 @@ class BridgeConfig:
         warnings: Human-readable load warnings (malformed TOML, bad types).
     """
 
-    bounds_tolerance: float | None = None
     results_tolerance: float | None = None
     formats: tuple[str, ...] | None = None
     out_dir: Path | None = None
@@ -132,11 +129,9 @@ def load_config(path: Path | None = None, *, start: Path | None = None) -> Bridg
 
     warnings: list[str] = []
     compare = _read_table(data, "compare")
-    bounds = _read_table(compare, "bounds")
     results = _read_table(compare, "results")
 
     return BridgeConfig(
-        bounds_tolerance=_read_number(bounds, "tolerance", "compare.bounds", warnings),
         results_tolerance=_read_number(
             results, "tolerance", "compare.results", warnings
         ),

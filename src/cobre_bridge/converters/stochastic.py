@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _LOAD_FACTORS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/load_factors.schema.json"
+    "/schemas/load_factors.schema.json"
 )
 
 

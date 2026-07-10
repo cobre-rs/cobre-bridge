@@ -11,7 +11,7 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
-from cobre_bridge.horizon import POST_STUDY_YEAR
+from cobre_bridge.horizon import POST_STUDY_YEAR, historical_start_date
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
 
@@ -19,27 +19,27 @@ _LOG = logging.getLogger(__name__)
 
 _BUSES_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/buses.schema.json"
+    "/schemas/buses.schema.json"
 )
 _LINES_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/lines.schema.json"
+    "/schemas/lines.schema.json"
 )
 _PENALTIES_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/penalties.schema.json"
+    "/schemas/penalties.schema.json"
 )
 _NCS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/non_controllable_sources.schema.json"
+    "/schemas/non_controllable_sources.schema.json"
 )
 _EXCHANGE_FACTORS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/exchange_factors.schema.json"
+    "/schemas/exchange_factors.schema.json"
 )
 _NCS_FACTORS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/non_controllable_factors.schema.json"
+    "/schemas/non_controllable_factors.schema.json"
 )
 
 # --------------------------------------------------------------------------
@@ -324,6 +324,11 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         if fallback_cost > 0:
             break
 
+    # Buses model network subsystems, which have no commissioning date; treat them
+    # as in service since the historical record (Cobre uses the date only as a
+    # canonical-ordering key, tiebroken by id).
+    op_date = historical_start_date(case.dger)
+
     buses: list[dict] = []
     for code, info in buses_by_code.items():
         segs = sorted(info["segments"], key=lambda s: s["patamar"])
@@ -344,6 +349,7 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         bus_entry: dict = {
             "id": id_map.bus_id(code),
             "name": info["name"],
+            "operational_start_date": op_date,
             "deficit_segments": deficit_segments,
         }
         buses.append(bus_entry)
@@ -527,6 +533,11 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # Use the shared canonical mapping for consistent line IDs.
     canonical_map = _build_canonical_pair_to_line_id(case)
 
+    # Interconnections have no commissioning date; treat every line as in service
+    # since the historical record (Cobre uses the date only as a canonical-ordering
+    # key, tiebroken by id).
+    op_date = historical_start_date(dger)
+
     lines: list[dict] = []
     for (src, tgt), line_id in sorted(canonical_map.items(), key=lambda x: x[1]):
         caps = pair_map.get((src, tgt), {"direct_mw": 0.0, "reverse_mw": 0.0})
@@ -537,6 +548,7 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         line_entry: dict = {
             "id": line_id,
             "name": f"{src_name}_{tgt_name}",
+            "operational_start_date": op_date,
             "source_bus_id": src_bus,
             "target_bus_id": tgt_bus,
             "capacity": {
@@ -1268,6 +1280,12 @@ def convert_non_controllable_sources(
 
     df_filtered = df_ncs[df_ncs["data"].apply(_in_horizon)].copy()
 
+    # The source model carries no per-source commissioning date for the aggregated
+    # non-controllable generation; treat every NCS as in service since the
+    # historical record (Cobre uses the date only as a canonical-ordering key,
+    # tiebroken by id).
+    op_date = historical_start_date(case.dger)
+
     # Columns: codigo_submercado, indice_bloco, fonte, data, valor
     # Group by (codigo_submercado, indice_bloco) — each unique pair is one NCS.
     ncs_list: list[dict] = []
@@ -1301,6 +1319,7 @@ def convert_non_controllable_sources(
             {
                 "id": ncs_id,
                 "name": f"{fonte}_{sub_code_int}",
+                "operational_start_date": op_date,
                 "bus_id": bus_id,
                 "max_generation_mw": max_gen,
                 # The source model pre-nets `geracao_usinas_nao_simuladas` from MERC

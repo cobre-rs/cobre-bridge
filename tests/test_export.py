@@ -73,7 +73,7 @@ def test_write_artifacts_emits_expected_files(tmp_path: Path) -> None:
 
     write_artifacts(
         dataset,
-        command="compare results",
+        command="compare newave",
         newave_dir=nw,
         cobre_output_dir=cb,
         tolerance=1e-2,
@@ -94,7 +94,7 @@ def test_manifest_lists_emitted_artifacts(tmp_path: Path) -> None:
 
     manifest = write_artifacts(
         dataset,
-        command="compare results",
+        command="compare newave",
         newave_dir=tmp_path / "newave",
         cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,
@@ -108,7 +108,7 @@ def test_manifest_lists_emitted_artifacts(tmp_path: Path) -> None:
     assert "summary.json" in manifest.artifacts
     assert "top_divergences.json" in manifest.artifacts
     assert manifest.artifacts == sorted(manifest.artifacts)
-    assert manifest.command == "compare results"
+    assert manifest.command == "compare newave"
     assert manifest.top_divergences == dataset.metadata["top_divergences"]
 
 
@@ -118,7 +118,7 @@ def test_unknown_format_raises_valueerror(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="xml"):
         write_artifacts(
             dataset,
-            command="compare results",
+            command="compare newave",
             newave_dir=tmp_path / "newave",
             cobre_output_dir=tmp_path / "output",
             tolerance=1e-2,
@@ -182,7 +182,7 @@ def test_write_artifacts_roundtrip_reload(tmp_path: Path) -> None:
 
     write_artifacts(
         dataset,
-        command="compare results",
+        command="compare newave",
         newave_dir=tmp_path / "newave",
         cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,

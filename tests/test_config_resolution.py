@@ -39,7 +39,6 @@ def test_no_file_returns_empty_config(
     result = load_config(start=empty_dir)
 
     assert result == BridgeConfig()
-    assert result.bounds_tolerance is None
     assert result.results_tolerance is None
     assert result.formats is None
     assert result.out_dir is None
@@ -50,8 +49,6 @@ def test_no_file_returns_empty_config(
 def test_local_toml_populates_all_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "cobre-bridge.toml"
     config_path.write_text(
-        "[compare.bounds]\n"
-        "tolerance = 5e-4\n"
         "[compare.results]\n"
         "tolerance = 2e-2\n"
         "[compare]\n"
@@ -62,7 +59,6 @@ def test_local_toml_populates_all_fields(tmp_path: Path) -> None:
 
     result = load_config(start=tmp_path)
 
-    assert result.bounds_tolerance == 5e-4
     assert result.results_tolerance == 2e-2
     assert result.formats == ("console", "html")
     assert result.out_dir == Path("art")
@@ -76,7 +72,6 @@ def test_malformed_toml_warns_and_returns_none_fields(tmp_path: Path) -> None:
 
     result = load_config(start=tmp_path)
 
-    assert result.bounds_tolerance is None
     assert result.results_tolerance is None
     assert result.formats is None
     assert result.out_dir is None
@@ -87,17 +82,17 @@ def test_malformed_toml_warns_and_returns_none_fields(tmp_path: Path) -> None:
 def test_wrong_typed_value_skips_only_that_key(tmp_path: Path) -> None:
     config_path = tmp_path / "cobre-bridge.toml"
     config_path.write_text(
-        '[compare.bounds]\ntolerance = "loose"\n[compare.results]\ntolerance = 3e-2\n',
+        '[compare.results]\ntolerance = "loose"\n[compare]\nout_dir = "art"\n',
         encoding="utf-8",
     )
 
     result = load_config(start=tmp_path)
 
-    assert result.bounds_tolerance is None
-    assert result.results_tolerance == 3e-2
+    assert result.results_tolerance is None
+    assert result.out_dir == Path("art")
     assert result.source_path == config_path
     assert len(result.warnings) == 1
-    assert "bounds" in result.warnings[0]
+    assert "results" in result.warnings[0]
 
 
 def test_empty_out_dir_warns_and_is_treated_as_absent(tmp_path: Path) -> None:

@@ -3,7 +3,8 @@ and electric constraints from restricao-eletrica.csv.
 
 Converts the source model minimum stored energy constraints into Cobre generic
 constraints. Each REE with entries in ``curva.dat`` becomes one generic constraint whose
-expression is a weighted sum of ``hydro_storage`` variables, with weights equal to the
+expression is a weighted sum of ``hydro_storage_final`` variables (the end-of-stage
+stored volume the source model's security curve bounds), with weights equal to the
 accumulated cascade productivities.
 
 Electric constraints from ``restricao-eletrica.csv`` (discovered via
@@ -39,7 +40,7 @@ _LOG = logging.getLogger(__name__)
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/generic_constraints.schema.json"
+    "/schemas/generic_constraints.schema.json"
 )
 
 
@@ -574,7 +575,8 @@ def convert_vminop_constraints(
             )
             continue
 
-        # Build expression: sum of @rho_acum_h{cobre_id} * hydro_storage(cobre_id).
+        # Build expression: sum of
+        # @rho_acum_h{cobre_id} * hydro_storage_final(cobre_id).
         # The coefficient is resolved by cobre to its own ρ_acum at solve time.
         # We collect the participating plants here; the RHS bound for each
         # stage is computed below using the per-stage ρ_acum so LHS and RHS
@@ -598,7 +600,9 @@ def convert_vminop_constraints(
                 cobre_id = id_map.hydro_id(plant_code)
             except KeyError:
                 continue
-            terms.append(f"@{rho_acum_name(cobre_id)} * hydro_storage({cobre_id})")
+            terms.append(
+                f"@{rho_acum_name(cobre_id)} * hydro_storage_final({cobre_id})"
+            )
             referenced_ids.append(cobre_id)
             active_plant_codes.append(plant_code)
 

@@ -29,11 +29,9 @@ def _in_git_checkout() -> bool:
 
 
 def test_create_sets_bridge_version_and_timestamp() -> None:
-    manifest = ComparisonManifest.create(
-        "compare results", Path("nw"), Path("cb"), 1e-2
-    )
+    manifest = ComparisonManifest.create("compare newave", Path("nw"), Path("cb"), 1e-2)
 
-    assert manifest.command == "compare results"
+    assert manifest.command == "compare newave"
     assert manifest.newave_dir == "nw"
     assert manifest.cobre_output_dir == "cb"
     assert manifest.tolerance == 1e-2
@@ -65,9 +63,7 @@ def test_create_passes_through_optional_versions() -> None:
 
 @pytest.mark.skipif(not _in_git_checkout(), reason="not a git checkout")
 def test_create_git_sha_in_repo() -> None:
-    manifest = ComparisonManifest.create(
-        "compare results", Path("nw"), Path("cb"), 1e-2
-    )
+    manifest = ComparisonManifest.create("compare newave", Path("nw"), Path("cb"), 1e-2)
 
     assert manifest.git_sha is not None
     assert re.fullmatch(r"[0-9a-f]{7,}", manifest.git_sha) is not None
@@ -101,7 +97,7 @@ def test_git_sha_returns_none_on_nonzero_returncode(
 
 def test_manifest_json_roundtrip(tmp_path: Path) -> None:
     manifest = ComparisonManifest.create(
-        "compare results",
+        "compare newave",
         Path("nw"),
         Path("cb"),
         1e-2,
@@ -140,7 +136,7 @@ def test_to_json_creates_parent_dirs(tmp_path: Path) -> None:
 def _base_manifest_data() -> dict[str, object]:
     """Return a minimal valid manifest JSON payload as a dict."""
     return {
-        "command": "compare results",
+        "command": "compare newave",
         "newave_dir": "nw",
         "cobre_output_dir": "cb",
         "tolerance": 1e-2,
@@ -163,7 +159,7 @@ def test_from_json_ignores_unknown_field(tmp_path: Path) -> None:
 
     manifest = ComparisonManifest.from_json(path)
 
-    assert manifest.command == "compare results"
+    assert manifest.command == "compare newave"
     assert not hasattr(manifest, "future_field")
 
 

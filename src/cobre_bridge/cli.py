@@ -15,7 +15,6 @@ import typer
 from cobre_bridge import __version__
 from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.config_resolution import (
-    BOUNDS_TOLERANCE_DEFAULT,
     RESULTS_TOLERANCE_DEFAULT,
     load_config,
 )
@@ -54,11 +53,13 @@ if TYPE_CHECKING:
     from cobre_bridge.pipeline import ConversionReport
 
 
-#: Minimum cobre / cobre-python version required for the dead-volume filling
-#: schema. ticket-014 imports this same constant for the manifest note (single
-#: source of truth); the ``--validate`` gate uses it to decide whether the
-#: installed cobre-python is new enough to validate a filling case.
-MIN_COBRE_FILLING_VERSION = "0.9.1"
+#: Minimum cobre / cobre-python version that can load the bridge's converted
+#: output. Since cobre 0.10.0 every ``system/*.json`` entity carries a required
+#: ``operational_start_date`` (absent in 0.9.x), so *all* converted cases — not
+#: only ``NE``-with-filling ones — require cobre >= this version. The manifest
+#: records it (single source of truth) and the ``--validate`` gate uses it to
+#: decide whether the installed cobre-python is new enough to validate the output.
+MIN_COBRE_VERSION = "0.10.0"
 
 
 def _installed_cobre_python_version() -> str | None:
@@ -77,13 +78,13 @@ def _installed_cobre_python_version() -> str | None:
         return None
 
 
-def _cobre_python_supports_filling(installed: str) -> bool:
-    """Whether an installed cobre-python *version* knows the filling schema.
+def _cobre_python_supports_output(installed: str) -> bool:
+    """Whether an installed cobre-python *version* can load the bridge's output.
 
-    ``True`` when *installed* is at least :data:`MIN_COBRE_FILLING_VERSION` by a
-    numeric release-segment comparison (so ``"0.9.1"`` and ``"0.10.0"`` qualify,
-    ``"0.9.0"`` does not). A non-numeric pre-release suffix on a segment is
-    ignored (``"0.9.1rc1"`` reads as ``0.9.1``); the gate only guards against an
+    ``True`` when *installed* is at least :data:`MIN_COBRE_VERSION` by a numeric
+    release-segment comparison (so ``"0.10.0"`` and ``"0.11.2"`` qualify,
+    ``"0.9.1"`` does not). A non-numeric pre-release suffix on a segment is
+    ignored (``"0.10.0rc1"`` reads as ``0.10.0``); the gate only guards against an
     obviously-older install, so the leniency is deliberate.
     """
 
@@ -98,7 +99,7 @@ def _cobre_python_supports_filling(installed: str) -> bool:
             parts.append(int(digits) if digits else 0)
         return tuple(parts)
 
-    return _release(installed) >= _release(MIN_COBRE_FILLING_VERSION)
+    return _release(installed) >= _release(MIN_COBRE_VERSION)
 
 
 def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
@@ -166,7 +167,7 @@ def _load_compare_context(
 ) -> tuple[NewaveCase, NewaveIdMap, EntityAlignment, list[dict[str, object]]]:
     """Load the source model case, id-map, entity alignment, and lines.json.
 
-    Shared setup for `compare bounds` and `compare results`. Builds the parsed
+    Setup for `compare newave`. Builds the parsed
     case once (so the id-map reuses its cached readers), loads lines.json, and
     builds the entity alignment.
 
@@ -202,8 +203,8 @@ def _export_compare_artifacts(
 ) -> tuple[set[str], Path]:
     """Resolve ``--format`` and write the machine-readable comparison artifacts.
 
-    Shared by `compare bounds` and `compare results`. Returns the requested
-    formats and the resolved out_dir so each handler can run its own HTML branch
+    Used by `compare newave`. Returns the requested
+    formats and the resolved out_dir so the handler can run its own HTML branch
     and exit-code logic.
 
     An invalid ``--format`` token exits 2 (clean stderr). A write failure must
@@ -247,15 +248,14 @@ def _export_compare_artifacts(
     return formats, out_dir
 
 
-def _resolve_compare_settings(args: SimpleNamespace, *, bounds: bool) -> None:
+def _resolve_compare_settings(args: SimpleNamespace) -> None:
     """Fill tolerance/format/out_dir from config when flag+env left them ``None``.
 
     Implements the bottom two rungs of the precedence chain
     **CLI flag > env var > config file > built-in default**: Typer has already
     resolved flag-or-env into ``args`` (a non-``None`` value means the flag or
     env var supplied it), so this fills in the config-file value, then the
-    built-in default, for whatever is still ``None``. Mutates *args* in place;
-    *bounds* selects the bounds- vs results-tolerance keys.
+    built-in default, for whatever is still ``None``. Mutates *args* in place.
 
     Loads the config once via :func:`load_config` (discovery from cwd) and emits
     one stderr WARNING note per load warning (e.g. a malformed config file). It
@@ -265,16 +265,12 @@ def _resolve_compare_settings(args: SimpleNamespace, *, bounds: bool) -> None:
     cfg = load_config()
 
     # Tolerance: flag/env, else the config value, else the built-in default.
-    config_tolerance = cfg.bounds_tolerance if bounds else cfg.results_tolerance
-    builtin_tolerance = (
-        BOUNDS_TOLERANCE_DEFAULT if bounds else RESULTS_TOLERANCE_DEFAULT
-    )
     if args.tolerance is not None:
         resolved_tolerance = args.tolerance
-    elif config_tolerance is not None:
-        resolved_tolerance = config_tolerance
+    elif cfg.results_tolerance is not None:
+        resolved_tolerance = cfg.results_tolerance
     else:
-        resolved_tolerance = builtin_tolerance
+        resolved_tolerance = RESULTS_TOLERANCE_DEFAULT
     args.tolerance = resolved_tolerance
 
     # Format: only consult config when neither flag nor env supplied it. Leave
@@ -299,127 +295,14 @@ def _resolve_compare_settings(args: SimpleNamespace, *, bounds: bool) -> None:
         )
 
 
-def _run_bounds_comparison(args: SimpleNamespace) -> None:
-    """Execute the compare bounds subcommand."""
-    _resolve_compare_settings(args, bounds=True)
+def _run_newave_comparison(args: SimpleNamespace) -> None:
+    """Execute the compare newave subcommand.
 
-    from cobre_bridge.comparators.analyze import build_bounds_dataset
-    from cobre_bridge.comparators.bounds import compare_bounds
-    from cobre_bridge.comparators.cobre_readers import CobreReadError
-    from cobre_bridge.comparators.report import (
-        print_bounds_mismatches_from_dataset,
-        print_bounds_summary_from_dataset,
-    )
-    from cobre_bridge.comparators.verdict import build_compare_verdict
-
-    newave_dir: Path = args.newave_dir
-    cobre_output_dir: Path = args.cobre_output_dir
-    tolerance: float = args.tolerance
-
-    # Validate paths.
-    bounds_path = cobre_output_dir / "training" / "dictionaries" / "bounds.parquet"
-    if not bounds_path.exists():
-        render_error(
-            f"bounds.parquet not found at {bounds_path}. "
-            "Run cobre with --output first.",
-        )
-        raise typer.Exit(code=1)
-
-    case, id_map, alignment, _lines_json = _load_compare_context(
-        newave_dir, cobre_output_dir
-    )
-
-    variables: set[str] | None = None
-    if args.variables:
-        variables = {v.strip() for v in args.variables.split(",")}
-
-    # Run comparison.  A CobreReadError means an *existing* Cobre output file
-    # was unreadable/malformed — fail loudly (exit 2) rather than report a
-    # false "no divergence" on data we could not actually read.
-    try:
-        with spinner(
-            "Comparing bounds…",
-            verbose=args.verbose > 0,
-            quiet=args.quiet,
-            no_color=args.no_color,
-        ):
-            results = compare_bounds(
-                alignment=alignment,
-                case=case,
-                id_map=id_map,
-                cobre_output_dir=cobre_output_dir,
-                tolerance=tolerance,
-                variables=variables,
-            )
-    except CobreReadError as exc:
-        print_status(
-            f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
-        )
-        raise typer.Exit(code=2)
-
-    # Build the canonical dataset once; console + artifacts derive from it.
-    dataset = build_bounds_dataset(results)
-
-    # The mismatch count drives the exit code (1 on any mismatch). Compute it
-    # before any rendering. The --json verdict ``status`` is derived separately
-    # from the verdict's ``all_within_tol`` (below) so it stays self-consistent
-    # with ``summary`` even on an empty result, where ``mismatches`` is 0 but
-    # ``all_within_tol`` is False (nothing was compared).
-    mismatches = sum(1 for r in results if not r.match)
-
-    # Output (sourced from the dataset). Under --json the Rich tables are
-    # suppressed in favour of a single machine-readable verdict on stdout.
-    if not args.json_output:
-        print_bounds_summary_from_dataset(
-            dataset, newave_dir, cobre_output_dir, tolerance
-        )
-
-        if not args.summary:
-            print_bounds_mismatches_from_dataset(dataset)
-
-    formats, _out_dir = _export_compare_artifacts(
-        dataset,
-        command="compare bounds",
-        raw_formats=args.format,
-        newave_dir=newave_dir,
-        cobre_output_dir=cobre_output_dir,
-        tolerance=tolerance,
-        out_dir_arg=args.out_dir,
-        quiet_status=args.json_output,
-    )
-
-    # Bounds has no HTML report; honor --format html with an ignore-warning.
-    if "html" in formats:
-        print_status(
-            "Warning: --format html is not supported for 'compare bounds' "
-            "(no HTML report); ignoring.",
-            console=get_console(stderr=True),
-            style="#F5A623",
-        )
-
-    if args.json_output:
-        # Compare has no diagnostics (default ``()`` → ``[]``). ``status`` reflects
-        # divergence via the same verdict ``summary`` is built from (uniform with
-        # ``compare results``), so it can never contradict ``all_within_tol``; the
-        # exit code is governed separately by ``mismatches``.
-        verdict = build_compare_verdict(dataset)
-        summary = compare_summary(verdict)
-        status = "mismatch" if not verdict.all_within_tol else "ok"
-        _emit_convert_json(build_verdict("compare bounds", status, summary))
-
-    if mismatches:
-        raise typer.Exit(code=1)
-
-
-def _run_results_comparison(args: SimpleNamespace) -> None:
-    """Execute the compare results subcommand.
-
-    Intentionally always exits 0: ``compare results`` is informational (a
-    descriptive the source-model-vs-Cobre divergence report), so it never signals a
-    failure on divergence. This is asymmetric with ``compare bounds``, which exits 1 on
-    any mismatch — bounds are a strict equivalence check.
+    Intentionally always exits 0: ``compare newave`` is informational (a
+    descriptive NEWAVE-vs-Cobre divergence report), so it never signals a
+    failure on divergence.
     """
-    _resolve_compare_settings(args, bounds=False)
+    _resolve_compare_settings(args)
 
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
@@ -464,7 +347,7 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
 
     formats, out_dir = _export_compare_artifacts(
         dataset,
-        command="compare results",
+        command="compare newave",
         raw_formats=args.format,
         newave_dir=newave_dir,
         cobre_output_dir=cobre_output_dir,
@@ -492,13 +375,13 @@ def _run_results_comparison(args: SimpleNamespace) -> None:
 
     if args.json_output:
         # ``status`` REFLECTS divergence (so it is self-consistent with
-        # ``summary`` and uniform with ``compare bounds``), but the results exit
+        # ``summary``), but the results exit
         # code is DECOUPLED from it — this command always exits 0. An empty
         # dataset → ``all_within_tol`` False → ``status`` "mismatch".
         verdict = build_compare_verdict(dataset)
         status = "mismatch" if not verdict.all_within_tol else "ok"
         _emit_convert_json(
-            build_verdict("compare results", status, compare_summary(verdict))
+            build_verdict("compare newave", status, compare_summary(verdict))
         )
 
     return
@@ -610,26 +493,6 @@ def _run_check(args: SimpleNamespace) -> None:
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
     return
-
-
-def _case_has_filling_plants(src: Path) -> bool:
-    """Return whether *src* has ``NE``-with-filling plants (best-effort, never raises).
-
-    Re-reads the case via :meth:`NewaveCase.from_directory` — the same constructor
-    the pipeline and manifest writer use — and evaluates the single-source-of-truth
-    predicate :func:`filling_hydro_codes`. A read failure (``OSError``/``ValueError``)
-    degrades to ``False`` so a ``--validate`` skip is a convenience, never a hard
-    failure.
-    """
-    from cobre_bridge.case import NewaveCase
-    from cobre_bridge.plants import filling_hydro_codes
-
-    try:
-        case = NewaveCase.from_directory(src)
-        exph_df = case.exph.expansoes if case.exph is not None else None
-        return bool(filling_hydro_codes(case.confhd.usinas, exph_df))
-    except (OSError, ValueError):
-        return False
 
 
 def _run_newave_conversion(args: SimpleNamespace) -> None:
@@ -767,38 +630,35 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     # populated; validation failure flips the exit code, never the status.
     validation_failed = False
     if args.validate:
-        # A case with NE-with-filling plants emits the dead-volume filling schema,
-        # which cobre-python learned in MIN_COBRE_FILLING_VERSION. Validating such a
-        # case against an OLDER cobre-python would reject correct output and force
-        # exit 2, so skip validation (success, exit 0) when the installed
-        # cobre-python predates the schema — recording why on stderr (human) and
-        # under summary["validation"] (machine), never flipping status. A
-        # cobre-python that knows the schema validates the case normally below; an
-        # absent cobre-python falls through to the generic "not installed" skip.
-        if _case_has_filling_plants(src):
-            installed = _installed_cobre_python_version()
-            if installed is not None and not _cobre_python_supports_filling(installed):
-                print_status(
-                    f"Note: dead-volume filling output requires cobre-python >= "
-                    f"{MIN_COBRE_FILLING_VERSION} (installed cobre-python {installed} "
-                    f"predates the filling schema); skipping cobre-python validation.",
-                    console=err_console,
-                    style="#F5A623",
+        # Every converted case now emits ``operational_start_date`` on all system
+        # entities (cobre 0.10.0+), so validating against an OLDER cobre-python
+        # would reject correct output and force exit 2. Skip validation (success,
+        # exit 0) when the installed cobre-python predates MIN_COBRE_VERSION —
+        # recording why on stderr (human) and under summary["validation"]
+        # (machine), never flipping status. A cobre-python that knows the schema
+        # validates the case normally below; an absent cobre-python (no metadata)
+        # falls through to the generic "not installed" skip.
+        installed = _installed_cobre_python_version()
+        if installed is not None and not _cobre_python_supports_output(installed):
+            print_status(
+                f"Note: converted output requires cobre-python >= "
+                f"{MIN_COBRE_VERSION} (installed cobre-python {installed} is "
+                f"older); skipping cobre-python validation.",
+                console=err_console,
+                style="#F5A623",
+            )
+            if args.json_output:
+                summary["validation"] = {
+                    "ran": False,
+                    "valid": None,
+                    "warnings": 0,
+                    "errors": 0,
+                    "skipped_reason": "cobre-python-too-old",
+                }
+                _emit_convert_json(
+                    build_verdict("convert newave", status, summary, report.diagnostics)
                 )
-                if args.json_output:
-                    summary["validation"] = {
-                        "ran": False,
-                        "valid": None,
-                        "warnings": 0,
-                        "errors": 0,
-                        "skipped_reason": "cobre-python-predates-filling-schema",
-                    }
-                    _emit_convert_json(
-                        build_verdict(
-                            "convert newave", status, summary, report.diagnostics
-                        )
-                    )
-                return
+            return
 
         try:
             import cobre.io  # type: ignore[import-untyped]
@@ -1035,11 +895,10 @@ def _write_conversion_manifest(
         "lines": report.line_count,
         "stages": report.stage_count,
     }
-    # Record the minimum cobre version the output requires: a case with
-    # NE-with-filling plants emits the unreleased filling schema, so its output
-    # is only loadable by cobre >= MIN_COBRE_FILLING_VERSION. EX-only cases stay
-    # None (loadable by any released cobre-python).
-    has_filling = _case_has_filling_plants(src)
+    # Record the minimum cobre version the output requires. Every converted case
+    # now emits ``operational_start_date`` on all system entities (cobre 0.10.0+),
+    # so the output is only loadable by cobre >= MIN_COBRE_VERSION regardless of
+    # whether it contains NE-with-filling plants.
     manifest = ConversionManifest.create(
         "convert newave",
         src,
@@ -1048,7 +907,7 @@ def _write_conversion_manifest(
         input_files=hash_input_files(files),
         diagnostics_summary=summarize_diagnostics(report.diagnostics),
         diagnostics=[d.to_dict() for d in report.diagnostics],
-        min_cobre_version=MIN_COBRE_FILLING_VERSION if has_filling else None,
+        min_cobre_version=MIN_COBRE_VERSION,
     )
 
     path = dst / "conversion_manifest.json"
@@ -1307,77 +1166,8 @@ def _convert_newave(
     )
 
 
-@compare_app.command("bounds")
-def _compare_bounds(
-    newave_dir: Annotated[
-        Path, typer.Argument(help="Path to the NEWAVE case directory.")
-    ],
-    cobre_output_dir: Annotated[
-        Path,
-        typer.Argument(help="Path to the Cobre output directory (has bounds.parquet)."),
-    ],
-    tolerance: Annotated[
-        float | None,
-        typer.Option(
-            envvar="COBRE_BRIDGE_BOUNDS_TOLERANCE",
-            help=(
-                "Absolute tolerance for bound comparison (default 1e-3; "
-                "overridable via COBRE_BRIDGE_BOUNDS_TOLERANCE or cobre-bridge.toml)."
-            ),
-        ),
-    ] = None,
-    fmt: _FormatOpt = None,
-    out_dir: _OutDirOpt = None,
-    summary: Annotated[
-        bool,
-        typer.Option(
-            "--summary", help="Print only summary counts, not individual mismatches."
-        ),
-    ] = False,
-    variables: Annotated[
-        str | None,
-        typer.Option(
-            "--variables",
-            help="Comma-separated variables to compare (e.g. storage_min,turbined).",
-        ),
-    ] = None,
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help=(
-                "Emit a single machine-readable JSON verdict to stdout and "
-                "suppress the human (Rich) tables."
-            ),
-        ),
-    ] = False,
-    verbose: _VerboseOpt = 0,
-    log_file: _LogFileOpt = None,
-    no_color: _NoColorOpt = False,
-    quiet: _QuietOpt = False,
-) -> None:
-    """Compare LP bounds computed from NEWAVE inputs against Cobre bounds."""
-    _configure_logging(verbose, log_file)
-    _run_bounds_comparison(
-        SimpleNamespace(
-            newave_dir=newave_dir,
-            cobre_output_dir=cobre_output_dir,
-            tolerance=tolerance,
-            format=fmt,
-            out_dir=out_dir,
-            summary=summary,
-            variables=variables,
-            json_output=json_output,
-            verbose=verbose,
-            log_file=log_file,
-            no_color=no_color,
-            quiet=quiet,
-        )
-    )
-
-
-@compare_app.command("results")
-def _compare_results(
+@compare_app.command("newave")
+def _compare_newave(
     newave_dir: Annotated[
         Path, typer.Argument(help="Path to the NEWAVE case directory (has saidas/).")
     ],
@@ -1413,10 +1203,10 @@ def _compare_results(
 ) -> None:
     """Compare NEWAVE published results against Cobre simulation output.
 
-    Informational: always exits 0, whereas 'compare bounds' exits 1 on any mismatch.
+    Informational: always exits 0, reporting divergences without failing.
     """
     _configure_logging(verbose, log_file)
-    _run_results_comparison(
+    _run_newave_comparison(
         SimpleNamespace(
             newave_dir=newave_dir,
             cobre_output_dir=cobre_output_dir,

@@ -25,7 +25,7 @@ from cobre_bridge.diagnostics import (
     emit,
     format_stage_ranges,
 )
-from cobre_bridge.horizon import build_stage_dates
+from cobre_bridge.horizon import build_stage_dates, historical_start_date
 from cobre_bridge.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ _THERMAL_BOUNDS_SCHEMA = pa.schema(
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/thermals.schema.json"
+    "/schemas/thermals.schema.json"
 )
 
 
@@ -118,6 +118,11 @@ def convert_thermals(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # commitment seeding clamps against the very bounds written here.
     gen_bounds = thermal_generation_bounds(case)
 
+    # The source model carries no per-thermal commissioning date; treat every
+    # thermal as in service since the historical record (Cobre uses the date only
+    # as a canonical-ordering key, tiebroken by id).
+    op_date = historical_start_date(case.dger)
+
     thermals: list[dict] = []
     for _, row in conft_df.iterrows():
         newave_code = int(row["codigo_usina"])
@@ -137,6 +142,7 @@ def convert_thermals(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         thermal_entry: dict = {
             "id": id_map.thermal_id(newave_code),
             "name": name,
+            "operational_start_date": op_date,
             "bus_id": bus_id,
             "cost_per_mwh": cost,
             "generation": {

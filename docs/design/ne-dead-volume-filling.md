@@ -314,16 +314,16 @@ reaches beyond `hydro.py`:
 
 ## 9. Validation / cobre-python lag
 
-The filling schema (`filling`, `filling_storage`, the develop-branch
-`entry/exit` semantics) is **unreleased** — `cobre-python` is at **0.8.2** and
-does not know these fields. `convert newave --validate` will therefore reject a
-case containing `NE` plants.
+**Resolved as of cobre 0.10.0.** The filling schema (`filling`,
+`filling_storage`, `entry/exit` semantics) shipped in cobre 0.9.1, and cobre
+0.10.0 additionally made `operational_start_date` a required field on every
+system entity. A converted case therefore now requires **cobre >= 0.10.0**
+(tracked as `MIN_COBRE_VERSION` in `cli.py`, single source of truth).
 
-**Recommendation:** when `--validate` is requested _and_ the case has `NE`
-plants, emit an informational `Diagnostic` ("dead-volume filling output requires
-cobre ≥ <ver>; skipping cobre-python validation") and **skip** validation rather
-than fail. Re-enable once a cobre-python release carries the schema. (Decision
-to confirm at plan time.)
+`convert newave --validate` validates against an installed `cobre-python >= 0.10`.
+When the installed `cobre-python` predates `MIN_COBRE_VERSION`, validation is
+**skipped** gracefully (an informational note on stderr, `skipped_reason:
+"cobre-python-too-old"` under `--json`) rather than producing a false failure.
 
 ---
 

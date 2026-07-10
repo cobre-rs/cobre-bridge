@@ -91,14 +91,16 @@ class TestNewaveIdMap:
         assert id_map.bus_id(3) == 2
         assert id_map.bus_id(4) == 3
 
-    def test_hydro_id_remapping_preserves_confhd_order(self) -> None:
+    def test_hydro_id_remapping_sorts_by_code(self) -> None:
+        # Hydro Cobre IDs follow ascending codigo_usina (hidr.dat registry order),
+        # not the order the codes are passed in.
         id_map = NewaveIdMap(
             subsystem_ids=[],
             hydro_codes=[10, 5, 20],
             thermal_codes=[],
         )
-        assert id_map.hydro_id(10) == 0
-        assert id_map.hydro_id(5) == 1
+        assert id_map.hydro_id(5) == 0
+        assert id_map.hydro_id(10) == 1
         assert id_map.hydro_id(20) == 2
 
     def test_thermal_id_remapping(self) -> None:
@@ -121,10 +123,11 @@ class TestNewaveIdMap:
             id_map.thermal_id(99)
 
     def test_all_hydro_codes_in_cobre_id_order(self) -> None:
+        # Cobre-ID order is ascending codigo_usina, regardless of input order.
         id_map = NewaveIdMap(
             subsystem_ids=[], hydro_codes=[30, 10, 20], thermal_codes=[]
         )
-        assert id_map.all_hydro_codes == [30, 10, 20]
+        assert id_map.all_hydro_codes == [10, 20, 30]
 
     def test_deterministic_regardless_of_input_order(self) -> None:
         a = NewaveIdMap(subsystem_ids=[2, 1, 3], hydro_codes=[], thermal_codes=[])
@@ -507,6 +510,7 @@ class TestConvertHydros:
         for h in result["hydros"]:
             assert "id" in h
             assert "name" in h
+            assert "operational_start_date" in h
             assert "bus_id" in h
             assert "reservoir" in h
             assert "min_storage_hm3" in h["reservoir"]
@@ -810,6 +814,9 @@ class TestConvertHydros:
         result = convert_hydros(case, _ne_filling_id_map())
         juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
         assert juruena["entry_stage_id"] == 2
+        # operational_start_date is the month filling completes and the plant enters
+        # service: Oct-2024 start + 1-month duracao ⇒ Nov 2024.
+        assert juruena["operational_start_date"] == "2024-11-01"
         assert juruena["exit_stage_id"] is None
         assert juruena["filling"] == {
             "start_stage_id": 1,
@@ -830,6 +837,8 @@ class TestConvertHydros:
             assert hydro["entry_stage_id"] is None
             assert hydro["exit_stage_id"] is None
             assert hydro["filling"] is None
+            # EX plants are in service since the historical record (Jan 1, 1931).
+            assert hydro["operational_start_date"] == "1931-01-01"
 
     def test_ne_plant_zero_duration_omits_filling(self, tmp_path) -> None:
         """``duracao_enchimento == 0`` ⇒ entry == start, no filling block.
@@ -951,6 +960,10 @@ def _make_hydro_dger_mock(
     dger.mes_inicio_estudo = start_month
     dger.num_anos_estudo = num_anos
     dger.num_anos_pos_estudo = num_anos_pos
+    # Historical-record start: drives the operational_start_date of always-in-service
+    # (EX) plants. Set explicitly so it is a real int, not a MagicMock (whose int()
+    # would otherwise resolve to 1).
+    dger.ano_inicial_historico = 1931
     dger.funcao_producao_uhe = 1
     return dger
 

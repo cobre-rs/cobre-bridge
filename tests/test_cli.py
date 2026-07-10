@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import sys
 import webbrowser
@@ -1519,10 +1518,10 @@ class TestCliInProcess:
         monkeypatch.setitem(sys.modules, "cobre.io", cobre_io)
         return validate
 
-    def test_validate_skipped_for_filling_case_when_cobre_python_old(
+    def test_validate_skipped_when_cobre_python_old(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A filling case + too-old cobre-python skips ``validate`` and exits 0."""
+        """A too-old cobre-python skips ``validate`` and exits 0."""
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1531,9 +1530,6 @@ class TestCliInProcess:
             hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
         )
 
-        monkeypatch.setattr(
-            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
-        )
         monkeypatch.setattr(
             "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
         )
@@ -1554,7 +1550,7 @@ class TestCliInProcess:
     def test_validate_skip_json_payload(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The filling skip records the explicit reason under ``summary.validation``."""
+        """The skip records the explicit reason under ``summary.validation``."""
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1563,9 +1559,6 @@ class TestCliInProcess:
             hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
         )
 
-        monkeypatch.setattr(
-            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
-        )
         monkeypatch.setattr(
             "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
         )
@@ -1590,19 +1583,16 @@ class TestCliInProcess:
             "valid": None,
             "warnings": 0,
             "errors": 0,
-            "skipped_reason": "cobre-python-predates-filling-schema",
+            "skipped_reason": "cobre-python-too-old",
         }
         assert doc["summary"]["validation"]["ran"] is False
-        assert (
-            doc["summary"]["validation"]["skipped_reason"]
-            == "cobre-python-predates-filling-schema"
-        )
+        assert doc["summary"]["validation"]["skipped_reason"] == "cobre-python-too-old"
 
     def test_validate_skip_human_message(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The filling skip note lands on stderr with the version + skip phrasing."""
-        from cobre_bridge.cli import MIN_COBRE_FILLING_VERSION
+        """The skip note lands on stderr with the version + skip phrasing."""
+        from cobre_bridge.cli import MIN_COBRE_VERSION
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1611,9 +1601,6 @@ class TestCliInProcess:
             hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
         )
 
-        monkeypatch.setattr(
-            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
-        )
         monkeypatch.setattr(
             "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
         )
@@ -1631,13 +1618,13 @@ class TestCliInProcess:
         assert code == 0
         validate.assert_not_called()
         assert "skipping cobre-python validation" in stderr
-        assert MIN_COBRE_FILLING_VERSION in stderr
+        assert MIN_COBRE_VERSION in stderr
 
-    def test_validate_runs_for_filling_case_when_cobre_python_supports_schema(
+    def test_validate_runs_when_cobre_python_supports_schema(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A filling case validates when the installed cobre-python knows the schema."""
-        from cobre_bridge.cli import MIN_COBRE_FILLING_VERSION
+        """The case validates when the installed cobre-python knows the schema."""
+        from cobre_bridge.cli import MIN_COBRE_VERSION
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1647,11 +1634,8 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
-        )
-        monkeypatch.setattr(
             "cobre_bridge.cli._installed_cobre_python_version",
-            lambda: MIN_COBRE_FILLING_VERSION,
+            lambda: MIN_COBRE_VERSION,
         )
         validate = self._inject_cobre_io(
             monkeypatch,
@@ -1670,10 +1654,10 @@ class TestCliInProcess:
         assert code == 0
         validate.assert_called_once()
 
-    def test_validate_filling_case_falls_through_when_cobre_python_absent(
+    def test_validate_falls_through_when_cobre_python_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No installed cobre-python → the filling gate defers to the generic skip."""
+        """No installed cobre-python → the version gate defers to the generic skip."""
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1683,15 +1667,12 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._case_has_filling_plants", lambda _src: True
-        )
-        monkeypatch.setattr(
             "cobre_bridge.cli._installed_cobre_python_version", lambda: None
         )
         # Force ``import cobre.io`` to raise regardless of whether the real
         # cobre-python is installed in this environment (a ``None`` entry in
         # sys.modules makes the import fail), so the generic "not installed"
-        # branch runs rather than the filling-version gate.
+        # branch runs rather than the version gate.
         monkeypatch.setitem(sys.modules, "cobre", None)
         monkeypatch.setitem(sys.modules, "cobre.io", None)
 
@@ -1707,10 +1688,10 @@ class TestCliInProcess:
         assert code == 0
         assert "cobre package not installed" in stderr
 
-    def test_validate_runs_for_ex_only_case(
+    def test_validate_runs_when_cobre_python_metadata_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An ``EX``-only case validates as today — the gate does not fire."""
+        """No version metadata + an importable cobre.io → validation runs."""
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1720,7 +1701,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._case_has_filling_plants", lambda _src: False
+            "cobre_bridge.cli._installed_cobre_python_version", lambda: None
         )
         validate = self._inject_cobre_io(
             monkeypatch,
@@ -1790,41 +1771,6 @@ class TestCompareDatasetWiring:
             ),
         ]
 
-    @staticmethod
-    def _bounds(*, all_match: bool) -> object:
-        from cobre_bridge.comparators.bounds import BoundComparison
-
-        rows = [
-            BoundComparison(
-                entity_type="hydro",
-                entity_name="ITAIPU",
-                newave_code=10,
-                cobre_id=0,
-                stage=0,
-                variable="storage_max",
-                newave_value=29000.0,
-                cobre_value=29000.0,
-                diff=0.0,
-                match=True,
-            ),
-        ]
-        if not all_match:
-            rows.append(
-                BoundComparison(
-                    entity_type="thermal",
-                    entity_name="ANGRA",
-                    newave_code=30,
-                    cobre_id=1,
-                    stage=0,
-                    variable="generation_max",
-                    newave_value=1350.0,
-                    cobre_value=1300.0,
-                    diff=50.0,
-                    match=False,
-                )
-            )
-        return rows
-
     def _patch_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.results import PercentileData
@@ -1848,42 +1794,6 @@ class TestCompareDatasetWiring:
             lambda **k: build_results_dataset(self._results(), PercentileData(), 1e-2),
         )
 
-    @staticmethod
-    def _make_cobre_dir_with_bounds(tmp_path: Path, name: str) -> Path:
-        """Create a Cobre output dir containing the required bounds.parquet stub.
-
-        The bounds handler validates ``training/dictionaries/bounds.parquet``
-        exists before running; the file content is unused here because
-        ``compare_bounds`` is patched.
-        """
-        import pyarrow.parquet as pq
-
-        cobre_dir = tmp_path / name
-        bounds_path = cobre_dir / "training" / "dictionaries" / "bounds.parquet"
-        bounds_path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.table({"x": pa.array([0], pa.int32())}), bounds_path)
-        return cobre_dir
-
-    def _patch_bounds(
-        self, monkeypatch: pytest.MonkeyPatch, *, all_match: bool
-    ) -> None:
-        monkeypatch.setattr(
-            "cobre_bridge.case.NewaveCase.from_directory",
-            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
-        )
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.alignment.build_entity_alignment",
-            lambda *a, **k: MagicMock(),
-        )
-        monkeypatch.setattr(
-            "cobre_bridge.cli._load_lines_json",
-            lambda _dir: [],
-        )
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.bounds.compare_bounds",
-            lambda **k: self._bounds(all_match=all_match),
-        )
-
     def test_compare_results_emits_artifacts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1892,7 +1802,7 @@ class TestCompareDatasetWiring:
         cobre_dir.mkdir()
 
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -1900,7 +1810,7 @@ class TestCompareDatasetWiring:
         manifest_path = cobre_dir / "comparison_artifacts" / "comparison.json"
         assert manifest_path.exists()
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert manifest["command"] == "compare results"
+        assert manifest["command"] == "compare newave"
         assert "Artifacts written to" in stdout
 
     def test_compare_results_artifacts_without_output_flag(
@@ -1920,7 +1830,7 @@ class TestCompareDatasetWiring:
         cobre_dir.mkdir()
 
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -1932,53 +1842,14 @@ class TestCompareDatasetWiring:
         assert (artifacts_dir / "metadata.json").exists()
         assert "Artifacts written to" in stdout
 
-    def test_compare_bounds_emits_artifacts(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._patch_bounds(monkeypatch, all_match=True)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
-            monkeypatch,
-        )
-
-        assert code == 0
-        manifest_path = cobre_dir / "comparison_artifacts" / "comparison.json"
-        assert manifest_path.exists()
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert manifest["command"] == "compare bounds"
-
-    def test_compare_bounds_exit_code_unchanged(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Full match -> exit 0.
-        self._patch_bounds(monkeypatch, all_match=True)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre_match")
-        code_match, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
-            monkeypatch,
-        )
-        assert code_match == 0
-
-        # Any mismatch -> exit 1.
-        self._patch_bounds(monkeypatch, all_match=False)
-        cobre_dir2 = self._make_cobre_dir_with_bounds(tmp_path, "cobre_mismatch")
-        code_mismatch, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir2)],
-            monkeypatch,
-        )
-        assert code_mismatch == 1
-
     def test_load_compare_context_missing_source_model_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ticket-015: bounds path gains FileNotFoundError -> exit 1 hardening.
+        """A missing source-model case directory exits 1 with a clean stderr message.
 
-        A missing the source model case directory now exits 1 with a clean stderr
-        message (via the shared ``_load_compare_context`` helper) instead of surfacing
-        an uncaught traceback. Results already had this; bounds gains it in this
-        refactor.
+        The shared ``_load_compare_context`` helper turns a ``FileNotFoundError``
+        from the case reader into a clean exit-1 message instead of surfacing an
+        uncaught traceback.
         """
 
         def _raise_missing(cls: object, _dir: Path) -> object:
@@ -1988,10 +1859,11 @@ class TestCompareDatasetWiring:
             "cobre_bridge.case.NewaveCase.from_directory",
             classmethod(_raise_missing),
         )
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
 
         code, _, stderr = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -2010,7 +1882,7 @@ class TestCompareDatasetWiring:
         code, _, _ = self._invoke_main(
             [
                 "compare",
-                "results",
+                "newave",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
                 "--format",
@@ -2035,7 +1907,7 @@ class TestCompareDatasetWiring:
         cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -2057,7 +1929,7 @@ class TestCompareDatasetWiring:
         code, _, _ = self._invoke_main(
             [
                 "compare",
-                "results",
+                "newave",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
                 "--format",
@@ -2082,7 +1954,7 @@ class TestCompareDatasetWiring:
         code, _, _ = self._invoke_main(
             [
                 "compare",
-                "results",
+                "newave",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
                 "--format",
@@ -2096,29 +1968,6 @@ class TestCompareDatasetWiring:
         assert (artifacts_dir / "comparison.parquet").exists()
         assert (artifacts_dir / "summary.json").exists()
 
-    def test_compare_bounds_html_warns_and_ignored(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``--format html`` on bounds: stderr warns, no HTML, exit 0 on match."""
-        self._patch_bounds(monkeypatch, all_match=True)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, _, stderr = self._invoke_main(
-            [
-                "compare",
-                "bounds",
-                str(tmp_path / "nw"),
-                str(cobre_dir),
-                "--format",
-                "html",
-            ],
-            monkeypatch,
-        )
-
-        assert code == 0
-        assert "not supported for 'compare bounds'" in stderr
-        assert not (cobre_dir / "comparison_artifacts" / "report.html").exists()
-
     def test_compare_unknown_format_exits_2(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2130,7 +1979,7 @@ class TestCompareDatasetWiring:
         code, _, stderr = self._invoke_main(
             [
                 "compare",
-                "results",
+                "newave",
                 str(tmp_path / "nw"),
                 str(cobre_dir),
                 "--format",
@@ -2147,7 +1996,7 @@ class TestCompareDatasetWiring:
     ) -> None:
         """``compare results --help`` lists --format/--out-dir, not --output/-o."""
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", "--help"],
+            ["compare", "newave", "--help"],
             monkeypatch,
         )
 
@@ -2170,7 +2019,7 @@ class TestCompareDatasetWiring:
         monkeypatch.setattr("cobre_bridge.comparators.export.write_artifacts", _boom)
 
         code, _, stderr = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -2214,41 +2063,6 @@ class TestCompareJson:
         return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
 
     @staticmethod
-    def _bounds(*, all_match: bool) -> object:
-        from cobre_bridge.comparators.bounds import BoundComparison
-
-        rows = [
-            BoundComparison(
-                entity_type="hydro",
-                entity_name="ITAIPU",
-                newave_code=10,
-                cobre_id=0,
-                stage=0,
-                variable="storage_max",
-                newave_value=29000.0,
-                cobre_value=29000.0,
-                diff=0.0,
-                match=True,
-            ),
-        ]
-        if not all_match:
-            rows.append(
-                BoundComparison(
-                    entity_type="thermal",
-                    entity_name="ANGRA",
-                    newave_code=30,
-                    cobre_id=1,
-                    stage=0,
-                    variable="generation_max",
-                    newave_value=1350.0,
-                    cobre_value=1300.0,
-                    diff=50.0,
-                    match=False,
-                )
-            )
-        return rows
-
-    @staticmethod
     def _results(*, within_tol: bool) -> object:
         """Build result rows that are fully within tol (matched) or divergent.
 
@@ -2276,22 +2090,6 @@ class TestCompareJson:
             ),
         ]
 
-    @staticmethod
-    def _make_cobre_dir_with_bounds(tmp_path: Path, name: str) -> Path:
-        """Create a Cobre output dir containing the required bounds.parquet stub.
-
-        The bounds handler validates ``training/dictionaries/bounds.parquet``
-        exists before running; the content is unused because ``compare_bounds``
-        is patched.
-        """
-        import pyarrow.parquet as pq
-
-        cobre_dir = tmp_path / name
-        bounds_path = cobre_dir / "training" / "dictionaries" / "bounds.parquet"
-        bounds_path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.table({"x": pa.array([0], pa.int32())}), bounds_path)
-        return cobre_dir
-
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Patch the shared context loaders (case, alignment, lines.json)."""
         monkeypatch.setattr(
@@ -2305,18 +2103,6 @@ class TestCompareJson:
         monkeypatch.setattr(
             "cobre_bridge.cli._load_lines_json",
             lambda _dir: [],
-        )
-
-    def _patch_bounds(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        *,
-        all_match: bool,
-    ) -> None:
-        self._patch_common(monkeypatch)
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.bounds.compare_bounds",
-            lambda **k: self._bounds(all_match=all_match),
         )
 
     def _patch_results(
@@ -2342,80 +2128,6 @@ class TestCompareJson:
         assert "Artifacts written to" not in stdout
         assert "HTML report written to" not in stdout
 
-    def test_compare_bounds_json_all_within_tol_exits_0(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC1: a fully-matching bounds run emits ``status="ok"`` and exits 0."""
-        self._patch_bounds(monkeypatch, all_match=True)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, stdout, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir), "--json"],
-            monkeypatch,
-        )
-
-        assert code == 0
-        doc = json.loads(stdout)
-        assert list(doc) == [
-            "schema_version",
-            "command",
-            "status",
-            "summary",
-            "diagnostics",
-        ]
-        assert doc["command"] == "compare bounds"
-        assert doc["status"] == "ok"
-        assert doc["summary"]["all_within_tol"] is True
-        assert doc["summary"]["worst_variable"] is None
-        assert doc["diagnostics"] == []
-        self._assert_no_rich_stdout(stdout)
-
-    def test_compare_bounds_json_mismatch_status_and_exit_1(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC2: any mismatch → ``status="mismatch"``, worst populated, exit 1."""
-        self._patch_bounds(monkeypatch, all_match=False)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, stdout, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir), "--json"],
-            monkeypatch,
-        )
-
-        assert code == 1
-        doc = json.loads(stdout)
-        assert doc["status"] == "mismatch"
-        assert doc["summary"]["all_within_tol"] is False
-        assert isinstance(doc["summary"]["worst_variable"], str)
-        self._assert_no_rich_stdout(stdout)
-
-    def test_compare_bounds_json_empty_results_status_consistent_exit_0(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An empty bounds result keeps ``status`` consistent with ``summary``.
-
-        With zero compared rows ``mismatches`` is 0 (so the command exits 0), but
-        ``all_within_tol`` is False (nothing was verified). ``status`` must track
-        ``all_within_tol`` — never report ``"ok"`` over an empty/False summary.
-        """
-        self._patch_common(monkeypatch)
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.bounds.compare_bounds",
-            lambda **k: [],
-        )
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, stdout, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir), "--json"],
-            monkeypatch,
-        )
-
-        assert code == 0
-        doc = json.loads(stdout)
-        assert doc["summary"]["all_within_tol"] is False
-        assert doc["status"] == "mismatch"
-        self._assert_no_rich_stdout(stdout)
-
     def test_compare_results_json_divergent_status_mismatch_exit_0(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2425,13 +2137,13 @@ class TestCompareJson:
         cobre_dir.mkdir()
 
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
             monkeypatch,
         )
 
         assert code == 0
         doc = json.loads(stdout)
-        assert doc["command"] == "compare results"
+        assert doc["command"] == "compare newave"
         assert doc["status"] == "mismatch"
         assert doc["summary"]["all_within_tol"] is False
         assert doc["summary"]["within_tol"] < doc["summary"]["total"]
@@ -2446,7 +2158,7 @@ class TestCompareJson:
         cobre_dir.mkdir()
 
         code, stdout, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
             monkeypatch,
         )
 
@@ -2456,43 +2168,10 @@ class TestCompareJson:
         assert doc["summary"]["all_within_tol"] is True
         self._assert_no_rich_stdout(stdout)
 
-    def test_compare_bounds_json_coexists_with_format_json_file(
+    def test_compare_results_json_cobre_read_error_exit_2_no_stdout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC5: ``--json`` and ``--format json`` coexist — stdout verdict + file."""
-        self._patch_bounds(monkeypatch, all_match=True)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-        out_dir = tmp_path / "artifacts"
-
-        code, stdout, _ = self._invoke_main(
-            [
-                "compare",
-                "bounds",
-                str(tmp_path / "nw"),
-                str(cobre_dir),
-                "--json",
-                "--format",
-                "json",
-                "--out-dir",
-                str(out_dir),
-            ],
-            monkeypatch,
-        )
-
-        assert code == 0
-        # stdout parses as exactly one JSON verdict, with no status line leaking.
-        doc = json.loads(stdout)
-        assert doc["command"] == "compare bounds"
-        assert "Artifacts written to" not in stdout
-        # The --format json FILE export still ran: the always-on provenance
-        # manifest plus the json-format-specific summary projection both landed.
-        assert (out_dir / "comparison.json").exists()
-        assert (out_dir / "summary.json").exists()
-
-    def test_compare_bounds_json_cobre_read_error_exit_2_no_stdout(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC6: a CobreReadError exits 2 with stderr only — no stdout JSON."""
+        """A CobreReadError exits 2 with stderr only — no stdout JSON."""
         from cobre_bridge.comparators.cobre_readers import CobreReadError
 
         self._patch_common(monkeypatch)
@@ -2501,13 +2180,14 @@ class TestCompareJson:
             raise CobreReadError("bad parquet")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.bounds.compare_bounds",
+            "cobre_bridge.comparators.results.compare_results",
             _raise,
         )
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
 
         code, stdout, stderr = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
             monkeypatch,
         )
 
@@ -3123,14 +2803,13 @@ class TestResolveCompareSettings:
         tolerance: float | None,
         fmt: list[str] | None,
         out_dir: Path | None,
-        bounds: bool,
     ) -> SimpleNamespace:
         """Run ``_resolve_compare_settings`` with ``load_config`` patched."""
         import cobre_bridge.cli as cli
 
         args = SimpleNamespace(tolerance=tolerance, format=fmt, out_dir=out_dir)
         with patch.object(cli, "load_config", return_value=config):
-            cli._resolve_compare_settings(args, bounds=bounds)
+            cli._resolve_compare_settings(args)
         return args
 
     def test_flag_or_env_value_wins_over_config(self) -> None:
@@ -3138,7 +2817,7 @@ class TestResolveCompareSettings:
         from cobre_bridge.config_resolution import BridgeConfig
 
         config = BridgeConfig(
-            bounds_tolerance=5e-4,
+            results_tolerance=5e-4,
             formats=("csv",),
             out_dir=Path("from_config"),
         )
@@ -3147,7 +2826,6 @@ class TestResolveCompareSettings:
             tolerance=9e-4,
             fmt=["json"],
             out_dir=Path("from_flag"),
-            bounds=True,
         )
 
         assert args.tolerance == 9e-4
@@ -3159,13 +2837,11 @@ class TestResolveCompareSettings:
         from cobre_bridge.config_resolution import BridgeConfig
 
         config = BridgeConfig(
-            bounds_tolerance=5e-4,
+            results_tolerance=5e-4,
             formats=("json", "csv"),
             out_dir=Path("art"),
         )
-        args = self._resolve(
-            config, tolerance=None, fmt=None, out_dir=None, bounds=True
-        )
+        args = self._resolve(config, tolerance=None, fmt=None, out_dir=None)
 
         assert args.tolerance == 5e-4
         assert args.format == ["json", "csv"]
@@ -3174,45 +2850,16 @@ class TestResolveCompareSettings:
     def test_builtin_default_when_config_empty(self) -> None:
         """An empty config falls through to the built-in tolerance default."""
         from cobre_bridge.config_resolution import (
-            BOUNDS_TOLERANCE_DEFAULT,
             RESULTS_TOLERANCE_DEFAULT,
             BridgeConfig,
         )
 
-        bounds_args = self._resolve(
-            BridgeConfig(), tolerance=None, fmt=None, out_dir=None, bounds=True
-        )
-        assert bounds_args.tolerance == BOUNDS_TOLERANCE_DEFAULT
+        args = self._resolve(BridgeConfig(), tolerance=None, fmt=None, out_dir=None)
+        assert args.tolerance == RESULTS_TOLERANCE_DEFAULT
         # Format/out-dir stay None so the downstream defaults (``_parse_formats``
         # / derived out-dir) still apply.
-        assert bounds_args.format is None
-        assert bounds_args.out_dir is None
-
-        results_args = self._resolve(
-            BridgeConfig(), tolerance=None, fmt=None, out_dir=None, bounds=False
-        )
-        assert results_args.tolerance == RESULTS_TOLERANCE_DEFAULT
-
-    def test_bounds_and_results_tolerance_keys_independent(self) -> None:
-        """``bounds=`` selects the bounds- vs results-tolerance config key."""
-        from cobre_bridge.config_resolution import (
-            BOUNDS_TOLERANCE_DEFAULT,
-            BridgeConfig,
-        )
-
-        config = BridgeConfig(results_tolerance=4e-2)
-
-        # Reading as results uses the results key.
-        results_args = self._resolve(
-            config, tolerance=None, fmt=None, out_dir=None, bounds=False
-        )
-        assert results_args.tolerance == 4e-2
-
-        # Reading as bounds ignores the results key and falls to the default.
-        bounds_args = self._resolve(
-            config, tolerance=None, fmt=None, out_dir=None, bounds=True
-        )
-        assert bounds_args.tolerance == BOUNDS_TOLERANCE_DEFAULT
+        assert args.format is None
+        assert args.out_dir is None
 
     def test_config_warning_emitted_to_stderr(
         self, capsys: pytest.CaptureFixture[str]
@@ -3223,7 +2870,7 @@ class TestResolveCompareSettings:
         config = BridgeConfig(
             warnings=("Ignoring malformed config file cobre-bridge.toml: bad",),
         )
-        self._resolve(config, tolerance=None, fmt=None, out_dir=None, bounds=True)
+        self._resolve(config, tolerance=None, fmt=None, out_dir=None)
 
         captured = capsys.readouterr()
         assert "Ignoring malformed config file" in captured.err
@@ -3233,12 +2880,12 @@ class TestResolveCompareSettings:
 class TestCompareConfigEnvPrecedence:
     """ticket-014: integration precedence tests for config/env wiring.
 
-    Runs ``compare bounds`` / ``compare results`` in-process via ``cli.main``,
-    with the heavy readers stubbed and ``compare_bounds`` / ``compare_results`` /
-    ``write_artifacts`` patched with recording wrappers so the resolved
-    ``tolerance`` / ``out_dir`` reaching them can be asserted. The cwd is an
-    isolated tmp subdir and ``XDG_CONFIG_HOME`` / ``HOME`` point at empty tmp
-    subdirs, so only the test's own ``cobre-bridge.toml`` (when written) is seen.
+    Runs ``compare results`` in-process via ``cli.main``, with the heavy readers
+    stubbed and ``compare_results`` / ``write_artifacts`` patched with recording
+    wrappers so the resolved ``tolerance`` / ``out_dir`` / ``formats`` reaching
+    them can be asserted. The cwd is an isolated tmp subdir and
+    ``XDG_CONFIG_HOME`` / ``HOME`` point at empty tmp subdirs, so only the test's
+    own ``cobre-bridge.toml`` (when written) is seen.
     """
 
     def _invoke_main(
@@ -3283,17 +2930,6 @@ class TestCompareConfigEnvPrecedence:
         monkeypatch.setenv("HOME", str(home))
         return workdir
 
-    @staticmethod
-    def _make_cobre_dir_with_bounds(base: Path, name: str) -> Path:
-        """Mirror ``_make_cobre_dir_with_bounds`` so the bounds path check passes."""
-        import pyarrow.parquet as pq
-
-        cobre_dir = base / name
-        bounds_path = cobre_dir / "training" / "dictionaries" / "bounds.parquet"
-        bounds_path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.table({"x": pa.array([0], pa.int32())}), bounds_path)
-        return cobre_dir
-
     def _stub_readers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stub the heavy the-source-model / Cobre readers shared by both commands."""
         monkeypatch.setattr(
@@ -3308,19 +2944,6 @@ class TestCompareConfigEnvPrecedence:
             "cobre_bridge.cli._load_lines_json",
             lambda _dir: [],
         )
-
-    def _capture_bounds_tolerance(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> dict[str, object]:
-        """Patch ``compare_bounds`` with a recorder; return the captured kwargs."""
-        captured: dict[str, object] = {}
-
-        def _recorder(**kwargs: object) -> list[object]:
-            captured.update(kwargs)
-            return []  # zero mismatches -> exit 0
-
-        monkeypatch.setattr("cobre_bridge.comparators.bounds.compare_bounds", _recorder)
-        return captured
 
     def _capture_results_tolerance(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3352,95 +2975,7 @@ class TestCompareConfigEnvPrecedence:
         )
         return captured
 
-    # -- bounds tolerance precedence ---------------------------------------
-
-    def test_bounds_builtin_default_no_config_no_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """No config, no env, no flag -> the built-in 1e-3 reaches compare_bounds."""
-        self._isolate_config_env(tmp_path, monkeypatch)
-        self._stub_readers(monkeypatch)
-        captured = self._capture_bounds_tolerance(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
-            monkeypatch,
-        )
-
-        assert code == 0
-        assert captured["tolerance"] == 1e-3
-
-    def test_bounds_config_fills_tolerance(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A cwd config tolerance is used when no flag/env is given."""
-        workdir = self._isolate_config_env(tmp_path, monkeypatch)
-        (workdir / "cobre-bridge.toml").write_text(
-            "[compare.bounds]\ntolerance = 5e-4\n", encoding="utf-8"
-        )
-        self._stub_readers(monkeypatch)
-        captured = self._capture_bounds_tolerance(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
-            monkeypatch,
-        )
-
-        assert code == 0
-        assert captured["tolerance"] == 5e-4
-
-    def test_bounds_env_beats_config(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The env var overrides the config-file tolerance."""
-        workdir = self._isolate_config_env(tmp_path, monkeypatch)
-        (workdir / "cobre-bridge.toml").write_text(
-            "[compare.bounds]\ntolerance = 5e-4\n", encoding="utf-8"
-        )
-        monkeypatch.setenv("COBRE_BRIDGE_BOUNDS_TOLERANCE", "7e-4")
-        self._stub_readers(monkeypatch)
-        captured = self._capture_bounds_tolerance(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
-            monkeypatch,
-        )
-
-        assert code == 0
-        assert captured["tolerance"] == 7e-4
-
-    def test_bounds_flag_beats_env_and_config(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The ``--tolerance`` flag overrides both env and config."""
-        workdir = self._isolate_config_env(tmp_path, monkeypatch)
-        (workdir / "cobre-bridge.toml").write_text(
-            "[compare.bounds]\ntolerance = 5e-4\n", encoding="utf-8"
-        )
-        monkeypatch.setenv("COBRE_BRIDGE_BOUNDS_TOLERANCE", "7e-4")
-        self._stub_readers(monkeypatch)
-        captured = self._capture_bounds_tolerance(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, _, _ = self._invoke_main(
-            [
-                "compare",
-                "bounds",
-                str(tmp_path / "nw"),
-                str(cobre_dir),
-                "--tolerance",
-                "9e-4",
-            ],
-            monkeypatch,
-        )
-
-        assert code == 0
-        assert captured["tolerance"] == 9e-4
-
-    # -- results tolerance + independence ----------------------------------
+    # -- results tolerance -------------------------------------------------
 
     def test_results_config_fills_tolerance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3456,32 +2991,12 @@ class TestCompareConfigEnvPrecedence:
         cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "results", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
         assert code == 0
         assert captured["tolerance"] == 4e-2
-
-    def test_results_key_does_not_affect_bounds_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """With only ``[compare.results]`` set, bounds still uses its 1e-3 default."""
-        workdir = self._isolate_config_env(tmp_path, monkeypatch)
-        (workdir / "cobre-bridge.toml").write_text(
-            "[compare.results]\ntolerance = 4e-2\n", encoding="utf-8"
-        )
-        self._stub_readers(monkeypatch)
-        captured = self._capture_bounds_tolerance(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
-
-        code, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
-            monkeypatch,
-        )
-
-        assert code == 0
-        assert captured["tolerance"] == 1e-3
 
     # -- out-dir from config -----------------------------------------------
 
@@ -3494,12 +3009,13 @@ class TestCompareConfigEnvPrecedence:
             '[compare]\nout_dir = "art"\n', encoding="utf-8"
         )
         self._stub_readers(monkeypatch)
-        self._capture_bounds_tolerance(monkeypatch)
+        self._capture_results_tolerance(monkeypatch)
         captured = self._capture_out_dir(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -3516,12 +3032,13 @@ class TestCompareConfigEnvPrecedence:
         )
         monkeypatch.setenv("COBRE_BRIDGE_OUT_DIR", "art_env")
         self._stub_readers(monkeypatch)
-        self._capture_bounds_tolerance(monkeypatch)
+        self._capture_results_tolerance(monkeypatch)
         captured = self._capture_out_dir(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -3544,12 +3061,13 @@ class TestCompareConfigEnvPrecedence:
         )
         monkeypatch.setenv("COBRE_BRIDGE_FORMAT", "parquet")
         self._stub_readers(monkeypatch)
-        self._capture_bounds_tolerance(monkeypatch)
+        self._capture_results_tolerance(monkeypatch)
         captured = self._capture_out_dir(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
 
         code, _, _ = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
@@ -3567,51 +3085,20 @@ class TestCompareConfigEnvPrecedence:
             "this is = not valid = toml\n", encoding="utf-8"
         )
         self._stub_readers(monkeypatch)
-        captured = self._capture_bounds_tolerance(monkeypatch)
-        cobre_dir = self._make_cobre_dir_with_bounds(tmp_path, "cobre")
+        captured = self._capture_results_tolerance(monkeypatch)
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
 
         code, stdout, stderr = self._invoke_main(
-            ["compare", "bounds", str(tmp_path / "nw"), str(cobre_dir)],
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
         # Not the config-error exit; the comparison still runs at the default.
         assert code == 0
-        assert captured["tolerance"] == 1e-3
+        assert captured["tolerance"] == 1e-2
         assert "cobre-bridge.toml" in stderr
         assert "cobre-bridge.toml" not in stdout
-
-    # -- E2E subprocess smoke ----------------------------------------------
-
-    def test_bounds_env_override_subprocess_exit_code(self, tmp_path: Path) -> None:
-        """``COBRE_BRIDGE_BOUNDS_TOLERANCE`` is honoured end-to-end (exit 1).
-
-        With a huge env tolerance every (absent) bound trivially "matches", so the
-        only signal here is the unchanged exit-code contract: a real Cobre output
-        dir without ``bounds.parquet`` still exits 1 (missing-file path), proving
-        the env var parses cleanly rather than tripping a usage error (exit 2).
-        """
-        env = {
-            **os.environ,
-            "COBRE_BRIDGE_BOUNDS_TOLERANCE": "1.0",
-        }
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "cobre_bridge.cli",
-                "compare",
-                "bounds",
-                str(tmp_path / "nw"),
-                str(tmp_path / "cobre"),
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-
-        assert result.returncode == 1
-        assert "bounds.parquet not found" in (result.stdout + result.stderr)
 
 
 class TestDashboardOpen:

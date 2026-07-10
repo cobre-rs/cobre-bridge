@@ -11,10 +11,21 @@ from cobre_bridge.horizon import (
     BIG_M,
     POST_STUDY_YEAR,
     build_stage_dates,
+    historical_start_date,
     seasonal_step_function,
     stage_dates_for,
     study_horizon,
 )
+
+
+def test_historical_start_date_is_jan_1_of_ano_inicial_historico() -> None:
+    dger = SimpleNamespace(ano_inicial_historico=1931)
+    assert historical_start_date(dger) == "1931-01-01"
+
+
+def test_historical_start_date_falls_back_when_absent() -> None:
+    dger = SimpleNamespace(ano_inicial_historico=None)
+    assert historical_start_date(dger) == "1931-01-01"
 
 
 def _dger(start_year=2024, start_month=9, num_anos=3, num_anos_pos=3):

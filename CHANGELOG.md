@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-10
+
+Syncs the bridge to the **cobre 0.10.0** ecosystem release. The conversion
+already emitted the two breaking 0.10.0 input-contract changes
+(`operational_start_date` on every entity; the `hydro_storage_final` generic
+constraint vocabulary); this release updates the version pin, the compatibility
+floor, and the documentation to match.
+
+Because every converted `system/*.json` entity now carries a required
+`operational_start_date` (introduced in cobre 0.10.0, absent in 0.9.x), a
+converted case now requires **cobre >= 0.10.0** — including EX-only cases, which
+previously loaded on cobre >= 0.8.2. This is a compatibility narrowing.
+
+Verified against the cobre 0.10.0 binary: `convert` output validates with **0
+errors** for both deterministic and stochastic (PAR(p)) cases, and `compare
+results` reads cobre 0.10.0 run output unchanged. No new converter work was
+required — cobre 0.10.0's optional `travel_time_hours` and chronological
+`block_mode` do not apply to a monthly NEWAVE model with parallel load blocks,
+so the bridge keeps cobre's defaults (instantaneous transfer, `"parallel"`
+blocks).
+
+### Changed
+
+- **`convert --validate` now requires `cobre-python>=0.10,<0.11`** (was
+  `>=0.9.1,<0.10`), pairing with the cobre 0.10.0 release used to validate this
+  version.
+- **The minimum-cobre-version floor is now universal.** `MIN_COBRE_VERSION`
+  (`= "0.10.0"`, replacing the filling-only `MIN_COBRE_FILLING_VERSION`) is
+  recorded in `conversion_manifest.json` for _every_ case, and the `--validate`
+  gate skips gracefully whenever the installed `cobre-python` predates it (JSON
+  `skipped_reason: "cobre-python-too-old"`) — previously that skip fired only for
+  `NE`-with-filling cases, so an EX-only case validated against an older
+  cobre-python would have produced a false failure.
+- **`compare results` is renamed to `compare newave`.** The comparison subcommand
+  now names its source model, mirroring `convert newave` / `check newave`, so the
+  `convert` and `compare` interfaces are uniform and ready for a future
+  `compare decomp`. The `--json` verdict and provenance-manifest `command` field is
+  now `"compare newave"`; the command's options and behavior are otherwise unchanged.
+
+### Removed
+
+- **The `compare bounds` command is removed.** The workflow standardized on
+  `compare newave` (the modelling-divergence tool), so the round-trip LP-bounds
+  check is no longer exposed as a CLI command. Its `--summary` / `--variables`
+  flags, the `[compare.bounds]` config table, and the
+  `COBRE_BRIDGE_BOUNDS_TOLERANCE` environment variable are gone with it. The
+  underlying comparator (`comparators/bounds.py`, `bounds_from_inputs.py`) is
+  retained as an internal library.
+
 ## [0.9.1] - 2026-06-27
 
 First release of the `NE` (future, will-be-built) hydro feature line: it adds

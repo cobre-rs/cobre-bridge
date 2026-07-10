@@ -107,6 +107,22 @@ def study_horizon(dger: Dger) -> StudyHorizon:
     )
 
 
+def historical_start_date(dger: Dger) -> str:
+    """ISO ``YYYY-MM-DD`` operational-start date for always-in-service entities.
+
+    Buses, transmission lines, thermals, non-controllable sources, and existing
+    hydros carry no per-entity commissioning date in the source model — they are
+    treated as in service since the start of the historical inflow record
+    (``dger.ano_inicial_historico``), taken as January 1st of that year. Falls
+    back to 1931 (the usual record start) when the field is absent, matching
+    ``converters.temporal``. The date is a canonical-ordering key in Cobre, not a
+    commissioning gate (that is ``entry_stage_id``/``exit_stage_id``), so a shared
+    value orders these entities by id.
+    """
+    year = int(dger.ano_inicial_historico or 1931)
+    return f"{year:04d}-01-01"
+
+
 def build_stage_dates(
     start_year: int, start_month: int, total_stages: int
 ) -> list[date]:

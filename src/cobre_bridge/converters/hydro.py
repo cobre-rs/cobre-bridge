@@ -14,6 +14,7 @@ import pyarrow as pa
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.filling import (
+    filling_completion_date,
     filling_min_rate_m3s,
     filling_schedule,
     online_machines,
@@ -22,6 +23,7 @@ from cobre_bridge.filling import stage_id as filling_stage_id
 from cobre_bridge.horizon import (
     POST_STUDY_YEAR,
     build_stage_dates,
+    historical_start_date,
     seasonal_step_function,
 )
 from cobre_bridge.id_map import NewaveIdMap
@@ -47,11 +49,11 @@ _stored_energy_productivity = stored_energy_productivity
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/hydros.schema.json"
+    "/schemas/hydros.schema.json"
 )
 _PRODUCTION_MODELS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/book/src/schemas/production_models.schema.json"
+    "/schemas/production_models.schema.json"
 )
 
 # --- FPHA (hydro production function) emission ---------------------------------
@@ -1040,6 +1042,11 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # Plants emitted as FPHA (empty unless dger funcao_producao_uhe == 0).
     fpha_codes = fpha_eligible_codes(case)
 
+    # Default operational_start_date for existing (EX) plants: in service since the
+    # historical record. Filling (NE) plants override it below with the calendar
+    # month they finish filling and enter operation.
+    existing_op_date = historical_start_date(case.dger)
+
     hydros: list[dict] = []
     # One diagnostic row per admitted filling plant, accumulated in the loop and
     # emitted as a single INFO Diagnostic after it (empty for EX-only cases, so
@@ -1088,6 +1095,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         # NE-with-exph set), so their entry/exit/filling stay None.
         entry_stage_id: int | None = None
         filling: dict | None = None
+        operational_start_date = existing_op_date
         if newave_code in filling_codes:
             # filling_codes is non-empty here ⇒ case.exph is not None (the
             # admission predicate required exph), so .expansoes is safe.
@@ -1103,6 +1111,12 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 ts.year, ts.month, duracao, horizon.start_year, horizon.start_month
             )
             entry_stage_id = entry_sid
+            # Operational start = the month filling completes and the plant enters
+            # service, computed from the raw exph schedule so it is truthful even
+            # when completion falls outside the study horizon.
+            operational_start_date = filling_completion_date(
+                ts.year, ts.month, duracao
+            ).isoformat()
             # One INFO-diagnostic row per filling plant (rendered after the loop):
             # its filling window, seeded dead volume, and unit-ramp summary. Built
             # for every filling plant, including the ``duracao == 0`` (no-filling-
@@ -1309,6 +1323,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         hydro_entry: dict = {
             "id": id_map.hydro_id(newave_code),
             "name": name,
+            "operational_start_date": operational_start_date,
             "bus_id": bus_id,
             "downstream_id": downstream_id,
             "reservoir": {
