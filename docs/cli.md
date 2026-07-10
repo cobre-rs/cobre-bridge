@@ -109,43 +109,13 @@ $ cobre-bridge compare [OPTIONS] COMMAND [ARGS]...
 
 **Commands**:
 
-* `bounds`: Compare LP bounds computed from NEWAVE...
 * `results`: Compare NEWAVE published results against...
-
-### `cobre-bridge compare bounds`
-
-Compare LP bounds computed from NEWAVE inputs against Cobre bounds.
-
-**Usage**:
-
-```console
-$ cobre-bridge compare bounds [OPTIONS] NEWAVE_DIR COBRE_OUTPUT_DIR
-```
-
-**Arguments**:
-
-* `NEWAVE_DIR`: Path to the NEWAVE case directory.  [required]
-* `COBRE_OUTPUT_DIR`: Path to the Cobre output directory (has bounds.parquet).  [required]
-
-**Options**:
-
-* `--tolerance FLOAT`: Absolute tolerance for bound comparison (default 1e-3; overridable via COBRE_BRIDGE_BOUNDS_TOLERANCE or cobre-bridge.toml).  [env var: COBRE_BRIDGE_BOUNDS_TOLERANCE]
-* `--format FORMAT`: Output format(s): console,html,csv,parquet,json,all. Comma-separated and/or repeatable. Overridable via COBRE_BRIDGE_FORMAT or cobre-bridge.toml. (default: console,parquet,json)  [env var: COBRE_BRIDGE_FORMAT]
-* `--out-dir PATH`: Directory for file artifacts. Overridable via COBRE_BRIDGE_OUT_DIR or cobre-bridge.toml. (default: &lt;cobre_output_dir&gt;/comparison_artifacts).  [env var: COBRE_BRIDGE_OUT_DIR]
-* `--summary`: Print only summary counts, not individual mismatches.
-* `--variables TEXT`: Comma-separated variables to compare (e.g. storage_min,turbined).
-* `--json`: Emit a single machine-readable JSON verdict to stdout and suppress the human (Rich) tables.
-* `-v, --verbose`: Increase console log verbosity (-v INFO, -vv DEBUG).  [default: 0]
-* `--log-file PATH`: Write the full DEBUG log to PATH (the console verbosity is unaffected).
-* `--no-color`: Disable coloured output (also honoured via the NO_COLOR env var).
-* `--quiet`: Suppress the summary and info notes; warnings/errors still show.
-* `--help`: Show this message and exit.
 
 ### `cobre-bridge compare results`
 
 Compare NEWAVE published results against Cobre simulation output.
 
-Informational: always exits 0, whereas &#x27;compare bounds&#x27; exits 1 on any mismatch.
+Informational: always exits 0, reporting divergences without failing.
 
 **Usage**:
 

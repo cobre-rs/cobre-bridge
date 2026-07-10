@@ -23,7 +23,6 @@ Requires Python >= 3.12.
 | ------------------------------------------------------- | ------------------------------------------------------- |
 | `cobre-bridge convert newave <SRC> <DST>`               | Convert a NEWAVE case to Cobre input format.            |
 | `cobre-bridge check newave <SRC>`                       | Preflight-validate NEWAVE inputs (no conversion).       |
-| `cobre-bridge compare bounds <NEWAVE_DIR> <COBRE_DIR>`  | Compare LP bounds between the two cases.                |
 | `cobre-bridge compare results <NEWAVE_DIR> <COBRE_DIR>` | Compare simulation results against Cobre output.        |
 | `cobre-bridge dashboard <CASE_DIR>`                     | Build an interactive HTML dashboard from Cobre results. |
 
@@ -31,8 +30,7 @@ Every command accepts `--json` (a single machine-readable verdict
 `{schema_version, command, status, summary, diagnostics}` on stdout) and
 `-v/-vv`, `--log-file PATH`, `--no-color`, `--quiet`. `convert` adds
 `--validate`, `--force`, `--dry-run`, `--diagnostics-json PATH`. `dashboard`
-adds `--open`. `compare` adds `--tolerance`, `--format`, `--out-dir` (and
-`compare bounds` also `--summary`, `--variables`).
+adds `--open`. `compare results` adds `--tolerance`, `--format`, `--out-dir`.
 
 See [docs/cli.md](docs/cli.md) for the full per-command reference.
 
@@ -45,11 +43,11 @@ See [docs/cli.md](docs/cli.md) for the full per-command reference.
 
 ## Configuration
 
-Defaults for compare `tolerance`, `format`, and `out_dir` can be set in a
-`cobre-bridge.toml` file (discovered from the working directory upward, then
+Defaults for `compare results` `tolerance`, `format`, and `out_dir` can be set
+in a `cobre-bridge.toml` file (discovered from the working directory upward, then
 `$XDG_CONFIG_HOME/cobre-bridge/config.toml`, then
 `~/.config/cobre-bridge/config.toml`) or via `COBRE_BRIDGE_*` environment
-variables (e.g. `COBRE_BRIDGE_BOUNDS_TOLERANCE`, `COBRE_BRIDGE_FORMAT`,
+variables (e.g. `COBRE_BRIDGE_RESULTS_TOLERANCE`, `COBRE_BRIDGE_FORMAT`,
 `COBRE_BRIDGE_OUT_DIR`). Precedence is flag > env > config file > default.
 
 ## Shell completion
