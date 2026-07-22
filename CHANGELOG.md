@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-22
+
+Syncs the bridge to the **cobre 0.12.0** ecosystem release (skipping the 0.11.x
+line, which carried no input-contract or output-format change relevant to the
+converter). An audit of the full 0.10.0 → 0.12.0 delta found that all 17
+system/entity/stage/constraint schemas are byte-identical to 0.10.0; only
+`config.json` gained fields, and every addition is optional. The v0.11.0 PAR
+`residual_std_ratio` derivation does not apply — the bridge ships inflow
+**history** and lets cobre fit PAR(p), never AR coefficients. Cobre's simulation
+and `training/` output columns are unchanged, so `compare newave` needs no work.
+
+### Added
+
+- **`convert newave` now emits `training.parallelism.backward_scheduler`** in
+  `config.json` (cobre 0.12.0+). The bridge opts the training backward pass into
+  cobre's opening-block scheduler — `{ "method": "opening_block", "block_size":
+⌈openings / 2⌉ }` — where `openings` is the source deck's backward opening
+  count (`dger.dat`'s número de aberturas). The block size is half the openings
+  rounded up; it coincides with cobre's own per-stage `opening_block` default but
+  records the value taken from the deck.
+
+### Changed
+
+- **`convert --validate` now requires `cobre-python>=0.12,<0.13`** (was
+  `>=0.10,<0.11`), pairing with the cobre 0.12.0 release used to validate this
+  version.
+- **`MIN_COBRE_VERSION` is now `0.12.0`** (was `0.10.0`). Because every converted
+  `config.json` now carries the 0.12.0-only `training.parallelism.backward_scheduler`
+  block, and the config rejects unknown keys, the output is loadable only by
+  cobre **>= 0.12.0**. The value is recorded in `conversion_manifest.json` and the
+  `--validate` gate skips gracefully against an older `cobre-python`
+  (`skipped_reason: "cobre-python-too-old"`).
+
+### Notes
+
+- **`modeling.cost_scale_factor` (new in cobre 0.12.0) is intentionally not
+  emitted.** The source model has no equivalent, and omitting it reproduces
+  cobre's previous hard-coded objective scaling byte-for-byte.
+- Verified against the cobre 0.12.0 binary and `cobre-python` 0.12.0: `convert`
+  output validates with **0 errors** (`cobre validate`), the `--validate` path
+  runs clean, and the full test suite (1551 tests) passes.
+
 ## [0.10.0] - 2026-07-10
 
 Syncs the bridge to the **cobre 0.10.0** ecosystem release. The conversion

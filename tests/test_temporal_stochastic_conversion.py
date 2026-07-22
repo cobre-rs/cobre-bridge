@@ -429,6 +429,39 @@ class TestConvertConfig:
         assert rules[0]["type"] == "iteration_limit"
         assert rules[0]["limit"] == 200
 
+    def test_backward_scheduler_opening_block_half_openings(self, tmp_path) -> None:
+        # block_size is ceil(num_aberturas / 2): even count halves exactly.
+        dger = _make_dger_mock(num_aberturas=20)
+        case = make_case(tmp_path, dger=dger)
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(case)
+        scheduler = result["training"]["parallelism"]["backward_scheduler"]
+        assert scheduler == {"method": "opening_block", "block_size": 10}
+
+    def test_backward_scheduler_block_size_rounds_up(self, tmp_path) -> None:
+        # An odd opening count rounds up: ceil(21 / 2) == 11.
+        dger = _make_dger_mock(num_aberturas=21)
+        case = make_case(tmp_path, dger=dger)
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(case)
+        scheduler = result["training"]["parallelism"]["backward_scheduler"]
+        assert scheduler["block_size"] == 11
+
+    def test_backward_scheduler_single_opening(self, tmp_path) -> None:
+        # A single backward opening yields block_size 1 (the schema minimum).
+        dger = _make_dger_mock(num_aberturas=1)
+        case = make_case(tmp_path, dger=dger)
+
+        from cobre_bridge.converters.temporal import convert_config
+
+        result = convert_config(case)
+        scheduler = result["training"]["parallelism"]["backward_scheduler"]
+        assert scheduler["block_size"] == 1
+
     def test_simulation_enabled_default(self, tmp_path) -> None:
         dger = _make_dger_mock(tipo_execucao=1, tipo_simulacao_final=1)
         case = make_case(tmp_path, dger=dger)

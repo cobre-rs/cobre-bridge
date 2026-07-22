@@ -34,12 +34,14 @@ adds `--open`. `compare newave` adds `--tolerance`, `--format`, `--out-dir`.
 
 See [docs/cli.md](docs/cli.md) for the full per-command reference.
 
-> **Cobre version.** `convert newave` targets **cobre 0.10.0**. Every converted
-> case requires **cobre >= 0.10.0** — all system entities now carry an
-> `operational_start_date` (introduced in cobre 0.10.0). NEWAVE `NE` (future,
-> will-be-built) plants are converted via cobre's dead-volume **filling** schema.
-> With `cobre-python >= 0.10` installed, `convert --validate` validates the
-> output; an older cobre-python that predates the schema is skipped gracefully.
+> **Cobre version.** `convert newave` targets **cobre 0.12.0**. Every converted
+> case requires **cobre >= 0.12.0** — `config.json` now carries a
+> `training.parallelism.backward_scheduler` block (opening-block scheduler, new in
+> cobre 0.12.0), and all system entities carry an `operational_start_date`
+> (introduced in cobre 0.10.0). NEWAVE `NE` (future, will-be-built) plants are
+> converted via cobre's dead-volume **filling** schema. With `cobre-python >= 0.12`
+> installed, `convert --validate` validates the output; an older cobre-python that
+> predates the schema is skipped gracefully.
 
 ## Configuration
 

@@ -54,12 +54,15 @@ if TYPE_CHECKING:
 
 
 #: Minimum cobre / cobre-python version that can load the bridge's converted
-#: output. Since cobre 0.10.0 every ``system/*.json`` entity carries a required
-#: ``operational_start_date`` (absent in 0.9.x), so *all* converted cases — not
-#: only ``NE``-with-filling ones — require cobre >= this version. The manifest
-#: records it (single source of truth) and the ``--validate`` gate uses it to
-#: decide whether the installed cobre-python is new enough to validate the output.
-MIN_COBRE_VERSION = "0.10.0"
+#: output. Since cobre 0.12.0 the converted ``config.json`` carries a
+#: ``training.parallelism.backward_scheduler`` block (an opening-block scheduler,
+#: new in 0.12.0); under the config's strict unknown-key rejection an older cobre
+#: rejects it outright. (Since 0.10.0 every ``system/*.json`` entity also carries
+#: a required ``operational_start_date``.) So *all* converted cases require cobre
+#: >= this version. The manifest records it (single source of truth) and the
+#: ``--validate`` gate uses it to decide whether the installed cobre-python is new
+#: enough to validate the output.
+MIN_COBRE_VERSION = "0.12.0"
 
 
 def _installed_cobre_python_version() -> str | None:
@@ -630,9 +633,11 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     # populated; validation failure flips the exit code, never the status.
     validation_failed = False
     if args.validate:
-        # Every converted case now emits ``operational_start_date`` on all system
-        # entities (cobre 0.10.0+), so validating against an OLDER cobre-python
-        # would reject correct output and force exit 2. Skip validation (success,
+        # Every converted case now emits a 0.12.0-only
+        # ``training.parallelism.backward_scheduler`` block (and, since 0.10.0,
+        # ``operational_start_date`` on all system entities), so validating against
+        # an OLDER cobre-python would reject correct output and force exit 2. Skip
+        # validation (success,
         # exit 0) when the installed cobre-python predates MIN_COBRE_VERSION —
         # recording why on stderr (human) and under summary["validation"]
         # (machine), never flipping status. A cobre-python that knows the schema
@@ -896,9 +901,9 @@ def _write_conversion_manifest(
         "stages": report.stage_count,
     }
     # Record the minimum cobre version the output requires. Every converted case
-    # now emits ``operational_start_date`` on all system entities (cobre 0.10.0+),
-    # so the output is only loadable by cobre >= MIN_COBRE_VERSION regardless of
-    # whether it contains NE-with-filling plants.
+    # now emits a ``training.parallelism.backward_scheduler`` block (cobre 0.12.0+)
+    # and ``operational_start_date`` on all system entities (cobre 0.10.0+), so the
+    # output is only loadable by cobre >= MIN_COBRE_VERSION.
     manifest = ConversionManifest.create(
         "convert newave",
         src,
