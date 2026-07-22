@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+import math
 from datetime import date
 
 from inewave.newave import Dger
@@ -519,6 +520,7 @@ def convert_config(case: NewaveCase) -> dict:
     max_iterations: int = dger.num_max_iteracoes or 200
     num_series: int = dger.num_series_sinteticas or 200
     max_order: int = dger.ordem_maxima_parp or 6
+    num_openings: int = dger.num_aberturas or 1
 
     # consideracao_media_anual_afluencias (dger.dat line 83):
     # 0 → classical PAR(p), maps to Cobre "pacf" 1, 2, 3 → PAR(p)-A variants; Cobre
@@ -593,6 +595,20 @@ def convert_config(case: NewaveCase) -> dict:
             "check_frequency": 1,
         }
 
+    # -- Backward-pass scheduler (cobre 0.12.0+) --
+    # Opt into the opening-block scheduler so each backward work unit is a
+    # (trial point, opening block) pair rather than a whole trial point, and
+    # pin the block size to half of the source model's backward opening count,
+    # rounded up.  Cobre's default scheduler is per-trial-point; the explicit
+    # block size coincides with cobre's own per-stage opening_block default
+    # (ceil(|Omega_s|/2)) but records the value taken from the source deck.
+    parallelism: dict = {
+        "backward_scheduler": {
+            "method": "opening_block",
+            "block_size": math.ceil(num_openings / 2),
+        }
+    }
+
     # -- Training scenario source --
     training_section: dict = {
         "forward_passes": forward_passes,
@@ -600,6 +616,7 @@ def convert_config(case: NewaveCase) -> dict:
             {"type": "iteration_limit", "limit": max_iterations},
         ],
         "cut_selection": cut_selection,
+        "parallelism": parallelism,
     }
     if not training_enabled:
         training_section["enabled"] = False
