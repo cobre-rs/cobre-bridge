@@ -39,8 +39,10 @@ if TYPE_CHECKING:
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _INVARIANT_RTOL = 1e-9
-# Smallest emitted block factor: the schema requires factors > 0, but a
-# zero-generation block (solar at the light patamar) is real data.
+# TRACKED COBRE-GAP WORKAROUND (C1, plans/conversion-found-improvements.md
+# in the cobre repo): the schema requires factors > 0, but a
+# zero-generation block (solar at the light patamar) is real data. Remove
+# the clamp when factor >= 0 is accepted.
 _MIN_FACTOR = 1e-9
 
 _LOG = logging.getLogger(__name__)
@@ -172,7 +174,9 @@ def convert_ncs_stats(
             mean_mw = _stage_mean_mw(s.per_stage_blocks[stage.index], stage)
             ncs_ids.append(s.ncs_id)
             stage_ids.append(stage.index)
-            # min() guards float rounding when the stage mean IS the maximum.
+            # TRACKED COBRE-GAP WORKAROUND (C2): the [0, 1] bound rejects
+            # 1 + ulp when the stage mean IS the maximum; clamp until the
+            # load-side check tolerates it.
             means.append(0.0 if max_gen == 0.0 else min(mean_mw / max_gen, 1.0))
 
     return pa.table(

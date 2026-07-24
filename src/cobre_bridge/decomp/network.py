@@ -123,7 +123,9 @@ def convert_lines_placeholder() -> dict:
 
     The exchange network waits on the ``IA`` accessor fix upstream; until
     it lands the buses are deliberately unconnected — each subsystem
-    self-balances against its own deficit cost.
+    self-balances against its own deficit cost. (The file being mandatory
+    for a lineless study is tracked cobre-gap C4,
+    ``plans/conversion-found-improvements.md`` in the cobre repo.)
     """
     _LOG_MESSAGE = (
         "exchange network deferred (IA accessor fix upstream): emitting an "

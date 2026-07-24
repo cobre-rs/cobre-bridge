@@ -112,7 +112,8 @@ def _write_json(path: Path, data: dict) -> None:
 
 def _write_parquet(path: Path, table: pa.Table) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # zstd matches the solver's parquet build (its reader has snappy disabled).
+    # TRACKED COBRE-GAP WORKAROUND (C3): the solver's parquet reader is
+    # built without snappy; zstd until the compression contract is settled.
     pq.write_table(table, path, compression="zstd")
 
 
