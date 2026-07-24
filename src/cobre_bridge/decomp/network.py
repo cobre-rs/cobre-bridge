@@ -15,12 +15,13 @@ have no Cobre encoding today).
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from cobre_bridge.converters.network import _BUSES_SCHEMA_URL
+from cobre_bridge.converters.network import _BUSES_SCHEMA_URL, _LINES_SCHEMA_URL
 
 if TYPE_CHECKING:
     from datetime import date
@@ -115,3 +116,18 @@ def convert_buses(
     )
 
     return {"$schema": _BUSES_SCHEMA_URL, "buses": buses}
+
+
+def convert_lines_placeholder() -> dict:
+    """An empty (but structurally required) ``lines.json``.
+
+    The exchange network waits on the ``IA`` accessor fix upstream; until
+    it lands the buses are deliberately unconnected — each subsystem
+    self-balances against its own deficit cost.
+    """
+    _LOG_MESSAGE = (
+        "exchange network deferred (IA accessor fix upstream): emitting an "
+        "empty lines.json — subsystems are unconnected and self-balance"
+    )
+    logging.getLogger(__name__).warning(_LOG_MESSAGE)
+    return {"$schema": _LINES_SCHEMA_URL, "lines": []}

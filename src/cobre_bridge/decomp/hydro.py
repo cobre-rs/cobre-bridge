@@ -225,6 +225,13 @@ def convert_energy_productivity(
             "hydro_id": pa.array(hydro_ids, type=pa.int32()),
             "stage_id": pa.array([None] * len(hydro_ids), type=pa.int32()),
             "equivalent_productivity_mw_per_m3s": pa.array(values, type=pa.float64()),
+            # Present-but-null: the reader requires the full column set.
+            "reference_outflow_m3s": pa.array(
+                [None] * len(hydro_ids), type=pa.float64()
+            ),
+            "specific_productivity_mw_per_m3s_per_m": pa.array(
+                [None] * len(hydro_ids), type=pa.float64()
+            ),
         }
     )
 

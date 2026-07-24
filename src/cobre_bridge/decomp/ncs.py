@@ -20,6 +20,7 @@ this same id space.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,11 @@ if TYPE_CHECKING:
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _INVARIANT_RTOL = 1e-9
+# Smallest emitted block factor: the schema requires factors > 0, but a
+# zero-generation block (solar at the light patamar) is real data.
+_MIN_FACTOR = 1e-9
+
+_LOG = logging.getLogger(__name__)
 
 _NCS_STATS_SCHEMA = pa.schema(
     [
@@ -166,7 +172,8 @@ def convert_ncs_stats(
             mean_mw = _stage_mean_mw(s.per_stage_blocks[stage.index], stage)
             ncs_ids.append(s.ncs_id)
             stage_ids.append(stage.index)
-            means.append(0.0 if max_gen == 0.0 else mean_mw / max_gen)
+            # min() guards float rounding when the stage mean IS the maximum.
+            means.append(0.0 if max_gen == 0.0 else min(mean_mw / max_gen, 1.0))
 
     return pa.table(
         {
@@ -187,18 +194,23 @@ def convert_ncs_factors(
     """Build ``non_controllable_factors.json`` block shapes per (ncs, stage).
 
     Entries exist only where the stage mean is positive; factors of a zero
-    mean are undefined and deliberately absent.
+    mean are undefined and deliberately absent. A zero block under a
+    positive mean (a solar series' light block, say) is clamped to a tiny
+    positive factor — the schema requires factors > 0, and under must-run
+    pinning the resulting availability is numerically zero anyway.
     """
     entries: list[dict] = []
+    clamped = 0
     for s in _pq_series(dadger, id_map, calendar):
         for stage in calendar:
             blocks = s.per_stage_blocks[stage.index]
             mean_mw = _stage_mean_mw(blocks, stage)
             if mean_mw == 0.0:
                 continue
-            factors = [mw / mean_mw for mw in blocks]
+            raw_factors = [mw / mean_mw for mw in blocks]
             weighted = sum(
-                f * hours for f, hours in zip(factors, stage.block_hours, strict=True)
+                f * hours
+                for f, hours in zip(raw_factors, stage.block_hours, strict=True)
             )
             if abs(weighted - stage.total_hours) > _INVARIANT_RTOL * stage.total_hours:
                 raise ValueError(
@@ -206,6 +218,12 @@ def convert_ncs_factors(
                     f"the hours invariant (Σ f·h = {weighted}, expected "
                     f"{stage.total_hours})"
                 )
+            factors = []
+            for factor in raw_factors:
+                if factor <= 0.0:
+                    factor = _MIN_FACTOR
+                    clamped += 1
+                factors.append(factor)
             entries.append(
                 {
                     "ncs_id": s.ncs_id,
@@ -216,4 +234,12 @@ def convert_ncs_factors(
                     ],
                 }
             )
+    if clamped:
+        _LOG.warning(
+            "%d zero NCS block factor(s) clamped to %.0e (schema requires "
+            "factors > 0; must-run pinning keeps the availability "
+            "numerically zero)",
+            clamped,
+            _MIN_FACTOR,
+        )
     return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": entries}

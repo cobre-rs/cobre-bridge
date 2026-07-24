@@ -1171,6 +1171,53 @@ def _convert_newave(
     )
 
 
+def _run_decomp_conversion(args: SimpleNamespace) -> None:
+    from cobre_bridge.decomp.pipeline import convert_decomp_case
+
+    try:
+        convert_decomp_case(args.src, args.dst, force=args.force)
+    except (FileNotFoundError, FileExistsError, ValueError) as exc:
+        logging.getLogger("cobre_bridge.cli").error("DECOMP conversion failed: %s", exc)
+        raise typer.Exit(code=1) from exc
+
+
+@convert_app.command("decomp")
+def _convert_decomp(
+    src: Annotated[Path, typer.Argument(help="Path to the DECOMP deck directory.")],
+    dst: Annotated[
+        Path, typer.Argument(help="Path to the output Cobre case directory.")
+    ],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Overwrite destination directory if it already contains files.",
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Convert a DECOMP deck revision to a Cobre case directory.
+
+    Loop-closing subset: the exchange network, renewables card file, GNL
+    anticipation and boundary FCF are deferred and reported as warnings.
+    """
+    _configure_logging(verbose, log_file)
+    _run_decomp_conversion(
+        SimpleNamespace(
+            src=src,
+            dst=dst,
+            force=force,
+            verbose=verbose,
+            log_file=log_file,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
 @compare_app.command("newave")
 def _compare_newave(
     newave_dir: Annotated[
