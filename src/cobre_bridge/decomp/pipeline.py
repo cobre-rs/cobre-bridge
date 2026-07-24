@@ -21,6 +21,9 @@ import pyarrow.parquet as pq
 from idecomp.decomp import Dadger, Vazoes
 
 from cobre_bridge.decomp import (
+    bounds as bounds_conv,
+)
+from cobre_bridge.decomp import (
     config as config_conv,
 )
 from cobre_bridge.decomp import (
@@ -58,6 +61,7 @@ class DecompFiles:
     vazoes: Path
     hidr: Path
     dadgnl: Path | None
+    renovaveis: Path | None
 
 
 def discover_decomp_files(src: Path) -> DecompFiles:
@@ -93,6 +97,7 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     vazoes = find("vazoes", required=True)
     hidr = find("hidr", required=True)
     dadgnl = find("dadgnl", required=False)
+    renovaveis = find("renovaveis", required=False)
     assert dadger is not None and vazoes is not None and hidr is not None
     return DecompFiles(
         revision=revision,
@@ -100,6 +105,7 @@ def discover_decomp_files(src: Path) -> DecompFiles:
         vazoes=vazoes,
         hidr=hidr,
         dadgnl=dadgnl,
+        renovaveis=renovaveis,
     )
 
 
@@ -128,6 +134,11 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     dadger = Dadger.read(str(files.dadger))
     vazoes = Vazoes.read(str(files.vazoes))
     hidr = hydro_conv.read_hidr(files.hidr)
+    renovaveis = None
+    if files.renovaveis is not None:
+        from idecomp.libs import Renovaveis
+
+        renovaveis = Renovaveis.read(str(files.renovaveis))
 
     id_map = DecompIdMap.from_dadger(dadger)
     calendar = temporal_conv.operative_calendar_from_dadger(dadger)
@@ -176,7 +187,14 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         system / "hydros.json",
         hydro_conv.convert_hydros(dadger, hidr, id_map, start_date),
     )
-    _write_json(system / "lines.json", network_conv.convert_lines_placeholder())
+    lines_doc, line_bounds, exchange_factors = network_conv.convert_lines(
+        dadger, id_map, calendar, start_date
+    )
+    _write_json(system / "lines.json", lines_doc)
+    _write_json(
+        system / "pumping_stations.json",
+        network_conv.convert_pumping_stations(dadger, id_map, start_date),
+    )
     _write_json(
         system / "thermals.json",
         thermal_conv.convert_thermals(dadger, id_map, calendar, start_date),
@@ -188,7 +206,9 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     _write_parquet(system / "hydro_energy_productivity.parquet", productivity)
     _write_json(
         system / "non_controllable_sources.json",
-        ncs_conv.convert_non_controllable_sources(dadger, id_map, calendar, start_date),
+        ncs_conv.convert_non_controllable_sources(
+            dadger, id_map, calendar, start_date, renovaveis
+        ),
     )
 
     scenarios = dst / "scenarios"
@@ -218,11 +238,11 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     )
     _write_parquet(
         scenarios / "non_controllable_stats.parquet",
-        ncs_conv.convert_ncs_stats(dadger, id_map, calendar),
+        ncs_conv.convert_ncs_stats(dadger, id_map, calendar, renovaveis),
     )
     _write_json(
         scenarios / "non_controllable_factors.json",
-        ncs_conv.convert_ncs_factors(dadger, id_map, calendar),
+        ncs_conv.convert_ncs_factors(dadger, id_map, calendar, renovaveis),
     )
 
     constraints = dst / "constraints"
@@ -230,11 +250,16 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         constraints / "thermal_bounds.parquet",
         thermal_conv.convert_thermal_bounds(dadger, id_map, calendar),
     )
+    _write_parquet(constraints / "line_bounds.parquet", line_bounds)
+    _write_json(constraints / "exchange_factors.json", exchange_factors)
+    hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, hidr, id_map, calendar)
+    if hydro_bounds.num_rows:
+        _write_parquet(constraints / "hydro_bounds.parquet", hydro_bounds)
 
     _LOG.warning(
-        "deferred at this milestone: exchange network (IA — upstream accessor "
-        "fix), renewables card file (reader), GNL anticipation (dadgnl%s), "
-        "boundary FCF (importer), windowed inflow inputs (solver 0.13)",
+        "deferred at this milestone: GNL anticipation (dadgnl%s), boundary "
+        "FCF (importer), windowed inflow inputs (solver 0.13), flow/volume/"
+        "electrical constraint families (generic-constraints emitter)",
         " present" if files.dadgnl is not None else " absent",
     )
     _LOG.info(

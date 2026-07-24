@@ -158,9 +158,9 @@ def convert_hydros(
 
     _LOG.warning(
         "deferred hydro fidelity (loop-closing milestone): AC registry "
-        "overrides, VI travel time, RQ minimum-outflow joins, FD/MP "
-        "availability, FPHA/tailrace/evaporation models, and the plant-66 "
-        "frequency split are not applied yet"
+        "overrides beyond VAZMIN, VI travel time, FD/MP availability, "
+        "FPHA/tailrace/evaporation models, and the plant-66 frequency "
+        "split are not applied yet"
     )
     return {"$schema": _SCHEMA_URL, "hydros": hydros}
 

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from datetime import date
 
     from idecomp.decomp import Dadger
+    from idecomp.libs import Renovaveis
 
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -139,8 +140,9 @@ def convert_non_controllable_sources(
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
     start_date: date,
+    renovaveis: Renovaveis | None = None,
 ) -> dict:
-    """Build ``non_controllable_sources.json`` from the ``PQ`` series."""
+    """Build ``non_controllable_sources.json`` (``PQ`` + renewable parks)."""
     op_date = start_date.isoformat()
     entries = [
         {
@@ -154,7 +156,7 @@ def convert_non_controllable_sources(
             # validated in docs/findings/ncs-must-run-treatment.md.
             "allow_curtailment": False,
         }
-        for s in _pq_series(dadger, id_map, calendar)
+        for s in _all_series(dadger, id_map, calendar, renovaveis)
     ]
     return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": entries}
 
@@ -163,12 +165,13 @@ def convert_ncs_stats(
     dadger: Dadger,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    renovaveis: Renovaveis | None = None,
 ) -> pa.Table:
     """Build ``non_controllable_stats`` rows: availability fraction, std 0."""
     ncs_ids: list[int] = []
     stage_ids: list[int] = []
     means: list[float] = []
-    for s in _pq_series(dadger, id_map, calendar):
+    for s in _all_series(dadger, id_map, calendar, renovaveis):
         max_gen = s.max_generation_mw
         for stage in calendar:
             mean_mw = _stage_mean_mw(s.per_stage_blocks[stage.index], stage)
@@ -194,6 +197,7 @@ def convert_ncs_factors(
     dadger: Dadger,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    renovaveis: Renovaveis | None = None,
 ) -> dict:
     """Build ``non_controllable_factors.json`` block shapes per (ncs, stage).
 
@@ -205,7 +209,7 @@ def convert_ncs_factors(
     """
     entries: list[dict] = []
     clamped = 0
-    for s in _pq_series(dadger, id_map, calendar):
+    for s in _all_series(dadger, id_map, calendar, renovaveis):
         for stage in calendar:
             blocks = s.per_stage_blocks[stage.index]
             mean_mw = _stage_mean_mw(blocks, stage)
@@ -247,3 +251,97 @@ def convert_ncs_factors(
             _MIN_FACTOR,
         )
     return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": entries}
+
+
+def _pee_series(
+    renovaveis: Renovaveis,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+    first_ncs_id: int,
+) -> list[_PqSeries]:
+    """Renewable equivalent parks as NCS series, appended after ``PQ``.
+
+    The generation card is scenario-indexed but current production fills
+    it uniformly; the collapse asserts identity per (park, stage, block)
+    and fails loudly if a deck ever carries genuinely per-scenario values
+    (the external availability class becomes the target then).
+    """
+    cad = renovaveis.pee_cad(df=True)
+    subm = renovaveis.pee_subm(df=True)
+    ger = renovaveis.pee_ger_per_pat_cen(df=True)
+    if cad is None or cad.empty or ger is None or ger.empty:
+        return []
+
+    names = {
+        int(r["codigo_pee"]): str(r["nome_pee"]).strip() for _, r in cad.iterrows()
+    }
+    buses = {
+        int(r["codigo_pee"]): int(r["codigo_submercado"]) for _, r in subm.iterrows()
+    }
+
+    values: dict[tuple[int, int, int], dict[int, float]] = {}
+    for _, row in ger.iterrows():
+        first = int(row["estagio_inicial"])
+        last = int(row["estagio_final"])
+        for estagio in range(first, last + 1):
+            stage_index = estagio - 1
+            if not 0 <= stage_index < len(calendar):
+                raise ValueError(
+                    f"renewable generation at stage {estagio} outside the "
+                    f"calendar (1..{len(calendar)})"
+                )
+            key = (int(row["codigo_pee"]), stage_index, int(row["patamar"]) - 1)
+            values.setdefault(key, {})[int(row["cenario"])] = float(row["geracao"])
+
+    per_park: dict[int, dict[int, list[float]]] = {}
+    for (code, stage_index, block), by_scenario in values.items():
+        top = max(by_scenario.values())
+        bottom = min(by_scenario.values())
+        if top - bottom > 1e-9 * max(abs(top), 1.0):
+            raise ValueError(
+                f"renewable park {code} stage {stage_index + 1} block "
+                f"{block + 1}: generation varies across scenarios "
+                f"({bottom}..{top}); per-scenario renewables need the "
+                "external availability class — not converted yet"
+            )
+        stage_blocks = per_park.setdefault(code, {}).setdefault(
+            stage_index, [0.0] * len(calendar[stage_index].block_hours)
+        )
+        stage_blocks[block] = top
+
+    series: list[_PqSeries] = []
+    for offset, code in enumerate(sorted(per_park)):
+        stages = per_park[code]
+        if 0 not in stages:
+            raise ValueError(
+                f"renewable park {code} does not declare stage 1; "
+                "sparse-stage inheritance has no base"
+            )
+        dense: list[tuple[float, ...]] = []
+        for stage in calendar:
+            blocks = stages.get(stage.index)
+            dense.append(tuple(blocks) if blocks else dense[-1])
+        sub_code = buses.get(code)
+        if sub_code is None:
+            raise ValueError(f"renewable park {code} has no subsystem record")
+        series.append(
+            _PqSeries(
+                ncs_id=first_ncs_id + offset,
+                name=f"{names.get(code, f'PEE_{code}')}_{sub_code}",
+                bus_id=id_map.bus_id(sub_code),
+                per_stage_blocks=tuple(dense),
+            )
+        )
+    return series
+
+
+def _all_series(
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+    renovaveis: Renovaveis | None,
+) -> list[_PqSeries]:
+    series = _pq_series(dadger, id_map, calendar)
+    if renovaveis is not None:
+        series += _pee_series(renovaveis, id_map, calendar, len(series))
+    return series

@@ -126,6 +126,7 @@ _EXPECTED_ARTIFACTS = [
     "system/buses.json",
     "system/hydros.json",
     "system/lines.json",
+    "system/pumping_stations.json",
     "system/thermals.json",
     "system/hydro_production_models.json",
     "system/hydro_energy_productivity.parquet",
@@ -139,6 +140,9 @@ _EXPECTED_ARTIFACTS = [
     "scenarios/non_controllable_stats.parquet",
     "scenarios/non_controllable_factors.json",
     "constraints/thermal_bounds.parquet",
+    "constraints/line_bounds.parquet",
+    "constraints/exchange_factors.json",
+    "constraints/hydro_bounds.parquet",
 ]
 
 
