@@ -1,0 +1,188 @@
+"""Tests for the DECOMP operative-calendar temporal conversion."""
+
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from cobre_bridge.decomp.temporal import (
+    OperativeStage,
+    build_operative_calendar,
+    convert_stages,
+    operative_calendar_from_dadger,
+    stage_records,
+)
+
+# The two committed production decks (integration tests skip when absent).
+_RV0_DECK = Path("example/decomp-set-24-rv0/dadger.rv0")
+_RV3_DECK = Path("example/decomp-jul-26-rv3/dadger.rv3")
+
+# rv0-shaped block hours: five operative weeks then the aggregated month.
+_RV0_WEEK = [40.0, 48.0, 80.0]
+_RV0_MONTH = [152.0, 184.0, 312.0]
+_RV0_HOURS = [_RV0_WEEK] * 5 + [_RV0_MONTH]
+
+
+class TestBuildOperativeCalendar:
+    def test_rv0_shape_dates_and_seasons(self) -> None:
+        calendar = build_operative_calendar(date(2024, 8, 31), _RV0_HOURS)
+        assert [s.start_date for s in calendar] == [
+            date(2024, 8, 31),
+            date(2024, 9, 7),
+            date(2024, 9, 14),
+            date(2024, 9, 21),
+            date(2024, 9, 28),
+            date(2024, 10, 5),
+        ]
+        assert calendar[-1].end_date == date(2024, 11, 1)
+        # Weekly stages carry September (8); the monthly stage October (9) —
+        # including the straddling head week (31/08) and tail week (28/09).
+        assert [s.season_id for s in calendar] == [8, 8, 8, 8, 8, 9]
+        assert calendar[0].total_hours == 168.0
+        assert calendar[-1].total_hours == 648.0
+
+    def test_rv3_shape(self) -> None:
+        hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
+        calendar = build_operative_calendar(date(2026, 7, 18), hours)
+        assert [s.start_date for s in calendar] == [
+            date(2026, 7, 18),
+            date(2026, 7, 25),
+            date(2026, 8, 1),
+        ]
+        assert calendar[-1].end_date == date(2026, 9, 1)
+        assert [s.season_id for s in calendar] == [6, 6, 7]
+
+    def test_year_wrap_december_deck(self) -> None:
+        # A December rv0: first week 28/11→05/12 (Friday 04/12 ⇒ December),
+        # five weekly stages then January aggregated.
+        # 02/01→01/02 is 30 days = 720 h.
+        hours = [[40.0, 48.0, 80.0]] * 5 + [[168.0, 200.0, 352.0]]
+        calendar = build_operative_calendar(date(2026, 11, 28), hours)
+        assert calendar[-1].start_date == date(2027, 1, 2)
+        assert calendar[-1].end_date == date(2027, 2, 1)
+        assert [s.season_id for s in calendar] == [11, 11, 11, 11, 11, 0]
+
+    def test_rejects_non_saturday_start(self) -> None:
+        with pytest.raises(ValueError, match="Saturday"):
+            build_operative_calendar(date(2024, 9, 1), _RV0_HOURS)
+
+    def test_rejects_non_weekly_stage(self) -> None:
+        hours = [[40.0, 48.0, 56.0]] + [_RV0_WEEK] * 4 + [_RV0_MONTH]
+        with pytest.raises(ValueError, match="168"):
+            build_operative_calendar(date(2024, 8, 31), hours)
+
+    def test_rejects_fractional_days(self) -> None:
+        hours = [_RV0_WEEK] * 5 + [[150.0, 184.0, 312.0]]
+        with pytest.raises(ValueError, match="whole"):
+            build_operative_calendar(date(2024, 8, 31), hours)
+
+    def test_rejects_final_stage_not_month_end(self) -> None:
+        hours = [_RV0_WEEK] * 5 + [[152.0, 184.0, 288.0]]  # 624 h → 31/10
+        with pytest.raises(ValueError, match="month boundary"):
+            build_operative_calendar(date(2024, 8, 31), hours)
+
+    def test_rejects_single_stage(self) -> None:
+        with pytest.raises(ValueError, match="two stages"):
+            build_operative_calendar(date(2024, 8, 31), [_RV0_WEEK])
+
+
+class TestStageRecords:
+    def _calendar(self) -> list[OperativeStage]:
+        return build_operative_calendar(date(2024, 8, 31), _RV0_HOURS)
+
+    def test_record_shape(self) -> None:
+        records = stage_records(self._calendar(), num_scenarios=[1] * 5 + [259])
+        assert [r["id"] for r in records] == list(range(6))
+        first = records[0]
+        assert first["start_date"] == "2024-08-31"
+        assert first["season_id"] == 8
+        assert first["blocks"] == [
+            {"id": 0, "name": "HEAVY", "hours": 40.0},
+            {"id": 1, "name": "MEDIUM", "hours": 48.0},
+            {"id": 2, "name": "LIGHT", "hours": 80.0},
+        ]
+        assert first["num_scenarios"] == 1
+        assert first["risk_measure"] == "expectation"
+        assert first["state_variables"] == {"storage": True, "inflow_lags": False}
+        assert records[-1]["num_scenarios"] == 259
+
+    def test_rejects_mismatched_num_scenarios(self) -> None:
+        with pytest.raises(ValueError, match="entries"):
+            stage_records(self._calendar(), num_scenarios=[1, 1])
+
+    def test_convert_stages_document(self) -> None:
+        doc = convert_stages(
+            self._calendar(),
+            annual_discount_rate=0.12,
+            num_scenarios=[1] * 5 + [259],
+        )
+        assert doc["season_definitions"]["cycle_type"] == "monthly"
+        assert len(doc["season_definitions"]["seasons"]) == 12
+        graph = doc["policy_graph"]
+        assert graph["type"] == "finite_horizon"
+        assert graph["annual_discount_rate"] == 0.12
+        assert len(graph["transitions"]) == 5
+        assert graph["transitions"][0] == {
+            "source_id": 0,
+            "target_id": 1,
+            "probability": 1.0,
+        }
+        assert "pre_study_stages" not in doc
+
+
+class TestFromDadger:
+    @pytest.mark.skipif(not _RV0_DECK.exists(), reason="rv0 deck not present")
+    def test_rv0_deck(self) -> None:
+        from idecomp.decomp import Dadger
+
+        calendar = operative_calendar_from_dadger(Dadger.read(str(_RV0_DECK)))
+        assert len(calendar) == 6
+        assert calendar[0].start_date == date(2024, 8, 31)
+        assert calendar[-1].end_date == date(2024, 11, 1)
+        assert [s.season_id for s in calendar] == [8, 8, 8, 8, 8, 9]
+        assert calendar[0].block_hours == (40.0, 48.0, 80.0)
+        assert calendar[-1].block_hours == (152.0, 184.0, 312.0)
+
+    @pytest.mark.skipif(not _RV3_DECK.exists(), reason="rv3 deck not present")
+    def test_rv3_deck(self) -> None:
+        from idecomp.decomp import Dadger
+
+        calendar = operative_calendar_from_dadger(Dadger.read(str(_RV3_DECK)))
+        assert len(calendar) == 3
+        assert calendar[0].start_date == date(2026, 7, 18)
+        assert calendar[-1].start_date == date(2026, 8, 1)
+        assert calendar[-1].end_date == date(2026, 9, 1)
+        assert [s.season_id for s in calendar] == [6, 6, 7]
+        assert calendar[0].block_hours == (15.0, 64.0, 89.0)
+        assert calendar[-1].block_hours == (63.0, 280.0, 401.0)
+
+    def test_rejects_cross_subsystem_mismatch(self) -> None:
+        import pandas as pd
+
+        class _Dt:
+            dia, mes, ano = 31, 8, 2024
+
+        class _Dadger:
+            dt = _Dt()
+
+            @staticmethod
+            def dp(df: bool = False) -> pd.DataFrame:
+                rows = []
+                for estagio in (1, 2):
+                    for sbm, d1 in ((1, 40.0), (2, 40.0 if estagio == 1 else 48.0)):
+                        rows.append(
+                            {
+                                "codigo_submercado": sbm,
+                                "estagio": estagio,
+                                "numero_patamares": 3,
+                                "duracao_1": d1,
+                                "duracao_2": 48.0,
+                                "duracao_3": 80.0,
+                            }
+                        )
+                return pd.DataFrame(rows)
+
+        with pytest.raises(ValueError, match="differ across"):
+            operative_calendar_from_dadger(_Dadger())  # type: ignore[arg-type]

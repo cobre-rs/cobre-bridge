@@ -40,6 +40,36 @@ def _block_names(n: int) -> list[str]:
     return [f"BLOCK_{i}" for i in range(n)]
 
 
+MONTH_LABELS = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+]
+
+
+def monthly_season_definitions() -> dict:
+    """Return the canonical calendar-monthly ``season_definitions`` block.
+
+    Twelve seasons with 0-based ids (Jan=0 … Dec=11), shared by every
+    converter family so the season convention has a single source.
+    """
+    return {
+        "cycle_type": "monthly",
+        "seasons": [
+            {"id": i, "month_start": i + 1, "label": MONTH_LABELS[i]} for i in range(12)
+        ],
+    }
+
+
 def _month_start_date(year: int, month: int) -> date:
     """Return the first day of the given calendar month."""
     return date(year, month, 1)
@@ -353,28 +383,7 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
         "transitions": transitions,
     }
 
-    _MONTH_LABELS = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ]
-
-    season_definitions: dict = {
-        "cycle_type": "monthly",
-        "seasons": [
-            {"id": i, "month_start": i + 1, "label": _MONTH_LABELS[i]}
-            for i in range(12)
-        ],
-    }
+    season_definitions: dict = monthly_season_definitions()
 
     result: dict = {
         "$schema": (
