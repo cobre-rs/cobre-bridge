@@ -88,10 +88,27 @@ class TestScenarioEmitters:
     def test_noise_openings_equal_external_values(self) -> None:
         vazoes, hidr, calendar = _StubVazoes(), _hidr_frame(), _calendar()
         external = convert_external_inflows(vazoes, hidr, _ID_MAP, calendar).to_pandas()
-        noise = convert_noise_openings(vazoes, hidr, _ID_MAP, calendar).to_pandas()
+        noise = convert_noise_openings(vazoes, hidr, _ID_MAP, calendar, 0).to_pandas()
         assert list(noise["value"]) == list(external["value_m3s"])
         assert list(noise["opening_index"]) == list(external["scenario_id"])
         assert list(noise["entity_index"]) == list(external["hydro_id"])
+
+    def test_noise_openings_span_the_whole_noise_vector(self) -> None:
+        """Non-controllable sources hold their noise slots, at zero deviation.
+
+        Their block follows the hydros in the solver's entity order, so
+        omitting it would leave every consumer of the later slots reading
+        past the end of each opening row.
+        """
+        vazoes, hidr, calendar = _StubVazoes(), _hidr_frame(), _calendar()
+        n_hydros = len(_ID_MAP.hydro_codes)
+        noise = convert_noise_openings(vazoes, hidr, _ID_MAP, calendar, 3).to_pandas()
+
+        per_opening = noise.groupby(["stage_id", "opening_index"]).size()
+        assert set(per_opening) == {n_hydros + 3}
+        appended = noise[noise["entity_index"] >= n_hydros]
+        assert sorted(set(appended["entity_index"])) == [n_hydros + i for i in range(3)]
+        assert set(appended["value"]) == {0.0}
 
     def test_identity_stats(self) -> None:
         stats = convert_inflow_stats_identity(_ID_MAP, _calendar()).to_pandas()

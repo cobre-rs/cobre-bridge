@@ -149,16 +149,25 @@ def convert_noise_openings(
     hidr: pd.DataFrame,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    ncs_count: int,
 ) -> pa.Table:
     """``noise_openings.parquet``: the same tree as the backward openings.
 
-    Under the identity convention the standardized noise equals the
-    natural incremental value, and with deterministic load the noise
-    vector is exactly the hydro block in id order — so
-    ``entity_index = hydro_id`` and the two scenario files carry identical
-    numbers by construction.
+    The file spans the **whole** noise vector, not just the inflow block:
+    the solver lays it out as hydros, then the load buses that carry a
+    non-zero standard deviation, then every non-controllable source — the
+    last block regardless of its deviation, because dropping a
+    deterministic source would shift every index after it.
+
+    Here the inflow block carries the tree values (under the identity
+    convention the standardized noise *is* the natural incremental value,
+    so this file and the external scenarios carry identical numbers), the
+    load block is empty because this source model's demand is
+    deterministic, and the non-controllable block is zero — those sources
+    have a zero deviation, so their noise never moves generation.
     """
     values = _tree_values(vazoes, hidr, id_map, calendar)
+    hydro_count = len(id_map.hydro_codes)
 
     stage_ids: list[int] = []
     opening_indices: list[int] = []
@@ -170,6 +179,11 @@ def convert_noise_openings(
             opening_indices.append(scenario_index)
             entity_indices.append(hydro_id)
             noise.append(value)
+        for ncs_id in range(ncs_count):
+            stage_ids.append(stage_index)
+            opening_indices.append(scenario_index)
+            entity_indices.append(hydro_count + ncs_id)
+            noise.append(0.0)
 
     return pa.table(
         {

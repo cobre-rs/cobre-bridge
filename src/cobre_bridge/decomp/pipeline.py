@@ -204,12 +204,10 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         hydro_conv.convert_production_models(id_map),
     )
     _write_parquet(system / "hydro_energy_productivity.parquet", productivity)
-    _write_json(
-        system / "non_controllable_sources.json",
-        ncs_conv.convert_non_controllable_sources(
-            dadger, id_map, calendar, start_date, renovaveis
-        ),
+    ncs_registry = ncs_conv.convert_non_controllable_sources(
+        dadger, id_map, calendar, start_date, renovaveis
     )
+    _write_json(system / "non_controllable_sources.json", ncs_registry)
 
     scenarios = dst / "scenarios"
     _write_parquet(
@@ -222,7 +220,13 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     )
     _write_parquet(
         scenarios / "noise_openings.parquet",
-        scenarios_conv.convert_noise_openings(vazoes, hidr, id_map, calendar),
+        scenarios_conv.convert_noise_openings(
+            vazoes,
+            hidr,
+            id_map,
+            calendar,
+            len(ncs_registry["non_controllable_sources"]),
+        ),
     )
     _write_parquet(
         scenarios / "scenario_probabilities.parquet",
