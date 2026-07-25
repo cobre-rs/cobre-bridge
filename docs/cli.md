@@ -64,6 +64,7 @@ $ cobre-bridge convert [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `newave`: Convert a NEWAVE case directory to a Cobre...
+* `decomp`: Convert a DECOMP deck revision to a Cobre...
 
 ### `cobre-bridge convert newave`
 
@@ -93,6 +94,33 @@ $ cobre-bridge convert newave [OPTIONS] SRC DST
 * `--quiet`: Suppress the summary and info notes; warnings/errors still show.
 * `--help`: Show this message and exit.
 
+### `cobre-bridge convert decomp`
+
+Convert a DECOMP deck revision to a Cobre case directory.
+
+Loop-closing subset: the exchange network, renewables card file, GNL
+anticipation and boundary FCF are deferred and reported as warnings.
+
+**Usage**:
+
+```console
+$ cobre-bridge convert decomp [OPTIONS] SRC DST
+```
+
+**Arguments**:
+
+* `SRC`: Path to the DECOMP deck directory.  [required]
+* `DST`: Path to the output Cobre case directory.  [required]
+
+**Options**:
+
+* `--force`: Overwrite destination directory if it already contains files.
+* `-v, --verbose`: Increase console log verbosity (-v INFO, -vv DEBUG).  [default: 0]
+* `--log-file PATH`: Write the full DEBUG log to PATH (the console verbosity is unaffected).
+* `--no-color`: Disable coloured output (also honoured via the NO_COLOR env var).
+* `--quiet`: Suppress the summary and info notes; warnings/errors still show.
+* `--help`: Show this message and exit.
+
 ## `cobre-bridge compare`
 
 Compare source model inputs/results against Cobre.
@@ -109,7 +137,34 @@ $ cobre-bridge compare [OPTIONS] COMMAND [ARGS]...
 
 **Commands**:
 
+* `decomp`: Compare a DECOMP run&#x27;s published operation...
 * `newave`: Compare NEWAVE published results against...
+
+### `cobre-bridge compare decomp`
+
+Compare a DECOMP run&#x27;s published operation against Cobre&#x27;s simulation.
+
+Informational: always exits 0, reporting divergences without failing.
+
+**Usage**:
+
+```console
+$ cobre-bridge compare decomp [OPTIONS] DECOMP_DIR COBRE_OUTPUT_DIR
+```
+
+**Arguments**:
+
+* `DECOMP_DIR`: Path to the DECOMP deck directory (has saidas/).  [required]
+* `COBRE_OUTPUT_DIR`: Path to the Cobre output directory.  [required]
+
+**Options**:
+
+* `--json`: Emit a single machine-readable JSON verdict to stdout and suppress the human (Rich) tables.
+* `-v, --verbose`: Increase console log verbosity (-v INFO, -vv DEBUG).  [default: 0]
+* `--log-file PATH`: Write the full DEBUG log to PATH (the console verbosity is unaffected).
+* `--no-color`: Disable coloured output (also honoured via the NO_COLOR env var).
+* `--quiet`: Suppress the summary and info notes; warnings/errors still show.
+* `--help`: Show this message and exit.
 
 ### `cobre-bridge compare newave`
 

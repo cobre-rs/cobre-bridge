@@ -28,6 +28,7 @@ from cobre_bridge.ui.console import (
     print_status,
     render_checklist,
     render_conversion_summary,
+    render_decomp_comparison,
     render_diagnostics,
     render_error,
     spinner,
@@ -1210,6 +1211,86 @@ def _convert_decomp(
             src=src,
             dst=dst,
             force=force,
+            verbose=verbose,
+            log_file=log_file,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+def _run_decomp_comparison(args: SimpleNamespace) -> None:
+    """Execute the compare decomp subcommand.
+
+    Informational like ``compare newave``: it always exits 0 and describes the
+    divergence rather than judging it. An unreadable *existing* output file is
+    the one failure (exit 2) — reporting a zero-vs-zero match on data we could
+    not read would be worse than stopping.
+    """
+    from cobre_bridge.comparators.cobre_readers import CobreReadError
+    from cobre_bridge.comparators.decomp_results import compare_decomp_results
+
+    try:
+        with spinner(
+            "Comparing results…",
+            verbose=args.verbose > 0,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ):
+            comparison = compare_decomp_results(args.decomp_dir, args.cobre_output_dir)
+    except (CobreReadError, FileNotFoundError, ValueError) as exc:
+        print_status(
+            f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
+        )
+        raise typer.Exit(code=2) from exc
+
+    if args.json_output:
+        payload = {
+            "schema_version": 1,
+            "command": "compare decomp",
+            "stages": comparison.stage_count,
+            "summary": comparison.summary.to_dicts(),
+            "unmapped": comparison.unmapped,
+        }
+        print(json.dumps(payload, indent=2, default=float))
+        return
+
+    render_decomp_comparison(comparison)
+
+
+@compare_app.command("decomp")
+def _compare_decomp(
+    decomp_dir: Annotated[
+        Path, typer.Argument(help="Path to the DECOMP deck directory (has saidas/).")
+    ],
+    cobre_output_dir: Annotated[
+        Path, typer.Argument(help="Path to the Cobre output directory.")
+    ],
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) tables."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Compare a DECOMP run's published operation against Cobre's simulation.
+
+    Informational: always exits 0, reporting divergences without failing.
+    """
+    _configure_logging(verbose, log_file)
+    _run_decomp_comparison(
+        SimpleNamespace(
+            decomp_dir=decomp_dir,
+            cobre_output_dir=cobre_output_dir,
+            json_output=json_output,
             verbose=verbose,
             log_file=log_file,
             no_color=no_color,
