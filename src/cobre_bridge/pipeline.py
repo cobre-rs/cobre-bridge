@@ -19,6 +19,7 @@ from cobre_bridge import diagnostics as dx
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
+from cobre_bridge.converters import inflow_windows
 from cobre_bridge.converters import initial_conditions as ic_conv
 from cobre_bridge.converters import network as network_conv
 from cobre_bridge.converters import scalar_parameters as scalar_params_conv
@@ -423,10 +424,12 @@ def _convert_newave_case_impl(
     logger.debug("Converting initial conditions")
     ic_dict = ic_conv.convert_initial_conditions(case, id_map)
 
-    logger.debug("Extracting recent inflow lags from vazpast.dat")
-    past_inflow_lags = stochastic_conv.convert_recent_inflow_lags(case, id_map)
-    if past_inflow_lags:
-        ic_dict["past_inflows"] = past_inflow_lags
+    logger.debug("Converting the hydrological tendency to conditioning windows")
+    observation_windows = inflow_windows.convert_recent_observation_windows(
+        case, id_map
+    )
+    if observation_windows:
+        ic_dict["recent_observations"] = observation_windows
 
     logger.debug("Converting inflow stats")
     inflow_table = stochastic_conv.convert_inflow_stats(case, id_map)
@@ -435,7 +438,7 @@ def _convert_newave_case_impl(
     load_table = stochastic_conv.convert_load_stats(case, id_map)
 
     logger.debug("Converting inflow history from vazoes.dat")
-    inflow_history_table = stochastic_conv.convert_inflow_history(case, id_map)
+    inflow_history_table = inflow_windows.convert_inflow_history_windows(case, id_map)
 
     logger.debug("Converting water withdrawal")
     withdrawal_table = hydro_conv.convert_water_withdrawal(case, id_map)

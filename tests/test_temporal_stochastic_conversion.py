@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import calendar
 import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -1665,125 +1664,6 @@ def _make_confhd_posto_mock(posto_to_code: dict[int, int]) -> MagicMock:
     mock = MagicMock()
     mock.usinas = df
     return mock
-
-
-# ---------------------------------------------------------------------------
-# Tests: convert_recent_inflow_lags (vazpast.dat → initial_conditions)
-# ---------------------------------------------------------------------------
-
-
-class TestConvertRecentInflowLagsNoFile:
-    def test_returns_empty_when_vazpast_absent(self, tmp_path: Path) -> None:
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(make_case(tmp_path), id_map)
-        assert result == []
-
-
-class TestConvertRecentInflowLagsWithFile:
-    def test_returns_12_lags_per_hydro(self, tmp_path: Path) -> None:
-        (tmp_path / "vazpast.dat").touch()
-
-        dger_mock = MagicMock()
-        dger_mock.mes_inicio_estudo = 3  # March
-
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
-        vazpast_mock = _make_vazpast_mock(postos=[1, 2], num_months=12)
-        case = make_case(
-            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-            confhd=_make_confhd_posto_mock({1: 1, 2: 2}),
-            dger=dger_mock,
-            vazpast=vazpast_mock,
-        )
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(case, id_map)
-
-        assert len(result) == 2
-        assert all(len(e["values_m3s"]) == 12 for e in result)
-
-    def test_lag_order_march_start(self, tmp_path: Path) -> None:
-        """Study starts March: lag1=Feb, lag2=Jan, lag3=Dec, ..., lag12=Mar."""
-        (tmp_path / "vazpast.dat").touch()
-
-        dger_mock = MagicMock()
-        dger_mock.mes_inicio_estudo = 3
-
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
-
-        # Build vazpast where each month has a distinct value = month number
-        rows = [
-            {"codigo_usina": 1, "nome_usina": "P1", "mes": m, "valor": float(m * 100)}
-            for m in range(1, 13)
-        ]
-        vp_mock = MagicMock()
-        vp_mock.tendencia = pd.DataFrame(rows)
-        case = make_case(
-            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-            confhd=_make_confhd_posto_mock({1: 1}),
-            dger=dger_mock,
-            vazpast=vp_mock,
-        )
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(case, id_map)
-
-        lags = result[0]["values_m3s"]
-        # lag1=Feb(200), lag2=Jan(100), lag3=Dec(1200), lag4=Nov(1100), ...
-        assert lags[0] == 200.0  # February
-        assert lags[1] == 100.0  # January
-        assert lags[2] == 1200.0  # December
-        assert lags[11] == 300.0  # March (12 months back)
-
-    def test_unknown_plant_skipped(self, tmp_path: Path) -> None:
-        (tmp_path / "vazpast.dat").touch()
-
-        dger_mock = MagicMock()
-        dger_mock.mes_inicio_estudo = 1
-
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
-        # vazpast has plant 1 (in id_map) and plant 99 (not in id_map)
-        vazpast_mock = _make_vazpast_mock(postos=[1, 99], num_months=12)
-        case = make_case(
-            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-            confhd=_make_confhd_posto_mock({1: 1}),
-            dger=dger_mock,
-            vazpast=vazpast_mock,
-        )
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(case, id_map)
-
-        assert len(result) == 1
-        assert result[0]["hydro_id"] == 0
-
-    @patch("cobre_bridge.case.Vazpast")
-    def test_parse_failure_returns_empty(self, mock_vp_cls, tmp_path: Path) -> None:
-        """If Vazpast.read() raises, return empty list gracefully."""
-        (tmp_path / "vazpast.dat").touch()
-
-        dger_mock = MagicMock()
-        dger_mock.mes_inicio_estudo = 1
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
-
-        # vazpast left un-injected so case.vazpast parses; Vazpast.read raises.
-        mock_vp_cls.read.side_effect = RuntimeError("bad file")
-        case = make_case(
-            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-            confhd=_make_confhd_posto_mock({1: 1}),
-            dger=dger_mock,
-        )
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(case, id_map)
-
-        assert result == []
 
 
 # ---------------------------------------------------------------------------

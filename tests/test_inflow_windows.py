@@ -18,10 +18,6 @@ from cobre_bridge.converters.inflow_windows import (
     month_window,
     previous_months,
 )
-from cobre_bridge.converters.stochastic import (
-    convert_inflow_history,
-    convert_recent_inflow_lags,
-)
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 
@@ -215,16 +211,29 @@ class TestConvertInflowHistoryWindows:
             assert starts[1:] == ends[:-1]
 
     @patch("cobre_bridge.converters.stochastic.Vazoes")
-    def test_values_match_point_dated_emitter(self, mock_vazoes_cls, tmp_path) -> None:
-        mock_vazoes_cls.read.return_value = _make_vazoes_mock()
-        case = _history_case(tmp_path)
-        windowed = convert_inflow_history_windows(case, _ID_MAP).to_pandas()
-        pointed = convert_inflow_history(case, _ID_MAP).to_pandas()
-        w = windowed.set_index(["hydro_id", "start_date"])["value_m3s"]
-        p = pointed.set_index(["hydro_id", "date"])["value_m3s"]
-        assert len(w) == len(p)
-        for key, value in p.items():
-            assert w[key] == value
+    def test_each_window_carries_its_month_of_record(
+        self, mock_vazoes_cls, tmp_path
+    ) -> None:
+        """A window's value is the record's value for the month it spans.
+
+        The two plants here have no cascade link, so incremental equals
+        natural and the emitted value is the gauge reading itself.
+        """
+        record = _make_vazoes_mock()
+        mock_vazoes_cls.read.return_value = record
+        windowed = convert_inflow_history_windows(
+            _history_case(tmp_path), _ID_MAP
+        ).to_pandas()
+        source = record.vazoes.set_index("data")
+
+        for hydro_id, posto in ((0, 1), (1, 2)):
+            rows = windowed[windowed["hydro_id"] == hydro_id]
+            for row in rows.itertuples():
+                expected = source.loc[
+                    datetime.datetime(row.start_date.year, row.start_date.month, 1),
+                    posto,
+                ]
+                assert row.value_m3s == expected
 
 
 # ---------------------------------------------------------------------------
@@ -252,22 +261,33 @@ class TestConvertRecentObservationWindows:
             for prev, curr in zip(windows, windows[1:]):
                 assert curr["start_date"] == prev["end_date"]
 
-    def test_values_match_positional_lags_oracle(self, tmp_path: Path) -> None:
-        # values_m3s[0] is lag 1 (the month before the study start) — i.e. the
-        # LAST window; the windowed list is oldest-first.
-        case = _tendency_case(tmp_path)
+    def test_each_window_carries_its_calendar_month_of_tendency(
+        self, tmp_path: Path
+    ) -> None:
+        """Values follow the calendar month a window spans, oldest first.
+
+        The tendency is keyed by calendar month, so a Sep-2024 study start
+        maps the first window (Sep 2023) to month 9 and the last (Aug 2024)
+        to month 8 — the ordering a positional lag list encodes backwards.
+        """
+        tendency = _make_vazpast_mock(postos=[1, 2])
+        case = _tendency_case(tmp_path, vazpast=tendency)
         windows = convert_recent_observation_windows(case, _ID_MAP)
-        lags = convert_recent_inflow_lags(case, _ID_MAP)
-        lag_by_hydro = {e["hydro_id"]: e["values_m3s"] for e in lags}
-        by_hydro: dict[int, list[float]] = {}
-        for entry in windows:
-            by_hydro.setdefault(entry["hydro_id"], []).append(entry["value_m3s"])
-        for hydro_id, values in by_hydro.items():
-            assert values == list(reversed(lag_by_hydro[hydro_id]))
+        source = tendency.tendencia.set_index(["codigo_usina", "mes"])["valor"]
+
+        for hydro_id, posto in ((0, 1), (1, 2)):
+            entries = [w for w in windows if w["hydro_id"] == hydro_id]
+            assert [w["start_date"][:7] for w in entries[:2]] == [
+                "2023-09",
+                "2023-10",
+            ]
+            for entry in entries:
+                month = int(entry["start_date"][5:7])
+                assert entry["value_m3s"] == source[(posto, month)]
 
     def test_missing_month_is_omitted_not_zero_filled(self, tmp_path: Path) -> None:
         # Tendency carries only months 1..11: the missing month (12) must be
-        # absent from the windows, while the positional emitter zero-fills it.
+        # absent from the windows rather than fabricated as a zero inflow.
         case = _tendency_case(
             tmp_path,
             vazpast=_make_vazpast_mock(postos=[1, 2], months=list(range(1, 12))),

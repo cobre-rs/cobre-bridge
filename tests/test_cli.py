@@ -271,11 +271,11 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
             return_value=_FAKE_LOAD_TABLE,
         ),
         patch(
-            "cobre_bridge.pipeline.stochastic_conv.convert_recent_inflow_lags",
+            "cobre_bridge.pipeline.inflow_windows.convert_recent_observation_windows",
             return_value=[],
         ),
         patch(
-            "cobre_bridge.pipeline.stochastic_conv.convert_inflow_history",
+            "cobre_bridge.pipeline.inflow_windows.convert_inflow_history_windows",
             return_value=_FAKE_INFLOW_TABLE,
         ),
         patch(

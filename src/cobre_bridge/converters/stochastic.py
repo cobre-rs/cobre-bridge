@@ -11,7 +11,6 @@ the ``scenarios/`` directory of a Cobre case.
 from __future__ import annotations
 
 import logging
-from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -169,46 +168,6 @@ _LOAD_SCHEMA = pa.schema(
     ]
 )
 
-# Parquet schema for past inflow history.
-_INFLOW_HISTORY_SCHEMA = pa.schema(
-    [
-        pa.field("hydro_id", pa.int32()),
-        pa.field("date", pa.date32()),
-        pa.field("value_m3s", pa.float64()),
-    ]
-)
-
-
-def convert_recent_inflow_lags(
-    case: NewaveCase,
-    id_map: NewaveIdMap,
-) -> list[dict]:
-    """Extract 12 recent inflow lags from vazpast.dat for initial_conditions.json.
-
-    Returns a list of ``{"hydro_id": int, "values_m3s": [lag1, ..., lag12]}``
-    entries conforming to the ``past_inflows`` field of the Cobre
-    ``initial_conditions.json`` schema.  ``values_m3s[0]`` is the most recent
-    lag (month immediately before study start), ``values_m3s[11]`` is the
-    oldest.
-
-    Returns an empty list if ``vazpast.dat`` is absent.
-    """
-    incremental = _vazpast_incremental(case, id_map)
-    if not incremental:
-        return []
-
-    start_m = case.dger.mes_inicio_estudo
-
-    # Lag order: lag 1 = month before study start, ..., lag 12 = 12 months back.
-    lag_cal_months = [((start_m - 1 - i) % 12) + 1 for i in range(1, 13)]
-
-    result: list[dict] = []
-    for hydro_id in sorted(incremental):
-        inc_vals = incremental[hydro_id]
-        values_m3s = [inc_vals.get(m, 0.0) for m in lag_cal_months]
-        result.append({"hydro_id": hydro_id, "values_m3s": values_m3s})
-    return result
-
 
 def _vazpast_incremental(
     case: NewaveCase,
@@ -272,43 +231,6 @@ def _vazpast_incremental(
         incremental[posto_to_cobre_id[posto]] = inc_vals
 
     return incremental
-
-
-def convert_inflow_history(
-    case: NewaveCase,
-    id_map: NewaveIdMap,
-) -> pa.Table:
-    """Convert the full historical inflow series from vazoes.dat to Parquet.
-
-    Reads ``vazoes.dat`` and produces one row per (hydro, month) pair,
-    starting from January of ``ano_inicial_historico`` (from ``dger.dat``).
-
-    Returns
-    -------
-    pa.Table
-        Columns: ``hydro_id`` (INT32), ``date`` (DATE32), ``value_m3s`` (DOUBLE).
-    """
-    hist_start_year, n_rows, incremental = _incremental_history(case, id_map)
-
-    rows_hydro_id: list[int] = []
-    rows_date: list[date] = []
-    rows_value: list[float] = []
-
-    for cobre_id, values in incremental.items():
-        for i in range(n_rows):
-            y = hist_start_year + (i // 12)
-            m = (i % 12) + 1
-            rows_hydro_id.append(cobre_id)
-            rows_date.append(date(y, m, 1))
-            rows_value.append(float(values[i]))
-
-    return pa.table(
-        {
-            "hydro_id": pa.array(rows_hydro_id, type=pa.int32()),
-            "date": pa.array(rows_date, type=pa.date32()),
-            "value_m3s": pa.array(rows_value, type=pa.float64()),
-        }
-    )
 
 
 def _incremental_history(
