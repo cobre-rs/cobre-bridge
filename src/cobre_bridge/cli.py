@@ -456,6 +456,39 @@ _VERDICT_EXIT_CODE: dict[PreflightVerdict, int] = {
 }
 
 
+def _run_decomp_check(args: SimpleNamespace) -> None:
+    """Execute the check decomp subcommand.
+
+    Same contract as ``check newave`` — the preflight captures every failure
+    as a verdict rather than raising, so this is rendering plus the exit code
+    (``OK`` → 0, ``WARNINGS`` → 1, ``WILL_NOT_CONVERT`` → 2). Writes no files
+    and never calls the conversion pipeline.
+    """
+    from cobre_bridge.decomp.preflight import run_decomp_preflight
+
+    result = run_decomp_preflight(args.src)
+
+    if args.json_output:
+        summary = check_summary(
+            [
+                {"label": check.label, "passed": check.passed, "detail": check.detail}
+                for check in result.checks
+            ]
+        )
+        _emit_convert_json(
+            build_verdict(
+                "check decomp", result.verdict.value, summary, result.diagnostics
+            )
+        )
+    else:
+        render_checklist(result, quiet=args.quiet)
+
+    exit_code = _VERDICT_EXIT_CODE[result.verdict]
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+    return
+
+
 def _run_check(args: SimpleNamespace) -> None:
     """Execute the check newave subcommand.
 
@@ -1376,6 +1409,42 @@ def _check_newave(
     """Validate a NEWAVE case directory without converting or writing any files."""
     _configure_logging(verbose, log_file)
     _run_check(
+        SimpleNamespace(
+            src=src,
+            json_output=json_output,
+            verbose=verbose,
+            log_file=log_file,
+            no_color=no_color,
+            quiet=quiet,
+        )
+    )
+
+
+@check_app.command("decomp")
+def _check_decomp(
+    src: Annotated[Path, typer.Argument(help="Path to the DECOMP deck directory.")],
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) checklist."
+            ),
+        ),
+    ] = False,
+    verbose: _VerboseOpt = 0,
+    log_file: _LogFileOpt = None,
+    no_color: _NoColorOpt = False,
+    quiet: _QuietOpt = False,
+) -> None:
+    """Validate a DECOMP deck revision without converting or writing any files.
+
+    Also reports what the conversion will leave behind, so a deferred feature
+    is never a silent omission.
+    """
+    _configure_logging(verbose, log_file)
+    _run_decomp_check(
         SimpleNamespace(
             src=src,
             json_output=json_output,

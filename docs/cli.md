@@ -212,6 +212,7 @@ $ cobre-bridge check [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `newave`: Validate a NEWAVE case directory without...
+* `decomp`: Validate a DECOMP deck revision without...
 
 ### `cobre-bridge check newave`
 
@@ -226,6 +227,32 @@ $ cobre-bridge check newave [OPTIONS] SRC
 **Arguments**:
 
 * `SRC`: Path to the NEWAVE case directory.  [required]
+
+**Options**:
+
+* `--json`: Emit a single machine-readable JSON verdict to stdout and suppress the human (Rich) checklist.
+* `-v, --verbose`: Increase console log verbosity (-v INFO, -vv DEBUG).  [default: 0]
+* `--log-file PATH`: Write the full DEBUG log to PATH (the console verbosity is unaffected).
+* `--no-color`: Disable coloured output (also honoured via the NO_COLOR env var).
+* `--quiet`: Suppress the summary and info notes; warnings/errors still show.
+* `--help`: Show this message and exit.
+
+### `cobre-bridge check decomp`
+
+Validate a DECOMP deck revision without converting or writing any files.
+
+Also reports what the conversion will leave behind, so a deferred feature
+is never a silent omission.
+
+**Usage**:
+
+```console
+$ cobre-bridge check decomp [OPTIONS] SRC
+```
+
+**Arguments**:
+
+* `SRC`: Path to the DECOMP deck directory.  [required]
 
 **Options**:
 
