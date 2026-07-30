@@ -1174,8 +1174,6 @@ class TestApplyPermanentOverrides:
 
     def test_volcota_override_warns_and_skips(self, tmp_path, caplog) -> None:
         """VOLCOTA records produce a warning and are skipped gracefully."""
-        import logging
-
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         volcota_rec = MagicMock()
@@ -1199,8 +1197,6 @@ class TestApplyPermanentOverrides:
 
     def test_unknown_plant_code_skipped(self, tmp_path, caplog) -> None:
         """Plant code not in cadastro: warning logged, no crash."""
-        import logging
-
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         usina_rec = MagicMock()
@@ -5646,8 +5642,6 @@ def _make_penalid_df() -> pd.DataFrame:
     Both REEs have patamar 2 rows with NaN values (unbounded tier).
     TURBMX is included to verify the "no mapping" skip path.
     """
-    import math
-
     return pd.DataFrame(
         {
             "variavel": [
@@ -5729,8 +5723,6 @@ class TestReadPenalid:
 
     def test_nan_values_are_skipped(self, tmp_path) -> None:
         """NaN cost values at patamar 1 do not appear in the output dict."""
-        import math
-
         from cobre_bridge.converters.hydro import _read_penalid
 
         df = pd.DataFrame(

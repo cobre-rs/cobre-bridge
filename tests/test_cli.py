@@ -347,17 +347,15 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
 
 def _run_with_all_mocks(src: Path, dst: Path) -> object:
     """Run convert_newave_case with all converters replaced by canned fakes."""
+    import contextlib
+
     from cobre_bridge.pipeline import convert_newave_case
 
     fake_id_map = MagicMock()
-    patches = _all_converter_patches(fake_id_map)
-    for p in patches:
-        p.__enter__()
-    try:
+    with contextlib.ExitStack() as stack:
+        for p in _all_converter_patches(fake_id_map):
+            stack.enter_context(p)
         return convert_newave_case(src, dst)
-    finally:
-        for p in patches:
-            p.__exit__(None, None, None)
 
 
 class TestConvertNewaweCasePipeline:
@@ -516,21 +514,21 @@ class TestConvertNewaweCasePipeline:
 
     def test_dry_run_does_not_call_write_table(self, tmp_path: Path) -> None:
         """``dry_run=True`` writes nothing yet records the would-write paths."""
+        import contextlib
+
         from cobre_bridge.pipeline import ConversionReport, convert_newave_case
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
 
         fake_id_map = MagicMock()
-        patches = _all_converter_patches(fake_id_map)
-        with patch("cobre_bridge.pipeline.pq.write_table") as write_table:
-            for p in patches:
-                p.__enter__()
-            try:
-                report = convert_newave_case(src, dst, dry_run=True)
-            finally:
-                for p in patches:
-                    p.__exit__(None, None, None)
+        with (
+            patch("cobre_bridge.pipeline.pq.write_table") as write_table,
+            contextlib.ExitStack() as stack,
+        ):
+            for p in _all_converter_patches(fake_id_map):
+                stack.enter_context(p)
+            report = convert_newave_case(src, dst, dry_run=True)
 
         assert isinstance(report, ConversionReport)
         # No Parquet table is written and no destination directory is created.

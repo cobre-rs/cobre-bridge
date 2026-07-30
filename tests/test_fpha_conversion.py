@@ -60,9 +60,6 @@ def _reservoir_row(
     )
 
 
-# --------------------------------------------------------------------------- #
-# Pure helpers
-# --------------------------------------------------------------------------- #
 class TestIsFphaEligible:
     def test_reservoir_with_storage_swing_is_eligible(self) -> None:
         assert _is_fpha_eligible(_reservoir_row()) is True
@@ -171,9 +168,6 @@ class TestParseFphaPlaneReduction:
         assert _parse_fpha_plane_reduction(self._case(tmp_path, None)) is None
 
 
-# --------------------------------------------------------------------------- #
-# Integration across the three converters
-# --------------------------------------------------------------------------- #
 class TestFphaConverters:
     """Plant 1 = reservoir (FPHA-eligible); plant 2 = non-FPHA.
 

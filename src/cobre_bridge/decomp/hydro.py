@@ -119,7 +119,7 @@ def convert_hydros(
     min_outflow_by_code: dict[int, float] = {}
     for _, row in operated.iterrows():
         value = row.get("vazao_defluente_minima")
-        if value is not None and not pd.isna(value):
+        if not pd.isna(value):
             min_outflow_by_code[int(row["codigo_usina"])] = float(value)
 
     op_date = start_date.isoformat()
@@ -193,7 +193,7 @@ def convert_initial_storage(
         value = min(max(value, v_min), v_max)
         storage.append({"hydro_id": id_map.hydro_id(code), "value_hm3": value})
         dead = row.get("volume_morto_inicial")
-        if dead is not None and not pd.isna(dead):
+        if not pd.isna(dead):
             _LOG.warning(
                 "plant %d declares an initial dead volume (%s); "
                 "dead-volume filling is not converted yet",

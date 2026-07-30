@@ -184,7 +184,6 @@ def _load_compare_context(
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import build_entity_alignment
 
-    # Build the parsed case once; the id-map reuses its cached readers.
     try:
         case = NewaveCase.from_directory(newave_dir)
     except FileNotFoundError as exc:
@@ -391,8 +390,6 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
             build_verdict("compare newave", status, compare_summary(verdict))
         )
 
-    return
-
 
 def _run_dashboard(args: SimpleNamespace) -> None:
     """Execute the dashboard subcommand."""
@@ -445,7 +442,6 @@ def _run_dashboard(args: SimpleNamespace) -> None:
                 console=err_console,
                 style="#F5A623",
             )
-    return
 
 
 #: Preflight verdict → process exit code. The contract is fixed by the epic
@@ -489,7 +485,6 @@ def _run_decomp_check(args: SimpleNamespace) -> None:
     exit_code = _VERDICT_EXIT_CODE[result.verdict]
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
-    return
 
 
 def _run_check(args: SimpleNamespace) -> None:
@@ -532,7 +527,6 @@ def _run_check(args: SimpleNamespace) -> None:
     exit_code = _VERDICT_EXIT_CODE[result.verdict]
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
-    return
 
 
 def _run_newave_conversion(args: SimpleNamespace) -> None:
@@ -550,16 +544,10 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     out_console = get_console(no_color=args.no_color)
     err_console = get_console(stderr=True, no_color=args.no_color)
 
-    # ------------------------------------------------------------------
-    # Source validation.
-    # ------------------------------------------------------------------
     if not src.exists() or not src.is_dir():
         render_error(f"source directory '{src}' does not exist", console=err_console)
         raise typer.Exit(code=1)
 
-    # ------------------------------------------------------------------
-    # Destination validation.
-    # ------------------------------------------------------------------
     if dst.exists() and any(dst.iterdir()):
         if not args.force:
             render_error(
@@ -577,9 +565,6 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     if not args.dry_run:
         dst.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Run conversion pipeline.
-    # ------------------------------------------------------------------
     try:
         with conversion_progress(
             len(CONVERSION_PHASE_LABELS),
@@ -660,9 +645,6 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     # to err_console (stderr) so the --json stdout verdict stays byte-deterministic.
     _write_conversion_manifest(report, src, dst, console=err_console)
 
-    # ------------------------------------------------------------------
-    # Optional post-conversion validation.
-    # ------------------------------------------------------------------
     # When --validate and --json are combined, the human validation messages stay
     # on err_console (stderr) exactly as without --json, and the machine-readable
     # outcome is folded UNDER ``summary`` as a ``validation`` sub-object. The
@@ -789,8 +771,6 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
 
     if validation_failed:
         raise typer.Exit(code=2)
-
-    return
 
 
 def _convert_verdict_summary(report: ConversionReport | None) -> dict[str, object]:

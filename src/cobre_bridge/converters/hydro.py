@@ -1242,11 +1242,8 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 
         # Minimum outflow from historical minimum (may have been overridden by MODIF).
         vazao_min_hist = hreg.get("vazao_minima_historica")
-        min_outflow = (
-            float(vazao_min_hist)
-            if vazao_min_hist and float(vazao_min_hist) > 0
-            else 0.0
-        )
+        vazao_min_hist_val = float(vazao_min_hist) if vazao_min_hist else 0.0
+        min_outflow = vazao_min_hist_val if vazao_min_hist_val > 0 else 0.0
 
         # VAZMINT temporal overrides are now emitted as per-stage bounds in
         # hydro_bounds.parquet via convert_storage_bounds().  The static
@@ -1371,6 +1368,12 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             if not math.isnan(cf_val) and cf_val > 0.0:
                 tailrace = {"type": "polynomial", "coefficients": [cf_val]}
 
+        evaporation: dict | None = None
+        if has_evaporation:
+            evaporation = {"coefficients_mm": evap_coeffs}
+            if evap_reference_volumes is not None:
+                evaporation["reference_volumes_hm3"] = evap_reference_volumes
+
         hydro_entry: dict = {
             "id": id_map.hydro_id(newave_code),
             "name": name,
@@ -1402,18 +1405,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 )
             ],
             "specific_productivity_mw_per_m3s_per_m": rho_esp,
-            "evaporation": (
-                {
-                    "coefficients_mm": evap_coeffs,
-                    **(
-                        {"reference_volumes_hm3": evap_reference_volumes}
-                        if evap_reference_volumes is not None
-                        else {}
-                    ),
-                }
-                if has_evaporation
-                else None
-            ),
+            "evaporation": evaporation,
             "tailrace": tailrace,
             "diversion": None,
             "filling": filling,
@@ -2389,6 +2381,16 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
     heights: list[float] = []
     areas: list[float] = []
 
+    def _eval_poly(coeffs: list[float], x: np.ndarray) -> np.ndarray:
+        """Evaluate a 4th-degree polynomial: c0 + c1*x + ... + c4*x^4."""
+        return (
+            coeffs[0]
+            + coeffs[1] * x
+            + coeffs[2] * x**2
+            + coeffs[3] * x**3
+            + coeffs[4] * x**4
+        )
+
     for newave_code in id_map.all_hydro_codes:
         if newave_code not in cadastro.index:
             _LOG.warning(
@@ -2413,16 +2415,6 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
 
         # Polynomial coefficients for height -> area (m -> km2).
         ca_coeffs = [float(hreg[f"a{i}_cota_area"]) for i in range(5)]
-
-        def _eval_poly(coeffs: list[float], x: np.ndarray) -> np.ndarray:
-            """Evaluate a 4th-degree polynomial: c0 + c1*x + ... + c4*x^4."""
-            return (
-                coeffs[0]
-                + coeffs[1] * x
-                + coeffs[2] * x**2
-                + coeffs[3] * x**3
-                + coeffs[4] * x**4
-            )
 
         cobre_id = id_map.hydro_id(newave_code)
 
@@ -2751,6 +2743,9 @@ def convert_storage_bounds(
     # MODIF/GHMIN row. Drives the ramp-wins de-dup pass before the table build.
     is_ramp_vals: list[bool] = []
 
+    def _identity(val: float) -> float:
+        return val
+
     plant_codes_with_data = set(temporal_overrides) | set(ghmin_by_plant_stage)
     for newave_code in sorted(plant_codes_with_data):
         overrides = temporal_overrides.get(newave_code, [])
@@ -2783,9 +2778,6 @@ def convert_storage_bounds(
             _vm: float = vol_min,
         ) -> float:
             return _vm + (pct / 100.0) * _u
-
-        def _identity(val: float) -> float:
-            return val
 
         # Storage bounds (percentage -> hm³). Seasonal post-study iff the
         # corresponding dger flag is set; otherwise freeze.

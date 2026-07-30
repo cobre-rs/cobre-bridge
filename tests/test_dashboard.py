@@ -1340,8 +1340,6 @@ def test_load_inflow_lags_lf_present(_v2_case: Path) -> None:
 
 def test_compute_non_fictitious_bus_ids_filters_zero_load() -> None:
     """Bus with zero mean_mw in all stages is excluded; nonzero bus is included."""
-    import pandas as pd
-
     from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
 
     load_stats = pd.DataFrame(
@@ -1359,8 +1357,6 @@ def test_compute_non_fictitious_bus_ids_filters_zero_load() -> None:
 
 def test_compute_non_fictitious_bus_ids_all_nonzero() -> None:
     """All buses with nonzero load in at least one stage are returned sorted."""
-    import pandas as pd
-
     from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
 
     load_stats = pd.DataFrame(
@@ -1378,8 +1374,6 @@ def test_compute_non_fictitious_bus_ids_all_nonzero() -> None:
 
 def test_compute_non_fictitious_bus_ids_empty_df() -> None:
     """Empty DataFrame returns an empty list."""
-    import pandas as pd
-
     from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
 
     result = compute_non_fictitious_bus_ids(pd.DataFrame())
@@ -1389,8 +1383,6 @@ def test_compute_non_fictitious_bus_ids_empty_df() -> None:
 
 def test_compute_non_fictitious_bus_ids_missing_column() -> None:
     """DataFrame missing mean_mw column returns an empty list (defensive)."""
-    import pandas as pd
-
     from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
 
     load_stats = pd.DataFrame({"bus_id": [0, 1], "stage_id": [0, 0]})
