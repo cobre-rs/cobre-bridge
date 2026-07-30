@@ -32,6 +32,14 @@ def _build_case(case_dir: Path) -> None:
     system.mkdir(parents=True, exist_ok=True)
     (case_dir / "output").mkdir(parents=True, exist_ok=True)
 
+    # NOTE (ticket-004 boundary, epic 01 vs epic 03): this hydros.json fixture
+    # stays 0.12-shaped (top-level bus_id, no unit_groups) rather than being
+    # swept onto tests.conftest.hydro_with_group. It is fed straight into
+    # load_hydro_metadata (dashboard/data.py) and read_cobre_hydro_metadata
+    # (comparators/cobre_readers.py), neither of which reads
+    # unit_groups[].bus_id yet — that is epic-03 tickets 011/012's job.
+    # Sweeping this fixture now would just make this test fail without
+    # exercising anything ticket-004 changed.
     hydros = {
         "hydros": [
             {

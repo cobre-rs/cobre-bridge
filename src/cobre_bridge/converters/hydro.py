@@ -898,6 +898,57 @@ def _reduced_caps(
     return max_turbined, max_generation
 
 
+def build_mirror_unit_group(
+    *,
+    name: str,
+    bus_id: int,
+    min_generation_mw: float,
+    max_generation_mw: float,
+    min_turbined_m3s: float,
+    max_turbined_m3s: float,
+) -> dict[str, object]:
+    """Build the mandatory single "mirror" unit group for a hydro plant.
+
+    cobre requires every hydro to declare a non-empty ``unit_groups`` array
+    (``RawUnitGroup``, all seven fields present). Until the bridge models
+    real per-group machine partitions, every plant it emits gets exactly one
+    group whose bounds *mirror* the plant's own generation envelope
+    verbatim — no clamping, no zeroing of minima, no recomputation. With a
+    single group, ``sum(group maxima) == plant maximum`` holds trivially,
+    which is exactly what cobre rule 41 checks, so the rule is satisfied by
+    construction.
+
+    ``id`` is always ``0``: unit-group ids are dense and 0-based within a
+    plant, and a mirror group is the plant's only (hence first) group.
+
+    Parameters
+    ----------
+    name:
+        The plant name, used verbatim as the group name.
+    bus_id:
+        The plant's bus id.
+    min_generation_mw, max_generation_mw:
+        The plant's generation bounds in MW, passed through unchanged.
+    min_turbined_m3s, max_turbined_m3s:
+        The plant's turbined-flow bounds in m^3/s, passed through unchanged.
+
+    Returns
+    -------
+    dict[str, object]
+        Exactly the seven ``RawUnitGroup`` keys required by
+        ``hydros.schema.json`` — no extras.
+    """
+    return {
+        "id": 0,
+        "name": name,
+        "bus_id": bus_id,
+        "min_generation_mw": min_generation_mw,
+        "max_generation_mw": max_generation_mw,
+        "min_turbined_m3s": min_turbined_m3s,
+        "max_turbined_m3s": max_turbined_m3s,
+    }
+
+
 def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     """Read ``hidr.dat`` and apply permanent MODIF.DAT overrides.
 
@@ -1324,7 +1375,6 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             "id": id_map.hydro_id(newave_code),
             "name": name,
             "operational_start_date": operational_start_date,
-            "bus_id": bus_id,
             "downstream_id": downstream_id,
             "reservoir": {
                 "min_storage_hm3": vol_min,
@@ -1341,6 +1391,16 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 "min_generation_mw": min_generation,
                 "max_generation_mw": max_generation,
             },
+            "unit_groups": [
+                build_mirror_unit_group(
+                    name=name,
+                    bus_id=bus_id,
+                    min_generation_mw=min_generation,
+                    max_generation_mw=max_generation,
+                    min_turbined_m3s=0.0,
+                    max_turbined_m3s=max_turbined,
+                )
+            ],
             "specific_productivity_mw_per_m3s_per_m": rho_esp,
             "evaporation": (
                 {

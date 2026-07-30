@@ -249,12 +249,16 @@ class TestFphaConverters:
             "type": "constant",
             "value": pytest.approx(_REALISTIC_RHO_ESP / _K),
         }
+        # The fpha path also emits the mandatory mirror unit group (ticket 002).
+        assert len(reservoir["unit_groups"]) == 1
 
     def test_hydros_non_fpha_plant_stays_constant(self, tmp_path: Path) -> None:
         hydros = convert_hydros(self._case(tmp_path), self._id_map())["hydros"]
         non_fpha = next(h for h in hydros if h["id"] == 1)
         assert non_fpha["generation"]["model"] == "constant_productivity"
         assert non_fpha["efficiency"] is None
+        # The constant-productivity path also emits the mirror unit group.
+        assert len(non_fpha["unit_groups"]) == 1
 
     def test_hydros_fpha_off_all_constant(self, tmp_path: Path) -> None:
         hydros = convert_hydros(self._case(tmp_path, fpha=False), self._id_map())[

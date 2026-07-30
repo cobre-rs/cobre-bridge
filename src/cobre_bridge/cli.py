@@ -59,11 +59,14 @@ if TYPE_CHECKING:
 #: ``training.parallelism.backward_scheduler`` block (an opening-block scheduler,
 #: new in 0.12.0); under the config's strict unknown-key rejection an older cobre
 #: rejects it outright. (Since 0.10.0 every ``system/*.json`` entity also carries
-#: a required ``operational_start_date``.) So *all* converted cases require cobre
-#: >= this version. The manifest records it (single source of truth) and the
-#: ``--validate`` gate uses it to decide whether the installed cobre-python is new
-#: enough to validate the output.
-MIN_COBRE_VERSION = "0.12.0"
+#: a required ``operational_start_date``.) Since cobre 0.13.0 every hydro also
+#: carries a mandatory ``unit_groups`` array and no longer accepts the removed
+#: top-level ``bus_id`` (cobre decisions 13/14), and the windowed
+#: ``inflow_history`` the bridge now emits also targets 0.13. So *all* converted
+#: cases require cobre >= this version. The manifest records it (single source
+#: of truth) and the ``--validate`` gate uses it to decide whether the installed
+#: cobre-python is new enough to validate the output.
+MIN_COBRE_VERSION = "0.13.0"
 
 
 def _installed_cobre_python_version() -> str | None:
@@ -935,9 +938,10 @@ def _write_conversion_manifest(
         "stages": report.stage_count,
     }
     # Record the minimum cobre version the output requires. Every converted case
-    # now emits a ``training.parallelism.backward_scheduler`` block (cobre 0.12.0+)
-    # and ``operational_start_date`` on all system entities (cobre 0.10.0+), so the
-    # output is only loadable by cobre >= MIN_COBRE_VERSION.
+    # now emits a ``training.parallelism.backward_scheduler`` block (cobre 0.12.0+),
+    # ``operational_start_date`` on all system entities (cobre 0.10.0+), and a
+    # mandatory hydro ``unit_groups`` array with the top-level ``bus_id`` removed
+    # (cobre 0.13.0+), so the output is only loadable by cobre >= MIN_COBRE_VERSION.
     manifest = ConversionManifest.create(
         "convert newave",
         src,

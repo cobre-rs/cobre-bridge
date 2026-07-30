@@ -138,7 +138,8 @@ class TestConvertHydros:
 
         up = hydros[0]
         assert up["name"] == "UP_RES"
-        assert up["bus_id"] == 0
+        assert "bus_id" not in up
+        assert up["unit_groups"][0]["bus_id"] == 0
         # Plant 1 → 3 (not operated, skipped) → 2 (operated).
         assert up["downstream_id"] == 1
         assert up["reservoir"] == {
@@ -153,6 +154,32 @@ class TestConvertHydros:
         assert hydros[1]["downstream_id"] is None
         assert "coupling-only" in caplog.text
         assert "99" in caplog.text
+
+    def test_unit_groups_present_and_mirror_generation(self, caplog) -> None:
+        """Every hydro carries exactly one mirror unit group (cobre rule 41)
+        and no top-level ``bus_id`` (removed field)."""
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
+            doc = convert_hydros(
+                _StubDadger(uh=_uh_frame()), _hidr_frame(), _ID_MAP, date(2026, 7, 18)
+            )
+        for h in doc["hydros"]:
+            assert "bus_id" not in h
+            assert len(h["unit_groups"]) == 1
+            group = h["unit_groups"][0]
+            assert group.keys() == {
+                "id",
+                "name",
+                "bus_id",
+                "min_generation_mw",
+                "max_generation_mw",
+                "min_turbined_m3s",
+                "max_turbined_m3s",
+            }
+            gen = h["generation"]
+            assert group["min_generation_mw"] == pytest.approx(gen["min_generation_mw"])
+            assert group["max_generation_mw"] == pytest.approx(gen["max_generation_mw"])
+            assert group["min_turbined_m3s"] == pytest.approx(gen["min_turbined_m3s"])
+            assert group["max_turbined_m3s"] == pytest.approx(gen["max_turbined_m3s"])
 
     def test_initial_storage_formula(self) -> None:
         storage = convert_initial_storage(
@@ -265,7 +292,8 @@ class TestRealDecks:
         hydros = doc["hydros"]
         assert len(hydros) == len(id_map.hydro_codes)
         itaipu = next(h for h in hydros if h["name"] == "ITAIPU")
-        assert itaipu["bus_id"] == 0  # SE, single-bus interim
+        assert "bus_id" not in itaipu
+        assert itaipu["unit_groups"][0]["bus_id"] == 0  # SE, single-bus interim
         assert itaipu["downstream_id"] is None
 
         storage = convert_initial_storage(dadger, hidr, id_map)

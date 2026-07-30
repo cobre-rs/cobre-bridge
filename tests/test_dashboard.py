@@ -155,6 +155,9 @@ def test_load_stage_labels_falls_back_to_stage_id_when_start_date_absent(
 
 
 def test_load_hydro_bus_map_returns_mapping(tmp_path: Path) -> None:
+    # NOTE (ticket-004 boundary, epic 01 vs epic 03): stays 0.12-shaped
+    # (top-level bus_id) — load_hydro_bus_map itself still reads h["bus_id"]
+    # directly; switching it to unit_groups[].bus_id is epic-03 ticket-012.
     hydros_json = {
         "hydros": [
             {"id": 0, "bus_id": 10},
@@ -258,6 +261,9 @@ def test_load_ncs_bus_map_missing_file_returns_empty(tmp_path: Path) -> None:
 
 
 def test_load_hydro_metadata_extracts_fields(tmp_path: Path) -> None:
+    # NOTE (ticket-004 boundary, epic 01 vs epic 03): stays 0.12-shaped
+    # (top-level bus_id) — load_hydro_metadata itself still reads h["bus_id"]
+    # directly; switching it to unit_groups[].bus_id is epic-03 ticket-012.
     hydros_json = {
         "hydros": [
             {
@@ -541,6 +547,12 @@ class TestDashboardIntegration:
         _write_json(case / "config.json", {"num_scenarios": 2, "num_stages": 2})
 
         # ---- system/ JSON files ----
+        # NOTE (ticket-004 boundary, epic 01 vs epic 03): this hydros.json
+        # fixture stays 0.12-shaped (top-level bus_id, no unit_groups) — the
+        # full DashboardData.load() pipeline exercised below still reaches
+        # load_hydro_bus_map/load_hydro_metadata (dashboard/data.py), which
+        # read h["bus_id"] directly. Switching those readers to
+        # unit_groups[].bus_id is epic-03 ticket-012.
         _write_json(
             case / "system" / "hydros.json",
             {

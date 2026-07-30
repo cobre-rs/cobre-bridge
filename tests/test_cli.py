@@ -1014,6 +1014,43 @@ class TestCliInProcess:
         # The fake source dir's stub files were discovered and hashed.
         assert manifest.input_files
 
+    def test_conversion_manifest_records_min_cobre_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manifest's ``min_cobre_version`` tracks the CLI constant, pinned.
+
+        ticket-005: a manifest written after the bump must record the real
+        floor (``"0.13.0"``), not a stale value — the manifest is provenance,
+        and a wrong floor there is false provenance. Pinning the literal (not
+        just equality with the constant) catches an accidental revert of the
+        constant itself.
+        """
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.pipeline import ConversionReport
+
+        assert MIN_COBRE_VERSION == "0.13.0"
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        manifest = ConversionManifest.from_json(dst / "conversion_manifest.json")
+        assert manifest.min_cobre_version == "0.13.0"
+        assert manifest.min_cobre_version == MIN_COBRE_VERSION
+
     def test_manifest_not_in_json_verdict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1065,6 +1102,7 @@ class TestCliInProcess:
         """
         import types
 
+        from cobre_bridge.cli import MIN_COBRE_VERSION
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1078,6 +1116,14 @@ class TestCliInProcess:
             stage_count=60,
         )
 
+        # Fix the installed-version gate at exactly MIN_COBRE_VERSION so this
+        # test exercises the injected fake ``cobre.io.validate`` below
+        # regardless of whichever cobre-python happens to be installed in the
+        # dev/CI venv (which may itself now be older than MIN_COBRE_VERSION).
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version",
+            lambda: MIN_COBRE_VERSION,
+        )
         # Inject a fake ``cobre.io`` whose ``validate`` reports a failure with one
         # warning and two errors; the real ``cobre`` package is not installed.
         cobre_pkg = types.ModuleType("cobre")
@@ -1133,6 +1179,7 @@ class TestCliInProcess:
         """
         import types
 
+        from cobre_bridge.cli import MIN_COBRE_VERSION
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1149,6 +1196,14 @@ class TestCliInProcess:
         def _raise(_dst: str) -> dict[str, object]:
             raise RuntimeError("validator blew up")
 
+        # Fix the installed-version gate at exactly MIN_COBRE_VERSION so this
+        # test reaches (and exercises) the injected raising ``validate`` below
+        # regardless of whichever cobre-python happens to be installed in the
+        # dev/CI venv (which may itself now be older than MIN_COBRE_VERSION).
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version",
+            lambda: MIN_COBRE_VERSION,
+        )
         cobre_pkg = types.ModuleType("cobre")
         cobre_io = types.ModuleType("cobre.io")
         cobre_io.validate = _raise  # type: ignore[attr-defined]
@@ -1619,6 +1674,63 @@ class TestCliInProcess:
         validate.assert_not_called()
         assert "skipping cobre-python validation" in stderr
         assert MIN_COBRE_VERSION in stderr
+
+    def test_validate_skipped_for_installed_0_12_below_new_min(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ticket-005: a 0.12 install is now too old and gets an honest skip.
+
+        Before the ``MIN_COBRE_VERSION`` bump to ``"0.13.0"``, an installed
+        ``0.12.0`` satisfied the gate and ``validate`` ran — against output
+        that (post hydro unit-groups / windowed inflow_history) a 0.12 cobre
+        cannot actually read, producing a false rejection. At the new floor
+        the gate must skip instead: no ``validate`` call, exit 0, and a
+        warning naming *both* the installed and required versions so the
+        skip is diagnosable rather than a silent no-op.
+        """
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.pipeline import ConversionReport
+
+        assert MIN_COBRE_VERSION == "0.13.0"
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.12.0"
+        )
+        validate = self._inject_cobre_io(monkeypatch, MagicMock())
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json", "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        validate.assert_not_called()
+        # Does not fail, and does not silently pretend it validated: the
+        # warning names both versions, and the JSON summary is explicit that
+        # validation did not run (not that it ran and passed).
+        assert "skipping cobre-python validation" in stderr
+        assert "0.12.0" in stderr
+        assert "0.13.0" in stderr
+        assert MIN_COBRE_VERSION in stderr
+        doc = json.loads(stdout)
+        assert doc["status"] == "ok"
+        assert doc["summary"]["validation"] == {
+            "ran": False,
+            "valid": None,
+            "warnings": 0,
+            "errors": 0,
+            "skipped_reason": "cobre-python-too-old",
+        }
 
     def test_validate_runs_when_cobre_python_supports_schema(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

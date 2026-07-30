@@ -29,6 +29,7 @@ from cobre_bridge.converters.hydro import (
     _apply_hydraulic_loss,
     _compute_max_turbined_simple,
     _mean_cota_over_volume,
+    build_mirror_unit_group,
 )
 
 if TYPE_CHECKING:
@@ -134,7 +135,6 @@ def convert_hydros(
             "id": id_map.hydro_id(code),
             "name": name,
             "operational_start_date": op_date,
-            "bus_id": id_map.bus_id(int(hreg["submercado"])),
             "downstream_id": (
                 None if downstream is None else id_map.hydro_id(downstream)
             ),
@@ -153,6 +153,16 @@ def convert_hydros(
                 "min_generation_mw": 0.0,
                 "max_generation_mw": max_generation,
             },
+            "unit_groups": [
+                build_mirror_unit_group(
+                    name=name,
+                    bus_id=id_map.bus_id(int(hreg["submercado"])),
+                    min_generation_mw=0.0,
+                    max_generation_mw=max_generation,
+                    min_turbined_m3s=0.0,
+                    max_turbined_m3s=max_turbined,
+                )
+            ],
         }
         hydros.append(entry)
 

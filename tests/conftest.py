@@ -4,7 +4,10 @@
 with paths under a tmp dir (no filesystem access). ``make_case`` wraps it in a
 :class:`~cobre_bridge.case.NewaveCase` and pre-fills the requested cached reader
 slots, so a converter under test reads the supplied mock objects instead of
-parsing files. Import them with ``from tests.conftest import make_case``.
+parsing files. ``hydro_with_group`` builds a 0.13-shaped ``hydros.json`` hydro
+dict (no top-level ``bus_id``, one mirror ``unit_groups`` entry) for tests that
+hand-build a hydro fixture rather than calling a converter. Import them with
+``from tests.conftest import make_case``.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import pandas as pd
 import pytest
 
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.converters.hydro import build_mirror_unit_group
 from cobre_bridge.newave_files import NewaveFiles
 
 
@@ -140,3 +144,68 @@ def make_case(files_or_tmp: NewaveFiles | Path, **parsed: Any) -> NewaveCase:
         default_hidr.cadastro = pd.DataFrame()
         case.__dict__["hidr"] = default_hidr
     return case
+
+
+def hydro_with_group(
+    hydro_id: int,
+    bus_id: int,
+    *,
+    name: str | None = None,
+    min_generation_mw: float = 0.0,
+    max_generation_mw: float = 50.0,
+    min_turbined_m3s: float = 0.0,
+    max_turbined_m3s: float = 100.0,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build a 0.13-shaped ``hydros.json`` hydro dict for tests.
+
+    Matches the shape every converter now emits (cobre decisions 13/14 →
+    §7.6, §7.8, via
+    :func:`cobre_bridge.converters.hydro.build_mirror_unit_group`): no
+    top-level ``bus_id`` and a single seven-field mirror ``unit_groups``
+    entry whose four bounds equal this dict's own ``generation`` envelope
+    (cobre rule 41's mirror invariant).
+
+    Use this wherever a test needs "some hydro on bus N" rather than a
+    real converter output — it replaces a hand-rolled seven-field group
+    literal duplicated across test modules.
+
+    Parameters
+    ----------
+    hydro_id:
+        The Cobre 0-based hydro id.
+    bus_id:
+        The plant's bus id (relocated into ``unit_groups[0].bus_id``; no
+        longer emitted at the top level).
+    name:
+        The plant name. Defaults to ``f"HYDRO_{hydro_id}"``.
+    min_generation_mw, max_generation_mw, min_turbined_m3s, max_turbined_m3s:
+        The plant's generation envelope. Pass these where a test asserts
+        specific bounds, so the mirror group tracks them.
+    **extra:
+        Any additional top-level keys a test needs (``reservoir``,
+        ``outflow``, ``downstream_id``, etc.), merged in verbatim.
+    """
+    plant_name = name if name is not None else f"HYDRO_{hydro_id}"
+    hydro: dict[str, Any] = {
+        "id": hydro_id,
+        "name": plant_name,
+        "generation": {
+            "min_generation_mw": min_generation_mw,
+            "max_generation_mw": max_generation_mw,
+            "min_turbined_m3s": min_turbined_m3s,
+            "max_turbined_m3s": max_turbined_m3s,
+        },
+        "unit_groups": [
+            build_mirror_unit_group(
+                name=plant_name,
+                bus_id=bus_id,
+                min_generation_mw=min_generation_mw,
+                max_generation_mw=max_generation_mw,
+                min_turbined_m3s=min_turbined_m3s,
+                max_turbined_m3s=max_turbined_m3s,
+            )
+        ],
+    }
+    hydro.update(extra)
+    return hydro

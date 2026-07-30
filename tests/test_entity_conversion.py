@@ -19,7 +19,7 @@ from cobre_bridge import diagnostics as dx
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
-from tests.conftest import make_case, make_nw_files
+from tests.conftest import hydro_with_group, make_case, make_nw_files
 
 
 def _make_nw_files(
@@ -511,13 +511,24 @@ class TestConvertHydros:
             assert "id" in h
             assert "name" in h
             assert "operational_start_date" in h
-            assert "bus_id" in h
+            assert "bus_id" not in h
             assert "reservoir" in h
             assert "min_storage_hm3" in h["reservoir"]
             assert "max_storage_hm3" in h["reservoir"]
             assert "outflow" in h
             assert "generation" in h
             assert h["generation"]["model"] == "constant_productivity"
+            assert len(h["unit_groups"]) == 1
+            group = h["unit_groups"][0]
+            assert group.keys() == {
+                "id",
+                "name",
+                "bus_id",
+                "min_generation_mw",
+                "max_generation_mw",
+                "min_turbined_m3s",
+                "max_turbined_m3s",
+            }
 
     def test_run_of_river_S_storage_collapsed_to_vmin(self, tmp_path) -> None:
         """``tipo_regulacao='S'`` (fio-d'água) collapses storage to Vmin.
@@ -561,8 +572,9 @@ class TestConvertHydros:
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
-            # Both plants are in REE 1 -> subsystem 1 -> bus 0.
-            assert h["bus_id"] == 0
+            # Both plants are in REE 1 -> subsystem 1 -> bus 0. bus_id now
+            # lives on the mirror unit group (ticket 002), not top-level.
+            assert h["unit_groups"][0]["bus_id"] == 0
 
     def test_generation_values_match_machine_sets(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
@@ -579,6 +591,34 @@ class TestConvertHydros:
         # top-level optional field for cobre's energy-conversion pipeline.
         assert "productivity_mw_per_m3s" not in gen
         assert hydro_a["specific_productivity_mw_per_m3s_per_m"] == pytest.approx(0.9)
+
+    def test_unit_group_mirrors_generation_on_every_plant(self, tmp_path) -> None:
+        """cobre rule 41: the mirror group's four bounds equal the plant's own
+        ``generation`` bounds verbatim, for every plant (not just one)."""
+        case = _hydro_case(tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, self._make_id_map())
+        for h in result["hydros"]:
+            gen = h["generation"]
+            group = h["unit_groups"][0]
+            assert group["min_generation_mw"] == pytest.approx(gen["min_generation_mw"])
+            assert group["max_generation_mw"] == pytest.approx(gen["max_generation_mw"])
+            assert group["min_turbined_m3s"] == pytest.approx(gen["min_turbined_m3s"])
+            assert group["max_turbined_m3s"] == pytest.approx(gen["max_turbined_m3s"])
+
+    def test_output_never_regresses_to_the_0_12_shape(self, tmp_path) -> None:
+        """The real converter output has no top-level ``bus_id`` and a
+        non-empty ``unit_groups`` on every plant — the shape cobre 0.13's
+        ``hydros.schema.json`` requires (decisions 13/14), never the 0.12
+        shape asserted in ``TestLegacyHydroShapeRejectedBy013``."""
+        case = _hydro_case(tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, self._make_id_map())
+        for h in result["hydros"]:
+            assert "bus_id" not in h
+            assert h["unit_groups"]
 
     def test_schema_key_present(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
@@ -5093,8 +5133,10 @@ class TestCrossReferenceConsistency:
         valid_bus_ids = {b["id"] for b in buses_result["buses"]}
 
         for h in hydros_result["hydros"]:
-            assert h["bus_id"] in valid_bus_ids, (
-                f"Hydro '{h['name']}' has bus_id={h['bus_id']} not in buses"
+            group_bus_id = h["unit_groups"][0]["bus_id"]
+            assert group_bus_id in valid_bus_ids, (
+                f"Hydro '{h['name']}' has unit_groups[0].bus_id={group_bus_id}"
+                " not in buses"
             )
 
         for t in thermals_result["thermals"]:
@@ -6095,3 +6137,145 @@ class TestWaterWithdrawalConversion:
         assert result.num_rows == 1
         row = result.to_pydict()
         assert row["water_withdrawal_m3s"][0] == pytest.approx(4.0)
+
+
+class TestBuildMirrorUnitGroup:
+    """Unit tests for ``build_mirror_unit_group``."""
+
+    def test_returns_exactly_seven_keys(self) -> None:
+        """The returned dict has exactly the seven ``RawUnitGroup`` keys."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        group = build_mirror_unit_group(
+            name="PLANT",
+            bus_id=3,
+            min_generation_mw=0.0,
+            max_generation_mw=100.0,
+            min_turbined_m3s=0.0,
+            max_turbined_m3s=50.0,
+        )
+
+        assert set(group.keys()) == {
+            "id",
+            "name",
+            "bus_id",
+            "min_generation_mw",
+            "max_generation_mw",
+            "min_turbined_m3s",
+            "max_turbined_m3s",
+        }
+
+    def test_id_is_zero_and_name_unchanged(self) -> None:
+        """``id`` is always 0; ``name`` passes through verbatim."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        group = build_mirror_unit_group(
+            name="M. DE MORAES",
+            bus_id=1,
+            min_generation_mw=0.0,
+            max_generation_mw=10.0,
+            min_turbined_m3s=0.0,
+            max_turbined_m3s=5.0,
+        )
+
+        assert group["id"] == 0
+        assert group["name"] == "M. DE MORAES"
+
+    def test_bounds_pass_through_verbatim(self) -> None:
+        """All four bounds are returned unchanged, including a 0.0 minimum."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        group = build_mirror_unit_group(
+            name="PLANT",
+            bus_id=2,
+            min_generation_mw=12.5,
+            max_generation_mw=1400.0,
+            min_turbined_m3s=0.0,
+            max_turbined_m3s=980.3,
+        )
+
+        assert group["min_generation_mw"] == pytest.approx(12.5)
+        assert group["max_generation_mw"] == pytest.approx(1400.0)
+        assert group["min_turbined_m3s"] == pytest.approx(0.0)
+        assert group["max_turbined_m3s"] == pytest.approx(980.3)
+
+    def test_mirror_invariant_group_maxima_sum_to_plant_maximum(self) -> None:
+        """Nested under a plant, ``sum(group maxima) == plant maximum`` holds
+        for both ``max_turbined_m3s`` and ``max_generation_mw`` — the cobre
+        rule-41 invariant a single mirror group satisfies by construction."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        plant_max_generation_mw = 1400.0
+        plant_max_turbined_m3s = 980.3
+        plant = {
+            "name": "PLANT",
+            "max_generation_mw": plant_max_generation_mw,
+            "max_turbined_m3s": plant_max_turbined_m3s,
+            "unit_groups": [
+                build_mirror_unit_group(
+                    name="PLANT",
+                    bus_id=2,
+                    min_generation_mw=12.5,
+                    max_generation_mw=plant_max_generation_mw,
+                    min_turbined_m3s=0.0,
+                    max_turbined_m3s=plant_max_turbined_m3s,
+                )
+            ],
+        }
+
+        assert sum(
+            g["max_generation_mw"] for g in plant["unit_groups"]
+        ) == pytest.approx(plant["max_generation_mw"])
+        assert sum(
+            g["max_turbined_m3s"] for g in plant["unit_groups"]
+        ) == pytest.approx(plant["max_turbined_m3s"])
+
+    def test_keyword_only_signature_enforced(self) -> None:
+        """A positional call raises ``TypeError``."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        with pytest.raises(TypeError):
+            build_mirror_unit_group("PLANT", 2, 0.0, 100.0, 0.0, 50.0)
+
+
+class TestLegacyHydroShapeRejectedBy013:
+    """AC5 (ticket-004): document the exact shape 0.12 produced — a hydro dict
+    with a top-level ``bus_id`` and no ``unit_groups`` — and that no converter
+    emits it anymore.
+
+    cobre 0.13's ``hydros.schema.json`` rejects that shape on load:
+    ``additionalProperties: false`` denies the stray top-level ``bus_id``
+    (decision 14 → §7.8), and ``unit_groups`` is a required, non-empty array
+    (decision 13 → §7.6). This test asserts the *shape difference* only — it
+    does not load either dict into cobre or a jsonschema validator (E4 owns
+    real schema loads).
+    """
+
+    def test_0_12_shape_has_top_level_bus_id_and_no_unit_groups(self) -> None:
+        """The exact shape 0.12 emitted for a hydro plant."""
+        legacy_0_12_hydro = {
+            "id": 0,
+            "name": "PLANT",
+            "bus_id": 3,
+            "generation": {
+                "min_generation_mw": 0.0,
+                "max_generation_mw": 50.0,
+                "min_turbined_m3s": 0.0,
+                "max_turbined_m3s": 100.0,
+            },
+        }
+
+        assert "bus_id" in legacy_0_12_hydro
+        assert "unit_groups" not in legacy_0_12_hydro
+
+    def test_0_13_shape_has_neither(self) -> None:
+        """The shape every converter emits today — via the shared test helper,
+        so this pins the helper to the same invariant the real converters
+        satisfy (no top-level ``bus_id``, one mirror ``unit_groups`` entry).
+        ``TestConvertHydros.test_output_never_regresses_to_the_0_12_shape``
+        pins the same invariant against the real converter output."""
+        modern_hydro = hydro_with_group(0, bus_id=3)
+
+        assert "bus_id" not in modern_hydro
+        assert len(modern_hydro["unit_groups"]) == 1
+        assert modern_hydro["unit_groups"][0]["bus_id"] == 3
