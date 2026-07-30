@@ -24,7 +24,6 @@ import pyarrow as pa
 
 from cobre_bridge.converters.network import (
     _BUSES_SCHEMA_URL,
-    _EXCHANGE_FACTORS_SCHEMA_URL,
     _LINES_SCHEMA_URL,
 )
 
@@ -138,11 +137,10 @@ def convert_lines_placeholder() -> dict:
     for a lineless study is tracked cobre-gap C4,
     ``plans/conversion-found-improvements.md`` in the cobre repo.)
     """
-    _LOG_MESSAGE = (
+    logging.getLogger(__name__).warning(
         "exchange network deferred (IA accessor fix upstream): emitting an "
         "empty lines.json — subsystems are unconnected and self-balance"
     )
-    logging.getLogger(__name__).warning(_LOG_MESSAGE)
     return {"$schema": _LINES_SCHEMA_URL, "lines": []}
 
 
@@ -209,20 +207,34 @@ def _ia_dense(
     return dense
 
 
+_LINE_BOUNDS_SCHEMA = pa.schema(
+    [
+        pa.field("line_id", pa.int32(), nullable=False),
+        pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("direct_mw", pa.float64(), nullable=False),
+        pa.field("reverse_mw", pa.float64(), nullable=False),
+        pa.field("block_id", pa.int32(), nullable=True),
+    ]
+)
+
+
 def convert_lines(
     dadger: Dadger,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
     start_date: date,
-) -> tuple[dict, pa.Table, dict]:
+) -> tuple[dict, pa.Table]:
     """Convert the ``IA`` exchange network.
 
-    Returns ``(lines.json dict, line_bounds table, exchange_factors dict)``:
-    one line per declared pair, the per-stage base capacity as the maximum
-    block limit of each direction, and the per-block shape as exchange
-    factors (``factor_b = limit_b / base``) — emitted only for
-    (line, stage) entries whose blocks actually differ. The unbounded
-    sentinel (99999) passes through as a plain large capacity.
+    Returns ``(lines.json dict, line_bounds table)``: one line per declared
+    pair, plus a ``line_bounds`` table carrying a stage-level base row
+    (``block_id = None``) whose direct/reverse capacity is the maximum block
+    limit of each direction, and — only for (line, stage) entries whose
+    blocks actually differ from that base — one per-block override row
+    (``block_id = 0..n-1``) per declared block. Base and block rows coexist
+    (cobre rule 36). Block rows carry the ``IA`` record's own per-block
+    limit as an absolute MW value, read directly with no factor round-trip.
+    The unbounded sentinel (99999) passes through as a plain large capacity.
     """
     dense = _ia_dense(dadger, calendar)
     op_date = start_date.isoformat()
@@ -237,7 +249,7 @@ def convert_lines(
     bounds_stage_ids: list[int] = []
     bounds_direct: list[float] = []
     bounds_reverse: list[float] = []
-    factor_entries: list[dict] = []
+    bounds_block_ids: list[int | None] = []
 
     for line_id, pair in enumerate(pairs):
         per_stage = dense[pair]
@@ -263,36 +275,25 @@ def convert_lines(
             bounds_stage_ids.append(stage.index)
             bounds_direct.append(direct_base)
             bounds_reverse.append(reverse_base)
+            bounds_block_ids.append(None)
 
-            block_factors = []
-            uniform = True
-            for b, (d, r) in enumerate(
-                zip(limits["de_para"], limits["para_de"], strict=True)
-            ):
-                d_factor = d / direct_base if direct_base > 0 else 1.0
-                r_factor = r / reverse_base if reverse_base > 0 else 1.0
-                if d_factor <= 0.0 or r_factor <= 0.0:
-                    raise ValueError(
-                        f"line {pair[0]}-{pair[1]} stage {stage.index}: zero "
-                        f"block limit (block {b}) has no factor encoding"
-                    )
-                if d_factor != 1.0 or r_factor != 1.0:
-                    uniform = False
-                block_factors.append(
-                    {
-                        "block_id": b,
-                        "direct_factor": d_factor,
-                        "reverse_factor": r_factor,
-                    }
-                )
+            # Per-block rows carry the IA record's own de_para/para_de
+            # values directly, as absolute MW — no factor round-trip, so
+            # no division and no reconstruction error. A block whose limit
+            # is 0.0 is now an ordinary bound (direct_mw = 0.0 / reverse_mw
+            # = 0.0): the previous factor encoding had no representation
+            # for a zero limit and raised on it; under absolute MW that
+            # case no longer exists, so the raise is gone and nothing
+            # replaces it.
+            blocks = list(zip(limits["de_para"], limits["para_de"], strict=True))
+            uniform = all(d == direct_base and r == reverse_base for d, r in blocks)
             if not uniform:
-                factor_entries.append(
-                    {
-                        "line_id": line_id,
-                        "stage_id": stage.index,
-                        "block_factors": block_factors,
-                    }
-                )
+                for b, (d, r) in enumerate(blocks):
+                    bounds_line_ids.append(line_id)
+                    bounds_stage_ids.append(stage.index)
+                    bounds_direct.append(d)
+                    bounds_reverse.append(r)
+                    bounds_block_ids.append(b)
 
     bounds = pa.table(
         {
@@ -300,15 +301,13 @@ def convert_lines(
             "stage_id": pa.array(bounds_stage_ids, type=pa.int32()),
             "direct_mw": pa.array(bounds_direct, type=pa.float64()),
             "reverse_mw": pa.array(bounds_reverse, type=pa.float64()),
-        }
+            "block_id": pa.array(bounds_block_ids, type=pa.int32()),
+        },
+        schema=_LINE_BOUNDS_SCHEMA,
     )
     return (
         {"$schema": _LINES_SCHEMA_URL, "lines": lines},
         bounds,
-        {
-            "$schema": _EXCHANGE_FACTORS_SCHEMA_URL,
-            "exchange_factors": factor_entries,
-        },
     )
 
 

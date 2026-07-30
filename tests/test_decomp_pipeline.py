@@ -158,7 +158,6 @@ _EXPECTED_ARTIFACTS = [
     "scenarios/non_controllable_factors.json",
     "constraints/thermal_bounds.parquet",
     "constraints/line_bounds.parquet",
-    "constraints/exchange_factors.json",
     "constraints/hydro_bounds.parquet",
 ]
 
@@ -175,6 +174,9 @@ class TestPipeline:
 
         for artifact in _EXPECTED_ARTIFACTS:
             assert (dst / artifact).is_file(), artifact
+        # The exchange-factors document is retired: line_bounds carries the
+        # per-block absolute-MW rows directly, so nothing writes this file.
+        assert not (dst / "constraints" / "exchange_factors.json").exists()
 
         stages = json.loads((dst / "stages.json").read_text())
         assert len(stages["stages"]) == 3

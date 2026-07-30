@@ -66,9 +66,9 @@ def _ia_frame() -> pd.DataFrame:
 
 
 class TestConvertLines:
-    def test_lines_bounds_and_factors(self) -> None:
+    def test_lines_and_base_bounds(self) -> None:
         calendar = _calendar()
-        lines_doc, bounds, factors = convert_lines(
+        lines_doc, bounds = convert_lines(
             _StubDadger(ia=_ia_frame()), _ID_MAP, calendar, date(2026, 7, 18)
         )
         lines = lines_doc["lines"]
@@ -79,20 +79,42 @@ class TestConvertLines:
         assert se_iv["capacity"]["reverse_mw"] == 11275.0
 
         table = bounds.to_pandas()
-        assert len(table) == 2 * 3
+        base_rows = table[table["block_id"].isna()]
+        assert len(base_rows) == 2 * 3  # one base row per (line, stage)
         s_iv_id = next(line["id"] for line in lines if line["name"] == "S-IV")
-        s_iv = table[table["line_id"] == s_iv_id].set_index("stage_id")
+        s_iv = base_rows[base_rows["line_id"] == s_iv_id].set_index("stage_id")
         assert s_iv.loc[1, "direct_mw"] == 5000.0  # inherited
         assert s_iv.loc[2, "direct_mw"] == 5500.0
 
-        entries = factors["exchange_factors"]
-        # Only SE-IV's reverse direction varies per block.
-        assert {e["line_id"] for e in entries} == {se_iv["id"]}
-        stage0 = next(e for e in entries if e["stage_id"] == 0)
-        assert stage0["block_factors"][0]["reverse_factor"] == pytest.approx(
-            9800.0 / 11275.0
+    def test_block_bounds_are_absolute_mw_no_factor(self) -> None:
+        calendar = _calendar()
+        lines_doc, bounds = convert_lines(
+            _StubDadger(ia=_ia_frame()), _ID_MAP, calendar, date(2026, 7, 18)
         )
-        assert stage0["block_factors"][0]["direct_factor"] == 1.0
+        lines = lines_doc["lines"]
+        se_iv_id = next(line["id"] for line in lines if line["name"] == "SE-IV")
+        s_iv_id = next(line["id"] for line in lines if line["name"] == "S-IV")
+
+        table = bounds.to_pandas()
+
+        # S-IV's blocks never differ from the base: no block rows at all.
+        assert s_iv_id not in set(table[table["block_id"].notna()]["line_id"])
+
+        # SE-IV's reverse direction varies per block; the absolute MW value
+        # comes straight from the IA record's own per-block limit columns,
+        # not from dividing by the base to build a factor.
+        stage0 = table[(table["line_id"] == se_iv_id) & (table["stage_id"] == 0)]
+
+        def _reverse_mw(block_id: int) -> float:
+            row = stage0[stage0["block_id"] == block_id]
+            assert len(row) == 1
+            return float(row.iloc[0]["reverse_mw"])
+
+        assert _reverse_mw(0) == 9800.0
+        assert _reverse_mw(1) == 9800.0
+        assert _reverse_mw(2) == 11275.0
+        block_rows = stage0[stage0["block_id"].notna()]
+        assert set(block_rows["direct_mw"]) == {6500.0}
 
     def test_missing_stage_one_raises(self) -> None:
         ia = _ia_frame()

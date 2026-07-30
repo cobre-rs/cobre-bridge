@@ -105,11 +105,21 @@ def compute_line_bounds(
     Since :mod:`comparators.bounds` also reads the converter's
     ``line_bounds.parquet`` as the "actual" side, this is a recompute-vs-on-disk
     consistency check.
+
+    ``convert_line_bounds`` now also emits per-block override rows
+    (``block_id`` set) alongside the stage-level base row (``block_id is
+    None``) — cobre decision 10 (epic 02 §7.2). Only the base rows are used
+    here: this dict is keyed by ``(line_id, stage_id)`` with no block
+    dimension, so folding block rows in would let a later row silently
+    overwrite the base capacity for any stage with a differing block, rather
+    than raising or comparing per block. Block-level fidelity is not yet this
+    check's job — a future ticket may extend the comparison to be block-aware.
     """
     from cobre_bridge.converters.network import convert_line_bounds
 
     table = convert_line_bounds(case, id_map)
-    cols = table.to_pydict()
+    base_rows = table.filter(table["block_id"].is_null())
+    cols = base_rows.to_pydict()
     result: dict[tuple[int, int, str], float] = {}
     for line_id, stage_id, direct_mw, reverse_mw in zip(
         cols["line_id"],

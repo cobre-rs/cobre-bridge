@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -10,8 +11,8 @@ import pytest
 
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.load import convert_load_factors, convert_load_stats
-from cobre_bridge.decomp.network import convert_buses
-from cobre_bridge.decomp.temporal import build_operative_calendar
+from cobre_bridge.decomp.network import convert_buses, convert_lines
+from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 
 _RV0_DECK = Path("example/decomp-set-24-rv0/dadger.rv0")
 _RV3_DECK = Path("example/decomp-jul-26-rv3/dadger.rv3")
@@ -28,15 +29,16 @@ def _calendar_rv3():
 
 
 class _StubDadger:
-    """Minimal Dadger stand-in carrying sb/cd/dp DataFrames."""
+    """Minimal Dadger stand-in carrying sb/cd/dp/ia DataFrames."""
 
     def __init__(
         self,
         sb: pd.DataFrame | None = None,
         cd: pd.DataFrame | None = None,
         dp: pd.DataFrame | None = None,
+        ia: pd.DataFrame | None = None,
     ) -> None:
-        self._sb, self._cd, self._dp = sb, cd, dp
+        self._sb, self._cd, self._dp, self._ia = sb, cd, dp, ia
 
     def sb(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return self._sb
@@ -46,6 +48,9 @@ class _StubDadger:
 
     def dp(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return self._dp
+
+    def ia(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return self._ia
 
 
 def _cd_frame(
@@ -227,3 +232,216 @@ class TestRealDecks:
         se_stage0 = stats[(stats["bus_id"] == 0) & (stats["stage_id"] == 0)]
         expected = (47751.0 * 15 + 45562.0 * 64 + 38982.0 * 89) / 168.0
         assert se_stage0["mean_mw"].iloc[0] == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# Ticket 008: convert_lines migration fidelity + zero-capability.
+#
+# Ticket 007's `test_block_bounds_are_absolute_mw_no_factor`
+# (test_decomp_idecomp112.py) already pins the pass-through identity on a
+# synthetic fixture. These tests pin the same identity plus a row-count
+# guard on BOTH production decks -- independently re-reading the raw ``IA``
+# dataframe rather than convert_lines'/``_ia_dense``'s own dense dict -- and
+# the synthetic zero-capability case no real deck exercises (measured: zero
+# zeros in either production deck's ``IA`` records).
+# ---------------------------------------------------------------------------
+
+
+def _declared_ia_rows(ia: pd.DataFrame) -> dict[tuple[str, str], dict[int, pd.Series]]:
+    """Independent per-pair, per-declared-stage IA rows (0-based stage index).
+
+    Mirrors the sparse-stage-inheritance contract documented on
+    ``decomp.network._ia_dense`` ("declared stages forward-filled") --
+    built fresh from the raw IA dataframe, never touching that function's
+    own dense dict.
+    """
+    declared: dict[tuple[str, str], dict[int, pd.Series]] = {}
+    for _, row in ia.iterrows():
+        pair = (
+            str(row["nome_submercado_de"]).strip(),
+            str(row["nome_submercado_para"]).strip(),
+        )
+        declared.setdefault(pair, {})[int(row["estagio"]) - 1] = row
+    return declared
+
+
+def _forward_filled_row(declared: dict[int, pd.Series], stage_index: int) -> pd.Series:
+    """The declared IA row governing *stage_index* under forward-fill
+    inheritance: the latest declared stage at or before it."""
+    candidates = [s for s in declared if s <= stage_index]
+    return declared[max(candidates)]
+
+
+class TestConvertLinesRealDeckFidelity:
+    """Ticket 008 acceptance criteria 2 + 4: block rows equal the ``IA``
+    record's own per-block limit columns exactly on both production decks,
+    and the per-block row count is asserted against the number of (line,
+    stage) pairs whose blocks genuinely differ from the base -- this
+    pipeline emits block rows per (line, stage), not per block, so a
+    non-uniform stage's *every* block gets a row, including any block that
+    individually equals the base (see ``convert_lines``'s ``uniform`` check).
+    """
+
+    def _load(
+        self, deck_path: Path
+    ) -> tuple[
+        list[dict],
+        pd.DataFrame,
+        Sequence[OperativeStage],
+        DecompIdMap,
+        dict[tuple[str, str], dict[int, pd.Series]],
+    ]:
+        if not deck_path.exists():
+            pytest.skip("real deck not present")
+        from idecomp.decomp import Dadger
+
+        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
+
+        dadger = Dadger.read(str(deck_path))
+        id_map = DecompIdMap.from_dadger(dadger)
+        calendar = operative_calendar_from_dadger(dadger)
+        lines_doc, bounds = convert_lines(
+            dadger, id_map, calendar, calendar[0].start_date
+        )
+        declared = _declared_ia_rows(dadger.ia(df=True))
+        return lines_doc["lines"], bounds.to_pandas(), calendar, id_map, declared
+
+    def _expected_blocks(
+        self,
+        lines: list[dict],
+        calendar: Sequence[OperativeStage],
+        id_map: DecompIdMap,
+        declared: dict[tuple[str, str], dict[int, pd.Series]],
+    ) -> dict[tuple[int, int], tuple[list[float], list[float]] | None]:
+        """``{(line_id, stage_index): (direct_vals, reverse_vals) | None}``.
+
+        ``None`` marks a (line, stage) whose blocks are uniform with the
+        base -- no block rows expected. Otherwise the full per-block
+        direct/reverse value lists, read straight off the forward-filled
+        IA row.
+        """
+        expected: dict[tuple[int, int], tuple[list[float], list[float]] | None] = {}
+        for line in lines:
+            pair = (
+                id_map.bus_name(line["source_bus_id"]),
+                id_map.bus_name(line["target_bus_id"]),
+            )
+            for stage in calendar:
+                row = _forward_filled_row(declared[pair], stage.index)
+                n_blocks = len(stage.block_hours)
+                direct_vals = [
+                    float(row[f"limite_de_para_{k}"]) for k in range(1, n_blocks + 1)
+                ]
+                reverse_vals = [
+                    float(row[f"limite_para_de_{k}"]) for k in range(1, n_blocks + 1)
+                ]
+                base_direct, base_reverse = max(direct_vals), max(reverse_vals)
+                uniform = all(
+                    d == base_direct and r == base_reverse
+                    for d, r in zip(direct_vals, reverse_vals, strict=True)
+                )
+                key = (line["id"], stage.index)
+                expected[key] = None if uniform else (direct_vals, reverse_vals)
+        return expected
+
+    @pytest.mark.parametrize("deck_path", [_RV0_DECK, _RV3_DECK], ids=["rv0", "rv3"])
+    def test_block_rows_are_the_ia_columns_verbatim(self, deck_path: Path) -> None:
+        lines, df, calendar, id_map, declared = self._load(deck_path)
+        expected = self._expected_blocks(lines, calendar, id_map, declared)
+
+        checked = 0
+        for (line_id, stage_index), values in expected.items():
+            if values is None:
+                continue
+            direct_vals, reverse_vals = values
+            block_rows = df[
+                (df["line_id"] == line_id)
+                & (df["stage_id"] == stage_index)
+                & df["block_id"].notna()
+            ]
+            for b in range(len(direct_vals)):
+                emitted = block_rows[block_rows["block_id"] == b]
+                assert len(emitted) == 1
+                assert emitted.iloc[0]["direct_mw"] == direct_vals[b]
+                assert emitted.iloc[0]["reverse_mw"] == reverse_vals[b]
+                checked += 1
+        assert checked > 0, (
+            "the real deck must exercise at least one differing (line, "
+            "stage) pair for this fidelity check to be meaningful"
+        )
+
+    @pytest.mark.parametrize("deck_path", [_RV0_DECK, _RV3_DECK], ids=["rv0", "rv3"])
+    def test_block_row_count_matches_differing_stage_pairs(
+        self, deck_path: Path
+    ) -> None:
+        lines, df, calendar, id_map, declared = self._load(deck_path)
+        expected = self._expected_blocks(lines, calendar, id_map, declared)
+
+        expected_rows = sum(
+            len(values[0]) for values in expected.values() if values is not None
+        )
+        actual_rows = int(df["block_id"].notna().sum())
+        assert expected_rows > 0, (
+            "the real deck must exercise at least one differing (line, "
+            "stage) pair for this row-count guard to be meaningful"
+        )
+        assert actual_rows == expected_rows
+
+
+def _ia_zero_block_frame() -> pd.DataFrame:
+    """One SE-IV exchange row whose block-0 ``de_para`` limit sits at
+    exactly zero and whose other blocks are non-zero and distinct from the
+    base -- the shape the deleted multiplicative-factor encoding could
+    never represent (factors are strictly positive)."""
+    return pd.DataFrame(
+        [
+            {
+                "estagio": 1,
+                "nome_submercado_de": "SE",
+                "nome_submercado_para": "IV",
+                "limite_de_para_1": 0.0,
+                "limite_de_para_2": 5000.0,
+                "limite_de_para_3": 6000.0,
+                "limite_para_de_1": 9000.0,
+                "limite_para_de_2": 9000.0,
+                "limite_para_de_3": 9000.0,
+            }
+        ]
+    )
+
+
+class TestConvertLinesZeroCapability:
+    """cobre decision 10 makes ``direct_mw = 0.0`` an ordinary bound; the
+    ``raise`` this replaced only ever fired on a zero-limit round-trip that
+    no longer exists (see the capability-gain comment at ``convert_lines``,
+    ``decomp/network.py``). No current deck exercises a zero IA limit
+    (measured: zero zeros in both production decks' ``IA`` records), so
+    this synthetic fixture pins the new capability (ticket 008 acceptance
+    criterion 3)."""
+
+    def test_zero_block_limit_converts_without_raising(self) -> None:
+        calendar = _calendar_rv3()
+        lines_doc, bounds = convert_lines(
+            _StubDadger(ia=_ia_zero_block_frame()),
+            _ID_MAP,
+            calendar,
+            date(2026, 7, 18),
+        )  # must not raise
+        line_id = lines_doc["lines"][0]["id"]
+        df = bounds.to_pandas()
+
+        zero_row = df[
+            (df["line_id"] == line_id) & (df["stage_id"] == 0) & (df["block_id"] == 0)
+        ]
+        assert len(zero_row) == 1
+        assert zero_row.iloc[0]["direct_mw"] == 0.0
+        assert zero_row.iloc[0]["reverse_mw"] == 9000.0
+
+        # Block 1 is non-zero and distinct from the base (6000.0), proving
+        # it is genuinely unaffected rather than coincidentally matching it.
+        other_block = df[
+            (df["line_id"] == line_id) & (df["stage_id"] == 0) & (df["block_id"] == 1)
+        ]
+        assert len(other_block) == 1
+        assert other_block.iloc[0]["direct_mw"] == 5000.0
+        assert other_block.iloc[0]["reverse_mw"] == 9000.0

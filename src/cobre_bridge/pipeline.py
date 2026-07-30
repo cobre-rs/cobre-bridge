@@ -483,14 +483,11 @@ def _convert_newave_case_impl(
     logger.debug("Converting load factors")
     load_factors_dict = stochastic_conv.convert_load_factors(case, id_map)
 
-    logger.debug("Converting line bounds")
+    logger.debug("Converting line bounds (folds in per-block exchange factors)")
     line_bounds_table = network_conv.convert_line_bounds(case, id_map)
 
     logger.debug("Converting non-controllable sources")
     ncs_dict = network_conv.convert_non_controllable_sources(case, id_map)
-
-    logger.debug("Converting exchange factors")
-    exchange_factors_dict = network_conv.convert_exchange_factors(case, id_map)
 
     logger.debug("Converting NCS block factors")
     ncs_factors_dict = network_conv.convert_ncs_factors(case, id_map)
@@ -556,7 +553,6 @@ def _convert_newave_case_impl(
     _write_json(dst / "system" / "lines.json", lines_dict)
     _write_json(dst / "system" / "non_controllable_sources.json", ncs_dict)
     _write_json(dst / "scenarios" / "load_factors.json", load_factors_dict)
-    _write_json(dst / "constraints" / "exchange_factors.json", exchange_factors_dict)
     _write_json(dst / "scenarios" / "non_controllable_factors.json", ncs_factors_dict)
 
     _write_json(dst / "system" / "hydro_production_models.json", production_models_dict)
@@ -607,8 +603,6 @@ def _convert_newave_case_impl(
     _write_parquet(inflow_history_table, history_path)
 
     constraints_dir = dst / "constraints"
-    if not dry_run:
-        constraints_dir.mkdir(parents=True, exist_ok=True)
     line_bounds_path = constraints_dir / "line_bounds.parquet"
     _write_parquet(line_bounds_table, line_bounds_path)
 

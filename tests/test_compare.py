@@ -13,11 +13,6 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pytest
 
-from cobre_bridge.comparators.alignment import (
-    EntityAlignment,
-    HydroEntity,
-    ThermalEntity,
-)
 from cobre_bridge.comparators.bounds import (
     BoundComparison,
     _bounds_match,
@@ -28,7 +23,6 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     build_results_summary,
 )
-from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import make_case
 
 # -------------------------------------------------------------------
@@ -68,36 +62,6 @@ class TestBoundsHelpers:
 
 
 class TestResultsComparison:
-    @staticmethod
-    def _make_alignment() -> EntityAlignment:
-        return EntityAlignment(
-            hydros=[
-                HydroEntity(
-                    newave_code=1,
-                    cobre_id=0,
-                    name="PLANT_A",
-                    has_reservoir=True,
-                ),
-            ],
-            thermals=[
-                ThermalEntity(
-                    newave_code=10,
-                    cobre_id=0,
-                    name="THERMAL_A",
-                ),
-            ],
-            lines=[],
-            num_newave_stages=3,
-        )
-
-    @staticmethod
-    def _make_id_map() -> NewaveIdMap:
-        return NewaveIdMap(
-            subsystem_ids=[1],
-            hydro_codes=[1],
-            thermal_codes=[10],
-        )
-
     def test_build_results_summary_empty(self) -> None:
         summary = build_results_summary([])
         assert summary.total == 0
@@ -771,6 +735,7 @@ class TestBoundsFromInputs:
                 "stage_id": pa.array([0], pa.int32()),
                 "direct_mw": pa.array([500.0], pa.float64()),
                 "reverse_mw": pa.array([300.0], pa.float64()),
+                "block_id": pa.array([None], pa.int32()),
             }
         )
         case = make_case(tmp_path)
@@ -782,6 +747,41 @@ class TestBoundsFromInputs:
 
         assert result[(0, 0, "direct_flow_max")] == 500.0
         assert result[(0, 0, "reverse_flow_max")] == 300.0
+
+    def test_compute_line_bounds_ignores_per_block_override_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """A per-block override row must not shadow the stage-level base row.
+
+        Regression test: before the ``block_id is None`` filter was added,
+        building the result dict by iterating every row (base row then block
+        rows) let the last-seen row for a given (line_id, stage_id) silently
+        overwrite the base capacity — collapsing to a block's absolute MW
+        instead of the line's declared capacity.
+        """
+        from cobre_bridge.comparators.bounds_from_inputs import compute_line_bounds
+
+        table = pa.table(
+            {
+                "line_id": pa.array([0, 0], pa.int32()),
+                "stage_id": pa.array([0, 0], pa.int32()),
+                "direct_mw": pa.array([500.0, 450.0], pa.float64()),
+                "reverse_mw": pa.array([300.0, 270.0], pa.float64()),
+                "block_id": pa.array([None, 0], pa.int32()),
+            }
+        )
+        case = make_case(tmp_path)
+        with patch(
+            "cobre_bridge.converters.network.convert_line_bounds",
+            return_value=table,
+        ):
+            result = compute_line_bounds(case, MagicMock())
+
+        # The base row's capacity (500.0 / 300.0), not the block row's
+        # (450.0 / 270.0), must survive.
+        assert result[(0, 0, "direct_flow_max")] == 500.0
+        assert result[(0, 0, "reverse_flow_max")] == 300.0
+        assert len(result) == 2
 
 
 class TestCompareHydrosProductivity:

@@ -20,33 +20,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from idecomp.decomp import Dadger, Vazoes
 
-from cobre_bridge.decomp import (
-    bounds as bounds_conv,
-)
-from cobre_bridge.decomp import (
-    config as config_conv,
-)
-from cobre_bridge.decomp import (
-    hydro as hydro_conv,
-)
-from cobre_bridge.decomp import (
-    load as load_conv,
-)
-from cobre_bridge.decomp import (
-    ncs as ncs_conv,
-)
-from cobre_bridge.decomp import (
-    network as network_conv,
-)
-from cobre_bridge.decomp import (
-    scenarios as scenarios_conv,
-)
-from cobre_bridge.decomp import (
-    temporal as temporal_conv,
-)
-from cobre_bridge.decomp import (
-    thermal as thermal_conv,
-)
+from cobre_bridge.decomp import bounds as bounds_conv
+from cobre_bridge.decomp import config as config_conv
+from cobre_bridge.decomp import hydro as hydro_conv
+from cobre_bridge.decomp import load as load_conv
+from cobre_bridge.decomp import ncs as ncs_conv
+from cobre_bridge.decomp import network as network_conv
+from cobre_bridge.decomp import scenarios as scenarios_conv
+from cobre_bridge.decomp import temporal as temporal_conv
+from cobre_bridge.decomp import thermal as thermal_conv
 from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -187,7 +169,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         system / "hydros.json",
         hydro_conv.convert_hydros(dadger, hidr, id_map, start_date),
     )
-    lines_doc, line_bounds, exchange_factors = network_conv.convert_lines(
+    lines_doc, line_bounds = network_conv.convert_lines(
         dadger, id_map, calendar, start_date
     )
     _write_json(system / "lines.json", lines_doc)
@@ -255,7 +237,6 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         thermal_conv.convert_thermal_bounds(dadger, id_map, calendar),
     )
     _write_parquet(constraints / "line_bounds.parquet", line_bounds)
-    _write_json(constraints / "exchange_factors.json", exchange_factors)
     hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, hidr, id_map, calendar)
     if hydro_bounds.num_rows:
         _write_parquet(constraints / "hydro_bounds.parquet", hydro_bounds)

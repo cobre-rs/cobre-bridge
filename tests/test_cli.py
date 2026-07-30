@@ -32,10 +32,10 @@ _FAKE_LINE_BOUNDS_TABLE = pa.table(
         "stage_id": pa.array([], type=pa.int32()),
         "direct_mw": pa.array([], type=pa.float64()),
         "reverse_mw": pa.array([], type=pa.float64()),
+        "block_id": pa.array([], type=pa.int32()),
     }
 )
 _FAKE_NCS: dict = {"non_controllable_sources": []}
-_FAKE_EXCHANGE_FACTORS: dict = {"exchange_factors": []}
 _FAKE_NCS_FACTORS: dict = {"non_controllable_factors": []}
 _FAKE_NCS_BOUNDS_TABLE = pa.table(
     {
@@ -311,10 +311,6 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
             return_value=_FAKE_NCS,
         ),
         patch(
-            "cobre_bridge.pipeline.network_conv.convert_exchange_factors",
-            return_value=_FAKE_EXCHANGE_FACTORS,
-        ),
-        patch(
             "cobre_bridge.pipeline.network_conv.convert_ncs_factors",
             return_value=_FAKE_NCS_FACTORS,
         ),
@@ -383,12 +379,40 @@ class TestConvertNewaweCasePipeline:
             dst / "scenarios" / "load_factors.json",
             dst / "constraints" / "line_bounds.parquet",
             dst / "system" / "non_controllable_sources.json",
-            dst / "constraints" / "exchange_factors.json",
             dst / "scenarios" / "non_controllable_factors.json",
             dst / "scenarios" / "non_controllable_stats.parquet",
         ]
         for f in expected:
             assert f.exists(), f"Expected output file not found: {f}"
+
+    def test_exchange_factors_json_is_not_written(self, tmp_path: Path) -> None:
+        """The per-block exchange factors are folded into line_bounds.parquet
+        (cobre decision 10); the pipeline must not write the deleted file."""
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+
+        _run_with_all_mocks(src, dst)
+
+        assert not (dst / "constraints" / "exchange_factors.json").exists()
+
+    def test_load_factors_and_ncs_factors_still_byte_identical(
+        self, tmp_path: Path
+    ) -> None:
+        """``load_factors.json`` and ``non_controllable_factors.json`` are
+        untouched by the exchange-factors migration (epic 02 draws the line at
+        authored-vs-sampled data; deleting these by analogy would be wrong)."""
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+
+        _run_with_all_mocks(src, dst)
+
+        load_factors_path = dst / "scenarios" / "load_factors.json"
+        with load_factors_path.open(encoding="utf-8") as f:
+            assert json.load(f) == _FAKE_LOAD_FACTORS
+
+        ncs_factors_path = dst / "scenarios" / "non_controllable_factors.json"
+        with ncs_factors_path.open(encoding="utf-8") as f:
+            assert json.load(f) == _FAKE_NCS_FACTORS
 
     def test_json_files_are_valid_json(self, tmp_path: Path) -> None:
         src = _make_fake_newave_dir(tmp_path)
@@ -2365,8 +2389,6 @@ class TestConversionWarningCapture:
     """``convert_newave_case`` surfaces converter warnings via ConversionReport."""
 
     def test_captures_and_dedupes_package_warnings(self, tmp_path: Path) -> None:
-        import logging
-
         from cobre_bridge import pipeline
         from cobre_bridge.pipeline import ConversionReport, convert_newave_case
 
@@ -2408,8 +2430,6 @@ class TestConversionWarningCapture:
         assert report.warnings == []
 
     def test_collector_detached_even_on_exception(self, tmp_path: Path) -> None:
-        import logging
-
         from cobre_bridge import pipeline
         from cobre_bridge.pipeline import convert_newave_case
 
@@ -2553,8 +2573,6 @@ class TestConversionDiagnosticsRendering:
     def test_diagnostics_json_written(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import json
-
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
         json_path = tmp_path / "diag.json"
