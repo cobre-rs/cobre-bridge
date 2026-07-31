@@ -28,7 +28,7 @@ dev = [
     "ruff",
 ]
 validation = [
-    "cobre-python>=0.12,<0.13",
+    "cobre-python>=0.13,<0.14",
 ]
 
 [project.scripts]
