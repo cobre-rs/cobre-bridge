@@ -564,6 +564,109 @@ class TestConvertNewaweCasePipeline:
         assert str(dst / "system" / "hydros.json") in report.would_write_paths
 
 
+class TestEmissionCheckWiring:
+    """The post-emission self-checks (ticket-016, epic-04) run inside the real
+    pipeline body, before the writes, and their findings flip the convert
+    verdict through ``_convert_status`` — not merely by inspecting the
+    diagnostic."""
+
+    def test_no_hydro_bounds_reports_rule_43_not_applicable(
+        self, tmp_path: Path
+    ) -> None:
+        """The fully-mocked fixture never builds a hydro_bounds table, so rule
+        43 is explicitly "not applicable" (INFO), not silently absent, and the
+        convert verdict stays clean."""
+        from cobre_bridge.cli import _convert_status
+        from cobre_bridge.diagnostics import Severity
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+        report = _run_with_all_mocks(src, dst)
+
+        not_applicable = [
+            d
+            for d in report.diagnostics  # type: ignore[union-attr]
+            if d.code == "hydro-bounds-raising-not-applicable"
+        ]
+        assert len(not_applicable) == 1
+        assert not_applicable[0].severity is Severity.INFO
+        assert _convert_status(report.diagnostics, success="ok") == "ok"  # type: ignore[union-attr]
+
+    def test_rule_43_violation_flips_convert_status_to_error(
+        self, tmp_path: Path
+    ) -> None:
+        """A hydro_bounds row raising the plant's declared max_turbined_m3s is
+        caught, and feeding the resulting diagnostics through
+        ``_convert_status`` (the same function cli.py uses to derive the
+        convert verdict) yields "error", never just an inspected diagnostic."""
+        import contextlib
+
+        from cobre_bridge.cli import _convert_status
+        from cobre_bridge.pipeline import convert_newave_case
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "cobre_case"
+
+        violating_hydros = {
+            "$schema": "http://example",
+            "hydros": [
+                {
+                    "id": 0,
+                    "name": "Test Plant",
+                    "generation": {
+                        "max_turbined_m3s": 100.0,
+                        "max_generation_mw": 50.0,
+                    },
+                    "unit_groups": [
+                        {
+                            "id": 0,
+                            "max_turbined_m3s": 100.0,
+                            "max_generation_mw": 50.0,
+                        }
+                    ],
+                }
+            ],
+        }
+        violating_storage_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([2], type=pa.int32()),
+                "max_turbined_m3s": pa.array([150.0], type=pa.float64()),
+            }
+        )
+
+        fake_id_map = MagicMock()
+        with contextlib.ExitStack() as stack:
+            for p in _all_converter_patches(fake_id_map):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch(
+                    "cobre_bridge.pipeline.hydro_conv.convert_hydros",
+                    return_value=violating_hydros,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "cobre_bridge.pipeline.hydro_conv.convert_storage_bounds",
+                    return_value=violating_storage_bounds,
+                )
+            )
+            report = convert_newave_case(src, dst)
+
+        errors = [
+            d
+            for d in report.diagnostics
+            if d.code == "hydro-bounds-raises-declared-capacity"
+        ]
+        assert len(errors) == 1
+        assert "Test Plant" not in errors[0].summary  # rule 43 names IDs, like cobre
+
+        # Load-bearing: the verdict comes from _convert_status, not a bare
+        # inspection of the diagnostic list.
+        assert _convert_status(report.diagnostics, success="ok") == "error"
+        assert _convert_status([], success="ok") == "ok"
+
+
 # ---------------------------------------------------------------------------
 # CLI integration tests
 # ---------------------------------------------------------------------------

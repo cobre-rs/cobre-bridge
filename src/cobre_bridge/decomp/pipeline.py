@@ -20,6 +20,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from idecomp.decomp import Dadger, Vazoes
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge import emission_checks
 from cobre_bridge.decomp import bounds as bounds_conv
 from cobre_bridge.decomp import config as config_conv
 from cobre_bridge.decomp import hydro as hydro_conv
@@ -32,6 +34,12 @@ from cobre_bridge.decomp import thermal as thermal_conv
 from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)
+
+#: Same logger name ``emission_checks`` itself logs to when no diagnostics
+#: sink is active — used to re-emit each collected finding below so a
+#: standalone call (no outer ``dx.collect()``) still logs under the check
+#: module's own name, exactly as it did before this wiring existed.
+_EMISSION_CHECKS_LOGGER = logging.getLogger("cobre_bridge.emission_checks")
 
 
 @dataclass(frozen=True)
@@ -105,8 +113,35 @@ def _write_parquet(path: Path, table: pa.Table) -> None:
     pq.write_table(table, path, compression="zstd")
 
 
+def _describe_emission_check_errors(errors: list[dx.Diagnostic]) -> str:
+    """Render *errors* (every entry ``ERROR`` severity) as a multi-line,
+    human-readable block naming the failing rule and the offending entities —
+    the message :func:`convert_decomp_case` raises when any is found. Each
+    diagnostic's own detail table (hydro/thermal/line id, stage, column) is
+    included, not just its one-line summary, so the exception is actionable
+    on its own without re-running with a diagnostics sink attached.
+    """
+    lines: list[str] = []
+    for diagnostic in errors:
+        lines.append(f"- {diagnostic.code}: {diagnostic.summary}")
+        if diagnostic.table is not None:
+            for row in diagnostic.table.rows:
+                lines.append("    " + ", ".join(str(value) for value in row))
+    return "\n".join(lines)
+
+
 def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
-    """Convert one deck revision into a Cobre case directory."""
+    """Convert one deck revision into a Cobre case directory.
+
+    Raises
+    ------
+    ValueError
+        If the post-emission self-checks (cobre 0.13 rules 43/41/36 and the
+        ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
+        find an ``ERROR``-severity violation in the converted artifacts. An
+        ``INFO`` finding (e.g. rule 43's "not applicable" report, always the
+        case for DECOMP) never raises.
+    """
     if dst.exists() and any(dst.iterdir()) and not force:
         raise FileExistsError(f"{dst} already contains files; pass force to overwrite")
 
@@ -136,12 +171,10 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     dst.mkdir(parents=True, exist_ok=True)
 
     _write_json(dst / "config.json", config_conv.convert_config(dadger, terminal_fan))
-    _write_json(
-        dst / "stages.json",
-        temporal_conv.convert_stages(
-            calendar, annual_discount_rate=tx, num_scenarios=num_scenarios
-        ),
+    stages_dict = temporal_conv.convert_stages(
+        calendar, annual_discount_rate=tx, num_scenarios=num_scenarios
     )
+    _write_json(dst / "stages.json", stages_dict)
 
     productivity = hydro_conv.convert_energy_productivity(hidr, id_map)
     deficit_costs = network_conv._bus_deficit_costs(dadger)
@@ -165,10 +198,8 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     _write_json(
         system / "buses.json", network_conv.convert_buses(dadger, id_map, start_date)
     )
-    _write_json(
-        system / "hydros.json",
-        hydro_conv.convert_hydros(dadger, hidr, id_map, start_date),
-    )
+    hydros_dict = hydro_conv.convert_hydros(dadger, hidr, id_map, start_date)
+    _write_json(system / "hydros.json", hydros_dict)
     lines_doc, line_bounds = network_conv.convert_lines(
         dadger, id_map, calendar, start_date
     )
@@ -232,12 +263,50 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     )
 
     constraints = dst / "constraints"
-    _write_parquet(
-        constraints / "thermal_bounds.parquet",
-        thermal_conv.convert_thermal_bounds(dadger, id_map, calendar),
-    )
-    _write_parquet(constraints / "line_bounds.parquet", line_bounds)
+    thermal_bounds_table = thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
     hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, hidr, id_map, calendar)
+
+    # Post-emission self-checks (cobre 0.13 rules 43, 41, 36, and the
+    # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
+    # the in-memory artifacts, run before the constraint tables are written.
+    # DECOMP writes max_turbined_m3s/max_generation_mw only on the entity
+    # (hydro_bounds carries min_outflow_m3s only), so the rule-43 check below
+    # is always "not applicable" here — reported explicitly, not silently
+    # skipped. See cobre_bridge.emission_checks for the rule scope.
+    #
+    # Unlike the NEWAVE pipeline (whose caller, convert_newave_case, opens one
+    # dx.collect() around the whole conversion and returns every diagnostic on
+    # the ConversionReport for the CLI to render and gate on), this simpler
+    # DECOMP entry point has no report object a caller could inspect
+    # afterwards — so an ERROR-severity finding here must fail the conversion
+    # outright rather than degrade to a log line a caller could easily miss.
+    # The local dx.collect() only exists so this function can inspect
+    # severity; every collected finding is then re-emitted via dx.emit() so a
+    # caller that already has its own sink open (e.g. a test wrapping this
+    # call in dx.collect()) still observes it exactly as it would have
+    # without this wiring, and a standalone call still logs it.
+    bound_families = [
+        emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds),
+        emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
+        emission_checks.BoundFamily("Line", "line_id", line_bounds),
+    ]
+    with dx.collect() as check_diagnostics:
+        emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds)
+        emission_checks.check_unit_group_envelope(hydros_dict)
+        emission_checks.check_bound_row_uniqueness(bound_families)
+        emission_checks.check_bound_block_id_range(stages_dict, bound_families)
+    for diagnostic in check_diagnostics:
+        dx.emit(diagnostic, logger=_EMISSION_CHECKS_LOGGER)
+    check_errors = [d for d in check_diagnostics if d.severity is dx.Severity.ERROR]
+    if check_errors:
+        raise ValueError(
+            f"DECOMP conversion failed {len(check_errors)} post-emission "
+            "self-check error(s) (cobre 0.13 rules 43/41/36/block_id-range):\n"
+            f"{_describe_emission_check_errors(check_errors)}"
+        )
+
+    _write_parquet(constraints / "thermal_bounds.parquet", thermal_bounds_table)
+    _write_parquet(constraints / "line_bounds.parquet", line_bounds)
     if hydro_bounds.num_rows:
         _write_parquet(constraints / "hydro_bounds.parquet", hydro_bounds)
 

@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge import emission_checks
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
@@ -509,6 +510,30 @@ def _convert_newave_case_impl(
     logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(case, id_map)
 
+    # Merge hydro_bounds now (hoisted from the write phase below) so the
+    # post-emission self-checks see the exact table that will be written.
+    hydro_bounds_table = _merge_hydro_bounds(withdrawal_table, storage_bounds_table)
+    hydro_bounds_table = _fold_head_turbined_bounds(
+        hydro_bounds_table, head_turbined_table
+    )
+
+    # ------------------------------------------------------------------
+    # 3b. Post-emission self-checks (cobre 0.13 rules 43, 41, 36, and the
+    # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
+    # the in-memory artifacts, run before anything is written so a bad
+    # emission fails in milliseconds with bridge-side context instead of at
+    # cobre load time. See cobre_bridge.emission_checks for the rule scope.
+    # ------------------------------------------------------------------
+    bound_families = [
+        emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds_table),
+        emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
+        emission_checks.BoundFamily("Line", "line_id", line_bounds_table),
+    ]
+    emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds_table)
+    emission_checks.check_unit_group_envelope(hydros_dict)
+    emission_checks.check_bound_row_uniqueness(bound_families)
+    emission_checks.check_bound_block_id_range(stages_dict, bound_families)
+
     # ------------------------------------------------------------------
     # 4. Create the output directory structure.
     # ------------------------------------------------------------------
@@ -609,10 +634,6 @@ def _convert_newave_case_impl(
     ncs_stats_path = dst / "scenarios" / "non_controllable_stats.parquet"
     _write_parquet(ncs_stats_table, ncs_stats_path)
 
-    hydro_bounds_table = _merge_hydro_bounds(withdrawal_table, storage_bounds_table)
-    hydro_bounds_table = _fold_head_turbined_bounds(
-        hydro_bounds_table, head_turbined_table
-    )
     if hydro_bounds_table is not None:
         hydro_bounds_path = constraints_dir / "hydro_bounds.parquet"
         _write_parquet(hydro_bounds_table, hydro_bounds_path)
@@ -661,10 +682,9 @@ def _convert_newave_case_impl(
         # VminOP bounds table has no block_id column; add a null column and
         # reorder to match the canonical schema.
         vminop_bounds = vminop_result.bounds
-        n = len(vminop_bounds)
         vminop_bounds_extended = vminop_bounds.append_column(
             pa.field("block_id", pa.int32()),
-            pa.array([None] * n, type=pa.int32()),
+            pa.array([None] * len(vminop_bounds), type=pa.int32()),
         ).select(_BOUNDS_COLUMNS)
         bounds_tables.append(vminop_bounds_extended)
 

@@ -1196,6 +1196,11 @@ def _convert_newave(
 
 
 def _run_decomp_conversion(args: SimpleNamespace) -> None:
+    """Execute the convert decomp subcommand; ``ValueError`` also covers an
+    ERROR-severity post-emission self-check finding (cobre 0.13 rules
+    43/41/36/block_id-range) — ``convert_decomp_case`` raises it with a
+    message naming the failing rule(s) and entities, already mapped to
+    exit 1 by this except tuple with no dedicated branch needed."""
     from cobre_bridge.decomp.pipeline import convert_decomp_case
 
     try:

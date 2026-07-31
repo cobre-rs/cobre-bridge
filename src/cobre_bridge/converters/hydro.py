@@ -1008,6 +1008,39 @@ def _unit_ramp_summary(
     return "; ".join(parts)
 
 
+def _per_stage_turbined_envelope(
+    case: NewaveCase, id_map: NewaveIdMap
+) -> dict[int, float]:
+    """Return ``{cobre_hydro_id: max per-stage max_turbined_m3s}`` from the
+    head-corrected per-stage table.
+
+    Delegates to :func:`convert_turbined_bounds_head_corrected` — the exact
+    function the pipeline uses to emit the per-(hydro, stage)
+    ``hydro_bounds`` rows — instead of re-deriving the per-stage head. This is
+    what lets :func:`convert_hydros` raise its declared
+    ``generation.max_turbined_m3s`` to cover every emitted per-stage row
+    (cobre rule 43) with zero risk of the two ever drifting apart: they are
+    two views of the same table, not two formulas that happen to agree today.
+
+    Returns an empty dict when no plant has a per-stage head (no CFUGA/CMONT
+    temporal overrides and no seasonal ``VOLREF_SAZ`` row), so callers must
+    treat a missing key as "no per-stage variation", not as zero.
+    """
+    table = convert_turbined_bounds_head_corrected(case, id_map)
+    if table is None:
+        return {}
+    envelope: dict[int, float] = {}
+    for hydro_id, value in zip(
+        table["hydro_id"].to_pylist(),
+        table["max_turbined_m3s"].to_pylist(),
+        strict=True,
+    ):
+        current = envelope.get(hydro_id)
+        if current is None or value > current:
+            envelope[hydro_id] = value
+    return envelope
+
+
 def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert the source model hydro plant data to a Cobre ``hydros.json`` dict.
 
@@ -1067,6 +1100,15 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro, filling_codes=filling_codes)
+
+    # Per-hydro envelope over the head-corrected per-stage turbined caps that
+    # convert_turbined_bounds_head_corrected emits into hydro_bounds.parquet.
+    # cobre rule 43 forbids any hydro_bounds row from raising max_turbined_m3s
+    # above the plant's own declared value, so the reference-head value below
+    # must be raised to cover every emitted per-stage row (ticket-015b). Empty
+    # for a hydro with no per-stage head variation, which keeps its declared
+    # value unchanged.
+    turbined_envelope = _per_stage_turbined_envelope(case, id_map)
 
     # Collect study plant codes for temporal override extraction.
     existing = case.active_hydros
@@ -1237,7 +1279,23 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         #     derated power undershoots it). This loose ceiling never binds
         #     before the head-corrected turbined cap, so a plant reaches its
         #     turbined limit, not nameplate power.
-        max_turbined = _compute_max_turbined_head_corrected(hreg, name)[0]
+        #
+        # The declaration itself is the ENVELOPE over that reference-head value
+        # and every per-stage head-corrected cap this hydro emits into
+        # hydro_bounds (ticket-015b): a plant with per-stage head variation
+        # (MODIF.DAT CFUGA/CMONT or seasonal VOLREF_SAZ) can turbine more at a
+        # higher-head stage than at the reference head, and cobre rule 43
+        # forbids a hydro_bounds row from exceeding the plant's own declared
+        # value. A hydro with no per-stage variation is absent from
+        # ``turbined_envelope`` and keeps its reference-head value unchanged.
+        cobre_hydro_id = id_map.hydro_id(newave_code)
+        max_turbined_reference = _compute_max_turbined_head_corrected(hreg, name)[0]
+        envelope_value = turbined_envelope.get(cobre_hydro_id)
+        max_turbined = (
+            max_turbined_reference
+            if envelope_value is None
+            else max(max_turbined_reference, envelope_value)
+        )
         max_generation = _compute_max_turbined_rated(hreg)[1]
 
         # Minimum outflow from historical minimum (may have been overridden by MODIF).
@@ -1375,7 +1433,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 evaporation["reference_volumes_hm3"] = evap_reference_volumes
 
         hydro_entry: dict = {
-            "id": id_map.hydro_id(newave_code),
+            "id": cobre_hydro_id,
             "name": name,
             "operational_start_date": operational_start_date,
             "downstream_id": downstream_id,
@@ -1933,14 +1991,13 @@ def _per_stage_drop_overrides(
     active_cmont: float | None = None
     for stage_id in range(total_stages):
         if stage_id == 0:
-            for past_stage in sorted(s for s in events_by_stage if s <= 0):
-                for cfuga_val, cmont_val in events_by_stage[past_stage]:
-                    if cfuga_val is not None:
-                        active_cfuga = cfuga_val
-                    if cmont_val is not None:
-                        active_cmont = cmont_val
-        if stage_id in events_by_stage and stage_id > 0:
-            for cfuga_val, cmont_val in events_by_stage[stage_id]:
+            applicable_stages = sorted(s for s in events_by_stage if s <= 0)
+        elif stage_id in events_by_stage:
+            applicable_stages = [stage_id]
+        else:
+            applicable_stages = []
+        for past_stage in applicable_stages:
+            for cfuga_val, cmont_val in events_by_stage[past_stage]:
                 if cfuga_val is not None:
                     active_cfuga = cfuga_val
                 if cmont_val is not None:
@@ -2772,12 +2829,8 @@ def convert_storage_bounds(
         vol_max = float(hreg["volume_maximo"])
         useful = vol_max - vol_min
 
-        def _pct_to_hm3(
-            pct: float,
-            _u: float = useful,
-            _vm: float = vol_min,
-        ) -> float:
-            return _vm + (pct / 100.0) * _u
+        def _pct_to_hm3(pct: float) -> float:
+            return vol_min + (pct / 100.0) * useful
 
         # Storage bounds (percentage -> hm³). Seasonal post-study iff the
         # corresponding dger flag is set; otherwise freeze.

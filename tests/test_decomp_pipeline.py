@@ -215,6 +215,140 @@ class TestPipeline:
             convert_decomp_case(tmp_path, tmp_path / "out")
 
 
+class TestEmissionCheckWiring:
+    """The post-emission self-checks (ticket-016, epic-04) run inside
+    ``convert_decomp_case``, before the constraint writes."""
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_rv3_conversion_reports_rule_43_not_applicable_and_no_errors(
+        self, tmp_path: Path
+    ) -> None:
+        """DECOMP writes ``max_turbined_m3s``/``max_generation_mw`` only on the
+        entity, never as per-stage ``hydro_bounds`` rows, so rule 43 is always
+        "not applicable" here (AC #8) — and the production deck converts
+        clean under the other three rules too (AC #6)."""
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.cli import _convert_status
+        from cobre_bridge.decomp.pipeline import convert_decomp_case
+        from cobre_bridge.diagnostics import Severity
+
+        dst = tmp_path / "case"
+        with dx.collect() as collected:
+            convert_decomp_case(_RV3_DECK, dst)
+
+        not_applicable = [
+            d for d in collected if d.code == "hydro-bounds-raising-not-applicable"
+        ]
+        assert len(not_applicable) == 1
+        assert not_applicable[0].severity is Severity.INFO
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert errors == [], f"unexpected ERROR diagnostics: {errors}"
+        assert _convert_status(collected, success="ok") == "ok"
+
+    def test_decomp_shaped_violation_flips_convert_status_through_the_same_function(
+        self,
+    ) -> None:
+        """A violation built from DECOMP-shaped artifacts still flips the
+        verdict via ``cli._convert_status`` — the single function both
+        pipelines' convert verdicts key off (AC #3), not a bare inspection of
+        the diagnostic."""
+        import pyarrow as pa
+
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.cli import _convert_status
+        from cobre_bridge.emission_checks import check_hydro_bounds_no_raising
+
+        hydros = {
+            "hydros": [
+                {
+                    "id": 0,
+                    "generation": {
+                        "max_turbined_m3s": 100.0,
+                        "max_generation_mw": 50.0,
+                    },
+                    "unit_groups": [
+                        {"max_turbined_m3s": 100.0, "max_generation_mw": 50.0}
+                    ],
+                }
+            ]
+        }
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([1], type=pa.int32()),
+                "max_turbined_m3s": pa.array([999.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_hydro_bounds_no_raising(hydros, hydro_bounds)
+
+        assert _convert_status(collected, success="ok") == "error"
+        assert _convert_status([], success="ok") == "ok"
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_a_real_emission_check_error_makes_the_real_conversion_fail(
+        self, tmp_path: Path
+    ) -> None:
+        """A DECOMP deck carrying a synthetic emission-check violation makes
+        the REAL conversion path fail: ``convert_decomp_case`` must raise, not
+        merely compute an "error" status from hand-built diagnostics (Finding
+        1, epic-04 boundary remediation). The violation is injected by
+        patching ONE check function to unconditionally emit an ERROR
+        diagnostic; file discovery, deck parsing, every converter, and the
+        OTHER three checks all still run for real against the rv3 deck."""
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge import emission_checks
+        from cobre_bridge.decomp.pipeline import convert_decomp_case
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+
+        def _synthetic_violation(*args: object, **kwargs: object) -> None:
+            dx.emit(
+                Diagnostic(
+                    code="synthetic-test-violation",
+                    severity=Severity.ERROR,
+                    category="Emission self-checks",
+                    title="Synthetic violation injected by the test",
+                    summary="synthetic ERROR diagnostic for Finding-1 coverage",
+                )
+            )
+
+        dst = tmp_path / "case"
+        with (
+            patch.object(
+                emission_checks,
+                "check_unit_group_envelope",
+                side_effect=_synthetic_violation,
+            ),
+            pytest.raises(ValueError, match="synthetic-test-violation"),
+        ):
+            convert_decomp_case(_RV3_DECK, dst)
+
+        # The raise happens before the constraint tables are written, so no
+        # half-valid case should look convertible on a bare retry.
+        assert not (dst / "constraints" / "hydro_bounds.parquet").exists()
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_normal_rv3_deck_still_converts_clean_via_the_real_pipeline(
+        self, tmp_path: Path
+    ) -> None:
+        """A normal deck's rule-43 "not applicable" INFO finding must not
+        trip the new raise — only ERROR severity does."""
+        from cobre_bridge.decomp.pipeline import convert_decomp_case
+
+        dst = tmp_path / "case"
+        convert_decomp_case(_RV3_DECK, dst)  # must not raise
+
+        assert (dst / "constraints" / "hydro_bounds.parquet").is_file()
+
+
 class TestCli:
     def test_convert_decomp_invokes_pipeline(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -232,6 +366,25 @@ class TestCli:
         with patch(
             "cobre_bridge.decomp.pipeline.convert_decomp_case",
             side_effect=FileNotFoundError("caso.dat not found"),
+        ):
+            result = runner.invoke(
+                app, ["convert", "decomp", str(tmp_path), str(tmp_path / "out")]
+            )
+        assert result.exit_code == 1
+
+    def test_convert_decomp_emission_check_error_exits_one(
+        self, tmp_path: Path
+    ) -> None:
+        """The ``ValueError`` ``convert_decomp_case`` raises on an
+        ERROR-severity post-emission self-check finding (Finding 1) is caught
+        by the same except tuple as a missing/existing-destination failure —
+        no dedicated CLI branch is needed."""
+        runner = CliRunner()
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            side_effect=ValueError(
+                "DECOMP conversion failed 1 post-emission self-check error(s)"
+            ),
         ):
             result = runner.invoke(
                 app, ["convert", "decomp", str(tmp_path), str(tmp_path / "out")]

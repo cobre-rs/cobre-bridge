@@ -1075,6 +1075,327 @@ def _hydro_case(
 
 
 # ---------------------------------------------------------------------------
+# max_turbined_m3s envelope declaration  (ticket-015b)
+# ---------------------------------------------------------------------------
+
+
+def _head_corrected_two_plant_cadastro() -> pd.DataFrame:
+    """Two-plant cadastro with the head-correction inputs the shared "simple"
+    fixture (``_make_hidr_cadastro``) lacks — ``queda_nominal_conjunto_*`` —
+    so ``_compute_max_turbined_head_corrected`` runs its head-corrected branch
+    instead of falling back to the plain ``Σ n·q_nom`` sum.
+
+    Both plants (USINA_A code 1, USINA_B code 2) share the same polynomial /
+    machine-set / productivity numbers on a realistic ρ_esp scale (~0.009
+    MW/(m³/s·m), not the toy 0.9 the shared fixture uses) so the installed-
+    power cap (``cap_pinst``) stays a loose ceiling and the affinity-corrected
+    flow term is what actually binds — matching the real deck behaviour the
+    ticket-015 spike found. The only thing that varies between the two plants
+    across this module's tests is whether a MODIF.DAT CFUGA record targets the
+    plant, which is exactly the "with per-stage head variation" / "without"
+    pairing acceptance criteria 5 and 6 need.
+    """
+    months = [
+        "JAN",
+        "FEV",
+        "MAR",
+        "ABR",
+        "MAI",
+        "JUN",
+        "JUL",
+        "AGO",
+        "SET",
+        "OUT",
+        "NOV",
+        "DEZ",
+    ]
+    base: dict[str, list] = {
+        "nome_usina": ["USINA_A", "USINA_B"],
+        "posto": [1, 2],
+        "submercado": [1, 1],
+        "empresa": [1, 1],
+        "codigo_usina_jusante": [pd.NA, pd.NA],
+        "desvio": [pd.NA, pd.NA],
+        "volume_minimo": [100.0, 100.0],
+        "volume_maximo": [1000.0, 1000.0],
+        "volume_referencia": [550.0, 550.0],
+        "canal_fuga_medio": [50.0, 50.0],
+        "tipo_regulacao": ["M", "M"],
+        "tipo_perda": [1, 1],
+        "perdas": [0.0, 0.0],
+        "a0_volume_cota": [300.0, 300.0],
+        "a1_volume_cota": [0.1, 0.1],
+        "a2_volume_cota": [0.0, 0.0],
+        "a3_volume_cota": [0.0, 0.0],
+        "a4_volume_cota": [0.0, 0.0],
+        "produtibilidade_especifica": [0.009, 0.009],
+        "numero_conjuntos_maquinas": [1, 1],
+        "maquinas_conjunto_1": [1, 1],
+        "maquinas_conjunto_2": [0, 0],
+        "maquinas_conjunto_3": [0, 0],
+        "maquinas_conjunto_4": [0, 0],
+        "maquinas_conjunto_5": [0, 0],
+        "potencia_nominal_conjunto_1": [1000.0, 1000.0],
+        "potencia_nominal_conjunto_2": [0.0, 0.0],
+        "potencia_nominal_conjunto_3": [0.0, 0.0],
+        "potencia_nominal_conjunto_4": [0.0, 0.0],
+        "potencia_nominal_conjunto_5": [0.0, 0.0],
+        "vazao_nominal_conjunto_1": [100.0, 100.0],
+        "vazao_nominal_conjunto_2": [0.0, 0.0],
+        "vazao_nominal_conjunto_3": [0.0, 0.0],
+        "vazao_nominal_conjunto_4": [0.0, 0.0],
+        "vazao_nominal_conjunto_5": [0.0, 0.0],
+        "queda_nominal_conjunto_1": [200.0, 200.0],
+        "queda_nominal_conjunto_2": [0.0, 0.0],
+        "queda_nominal_conjunto_3": [0.0, 0.0],
+        "queda_nominal_conjunto_4": [0.0, 0.0],
+        "queda_nominal_conjunto_5": [0.0, 0.0],
+        "vazao_minima_historica": [0.0, 0.0],
+        "teif": [0.0, 0.0],
+        "ip": [0.0, 0.0],
+        "fator_carga_maximo": [1.0, 1.0],
+        "fator_carga_minimo": [0.0, 0.0],
+    }
+    for m in months:
+        base[f"evaporacao_{m}"] = [0.0, 0.0]
+    return pd.DataFrame(base, index=pd.Index([1, 2], name="codigo_usina"))
+
+
+def _cfuga_modif_mock(code: int, *, month: int, year: int, nivel: float) -> MagicMock:
+    """A MODIF.DAT mock carrying a single CFUGA record for *code* only."""
+    usina_rec = MagicMock()
+    usina_rec.codigo = code
+    mock_modif = MagicMock()
+    mock_modif.usina.return_value = [usina_rec]
+    mock_modif.modificacoes_usina.return_value = [
+        _make_cfuga_rec(month=month, year=year, nivel=nivel)
+    ]
+    return mock_modif
+
+
+class TestConvertHydrosMaxTurbinedEnvelope:
+    """ticket-015b: declared ``max_turbined_m3s`` must rise to cover every
+    per-stage head-corrected cap ``convert_turbined_bounds_head_corrected``
+    emits for that hydro (cobre rule 43), instead of staying pinned at the
+    single reference-head value it used to declare unconditionally.
+
+    ``130.0961183125769`` (offset from the reference ``120.26013470805694``)
+    is the exact value ``_compute_max_turbined_head_corrected`` returns for
+    USINA_A's fixture with a CFUGA-override head of 338.5 m — cross-checked
+    directly against that function in
+    ``test_per_stage_envelope_exceeds_reference_head_value`` rather than
+    hand-derived, so a fixture-numbers change cannot silently desync the
+    hard-coded expectations below it.
+    """
+
+    def _make_id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+
+    def _case_with_cfuga_on_usina_a(self, tmp_path: Path, *, nivel: float = 30.0):
+        """USINA_A (code 1) carries a CFUGA override effective from stage 0
+        (month=1 matches the horizon's start month/year), so every stage of
+        the 12-stage horizon picks up the override uniformly. USINA_B
+        (code 2) carries none.
+        """
+        modif = _cfuga_modif_mock(1, month=1, year=2025, nivel=nivel)
+        return _hydro_case(
+            tmp_path,
+            cadastro=_head_corrected_two_plant_cadastro(),
+            confhd=_make_confhd_df(),
+            rees=_make_ree_df(),
+            modif=modif,
+            dger=_make_hydro_dger_mock(
+                start_year=2025, start_month=1, num_anos=1, num_anos_pos=0
+            ),
+        )
+
+    def test_per_stage_envelope_exceeds_reference_head_value(
+        self, tmp_path: Path
+    ) -> None:
+        """Sanity check on the fixture itself: the per-stage head-corrected cap
+        this CFUGA override produces genuinely exceeds the reference-head
+        value — otherwise the rest of this class would be exercising a no-op."""
+        from cobre_bridge.converters.hydro import (
+            _compute_max_turbined_head_corrected,
+            convert_turbined_bounds_head_corrected,
+        )
+
+        case = self._case_with_cfuga_on_usina_a(tmp_path)
+        hreg_a = _head_corrected_two_plant_cadastro().loc[1]
+
+        reference = _compute_max_turbined_head_corrected(hreg_a, "USINA_A")[0]
+        assert reference == pytest.approx(120.26013470805694)
+
+        table = convert_turbined_bounds_head_corrected(case, self._make_id_map())
+        assert table is not None
+        rows = [r for r in table.to_pylist() if r["hydro_id"] == 0]
+        assert len(rows) == 12  # every stage of the 1-year horizon
+        for row in rows:
+            assert row["max_turbined_m3s"] == pytest.approx(130.0961183125769)
+        assert rows[0]["max_turbined_m3s"] > reference
+
+    def test_declared_value_raised_to_per_stage_envelope(self, tmp_path: Path) -> None:
+        """AC #6: the declared value equals ``max(reference, per-stage max)``."""
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        case = self._case_with_cfuga_on_usina_a(tmp_path)
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+
+        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(
+            130.0961183125769
+        )
+
+    def test_mirror_group_matches_raised_declared_value(self, tmp_path: Path) -> None:
+        """AC #3: the mirror unit group still carries the SAME (now-raised)
+        value as ``generation.max_turbined_m3s`` — rule 41's mirror invariant
+        holds at the envelope value, not just at the un-raised reference."""
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        case = self._case_with_cfuga_on_usina_a(tmp_path)
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+
+        assert hydro_a["unit_groups"][0]["max_turbined_m3s"] == pytest.approx(
+            hydro_a["generation"]["max_turbined_m3s"]
+        )
+
+    def test_plant_without_per_stage_variation_keeps_reference_value(
+        self, tmp_path: Path
+    ) -> None:
+        """AC #5: USINA_B carries no CFUGA/CMONT/VOLREF_SAZ override, so it is
+        absent from the envelope and keeps its un-raised reference-head value
+        — the CFUGA override on its sibling USINA_A must not leak into it."""
+        from cobre_bridge.converters.hydro import (
+            _compute_max_turbined_head_corrected,
+            convert_hydros,
+        )
+
+        case = self._case_with_cfuga_on_usina_a(tmp_path)
+        hreg_b = _head_corrected_two_plant_cadastro().loc[2]
+        expected_b = _compute_max_turbined_head_corrected(hreg_b, "USINA_B")[0]
+
+        result = convert_hydros(case, self._make_id_map())
+        hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
+
+        assert hydro_b["generation"]["max_turbined_m3s"] == pytest.approx(expected_b)
+        assert hydro_b["unit_groups"][0]["max_turbined_m3s"] == pytest.approx(
+            expected_b
+        )
+
+    def test_no_overrides_anywhere_keeps_declared_value_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """A hydro case with no MODIF/VOLREF_SAZ at all (the common case) must
+        declare exactly the reference-head value — the envelope lookup is a
+        pure no-op when ``convert_turbined_bounds_head_corrected`` returns
+        ``None``."""
+        from cobre_bridge.converters.hydro import (
+            _compute_max_turbined_head_corrected,
+            convert_hydros,
+        )
+
+        case = _hydro_case(
+            tmp_path,
+            cadastro=_head_corrected_two_plant_cadastro(),
+            confhd=_make_confhd_df(),
+            rees=_make_ree_df(),
+            dger=_make_hydro_dger_mock(
+                start_year=2025, start_month=1, num_anos=1, num_anos_pos=0
+            ),
+        )
+        hreg_a = _head_corrected_two_plant_cadastro().loc[1]
+        expected_a = _compute_max_turbined_head_corrected(hreg_a, "USINA_A")[0]
+
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(expected_a)
+
+    def test_per_stage_hydro_bounds_rows_unaffected_by_the_declaration_fix(
+        self, tmp_path: Path
+    ) -> None:
+        """AC #4 (LP-neutrality): the per-stage rows
+        ``convert_turbined_bounds_head_corrected`` emits for ``hydro_bounds.parquet``
+        are IDENTICAL whether or not ``convert_hydros``'s envelope-raising
+        declaration fix (ticket-015b) already ran against an equivalent case —
+        the fix only ever raises the entity-level declaration, never the
+        per-stage table. Two independently-built (but data-identical) cases
+        isolate this: one has ``convert_hydros`` run against it FIRST, the
+        other never sees ``convert_hydros`` at all, and the per-stage tables
+        must still match row for row."""
+        from cobre_bridge.converters.hydro import (
+            convert_hydros,
+            convert_turbined_bounds_head_corrected,
+        )
+
+        id_map = self._make_id_map()
+
+        case_without_declaration_fix = self._case_with_cfuga_on_usina_a(tmp_path)
+        rows_without_declaration_fix = [
+            r
+            for r in convert_turbined_bounds_head_corrected(
+                case_without_declaration_fix, id_map
+            ).to_pylist()
+            if r["hydro_id"] == 0
+        ]
+
+        case_with_declaration_fix = self._case_with_cfuga_on_usina_a(tmp_path)
+        convert_hydros(case_with_declaration_fix, id_map)  # exercises the raise
+        rows_with_declaration_fix = [
+            r
+            for r in convert_turbined_bounds_head_corrected(
+                case_with_declaration_fix, id_map
+            ).to_pylist()
+            if r["hydro_id"] == 0
+        ]
+
+        assert len(rows_without_declaration_fix) == len(rows_with_declaration_fix) == 12
+        assert rows_without_declaration_fix == rows_with_declaration_fix
+        assert all(
+            r["max_turbined_m3s"] == pytest.approx(130.0961183125769)
+            for r in rows_with_declaration_fix
+        )
+
+
+class TestPerStageTurbinedEnvelopeHelper:
+    """Unit tests for ``_per_stage_turbined_envelope`` in isolation, via a
+    mocked ``convert_turbined_bounds_head_corrected`` — the real head physics
+    are covered end-to-end by ``TestConvertHydrosMaxTurbinedEnvelope``; this
+    class only checks the max-per-hydro-id aggregation contract."""
+
+    def test_empty_dict_when_table_is_none(self) -> None:
+        from cobre_bridge.converters.hydro import _per_stage_turbined_envelope
+
+        with patch(
+            "cobre_bridge.converters.hydro.convert_turbined_bounds_head_corrected",
+            return_value=None,
+        ):
+            envelope = _per_stage_turbined_envelope(MagicMock(), MagicMock())
+
+        assert envelope == {}
+
+    def test_max_per_hydro_id_across_stages(self) -> None:
+        from cobre_bridge.converters.hydro import _per_stage_turbined_envelope
+
+        table = pa.table(
+            {
+                "hydro_id": pa.array([0, 0, 0, 1, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 1, 2, 0, 1], type=pa.int32()),
+                "max_turbined_m3s": pa.array(
+                    [100.0, 150.0, 120.0, 30.0, 45.0], type=pa.float64()
+                ),
+            }
+        )
+        with patch(
+            "cobre_bridge.converters.hydro.convert_turbined_bounds_head_corrected",
+            return_value=table,
+        ):
+            envelope = _per_stage_turbined_envelope(MagicMock(), MagicMock())
+
+        assert envelope == {0: 150.0, 1: 45.0}
+
+
+# ---------------------------------------------------------------------------
 # _apply_permanent_overrides unit tests  (ticket-004)
 # ---------------------------------------------------------------------------
 
@@ -1757,8 +2078,6 @@ class TestConvertStorageBoundsMaxGenColumn:
 
     def test_filling_case_includes_max_generation_column(self, tmp_path) -> None:
         """A filling plant adds a float64 max_generation_mw column after min_gen."""
-        import pyarrow as pa
-
         tbl = self._run_filling(tmp_path)
         assert tbl is not None
         assert "max_generation_mw" in tbl.column_names
@@ -2072,8 +2391,6 @@ class TestMergeHydroBoundsMaxGenColumn:
 
     def test_storage_side_max_generation_column_survives_full_join(self) -> None:
         """A storage-only max_generation_mw column appears in the merged table."""
-        import pyarrow as pa
-
         from cobre_bridge.pipeline import _merge_hydro_bounds
 
         withdrawal = pa.table(
@@ -5983,8 +6300,6 @@ class TestGenerateHydroGeometry:
 
     def test_produces_100_rows_per_plant(self) -> None:
         """A reservoir plant yields exactly 100 rows in the output table."""
-        import pyarrow as pa
-
         from cobre_bridge.converters.hydro import generate_hydro_geometry
 
         cadastro = _make_geometry_cadastro()
@@ -6013,8 +6328,6 @@ class TestGenerateHydroGeometry:
 
     def test_correct_schema(self) -> None:
         """Output table has the required schema with correct column types."""
-        import pyarrow as pa
-
         from cobre_bridge.converters.hydro import generate_hydro_geometry
 
         cadastro = _make_geometry_cadastro()
@@ -6028,7 +6341,6 @@ class TestGenerateHydroGeometry:
 
     def test_correct_schema_roundtrip_parquet(self, tmp_path) -> None:
         """Schema is preserved when written and read back as Parquet."""
-        import pyarrow as pa
         import pyarrow.parquet as pq
 
         from cobre_bridge.converters.hydro import generate_hydro_geometry
@@ -6444,8 +6756,6 @@ class TestWaterWithdrawalConversion:
 
         assert result is not None
         assert result.schema.names == ["hydro_id", "stage_id", "water_withdrawal_m3s"]
-        import pyarrow as pa
-
         assert result.schema.field("hydro_id").type == pa.int32()
         assert result.schema.field("stage_id").type == pa.int32()
         assert result.schema.field("water_withdrawal_m3s").type == pa.float64()

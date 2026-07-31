@@ -1,0 +1,396 @@
+"""Unit tests for cobre_bridge.emission_checks (ticket-016, epic-04).
+
+Each rule gets a positive test (synthetic violation caught) and a negative
+test (the legal shape passes), run against hand-built artifacts — this module
+never imports either pipeline, matching emission_checks.py's own contract.
+"""
+
+from __future__ import annotations
+
+import pyarrow as pa
+
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.diagnostics import Severity
+from cobre_bridge.emission_checks import (
+    BoundFamily,
+    check_bound_block_id_range,
+    check_bound_row_uniqueness,
+    check_hydro_bounds_no_raising,
+    check_unit_group_envelope,
+)
+
+
+def _hydros(*entries: dict) -> dict:
+    return {"hydros": list(entries)}
+
+
+def _hydro(
+    hydro_id: int,
+    *,
+    max_turbined_m3s: float,
+    max_generation_mw: float,
+    groups: list[tuple[float, float]] | None = None,
+) -> dict:
+    """One ``hydros.json`` entry with a declared envelope and unit groups.
+
+    ``groups`` is a list of ``(max_turbined_m3s, max_generation_mw)`` pairs;
+    defaults to a single mirror group matching the plant's own declaration
+    (holds rule 41 by construction, as ``build_mirror_unit_group`` does).
+    """
+    if groups is None:
+        groups = [(max_turbined_m3s, max_generation_mw)]
+    return {
+        "id": hydro_id,
+        "name": f"Hydro {hydro_id}",
+        "generation": {
+            "max_turbined_m3s": max_turbined_m3s,
+            "max_generation_mw": max_generation_mw,
+        },
+        "unit_groups": [
+            {
+                "id": i,
+                "max_turbined_m3s": turbined,
+                "max_generation_mw": generation,
+            }
+            for i, (turbined, generation) in enumerate(groups)
+        ],
+    }
+
+
+def _stages(*block_counts: int) -> dict:
+    return {
+        "stages": [
+            {"id": i, "blocks": [{"id": b} for b in range(count)]}
+            for i, count in enumerate(block_counts)
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# Rule 43 — check_hydro_bounds_no_raising
+# ---------------------------------------------------------------------------
+
+
+class TestHydroBoundsNoRaising:
+    def test_hydro_bounds_none_is_not_applicable(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+
+        with dx.collect() as collected:
+            check_hydro_bounds_no_raising(hydros, None)
+
+        assert len(collected) == 1
+        assert collected[0].code == "hydro-bounds-raising-not-applicable"
+        assert collected[0].severity is Severity.INFO
+
+    def test_decomp_shaped_table_without_guarded_columns_is_not_applicable(
+        self,
+    ) -> None:
+        """DECOMP's hydro_bounds carries only min_outflow_m3s (AC #8)."""
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "min_outflow_m3s": pa.array([5.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_hydro_bounds_no_raising(hydros, hydro_bounds)
+
+        assert len(collected) == 1
+        assert collected[0].code == "hydro-bounds-raising-not-applicable"
+        assert collected[0].severity is Severity.INFO
+        assert not any(d.severity is Severity.ERROR for d in collected)
+
+    def test_row_raising_declared_turbined_cap_is_caught(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([3], type=pa.int32()),
+                "max_turbined_m3s": pa.array([150.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_hydro_bounds_no_raising(hydros, hydro_bounds)
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert len(errors) == 1
+        diag = errors[0]
+        assert diag.code == "hydro-bounds-raises-declared-capacity"
+        assert diag.table is not None
+        row = diag.table.rows[0]
+        # entity, column, stage, declared, offending — all named.
+        assert row[0] == 0
+        assert row[1] == "max_turbined_m3s"
+        assert "3" in row[2]
+        assert row[3] == 100.0
+        assert row[4] == 150.0
+
+    def test_row_at_or_below_declared_cap_passes(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], type=pa.int32()),
+                "stage_id": pa.array([0, 1], type=pa.int32()),
+                "max_turbined_m3s": pa.array([100.0, 80.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_hydro_bounds_no_raising(hydros, hydro_bounds)
+
+        assert collected == []
+
+    def test_generation_column_checked_independently_of_turbined(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "max_turbined_m3s": pa.array([90.0], type=pa.float64()),
+                "max_generation_mw": pa.array([75.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_hydro_bounds_no_raising(hydros, hydro_bounds)
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert len(errors) == 1
+        assert errors[0].table is not None
+        assert [row[1] for row in errors[0].table.rows] == ["max_generation_mw"]
+
+
+# ---------------------------------------------------------------------------
+# Rule 41 — check_unit_group_envelope
+# ---------------------------------------------------------------------------
+
+
+class TestUnitGroupEnvelope:
+    def test_single_mirror_group_holds_by_construction(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+
+        with dx.collect() as collected:
+            check_unit_group_envelope(hydros)
+
+        assert collected == []
+
+    def test_group_sum_exceeding_declared_cap_is_caught(self) -> None:
+        hydros = _hydros(
+            _hydro(
+                0,
+                max_turbined_m3s=100.0,
+                max_generation_mw=50.0,
+                groups=[(60.0, 30.0), (60.0, 30.0)],  # sums to 120 / 60
+            )
+        )
+
+        with dx.collect() as collected:
+            check_unit_group_envelope(hydros)
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert len(errors) == 1
+        diag = errors[0]
+        assert diag.code == "hydro-unit-group-envelope-exceeded"
+        assert diag.table is not None
+        by_column = {row[1]: row for row in diag.table.rows}
+        assert by_column["max_turbined_m3s"][2] == 100.0  # declared
+        assert by_column["max_turbined_m3s"][3] == 120.0  # group sum
+        assert by_column["max_generation_mw"][2] == 50.0
+        assert by_column["max_generation_mw"][3] == 60.0
+
+    def test_value_inside_relative_tolerance_passes(self) -> None:
+        """Rule 41's tolerance mirrors cobre's ENVELOPE_TOLERANCE = 1e-9 * max(|v|, 1.0)."""
+        declared = 100.0
+        tolerance = 1e-9 * max(abs(declared), 1.0)
+        hydros = _hydros(
+            _hydro(
+                0,
+                max_turbined_m3s=declared,
+                max_generation_mw=50.0,
+                groups=[(declared + tolerance * 0.5, 50.0)],
+            )
+        )
+
+        with dx.collect() as collected:
+            check_unit_group_envelope(hydros)
+
+        assert collected == []
+
+    def test_value_outside_relative_tolerance_fails(self) -> None:
+        declared = 100.0
+        tolerance = 1e-9 * max(abs(declared), 1.0)
+        hydros = _hydros(
+            _hydro(
+                0,
+                max_turbined_m3s=declared,
+                max_generation_mw=50.0,
+                groups=[(declared + tolerance * 10, 50.0)],
+            )
+        )
+
+        with dx.collect() as collected:
+            check_unit_group_envelope(hydros)
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert len(errors) == 1
+
+
+# ---------------------------------------------------------------------------
+# Rule 36 — check_bound_row_uniqueness
+# ---------------------------------------------------------------------------
+
+
+class TestBoundRowUniqueness:
+    def test_duplicate_stage_wide_column_is_caught(self) -> None:
+        table = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                "max_turbined_m3s": pa.array([10.0, 20.0], type=pa.float64()),
+            }
+        )
+        families = [BoundFamily("Hydro", "hydro_id", table)]
+
+        with dx.collect() as collected:
+            check_bound_row_uniqueness(families)
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert len(errors) == 1
+        assert errors[0].code == "bound-row-duplicate"
+        assert errors[0].table is not None
+        row = errors[0].table.rows[0]
+        assert row[0] == "Hydro"
+        assert row[1] == 0
+        assert row[2] == 0
+        assert row[4] == "max_turbined_m3s"
+
+    def test_stage_wide_row_and_per_block_rows_coexist(self) -> None:
+        """A None-block base row plus Some(b) per-block rows on the same
+        (entity, stage, column) is legal usage (epic-02's line_bounds
+        convention), not a duplicate."""
+        table = pa.table(
+            {
+                "line_id": pa.array([0, 0, 0], type=pa.int32()),
+                "stage_id": pa.array([0, 0, 0], type=pa.int32()),
+                "block_id": pa.array([None, 0, 1], type=pa.int32()),
+                "direct_mw": pa.array([100.0, 80.0, 100.0], type=pa.float64()),
+            }
+        )
+        families = [BoundFamily("Line", "line_id", table)]
+
+        with dx.collect() as collected:
+            check_bound_row_uniqueness(families)
+
+        assert collected == []
+
+    def test_disjoint_columns_on_same_key_are_not_duplicates(self) -> None:
+        table = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "min_turbined_m3s": pa.array([1.0], type=pa.float64()),
+                "max_turbined_m3s": pa.array([2.0], type=pa.float64()),
+            }
+        )
+        families = [BoundFamily("Hydro", "hydro_id", table)]
+
+        with dx.collect() as collected:
+            check_bound_row_uniqueness(families)
+
+        assert collected == []
+
+    def test_absent_family_table_is_skipped_without_a_finding(self) -> None:
+        families = [BoundFamily("Hydro", "hydro_id", None)]
+
+        with dx.collect() as collected:
+            check_bound_row_uniqueness(families)
+
+        assert collected == []
+
+
+# ---------------------------------------------------------------------------
+# block_id range — check_bound_block_id_range
+# ---------------------------------------------------------------------------
+
+
+class TestBoundBlockIdRange:
+    def test_out_of_range_block_id_is_caught(self) -> None:
+        stages = _stages(3, 2)  # stage 0 -> 3 blocks, stage 1 -> 2 blocks
+        table = pa.table(
+            {
+                "line_id": pa.array([1], type=pa.int32()),
+                "stage_id": pa.array([1], type=pa.int32()),
+                "block_id": pa.array([2], type=pa.int32()),  # stage 1 has 0..2
+                "direct_mw": pa.array([10.0], type=pa.float64()),
+            }
+        )
+        families = [BoundFamily("Line", "line_id", table)]
+
+        with dx.collect() as collected:
+            check_bound_block_id_range(stages, families)
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert len(errors) == 1
+        diag = errors[0]
+        assert diag.code == "bound-block-id-out-of-range"
+        assert diag.table is not None
+        row = diag.table.rows[0]
+        assert row[0] == "Line"
+        assert row[1] == 1  # entity
+        assert row[2] == 1  # stage
+        assert row[3] == 2  # offending block_id
+        assert row[4] == 2  # declared block count
+
+    def test_in_range_block_id_passes(self) -> None:
+        stages = _stages(3, 2)
+        table = pa.table(
+            {
+                "line_id": pa.array([1, 2], type=pa.int32()),
+                "stage_id": pa.array([0, 1], type=pa.int32()),
+                "block_id": pa.array([2, 1], type=pa.int32()),
+                "direct_mw": pa.array([10.0, 20.0], type=pa.float64()),
+            }
+        )
+        families = [BoundFamily("Line", "line_id", table)]
+
+        with dx.collect() as collected:
+            check_bound_block_id_range(stages, families)
+
+        assert collected == []
+
+    def test_unknown_stage_id_is_skipped_without_a_finding(self) -> None:
+        stages = _stages(3)
+        table = pa.table(
+            {
+                "line_id": pa.array([1], type=pa.int32()),
+                "stage_id": pa.array([99], type=pa.int32()),
+                "block_id": pa.array([0], type=pa.int32()),
+                "direct_mw": pa.array([10.0], type=pa.float64()),
+            }
+        )
+        families = [BoundFamily("Line", "line_id", table)]
+
+        with dx.collect() as collected:
+            check_bound_block_id_range(stages, families)
+
+        assert collected == []
+
+    def test_family_without_block_id_column_is_skipped(self) -> None:
+        stages = _stages(1)
+        table = pa.table(
+            {
+                "thermal_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "max_generation_mw": pa.array([10.0], type=pa.float64()),
+            }
+        )
+        families = [BoundFamily("Thermal", "thermal_id", table)]
+
+        with dx.collect() as collected:
+            check_bound_block_id_range(stages, families)
+
+        assert collected == []
