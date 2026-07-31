@@ -2330,6 +2330,45 @@ class TestCompareJson:
         assert "ERROR:" in stderr
         assert "bad parquet" in stderr
 
+    def test_compare_results_partition_missing_exit_2_no_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FINDING-1 regression: CobrePartitionMissingError (raised by
+        read_cobre_bus_aggregates against a pre-0.13 / 0.13-incomplete
+        output dir lacking simulation/hydro_bus_generation/) extends
+        BridgeError -- a hierarchy disjoint from CobreReadError
+        (RuntimeError). The compare newave CLI handler must catch it too,
+        rendering a clean ERROR line + exit 2, not an unhandled traceback.
+        This drives the REAL reader against a genuinely 0.13-incomplete
+        output dir (simulation/hydros/ present, simulation/
+        hydro_bus_generation/ absent), so the exception message is
+        production-generated, not hand-typed."""
+        from cobre_bridge.comparators.cobre_readers import read_cobre_bus_aggregates
+
+        self._patch_common(monkeypatch)
+
+        cobre_dir = tmp_path / "cobre"
+        (cobre_dir / "simulation" / "hydros").mkdir(parents=True)
+
+        def _raise(**_k: object) -> object:
+            return read_cobre_bus_aggregates(cobre_dir)
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            _raise,
+        )
+
+        code, stdout, stderr = self._invoke_main(
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
+            monkeypatch,
+        )
+
+        assert code == 2
+        assert stdout == ""
+        assert "ERROR:" in stderr
+        assert str(cobre_dir / "simulation" / "hydro_bus_generation") in stderr
+        assert "0.13.0" in stderr
+
 
 class TestParseFormats:
     """ticket-016: ``_parse_formats`` token parsing and validation."""

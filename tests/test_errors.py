@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.errors import (
+    BridgeError,
     CobreOutputError,
+    CobrePartitionMissingError,
     FieldParseError,
     SourceFileError,
     diagnostic_from_exception,
@@ -20,6 +22,12 @@ class TestExceptionHierarchy:
         assert exc.path == "/case"
         assert exc.field == "caso.dat"
         assert str(exc) == "caso.dat not found"
+
+    def test_cobre_partition_missing_error_is_bridge_error(self) -> None:
+        exc = CobrePartitionMissingError("partition not found", path="/out/sim/x")
+        assert isinstance(exc, BridgeError)
+        assert exc.path == "/out/sim/x"
+        assert str(exc) == "partition not found"
 
 
 class TestDiagnosticFromException:
@@ -66,3 +74,14 @@ class TestDiagnosticFromException:
         assert diag.code == "cobre-output-unreadable"
         assert diag.category == "Comparison failure"
         assert "file: /out/bounds.parquet" in diag.notes
+
+    def test_cobre_partition_missing_error_category(self) -> None:
+        exc = CobrePartitionMissingError(
+            "Cobre output partition not found: /out/simulation/hydro_bus_generation. "
+            "cobre >= 0.13.0",
+            path="/out/simulation/hydro_bus_generation",
+        )
+        diag = diagnostic_from_exception(exc, context="Comparison")
+        assert diag.code == "cobre-partition-missing"
+        assert diag.category == "Comparison failure"
+        assert "file: /out/simulation/hydro_bus_generation" in diag.notes

@@ -876,10 +876,11 @@ def hydro_per_bus_chart(
     """Per-bus faceted hydro comparison for *variable*.
 
     Aggregates hydro-plant ResultComparison rows by the plant's owning bus (taken from
-    ``hydro_meta[cobre_id]["bus_id"]``), then renders a small-multiples grid (one panel
-    per non-fictitious bus, same layout convention as ``line_summary_chart``) with the
-    source model + Cobre traces and an optional Cobre P10–P90 band summed across each
-    bus's plants.
+    ``hydro_meta[cobre_id]["bus_ids"]``, the hydro_bus_generation-partition-sourced
+    label -- see ``analyze._bus_name_lookups``), then renders a small-multiples grid
+    (one panel per non-fictitious bus, same layout convention as ``line_summary_chart``)
+    with the source model + Cobre traces and an optional Cobre P10–P90 band summed
+    across each bus's plants.
 
     Returns a short ``<p>`` fallback when the variable is absent on
     both sides or no plants can be mapped to buses.
@@ -1138,7 +1139,7 @@ def hydro_slack_per_bus_chart(
     Parallel to :func:`hydro_per_bus_chart` for the slack variables that aren't surfaced
     through ``ResultComparison`` (no Cobre/the source model comparison row exists for
     them).  Plants are bucketed by their owning bus via
-    ``hydro_meta[cobre_id]["bus_id"]``; fictitious buses (``NOFICT*``) are excluded,
+    ``hydro_meta[cobre_id]["bus_ids"]``; fictitious buses (``NOFICT*``) are excluded,
     matching the existing per-bus charts.  When *nw_slacks* is ``None`` or lacks the
     column, the source model trace is omitted (used for
     ``inflow_nonnegativity_slack_m3s`` which has no source-model counterpart).

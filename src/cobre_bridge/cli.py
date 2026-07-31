@@ -314,6 +314,7 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.results import compare_results
     from cobre_bridge.comparators.verdict import build_compare_verdict
+    from cobre_bridge.errors import CobrePartitionMissingError
 
     newave_dir: Path = args.newave_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -323,9 +324,14 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
         newave_dir, cobre_output_dir
     )
 
-    # Run comparison.  A CobreReadError means an *existing* Cobre output file
-    # was unreadable/malformed — fail loudly (exit 2) rather than report a
-    # false "no divergence" on data we could not actually read.
+    # Run comparison. A CobreReadError means an *existing* Cobre output file
+    # was unreadable/malformed; a CobrePartitionMissingError means the output
+    # predates the cobre version that introduced a partition this compare
+    # relies on (e.g. simulation/hydro_bus_generation/, cobre >= 0.13.0).
+    # CobrePartitionMissingError extends BridgeError, a hierarchy disjoint
+    # from CobreReadError (RuntimeError) — both must be caught here, or the
+    # latter crashes with an unhandled traceback instead of failing loudly
+    # (exit 2) like the former.
     try:
         with spinner(
             "Comparing results…",
@@ -340,7 +346,7 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
                 cobre_output_dir=cobre_output_dir,
                 tolerance=tolerance,
             )
-    except CobreReadError as exc:
+    except (CobreReadError, CobrePartitionMissingError) as exc:
         print_status(
             f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
         )
@@ -1246,6 +1252,7 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
     """
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.decomp_results import compare_decomp_results
+    from cobre_bridge.errors import CobrePartitionMissingError
 
     try:
         with spinner(
@@ -1255,7 +1262,12 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
             no_color=args.no_color,
         ):
             comparison = compare_decomp_results(args.decomp_dir, args.cobre_output_dir)
-    except (CobreReadError, FileNotFoundError, ValueError) as exc:
+    except (
+        CobreReadError,
+        CobrePartitionMissingError,
+        FileNotFoundError,
+        ValueError,
+    ) as exc:
         print_status(
             f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
         )

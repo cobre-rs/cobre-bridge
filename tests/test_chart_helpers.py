@@ -820,9 +820,9 @@ def per_bus_results() -> list[ResultComparison]:
 @pytest.fixture()
 def per_bus_hydro_meta() -> dict[int, dict]:
     return {
-        0: {"bus_id": 100},
-        1: {"bus_id": 101},
-        2: {"bus_id": 199},  # NOFICT
+        0: {"bus_ids": {100}},
+        1: {"bus_ids": {101}},
+        2: {"bus_ids": {199}},  # NOFICT
     }
 
 
@@ -898,6 +898,16 @@ def detail_cobre_hydro() -> pl.DataFrame:
     )
 
 
+# ticket-011 (epic-03): read_cobre_hydro_metadata no longer carries a plant
+# "bus_id" (decision B1); the per-bus roll-up now sources the plant->bus label
+# from "bus_ids" (see analyze._bus_name_lookups), merged onto hydro_meta by
+# the results-comparison orchestrator from the hydro_bus_generation
+# partition. ``per_bus_hydro_meta`` was migrated to the "bus_ids" shape by
+# ticket-014, one bus per plant (0->100, 1->101, 2->199), so every plant here
+# still resolves to exactly the bus it did under the legacy "bus_id" shape --
+# a value-preserving migration, confirmed by ticket-014 to render the
+# byte-identical golden HTML (see epic-03/learnings.md for the verified
+# before/after series).
 def test_hydro_per_bus_chart_html_matches_golden(
     per_bus_results: list[ResultComparison],
     per_bus_hydro_pct: pl.DataFrame,
@@ -937,6 +947,75 @@ def test_hydro_slack_per_bus_chart_html_matches_golden(
         encoding="utf-8"
     )
     assert _strip_chart_id(html) == _strip_chart_id(golden)
+
+
+# ---------------------------------------------------------------------------
+# ticket-011: synthetic two-bus plant coverage (AC5) at the chart-rendering
+# level -- the analyze-layer exclusion/diagnostic behaviour is unit-tested
+# directly in test_analyze.py; these confirm the chart builders that consume
+# it render the single-bus plant's panel and simply omit the ambiguous one,
+# rather than crashing or double-counting it into both bus panels.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def two_bus_hydro_meta() -> dict[int, dict]:
+    return {
+        0: {"bus_ids": {100}},
+        9: {"bus_ids": {100, 101}},  # synthetic two-bus plant (epic 08 territory).
+    }
+
+
+@pytest.fixture()
+def two_bus_bus_meta() -> dict[int, dict]:
+    return {100: {"name": "SUDESTE"}, 101: {"name": "SUL"}}
+
+
+def test_hydro_per_bus_chart_excludes_multi_bus_plant(
+    two_bus_hydro_meta: dict[int, dict],
+    two_bus_bus_meta: dict[int, dict],
+) -> None:
+    results = [
+        _rc("hydro", "H1", 0, 1, "storage_final_hm3", 100.0, 90.0),
+        _rc("hydro", "H9", 9, 1, "storage_final_hm3", 500.0, 480.0),
+    ]
+    html = _cmp_charts.hydro_per_bus_chart(
+        results,
+        "storage_final_hm3",
+        "Hydro Storage by Bus",
+        None,
+        two_bus_hydro_meta,
+        two_bus_bus_meta,
+    )
+    # SUDESTE (plant 0) renders; SUL never appears since plant 9's value was
+    # excluded rather than collapsed into it or double-counted across both.
+    assert "SUDESTE" in html
+    assert "SUL" not in html
+
+
+def test_hydro_slack_per_bus_chart_excludes_multi_bus_plant(
+    two_bus_hydro_meta: dict[int, dict],
+    two_bus_bus_meta: dict[int, dict],
+) -> None:
+    cobre_hydro = pl.DataFrame(
+        {
+            "entity_id": [0, 9],
+            "stage_id": [1, 1],
+            "water_withdrawal_violation_pos_m3s": [5.0, 50.0],
+        }
+    )
+    html = _cmp_charts.hydro_slack_per_bus_chart(
+        cobre_hydro,
+        None,
+        "water_withdrawal_violation_pos_m3s",
+        "Withdrawal Slack by Bus",
+        None,
+        two_bus_hydro_meta,
+        two_bus_bus_meta,
+        {0, 9},
+    )
+    assert "SUDESTE" in html
+    assert "SUL" not in html
 
 
 @pytest.fixture()

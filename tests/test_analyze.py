@@ -10,6 +10,7 @@ from typing import cast
 import pandas as pd
 import polars as pl
 
+from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.analyze import (
     aggregate_percentile_band,
     bounds_mismatch_listing,
@@ -915,6 +916,11 @@ def _hydro_row(
 
 def test_per_bus_sums_from_results_buckets_and_skips_fictitious() -> None:
     # Four hydro rows: ids 0,1 -> SUDESTE; id 2 -> SUL; id 3 -> NOFICT1 (dropped).
+    #
+    # ticket-011: the bus label is re-sourced from the hydro_bus_generation
+    # partition's distinct (hydro_id, bus_id) pairs (merged onto hydro_meta as
+    # "bus_ids" by the results-comparison orchestrator) -- read_cobre_hydro_metadata
+    # itself no longer carries a "bus_id" key.
     results = [
         _hydro_row(0, 1, "storage_final_hm3", 100.0, 90.0),
         _hydro_row(1, 1, "storage_final_hm3", 200.0, 180.0),
@@ -925,10 +931,10 @@ def test_per_bus_sums_from_results_buckets_and_skips_fictitious() -> None:
         _hydro_row(5, 1, "storage_final_hm3", 7.0, 7.0, entity_type="thermal"),
     ]
     hydro_meta: dict[int, dict[str, object]] = {
-        0: {"bus_id": 100},
-        1: {"bus_id": 100},
-        2: {"bus_id": 101},
-        3: {"bus_id": 199},
+        0: {"bus_ids": {100}},
+        1: {"bus_ids": {100}},
+        2: {"bus_ids": {101}},
+        3: {"bus_ids": {199}},
     }
     bus_meta: dict[int, dict[str, object]] = {
         100: {"name": "SUDESTE"},
@@ -947,15 +953,17 @@ def test_per_bus_sums_from_results_buckets_and_skips_fictitious() -> None:
     assert out["SUL"]["ids"] == {2}
 
 
-def test_per_bus_sums_from_results_skips_plants_without_bus_id() -> None:
+def test_per_bus_sums_from_results_skips_plants_without_bus_ids() -> None:
     results = [
         _hydro_row(0, 1, "storage_final_hm3", 100.0, 90.0),
         _hydro_row(1, 1, "storage_final_hm3", 200.0, 180.0),
     ]
-    # id 1 has bus_id None -> skipped entirely.
+    # id 1 carries no "bus_ids" label at all (e.g. it never appears in the
+    # hydro_bus_generation partition) -> skipped entirely, same as the legacy
+    # bus_id-is-None skip.
     hydro_meta: dict[int, dict[str, object]] = {
-        0: {"bus_id": 100},
-        1: {"bus_id": None},
+        0: {"bus_ids": {100}},
+        1: {},
     }
     bus_meta: dict[int, dict[str, object]] = {100: {"name": "SUDESTE"}}
 
@@ -964,6 +972,44 @@ def test_per_bus_sums_from_results_skips_plants_without_bus_id() -> None:
     assert set(out) == {"SUDESTE"}
     assert out["SUDESTE"]["ids"] == {0}
     assert out["SUDESTE"]["nw"] == {1: 100.0}
+
+
+def test_per_bus_sums_from_results_excludes_multi_bus_plant() -> None:
+    """ticket-011 AC5: a plant recorded at two buses is neither collapsed onto
+
+    one of them nor added to both (which would double-count its aggregate
+    value); it is dropped from every bus's roll-up and a Diagnostic is raised.
+    """
+    results = [
+        _hydro_row(0, 1, "storage_final_hm3", 100.0, 90.0),  # single-bus, kept.
+        _hydro_row(9, 1, "storage_final_hm3", 500.0, 480.0),  # two-bus, excluded.
+    ]
+    hydro_meta: dict[int, dict[str, object]] = {
+        0: {"bus_ids": {100}},
+        # synthetic two-bus plant (epic 08 territory); named so FINDING-4's
+        # fix (include the plant name, not just its numeric id) is checked.
+        9: {"bus_ids": {100, 101}, "name": "AMBIGUOUS_PLANT"},
+    }
+    bus_meta: dict[int, dict[str, object]] = {
+        100: {"name": "SUDESTE"},
+        101: {"name": "SUL"},
+    }
+
+    with dx.collect() as collected:
+        out = per_bus_sums_from_results(
+            results, "storage_final_hm3", hydro_meta, bus_meta
+        )
+
+    # Plant 9's value appears in NEITHER bus's bucket -- not collapsed onto
+    # SUDESTE or SUL, and not double-counted into both.
+    assert out["SUDESTE"]["ids"] == {0}
+    assert out["SUDESTE"]["nw"] == {1: 100.0}
+    assert "SUL" not in out
+
+    ambiguous = [d for d in collected if d.code == "hydro-multi-bus-ambiguous"]
+    assert len(ambiguous) == 1
+    assert "9" in ambiguous[0].summary
+    assert "AMBIGUOUS_PLANT" in ambiguous[0].summary
 
 
 def test_per_bus_sums_from_frame_matches_legacy_closure() -> None:
@@ -975,9 +1021,9 @@ def test_per_bus_sums_from_frame_matches_legacy_closure() -> None:
         }
     )
     hydro_meta: dict[int, dict[str, object]] = {
-        0: {"bus_id": 100},
-        1: {"bus_id": 100},
-        2: {"bus_id": 199},  # NOFICT -> dropped.
+        0: {"bus_ids": {100}},
+        1: {"bus_ids": {100}},
+        2: {"bus_ids": {199}},  # NOFICT -> dropped.
     }
     bus_meta: dict[int, dict[str, object]] = {
         100: {"name": "SUDESTE"},
@@ -993,12 +1039,94 @@ def test_per_bus_sums_from_frame_matches_legacy_closure() -> None:
     assert out["SUDESTE"]["ids"] == {0, 1}
 
 
+def test_per_bus_sums_from_frame_excludes_multi_bus_plant() -> None:
+    """ticket-011 AC5, frame-sourced variant of the two-bus exclusion."""
+    df = pl.DataFrame(
+        {
+            "entity_id": [0, 9],
+            "stage_id": [1, 1],
+            "water_withdrawal_violation_pos_m3s": [5.0, 50.0],
+        }
+    )
+    hydro_meta: dict[int, dict[str, object]] = {
+        0: {"bus_ids": {100}},
+        9: {"bus_ids": {100, 101}},
+    }
+    bus_meta: dict[int, dict[str, object]] = {
+        100: {"name": "SUDESTE"},
+        101: {"name": "SUL"},
+    }
+
+    with dx.collect() as collected:
+        out = per_bus_sums_from_frame(
+            df, "water_withdrawal_violation_pos_m3s", {0, 9}, hydro_meta, bus_meta
+        )
+
+    assert out["SUDESTE"]["sum"] == {1: 5.0}
+    assert out["SUDESTE"]["ids"] == {0}
+    assert "SUL" not in out
+    assert any(d.code == "hydro-multi-bus-ambiguous" for d in collected)
+
+
 def test_per_bus_sums_from_frame_empty_or_missing_column_returns_empty() -> None:
-    hydro_meta: dict[int, dict[str, object]] = {0: {"bus_id": 100}}
+    hydro_meta: dict[int, dict[str, object]] = {0: {"bus_ids": {100}}}
     bus_meta: dict[int, dict[str, object]] = {100: {"name": "SUDESTE"}}
     assert per_bus_sums_from_frame(None, "v", None, hydro_meta, bus_meta) == {}
     df = pl.DataFrame({"entity_id": [0], "stage_id": [1], "other": [1.0]})
     assert per_bus_sums_from_frame(df, "v", None, hydro_meta, bus_meta) == {}
+
+
+def test_per_bus_sums_from_results_empty_hydro_meta_diagnoses_map_empty() -> None:
+    """ticket-011 AC4: a non-empty hydro_meta that resolves to zero usable
+
+    bus labels must not silently produce an empty map -- a Diagnostic names
+    the failure instead.
+    """
+    results = [_hydro_row(0, 1, "storage_final_hm3", 100.0, 90.0)]
+    # Every plant lacks a "bus_ids" label (e.g. the merge step never ran).
+    hydro_meta: dict[int, dict[str, object]] = {0: {}}
+    bus_meta: dict[int, dict[str, object]] = {}
+
+    with dx.collect() as collected:
+        out = per_bus_sums_from_results(
+            results, "storage_final_hm3", hydro_meta, bus_meta
+        )
+
+    assert out == {}
+    assert any(d.code == "hydro-to-bus-map-empty" for d in collected)
+
+
+def test_per_bus_sums_from_results_dedupes_repeated_ambiguity_diagnostic() -> None:
+    """FINDING-3 regression: report_builder.py threads the SAME hydro_meta/
+    bus_meta object pair into ~11 per-bus chart calls per comparison run
+    (one per chart variable); the ambiguous-plant diagnostic must fire once
+    per run, not once per call -- compare has no diagnostics de-dup sink, so
+    the un-memoized helper would log the identical warning ~11x."""
+    results = [_hydro_row(0, 1, "storage_final_hm3", 100.0, 90.0)]
+    hydro_meta: dict[int, dict[str, object]] = {
+        0: {"bus_ids": {100}},
+        9: {"bus_ids": {100, 101}},
+    }
+    bus_meta: dict[int, dict[str, object]] = {100: {"name": "SUDESTE"}}
+
+    with dx.collect() as collected:
+        for _ in range(11):
+            per_bus_sums_from_results(
+                results, "storage_final_hm3", hydro_meta, bus_meta
+            )
+
+    ambiguous = [d for d in collected if d.code == "hydro-multi-bus-ambiguous"]
+    assert len(ambiguous) == 1
+
+    # A genuinely different hydro_meta/bus_meta pair (a later, distinct
+    # comparison run) is unaffected by the memo -- the diagnostic is
+    # per-pair, not globally suppressed after its first ever emission.
+    other_hydro_meta: dict[int, dict[str, object]] = {9: {"bus_ids": {100, 101}}}
+    with dx.collect() as collected_other:
+        per_bus_sums_from_results(
+            results, "storage_final_hm3", other_hydro_meta, bus_meta
+        )
+    assert any(d.code == "hydro-multi-bus-ambiguous" for d in collected_other)
 
 
 def test_per_bus_band_from_pct_sums_across_bus_ids() -> None:

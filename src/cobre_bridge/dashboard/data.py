@@ -20,6 +20,8 @@ import pyarrow.parquet as pq
 from cobre_bridge.cobre_io import (
     resolve_hydro_productivities,
 )
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.errors import CobreOutputError
 
 logger = logging.getLogger(__name__)
 
@@ -85,13 +87,79 @@ def load_stage_labels(case_dir: Path) -> dict[int, str]:
     return labels
 
 
+def resolve_hydro_bus_id(hydro: dict, *, hydros_path: Path) -> int | None:
+    """Resolve one hydro plant's bus id from its ``unit_groups`` array.
+
+    Single implementation of the pre-0.13 top-level ``hydros.json``
+    ``bus_id`` -> 0.13 ``unit_groups[].bus_id`` relocation, shared by
+    ``load_hydro_bus_map`` and ``load_hydro_metadata`` so the two never
+    disagree on a plant's bus (AC5).
+
+    - Every plant either pipeline emits today carries exactly one distinct
+      ``bus_id`` across its groups (cobre rule 41's mirror invariant) -- that
+      value is returned.
+    - A plant recorded at more than one distinct bus is **not** collapsed
+      onto an arbitrary group's bus (that would silently mislabel it) and is
+      **not** duplicated across every bus it touches either (that would
+      double-count it wherever a caller sums per bus) -- the same dilemma the
+      compare layer resolved the same way in
+      ``comparators.analyze._bus_name_lookups``. Implementation note (the
+      deliberate degraded-rendering choice for this ticket): a ``WARNING``
+      :class:`~cobre_bridge.diagnostics.Diagnostic` is emitted and ``None``
+      is returned. Callers must omit the plant from any single-bus-keyed
+      view: ``load_hydro_bus_map``'s id->bus map has no room for more than
+      one bus per plant, and ``load_hydro_metadata`` drops the ``"bus_id"``
+      key entirely so its existing ``.get("bus_id", <default>)`` call sites
+      in the dashboard tabs degrade to "unknown bus" for it. The plant's
+      non-bus metadata (name, volumes, productivity, ...) is unaffected and
+      keeps rendering in the per-plant tables that are not bus-keyed.
+    - Missing or empty ``unit_groups`` raises :class:`CobreOutputError`
+      naming the plant. This cannot happen on a real 0.13 case (cobre rejects
+      it at load), so it only guards a hand-edited or pre-0.13 file.
+    """
+    hid = hydro.get("id")
+    name = hydro.get("name", str(hid))
+    groups = hydro.get("unit_groups")
+    if not groups:
+        raise CobreOutputError(
+            f"hydro {hid} ({name}) has no unit_groups; cannot resolve its bus",
+            path=str(hydros_path),
+        )
+    bus_ids = {g["bus_id"] for g in groups}
+    if len(bus_ids) == 1:
+        return next(iter(bus_ids))
+    emit(
+        Diagnostic(
+            code="hydro-unit-groups-multi-bus",
+            severity=Severity.WARNING,
+            category="Dashboard data",
+            title="Hydro plant spans multiple buses",
+            summary=(
+                f"Hydro {hid} ({name}) has unit_groups recorded at buses "
+                f"{sorted(bus_ids)}; a single plant-level bus cannot be "
+                "chosen without collapsing onto one of them or "
+                "double-counting the plant at each, so it is omitted from "
+                "bus-keyed dashboard views."
+            ),
+            notes=[f"hydro_id: {hid}", f"bus_ids: {sorted(bus_ids)}"],
+        ),
+        logger=logger,
+    )
+    return None
+
+
 def load_hydro_bus_map(case_dir: Path) -> dict[int, int]:
     path = case_dir / "system" / "hydros.json"
     if not path.exists():
         return {}
     with open(path) as f:
         d = json.load(f)
-    return {h["id"]: h["bus_id"] for h in d["hydros"]}
+    result: dict[int, int] = {}
+    for h in d["hydros"]:
+        bus_id = resolve_hydro_bus_id(h, hydros_path=path)
+        if bus_id is not None:
+            result[h["id"]] = bus_id
+    return result
 
 
 def load_thermal_metadata(case_dir: Path) -> dict[int, dict]:
@@ -128,8 +196,24 @@ def load_ncs_bus_map(case_dir: Path) -> dict[int, int]:
     return {n["id"]: n["bus_id"] for n in d["non_controllable_sources"]}
 
 
-def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
+def load_hydro_metadata(
+    case_dir: Path, *, bus_map: dict[int, int] | None = None
+) -> dict[int, dict]:
     """Return hydro_id -> {bus_id, name, vol_max, vol_min, max_gen_mw, max_turbined}.
+
+    ``bus_id`` is resolved via :func:`resolve_hydro_bus_id` and is absent from
+    a plant's dict when its ``unit_groups`` disagree on a bus (see that
+    function's docstring for the degraded-rendering rationale).
+
+    *bus_map*, when supplied, is used instead of re-resolving each plant's
+    bus: :func:`load_entity_metadata` computes it once via
+    :func:`load_hydro_bus_map` and passes it here, so an ambiguous plant's
+    ``hydro-unit-groups-multi-bus`` warning is diagnosed once per case load
+    rather than once per loader (``load_hydro_bus_map`` and
+    ``load_hydro_metadata`` otherwise each resolve every plant's bus
+    independently over the same ``hydros.json``). Called standalone (the
+    default, *bus_map* omitted) this still resolves each plant's bus itself,
+    exactly as before.
 
     Productivity is read from ``hydro_energy_productivity.parquet`` (the
     cobre productivity-resolution-rules contract). Falls back through
@@ -151,8 +235,12 @@ def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
         res = h.get("reservoir", {})
         prod = productivities.get(h["id"]) or 0
         max_turbined = gen.get("max_turbined_m3s", 0)
-        result[h["id"]] = {
-            "bus_id": h["bus_id"],
+        bus_id = (
+            bus_map.get(h["id"])
+            if bus_map is not None
+            else resolve_hydro_bus_id(h, hydros_path=path)
+        )
+        entry: dict = {
             "name": h.get("name", str(h["id"])),
             "vol_max": res.get("max_storage_hm3", 0),
             "vol_min": res.get("min_storage_hm3", 0),
@@ -162,6 +250,9 @@ def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
             "productivity": prod,
             "downstream_id": h.get("downstream_id"),
         }
+        if bus_id is not None:
+            entry["bus_id"] = bus_id
+        result[h["id"]] = entry
     return result
 
 
@@ -429,16 +520,24 @@ class EntityMetadata:
 
 
 def load_entity_metadata(case_dir: Path) -> EntityMetadata:
-    """Load entity name maps and hydro/thermal metadata dictionaries."""
+    """Load entity name maps and hydro/thermal metadata dictionaries.
+
+    ``hydro_bus_map`` is resolved once via :func:`load_hydro_bus_map` and
+    reused by :func:`load_hydro_metadata` (FINDING-5: both loaders resolve
+    every plant's bus over the same ``system/hydros.json``; without sharing
+    the map, an ambiguous plant's ``hydro-unit-groups-multi-bus`` warning
+    fires twice per dashboard build instead of once).
+    """
     names = load_names(case_dir)
     bus_names = {eid: nm for (entity, eid), nm in names.items() if entity == "buses"}
+    hydro_bus_map = load_hydro_bus_map(case_dir)
     return EntityMetadata(
         names=names,
         stage_labels=load_stage_labels(case_dir),
-        hydro_bus_map=load_hydro_bus_map(case_dir),
+        hydro_bus_map=hydro_bus_map,
         thermal_meta=load_thermal_metadata(case_dir),
         ncs_bus_map=load_ncs_bus_map(case_dir),
-        hydro_meta=load_hydro_metadata(case_dir),
+        hydro_meta=load_hydro_metadata(case_dir, bus_map=hydro_bus_map),
         bus_names=bus_names,
     )
 
@@ -522,8 +621,8 @@ class ScenarioInputs:
     non_fictitious_bus_ids: list[int]
     ncs_stats: pd.DataFrame
     inflow_history: pd.DataFrame
-    exchange_factors: list[dict]
     line_bounds: pd.DataFrame
+    line_block_bounds: pd.DataFrame
     hydro_bounds: pd.DataFrame
     thermal_bounds: pd.DataFrame
 
@@ -559,15 +658,22 @@ def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
         pq.read_table(ih_path).to_pandas() if ih_path.exists() else pd.DataFrame()
     )
 
-    ef_path = case_dir / "constraints" / "exchange_factors.json"
-    exchange_factors: list[dict] = []
-    if ef_path.exists():
-        with ef_path.open() as f:
-            exchange_factors = json.load(f).get("exchange_factors", [])
-
     lb_path = case_dir / "constraints" / "line_bounds.parquet"
     line_bounds = (
         pq.read_table(lb_path).to_pandas() if lb_path.exists() else pd.DataFrame()
+    )
+    # Cobre 0.13 deleted the standalone per-block exchange-factor JSON
+    # document and folded it into absolute-MW override rows inside
+    # line_bounds.parquet (see converters/network.py::convert_line_bounds):
+    # block_id is non-null only on those rows, never on the stage-level base
+    # row. Do not reconstruct a factor by dividing back through the base —
+    # that reintroduces the division cobre's decision removed and can divide
+    # by a zero base. A line-stage whose blocks are uniform legitimately has
+    # no override row, so an empty frame here is a correct steady state.
+    line_block_bounds = (
+        line_bounds[line_bounds["block_id"].notna()].reset_index(drop=True)
+        if "block_id" in line_bounds.columns
+        else pd.DataFrame()
     )
     hb_path = case_dir / "constraints" / "hydro_bounds.parquet"
     hydro_bounds = (
@@ -584,8 +690,8 @@ def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
         non_fictitious_bus_ids=non_fictitious_bus_ids,
         ncs_stats=ncs_stats,
         inflow_history=inflow_history,
-        exchange_factors=exchange_factors,
         line_bounds=line_bounds,
+        line_block_bounds=line_block_bounds,
         hydro_bounds=hydro_bounds,
         thermal_bounds=thermal_bounds,
     )
@@ -882,7 +988,9 @@ class DashboardData:
     hydro_bounds: pd.DataFrame
     thermal_bounds: pd.DataFrame
     ncs_stats: pd.DataFrame
-    exchange_factors: list[dict]
+    # Per-block line_bounds override rows (block_id non-null); a case whose
+    # lines are uniform across blocks legitimately has none (ticket-013).
+    line_block_bounds: pd.DataFrame
     retry_histogram: pd.DataFrame
 
     # Summary counts
@@ -999,7 +1107,7 @@ class DashboardData:
             hydro_bounds=scenario.hydro_bounds,
             thermal_bounds=scenario.thermal_bounds,
             ncs_stats=scenario.ncs_stats,
-            exchange_factors=scenario.exchange_factors,
+            line_block_bounds=scenario.line_block_bounds,
             retry_histogram=performance.retry_histogram,
             n_scenarios=n_scenarios,
             n_stages=n_stages,

@@ -1028,6 +1028,7 @@ def compare_results(
         read_cobre_convergence,
         read_cobre_cost_breakdown,
         read_cobre_fpha_planes,
+        read_cobre_hydro_bus_labels,
         read_cobre_hydro_means,
         read_cobre_hydro_metadata,
         read_cobre_hydro_per_stage_bounds,
@@ -1070,6 +1071,16 @@ def compare_results(
     # Read entity names from both sides.
     nw_hydro_names, nw_thermal_names, nw_bus_names = read_reference_names(case)
     cobre_hydro_meta = read_cobre_hydro_metadata(cobre_output_dir)
+    # ``read_cobre_hydro_metadata`` carries plant physics only (decision B1);
+    # merge in the plant->bus *label* from the 0.13 hydro_bus_generation
+    # partition so ``dataset.metadata["cobre_hydro_meta"]`` -- the single
+    # channel report_builder.py already threads into the per-bus hydro chart
+    # helpers -- keeps carrying a bus label without those callers changing.
+    # A plant absent from the partition (e.g. it has no simulation output at
+    # all) simply gets no "bus_ids" key, matching the legacy "no bus" skip.
+    for hid, bus_ids in read_cobre_hydro_bus_labels(cobre_output_dir).items():
+        if hid in cobre_hydro_meta:
+            cobre_hydro_meta[hid]["bus_ids"] = bus_ids
     cobre_thermal_meta = read_cobre_thermal_metadata(cobre_output_dir)
     cobre_bus_meta = read_cobre_bus_metadata(cobre_output_dir)
 

@@ -19,6 +19,7 @@ import pyarrow.parquet as pq
 from cobre_bridge.cobre_io import resolve_hydro_productivities
 from cobre_bridge.comparators.cobre_readers import read_cobre_hydro_metadata
 from cobre_bridge.dashboard.data import load_hydro_metadata
+from tests.conftest import hydro_with_group
 
 
 def _build_case(case_dir: Path) -> None:
@@ -32,36 +33,33 @@ def _build_case(case_dir: Path) -> None:
     system.mkdir(parents=True, exist_ok=True)
     (case_dir / "output").mkdir(parents=True, exist_ok=True)
 
-    # NOTE (ticket-004 boundary, epic 01 vs epic 03): this hydros.json fixture
-    # stays 0.12-shaped (top-level bus_id, no unit_groups) rather than being
-    # swept onto tests.conftest.hydro_with_group. It is fed straight into
-    # load_hydro_metadata (dashboard/data.py) and read_cobre_hydro_metadata
-    # (comparators/cobre_readers.py), neither of which reads
-    # unit_groups[].bus_id yet — that is epic-03 tickets 011/012's job.
-    # Sweeping this fixture now would just make this test fail without
-    # exercising anything ticket-004 changed.
+    # 0.13-shaped hydros.json (unit_groups[].bus_id, no top-level bus_id).
+    # Feeds load_hydro_metadata (dashboard/data.py, epic-03 ticket-012) below.
+    # read_cobre_hydro_metadata (comparators/cobre_readers.py) no longer reads
+    # any bus id from hydros.json at all (decision B1, ticket-011), so it is
+    # indifferent to this shape.
     hydros = {
         "hydros": [
-            {
-                "id": 0,
-                "bus_id": 0,
-                "name": "H0",
-                "generation": {
+            hydro_with_group(
+                0,
+                0,
+                name="H0",
+                generation={
                     "productivity_mw_per_m3s": 0.9,  # embedded (lowest priority)
                     "max_turbined_m3s": 100.0,
                 },
-                "reservoir": {},
-            },
-            {
-                "id": 1,
-                "bus_id": 0,
-                "name": "H1",
-                "generation": {
+                reservoir={},
+            ),
+            hydro_with_group(
+                1,
+                0,
+                name="H1",
+                generation={
                     "productivity_mw_per_m3s": 0.9,  # embedded (must NOT win)
                     "max_turbined_m3s": 100.0,
                 },
-                "reservoir": {},
-            },
+                reservoir={},
+            ),
         ]
     }
     (system / "hydros.json").write_text(json.dumps(hydros))

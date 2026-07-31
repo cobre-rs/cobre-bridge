@@ -257,3 +257,43 @@ class TestCompareDecompCommand:
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]
         )
         assert result.exit_code == 2
+
+    def test_partition_missing_output_exits_two(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """FINDING-1 regression: CobrePartitionMissingError extends
+        BridgeError, a hierarchy disjoint from CobreReadError (RuntimeError)
+        and FileNotFoundError/ValueError. The compare decomp CLI handler
+        must catch it too -- a clean ERROR line + exit 2, not an unhandled
+        traceback -- mirroring the compare newave fix and this class's own
+        CobreReadError-analogue test above."""
+        from cobre_bridge.errors import CobrePartitionMissingError
+
+        sim_dir = tmp_path / "cobre" / "simulation" / "hydro_bus_generation"
+
+        def _boom(*_args: object, **_kwargs: object) -> DecompComparison:
+            raise CobrePartitionMissingError(
+                f"Cobre output partition not found: {sim_dir}. The "
+                "hydro_bus_generation partition is produced by cobre "
+                ">= 0.13.0; this output directory may predate that cobre "
+                "version.",
+                path=str(sim_dir),
+            )
+
+        from typer.testing import CliRunner
+
+        from cobre_bridge.cli import app
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.compare_decomp_results", _boom
+        )
+        result = CliRunner().invoke(
+            app, ["compare", "decomp", str(tmp_path), str(tmp_path)]
+        )
+        # exit_code == 2 (not 1) proves this is the clean typer.Exit(code=2)
+        # path, not an unhandled exception caught by CliRunner's default
+        # catch_exceptions=True (which would report exit_code == 1).
+        assert result.exit_code == 2
+        assert "ERROR:" in result.stderr
+        assert str(sim_dir) in result.stderr
+        assert "0.13.0" in result.stderr

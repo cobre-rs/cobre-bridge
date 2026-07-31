@@ -69,6 +69,22 @@ class CobreOutputError(BridgeError):
         self.path = path
 
 
+class CobrePartitionMissingError(BridgeError):
+    """A required Cobre output simulation partition does not exist.
+
+    Raised by readers that must fail loudly instead of silently returning an
+    empty frame when their source partition is absent — e.g. because the
+    Cobre output directory predates the cobre version that introduced the
+    partition. The message names the missing directory and the minimum
+    required cobre version, so the caller learns their *output* is stale
+    rather than concluding there is nothing to report.
+    """
+
+    def __init__(self, message: str, *, path: str | None = None) -> None:
+        super().__init__(message)
+        self.path = path
+
+
 # Per-type mapping: exception type → (code, category, remediation). Looked up by
 # walking ``type(exc).__mro__`` so a subclass still resolves to its base's entry.
 # An exception not present here falls back to ``_FALLBACK`` ("unexpected-error").
@@ -87,6 +103,11 @@ _TYPE_MAP: dict[type[BaseException], tuple[str, str, str | None]] = {
         "cobre-output-unreadable",
         "Comparison failure",
         "→ Re-run cobre with --output to regenerate the output directory.",
+    ),
+    CobrePartitionMissingError: (
+        "cobre-partition-missing",
+        "Comparison failure",
+        "→ Re-run cobre at the required version to produce this partition.",
     ),
 }
 

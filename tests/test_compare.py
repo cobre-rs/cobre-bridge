@@ -1278,6 +1278,7 @@ class TestCompareResultsReturnsDataset:
             monkeypatch.setattr(cr + name, lambda *a, **k: empty_pl())
         # Dict / scalar Cobre readers.
         monkeypatch.setattr(cr + "read_cobre_hydro_metadata", lambda *a, **k: {})
+        monkeypatch.setattr(cr + "read_cobre_hydro_bus_labels", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_thermal_metadata", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_bus_metadata", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_cost_breakdown", lambda *a, **k: {})
