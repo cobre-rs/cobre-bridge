@@ -25,7 +25,7 @@ from cobre_bridge.decomp.contracts import (
     warn_nonnull_loss_factor,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.temporal import build_operative_calendar
+from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 
 _COBRE_SCHEMA = (
     Path.home() / "git" / "cobre" / "schemas" / "energy_contracts.schema.json"
@@ -75,12 +75,12 @@ class _StubDadger:
         return self._ce
 
 
-def _calendar():
+def _calendar() -> list[OperativeStage]:
     hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
 
 
-def _uniform_calendar():
+def _uniform_calendar() -> list[OperativeStage]:
     """A calendar whose per-stage blocks all carry equal hours."""
     hours = [[56.0, 56.0, 56.0]] * 2 + [[248.0, 248.0, 248.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
