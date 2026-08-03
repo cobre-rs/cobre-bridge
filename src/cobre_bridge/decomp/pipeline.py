@@ -24,6 +24,7 @@ from cobre_bridge import diagnostics as dx
 from cobre_bridge import emission_checks
 from cobre_bridge.decomp import bounds as bounds_conv
 from cobre_bridge.decomp import config as config_conv
+from cobre_bridge.decomp import group_bounds as group_bounds_conv
 from cobre_bridge.decomp import hydro as hydro_conv
 from cobre_bridge.decomp import load as load_conv
 from cobre_bridge.decomp import ncs as ncs_conv
@@ -59,7 +60,7 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     caso = src / "caso.dat"
     if not caso.is_file():
         raise FileNotFoundError(f"{caso} not found; not a deck directory")
-    revision = caso.read_text(encoding="latin-1").split()[0].strip()
+    revision = caso.read_text(encoding="latin-1").split()[0]
 
     names: list[str] = []
     index = src / revision
@@ -136,8 +137,8 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     Raises
     ------
     ValueError
-        If the post-emission self-checks (cobre 0.13 rules 43/41/38/36 and the
-        ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
+        If the post-emission self-checks (cobre 0.13 rules 43/41/45/38/36 and
+        the ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
         find an ``ERROR``-severity violation in the converted artifacts. An
         ``INFO`` finding (e.g. rule 43's "not applicable" report, always the
         case for DECOMP) never raises.
@@ -263,8 +264,72 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     constraints = dst / "constraints"
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
     hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, hidr, id_map, calendar)
+    # ticket-026/027: B8 per-group per-stage availability (installed × MP ×
+    # FD, capped by the ρ_eq·q_max hydraulic ceiling) for every plant,
+    # single-group and Itaipu's own two per-frequency groups (code 66) alike.
+    # Sparse by construction — a value only lands here where it lowers that
+    # group's own declared envelope — so cobre rule 45 (a group-bound max_*
+    # may not exceed that group's declared max) is now reachable; its mirror
+    # is wired into the self-check block below.
+    availability_values, availability_deltas = (
+        hydro_conv.convert_hydro_group_availability(dadger, hidr, id_map, calendar)
+    )
+    group_bounds = group_bounds_conv.convert_hydro_unit_group_bounds(
+        availability_values, calendar
+    )
 
-    # Post-emission self-checks (cobre 0.13 rules 43, 41, 38, 36, and the
+    # B8's attached measurement obligation: the hydraulic ceiling binding
+    # below the installed×MP×FD availability is an *accepted cost*, not an
+    # error — but it must be recorded, not assumed away. One INFO Diagnostic
+    # per conversion (never raises), the ten worst offenders by how far under
+    # the availability ceiling the hydraulic cap sits.
+    if availability_deltas:
+        worst = sorted(
+            availability_deltas, key=lambda row: row.pct_under, reverse=True
+        )[:10]
+        dx.emit(
+            dx.Diagnostic(
+                code="hydro-availability-hydraulic-cap-binds",
+                severity=dx.Severity.INFO,
+                category="Hydro availability",
+                title=(
+                    "Hydraulic cap binds below availability "
+                    f"({len(availability_deltas)} (hydro, stage) row(s))"
+                ),
+                summary=(
+                    f"{len(availability_deltas)} single-group (hydro, stage) row(s) "
+                    "have the ρ_eq·q_max hydraulic ceiling below installed×MP×FD; "
+                    "the emitted max_generation_mw overlay is capped to the (lower) "
+                    "hydraulic value on these rows, below the source model's "
+                    "reported availability"
+                ),
+                table=dx.DiagnosticTable(
+                    columns=[
+                        "Hydro",
+                        "Code",
+                        "Stage",
+                        "Hydraulic MW",
+                        "Availability MW",
+                        "% under",
+                    ],
+                    rows=[
+                        [
+                            row.name,
+                            row.code,
+                            row.stage_id,
+                            round(row.hydraulic_mw, 3),
+                            round(row.availability_mw, 3),
+                            round(row.pct_under, 2),
+                        ]
+                        for row in worst
+                    ],
+                    justify=["left", "right", "right", "right", "right", "right"],
+                ),
+            ),
+            logger=_LOG,
+        )
+
+    # Post-emission self-checks (cobre 0.13 rules 43, 41, 45, 38, 36, and the
     # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
     # the in-memory artifacts, run before the constraint tables are written.
     # DECOMP writes max_turbined_m3s/max_generation_mw only on the entity
@@ -287,10 +352,17 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds),
         emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
         emission_checks.BoundFamily("Line", "line_id", line_bounds),
+        emission_checks.BoundFamily(
+            "HydroUnitGroup",
+            "hydro_id",
+            group_bounds,
+            group_column="hydro_unit_group_id",
+        ),
     ]
     with dx.collect() as check_diagnostics:
         emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds)
         emission_checks.check_unit_group_envelope(hydros_dict)
+        emission_checks.check_group_bound_envelope(hydros_dict, group_bounds)
         emission_checks.check_bound_row_uniqueness(bound_families)
         emission_checks.check_bound_block_id_range(stages_dict, bound_families)
         emission_checks.check_block_id_not_on_anticipated_thermal(
@@ -302,7 +374,8 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     if check_errors:
         raise ValueError(
             f"DECOMP conversion failed {len(check_errors)} post-emission "
-            "self-check error(s) (cobre 0.13 rules 43/41/38/36/block_id-range):\n"
+            "self-check error(s) (cobre 0.13 rules 43/41/45/38/36/"
+            "block_id-range):\n"
             f"{_describe_emission_check_errors(check_errors)}"
         )
 
@@ -310,6 +383,8 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     _write_parquet(constraints / "line_bounds.parquet", line_bounds)
     if hydro_bounds.num_rows:
         _write_parquet(constraints / "hydro_bounds.parquet", hydro_bounds)
+    if group_bounds.num_rows:
+        _write_parquet(constraints / "hydro_unit_group_bounds.parquet", group_bounds)
 
     _LOG.warning(
         "deferred at this milestone: GNL anticipation (dadgnl%s), boundary "

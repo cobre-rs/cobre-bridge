@@ -16,6 +16,7 @@ from cobre_bridge.emission_checks import (
     check_block_id_not_on_anticipated_thermal,
     check_bound_block_id_range,
     check_bound_row_uniqueness,
+    check_group_bound_envelope,
     check_hydro_bounds_no_raising,
     check_unit_group_envelope,
 )
@@ -248,6 +249,199 @@ class TestUnitGroupEnvelope:
 
         with dx.collect() as collected:
             check_unit_group_envelope(hydros)
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert len(errors) == 1
+
+
+# ---------------------------------------------------------------------------
+# Rule 45 — check_group_bound_envelope
+# ---------------------------------------------------------------------------
+
+
+class TestGroupBoundEnvelope:
+    def test_none_table_passes_without_a_finding(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+
+        with dx.collect() as collected:
+            check_group_bound_envelope(hydros, None)
+
+        assert collected == []
+
+    def test_empty_table_passes_without_a_finding(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+        group_bounds = pa.table(
+            {
+                "hydro_id": pa.array([], type=pa.int32()),
+                "hydro_unit_group_id": pa.array([], type=pa.int32()),
+                "stage_id": pa.array([], type=pa.int32()),
+                "max_generation_mw": pa.array([], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_group_bound_envelope(hydros, group_bounds)
+
+        assert collected == []
+
+    def test_row_raising_the_groups_own_declared_max_is_caught(self) -> None:
+        hydros = _hydros(
+            _hydro(
+                0,
+                max_turbined_m3s=100.0,
+                max_generation_mw=50.0,
+                groups=[(60.0, 30.0), (40.0, 20.0)],
+            )
+        )
+        group_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "hydro_unit_group_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([2], type=pa.int32()),
+                "max_generation_mw": pa.array([35.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_group_bound_envelope(hydros, group_bounds)
+
+        errors = [d for d in collected if d.severity is Severity.ERROR]
+        assert len(errors) == 1
+        diag = errors[0]
+        assert diag.code == "hydro-group-bounds-raises-declared-capacity"
+        assert diag.table is not None
+        row = diag.table.rows[0]
+        # hydro, group, column, stages, declared, offending — all named.
+        assert row[0] == 0
+        assert row[1] == 0
+        assert row[2] == "max_generation_mw"
+        assert "2" in row[3]
+        assert row[4] == 30.0
+        assert row[5] == 35.0
+
+    def test_row_at_or_below_the_groups_declared_max_passes(self) -> None:
+        hydros = _hydros(
+            _hydro(
+                0,
+                max_turbined_m3s=100.0,
+                max_generation_mw=50.0,
+                groups=[(60.0, 30.0), (40.0, 20.0)],
+            )
+        )
+        group_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], type=pa.int32()),
+                "hydro_unit_group_id": pa.array([0, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 1], type=pa.int32()),
+                "max_generation_mw": pa.array([30.0, 15.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_group_bound_envelope(hydros, group_bounds)
+
+        assert collected == []
+
+    def test_a_groups_row_is_checked_against_its_own_declared_max_only(self) -> None:
+        """The row is checked against *its own* group's declared max, not
+        another group of the same plant — this is what distinguishes rule 45
+        from rule 43 (:class:`TestHydroBoundsNoRaising`, the plant-envelope
+        mirror)."""
+        hydros = _hydros(
+            _hydro(
+                0,
+                max_turbined_m3s=100.0,
+                max_generation_mw=50.0,
+                groups=[(60.0, 30.0), (40.0, 20.0)],
+            )
+        )
+        group_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], type=pa.int32()),
+                "hydro_unit_group_id": pa.array([0, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                # Group 0's row (25) is under its own declared 30 — legal
+                # even though it exceeds group 1's declared 20.
+                "max_generation_mw": pa.array([25.0, 20.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_group_bound_envelope(hydros, group_bounds)
+
+        assert collected == []
+
+    def test_unknown_group_id_is_skipped_without_a_finding(self) -> None:
+        """Referential existence (does ``hydro_unit_group_id`` name a
+        declared group) is out of scope for this rule — covered-by-
+        construction while ``id = 0`` is the only group the bridge ever
+        emits (ticket-025's note)."""
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+        group_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "hydro_unit_group_id": pa.array([7], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "max_generation_mw": pa.array([9999.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_group_bound_envelope(hydros, group_bounds)
+
+        assert collected == []
+
+    def test_value_inside_relative_tolerance_passes(self) -> None:
+        declared = 100.0
+        tolerance = 1e-9 * max(abs(declared), 1.0)
+        hydros = _hydros(
+            _hydro(
+                0,
+                max_turbined_m3s=100.0,
+                max_generation_mw=declared,
+                groups=[(100.0, declared)],
+            )
+        )
+        group_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "hydro_unit_group_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "max_generation_mw": pa.array(
+                    [declared + tolerance * 0.5], type=pa.float64()
+                ),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_group_bound_envelope(hydros, group_bounds)
+
+        assert collected == []
+
+    def test_value_outside_relative_tolerance_fails(self) -> None:
+        declared = 100.0
+        tolerance = 1e-9 * max(abs(declared), 1.0)
+        hydros = _hydros(
+            _hydro(
+                0,
+                max_turbined_m3s=100.0,
+                max_generation_mw=declared,
+                groups=[(100.0, declared)],
+            )
+        )
+        group_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "hydro_unit_group_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "max_generation_mw": pa.array(
+                    [declared + tolerance * 10], type=pa.float64()
+                ),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_group_bound_envelope(hydros, group_bounds)
 
         errors = [d for d in collected if d.severity is Severity.ERROR]
         assert len(errors) == 1

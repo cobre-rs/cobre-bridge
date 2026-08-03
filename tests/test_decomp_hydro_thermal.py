@@ -94,6 +94,18 @@ class _StubDadger:
     def ct(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return self._ct
 
+    def ac(  # noqa: ARG002
+        self,
+        codigo_usina: int | None = None,
+        modificacao: type | None = None,
+        df: bool = False,
+    ) -> pd.DataFrame:
+        # No AC machine-configuration overrides on this synthetic stub — every
+        # plant here has teif=ip=0.0 anyway, so the AC-adjusted rated capacity
+        # (decomp/hydro.py::_compute_max_turbined_rated_ac_adjusted) reduces
+        # to the plain registry rated sum regardless.
+        return pd.DataFrame()
+
 
 def _uh_frame() -> pd.DataFrame:
     rows = [
@@ -304,7 +316,15 @@ class TestRealDecks:
         assert len(hydros) == len(id_map.hydro_codes)
         itaipu = next(h for h in hydros if h["name"] == "ITAIPU")
         assert "bus_id" not in itaipu
-        assert itaipu["unit_groups"][0]["bus_id"] == 0  # SE, single-bus interim
+        # Two per-frequency groups (ticket-027, code 66): unique ids {0, 1},
+        # both on bus SE (id_map.bus_id(1) == 0), each 7000 MW / 6620 m3/s —
+        # id-addressed, not array-order (cobre sorts by group id on load).
+        groups = itaipu["unit_groups"]
+        assert {g["id"] for g in groups} == {0, 1}
+        for group in groups:
+            assert group["bus_id"] == 0  # SE
+            assert group["max_generation_mw"] == pytest.approx(7000.0)
+            assert group["max_turbined_m3s"] == pytest.approx(6620.0)
         assert itaipu["downstream_id"] is None
 
         storage = convert_initial_storage(dadger, hidr, id_map)
