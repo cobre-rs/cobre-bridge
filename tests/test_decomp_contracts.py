@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import date
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
+from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.contracts import (
     _CONTRACT_BOUNDS_SCHEMA,
     _SCHEMA_URL,
@@ -20,12 +22,39 @@ from cobre_bridge.decomp.contracts import (
     convert_contract_bounds,
     convert_energy_contracts,
     read_contracts,
+    warn_nonnull_loss_factor,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
 
 _COBRE_SCHEMA = (
     Path.home() / "git" / "cobre" / "schemas" / "energy_contracts.schema.json"
+)
+
+# ticket-007: the local develop build under the cobre oracle checkout — never
+# ~/.cargo/bin/cobre (see the `reference_local_cobre_binary` convention). CI
+# hosts lack this checkout, so every test depending on it is skipif-guarded.
+_COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
+_RV0_DECK = Path("example/decomp-set-24-rv0")
+_RV3_DECK = Path("example/decomp-jul-26-rv3")
+_D41_DIR = (
+    Path.home()
+    / "git"
+    / "cobre"
+    / "examples"
+    / "deterministic"
+    / "d41-energy-contracts"
+)
+_D41_REQUIRED_CONTRACT_KEYS = frozenset(
+    {
+        "id",
+        "name",
+        "operational_start_date",
+        "bus_id",
+        "type",
+        "price_per_mwh",
+        "limits",
+    }
 )
 
 
@@ -84,6 +113,64 @@ def _contract_row(
         row[f"limite_superior_{k + 1}"] = max_mw[k]
         row[f"custo_{k + 1}"] = custo[k]
     return row
+
+
+def _contracts_stub() -> _StubDadger:
+    """Shared integrated fixture: CI 1 (stages 1+3) + CI 9 placeholder + CE 1.
+
+    ``CI`` numero 1 is declared at stages 1 and 3 only, so stage 2 is
+    forward-filled per D1; stage 1's limits are block-uniform and stage 3's
+    ``limite_superior`` is non-uniform, to exercise the per-block override
+    rows. ``CE`` numero 1 carries a non-zero ``custo`` (D3 sign) and
+    deliberately reuses the same ``numero_contrato`` as the ``CI`` row, to
+    genuinely exercise D5's ``(kind, numero)`` id assignment. ``CI`` numero 9
+    is a blank-name, all-zero-bound placeholder (D6).
+    """
+    ci = pd.DataFrame(
+        [
+            _contract_row(
+                1,
+                1,
+                nome="IMPORTACAO",
+                bus_code=1,
+                min_mw=(1.0, 1.0, 1.0),
+                max_mw=(50.0, 50.0, 50.0),
+                custo=(200.0, 200.0, 200.0),
+            ),
+            _contract_row(
+                1,
+                3,
+                nome="IMPORTACAO",
+                bus_code=1,
+                min_mw=(2.0, 2.0, 2.0),
+                max_mw=(40.0, 50.0, 60.0),
+                custo=(210.0, 210.0, 210.0),
+            ),
+            _contract_row(
+                9,
+                1,
+                nome="",
+                bus_code=1,
+                min_mw=(0.0, 0.0, 0.0),
+                max_mw=(0.0, 0.0, 0.0),
+                custo=(0.0, 0.0, 0.0),
+            ),
+        ]
+    )
+    ce = pd.DataFrame(
+        [
+            _contract_row(
+                1,
+                1,
+                nome="EXPORTACAO",
+                bus_code=2,
+                min_mw=(0.0, 0.0, 0.0),
+                max_mw=(30.0, 30.0, 30.0),
+                custo=(150.0, 150.0, 150.0),
+            )
+        ]
+    )
+    return _StubDadger(ci=ci, ce=ce)
 
 
 def test_read_contracts_forward_fills_and_assigns_dense_ids() -> None:
@@ -466,3 +553,444 @@ def test_contract_bounds_empty_is_total() -> None:
 
     assert table.num_rows == 0
     assert table.schema == _CONTRACT_BOUNDS_SCHEMA
+
+
+def test_loss_factor_all_null_emits_nothing() -> None:
+    contract = Contract(
+        id=0,
+        kind="import",
+        numero=1,
+        name="X",
+        bus_code=1,
+        stages=[
+            ContractStage(
+                min_mw=[0.0, 0.0, 0.0],
+                max_mw=[10.0, 10.0, 10.0],
+                custo=[5.0, 5.0, 5.0],
+                loss_factor=None,
+            ),
+            ContractStage(
+                min_mw=[0.0, 0.0, 0.0],
+                max_mw=[10.0, 10.0, 10.0],
+                custo=[5.0, 5.0, 5.0],
+                loss_factor=None,
+            ),
+        ],
+    )
+
+    with dx.collect() as collected:
+        warn_nonnull_loss_factor([contract])
+
+    assert collected == []
+
+
+def test_loss_factor_nonnull_emits_one_warning() -> None:
+    contract = Contract(
+        id=0,
+        kind="import",
+        numero=1,
+        name="X",
+        bus_code=1,
+        stages=[
+            ContractStage(
+                min_mw=[0.0, 0.0, 0.0],
+                max_mw=[10.0, 10.0, 10.0],
+                custo=[5.0, 5.0, 5.0],
+                loss_factor=3.5,
+            )
+        ],
+    )
+
+    with dx.collect() as collected:
+        warn_nonnull_loss_factor([contract])
+
+    assert len(collected) == 1
+    diagnostic = collected[0]
+    assert diagnostic.severity is dx.Severity.WARNING
+    assert diagnostic.code == "contract-loss-factor-unmapped"
+    assert diagnostic.table is not None
+    assert any(row[0] == 0 and row[1] == "X" for row in diagnostic.table.rows)
+
+
+def test_loss_factor_zero_is_treated_as_null() -> None:
+    contract = Contract(
+        id=0,
+        kind="import",
+        numero=1,
+        name="X",
+        bus_code=1,
+        stages=[
+            ContractStage(
+                min_mw=[0.0, 0.0, 0.0],
+                max_mw=[10.0, 10.0, 10.0],
+                custo=[5.0, 5.0, 5.0],
+                loss_factor=0.0,
+            )
+        ],
+    )
+
+    with dx.collect() as collected:
+        warn_nonnull_loss_factor([contract])
+
+    assert collected == []
+
+
+def test_loss_factor_is_not_folded_into_numbers() -> None:
+    calendar = _uniform_calendar()
+    id_map = _bus_id_map()
+
+    def _contract(loss_factor: float | None) -> Contract:
+        return Contract(
+            id=0,
+            kind="import",
+            numero=1,
+            name="IMPORTACAO",
+            bus_code=1,
+            stages=[
+                ContractStage(
+                    min_mw=[0.0, 0.0, 0.0],
+                    max_mw=[50.0, 50.0, 50.0],
+                    custo=[200.0, 200.0, 200.0],
+                    loss_factor=loss_factor,
+                )
+            ],
+        )
+
+    with_loss_factor = convert_energy_contracts(
+        [_contract(5.0)], id_map, calendar, calendar[0].start_date
+    )
+    without_loss_factor = convert_energy_contracts(
+        [_contract(None)], id_map, calendar, calendar[0].start_date
+    )
+
+    assert with_loss_factor == without_loss_factor
+
+
+# --- Integrated golden-fixture suite -----------------------------------
+#
+# The narrow tests above exercise read_contracts/convert_energy_contracts/
+# convert_contract_bounds one at a time. These tests drive the same
+# _contracts_stub() fixture through the full reader -> both-emitters flow
+# in one shot, over a single 3-stage calendar with known block hours.
+
+
+def test_integrated_ids_and_placeholder_and_window() -> None:
+    calendar = _calendar()
+    id_map = _bus_id_map()
+    dadger = _contracts_stub()
+
+    contracts = read_contracts(dadger, calendar)
+    result = convert_energy_contracts(
+        contracts, id_map, calendar, calendar[0].start_date
+    )
+
+    assert len(result["contracts"]) == 2
+    by_id = {entry["id"]: entry for entry in result["contracts"]}
+    assert by_id[0]["type"] == "import"
+    assert by_id[1]["type"] == "export"
+
+    # D6: the blank-name, all-zero CI numero 9 placeholder never becomes a
+    # contract, so it cannot surface in the json output either.
+    assert not any(c.numero == 9 for c in contracts)
+
+    # D1: every contract is emitted always-active.
+    for entry in result["contracts"]:
+        assert "entry_stage_id" not in entry
+        assert "exit_stage_id" not in entry
+
+
+def test_integrated_export_sign_and_bus_mapping() -> None:
+    calendar = _calendar()
+    id_map = _bus_id_map()
+    dadger = _contracts_stub()
+
+    contracts = read_contracts(dadger, calendar)
+    result = convert_energy_contracts(
+        contracts, id_map, calendar, calendar[0].start_date
+    )
+
+    export_contract = next(c for c in contracts if c.kind == "export")
+    export_entry = next(e for e in result["contracts"] if e["type"] == "export")
+
+    assert export_entry["price_per_mwh"] < 0
+    assert export_entry["bus_id"] == id_map.bus_id(export_contract.bus_code)
+
+
+def test_integrated_carry_forward_and_per_block_sparsity() -> None:
+    calendar = _calendar()
+    dadger = _contracts_stub()
+
+    contracts = read_contracts(dadger, calendar)
+    table = convert_contract_bounds(contracts, calendar)
+
+    import_contract = next(c for c in contracts if c.kind == "import")
+    import_rows = [
+        row for row in table.to_pylist() if row["contract_id"] == import_contract.id
+    ]
+    base_by_stage = {
+        row["stage_id"]: row for row in import_rows if row["block_id"] is None
+    }
+
+    # D1 carry-forward: the forward-filled stage-2 (stage_id==1) base row is
+    # identical to its declared stage-1 (stage_id==0) base row.
+    assert base_by_stage[0]["min_mw"] == base_by_stage[1]["min_mw"]
+    assert base_by_stage[0]["max_mw"] == base_by_stage[1]["max_mw"]
+    assert base_by_stage[0]["price_per_mwh"] == base_by_stage[1]["price_per_mwh"]
+
+    # Uniform stages (1 and 2, i.e. stage_id 0 and 1) emit base-only rows.
+    overrides_stage0 = [
+        row
+        for row in import_rows
+        if row["stage_id"] == 0 and row["block_id"] is not None
+    ]
+    overrides_stage1 = [
+        row
+        for row in import_rows
+        if row["stage_id"] == 1 and row["block_id"] is not None
+    ]
+    assert overrides_stage0 == []
+    assert overrides_stage1 == []
+
+    # D4: the non-uniform declared stage 3 (stage_id==2) emits per-block
+    # override rows for every block.
+    overrides_stage2 = sorted(
+        (
+            row
+            for row in import_rows
+            if row["stage_id"] == 2 and row["block_id"] is not None
+        ),
+        key=lambda row: row["block_id"],
+    )
+    assert [o["block_id"] for o in overrides_stage2] == [0, 1, 2]
+
+
+@pytest.mark.skipif(
+    not _COBRE_SCHEMA.exists(),
+    reason="cobre schema not present (sibling checkout ~/git/cobre required)",
+)
+def test_integrated_json_schema_and_parquet_roundtrip(tmp_path: Path) -> None:
+    calendar = _calendar()
+    id_map = _bus_id_map()
+    dadger = _contracts_stub()
+
+    contracts = read_contracts(dadger, calendar)
+    result = convert_energy_contracts(
+        contracts, id_map, calendar, calendar[0].start_date
+    )
+    table = convert_contract_bounds(contracts, calendar)
+
+    schema = json.loads(_COBRE_SCHEMA.read_text(encoding="utf-8"))
+    jsonschema.validate(result, schema)
+
+    out = tmp_path / "contract_bounds.parquet"
+    pq.write_table(table, out)
+    read_back = pq.read_table(out)
+
+    assert read_back.schema.names == [
+        "contract_id",
+        "stage_id",
+        "min_mw",
+        "max_mw",
+        "price_per_mwh",
+        "block_id",
+    ]
+    assert [str(field_type) for field_type in read_back.schema.types] == [
+        "int32",
+        "int32",
+        "double",
+        "double",
+        "double",
+        "int32",
+    ]
+
+
+# --- End-to-end cobre-validate + d41 round-trip (ticket-007) ------------
+#
+# The two ``cobre validate`` tests are skipif-guarded on the local oracle
+# binary (CI hosts lack the ~/git/cobre checkout entirely); the d41 shape
+# round-trip needs no binary but is itself skipif-guarded on that sibling
+# checkout being present.
+
+
+@pytest.mark.skipif(
+    not _COBRE_BIN.exists(),
+    reason="cobre binary not present (~/git/cobre/target/release/cobre required)",
+)
+def test_real_decks_still_validate_clean(tmp_path: Path) -> None:
+    """Regression guard: both real decks still convert to a case ``cobre
+    validate`` accepts with 0 errors. Neither carries usable contract data
+    (rv0's lone ``CI`` row is a D6 placeholder; rv3 declares none), so this
+    proves the contract wiring changed nothing for a contract-free deck.
+    """
+    from cobre_bridge.decomp.pipeline import convert_decomp_case
+
+    for name, deck in (("rv0", _RV0_DECK), ("rv3", _RV3_DECK)):
+        dst = tmp_path / name
+        convert_decomp_case(deck, dst, force=True)
+
+        result = subprocess.run(
+            [str(_COBRE_BIN), "validate", str(dst)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"cobre validate failed for {name} ({deck}):\n{result.stderr}"
+        )
+
+
+@pytest.mark.skipif(
+    not _COBRE_BIN.exists(),
+    reason="cobre binary not present (~/git/cobre/target/release/cobre required)",
+)
+def test_synthetic_contracts_validate_in_a_real_case(tmp_path: Path) -> None:
+    """Overwrite a real rv3 conversion's two contract files with the
+    ticket-006 synthetic fixture's output and confirm ``cobre validate``
+    accepts them. The fixture's ``codigo_submercado`` values are re-mapped
+    through the module's own ``_bus_id_map()`` (bus 1 -> id 0, bus 2 -> id 1),
+    checked below against the converted case's own ``buses.json`` rather than
+    assumed, since only an id that genuinely exists there proves anything.
+    """
+    from cobre_bridge.decomp.pipeline import (
+        _write_json,
+        _write_parquet,
+        convert_decomp_case,
+    )
+
+    dst = tmp_path / "case"
+    convert_decomp_case(_RV3_DECK, dst, force=True)
+
+    buses_doc = json.loads((dst / "system" / "buses.json").read_text(encoding="utf-8"))
+    valid_bus_ids = {bus["id"] for bus in buses_doc["buses"]}
+
+    calendar = _calendar()
+    id_map = _bus_id_map()
+    mapped_bus_ids = {id_map.bus_id(1), id_map.bus_id(2)}
+    assert mapped_bus_ids.issubset(valid_bus_ids), (
+        f"the synthetic fixture's mapped bus ids {mapped_bus_ids} must exist "
+        f"in the converted rv3 case's buses.json ({valid_bus_ids})"
+    )
+
+    contracts = read_contracts(_contracts_stub(), calendar)
+    energy_contracts_doc = convert_energy_contracts(
+        contracts, id_map, calendar, calendar[0].start_date
+    )
+    contract_bounds_table = convert_contract_bounds(contracts, calendar)
+
+    _write_json(dst / "system" / "energy_contracts.json", energy_contracts_doc)
+    _write_parquet(
+        dst / "constraints" / "contract_bounds.parquet", contract_bounds_table
+    )
+
+    result = subprocess.run(
+        [str(_COBRE_BIN), "validate", str(dst)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"cobre validate failed on the synthetic-contract case:\n{result.stderr}"
+    )
+
+
+@pytest.mark.skipif(
+    not _D41_DIR.exists(),
+    reason="d41 example not present (sibling checkout ~/git/cobre required)",
+)
+def test_d41_json_shape_roundtrip() -> None:
+    """Every d41 ``RawContract`` required key must also be present in the
+    bridge's emitted contracts for an equivalent import+export pair.
+
+    Value identity is intentionally not asserted: d41's export contract
+    carries ``entry_stage_id``/``exit_stage_id`` (a commissioning window),
+    while the bridge always emits D1's always-active window (neither key at
+    all) — both are legal shapes under the same required-key set.
+    """
+    d41_doc = json.loads(
+        (_D41_DIR / "system" / "energy_contracts.json").read_text(encoding="utf-8")
+    )
+    assert d41_doc["contracts"], "the d41 fixture must carry at least one contract"
+    for entry in d41_doc["contracts"]:
+        assert _D41_REQUIRED_CONTRACT_KEYS.issubset(entry.keys())
+
+    calendar = _uniform_calendar()
+    id_map = _bus_id_map()
+    contracts = [
+        Contract(
+            id=0,
+            kind="import",
+            numero=1,
+            name="Import equivalent",
+            bus_code=1,
+            stages=[
+                ContractStage(
+                    min_mw=[0.0, 0.0, 0.0],
+                    max_mw=[50.0, 50.0, 50.0],
+                    custo=[200.0, 200.0, 200.0],
+                    loss_factor=None,
+                )
+            ],
+        ),
+        Contract(
+            id=1,
+            kind="export",
+            numero=2,
+            name="Export equivalent",
+            bus_code=1,
+            stages=[
+                ContractStage(
+                    min_mw=[0.0, 0.0, 0.0],
+                    max_mw=[30.0, 30.0, 30.0],
+                    custo=[150.0, 150.0, 150.0],
+                    loss_factor=None,
+                )
+            ],
+        ),
+    ]
+
+    result = convert_energy_contracts(
+        contracts, id_map, calendar, calendar[0].start_date
+    )
+
+    assert len(result["contracts"]) == 2
+    for entry in result["contracts"]:
+        assert _D41_REQUIRED_CONTRACT_KEYS.issubset(entry.keys())
+
+
+@pytest.mark.skipif(
+    not _D41_DIR.exists(),
+    reason="d41 example not present (sibling checkout ~/git/cobre required)",
+)
+def test_d41_parquet_schema_superset() -> None:
+    """The bridge's ``contract_bounds`` schema is a superset of d41's
+    hand-built 5-column shape, with identical arrow types on the shared
+    columns.
+
+    d41's parquet has no ``block_id`` column; the bridge's always does (a
+    legal superset per decision 6), so value identity is not asserted here —
+    only column presence and shared-column types.
+    """
+    d41_table = pq.read_table(_D41_DIR / "constraints" / "contract_bounds.parquet")
+
+    calendar = _uniform_calendar()
+    stage = ContractStage(
+        min_mw=[0.0, 0.0, 0.0],
+        max_mw=[50.0, 50.0, 50.0],
+        custo=[200.0, 200.0, 200.0],
+        loss_factor=None,
+    )
+    contract = Contract(
+        id=0,
+        kind="import",
+        numero=1,
+        name="IMPORTACAO",
+        bus_code=1,
+        stages=[stage, stage, stage],
+    )
+    bridge_table = convert_contract_bounds([contract], calendar)
+
+    d41_names = set(d41_table.schema.names)
+    bridge_names = set(bridge_table.schema.names)
+    assert d41_names.issubset(bridge_names), (
+        f"bridge columns {bridge_names} must be a superset of d41's {d41_names}"
+    )
+    for name in ["contract_id", "stage_id", "min_mw", "max_mw", "price_per_mwh"]:
+        assert bridge_table.schema.field(name).type == d41_table.schema.field(name).type

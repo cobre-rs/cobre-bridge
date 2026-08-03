@@ -11,6 +11,7 @@ concerns, not this reader's.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.thermal import _hours_weighted
 
 if TYPE_CHECKING:
@@ -28,6 +30,8 @@ if TYPE_CHECKING:
 
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
+
+_LOG = logging.getLogger(__name__)
 
 _LOWER_LIMIT_COLUMN = re.compile(r"^limite_inferior_\d+$")
 _UPPER_LIMIT_COLUMN = re.compile(r"^limite_superior_\d+$")
@@ -183,6 +187,57 @@ def read_contracts(
         )
         for position, c in enumerate(provisional)
     ]
+
+
+def warn_nonnull_loss_factor(contracts: Sequence[Contract]) -> None:
+    """D2: WARN (never fold, never reject) on a non-null, non-zero ``fator_perdas``.
+
+    cobre's ``energy_contracts`` entity has no loss-factor field, so the
+    source model's per-stage ``fator_perdas`` is intentionally excluded from
+    every emitted number (``price_per_mwh``, ``limits``). A deck that
+    declares one anyway is not an error — it is a WARNING, and the WARNING
+    is the record; nothing is folded and the deck is never rejected. A
+    declared ``0.0`` is treated the same as ``None`` (the expected case) and
+    does not trigger this.
+    """
+    offenders: list[tuple[int, str, float]] = []
+    for contract in contracts:
+        non_null_non_zero = [
+            stage.loss_factor
+            for stage in contract.stages
+            if stage.loss_factor is not None and stage.loss_factor != 0.0
+        ]
+        if non_null_non_zero:
+            offenders.append((contract.id, contract.name, max(non_null_non_zero)))
+
+    if not offenders:
+        return
+
+    dx.emit(
+        dx.Diagnostic(
+            code="contract-loss-factor-unmapped",
+            severity=dx.Severity.WARNING,
+            category="Energy contracts",
+            title=(
+                f"Non-null fator_perdas on {len(offenders)} energy "
+                "contract(s) is ignored"
+            ),
+            summary=(
+                "The source model's fator_perdas (loss factor) has no cobre "
+                "energy_contracts target; it is ignored — not folded into "
+                "price_per_mwh or limits, and does not reject the deck"
+            ),
+            table=dx.DiagnosticTable(
+                columns=["Id", "Name", "fator_perdas %"],
+                rows=[
+                    [contract_id, name, round(value, 3)]
+                    for contract_id, name, value in offenders
+                ],
+                justify=["right", "left", "right"],
+            ),
+        ),
+        logger=_LOG,
+    )
 
 
 def _signed_price(custo: float, kind: str) -> float:

@@ -285,6 +285,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     # visible effect on a real conversion is: no contract files written, no
     # self-check finding, no regression.
     contracts = contracts_conv.read_contracts(dadger, calendar)
+    contracts_conv.warn_nonnull_loss_factor(contracts)
     energy_contracts_doc = contracts_conv.convert_energy_contracts(
         contracts, id_map, calendar, start_date
     )
