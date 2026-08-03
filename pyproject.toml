@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 dependencies = [
-    "idecomp>=1.12.0",
+    "idecomp>=1.13.0",
     "inewave>=1.14.0",
     "pyarrow>=24.0.0",
     "pandas>=3.0.3",
@@ -26,6 +26,7 @@ dev = [
     "ty>=0.0.55",
     "pytest-cov",
     "ruff",
+    "jsonschema",
 ]
 validation = [
     "cobre-python>=0.13,<0.14",

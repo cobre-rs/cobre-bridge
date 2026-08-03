@@ -24,6 +24,7 @@ from cobre_bridge import diagnostics as dx
 from cobre_bridge import emission_checks
 from cobre_bridge.decomp import bounds as bounds_conv
 from cobre_bridge.decomp import config as config_conv
+from cobre_bridge.decomp import contracts as contracts_conv
 from cobre_bridge.decomp import group_bounds as group_bounds_conv
 from cobre_bridge.decomp import hydro as hydro_conv
 from cobre_bridge.decomp import load as load_conv
@@ -278,6 +279,17 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         availability_values, calendar
     )
 
+    # epic-01 (contracts): the CI/CE energy-contract model, read once and
+    # shared by both emitters. Real decks carry no usable contract data
+    # (rv0's single placeholder is skipped by D6, rv3 has none), so the
+    # visible effect on a real conversion is: no contract files written, no
+    # self-check finding, no regression.
+    contracts = contracts_conv.read_contracts(dadger, calendar)
+    energy_contracts_doc = contracts_conv.convert_energy_contracts(
+        contracts, id_map, calendar, start_date
+    )
+    contract_bounds_table = contracts_conv.convert_contract_bounds(contracts, calendar)
+
     # B8's attached measurement obligation: the hydraulic ceiling binding
     # below the installed×MP×FD availability is an *accepted cost*, not an
     # error — but it must be recorded, not assumed away. One INFO Diagnostic
@@ -358,6 +370,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
             group_bounds,
             group_column="hydro_unit_group_id",
         ),
+        emission_checks.BoundFamily("Contract", "contract_id", contract_bounds_table),
     ]
     with dx.collect() as check_diagnostics:
         emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds)
@@ -385,6 +398,10 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         _write_parquet(constraints / "hydro_bounds.parquet", hydro_bounds)
     if group_bounds.num_rows:
         _write_parquet(constraints / "hydro_unit_group_bounds.parquet", group_bounds)
+    if contracts:
+        _write_json(system / "energy_contracts.json", energy_contracts_doc)
+    if contract_bounds_table.num_rows:
+        _write_parquet(constraints / "contract_bounds.parquet", contract_bounds_table)
 
     _LOG.warning(
         "deferred at this milestone: GNL anticipation (dadgnl%s), boundary "

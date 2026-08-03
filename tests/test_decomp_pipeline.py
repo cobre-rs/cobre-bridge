@@ -349,6 +349,85 @@ class TestEmissionCheckWiring:
         assert (dst / "constraints" / "hydro_bounds.parquet").is_file()
 
 
+class TestContractWiring:
+    """ticket-004 (epic-01): the CI/CE contract model wires into
+    ``convert_decomp_case``, gated on non-empty like every other bound
+    family it joins in ``bound_families``."""
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_rv3_conversion_writes_no_contract_files(self, tmp_path: Path) -> None:
+        """rv3 has no contracts (D6 skips its lone placeholder row), so
+        neither gated write fires and the conversion still completes clean."""
+        from cobre_bridge.decomp.pipeline import convert_decomp_case
+
+        dst = tmp_path / "case"
+        convert_decomp_case(_RV3_DECK, dst)
+
+        assert not (dst / "system" / "energy_contracts.json").exists()
+        assert not (dst / "constraints" / "contract_bounds.parquet").exists()
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_deck_with_contract_writes_both_files(self, tmp_path: Path) -> None:
+        """A deck carrying one non-placeholder contract writes both gated
+        files, non-empty — ``read_contracts`` is patched to yield it so the
+        rest of the real rv3 conversion (dadger parsing, id_map, calendar,
+        every other converter) still runs for real."""
+        from collections.abc import Sequence
+
+        from idecomp.decomp import Dadger
+
+        from cobre_bridge.decomp.contracts import Contract, ContractStage
+        from cobre_bridge.decomp.pipeline import convert_decomp_case
+        from cobre_bridge.decomp.temporal import OperativeStage
+
+        def _fake_read_contracts(
+            dadger: Dadger, calendar: Sequence[OperativeStage]
+        ) -> list[Contract]:
+            sb = dadger.sb(df=True)
+            bus_code = int(sb["codigo_submercado"].iloc[0])
+            stages = [
+                ContractStage(
+                    min_mw=[0.0] * len(stage.block_hours),
+                    max_mw=[100.0] * len(stage.block_hours),
+                    custo=[50.0] * len(stage.block_hours),
+                    loss_factor=None,
+                )
+                for stage in calendar
+            ]
+            return [
+                Contract(
+                    id=0,
+                    kind="import",
+                    numero=1,
+                    name="Test Contract",
+                    bus_code=bus_code,
+                    stages=stages,
+                )
+            ]
+
+        dst = tmp_path / "case"
+        with patch(
+            "cobre_bridge.decomp.pipeline.contracts_conv.read_contracts",
+            side_effect=_fake_read_contracts,
+        ):
+            convert_decomp_case(_RV3_DECK, dst)
+
+        contracts_path = dst / "system" / "energy_contracts.json"
+        bounds_path = dst / "constraints" / "contract_bounds.parquet"
+        assert contracts_path.is_file()
+        assert bounds_path.is_file()
+
+        contracts_doc = json.loads(contracts_path.read_text())
+        assert len(contracts_doc["contracts"]) == 1
+
+        bounds_table = pq.read_table(bounds_path)
+        assert bounds_table.num_rows > 0
+
+
 class TestCli:
     def test_convert_decomp_invokes_pipeline(self, tmp_path: Path) -> None:
         runner = CliRunner()
