@@ -205,7 +205,13 @@ class TestConvertHydroBounds:
         table = convert_hydro_bounds(
             self._dadger(), self._hidr(), _ID_MAP, calendar
         ).to_pandas()
-        plant1 = table[table["hydro_id"] == 0].set_index("stage_id")
+        # Base row only (block_id = None) — the backward-compatible
+        # hours-weighted per-stage value; the RQ percentages (100, 100, 0)
+        # are non-uniform, so per-block override rows are also emitted
+        # (covered by tests/test_decomp_rq_bounds.py).
+        plant1 = table[(table["hydro_id"] == 0) & (table["block_id"].isna())].set_index(
+            "stage_id"
+        )
         # Weekly stages: (100·15 + 100·64 + 0·89)/168 = 47.02 % of 40 m³/s.
         weekly_pct = (100.0 * 15 + 100.0 * 64) / 168.0
         assert plant1.loc[0, "min_outflow_m3s"] == pytest.approx(

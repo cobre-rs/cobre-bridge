@@ -13,6 +13,7 @@ from cobre_bridge import diagnostics as dx
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.emission_checks import (
     BoundFamily,
+    check_block_id_not_on_anticipated_thermal,
     check_bound_block_id_range,
     check_bound_row_uniqueness,
     check_hydro_bounds_no_raising,
@@ -54,6 +55,19 @@ def _hydro(
             }
             for i, (turbined, generation) in enumerate(groups)
         ],
+    }
+
+
+def _thermals(*entries: dict) -> dict:
+    return {"thermals": list(entries)}
+
+
+def _thermal(thermal_id: int, *, anticipated: bool = False) -> dict:
+    """One ``thermals.json`` entry, optionally declaring ``anticipated_config``."""
+    return {
+        "id": thermal_id,
+        "name": f"Thermal {thermal_id}",
+        "anticipated_config": {"lead_stages": 1} if anticipated else None,
     }
 
 
@@ -392,5 +406,102 @@ class TestBoundBlockIdRange:
 
         with dx.collect() as collected:
             check_bound_block_id_range(stages, families)
+
+        assert collected == []
+
+
+# ---------------------------------------------------------------------------
+# Rule 38 — check_block_id_not_on_anticipated_thermal
+# ---------------------------------------------------------------------------
+
+
+class TestBlockIdNotOnAnticipatedThermal:
+    def test_block_id_on_anticipated_thermal_is_caught(self) -> None:
+        thermals = _thermals(_thermal(0, anticipated=True))
+        thermal_bounds = pa.table(
+            {
+                "thermal_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([2], type=pa.int32()),
+                "min_generation_mw": pa.array([10.0], type=pa.float64()),
+                "max_generation_mw": pa.array([20.0], type=pa.float64()),
+                "cost_per_mwh": pa.array([None], type=pa.float64()),
+                "block_id": pa.array([1], type=pa.int32()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_block_id_not_on_anticipated_thermal(thermals, thermal_bounds)
+
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.severity is Severity.ERROR
+        assert diag.code == "thermal-bound-block-id-on-anticipated"
+        assert diag.table is not None
+        row = diag.table.rows[0]
+        assert row[0] == 0  # thermal id
+        assert row[1] == 2  # stage
+        assert row[2] == 1  # block_id
+
+    def test_block_id_without_anticipated_config_passes(self) -> None:
+        """Same table shape, but no thermal declares anticipated_config."""
+        thermals = _thermals(_thermal(0, anticipated=False))
+        thermal_bounds = pa.table(
+            {
+                "thermal_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([2], type=pa.int32()),
+                "min_generation_mw": pa.array([10.0], type=pa.float64()),
+                "max_generation_mw": pa.array([20.0], type=pa.float64()),
+                "cost_per_mwh": pa.array([None], type=pa.float64()),
+                "block_id": pa.array([1], type=pa.int32()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_block_id_not_on_anticipated_thermal(thermals, thermal_bounds)
+
+        assert collected == []
+
+    def test_anticipated_thermal_with_no_block_id_rows_passes(self) -> None:
+        """An anticipated thermal is fine as long as its own rows stay
+        stage-level; another thermal's block_id row is not its problem."""
+        thermals = _thermals(_thermal(0, anticipated=True), _thermal(1))
+        thermal_bounds = pa.table(
+            {
+                "thermal_id": pa.array([0, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                "min_generation_mw": pa.array([10.0, 5.0], type=pa.float64()),
+                "max_generation_mw": pa.array([20.0, 15.0], type=pa.float64()),
+                "cost_per_mwh": pa.array([5.0, None], type=pa.float64()),
+                "block_id": pa.array([None, 0], type=pa.int32()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_block_id_not_on_anticipated_thermal(thermals, thermal_bounds)
+
+        assert collected == []
+
+    def test_absent_block_id_column_is_not_applicable(self) -> None:
+        thermals = _thermals(_thermal(0, anticipated=True))
+        thermal_bounds = pa.table(
+            {
+                "thermal_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "min_generation_mw": pa.array([10.0], type=pa.float64()),
+                "max_generation_mw": pa.array([20.0], type=pa.float64()),
+                "cost_per_mwh": pa.array([5.0], type=pa.float64()),
+            }
+        )
+
+        with dx.collect() as collected:
+            check_block_id_not_on_anticipated_thermal(thermals, thermal_bounds)
+
+        assert collected == []
+
+    def test_absent_thermal_bounds_table_is_not_applicable(self) -> None:
+        thermals = _thermals(_thermal(0, anticipated=True))
+
+        with dx.collect() as collected:
+            check_block_id_not_on_anticipated_thermal(thermals, None)
 
         assert collected == []

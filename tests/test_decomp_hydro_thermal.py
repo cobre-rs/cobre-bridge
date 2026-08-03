@@ -44,7 +44,7 @@ def _hidr_frame() -> pd.DataFrame:
         cota: float = 100.0,
         cf: float = 20.0,
     ) -> dict:
-        row = {
+        return {
             "nome_usina": name,
             "submercado": sub,
             "codigo_usina_jusante": jusante,
@@ -66,7 +66,6 @@ def _hidr_frame() -> pd.DataFrame:
             "tipo_perda": 0,
             "perdas": 0.0,
         }
-        return row
 
     df = pd.DataFrame(
         {
@@ -237,7 +236,7 @@ def _ct_frame() -> pd.DataFrame:
 
 
 class TestConvertThermals:
-    def test_registry_and_bounds(self, caplog) -> None:
+    def test_registry_and_bounds(self) -> None:
         calendar = _calendar()
         doc = convert_thermals(
             _StubDadger(ct=_ct_frame()), _ID_MAP, calendar, date(2026, 7, 18)
@@ -249,17 +248,29 @@ class TestConvertThermals:
         assert thermals[1]["cost_per_mwh"] == pytest.approx(50.0)
         assert thermals[1]["generation"]["min_mw"] == pytest.approx(640.0)
 
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.thermal"):
-            bounds = convert_thermal_bounds(
-                _StubDadger(ct=_ct_frame()), _ID_MAP, calendar
-            ).to_pandas()
-        assert len(bounds) == 2 * 3
-        flat = bounds[bounds["thermal_id"] == 1]
+        bounds = convert_thermal_bounds(
+            _StubDadger(ct=_ct_frame()), _ID_MAP, calendar
+        ).to_pandas()
+        base = bounds[bounds["block_id"].isna()]
+        overrides = bounds[bounds["block_id"].notna()]
+        assert len(base) == 2 * 3  # one base row per (thermal, stage)
+
+        flat = base[base["thermal_id"] == 1]
         assert set(flat["max_generation_mw"]) == {640.0}
-        spread = bounds[bounds["thermal_id"] == 0].set_index("stage_id")
+        assert bounds[bounds["thermal_id"] == 1]["block_id"].isna().all()  # no spread
+
+        spread = base[base["thermal_id"] == 0].set_index("stage_id")
         assert spread.loc[1, "cost_per_mwh"] == pytest.approx(100.0)  # inherited
         assert spread.loc[2, "cost_per_mwh"] == pytest.approx(120.0)
-        assert "spread folded away: 50.0%" in caplog.text
+
+        # Plant 10's availability varies by block on every stage (its own
+        # declarations at stage 1 and 3, plus stage 2 inheriting stage 1) —
+        # one override row per (stage, block), inflexibilidade flat at 0.0.
+        spread_overrides = overrides[overrides["thermal_id"] == 0]
+        assert len(spread_overrides) == 3 * 3
+        assert set(spread_overrides["max_generation_mw"]) == {400.0, 300.0, 200.0}
+        assert set(spread_overrides["min_generation_mw"]) == {0.0}
+        assert spread_overrides["cost_per_mwh"].isna().all()
 
     def test_missing_stage_one_raises(self) -> None:
         ct = _ct_frame()
@@ -314,4 +325,6 @@ class TestRealDecks:
         assert cuiaba["generation"]["max_mw"] == pytest.approx(490.0)
 
         bounds = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
-        assert len(bounds) == 97 * len(calendar)
+        base = bounds[bounds["block_id"].isna()]
+        assert len(base) == 97 * len(calendar)  # one base row per (thermal, stage)
+        assert (bounds["block_id"].notna() & bounds["cost_per_mwh"].notna()).sum() == 0

@@ -1,22 +1,31 @@
-"""Grades the interim per-stage thermal fold against the reference run.
+"""Grades the per-block thermal bounds against the reference run.
 
-The source model declares thermal bounds per block; until the solver accepts
-block-scoped bounds the converter folds them to one value per stage, weighted
-by block hours. Two questions matter and they are different:
+The source model declares thermal bounds per block. ``convert_thermal_bounds``
+emits a stage-level base row (hours-weighted, unchanged from the earlier
+interim fold) plus sparse per-block override rows wherever a stage's blocks
+actually differ, so the resolution that fold used to throw away is now
+reproduced exactly. Two questions matter and they are different:
 
-1. **Is the fold arithmetic right?** It must reproduce, exactly, the fold the
-   reference's own per-block bounds imply. This is a hard invariant and the
-   first test asserts it.
-2. **What does the lost resolution cost?** Flattening preserves stage energy
-   but moves it between blocks, so a peaking must-run is under-committed at
-   peak and over-committed off-peak, and a flat cap can exceed the true cap
-   in the block where it was lowest. The second test records the measured
-   size of both effects, so an upgrade that changes them is visible.
+1. **Does the reconstructed per-block bound match reality?** Take the emitted
+   table's effective bound for every ``(plant, stage, block)`` cell (the
+   override row if one exists, else the base row) and compare it against the
+   reference's own per-block report. This is a hard invariant against
+   independently-sourced data and is graded to a `< 1e-6` MW tolerance (the
+   two sources are parsed from different files, so exact floating-point
+   equality is not expected even when the underlying physical value is
+   identical).
+2. **Does the sparse override mechanism itself lose anything?** For every
+   block whose stage the converter judged non-uniform, the override row's
+   `min`/`max` is a direct, untransformed copy of the source `inflex`/`disp`
+   entry the converter read — comparing the two, straight off the emitted
+   table, is a bit-exact `== 0.0` invariant, not a tolerance.
 
-Measured on ``decomp-jul-26-rv3`` (2026-07-25): the fold is exact on all 291
-(plant, stage) rows; only 5 rows carry a block-varying minimum and 35 a
-block-varying maximum; flattening misallocates 0.31 % of must-run energy —
-72 % of it from a single peaking plant — and over-allows 0.078 % of capacity.
+Measured on ``decomp-jul-26-rv3`` (2026-08-02): 291 (plant, stage) rows, 38 of
+them block-varying (5 in the minimum, 35 in the maximum), 114 override rows
+emitted; every reconstructed per-block bound matches the reference to well
+under `1e-6` MW (worst observed difference ~6e-14 MW, floating-point noise
+from the reference's own duplicate-row averaging); the override mechanism's
+own must-run misallocation and capacity over-allowance are both exactly zero.
 """
 
 from __future__ import annotations
@@ -67,10 +76,12 @@ def _reference_fold(blocks: pl.DataFrame) -> pl.DataFrame:
 @_needs_deck
 class TestThermalFold:
     def test_converted_bounds_equal_the_reference_fold(self) -> None:
-        """The emitted per-stage bounds are the reference's own hours fold.
+        """The emitted base rows are still the reference's own hours fold.
 
         Anything else means the converter and the reference disagree about
-        the stage a block belongs to or the weight it carries.
+        the stage a block belongs to or the weight it carries. Scoped to the
+        base (``block_id = None``) rows — the per-block override rows added
+        by this ticket carry no stage-level fold to compare here.
         """
         from idecomp.decomp import Dadger
 
@@ -81,7 +92,8 @@ class TestThermalFold:
         dadger = Dadger.read(str(_DECK / "dadger.rv3"))
         id_map = DecompIdMap.from_dadger(dadger)
         calendar = operative_calendar_from_dadger(dadger)
-        ours = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+        ours = table[table["block_id"].isna()]
 
         reference = _reference_fold(_reference_blocks()).to_pandas()
         reference["thermal_id"] = reference["codigo_usina"].map(
@@ -101,37 +113,186 @@ class TestThermalFold:
             worst = (merged[ours_col] - merged[ref_col]).abs().max()
             assert worst < 1e-6, f"{ours_col}: worst |Δ| {worst} MW"
 
-    def test_resolution_loss_stays_within_its_measured_size(self) -> None:
-        """Records what the flattening costs, so an upgrade shows up here.
+    def test_effective_per_block_bounds_match_the_reference(self) -> None:
+        """The emitted table's *effective* per-block bound — the override row
+        if one exists for a ``(thermal, stage, block)``, else the base row —
+        matches the reference's own per-block report to `< 1e-6` MW.
 
-        Both figures are bounds on a known interim approximation, not
-        tolerances on a correct result — they shrink to zero when block-scoped
-        bounds land.
+        This is the acceptance test for the sparse per-block convention: it
+        reconstructs exactly what cobre reads for every block, not just the
+        stage-level summary.
         """
-        blocks = _reference_blocks()
-        folded = _reference_fold(blocks)
-        detail = blocks.join(folded, on=["codigo_usina", "estagio"])
+        from idecomp.decomp import Dadger
 
-        misallocated = (
-            (detail["min"] - detail["min_folded"]).abs() * detail["duracao"]
-        ).sum()
-        must_run = (detail["min"] * detail["duracao"]).sum()
-        assert misallocated / must_run < 0.005, (
-            f"must-run misallocation grew to {100 * misallocated / must_run:.2f}%"
+        from cobre_bridge.decomp.id_map import DecompIdMap
+        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
+        from cobre_bridge.decomp.thermal import convert_thermal_bounds
+
+        dadger = Dadger.read(str(_DECK / "dadger.rv3"))
+        id_map = DecompIdMap.from_dadger(dadger)
+        calendar = operative_calendar_from_dadger(dadger)
+        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+
+        base = table[table["block_id"].isna()][
+            ["thermal_id", "stage_id", "min_generation_mw", "max_generation_mw"]
+        ]
+        overrides = table[table["block_id"].notna()][
+            [
+                "thermal_id",
+                "stage_id",
+                "block_id",
+                "min_generation_mw",
+                "max_generation_mw",
+            ]
+        ].copy()
+        overrides["block_id"] = overrides["block_id"].astype(int)
+
+        blocks = _reference_blocks().to_pandas()
+        blocks["thermal_id"] = blocks["codigo_usina"].map(
+            lambda c: (
+                id_map.thermal_id(int(c)) if int(c) in id_map.thermal_codes else None
+            )
+        )
+        blocks["stage_id"] = blocks["estagio"] - 1
+        blocks["block_id"] = (blocks["patamar"] - 1).astype(int)
+        blocks = blocks.dropna(subset=["thermal_id"])
+        blocks["thermal_id"] = blocks["thermal_id"].astype(int)
+
+        merged = blocks.merge(base, on=["thermal_id", "stage_id"], how="left")
+        merged = merged.merge(
+            overrides,
+            on=["thermal_id", "stage_id", "block_id"],
+            how="left",
+            suffixes=("", "_override"),
+        )
+        merged["effective_min"] = merged["min_generation_mw_override"].combine_first(
+            merged["min_generation_mw"]
+        )
+        merged["effective_max"] = merged["max_generation_mw_override"].combine_first(
+            merged["max_generation_mw"]
         )
 
-        over = detail.filter(pl.col("max_folded") > pl.col("max"))
-        over_allowed = ((over["max_folded"] - over["max"]) * over["duracao"]).sum()
-        capacity = (detail["max"] * detail["duracao"]).sum()
-        assert over_allowed / capacity < 0.002, (
-            f"capacity over-allowance grew to {100 * over_allowed / capacity:.3f}%"
+        assert len(merged) > 800, (
+            f"only {len(merged)} (plant, stage, block) rows compared"
         )
+        worst_min = (merged["min"] - merged["effective_min"]).abs().max()
+        worst_max = (merged["max"] - merged["effective_max"]).abs().max()
+        assert worst_min < 1e-6, f"min_generation_mw: worst |Δ| {worst_min} MW"
+        assert worst_max < 1e-6, f"max_generation_mw: worst |Δ| {worst_max} MW"
+
+    def test_override_rows_lose_no_resolution(self) -> None:
+        """The per-block override mechanism itself is exact: for every block
+        of a non-uniform stage, the emitted override row's `min`/`max` is a
+        direct, untransformed copy of the source `inflex`/`disp` value —
+        computed straight off the emitted table, must-run misallocation and
+        capacity over-allowance are both exactly zero, replacing the
+        previous interim `< 0.005` / `< 0.002` bounds on the old
+        no-block-axis fold.
+
+        Block-uniform stages are out of scope here: with no spread across
+        blocks there is nothing to redistribute, so they carry no override
+        row and no possible resolution loss by construction (criterion 2's
+        base-row-fold test already grades their hours-weighted summary
+        against the reference to `< 1e-6`).
+        """
+        from idecomp.decomp import Dadger
+
+        from cobre_bridge.decomp.id_map import DecompIdMap
+        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
+        from cobre_bridge.decomp.thermal import _ct_dense, convert_thermal_bounds
+
+        dadger = Dadger.read(str(_DECK / "dadger.rv3"))
+        id_map = DecompIdMap.from_dadger(dadger)
+        calendar = operative_calendar_from_dadger(dadger)
+        plants = _ct_dense(dadger, calendar)
+        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+
+        overrides = table[table["block_id"].notna()]
+        override_lookup = {
+            (int(r.thermal_id), int(r.stage_id), int(r.block_id)): r
+            for r in overrides.itertuples()
+        }
+
+        misallocated = 0.0
+        over_allowed = 0.0
+        checked_blocks = 0
+        for code in id_map.thermal_codes:
+            thermal_id = id_map.thermal_id(code)
+            for stage in calendar:
+                values = plants[code]["stages"][stage.index]
+                disp, inflex = values["disp"], values["inflex"]
+                uniform = all(d == disp[0] for d in disp) and all(
+                    m == inflex[0] for m in inflex
+                )
+                if uniform:
+                    continue
+                for b, hours in enumerate(stage.block_hours):
+                    row = override_lookup[(thermal_id, stage.index, b)]
+                    misallocated += abs(inflex[b] - row.min_generation_mw) * hours
+                    over_allowed += max(0.0, row.max_generation_mw - disp[b]) * hours
+                    checked_blocks += 1
+
+        assert checked_blocks > 0, "no block-varying stage found; nothing graded"
+        assert misallocated == 0.0, f"must-run misallocation {misallocated} MWh"
+        assert over_allowed == 0.0, f"capacity over-allowance {over_allowed} MWh"
+
+    def test_no_override_row_for_block_uniform_stages(self) -> None:
+        """A block-uniform ``(thermal, stage)`` gets only its base row —
+        emitting per-block overrides there would inflate the table for no
+        gain (AC #4)."""
+        from idecomp.decomp import Dadger
+
+        from cobre_bridge.decomp.id_map import DecompIdMap
+        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
+        from cobre_bridge.decomp.thermal import _ct_dense, convert_thermal_bounds
+
+        dadger = Dadger.read(str(_DECK / "dadger.rv3"))
+        id_map = DecompIdMap.from_dadger(dadger)
+        calendar = operative_calendar_from_dadger(dadger)
+        plants = _ct_dense(dadger, calendar)
+        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+
+        override_pairs = {
+            (int(r.thermal_id), int(r.stage_id))
+            for r in table[table["block_id"].notna()].itertuples()
+        }
+
+        for code in id_map.thermal_codes:
+            thermal_id = id_map.thermal_id(code)
+            for stage in calendar:
+                values = plants[code]["stages"][stage.index]
+                disp, inflex = values["disp"], values["inflex"]
+                uniform = all(d == disp[0] for d in disp) and all(
+                    m == inflex[0] for m in inflex
+                )
+                if uniform:
+                    assert (thermal_id, stage.index) not in override_pairs
+
+    def test_override_rows_carry_no_cost_and_are_fully_bounded(self) -> None:
+        """Every per-block override row has `cost_per_mwh = None` (rule 37 —
+        thermal cost is not block-eligible) and non-null `min`/`max` (AC #4)."""
+        from idecomp.decomp import Dadger
+
+        from cobre_bridge.decomp.id_map import DecompIdMap
+        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
+        from cobre_bridge.decomp.thermal import convert_thermal_bounds
+
+        dadger = Dadger.read(str(_DECK / "dadger.rv3"))
+        id_map = DecompIdMap.from_dadger(dadger)
+        calendar = operative_calendar_from_dadger(dadger)
+        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+
+        overrides = table[table["block_id"].notna()]
+        assert len(overrides) > 0, "no override rows found; nothing to grade"
+        assert overrides["cost_per_mwh"].isna().all()
+        assert overrides["min_generation_mw"].notna().all()
+        assert overrides["max_generation_mw"].notna().all()
 
     def test_block_variation_is_rare_and_concentrated(self) -> None:
         """Few (plant, stage) rows vary across blocks at all.
 
-        This is why the interim fold is tolerable: the upgrade to block-scoped
-        bounds matters for a handful of plants, not the fleet.
+        This is why the sparse override convention is cheap: only a handful
+        of plants need per-block rows, not the fleet.
         """
         blocks = _reference_blocks()
         spread = blocks.group_by(["codigo_usina", "estagio"]).agg(

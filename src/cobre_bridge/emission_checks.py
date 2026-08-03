@@ -2,13 +2,13 @@
 
 Both pipelines build every artifact in memory before writing the Cobre case
 directory. This module inspects those in-memory artifacts — the ``hydros.json``
-document, the ``stages.json`` document, and the ``*_bounds`` Parquet tables —
-for the four cobre 0.13 rules the bridge is most likely to violate silently,
-and reports a match as an ``ERROR`` :class:`~cobre_bridge.diagnostics.Diagnostic`
-through the sink the pipeline already runs converters inside. A failure here
-therefore surfaces with bridge-side context (entity, stage, column, declared
-vs. offending value) in milliseconds, instead of at ``cobre validate``/``cobre
-run`` load time.
+document, the ``thermals.json`` document, the ``stages.json`` document, and the
+``*_bounds`` Parquet tables — for the cobre 0.13 rules the bridge is most
+likely to violate silently, and reports a match as an ``ERROR``
+:class:`~cobre_bridge.diagnostics.Diagnostic` through the sink the pipeline
+already runs converters inside. A failure here therefore surfaces with
+bridge-side context (entity, stage, column, declared vs. offending value) in
+milliseconds, instead of at ``cobre validate``/``cobre run`` load time.
 
 This is a **courtesy mirror**, not a substitute: cobre remains the authority.
 Each rule is scoped to match cobre's own implementation exactly (see
@@ -23,6 +23,8 @@ Each rule is scoped to match cobre's own implementation exactly (see
   (``block_bounds.rs::check_duplicate_bound_rows``).
 - The ``block_id``-range rule — :func:`check_bound_block_id_range`
   (``block_bounds.rs::check_bound_block_id_range``).
+- Rule 38 — :func:`check_block_id_not_on_anticipated_thermal`
+  (``block_bounds.rs::check_block_id_on_anticipated_thermal``).
 
 This module must not import either pipeline — they import it — so it stays
 unit-testable against hand-built artifacts.
@@ -439,6 +441,88 @@ def check_bound_block_id_range(
                 justify=["left", "right", "right", "right", "right"],
             ),
             remediation="Fix the block_id or the stage's declared block count.",
+        ),
+        logger=_LOG,
+    )
+
+
+def _thermal_anticipated(thermals: Mapping[str, object]) -> dict[int, bool]:
+    """``{thermal_id: declares anticipated_config}`` from ``thermals.json``."""
+    declared: dict[int, bool] = {}
+    raw_thermals = thermals.get("thermals")
+    if not isinstance(raw_thermals, list):
+        return declared
+    for thermal in raw_thermals:
+        if not isinstance(thermal, Mapping):
+            continue
+        thermal_id = thermal.get("id")
+        if not isinstance(thermal_id, int):
+            continue
+        declared[thermal_id] = thermal.get("anticipated_config") is not None
+    return declared
+
+
+def check_block_id_not_on_anticipated_thermal(
+    thermals: Mapping[str, object],
+    thermal_bounds: pa.Table | None,
+) -> None:
+    """Cobre rule 38 mirror: no ``thermal_bounds`` row may carry a non-null
+    ``block_id`` for a thermal whose ``thermals.json`` entry declares a
+    non-null ``anticipated_config``
+    (``block_bounds.rs::check_block_id_on_anticipated_thermal``). An
+    anticipated thermal's dispatch is committed ahead of the block axis, so
+    cobre rejects any block-scoped bound on it outright.
+
+    Structurally inapplicable, without a finding, when *thermal_bounds* is
+    absent/empty, carries no ``block_id`` column, or no thermal declares
+    ``anticipated_config``.
+    """
+    if thermal_bounds is None or thermal_bounds.num_rows == 0:
+        return
+    if "block_id" not in thermal_bounds.column_names:
+        return
+
+    anticipated = _thermal_anticipated(thermals)
+    if not any(anticipated.values()):
+        return
+
+    thermal_ids = thermal_bounds["thermal_id"].to_pylist()
+    stage_ids = thermal_bounds["stage_id"].to_pylist()
+    block_ids = thermal_bounds["block_id"].to_pylist()
+
+    rows: list[list[object]] = []
+    for thermal_id, stage_id, block_id in zip(
+        thermal_ids, stage_ids, block_ids, strict=True
+    ):
+        if block_id is None:
+            continue
+        if anticipated.get(thermal_id):
+            rows.append([thermal_id, stage_id, block_id])
+
+    if not rows:
+        return
+
+    rows.sort(key=lambda r: (r[0], r[1], r[2]))
+    emit(
+        Diagnostic(
+            code="thermal-bound-block-id-on-anticipated",
+            severity=Severity.ERROR,
+            category=_CATEGORY,
+            title=f"block_id on an anticipated thermal ({len(rows)} finding(s))",
+            summary=(
+                f"{len(rows)} thermal_bounds row(s) carry a non-null block_id "
+                "for a thermal whose thermals.json entry declares "
+                "anticipated_config (cobre rule 38)"
+            ),
+            table=DiagnosticTable(
+                columns=["Thermal ID", "Stage", "block_id"],
+                rows=rows,
+                justify=["right", "right", "right"],
+            ),
+            remediation=(
+                "Drop the per-block override row(s) for this thermal; an "
+                "anticipated thermal's bounds must stay stage-level."
+            ),
         ),
         logger=_LOG,
     )

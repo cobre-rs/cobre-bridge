@@ -3,11 +3,13 @@
 ``CT`` declares, per (plant, stage), the per-block incremental cost
 (``cvu``), availability (``disponibilidade``) and inflexibility
 (``inflexibilidade``), sparsely by stage (later stages inherit the last
-declared record). Cobre's thermal bounds carry no block dimension until
-the unit-groups work activates the ``block_id`` column, so per-block
-values are **hours-weighted** into per-stage bounds — a documented interim
-approximation: one summary warning reports the worst per-block relative
-spread folded away per conversion.
+declared record). ``convert_thermal_bounds`` emits a stage-level base row
+(hours-weighted ``min``/``max``/``cost``, ``block_id = None``) plus, only
+where a stage's per-block ``disp``/``inflex`` values actually differ across
+blocks, sparse per-block override rows (``block_id = 0..n-1``) carrying the
+exact per-block ``min``/``max`` — the block-hour fold that used to be the
+only representation is now just the base row's summary. ``cost_per_mwh`` is
+not block-eligible (cobre rule 37) and stays on the base row only.
 
 GNL plants live in the anticipated-dispatch file and are converted by the
 anticipation track, not here.
@@ -15,7 +17,6 @@ anticipation track, not here.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -31,8 +32,6 @@ if TYPE_CHECKING:
 
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
-
-_LOG = logging.getLogger(__name__)
 
 
 def _ct_dense(
@@ -103,13 +102,6 @@ def _hours_weighted(values: Sequence[float], stage: OperativeStage) -> float:
     )
 
 
-def _relative_spread(values: Sequence[float]) -> float:
-    top = max(values)
-    if top == 0.0:
-        return 0.0
-    return (top - min(values)) / top
-
-
 def convert_thermals(
     dadger: Dadger,
     id_map: DecompIdMap,
@@ -143,17 +135,35 @@ def convert_thermals(
     return {"$schema": _SCHEMA_URL, "thermals": thermals}
 
 
+_THERMAL_BOUNDS_SCHEMA = pa.schema(
+    [
+        pa.field("thermal_id", pa.int32(), nullable=False),
+        pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("min_generation_mw", pa.float64(), nullable=False),
+        pa.field("max_generation_mw", pa.float64(), nullable=False),
+        pa.field("cost_per_mwh", pa.float64(), nullable=True),
+        pa.field("block_id", pa.int32(), nullable=True),
+    ]
+)
+
+
 def convert_thermal_bounds(
     dadger: Dadger,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
 ) -> pa.Table:
-    """Per-stage thermal bounds, hours-weighted from the per-block values.
+    """Thermal bounds: a stage-level base row plus sparse per-block overrides.
 
-    One summary warning reports the largest per-block relative spread the
-    aggregation folds away (availability and inflexibility); it goes to
-    zero when the unit-groups ``block_id`` convention lands and the emitter
-    switches to per-block rows.
+    Every ``(thermal, stage)`` gets a base row (``block_id = None``) carrying
+    the hours-weighted ``min_generation_mw`` / ``max_generation_mw`` /
+    ``cost_per_mwh`` — unchanged from the pre-block-axis fold, so any
+    stage-level consumer sees the same numbers as before. Where — and only
+    where — the stage's per-block ``disponibilidade`` (max) or
+    ``inflexibilidade`` (min) values are not block-uniform, one additional
+    override row per block is emitted with the block's own exact ``min``/
+    ``max`` and ``cost_per_mwh = None`` (cost has no per-block LP variable;
+    cobre rule 37 rejects it there). This mirrors ``convert_lines``' sparse
+    base-plus-override convention (``decomp/network.py``) exactly.
     """
     plants = _ct_dense(dadger, calendar)
 
@@ -161,32 +171,36 @@ def convert_thermal_bounds(
     stage_ids: list[int] = []
     mins: list[float] = []
     maxs: list[float] = []
-    costs: list[float] = []
-    worst_spread = 0.0
+    costs: list[float | None] = []
+    block_ids: list[int | None] = []
     for code in id_map.thermal_codes:
         plant = plants.get(code)
         if plant is None:
             raise ValueError(f"thermal code {code} has no CT records")
+        thermal_id = id_map.thermal_id(code)
         for stage in calendar:
             values = plant["stages"][stage.index]
-            thermal_ids.append(id_map.thermal_id(code))
-            stage_ids.append(stage.index)
-            mins.append(_hours_weighted(values["inflex"], stage))
-            maxs.append(_hours_weighted(values["disp"], stage))
-            costs.append(_hours_weighted(values["cvu"], stage))
-            worst_spread = max(
-                worst_spread,
-                _relative_spread(values["disp"]),
-                _relative_spread(values["inflex"]),
-            )
+            disp = values["disp"]
+            inflex = values["inflex"]
 
-    if worst_spread > 0.0:
-        _LOG.warning(
-            "thermal per-block values hours-weighted into per-stage bounds "
-            "(worst per-block relative spread folded away: %.1f%%); exact "
-            "per-block bounds land with the unit-groups block_id convention",
-            worst_spread * 100.0,
-        )
+            thermal_ids.append(thermal_id)
+            stage_ids.append(stage.index)
+            mins.append(_hours_weighted(inflex, stage))
+            maxs.append(_hours_weighted(disp, stage))
+            costs.append(_hours_weighted(values["cvu"], stage))
+            block_ids.append(None)
+
+            uniform = all(d == disp[0] for d in disp) and all(
+                m == inflex[0] for m in inflex
+            )
+            if not uniform:
+                for b in range(len(disp)):
+                    thermal_ids.append(thermal_id)
+                    stage_ids.append(stage.index)
+                    mins.append(inflex[b])
+                    maxs.append(disp[b])
+                    costs.append(None)
+                    block_ids.append(b)
 
     return pa.table(
         {
@@ -195,5 +209,7 @@ def convert_thermal_bounds(
             "min_generation_mw": pa.array(mins, type=pa.float64()),
             "max_generation_mw": pa.array(maxs, type=pa.float64()),
             "cost_per_mwh": pa.array(costs, type=pa.float64()),
-        }
+            "block_id": pa.array(block_ids, type=pa.int32()),
+        },
+        schema=_THERMAL_BOUNDS_SCHEMA,
     )

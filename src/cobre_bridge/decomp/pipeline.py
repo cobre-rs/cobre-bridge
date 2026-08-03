@@ -136,7 +136,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     Raises
     ------
     ValueError
-        If the post-emission self-checks (cobre 0.13 rules 43/41/36 and the
+        If the post-emission self-checks (cobre 0.13 rules 43/41/38/36 and the
         ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
         find an ``ERROR``-severity violation in the converted artifacts. An
         ``INFO`` finding (e.g. rule 43's "not applicable" report, always the
@@ -208,10 +208,8 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         system / "pumping_stations.json",
         network_conv.convert_pumping_stations(dadger, id_map, start_date),
     )
-    _write_json(
-        system / "thermals.json",
-        thermal_conv.convert_thermals(dadger, id_map, calendar, start_date),
-    )
+    thermals_dict = thermal_conv.convert_thermals(dadger, id_map, calendar, start_date)
+    _write_json(system / "thermals.json", thermals_dict)
     _write_json(
         system / "hydro_production_models.json",
         hydro_conv.convert_production_models(id_map),
@@ -266,7 +264,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
     hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, hidr, id_map, calendar)
 
-    # Post-emission self-checks (cobre 0.13 rules 43, 41, 36, and the
+    # Post-emission self-checks (cobre 0.13 rules 43, 41, 38, 36, and the
     # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
     # the in-memory artifacts, run before the constraint tables are written.
     # DECOMP writes max_turbined_m3s/max_generation_mw only on the entity
@@ -295,13 +293,16 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         emission_checks.check_unit_group_envelope(hydros_dict)
         emission_checks.check_bound_row_uniqueness(bound_families)
         emission_checks.check_bound_block_id_range(stages_dict, bound_families)
+        emission_checks.check_block_id_not_on_anticipated_thermal(
+            thermals_dict, thermal_bounds_table
+        )
     for diagnostic in check_diagnostics:
         dx.emit(diagnostic, logger=_EMISSION_CHECKS_LOGGER)
     check_errors = [d for d in check_diagnostics if d.severity is dx.Severity.ERROR]
     if check_errors:
         raise ValueError(
             f"DECOMP conversion failed {len(check_errors)} post-emission "
-            "self-check error(s) (cobre 0.13 rules 43/41/36/block_id-range):\n"
+            "self-check error(s) (cobre 0.13 rules 43/41/38/36/block_id-range):\n"
             f"{_describe_emission_check_errors(check_errors)}"
         )
 

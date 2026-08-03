@@ -15,10 +15,14 @@ the jul-26 deck's own outputs (2026-07-24):
   those plants are skipped here and handled by the generic-constraints
   emitter.
 
-Cobre's bounds carry no block dimension until the unit-groups work
-activates ``block_id``, so the per-block percentages are hours-weighted —
-same interim treatment as thermal, one summary warning for the folded
-spread (typically 100 %: the light block is fully relaxed).
+Cobre's ``block_id`` axis is active for ``min_outflow_m3s``: an
+``RQ``-derived plant emits a stage-level base row (``block_id = None``, the
+hours-weighted value — unchanged from the earlier interim fold) plus, only
+where a stage's per-block percentages actually differ, sparse per-block
+override rows (``block_id = 0..n-1``) carrying the exact per-block minimum.
+This mirrors the base-plus-sparse-override convention ``convert_lines`` and
+``convert_thermal_bounds`` already use. ``UH``-declared and ``QDEF``-windowed
+plants are unaffected — neither varies across blocks.
 """
 
 from __future__ import annotations
@@ -39,6 +43,15 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 
+_HYDRO_BOUNDS_SCHEMA = pa.schema(
+    [
+        pa.field("hydro_id", pa.int32(), nullable=False),
+        pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("min_outflow_m3s", pa.float64(), nullable=False),
+        pa.field("block_id", pa.int32(), nullable=True),
+    ]
+)
+
 
 def _empty() -> pa.Table:
     return pa.table(
@@ -46,7 +59,9 @@ def _empty() -> pa.Table:
             "hydro_id": pa.array([], type=pa.int32()),
             "stage_id": pa.array([], type=pa.int32()),
             "min_outflow_m3s": pa.array([], type=pa.float64()),
-        }
+            "block_id": pa.array([], type=pa.int32()),
+        },
+        schema=_HYDRO_BOUNDS_SCHEMA,
     )
 
 
@@ -56,7 +71,17 @@ def convert_hydro_bounds(
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
 ) -> pa.Table:
-    """Per-(plant, stage) minimum-outflow rows from the ``RQ`` defaults."""
+    """Minimum-outflow bounds from the ``RQ`` defaults.
+
+    ``UH``-declared and ``QDEF``-windowed plants each emit a single
+    stage-level base row (``block_id = None``) per stage — a constant value
+    for ``UH``, none at all for ``QDEF`` (skipped, deferred to the
+    generic-constraints emitter). An ``RQ``-derived plant emits that same
+    base row (the hours-weighted per-stage value, backward-compatible) plus,
+    only where the stage's per-block percentages are not all equal, one
+    override row per block (``block_id = 0..n-1``) carrying the exact
+    ``pct[block] / 100 * base``.
+    """
     rq = dadger.rq(df=True)
     if rq is None or rq.empty:
         return _empty()
@@ -109,31 +134,34 @@ def convert_hydro_bounds(
             k += 1
         pct_blocks[int(row["codigo_ree"])] = values
 
-    worst_spread = 0.0
-    for values in pct_blocks.values():
-        top = max(values) if values else 0.0
-        if top > 0.0:
-            worst_spread = max(worst_spread, (top - min(values)) / top)
-
     hydro_ids: list[int] = []
     stage_ids: list[int] = []
     minimums: list[float] = []
+    block_ids: list[int | None] = []
     skipped_qdef = 0
     for code in id_map.hydro_codes:
+        # ``per_block_stage[stage.index]`` is the RQ-derived per-block
+        # minimum (``pct[b] / 100 * base``, one entry per declared block) —
+        # ``None`` for a UH-declared plant, which never varies across
+        # blocks.
+        per_block_stage: list[list[float]] | None
         if code in uh_declared:
             per_stage = [uh_declared[code]] * len(calendar)
+            per_block_stage = None
+        elif code in qdef_plants:
+            skipped_qdef += 1
+            continue
         else:
-            if code in qdef_plants:
-                skipped_qdef += 1
-                continue
             ree = ree_by_code.get(code)
             base = vazmin.get(code, 0.0)
             if ree is None or ree not in pct_blocks or base <= 0.0:
                 continue
             values = pct_blocks[ree]
             per_stage = []
+            per_block_stage = []
             for stage in calendar:
                 n_blocks = len(stage.block_hours)
+                block_values = [pct / 100.0 * base for pct in values[:n_blocks]]
                 weighted_pct = (
                     sum(
                         pct * hours
@@ -144,6 +172,7 @@ def convert_hydro_bounds(
                     / stage.total_hours
                 )
                 per_stage.append(weighted_pct / 100.0 * base)
+                per_block_stage.append(block_values)
         for stage in calendar:
             value = per_stage[stage.index]
             if value <= 0.0:
@@ -151,6 +180,19 @@ def convert_hydro_bounds(
             hydro_ids.append(id_map.hydro_id(code))
             stage_ids.append(stage.index)
             minimums.append(value)
+            block_ids.append(None)
+
+            if per_block_stage is None:
+                continue
+            block_values = per_block_stage[stage.index]
+            uniform = all(v == block_values[0] for v in block_values)
+            if uniform:
+                continue
+            for b, block_value in enumerate(block_values):
+                hydro_ids.append(id_map.hydro_id(code))
+                stage_ids.append(stage.index)
+                minimums.append(block_value)
+                block_ids.append(b)
 
     if n_overrides:
         _LOG.info(
@@ -165,14 +207,6 @@ def convert_hydro_bounds(
             "pending)",
             skipped_qdef,
         )
-    if worst_spread > 0.0:
-        _LOG.warning(
-            "RQ per-block minimum-outflow percentages hours-weighted into "
-            "per-stage bounds (worst per-block relative spread folded away: "
-            "%.1f%%); exact per-block bounds land with the unit-groups "
-            "block_id convention",
-            worst_spread * 100.0,
-        )
 
     if not hydro_ids:
         return _empty()
@@ -181,5 +215,7 @@ def convert_hydro_bounds(
             "hydro_id": pa.array(hydro_ids, type=pa.int32()),
             "stage_id": pa.array(stage_ids, type=pa.int32()),
             "min_outflow_m3s": pa.array(minimums, type=pa.float64()),
-        }
+            "block_id": pa.array(block_ids, type=pa.int32()),
+        },
+        schema=_HYDRO_BOUNDS_SCHEMA,
     )
