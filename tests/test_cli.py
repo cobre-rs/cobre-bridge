@@ -749,6 +749,39 @@ class TestCliExitCodes:
         assert result.returncode == 2
 
 
+class TestPartitionValidationWarnings:
+    """``_partition_validation_warnings`` — the pure whitelist filter (ticket-007)."""
+
+    def test_partition_whitelists_interop_warning(self) -> None:
+        """The interop message is whitelisted; an unrelated one still renders."""
+        from cobre_bridge.cli import _partition_validation_warnings
+
+        interop = (
+            "inflow lags are disabled on all study stages. This is a valid "
+            "configuration for external-solver interoperability; otherwise "
+            "it is likely a misconfiguration."
+        )
+        unrelated = "some unrelated warning"
+
+        rendered, whitelisted = _partition_validation_warnings(
+            [interop, unrelated], ("external-solver interoperability",)
+        )
+
+        assert rendered == [unrelated]
+        assert whitelisted == [interop]
+
+    def test_partition_empty_whitelist_is_identity(self) -> None:
+        """An empty whitelist — what ``convert newave`` passes — changes nothing."""
+        from cobre_bridge.cli import _partition_validation_warnings
+
+        warnings: list[object] = ["w1", "w2", {"message": "w3"}]
+
+        rendered, whitelisted = _partition_validation_warnings(warnings, ())
+
+        assert rendered == warnings
+        assert whitelisted == []
+
+
 class TestCliInProcess:
     """In-process CLI tests that patch the pipeline to avoid inewave I/O."""
 
@@ -1956,6 +1989,109 @@ class TestCliInProcess:
 
         assert code == 0
         validate.assert_called_once()
+
+    def test_convert_newave_validate_unchanged_by_helper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``convert newave --validate`` still renders the interop warning.
+
+        ``convert newave`` passes an empty whitelist to the shared
+        ``_run_cobre_validation`` helper, so a warning DECOMP whitelists (the
+        cobre external-solver-interop note) must still render here — the
+        byte-identical-behavior guarantee the ticket-007 helper extraction
+        must not break. Contrast with
+        ``test_convert_decomp_validate_whitelists_interop`` below.
+        """
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version",
+            lambda: MIN_COBRE_VERSION,
+        )
+        interop_warning = (
+            "inflow lags are disabled on all study stages. This is a valid "
+            "configuration for external-solver interoperability; otherwise "
+            "it is likely a misconfiguration."
+        )
+        validate = self._inject_cobre_io(
+            monkeypatch,
+            MagicMock(
+                return_value={
+                    "valid": True,
+                    "warnings": [interop_warning],
+                    "errors": [],
+                }
+            ),
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        validate.assert_called_once()
+        assert "external-solver interoperability" in stderr
+        assert "Validation warning:" in stderr
+
+    def test_convert_decomp_validate_whitelists_interop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``convert decomp --validate`` whitelists the interop inflow-lags warning.
+
+        The P3 lag-blind stage shape (``inflow_lags=false`` on every stage,
+        locked in ``test_decomp_temporal.py``) trips cobre's non-fatal
+        external-solver-interop warning on purpose; DECOMP's whitelist keeps
+        it off stderr while newave's does not (see the sibling
+        ``test_convert_newave_validate_unchanged_by_helper`` above).
+        """
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version",
+            lambda: MIN_COBRE_VERSION,
+        )
+        interop_warning = (
+            "inflow lags are disabled on all study stages. This is a valid "
+            "configuration for external-solver interoperability; otherwise "
+            "it is likely a misconfiguration."
+        )
+        validate = self._inject_cobre_io(
+            monkeypatch,
+            MagicMock(
+                return_value={
+                    "valid": True,
+                    "warnings": [interop_warning],
+                    "errors": [],
+                }
+            ),
+        )
+
+        with patch("cobre_bridge.decomp.pipeline.convert_decomp_case"):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        validate.assert_called_once()
+        assert "external-solver interoperability" not in stderr
+        assert "Validation warning:" not in stderr
 
 
 class TestCompareDatasetWiring:

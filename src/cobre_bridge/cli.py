@@ -535,6 +535,175 @@ def _run_check(args: SimpleNamespace) -> None:
         raise typer.Exit(code=exit_code)
 
 
+def _validation_message(item: object) -> str:
+    """Extract the display text from a ``cobre.io.validate`` warning/error item.
+
+    Each item is either a plain string or a ``{"message": ...}`` dict; both
+    forms render and partition on the same text.
+    """
+    text = item.get("message", item) if isinstance(item, dict) else item
+    return str(text)
+
+
+def _partition_validation_warnings(
+    warnings: Sequence[object], whitelist_substrings: Sequence[str] = ()
+) -> tuple[list[object], list[object]]:
+    """Split ``cobre.io.validate`` ``warnings`` into ``(rendered, whitelisted)``.
+
+    A warning whose message (:func:`_validation_message`) contains any of
+    *whitelist_substrings* is whitelisted — not rendered as a "Validation
+    warning" and not counted in the rendered/blocking warning count; every
+    other warning goes to *rendered* exactly as before. An empty
+    *whitelist_substrings* — what ``convert newave`` passes — is the identity
+    partition: ``rendered == warnings`` and ``whitelisted == []``. Pure; never
+    touches ``errors``, and never suppresses a non-matching warning.
+    """
+    if not whitelist_substrings:
+        return list(warnings), []
+
+    rendered: list[object] = []
+    whitelisted: list[object] = []
+    for warning in warnings:
+        message = _validation_message(warning)
+        if any(substring in message for substring in whitelist_substrings):
+            whitelisted.append(warning)
+        else:
+            rendered.append(warning)
+    return rendered, whitelisted
+
+
+def _run_cobre_validation(
+    dst: Path,
+    *,
+    command: str,
+    summary: dict[str, object],
+    json_output: bool,
+    err_console: Console,
+    whitelist_substrings: Sequence[str] = (),
+) -> bool:
+    """Validate *dst* with the installed cobre-python and render the outcome.
+
+    Shared by every ``convert *`` command's ``--validate`` gate: the
+    :data:`MIN_COBRE_VERSION` skip, the ``cobre.io.validate`` call,
+    warning/error rendering (warnings are first partitioned through
+    :func:`_partition_validation_warnings` against *whitelist_substrings* —
+    ``convert newave`` passes an empty tuple, the identity case, so its
+    rendering stays byte-identical), and the machine-readable
+    ``summary["validation"]`` sub-object, populated only when *json_output*
+    is set. *command* names the caller in the whitelisted-note message;
+    *summary* is mutated in place.
+
+    Returns whether validation FAILED (``valid`` came back ``False``, or
+    ``cobre.io.validate`` itself raised) so the caller can flip its exit code
+    to 2 — a skipped validation (old/absent cobre-python) is never a failure.
+    Does not emit the enclosing ``--json`` verdict or raise ``typer.Exit``;
+    that stays the caller's job, run immediately after this returns.
+    """
+    installed = _installed_cobre_python_version()
+    if installed is not None and not _cobre_python_supports_output(installed):
+        print_status(
+            f"Note: converted output requires cobre-python >= "
+            f"{MIN_COBRE_VERSION} (installed cobre-python {installed} is "
+            f"older); skipping cobre-python validation.",
+            console=err_console,
+            style="#F5A623",
+        )
+        if json_output:
+            summary["validation"] = {
+                "ran": False,
+                "valid": None,
+                "warnings": 0,
+                "errors": 0,
+                "skipped_reason": "cobre-python-too-old",
+            }
+        return False
+
+    try:
+        import cobre.io  # type: ignore[import-untyped]
+    except ImportError:
+        print_status(
+            "Warning: cobre package not installed, skipping validation",
+            console=err_console,
+            style="#F5A623",
+        )
+        if json_output:
+            # Validation was requested but could not run; record that it was
+            # skipped so the absence of a real outcome is explicit.
+            summary["validation"] = {
+                "ran": False,
+                "valid": None,
+                "warnings": 0,
+                "errors": 0,
+            }
+        return False
+
+    try:
+        # cobre v0.6.x: cobre.io.validate is a function returning a
+        # report dict; it never raises (errors are surfaced as data).
+        result = cobre.io.validate(str(dst))
+    except Exception as exc:  # noqa: BLE001
+        render_error(f"Validation error: {exc}", console=err_console)
+        if json_output:
+            # Validation raised unexpectedly; still emit one JSON object so
+            # the --json contract (exactly one verdict on stdout) holds on
+            # this exit-2 path too. The conversion itself succeeded, so the
+            # summary is intact; only the validation outcome is an error.
+            summary["validation"] = {
+                "ran": False,
+                "valid": None,
+                "warnings": 0,
+                "errors": 1,
+            }
+        return True
+
+    raw_warnings = result.get("warnings", [])
+    errors = result.get("errors", [])
+    valid = bool(result.get("valid", False))
+
+    rendered_warnings, whitelisted_warnings = _partition_validation_warnings(
+        raw_warnings, whitelist_substrings
+    )
+
+    for warning in rendered_warnings:
+        print_status(
+            f"Validation warning: {_validation_message(warning)}",
+            console=err_console,
+            style="#F5A623",
+        )
+    if whitelisted_warnings:
+        # Whitelisted-but-present is worth one INFO note, never a WARNING —
+        # this is what tells the whitelist apart from a real suppression.
+        print_status(
+            f"Note: {len(whitelisted_warnings)} validation warning(s) matched "
+            "the expected external-solver-interop configuration for "
+            f"{command}; not rendered.",
+            console=err_console,
+        )
+
+    validation_failed = False
+    if not valid:
+        for err in errors:
+            print_status(
+                f"Validation error: {_validation_message(err)}",
+                console=err_console,
+                style="bold #DC4C4C",
+            )
+        print_status("Validation failed.", console=err_console, style="bold #DC4C4C")
+        validation_failed = True
+
+    if json_output:
+        # The machine-readable outcome under ``summary``; ``status`` stays
+        # derived from diagnostics only (validation never flips it).
+        summary["validation"] = {
+            "ran": True,
+            "valid": valid,
+            "warnings": len(rendered_warnings),
+            "errors": len(errors),
+        }
+
+    return validation_failed
+
+
 def _run_newave_conversion(args: SimpleNamespace) -> None:
     """Execute the convert newave subcommand."""
     from cobre_bridge.pipeline import (
@@ -652,121 +821,22 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
 
     # When --validate and --json are combined, the human validation messages stay
     # on err_console (stderr) exactly as without --json, and the machine-readable
-    # outcome is folded UNDER ``summary`` as a ``validation`` sub-object. The
-    # verdict is emitted (below) only AFTER this block so ``validation`` is
-    # populated; validation failure flips the exit code, never the status.
+    # outcome is folded UNDER ``summary`` as a ``validation`` sub-object (mutated
+    # in place by the shared helper below). The verdict is emitted (below) only
+    # AFTER this block so ``validation`` is populated; validation failure flips
+    # the exit code, never the status. ``convert newave`` passes an empty
+    # whitelist, so ``_run_cobre_validation`` is the identity case here and its
+    # rendering/``--json`` shape stay byte-identical to before the extraction.
     validation_failed = False
     if args.validate:
-        # Every converted case now emits a 0.12.0-only
-        # ``training.parallelism.backward_scheduler`` block (and, since 0.10.0,
-        # ``operational_start_date`` on all system entities), so validating against
-        # an OLDER cobre-python would reject correct output and force exit 2. Skip
-        # validation (success,
-        # exit 0) when the installed cobre-python predates MIN_COBRE_VERSION —
-        # recording why on stderr (human) and under summary["validation"]
-        # (machine), never flipping status. A cobre-python that knows the schema
-        # validates the case normally below; an absent cobre-python (no metadata)
-        # falls through to the generic "not installed" skip.
-        installed = _installed_cobre_python_version()
-        if installed is not None and not _cobre_python_supports_output(installed):
-            print_status(
-                f"Note: converted output requires cobre-python >= "
-                f"{MIN_COBRE_VERSION} (installed cobre-python {installed} is "
-                f"older); skipping cobre-python validation.",
-                console=err_console,
-                style="#F5A623",
-            )
-            if args.json_output:
-                summary["validation"] = {
-                    "ran": False,
-                    "valid": None,
-                    "warnings": 0,
-                    "errors": 0,
-                    "skipped_reason": "cobre-python-too-old",
-                }
-                _emit_convert_json(
-                    build_verdict("convert newave", status, summary, report.diagnostics)
-                )
-            return
-
-        try:
-            import cobre.io  # type: ignore[import-untyped]
-        except ImportError:
-            print_status(
-                "Warning: cobre package not installed, skipping validation",
-                console=err_console,
-                style="#F5A623",
-            )
-            if args.json_output:
-                # Validation was requested but could not run; record that it was
-                # skipped so the absence of a real outcome is explicit.
-                summary["validation"] = {
-                    "ran": False,
-                    "valid": None,
-                    "warnings": 0,
-                    "errors": 0,
-                }
-                _emit_convert_json(
-                    build_verdict("convert newave", status, summary, report.diagnostics)
-                )
-            return
-
-        try:
-            # cobre v0.6.x: cobre.io.validate is a function returning a
-            # report dict; it never raises (errors are surfaced as data).
-            result = cobre.io.validate(str(dst))
-        except Exception as exc:  # noqa: BLE001
-            render_error(f"Validation error: {exc}", console=err_console)
-            if args.json_output:
-                # Validation raised unexpectedly; still emit one JSON object so
-                # the --json contract (exactly one verdict on stdout) holds on
-                # this exit-2 path too. The conversion itself succeeded, so the
-                # summary is intact; only the validation outcome is an error.
-                summary["validation"] = {
-                    "ran": False,
-                    "valid": None,
-                    "warnings": 0,
-                    "errors": 1,
-                }
-                _emit_convert_json(
-                    build_verdict("convert newave", status, summary, report.diagnostics)
-                )
-            raise typer.Exit(code=2)
-
-        def _msg(item: object) -> object:
-            return item.get("message", item) if isinstance(item, dict) else item
-
-        warnings = result.get("warnings", [])
-        errors = result.get("errors", [])
-        valid = bool(result.get("valid", False))
-
-        for warning in warnings:
-            print_status(
-                f"Validation warning: {_msg(warning)}",
-                console=err_console,
-                style="#F5A623",
-            )
-        if not valid:
-            for err in errors:
-                print_status(
-                    f"Validation error: {_msg(err)}",
-                    console=err_console,
-                    style="bold #DC4C4C",
-                )
-            print_status(
-                "Validation failed.", console=err_console, style="bold #DC4C4C"
-            )
-            validation_failed = True
-
-        if args.json_output:
-            # The machine-readable outcome under ``summary``; ``status`` stays
-            # derived from diagnostics only (validation never flips it).
-            summary["validation"] = {
-                "ran": True,
-                "valid": valid,
-                "warnings": len(warnings),
-                "errors": len(errors),
-            }
+        validation_failed = _run_cobre_validation(
+            dst,
+            command="convert newave",
+            summary=summary,
+            json_output=args.json_output,
+            err_console=err_console,
+            whitelist_substrings=(),
+        )
 
     # Emit the --json verdict now (after validation has populated ``summary``).
     if args.json_output:
@@ -1194,12 +1264,30 @@ def _convert_newave(
     )
 
 
+#: Warning substring that marks the P3 lag-blind stage shape
+#: (``state_variables.inflow_lags = false`` on every stage, alongside a
+#: positive ``inflow_lag_depth`` — see ``decomp/temporal.py::stage_records``)
+#: as deliberate external-solver interoperability, not a misconfiguration.
+#: Matched via :func:`_partition_validation_warnings` against cobre's stable
+#: substring (never the volatile message prefix); see
+#: ``cobre-io/src/validation/semantic/stages.rs``.
+_DECOMP_VALIDATION_WHITELIST: tuple[str, ...] = ("external-solver interoperability",)
+
+
 def _run_decomp_conversion(args: SimpleNamespace) -> None:
     """Execute the convert decomp subcommand; ``ValueError`` also covers an
     ERROR-severity post-emission self-check finding (cobre 0.13 rules
     43/41/36/block_id-range) — ``convert_decomp_case`` raises it with a
     message naming the failing rule(s) and entities, already mapped to
-    exit 1 by this except tuple with no dedicated branch needed."""
+    exit 1 by this except tuple with no dedicated branch needed.
+
+    ``--validate`` runs after a successful conversion via the shared
+    ``_run_cobre_validation`` helper (mirroring ``convert newave``), with the
+    DECOMP external-solver-interop whitelist so the deliberate
+    ``inflow_lags=false`` shape never surfaces as a scary warning; a failed
+    validation exits 2, giving ``convert decomp`` the same 0/1/2 exit-code
+    set as ``convert newave``.
+    """
     from cobre_bridge.decomp.pipeline import convert_decomp_case
 
     try:
@@ -1207,6 +1295,21 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     except (FileNotFoundError, FileExistsError, ValueError) as exc:
         logging.getLogger("cobre_bridge.cli").error("DECOMP conversion failed: %s", exc)
         raise typer.Exit(code=1) from exc
+
+    if not args.validate:
+        return
+
+    err_console = get_console(stderr=True, no_color=args.no_color)
+    validation_failed = _run_cobre_validation(
+        args.dst,
+        command="convert decomp",
+        summary={},
+        json_output=False,
+        err_console=err_console,
+        whitelist_substrings=_DECOMP_VALIDATION_WHITELIST,
+    )
+    if validation_failed:
+        raise typer.Exit(code=2)
 
 
 @convert_app.command("decomp")
@@ -1220,6 +1323,13 @@ def _convert_decomp(
         typer.Option(
             "--force",
             help="Overwrite destination directory if it already contains files.",
+        ),
+    ] = False,
+    validate: Annotated[
+        bool,
+        typer.Option(
+            "--validate",
+            help="After conversion, validate the output with the cobre package.",
         ),
     ] = False,
     verbose: _VerboseOpt = 0,
@@ -1238,6 +1348,7 @@ def _convert_decomp(
             src=src,
             dst=dst,
             force=force,
+            validate=validate,
             verbose=verbose,
             log_file=log_file,
             no_color=no_color,

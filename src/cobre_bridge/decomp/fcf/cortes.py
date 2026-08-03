@@ -12,8 +12,10 @@ cut coefficients. ``inewave.newave.Cortesh`` parses the header into
 :class:`StageCutRecord`/:class:`BoundaryCuts` via ``inewave`` 1.15.0's
 ``Cortes.from_cortesh``, which returns a ``.cortes`` frame of named columns
 (``rhs``, ``pi_gnl_sbm{s}_pat{p}_lag{l}``, ``pi_varm_uhe{code}``,
-``pi_qafl_uhe{code}_lag{l}``, ``pi_mx_sar_uhe{code}``) — a faithful
-transcription of the named layout, not raw byte arithmetic.
+``pi_qafl_uhe{code}_lag{l}``, ``pi_mx_sar_uhe{code}``, plus the per-cut
+provenance columns ``indice_corte``, ``iteracao_construcao``,
+``indice_forward``, ``iteracao_desativacao``) — a faithful transcription of
+the named layout, not raw byte arithmetic.
 
 ``Cortesh.STORAGE`` is binary and its ``read`` classmethod accepts a file
 path directly (confirmed against both a non-GNL deck,
@@ -61,12 +63,23 @@ class CortesHeader:
 
 @dataclass(frozen=True)
 class StageCutRecord:
-    """One boundary cut's coefficients, in header slot order.
+    """One boundary cut's provenance and coefficients, in header slot order.
 
     Populated by the record reader (ticket-002); defined here so the
-    header reader and its consumers share one type.
+    header reader and its consumers share one type. ``cut_id``,
+    ``iteration``, ``forward_pass_index``, and ``is_active`` are the
+    per-cut provenance columns the checkpoint writer (epic 2's ticket-008)
+    needs — carried verbatim from the ``from_cortesh`` frame's
+    ``indice_corte``, ``iteracao_construcao``, ``indice_forward``, and
+    ``iteracao_desativacao == 0`` respectively. The reader carries every
+    record regardless of ``is_active``; deactivated-cut filtering is the
+    writer's concern, not the reader's.
     """
 
+    cut_id: int
+    iteration: int
+    forward_pass_index: int
+    is_active: bool
     rhs: float
     pi_varm: tuple[float, ...]
     pi_qafl: tuple[tuple[float, ...], ...]
@@ -338,6 +351,10 @@ def _build_records(
 
     _validate_sar_zero(df, sar_cols, header.plant_codes)
 
+    cut_id_values = df["indice_corte"].to_numpy(dtype=int).tolist()
+    iteration_values = df["iteracao_construcao"].to_numpy(dtype=int).tolist()
+    forward_pass_values = df["indice_forward"].to_numpy(dtype=int).tolist()
+    deactivation_values = df["iteracao_desativacao"].to_numpy(dtype=int).tolist()
     rhs_values = df["rhs"].to_numpy(dtype=float).tolist()
     varm_values = df[varm_cols].to_numpy(dtype=float).tolist()
     qafl_values = (
@@ -350,6 +367,10 @@ def _build_records(
 
     return tuple(
         StageCutRecord(
+            cut_id=cut_id_values[i],
+            iteration=iteration_values[i],
+            forward_pass_index=forward_pass_values[i],
+            is_active=deactivation_values[i] == 0,
             rhs=rhs_values[i],
             pi_varm=tuple(varm_values[i]),
             pi_qafl=tuple(tuple(lags) for lags in qafl_values[i]),

@@ -119,6 +119,31 @@ def test_read_cortes_nongnl_boundary_stage_and_shapes() -> None:
     not _NEWAVE_RODADA.exists() or not _NEWAVE_RODADA_CORTES.exists(),
     reason="newave_rodada deck not present",
 )
+def test_read_cortes_exposes_per_cut_provenance() -> None:
+    cortesh = Cortesh.read(str(_NEWAVE_RODADA))
+    boundary = read_cortes(_NEWAVE_RODADA_CORTES, cortesh, boundary_stage=11)
+
+    assert len(boundary.records) > 0
+    for record in boundary.records:
+        assert isinstance(record.cut_id, int) and record.cut_id > 0
+        assert isinstance(record.iteration, int) and record.iteration > 0
+        assert (
+            isinstance(record.forward_pass_index, int) and record.forward_pass_index > 0
+        )
+        assert isinstance(record.is_active, bool)
+
+    # Every record in this deck's boundary-stage export is active (byte-exact
+    # `from_cortesh` measurement, 2026-08-03) — a real cut chain with no
+    # deactivated entries at this boundary, not a read bug.
+    assert all(record.is_active for record in boundary.records)
+    cut_ids = [record.cut_id for record in boundary.records]
+    assert len(set(cut_ids)) == len(cut_ids)  # cut_id is unique per record
+
+
+@pytest.mark.skipif(
+    not _NEWAVE_RODADA.exists() or not _NEWAVE_RODADA_CORTES.exists(),
+    reason="newave_rodada deck not present",
+)
 def test_read_cortes_nongnl_nonzero_families() -> None:
     cortesh = Cortesh.read(str(_NEWAVE_RODADA))
     boundary = read_cortes(_NEWAVE_RODADA_CORTES, cortesh, boundary_stage=11)
@@ -313,12 +338,20 @@ def test_summarize_families_counts_plant_once_across_records() -> None:
     )
     records = (
         StageCutRecord(
+            cut_id=1,
+            iteration=1,
+            forward_pass_index=1,
+            is_active=True,
             rhs=10.0,
             pi_varm=(1.0, 0.0),
             pi_qafl=((1.0,) + (0.0,) * 11, (0.0,) * 12),
             pi_gnl=(1.0,),
         ),
         StageCutRecord(
+            cut_id=2,
+            iteration=1,
+            forward_pass_index=2,
+            is_active=True,
             rhs=20.0,
             pi_varm=(1.0, 0.0),
             pi_qafl=((1.0,) + (0.0,) * 11, (0.0,) * 12),

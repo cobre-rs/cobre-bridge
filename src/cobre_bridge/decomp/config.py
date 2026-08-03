@@ -1,10 +1,10 @@
 """Run configuration and penalties for DECOMP-like decks.
 
-``config.json`` carries the deck-faithful iteration backstop (``NI``) and
-the external inflow scheme. The deck's ``GP`` gap criterion has no solver
-counterpart until the enumeration work lands its absolute-gap rule; it is
-logged at conversion (canonical value = GP × 1000 R$) so the omission is
-visible, never silent.
+``config.json`` carries the fixed ``state_space.inflow_lag_depth`` (P3/D8),
+the deck-faithful iteration backstop (``NI``), and the external inflow
+scheme. The deck's ``GP`` gap criterion has no solver counterpart until the
+enumeration work lands its absolute-gap rule; it is logged at conversion
+(canonical value = GP × 1000 R$) so the omission is visible, never silent.
 
 ``penalties.json`` reuses the shared ρ-scaled hydro penalty construction
 with the deck's deficit cost and the converted productivities — the same
@@ -42,9 +42,23 @@ _CONFIG_SCHEMA_URL = (
 # enumeration replaces this when the selection mode exists.
 _SMOKE_FORWARD_PASSES = 5
 
+# D8: the boundary cut's deepest lag term sets the state-space depth cobre
+# must reserve, so the emitted config declares it explicitly rather than
+# leaving cobre to infer one. The source model's boundary cuts carry
+# ``pi_qafl`` lag coefficients out to depth 12, so a smaller value would
+# drop lag coefficients cobre would then reject at load.
+_INFLOW_LAG_DEPTH = 12
+
 
 def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
-    """Build ``config.json``: NI backstop, external inflows, simulation on."""
+    """Build ``config.json``: state space depth, NI backstop, external
+    inflows, simulation on.
+
+    ``state_space.inflow_lag_depth`` is fixed at 12 (P3/D8): under
+    no-folding, the source model's boundary cuts carry lag coefficients out
+    to depth 12, so cobre's bookkeeping must reserve that many lag slots for
+    the terminal boundary cut to price.
+    """
     ni = int(dadger.ni.iteracoes or 500)
     gp = float(dadger.gp.data[0])
     _LOG.warning(
@@ -61,6 +75,7 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
 
     return {
         "$schema": _CONFIG_SCHEMA_URL,
+        "state_space": {"inflow_lag_depth": _INFLOW_LAG_DEPTH},
         "training": {
             "forward_passes": _SMOKE_FORWARD_PASSES,
             "stopping_rules": [{"type": "iteration_limit", "limit": ni}],

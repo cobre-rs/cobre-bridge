@@ -112,6 +112,19 @@ class TestStageRecords:
         with pytest.raises(ValueError, match="entries"):
             stage_records(self._calendar(), num_scenarios=[1, 1])
 
+    def test_stage_records_inflow_lags_false(self) -> None:
+        """Locks the P3 lag-blind convention (ticket-007) on EVERY stage, not
+        just the first: ``inflow_lags`` disabled, ``storage`` enabled. This is
+        the exact shape that trips cobre's non-fatal external-solver-interop
+        validation warning on purpose — ``convert decomp --validate``
+        whitelists that warning by relying on this convention holding.
+        """
+        records = stage_records(self._calendar(), num_scenarios=[1] * 5 + [259])
+        assert len(records) == 6
+        for record in records:
+            assert record["state_variables"]["inflow_lags"] is False
+            assert record["state_variables"]["storage"] is True
+
     def test_convert_stages_document(self) -> None:
         doc = convert_stages(
             self._calendar(),
