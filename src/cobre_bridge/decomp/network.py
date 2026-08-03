@@ -108,9 +108,10 @@ def convert_buses(
 
     buses: list[dict] = []
     for code in id_map.bus_codes:
+        bus_id = id_map.bus_id(code)
         entry: dict = {
-            "id": id_map.bus_id(code),
-            "name": id_map.bus_name(id_map.bus_id(code)),
+            "id": bus_id,
+            "name": id_map.bus_name(bus_id),
             "operational_start_date": op_date,
         }
         if code in costs:

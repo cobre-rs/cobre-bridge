@@ -1284,12 +1284,16 @@ def bus_groups_and_pct(
     pct_by_eid: dict[int, dict[int, dict[str, object]]] = {}
     p10_col = f"{variable}_p10"
     p90_col = f"{variable}_p90"
-    if pct_df is not None and not pct_df.is_empty():
-        if p10_col in pct_df.columns and p90_col in pct_df.columns:
-            for row in pct_df.iter_rows(named=True):
-                eid = int(row["entity_id"])
-                sid = int(row["stage_id"])
-                pct_by_eid.setdefault(eid, {})[sid] = row
+    if (
+        pct_df is not None
+        and not pct_df.is_empty()
+        and p10_col in pct_df.columns
+        and p90_col in pct_df.columns
+    ):
+        for row in pct_df.iter_rows(named=True):
+            eid = int(row["entity_id"])
+            sid = int(row["stage_id"])
+            pct_by_eid.setdefault(eid, {})[sid] = row
 
     return buses, pct_by_eid
 

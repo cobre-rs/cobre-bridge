@@ -17,9 +17,7 @@ import pandas as pd
 import polars as pl
 import pyarrow.parquet as pq
 
-from cobre_bridge.cobre_io import (
-    resolve_hydro_productivities,
-)
+from cobre_bridge.cobre_io import resolve_hydro_productivities
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.errors import CobreOutputError
 
@@ -46,18 +44,12 @@ def scan_entity(case_dir: Path, entity: str) -> pl.LazyFrame:
 def load_names(case_dir: Path) -> dict[tuple[str, int], str]:
     """Load entity name mappings from system JSON files."""
     names: dict[tuple[str, int], str] = {}
-    for entity, key in [
-        ("hydros", "hydros"),
-        ("buses", "buses"),
-        ("thermals", "thermals"),
-        ("lines", "lines"),
-        ("non_controllable_sources", "non_controllable_sources"),
-    ]:
+    for entity in ("hydros", "buses", "thermals", "lines", "non_controllable_sources"):
         path = case_dir / "system" / f"{entity}.json"
         if path.exists():
             with open(path) as f:
                 data = json.load(f)
-            for item in data.get(key, []):
+            for item in data.get(entity, []):
                 names[(entity, item["id"])] = item.get("name", str(item["id"]))
     return names
 
@@ -1018,8 +1010,6 @@ class DashboardData:
             case_dir / "output" / "training" / "convergence.parquet"
         ).to_pandas()
 
-        # Each cohesive section is read by its own loader (above) and composed
-        # into the flat aggregate below.
         temporal = load_temporal_context(case_dir)
         entities = load_entity_metadata(case_dir)
         simulation = load_simulation_data(case_dir)

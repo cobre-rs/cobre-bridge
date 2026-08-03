@@ -79,7 +79,7 @@ class BoundFamily:
     to name it in a finding.
 
     *table* is ``None`` when the pipeline did not build that family for this
-    case (e.g. a NEWAVE case with no thermal capacity overrides); the row-level
+    case (e.g. a source-model case with no thermal capacity overrides); the row-level
     checks skip an absent family without a finding, exactly as they would skip
     an empty one.
 

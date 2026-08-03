@@ -125,9 +125,8 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   p_INT (0.000273) < p_PFIO = p_EVERT (0.000300)
 #   < p_TURB (0.000333) < p_CORTEOL (0.000344) < p_EXC (0.000355)
 
-MONTH_HOURS: float = (
-    730.0  # The source model convention (manual §3.24, used in C_M3S2HM3)
-)
+# The source model convention (manual §3.24, used in C_M3S2HM3)
+MONTH_HOURS: float = 730.0
 C_M3S2HM3: float = MONTH_HOURS * 3600.0 / 1e6  # = 2.628 hm³ / (m³/s · month)
 # HM3 × ρ_MW_per_m3s → MWh conversion (purely volumetric; 730 cancels here).
 HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78

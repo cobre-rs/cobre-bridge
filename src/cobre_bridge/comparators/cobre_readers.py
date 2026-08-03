@@ -1681,13 +1681,11 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
         return empty
 
     inv_map = {v: k for k, v in col_map.items()}
-    result = df.select(
+    return df.select(
         pl.col(inv_map["iteration"]).cast(pl.Int64).alias("iteration"),
         pl.col(inv_map["lower_bound"]).cast(pl.Float64).alias("lower_bound"),
         pl.col(inv_map["upper_bound_mean"]).cast(pl.Float64).alias("upper_bound_mean"),
     )
-
-    return result
 
 
 def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:

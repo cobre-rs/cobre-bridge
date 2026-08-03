@@ -853,8 +853,6 @@ def _compare_lines(
     if nw_intercambio.is_empty() or cobre_line.is_empty():
         return results
 
-    offset = nw_offset
-
     # (nw_de, nw_para) → (cobre_line_id, name)
     matched: dict[tuple[int, int], tuple[int, str]] = {}
     for ln in alignment.lines:
@@ -870,7 +868,7 @@ def _compare_lines(
         if match is None:
             continue
         cobre_line_id, _name = match
-        stage_0based = int(row["stage"]) - offset
+        stage_0based = int(row["stage"]) - nw_offset
         if stage_0based < 0:
             continue
         nw_lookup[(cobre_line_id, stage_0based)] = float(row["value"])

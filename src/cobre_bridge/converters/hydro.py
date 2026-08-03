@@ -582,9 +582,7 @@ _KTURB_BY_TIPO_TURBINA: dict[int, float] = {0: 0.5, 1: 0.5, 2: 0.2, 3: 0.5}
 
 def _clamp_outage_pct(value: float, label: str, plant_name: str) -> float:
     """Clamp TEIF/IP percentages into ``[0, 100]`` and warn on overshoot."""
-    if math.isnan(value):
-        return 0.0
-    if value < 0.0:
+    if math.isnan(value) or value < 0.0:
         return 0.0
     if value > 100.0:
         _LOG.warning(
@@ -2679,7 +2677,7 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
                 continue
 
             have = existing_stages.get(hid, set())
-            for s in range(0, num_total_stages):
+            for s in range(num_total_stages):
                 if s in have:
                     continue
                 total_month = start_month + s
@@ -2958,7 +2956,7 @@ def convert_storage_bounds(
             # 0-cap rows for every in-study stage [0, total_stages) — it never
             # operates in-study, so every stage is pre-operating.
             full_online_sid = max(max(usid, entry_sid) for _c, usid in unit_rows)
-            for s in range(0, min(full_online_sid, total_stages)):
+            for s in range(min(full_online_sid, total_stages)):
                 online = online_machines(unit_rows, entry_sid, s)
                 mt, mg = _reduced_caps(hreg, online, name)
                 hydro_ids.append(hydro_id)

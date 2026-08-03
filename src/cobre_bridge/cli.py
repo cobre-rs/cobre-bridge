@@ -537,7 +537,6 @@ def _run_check(args: SimpleNamespace) -> None:
 
 def _run_newave_conversion(args: SimpleNamespace) -> None:
     """Execute the convert newave subcommand."""
-    # Import here so the module-level import of pipeline is deferred.
     from cobre_bridge.pipeline import (
         CONVERSION_PHASE_LABELS,
         _clear_dst_contents,
