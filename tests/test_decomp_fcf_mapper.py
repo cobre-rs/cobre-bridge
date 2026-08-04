@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 
-from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
-from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, CortesHeader, StageCutRecord
 from cobre_bridge.decomp.fcf.mapper import DroppedTerm, map_boundary_cuts
-from cobre_bridge.decomp.id_map import DecompIdMap
+from tests._fcf_fixtures import (
+    make_boundary_cuts,
+    make_cut_record,
+    make_id_map,
+    make_manifest,
+    make_slot,
+    synthetic_roundtrip,
+)
+from tests.conftest import requires_cobre_python
 
 # cobre `policy.fbs` entity_type codes (see ticket-005's Current State) — a
 # stable external contract, restated locally rather than importing the
@@ -20,101 +26,26 @@ _ANTICIPATED_THERMAL_STATE = 2
 _HYDRO_TRANSIT_BUCKET = 3
 
 
-def _slot(
-    entity_type: int,
-    entity_id: int,
-    subindex: int,
-    *,
-    was_active: bool = True,
-    delivery_anchor: int = 0,
-) -> dict[str, object]:
-    """One hand-authored terminal-manifest slot dict."""
-    return {
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "subindex": subindex,
-        "was_active": was_active,
-        "delivery_anchor": delivery_anchor,
-    }
-
-
-def _manifest(slots: Sequence[dict[str, object]]) -> TerminalManifest:
-    """A synthetic terminal manifest; `state_dimension` == slot count."""
-    return TerminalManifest(entity_manifest=tuple(slots), state_dimension=len(slots))
-
-
-def _header(plant_codes: tuple[int, ...]) -> CortesHeader:
-    """A synthetic source header carrying only `plant_codes` meaningfully."""
-    return CortesHeader(
-        plant_codes=plant_codes,
-        submercado_codes=(1,),
-        n_patamares=3,
-        lag_maximo_gnl=0,
-        n_plants=len(plant_codes),
-        individualized=True,
-        record_size=32,
-        last_cut_record_by_stage=(1,),
-    )
-
-
-def _record(
-    *,
-    pi_varm: tuple[float, ...],
-    pi_qafl: tuple[tuple[float, ...], ...] | None = None,
-    rhs: float = 0.0,
-    cut_id: int = 1,
-    iteration: int = 1,
-    forward_pass_index: int = 1,
-    is_active: bool = True,
-) -> StageCutRecord:
-    """A synthetic `StageCutRecord`; `pi_qafl` defaults to all-zero lags."""
-    n_plants = len(pi_varm)
-    return StageCutRecord(
-        cut_id=cut_id,
-        iteration=iteration,
-        forward_pass_index=forward_pass_index,
-        is_active=is_active,
-        rhs=rhs,
-        pi_varm=pi_varm,
-        pi_qafl=(
-            pi_qafl
-            if pi_qafl is not None
-            else tuple((0.0,) * 12 for _ in range(n_plants))
-        ),
-        pi_gnl=(),
-    )
-
-
-def _cuts(
-    plant_codes: tuple[int, ...], records: tuple[StageCutRecord, ...]
-) -> BoundaryCuts:
-    """A synthetic `BoundaryCuts` over `plant_codes`, boundary_stage arbitrary."""
-    return BoundaryCuts(header=_header(plant_codes), boundary_stage=5, records=records)
-
-
-def _id_map(hydro_codes: tuple[int, ...]) -> DecompIdMap:
-    """A minimal `DecompIdMap` carrying only the hydro-code join surface."""
-    return DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=hydro_codes)
-
-
 def test_map_storage_places_pi_varm_at_hydro_slots() -> None:
-    id_map = _id_map((10, 20))
+    id_map = make_id_map((10, 20))
     # Plant 10 (hydro_id 0) carries a full-width HydroInflowLag family
     # (subindices 0..11) so the default identity `lag_slot_of` (d -> d-1)
     # stays in range for every calendar depth 1..12 (all zero here, per
     # "lags zero" in the AC); plant 20 has no lag exposure in this fixture.
-    manifest = _manifest(
+    manifest = make_manifest(
         [
-            _slot(_HYDRO_STORAGE, 0, 0),  # position 0: plant 10's storage
-            _slot(_HYDRO_STORAGE, 1, 0),  # position 1: plant 20's storage
+            make_slot(_HYDRO_STORAGE, 0, 0),  # position 0: plant 10's storage
+            make_slot(_HYDRO_STORAGE, 1, 0),  # position 1: plant 20's storage
             *[
-                _slot(_HYDRO_INFLOW_LAG, 0, lag)  # positions 2..13
+                make_slot(_HYDRO_INFLOW_LAG, 0, lag)  # positions 2..13
                 for lag in range(12)
             ],
-            _slot(_HYDRO_TRANSIT_BUCKET, 1, 2),  # position 14
+            make_slot(_HYDRO_TRANSIT_BUCKET, 1, 2),  # position 14
         ]
     )
-    cuts = _cuts((10, 20), (_record(pi_varm=(3.0, 5.0), rhs=100.0),))
+    cuts = make_boundary_cuts(
+        (10, 20), (make_cut_record(pi_varm=(3.0, 5.0), rhs=100.0),)
+    )
 
     result = map_boundary_cuts(cuts, manifest, id_map)
 
@@ -130,9 +61,9 @@ def test_map_storage_places_pi_varm_at_hydro_slots() -> None:
 
 def test_map_drops_source_only_plant_with_diagnostic_record() -> None:
     # Plant 20 is present in the source but unknown to the target id_map.
-    id_map = _id_map((10,))
-    manifest = _manifest([_slot(_HYDRO_STORAGE, 0, 0)])
-    cuts = _cuts((10, 20), (_record(pi_varm=(3.0, 7.0)),))
+    id_map = make_id_map((10,))
+    manifest = make_manifest([make_slot(_HYDRO_STORAGE, 0, 0)])
+    cuts = make_boundary_cuts((10, 20), (make_cut_record(pi_varm=(3.0, 7.0)),))
 
     result = map_boundary_cuts(cuts, manifest, id_map)
 
@@ -142,21 +73,23 @@ def test_map_drops_source_only_plant_with_diagnostic_record() -> None:
 
 
 def test_map_lags_one_to_one() -> None:
-    id_map = _id_map((10,))
+    id_map = make_id_map((10,))
     # Full-width HydroInflowLag family (subindices 0..11) so identity
     # `lag_slot_of` stays in range for every calendar depth 1..12; only
     # depths 1 and 2 carry a nonzero source coefficient.
-    manifest = _manifest(
+    manifest = make_manifest(
         [
-            _slot(_HYDRO_STORAGE, 0, 0),  # position 0
+            make_slot(_HYDRO_STORAGE, 0, 0),  # position 0
             *[
-                _slot(_HYDRO_INFLOW_LAG, 0, lag)  # positions 1..12
+                make_slot(_HYDRO_INFLOW_LAG, 0, lag)  # positions 1..12
                 for lag in range(12)
             ],
         ]
     )
     lags = (1.0, 2.0) + (0.0,) * 10
-    cuts = _cuts((10,), (_record(pi_varm=(0.0,), pi_qafl=(lags,)),))
+    cuts = make_boundary_cuts(
+        (10,), (make_cut_record(pi_varm=(0.0,), pi_qafl=(lags,)),)
+    )
 
     result = map_boundary_cuts(cuts, manifest, id_map, lag_slot_of=lambda d: d - 1)
 
@@ -167,15 +100,15 @@ def test_map_lags_one_to_one() -> None:
 
 
 def test_map_zeroes_buckets_and_gnl_ring() -> None:
-    id_map = _id_map((10,))
-    manifest = _manifest(
+    id_map = make_id_map((10,))
+    manifest = make_manifest(
         [
-            _slot(_HYDRO_STORAGE, 0, 0),  # position 0
-            _slot(_HYDRO_TRANSIT_BUCKET, 0, 5),  # position 1
-            _slot(_ANTICIPATED_THERMAL_STATE, 0, 0),  # position 2
+            make_slot(_HYDRO_STORAGE, 0, 0),  # position 0
+            make_slot(_HYDRO_TRANSIT_BUCKET, 0, 5),  # position 1
+            make_slot(_ANTICIPATED_THERMAL_STATE, 0, 0),  # position 2
         ]
     )
-    cuts = _cuts((10,), (_record(pi_varm=(9.0,)),))
+    cuts = make_boundary_cuts((10,), (make_cut_record(pi_varm=(9.0,)),))
 
     result = map_boundary_cuts(cuts, manifest, id_map)
 
@@ -186,15 +119,46 @@ def test_map_zeroes_buckets_and_gnl_ring() -> None:
 
 
 def test_map_rejects_out_of_range_lag_slot() -> None:
-    id_map = _id_map((10,))
+    id_map = make_id_map((10,))
     # Only one HydroInflowLag slot exists (subindex 0) -> valid range is {0}.
-    manifest = _manifest(
+    manifest = make_manifest(
         [
-            _slot(_HYDRO_STORAGE, 0, 0),
-            _slot(_HYDRO_INFLOW_LAG, 0, 0),
+            make_slot(_HYDRO_STORAGE, 0, 0),
+            make_slot(_HYDRO_INFLOW_LAG, 0, 0),
         ]
     )
-    cuts = _cuts((10,), (_record(pi_varm=(1.0,)),))
+    cuts = make_boundary_cuts((10,), (make_cut_record(pi_varm=(1.0,)),))
 
     with pytest.raises(ValueError, match="out of range"):
         map_boundary_cuts(cuts, manifest, id_map, lag_slot_of=lambda d: d)
+
+
+@requires_cobre_python
+def test_synthetic_roundtrip_preserves_coeffs(tmp_path: Path) -> None:
+    """The mapper's storage + lag-depth-1 placement survives a real
+    map -> write -> load_policy round trip, with no deck and no cobre
+    binary — the reloaded cut's intercept and leading coefficients match
+    the synthetic source record verbatim.
+    """
+    id_map = make_id_map((10,))
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # position 0
+            *[
+                make_slot(_HYDRO_INFLOW_LAG, 0, lag)  # positions 1..12
+                for lag in range(12)
+            ],
+        ]
+    )
+    record = make_cut_record(
+        pi_varm=(2.5,),
+        pi_qafl=((0.75,) + (0.0,) * 11,),
+        rhs=42.0,
+    )
+    cuts = make_boundary_cuts((10,), (record,))
+
+    reloaded = synthetic_roundtrip(tmp_path / "boundary", cuts, manifest, id_map)
+
+    reloaded_cut = reloaded["stage_cuts"][0]["cuts"][0]
+    assert reloaded_cut["intercept"] == record.rhs
+    assert reloaded_cut["coefficients"][0:3] == [2.5, 0.75, 0.0]

@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import cobre
-
 from cobre_bridge.decomp.fcf.bootstrap import ensure_writer_binding
 
 if TYPE_CHECKING:
@@ -156,4 +154,6 @@ def write_boundary_checkpoint(
         `write_policy_checkpoint`.
     """
     ensure_writer_binding()
+    import cobre
+
     cobre.write_policy_checkpoint(boundary_dir, [stage_cuts_payload], metadata)

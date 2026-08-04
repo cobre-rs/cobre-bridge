@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -37,18 +38,22 @@ def _write_fake_binary(path: Path, *, exit_code: int, stderr: str = "") -> None:
     path.chmod(0o755)
 
 
-def test_ensure_writer_binding_raises_when_absent() -> None:
+def test_ensure_writer_binding_raises_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stub_cobre = SimpleNamespace()
-    with patch("cobre_bridge.decomp.fcf.bootstrap.cobre", stub_cobre):
-        with pytest.raises(RuntimeError, match="write_policy_checkpoint") as exc_info:
-            ensure_writer_binding()
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+    with pytest.raises(RuntimeError, match="write_policy_checkpoint") as exc_info:
+        ensure_writer_binding()
     assert "~/git/cobre" in str(exc_info.value)
 
 
-def test_ensure_writer_binding_passes_when_present() -> None:
+def test_ensure_writer_binding_passes_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stub_cobre = SimpleNamespace(write_policy_checkpoint=lambda: None)
-    with patch("cobre_bridge.decomp.fcf.bootstrap.cobre", stub_cobre):
-        ensure_writer_binding()  # must not raise
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+    ensure_writer_binding()  # must not raise
 
 
 @pytest.mark.skipif(
@@ -78,9 +83,11 @@ def test_bootstrap_reads_terminal_manifest(tmp_path: Path) -> None:
         assert "subindex" in slot
 
 
-def test_bootstrap_does_not_mutate_input_case(tmp_path: Path) -> None:
+def test_bootstrap_does_not_mutate_input_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """AC 3 — needs neither the real binary nor a real deck: a fake ``cobre``
-    stand-in that exits 0 plus a mocked ``load_policy`` exercise the same
+    stand-in that exits 0 plus a stubbed ``load_policy`` exercise the same
     copy -> edit-the-copy -> read-back path without live cobre I/O."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
@@ -100,11 +107,11 @@ def test_bootstrap_does_not_mutate_input_case(tmp_path: Path) -> None:
             },
         ],
     }
-    with patch(
-        "cobre_bridge.decomp.fcf.bootstrap.cobre.results.load_policy",
-        return_value=fake_policy,
-    ):
-        bootstrap_terminal_manifest(case_dir, fake_bin, work_dir=tmp_path / "work")
+    stub_cobre = SimpleNamespace(
+        results=SimpleNamespace(load_policy=lambda *args, **kwargs: fake_policy)
+    )
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+    bootstrap_terminal_manifest(case_dir, fake_bin, work_dir=tmp_path / "work")
 
     assert (case_dir / "config.json").read_bytes() == original_bytes
 
@@ -121,7 +128,9 @@ def test_bootstrap_raises_on_cobre_failure(tmp_path: Path) -> None:
         bootstrap_terminal_manifest(case_dir, broken_bin, work_dir=tmp_path / "work")
 
 
-def test_bootstrap_raises_on_empty_stage_cuts(tmp_path: Path) -> None:
+def test_bootstrap_raises_on_empty_stage_cuts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A checkpoint whose ``stage_cuts`` list is empty is a load error, not a
     legitimate empty terminal pool (an empty *terminal* pool still carries an
     ``entity_manifest``; an empty ``stage_cuts`` list means no pool at all)."""
@@ -132,17 +141,23 @@ def test_bootstrap_raises_on_empty_stage_cuts(tmp_path: Path) -> None:
     fake_bin = tmp_path / "fake_cobre.sh"
     _write_fake_binary(fake_bin, exit_code=0)
 
-    with (
-        patch(
-            "cobre_bridge.decomp.fcf.bootstrap.cobre.results.load_policy",
-            return_value={"metadata": {"state_dimension": 0}, "stage_cuts": []},
-        ),
-        pytest.raises(RuntimeError, match="no stage cuts"),
-    ):
+    stub_cobre = SimpleNamespace(
+        results=SimpleNamespace(
+            load_policy=lambda *args, **kwargs: {
+                "metadata": {"state_dimension": 0},
+                "stage_cuts": [],
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+
+    with pytest.raises(RuntimeError, match="no stage cuts"):
         bootstrap_terminal_manifest(case_dir, fake_bin, work_dir=tmp_path / "work")
 
 
-def test_bootstrap_raises_on_state_dimension_mismatch(tmp_path: Path) -> None:
+def test_bootstrap_raises_on_state_dimension_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
@@ -165,18 +180,18 @@ def test_bootstrap_raises_on_state_dimension_mismatch(tmp_path: Path) -> None:
             },
         ],
     }
+    stub_cobre = SimpleNamespace(
+        results=SimpleNamespace(load_policy=lambda *args, **kwargs: fake_policy)
+    )
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
 
-    with (
-        patch(
-            "cobre_bridge.decomp.fcf.bootstrap.cobre.results.load_policy",
-            return_value=fake_policy,
-        ),
-        pytest.raises(RuntimeError, match="disagrees with checkpoint metadata"),
-    ):
+    with pytest.raises(RuntimeError, match="disagrees with checkpoint metadata"):
         bootstrap_terminal_manifest(case_dir, fake_bin, work_dir=tmp_path / "work")
 
 
-def test_bootstrap_raises_on_empty_terminal_entity_manifest(tmp_path: Path) -> None:
+def test_bootstrap_raises_on_empty_terminal_entity_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
@@ -190,14 +205,34 @@ def test_bootstrap_raises_on_empty_terminal_entity_manifest(tmp_path: Path) -> N
             {"stage_id": 0, "state_dimension": 5, "entity_manifest": []},
         ],
     }
+    stub_cobre = SimpleNamespace(
+        results=SimpleNamespace(load_policy=lambda *args, **kwargs: fake_policy)
+    )
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
 
-    with (
-        patch(
-            "cobre_bridge.decomp.fcf.bootstrap.cobre.results.load_policy",
-            return_value=fake_policy,
-        ),
-        pytest.raises(RuntimeError, match="empty terminal entity_manifest"),
-    ):
+    with pytest.raises(RuntimeError, match="empty terminal entity_manifest"):
+        bootstrap_terminal_manifest(case_dir, fake_bin, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_read_back_raises_when_cobre_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 4 — with no ``cobre`` importable and a fake binary exiting 0, the
+    read-back ``import cobre`` fails loudly rather than silently. Setting the
+    ``sys.modules`` entry to ``None`` (rather than deleting it) forces the
+    import to raise ``ModuleNotFoundError`` even in an environment where
+    cobre is genuinely installed on disk, so this test behaves the same in
+    the dev venv and in a cobre-free venv."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+
+    fake_bin = tmp_path / "fake_cobre.sh"
+    _write_fake_binary(fake_bin, exit_code=0)
+
+    monkeypatch.setitem(sys.modules, "cobre", None)
+
+    with pytest.raises(ModuleNotFoundError):
         bootstrap_terminal_manifest(case_dir, fake_bin, work_dir=tmp_path / "work")
 
 

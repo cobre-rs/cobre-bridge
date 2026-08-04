@@ -23,7 +23,6 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-import cobre
 from idecomp.decomp import Dadger
 from inewave.newave import Cortesh
 
@@ -226,6 +225,8 @@ def import_boundary_fcf(
     boundary_stage = int(cuts.boundary_stage)
 
     ensure_writer_binding()
+    import cobre
+
     manifest = bootstrap_terminal_manifest(case_dir, cobre_bin, work_dir=work_dir)
     mapping = map_boundary_cuts(cuts, manifest, id_map)
     _emit_import_diagnostics(cuts, mapping)

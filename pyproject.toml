@@ -31,6 +31,9 @@ dev = [
 validation = [
     "cobre-python>=0.13,<0.14",
 ]
+test-roundtrip = [
+    "cobre-python>=0.13,<0.14",
+]
 
 [project.scripts]
 cobre-bridge = "cobre_bridge.cli:main"

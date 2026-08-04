@@ -22,8 +22,6 @@ import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import cobre
-
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -44,8 +42,19 @@ def ensure_writer_binding() -> None:
     RuntimeError
         Naming the missing binding and the remediation: reinstall the
         wheel from ``~/git/cobre`` (e.g. ``maturin develop --release -m
-        ~/git/cobre/crates/cobre-python/Cargo.toml``).
+        ~/git/cobre/crates/cobre-python/Cargo.toml``). Raised both when
+        ``cobre`` is not installed at all (caught as ``ModuleNotFoundError``)
+        and when it is installed but predates ``write_policy_checkpoint``.
     """
+    try:
+        import cobre
+    except ModuleNotFoundError:
+        raise RuntimeError(
+            "cobre is not installed; install/reinstall it from "
+            "~/git/cobre, e.g. `VIRTUAL_ENV=<bridge>/.venv "
+            "<bridge>/.venv/bin/maturin develop --release -m "
+            "~/git/cobre/crates/cobre-python/Cargo.toml`"
+        ) from None
     if not hasattr(cobre, "write_policy_checkpoint"):
         raise RuntimeError(
             "the installed cobre wheel does not expose "
@@ -142,6 +151,8 @@ def bootstrap_terminal_manifest(
             f"cobre run failed (exit {completed.returncode}) on {scratch_case}:\n"
             f"{_stderr_tail(completed.stderr)}"
         )
+
+    import cobre
 
     policy = cobre.results.load_policy(output_dir, policy_subdir="policy")
     stage_cuts = policy["stage_cuts"]

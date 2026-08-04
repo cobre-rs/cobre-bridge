@@ -12,6 +12,7 @@ hand-build a hydro fixture rather than calling a converter. Import them with
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -24,6 +25,20 @@ import pytest
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro import build_mirror_unit_group
 from cobre_bridge.newave_files import NewaveFiles
+
+# Shared skip marker for tier-2 tests that need the optional cobre-python
+# wheel (`import cobre`). CI installs it via the `validation`/`test-roundtrip`
+# extras on the primary (3.13) job only; use ``find_spec`` (import-free) so
+# this module stays importable in a cobre-free environment. ``condition`` is
+# passed by keyword (rather than positionally) so ``.kwargs["condition"]`` is
+# introspectable, per the ticket's resolved Requirement#3-vs-AC3/4 conflict.
+# Import via ``from tests.conftest import requires_cobre_python``.
+requires_cobre_python = pytest.mark.skipif(
+    condition=importlib.util.find_spec("cobre") is None,
+    reason=(
+        "requires the optional cobre-python wheel (validation / test-roundtrip extra)"
+    ),
+)
 
 
 @pytest.fixture
