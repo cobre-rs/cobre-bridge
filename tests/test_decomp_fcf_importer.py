@@ -15,27 +15,22 @@ explicitly legitimate case shape, not an error.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-import cobre
 import pytest
 from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.fcf import _emit_import_diagnostics, import_boundary_fcf
-from cobre_bridge.decomp.fcf.cortes import (
-    BoundaryCuts,
-    CortesHeader,
-    StageCutRecord,
-    read_cortes,
-    summarize_cut_families,
-)
-from cobre_bridge.decomp.fcf.mapper import MappedCut, MappingResult
+from cobre_bridge.decomp.fcf.cortes import read_cortes, summarize_cut_families
+from cobre_bridge.decomp.fcf.mapper import DroppedTerm, MappingResult
 from cobre_bridge.decomp.pipeline import convert_decomp_case
+from tests._fcf_fixtures import make_boundary_cuts, make_cut_record, make_mapped_cut
 
 # Real, gitignored deck + local cobre build (see example/README.md and
 # tests/test_decomp_fcf_bootstrap.py's identical constants) — CI has
@@ -46,7 +41,24 @@ _DECK = Path("example/decomp-set-24-rv0")
 _CORTESH = _DECK / "cortesh.dat"
 _CORTES = _DECK / "cortes-010.dat"
 _COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
-_HAS_WRITER_BINDING = hasattr(cobre, "write_policy_checkpoint")
+
+
+def _has_writer_binding() -> bool:
+    """Whether an installed cobre wheel exposes ``write_policy_checkpoint``.
+
+    Checked via ``importlib.util.find_spec`` before any import, so this
+    module's collection never requires cobre — the real ``import cobre``
+    below only executes once the package's presence is already confirmed
+    (mirrors ``test_decomp_fcf_injection.py``'s identical helper).
+    """
+    if importlib.util.find_spec("cobre") is None:
+        return False
+    import cobre
+
+    return hasattr(cobre, "write_policy_checkpoint")
+
+
+_HAS_WRITER_BINDING = _has_writer_binding()
 
 _HAS_E2E_DEPS = _COBRE_BIN.exists() and _DECK.exists() and _HAS_WRITER_BINDING
 _SKIP_REASON = (
@@ -216,41 +228,59 @@ def test_import_boundary_fcf_emits_diagnostics(
     )
 
 
+def test_emit_import_diagnostics_ac1_ac2_from_synthetic() -> None:
+    """AC 1/AC 2 (ticket-015) — both diagnostics fire against fully synthetic
+    inputs: no deck, no cobre binary. ``dropped`` uses codes 20/30 rather
+    than the real deck's 132/176 (see
+    ``test_import_boundary_fcf_emits_diagnostics`` above), so this test
+    carries no hidden dependency on ``example/``.
+    """
+    cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
+    mapping = MappingResult(
+        cuts=(make_mapped_cut(coefficients=(1.5,), intercept=10.0),),
+        dropped=(
+            DroppedTerm(plant_code=20, beta=0.4),
+            DroppedTerm(plant_code=30, beta=0.7),
+        ),
+    )
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping)
+
+    assert {diagnostic.code for diagnostic in sink} == {
+        "boundary-fcf-cut-family-summary",
+        "boundary-fcf-source-only-plants-dropped",
+    }
+    assert all(diagnostic.severity is dx.Severity.INFO for diagnostic in sink)
+
+    by_code = {diagnostic.code: diagnostic for diagnostic in sink}
+    dropped_diagnostic = by_code["boundary-fcf-source-only-plants-dropped"]
+    assert dropped_diagnostic.table is not None
+    assert {row[0] for row in dropped_diagnostic.table.rows} == {20, 30}
+
+    summary_diagnostic = by_code["boundary-fcf-cut-family-summary"]
+    summary = summarize_cut_families(cuts)
+    assert f"n_active_cuts={summary.n_active_cuts}" in summary_diagnostic.notes
+    assert (
+        f"storage_nonzero_plants={summary.storage_nonzero_plants}"
+        in summary_diagnostic.notes
+    )
+    assert (
+        f"lag_nonzero_by_depth={summary.lag_nonzero_by_depth}"
+        in summary_diagnostic.notes
+    )
+
+
 def test_emit_import_diagnostics_no_dropped_gates_dropped_diagnostic_off() -> None:
     """AC 3 (ticket-015) — ``mapping.dropped == ()`` gates off the
     dropped-plant diagnostic while the cut-family-summary diagnostic still
-    fires. No cobre binary or real deck needed: both payloads are hand-built.
+    fires. No cobre binary or real deck needed: both payloads are hand-built
+    from the shared ``tests/_fcf_fixtures.py`` builders (ticket-003).
     """
-    header = CortesHeader(
-        plant_codes=(1,),
-        submercado_codes=(1,),
-        n_patamares=1,
-        lag_maximo_gnl=0,
-        n_plants=1,
-        individualized=True,
-        record_size=112,
-        last_cut_record_by_stage=(1,),
+    cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
+    mapping = MappingResult(
+        cuts=(make_mapped_cut(coefficients=(1.5,), intercept=10.0),), dropped=()
     )
-    record = StageCutRecord(
-        cut_id=1,
-        iteration=1,
-        forward_pass_index=0,
-        is_active=True,
-        rhs=10.0,
-        pi_varm=(1.5,),
-        pi_qafl=((0.0,) * 12,),
-        pi_gnl=(),
-    )
-    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
-    mapped_cut = MappedCut(
-        intercept=10.0,
-        coefficients=(1.5,),
-        cut_id=1,
-        iteration=1,
-        forward_pass_index=0,
-        is_active=True,
-    )
-    mapping = MappingResult(cuts=(mapped_cut,), dropped=())
 
     with dx.collect() as sink:
         _emit_import_diagnostics(cuts, mapping)

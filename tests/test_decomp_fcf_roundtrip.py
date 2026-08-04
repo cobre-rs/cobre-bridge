@@ -24,6 +24,17 @@ both a direct coefficient comparison and a deterministic evaluation sweep
 catches a sign flip, a unit error, a lag off-by-one, or a dropped
 ``cost_scale_factor`` marker (which makes cobre silently scale every value
 by 10⁶) in one test.
+
+Alongside that tier-3 (real deck + local cobre binary) gate, this module also
+carries a tier-2 synthetic round trip
+(``test_synthetic_roundtrip_coefficient_identity``,
+``test_synthetic_roundtrip_theta_sweep``) that proves the same coefficient
+and evaluation identity against a hand-authored ``BoundaryCuts``/
+``TerminalManifest``/``DecompIdMap`` — no deck, no cobre binary, gated only
+on ``@requires_cobre_python`` (the in-wheel ``write_policy_checkpoint``/
+``results.load_policy`` bindings). It reuses this module's own
+``_resolve``/``_theta_source``/``_theta_cobre`` oracle, keyed off the
+synthetic inputs instead of a real deck parse.
 """
 
 from __future__ import annotations
@@ -34,7 +45,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import cobre
 import numpy as np
 import pytest
 
@@ -45,19 +55,45 @@ from idecomp.decomp import Dadger  # type: ignore[attr-defined]
 from inewave.newave import Cortesh
 
 from cobre_bridge.decomp.fcf import import_boundary_fcf
+from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, StageCutRecord, read_cortes
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import convert_decomp_case, discover_decomp_files
+from tests._fcf_fixtures import (
+    make_boundary_cuts,
+    make_cut_record,
+    make_id_map,
+    make_manifest,
+    make_slot,
+    synthetic_roundtrip,
+)
+from tests.conftest import requires_cobre_python
 
 # Same real, gitignored deck + local cobre build as test_decomp_fcf_importer.py
-# (identical constants, copied verbatim) — CI has neither, so every test here
-# is skipif-guarded.
+# (identical constants, copied verbatim) — CI has neither, so every tier-3
+# test below is skipif-guarded.
 _DECK = Path("example/decomp-set-24-rv0")
 _CORTESH = _DECK / "cortesh.dat"
 _CORTES = _DECK / "cortes-010.dat"
 _COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
-_HAS_WRITER_BINDING = hasattr(cobre, "write_policy_checkpoint")
 
+
+def _has_writer_binding() -> bool:
+    """Whether an installed cobre wheel exposes ``write_policy_checkpoint``.
+
+    A local, try/except-guarded import — never a module-top ``import
+    cobre`` — so this module still collects in a cobre-free environment
+    (the same convention ``fcf/bootstrap.py::ensure_writer_binding`` uses
+    in the library code this test exercises).
+    """
+    try:
+        import cobre
+    except ModuleNotFoundError:
+        return False
+    return hasattr(cobre, "write_policy_checkpoint")
+
+
+_HAS_WRITER_BINDING = _has_writer_binding()
 _HAS_E2E_DEPS = _COBRE_BIN.exists() and _DECK.exists() and _HAS_WRITER_BINDING
 _skip_e2e = pytest.mark.skipif(
     not _HAS_E2E_DEPS,
@@ -73,12 +109,18 @@ _skip_e2e = pytest.mark.skipif(
 #: this oracle's slot lookup never depends on the mapper under test).
 _HYDRO_STORAGE = 0
 _HYDRO_INFLOW_LAG = 1
+_HYDRO_TRANSIT_BUCKET = 3
 _STORAGE_SUBINDEX = 0
 
 #: Random states in the AC 4 sweep beyond the all-zero and per-plant
 #: unit-storage states — 2 + 8 = 10, comfortably above the ticket's >= 8
-#: floor.
+#: floor. Shared by the tier-2 synthetic sweep test below.
 _N_RANDOM_STATES = 8
+
+#: The tier-2 synthetic case's two resolved plant codes (joining hydro ids 0
+#: and 1) and its one source-only, D3-dropped plant code.
+_RESOLVED_PLANT_CODES = (10, 20)
+_DROPPED_PLANT_CODE = 30
 
 
 @dataclass(frozen=True)
@@ -222,6 +264,202 @@ def _theta_cobre(cuts: Sequence[Mapping[str, Any]], x_cobre: Sequence[float]) ->
     return best
 
 
+# ---------------------------------------------------------------------------
+# Tier 2 — in-wheel synthetic round trip (no deck, no cobre binary).
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_two_plant_case() -> tuple[
+    tuple[int, ...], DecompIdMap, TerminalManifest
+]:
+    """A synthetic two-resolved-plant, one-dropped-plant case.
+
+    Plant codes 10 and 20 resolve to hydro ids 0 and 1 (each with a full
+    12-slot ``HydroInflowLag`` family); plant code 30 is source-only —
+    absent from ``id_map``, so ``map_boundary_cuts`` drops it (D3). One
+    trailing ``HydroTransitBucket`` slot is never targeted by the mapper,
+    giving the coefficient-identity test below an unmapped slot to check
+    against 0.0.
+    """
+    plant_codes = (*_RESOLVED_PLANT_CODES, _DROPPED_PLANT_CODE)
+    id_map = make_id_map(_RESOLVED_PLANT_CODES)
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # position 0: plant 10
+            make_slot(_HYDRO_STORAGE, 1, 0),  # position 1: plant 20
+            *[
+                make_slot(_HYDRO_INFLOW_LAG, 0, lag)  # positions 2..13
+                for lag in range(12)
+            ],
+            *[
+                make_slot(_HYDRO_INFLOW_LAG, 1, lag)  # positions 14..25
+                for lag in range(12)
+            ],
+            make_slot(_HYDRO_TRANSIT_BUCKET, 0, 0),  # position 26: unmapped
+        ]
+    )
+    return plant_codes, id_map, manifest
+
+
+@requires_cobre_python
+def test_synthetic_roundtrip_coefficient_identity(tmp_path: Path) -> None:
+    """AC 1/2 — coefficient identity, no deck and no cobre binary.
+
+    Reuses this module's own ``_resolve`` oracle (never
+    ``fcf.mapper.map_boundary_cuts``'s bookkeeping) against a hand-authored
+    multi-cut ``BoundaryCuts`` with one active and one inactive record: for
+    every active reloaded cut, each resolved plant's ``HydroStorage``
+    coefficient equals the source ``pi_varm``, each present
+    ``HydroInflowLag`` coefficient equals the source ``pi_qafl`` at that
+    depth (nonzero at depths 1-2, proving no off-by-one), and every unmapped
+    slot is exactly 0.0. Also checks the intercept and the
+    ``cost_scale_factor == 1.0`` marker survive the round trip.
+    """
+    plant_codes, id_map, manifest = _synthetic_two_plant_case()
+    active_record = make_cut_record(
+        pi_varm=(3.0, 5.0, 7.0),
+        pi_qafl=((1.5, 2.5) + (0.0,) * 10, (0.0,) * 12, (0.0,) * 12),
+        rhs=100.0,
+        cut_id=1,
+        iteration=1,
+        forward_pass_index=1,
+        is_active=True,
+    )
+    inactive_record = make_cut_record(
+        pi_varm=(30.0, 50.0, 70.0),
+        rhs=999.0,
+        cut_id=2,
+        iteration=2,
+        forward_pass_index=1,
+        is_active=False,
+    )
+    cuts = make_boundary_cuts(plant_codes, (active_record, inactive_record))
+
+    reloaded = synthetic_roundtrip(tmp_path / "boundary", cuts, manifest, id_map)
+    assert reloaded["metadata"]["cost_scale_factor"] == 1.0
+
+    entry = reloaded["stage_cuts"][0]
+    resolved, dropped = _resolve(plant_codes, id_map, entry["entity_manifest"])
+    assert dropped == frozenset({2})
+    assert len(resolved) == 2
+
+    mapped_positions: set[int] = set()
+    for _hydro_id, storage_position, lag_positions in resolved.values():
+        mapped_positions.add(storage_position)
+        mapped_positions.update(lag_positions.values())
+
+    active_cuts = [cut for cut in entry["cuts"] if cut["is_active"]]
+    assert len(active_cuts) == 1
+    cut = active_cuts[0]
+    coefficients = cut["coefficients"]
+    assert cut["intercept"] == active_record.rhs
+
+    for plant_index, (_hydro_id, storage_position, lag_positions) in resolved.items():
+        source_storage = active_record.pi_varm[plant_index]
+        assert math.isclose(
+            coefficients[storage_position], source_storage, rel_tol=1e-9, abs_tol=1e-6
+        ), f"plant_index={plant_index} storage slot {storage_position}"
+        plant_lags = active_record.pi_qafl[plant_index]
+        for depth, lag_position in lag_positions.items():
+            assert math.isclose(
+                coefficients[lag_position],
+                plant_lags[depth - 1],
+                rel_tol=1e-9,
+                abs_tol=1e-6,
+            ), f"plant_index={plant_index} lag depth={depth} slot {lag_position}"
+
+    for position, value in enumerate(coefficients):
+        if position not in mapped_positions:
+            assert value == 0.0, f"unmapped slot {position} = {value!r}"
+
+
+@requires_cobre_python
+def test_synthetic_roundtrip_theta_sweep(tmp_path: Path) -> None:
+    """AC 3 — ``theta_cobre(x) == theta_source(x)`` over >= 8 states, no deck
+    and no cobre binary.
+
+    Reuses this module's own ``_theta_source``/``_theta_cobre`` oracle
+    against the same synthetic two-plant case, over the all-zero,
+    per-plant-unit-storage, and ``rng(0)``-random states.
+    """
+    plant_codes, id_map, manifest = _synthetic_two_plant_case()
+    records = (
+        make_cut_record(
+            pi_varm=(3.0, 5.0, 7.0),
+            pi_qafl=((1.5, 2.5) + (0.0,) * 10, (0.4,) + (0.0,) * 11, (0.0,) * 12),
+            rhs=100.0,
+            cut_id=1,
+            iteration=1,
+            forward_pass_index=1,
+            is_active=True,
+        ),
+        make_cut_record(
+            pi_varm=(1.0, -2.0, 4.0),
+            pi_qafl=((0.2,) * 12, (0.0,) * 12, (0.0,) * 12),
+            rhs=-50.0,
+            cut_id=2,
+            iteration=2,
+            forward_pass_index=1,
+            is_active=True,
+        ),
+        make_cut_record(
+            pi_varm=(30.0, 50.0, 70.0),
+            rhs=999.0,
+            cut_id=3,
+            iteration=3,
+            forward_pass_index=1,
+            is_active=False,
+        ),
+    )
+    cuts = make_boundary_cuts(plant_codes, records)
+
+    reloaded = synthetic_roundtrip(tmp_path / "boundary", cuts, manifest, id_map)
+    entry = reloaded["stage_cuts"][0]
+    cuts_list = entry["cuts"]
+    state_dimension = entry["state_dimension"]
+
+    resolved, dropped = _resolve(plant_codes, id_map, entry["entity_manifest"])
+    assert dropped == frozenset({2})
+
+    rng = np.random.default_rng(0)
+    states: list[_PhysicalState] = [
+        _PhysicalState(storage={}, inflow={}),
+        _PhysicalState(storage={i: 1.0 for i in resolved}, inflow={}),
+    ]
+    for _ in range(_N_RANDOM_STATES):
+        storage = {i: float(rng.normal(scale=1000.0)) for i in resolved}
+        inflow = {
+            (i, depth): float(rng.normal(scale=1000.0))
+            for i, (_hydro_id, _storage_position, lag_positions) in resolved.items()
+            for depth in lag_positions
+        }
+        states.append(_PhysicalState(storage=storage, inflow=inflow))
+    assert len(states) >= 8
+
+    for index, state in enumerate(states):
+        x_cobre = [0.0] * state_dimension
+        for plant_index, (
+            _hydro_id,
+            storage_position,
+            lag_positions,
+        ) in resolved.items():
+            x_cobre[storage_position] = state.storage.get(plant_index, 0.0)
+            for depth, lag_position in lag_positions.items():
+                x_cobre[lag_position] = state.inflow.get((plant_index, depth), 0.0)
+
+        theta_cobre = _theta_cobre(cuts_list, x_cobre)
+        theta_source = _theta_source(records, resolved, state)
+        assert math.isclose(theta_cobre, theta_source, rel_tol=1e-9, abs_tol=1e-6), (
+            f"state {index}: theta_cobre={theta_cobre!r} != "
+            f"theta_source={theta_source!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — real deck + local cobre binary (dev-only smoke; skips on CI).
+# ---------------------------------------------------------------------------
+
+
 @pytest.fixture(scope="module")
 def roundtrip_case(tmp_path_factory: pytest.TempPathFactory) -> _RoundTripCase:
     """Convert ``decomp-set-24-rv0``, import its own boundary FCF, reload the
@@ -239,6 +477,8 @@ def roundtrip_case(tmp_path_factory: pytest.TempPathFactory) -> _RoundTripCase:
             f"decomp-set-24-rv0 deck ({_DECK}), and the "
             "write_policy_checkpoint writer binding"
         )
+
+    import cobre
 
     root = tmp_path_factory.mktemp("fcf_roundtrip_e2e")
     case_dir = root / "converted"
@@ -403,6 +643,8 @@ def test_evaluation_sweep_theta_identity(roundtrip_case: _RoundTripCase) -> None
     full random states), plus the optional ``cobre.Policy.evaluate``
     cross-check (skipped, not failed, if ``Study``/``Policy`` load raises).
     """
+    import cobre
+
     entry = roundtrip_case.reloaded["stage_cuts"][0]
     cuts_list = entry["cuts"]
     manifest = entry["entity_manifest"]

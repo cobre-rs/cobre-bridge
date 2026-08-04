@@ -1,4 +1,14 @@
-"""Tests for the source model's ``CORTESH``/``cortes`` readers (``fcf/cortes.py``)."""
+"""Tests for the source model's ``CORTESH``/``cortes`` readers (``fcf/cortes.py``).
+
+Per H5 (deck-independent unit coverage), every *unit* test in this module
+reads no real deck: the header-parse (``read_cortesh``), record-assembly
+(``read_cortes``), and trailer-detection (``_read_trailer``) paths are
+exercised against synthetic ``_FakeCortesh``/``_FakeCortes`` stand-ins and
+tiny in-code ``struct.pack`` blobs. The ``@pytest.mark.skipif(...exists())``
+tests below (pinning byte-exact facts from the real, gitignored decks under
+``example/``) are **dev smoke only** — they exercise the full ~176 MB export
+and never run in CI; they skip cleanly in a CI environment.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +25,7 @@ from cobre_bridge.decomp.fcf.cortes import (
     CortesHeader,
     CutFamilySummary,
     StageCutRecord,
+    _read_trailer,
     read_cortes,
     read_cortesh,
     summarize_cut_families,
@@ -96,6 +107,40 @@ def test_read_cortesh_rejects_non_individualized() -> None:
         pytest.raises(ValueError, match="individualized"),
     ):
         read_cortesh(Path("unused-cortesh.dat"))
+
+
+def test_read_cortesh_synthetic_preserves_slot_order() -> None:
+    class _FakeCortesh:
+        tipo_agregacao_caso = 1
+        numero_maximo_uhes = 3
+        dados_uhes = pd.DataFrame(
+            {"indice_usina": [1, 2, 3], "codigo_usina": [30, 10, 20]}
+        )
+        dados_submercados = pd.DataFrame({"codigo_submercado": [1]})
+        numero_patamares = 3
+        lag_maximo_gnl = 2
+        numero_submercados = 1
+        tamanho_registro_individualizado = 112
+        ultimo_registro_cortes_estagio = pd.DataFrame(
+            {
+                "tipo_estagio": ["estudo"],
+                "estagio": [10],
+                "indice_ultimo_corte": [1],
+            }
+        )
+
+    with patch(
+        "cobre_bridge.decomp.fcf.cortes.Cortesh.read",
+        return_value=_FakeCortesh(),
+    ):
+        header = read_cortesh(Path("unused-cortesh.dat"))
+
+    assert isinstance(header, CortesHeader)
+    # Slot order (indice_usina 1,2,3), not sorted by codigo_usina (30,10,20).
+    assert header.plant_codes == (30, 10, 20)
+    assert header.n_plants == 3
+    assert header.lag_maximo_gnl == 2
+    assert header.individualized is True
 
 
 @pytest.mark.skipif(
@@ -251,6 +296,88 @@ def test_read_cortes_rejects_nonzero_sar(tmp_path: Path) -> None:
         pytest.raises(ValueError, match="SAR"),
     ):
         read_cortes(cortes_path, _FakeCortesh(), boundary_stage=5)
+
+
+def test_read_cortes_synthetic_records_and_trailer_stage(tmp_path: Path) -> None:
+    class _FakeCortesh:
+        tipo_agregacao_caso = 1
+        numero_maximo_uhes = 1
+        dados_uhes = pd.DataFrame({"indice_usina": [1], "codigo_usina": [4]})
+        dados_submercados = pd.DataFrame({"codigo_submercado": [1]})
+        numero_patamares = 3
+        lag_maximo_gnl = 0
+        numero_submercados = 1
+        tamanho_registro_individualizado = 32
+        ultimo_registro_cortes_estagio = pd.DataFrame(
+            {
+                "tipo_estagio": ["estudo"],
+                "estagio": [10],
+                "indice_ultimo_corte": [1],
+            }
+        )
+        ano_inicio_estudo = 2024
+
+    record_size = _FakeCortesh.tamanho_registro_individualizado
+    # The single physical record is the sentinel: leading int32[4] trailer
+    # (study_start_month, study_start_year, cut_stage_month, cut_stage_year),
+    # then rhs left at 0.0 (bytes [16:24] default-zeroed) so `_read_trailer`
+    # recognizes it as the sentinel, not a real cut.
+    sentinel = bytearray(record_size)
+    sentinel[0:16] = struct.pack("<4i", 9, 2024, 10, 2024)
+    cortes_path = tmp_path / "cortes-010.dat"
+    cortes_path.write_bytes(bytes(sentinel))
+
+    qafl_lags = tuple(float(lag) for lag in range(1, 13))
+    frame = pd.DataFrame(
+        {
+            "rhs": [100.0],
+            "indice_corte": [7],
+            "iteracao_construcao": [3],
+            "indice_forward": [2],
+            "iteracao_desativacao": [0],
+            "pi_varm_uhe4": [0.5],
+            **{
+                f"pi_qafl_uhe4_lag{lag}": [value]
+                for lag, value in enumerate(qafl_lags, start=1)
+            },
+            "pi_mx_sar_uhe4": [0.0],
+        }
+    )
+
+    class _FakeCortes:
+        cortes = frame
+
+    with patch(
+        "cobre_bridge.decomp.fcf.cortes.Cortes.from_cortesh",
+        return_value=_FakeCortes(),
+    ):
+        boundary = read_cortes(cortes_path, _FakeCortesh(), boundary_stage=None)
+
+    # Trailer-derived: (cut_stage_year=2024 - ano_inicio_estudo=2024) * 12
+    # + cut_stage_month=10 == 10.
+    assert boundary.boundary_stage == 10
+    assert len(boundary.records) == 1
+    record = boundary.records[0]
+    assert record.pi_varm == (0.5,)
+    assert record.pi_qafl == (qafl_lags,)
+    assert record.cut_id == 7
+    assert record.iteration == 3
+    assert record.forward_pass_index == 2
+    assert record.is_active is True
+
+
+def test_read_trailer_sentinel_vs_nonzero_rhs(tmp_path: Path) -> None:
+    # A tiny record: int32[4] (16 bytes) + rhs float64 (8 bytes), no padding.
+    record_size = 24
+
+    sentinel_path = tmp_path / "sentinel.dat"
+    sentinel_path.write_bytes(struct.pack("<4i", 1, 2, 3, 4) + struct.pack("<d", 0.0))
+
+    nonzero_path = tmp_path / "nonzero.dat"
+    nonzero_path.write_bytes(struct.pack("<4i", 1, 2, 3, 4) + struct.pack("<d", 5.0))
+
+    assert _read_trailer(sentinel_path, record_size) == (1, 2, 3, 4)
+    assert _read_trailer(nonzero_path, record_size) is None
 
 
 @pytest.mark.skipif(
