@@ -23,6 +23,7 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.converters.thermal import _SCHEMA_URL
+from cobre_bridge.decomp.temporal import hours_weighted as _hours_weighted
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -93,13 +94,6 @@ def _ct_dense(
         plant["stages"] = dense
         del plant["declared"]
     return declared
-
-
-def _hours_weighted(values: Sequence[float], stage: OperativeStage) -> float:
-    return (
-        sum(v * h for v, h in zip(values, stage.block_hours, strict=True))
-        / stage.total_hours
-    )
 
 
 def convert_thermals(

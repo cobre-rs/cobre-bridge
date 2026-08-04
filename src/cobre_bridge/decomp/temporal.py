@@ -57,6 +57,20 @@ class OperativeStage:
         return sum(self.block_hours)
 
 
+def hours_weighted(values: Sequence[float], stage: OperativeStage) -> float:
+    """Hours-weighted mean of per-block *values* over *stage*'s block hours.
+
+    Shared by every converter that folds a per-block declaration down to one
+    stage-level number (``decomp/thermal.py``'s ``CT`` base row,
+    ``decomp/anticipated.py``'s ``tg`` registry, ...) — the single canonical
+    implementation of the convention.
+    """
+    return (
+        sum(v * h for v, h in zip(values, stage.block_hours, strict=True))
+        / stage.total_hours
+    )
+
+
 def build_operative_calendar(
     start_date: date,
     stage_block_hours: Sequence[Sequence[float]],
