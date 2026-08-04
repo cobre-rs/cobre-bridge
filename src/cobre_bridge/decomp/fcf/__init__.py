@@ -27,11 +27,12 @@ import cobre
 from idecomp.decomp import Dadger
 from inewave.newave import Cortesh
 
+from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.fcf.bootstrap import (
     bootstrap_terminal_manifest,
     ensure_writer_binding,
 )
-from cobre_bridge.decomp.fcf.cortes import read_cortes
+from cobre_bridge.decomp.fcf.cortes import read_cortes, summarize_cut_families
 from cobre_bridge.decomp.fcf.mapper import map_boundary_cuts
 from cobre_bridge.decomp.fcf.writer import (
     build_metadata,
@@ -44,7 +45,82 @@ from cobre_bridge.decomp.pipeline import discover_decomp_files
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
+    from cobre_bridge.decomp.fcf.mapper import MappingResult
+
 _LOG = logging.getLogger(__name__)
+
+
+def _emit_import_diagnostics(cuts: BoundaryCuts, mapping: MappingResult) -> None:
+    """Surface the importer's two documented, accepted approximations.
+
+    Always emits ``boundary-fcf-cut-family-summary`` — the importer always
+    authors cuts, so the family triage (built from
+    :func:`~cobre_bridge.decomp.fcf.cortes.summarize_cut_families`, never
+    re-implemented here) is always informative. Additionally emits
+    ``boundary-fcf-source-only-plants-dropped`` when ``mapping.dropped`` is
+    non-empty — a source-only plant has no target ``HydroStorage`` slot, so
+    its storage/lag terms are omitted (D3: dropped, never folded).
+
+    Pure side effect via :func:`cobre_bridge.diagnostics.emit`: reads
+    ``cuts``/``mapping`` but does not alter either, so it can run before the
+    checkpoint is written without changing the checkpoint bytes or the
+    importer's return value. Mirrors ``decomp/pipeline.py``'s gated-INFO-
+    ``Diagnostic`` idiom; relies on the ambient-sink/log-fallback contract of
+    ``diagnostics.emit`` rather than opening its own ``dx.collect()`` sink.
+    """
+    summary = summarize_cut_families(cuts)
+    dx.emit(
+        dx.Diagnostic(
+            code="boundary-fcf-cut-family-summary",
+            severity=dx.Severity.INFO,
+            category="Boundary FCF",
+            title=f"Boundary FCF authors {summary.n_active_cuts} cut(s)",
+            summary=(
+                f"{summary.n_active_cuts} active cut(s) authored from the "
+                f"source model's boundary cuts; {summary.storage_nonzero_plants} "
+                "plant(s) carry a nonzero storage coefficient, RHS range "
+                f"[{summary.rhs_min:.6g}, {summary.rhs_max:.6g}]"
+            ),
+            notes=[
+                f"n_active_cuts={summary.n_active_cuts}",
+                f"storage_nonzero_plants={summary.storage_nonzero_plants}",
+                f"lag_nonzero_by_depth={summary.lag_nonzero_by_depth}",
+                f"rhs_min={summary.rhs_min!r}",
+                f"rhs_max={summary.rhs_max!r}",
+            ],
+        ),
+        logger=_LOG,
+    )
+
+    if mapping.dropped:
+        dx.emit(
+            dx.Diagnostic(
+                code="boundary-fcf-source-only-plants-dropped",
+                severity=dx.Severity.INFO,
+                category="Boundary FCF",
+                title=(
+                    f"{len(mapping.dropped)} source-only plant(s) dropped "
+                    "from the boundary FCF"
+                ),
+                summary=(
+                    f"{len(mapping.dropped)} plant(s) present in the source "
+                    "model's boundary cuts have no target HydroStorage slot "
+                    "in the converted case; their storage and inflow-lag "
+                    "terms are omitted from every authored cut, never "
+                    "folded into a neighbouring plant"
+                ),
+                table=dx.DiagnosticTable(
+                    columns=["Plant code", "β (pi_varm)"],
+                    rows=[
+                        [term.plant_code, round(term.beta, 6)]
+                        for term in mapping.dropped
+                    ],
+                    justify=["right", "right"],
+                ),
+            ),
+            logger=_LOG,
+        )
 
 
 def _patch_policy_boundary(config_path: Path, *, source_stage: int) -> None:
@@ -60,6 +136,13 @@ def _patch_policy_boundary(config_path: Path, *, source_stage: int) -> None:
     with config_path.open(encoding="utf-8") as handle:
         config = json.load(handle)
     policy = config.setdefault("policy", {})
+    # TRACKED COBRE-GAP WORKAROUND (C8, ~/git/cobre/plans/
+    # conversion-found-improvements.md): cobre resolves this path against the
+    # run's --output directory, not case_dir (run/policy.rs:209), while every
+    # other case input resolves against case_dir. A default `cobre run
+    # <case>` will not find `case_dir/boundary` — callers must run with
+    # `--output <case_dir>` until cobre resolves policy.boundary.path
+    # relative to case_dir.
     policy["boundary"] = {"path": "boundary", "source_stage": source_stage}
     with config_path.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2, ensure_ascii=False)
@@ -96,9 +179,18 @@ def import_boundary_fcf(
        inflow-lag terms by calendar-month lag depth; the
        ``AnticipatedThermalState`` GNL ring and ``HydroTransitBucket`` slots
        are left at coefficient 0 — epic 3's job, not this one's).
-    5. Assembles and writes ``case_dir/boundary/{metadata.json,
+    5. Surfaces the mapping's two documented approximations as ``Diagnostic``s
+       (:func:`_emit_import_diagnostics`): the always-on cut-family triage,
+       and — gated on non-empty — the D3-dropped source-only plants.
+    6. Assembles and writes ``case_dir/boundary/{metadata.json,
        cuts/stage_NNN.bin, basis/}``, then patches ``case_dir/config.json``'s
        ``["policy"]["boundary"]`` to point at it.
+    7. Logs the TRACKED COBRE-GAP WORKAROUND (C8) usage constraint this patch
+       implies: until cobre resolves ``policy.boundary.path`` relative to
+       ``case_dir`` rather than the run's ``--output`` directory, the case
+       must be run with ``--output <case_dir>`` (see
+       ``_patch_policy_boundary``'s code comment and
+       ``~/git/cobre/plans/conversion-found-improvements.md``).
 
     Returns the ``case_dir/boundary`` path, or ``None`` on the no-cut-files
     no-op.
@@ -136,6 +228,7 @@ def import_boundary_fcf(
     ensure_writer_binding()
     manifest = bootstrap_terminal_manifest(case_dir, cobre_bin, work_dir=work_dir)
     mapping = map_boundary_cuts(cuts, manifest, id_map)
+    _emit_import_diagnostics(cuts, mapping)
 
     stage_cuts_payload = build_stage_cuts_payload(
         mapping, manifest, stage_id=boundary_stage
@@ -159,5 +252,17 @@ def import_boundary_fcf(
     write_boundary_checkpoint(boundary_dir, stage_cuts_payload, metadata)
 
     _patch_policy_boundary(case_dir / "config.json", source_stage=boundary_stage)
+    _LOG.warning(
+        "TRACKED COBRE-GAP WORKAROUND (C8): cobre resolves "
+        "policy.boundary.path against the run's --output directory, not "
+        "case_dir (~/git/cobre/plans/conversion-found-improvements.md); "
+        "until cobre is fixed, run this case with `cobre run %s --output "
+        "%s` so output_dir == case_dir and %s resolves — a default `cobre "
+        "run <case>` (no --output, or --output pointed elsewhere) will "
+        "NOT find the boundary checkpoint and aborts before any iteration",
+        case_dir,
+        case_dir,
+        boundary_dir,
+    )
 
     return boundary_dir

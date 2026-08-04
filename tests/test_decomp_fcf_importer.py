@@ -23,8 +23,18 @@ from pathlib import Path
 
 import cobre
 import pytest
+from inewave.newave import Cortesh
 
-from cobre_bridge.decomp.fcf import import_boundary_fcf
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.decomp.fcf import _emit_import_diagnostics, import_boundary_fcf
+from cobre_bridge.decomp.fcf.cortes import (
+    BoundaryCuts,
+    CortesHeader,
+    StageCutRecord,
+    read_cortes,
+    summarize_cut_families,
+)
+from cobre_bridge.decomp.fcf.mapper import MappedCut, MappingResult
 from cobre_bridge.decomp.pipeline import convert_decomp_case
 
 # Real, gitignored deck + local cobre build (see example/README.md and
@@ -39,14 +49,12 @@ _COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
 _HAS_WRITER_BINDING = hasattr(cobre, "write_policy_checkpoint")
 
 _HAS_E2E_DEPS = _COBRE_BIN.exists() and _DECK.exists() and _HAS_WRITER_BINDING
-_skip_e2e = pytest.mark.skipif(
-    not _HAS_E2E_DEPS,
-    reason=(
-        f"requires the local cobre binary ({_COBRE_BIN}), the "
-        f"decomp-set-24-rv0 deck ({_DECK}), and the write_policy_checkpoint "
-        "writer binding"
-    ),
+_SKIP_REASON = (
+    f"requires the local cobre binary ({_COBRE_BIN}), the "
+    f"decomp-set-24-rv0 deck ({_DECK}), and the write_policy_checkpoint "
+    "writer binding"
 )
+_skip_e2e = pytest.mark.skipif(not _HAS_E2E_DEPS, reason=_SKIP_REASON)
 
 
 @dataclass(frozen=True)
@@ -73,11 +81,7 @@ def imported_case(
     its own).
     """
     if not _HAS_E2E_DEPS:
-        pytest.skip(
-            f"requires the local cobre binary ({_COBRE_BIN}), the "
-            f"decomp-set-24-rv0 deck ({_DECK}), and the "
-            "write_policy_checkpoint writer binding"
-        )
+        pytest.skip(_SKIP_REASON)
 
     root = tmp_path_factory.mktemp("fcf_importer_e2e")
     case_dir = root / "converted"
@@ -148,6 +152,113 @@ def test_import_boundary_fcf_case_validates(imported_case: _ImportedCase) -> Non
         f"cobre validate failed (exit {completed.returncode}):\n"
         f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
+
+
+@_skip_e2e
+def test_import_boundary_fcf_emits_diagnostics(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """AC 1/AC 2 (ticket-015) — the importer's two INFO ``Diagnostic``s.
+
+    A fresh convert+import, wrapped in its own ``dx.collect()`` block —
+    ``imported_case``'s call above already ran with no sink installed, and
+    ``diagnostics.emit`` cannot retroactively populate a sink that wasn't
+    active at call time, so this test performs its own run rather than
+    reusing that fixture's result.
+
+    Asserts the dropped-plant table names exactly the two D3-dropped plants
+    (codes 132, 176 — pinned from the epic-2 learnings) and that the
+    cut-family-summary diagnostic's reported figures equal a *direct*
+    ``summarize_cut_families`` call on an independently re-read
+    ``BoundaryCuts`` — proving the diagnostic never re-implements the triage.
+    """
+    root = tmp_path_factory.mktemp("fcf_importer_diagnostics_e2e")
+    case_dir = root / "converted"
+    convert_decomp_case(_DECK, case_dir, force=True)
+
+    with dx.collect() as sink:
+        boundary_dir = import_boundary_fcf(
+            case_dir,
+            _CORTESH,
+            _CORTES,
+            cobre_bin=_COBRE_BIN,
+            work_dir=root / "work",
+            cost_scale_factor=1.0,
+        )
+    assert boundary_dir is not None
+
+    assert len(sink) == 2
+    by_code = {diagnostic.code: diagnostic for diagnostic in sink}
+    assert set(by_code) == {
+        "boundary-fcf-cut-family-summary",
+        "boundary-fcf-source-only-plants-dropped",
+    }
+
+    dropped_diagnostic = by_code["boundary-fcf-source-only-plants-dropped"]
+    assert dropped_diagnostic.severity is dx.Severity.INFO
+    assert dropped_diagnostic.table is not None
+    assert {row[0] for row in dropped_diagnostic.table.rows} == {132, 176}
+
+    summary_diagnostic = by_code["boundary-fcf-cut-family-summary"]
+    assert summary_diagnostic.severity is dx.Severity.INFO
+
+    cortesh = Cortesh.read(str(_CORTESH))
+    cuts = read_cortes(_CORTES, cortesh, boundary_stage=None)
+    summary = summarize_cut_families(cuts)
+    assert f"n_active_cuts={summary.n_active_cuts}" in summary_diagnostic.notes
+    assert (
+        f"storage_nonzero_plants={summary.storage_nonzero_plants}"
+        in summary_diagnostic.notes
+    )
+    assert (
+        f"lag_nonzero_by_depth={summary.lag_nonzero_by_depth}"
+        in summary_diagnostic.notes
+    )
+
+
+def test_emit_import_diagnostics_no_dropped_gates_dropped_diagnostic_off() -> None:
+    """AC 3 (ticket-015) — ``mapping.dropped == ()`` gates off the
+    dropped-plant diagnostic while the cut-family-summary diagnostic still
+    fires. No cobre binary or real deck needed: both payloads are hand-built.
+    """
+    header = CortesHeader(
+        plant_codes=(1,),
+        submercado_codes=(1,),
+        n_patamares=1,
+        lag_maximo_gnl=0,
+        n_plants=1,
+        individualized=True,
+        record_size=112,
+        last_cut_record_by_stage=(1,),
+    )
+    record = StageCutRecord(
+        cut_id=1,
+        iteration=1,
+        forward_pass_index=0,
+        is_active=True,
+        rhs=10.0,
+        pi_varm=(1.5,),
+        pi_qafl=((0.0,) * 12,),
+        pi_gnl=(),
+    )
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    mapped_cut = MappedCut(
+        intercept=10.0,
+        coefficients=(1.5,),
+        cut_id=1,
+        iteration=1,
+        forward_pass_index=0,
+        is_active=True,
+    )
+    mapping = MappingResult(cuts=(mapped_cut,), dropped=())
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping)
+
+    assert [diagnostic.code for diagnostic in sink] == [
+        "boundary-fcf-cut-family-summary"
+    ]
+    assert sink[0].severity is dx.Severity.INFO
 
 
 def test_import_boundary_fcf_no_cut_files_is_noop(
