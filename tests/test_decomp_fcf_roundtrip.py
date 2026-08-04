@@ -30,9 +30,12 @@ carries a tier-2 synthetic round trip
 (``test_synthetic_roundtrip_coefficient_identity``,
 ``test_synthetic_roundtrip_theta_sweep``) that proves the same coefficient
 and evaluation identity against a hand-authored ``BoundaryCuts``/
-``TerminalManifest``/``DecompIdMap`` — no deck, no cobre binary, gated only
-on ``@requires_cobre_python`` (the in-wheel ``write_policy_checkpoint``/
-``results.load_policy`` bindings). It reuses this module's own
+``TerminalManifest``/``DecompIdMap`` — no deck, no cobre binary. Gated on
+``@requires_cobre_python`` (cobre is import-able) stacked with
+``@requires_writer_binding`` (the installed wheel actually exposes the
+``write_policy_checkpoint`` binding this path calls — an older, importable
+wheel lacking it would otherwise fail at runtime with ``AttributeError``
+instead of skipping). It reuses this module's own
 ``_resolve``/``_theta_source``/``_theta_cobre`` oracle, keyed off the
 synthetic inputs instead of a real deck parse.
 """
@@ -67,7 +70,11 @@ from tests._fcf_fixtures import (
     make_slot,
     synthetic_roundtrip,
 )
-from tests.conftest import requires_cobre_python
+from tests.conftest import (
+    has_writer_binding,
+    requires_cobre_python,
+    requires_writer_binding,
+)
 
 # Same real, gitignored deck + local cobre build as test_decomp_fcf_importer.py
 # (identical constants, copied verbatim) — CI has neither, so every tier-3
@@ -78,22 +85,12 @@ _CORTES = _DECK / "cortes-010.dat"
 _COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
 
 
-def _has_writer_binding() -> bool:
-    """Whether an installed cobre wheel exposes ``write_policy_checkpoint``.
-
-    A local, try/except-guarded import — never a module-top ``import
-    cobre`` — so this module still collects in a cobre-free environment
-    (the same convention ``fcf/bootstrap.py::ensure_writer_binding`` uses
-    in the library code this test exercises).
-    """
-    try:
-        import cobre
-    except ModuleNotFoundError:
-        return False
-    return hasattr(cobre, "write_policy_checkpoint")
-
-
-_HAS_WRITER_BINDING = _has_writer_binding()
+# ``has_writer_binding()`` (tests/conftest.py) is import-free-first (never a
+# module-top ``import cobre``), so this module still collects in a
+# cobre-free environment (the same convention
+# ``fcf/bootstrap.py::ensure_writer_binding`` uses in the library code this
+# test exercises).
+_HAS_WRITER_BINDING = has_writer_binding()
 _HAS_E2E_DEPS = _COBRE_BIN.exists() and _DECK.exists() and _HAS_WRITER_BINDING
 _skip_e2e = pytest.mark.skipif(
     not _HAS_E2E_DEPS,
@@ -302,6 +299,7 @@ def _synthetic_two_plant_case() -> tuple[
 
 
 @requires_cobre_python
+@requires_writer_binding
 def test_synthetic_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     """AC 1/2 — coefficient identity, no deck and no cobre binary.
 
@@ -374,6 +372,7 @@ def test_synthetic_roundtrip_coefficient_identity(tmp_path: Path) -> None:
 
 
 @requires_cobre_python
+@requires_writer_binding
 def test_synthetic_roundtrip_theta_sweep(tmp_path: Path) -> None:
     """AC 3 — ``theta_cobre(x) == theta_source(x)`` over >= 8 states, no deck
     and no cobre binary.

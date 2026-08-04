@@ -19,7 +19,13 @@ import re
 from pathlib import Path
 
 _TESTS_DIR = Path(__file__).resolve().parent
-_TOP_LEVEL_COBRE_IMPORT = re.compile(r"^import cobre$", re.MULTILINE)
+# Matches any column-0 import of the `cobre` package itself — `import
+# cobre`, `import cobre as ...`, `import cobre.submodule`, or `from cobre
+# import ...` — including a trailing comment. The `\b` after `cobre`
+# excludes an unrelated package sharing the prefix (e.g. this project's own
+# `cobre_bridge`), and the `^` anchor (MULTILINE) excludes an indented
+# call-site import.
+_TOP_LEVEL_COBRE_IMPORT = re.compile(r"^(?:import cobre\b|from cobre\b)", re.MULTILINE)
 
 
 def _fcf_test_modules() -> list[Path]:
@@ -30,10 +36,12 @@ def _fcf_test_modules() -> list[Path]:
 def test_fcf_test_modules_have_no_top_level_cobre_import() -> None:
     """No FCF test module blocks cobre-free collection with a module-top import.
 
-    A call-site ``import cobre`` (inside a function/test body, always
+    A call-site import of ``cobre`` (inside a function/test body, always
     indented) is fine — every tier-2/3 test defers it there. Only a
-    column-0 ``import cobre`` line, which pytest would execute at collection
-    time regardless of markers, is disallowed.
+    column-0 import of the ``cobre`` package itself — ``import cobre``,
+    ``import cobre as ...``, ``import cobre.submodule``, or ``from cobre
+    import ...`` — which pytest would execute at collection time regardless
+    of markers, is disallowed.
     """
     modules = _fcf_test_modules()
     assert modules, f"no test_decomp_fcf_*.py modules found under {_TESTS_DIR}"
@@ -44,8 +52,9 @@ def test_fcf_test_modules_have_no_top_level_cobre_import() -> None:
         if _TOP_LEVEL_COBRE_IMPORT.search(module.read_text(encoding="utf-8"))
     ]
     assert not offenders, (
-        "module-top `import cobre` blocks cobre-free collection in: "
-        f"{offenders}; move the import into a call site or test body"
+        "module-top `import cobre`/`from cobre import ...` blocks cobre-free "
+        f"collection in: {offenders}; move the import into a call site or "
+        "test body"
     )
 
 

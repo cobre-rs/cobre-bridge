@@ -89,14 +89,12 @@ def _has_writer_binding() -> bool:
 _HAS_WRITER_BINDING = _has_writer_binding()
 
 _HAS_E2E_DEPS = _COBRE_BIN.exists() and _DECK.exists() and _HAS_WRITER_BINDING
-_skip_e2e = pytest.mark.skipif(
-    not _HAS_E2E_DEPS,
-    reason=(
-        f"requires the local cobre binary ({_COBRE_BIN}), the "
-        f"decomp-set-24-rv0-small deck ({_DECK}), and the "
-        "write_policy_checkpoint writer binding"
-    ),
+_E2E_SKIP_REASON = (
+    f"requires the local cobre binary ({_COBRE_BIN}), the "
+    f"decomp-set-24-rv0-small deck ({_DECK}), and the "
+    "write_policy_checkpoint writer binding"
 )
+_skip_e2e = pytest.mark.skipif(not _HAS_E2E_DEPS, reason=_E2E_SKIP_REASON)
 
 
 @dataclass(frozen=True)
@@ -124,11 +122,7 @@ def imported_case(
     safe even if invoked on its own).
     """
     if not _HAS_E2E_DEPS:
-        pytest.skip(
-            f"requires the local cobre binary ({_COBRE_BIN}), the "
-            f"decomp-set-24-rv0-small deck ({_DECK}), and the "
-            "write_policy_checkpoint writer binding"
-        )
+        pytest.skip(_E2E_SKIP_REASON)
 
     root = tmp_path_factory.mktemp("fcf_injection_e2e")
     case_dir = root / "converted"
@@ -245,12 +239,21 @@ def test_patch_policy_boundary_preserves_other_sections(tmp_path: Path) -> None:
     every other top-level section byte-for-byte unchanged, writing the file
     in `decomp/pipeline.py`'s `_write_json` style (`indent=2`,
     `ensure_ascii=False`, single trailing newline).
+
+    Guards the raw serialized text against an independently constructed
+    expected string, not just `json.loads`-parsed equality — parsed
+    equality is indent-agnostic, so it would pass under any indentation and
+    never actually exercise `indent=2`. `simulation.scenario_label` carries
+    a raw non-ASCII character (not a `\\uXXXX` escape) so `ensure_ascii=False`
+    is genuinely distinguished: under `ensure_ascii=True` that character
+    would still round-trip through `json.loads` equality, but the raw text
+    on disk would differ.
     """
     config_path = tmp_path / "config.json"
     other_sections = {
         "state_space": {"hydro_storage": {"n_plants": 3}},
         "training": {"stopping_rules": [{"type": "iteration_limit", "limit": 500}]},
-        "simulation": {"num_openings": 10},
+        "simulation": {"num_openings": 10, "scenario_label": "cenário"},
     }
     config_path.write_text(
         json.dumps(other_sections, indent=2, ensure_ascii=False) + "\n",
@@ -266,8 +269,19 @@ def test_patch_policy_boundary_preserves_other_sections(tmp_path: Path) -> None:
     for key, value in other_sections.items():
         assert patched[key] == value
 
-    assert patched_text.endswith("\n")
-    assert not patched_text.endswith("\n\n")
+    expected_config = {
+        **other_sections,
+        "policy": {"boundary": {"path": "boundary", "source_stage": 10}},
+    }
+    expected_text = json.dumps(expected_config, indent=2, ensure_ascii=False) + "\n"
+    assert patched_text == expected_text, (
+        "patched config.json's raw serialized text diverges from the "
+        "expected indent=2 / ensure_ascii=False / single-trailing-newline "
+        "style"
+    )
+    assert "cenário" in patched_text, (
+        "raw non-ASCII character was escaped on write — ensure_ascii=False not honored"
+    )
 
 
 def test_import_boundary_fcf_logs_c8_workaround(

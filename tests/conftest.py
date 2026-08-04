@@ -41,6 +41,40 @@ requires_cobre_python = pytest.mark.skipif(
 )
 
 
+def has_writer_binding() -> bool:
+    """Whether an installed cobre wheel exposes ``write_policy_checkpoint``.
+
+    Checked via ``importlib.util.find_spec`` before any import — the same
+    import-free-first convention as ``requires_cobre_python`` above — so
+    calling this (or importing this module) never requires cobre to be
+    installed. A cobre wheel older than the one that added the writer
+    binding is import-able (``find_spec`` succeeds) but lacks the attribute;
+    ``requires_writer_binding`` below turns that case into a clean SKIP
+    instead of a runtime ``AttributeError``.
+    """
+    if importlib.util.find_spec("cobre") is None:
+        return False
+    import cobre
+
+    return hasattr(cobre, "write_policy_checkpoint")
+
+
+# Additional skip marker for tier-2 tests whose path calls an in-wheel
+# binding newer than the mere import-ability ``requires_cobre_python``
+# checks. Stack this alongside ``requires_cobre_python`` on any test that
+# calls ``cobre.write_policy_checkpoint`` directly (or transitively via a
+# helper that does), so an old-but-importable cobre wheel skips cleanly
+# rather than failing at runtime with ``AttributeError``.
+# Import via ``from tests.conftest import requires_writer_binding``.
+requires_writer_binding = pytest.mark.skipif(
+    condition=not has_writer_binding(),
+    reason=(
+        "requires a cobre-python wheel exposing the write_policy_checkpoint "
+        "writer binding"
+    ),
+)
+
+
 @pytest.fixture
 def dumb_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force a plain, fixed-width terminal for Typer ``--help`` content tests.
