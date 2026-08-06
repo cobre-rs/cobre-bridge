@@ -9,6 +9,7 @@ import pytest
 
 from cobre_bridge.decomp.temporal import (
     OperativeStage,
+    build_node_graph,
     build_operative_calendar,
     convert_stages,
     operative_calendar_from_dadger,
@@ -93,7 +94,7 @@ class TestStageRecords:
         return build_operative_calendar(date(2024, 8, 31), _RV0_HOURS)
 
     def test_record_shape(self) -> None:
-        records = stage_records(self._calendar(), num_scenarios=[1] * 5 + [259])
+        records = stage_records(self._calendar())
         assert [r["id"] for r in records] == list(range(6))
         first = records[0]
         assert first["start_date"] == "2024-08-31"
@@ -103,14 +104,16 @@ class TestStageRecords:
             {"id": 1, "name": "MEDIUM", "hours": 48.0},
             {"id": 2, "name": "LIGHT", "hours": 80.0},
         ]
-        assert first["num_scenarios"] == 1
         assert first["risk_measure"] == "expectation"
         assert first["state_variables"] == {"storage": True, "inflow_lags": False}
-        assert records[-1]["num_scenarios"] == 259
 
-    def test_rejects_mismatched_num_scenarios(self) -> None:
-        with pytest.raises(ValueError, match="entries"):
-            stage_records(self._calendar(), num_scenarios=[1, 1])
+    def test_no_num_openings_on_external_stages(self) -> None:
+        """Every DECOMP stage is external-only, so cobre rejects a per-stage
+        ``num_openings`` (and the retired ``num_scenarios``); the node graph's
+        per-node ``scenario_id`` binds the openings instead."""
+        for record in stage_records(self._calendar()):
+            assert "num_openings" not in record
+            assert "num_scenarios" not in record
 
     def test_stage_records_inflow_lags_false(self) -> None:
         """Locks the P3 lag-blind convention (ticket-007) on EVERY stage, not
@@ -119,7 +122,7 @@ class TestStageRecords:
         validation warning on purpose — ``convert decomp --validate``
         whitelists that warning by relying on this convention holding.
         """
-        records = stage_records(self._calendar(), num_scenarios=[1] * 5 + [259])
+        records = stage_records(self._calendar())
         assert len(records) == 6
         for record in records:
             assert record["state_variables"]["inflow_lags"] is False
@@ -129,20 +132,88 @@ class TestStageRecords:
         doc = convert_stages(
             self._calendar(),
             annual_discount_rate=0.12,
-            num_scenarios=[1] * 5 + [259],
+            fan_probabilities=[0.5, 0.5],
         )
         assert doc["season_definitions"]["cycle_type"] == "monthly"
         assert len(doc["season_definitions"]["seasons"]) == 12
         graph = doc["policy_graph"]
         assert graph["type"] == "finite_horizon"
         assert graph["annual_discount_rate"] == 0.12
-        assert len(graph["transitions"]) == 5
+        # 6 stages: 5 trunk nodes (0..4) + a 2-node terminal fan (ids 5, 6).
+        assert [n["id"] for n in graph["nodes"]] == [0, 1, 2, 3, 4, 5, 6]
+        assert graph["nodes"][0] == {
+            "id": 0,
+            "stage_id": 0,
+            "scenario_id": 0,
+            "label": "trunk-0",
+        }
+        assert graph["nodes"][-1] == {
+            "id": 6,
+            "stage_id": 5,
+            "scenario_id": 1,
+            "label": "fan-1",
+        }
+        # 4 trunk edges (0->1..3->4) + 2 terminal branch edges (4->5, 4->6).
+        assert len(graph["transitions"]) == 6
         assert graph["transitions"][0] == {
             "source_id": 0,
             "target_id": 1,
             "probability": 1.0,
         }
+        assert graph["transitions"][-2:] == [
+            {"source_id": 4, "target_id": 5, "probability": 0.5},
+            {"source_id": 4, "target_id": 6, "probability": 0.5},
+        ]
         assert "pre_study_stages" not in doc
+
+
+class TestBuildNodeGraph:
+    def test_trunk_plus_fan_ids_and_stages(self) -> None:
+        # 4 stages: trunk stages 0,1,2 then a 3-opening terminal fan at stage 3.
+        nodes, transitions = build_node_graph(4, [0.2, 0.3, 0.5])
+        assert nodes == [
+            {"id": 0, "stage_id": 0, "scenario_id": 0, "label": "trunk-0"},
+            {"id": 1, "stage_id": 1, "scenario_id": 0, "label": "trunk-1"},
+            {"id": 2, "stage_id": 2, "scenario_id": 0, "label": "trunk-2"},
+            {"id": 3, "stage_id": 3, "scenario_id": 0, "label": "fan-0"},
+            {"id": 4, "stage_id": 3, "scenario_id": 1, "label": "fan-1"},
+            {"id": 5, "stage_id": 3, "scenario_id": 2, "label": "fan-2"},
+        ]
+        assert transitions == [
+            {"source_id": 0, "target_id": 1, "probability": 1.0},
+            {"source_id": 1, "target_id": 2, "probability": 1.0},
+            {"source_id": 2, "target_id": 3, "probability": 0.2},
+            {"source_id": 2, "target_id": 4, "probability": 0.3},
+            {"source_id": 2, "target_id": 5, "probability": 0.5},
+        ]
+
+    def test_single_root_at_stage_zero(self) -> None:
+        """Exactly one node sits at stage 0 (the trunk head / graph root)."""
+        nodes, _ = build_node_graph(4, [0.5, 0.5])
+        assert sum(1 for n in nodes if n["stage_id"] == 0) == 1
+
+    def test_leaves_only_at_terminal_stage(self) -> None:
+        """Every node with no out-edge sits at the final stage (no mid-horizon
+        leaf), and every edge advances exactly one stage."""
+        nodes, transitions = build_node_graph(4, [0.5, 0.5])
+        terminal_stage = max(n["stage_id"] for n in nodes)
+        stage_of = {n["id"]: n["stage_id"] for n in nodes}
+        sources = {t["source_id"] for t in transitions}
+        for node in nodes:
+            if node["id"] not in sources:
+                assert node["stage_id"] == terminal_stage
+        for t in transitions:
+            assert stage_of[t["target_id"]] == stage_of[t["source_id"]] + 1
+
+    def test_degenerate_single_scenario_fan(self) -> None:
+        """A one-member fan degenerates to a pure chain into one terminal leaf."""
+        nodes, transitions = build_node_graph(3, [1.0])
+        assert [n["id"] for n in nodes] == [0, 1, 2]
+        assert transitions[-1] == {"source_id": 1, "target_id": 2, "probability": 1.0}
+
+    def test_rejects_single_stage(self) -> None:
+        with pytest.raises(ValueError, match="trunk stage and a terminal"):
+            build_node_graph(1, [0.5, 0.5])
 
 
 class TestFromDadger:

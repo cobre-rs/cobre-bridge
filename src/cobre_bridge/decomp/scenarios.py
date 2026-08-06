@@ -8,12 +8,15 @@ upstream stations (water routed through non-operated intermediates is
 attributed to the next operated plant, matching the registry cascade
 walk).
 
-Under the identity stochastic convention (μ = 0, σ = 1, order 0) the
-standardized noise equals the natural value, so the same numbers feed
-both the forward external scenarios and the backward opening tree
-(``noise_openings``) — the two files describe one tree by construction.
-``scenario_probabilities.parquet`` is emitted in the agreed shape for the
-enumeration work; current solver versions ignore it.
+The tree is emitted node-natively: every stage draws its openings from
+``external_inflow_scenarios.parquet`` (trunk column 0, terminal fan
+columns ``0..N-1``), and the per-scenario weights become the terminal
+branch-edge probabilities on the ``policy_graph`` (see
+``temporal.convert_stages``). Under the identity stochastic convention
+(μ = 0, σ = 1, order 0) the standardized noise equals the natural value.
+``terminal_fan_probabilities`` supplies those fan weights;
+``convert_scenario_probabilities`` remains a validation view for
+``check decomp`` and is no longer written to the case directory.
 """
 
 from __future__ import annotations
@@ -144,53 +147,85 @@ def convert_external_inflows(
     )
 
 
-def convert_noise_openings(
+def terminal_fan_probabilities(
     vazoes: Vazoes,
-    hidr: pd.DataFrame,
-    id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
-    ncs_count: int,
-) -> pa.Table:
-    """``noise_openings.parquet``: the same tree as the backward openings.
+) -> list[float]:
+    """Terminal-stage per-scenario probabilities, ordered by scenario id.
 
-    The file spans the **whole** noise vector, not just the inflow block:
-    the solver lays it out as hydros, then the load buses that carry a
-    non-zero standard deviation, then every non-controllable source — the
-    last block regardless of its deviation, because dropping a
-    deterministic source would shift every index after it.
-
-    Here the inflow block carries the tree values (under the identity
-    convention the standardized noise *is* the natural incremental value,
-    so this file and the external scenarios carry identical numbers), the
-    load block is empty because this source model's demand is
-    deterministic, and the non-controllable block is zero — those sources
-    have a zero deviation, so their noise never moves generation.
+    The DECOMP fan probabilities (``vazoes.probabilidades`` at the terminal
+    stage) become the terminal branch-edge weights on the ``policy_graph``
+    node graph; cobre re-normalizes each source's out-edges at load. The
+    returned list is indexed by 0-based scenario id (``cenario - 1``), the
+    same id the external inflow library binds via each fan node's
+    ``scenario_id``. Validated to be a contiguous 0-based range summing to 1.
     """
-    values = _tree_values(vazoes, hidr, id_map, calendar)
-    hydro_count = len(id_map.hydro_codes)
+    prob = vazoes.probabilidades
+    if prob is None or prob.empty:
+        raise ValueError("the inflow file has no probability table")
 
-    stage_ids: list[int] = []
-    opening_indices: list[int] = []
-    entity_indices: list[int] = []
-    noise: list[float] = []
-    for (stage_index, scenario_index), incrementals in sorted(values.items()):
-        for hydro_id, value in enumerate(incrementals):
-            stage_ids.append(stage_index)
-            opening_indices.append(scenario_index)
-            entity_indices.append(hydro_id)
-            noise.append(value)
-        for ncs_id in range(ncs_count):
-            stage_ids.append(stage_index)
-            opening_indices.append(scenario_index)
-            entity_indices.append(hydro_count + ncs_id)
-            noise.append(0.0)
+    terminal = len(calendar)  # 1-based id of the terminal (fan) stage
+    rows = prob[prob["estagio"].astype(int) == terminal]
+    if rows.empty:
+        raise ValueError(
+            f"the inflow probability table has no rows for the terminal "
+            f"stage {terminal}"
+        )
+
+    by_scenario: dict[int, float] = {}
+    for _, row in rows.iterrows():
+        by_scenario[int(row["cenario"]) - 1] = float(row["probabilidade"])
+
+    if set(by_scenario) != set(range(len(by_scenario))):
+        raise ValueError(
+            "terminal fan scenarios are not a contiguous 0-based range: "
+            f"{sorted(by_scenario)}"
+        )
+    ordered = [by_scenario[k] for k in range(len(by_scenario))]
+
+    total = sum(ordered)
+    if abs(total - 1.0) > _PROBABILITY_ATOL:
+        raise ValueError(f"terminal fan probabilities sum to {total}, expected 1.0")
+    return ordered
+
+
+def deterministic_external_scenarios(
+    stats: pa.Table,
+    *,
+    entity_column: str,
+    value_in: str,
+    value_out: str,
+    scenario_counts: Sequence[int],
+) -> pa.Table:
+    """Replicate a deterministic per-(entity, stage) value across external columns.
+
+    ``stats`` carries one row per (``entity_column``, ``stage_id``) with the
+    deterministic value in ``value_in`` (load base MW, or NCS availability
+    fraction). Each row expands to ``scenario_counts[stage_id]`` external rows
+    (``scenario_id`` ``0..n-1``) with the value repeated, so the library's
+    per-stage column count matches the inflow library (1 on the deterministic
+    trunk, the terminal fan width). This satisfies cobre's node-native rule
+    that every non-empty class at an external-column node be external: the
+    DECOMP load and NCS are deterministic, so a single value fans out unchanged.
+    """
+    entities = stats.column(entity_column).to_pylist()
+    stages = stats.column("stage_id").to_pylist()
+    values = stats.column(value_in).to_pylist()
+
+    rows: list[tuple[int, int, int, float]] = []
+    for entity, stage, value in zip(entities, stages, values, strict=True):
+        for scenario_id in range(scenario_counts[int(stage)]):
+            rows.append((int(stage), scenario_id, int(entity), float(value)))
+    # Sort by (stage_id, scenario_id, entity) to match the inflow emitter and
+    # cobre's canonical external-library order.
+    rows.sort()
 
     return pa.table(
         {
-            "stage_id": pa.array(stage_ids, type=pa.int32()),
-            "opening_index": pa.array(opening_indices, type=pa.uint32()),
-            "entity_index": pa.array(entity_indices, type=pa.uint32()),
-            "value": pa.array(noise, type=pa.float64()),
+            "stage_id": pa.array([r[0] for r in rows], type=pa.int32()),
+            "scenario_id": pa.array([r[1] for r in rows], type=pa.int32()),
+            entity_column: pa.array([r[2] for r in rows], type=pa.int32()),
+            value_out: pa.array([r[3] for r in rows], type=pa.float64()),
         }
     )
 
@@ -226,10 +261,12 @@ def convert_scenario_probabilities(
     vazoes: Vazoes,
     calendar: Sequence[OperativeStage],
 ) -> pa.Table:
-    """``scenario_probabilities.parquet``: per-(stage, scenario) weights.
+    """Per-(stage, scenario) probability view for validation.
 
-    Emitted in the agreed enumeration-input shape (trunk rows carry
-    probability 1.0); validated to sum to 1 per stage.
+    Trunk rows carry probability 1.0; validated to sum to 1 per stage. No
+    longer written to the case directory (the terminal weights now live on
+    the ``policy_graph`` transitions); ``check decomp`` still uses this to
+    validate the deck's probability table.
     """
     prob = vazoes.probabilidades
     if prob is None or prob.empty:

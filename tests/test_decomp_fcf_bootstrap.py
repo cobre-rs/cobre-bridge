@@ -155,40 +155,6 @@ def test_bootstrap_raises_on_empty_stage_cuts(
         bootstrap_terminal_manifest(case_dir, fake_bin, work_dir=tmp_path / "work")
 
 
-def test_bootstrap_raises_on_state_dimension_mismatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    case_dir = tmp_path / "case"
-    case_dir.mkdir()
-    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
-
-    fake_bin = tmp_path / "fake_cobre.sh"
-    _write_fake_binary(fake_bin, exit_code=0)
-
-    fake_policy = {
-        "metadata": {"state_dimension": 5},
-        "stage_cuts": [
-            {
-                "stage_id": 0,
-                "state_dimension": 5,
-                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
-            },
-            {
-                "stage_id": 1,
-                "state_dimension": 4,
-                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
-            },
-        ],
-    }
-    stub_cobre = SimpleNamespace(
-        results=SimpleNamespace(load_policy=lambda *args, **kwargs: fake_policy)
-    )
-    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
-
-    with pytest.raises(RuntimeError, match="disagrees with checkpoint metadata"):
-        bootstrap_terminal_manifest(case_dir, fake_bin, work_dir=tmp_path / "work")
-
-
 def test_bootstrap_raises_on_empty_terminal_entity_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

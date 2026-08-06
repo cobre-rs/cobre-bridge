@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from cobre_bridge.decomp.config import (
     _INFLOW_LAG_DEPTH,
-    _SMOKE_FORWARD_PASSES,
     convert_config,
 )
 
@@ -34,20 +33,26 @@ class TestConvertConfigStateSpace:
         assert result["state_space"] == {"inflow_lag_depth": 12}
         assert _INFLOW_LAG_DEPTH == 12
 
-    def test_convert_config_leaves_training_simulation_unchanged(self) -> None:
+    def test_convert_config_training_enumerated_simulation_sampled(self) -> None:
         result = convert_config(_Dadger(), n_terminal_scenarios=259)  # type: ignore[arg-type]
 
+        # Training enumerates the explicit trunk-plus-fan node graph; NCS is
+        # external (32 canonical entities), inflow external, load stays
+        # in-sample (deterministic, zero-entity, exempt).
         expected_training = {
-            "forward_passes": _SMOKE_FORWARD_PASSES,
+            "selection": {"method": "enumerated"},
             "stopping_rules": [{"type": "iteration_limit", "limit": 250}],
             "scenario_source": {
                 "seed": 20260718,
                 "inflow": {"scheme": "external"},
+                "ncs": {"scheme": "external"},
             },
         }
+        # Simulation is sampled (C10 workaround) until cobre wires
+        # branching-census simulation.
         expected_simulation = {
             "enabled": True,
-            "num_scenarios": 259,
+            "selection": {"method": "sampled", "num_scenarios": 259},
         }
 
         assert result["training"] == expected_training

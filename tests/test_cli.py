@@ -184,8 +184,14 @@ _FAKE_STAGES = {
 }
 _FAKE_CONFIG = {
     "$schema": "http://example",
-    "training": {"forward_passes": 5, "stopping_rules": []},
-    "simulation": {"enabled": True, "num_scenarios": 200},
+    "training": {
+        "selection": {"method": "sampled", "forward_passes": 5},
+        "stopping_rules": [],
+    },
+    "simulation": {
+        "enabled": True,
+        "selection": {"method": "sampled", "num_scenarios": 200},
+    },
 }
 _FAKE_IC = {"$schema": "http://example", "storage": [], "filling_storage": []}
 _FAKE_INFLOW_TABLE = pa.table(

@@ -120,11 +120,13 @@ def test_import_boundary_fcf_nongnl_writes_checkpoint(
 
     assert boundary_dir == imported_case.case_dir / "boundary"
     assert (boundary_dir / "metadata.json").is_file()
-    assert (boundary_dir / "cuts" / "stage_010.bin").is_file()
+    # cobre 0.14 keys the cut file by pool id (stage 10 -> "010.bin").
+    assert (boundary_dir / "cuts" / "010.bin").is_file()
     assert (boundary_dir / "basis").is_dir()
 
     metadata = json.loads((boundary_dir / "metadata.json").read_text())
-    assert metadata["cost_scale_factor"] == 1.0
+    # 0.14 nests the algorithm provenance under a "producer" block.
+    assert metadata["producer"]["cost_scale_factor"] == 1.0
     assert metadata["num_stages"] == 1
 
 

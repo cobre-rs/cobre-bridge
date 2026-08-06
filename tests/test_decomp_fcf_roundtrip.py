@@ -334,7 +334,7 @@ def test_synthetic_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     cuts = make_boundary_cuts(plant_codes, (active_record, inactive_record))
 
     reloaded = synthetic_roundtrip(tmp_path / "boundary", cuts, manifest, id_map)
-    assert reloaded["metadata"]["cost_scale_factor"] == 1.0
+    assert reloaded["metadata"]["producer"]["cost_scale_factor"] == 1.0
 
     entry = reloaded["stage_cuts"][0]
     resolved, dropped = _resolve(plant_codes, id_map, entry["entity_manifest"])
@@ -539,7 +539,7 @@ def test_reloaded_boundary_checkpoint_shape(roundtrip_case: _RoundTripCase) -> N
     for cut in entry["cuts"]:
         assert len(cut["coefficients"]) == state_dimension
 
-    assert reloaded["metadata"]["cost_scale_factor"] == 1.0
+    assert reloaded["metadata"]["producer"]["cost_scale_factor"] == 1.0
 
 
 @_skip_e2e

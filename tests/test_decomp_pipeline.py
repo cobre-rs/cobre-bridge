@@ -17,8 +17,9 @@ from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.scenarios import (
     convert_external_inflows,
     convert_inflow_stats_identity,
-    convert_noise_openings,
     convert_scenario_probabilities,
+    deterministic_external_scenarios,
+    terminal_fan_probabilities,
 )
 from cobre_bridge.decomp.temporal import build_operative_calendar
 
@@ -85,36 +86,37 @@ class TestScenarioEmitters:
         assert fan[fan["hydro_id"] == 0]["value_m3s"].iloc[0] == pytest.approx(120.0)
         assert fan[fan["hydro_id"] == 1]["value_m3s"].iloc[0] == pytest.approx(60.0)
 
-    def test_noise_openings_equal_external_values(self) -> None:
-        vazoes, hidr, calendar = _StubVazoes(), _hidr_frame(), _calendar()
-        external = convert_external_inflows(vazoes, hidr, _ID_MAP, calendar).to_pandas()
-        noise = convert_noise_openings(vazoes, hidr, _ID_MAP, calendar, 0).to_pandas()
-        assert list(noise["value"]) == list(external["value_m3s"])
-        assert list(noise["opening_index"]) == list(external["scenario_id"])
-        assert list(noise["entity_index"]) == list(external["hydro_id"])
-
-    def test_noise_openings_span_the_whole_noise_vector(self) -> None:
-        """Non-controllable sources hold their noise slots, at zero deviation.
-
-        Their block follows the hydros in the solver's entity order, so
-        omitting it would leave every consumer of the later slots reading
-        past the end of each opening row.
-        """
-        vazoes, hidr, calendar = _StubVazoes(), _hidr_frame(), _calendar()
-        n_hydros = len(_ID_MAP.hydro_codes)
-        noise = convert_noise_openings(vazoes, hidr, _ID_MAP, calendar, 3).to_pandas()
-
-        per_opening = noise.groupby(["stage_id", "opening_index"]).size()
-        assert set(per_opening) == {n_hydros + 3}
-        appended = noise[noise["entity_index"] >= n_hydros]
-        assert sorted(set(appended["entity_index"])) == [n_hydros + i for i in range(3)]
-        assert set(appended["value"]) == {0.0}
-
     def test_identity_stats(self) -> None:
         stats = convert_inflow_stats_identity(_ID_MAP, _calendar()).to_pandas()
         assert len(stats) == 2 * 3
         assert set(stats["mean_m3s"]) == {0.0}
         assert set(stats["std_m3s"]) == {1.0}
+
+    def test_deterministic_external_scenarios_replicate_across_columns(self) -> None:
+        import pyarrow as pa
+
+        stats = pa.table(
+            {
+                "ncs_id": pa.array([0, 0, 1, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 1, 0, 1], type=pa.int32()),
+                "mean": pa.array([0.5, 0.6, 0.7, 0.8], type=pa.float64()),
+            }
+        )
+        # Trunk stage 0 -> 1 column; terminal stage 1 -> a 3-member fan.
+        out = deterministic_external_scenarios(
+            stats,
+            entity_column="ncs_id",
+            value_in="mean",
+            value_out="value",
+            scenario_counts=[1, 3],
+        ).to_pandas()
+        # stage 0: 2 entities × 1 col; stage 1: 2 entities × 3 cols.
+        assert len(out) == 2 + 6
+        fan = out[(out["stage_id"] == 1) & (out["ncs_id"] == 0)].sort_values(
+            "scenario_id"
+        )
+        assert list(fan["scenario_id"]) == [0, 1, 2]
+        assert list(fan["value"]) == [0.6, 0.6, 0.6]
 
     def test_probabilities_shape_and_sums(self) -> None:
         table = convert_scenario_probabilities(_StubVazoes(), _calendar()).to_pandas()
@@ -127,6 +129,18 @@ class TestScenarioEmitters:
         vazoes.probabilidades.loc[3, "probabilidade"] = 0.3
         with pytest.raises(ValueError, match="sum"):
             convert_scenario_probabilities(vazoes, _calendar())
+
+    def test_terminal_fan_probabilities_ordered(self) -> None:
+        # Terminal (1-based stage 3) fan: cenario 1 -> 0.6, cenario 2 -> 0.4,
+        # returned ordered by 0-based scenario id.
+        probs = terminal_fan_probabilities(_StubVazoes(), _calendar())
+        assert probs == pytest.approx([0.6, 0.4])
+
+    def test_terminal_fan_probabilities_bad_sum_raises(self) -> None:
+        vazoes = _StubVazoes()
+        vazoes.probabilidades.loc[3, "probabilidade"] = 0.3  # terminal sums 0.9
+        with pytest.raises(ValueError, match="sum"):
+            terminal_fan_probabilities(vazoes, _calendar())
 
     def test_pre_terminal_fan_raises(self) -> None:
         vazoes = _StubVazoes()
@@ -150,8 +164,7 @@ _EXPECTED_ARTIFACTS = [
     "system/non_controllable_sources.json",
     "scenarios/inflow_seasonal_stats.parquet",
     "scenarios/external_inflow_scenarios.parquet",
-    "scenarios/noise_openings.parquet",
-    "scenarios/scenario_probabilities.parquet",
+    "scenarios/external_ncs_scenarios.parquet",
     "scenarios/load_seasonal_stats.parquet",
     "scenarios/load_factors.json",
     "scenarios/non_controllable_stats.parquet",
@@ -180,30 +193,51 @@ class TestPipeline:
 
         stages = json.loads((dst / "stages.json").read_text())
         assert len(stages["stages"]) == 3
-        assert [s["num_scenarios"] for s in stages["stages"]] == [1, 1, 353]
-        assert stages["policy_graph"]["annual_discount_rate"] == pytest.approx(0.12)
+        # No per-stage num_openings on external-only DECOMP stages.
+        assert all("num_openings" not in s for s in stages["stages"])
+        graph = stages["policy_graph"]
+        assert graph["annual_discount_rate"] == pytest.approx(0.12)
+        # 3 stages: 2 trunk nodes (0,1) + a 353-node terminal fan (ids 2..354).
+        assert len(graph["nodes"]) == 2 + 353
+        assert sum(1 for n in graph["nodes"] if n["stage_id"] == 0) == 1
+        fan_edges = [t for t in graph["transitions"] if t["source_id"] == 1]
+        assert len(fan_edges) == 353
+        assert sum(t["probability"] for t in fan_edges) == pytest.approx(1.0, abs=1e-4)
 
         config = json.loads((dst / "config.json").read_text())
+        # Training enumerates the tree; simulation samples the fan (C10 gap).
+        assert config["training"]["selection"] == {"method": "enumerated"}
+        assert config["simulation"]["selection"] == {
+            "method": "sampled",
+            "num_scenarios": 353,
+        }
         assert config["training"]["stopping_rules"] == [
             {"type": "iteration_limit", "limit": 500}
         ]
-        assert config["training"]["scenario_source"]["inflow"]["scheme"] == "external"
-        assert config["training"]["scenario_source"]["seed"] == 20260718
+        source = config["training"]["scenario_source"]
+        assert source["inflow"]["scheme"] == "external"
+        # NCS externalized (node-native rule); load stays in-sample (exempt).
+        assert source["ncs"]["scheme"] == "external"
+        assert "load" not in source
+        assert source["seed"] == 20260718
 
         buses = json.loads((dst / "system" / "buses.json").read_text())["buses"]
         assert len(buses) == 6
-
-        prob = pq.read_table(
-            dst / "scenarios" / "scenario_probabilities.parquet"
-        ).to_pandas()
-        sums = prob.groupby("stage_id")["probability"].sum()
-        assert sums.tolist() == pytest.approx([1.0, 1.0, 1.0], abs=1e-4)
 
         external = pq.read_table(
             dst / "scenarios" / "external_inflow_scenarios.parquet"
         )
         hydros = json.loads((dst / "system" / "hydros.json").read_text())["hydros"]
         assert external.num_rows == len(hydros) * (1 + 1 + 353)
+        # External NCS library: 32 sources × (trunk col + trunk col + 353 fan).
+        ext_ncs = pq.read_table(dst / "scenarios" / "external_ncs_scenarios.parquet")
+        n_ncs = len(
+            json.loads((dst / "system" / "non_controllable_sources.json").read_text())[
+                "non_controllable_sources"
+            ]
+        )
+        assert ext_ncs.num_rows == n_ncs * (1 + 1 + 353)
+        assert not (dst / "scenarios" / "external_load_scenarios.parquet").exists()
 
         with pytest.raises(FileExistsError, match="force"):
             convert_decomp_case(_RV3_DECK, dst)

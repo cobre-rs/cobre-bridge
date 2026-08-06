@@ -5759,7 +5759,13 @@ def _ic_case(tmp_path, pct_b: float = 75.0):
     mock_confhd = MagicMock()
     mock_confhd.usinas = df
 
-    return make_case(tmp_path, hidr=mock_hidr, confhd=mock_confhd)
+    # A dger with a concrete study start so the windowed anticipated-commitment
+    # dates resolve (study stage k -> month (2024-01) + k).
+    mock_dger = MagicMock()
+    mock_dger.ano_inicio_estudo = 2024
+    mock_dger.mes_inicio_estudo = 1
+
+    return make_case(tmp_path, hidr=mock_hidr, confhd=mock_confhd, dger=mock_dger)
 
 
 class TestThermalGenerationBounds:
@@ -5823,8 +5829,21 @@ class TestAnticipatedCommitmentSeeding:
         ):
             result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
+        # Windowed records (cobre 0.14): one contiguous monthly window per
+        # leading delivery stage, zero-MW stages written explicitly.
         assert result["past_anticipated_commitments"] == [
-            {"thermal_id": 0, "values_mw": [204.5647, 0.0]}
+            {
+                "thermal_id": 0,
+                "start_date": "2024-01-01",
+                "end_date": "2024-02-01",
+                "value_mw": 204.5647,
+            },
+            {
+                "thermal_id": 0,
+                "start_date": "2024-02-01",
+                "end_date": "2024-03-01",
+                "value_mw": 0.0,
+            },
         ]
         assert "clamping" not in caplog.text
 
@@ -5850,7 +5869,9 @@ class TestAnticipatedCommitmentSeeding:
             result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
         commitments = result["past_anticipated_commitments"]
-        assert commitments[0]["values_mw"] == pytest.approx([481.27, 0.0])
+        assert [c["value_mw"] for c in commitments] == pytest.approx([481.27, 0.0])
+        assert commitments[0]["start_date"] == "2024-01-01"
+        assert commitments[0]["end_date"] == "2024-02-01"
         assert "code=86" in caplog.text
         assert "clamping" in caplog.text
 
@@ -5893,6 +5914,19 @@ class TestAnticipatedCommitmentSeeding:
 
         assert "past_anticipated_commitments" not in result
         mock_bounds.assert_not_called()
+
+    def test_delivery_window_year_and_december_wrap(self) -> None:
+        """The windowed-commitment dates wrap the year at December correctly."""
+        from cobre_bridge.converters.initial_conditions import _delivery_window
+
+        # Study starts Nov 2024.
+        assert _delivery_window(2024, 11, 0) == ("2024-11-01", "2024-12-01")
+        # k=1 is December -> exclusive end rolls into the next year.
+        assert _delivery_window(2024, 11, 1) == ("2024-12-01", "2025-01-01")
+        # k=2 crosses into the new year.
+        assert _delivery_window(2024, 11, 2) == ("2025-01-01", "2025-02-01")
+        # A multi-year lead stays aligned.
+        assert _delivery_window(2024, 11, 14) == ("2026-01-01", "2026-02-01")
 
 
 # ---------------------------------------------------------------------------

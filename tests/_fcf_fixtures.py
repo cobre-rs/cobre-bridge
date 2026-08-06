@@ -205,7 +205,6 @@ def synthetic_roundtrip(
     stage_cuts_payload = build_stage_cuts_payload(mapping, manifest, stage_id=stage_id)
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
     metadata = build_metadata(
-        state_dimension=manifest.state_dimension,
         num_stages=1,
         cost_scale_factor=cost_scale_factor,
         completed_iterations=completed_iterations,

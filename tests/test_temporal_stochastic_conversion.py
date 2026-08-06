@@ -183,7 +183,7 @@ class TestConvertStagesSingleBlock:
         assert block["name"] == "SINGLE"
         assert block["id"] == 0
 
-    def test_num_scenarios_from_dger(self, tmp_path) -> None:
+    def test_num_openings_from_dger(self, tmp_path) -> None:
         dger = _make_dger_mock(num_aberturas=50)
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
@@ -192,7 +192,7 @@ class TestConvertStagesSingleBlock:
 
         result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
-            assert stage["num_scenarios"] == 50
+            assert stage["num_openings"] == 50
 
     def test_discount_rate_percent_to_decimal(self, tmp_path) -> None:
         dger = _make_dger_mock(taxa_de_desconto=12.0)
@@ -414,7 +414,10 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["forward_passes"] == 20
+        assert result["training"]["selection"] == {
+            "method": "sampled",
+            "forward_passes": 20,
+        }
 
     def test_iteration_limit(self, tmp_path) -> None:
         dger = _make_dger_mock(num_max_iteracoes=200)
@@ -428,7 +431,7 @@ class TestConvertConfig:
         assert rules[0]["type"] == "iteration_limit"
         assert rules[0]["limit"] == 200
 
-    def test_backward_scheduler_opening_block_half_openings(self, tmp_path) -> None:
+    def test_backward_scheduler_by_node_half_openings(self, tmp_path) -> None:
         # block_size is ceil(num_aberturas / 2): even count halves exactly.
         dger = _make_dger_mock(num_aberturas=20)
         case = make_case(tmp_path, dger=dger)
@@ -437,7 +440,7 @@ class TestConvertConfig:
 
         result = convert_config(case)
         scheduler = result["training"]["parallelism"]["backward_scheduler"]
-        assert scheduler == {"method": "opening_block", "block_size": 10}
+        assert scheduler == {"method": "by_node", "block_size": 10}
 
     def test_backward_scheduler_block_size_rounds_up(self, tmp_path) -> None:
         # An odd opening count rounds up: ceil(21 / 2) == 11.
@@ -477,7 +480,10 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["simulation"]["num_scenarios"] == 500
+        assert result["simulation"]["selection"] == {
+            "method": "sampled",
+            "num_scenarios": 500,
+        }
 
     # -- impressao_estados_geracao_cortes / exports.states --
 
@@ -640,7 +646,7 @@ class TestConvertConfig:
         assert src["historical_years"] == [1983]
         # Simulation side stays consistent.
         assert result["simulation"]["scenario_source"]["historical_years"] == [1983]
-        assert result["simulation"]["num_scenarios"] == 1
+        assert result["simulation"]["selection"]["num_scenarios"] == 1
         # Deterministic mode also forces estimation.max_order = 0 (workaround
         # for cobre's SDDP negative-gap regression when lag-state is present)
         # and pins order_selection to "pacf" to avoid the residual annual
@@ -967,7 +973,7 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["simulation"]["num_scenarios"] == 3
+        assert result["simulation"]["selection"]["num_scenarios"] == 3
 
     def test_historical_num_scenarios_matches_range_length(self, tmp_path) -> None:
         """For a range historical_years, num_scenarios = to - from + 1."""
@@ -990,7 +996,7 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["simulation"]["num_scenarios"] == 2018 - 1932 + 1
+        assert result["simulation"]["selection"]["num_scenarios"] == 2018 - 1932 + 1
 
     def test_non_historical_num_scenarios_uses_num_series_sinteticas(
         self, tmp_path
@@ -1008,7 +1014,7 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["simulation"]["num_scenarios"] == 2000
+        assert result["simulation"]["selection"]["num_scenarios"] == 2000
 
     # -- considera_reamostragem_cenarios / training.scenario_source --
 

@@ -314,7 +314,7 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
             "end_date": end_date.isoformat(),
             "season_id": month - 1,  # 0-based: Jan=0, ..., Dec=11
             "blocks": blocks,
-            "num_scenarios": num_scenarios,
+            "num_openings": num_scenarios,
             "risk_measure": risk_measure,
             "state_variables": {
                 "storage": True,
@@ -604,23 +604,24 @@ def convert_config(case: NewaveCase) -> dict:
             "check_frequency": 1,
         }
 
-    # -- Backward-pass scheduler (cobre 0.12.0+) --
-    # Opt into the opening-block scheduler so each backward work unit is a
+    # -- Backward-pass scheduler (cobre 0.14) --
+    # Opt into the by_node scheduler so each backward work unit is a
     # (trial point, opening block) pair rather than a whole trial point, and
     # pin the block size to half of the source model's backward opening count,
     # rounded up.  Cobre's default scheduler is per-trial-point; the explicit
-    # block size coincides with cobre's own per-stage opening_block default
+    # block size coincides with cobre's own per-node opening-block default
     # (ceil(|Omega_s|/2)) but records the value taken from the source deck.
+    # (0.14 renamed the method "opening_block" → "by_node"; block_size unchanged.)
     parallelism: dict = {
         "backward_scheduler": {
-            "method": "opening_block",
+            "method": "by_node",
             "block_size": math.ceil(num_openings / 2),
         }
     }
 
     # -- Training scenario source --
     training_section: dict = {
-        "forward_passes": forward_passes,
+        "selection": {"method": "sampled", "forward_passes": forward_passes},
         "stopping_rules": [
             {"type": "iteration_limit", "limit": max_iterations},
         ],
@@ -650,7 +651,7 @@ def convert_config(case: NewaveCase) -> dict:
     # considera_reamostragem determines the scheme (1=out_of_sample, 0=in_sample).
     simulation_section: dict = {
         "enabled": simulation_enabled,
-        "num_scenarios": num_series,
+        "selection": {"method": "sampled", "num_scenarios": num_series},
     }
     if simulation_enabled:
         if tipo_simulacao_final == 2:
@@ -667,7 +668,7 @@ def convert_config(case: NewaveCase) -> dict:
             # number of scenarios is fully determined by the size of the historical
             # pool.  Override num_series_sinteticas so the cobre case doesn't request
             # more scenarios than the source model generates.
-            simulation_section["num_scenarios"] = _count_historical_years(
+            simulation_section["selection"]["num_scenarios"] = _count_historical_years(
                 historical_years
             )
         simulation_section["scenario_source"] = sim_source

@@ -1615,6 +1615,10 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
 
     Returns DataFrame with columns: ``iteration`` (Int64),
     ``lower_bound`` (Float64), ``upper_bound_mean`` (Float64).
+
+    The upper-bound column is read from cobre's ``upper_bound`` (0.14) or the
+    legacy ``upper_bound_mean``; either maps to the canonical
+    ``upper_bound_mean`` returned here.
     """
     empty = pl.DataFrame(
         schema={
@@ -1649,6 +1653,18 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
             col_map[col] = "lower_bound"
         elif lower == "upper_bound_mean":
             col_map[col] = "upper_bound_mean"
+
+    # cobre 0.14 renamed the statistical upper-bound column
+    # "upper_bound_mean" -> "upper_bound" (alongside a nullable
+    # "upper_bound_std" and a new "upper_bound_kind" tag).  Accept the new
+    # spelling as an exact match into our canonical "upper_bound_mean" slot,
+    # but only when the legacy column is absent, and via an exact compare so
+    # the prefix-sharing "upper_bound_std"/"upper_bound_kind" never claim it.
+    if "upper_bound_mean" not in col_map.values():
+        for col, lower in cols_lower.items():
+            if lower == "upper_bound":
+                col_map[col] = "upper_bound_mean"
+                break
 
     # Fuzzy fallback for columns not yet mapped.
     for col, lower in cols_lower.items():

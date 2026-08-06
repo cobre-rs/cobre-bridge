@@ -194,21 +194,16 @@ def operative_calendar_from_dadger(dadger: Dadger) -> list[OperativeStage]:
     return build_operative_calendar(start, stage_block_hours)
 
 
-def stage_records(
-    calendar: Sequence[OperativeStage],
-    num_scenarios: Sequence[int],
-) -> list[dict]:
+def stage_records(calendar: Sequence[OperativeStage]) -> list[dict]:
     """Build the ``stages.json`` stage entries for an operative calendar.
 
-    ``num_scenarios[s]`` is stage *s*'s opening branching factor (1 on the
-    deterministic trunk, the fan width at the terminal stage). State
-    variables follow the lag-blind convention: storage only, no inflow-lag
-    state (only the boundary FCF prices lags).
+    Every DECOMP stage draws its openings from the external inflow library
+    (trunk column 0, terminal fan columns ``0..N-1``), so no stage declares
+    ``num_openings`` — the node graph's per-node ``scenario_id`` binds the
+    openings, and cobre rejects a ``num_openings`` on an external-only stage.
+    State variables follow the lag-blind convention: storage only, no
+    inflow-lag state (only the boundary FCF prices lags).
     """
-    if len(num_scenarios) != len(calendar):
-        raise ValueError(
-            f"num_scenarios has {len(num_scenarios)} entries for {len(calendar)} stages"
-        )
     records: list[dict] = []
     for stage in calendar:
         names = _block_names(len(stage.block_hours))
@@ -222,7 +217,6 @@ def stage_records(
                     {"id": b, "name": names[b], "hours": hours}
                     for b, hours in enumerate(stage.block_hours)
                 ],
-                "num_scenarios": int(num_scenarios[stage.index]),
                 "risk_measure": "expectation",
                 "state_variables": {"storage": True, "inflow_lags": False},
             }
@@ -230,30 +224,81 @@ def stage_records(
     return records
 
 
+def build_node_graph(
+    n_stages: int,
+    fan_probabilities: Sequence[float],
+) -> tuple[list[dict], list[dict]]:
+    """Node-native graph for the trunk-as-external + terminal-fan tree.
+
+    The deterministic trunk (stages ``0..T-2``) is one node per stage bound
+    to external inflow column 0; the terminal stage ``T-1`` fans into
+    ``len(fan_probabilities)`` leaf nodes bound to columns ``0..N-1``. Node
+    ids are their own id space: trunk node ``id == stage_id`` (``0..T-2``),
+    fan node ``id == (T-1) + k`` ascending with ``scenario_id`` (the
+    canonical successor order). Trunk edges carry probability 1.0; each
+    terminal branch edge carries its DECOMP per-scenario weight (cobre
+    re-normalizes out-edges at load).
+    """
+    terminal = n_stages - 1
+    if terminal < 1:
+        raise ValueError(
+            "the DECOMP node graph needs at least a trunk stage and a "
+            f"terminal fan stage; got {n_stages} stage(s)"
+        )
+
+    nodes: list[dict] = [
+        {"id": s, "stage_id": s, "scenario_id": 0, "label": f"trunk-{s}"}
+        for s in range(terminal)
+    ]
+    fan_base = terminal  # ids after the T-1 trunk nodes (0..terminal-1)
+    nodes.extend(
+        {
+            "id": fan_base + k,
+            "stage_id": terminal,
+            "scenario_id": k,
+            "label": f"fan-{k}",
+        }
+        for k in range(len(fan_probabilities))
+    )
+
+    transitions: list[dict] = [
+        {"source_id": s, "target_id": s + 1, "probability": 1.0}
+        for s in range(terminal - 1)
+    ]
+    last_trunk = terminal - 1
+    transitions.extend(
+        {
+            "source_id": last_trunk,
+            "target_id": fan_base + k,
+            "probability": probability,
+        }
+        for k, probability in enumerate(fan_probabilities)
+    )
+    return nodes, transitions
+
+
 def convert_stages(
     calendar: Sequence[OperativeStage],
     *,
     annual_discount_rate: float,
-    num_scenarios: Sequence[int],
+    fan_probabilities: Sequence[float],
 ) -> dict:
     """Build the full ``stages.json`` dict for an operative calendar.
 
-    A linear finite-horizon chain (transition probability 1.0 between
-    consecutive stages) under the shared calendar-monthly season map. No
-    pre-study stages: the inflow model is order-0 and pre-study inflows
-    travel as dated windows.
+    A node-native finite-horizon graph: a deterministic trunk that fans into
+    the terminal stage (see :func:`build_node_graph`), under the shared
+    calendar-monthly season map. No pre-study stages: the inflow model is
+    order-0 and pre-study inflows travel as dated windows.
     """
-    stages = stage_records(calendar, num_scenarios)
-    transitions = [
-        {"source_id": s, "target_id": s + 1, "probability": 1.0}
-        for s in range(len(stages) - 1)
-    ]
+    stages = stage_records(calendar)
+    nodes, transitions = build_node_graph(len(stages), fan_probabilities)
     return {
         "$schema": _STAGES_SCHEMA_URL,
         "season_definitions": monthly_season_definitions(),
         "policy_graph": {
             "type": "finite_horizon",
             "annual_discount_rate": annual_discount_rate,
+            "nodes": nodes,
             "transitions": transitions,
         },
         "stages": stages,

@@ -1063,6 +1063,55 @@ class TestEdgeCases:
         assert read_cobre_convergence(fake_dir).is_empty()
         assert read_cobre_hydro_metadata(fake_dir) == {}
 
+    def test_cobre_convergence_reads_014_upper_bound(self, tmp_path: Path) -> None:
+        """cobre 0.14 renamed ``upper_bound_mean`` -> ``upper_bound`` (with a
+        sibling ``upper_bound_std``/``upper_bound_kind``).  The reader must map
+        ``upper_bound`` into the canonical ``upper_bound_mean`` slot and must
+        NOT let the prefix-sharing ``_std``/``_kind`` columns hijack it — the
+        failure mode is a silently empty convergence frame."""
+        import polars as pl
+
+        from cobre_bridge.comparators.cobre_readers import read_cobre_convergence
+
+        training = tmp_path / "training"
+        training.mkdir()
+        pl.DataFrame(
+            {
+                "iteration": [1, 2],
+                "lower_bound": [10.0, 20.0],
+                "upper_bound_std": [1.0, 0.5],
+                "upper_bound_kind": ["statistical", "statistical"],
+                "upper_bound": [15.0, 22.0],
+            }
+        ).write_parquet(training / "convergence.parquet")
+
+        df = read_cobre_convergence(tmp_path)
+        assert not df.is_empty()
+        assert df["iteration"].to_list() == [1, 2]
+        assert df["lower_bound"].to_list() == [10.0, 20.0]
+        assert df["upper_bound_mean"].to_list() == [15.0, 22.0]
+
+    def test_cobre_convergence_reads_legacy_upper_bound_mean(
+        self, tmp_path: Path
+    ) -> None:
+        """The legacy ``upper_bound_mean`` spelling still reads (back-compat)."""
+        import polars as pl
+
+        from cobre_bridge.comparators.cobre_readers import read_cobre_convergence
+
+        training = tmp_path / "training"
+        training.mkdir()
+        pl.DataFrame(
+            {
+                "iteration": [1],
+                "lower_bound": [10.0],
+                "upper_bound_mean": [15.0],
+            }
+        ).write_parquet(training / "convergence.parquet")
+
+        df = read_cobre_convergence(tmp_path)
+        assert df["upper_bound_mean"].to_list() == [15.0]
+
     def test_empty_alignment_produces_no_results(self) -> None:
         """Alignment with no entities produces empty comparison."""
         summary = build_results_summary([])

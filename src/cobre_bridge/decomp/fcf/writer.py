@@ -5,8 +5,9 @@ of :class:`~cobre_bridge.decomp.fcf.mapper.MappedCut`, each already aligned
 to the terminal manifest's state-vector layout (``fcf/bootstrap.py``,
 ticket-004). This module assembles that pair into the plain-dict payload and
 metadata shapes ``cobre.write_policy_checkpoint`` expects, then calls it to
-produce ``boundary/{metadata.json, cuts/stage_NNN.bin, basis/}`` — a raw,
-one-stage checkpoint the target case's ``config.json -> policy.boundary``
+produce ``boundary/{metadata.json, cuts/<pool>.bin, basis/}`` — a raw,
+one-pool checkpoint (cobre 0.14 keys the cut file by pool id, not the old
+``stage_NNN.bin``) the target case's ``config.json -> policy.boundary``
 loads.
 
 ``cost_scale_factor`` is the single most dangerous field in ``metadata``: if
@@ -89,7 +90,6 @@ def build_stage_cuts_payload(
 
 def build_metadata(
     *,
-    state_dimension: int,
     num_stages: int,
     cost_scale_factor: float | None,
     completed_iterations: int,
@@ -103,9 +103,13 @@ def build_metadata(
 ) -> dict[str, Any]:
     """Build the checkpoint `metadata` dict, refusing an unset `cost_scale_factor`.
 
-    `created_at` is accepted as a parameter rather than derived internally
-    (this module never calls `datetime.now()`) — the caller (ticket-009's
-    orchestration) is responsible for supplying an ISO 8601 timestamp.
+    cobre 0.14 splits checkpoint metadata into a small core (`cobre_version`,
+    `created_at`, `num_stages`) plus a namespaced `producer` block carrying the
+    algorithm-specific provenance. `state_dimension` is no longer a metadata
+    field — it is per-pool, on each `stage_cuts` payload
+    (:func:`build_stage_cuts_payload`). `created_at` is accepted as a parameter
+    rather than derived internally (this module never calls `datetime.now()`) —
+    the caller (ticket-009's orchestration) supplies an ISO 8601 timestamp.
 
     Raises
     ------
@@ -122,15 +126,16 @@ def build_metadata(
     return {
         "cobre_version": cobre_version,
         "created_at": created_at,
-        "completed_iterations": completed_iterations,
-        "final_lower_bound": final_lower_bound,
-        "state_dimension": state_dimension,
         "num_stages": num_stages,
-        "max_iterations": max_iterations,
-        "forward_passes": forward_passes,
-        "warm_start_cuts": warm_start_cuts,
-        "rng_seed": rng_seed,
-        "cost_scale_factor": cost_scale_factor,
+        "producer": {
+            "completed_iterations": completed_iterations,
+            "final_lower_bound": final_lower_bound,
+            "max_iterations": max_iterations,
+            "forward_passes": forward_passes,
+            "warm_start_cuts": warm_start_cuts,
+            "rng_seed": rng_seed,
+            "cost_scale_factor": cost_scale_factor,
+        },
     }
 
 

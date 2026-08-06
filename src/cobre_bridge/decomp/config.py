@@ -37,11 +37,6 @@ _CONFIG_SCHEMA_URL = (
     "/schemas/config.schema.json"
 )
 
-# Trajectories per iteration for the smoke configuration: the trunk is
-# deterministic, so forwards only choose terminal-fan members; full
-# enumeration replaces this when the selection mode exists.
-_SMOKE_FORWARD_PASSES = 5
-
 # D8: the boundary cut's deepest lag term sets the state-space depth cobre
 # must reserve, so the emitted config declares it explicitly rather than
 # leaving cobre to infer one. The source model's boundary cuts carry
@@ -53,6 +48,15 @@ _INFLOW_LAG_DEPTH = 12
 def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
     """Build ``config.json``: state space depth, NI backstop, external
     inflows, simulation on.
+
+    Training uses ``selection = {"method": "enumerated"}``: the explicit
+    trunk-plus-fan node graph enumerates every root-to-leaf path, so the
+    forward-pass count is derived from the graph. Simulation uses ``sampled``
+    with ``n_terminal_scenarios`` as a TRACKED COBRE-GAP WORKAROUND (C9):
+    cobre 0.14 cannot yet execute enumerated (weighted-census) simulation over
+    a *branching* graph — only a single-realization tree — so an enumerated
+    simulation aborts. Sampling the fan width approximates the census until
+    cobre wires branching-census simulation (epic-06/epic-14).
 
     ``state_space.inflow_lag_depth`` is fixed at 12 (P3/D8): under
     no-folding, the source model's boundary cuts carry lag coefficients out
@@ -73,20 +77,46 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
     dt = dadger.dt
     seed = int(dt.ano) * 10000 + int(dt.mes) * 100 + int(dt.dia)
 
+    _LOG.warning(
+        "TRACKED COBRE-GAP WORKAROUND (C9): cobre 0.14 executes enumerated "
+        "selection only on a single-realization tree; a branching graph's "
+        "weighted-census SIMULATION is not wired, so simulation falls back to "
+        "sampled selection over the %d terminal-fan scenarios "
+        "(~/git/cobre/plans/conversion-found-improvements.md). Training stays "
+        "enumerated (it runs the full census). Remove when cobre wires "
+        "branching-census simulation (epic-06/epic-14).",
+        n_terminal_scenarios,
+    )
+
     return {
         "$schema": _CONFIG_SCHEMA_URL,
         "state_space": {"inflow_lag_depth": _INFLOW_LAG_DEPTH},
         "training": {
-            "forward_passes": _SMOKE_FORWARD_PASSES,
+            "selection": {"method": "enumerated"},
             "stopping_rules": [{"type": "iteration_limit", "limit": ni}],
             "scenario_source": {
                 "seed": seed,
                 "inflow": {"scheme": "external"},
+                # A node-native external-column graph requires every *non-empty*
+                # stochastic class to be external. A DECOMP deck's NCS
+                # (renewables) are non-empty in the canonical (unfiltered) noise
+                # order, so NCS must be external. Load is fully deterministic
+                # (std = 0), so cobre's canonical load order — filtered to
+                # std > 0 buses — is empty: load is a zero-entity class, exempt
+                # from the rule, and stays in-sample (an external load library
+                # would have zero width). (A deck with zero NCS is out of scope;
+                # every real DECOMP deck carries renewables.)
+                "ncs": {"scheme": "external"},
             },
         },
         "simulation": {
             "enabled": True,
-            "num_scenarios": n_terminal_scenarios,
+            # C9 workaround: sampled (not enumerated) until cobre wires
+            # branching-census simulation — see the module note above.
+            "selection": {
+                "method": "sampled",
+                "num_scenarios": n_terminal_scenarios,
+            },
         },
     }
 

@@ -61,7 +61,6 @@ def test_build_stage_cuts_payload_shape() -> None:
 def test_build_metadata_refuses_none_cost_scale_factor() -> None:
     with pytest.raises(RuntimeError, match="cost_scale_factor"):
         build_metadata(
-            state_dimension=4,
             num_stages=1,
             cost_scale_factor=None,
             completed_iterations=1,
@@ -86,7 +85,6 @@ def test_write_boundary_checkpoint_creates_files(tmp_path: Path) -> None:
     )
     payload = build_stage_cuts_payload(mapping, manifest, stage_id=10)
     metadata = build_metadata(
-        state_dimension=2,
         num_stages=1,
         cost_scale_factor=1.0,
         completed_iterations=1,
@@ -96,24 +94,29 @@ def test_write_boundary_checkpoint_creates_files(tmp_path: Path) -> None:
         warm_start_cuts=0,
         rng_seed=0,
         created_at="2026-08-03T00:00:00Z",
-        cobre_version="0.13.0",
+        cobre_version="0.14.0",
     )
 
     boundary_dir = tmp_path / "boundary"
     write_boundary_checkpoint(boundary_dir, payload, metadata)
 
     assert (boundary_dir / "metadata.json").exists()
-    assert (boundary_dir / "cuts" / "stage_010.bin").exists()
+    # cobre 0.14 keys the cut file by pool id (stage_id 10 -> "010.bin"),
+    # replacing the old positional "stage_NNN.bin".
+    assert (boundary_dir / "cuts" / "010.bin").exists()
     assert (boundary_dir / "basis").is_dir()
 
     on_disk_metadata = json.loads((boundary_dir / "metadata.json").read_text())
     assert isinstance(on_disk_metadata, dict)
-    assert on_disk_metadata["cost_scale_factor"] is not None
+    # 0.14 nests the algorithm provenance (incl. cost_scale_factor) under a
+    # "producer" block; state_dimension is no longer a metadata field.
+    assert "state_dimension" not in on_disk_metadata
+    assert on_disk_metadata["producer"]["cost_scale_factor"] is not None
 
     reloaded = cobre.results.load_policy(
         boundary_dir.parent, policy_subdir=boundary_dir.name
     )
-    assert reloaded["metadata"]["cost_scale_factor"] is not None
+    assert reloaded["metadata"]["producer"]["cost_scale_factor"] is not None
     reloaded_stage = reloaded["stage_cuts"][0]
     assert reloaded_stage["state_dimension"] == 2
     assert len(reloaded_stage["cuts"]) == 1

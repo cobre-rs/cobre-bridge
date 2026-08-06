@@ -159,15 +159,12 @@ def bootstrap_terminal_manifest(
     if not stage_cuts:
         raise RuntimeError(f"checkpoint at {output_dir} has no stage cuts")
 
+    # cobre 0.14 carries state_dimension per pool (on each stage_cuts entry),
+    # not on the checkpoint metadata, so the terminal pool's own value is the
+    # authoritative state-vector width — there is no separate global metadata
+    # value left to cross-check it against.
     terminal = max(stage_cuts, key=lambda stage: stage["stage_id"])
     terminal_state_dimension = int(terminal["state_dimension"])
-    metadata_state_dimension = int(policy["metadata"]["state_dimension"])
-    if terminal_state_dimension != metadata_state_dimension:
-        raise RuntimeError(
-            f"terminal stage state_dimension {terminal_state_dimension} "
-            "disagrees with checkpoint metadata state_dimension "
-            f"{metadata_state_dimension} at {output_dir}"
-        )
 
     entity_manifest = tuple(terminal["entity_manifest"])
     if not entity_manifest:

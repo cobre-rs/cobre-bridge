@@ -162,19 +162,18 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     id_map = DecompIdMap.from_dadger(dadger)
     calendar = temporal_conv.operative_calendar_from_dadger(dadger)
     start_date = calendar[0].start_date
-    probabilities = vazoes.probabilidades
-    if probabilities is None or probabilities.empty:
-        raise ValueError("the inflow file has no probability table")
-    terminal_fan = int(probabilities.groupby("estagio")["cenario"].nunique().max())
-    num_scenarios = [1] * (len(calendar) - 1) + [terminal_fan]
+    fan_probabilities = scenarios_conv.terminal_fan_probabilities(vazoes, calendar)
 
     tx = float(dadger.tx.taxa) / 100.0
 
     dst.mkdir(parents=True, exist_ok=True)
 
-    _write_json(dst / "config.json", config_conv.convert_config(dadger, terminal_fan))
+    _write_json(
+        dst / "config.json",
+        config_conv.convert_config(dadger, len(fan_probabilities)),
+    )
     stages_dict = temporal_conv.convert_stages(
-        calendar, annual_discount_rate=tx, num_scenarios=num_scenarios
+        calendar, annual_discount_rate=tx, fan_probabilities=fan_probabilities
     )
     _write_json(dst / "stages.json", stages_dict)
 
@@ -231,35 +230,36 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         scenarios / "external_inflow_scenarios.parquet",
         scenarios_conv.convert_external_inflows(vazoes, hidr, id_map, calendar),
     )
-    _write_parquet(
-        scenarios / "noise_openings.parquet",
-        scenarios_conv.convert_noise_openings(
-            vazoes,
-            hidr,
-            id_map,
-            calendar,
-            len(ncs_registry["non_controllable_sources"]),
-        ),
-    )
-    _write_parquet(
-        scenarios / "scenario_probabilities.parquet",
-        scenarios_conv.convert_scenario_probabilities(vazoes, calendar),
-    )
-    _write_parquet(
-        scenarios / "load_seasonal_stats.parquet",
-        load_conv.convert_load_stats(dadger, id_map, calendar),
-    )
+    load_stats = load_conv.convert_load_stats(dadger, id_map, calendar)
+    _write_parquet(scenarios / "load_seasonal_stats.parquet", load_stats)
     _write_json(
         scenarios / "load_factors.json",
         load_conv.convert_load_factors(dadger, id_map, calendar),
     )
-    _write_parquet(
-        scenarios / "non_controllable_stats.parquet",
-        ncs_conv.convert_ncs_stats(dadger, id_map, calendar, renovaveis),
-    )
+    ncs_stats = ncs_conv.convert_ncs_stats(dadger, id_map, calendar, renovaveis)
+    _write_parquet(scenarios / "non_controllable_stats.parquet", ncs_stats)
     _write_json(
         scenarios / "non_controllable_factors.json",
         ncs_conv.convert_ncs_factors(dadger, id_map, calendar, renovaveis),
+    )
+    # A node-native external-column graph requires every *non-empty* stochastic
+    # class to be external (cobre setup rule). NCS carries 32 entities in the
+    # canonical noise order, so it must be external; the deterministic NCS mean
+    # (availability fraction) fans out unchanged across the same per-stage
+    # scenario columns as the inflow library (1 on the trunk, the terminal fan
+    # width at the last stage). Load is deterministic (std = 0) — cobre's
+    # canonical load order is std > 0 only, so it is empty and exempt: load
+    # stays in-sample and writes no external library.
+    scenario_counts = [1] * (len(calendar) - 1) + [len(fan_probabilities)]
+    _write_parquet(
+        scenarios / "external_ncs_scenarios.parquet",
+        scenarios_conv.deterministic_external_scenarios(
+            ncs_stats,
+            entity_column="ncs_id",
+            value_in="mean",
+            value_out="value",
+            scenario_counts=scenario_counts,
+        ),
     )
 
     constraints = dst / "constraints"
@@ -416,5 +416,5 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         len(id_map.hydro_codes),
         len(id_map.thermal_codes),
         len(calendar),
-        terminal_fan,
+        len(fan_probabilities),
     )
