@@ -47,8 +47,8 @@ _HYDRO_BOUNDS_SCHEMA = pa.schema(
     [
         pa.field("hydro_id", pa.int32(), nullable=False),
         pa.field("stage_id", pa.int32(), nullable=False),
-        pa.field("min_outflow_m3s", pa.float64(), nullable=False),
         pa.field("block_id", pa.int32(), nullable=True),
+        pa.field("min_outflow_m3s", pa.float64(), nullable=False),
     ]
 )
 
@@ -58,8 +58,8 @@ def _empty() -> pa.Table:
         {
             "hydro_id": pa.array([], type=pa.int32()),
             "stage_id": pa.array([], type=pa.int32()),
-            "min_outflow_m3s": pa.array([], type=pa.float64()),
             "block_id": pa.array([], type=pa.int32()),
+            "min_outflow_m3s": pa.array([], type=pa.float64()),
         },
         schema=_HYDRO_BOUNDS_SCHEMA,
     )
@@ -214,8 +214,8 @@ def convert_hydro_bounds(
         {
             "hydro_id": pa.array(hydro_ids, type=pa.int32()),
             "stage_id": pa.array(stage_ids, type=pa.int32()),
-            "min_outflow_m3s": pa.array(minimums, type=pa.float64()),
             "block_id": pa.array(block_ids, type=pa.int32()),
+            "min_outflow_m3s": pa.array(minimums, type=pa.float64()),
         },
         schema=_HYDRO_BOUNDS_SCHEMA,
     )

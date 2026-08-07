@@ -60,11 +60,11 @@ _HYDRO_UNIT_GROUP_BOUNDS_SCHEMA = pa.schema(
         pa.field("hydro_id", pa.int32(), nullable=False),
         pa.field("hydro_unit_group_id", pa.int32(), nullable=False),
         pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("block_id", pa.int32(), nullable=True),
         pa.field("min_turbined_m3s", pa.float64(), nullable=True),
         pa.field("max_turbined_m3s", pa.float64(), nullable=True),
         pa.field("min_generation_mw", pa.float64(), nullable=True),
         pa.field("max_generation_mw", pa.float64(), nullable=True),
-        pa.field("block_id", pa.int32(), nullable=True),
     ]
 )
 
@@ -83,11 +83,11 @@ def _empty() -> pa.Table:
             "hydro_id": pa.array([], type=pa.int32()),
             "hydro_unit_group_id": pa.array([], type=pa.int32()),
             "stage_id": pa.array([], type=pa.int32()),
+            "block_id": pa.array([], type=pa.int32()),
             "min_turbined_m3s": pa.array([], type=pa.float64()),
             "max_turbined_m3s": pa.array([], type=pa.float64()),
             "min_generation_mw": pa.array([], type=pa.float64()),
             "max_generation_mw": pa.array([], type=pa.float64()),
-            "block_id": pa.array([], type=pa.int32()),
         },
         schema=_HYDRO_UNIT_GROUP_BOUNDS_SCHEMA,
     )
@@ -233,6 +233,7 @@ def convert_hydro_unit_group_bounds(
             "hydro_id": pa.array(hydro_ids, type=pa.int32()),
             "hydro_unit_group_id": pa.array(group_ids, type=pa.int32()),
             "stage_id": pa.array(stage_ids, type=pa.int32()),
+            "block_id": pa.array(block_ids, type=pa.int32()),
             "min_turbined_m3s": pa.array(
                 columns["min_turbined_m3s"], type=pa.float64()
             ),
@@ -245,7 +246,6 @@ def convert_hydro_unit_group_bounds(
             "max_generation_mw": pa.array(
                 columns["max_generation_mw"], type=pa.float64()
             ),
-            "block_id": pa.array(block_ids, type=pa.int32()),
         },
         schema=_HYDRO_UNIT_GROUP_BOUNDS_SCHEMA,
     )

@@ -212,9 +212,9 @@ _LINE_BOUNDS_SCHEMA = pa.schema(
     [
         pa.field("line_id", pa.int32(), nullable=False),
         pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("block_id", pa.int32(), nullable=True),
         pa.field("direct_mw", pa.float64(), nullable=False),
         pa.field("reverse_mw", pa.float64(), nullable=False),
-        pa.field("block_id", pa.int32(), nullable=True),
     ]
 )
 
@@ -300,9 +300,9 @@ def convert_lines(
         {
             "line_id": pa.array(bounds_line_ids, type=pa.int32()),
             "stage_id": pa.array(bounds_stage_ids, type=pa.int32()),
+            "block_id": pa.array(bounds_block_ids, type=pa.int32()),
             "direct_mw": pa.array(bounds_direct, type=pa.float64()),
             "reverse_mw": pa.array(bounds_reverse, type=pa.float64()),
-            "block_id": pa.array(bounds_block_ids, type=pa.int32()),
         },
         schema=_LINE_BOUNDS_SCHEMA,
     )

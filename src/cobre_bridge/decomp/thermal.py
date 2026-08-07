@@ -133,10 +133,10 @@ _THERMAL_BOUNDS_SCHEMA = pa.schema(
     [
         pa.field("thermal_id", pa.int32(), nullable=False),
         pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("block_id", pa.int32(), nullable=True),
         pa.field("min_generation_mw", pa.float64(), nullable=False),
         pa.field("max_generation_mw", pa.float64(), nullable=False),
         pa.field("cost_per_mwh", pa.float64(), nullable=True),
-        pa.field("block_id", pa.int32(), nullable=True),
     ]
 )
 
@@ -200,10 +200,10 @@ def convert_thermal_bounds(
         {
             "thermal_id": pa.array(thermal_ids, type=pa.int32()),
             "stage_id": pa.array(stage_ids, type=pa.int32()),
+            "block_id": pa.array(block_ids, type=pa.int32()),
             "min_generation_mw": pa.array(mins, type=pa.float64()),
             "max_generation_mw": pa.array(maxs, type=pa.float64()),
             "cost_per_mwh": pa.array(costs, type=pa.float64()),
-            "block_id": pa.array(block_ids, type=pa.int32()),
         },
         schema=_THERMAL_BOUNDS_SCHEMA,
     )
