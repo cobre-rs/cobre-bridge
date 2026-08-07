@@ -242,14 +242,15 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         scenarios / "non_controllable_factors.json",
         ncs_conv.convert_ncs_factors(dadger, id_map, calendar, renovaveis),
     )
-    # A node-native external-column graph requires every *non-empty* stochastic
-    # class to be external (cobre setup rule). NCS carries 32 entities in the
-    # canonical noise order, so it must be external; the deterministic NCS mean
-    # (availability fraction) fans out unchanged across the same per-stage
-    # scenario columns as the inflow library (1 on the trunk, the terminal fan
-    # width at the last stage). Load is deterministic (std = 0) — cobre's
-    # canonical load order is std > 0 only, so it is empty and exempt: load
-    # stays in-sample and writes no external library.
+    # Under the node-native explicit tree every stochastic class is sourced
+    # externally: inflow (the tree), NCS (renewables), and load. cobre landed
+    # scheme-aware load membership (`std > 0 OR load_scheme == External`), so a
+    # deterministic (std = 0) external load class still occupies its noise slot
+    # and standardizes to eta = 0 (value == mean) — no longer the in-sample-with-
+    # null-std workaround. Each deterministic per-(entity, stage) mean fans out
+    # unchanged across the same per-stage scenario columns as the inflow library
+    # (1 on the trunk, the terminal fan width at the last stage) for joint
+    # scenario_id coherence across the external classes.
     scenario_counts = [1] * (len(calendar) - 1) + [len(fan_probabilities)]
     _write_parquet(
         scenarios / "external_ncs_scenarios.parquet",
@@ -258,6 +259,16 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
             entity_column="ncs_id",
             value_in="mean",
             value_out="value",
+            scenario_counts=scenario_counts,
+        ),
+    )
+    _write_parquet(
+        scenarios / "external_load_scenarios.parquet",
+        scenarios_conv.deterministic_external_scenarios(
+            load_stats,
+            entity_column="bus_id",
+            value_in="mean_mw",
+            value_out="value_mw",
             scenario_counts=scenario_counts,
         ),
     )

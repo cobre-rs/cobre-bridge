@@ -1,10 +1,11 @@
 """Run configuration and penalties for DECOMP-like decks.
 
 ``config.json`` carries the fixed ``state_space.inflow_lag_depth`` (P3/D8),
-the deck-faithful iteration backstop (``NI``), and the external inflow
-scheme. The deck's ``GP`` gap criterion has no solver counterpart until the
-enumeration work lands its absolute-gap rule; it is logged at conversion
-(canonical value = GP × 1000 R$) so the omission is visible, never silent.
+the deck's ``GP`` convergence criterion as a **relative** ``Gap`` stopping
+rule (``relative_tolerance``, matching DECOMP's ``Zsup/Zinf - 1 <= GP``
+convergence; cobre auto-injects a ``BoundStalling`` companion so an
+unattainable tolerance degrades to a diagnosed stall), the deck-faithful
+``NI`` iteration backstop, and the external scenario schemes.
 
 ``penalties.json`` reuses the shared ρ-scaled hydro penalty construction
 with the deck's deficit cost and the converted productivities — the same
@@ -46,8 +47,8 @@ _INFLOW_LAG_DEPTH = 12
 
 
 def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
-    """Build ``config.json``: state space depth, NI backstop, external
-    inflows, simulation on.
+    """Build ``config.json``: state space depth, Gap + NI stopping rules,
+    external scenario sources, simulation on.
 
     Training uses ``selection = {"method": "enumerated"}``: the explicit
     trunk-plus-fan node graph enumerates every root-to-leaf path, so the
@@ -65,12 +66,11 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
     """
     ni = int(dadger.ni.iteracoes or 500)
     gp = float(dadger.gp.data[0])
-    _LOG.warning(
-        "the deck's GP gap criterion (%g, canonical %g R$) has no solver "
-        "counterpart yet; emitting the NI iteration backstop (%d) only — "
-        "the absolute-gap rule lands with the enumeration work",
+    _LOG.info(
+        "emitting the deck's GP=%g as a relative Gap stopping rule "
+        "(relative_tolerance, DECOMP's Zsup/Zinf-1 <= GP convergence); cobre "
+        "auto-injects a BoundStalling companion, with the NI=%d iteration backstop",
         gp,
-        gp * 1000.0,
         ni,
     )
 
@@ -93,19 +93,20 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
         "state_space": {"inflow_lag_depth": _INFLOW_LAG_DEPTH},
         "training": {
             "selection": {"method": "enumerated"},
-            "stopping_rules": [{"type": "iteration_limit", "limit": ni}],
+            "stopping_rules": [
+                {"type": "gap", "relative_tolerance": gp},
+                {"type": "iteration_limit", "limit": ni},
+            ],
+            # Under the node-native explicit tree every stochastic class is
+            # external: inflow (the tree), NCS (renewables), and load. cobre's
+            # scheme-aware load membership admits an external load class
+            # regardless of σ (a deterministic std = 0 load standardizes to
+            # eta = 0), so load is external here rather than the former
+            # in-sample-with-null-std workaround.
             "scenario_source": {
                 "seed": seed,
                 "inflow": {"scheme": "external"},
-                # A node-native external-column graph requires every *non-empty*
-                # stochastic class to be external. A DECOMP deck's NCS
-                # (renewables) are non-empty in the canonical (unfiltered) noise
-                # order, so NCS must be external. Load is fully deterministic
-                # (std = 0), so cobre's canonical load order — filtered to
-                # std > 0 buses — is empty: load is a zero-entity class, exempt
-                # from the rule, and stays in-sample (an external load library
-                # would have zero width). (A deck with zero NCS is out of scope;
-                # every real DECOMP deck carries renewables.)
+                "load": {"scheme": "external"},
                 "ncs": {"scheme": "external"},
             },
         },

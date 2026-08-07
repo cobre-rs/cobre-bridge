@@ -36,15 +36,20 @@ class TestConvertConfigStateSpace:
     def test_convert_config_training_enumerated_simulation_sampled(self) -> None:
         result = convert_config(_Dadger(), n_terminal_scenarios=259)  # type: ignore[arg-type]
 
-        # Training enumerates the explicit trunk-plus-fan node graph; NCS is
-        # external (32 canonical entities), inflow external, load stays
-        # in-sample (deterministic, zero-entity, exempt).
+        # Training enumerates the explicit trunk-plus-fan node graph; every
+        # stochastic class is external — inflow (the tree), load, and NCS.
+        # cobre's scheme-aware load membership admits a deterministic (std = 0)
+        # external load class (it standardizes to eta = 0).
         expected_training = {
             "selection": {"method": "enumerated"},
-            "stopping_rules": [{"type": "iteration_limit", "limit": 250}],
+            "stopping_rules": [
+                {"type": "gap", "relative_tolerance": 0.5},
+                {"type": "iteration_limit", "limit": 250},
+            ],
             "scenario_source": {
                 "seed": 20260718,
                 "inflow": {"scheme": "external"},
+                "load": {"scheme": "external"},
                 "ncs": {"scheme": "external"},
             },
         }

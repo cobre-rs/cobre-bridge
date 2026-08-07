@@ -165,6 +165,7 @@ _EXPECTED_ARTIFACTS = [
     "scenarios/inflow_seasonal_stats.parquet",
     "scenarios/external_inflow_scenarios.parquet",
     "scenarios/external_ncs_scenarios.parquet",
+    "scenarios/external_load_scenarios.parquet",
     "scenarios/load_seasonal_stats.parquet",
     "scenarios/load_factors.json",
     "scenarios/non_controllable_stats.parquet",
@@ -212,13 +213,14 @@ class TestPipeline:
             "num_scenarios": 353,
         }
         assert config["training"]["stopping_rules"] == [
-            {"type": "iteration_limit", "limit": 500}
+            {"type": "gap", "relative_tolerance": 0.001},
+            {"type": "iteration_limit", "limit": 500},
         ]
         source = config["training"]["scenario_source"]
         assert source["inflow"]["scheme"] == "external"
-        # NCS externalized (node-native rule); load stays in-sample (exempt).
+        # Every stochastic class is external: inflow (the tree), load, NCS.
         assert source["ncs"]["scheme"] == "external"
-        assert "load" not in source
+        assert source["load"]["scheme"] == "external"
         assert source["seed"] == 20260718
 
         buses = json.loads((dst / "system" / "buses.json").read_text())["buses"]
@@ -237,7 +239,15 @@ class TestPipeline:
             ]
         )
         assert ext_ncs.num_rows == n_ncs * (1 + 1 + 353)
-        assert not (dst / "scenarios" / "external_load_scenarios.parquet").exists()
+        # External load library: 6 buses × (trunk col + trunk col + 353 fan).
+        ext_load = pq.read_table(dst / "scenarios" / "external_load_scenarios.parquet")
+        assert set(ext_load.column_names) == {
+            "stage_id",
+            "scenario_id",
+            "bus_id",
+            "value_mw",
+        }
+        assert ext_load.num_rows == len(buses) * (1 + 1 + 353)
 
         with pytest.raises(FileExistsError, match="force"):
             convert_decomp_case(_RV3_DECK, dst)
