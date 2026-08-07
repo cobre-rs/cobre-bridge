@@ -38,3 +38,4 @@ example/
 
 plans/
 CLAUDE.md.tmp
+.mypy_cache/

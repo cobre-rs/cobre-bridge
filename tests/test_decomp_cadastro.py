@@ -136,7 +136,7 @@ def test_read_scalar_overrides_in_horizon_row_resolves_to_stage(
     dadger = _FakeDadger(
         {
             ACVOLMAX: _ac_frame(
-                codigo_usina=1, volume=250.0, mes=8, semana=None, ano=2026
+                codigo_usina=1, volume=250.0, mes="AGO", semana=None, ano=2026.0
             ),
             ACVOLMIN: None,
         }
@@ -152,7 +152,11 @@ def test_read_scalar_overrides_blank_date_is_permanent_stage_zero(
     dadger = _FakeDadger(
         {
             ACVOLMIN: _ac_frame(
-                codigo_usina=1, volume=30.0, mes=None, semana=None, ano=None
+                codigo_usina=1,
+                volume=30.0,
+                mes="",
+                semana=float("nan"),
+                ano=float("nan"),
             ),
             ACVOLMAX: None,
         }
@@ -162,13 +166,39 @@ def test_read_scalar_overrides_blank_date_is_permanent_stage_zero(
     assert out_of_horizon == []
 
 
+def test_read_scalar_overrides_real_representation_resolves_both_specs(
+    scalar_calendar: list[OperativeStage],
+) -> None:
+    """The real deck shape: a string-month row and an empty-string blank row."""
+    dadger = _FakeDadger(
+        {
+            ACVOLMAX: _ac_frame(
+                codigo_usina=1, volume=250.0, mes="AGO", semana=1.0, ano=2026.0
+            ),
+            ACVOLMIN: _ac_frame(
+                codigo_usina=1,
+                volume=30.0,
+                mes="",
+                semana=float("nan"),
+                ano=float("nan"),
+            ),
+        }
+    )
+    records, out_of_horizon = _read_scalar_overrides(dadger, scalar_calendar)
+    assert records == {
+        (1, "volume_maximo"): [(2, 250.0)],
+        (1, "volume_minimo"): [(0, 30.0)],
+    }
+    assert out_of_horizon == []
+
+
 def test_read_scalar_overrides_past_horizon_is_reported_not_dropped(
     scalar_calendar: list[OperativeStage],
 ) -> None:
     dadger = _FakeDadger(
         {
             ACVOLMAX: _ac_frame(
-                codigo_usina=1, volume=999.0, mes=10, semana=None, ano=2026
+                codigo_usina=1, volume=999.0, mes="OUT", semana=None, ano=2026.0
             ),
             ACVOLMIN: None,
         }
@@ -194,10 +224,14 @@ def resolved_case(
     dadger = _FakeDadger(
         {
             ACVOLMAX: _ac_frame(
-                codigo_usina=1, volume=250.0, mes=8, semana=None, ano=2026
+                codigo_usina=1, volume=250.0, mes="AGO", semana=None, ano=2026.0
             ),
             ACVOLMIN: _ac_frame(
-                codigo_usina=1, volume=30.0, mes=None, semana=None, ano=None
+                codigo_usina=1,
+                volume=30.0,
+                mes="",
+                semana=float("nan"),
+                ano=float("nan"),
             ),
         }
     )
@@ -237,7 +271,7 @@ def test_build_effective_cadastro_unknown_plant_code_raises_value_error(
     dadger = _FakeDadger(
         {
             ACVOLMAX: _ac_frame(
-                codigo_usina=999, volume=250.0, mes=8, semana=None, ano=2026
+                codigo_usina=999, volume=250.0, mes="AGO", semana=None, ano=2026.0
             ),
             ACVOLMIN: None,
         }

@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.hydro import (
     convert_energy_productivity,
     convert_hydros,
@@ -34,50 +35,96 @@ def _calendar():
     return build_operative_calendar(date(2026, 7, 18), hours)
 
 
-def _hidr_frame() -> pd.DataFrame:
-    def plant(
-        name: str,
-        sub: int,
-        jusante: int,
-        vmin: float,
-        vmax: float,
-        cota: float = 100.0,
-        cf: float = 20.0,
-    ) -> dict:
-        return {
-            "nome_usina": name,
-            "submercado": sub,
-            "codigo_usina_jusante": jusante,
-            "volume_minimo": vmin,
-            "volume_maximo": vmax,
-            "numero_conjuntos_maquinas": 1,
-            "maquinas_conjunto_1": 2,
-            "vazao_nominal_conjunto_1": 100.0,
-            "potencia_nominal_conjunto_1": 50.0,
-            "teif": 0.0,
-            "ip": 0.0,
-            "a0_volume_cota": cota,
-            "a1_volume_cota": 0.0,
-            "a2_volume_cota": 0.0,
-            "a3_volume_cota": 0.0,
-            "a4_volume_cota": 0.0,
-            "canal_fuga_medio": cf,
-            "produtibilidade_especifica": 0.009,
-            "tipo_perda": 0,
-            "perdas": 0.0,
-        }
+def _plant_row(
+    name: str,
+    sub: int,
+    jusante: int,
+    vmin: float,
+    vmax: float,
+    cota: float = 100.0,
+    cf: float = 20.0,
+) -> dict:
+    return {
+        "nome_usina": name,
+        "submercado": sub,
+        "codigo_usina_jusante": jusante,
+        "volume_minimo": vmin,
+        "volume_maximo": vmax,
+        "numero_conjuntos_maquinas": 1,
+        "maquinas_conjunto_1": 2,
+        "vazao_nominal_conjunto_1": 100.0,
+        "potencia_nominal_conjunto_1": 50.0,
+        "teif": 0.0,
+        "ip": 0.0,
+        "a0_volume_cota": cota,
+        "a1_volume_cota": 0.0,
+        "a2_volume_cota": 0.0,
+        "a3_volume_cota": 0.0,
+        "a4_volume_cota": 0.0,
+        "canal_fuga_medio": cf,
+        "produtibilidade_especifica": 0.009,
+        "tipo_perda": 0,
+        "perdas": 0.0,
+    }
 
+
+def _hidr_frame() -> pd.DataFrame:
     df = pd.DataFrame(
         {
-            1: plant("UP_RES", 1, 3, 100.0, 500.0),
+            1: _plant_row("UP_RES", 1, 3, 100.0, 500.0),
             # Plant 3 exists in the registry but is not operated (skipped through).
-            3: plant("SKIPPED", 1, 2, 0.0, 0.0),
-            2: plant("MID_RES", 2, 0, 50.0, 250.0),
-            5: plant("LEAF", 4, 0, 10.0, 10.0),
+            3: _plant_row("SKIPPED", 1, 2, 0.0, 0.0),
+            2: _plant_row("MID_RES", 2, 0, 50.0, 250.0),
+            5: _plant_row("LEAF", 4, 0, 10.0, 10.0),
         }
     ).T
     df.index.name = "codigo_usina"
     return df
+
+
+def _no_override_effective(hidr: pd.DataFrame, n_stages: int = 1) -> EffectiveCadastro:
+    """Empty-override view of *hidr*: falls through to the base scalar at
+    every stage (outer envelope == base, stage-0 == base) — the ticket-007
+    regression fixture: reservoir/initial-storage output must be
+    byte-identical to the pre-layer base-registry reads.
+    """
+    return EffectiveCadastro(base=hidr, n_stages=n_stages, stage_varying={})
+
+
+def _temporal_hidr_frame() -> pd.DataFrame:
+    """Single plant, code 1: base ``volume_minimo``/``volume_maximo`` 20.0/100.0."""
+    df = pd.DataFrame({1: _plant_row("TEMPORAL", 1, 0, 20.0, 100.0)}).T
+    df.index.name = "codigo_usina"
+    return df
+
+
+def _temporal_uh_frame(volume_inicial: float) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "codigo_usina": 1,
+                "volume_inicial": volume_inicial,
+                "vazao_defluente_minima": None,
+                "volume_morto_inicial": None,
+            }
+        ]
+    )
+
+
+_TEMPORAL_ID_MAP = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
+
+
+def _raised_envelope_effective() -> EffectiveCadastro:
+    """Plant 1: flat ``volume_minimo`` 20.0; ``volume_maximo`` raised to
+    250.0 at stage 2 (mirrors the storage-bounds emitter's own fixture,
+    ticket-006) — the outer envelope is ``(20.0, 250.0)``, wider than the
+    stage-0 ``(20.0, 100.0)`` used for the initial-storage % clamp.
+    """
+    return EffectiveCadastro(
+        base=_temporal_hidr_frame(),
+        n_stages=3,
+        stage_varying={(1, "volume_maximo"): (100.0, 100.0, 250.0)},
+    )
 
 
 class _StubDadger:
@@ -140,9 +187,14 @@ def _uh_frame() -> pd.DataFrame:
 
 class TestConvertHydros:
     def test_registry_entries_and_cascade_skip(self, caplog) -> None:
+        hidr = _hidr_frame()
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
             doc = convert_hydros(
-                _StubDadger(uh=_uh_frame()), _hidr_frame(), _ID_MAP, date(2026, 7, 18)
+                _StubDadger(uh=_uh_frame()),
+                hidr,
+                _ID_MAP,
+                date(2026, 7, 18),
+                _no_override_effective(hidr),
             )
         hydros = doc["hydros"]
         assert [h["id"] for h in hydros] == [0, 1, 2]
@@ -169,9 +221,14 @@ class TestConvertHydros:
     def test_unit_groups_present_and_mirror_generation(self, caplog) -> None:
         """Every hydro carries exactly one mirror unit group (cobre rule 41)
         and no top-level ``bus_id`` (removed field)."""
+        hidr = _hidr_frame()
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
             doc = convert_hydros(
-                _StubDadger(uh=_uh_frame()), _hidr_frame(), _ID_MAP, date(2026, 7, 18)
+                _StubDadger(uh=_uh_frame()),
+                hidr,
+                _ID_MAP,
+                date(2026, 7, 18),
+                _no_override_effective(hidr),
             )
         for h in doc["hydros"]:
             assert "bus_id" not in h
@@ -193,8 +250,9 @@ class TestConvertHydros:
             assert group["max_turbined_m3s"] == pytest.approx(gen["max_turbined_m3s"])
 
     def test_initial_storage_formula(self) -> None:
+        hidr = _hidr_frame()
         storage = convert_initial_storage(
-            _StubDadger(uh=_uh_frame()), _hidr_frame(), _ID_MAP
+            _StubDadger(uh=_uh_frame()), hidr, _ID_MAP, _no_override_effective(hidr)
         )
         by_id = {e["hydro_id"]: e["value_hm3"] for e in storage}
         assert by_id[0] == pytest.approx(100.0 + 0.5 * 400.0)
@@ -216,6 +274,63 @@ class TestConvertHydros:
         assert all(
             m["stage_ranges"][0]["model"] == "constant_productivity" for m in models
         )
+
+
+class TestEffectiveCadastroSourcing:
+    """ticket-007: the entity ``reservoir`` block and the initial-storage
+    start volume are re-sourced off the per-stage-effective cadastro layer.
+    """
+
+    def test_no_override_matches_the_pre_layer_base_registry_reads(self) -> None:
+        """An ``EffectiveCadastro`` with no stage-varying volumes reduces to
+        the base registry scalars everywhere, so the reservoir block and the
+        initial storage volume equal the pre-ticket base-registry reads."""
+        hidr = _temporal_hidr_frame()
+        effective = _no_override_effective(hidr)
+        uh = _temporal_uh_frame(volume_inicial=50.0)
+
+        doc = convert_hydros(
+            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, date(2026, 7, 18), effective
+        )
+        assert doc["hydros"][0]["reservoir"] == {
+            "min_storage_hm3": 20.0,
+            "max_storage_hm3": 100.0,
+        }
+
+        storage = convert_initial_storage(
+            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, effective
+        )
+        assert storage[0]["value_hm3"] == pytest.approx(20.0 + 0.5 * (100.0 - 20.0))
+
+    def test_reservoir_block_is_the_outer_envelope_not_the_stage_zero_value(
+        self,
+    ) -> None:
+        """A temporal ``VOLMAX`` raise widens the entity ``reservoir`` block
+        to the outer envelope, so per-stage bound rows (ticket-006) always
+        sit inside it."""
+        effective = _raised_envelope_effective()
+        hidr = _temporal_hidr_frame()
+        uh = _temporal_uh_frame(volume_inicial=50.0)
+
+        doc = convert_hydros(
+            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, date(2026, 7, 18), effective
+        )
+        reservoir = doc["hydros"][0]["reservoir"]
+        assert reservoir["max_storage_hm3"] == 250.0
+        assert reservoir["min_storage_hm3"] == 20.0
+
+    def test_initial_storage_uses_stage_zero_not_the_raised_envelope(self) -> None:
+        """``volume_inicial`` is a percentage of the *initial stage's*
+        useful volume — a later-stage ``VOLMAX`` raise must not leak into the
+        start volume."""
+        effective = _raised_envelope_effective()
+        hidr = _temporal_hidr_frame()
+        uh = _temporal_uh_frame(volume_inicial=50.0)
+
+        storage = convert_initial_storage(
+            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, effective
+        )
+        assert storage[0]["value_hm3"] == pytest.approx(60.0)
 
 
 def _ct_frame() -> pd.DataFrame:
@@ -307,11 +422,16 @@ class TestRealDecks:
         id_map = DecompIdMap.from_dadger(dadger)
         calendar = operative_calendar_from_dadger(dadger)
         hidr = read_hidr(_RV3_DECK / "hidr.dat")
+        # This smoke test exercises the registry/cascade/capability
+        # conversion, not the AC-override resolution layer (ticket-004/006's
+        # own territory) — an empty-override view falls straight through to
+        # the base registry, matching this test's pre-existing assertions.
+        effective = _no_override_effective(hidr, n_stages=len(calendar))
 
         assert len(id_map.hydro_codes) > 150
         assert len(id_map.thermal_codes) == 97
 
-        doc = convert_hydros(dadger, hidr, id_map, calendar[0].start_date)
+        doc = convert_hydros(dadger, hidr, id_map, calendar[0].start_date, effective)
         hydros = doc["hydros"]
         assert len(hydros) == len(id_map.hydro_codes)
         itaipu = next(h for h in hydros if h["name"] == "ITAIPU")
@@ -327,7 +447,7 @@ class TestRealDecks:
             assert group["max_turbined_m3s"] == pytest.approx(6620.0)
         assert itaipu["downstream_id"] is None
 
-        storage = convert_initial_storage(dadger, hidr, id_map)
+        storage = convert_initial_storage(dadger, hidr, id_map, effective)
         assert len(storage) == len(id_map.hydro_codes)
         for entry, hydro in zip(storage, hydros, strict=True):
             reservoir = hydro["reservoir"]

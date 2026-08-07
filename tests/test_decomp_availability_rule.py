@@ -28,6 +28,7 @@ import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.decomp_readers import read_dec_oper_usih
+from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.group_bounds import convert_hydro_unit_group_bounds
 from cobre_bridge.decomp.hydro import (
     convert_energy_productivity,
@@ -312,7 +313,13 @@ class TestConverterEmitsAvailability:
             dadger
         )
 
-        doc = convert_hydros(dadger, hidr, id_map, calendar[0].start_date)
+        doc = convert_hydros(
+            dadger,
+            hidr,
+            id_map,
+            calendar[0].start_date,
+            EffectiveCadastro(base=hidr, n_stages=len(calendar), stage_varying={}),
+        )
         hydros_by_id = {h["id"]: h for h in doc["hydros"]}
         assert len(hydros_by_id) == len(id_map.hydro_codes)
 
@@ -510,7 +517,13 @@ class TestConverterEmitsAvailability:
         validate`` pass, recorded in ``epic-08/learnings.md``, covers the
         rest)."""
         dadger, hidr, id_map, calendar = _load_deck()
-        doc = convert_hydros(dadger, hidr, id_map, calendar[0].start_date)
+        doc = convert_hydros(
+            dadger,
+            hidr,
+            id_map,
+            calendar[0].start_date,
+            EffectiveCadastro(base=hidr, n_stages=len(calendar), stage_varying={}),
+        )
         values, _ = convert_hydro_group_availability(dadger, hidr, id_map, calendar)
         group_bounds = convert_hydro_unit_group_bounds(values, calendar)
 
@@ -586,7 +599,13 @@ class TestItaipuSplitGroups:
         construction (7000+7000 == 14000, 6620+6620 == 13240).
         """
         dadger, hidr, id_map, calendar = _load_deck()
-        doc = convert_hydros(dadger, hidr, id_map, calendar[0].start_date)
+        doc = convert_hydros(
+            dadger,
+            hidr,
+            id_map,
+            calendar[0].start_date,
+            EffectiveCadastro(base=hidr, n_stages=len(calendar), stage_varying={}),
+        )
         hydro_id = id_map.hydro_id(_SPLIT_PLANT)
         itaipu = next(h for h in doc["hydros"] if h["id"] == hydro_id)
         assert itaipu["name"] == "ITAIPU"
@@ -742,7 +761,13 @@ class TestItaipuSplitGroups:
         groups and overlay — every emitted value sits at or below
         ρ_eq x 6620 (~6810.80), itself below each group's declared 7000."""
         dadger, hidr, id_map, calendar = _load_deck()
-        doc = convert_hydros(dadger, hidr, id_map, calendar[0].start_date)
+        doc = convert_hydros(
+            dadger,
+            hidr,
+            id_map,
+            calendar[0].start_date,
+            EffectiveCadastro(base=hidr, n_stages=len(calendar), stage_varying={}),
+        )
         values, _ = convert_hydro_group_availability(dadger, hidr, id_map, calendar)
         group_bounds = convert_hydro_unit_group_bounds(values, calendar)
 

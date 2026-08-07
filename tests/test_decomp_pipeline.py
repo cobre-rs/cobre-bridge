@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
 
 from cobre_bridge.cli import app
+from cobre_bridge.decomp.bounds import _HYDRO_BOUNDS_SCHEMA
 from cobre_bridge.decomp.id_map import DecompIdMap
+from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
 from cobre_bridge.decomp.scenarios import (
     convert_external_inflows,
     convert_inflow_stats_identity,
@@ -22,6 +26,7 @@ from cobre_bridge.decomp.scenarios import (
     terminal_fan_probabilities,
 )
 from cobre_bridge.decomp.temporal import build_operative_calendar
+from cobre_bridge.decomp.thermal import _THERMAL_BOUNDS_SCHEMA
 
 _RV3_DECK = Path("example/decomp-jul-26-rv3")
 
@@ -93,8 +98,6 @@ class TestScenarioEmitters:
         assert set(stats["std_m3s"]) == {1.0}
 
     def test_deterministic_external_scenarios_replicate_across_columns(self) -> None:
-        import pyarrow as pa
-
         stats = pa.table(
             {
                 "ncs_id": pa.array([0, 0, 1, 1], type=pa.int32()),
@@ -299,8 +302,6 @@ class TestEmissionCheckWiring:
         verdict via ``cli._convert_status`` — the single function both
         pipelines' convert verdicts key off (AC #3), not a bare inspection of
         the diagnostic."""
-        import pyarrow as pa
-
         from cobre_bridge import diagnostics as dx
         from cobre_bridge.cli import _convert_status
         from cobre_bridge.emission_checks import check_hydro_bounds_no_raising
@@ -513,3 +514,323 @@ class TestCli:
                 app, ["convert", "decomp", str(tmp_path), str(tmp_path / "out")]
             )
         assert result.exit_code == 1
+
+
+# ticket-008 (epic-02, cadastro overrides): a fully synthetic Tier-1 harness
+# for ``convert_decomp_case`` — no real deck under ``example/``. Every
+# converter the pipeline calls other than the five this ticket wires
+# (``build_effective_cadastro``, ``convert_initial_storage``,
+# ``convert_hydros``, ``convert_hydro_bounds``, ``convert_storage_bounds``)
+# is patched to a canned return value, so the test exercises only this
+# ticket's own orchestration: threading the effective cadastro through,
+# combining ``hydro_bounds`` with the storage-bounds overlay, and the
+# resolution-report summary diagnostic.
+
+
+def _cadastro_plant_row(
+    name: str, sub: int, jusante: int, vmin: float, vmax: float
+) -> dict:
+    return {
+        "nome_usina": name,
+        "submercado": sub,
+        "codigo_usina_jusante": jusante,
+        "volume_minimo": vmin,
+        "volume_maximo": vmax,
+        "numero_conjuntos_maquinas": 1,
+        "maquinas_conjunto_1": 2,
+        "vazao_nominal_conjunto_1": 100.0,
+        "potencia_nominal_conjunto_1": 50.0,
+        "teif": 0.0,
+        "ip": 0.0,
+        "a0_volume_cota": 100.0,
+        "a1_volume_cota": 0.0,
+        "a2_volume_cota": 0.0,
+        "a3_volume_cota": 0.0,
+        "a4_volume_cota": 0.0,
+        "canal_fuga_medio": 20.0,
+        "produtibilidade_especifica": 0.009,
+        "tipo_perda": 0,
+        "perdas": 0.0,
+    }
+
+
+def _cadastro_hidr_frame() -> pd.DataFrame:
+    """Two plants, codes 1 and 2, both on bus (submercado) 1, no cascade."""
+    df = pd.DataFrame(
+        {
+            1: _cadastro_plant_row("PLANT_ONE", 1, 0, 20.0, 100.0),
+            2: _cadastro_plant_row("PLANT_TWO", 1, 0, 10.0, 50.0),
+        }
+    ).T
+    df.index.name = "codigo_usina"
+    return df
+
+
+def _cadastro_uh_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "codigo_usina": 1,
+                "volume_inicial": 50.0,
+                "vazao_defluente_minima": None,
+                "volume_morto_inicial": None,
+            },
+            {
+                "codigo_usina": 2,
+                "volume_inicial": 50.0,
+                "vazao_defluente_minima": None,
+                "volume_morto_inicial": None,
+            },
+        ]
+    )
+
+
+_CADASTRO_ID_MAP = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1, 2))
+
+
+class _CadastroDadger:
+    """Mock ``Dadger`` covering only what the real consumers below need:
+    ``.tx.taxa`` (the discount rate), ``.uh(df=True)`` (the operated
+    registrations both ``convert_hydros``/``convert_initial_storage`` read),
+    and ``.ac(...)`` — returning *ac_volmax_frame* for the ``ACVOLMAX``
+    subtype (the real idecomp representation: string month abbreviation,
+    float ``semana``/``ano``) and ``None`` (no override) for every other
+    ``AC`` subtype, including ``ACVOLMIN`` and the four machine-configuration
+    overrides ``convert_hydros`` also probes.
+    """
+
+    class _Tx:
+        taxa = 12.0
+
+    def __init__(self, ac_volmax_frame: pd.DataFrame | None) -> None:
+        self.tx = self._Tx()
+        self._uh = _cadastro_uh_frame()
+        self._ac_volmax_frame = ac_volmax_frame
+
+    def uh(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
+        return self._uh
+
+    def ac(
+        self,
+        codigo_usina: int | None = None,  # noqa: ARG002
+        modificacao: type | None = None,
+        df: bool = False,  # noqa: ARG002
+    ) -> pd.DataFrame | None:
+        from idecomp.decomp.modelos.dadger import ACVOLMAX
+
+        if modificacao is ACVOLMAX:
+            return self._ac_volmax_frame
+        return None
+
+
+def _run_cadastro_pipeline(
+    tmp_path: Path, ac_volmax_frame: pd.DataFrame | None
+) -> Path:
+    """Run ``convert_decomp_case`` against the fully synthetic mock deck
+    above, patching every converter this ticket does not wire to a canned
+    return value. Returns the case directory.
+    """
+    from cobre_bridge.decomp.pipeline import DecompFiles, convert_decomp_case
+
+    files = DecompFiles(
+        revision="rv0",
+        dadger=Path("unused/dadger.rv0"),
+        vazoes=Path("unused/vazoes.rv0"),
+        hidr=Path("unused/hidr.dat"),
+        dadgnl=None,
+        renovaveis=None,
+    )
+    dadger = _CadastroDadger(ac_volmax_frame)
+    hidr = _cadastro_hidr_frame()
+    calendar = _calendar()
+
+    productivity_table = pa.table(
+        {"equivalent_productivity_mw_per_m3s": pa.array([0.5, 0.6], type=pa.float64())}
+    )
+    load_stats_table = pa.table(
+        {
+            "bus_id": pa.array([0, 0, 0], type=pa.int32()),
+            "stage_id": pa.array([0, 1, 2], type=pa.int32()),
+            "mean_mw": pa.array([10.0, 10.0, 10.0], type=pa.float64()),
+        }
+    )
+    ncs_stats_table = pa.table(
+        {
+            "ncs_id": pa.array([0, 0, 0], type=pa.int32()),
+            "stage_id": pa.array([0, 1, 2], type=pa.int32()),
+            "mean": pa.array([5.0, 5.0, 5.0], type=pa.float64()),
+        }
+    )
+    external_inflow_table = pa.table(
+        {
+            "hydro_id": pa.array([], type=pa.int32()),
+            "stage_id": pa.array([], type=pa.int32()),
+            "scenario_id": pa.array([], type=pa.int32()),
+            "value_m3s": pa.array([], type=pa.float64()),
+        }
+    )
+    # The pre-ticket-008 baseline hydro_bounds: one RQ/UH-derived min-outflow
+    # row, no storage columns populated — this ticket's own combine logic
+    # (concat + sort with the real convert_storage_bounds output) is what is
+    # under test, not convert_hydro_bounds' own RQ/UH logic (out of scope).
+    baseline_hydro_bounds = pa.table(
+        {
+            "hydro_id": pa.array([0], type=pa.int32()),
+            "stage_id": pa.array([0], type=pa.int32()),
+            "block_id": pa.array([None], type=pa.int32()),
+            "min_outflow_m3s": pa.array([5.0], type=pa.float64()),
+            "min_storage_hm3": pa.array([None], type=pa.float64()),
+            "max_storage_hm3": pa.array([None], type=pa.float64()),
+        },
+        schema=_HYDRO_BOUNDS_SCHEMA,
+    )
+
+    patches: dict[str, object] = {
+        "cobre_bridge.decomp.pipeline.discover_decomp_files": files,
+        "cobre_bridge.decomp.pipeline.Dadger.read": dadger,
+        "cobre_bridge.decomp.pipeline.Vazoes.read": object(),
+        "cobre_bridge.decomp.pipeline.hydro_conv.read_hidr": hidr,
+        "cobre_bridge.decomp.pipeline.DecompIdMap.from_dadger": _CADASTRO_ID_MAP,
+        "cobre_bridge.decomp.pipeline"
+        ".temporal_conv.operative_calendar_from_dadger": calendar,
+        "cobre_bridge.decomp.pipeline.scenarios_conv.terminal_fan_probabilities": [1.0],
+        "cobre_bridge.decomp.pipeline.config_conv.convert_config": {},
+        "cobre_bridge.decomp.pipeline.network_conv._bus_deficit_costs": {},
+        "cobre_bridge.decomp.pipeline"
+        ".hydro_conv.convert_energy_productivity": productivity_table,
+        "cobre_bridge.decomp.pipeline.network_conv.convert_buses": {"buses": []},
+        "cobre_bridge.decomp.pipeline.network_conv.convert_lines": (
+            {"lines": []},
+            _LINE_BOUNDS_SCHEMA.empty_table(),
+        ),
+        "cobre_bridge.decomp.pipeline.network_conv.convert_pumping_stations": {
+            "pumping_stations": []
+        },
+        "cobre_bridge.decomp.pipeline.thermal_conv.convert_thermals": {"thermals": []},
+        "cobre_bridge.decomp.pipeline.ncs_conv.convert_non_controllable_sources": {
+            "non_controllable_sources": []
+        },
+        "cobre_bridge.decomp.pipeline"
+        ".scenarios_conv.convert_external_inflows": external_inflow_table,
+        "cobre_bridge.decomp.pipeline.load_conv.convert_load_stats": load_stats_table,
+        "cobre_bridge.decomp.pipeline.load_conv.convert_load_factors": {},
+        "cobre_bridge.decomp.pipeline.ncs_conv.convert_ncs_stats": ncs_stats_table,
+        "cobre_bridge.decomp.pipeline.ncs_conv.convert_ncs_factors": {},
+        "cobre_bridge.decomp.pipeline"
+        ".thermal_conv.convert_thermal_bounds": _THERMAL_BOUNDS_SCHEMA.empty_table(),
+        "cobre_bridge.decomp.pipeline"
+        ".bounds_conv.convert_hydro_bounds": baseline_hydro_bounds,
+        "cobre_bridge.decomp.pipeline.hydro_conv.convert_hydro_group_availability": (
+            {},
+            [],
+        ),
+        "cobre_bridge.decomp.pipeline.contracts_conv.read_contracts": [],
+    }
+    with ExitStack() as stack:
+        for target, value in patches.items():
+            stack.enter_context(patch(target, return_value=value))
+        dst = tmp_path / "case"
+        convert_decomp_case(Path("unused-src"), dst)
+    return dst
+
+
+class TestCadastroPipelineWiring:
+    """ticket-008: ``build_effective_cadastro`` threads into
+    ``convert_decomp_case`` and the storage-bounds overlay folds into the
+    same ``hydro_bounds.parquet`` the RQ/UH minimum-outflow rows populate."""
+
+    def test_no_override_regresses_hydro_bounds_and_entity_output(
+        self, tmp_path: Path
+    ) -> None:
+        """No ``AC`` volume record: the combined table equals the pre-ticket
+        baseline (no storage rows), and ``initial_conditions.json`` /
+        ``system/hydros.json`` reflect the base registry values unchanged."""
+        dst = _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
+
+        table = pq.read_table(dst / "constraints" / "hydro_bounds.parquet")
+        assert table.num_rows == 1
+        assert table["min_outflow_m3s"].to_pylist() == [5.0]
+        assert table["min_storage_hm3"].to_pylist() == [None]
+        assert table["max_storage_hm3"].to_pylist() == [None]
+
+        hydros = json.loads((dst / "system" / "hydros.json").read_text())["hydros"]
+        reservoirs = {h["id"]: h["reservoir"] for h in hydros}
+        assert reservoirs[0] == {"min_storage_hm3": 20.0, "max_storage_hm3": 100.0}
+        assert reservoirs[1] == {"min_storage_hm3": 10.0, "max_storage_hm3": 50.0}
+
+        storage = json.loads((dst / "initial_conditions.json").read_text())["storage"]
+        values = {row["hydro_id"]: row["value_hm3"] for row in storage}
+        # 50% of the base [20, 100] / [10, 50] ranges.
+        assert values[0] == pytest.approx(60.0)
+        assert values[1] == pytest.approx(30.0)
+
+    def test_temporal_override_adds_storage_rows_and_raises_the_entity_envelope(
+        self, tmp_path: Path
+    ) -> None:
+        """An ``ACVOLMAX`` row raising plant 1's ``volume_maximo`` to 250.0
+        from the final stage forward widens its entity envelope to 250.0
+        (``system/hydros.json``) and adds override rows to the combined
+        ``hydro_bounds`` table. Per Rule A (ticket-006, ``storage_envelope``):
+        the raised (final) stage itself now *equals* the widened envelope and
+        needs no override row; the earlier stages, which still sit at the
+        narrower pre-raise ceiling, are what differ from it and get the
+        override rows — non-null ``max_storage_hm3``, null ``min_outflow_m3s``.
+        """
+        ac_volmax_frame = pd.DataFrame(
+            [
+                {
+                    "codigo_usina": 1,
+                    "volume": 250.0,
+                    "mes": "AGO",
+                    "semana": 0.0,
+                    "ano": 2026.0,
+                }
+            ]
+        )
+        dst = _run_cadastro_pipeline(tmp_path, ac_volmax_frame=ac_volmax_frame)
+
+        table = pq.read_table(dst / "constraints" / "hydro_bounds.parquet")
+        storage_rows = table.to_pylist()
+        storage_only = [
+            row
+            for row in storage_rows
+            if row["max_storage_hm3"] is not None and row["min_outflow_m3s"] is None
+        ]
+        assert len(storage_only) >= 1
+        assert all(row["max_storage_hm3"] == 100.0 for row in storage_only)
+        # The pre-ticket-008 baseline row (min_outflow, no storage columns)
+        # is still present, untouched by the combine.
+        outflow_only = [row for row in storage_rows if row["min_outflow_m3s"] == 5.0]
+        assert len(outflow_only) == 1
+
+        hydros = json.loads((dst / "system" / "hydros.json").read_text())["hydros"]
+        reservoirs = {h["id"]: h["reservoir"] for h in hydros}
+        assert reservoirs[0]["max_storage_hm3"] == pytest.approx(250.0)
+
+    def test_temporal_override_emits_exactly_one_summary_diagnostic(
+        self, tmp_path: Path
+    ) -> None:
+        """The resolution-report summary is a single INFO diagnostic naming
+        ``volume_maximo`` among the applied overrides."""
+        from cobre_bridge import diagnostics as dx
+
+        ac_volmax_frame = pd.DataFrame(
+            [
+                {
+                    "codigo_usina": 1,
+                    "volume": 250.0,
+                    "mes": "AGO",
+                    "semana": 0.0,
+                    "ano": 2026.0,
+                }
+            ]
+        )
+        with dx.collect() as collected:
+            _run_cadastro_pipeline(tmp_path, ac_volmax_frame=ac_volmax_frame)
+
+        cadastro_diagnostics = [
+            d for d in collected if d.code == "cadastro-volume-overrides-applied"
+        ]
+        assert len(cadastro_diagnostics) == 1
+        assert cadastro_diagnostics[0].severity is dx.Severity.INFO
+        assert "volume_maximo" in cadastro_diagnostics[0].summary

@@ -25,6 +25,8 @@ def test_hydro_bounds_index_columns_precede_values() -> None:
         "stage_id",
         "block_id",
         "min_outflow_m3s",
+        "min_storage_hm3",
+        "max_storage_hm3",
     ]
 
 

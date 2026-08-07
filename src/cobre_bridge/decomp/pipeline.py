@@ -23,6 +23,7 @@ from idecomp.decomp import Dadger, Vazoes
 from cobre_bridge import diagnostics as dx
 from cobre_bridge import emission_checks
 from cobre_bridge.decomp import bounds as bounds_conv
+from cobre_bridge.decomp import cadastro as cadastro_conv
 from cobre_bridge.decomp import config as config_conv
 from cobre_bridge.decomp import contracts as contracts_conv
 from cobre_bridge.decomp import group_bounds as group_bounds_conv
@@ -161,6 +162,35 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
 
     id_map = DecompIdMap.from_dadger(dadger)
     calendar = temporal_conv.operative_calendar_from_dadger(dadger)
+    # epic-02 (cadastro overrides): the per-stage-effective view of the
+    # registry, folding in any temporal AC VOLMIN/VOLMAX override — read once
+    # and threaded to every consumer below (initial storage, the entity
+    # reservoir envelope, the per-stage storage bounds) so they all agree on
+    # the same effective values.
+    effective, cadastro_report = cadastro_conv.build_effective_cadastro(
+        dadger, hidr, calendar
+    )
+    if cadastro_report.applied or cadastro_report.out_of_horizon:
+        applied_desc = ", ".join(
+            f"{count} {param}"
+            for param, count in sorted(cadastro_report.applied.items())
+        )
+        summary = f"cadastro volume overrides applied: {applied_desc or 'none'}"
+        if cadastro_report.out_of_horizon:
+            summary += (
+                f"; {len(cadastro_report.out_of_horizon)} override(s) fall "
+                "outside the study horizon and were not applied"
+            )
+        dx.emit(
+            dx.Diagnostic(
+                code="cadastro-volume-overrides-applied",
+                severity=dx.Severity.INFO,
+                category="Cadastro overrides",
+                title="Cadastro volume overrides applied",
+                summary=summary,
+            ),
+            logger=_LOG,
+        )
     start_date = calendar[0].start_date
     fan_probabilities = scenarios_conv.terminal_fan_probabilities(vazoes, calendar)
 
@@ -190,7 +220,9 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     _write_json(
         dst / "initial_conditions.json",
         {
-            "storage": hydro_conv.convert_initial_storage(dadger, hidr, id_map),
+            "storage": hydro_conv.convert_initial_storage(
+                dadger, hidr, id_map, effective
+            ),
             "filling_storage": [],
         },
     )
@@ -199,7 +231,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     _write_json(
         system / "buses.json", network_conv.convert_buses(dadger, id_map, start_date)
     )
-    hydros_dict = hydro_conv.convert_hydros(dadger, hidr, id_map, start_date)
+    hydros_dict = hydro_conv.convert_hydros(dadger, hidr, id_map, start_date, effective)
     _write_json(system / "hydros.json", hydros_dict)
     lines_doc, line_bounds = network_conv.convert_lines(
         dadger, id_map, calendar, start_date
@@ -276,6 +308,17 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     constraints = dst / "constraints"
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
     hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, hidr, id_map, calendar)
+    # epic-02 (cadastro overrides): fold the per-stage storage-bound
+    # overrides (sparse wherever a stage's effective volume envelope
+    # tightens/widens past the plant's outer envelope) into the same
+    # hydro_bounds table the RQ/UH minimum-outflow rows populate — both share
+    # _HYDRO_BOUNDS_SCHEMA (ticket-005), so every consumer below (the
+    # self-check BoundFamily entry, the parquet write) sees one combined
+    # table, exactly as if a single emitter had produced it.
+    storage_bounds = bounds_conv.convert_storage_bounds(effective, id_map, calendar)
+    hydro_bounds = pa.concat_tables([hydro_bounds, storage_bounds]).sort_by(
+        [("hydro_id", "ascending"), ("stage_id", "ascending")]
+    )
     # ticket-026/027: B8 per-group per-stage availability (installed × MP ×
     # FD, capped by the ρ_eq·q_max hydraulic ceiling) for every plant,
     # single-group and Itaipu's own two per-frequency groups (code 66) alike.

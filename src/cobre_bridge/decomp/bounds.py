@@ -33,22 +33,39 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge.decomp.cadastro import storage_envelope
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _LOG = logging.getLogger(__name__)
+
+#: Mirrors the ``_SPARSITY_TOLERANCE`` idiom in ``decomp/hydro.py`` — a
+#: relative tolerance scaled by the reference magnitude, used only to decide
+#: whether a stage's effective storage bounds differ from the plant's outer
+#: envelope past float noise (not a cobre-side rule).
+_SPARSITY_TOLERANCE = 1e-9
+
+
+def _floats_differ(value: float, reference: float) -> bool:
+    """Whether *value* differs from *reference* past relative float noise."""
+    return abs(value - reference) > _SPARSITY_TOLERANCE * max(abs(reference), 1.0)
+
 
 _HYDRO_BOUNDS_SCHEMA = pa.schema(
     [
         pa.field("hydro_id", pa.int32(), nullable=False),
         pa.field("stage_id", pa.int32(), nullable=False),
         pa.field("block_id", pa.int32(), nullable=True),
-        pa.field("min_outflow_m3s", pa.float64(), nullable=False),
+        pa.field("min_outflow_m3s", pa.float64(), nullable=True),
+        pa.field("min_storage_hm3", pa.float64(), nullable=True),
+        pa.field("max_storage_hm3", pa.float64(), nullable=True),
     ]
 )
 
@@ -60,6 +77,8 @@ def _empty() -> pa.Table:
             "stage_id": pa.array([], type=pa.int32()),
             "block_id": pa.array([], type=pa.int32()),
             "min_outflow_m3s": pa.array([], type=pa.float64()),
+            "min_storage_hm3": pa.array([], type=pa.float64()),
+            "max_storage_hm3": pa.array([], type=pa.float64()),
         },
         schema=_HYDRO_BOUNDS_SCHEMA,
     )
@@ -210,12 +229,63 @@ def convert_hydro_bounds(
 
     if not hydro_ids:
         return _empty()
+    n = len(hydro_ids)
     return pa.table(
         {
             "hydro_id": pa.array(hydro_ids, type=pa.int32()),
             "stage_id": pa.array(stage_ids, type=pa.int32()),
             "block_id": pa.array(block_ids, type=pa.int32()),
             "min_outflow_m3s": pa.array(minimums, type=pa.float64()),
+            "min_storage_hm3": pa.array([None] * n, type=pa.float64()),
+            "max_storage_hm3": pa.array([None] * n, type=pa.float64()),
+        },
+        schema=_HYDRO_BOUNDS_SCHEMA,
+    )
+
+
+def convert_storage_bounds(
+    effective: EffectiveCadastro,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> pa.Table:
+    """Sparse per-stage storage bounds wherever a stage tightens the envelope.
+
+    For each hydro *code*, the outer envelope is ``storage_envelope(effective,
+    code)`` — the widest floor/ceiling the plant's per-stage volumes ever
+    reach, and the default the entity ``reservoir`` block (ticket-007)
+    declares. A stage whose effective ``(volume_minimo, volume_maximo)``
+    differs from that envelope (past float noise) emits an override row;
+    a stage equal to the envelope emits none and simply inherits it. A plant
+    with no temporal ``VOLMIN``/``VOLMAX`` override never differs from its own
+    envelope, so it contributes no rows at all.
+    """
+    hydro_ids: list[int] = []
+    stage_ids: list[int] = []
+    min_storage_vals: list[float] = []
+    max_storage_vals: list[float] = []
+    for code in id_map.hydro_codes:
+        env_min, env_max = storage_envelope(effective, code)
+        for stage_index in range(len(calendar)):
+            vmin = effective.value(code, "volume_minimo", stage_index)
+            vmax = effective.value(code, "volume_maximo", stage_index)
+            if not (_floats_differ(vmin, env_min) or _floats_differ(vmax, env_max)):
+                continue
+            hydro_ids.append(id_map.hydro_id(code))
+            stage_ids.append(stage_index)
+            min_storage_vals.append(vmin)
+            max_storage_vals.append(vmax)
+
+    if not hydro_ids:
+        return _empty()
+    n = len(hydro_ids)
+    return pa.table(
+        {
+            "hydro_id": pa.array(hydro_ids, type=pa.int32()),
+            "stage_id": pa.array(stage_ids, type=pa.int32()),
+            "block_id": pa.array([None] * n, type=pa.int32()),
+            "min_outflow_m3s": pa.array([None] * n, type=pa.float64()),
+            "min_storage_hm3": pa.array(min_storage_vals, type=pa.float64()),
+            "max_storage_hm3": pa.array(max_storage_vals, type=pa.float64()),
         },
         schema=_HYDRO_BOUNDS_SCHEMA,
     )

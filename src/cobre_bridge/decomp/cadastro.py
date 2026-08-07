@@ -24,17 +24,63 @@ if TYPE_CHECKING:
     from cobre_bridge.decomp.temporal import OperativeStage
 
 
+_MONTH_ABBR_TO_INT: dict[str, int] = {
+    "JAN": 1,
+    "FEV": 2,
+    "MAR": 3,
+    "ABR": 4,
+    "MAI": 5,
+    "JUN": 6,
+    "JUL": 7,
+    "AGO": 8,
+    "SET": 9,
+    "OUT": 10,
+    "NOV": 11,
+    "DEZ": 12,
+}
+
+
+def _parse_month(mes: str | int | float | None) -> int | None:
+    """Normalize an ``AC`` ``mes`` field to a 1..12 month, or ``None`` when blank.
+
+    Blank (``None``, NaN, or an empty/whitespace-only string after
+    ``strip()``) resolves to ``None``. An integer/float is coerced with
+    ``int(...)``. A non-blank string is matched case-insensitively against
+    the source model's 3-letter month abbreviations. A non-blank value that
+    is neither a valid month int (1..12) nor a known abbreviation raises
+    ``ValueError`` naming the value (a malformed deck is a hard error, never
+    a silent default).
+    """
+    if mes is None:
+        return None
+    if isinstance(mes, str):
+        stripped = mes.strip()
+        if not stripped:
+            return None
+        month = _MONTH_ABBR_TO_INT.get(stripped.upper())
+        if month is None:
+            raise ValueError(f"unrecognized AC month value: {mes!r}")
+        return month
+    if pd.isna(mes):
+        return None
+    month = int(mes)
+    if not 1 <= month <= 12:
+        raise ValueError(f"unrecognized AC month value: {mes!r}")
+    return month
+
+
 def resolve_effective_stage(
-    mes: int | None,
-    semana: int | None,
-    ano: int | None,
+    mes: str | int | float | None,
+    semana: int | float | None,
+    ano: int | float | None,
     calendar: Sequence[OperativeStage],
 ) -> int | None:
     """Resolve a ``(mes, semana, ano)`` triple to a 0-based stage index.
 
-    A blank ``mes`` (``None`` or NaN) means the override is effective from
-    the initial stage (index ``0``). Otherwise ``(ano, mes)`` is resolved to
-    an operative month against *calendar*: a blank ``ano`` defaults to the
+    A blank ``mes`` (per :func:`_parse_month`: ``None``, NaN, or an
+    empty/whitespace-only string) means the override is effective from the
+    initial stage (index ``0``). Otherwise ``(ano, mes)`` is resolved to an
+    operative month against *calendar*: a blank ``ano`` defaults to the
     calendar's first stage's year, a month strictly before the calendar's
     horizon also resolves to the initial stage, and a month strictly after
     the horizon resolves to ``None`` for the caller to report as
@@ -47,22 +93,24 @@ def resolve_effective_stage(
     Raises
     ------
     ValueError
-        If ``mes``, ``semana``, or ``ano`` cannot be coerced to ``int``
-        (a malformed deck is a hard error, never a silent default).
+        If ``mes`` is a non-blank value that is neither a 1..12 int nor a
+        known month abbreviation (see :func:`_parse_month`), or if
+        ``semana``/``ano`` cannot be coerced to ``int`` (a malformed deck is
+        a hard error, never a silent default).
     """
-    if mes is None or pd.isna(mes):
+    month = _parse_month(mes)
+    if month is None:
         return 0
 
-    resolved_mes = int(mes)
     resolved_ano = (
         calendar[0].start_date.year if ano is None or pd.isna(ano) else int(ano)
     )
 
-    target = resolved_ano * 12 + (resolved_mes - 1)
+    target = resolved_ano * 12 + (month - 1)
     month_stages = [
         stage
         for stage in calendar
-        if stage.season_id == resolved_mes - 1 and stage.start_date.year == resolved_ano
+        if stage.season_id == month - 1 and stage.start_date.year == resolved_ano
     ]
 
     if not month_stages:
@@ -154,8 +202,10 @@ def _read_scalar_overrides(
                     if ano is None or pd.isna(ano)
                     else int(ano)
                 )
+                month = _parse_month(mes)
+                assert month is not None  # eff is None only for a non-blank mes
                 out_of_horizon.append(
-                    OutOfHorizon(code, spec.param, int(mes), resolved_ano)
+                    OutOfHorizon(code, spec.param, month, resolved_ano)
                 )
                 continue
             records.setdefault((code, spec.param), []).append((eff, value))
@@ -221,6 +271,23 @@ class EffectiveCadastro:
     def is_stage_varying(self, code: int, param: str) -> bool:
         """Whether *param* for plant *code* carries at least one override."""
         return (code, param) in self.stage_varying
+
+
+def storage_envelope(effective: EffectiveCadastro, code: int) -> tuple[float, float]:
+    """Outer per-stage operating range for plant *code*, in hm³.
+
+    ``(min over stages of volume_minimo, max over stages of volume_maximo)``
+    — the widest floor/ceiling the plant's dense per-stage series ever
+    reaches. For a plant with no override both reduce to the base scalar.
+    This is the envelope the entity ``reservoir`` block (ticket-007) declares
+    as its default storage bounds; :func:`cobre_bridge.decomp.bounds.
+    convert_storage_bounds` emits a per-stage override wherever a stage's
+    effective bounds differ from it.
+    """
+    return (
+        min(effective.series(code, "volume_minimo")),
+        max(effective.series(code, "volume_maximo")),
+    )
 
 
 @dataclass(frozen=True)

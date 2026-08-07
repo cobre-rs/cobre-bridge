@@ -42,6 +42,7 @@ from cobre_bridge.converters.hydro import (
     _mean_cota_over_volume,
     build_mirror_unit_group,
 )
+from cobre_bridge.decomp.cadastro import storage_envelope
 from cobre_bridge.decomp.group_bounds import GroupBoundEntry
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -367,6 +369,7 @@ def convert_hydros(
     hidr: pd.DataFrame,
     id_map: DecompIdMap,
     start_date: date,
+    effective: EffectiveCadastro,
 ) -> dict:
     """Build ``hydros.json`` for the operated plants.
 
@@ -379,8 +382,11 @@ def convert_hydros(
     unit group, except the per-frequency split plant (Itaipu, code 66),
     which declares two conjunto-backed groups instead
     (:func:`_build_split_unit_groups`) — the plant's own ``generation``
-    envelope is unaffected either way. Deferred fidelity is logged once per
-    family.
+    envelope is unaffected either way. The entity ``reservoir`` block is the
+    plant's outer per-stage storage envelope (:func:`storage_envelope`), so
+    per-stage bound overrides (:func:`cobre_bridge.decomp.bounds.
+    convert_storage_bounds`) always sit inside it. Deferred fidelity is
+    logged once per family.
     """
     operated = _operated_uh(dadger)
     operated_codes = set(id_map.hydro_codes)
@@ -410,6 +416,7 @@ def convert_hydros(
         max_turbined, max_generation = _compute_max_turbined_rated_ac_adjusted(
             hreg, code, overrides
         )
+        min_storage_hm3, max_storage_hm3 = storage_envelope(effective, code)
         bus_id = id_map.bus_id(int(hreg["submercado"]))
         if code == _ITAIPU_CODE:
             frequencies = _split_plant_frequencies(hreg, code, overrides, mp, fd)
@@ -435,8 +442,8 @@ def convert_hydros(
                 None if downstream is None else id_map.hydro_id(downstream)
             ),
             "reservoir": {
-                "min_storage_hm3": float(hreg["volume_minimo"]),
-                "max_storage_hm3": float(hreg["volume_maximo"]),
+                "min_storage_hm3": min_storage_hm3,
+                "max_storage_hm3": max_storage_hm3,
             },
             "outflow": {
                 "min_outflow_m3s": min_outflow_by_code.get(code, 0.0),
@@ -472,15 +479,20 @@ def convert_initial_storage(
     dadger: Dadger,
     hidr: pd.DataFrame,
     id_map: DecompIdMap,
+    effective: EffectiveCadastro,
 ) -> list[dict]:
-    """Initial reservoir volumes from ``UH`` (% of useful → hm³)."""
+    """Initial reservoir volumes from ``UH`` (% of useful → hm³).
+
+    ``volume_inicial`` is a percentage of the *initial stage's* effective
+    useful volume, not the plant's outer envelope, so the min/max here are
+    read from :meth:`EffectiveCadastro.value` at stage ``0``.
+    """
     operated = _operated_uh(dadger)
     storage: list[dict] = []
     for _, row in operated.iterrows():
         code = int(row["codigo_usina"])
-        hreg = hidr.loc[code]
-        v_min = float(hreg["volume_minimo"])
-        v_max = float(hreg["volume_maximo"])
+        v_min = effective.value(code, "volume_minimo", 0)
+        v_max = effective.value(code, "volume_maximo", 0)
         pct = float(row["volume_inicial"])
         value = v_min + (pct / 100.0) * (v_max - v_min)
         value = min(max(value, v_min), v_max)
