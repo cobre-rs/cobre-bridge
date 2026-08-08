@@ -55,10 +55,14 @@ instead of the usual single mirror group — see
 :func:`_build_split_unit_groups`. Scope is the ratified loop-closing
 milestone: faithful registry, cascade, capability, initial storage, and (as
 of tickets 013/017, E5) head/productivity, including head-aware
-engolimento — with everything whose faithful
-treatment is still gated on later features deferred **loudly** (one summary
-log warning each): travel time (``VI``) and the evaporation/tailrace-
-polynomial models (``COTVAZ``/``COTARE``/``COFEVA`` — no DECOMP consumer).
+engolimento — with everything whose faithful treatment is still gated on
+later features left unconverted: travel time (``VI`` — a separate dadger
+register, not an ``AC`` class) and the evaporation/tailrace-polynomial
+models (``COTVAZ``/``COTARE``/``COFEVA`` — ``AC`` classes with no DECOMP
+consumer). The ``AC`` families' own per-deck coverage (which of them a
+given deck actually declares) is reported by ``check decomp``
+(:mod:`cobre_bridge.decomp.preflight`); ``VI``, not being an ``AC``
+register, is documented only here.
 
 **Effective (post-``AC``) cascade topology and inflow gauge (ticket-014,
 E5, OQ-4 resolved).** The cascade walk (:func:`_downstream_operated`,
@@ -71,8 +75,8 @@ columns directly. Absent an override the effective value equals base, so
 this is byte-identical to the pre-ticket behaviour for every plant with no
 ``NUMJUS``/``NUMPOS`` row. ``AC JUSENA`` (a downstream-**energy** coupling,
 not a water-routing link) and ``AC NPOSNW`` (the other source family's own
-inflow gauge) are deliberately **not** ingested — no DECOMP consumer — and
-stay in the deferred-fidelity warning below alongside ``VI``/``COTVAZ``/
+inflow gauge) are deliberately **not** ingested — no DECOMP consumer; their
+per-deck coverage is reported by ``check decomp`` alongside ``COTVAZ``/
 ``COTARE``/``COFEVA``.
 
 ``UH`` rows without an initial volume (the coupling-only registrations)
@@ -712,7 +716,8 @@ def convert_hydros(
     power. The entity ``reservoir`` block is the plant's outer per-stage
     storage envelope (:func:`storage_envelope`), so per-stage bound
     overrides (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
-    always sit inside it. Deferred fidelity is logged once per family.
+    always sit inside it. Per-family ``AC`` coverage is reported by
+    ``check decomp`` (:mod:`cobre_bridge.decomp.preflight`), not logged here.
     """
     operated = _operated_uh(dadger)
     operated_codes = set(id_map.hydro_codes)
@@ -828,13 +833,6 @@ def convert_hydros(
             n_altefe,
         )
 
-    _LOG.warning(
-        "deferred hydro fidelity (loop-closing milestone): VI travel time, "
-        "the evaporation/tailrace-polynomial models (COTVAZ/COTARE/COFEVA), "
-        "AC JUSENA (downstream-energy link, no DECOMP consumer), and AC "
-        "NPOSNW (the other source family's inflow gauge, no DECOMP "
-        "consumer) are not applied yet"
-    )
     return {"$schema": _SCHEMA_URL, "hydros": hydros}
 
 

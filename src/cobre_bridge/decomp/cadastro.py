@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from idecomp.decomp.modelos.dadger import (
+    ACALTEFE,
     ACCOTVOL,
     ACDESVIO,
     ACJUSMED,
@@ -185,6 +186,35 @@ _SCALAR_AC_SPECS: tuple[_ScalarAcSpec, ...] = (
     _ScalarAcSpec(ACPERHID, "coeficiente", "perdas"),
     _ScalarAcSpec(ACJUSMED, "cota", "canal_fuga_medio"),
 )
+
+
+#: Every AC register the resolver ingests AND applies to a live consumer —
+#: the single source of truth `check decomp` diffs the idecomp AC universe
+#: against (see `cobre_bridge.decomp.preflight._ac_coverage`). The scalar
+#: portion is derived from `_SCALAR_AC_SPECS`; any new NON-scalar reader
+#: wired into `build_effective_cadastro` must add its class to this
+#: frozenset too, or `check decomp` will misreport it as deferred.
+APPLIED_AC_CLASSES: frozenset[type] = frozenset(
+    spec.ac_class for spec in _SCALAR_AC_SPECS
+) | frozenset(
+    {
+        ACDESVIO,
+        ACNUMCON,
+        ACNUMMAQ,
+        ACPOTEFE,
+        ACVAZEFE,
+        ACCOTVOL,
+        ACNUMJUS,
+        ACNUMPOS,
+    }
+)
+
+#: AC registers idecomp models but exposes NO value accessor for, so the
+#: resolver cannot ingest them at all — reported distinctly from "deferred
+#: (has a value but no consumer)". `ALTEFE` is the sole member (idecomp
+#: 1.13.0); see the `TRACKED COBRE-GAP WORKAROUND` in
+#: `cobre_bridge.decomp.hydro.convert_hydros`.
+UNINGESTABLE_AC_CLASSES: frozenset[type] = frozenset({ACALTEFE})
 
 
 @dataclass(frozen=True)

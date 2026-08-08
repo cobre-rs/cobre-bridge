@@ -284,13 +284,15 @@ class TestConvertHydros:
 
 
 def test_deferred_note_excludes_head_productivity(caplog) -> None:
-    """ticket-013 (AC6): the head/productivity ``AC`` family (``PROESP``/
-    ``PERHID``/``JUSMED``/``COTVOL``) now has a live consumer
-    (``_equivalent_productivity_mw_per_m3s``), so it drops out of the
-    loudly-logged deferred-fidelity note entirely — while ``VI`` travel time
-    and the evaporation/tailrace-polynomial family (``COTVAZ``/``COTARE``/
-    ``COFEVA``), which the source model has no consumer for, stay listed as
-    deferred in both the warning and the module docstring.
+    """ticket-013 (AC6) + ticket-015 (E6): the head/productivity ``AC``
+    family (``PROESP``/``PERHID``/``JUSMED``/``COTVOL``) has a live consumer
+    (``_equivalent_productivity_mw_per_m3s``), so it was never listed as
+    deferred. ticket-015 retires the blanket, hand-maintained
+    "deferred hydro fidelity" warning entirely — deck-aware, per-family
+    ``AC`` coverage now lives in ``check decomp`` — while the module
+    docstring still documents the genuinely-deferred families (``VI``
+    travel time, ``COTVAZ``/``COTARE``/``COFEVA``) and now points at
+    ``check decomp`` for their per-deck coverage.
     """
     import cobre_bridge.decomp.hydro as hydro_module
 
@@ -303,13 +305,7 @@ def test_deferred_note_excludes_head_productivity(caplog) -> None:
             date(2026, 7, 18),
             _no_override_effective(hidr),
         )
-    warning = next(
-        r.message for r in caplog.records if "deferred hydro fidelity" in r.message
-    )
-    for mnemonic in ("PROESP", "PERHID", "JUSMED", "COTVOL"):
-        assert mnemonic not in warning
-    for marker in ("VI travel time", "COTVAZ", "COTARE", "COFEVA"):
-        assert marker in warning
+    assert not any("deferred hydro fidelity" in r.message for r in caplog.records)
 
     docstring = hydro_module.__doc__
     assert docstring is not None
@@ -317,6 +313,7 @@ def test_deferred_note_excludes_head_productivity(caplog) -> None:
         assert mnemonic not in docstring
     for marker in ("``VI``", "COTVAZ", "COTARE", "COFEVA"):
         assert marker in docstring
+    assert "check decomp" in docstring
 
 
 class TestEffectiveCadastroSourcing:

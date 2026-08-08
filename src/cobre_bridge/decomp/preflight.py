@@ -17,13 +17,33 @@ mirror, never a substitute.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from cobre_bridge.diagnostics import Diagnostic, Severity
+import pandas as pd
+from idecomp.decomp.modelos import dadger as _dadger_models
+
+from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
+from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
 from cobre_bridge.errors import diagnostic_from_exception
 from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
 
+if TYPE_CHECKING:
+    from cobre_bridge.decomp.cadastro import CadastroResolutionReport
+
 _CONTEXT = "Preflight"
+
+#: Every idecomp `AC` register class, discovered by reflection so a future
+#: idecomp release adding one lands automatically in the deferred bucket
+#: (the conservative default) with no edit here. idecomp is a hard
+#: dependency (unlike the optional `cobre` wheel), so this module-scope
+#: import/reflection is safe in every CI tier.
+_ALL_AC_CLASSES: frozenset[type] = frozenset(
+    obj
+    for name, obj in vars(_dadger_models).items()
+    if name.startswith("AC") and inspect.isclass(obj)
+)
 
 #: Per-stage scenario probabilities must sum to 1 within this absolute
 #: tolerance — the deck writes them rounded to four decimals.
@@ -213,6 +233,146 @@ def _deferred_inventory(dadger: object, files: object) -> list[Diagnostic]:
     return found
 
 
+def _ac_present(dadger: object, classes: frozenset[type]) -> list[type]:
+    """The subset of *classes* present in *dadger*'s deck, name-sorted.
+
+    A class is present iff its ``AC`` frame is a non-empty
+    ``pd.DataFrame`` — mirrors the resolver's own guard
+    (:func:`cobre_bridge.decomp.cadastro._read_scalar_overrides` and its
+    siblings), so a ``None``/empty frame (an unregistered mnemonic, or an
+    absent one) contributes nothing.
+    """
+    present = [
+        cls
+        for cls in classes
+        if isinstance(
+            frame := dadger.ac(codigo_usina=None, modificacao=cls, df=True),  # type: ignore[attr-defined]
+            pd.DataFrame,
+        )
+        and not frame.empty
+    ]
+    return sorted(present, key=lambda cls: cls.__name__)
+
+
+def _ac_coverage(
+    dadger: object, report: CadastroResolutionReport
+) -> tuple[list[CheckItem], list[Diagnostic]]:
+    """Classify every idecomp ``AC`` class into applied/uningestable/deferred
+    and report which of those buckets the deck actually exercises.
+
+    A pure function of *dadger* (for the per-class deck-presence scan) and
+    *report* (for ``out_of_horizon``) — no file I/O, no calendar, no
+    ``hidr``. The three buckets are computed once by set arithmetic against
+    the module-level :data:`_ALL_AC_CLASSES` reflection and the resolver's
+    own :data:`~cobre_bridge.decomp.cadastro.APPLIED_AC_CLASSES` /
+    :data:`~cobre_bridge.decomp.cadastro.UNINGESTABLE_AC_CLASSES` registries
+    — enumerate-and-diff, never a hand-maintained list, so a newly-applied
+    family automatically drops off the deferred bucket and a new idecomp
+    class automatically lands in it.
+
+    Always returns exactly one passing summary :class:`CheckItem` (coverage
+    never blocks conversion) plus a diagnostic per bucket that has at least
+    one class present in the deck: an ``INFO`` for the applied mnemonics
+    (visibility only), a ``WARNING`` for the deferred mnemonics (has a
+    value but no converter consumer), a distinct ``WARNING`` for ``ALTEFE``
+    specifically (an idecomp accessor gap, not lumped with "deferred"), and
+    a ``WARNING`` with a per-row detail table when *report* carries an
+    out-of-horizon override.
+    """
+    applied = _ALL_AC_CLASSES & APPLIED_AC_CLASSES
+    uningestable = _ALL_AC_CLASSES & UNINGESTABLE_AC_CLASSES
+    deferred = _ALL_AC_CLASSES - APPLIED_AC_CLASSES - UNINGESTABLE_AC_CLASSES
+
+    applied_present = _ac_present(dadger, applied)
+    uningestable_present = _ac_present(dadger, uningestable)
+    deferred_present = _ac_present(dadger, deferred)
+
+    checks = [
+        CheckItem(
+            label="AC cadastro-override coverage",
+            passed=True,
+            detail=(
+                f"applied {len(applied_present)}/{len(applied)}, "
+                f"deferred {len(deferred_present)}/{len(deferred)}, "
+                f"uningestable {len(uningestable_present)}/{len(uningestable)} "
+                "family(ies) present in the deck"
+            ),
+        )
+    ]
+    diagnostics: list[Diagnostic] = []
+
+    if applied_present:
+        mnemonics = ", ".join(
+            cls.__name__.removeprefix("AC") for cls in applied_present
+        )
+        diagnostics.append(
+            Diagnostic(
+                code="decomp-ac-overrides-applied",
+                severity=Severity.INFO,
+                category=_CONTEXT,
+                title="AC cadastro overrides applied",
+                summary=(
+                    f"The deck declares AC cadastro overrides the conversion "
+                    f"applies: {mnemonics}."
+                ),
+            )
+        )
+
+    if deferred_present:
+        mnemonics = ", ".join(
+            cls.__name__.removeprefix("AC") for cls in deferred_present
+        )
+        diagnostics.append(
+            _deferred(
+                "decomp-ac-overrides-deferred",
+                "AC cadastro overrides not converted",
+                f"The deck declares AC cadastro overrides with no converter "
+                f"consumer: {mnemonics}.",
+                "Tracked in the conversion roadmap; no action needed to convert.",
+            )
+        )
+
+    if uningestable_present:
+        diagnostics.append(
+            _deferred(
+                "decomp-ac-altefe-uningestable",
+                "AC ALTEFE cannot be ingested",
+                "The deck declares an AC ALTEFE effective-head override; "
+                "idecomp exposes no value accessor for it, so the conversion "
+                "cannot read it at all (distinct from a deferred override, "
+                "which idecomp does expose a value for).",
+                "Tracked as an idecomp accessor gap; no action needed to convert.",
+            )
+        )
+
+    if report.out_of_horizon:
+        diagnostics.append(
+            Diagnostic(
+                code="decomp-ac-out-of-horizon",
+                severity=Severity.WARNING,
+                category=_CONTEXT,
+                title="AC override effective date past the study horizon",
+                summary=(
+                    f"{len(report.out_of_horizon)} AC cadastro override(s) "
+                    "resolve past the calendar horizon and are not applied."
+                ),
+                table=DiagnosticTable(
+                    columns=["plant", "param", "month", "year"],
+                    rows=[
+                        [oh.code, oh.param, oh.mes, oh.ano]
+                        for oh in report.out_of_horizon
+                    ],
+                ),
+                remediation=(
+                    "→ Check the override's (mes, semana, ano) triple against "
+                    "the deck's study horizon."
+                ),
+            )
+        )
+
+    return checks, diagnostics
+
+
 def run_decomp_preflight(src: Path) -> PreflightResult:
     """Validate the deck at *src*, writing nothing and raising nothing.
 
@@ -308,6 +468,27 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
             )
         else:
             checks.extend(_tree_checks(vazoes, calendar))
+
+        from cobre_bridge.decomp.cadastro import build_effective_cadastro
+        from cobre_bridge.decomp.hydro import read_hidr
+
+        try:
+            hidr = read_hidr(files.hidr)
+            _effective, cadastro_report = build_effective_cadastro(
+                dadger, hidr, calendar
+            )
+        except (ValueError, KeyError, OSError) as exc:
+            checks.append(
+                CheckItem(
+                    label="AC cadastro overrides resolvable",
+                    passed=False,
+                    detail=str(exc),
+                )
+            )
+        else:
+            cov_checks, cov_diags = _ac_coverage(dadger, cadastro_report)
+            checks.extend(cov_checks)
+            diagnostics.extend(cov_diags)
 
     diagnostics.extend(_deferred_inventory(dadger, files))
 

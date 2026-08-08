@@ -6,10 +6,32 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pytest
+from idecomp.decomp.modelos.dadger import (
+    ACALTEFE,
+    ACCOTVAZ,
+    ACNCHAVE,
+    ACTIPERH,
+    ACVERTJU,
+    ACVOLMIN,
+)
 
-from cobre_bridge.decomp.preflight import run_decomp_preflight
+from cobre_bridge.decomp.cadastro import (
+    APPLIED_AC_CLASSES,
+    UNINGESTABLE_AC_CLASSES,
+    CadastroResolutionReport,
+    OutOfHorizon,
+    _SCALAR_AC_SPECS,
+)
+from cobre_bridge.decomp.preflight import (
+    _ALL_AC_CLASSES,
+    _ac_coverage,
+    run_decomp_preflight,
+)
+from cobre_bridge.diagnostics import Severity
 from cobre_bridge.preflight import PreflightVerdict
+from tests.test_decomp_cadastro import _FakeDadger
 
 _DECKS = (
     Path("example/decomp-jul-26-rv3"),
@@ -101,3 +123,110 @@ class TestCheckDecompCommand:
             "decomp-anticipation-deferred",
             "decomp-availability-deferred",
         }
+
+
+class TestAcCoverageRegistry:
+    """ticket-015: the resolver's ``APPLIED_AC_CLASSES``/
+    ``UNINGESTABLE_AC_CLASSES`` registries and the reflected idecomp ``AC``
+    universe (``_ALL_AC_CLASSES``) stay consistent with each other, and the
+    derived deferred bucket is populated by enumerate-and-diff rather than a
+    hand-maintained list — proven by three families
+    (``NCHAVE``/``TIPERH``/``VERTJU``) the old blanket warning never named.
+    """
+
+    def test_coverage_registry_applied_classes_count_is_16(self) -> None:
+        assert len(APPLIED_AC_CLASSES) == 16
+
+    def test_coverage_registry_uningestable_is_altefe_only(self) -> None:
+        assert UNINGESTABLE_AC_CLASSES == frozenset({ACALTEFE})
+
+    def test_coverage_registry_applied_and_uningestable_disjoint(self) -> None:
+        assert not (APPLIED_AC_CLASSES & UNINGESTABLE_AC_CLASSES)
+
+    def test_coverage_registry_scalar_specs_subset_of_applied(self) -> None:
+        scalar_classes = {spec.ac_class for spec in _SCALAR_AC_SPECS}
+        assert scalar_classes <= APPLIED_AC_CLASSES
+
+    def test_coverage_registry_applied_subset_of_all_ac_classes(self) -> None:
+        assert APPLIED_AC_CLASSES <= _ALL_AC_CLASSES
+
+    def test_coverage_registry_uningestable_subset_of_all_ac_classes(self) -> None:
+        assert UNINGESTABLE_AC_CLASSES <= _ALL_AC_CLASSES
+
+    def test_coverage_registry_all_ac_classes_has_at_least_25_members(self) -> None:
+        # idecomp 1.13.0 exposes exactly 25; ``>=`` stays robust to a future add.
+        assert len(_ALL_AC_CLASSES) >= 25
+
+    def test_coverage_registry_deferred_bucket_contains_uncovered_families(
+        self,
+    ) -> None:
+        deferred = _ALL_AC_CLASSES - APPLIED_AC_CLASSES - UNINGESTABLE_AC_CLASSES
+        assert {ACNCHAVE, ACTIPERH, ACVERTJU} <= deferred
+
+
+class TestAcCoverage:
+    """ticket-015: ``_ac_coverage``'s three-bucket classification and its
+    always-passing summary ``CheckItem`` plus per-bucket diagnostics.
+    """
+
+    def test_ac_coverage_mixed_presence_emits_all_four_diagnostics(self) -> None:
+        present = pd.DataFrame({"codigo_usina": [1]})
+        dadger = _FakeDadger({ACVOLMIN: present, ACCOTVAZ: present, ACALTEFE: present})
+        report = CadastroResolutionReport(
+            applied={"volume_minimo": 1},
+            out_of_horizon=(
+                OutOfHorizon(code=7, param="volume_minimo", mes=12, ano=2030),
+            ),
+        )
+
+        checks, diagnostics = _ac_coverage(dadger, report)
+
+        assert len(checks) == 1
+        assert checks[0].label == "AC cadastro-override coverage"
+        assert checks[0].passed is True
+
+        by_code = {d.code: d for d in diagnostics}
+        assert set(by_code) == {
+            "decomp-ac-overrides-applied",
+            "decomp-ac-overrides-deferred",
+            "decomp-ac-altefe-uningestable",
+            "decomp-ac-out-of-horizon",
+        }
+        assert by_code["decomp-ac-overrides-applied"].severity is Severity.INFO
+        assert by_code["decomp-ac-overrides-deferred"].severity is Severity.WARNING
+        assert by_code["decomp-ac-altefe-uningestable"].severity is Severity.WARNING
+        assert by_code["decomp-ac-out-of-horizon"].severity is Severity.WARNING
+
+        deferred_summary = by_code["decomp-ac-overrides-deferred"].summary
+        assert "COTVAZ" in deferred_summary
+        assert "ALTEFE" not in deferred_summary
+
+        table = by_code["decomp-ac-out-of-horizon"].table
+        assert table is not None
+        assert table.columns == ["plant", "param", "month", "year"]
+        assert table.rows == [[7, "volume_minimo", 12, 2030]]
+
+    def test_ac_coverage_applied_only_emits_only_info_diagnostic(self) -> None:
+        present = pd.DataFrame({"codigo_usina": [1]})
+        dadger = _FakeDadger({ACVOLMIN: present})
+        report = CadastroResolutionReport(
+            applied={"volume_minimo": 1}, out_of_horizon=()
+        )
+
+        checks, diagnostics = _ac_coverage(dadger, report)
+
+        assert len(checks) == 1
+        assert checks[0].passed is True
+        assert len(diagnostics) == 1
+        assert diagnostics[0].code == "decomp-ac-overrides-applied"
+        assert diagnostics[0].severity is Severity.INFO
+
+    def test_ac_coverage_empty_deck_emits_only_the_passing_summary(self) -> None:
+        dadger = _FakeDadger({})
+        report = CadastroResolutionReport(applied={}, out_of_horizon=())
+
+        checks, diagnostics = _ac_coverage(dadger, report)
+
+        assert len(checks) == 1
+        assert checks[0].passed is True
+        assert diagnostics == []
