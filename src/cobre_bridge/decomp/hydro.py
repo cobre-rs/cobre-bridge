@@ -4,22 +4,49 @@ The registry file is byte-identical across the two source families, so the
 shared row-level physics helpers (cota polynomial, hydraulic losses) are
 reused verbatim. The rated-capability sum is *not* reused as-is, though:
 :func:`_compute_max_turbined_rated_ac_adjusted` below is a DECOMP-only
-counterpart that layers ``AC NUMCON``/``AC NUMMAQ``/``AC POTEFE``/
-``AC VAZEFE`` machine-configuration overrides on top of the same per-conjunto
-registry data the shared ``converters.hydro._compute_max_turbined_rated``
-reads — some plants' *true* in-service machine count differs from
-``hidr.dat``'s nameplate conjunto sum, and the shared helper (which the
-source-model side keeps byte-identical) exposes only the pre-summed total,
-not a per-conjunto override hook. The one plant whose maintenance and
-availability registers are declared *per generating-unit group* rather than
-per plant (Itaipu, code 66, carries two ``MP``/``FD`` ``frequencia`` rows)
-gets two conjunto-backed unit groups instead of the usual single mirror
-group — see :func:`_build_split_unit_groups`. Scope is the ratified
-loop-closing milestone: faithful registry, cascade, capability and initial
-storage — with everything whose faithful treatment is gated on later
-features deferred **loudly** (one summary log warning each): registry
-overrides beyond ``VAZMIN``/``NUMCON``/``NUMMAQ``/``POTEFE``/``VAZEFE``,
-travel time (``VI``), and FPHA/tailrace/evaporation models.
+counterpart that layers the ``NUMCON``/``NUMMAQ``/``POTEFE``/``VAZEFE``
+machine-configuration overrides on top of the same per-conjunto registry
+data the shared ``converters.hydro._compute_max_turbined_rated`` reads —
+some plants' *true* in-service machine count differs from ``hidr.dat``'s
+nameplate conjunto sum, and the shared helper (which the source-model side
+keeps byte-identical) exposes only the pre-summed total, not a per-conjunto
+override hook. Unlike the source-model side, these overrides are
+**temporal**: :class:`~cobre_bridge.decomp.cadastro.EffectiveCadastro`'s
+``machine_conjunto_count``/``machine_set`` accessors resolve them to a
+per-stage-effective value (a plant's machine set can change mid-horizon), so
+every rated-capacity read below takes a ``stage_index`` and a plant's or
+group's *declared* capacity is the max-over-stages envelope of that
+per-stage value (:func:`_rated_envelope`/:func:`_conjunto_rated_envelope`) —
+the same outer-envelope construction :func:`~cobre_bridge.decomp.cadastro.
+storage_envelope` uses for the reservoir block. A stage whose effective
+machine set drops below that envelope gets a sparse per-stage overlay row
+instead (:func:`convert_hydro_group_availability`), never a change to the
+declared envelope itself.
+
+**Tracked E5 fidelity gap (user-confirmed 2026-08-07):** the emitted
+``max_turbined_m3s`` here is always the AC-adjusted **rated** (un-derated)
+unit-flow sum, with no per-stage-head adjustment — unlike the source-model
+side's ``converters.hydro._compute_max_turbined_head_corrected``, which
+derates by the affinity law ``(h_op / h_nom) ** k_turb`` and a
+``p_inst / (rho_esp * h)`` power cap. Porting that head-aware engolimento
+correction to DECOMP (per-stage ``h = rho_eq / rho_esp``) is deliberately
+**deferred to E5**, blocked on the ``ALTEFE`` (effective head) accessor gap
+noted in ``decomp/cadastro.py``. This is a recorded, tracked gap, not a
+silent omission — it composes cleanly with the per-stage machine-set
+envelope here once landed, since the two adjustments are orthogonal (one
+scales the rated flow by head, the other scales it by which conjuntos are
+effective).
+
+The one plant whose maintenance and availability registers are declared
+*per generating-unit group* rather than per plant (Itaipu, code 66, carries
+two ``MP``/``FD`` ``frequencia`` rows) gets two conjunto-backed unit groups
+instead of the usual single mirror group — see
+:func:`_build_split_unit_groups`. Scope is the ratified loop-closing
+milestone: faithful registry, cascade, capability and initial storage —
+with everything whose faithful treatment is gated on later features
+deferred **loudly** (one summary log warning each): registry overrides
+beyond ``VAZMIN``/``NUMCON``/``NUMMAQ``/``POTEFE``/``VAZEFE``, travel time
+(``VI``), and FPHA/tailrace/evaporation models.
 
 ``UH`` rows without an initial volume (the coupling-only registrations)
 are excluded from the operated set and reported.
@@ -125,131 +152,132 @@ def _downstream_operated(
     return current if current != 0 else None
 
 
-@dataclass(frozen=True)
-class _AcOverrides:
-    """Parsed ``AC NUMCON``/``AC NUMMAQ``/``AC POTEFE``/``AC VAZEFE``
-    machine-configuration overrides, keyed for
-    :func:`_compute_max_turbined_rated_ac_adjusted`'s per-conjunto lookup.
-
-    Applied unconditionally per key (a duplicate row for the same key is
-    last-write-wins, in the register's own iteration order) — the register's
-    ``ano``/``mes``/``semana`` timing columns are not consulted, the same
-    precedent :func:`cobre_bridge.decomp.bounds.convert_hydro_bounds` already
-    sets for ``AC VAZMIN``. Verified against the ``dec_oper_usih`` oracle's
-    ``potencia_instalada_MW`` for every AC-affected plant on both reference
-    decks (2026-08-03): applying the overrides this way — no time filtering —
-    reproduces the oracle to < 0.01 MW on all of them.
-    """
-
-    numero_conjuntos: dict[int, int]
-    numero_maquinas: dict[tuple[int, int], int]
-    potencia: dict[tuple[int, int], float]
-    vazao: dict[tuple[int, int], float]
-
-    @property
-    def affected_codes(self) -> set[int]:
-        """Every plant code touched by at least one of the four overrides."""
-        return (
-            set(self.numero_conjuntos)
-            | {code for code, _ in self.numero_maquinas}
-            | {code for code, _ in self.potencia}
-            | {code for code, _ in self.vazao}
-        )
-
-
-def _read_ac_machine_overrides(dadger: Dadger) -> _AcOverrides:
-    """Parse the four machine-configuration ``AC`` subtypes from *dadger*."""
-    from idecomp.decomp.modelos.dadger import ACNUMCON, ACNUMMAQ, ACPOTEFE, ACVAZEFE
-
-    def _records(modificacao: type) -> pd.DataFrame | None:
-        table = dadger.ac(codigo_usina=None, modificacao=modificacao, df=True)
-        return table if isinstance(table, pd.DataFrame) and not table.empty else None
-
-    numero_conjuntos: dict[int, int] = {}
-    table = _records(ACNUMCON)
-    if table is not None:
-        for _, row in table.iterrows():
-            numero_conjuntos[int(row["codigo_usina"])] = int(row["numero_conjuntos"])
-
-    numero_maquinas: dict[tuple[int, int], int] = {}
-    table = _records(ACNUMMAQ)
-    if table is not None:
-        for _, row in table.iterrows():
-            key = (int(row["codigo_usina"]), int(row["indice_conjunto"]))
-            numero_maquinas[key] = int(row["numero_maquinas"])
-
-    potencia: dict[tuple[int, int], float] = {}
-    table = _records(ACPOTEFE)
-    if table is not None:
-        for _, row in table.iterrows():
-            key = (int(row["codigo_usina"]), int(row["indice_conjunto"]))
-            potencia[key] = float(row["potencia"])
-
-    vazao: dict[tuple[int, int], float] = {}
-    table = _records(ACVAZEFE)
-    if table is not None:
-        for _, row in table.iterrows():
-            key = (int(row["codigo_usina"]), int(row["indice_conjunto"]))
-            vazao[key] = float(row["vazao"])
-
-    return _AcOverrides(numero_conjuntos, numero_maquinas, potencia, vazao)
-
-
 def _conjunto_rated_ac_adjusted(
-    hreg: pd.Series, code: int, conjunto_index: int, overrides: _AcOverrides
+    hreg: pd.Series,
+    code: int,
+    conjunto_index: int,
+    effective: EffectiveCadastro,
+    stage_index: int,
 ) -> tuple[float, float]:
     """Return ``(q, p)`` — the AC-adjusted rated flow/power of one 1-based
-    ``conjunto_index`` — the per-conjunto building block
+    ``conjunto_index`` at *stage_index* — the per-conjunto building block
     :func:`_compute_max_turbined_rated_ac_adjusted` sums over every
     conjunto, and :func:`_build_split_unit_groups`/
-    :func:`convert_hydro_group_availability` call directly for a single
-    conjunto to get one per-frequency group's own bounds. Each of the four
-    registry inputs is independently overridden if *overrides* carries one
-    for ``(code, conjunto_index)``, else falls back to the ``hidr.dat`` row.
+    :func:`_conjunto_rated_envelope`/:func:`convert_hydro_group_availability`
+    call directly for a single conjunto to get one per-frequency group's own
+    bounds. Reads ``effective.machine_set(code, conjunto_index,
+    stage_index)``: when present, its three fields already reflect
+    :func:`~cobre_bridge.decomp.cadastro.build_effective_cadastro`'s
+    independent per-field densification (a field with no override of its
+    own is the ``hidr`` base, forward-filled flat); ``None`` means the pair
+    carries no override at all, and every field falls back to the
+    ``hidr.dat`` row directly — the same ``.get(..., base)`` fallback the
+    pre-ticket date-blind reader used.
     """
-    n_machines = overrides.numero_maquinas.get(
-        (code, conjunto_index), int(hreg[f"maquinas_conjunto_{conjunto_index}"])
-    )
-    q_nom = overrides.vazao.get(
-        (code, conjunto_index), float(hreg[f"vazao_nominal_conjunto_{conjunto_index}"])
-    )
-    p_nom = overrides.potencia.get(
-        (code, conjunto_index),
-        float(hreg[f"potencia_nominal_conjunto_{conjunto_index}"]),
-    )
+    machine_set = effective.machine_set(code, conjunto_index, stage_index)
+    if machine_set is None:
+        n_machines = int(hreg[f"maquinas_conjunto_{conjunto_index}"])
+        q_nom = float(hreg[f"vazao_nominal_conjunto_{conjunto_index}"])
+        p_nom = float(hreg[f"potencia_nominal_conjunto_{conjunto_index}"])
+    else:
+        n_machines = machine_set.numero_maquinas
+        q_nom = machine_set.vazao
+        p_nom = machine_set.potencia
     return q_nom * n_machines, p_nom * n_machines
 
 
 def _compute_max_turbined_rated_ac_adjusted(
-    hreg: pd.Series, code: int, overrides: _AcOverrides
+    hreg: pd.Series,
+    code: int,
+    effective: EffectiveCadastro,
+    stage_index: int,
 ) -> tuple[float, float]:
-    """Return ``(max_turbined, max_generation)`` as the AC-adjusted rated
-    nameplate capacity — the DECOMP-only counterpart to the shared, un-derated
-    ``converters.hydro._compute_max_turbined_rated``.
+    """Return ``(max_turbined, max_generation)`` — the AC-adjusted rated
+    nameplate capacity at *stage_index* — the DECOMP-only counterpart to the
+    shared, un-derated, stage-invariant ``converters.hydro.
+    _compute_max_turbined_rated``.
 
-    Sums :func:`_conjunto_rated_ac_adjusted` over every declared conjunto.
-    Identical to the shared helper for a plant with no override at all —
-    every lookup misses and falls back — so this changes nothing for the
-    majority; it exists only because the override is per-conjunto and the
-    shared helper exposes just the pre-summed total. The shared helper
-    itself is untouched.
+    Sums :func:`_conjunto_rated_ac_adjusted` over every conjunto effective
+    at *stage_index* (``effective.machine_conjunto_count(code,
+    stage_index)``, falling back to the ``hidr`` base
+    ``numero_conjuntos_maquinas`` when that returns ``None``). Identical to
+    the shared helper for a plant with no machine-set override at all —
+    every lookup misses and falls back at every stage — so this changes
+    nothing for the majority; it exists only because the override is
+    per-conjunto, per-stage, and the shared helper exposes just the
+    pre-summed, stage-invariant total. The shared helper itself is
+    untouched. Callers needing the plant's *declared* (max-over-stages)
+    capacity use :func:`_rated_envelope` instead of calling this per stage
+    directly.
     """
-    n_sets = overrides.numero_conjuntos.get(
-        code, int(hreg["numero_conjuntos_maquinas"])
-    )
+    n_sets = effective.machine_conjunto_count(code, stage_index)
+    if n_sets is None:
+        n_sets = int(hreg["numero_conjuntos_maquinas"])
     max_turbined = 0.0
     max_generation = 0.0
     for i in range(1, n_sets + 1):
-        q, p = _conjunto_rated_ac_adjusted(hreg, code, i, overrides)
+        q, p = _conjunto_rated_ac_adjusted(hreg, code, i, effective, stage_index)
         max_turbined += q
         max_generation += p
     return max_turbined, max_generation
 
 
+def _rated_envelope(
+    hreg: pd.Series, code: int, effective: EffectiveCadastro
+) -> tuple[float, float]:
+    """Max-over-stages AC-adjusted rated ``(max_turbined, max_generation)``
+    for the whole plant.
+
+    The entity ``generation``/mirror-``unit_groups`` envelope for every
+    non-split plant (:func:`convert_hydros`) and the per-plant comparison
+    base for the B8 availability overlay
+    (:func:`convert_hydro_group_availability`) — mirrors
+    :func:`~cobre_bridge.decomp.cadastro.storage_envelope`'s outer-bound
+    construction: the widest each of :func:`_compute_max_turbined_rated_
+    ac_adjusted`'s two components ever reaches over the horizon, taken
+    independently (the two maxima need not land on the same stage). A
+    constant machine set collapses this to the stage-0 value, matching the
+    pre-ticket date-blind value exactly. Not used for the split plant
+    (Itaipu): its entity envelope is instead the *sum* of the two groups'
+    own :func:`_conjunto_rated_envelope`, computed in
+    :func:`convert_hydros`, so cobre rule 41 holds by construction rather
+    than by coincidence of the two groups peaking on the same stage.
+    """
+    per_stage = [
+        _compute_max_turbined_rated_ac_adjusted(hreg, code, effective, stage)
+        for stage in range(effective.n_stages)
+    ]
+    return (
+        max(turbined for turbined, _ in per_stage),
+        max(generation for _, generation in per_stage),
+    )
+
+
+def _conjunto_rated_envelope(
+    hreg: pd.Series, code: int, conjunto_index: int, effective: EffectiveCadastro
+) -> tuple[float, float]:
+    """Max-over-stages AC-adjusted rated ``(q, p)`` for one conjunto.
+
+    The split plant's own per-group declared envelope
+    (:func:`_build_split_unit_groups`) and the per-group comparison base
+    for its own B8 availability overlay
+    (:func:`convert_hydro_group_availability`) — the per-conjunto mirror of
+    :func:`_rated_envelope`.
+    """
+    per_stage = [
+        _conjunto_rated_ac_adjusted(hreg, code, conjunto_index, effective, stage)
+        for stage in range(effective.n_stages)
+    ]
+    return (
+        max(q for q, _ in per_stage),
+        max(p for _, p in per_stage),
+    )
+
+
 def _split_plant_frequencies(
     hreg: pd.Series,
     code: int,
-    overrides: _AcOverrides,
+    effective: EffectiveCadastro,
     mp: pd.DataFrame | None,
     fd: pd.DataFrame | None,
 ) -> list[float]:
@@ -263,14 +291,23 @@ def _split_plant_frequencies(
     is pinned for determinism, not derived from any frequency-to-conjunto
     label in the registry (``hidr.dat`` carries none).
 
+    The conjunto-count/frequency-count agreement check below deliberately
+    uses the plant's **stage-0** effective conjunto count
+    (``effective.machine_conjunto_count(code, 0)``), never a per-stage
+    value: no reference deck exercises a mid-horizon ``NUMCON`` change on
+    the split plant specifically, and the ``MP``/``FD`` frequency rows
+    themselves carry no per-stage cardinality to validate against. Tracked
+    non-goal, not a silent branch (Itaipu carries no ``NUMCON`` override on
+    rv3, so this is base-count = 2 there regardless).
+
     Raises
     ------
     ValueError
         Naming *code*, if the ``MP`` and ``FD`` registers disagree on the
         set of declared frequencies (or either is empty) — no silent
         single-group fallback for a mismatched registry — or if the
-        AC-adjusted conjunto count does not equal the number of declared
-        frequencies.
+        stage-0 AC-adjusted conjunto count does not equal the number of
+        declared frequencies.
     """
 
     def _freqs(table: pd.DataFrame | None) -> set[float]:
@@ -289,9 +326,9 @@ def _split_plant_frequencies(
         )
     frequencies = sorted(mp_freqs)
 
-    n_sets = overrides.numero_conjuntos.get(
-        code, int(hreg["numero_conjuntos_maquinas"])
-    )
+    n_sets = effective.machine_conjunto_count(code, 0)
+    if n_sets is None:
+        n_sets = int(hreg["numero_conjuntos_maquinas"])
     if n_sets != len(frequencies):
         raise ValueError(
             f"plant {code}: numero_conjuntos_maquinas ({n_sets}) does not "
@@ -306,25 +343,30 @@ def _build_split_unit_groups(
     name: str,
     bus_id: int,
     frequencies: list[float],
-    overrides: _AcOverrides,
-) -> list[dict[str, object]]:
+    effective: EffectiveCadastro,
+) -> tuple[list[dict[str, object]], float, float]:
     """Conjunto-backed unit groups for the per-frequency split plant.
 
     Group id ``i`` (``i`` in ``0..len(frequencies)-1``, ascending frequency,
     so id 0 = the lowest — 50 Hz for Itaipu) is backed by hidr conjunto
     ``i + 1``: its ``max_generation_mw``/``max_turbined_m3s`` is *that*
-    conjunto's own AC-adjusted rated sum
-    (:func:`_conjunto_rated_ac_adjusted`), not the plant's. All groups sit
-    on *bus_id*, the plant's own bus (no per-group bus on this deck). The
-    group maxima sum exactly to the plant's own AC-adjusted installed
-    envelope, because every conjunto is covered by exactly one group — cobre
-    rule 41 holds by construction, the same as the ordinary single
-    mirror-group case.
+    conjunto's own max-over-stages AC-adjusted rated envelope
+    (:func:`_conjunto_rated_envelope`), not the plant's. All groups sit on
+    *bus_id*, the plant's own bus (no per-group bus on this deck).
+
+    Returns the groups plus their summed ``(max_turbined_m3s,
+    max_generation_mw)``: :func:`convert_hydros` declares the plant's own
+    entity envelope as exactly this sum, rather than recomputing it
+    independently, so cobre rule 41 holds by construction even though the
+    two groups' own per-stage machine-set changes (if any) need not peak on
+    the same stage.
     """
     groups: list[dict[str, object]] = []
+    total_turbined = 0.0
+    total_generation = 0.0
     for i in range(len(frequencies)):
         conjunto_index = i + 1
-        q, p = _conjunto_rated_ac_adjusted(hreg, code, conjunto_index, overrides)
+        q, p = _conjunto_rated_envelope(hreg, code, conjunto_index, effective)
         groups.append(
             build_mirror_unit_group(
                 name=name,
@@ -336,7 +378,9 @@ def _build_split_unit_groups(
                 group_id=i,
             )
         )
-    return groups
+        total_turbined += q
+        total_generation += p
+    return groups, total_turbined, total_generation
 
 
 def _frequency_row(
@@ -373,17 +417,31 @@ def convert_hydros(
 ) -> dict:
     """Build ``hydros.json`` for the operated plants.
 
-    Capability is the installed (un-derated, ``TEIF``/``IP``-free) rated sum
-    of unit flows/powers, AC-adjusted where the deck overrides a plant's true
-    in-service machine configuration
-    (:func:`_compute_max_turbined_rated_ac_adjusted`); the production model
-    is constant productivity, with the value emitted separately
-    (:func:`convert_energy_productivity`). Every plant declares one mirror
-    unit group, except the per-frequency split plant (Itaipu, code 66),
-    which declares two conjunto-backed groups instead
-    (:func:`_build_split_unit_groups`) — the plant's own ``generation``
-    envelope is unaffected either way. The entity ``reservoir`` block is the
-    plant's outer per-stage storage envelope (:func:`storage_envelope`), so
+    Capability is the installed (un-derated, ``TEIF``/``IP``-free)
+    max-over-stages envelope of the AC-adjusted rated unit-flow/power sum,
+    sourced per stage from *effective*'s machine-set view
+    (:func:`_rated_envelope`, mirroring :func:`storage_envelope`'s
+    outer-bound construction for the reservoir block) — some plants' *true*
+    in-service machine configuration differs from ``hidr.dat``'s nameplate
+    conjunto sum, and/or changes mid-horizon; a stage whose effective
+    capacity drops below that envelope gets a sparse per-stage overlay
+    instead (:func:`convert_hydro_group_availability`), never a change to
+    the declared envelope itself. The production model is constant
+    productivity, with the value emitted separately
+    (:func:`convert_energy_productivity`).
+
+    **Tracked E5 fidelity gap (user-confirmed 2026-08-07):** this envelope
+    is always the rated (un-derated) unit-flow sum with no per-stage-head
+    adjustment — see the module docstring; the source-model side's
+    head-aware engolimento correction is not ported here.
+
+    Every plant declares one mirror unit group, except the per-frequency
+    split plant (Itaipu, code 66), which declares two conjunto-backed groups
+    instead (:func:`_build_split_unit_groups`), whose summed maxima *are*
+    the entity envelope by construction — cobre rule 41 holds even though
+    the two groups' own per-stage machine-set changes (if any) need not
+    peak on the same stage. The entity ``reservoir`` block is the plant's
+    outer per-stage storage envelope (:func:`storage_envelope`), so
     per-stage bound overrides (:func:`cobre_bridge.decomp.bounds.
     convert_storage_bounds`) always sit inside it. Deferred fidelity is
     logged once per family.
@@ -396,7 +454,6 @@ def convert_hydros(
         if not pd.isna(value):
             min_outflow_by_code[int(row["codigo_usina"])] = float(value)
 
-    overrides = _read_ac_machine_overrides(dadger)
     # Read the MP/FD registers only if the split plant is actually present —
     # keeps every other (hand-built or real, non-Itaipu) caller from needing
     # a Dadger stub for methods this function otherwise never touches.
@@ -413,17 +470,15 @@ def convert_hydros(
         hreg = hidr.loc[code]
         name = str(hreg["nome_usina"]).strip()
         downstream = _downstream_operated(hidr, code, operated_codes)
-        max_turbined, max_generation = _compute_max_turbined_rated_ac_adjusted(
-            hreg, code, overrides
-        )
         min_storage_hm3, max_storage_hm3 = storage_envelope(effective, code)
         bus_id = id_map.bus_id(int(hreg["submercado"]))
         if code == _ITAIPU_CODE:
-            frequencies = _split_plant_frequencies(hreg, code, overrides, mp, fd)
-            unit_groups = _build_split_unit_groups(
-                hreg, code, name, bus_id, frequencies, overrides
+            frequencies = _split_plant_frequencies(hreg, code, effective, mp, fd)
+            unit_groups, max_turbined, max_generation = _build_split_unit_groups(
+                hreg, code, name, bus_id, frequencies, effective
             )
         else:
+            max_turbined, max_generation = _rated_envelope(hreg, code, effective)
             unit_groups = [
                 build_mirror_unit_group(
                     name=name,
@@ -460,7 +515,10 @@ def convert_hydros(
         }
         hydros.append(entry)
 
-    n_ac_affected = len(overrides.affected_codes & operated_codes)
+    affected_codes = set(effective.machine_conjunto_counts) | {
+        code for code, _ in effective.machine_sets
+    }
+    n_ac_affected = len(affected_codes & operated_codes)
     if n_ac_affected:
         _LOG.info(
             "applied AC NUMCON/NUMMAQ/POTEFE/VAZEFE machine-configuration "
@@ -626,49 +684,90 @@ class AvailabilityDeltaRow:
         return (self.availability_mw - self.hydraulic_mw) / self.availability_mw * 100.0
 
 
+def _availability_bound_entry(
+    q_g: float,
+    hydraulic_mw: float,
+    availability_mw: float,
+    q_envelope: float,
+    p_envelope: float,
+) -> GroupBoundEntry | None:
+    """One ``(hydro/group, stage)``'s B8 overlay entry, or ``None`` if
+    neither bound column falls below that group's own declared envelope.
+
+    ``max_generation_mw`` is ``min(hydraulic_mw, availability_mw)`` when
+    that falls below *p_envelope* (the existing B8 behaviour);
+    ``max_turbined_m3s`` is *q_g* — the per-stage AC-adjusted rated flow —
+    when it falls below *q_envelope* (new: a mid-horizon machine-set shrink
+    lowers the turbined-flow cap too, not just generation). Shared by the
+    single-group and Itaipu per-conjunto-group emission loops in
+    :func:`convert_hydro_group_availability`.
+    """
+    emitted = min(hydraulic_mw, availability_mw)
+    max_generation_mw = emitted if _below_envelope(emitted, p_envelope) else None
+    max_turbined_m3s = q_g if _below_envelope(q_g, q_envelope) else None
+    if max_generation_mw is None and max_turbined_m3s is None:
+        return None
+    return GroupBoundEntry(
+        max_generation_mw=max_generation_mw, max_turbined_m3s=max_turbined_m3s
+    )
+
+
 def convert_hydro_group_availability(
     dadger: Dadger,
     hidr: pd.DataFrame,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    effective: EffectiveCadastro,
 ) -> tuple[dict[tuple[int, int, int], GroupBoundEntry], list[AvailabilityDeltaRow]]:
     """B8 per-group per-stage available capacity.
 
     For the single-group majority (every plant but Itaipu):
-    ``availability_mw(stage) = installed × MP(stage) × FD(stage)`` —
-    installed is the AC-adjusted rated power
-    (:func:`_compute_max_turbined_rated_ac_adjusted`), a missing ``MP``/``FD``
-    register defaults its factor to ``1.0`` — capped by the hydraulic ceiling
-    ``ρ_eq · q_max`` (the same ρ_eq :func:`convert_energy_productivity` emits;
-    ``q_max`` the AC-adjusted rated flow). Defensively, any *other* plant
+    ``availability_mw(stage) = installed(stage) × MP(stage) × FD(stage)`` —
+    ``installed(stage)`` is the per-stage AC-adjusted rated power
+    (:func:`_compute_max_turbined_rated_ac_adjusted`, sourced from
+    *effective*'s machine-set view), a missing ``MP``/``FD`` register
+    defaults its factor to ``1.0`` — capped by the per-stage hydraulic
+    ceiling ``ρ_eq · q(stage)`` (the same ρ_eq :func:`convert_energy_
+    productivity` emits; ``q(stage)`` the per-stage AC-adjusted rated flow).
+    Both the emitted ``max_generation_mw`` and the emitted
+    ``max_turbined_m3s`` are sparse overlays against the group's own
+    declared envelope (:func:`_rated_envelope`) — a mid-horizon machine-set
+    shrink lowers *both* the availability ceiling and the turbined-flow cap
+    (:func:`_availability_bound_entry`). Defensively, any *other* plant
     whose ``MP``/``FD`` register carries more than one row is also dropped
     from this path (today only Itaipu, code 66, does).
 
+    **Tracked E5 fidelity gap (user-confirmed 2026-08-07):** ``installed``/
+    the flow cap above is always the rated (un-derated) unit-flow sum, with
+    no per-stage-head adjustment — see the module docstring; the
+    source-model side's head-aware engolimento correction is not ported
+    here.
+
     For Itaipu specifically, the same B8 formula is computed **per
     conjunto-backed group** rather than per plant —
-    ``availability_mw(g, stage) = installed_g × MP_g(stage) × FD_g(stage)``,
-    ``g`` in ``{0, 1}`` (frequencies sorted ascending, matching
-    :func:`_build_split_unit_groups`'s group ids), each register row
-    frequency-matched via :func:`_frequency_row` (no defaulting to ``1.0`` —
-    the split plant declares both rows) — capped by that same group's own
-    hydraulic ceiling ``ρ_eq · q_max_g`` (``ρ_eq`` is per-plant, ``q_max_g``
-    per-conjunto). Itaipu's binding rows are *not* folded into the returned
-    ``deltas`` list (which stays single-group-only, preserving the shared B8
-    Diagnostic's pre-existing count) — its own accepted-cost delta is
-    measured and pinned directly in ``tests/test_decomp_availability_rule.py``
-    per the ticket's own "reconstruct independently, never read the
-    converter's own intermediate" discipline.
+    ``availability_mw(g, stage) = installed_g(stage) × MP_g(stage) ×
+    FD_g(stage)``, ``g`` in ``{0, 1}`` (frequencies sorted ascending,
+    matching :func:`_build_split_unit_groups`'s group ids), each register
+    row frequency-matched via :func:`_frequency_row` (no defaulting to
+    ``1.0`` — the split plant declares both rows) — capped by that same
+    group's own per-stage hydraulic ceiling ``ρ_eq · q_g(stage)`` (``ρ_eq``
+    is per-plant, ``q_g(stage)`` per-conjunto). Itaipu's binding rows are
+    *not* folded into the returned ``deltas`` list (which stays
+    single-group-only, preserving the shared B8 Diagnostic's pre-existing
+    count) — its own accepted-cost delta is measured and pinned directly in
+    ``tests/test_decomp_availability_rule.py`` per the ticket's own
+    "reconstruct independently, never read the converter's own
+    intermediate" discipline.
 
     Returns the ``(hydro_id, hydro_unit_group_id, stage_id) ->
     GroupBoundEntry`` mapping ticket-025's ``convert_hydro_unit_group_bounds``
-    consumes unchanged — populated *sparsely*, only where the emitted value
+    consumes unchanged — populated *sparsely*, only where an emitted value
     falls below that group's own declared envelope, the same "only where it
     differs" convention every sibling emitter uses — plus the list of
     single-group ``(hydro, stage)`` rows where the hydraulic ceiling actually
     bound below availability, B8's own attached measurement obligation. The
     caller reports that list as a :class:`~cobre_bridge.diagnostics.Diagnostic`.
     """
-    overrides = _read_ac_machine_overrides(dadger)
     mp = dadger.mp(df=True)
     fd = dadger.fd(df=True)
     mp_by_code = _single_group_factor_rows(mp)
@@ -677,21 +776,24 @@ def convert_hydro_group_availability(
     values: dict[tuple[int, int, int], GroupBoundEntry] = {}
     deltas: list[AvailabilityDeltaRow] = []
     for code in id_map.hydro_codes:
+        hreg = hidr.loc[code]
+        hydro_id = id_map.hydro_id(code)
+        rho_eq = _equivalent_productivity_mw_per_m3s(hreg)
         if code == _ITAIPU_CODE:
-            hreg = hidr.loc[code]
-            hydro_id = id_map.hydro_id(code)
-            rho_eq = _equivalent_productivity_mw_per_m3s(hreg)
-            frequencies = _split_plant_frequencies(hreg, code, overrides, mp, fd)
+            frequencies = _split_plant_frequencies(hreg, code, effective, mp, fd)
             for i, frequency in enumerate(frequencies):
                 conjunto_index = i + 1
-                q_g, p_g = _conjunto_rated_ac_adjusted(
-                    hreg, code, conjunto_index, overrides
+                q_envelope, p_envelope = _conjunto_rated_envelope(
+                    hreg, code, conjunto_index, effective
                 )
-                hydraulic_mw = rho_eq * q_g
                 mp_row = _frequency_row(mp, code, frequency)
                 fd_row = _frequency_row(fd, code, frequency)
 
                 for stage in calendar:
+                    q_g, p_g = _conjunto_rated_ac_adjusted(
+                        hreg, code, conjunto_index, effective, stage.index
+                    )
+                    hydraulic_mw = rho_eq * q_g
                     mp_factor = _stage_register_factor(
                         mp_row, "manutencao", code, stage.index
                     )
@@ -699,21 +801,22 @@ def convert_hydro_group_availability(
                         fd_row, "fator", code, stage.index
                     )
                     availability_mw = p_g * mp_factor * fd_factor
-                    emitted = min(hydraulic_mw, availability_mw)
-                    if _below_envelope(emitted, p_g):
-                        values[(hydro_id, i, stage.index)] = GroupBoundEntry(
-                            max_generation_mw=emitted
-                        )
+                    entry = _availability_bound_entry(
+                        q_g, hydraulic_mw, availability_mw, q_envelope, p_envelope
+                    )
+                    if entry is not None:
+                        values[(hydro_id, i, stage.index)] = entry
             continue
-        hreg = hidr.loc[code]
         name = str(hreg["nome_usina"]).strip()
-        q_max, p_max = _compute_max_turbined_rated_ac_adjusted(hreg, code, overrides)
-        hydraulic_mw = _equivalent_productivity_mw_per_m3s(hreg) * q_max
-        hydro_id = id_map.hydro_id(code)
+        q_envelope, p_envelope = _rated_envelope(hreg, code, effective)
         mp_row = mp_by_code.get(code)
         fd_row = fd_by_code.get(code)
 
         for stage in calendar:
+            q_g, p_g = _compute_max_turbined_rated_ac_adjusted(
+                hreg, code, effective, stage.index
+            )
+            hydraulic_mw = rho_eq * q_g
             mp_factor = (
                 1.0
                 if mp_row is None
@@ -724,7 +827,7 @@ def convert_hydro_group_availability(
                 if fd_row is None
                 else _stage_register_factor(fd_row, "fator", code, stage.index)
             )
-            availability_mw = p_max * mp_factor * fd_factor
+            availability_mw = p_g * mp_factor * fd_factor
 
             if hydraulic_mw < availability_mw:
                 deltas.append(
@@ -737,11 +840,11 @@ def convert_hydro_group_availability(
                     )
                 )
 
-            emitted = min(hydraulic_mw, availability_mw)
-            if _below_envelope(emitted, p_max):
-                values[(hydro_id, 0, stage.index)] = GroupBoundEntry(
-                    max_generation_mw=emitted
-                )
+            entry = _availability_bound_entry(
+                q_g, hydraulic_mw, availability_mw, q_envelope, p_envelope
+            )
+            if entry is not None:
+                values[(hydro_id, 0, stage.index)] = entry
 
     return values, deltas
 

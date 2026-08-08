@@ -12,11 +12,15 @@ source model's own temporal overrides resolve to per-stage effective values
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from idecomp.decomp.modelos.dadger import (
     ACDESVIO,
+    ACNUMCON,
+    ACNUMMAQ,
+    ACPOTEFE,
+    ACVAZEFE,
     ACVAZMIN,
     ACVMDESV,
     ACVOLMAX,
@@ -25,7 +29,7 @@ from idecomp.decomp.modelos.dadger import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from idecomp.decomp import Dadger
 
@@ -298,6 +302,148 @@ def _read_diversion_overrides(
     return records, out_of_horizon
 
 
+@dataclass(frozen=True)
+class MachineSet:
+    """One conjunto's effective machine configuration at a stage.
+
+    ``numero_maquinas`` is the conjunto's machine-unit count; ``potencia``
+    and ``vazao`` are its per-unit rated power (MW) and rated flow (m³/s) —
+    the same three quantities the source model's ``NUMMAQ``/``POTEFE``/
+    ``VAZEFE`` registers carry, densified per stage by
+    :func:`build_effective_cadastro`.
+    """
+
+    numero_maquinas: int
+    potencia: float
+    vazao: float
+
+
+def _read_compound_key_overrides[T](
+    dadger: Dadger,
+    calendar: Sequence[OperativeStage],
+    ac_class: type,
+    value_column: str,
+    param: str,
+    value_caster: Callable[[Any], T],
+) -> tuple[dict[tuple[int, int], list[tuple[int, T]]], list[OutOfHorizon]]:
+    """Ingest one compound-key ``(codigo_usina, indice_conjunto)`` ``AC`` mnemonic.
+
+    Shared body for the three compound-key machine-set mnemonics
+    (``NUMMAQ``/``POTEFE``/``VAZEFE``) that :func:`_read_machine_set_overrides`
+    calls once per mnemonic — this is what keeps that reader from repeating
+    three near-identical loops, the same way :func:`_forward_fill_series` is
+    reused for both the ``int`` and ``float`` per-stage series it densifies.
+    Reads ``dadger.ac(codigo_usina=None, modificacao=ac_class, df=True)`` and
+    resolves every row's ``(mes, semana, ano)`` triple to an effective stage
+    via :func:`resolve_effective_stage`. Rows that resolve within the horizon
+    are grouped by ``(codigo_usina, indice_conjunto)`` as ``(eff_stage,
+    value_caster(row[value_column]))``; rows that resolve past the horizon
+    are reported (with *param* as the label) in the returned out-of-horizon
+    list instead of being dropped.
+
+    Raises
+    ------
+    KeyError
+        If the accessor frame is missing an expected column (a malformed
+        idecomp frame is a hard error, never a silent default).
+    """
+    records: dict[tuple[int, int], list[tuple[int, T]]] = {}
+    out_of_horizon: list[OutOfHorizon] = []
+    table = dadger.ac(codigo_usina=None, modificacao=ac_class, df=True)
+    if not isinstance(table, pd.DataFrame) or table.empty:
+        return records, out_of_horizon
+    for _, row in table.iterrows():
+        code = int(row["codigo_usina"])
+        conjunto = int(row["indice_conjunto"])
+        mes = row["mes"]
+        eff = resolve_effective_stage(mes, row["semana"], row["ano"], calendar)
+        if eff is None:
+            out_of_horizon.append(
+                _out_of_horizon_record(code, mes, row["ano"], param, calendar)
+            )
+            continue
+        value = value_caster(row[value_column])
+        records.setdefault((code, conjunto), []).append((eff, value))
+    return records, out_of_horizon
+
+
+def _read_machine_set_overrides(
+    dadger: Dadger,
+    calendar: Sequence[OperativeStage],
+) -> tuple[
+    dict[int, list[tuple[int, int]]],
+    dict[tuple[int, int], list[tuple[int, int]]],
+    dict[tuple[int, int], list[tuple[int, float]]],
+    dict[tuple[int, int], list[tuple[int, float]]],
+    list[OutOfHorizon],
+]:
+    """Ingest the machine-set ``AC`` overrides via idecomp's typed accessor.
+
+    Covers the third distinct override shape (after the scalar single-value
+    mnemonics and the non-scalar diversion channel): ``NUMCON`` is
+    **plant-keyed** (one conjunto count per ``codigo_usina``), while
+    ``NUMMAQ``/``POTEFE``/``VAZEFE`` are **compound-keyed** by
+    ``(codigo_usina, indice_conjunto)`` — a conjunto's machine count, rated
+    power, and rated flow. ``NUMCON`` is read by its own plant-keyed loop
+    (its frame carries no ``indice_conjunto`` column); the other three are
+    read through :func:`_read_compound_key_overrides`, one call per mnemonic.
+    Every row's ``(mes, semana, ano)`` triple is resolved to an effective
+    stage via :func:`resolve_effective_stage`; in-horizon rows are grouped by
+    key, past-horizon rows are reported (param labels ``"numero_conjuntos"``,
+    ``"numero_maquinas"``, ``"potencia"``, ``"vazao"``) in the returned
+    out-of-horizon list instead of being dropped. Reads a frame only when
+    ``isinstance(table, pd.DataFrame) and not table.empty``, mirroring
+    :func:`_read_scalar_overrides`/:func:`_read_diversion_overrides`, so a
+    ``None``/empty frame contributes nothing.
+
+    A fifth machine-configuration mnemonic, ``ALTEFE`` (effective head), is
+    deliberately **not** ingested here: the installed idecomp accessor
+    exposes no value property on it, only the identifying/timing columns, so
+    its ``df=True`` frame carries nothing to consume — and effective head is
+    out of this ticket's scope regardless (E5 head/productivity work). Do
+    not import or read it without a value accessor to back it.
+
+    Raises
+    ------
+    KeyError
+        If an accessor frame is missing an expected column (a malformed
+        idecomp frame is a hard error, never a silent default).
+    """
+    numero_conjuntos: dict[int, list[tuple[int, int]]] = {}
+    out_of_horizon: list[OutOfHorizon] = []
+    table = dadger.ac(codigo_usina=None, modificacao=ACNUMCON, df=True)
+    if isinstance(table, pd.DataFrame) and not table.empty:
+        for _, row in table.iterrows():
+            code = int(row["codigo_usina"])
+            mes = row["mes"]
+            eff = resolve_effective_stage(mes, row["semana"], row["ano"], calendar)
+            if eff is None:
+                out_of_horizon.append(
+                    _out_of_horizon_record(
+                        code, mes, row["ano"], "numero_conjuntos", calendar
+                    )
+                )
+                continue
+            numero_conjuntos.setdefault(code, []).append(
+                (eff, int(row["numero_conjuntos"]))
+            )
+
+    numero_maquinas, maquinas_out_of_horizon = _read_compound_key_overrides(
+        dadger, calendar, ACNUMMAQ, "numero_maquinas", "numero_maquinas", int
+    )
+    potencia, potencia_out_of_horizon = _read_compound_key_overrides(
+        dadger, calendar, ACPOTEFE, "potencia", "potencia", float
+    )
+    vazao, vazao_out_of_horizon = _read_compound_key_overrides(
+        dadger, calendar, ACVAZEFE, "vazao", "vazao", float
+    )
+    out_of_horizon.extend(maquinas_out_of_horizon)
+    out_of_horizon.extend(potencia_out_of_horizon)
+    out_of_horizon.extend(vazao_out_of_horizon)
+
+    return numero_conjuntos, numero_maquinas, potencia, vazao, out_of_horizon
+
+
 def _forward_fill_series[T](
     base_value: T,
     records: Sequence[tuple[int, T]],
@@ -344,6 +490,10 @@ class EffectiveCadastro:
     diversions: Mapping[int, tuple[DiversionChannel | None, ...]] = field(
         default_factory=dict
     )
+    machine_conjunto_counts: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    machine_sets: Mapping[tuple[int, int], tuple[MachineSet, ...]] = field(
+        default_factory=dict
+    )
 
     def value(self, code: int, param: str, stage_index: int) -> float:
         """Effective value of *param* for plant *code* at *stage_index*."""
@@ -383,6 +533,32 @@ class EffectiveCadastro:
             return None
         return self.diversions[code][stage_index]
 
+    def machine_conjunto_count(self, code: int, stage_index: int) -> int | None:
+        """The overridden per-stage ``AC NUMCON`` conjunto count for plant *code*.
+
+        ``None`` when *code* carries no ``NUMCON`` override at all (absent
+        from :attr:`machine_conjunto_counts`) — the caller then falls through
+        to the ``hidr`` base ``numero_conjuntos_maquinas``.
+        """
+        if code not in self.machine_conjunto_counts:
+            return None
+        return self.machine_conjunto_counts[code][stage_index]
+
+    def machine_set(
+        self, code: int, indice_conjunto: int, stage_index: int
+    ) -> MachineSet | None:
+        """The overridden per-stage machine configuration for one conjunto.
+
+        ``None`` when ``(code, indice_conjunto)`` carries no ``NUMMAQ``/
+        ``POTEFE``/``VAZEFE`` override at all (absent from
+        :attr:`machine_sets`) — the caller then falls through to the
+        ``hidr`` base per-conjunto columns.
+        """
+        key = (code, indice_conjunto)
+        if key not in self.machine_sets:
+            return None
+        return self.machine_sets[key][stage_index]
+
 
 def storage_envelope(effective: EffectiveCadastro, code: int) -> tuple[float, float]:
     """Outer per-stage operating range for plant *code*, in hm³.
@@ -415,6 +591,15 @@ class CadastroResolutionReport:
     out_of_horizon: tuple[OutOfHorizon, ...]
 
 
+def _require_cadastro_row(hidr: pd.DataFrame, code: int) -> None:
+    """Raise ``ValueError`` if *code* has no row in the cadastro registry."""
+    if code not in hidr.index:
+        raise ValueError(
+            f"AC override references plant code {code}, which is not in"
+            " the cadastro registry"
+        )
+
+
 def build_effective_cadastro(
     dadger: Dadger,
     hidr: pd.DataFrame,
@@ -440,30 +625,45 @@ def build_effective_cadastro(
     with a base or ``AC`` diversion. ``diversions`` is absent-by-default for
     every other plant, matching *stage_varying*'s sparsity discipline.
 
+    Also builds the two machine-set maps from :func:`_read_machine_set_overrides`,
+    each densified independently against *hidr*'s own per-conjunto columns:
+    ``machine_conjunto_counts`` (sparse by plant code, seeded from
+    ``numero_conjuntos_maquinas``) and ``machine_sets`` (sparse by
+    ``(code, indice_conjunto)``, seeded from ``maquinas_conjunto_{k}``/
+    ``potencia_nominal_conjunto_{k}``/``vazao_nominal_conjunto_{k}`` and
+    zipped into a :class:`MachineSet` tuple). *hidr*'s per-conjunto columns
+    are read only for the ``(code, k)`` pairs that actually carry an
+    override — never scanned unconditionally — so a conjunto with, say, a
+    ``NUMMAQ`` override but no ``POTEFE``/``VAZEFE`` override still gets its
+    ``potencia``/``vazao`` from the ``hidr`` base at every stage.
+
     Raises
     ------
     ValueError
         If an override references a plant *code* absent from ``hidr.index``
-        — the registry has no cadastro row to override. Applies to both the
-        scalar overrides and the source plant of an ``AC DESVIO`` (the
+        — the registry has no cadastro row to override. Applies to the
+        scalar overrides, the source plant of an ``AC DESVIO`` (the
         downstream plant it names is not validated here — that is M2.1's
-        concern).
+        concern), and every machine-set override.
     """
     records, out_of_horizon = _read_scalar_overrides(dadger, calendar)
     diversion_records, diversion_out_of_horizon = _read_diversion_overrides(
         dadger, calendar
     )
-    out_of_horizon = out_of_horizon + diversion_out_of_horizon
+    (
+        numero_conjuntos_records,
+        numero_maquinas_records,
+        potencia_records,
+        vazao_records,
+        machine_out_of_horizon,
+    ) = _read_machine_set_overrides(dadger, calendar)
+    out_of_horizon = out_of_horizon + diversion_out_of_horizon + machine_out_of_horizon
 
     n_stages = len(calendar)
     stage_varying: dict[tuple[int, str], tuple[float, ...]] = {}
     applied: dict[str, int] = {}
     for (code, param), overrides in records.items():
-        if code not in hidr.index:
-            raise ValueError(
-                f"AC override references plant code {code}, which is not in"
-                " the cadastro registry"
-            )
+        _require_cadastro_row(hidr, code)
         base_value = float(hidr.loc[code, param])
         stage_varying[(code, param)] = tuple(
             _forward_fill_series(base_value, overrides, n_stages)
@@ -479,11 +679,7 @@ def build_effective_cadastro(
     }
     diversions: dict[int, tuple[DiversionChannel | None, ...]] = {}
     for code in base_diversion_codes | set(diversion_records):
-        if code not in hidr.index:
-            raise ValueError(
-                f"AC override references plant code {code}, which is not in"
-                " the cadastro registry"
-            )
+        _require_cadastro_row(hidr, code)
         base_desvio = float(hidr.loc[code, "desvio"])
         base_channel = (
             DiversionChannel(int(base_desvio), None) if base_desvio != 0 else None
@@ -495,11 +691,54 @@ def build_effective_cadastro(
     if diversion_records:
         applied["diversion"] = len(diversion_records)
 
+    machine_conjunto_counts: dict[int, tuple[int, ...]] = {}
+    for code, count_overrides in numero_conjuntos_records.items():
+        _require_cadastro_row(hidr, code)
+        base_count = int(hidr.loc[code, "numero_conjuntos_maquinas"])
+        machine_conjunto_counts[code] = tuple(
+            _forward_fill_series(base_count, count_overrides, n_stages)
+        )
+    if numero_conjuntos_records:
+        applied["numero_conjuntos"] = len(numero_conjuntos_records)
+
+    machine_sets: dict[tuple[int, int], tuple[MachineSet, ...]] = {}
+    compound_keys = (
+        set(numero_maquinas_records) | set(potencia_records) | set(vazao_records)
+    )
+    for code, conjunto in compound_keys:
+        _require_cadastro_row(hidr, code)
+        base_numero_maquinas = int(hidr.loc[code, f"maquinas_conjunto_{conjunto}"])
+        base_potencia = float(hidr.loc[code, f"potencia_nominal_conjunto_{conjunto}"])
+        base_vazao = float(hidr.loc[code, f"vazao_nominal_conjunto_{conjunto}"])
+        numero_maquinas_series = _forward_fill_series(
+            base_numero_maquinas,
+            numero_maquinas_records.get((code, conjunto), []),
+            n_stages,
+        )
+        potencia_series = _forward_fill_series(
+            base_potencia, potencia_records.get((code, conjunto), []), n_stages
+        )
+        vazao_series = _forward_fill_series(
+            base_vazao, vazao_records.get((code, conjunto), []), n_stages
+        )
+        machine_sets[(code, conjunto)] = tuple(
+            MachineSet(numero_maquinas_series[s], potencia_series[s], vazao_series[s])
+            for s in range(n_stages)
+        )
+    if numero_maquinas_records:
+        applied["numero_maquinas"] = len(numero_maquinas_records)
+    if potencia_records:
+        applied["potencia"] = len(potencia_records)
+    if vazao_records:
+        applied["vazao"] = len(vazao_records)
+
     effective = EffectiveCadastro(
         base=hidr,
         n_stages=n_stages,
         stage_varying=stage_varying,
         diversions=diversions,
+        machine_conjunto_counts=machine_conjunto_counts,
+        machine_sets=machine_sets,
     )
     report = CadastroResolutionReport(
         applied=applied, out_of_horizon=tuple(out_of_horizon)

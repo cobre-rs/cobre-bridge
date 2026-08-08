@@ -327,7 +327,9 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     # may not exceed that group's declared max) is now reachable; its mirror
     # is wired into the self-check block below.
     availability_values, availability_deltas = (
-        hydro_conv.convert_hydro_group_availability(dadger, hidr, id_map, calendar)
+        hydro_conv.convert_hydro_group_availability(
+            dadger, hidr, id_map, calendar, effective
+        )
     )
     group_bounds = group_bounds_conv.convert_hydro_unit_group_bounds(
         availability_values, calendar

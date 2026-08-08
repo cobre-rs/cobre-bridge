@@ -28,7 +28,7 @@ import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.decomp_readers import read_dec_oper_usih
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.cadastro import build_effective_cadastro
 from cobre_bridge.decomp.group_bounds import convert_hydro_unit_group_bounds
 from cobre_bridge.decomp.hydro import (
     convert_energy_productivity,
@@ -178,14 +178,18 @@ class TestAvailabilityRule:
 
 
 def _load_deck():
-    """Parse the deck once: dadger, registry, id map, and calendar."""
+    """Parse the deck once: dadger, registry, id map, calendar, and the
+    machine-set-populated effective cadastro (ticket-012: the sole machine-
+    set source for both ``convert_hydros`` and
+    ``convert_hydro_group_availability`` now)."""
     from idecomp.decomp import Dadger
 
     dadger = Dadger.read(str(_DECK / "dadger.rv3"))
     hidr = read_hidr(_DECK / "hidr.dat")
     id_map = DecompIdMap.from_dadger(dadger)
     calendar = operative_calendar_from_dadger(dadger)
-    return dadger, hidr, id_map, calendar
+    effective, _ = build_effective_cadastro(dadger, hidr, calendar)
+    return dadger, hidr, id_map, calendar, effective
 
 
 def _independent_ac_overrides(
@@ -308,7 +312,7 @@ class TestConverterEmitsAvailability:
         groups instead sum to the entity (ticket-027,
         ``TestItaipuSplitGroups`` below covers that shape directly).
         """
-        dadger, hidr, id_map, calendar = _load_deck()
+        dadger, hidr, id_map, calendar, effective = _load_deck()
         numero_conjuntos, numero_maquinas, potencia, vazao = _independent_ac_overrides(
             dadger
         )
@@ -318,7 +322,7 @@ class TestConverterEmitsAvailability:
             hidr,
             id_map,
             calendar[0].start_date,
-            EffectiveCadastro(base=hidr, n_stages=len(calendar), stage_varying={}),
+            effective,
         )
         hydros_by_id = {h["id"]: h for h in doc["hydros"]}
         assert len(hydros_by_id) == len(id_map.hydro_codes)
@@ -366,7 +370,7 @@ class TestConverterEmitsAvailability:
         obligation) by cross-checking it against the converter's own delta
         list.
         """
-        dadger, hidr, id_map, calendar = _load_deck()
+        dadger, hidr, id_map, calendar, effective = _load_deck()
         numero_conjuntos, numero_maquinas, potencia, vazao = _independent_ac_overrides(
             dadger
         )
@@ -375,7 +379,7 @@ class TestConverterEmitsAvailability:
         rho_by_hydro_id = _rho_by_hydro_id(hidr, id_map)
 
         values, deltas = convert_hydro_group_availability(
-            dadger, hidr, id_map, calendar
+            dadger, hidr, id_map, calendar, effective
         )
         actual_binding = {(d.code, d.stage_id) for d in deltas}
 
@@ -430,7 +434,7 @@ class TestConverterEmitsAvailability:
         ``_compute_max_turbined_rated`` would have left. Every binding row
         stays at or below it (the accepted, B8-sanctioned cost).
         """
-        dadger, hidr, id_map, calendar = _load_deck()
+        dadger, hidr, id_map, calendar, _effective = _load_deck()
         numero_conjuntos, numero_maquinas, potencia, vazao = _independent_ac_overrides(
             dadger
         )
@@ -502,8 +506,10 @@ class TestConverterEmitsAvailability:
         value, ≈ 332.9 MW. The overlay now reduces stages 1-2's
         ``max_generation_mw`` to the maintenance-derated value ≈ 115.7 MW.
         """
-        dadger, hidr, id_map, calendar = _load_deck()
-        values, _ = convert_hydro_group_availability(dadger, hidr, id_map, calendar)
+        dadger, hidr, id_map, calendar, effective = _load_deck()
+        values, _ = convert_hydro_group_availability(
+            dadger, hidr, id_map, calendar, effective
+        )
         hydro_id = id_map.hydro_id(42)
 
         for stage_index in (0, 1):
@@ -516,15 +522,17 @@ class TestConverterEmitsAvailability:
         deck's emitted ``hydros.json`` + overlay (the end-to-end ``cobre
         validate`` pass, recorded in ``epic-08/learnings.md``, covers the
         rest)."""
-        dadger, hidr, id_map, calendar = _load_deck()
+        dadger, hidr, id_map, calendar, effective = _load_deck()
         doc = convert_hydros(
             dadger,
             hidr,
             id_map,
             calendar[0].start_date,
-            EffectiveCadastro(base=hidr, n_stages=len(calendar), stage_varying={}),
+            effective,
         )
-        values, _ = convert_hydro_group_availability(dadger, hidr, id_map, calendar)
+        values, _ = convert_hydro_group_availability(
+            dadger, hidr, id_map, calendar, effective
+        )
         group_bounds = convert_hydro_unit_group_bounds(values, calendar)
 
         with dx.collect() as collected:
@@ -574,7 +582,7 @@ class TestItaipuSplitGroups:
         2 frequencia rows (50, 60) this whole ticket is built on. A registry
         drift here is a STOP-and-escalate condition, not silently absorbed.
         """
-        _dadger, hidr, id_map, _calendar = _load_deck()
+        _dadger, hidr, id_map, _calendar, _effective = _load_deck()
         hreg = hidr.loc[_SPLIT_PLANT]
         assert int(hreg["numero_conjuntos_maquinas"]) == 2
         assert int(hreg["submercado"]) == 1
@@ -598,13 +606,13 @@ class TestItaipuSplitGroups:
         stays installed (14000/13240), so rule 41 holds exactly by
         construction (7000+7000 == 14000, 6620+6620 == 13240).
         """
-        dadger, hidr, id_map, calendar = _load_deck()
+        dadger, hidr, id_map, calendar, effective = _load_deck()
         doc = convert_hydros(
             dadger,
             hidr,
             id_map,
             calendar[0].start_date,
-            EffectiveCadastro(base=hidr, n_stages=len(calendar), stage_varying={}),
+            effective,
         )
         hydro_id = id_map.hydro_id(_SPLIT_PLANT)
         itaipu = next(h for h in doc["hydros"] if h["id"] == hydro_id)
@@ -687,7 +695,7 @@ class TestItaipuSplitGroups:
           stage 3 (< 0.01 MW) — the measured B8 accepted cost, pinned here,
           not asserted equal to the oracle.
         """
-        dadger, hidr, id_map, calendar = _load_deck()
+        dadger, hidr, id_map, calendar, effective = _load_deck()
         hydro_id = id_map.hydro_id(_SPLIT_PLANT)
         rho_by_hydro_id = _rho_by_hydro_id(hidr, id_map)
         rho_eq = rho_by_hydro_id[hydro_id]
@@ -705,7 +713,9 @@ class TestItaipuSplitGroups:
             .iterrows()
         )
 
-        values, _ = convert_hydro_group_availability(dadger, hidr, id_map, calendar)
+        values, _ = convert_hydro_group_availability(
+            dadger, hidr, id_map, calendar, effective
+        )
         group_bounds = convert_hydro_unit_group_bounds(values, calendar)
         bounds_pd = group_bounds.to_pandas()
         itaipu_bounds = bounds_pd[bounds_pd["hydro_id"] == hydro_id]
@@ -735,6 +745,7 @@ class TestItaipuSplitGroups:
                     f"expected an overlay row at group {group_id} stage {stage_index}"
                 )
                 emitted = values[key].max_generation_mw
+                assert isinstance(emitted, float)  # a scalar per-stage generation cap
                 assert emitted == pytest.approx(expected_emitted, abs=1e-6)
                 assert emitted <= 7000.0 + 1e-6
 
@@ -760,15 +771,17 @@ class TestItaipuSplitGroups:
         """The rule-45 mirror, run directly against Itaipu's own declared
         groups and overlay — every emitted value sits at or below
         ρ_eq x 6620 (~6810.80), itself below each group's declared 7000."""
-        dadger, hidr, id_map, calendar = _load_deck()
+        dadger, hidr, id_map, calendar, effective = _load_deck()
         doc = convert_hydros(
             dadger,
             hidr,
             id_map,
             calendar[0].start_date,
-            EffectiveCadastro(base=hidr, n_stages=len(calendar), stage_varying={}),
+            effective,
         )
-        values, _ = convert_hydro_group_availability(dadger, hidr, id_map, calendar)
+        values, _ = convert_hydro_group_availability(
+            dadger, hidr, id_map, calendar, effective
+        )
         group_bounds = convert_hydro_unit_group_bounds(values, calendar)
 
         with dx.collect() as collected:
