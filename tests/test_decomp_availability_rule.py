@@ -21,6 +21,7 @@ the group-wise sum lands on the reported value exactly.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import polars as pl
@@ -28,10 +29,11 @@ import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.decomp_readers import read_dec_oper_usih
+from cobre_bridge.converters.hydro import _KTURB_BY_TIPO_TURBINA
 from cobre_bridge.decomp.cadastro import build_effective_cadastro
 from cobre_bridge.decomp.group_bounds import convert_hydro_unit_group_bounds
 from cobre_bridge.decomp.hydro import (
-    convert_energy_productivity,
+    _equivalent_productivity_mw_per_m3s,
     convert_hydro_group_availability,
     convert_hydros,
     read_hidr,
@@ -40,6 +42,12 @@ from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.emission_checks import check_group_bound_envelope
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.temporal import OperativeStage
 
 _DECK = Path("example/decomp-jul-26-rv3")
 _needs_deck = pytest.mark.skipif(
@@ -266,6 +274,68 @@ def _independent_ac_adjusted_rated(
     return q_max, p_max
 
 
+def _independent_head_corrected_max_turbined(
+    code: int,
+    hidr: pd.DataFrame,
+    effective: EffectiveCadastro,
+    calendar: Sequence[OperativeStage],
+    rho_by_hydro_id: dict[tuple[int, int], float],
+    hydro_id: int,
+    numero_conjuntos: dict[int, int],
+    numero_maquinas: dict[tuple[int, int], int],
+    potencia: dict[tuple[int, int], float],
+    vazao: dict[tuple[int, int], float],
+) -> float:
+    """Max-over-stages head-corrected ``max_turbined_m3s`` for *code*,
+    reconstructed independently of ``decomp/hydro.py``'s own head-corrected
+    helpers (ticket-017): reuses only ``rho_by_hydro_id`` (itself the shared
+    ``_equivalent_productivity_mw_per_m3s`` formula, already treated as an
+    independent building block above) and the raw AC NUMCON/NUMMAQ/POTEFE/
+    VAZEFE overrides already parsed into *numero_conjuntos*/*numero_maquinas*/
+    *potencia*/*vazao* — the affinity-ratio/power-cap arithmetic itself is
+    redone here, not called from ``decomp/hydro.py``. ``AC ALTEFE`` is not
+    consumed by either side (ticket-017's tracked gap), so ``h_nom``/
+    ``tipo_turbina`` are always read straight off the base ``hidr`` row.
+    """
+    hreg = hidr.loc[code]
+    tipo_turbina = int(hreg.get("tipo_turbina", 0) or 0)
+    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+    n_sets = numero_conjuntos.get(code, int(hreg["numero_conjuntos_maquinas"]))
+
+    per_stage: list[float] = []
+    for stage in calendar:
+        rho_eq = rho_by_hydro_id[(hydro_id, stage.index)]
+        rho_esp = effective.value(code, "produtibilidade_especifica", stage.index)
+        h_op = rho_eq / rho_esp if rho_eq > 0.0 and rho_esp > 0.0 else 0.0
+
+        if h_op <= 0.0:
+            per_stage.append(
+                _independent_ac_adjusted_rated(
+                    code, hreg, numero_conjuntos, numero_maquinas, potencia, vazao
+                )[0]
+            )
+            continue
+
+        sum_affinity = 0.0
+        sum_p = 0.0
+        for i in range(1, n_sets + 1):
+            n_machines = numero_maquinas.get(
+                (code, i), int(hreg[f"maquinas_conjunto_{i}"])
+            )
+            q_nom = vazao.get((code, i), float(hreg[f"vazao_nominal_conjunto_{i}"]))
+            p_nom = potencia.get(
+                (code, i), float(hreg[f"potencia_nominal_conjunto_{i}"])
+            )
+            n_q = n_machines * q_nom
+            n_p = n_machines * p_nom
+            h_nom = float(hreg[f"queda_nominal_conjunto_{i}"])
+            sum_affinity += n_q if h_nom <= 0.0 else n_q * (h_op / h_nom) ** kturb
+            sum_p += n_p
+        per_stage.append(min(sum_affinity, sum_p / rho_eq))
+
+    return max(per_stage)
+
+
 def _independent_single_group_rows(
     records: pd.DataFrame | None,
 ) -> dict[int, pd.Series]:
@@ -279,23 +349,30 @@ def _independent_single_group_rows(
     return {int(row["codigo_usina"]): row for _, row in single.iterrows()}
 
 
-def _rho_by_hydro_id(hidr: pd.DataFrame, id_map: DecompIdMap) -> dict[int, float]:
-    """ρ_eq per hydro id via :func:`convert_energy_productivity` — Requirement
-    3 names this function's formula explicitly as the hydraulic cap's ρ_eq
-    source, and it is independently pinned by
-    ``test_decomp_hydro_thermal.py::test_energy_productivity_head`` already,
-    so reusing it here (rather than re-deriving the cota-polynomial/
-    hydraulic-loss integral a third time) still keeps the AC/availability
-    logic under test independent.
+def _rho_by_hydro_id(
+    effective: EffectiveCadastro,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> dict[tuple[int, int], float]:
+    """ρ_eq per ``(hydro_id, stage_index)`` via
+    ``decomp.hydro._equivalent_productivity_mw_per_m3s`` — ticket-013's
+    Requirement 3 names this function's formula explicitly as the hydraulic
+    cap's ρ_eq source, and its stage-0 value is independently pinned by
+    ``test_decomp_hydro_thermal.py::test_energy_productivity_head`` already.
+    ``convert_energy_productivity`` itself only exposes that stage-0 value
+    (one ρ_eq per plant, penalties' own input); the availability overlay's
+    hydraulic ceiling instead needs ρ_eq at every stage, so this calls the
+    same per-stage production formula directly (rather than re-deriving the
+    cota-polynomial/hydraulic-loss integral a third time), which still keeps
+    the AC/availability logic under test independent.
     """
-    table = convert_energy_productivity(hidr, id_map)
-    return dict(
-        zip(
-            table["hydro_id"].to_pylist(),
-            table["equivalent_productivity_mw_per_m3s"].to_pylist(),
-            strict=True,
+    return {
+        (id_map.hydro_id(code), stage.index): _equivalent_productivity_mw_per_m3s(
+            effective, code, stage.index
         )
-    )
+        for code in id_map.hydro_codes
+        for stage in calendar
+    }
 
 
 @_needs_deck
@@ -316,6 +393,7 @@ class TestConverterEmitsAvailability:
         numero_conjuntos, numero_maquinas, potencia, vazao = _independent_ac_overrides(
             dadger
         )
+        rho_by_hydro_id = _rho_by_hydro_id(effective, id_map, calendar)
 
         doc = convert_hydros(
             dadger,
@@ -329,10 +407,28 @@ class TestConverterEmitsAvailability:
 
         for code in id_map.hydro_codes:
             hreg = hidr.loc[code]
-            q_expected, p_expected = _independent_ac_adjusted_rated(
+            hydro_id = id_map.hydro_id(code)
+            _, p_expected = _independent_ac_adjusted_rated(
                 code, hreg, numero_conjuntos, numero_maquinas, potencia, vazao
             )
-            hydro = hydros_by_id[id_map.hydro_id(code)]
+            # max_turbined_m3s is head-corrected (ticket-017); Itaipu's own
+            # per-conjunto-capped entity sum happens to equal this
+            # plant-wide-cap formula here because its two conjuntos are
+            # identical (min is homogeneous: sum of two equal per-conjunto
+            # mins == min of the doubled sums) — verified below regardless.
+            q_expected = _independent_head_corrected_max_turbined(
+                code,
+                hidr,
+                effective,
+                calendar,
+                rho_by_hydro_id,
+                hydro_id,
+                numero_conjuntos,
+                numero_maquinas,
+                potencia,
+                vazao,
+            )
+            hydro = hydros_by_id[hydro_id]
             gen = hydro["generation"]
             assert gen["max_turbined_m3s"] == pytest.approx(q_expected, abs=1e-6)
             assert gen["max_generation_mw"] == pytest.approx(p_expected, abs=1e-6)
@@ -352,13 +448,16 @@ class TestConverterEmitsAvailability:
         # Itaipu specifically (Requirement 1's own example): 14000 MW, not
         # the pre-D-1 TEIF/IP-derated ~12236.94 MW. Itaipu has no AC override
         # on this deck, so its declared envelope is the plain registry rated
-        # sum once TEIF/IP stops derating it.
+        # sum once TEIF/IP stops derating it. max_turbined_m3s is
+        # head-corrected (ticket-017): 13240 rated derates to ~13060.65 at
+        # Itaipu's own nominal (117 m) vs operating head (both conjuntos
+        # symmetric, TestItaipuSplitGroups below covers the per-group shape).
         itaipu = hydros_by_id[id_map.hydro_id(_SPLIT_PLANT)]
         assert itaipu["generation"]["max_generation_mw"] == pytest.approx(
             14000.0, abs=1e-6
         )
         assert itaipu["generation"]["max_turbined_m3s"] == pytest.approx(
-            13240.0, abs=1e-6
+            13060.65, abs=0.01
         )
 
     def test_overlay_reconstruction_matches_independent_registers(self) -> None:
@@ -376,7 +475,7 @@ class TestConverterEmitsAvailability:
         )
         mp_by_code = _independent_single_group_rows(dadger.mp(df=True))
         fd_by_code = _independent_single_group_rows(dadger.fd(df=True))
-        rho_by_hydro_id = _rho_by_hydro_id(hidr, id_map)
+        rho_by_hydro_id = _rho_by_hydro_id(effective, id_map, calendar)
 
         values, deltas = convert_hydro_group_availability(
             dadger, hidr, id_map, calendar, effective
@@ -393,11 +492,11 @@ class TestConverterEmitsAvailability:
             q_max, p_max = _independent_ac_adjusted_rated(
                 code, hreg, numero_conjuntos, numero_maquinas, potencia, vazao
             )
-            hydraulic_mw = rho_by_hydro_id[hydro_id] * q_max
             mp_row = mp_by_code.get(code)
             fd_row = fd_by_code.get(code)
 
             for stage in calendar:
+                hydraulic_mw = rho_by_hydro_id[(hydro_id, stage.index)] * q_max
                 mp_factor = (
                     1.0
                     if mp_row is None
@@ -421,8 +520,10 @@ class TestConverterEmitsAvailability:
                 checked += 1
 
         assert checked == 504, f"expected 504 single-group rows, got {checked}"
-        # Criterion 4: pinned — measured here (not assumed), 2026-08-03.
-        assert len(expected_binding) == 110
+        # Criterion 4: pinned — measured here (not assumed), 2026-08-03; shifted
+        # 110 -> 103 by ticket-013's per-stage, AC-COTVOL/JUSMED-effective ρ_eq
+        # (rv3 carries those overrides on 7 plants), re-measured 2026-08-08.
+        assert len(expected_binding) == 103
         assert actual_binding == expected_binding
 
     def test_non_binding_rows_match_oracle_binding_rows_stay_below(self) -> None:
@@ -434,13 +535,13 @@ class TestConverterEmitsAvailability:
         ``_compute_max_turbined_rated`` would have left. Every binding row
         stays at or below it (the accepted, B8-sanctioned cost).
         """
-        dadger, hidr, id_map, calendar, _effective = _load_deck()
+        dadger, hidr, id_map, calendar, effective = _load_deck()
         numero_conjuntos, numero_maquinas, potencia, vazao = _independent_ac_overrides(
             dadger
         )
         mp_by_code = _independent_single_group_rows(dadger.mp(df=True))
         fd_by_code = _independent_single_group_rows(dadger.fd(df=True))
-        rho_by_hydro_id = _rho_by_hydro_id(hidr, id_map)
+        rho_by_hydro_id = _rho_by_hydro_id(effective, id_map, calendar)
 
         checked_nonbinding = 0
         checked_binding = 0
@@ -454,7 +555,7 @@ class TestConverterEmitsAvailability:
             q_max, p_max = _independent_ac_adjusted_rated(
                 code, hreg, numero_conjuntos, numero_maquinas, potencia, vazao
             )
-            hydraulic_mw = rho_by_hydro_id[hydro_id] * q_max
+            hydraulic_mw = rho_by_hydro_id[(hydro_id, stage_number - 1)] * q_max
             mp_row = mp_by_code.get(code)
             fd_row = fd_by_code.get(code)
             mp_factor = (
@@ -476,8 +577,9 @@ class TestConverterEmitsAvailability:
                 assert emitted <= row["available"] + _TOL
                 checked_binding += 1
 
-        assert checked_nonbinding == 504 - 110
-        assert checked_binding == 110
+        # Shifted 110 -> 103 alongside the binding count above (ticket-013).
+        assert checked_nonbinding == 504 - 103
+        assert checked_binding == 103
 
     def test_pipeline_emits_the_availability_delta_diagnostic(
         self, tmp_path: Path
@@ -495,7 +597,8 @@ class TestConverterEmitsAvailability:
         assert len(found) == 1
         diagnostic = found[0]
         assert diagnostic.severity is Severity.INFO
-        assert "110" in diagnostic.summary
+        # Shifted 110 -> 103 alongside the binding count above (ticket-013).
+        assert "103" in diagnostic.summary
         assert diagnostic.table is not None
         assert len(diagnostic.table.rows) == 10
 
@@ -572,6 +675,45 @@ def _itaipu_conjunto_rated(hidr: pd.DataFrame) -> list[tuple[float, float]]:
     ]
 
 
+def _itaipu_conjunto_head_corrected(
+    hidr: pd.DataFrame,
+    effective: EffectiveCadastro,
+    calendar: Sequence[OperativeStage],
+    rho_by_hydro_id: dict[tuple[int, int], float],
+    hydro_id: int,
+) -> list[float]:
+    """Max-over-stages head-corrected flow for each of Itaipu's two hidr
+    conjuntos (ticket-017), independent of ``decomp/hydro.py::
+    _conjunto_head_corrected_ac_adjusted`` — Itaipu carries no AC override
+    on either reference deck, so :func:`_itaipu_conjunto_rated`'s bare
+    registry pair plus a bare ``queda_nominal_conjunto_i``/``tipo_turbina``
+    read is the correct independent reconstruction here, with the
+    per-conjunto affinity/power-cap arithmetic redone rather than called.
+    """
+    hreg = hidr.loc[_SPLIT_PLANT]
+    tipo_turbina = int(hreg.get("tipo_turbina", 0) or 0)
+    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+    rated = _itaipu_conjunto_rated(hidr)
+
+    result: list[float] = []
+    for i, (n_q, n_p) in zip((1, 2), rated, strict=True):
+        h_nom = float(hreg[f"queda_nominal_conjunto_{i}"])
+        per_stage: list[float] = []
+        for stage in calendar:
+            rho_eq = rho_by_hydro_id[(hydro_id, stage.index)]
+            rho_esp = effective.value(
+                _SPLIT_PLANT, "produtibilidade_especifica", stage.index
+            )
+            h_op = rho_eq / rho_esp if rho_eq > 0.0 and rho_esp > 0.0 else 0.0
+            if h_op <= 0.0:
+                per_stage.append(n_q)
+                continue
+            affinity = n_q if h_nom <= 0.0 else n_q * (h_op / h_nom) ** kturb
+            per_stage.append(min(affinity, n_p / rho_eq))
+        result.append(max(per_stage))
+    return result
+
+
 @_needs_deck
 class TestItaipuSplitGroups:
     """Criteria 1-4: Itaipu's own two conjunto-backed groups + their overlay."""
@@ -602,9 +744,12 @@ class TestItaipuSplitGroups:
 
     def test_two_declared_groups_sum_to_the_installed_plant_envelope(self) -> None:
         """Criterion 1: two unique-id groups (id 0 = 50 Hz, id 1 = 60 Hz),
-        each 7000 MW / 6620 m3/s, both on bus SE; the plant's own envelope
-        stays installed (14000/13240), so rule 41 holds exactly by
-        construction (7000+7000 == 14000, 6620+6620 == 13240).
+        each 7000 MW installed (rated, unchanged); the plant's own
+        ``max_generation_mw`` envelope stays installed (14000), so rule 41
+        holds exactly by construction (7000+7000 == 14000). Each group's
+        ``max_turbined_m3s`` is head-corrected (ticket-017, per-conjunto
+        cap: :func:`_itaipu_conjunto_head_corrected`), and the entity's
+        ``max_turbined_m3s`` is their sum, per :func:`_build_split_unit_groups`.
         """
         dadger, hidr, id_map, calendar, effective = _load_deck()
         doc = convert_hydros(
@@ -623,20 +768,25 @@ class TestItaipuSplitGroups:
         assert {g["id"] for g in groups} == {0, 1}
 
         conjuntos = _itaipu_conjunto_rated(hidr)
+        rho_by_hydro_id = _rho_by_hydro_id(effective, id_map, calendar)
+        q_head_expected = _itaipu_conjunto_head_corrected(
+            hidr, effective, calendar, rho_by_hydro_id, hydro_id
+        )
         expected_bus = id_map.bus_id(1)
         for group in sorted(groups, key=lambda g: g["id"]):
-            q_expected, p_expected = conjuntos[group["id"]]
+            _, p_expected = conjuntos[group["id"]]
             assert group["max_generation_mw"] == pytest.approx(p_expected, abs=1e-6)
             assert group["max_generation_mw"] == pytest.approx(7000.0, abs=1e-6)
-            assert group["max_turbined_m3s"] == pytest.approx(q_expected, abs=1e-6)
-            assert group["max_turbined_m3s"] == pytest.approx(6620.0, abs=1e-6)
+            assert group["max_turbined_m3s"] == pytest.approx(
+                q_head_expected[group["id"]], abs=1e-6
+            )
             assert group["min_generation_mw"] == 0.0
             assert group["min_turbined_m3s"] == 0.0
             assert group["bus_id"] == expected_bus
 
         gen = itaipu["generation"]
         assert gen["max_generation_mw"] == pytest.approx(14000.0, abs=1e-6)
-        assert gen["max_turbined_m3s"] == pytest.approx(13240.0, abs=1e-6)
+        assert gen["max_turbined_m3s"] == pytest.approx(sum(q_head_expected), abs=1e-6)
         assert sum(g["max_generation_mw"] for g in groups) == pytest.approx(
             gen["max_generation_mw"]
         )
@@ -681,8 +831,9 @@ class TestItaipuSplitGroups:
 
     def test_overlay_reconstruction_and_binding_delta(self) -> None:
         """Criteria 3 and 4 together (both reconstructed independently from
-        the registers, ρ_eq re-derived the same way
-        ``convert_energy_productivity`` does — never hardcoded):
+        the registers, ρ_eq re-derived per stage via the same production
+        formula ``convert_energy_productivity`` and ``convert_hydro_group_
+        availability`` both call — never hardcoded):
 
         - Criterion 3: each emitted ``(group, stage)`` ``max_generation_mw``
           equals ``min(ρ_eq x 6620, 7000 x MP_g x FD_g)`` to < 0.01 MW, with
@@ -697,8 +848,7 @@ class TestItaipuSplitGroups:
         """
         dadger, hidr, id_map, calendar, effective = _load_deck()
         hydro_id = id_map.hydro_id(_SPLIT_PLANT)
-        rho_by_hydro_id = _rho_by_hydro_id(hidr, id_map)
-        rho_eq = rho_by_hydro_id[hydro_id]
+        rho_by_hydro_id = _rho_by_hydro_id(effective, id_map, calendar)
 
         conjuntos = _itaipu_conjunto_rated(hidr)
         maintenance, availability = _registers()
@@ -727,11 +877,11 @@ class TestItaipuSplitGroups:
         for group_id in (0, 1):
             q_g, p_g = conjuntos[group_id]
             assert p_g == pytest.approx(7000.0)
-            hydraulic_mw = rho_eq * q_g
             _, mp_row = mp_rows[group_id]
             _, fd_row = fd_rows[group_id]
 
             for stage_index in range(3):
+                hydraulic_mw = rho_by_hydro_id[(hydro_id, stage_index)] * q_g
                 stage_number = stage_index + 1
                 availability_mw = (
                     p_g

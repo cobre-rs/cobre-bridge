@@ -133,6 +133,83 @@ def _describe_emission_check_errors(errors: list[dx.Diagnostic]) -> str:
     return "\n".join(lines)
 
 
+def _topology_relink_diagnostic(
+    effective: cadastro_conv.EffectiveCadastro,
+    id_map: DecompIdMap,
+) -> dx.Diagnostic | None:
+    """The ``cadastro-topology-relinked`` INFO diagnostic (ticket-014, OQ-4),
+    or ``None`` when no operated plant's effective downstream link/inflow
+    gauge differs from the base registry (the byte-identical no-override
+    case).
+
+    Lists every operated plant whose stage-0 effective downstream link
+    (``AC NUMJUS``) or inflow gauge (``AC NUMPOS``) differs from the base
+    ``hidr`` value — the direct, human-readable relink; rv3's own 5
+    ``AC NUMJUS`` rows all take this form (34/43 -> 45, 127/181 -> 129,
+    117 -> 108).
+
+    As a defensive backstop — the "precise relink check" the ticket calls
+    for — also walks the incremental-inflow cascade
+    (:func:`~cobre_bridge.decomp.scenarios._incremental_context`) under
+    both *effective* and a base-only cadastro (same registry, no override
+    maps) and compares the resolved ``parents`` maps: an ``AC NUMJUS`` on a
+    non-operated intermediate can change which operated plant receives an
+    upstream plant's water without any operated plant's own link differing,
+    so the direct per-code diff above would miss it. No rv3 row exercises
+    that case, so it is not itemized by name here, but it is never silently
+    dropped either — a tracked-gap warning fires instead of a
+    diagnostic-less, byte-different conversion.
+    """
+    base = cadastro_conv.EffectiveCadastro(
+        base=effective.base, n_stages=effective.n_stages, stage_varying={}
+    )
+    _, base_parents = scenarios_conv._incremental_context(base, id_map)
+    _, effective_parents = scenarios_conv._incremental_context(effective, id_map)
+
+    rows: list[list[object]] = []
+    affected_codes: set[int] = set()
+    for code in id_map.hydro_codes:
+        name = str(effective.base.loc[code, "nome_usina"]).strip()
+        base_downstream = int(effective.base.loc[code, "codigo_usina_jusante"])
+        eff_downstream = effective.downstream_plant(code, 0)
+        if eff_downstream != base_downstream:
+            rows.append([name, code, "downstream", base_downstream, eff_downstream])
+            affected_codes.add(code)
+        base_gauge = int(effective.base.loc[code, "posto"])
+        eff_gauge = effective.inflow_gauge(code, 0)
+        if eff_gauge != base_gauge:
+            rows.append([name, code, "gauge", base_gauge, eff_gauge])
+            affected_codes.add(code)
+
+    if not rows:
+        if base_parents != effective_parents:
+            _LOG.warning(
+                "the effective and base incremental-inflow cascades differ, "
+                "but no operated plant's own downstream link or inflow "
+                "gauge changed directly; likely an AC NUMJUS relink on a "
+                "non-operated intermediate -- not itemized by the "
+                "cadastro-topology-relinked diagnostic"
+            )
+        return None
+
+    return dx.Diagnostic(
+        code="cadastro-topology-relinked",
+        severity=dx.Severity.INFO,
+        category="Cadastro overrides",
+        title=f"Topology/gauge relinked for {len(affected_codes)} plant(s)",
+        summary=(
+            f"{len(affected_codes)} operated plant(s) carry an AC NUMJUS/"
+            "NUMPOS override that changes their effective downstream link "
+            "or inflow gauge from the base registry"
+        ),
+        table=dx.DiagnosticTable(
+            columns=["Plant", "Code", "Kind", "Base", "Effective"],
+            rows=rows,
+            justify=["left", "right", "left", "right", "right"],
+        ),
+    )
+
+
 def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     """Convert one deck revision into a Cobre case directory.
 
@@ -191,6 +268,13 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
             ),
             logger=_LOG,
         )
+    # ticket-014 (E5, OQ-4): the topology/gauge relink is its own diagnostic
+    # (not folded into the summary above) so an automated consumer can key
+    # on "cadastro-topology-relinked" specifically — the resolved
+    # downstream/gauge links, not just an override count.
+    relink_diagnostic = _topology_relink_diagnostic(effective, id_map)
+    if relink_diagnostic is not None:
+        dx.emit(relink_diagnostic, logger=_LOG)
     start_date = calendar[0].start_date
     fan_probabilities = scenarios_conv.terminal_fan_probabilities(vazoes, calendar)
 
@@ -207,7 +291,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     )
     _write_json(dst / "stages.json", stages_dict)
 
-    productivity = hydro_conv.convert_energy_productivity(hidr, id_map)
+    productivity = hydro_conv.convert_energy_productivity(effective, id_map)
     deficit_costs = network_conv._bus_deficit_costs(dadger)
     deficit_cost = max(deficit_costs.values()) if deficit_costs else 0.0
     _write_json(
@@ -260,7 +344,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     )
     _write_parquet(
         scenarios / "external_inflow_scenarios.parquet",
-        scenarios_conv.convert_external_inflows(vazoes, hidr, id_map, calendar),
+        scenarios_conv.convert_external_inflows(vazoes, effective, id_map, calendar),
     )
     load_stats = load_conv.convert_load_stats(dadger, id_map, calendar)
     _write_parquet(scenarios / "load_seasonal_stats.parquet", load_stats)

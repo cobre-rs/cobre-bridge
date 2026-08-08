@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from cobre_bridge.cli import app
 from cobre_bridge.decomp.bounds import _HYDRO_BOUNDS_SCHEMA
+from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
 from cobre_bridge.decomp.scenarios import (
@@ -53,6 +54,17 @@ def _hidr_frame() -> pd.DataFrame:
     return df
 
 
+def _effective_no_override(hidr: pd.DataFrame) -> EffectiveCadastro:
+    """ticket-014: ``convert_external_inflows`` now takes the effective
+    cadastro, not the bare ``hidr`` frame; every call site in this module
+    that carries no ``AC NUMJUS``/``NUMPOS`` override wraps *hidr* through
+    this — the resulting downstream/gauge reads fall through to *hidr*
+    unchanged (see ``tests/test_decomp_cadastro_topology.py`` for the
+    override-bearing cases).
+    """
+    return EffectiveCadastro(base=hidr, n_stages=len(_calendar()), stage_varying={})
+
+
 class _StubVazoes:
     def __init__(self) -> None:
         self.previsoes = pd.DataFrame(
@@ -79,8 +91,9 @@ class _StubVazoes:
 
 class TestScenarioEmitters:
     def test_external_inflows_are_incremental(self) -> None:
+        hidr = _hidr_frame()
         table = convert_external_inflows(
-            _StubVazoes(), _hidr_frame(), _ID_MAP, _calendar()
+            _StubVazoes(), _effective_no_override(hidr), _ID_MAP, _calendar()
         ).to_pandas()
         # 4 tree nodes × 2 hydros.
         assert len(table) == 8
@@ -149,7 +162,9 @@ class TestScenarioEmitters:
         vazoes = _StubVazoes()
         vazoes.cenarios_gerados.loc[0, "estagio"] = 2
         with pytest.raises(ValueError, match="node-graph"):
-            convert_external_inflows(vazoes, _hidr_frame(), _ID_MAP, _calendar())
+            convert_external_inflows(
+                vazoes, _effective_no_override(_hidr_frame()), _ID_MAP, _calendar()
+            )
 
 
 _EXPECTED_ARTIFACTS = [
@@ -528,12 +543,13 @@ class TestCli:
 
 
 def _cadastro_plant_row(
-    name: str, sub: int, jusante: int, vmin: float, vmax: float
+    name: str, sub: int, jusante: int, vmin: float, vmax: float, posto: int = 0
 ) -> dict:
     return {
         "nome_usina": name,
         "submercado": sub,
         "codigo_usina_jusante": jusante,
+        "posto": posto,
         "desvio": 0,
         "volume_minimo": vmin,
         "volume_maximo": vmax,
@@ -559,8 +575,8 @@ def _cadastro_hidr_frame() -> pd.DataFrame:
     """Two plants, codes 1 and 2, both on bus (submercado) 1, no cascade."""
     df = pd.DataFrame(
         {
-            1: _cadastro_plant_row("PLANT_ONE", 1, 0, 20.0, 100.0),
-            2: _cadastro_plant_row("PLANT_TWO", 1, 0, 10.0, 50.0),
+            1: _cadastro_plant_row("PLANT_ONE", 1, 0, 20.0, 100.0, posto=11),
+            2: _cadastro_plant_row("PLANT_TWO", 1, 0, 10.0, 50.0, posto=12),
         }
     ).T
     df.index.name = "codigo_usina"

@@ -47,6 +47,16 @@ def _plant_row() -> dict:
     the fixtures below isolate the machine-set/MP/FD behaviour from B8's
     hydraulic-cap behaviour, which is already covered elsewhere
     (``test_decomp_availability_rule.py``).
+
+    ``queda_nominal_conjunto_1`` is pinned to 80.0 m — exactly the plant's
+    own operating head (``h_op = rho_eq / rho_esp = 0.72 / 0.009 = 80``) —
+    so the ticket-017 affinity ratio is a no-op (``(h_op/h_nom)**k == 1``)
+    and this fixture stays a pure machine-set/MP-FD regression, isolated
+    from head-affinity effects (covered elsewhere,
+    ``test_decomp_head_aware_max_turbined.py``). The head-corrected
+    ``max_turbined_m3s`` is not, however, isolated from the *power* cap
+    (``Σ n·p_nom / rho_eq``): with this plant's numbers that cap (see each
+    test's own comment) binds below the affinity-neutral rated flow.
     """
     return {
         "nome_usina": "SYN",
@@ -58,6 +68,7 @@ def _plant_row() -> dict:
         "maquinas_conjunto_1": 4,
         "vazao_nominal_conjunto_1": 50.0,
         "potencia_nominal_conjunto_1": 25.0,
+        "queda_nominal_conjunto_1": 80.0,
         "teif": 0.0,
         "ip": 0.0,
         "a0_volume_cota": 100.0,
@@ -116,6 +127,17 @@ class _StubDadger:
     def fd(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return self._fd
 
+    def ac(  # noqa: ARG002
+        self,
+        codigo_usina: int | None = None,
+        modificacao: type | None = None,
+        df: bool = False,
+    ) -> pd.DataFrame:
+        # No ACALTEFE (or any other AC) row on this synthetic double — the
+        # ticket-017 tracked-gap warning is covered separately in
+        # test_decomp_head_aware_max_turbined.py.
+        return pd.DataFrame()
+
 
 def _no_override_effective(hidr: pd.DataFrame, n_stages: int) -> EffectiveCadastro:
     """Constant machine set: no override at all, falls through to the
@@ -143,9 +165,13 @@ def _dropping_machine_set_effective(
 
 
 def test_constant_machine_set_matches_base_rated_sum() -> None:
-    """No override at all: the entity envelope and its mirror group equal
-    the base ``hidr`` rated sum (4 x 50 = 200 m3/s, 4 x 25 = 100 MW) —
-    byte-identical to the pre-ticket date-blind value."""
+    """No override at all: the entity envelope and its mirror group's
+    ``max_generation_mw`` equal the base ``hidr`` rated sum (4 x 25 = 100
+    MW) — byte-identical to the pre-ticket date-blind value.
+    ``max_turbined_m3s`` is head-corrected (ticket-017): the affinity ratio
+    is a no-op here (``queda_nominal_conjunto_1`` pinned to ``h_op``), but
+    the installed-power cap ``Σ n·p_nom / rho_eq`` (= 100 / 0.72) still
+    binds below the rated 4 x 50 = 200 m3/s."""
     hidr = _hidr_frame()
     calendar = _calendar()
     effective = _no_override_effective(hidr, len(calendar))
@@ -154,7 +180,7 @@ def test_constant_machine_set_matches_base_rated_sum() -> None:
         _StubDadger(uh=_uh_frame()), hidr, _ID_MAP, date(2026, 7, 18), effective
     )
     gen = doc["hydros"][0]["generation"]
-    assert gen["max_turbined_m3s"] == pytest.approx(200.0)
+    assert gen["max_turbined_m3s"] == pytest.approx(100.0 / 0.72)
     assert gen["max_generation_mw"] == pytest.approx(100.0)
 
     group = doc["hydros"][0]["unit_groups"][0]
@@ -165,7 +191,9 @@ def test_constant_machine_set_matches_base_rated_sum() -> None:
 def test_mid_horizon_nummaq_drop_entity_declares_pre_drop_envelope() -> None:
     """A machine-count drop at the final stage does not lower the declared
     entity/mirror-group envelope: both stay at the pre-drop max-over-stages
-    value (200 m3/s / 100 MW), not the reduced stage's (100 m3/s / 50 MW)."""
+    value (``max_generation_mw`` 100 MW rated; ``max_turbined_m3s`` the
+    power-cap-bound 100 / 0.72 m3/s, same as the constant-machine-set case
+    above), not the reduced stage's (50 MW / 50 x 0.72 m3/s)."""
     hidr = _hidr_frame()
     calendar = _calendar()
     effective = _dropping_machine_set_effective(hidr, len(calendar))
@@ -174,7 +202,7 @@ def test_mid_horizon_nummaq_drop_entity_declares_pre_drop_envelope() -> None:
         _StubDadger(uh=_uh_frame()), hidr, _ID_MAP, date(2026, 7, 18), effective
     )
     gen = doc["hydros"][0]["generation"]
-    assert gen["max_turbined_m3s"] == pytest.approx(200.0)
+    assert gen["max_turbined_m3s"] == pytest.approx(100.0 / 0.72)
     assert gen["max_generation_mw"] == pytest.approx(100.0)
 
     group = doc["hydros"][0]["unit_groups"][0]
@@ -185,9 +213,10 @@ def test_mid_horizon_nummaq_drop_entity_declares_pre_drop_envelope() -> None:
 def test_mid_horizon_nummaq_drop_overlay_only_at_reduced_stage() -> None:
     """The machine-count drop's own overlay row: sparse, lands only at the
     reduced final stage, carrying both the lowered ``max_generation_mw``
-    (50 MW) and the new ``max_turbined_m3s`` (100 m3/s) overlay columns;
-    the unchanged stages 0-1 get no row at all (MP=FD=1, hydraulic
-    non-binding at every stage)."""
+    (50 MW, rated) and the head-corrected ``max_turbined_m3s`` overlay
+    (``Σ n·p_nom / rho_eq`` = 50 / 0.72, power-cap-bound — not the rated
+    2 x 50 = 100 m3/s); the unchanged stages 0-1 get no row at all (MP=FD=1,
+    hydraulic non-binding at every stage)."""
     hidr = _hidr_frame()
     calendar = _calendar()
     effective = _dropping_machine_set_effective(hidr, len(calendar))
@@ -202,7 +231,7 @@ def test_mid_horizon_nummaq_drop_overlay_only_at_reduced_stage() -> None:
 
     entry = values[(hydro_id, 0, 2)]
     assert entry.max_generation_mw == pytest.approx(50.0)
-    assert entry.max_turbined_m3s == pytest.approx(100.0)
+    assert entry.max_turbined_m3s == pytest.approx(50.0 / 0.72)
     assert deltas == []
 
 

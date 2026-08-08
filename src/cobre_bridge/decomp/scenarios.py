@@ -21,6 +21,7 @@ branch-edge probabilities on the ``policy_graph`` (see
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -33,24 +34,46 @@ if TYPE_CHECKING:
 
     from idecomp.decomp import Vazoes
 
+    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
+
+_LOG = logging.getLogger(__name__)
 
 _PROBABILITY_ATOL = 1e-4
 
 
 def _incremental_context(
-    hidr: pd.DataFrame,
+    effective: EffectiveCadastro,
     id_map: DecompIdMap,
 ) -> tuple[dict[int, str], dict[int, list[int]]]:
-    """Per-plant station column and direct operated-upstream stations."""
+    """Per-plant station column and direct operated-upstream stations, off
+    the *effective* (post-``AC NUMJUS``/``NUMPOS``) topology (ticket-014).
+
+    Stage-agnostic by design (one cascade for the whole horizon): both the
+    station column and the downstream link are read at stage 0
+    (:meth:`~cobre_bridge.decomp.cadastro.EffectiveCadastro.inflow_gauge`/
+    :func:`~cobre_bridge.decomp.hydro._downstream_operated`'s own default).
+    A plant whose effective gauge varies across stages (a temporal ``AC
+    NUMPOS``) gets a tracked-gap warning here; the downstream sibling gap is
+    logged inside ``_downstream_operated`` itself, which this function also
+    walks per plant.
+    """
     operated = set(id_map.hydro_codes)
-    station_by_code = {
-        code: str(int(hidr.loc[code, "posto"])) for code in id_map.hydro_codes
-    }
+    station_by_code: dict[int, str] = {}
+    for code in id_map.hydro_codes:
+        if effective.inflow_gauge_varies(code):
+            _LOG.warning(
+                "plant %d's inflow gauge (AC NUMPOS) varies across stages; "
+                "per-stage gauge attribution is not modeled (deferred "
+                "fidelity) -- using the stage-0 effective gauge for the "
+                "whole horizon",
+                code,
+            )
+        station_by_code[code] = str(effective.inflow_gauge(code, 0))
     parents: dict[int, list[int]] = {code: [] for code in id_map.hydro_codes}
     for code in id_map.hydro_codes:
-        downstream = _downstream_operated(hidr, code, operated)
+        downstream = _downstream_operated(effective, code, operated)
         if downstream is not None:
             parents[downstream].append(code)
     return station_by_code, parents
@@ -72,12 +95,12 @@ def _incremental_values(
 
 def _tree_values(
     vazoes: Vazoes,
-    hidr: pd.DataFrame,
+    effective: EffectiveCadastro,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
 ) -> dict[tuple[int, int], list[float]]:
     """``{(stage_index, scenario_index): incrementals}`` for the whole tree."""
-    station_by_code, parents = _incremental_context(hidr, id_map)
+    station_by_code, parents = _incremental_context(effective, id_map)
     terminal = len(calendar) - 1
 
     previsoes = vazoes.previsoes
@@ -119,12 +142,13 @@ def _tree_values(
 
 def convert_external_inflows(
     vazoes: Vazoes,
-    hidr: pd.DataFrame,
+    effective: EffectiveCadastro,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
 ) -> pa.Table:
-    """``external_inflow_scenarios.parquet``: the tree in natural units."""
-    values = _tree_values(vazoes, hidr, id_map, calendar)
+    """``external_inflow_scenarios.parquet``: the tree in natural units, off
+    the *effective* (post-``AC NUMJUS``/``NUMPOS``) topology (ticket-014)."""
+    values = _tree_values(vazoes, effective, id_map, calendar)
 
     stage_ids: list[int] = []
     scenario_ids: list[int] = []

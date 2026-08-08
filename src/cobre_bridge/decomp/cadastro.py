@@ -16,10 +16,16 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from idecomp.decomp.modelos.dadger import (
+    ACCOTVOL,
     ACDESVIO,
+    ACJUSMED,
     ACNUMCON,
+    ACNUMJUS,
     ACNUMMAQ,
+    ACNUMPOS,
+    ACPERHID,
     ACPOTEFE,
+    ACPROESP,
     ACVAZEFE,
     ACVAZMIN,
     ACVMDESV,
@@ -161,12 +167,23 @@ class _ScalarAcSpec:
 #: epic-03 extends this same tuple with the diversion-channel volume
 #: thresholds (`VMDESV`/`VSVERT`); the diversion channel itself (`DESVIO`)
 #: is not scalar and gets its own reader, :func:`_read_diversion_overrides`.
+#: ticket-013 (E5) extends it further with the three scalar head/
+#: productivity mnemonics (`PROESP`/`PERHID`/`JUSMED`) — the fourth,
+#: `COTVOL`, is a multi-row polynomial and gets its own reader instead,
+#: :func:`_read_polynomial_overrides`. ticket-014 (E5) adds the topology/
+#: gauge pair (`NUMJUS`/`NUMPOS`) via the shared :func:`_read_keyed_overrides`
+#: (with :func:`_plant_code_key`): single-value and plant-keyed like this
+#: tuple's own entries, but `int`-valued (a plant/gauge code), so it does
+#: not fit this `float`-typed tuple either.
 _SCALAR_AC_SPECS: tuple[_ScalarAcSpec, ...] = (
     _ScalarAcSpec(ACVOLMIN, "volume", "volume_minimo"),
     _ScalarAcSpec(ACVOLMAX, "volume", "volume_maximo"),
     _ScalarAcSpec(ACVAZMIN, "vazao", "vazao_minima_historica"),
     _ScalarAcSpec(ACVMDESV, "volume", "volume_desvio"),
     _ScalarAcSpec(ACVSVERT, "volume", "volume_vertedouro"),
+    _ScalarAcSpec(ACPROESP, "produtibilidade", "produtibilidade_especifica"),
+    _ScalarAcSpec(ACPERHID, "coeficiente", "perdas"),
+    _ScalarAcSpec(ACJUSMED, "cota", "canal_fuga_medio"),
 )
 
 
@@ -318,28 +335,51 @@ class MachineSet:
     vazao: float
 
 
-def _read_compound_key_overrides[T](
+def _plant_code_key(row: Any) -> int:
+    """Group-key for the plant-keyed single-value ``AC`` mnemonics —
+    ``codigo_usina`` alone (``NUMJUS``/``NUMPOS``)."""
+    return int(row["codigo_usina"])
+
+
+def _conjunto_key(row: Any) -> tuple[int, int]:
+    """Group-key for the compound-keyed machine-set mnemonics —
+    ``(codigo_usina, indice_conjunto)`` (``NUMMAQ``/``POTEFE``/``VAZEFE``)."""
+    return int(row["codigo_usina"]), int(row["indice_conjunto"])
+
+
+def _read_keyed_overrides[K, T](
     dadger: Dadger,
     calendar: Sequence[OperativeStage],
     ac_class: type,
     value_column: str,
     param: str,
     value_caster: Callable[[Any], T],
-) -> tuple[dict[tuple[int, int], list[tuple[int, T]]], list[OutOfHorizon]]:
-    """Ingest one compound-key ``(codigo_usina, indice_conjunto)`` ``AC`` mnemonic.
+    key: Callable[[Any], K],
+) -> tuple[dict[K, list[tuple[int, T]]], list[OutOfHorizon]]:
+    """Ingest one single-value ``AC`` mnemonic, grouped by *key*.
 
-    Shared body for the three compound-key machine-set mnemonics
-    (``NUMMAQ``/``POTEFE``/``VAZEFE``) that :func:`_read_machine_set_overrides`
-    calls once per mnemonic — this is what keeps that reader from repeating
-    three near-identical loops, the same way :func:`_forward_fill_series` is
-    reused for both the ``int`` and ``float`` per-stage series it densifies.
+    The shared body for both single-value override shapes that differ only in
+    their grouping key: the compound-key machine-set mnemonics
+    (``NUMMAQ``/``POTEFE``/``VAZEFE``, grouped by ``(codigo_usina,
+    indice_conjunto)`` via :func:`_conjunto_key`) and the plant-keyed
+    topology/gauge mnemonics (``NUMJUS``/``NUMPOS``, grouped by
+    ``codigo_usina`` via :func:`_plant_code_key`). Sharing one loop keeps
+    these from repeating near-identical bodies, the same way
+    :func:`_forward_fill_series` is reused across the ``int``/``float``
+    per-stage series it densifies. ``NUMCON`` keeps its own plant-keyed loop
+    in :func:`_read_machine_set_overrides`, and the multi-row polynomial shape
+    (:func:`_read_polynomial_overrides`) is genuinely different — neither is
+    folded in here. Does not reuse :func:`_read_scalar_overrides`'s
+    ``_SCALAR_AC_SPECS`` tuple: that tuple is uniformly ``float``-typed, while
+    these mnemonics span ``int`` (machine counts, plant/gauge codes) and
+    ``float`` (rated power/flow) via *value_caster*.
+
     Reads ``dadger.ac(codigo_usina=None, modificacao=ac_class, df=True)`` and
     resolves every row's ``(mes, semana, ano)`` triple to an effective stage
-    via :func:`resolve_effective_stage`. Rows that resolve within the horizon
-    are grouped by ``(codigo_usina, indice_conjunto)`` as ``(eff_stage,
-    value_caster(row[value_column]))``; rows that resolve past the horizon
-    are reported (with *param* as the label) in the returned out-of-horizon
-    list instead of being dropped.
+    via :func:`resolve_effective_stage`. In-horizon rows are grouped by
+    ``key(row)`` as ``(eff_stage, value_caster(row[value_column]))``; rows
+    that resolve past the horizon are reported (with *param* as the label) in
+    the returned out-of-horizon list instead of being dropped.
 
     Raises
     ------
@@ -347,14 +387,13 @@ def _read_compound_key_overrides[T](
         If the accessor frame is missing an expected column (a malformed
         idecomp frame is a hard error, never a silent default).
     """
-    records: dict[tuple[int, int], list[tuple[int, T]]] = {}
+    records: dict[K, list[tuple[int, T]]] = {}
     out_of_horizon: list[OutOfHorizon] = []
     table = dadger.ac(codigo_usina=None, modificacao=ac_class, df=True)
     if not isinstance(table, pd.DataFrame) or table.empty:
         return records, out_of_horizon
     for _, row in table.iterrows():
         code = int(row["codigo_usina"])
-        conjunto = int(row["indice_conjunto"])
         mes = row["mes"]
         eff = resolve_effective_stage(mes, row["semana"], row["ano"], calendar)
         if eff is None:
@@ -362,8 +401,7 @@ def _read_compound_key_overrides[T](
                 _out_of_horizon_record(code, mes, row["ano"], param, calendar)
             )
             continue
-        value = value_caster(row[value_column])
-        records.setdefault((code, conjunto), []).append((eff, value))
+        records.setdefault(key(row), []).append((eff, value_caster(row[value_column])))
     return records, out_of_horizon
 
 
@@ -386,7 +424,8 @@ def _read_machine_set_overrides(
     ``(codigo_usina, indice_conjunto)`` — a conjunto's machine count, rated
     power, and rated flow. ``NUMCON`` is read by its own plant-keyed loop
     (its frame carries no ``indice_conjunto`` column); the other three are
-    read through :func:`_read_compound_key_overrides`, one call per mnemonic.
+    read through :func:`_read_keyed_overrides` with :func:`_conjunto_key`, one
+    call per mnemonic.
     Every row's ``(mes, semana, ano)`` triple is resolved to an effective
     stage via :func:`resolve_effective_stage`; in-horizon rows are grouped by
     key, past-horizon rows are reported (param labels ``"numero_conjuntos"``,
@@ -428,20 +467,88 @@ def _read_machine_set_overrides(
                 (eff, int(row["numero_conjuntos"]))
             )
 
-    numero_maquinas, maquinas_out_of_horizon = _read_compound_key_overrides(
-        dadger, calendar, ACNUMMAQ, "numero_maquinas", "numero_maquinas", int
+    numero_maquinas, maquinas_out_of_horizon = _read_keyed_overrides(
+        dadger,
+        calendar,
+        ACNUMMAQ,
+        "numero_maquinas",
+        "numero_maquinas",
+        int,
+        _conjunto_key,
     )
-    potencia, potencia_out_of_horizon = _read_compound_key_overrides(
-        dadger, calendar, ACPOTEFE, "potencia", "potencia", float
+    potencia, potencia_out_of_horizon = _read_keyed_overrides(
+        dadger, calendar, ACPOTEFE, "potencia", "potencia", float, _conjunto_key
     )
-    vazao, vazao_out_of_horizon = _read_compound_key_overrides(
-        dadger, calendar, ACVAZEFE, "vazao", "vazao", float
+    vazao, vazao_out_of_horizon = _read_keyed_overrides(
+        dadger, calendar, ACVAZEFE, "vazao", "vazao", float, _conjunto_key
     )
     out_of_horizon.extend(maquinas_out_of_horizon)
     out_of_horizon.extend(potencia_out_of_horizon)
     out_of_horizon.extend(vazao_out_of_horizon)
 
     return numero_conjuntos, numero_maquinas, potencia, vazao, out_of_horizon
+
+
+def _read_polynomial_overrides(
+    dadger: Dadger,
+    calendar: Sequence[OperativeStage],
+    ac_class: type,
+    param: str,
+) -> tuple[dict[int, list[tuple[int, tuple[float, ...]]]], list[OutOfHorizon]]:
+    """Ingest a multi-row-per-plant polynomial ``AC`` mnemonic (the fifth shape).
+
+    Unlike the scalar, diversion, and compound-key shapes above, one
+    *effective* override here is not a single row: ``AC COTVOL`` declares the
+    plant's full 5-coefficient forebay-cota polynomial as up to five separate
+    rows, one per ``ordem`` (0..4), all sharing the same ``(codigo_usina,
+    mes, semana, ano)`` triple. Reads ``dadger.ac(codigo_usina=None,
+    modificacao=ac_class, df=True)`` and resolves **every row's own**
+    ``(mes, semana, ano)`` triple to an effective stage via
+    :func:`resolve_effective_stage`, then groups rows by ``(codigo_usina,
+    effective_stage)`` rather than by the raw date fields themselves — a
+    blank-date group's ``mes``/``semana``/``ano`` are typically distinct NaN
+    objects that compare unequal to each other (``nan != nan``), which would
+    silently fragment one group into several under a raw-field dict key;
+    resolving first and grouping by the resolved stage sidesteps that
+    entirely. Within a group, an ``ordem`` absent from the rows defaults its
+    coefficient to ``0.0`` — the one documented default in this reader, never
+    applied to an ``ordem`` that *is* present. Rows that resolve within the
+    horizon are grouped by *codigo_usina* as ``(eff_stage, coefficients)``,
+    *coefficients* ordered ``ordem 0..4``; rows whose date resolves past the
+    horizon are reported (with *param* as the label) in the returned
+    out-of-horizon list instead of being dropped.
+
+    Raises
+    ------
+    KeyError
+        If the accessor frame is missing an expected column (a malformed
+        idecomp frame is a hard error, never a silent default).
+    """
+    out_of_horizon: list[OutOfHorizon] = []
+    table = dadger.ac(codigo_usina=None, modificacao=ac_class, df=True)
+    if not isinstance(table, pd.DataFrame) or table.empty:
+        return {}, out_of_horizon
+
+    coeffs_by_group: dict[tuple[int, int], dict[int, float]] = {}
+    for _, row in table.iterrows():
+        code = int(row["codigo_usina"])
+        ordem = int(row["ordem"])
+        coeficiente = float(row["coeficiente"])
+        mes = row["mes"]
+        eff = resolve_effective_stage(mes, row["semana"], row["ano"], calendar)
+        if eff is None:
+            out_of_horizon.append(
+                _out_of_horizon_record(code, mes, row["ano"], param, calendar)
+            )
+            continue
+        coeffs_by_group.setdefault((code, eff), {})[ordem] = coeficiente
+
+    records: dict[int, list[tuple[int, tuple[float, ...]]]] = {}
+    for (code, eff), coeffs_by_ordem in coeffs_by_group.items():
+        coefficients = tuple(coeffs_by_ordem.get(i, 0.0) for i in range(5))
+        records.setdefault(code, []).append((eff, coefficients))
+
+    return records, out_of_horizon
 
 
 def _forward_fill_series[T](
@@ -494,6 +601,11 @@ class EffectiveCadastro:
     machine_sets: Mapping[tuple[int, int], tuple[MachineSet, ...]] = field(
         default_factory=dict
     )
+    cota_polynomials: Mapping[int, tuple[tuple[float, ...], ...]] = field(
+        default_factory=dict
+    )
+    downstream_links: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    inflow_gauges: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
 
     def value(self, code: int, param: str, stage_index: int) -> float:
         """Effective value of *param* for plant *code* at *stage_index*."""
@@ -559,22 +671,133 @@ class EffectiveCadastro:
             return None
         return self.machine_sets[key][stage_index]
 
+    def cota_polynomial(self, code: int, stage_index: int) -> tuple[float, ...]:
+        """The effective 5-coefficient forebay-cota polynomial for plant
+        *code* at *stage_index*, ordered ``ordem 0..4``.
+
+        Falls through to the base ``a{0..4}_volume_cota`` columns when *code*
+        carries no ``AC COTVOL`` override at all (absent from
+        :attr:`cota_polynomials`) — the same "absent means base" convention
+        every other accessor here follows.
+        """
+        if code not in self.cota_polynomials:
+            return tuple(
+                float(self.base.loc[code, f"a{i}_volume_cota"]) for i in range(5)
+            )
+        return self.cota_polynomials[code][stage_index]
+
+    def downstream_plant(self, code: int, stage_index: int) -> int:
+        """The effective downstream-plant code for *code* at *stage_index*.
+
+        Falls through to the base ``codigo_usina_jusante`` when *code*
+        carries no ``AC NUMJUS`` override at all (absent from
+        :attr:`downstream_links`) — the same "absent means base" convention
+        every other accessor here follows. ``0`` is a valid return (the
+        sink); the cascade walk (:func:`~cobre_bridge.decomp.hydro.
+        _downstream_operated`) treats it as such.
+        """
+        if code not in self.downstream_links:
+            return int(self.base.loc[code, "codigo_usina_jusante"])
+        return self.downstream_links[code][stage_index]
+
+    def downstream_plant_varies(self, code: int) -> bool:
+        """Whether *code*'s effective downstream link varies across stages
+        (a temporal ``AC NUMJUS``) — the ticket-014 tracked-gap trigger:
+        :func:`~cobre_bridge.decomp.hydro._downstream_operated` reads one
+        stage-representative link for the whole horizon (stage 0 by
+        default), so a caller checks this to warn rather than silently
+        picking a stage. ``False`` for a plant with no override at all.
+        """
+        if code not in self.downstream_links:
+            return False
+        series = self.downstream_links[code]
+        return any(value != series[0] for value in series)
+
+    def inflow_gauge(self, code: int, stage_index: int) -> int:
+        """The effective inflow-gauge (``posto``) for *code* at *stage_index*.
+
+        Falls through to the base ``posto`` when *code* carries no ``AC
+        NUMPOS`` override at all (absent from :attr:`inflow_gauges`).
+        """
+        if code not in self.inflow_gauges:
+            return int(self.base.loc[code, "posto"])
+        return self.inflow_gauges[code][stage_index]
+
+    def inflow_gauge_varies(self, code: int) -> bool:
+        """Whether *code*'s effective inflow gauge varies across stages (a
+        temporal ``AC NUMPOS``) — the gauge sibling of
+        :meth:`downstream_plant_varies`.
+        """
+        if code not in self.inflow_gauges:
+            return False
+        series = self.inflow_gauges[code]
+        return any(value != series[0] for value in series)
+
+
+def effective_storage_range(
+    effective: EffectiveCadastro, code: int, stage_index: int
+) -> tuple[float, float]:
+    """Per-stage effective storage range for plant *code*, in hm³.
+
+    A run-of-river plant (``tipo_regulacao == "D"``) cannot accumulate water
+    across stages — the source model's own precedent (``converters.hydro``'s
+    ``tipo_reg == "D"`` branch) freezes its operating range at the reference
+    volume (``volume_referencia``) rather than the ``hidr`` registry's
+    ``(volume_minimo, volume_maximo)`` band, so this collapses to
+    ``(vol_ref, vol_ref)`` for a ``D`` plant. ``vol_ref`` falls back to the
+    per-stage effective ``volume_minimo`` when ``volume_referencia`` is
+    missing, ``NaN``, or ``<= 0`` — never a zero-width range at zero.
+    ``tipo_regulacao`` is read defensively off the base row
+    (``row.get(..., "")`` then ``str(...).strip()``, matching that same
+    precedent), so a synthetic cadastro carrying no such column simply falls
+    through to the per-stage read below.
+
+    Every other regulation class — under the DECOMP predicate, a reservoir
+    is ``tipo_regulacao in ("M", "S")`` — is unchanged: the per-stage
+    ``(volume_minimo, volume_maximo)`` via :meth:`EffectiveCadastro.value`.
+    This is the one place the ``D``-collapse predicate lives; every storage
+    consumer (:func:`storage_envelope`, :func:`cobre_bridge.decomp.bounds.
+    convert_storage_bounds`, :func:`cobre_bridge.decomp.hydro.
+    convert_initial_storage`) routes through it. Productivity does **not** —
+    :func:`cobre_bridge.decomp.hydro._equivalent_productivity_mw_per_m3s`
+    keeps reading the full ``(volume_minimo, volume_maximo)`` range directly,
+    validated independently of this collapse.
+    """
+    row = effective.base.loc[code]
+    tipo_reg = str(row.get("tipo_regulacao", "")).strip()
+    if tipo_reg == "D":
+        vol_ref_raw = row.get("volume_referencia")
+        if vol_ref_raw is not None and not pd.isna(vol_ref_raw) and vol_ref_raw > 0:
+            vol_ref = float(vol_ref_raw)
+        else:
+            vol_ref = effective.value(code, "volume_minimo", stage_index)
+        return (vol_ref, vol_ref)
+    return (
+        effective.value(code, "volume_minimo", stage_index),
+        effective.value(code, "volume_maximo", stage_index),
+    )
+
 
 def storage_envelope(effective: EffectiveCadastro, code: int) -> tuple[float, float]:
     """Outer per-stage operating range for plant *code*, in hm³.
 
-    ``(min over stages of volume_minimo, max over stages of volume_maximo)``
-    — the widest floor/ceiling the plant's dense per-stage series ever
-    reaches. For a plant with no override both reduce to the base scalar.
-    This is the envelope the entity ``reservoir`` block (ticket-007) declares
-    as its default storage bounds; :func:`cobre_bridge.decomp.bounds.
-    convert_storage_bounds` emits a per-stage override wherever a stage's
-    effective bounds differ from it.
+    ``(min over stages of the effective floor, max over stages of the
+    effective ceiling)`` per :func:`effective_storage_range` — the widest
+    floor/ceiling the plant's dense per-stage range ever reaches. For a
+    plant with no override and no run-of-river collapse both reduce to the
+    base scalar. A run-of-river (``D``) plant's per-stage range is already
+    the single-point collapse ``(vol_ref, vol_ref)`` at every stage, so its
+    envelope collapses to that same point; every ``M``/``S`` plant is
+    unchanged. This is the envelope the entity ``reservoir`` block
+    (ticket-007) declares as its default storage bounds;
+    :func:`cobre_bridge.decomp.bounds.convert_storage_bounds` emits a
+    per-stage override wherever a stage's effective bounds differ from it.
     """
-    return (
-        min(effective.series(code, "volume_minimo")),
-        max(effective.series(code, "volume_maximo")),
-    )
+    ranges = [
+        effective_storage_range(effective, code, stage_index)
+        for stage_index in range(effective.n_stages)
+    ]
+    return (min(r[0] for r in ranges), max(r[1] for r in ranges))
 
 
 @dataclass(frozen=True)
@@ -637,6 +860,27 @@ def build_effective_cadastro(
     ``NUMMAQ`` override but no ``POTEFE``/``VAZEFE`` override still gets its
     ``potencia``/``vazao`` from the ``hidr`` base at every stage.
 
+    Also builds the ``cota_polynomials`` map from :func:`_read_polynomial_overrides`
+    (the fifth, multi-row-per-plant shape): sparse by plant code, seeded from
+    the base ``a{0..4}_volume_cota`` columns and densified the same way as
+    every other per-stage series, one full 5-coefficient polynomial per
+    stage rather than one scalar.
+
+    Also builds ``downstream_links``/``inflow_gauges`` from
+    :func:`_read_keyed_overrides` (ticket-014, OQ-4): sparse by plant
+    code, seeded from the base ``codigo_usina_jusante``/``posto`` columns
+    and densified the same way as every other per-stage series. Consumed by
+    :meth:`EffectiveCadastro.downstream_plant`/``inflow_gauge`` — the
+    cascade walk (:func:`~cobre_bridge.decomp.hydro._downstream_operated`)
+    and the incremental-inflow gauge attribution
+    (:func:`~cobre_bridge.decomp.scenarios._incremental_context`) read one
+    stage-representative (stage 0) value off these, never per-stage, so a
+    temporal ``NUMJUS``/``NUMPOS`` is a tracked gap
+    (:meth:`EffectiveCadastro.downstream_plant_varies`/``inflow_gauge_varies``),
+    not a silent per-stage cascade. ``AC JUSENA``/``AC NPOSNW`` are
+    deliberately **not** ingested here — no DECOMP consumer; see the
+    deferred-fidelity warning in :mod:`cobre_bridge.decomp.hydro`.
+
     Raises
     ------
     ValueError
@@ -657,7 +901,29 @@ def build_effective_cadastro(
         vazao_records,
         machine_out_of_horizon,
     ) = _read_machine_set_overrides(dadger, calendar)
-    out_of_horizon = out_of_horizon + diversion_out_of_horizon + machine_out_of_horizon
+    cota_records, cota_out_of_horizon = _read_polynomial_overrides(
+        dadger, calendar, ACCOTVOL, "cota_volume"
+    )
+    topology_records, topology_out_of_horizon = _read_keyed_overrides(
+        dadger,
+        calendar,
+        ACNUMJUS,
+        "codigo_usina_jusante",
+        "codigo_usina_jusante",
+        int,
+        _plant_code_key,
+    )
+    gauge_records, gauge_out_of_horizon = _read_keyed_overrides(
+        dadger, calendar, ACNUMPOS, "codigo_posto", "posto", int, _plant_code_key
+    )
+    out_of_horizon = (
+        out_of_horizon
+        + diversion_out_of_horizon
+        + machine_out_of_horizon
+        + cota_out_of_horizon
+        + topology_out_of_horizon
+        + gauge_out_of_horizon
+    )
 
     n_stages = len(calendar)
     stage_varying: dict[tuple[int, str], tuple[float, ...]] = {}
@@ -732,6 +998,38 @@ def build_effective_cadastro(
     if vazao_records:
         applied["vazao"] = len(vazao_records)
 
+    cota_polynomials: dict[int, tuple[tuple[float, ...], ...]] = {}
+    for code, cota_overrides in cota_records.items():
+        _require_cadastro_row(hidr, code)
+        base_coefficients = tuple(
+            float(hidr.loc[code, f"a{i}_volume_cota"]) for i in range(5)
+        )
+        cota_polynomials[code] = tuple(
+            _forward_fill_series(base_coefficients, cota_overrides, n_stages)
+        )
+    if cota_records:
+        applied["cota_volume"] = len(cota_records)
+
+    downstream_links: dict[int, tuple[int, ...]] = {}
+    for code, topology_overrides in topology_records.items():
+        _require_cadastro_row(hidr, code)
+        base_downstream = int(hidr.loc[code, "codigo_usina_jusante"])
+        downstream_links[code] = tuple(
+            _forward_fill_series(base_downstream, topology_overrides, n_stages)
+        )
+    if topology_records:
+        applied["codigo_usina_jusante"] = len(topology_records)
+
+    inflow_gauges: dict[int, tuple[int, ...]] = {}
+    for code, gauge_overrides in gauge_records.items():
+        _require_cadastro_row(hidr, code)
+        base_gauge = int(hidr.loc[code, "posto"])
+        inflow_gauges[code] = tuple(
+            _forward_fill_series(base_gauge, gauge_overrides, n_stages)
+        )
+    if gauge_records:
+        applied["posto"] = len(gauge_records)
+
     effective = EffectiveCadastro(
         base=hidr,
         n_stages=n_stages,
@@ -739,6 +1037,9 @@ def build_effective_cadastro(
         diversions=diversions,
         machine_conjunto_counts=machine_conjunto_counts,
         machine_sets=machine_sets,
+        cota_polynomials=cota_polynomials,
+        downstream_links=downstream_links,
+        inflow_gauges=inflow_gauges,
     )
     report = CadastroResolutionReport(
         applied=applied, out_of_horizon=tuple(out_of_horizon)

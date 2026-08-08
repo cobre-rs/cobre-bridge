@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.decomp.cadastro import storage_envelope
+from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -230,11 +230,14 @@ def convert_storage_bounds(
     For each hydro *code*, the outer envelope is ``storage_envelope(effective,
     code)`` — the widest floor/ceiling the plant's per-stage volumes ever
     reach, and the default the entity ``reservoir`` block (ticket-007)
-    declares. A stage whose effective ``(volume_minimo, volume_maximo)``
-    differs from that envelope (past float noise) emits an override row;
-    a stage equal to the envelope emits none and simply inherits it. A plant
-    with no temporal ``VOLMIN``/``VOLMAX`` override never differs from its own
-    envelope, so it contributes no rows at all.
+    declares. A stage whose effective range (:func:`~cobre_bridge.decomp.
+    cadastro.effective_storage_range`) differs from that envelope (past float
+    noise) emits an override row; a stage equal to the envelope emits none
+    and simply inherits it. A plant with no temporal ``VOLMIN``/``VOLMAX``
+    override never differs from its own envelope, so it contributes no rows
+    at all — and neither does a run-of-river (``D``) plant, whose per-stage
+    range is already the same single-point collapse as its envelope
+    (ticket-018).
     """
     hydro_ids: list[int] = []
     stage_ids: list[int] = []
@@ -243,8 +246,7 @@ def convert_storage_bounds(
     for code in id_map.hydro_codes:
         env_min, env_max = storage_envelope(effective, code)
         for stage_index in range(len(calendar)):
-            vmin = effective.value(code, "volume_minimo", stage_index)
-            vmax = effective.value(code, "volume_maximo", stage_index)
+            vmin, vmax = effective_storage_range(effective, code, stage_index)
             if not (_floats_differ(vmin, env_min) or _floats_differ(vmax, env_max)):
                 continue
             hydro_ids.append(id_map.hydro_id(code))

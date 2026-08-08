@@ -210,8 +210,12 @@ class TestConvertHydros:
             "max_storage_hm3": 500.0,
         }
         assert up["outflow"]["min_outflow_m3s"] == 30.0
-        # 2 machines × 100 m³/s and × 50 MW, no derating.
-        assert up["generation"]["max_turbined_m3s"] == 200.0
+        # 2 machines × 50 MW, no derating: max_generation_mw stays rated.
+        # max_turbined_m3s is head-corrected (ticket-017): this fixture
+        # carries no queda_nominal_conjunto_1, so the affinity ratio is a
+        # no-op (falls back to the rated 200 m³/s), but the installed-power
+        # cap Σ n·p_nom / ρ_eq (= 100 / 0.72) still binds below it.
+        assert up["generation"]["max_turbined_m3s"] == pytest.approx(100.0 / 0.72)
         assert up["generation"]["max_generation_mw"] == 100.0
 
         assert hydros[1]["downstream_id"] is None
@@ -260,7 +264,10 @@ class TestConvertHydros:
         assert by_id[2] == pytest.approx(10.0)  # run-of-river, vmin == vmax
 
     def test_energy_productivity_head(self) -> None:
-        table = convert_energy_productivity(_hidr_frame(), _ID_MAP).to_pandas()
+        hidr = _hidr_frame()
+        table = convert_energy_productivity(
+            _no_override_effective(hidr), _ID_MAP
+        ).to_pandas()
         # Flat cota 100, tailrace 20 → head 80; ρ = 0.009 × 80.
         assert table["equivalent_productivity_mw_per_m3s"].iloc[0] == pytest.approx(
             0.009 * 80.0
@@ -274,6 +281,42 @@ class TestConvertHydros:
         assert all(
             m["stage_ranges"][0]["model"] == "constant_productivity" for m in models
         )
+
+
+def test_deferred_note_excludes_head_productivity(caplog) -> None:
+    """ticket-013 (AC6): the head/productivity ``AC`` family (``PROESP``/
+    ``PERHID``/``JUSMED``/``COTVOL``) now has a live consumer
+    (``_equivalent_productivity_mw_per_m3s``), so it drops out of the
+    loudly-logged deferred-fidelity note entirely — while ``VI`` travel time
+    and the evaporation/tailrace-polynomial family (``COTVAZ``/``COTARE``/
+    ``COFEVA``), which the source model has no consumer for, stay listed as
+    deferred in both the warning and the module docstring.
+    """
+    import cobre_bridge.decomp.hydro as hydro_module
+
+    hidr = _hidr_frame()
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
+        convert_hydros(
+            _StubDadger(uh=_uh_frame()),
+            hidr,
+            _ID_MAP,
+            date(2026, 7, 18),
+            _no_override_effective(hidr),
+        )
+    warning = next(
+        r.message for r in caplog.records if "deferred hydro fidelity" in r.message
+    )
+    for mnemonic in ("PROESP", "PERHID", "JUSMED", "COTVOL"):
+        assert mnemonic not in warning
+    for marker in ("VI travel time", "COTVAZ", "COTARE", "COFEVA"):
+        assert marker in warning
+
+    docstring = hydro_module.__doc__
+    assert docstring is not None
+    for mnemonic in ("PROESP", "PERHID", "JUSMED", "COTVOL"):
+        assert mnemonic not in docstring
+    for marker in ("``VI``", "COTVAZ", "COTARE", "COFEVA"):
+        assert marker in docstring
 
 
 class TestEffectiveCadastroSourcing:
@@ -437,14 +480,17 @@ class TestRealDecks:
         itaipu = next(h for h in hydros if h["name"] == "ITAIPU")
         assert "bus_id" not in itaipu
         # Two per-frequency groups (ticket-027, code 66): unique ids {0, 1},
-        # both on bus SE (id_map.bus_id(1) == 0), each 7000 MW / 6620 m3/s —
-        # id-addressed, not array-order (cobre sorts by group id on load).
+        # both on bus SE (id_map.bus_id(1) == 0), each 7000 MW installed
+        # (rated, unchanged) — id-addressed, not array-order (cobre sorts by
+        # group id on load). max_turbined_m3s is head-corrected (ticket-017):
+        # 6620 m3/s rated derates to ~6530.33 m3/s at Itaipu's own nominal
+        # head (117 m) and operating head, both conjuntos symmetric.
         groups = itaipu["unit_groups"]
         assert {g["id"] for g in groups} == {0, 1}
         for group in groups:
             assert group["bus_id"] == 0  # SE
             assert group["max_generation_mw"] == pytest.approx(7000.0)
-            assert group["max_turbined_m3s"] == pytest.approx(6620.0)
+            assert group["max_turbined_m3s"] == pytest.approx(6530.33, abs=0.01)
         assert itaipu["downstream_id"] is None
 
         storage = convert_initial_storage(dadger, hidr, id_map, effective)
