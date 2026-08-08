@@ -534,6 +534,7 @@ def _cadastro_plant_row(
         "nome_usina": name,
         "submercado": sub,
         "codigo_usina_jusante": jusante,
+        "desvio": 0,
         "volume_minimo": vmin,
         "volume_maximo": vmax,
         "numero_conjuntos_maquinas": 1,
@@ -829,7 +830,7 @@ class TestCadastroPipelineWiring:
             _run_cadastro_pipeline(tmp_path, ac_volmax_frame=ac_volmax_frame)
 
         cadastro_diagnostics = [
-            d for d in collected if d.code == "cadastro-volume-overrides-applied"
+            d for d in collected if d.code == "cadastro-overrides-applied"
         ]
         assert len(cadastro_diagnostics) == 1
         assert cadastro_diagnostics[0].severity is dx.Severity.INFO

@@ -11,10 +11,18 @@ source model's own temporal overrides resolve to per-stage effective values
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import pandas as pd
+from idecomp.decomp.modelos.dadger import (
+    ACDESVIO,
+    ACVAZMIN,
+    ACVMDESV,
+    ACVOLMAX,
+    ACVOLMIN,
+    ACVSVERT,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -143,6 +151,21 @@ class _ScalarAcSpec:
     param: str
 
 
+#: The scalar single-value ``AC`` mnemonics ingested by
+#: :func:`_read_scalar_overrides`. Module scope (rather than function-local)
+#: so every consumer of the scalar-override machinery shares one registry —
+#: epic-03 extends this same tuple with the diversion-channel volume
+#: thresholds (`VMDESV`/`VSVERT`); the diversion channel itself (`DESVIO`)
+#: is not scalar and gets its own reader, :func:`_read_diversion_overrides`.
+_SCALAR_AC_SPECS: tuple[_ScalarAcSpec, ...] = (
+    _ScalarAcSpec(ACVOLMIN, "volume", "volume_minimo"),
+    _ScalarAcSpec(ACVOLMAX, "volume", "volume_maximo"),
+    _ScalarAcSpec(ACVAZMIN, "vazao", "vazao_minima_historica"),
+    _ScalarAcSpec(ACVMDESV, "volume", "volume_desvio"),
+    _ScalarAcSpec(ACVSVERT, "volume", "volume_vertedouro"),
+)
+
+
 @dataclass(frozen=True)
 class OutOfHorizon:
     """An ``AC`` override whose effective date falls after the calendar horizon.
@@ -156,6 +179,28 @@ class OutOfHorizon:
     param: str
     mes: int
     ano: int
+
+
+def _out_of_horizon_record(
+    code: int,
+    mes: str | int | float | None,
+    ano: int | float | None,
+    param: str,
+    calendar: Sequence[OperativeStage],
+) -> OutOfHorizon:
+    """Build the :class:`OutOfHorizon` record for an override that resolved
+    past the calendar horizon.
+
+    Shared by :func:`_read_scalar_overrides` and
+    :func:`_read_diversion_overrides`, which report an out-of-horizon override
+    the same way, differing only in the *param* label.
+    """
+    resolved_ano = (
+        calendar[0].start_date.year if ano is None or pd.isna(ano) else int(ano)
+    )
+    month = _parse_month(mes)
+    assert month is not None  # eff is None only for a non-blank mes
+    return OutOfHorizon(code, param, month, resolved_ano)
 
 
 def _read_scalar_overrides(
@@ -177,13 +222,6 @@ def _read_scalar_overrides(
         If an accessor frame is missing an expected column (a malformed
         idecomp frame is a hard error, never a silent default).
     """
-    from idecomp.decomp.modelos.dadger import ACVOLMAX, ACVOLMIN
-
-    _SCALAR_AC_SPECS: tuple[_ScalarAcSpec, ...] = (
-        _ScalarAcSpec(ACVOLMIN, "volume", "volume_minimo"),
-        _ScalarAcSpec(ACVOLMAX, "volume", "volume_maximo"),
-    )
-
     records: dict[tuple[int, str], list[tuple[int, float]]] = {}
     out_of_horizon: list[OutOfHorizon] = []
     for spec in _SCALAR_AC_SPECS:
@@ -196,27 +234,75 @@ def _read_scalar_overrides(
             mes = row["mes"]
             eff = resolve_effective_stage(mes, row["semana"], row["ano"], calendar)
             if eff is None:
-                ano = row["ano"]
-                resolved_ano = (
-                    calendar[0].start_date.year
-                    if ano is None or pd.isna(ano)
-                    else int(ano)
-                )
-                month = _parse_month(mes)
-                assert month is not None  # eff is None only for a non-blank mes
                 out_of_horizon.append(
-                    OutOfHorizon(code, spec.param, month, resolved_ano)
+                    _out_of_horizon_record(code, mes, row["ano"], spec.param, calendar)
                 )
                 continue
             records.setdefault((code, spec.param), []).append((eff, value))
     return records, out_of_horizon
 
 
-def _forward_fill_series(
-    base_value: float,
-    records: Sequence[tuple[int, float]],
+@dataclass(frozen=True)
+class DiversionChannel:
+    """The diversion channel (canal de desvio) active for a plant at a stage.
+
+    ``downstream`` is the ``codigo_usina`` of the plant that receives the
+    diverted water; ``limit`` is the channel's flow limit in m³/s, or
+    ``None`` for a base-declared diversion, which carries no explicit
+    limit — only an ``AC DESVIO`` override supplies one.
+    """
+
+    downstream: int
+    limit: float | None
+
+
+def _read_diversion_overrides(
+    dadger: Dadger,
+    calendar: Sequence[OperativeStage],
+) -> tuple[dict[int, list[tuple[int, DiversionChannel]]], list[OutOfHorizon]]:
+    """Ingest the ``AC DESVIO`` diversion-channel override via idecomp's typed accessor.
+
+    Mirrors :func:`_read_scalar_overrides` one-for-one: reads
+    ``dadger.ac(codigo_usina=None, modificacao=ACDESVIO, df=True)`` and
+    resolves every row's ``(mes, semana, ano)`` triple to an effective stage
+    via :func:`resolve_effective_stage`. Rows that resolve within the horizon
+    are grouped by the source plant *code* as ``(eff_stage, DiversionChannel(
+    downstream, limit))``; rows that resolve past the horizon are reported
+    (``param="diversion"``) in the returned out-of-horizon list instead of
+    being dropped.
+
+    Raises
+    ------
+    KeyError
+        If the accessor frame is missing an expected column (a malformed
+        idecomp frame is a hard error, never a silent default).
+    """
+    records: dict[int, list[tuple[int, DiversionChannel]]] = {}
+    out_of_horizon: list[OutOfHorizon] = []
+    table = dadger.ac(codigo_usina=None, modificacao=ACDESVIO, df=True)
+    if not isinstance(table, pd.DataFrame) or table.empty:
+        return records, out_of_horizon
+    for _, row in table.iterrows():
+        code = int(row["codigo_usina"])
+        channel = DiversionChannel(
+            int(row["codigo_usina_jusante"]), float(row["limite_vazao"])
+        )
+        mes = row["mes"]
+        eff = resolve_effective_stage(mes, row["semana"], row["ano"], calendar)
+        if eff is None:
+            out_of_horizon.append(
+                _out_of_horizon_record(code, mes, row["ano"], "diversion", calendar)
+            )
+            continue
+        records.setdefault(code, []).append((eff, channel))
+    return records, out_of_horizon
+
+
+def _forward_fill_series[T](
+    base_value: T,
+    records: Sequence[tuple[int, T]],
     n_stages: int,
-) -> list[float]:
+) -> list[T]:
     """Densify a sparse set of effective-stage overrides into a dense series.
 
     *records* is a possibly-unordered, possibly-empty sequence of
@@ -224,10 +310,12 @@ def _forward_fill_series(
     of the last record whose ``effective_stage <= s``, else *base_value*. A
     record at stage ``0`` therefore overwrites the base for every stage
     (permanent semantics); later records supersede earlier ones. *records*
-    is not mutated.
+    is not mutated. Generic over the value type ``T`` so both the scalar
+    ``float`` overrides and the non-scalar ``DiversionChannel | None``
+    overrides share this one densification helper.
     """
     ordered = sorted(records, key=lambda record: record[0])
-    series: list[float] = []
+    series: list[T] = []
     current = base_value
     next_index = 0
     for stage in range(n_stages):
@@ -253,6 +341,9 @@ class EffectiveCadastro:
     base: pd.DataFrame
     n_stages: int
     stage_varying: Mapping[tuple[int, str], tuple[float, ...]]
+    diversions: Mapping[int, tuple[DiversionChannel | None, ...]] = field(
+        default_factory=dict
+    )
 
     def value(self, code: int, param: str, stage_index: int) -> float:
         """Effective value of *param* for plant *code* at *stage_index*."""
@@ -271,6 +362,26 @@ class EffectiveCadastro:
     def is_stage_varying(self, code: int, param: str) -> bool:
         """Whether *param* for plant *code* carries at least one override."""
         return (code, param) in self.stage_varying
+
+    def has_diversion(self, code: int) -> bool:
+        """Whether plant *code* has a base or ``AC DESVIO`` diversion channel.
+
+        ``True`` iff *code* is a key of :attr:`diversions`, i.e. it carries a
+        non-zero base ``desvio`` code or an in-horizon ``AC DESVIO`` record in
+        at least one stage.
+        """
+        return code in self.diversions
+
+    def diversion(self, code: int, stage_index: int) -> DiversionChannel | None:
+        """The diversion channel active for plant *code* at *stage_index*.
+
+        ``None`` when plant *code* has no diversion at all (absent from
+        :attr:`diversions`) or when it has a diversion in some stages but not
+        at *stage_index*.
+        """
+        if code not in self.diversions:
+            return None
+        return self.diversions[code][stage_index]
 
 
 def storage_envelope(effective: EffectiveCadastro, code: int) -> tuple[float, float]:
@@ -320,13 +431,29 @@ def build_effective_cadastro(
     from the returned :class:`EffectiveCadastro`'s ``stage_varying`` map and
     falls through to *hidr* for every stage.
 
+    Also builds the diversion-channel map from :func:`_read_diversion_overrides`
+    for the union of {plants with a non-zero base ``desvio``} and {plants with
+    an in-horizon ``AC DESVIO``}: the base ``desvio`` seeds the forward-fill
+    (as ``DiversionChannel(downstream, limit=None)``, or ``None`` when
+    ``desvio`` is zero), the resolved ``AC DESVIO`` records overlay it, and
+    the result is stored densely per stage — sparsely, i.e. only for plants
+    with a base or ``AC`` diversion. ``diversions`` is absent-by-default for
+    every other plant, matching *stage_varying*'s sparsity discipline.
+
     Raises
     ------
     ValueError
         If an override references a plant *code* absent from ``hidr.index``
-        — the registry has no cadastro row to override.
+        — the registry has no cadastro row to override. Applies to both the
+        scalar overrides and the source plant of an ``AC DESVIO`` (the
+        downstream plant it names is not validated here — that is M2.1's
+        concern).
     """
     records, out_of_horizon = _read_scalar_overrides(dadger, calendar)
+    diversion_records, diversion_out_of_horizon = _read_diversion_overrides(
+        dadger, calendar
+    )
+    out_of_horizon = out_of_horizon + diversion_out_of_horizon
 
     n_stages = len(calendar)
     stage_varying: dict[tuple[int, str], tuple[float, ...]] = {}
@@ -343,8 +470,36 @@ def build_effective_cadastro(
         )
         applied[param] = applied.get(param, 0) + 1
 
+    base_diversion_codes = {
+        int(code)
+        for code, desvio in zip(
+            hidr.index.tolist(), hidr["desvio"].tolist(), strict=True
+        )
+        if float(desvio) != 0
+    }
+    diversions: dict[int, tuple[DiversionChannel | None, ...]] = {}
+    for code in base_diversion_codes | set(diversion_records):
+        if code not in hidr.index:
+            raise ValueError(
+                f"AC override references plant code {code}, which is not in"
+                " the cadastro registry"
+            )
+        base_desvio = float(hidr.loc[code, "desvio"])
+        base_channel = (
+            DiversionChannel(int(base_desvio), None) if base_desvio != 0 else None
+        )
+        diversion_overrides = diversion_records.get(code, [])
+        diversions[code] = tuple(
+            _forward_fill_series(base_channel, diversion_overrides, n_stages)
+        )
+    if diversion_records:
+        applied["diversion"] = len(diversion_records)
+
     effective = EffectiveCadastro(
-        base=hidr, n_stages=n_stages, stage_varying=stage_varying
+        base=hidr,
+        n_stages=n_stages,
+        stage_varying=stage_varying,
+        diversions=diversions,
     )
     report = CadastroResolutionReport(
         applied=applied, out_of_horizon=tuple(out_of_horizon)

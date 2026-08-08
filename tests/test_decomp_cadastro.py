@@ -14,7 +14,7 @@ from datetime import date
 
 import pandas as pd
 import pytest
-from idecomp.decomp.modelos.dadger import ACVOLMAX, ACVOLMIN
+from idecomp.decomp.modelos.dadger import ACVAZMIN, ACVOLMAX, ACVOLMIN
 
 from cobre_bridge.decomp.cadastro import (
     CadastroResolutionReport,
@@ -30,8 +30,8 @@ from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calenda
 def _hidr_frame() -> pd.DataFrame:
     df = pd.DataFrame(
         {
-            1: {"volume_minimo": 20.0, "volume_maximo": 100.0},
-            2: {"volume_minimo": 30.0, "volume_maximo": 150.0},
+            1: {"desvio": 0, "volume_minimo": 20.0, "volume_maximo": 100.0},
+            2: {"desvio": 0, "volume_minimo": 30.0, "volume_maximo": 150.0},
         }
     ).T
     df.index.name = "codigo_usina"
@@ -278,3 +278,32 @@ def test_build_effective_cadastro_unknown_plant_code_raises_value_error(
     )
     with pytest.raises(ValueError, match="999"):
         build_effective_cadastro(dadger, _hidr_frame(), scalar_calendar)
+
+
+def test_build_effective_cadastro_permanent_vazmin_resolves_and_is_applied(
+    scalar_calendar: list[OperativeStage],
+) -> None:
+    """ticket-009: a permanent ``AC VAZMIN`` row (the real deck shape — blank
+    ``mes``/``semana``/``ano``) resolves to a constant per-stage
+    ``vazao_minima_historica`` series and is counted in
+    ``report.applied``."""
+    hidr = pd.DataFrame({1: {"desvio": 0, "vazao_minima_historica": 73.0}}).T
+    hidr.index.name = "codigo_usina"
+    dadger = _FakeDadger(
+        {
+            ACVAZMIN: _ac_frame(
+                codigo_usina=1,
+                vazao=0.0,
+                mes="",
+                semana=float("nan"),
+                ano=float("nan"),
+            ),
+        }
+    )
+    effective, report = build_effective_cadastro(dadger, hidr, scalar_calendar)
+    assert [effective.value(1, "vazao_minima_historica", s) for s in range(3)] == [
+        0.0,
+        0.0,
+        0.0,
+    ]
+    assert report.applied["vazao_minima_historica"] == 1

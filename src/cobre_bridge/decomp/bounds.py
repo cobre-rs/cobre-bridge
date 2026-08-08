@@ -86,9 +86,9 @@ def _empty() -> pa.Table:
 
 def convert_hydro_bounds(
     dadger: Dadger,
-    hidr: pd.DataFrame,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    effective: EffectiveCadastro,
 ) -> pa.Table:
     """Minimum-outflow bounds from the ``RQ`` defaults.
 
@@ -115,23 +115,6 @@ def convert_hydro_bounds(
         declared = row.get("vazao_defluente_minima")
         if declared is not None and not pd.isna(declared):
             uh_declared[code] = float(declared)
-
-    # Registry historical minimum, post AC VAZMIN overrides.
-    vazmin: dict[int, float] = {}
-    for code in id_map.hydro_codes:
-        if code in hidr.index:
-            base = hidr.loc[code, "vazao_minima_historica"]
-            vazmin[code] = 0.0 if pd.isna(base) else float(base)
-    from idecomp.decomp.modelos.dadger import ACVAZMIN
-
-    overrides = dadger.ac(codigo_usina=None, modificacao=ACVAZMIN, df=True)
-    n_overrides = 0
-    if isinstance(overrides, pd.DataFrame) and not overrides.empty:
-        for _, row in overrides.iterrows():
-            code = int(row["codigo_usina"])
-            if code in vazmin:
-                vazmin[code] = float(row["vazao"])
-                n_overrides += 1
 
     # Plants whose defluence is governed by an explicit flow-constraint
     # window are the generic-constraints emitter's territory.
@@ -172,13 +155,13 @@ def convert_hydro_bounds(
             continue
         else:
             ree = ree_by_code.get(code)
-            base = vazmin.get(code, 0.0)
-            if ree is None or ree not in pct_blocks or base <= 0.0:
+            if ree is None or ree not in pct_blocks or code not in effective.base.index:
                 continue
             values = pct_blocks[ree]
             per_stage = []
             per_block_stage = []
             for stage in calendar:
+                base = effective.value(code, "vazao_minima_historica", stage.index)
                 n_blocks = len(stage.block_hours)
                 block_values = [pct / 100.0 * base for pct in values[:n_blocks]]
                 weighted_pct = (
@@ -194,7 +177,7 @@ def convert_hydro_bounds(
                 per_block_stage.append(block_values)
         for stage in calendar:
             value = per_stage[stage.index]
-            if value <= 0.0:
+            if pd.isna(value) or value <= 0.0:
                 continue
             hydro_ids.append(id_map.hydro_id(code))
             stage_ids.append(stage.index)
@@ -213,12 +196,6 @@ def convert_hydro_bounds(
                 minimums.append(block_value)
                 block_ids.append(b)
 
-    if n_overrides:
-        _LOG.info(
-            "applied %d AC VAZMIN historical-minimum overrides "
-            "(first AC subtype converted)",
-            n_overrides,
-        )
     if skipped_qdef:
         _LOG.warning(
             "%d plant(s) with explicit QDEF flow windows skipped by the RQ "

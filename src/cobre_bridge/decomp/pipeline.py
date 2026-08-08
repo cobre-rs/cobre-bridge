@@ -162,11 +162,11 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
 
     id_map = DecompIdMap.from_dadger(dadger)
     calendar = temporal_conv.operative_calendar_from_dadger(dadger)
-    # epic-02 (cadastro overrides): the per-stage-effective view of the
-    # registry, folding in any temporal AC VOLMIN/VOLMAX override — read once
-    # and threaded to every consumer below (initial storage, the entity
-    # reservoir envelope, the per-stage storage bounds) so they all agree on
-    # the same effective values.
+    # epic-02/epic-03 (cadastro overrides): the per-stage-effective view of
+    # the registry, folding in any temporal AC VOLMIN/VOLMAX/VAZMIN override —
+    # read once and threaded to every consumer below (initial storage, the
+    # entity reservoir envelope, the per-stage storage and minimum-outflow
+    # bounds) so they all agree on the same effective values.
     effective, cadastro_report = cadastro_conv.build_effective_cadastro(
         dadger, hidr, calendar
     )
@@ -175,7 +175,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
             f"{count} {param}"
             for param, count in sorted(cadastro_report.applied.items())
         )
-        summary = f"cadastro volume overrides applied: {applied_desc or 'none'}"
+        summary = f"cadastro overrides applied: {applied_desc or 'none'}"
         if cadastro_report.out_of_horizon:
             summary += (
                 f"; {len(cadastro_report.out_of_horizon)} override(s) fall "
@@ -183,10 +183,10 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
             )
         dx.emit(
             dx.Diagnostic(
-                code="cadastro-volume-overrides-applied",
+                code="cadastro-overrides-applied",
                 severity=dx.Severity.INFO,
                 category="Cadastro overrides",
-                title="Cadastro volume overrides applied",
+                title="Cadastro overrides applied",
                 summary=summary,
             ),
             logger=_LOG,
@@ -307,7 +307,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
 
     constraints = dst / "constraints"
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
-    hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, hidr, id_map, calendar)
+    hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, id_map, calendar, effective)
     # epic-02 (cadastro overrides): fold the per-stage storage-bound
     # overrides (sparse wherever a stage's effective volume envelope
     # tightens/widens past the plant's outer envelope) into the same

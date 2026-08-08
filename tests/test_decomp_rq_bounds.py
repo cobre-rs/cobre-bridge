@@ -37,6 +37,7 @@ deck's own data and are pinned by a small synthetic fixture instead
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -45,9 +46,11 @@ import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.bounds import convert_hydro_bounds
+from cobre_bridge.decomp.cadastro import EffectiveCadastro, build_effective_cadastro
 from cobre_bridge.decomp.hydro import read_hidr
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import (
+    OperativeStage,
     build_operative_calendar,
     operative_calendar_from_dadger,
 )
@@ -170,7 +173,8 @@ class TestRqPerBlockBounds:
 
     def test_effective_per_block_matches_registers_and_fold(self) -> None:
         dadger, hidr, id_map, calendar = _load()
-        table = convert_hydro_bounds(dadger, hidr, id_map, calendar).to_pandas()
+        effective, _ = build_effective_cadastro(dadger, hidr, calendar)
+        table = convert_hydro_bounds(dadger, id_map, calendar, effective).to_pandas()
 
         pct_blocks = _rq_pct_blocks(dadger)
         vazmin = _vazmin(dadger, hidr, id_map)
@@ -230,8 +234,8 @@ class TestRqPerBlockBounds:
                 # Criterion 1: the reconstructed effective value (override
                 # row if present, else the base row) for every block.
                 for b, expected_value in enumerate(expected_blocks):
-                    effective = override_by_block.get(b, base_value)
-                    assert effective == pytest.approx(expected_value, abs=_TOL)
+                    effective_value = override_by_block.get(b, base_value)
+                    assert effective_value == pytest.approx(expected_value, abs=_TOL)
                     checked_cells += 1
 
         # Pinned against the deck (see module docstring): every RQ record on
@@ -252,8 +256,11 @@ class TestQdefUnaffected:
         qdef = _qdef_codes(dadger) & set(id_map.hydro_codes)
         assert qdef, "deck must declare at least one QDEF-windowed plant"
 
+        effective, _ = build_effective_cadastro(dadger, hidr, calendar)
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.bounds"):
-            table = convert_hydro_bounds(dadger, hidr, id_map, calendar).to_pandas()
+            table = convert_hydro_bounds(
+                dadger, id_map, calendar, effective
+            ).to_pandas()
 
         qdef_ids = {id_map.hydro_id(code) for code in qdef}
         assert not set(table["hydro_id"]) & qdef_ids
@@ -266,7 +273,8 @@ class TestEmissionSelfChecks:
 
     def test_no_error_severity_finding(self) -> None:
         dadger, hidr, id_map, calendar = _load()
-        table = convert_hydro_bounds(dadger, hidr, id_map, calendar)
+        effective, _ = build_effective_cadastro(dadger, hidr, calendar)
+        table = convert_hydro_bounds(dadger, id_map, calendar, effective)
 
         stages_doc = {
             "stages": [
@@ -374,9 +382,7 @@ class TestSyntheticUniformAndUhDeclared:
                 }
             ]
         )
-        stub = _StubDadger(uh=uh, rq=rq, cq=cq)
-        stub.ac = lambda codigo_usina=None, modificacao=None, df=False: pd.DataFrame()  # type: ignore[attr-defined]
-        return stub
+        return _StubDadger(uh=uh, rq=rq, cq=cq)
 
     def _hidr(self) -> pd.DataFrame:
         df = pd.DataFrame(
@@ -390,10 +396,23 @@ class TestSyntheticUniformAndUhDeclared:
         df.index.name = "codigo_usina"
         return df
 
+    def _effective(
+        self,
+        calendar: Sequence[OperativeStage],
+        stage_varying: dict[tuple[int, str], tuple[float, ...]] | None = None,
+    ) -> EffectiveCadastro:
+        """Build an ``EffectiveCadastro`` directly over ``self._hidr()``,
+        bypassing ``build_effective_cadastro``/``AC`` ingestion — this class
+        pins the ``RQ``/``UH``/``QDEF`` classification, not the resolver
+        itself (covered by ``tests/test_decomp_cadastro.py``)."""
+        return EffectiveCadastro(
+            base=self._hidr(), n_stages=len(calendar), stage_varying=stage_varying or {}
+        )
+
     def test_uniform_stage_emits_base_row_only(self) -> None:
         calendar = self._calendar()
         table = convert_hydro_bounds(
-            self._dadger(), self._hidr(), self._ID_MAP, calendar
+            self._dadger(), self._ID_MAP, calendar, self._effective(calendar)
         ).to_pandas()
 
         plant1 = table[table["hydro_id"] == self._ID_MAP.hydro_id(1)]
@@ -402,10 +421,25 @@ class TestSyntheticUniformAndUhDeclared:
         assert plant1["block_id"].isna().all()
         assert set(plant1["min_outflow_m3s"]) == {20.0}  # 50 % of 40 m3/s
 
+    def test_nan_historical_minimum_emits_no_row(self) -> None:
+        # A NaN historical-minimum (a missing registry value) must be treated
+        # like a non-positive one and emit no row, not a NaN outflow bound.
+        calendar = self._calendar()
+        effective = self._effective(
+            calendar,
+            stage_varying={
+                (1, "vazao_minima_historica"): (float("nan"),) * len(calendar)
+            },
+        )
+        table = convert_hydro_bounds(
+            self._dadger(), self._ID_MAP, calendar, effective
+        ).to_pandas()
+        assert table[table["hydro_id"] == self._ID_MAP.hydro_id(1)].empty
+
     def test_uh_declared_rows_carry_no_block_id(self) -> None:
         calendar = self._calendar()
         table = convert_hydro_bounds(
-            self._dadger(), self._hidr(), self._ID_MAP, calendar
+            self._dadger(), self._ID_MAP, calendar, self._effective(calendar)
         ).to_pandas()
 
         # Criterion 4 (UH half): a UH-declared plant's rows are all base
@@ -420,7 +454,7 @@ class TestSyntheticUniformAndUhDeclared:
         calendar = self._calendar()
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.bounds"):
             table = convert_hydro_bounds(
-                self._dadger(), self._hidr(), self._ID_MAP, calendar
+                self._dadger(), self._ID_MAP, calendar, self._effective(calendar)
             ).to_pandas()
 
         # Criterion 4 (QDEF half), same mixed deck as the two tests above.
@@ -432,7 +466,7 @@ class TestSyntheticUniformAndUhDeclared:
         # unperturbed by the UH/QDEF plants sharing the same deck.
         calendar = self._calendar()
         table = convert_hydro_bounds(
-            self._dadger(), self._hidr(), self._ID_MAP, calendar
+            self._dadger(), self._ID_MAP, calendar, self._effective(calendar)
         ).to_pandas()
 
         plant2 = table[table["hydro_id"] == self._ID_MAP.hydro_id(2)]
@@ -446,3 +480,22 @@ class TestSyntheticUniformAndUhDeclared:
                 zip(stage_overrides["block_id"], stage_overrides["min_outflow_m3s"])
             )
             assert values == {0: 40.0, 1: 40.0, 2: 0.0}
+
+    def test_temporal_vazmin_override_gates_only_the_overridden_stage(self) -> None:
+        """A temporal ``vazao_minima_historica`` override that zeroes plant
+        2's effective minimum only at the final stage: the stage-level
+        ``value <= 0.0`` gate drops that stage's rows while the earlier
+        stages (still at the 40.0 base) keep theirs — never a plant-level
+        skip, which would incorrectly drop every stage."""
+        calendar = self._calendar()
+        effective = self._effective(
+            calendar,
+            stage_varying={(2, "vazao_minima_historica"): (40.0, 40.0, 0.0)},
+        )
+        table = convert_hydro_bounds(
+            self._dadger(), self._ID_MAP, calendar, effective
+        ).to_pandas()
+
+        plant2 = table[table["hydro_id"] == self._ID_MAP.hydro_id(2)]
+        assert set(plant2["stage_id"]) == {0, 1}
+        assert plant2[plant2["stage_id"] == 2].empty

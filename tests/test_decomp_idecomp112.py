@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -9,10 +10,11 @@ import pandas as pd
 import pytest
 
 from cobre_bridge.decomp.bounds import convert_hydro_bounds
+from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.ncs import convert_non_controllable_sources
 from cobre_bridge.decomp.network import convert_lines, convert_pumping_stations
-from cobre_bridge.decomp.temporal import build_operative_calendar
+from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 
 _RV3_DECK = Path("example/decomp-jul-26-rv3")
 _needs_deck = pytest.mark.skipif(
@@ -151,7 +153,6 @@ class TestConvertHydroBounds:
     def _dadger(
         self,
         rq: pd.DataFrame | None = None,
-        ac: pd.DataFrame | None = None,
         cq: pd.DataFrame | None = None,
     ) -> _StubDadger:
         uh = pd.DataFrame(
@@ -176,7 +177,7 @@ class TestConvertHydroBounds:
                 },
             ]
         )
-        stub = _StubDadger(
+        return _StubDadger(
             uh=uh,
             rq=rq
             if rq is not None
@@ -185,9 +186,6 @@ class TestConvertHydroBounds:
             ),
             cq=cq if cq is not None else pd.DataFrame(),
         )
-        overrides = ac if ac is not None else pd.DataFrame()
-        stub.ac = lambda codigo_usina=None, modificacao=None, df=False: overrides  # type: ignore[attr-defined]
-        return stub
 
     def _hidr(self) -> pd.DataFrame:
         df = pd.DataFrame(
@@ -200,10 +198,19 @@ class TestConvertHydroBounds:
         df.index.name = "codigo_usina"
         return df
 
+    def _effective(
+        self,
+        calendar: Sequence[OperativeStage],
+        stage_varying: dict[tuple[int, str], tuple[float, ...]] | None = None,
+    ) -> EffectiveCadastro:
+        return EffectiveCadastro(
+            base=self._hidr(), n_stages=len(calendar), stage_varying=stage_varying or {}
+        )
+
     def test_rq_percentages_and_uh_priority(self) -> None:
         calendar = _calendar()
         table = convert_hydro_bounds(
-            self._dadger(), self._hidr(), _ID_MAP, calendar
+            self._dadger(), _ID_MAP, calendar, self._effective(calendar)
         ).to_pandas()
         # Base row only (block_id = None) — the backward-compatible
         # hours-weighted per-stage value; the RQ percentages (100, 100, 0)
@@ -224,9 +231,13 @@ class TestConvertHydroBounds:
         assert 2 not in set(table["hydro_id"])
 
     def test_ac_vazmin_override_applies(self) -> None:
-        ac = pd.DataFrame([{"codigo_usina": 1, "vazao": 0.0}])
+        calendar = _calendar()
+        effective = self._effective(
+            calendar,
+            stage_varying={(1, "vazao_minima_historica"): (0.0,) * len(calendar)},
+        )
         table = convert_hydro_bounds(
-            self._dadger(ac=ac), self._hidr(), _ID_MAP, _calendar()
+            self._dadger(), _ID_MAP, calendar, effective
         ).to_pandas()
         # Plant 1's historical minimum overridden to zero: no rows.
         assert 0 not in set(table["hydro_id"])
@@ -243,8 +254,9 @@ class TestConvertHydroBounds:
                 }
             ]
         )
+        calendar = _calendar()
         table = convert_hydro_bounds(
-            self._dadger(cq=cq), self._hidr(), _ID_MAP, _calendar()
+            self._dadger(cq=cq), _ID_MAP, calendar, self._effective(calendar)
         ).to_pandas()
         assert 0 not in set(table["hydro_id"])
 
