@@ -44,3 +44,31 @@ packages = ["src/cobre_bridge"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--tb=short"
+
+[tool.pyright]
+# Pyright is an editor aid only — CI gates ruff (see ruff.toml) and the project's
+# declared type checker is `ty` (a dev dependency). Point Pyright at the project
+# virtualenv so it resolves the typed first-party deps (idecomp/inewave both ship
+# py.typed); without this, every `import idecomp...` raises a phantom
+# reportMissingImports that buries genuine diagnostics.
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+# `typeCheckingMode = "off"` disables type-inference rules while KEEPING the
+# high-value semantic checks — unresolved imports, undefined/unbound names,
+# syntax errors — so a real broken import or typo still surfaces. Full type
+# inference over pandas 3.x's `Series | DataFrame` unions produces ~1000
+# false positives in this data-pipeline code (deep `.loc`/attribute/index
+# access on the sanctioned bare-accessor idiom); ruff + `ty` are the real gates.
+typeCheckingMode = "off"
+# Keep unresolved-import reporting active even in "off" mode — that is exactly
+# the class of diagnostic we DO want (a genuinely missing/typo'd import), now
+# that the venv resolves the real deps.
+reportMissingImports = "error"
+reportMissingModuleSource = "none"
+# Function-local type aliases (`BaseRow = dict[str, float]` used in a later
+# annotation) are valid Python and work at runtime, but Pyright flags them under
+# PEP 613 ("Variable not allowed in type expression"). Benign pedantry — silence
+# it so the board stays 0/0 and any diagnostic that does appear is real signal.
+reportInvalidTypeForm = "none"
