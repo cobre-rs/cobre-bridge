@@ -6,13 +6,19 @@ Synthetic-fixture only — a fake ``Dadger`` returns pandas DataFrames shaped li
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintRecord,
+    ConstraintTerm,
+    detect_libs_electrical,
+    detect_unreadable_electrical,
     lowers_to_bound,
     read_constraints,
 )
+from cobre_bridge.diagnostics import Severity
 
 
 class _FakeDadger:
@@ -48,6 +54,34 @@ def _coeff(*rows: tuple, tipo: bool = False, freq: bool = False) -> pd.DataFrame
     return pd.DataFrame(rows, columns=cols)
 
 
+def _ft(*rows: tuple) -> pd.DataFrame:
+    """FT rows: (constraint_id, codigo_submercado, codigo_usina, coeficiente, estagio)."""
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "codigo_restricao",
+            "codigo_submercado",
+            "codigo_usina",
+            "coeficiente",
+            "estagio",
+        ],
+    )
+
+
+def _fi(*rows: tuple) -> pd.DataFrame:
+    """FI rows: (cid, codigo_submercado_de, codigo_submercado_para, coeficiente, estagio)."""
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "codigo_restricao",
+            "codigo_submercado_de",
+            "codigo_submercado_para",
+            "coeficiente",
+            "estagio",
+        ],
+    )
+
+
 def _lu(*rows: tuple) -> pd.DataFrame:
     """Per-block limit rows: (cid, estagio, li1, ls1, li2, ls2, li3, ls3)."""
     return pd.DataFrame(
@@ -73,10 +107,54 @@ def _lv(*rows: tuple) -> pd.DataFrame:
     )
 
 
+def _he(*rows: tuple) -> pd.DataFrame:
+    """HE rows, all 9 idecomp columns: (cid, estagio, limite, tipo_limite,
+    forma_calculo_produtibilidades, tipo_valores_produtibilidades,
+    arquivo_produtibilidades, valor_penalidade, tipo_penalidade)."""
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "codigo_restricao",
+            "estagio",
+            "limite",
+            "tipo_limite",
+            "forma_calculo_produtibilidades",
+            "tipo_valores_produtibilidades",
+            "arquivo_produtibilidades",
+            "valor_penalidade",
+            "tipo_penalidade",
+        ],
+    )
+
+
+def _cm(*rows: tuple) -> pd.DataFrame:
+    """CM rows: (constraint_id, codigo_ree, coeficiente)."""
+    return pd.DataFrame(rows, columns=["codigo_restricao", "codigo_ree", "coeficiente"])
+
+
 def _only(census_records: object, cid: int) -> ConstraintRecord:
     records = [r for r in census_records if r.constraint_id == cid]  # type: ignore[attr-defined]
     assert len(records) == 1, f"expected exactly one record for {cid}"
     return records[0]
+
+
+def _term(coefficient: float, variable: str = "QDEF") -> ConstraintTerm:
+    """A single flow term on one plant, for classifier-only tests."""
+    return ConstraintTerm(code=30, coefficient=coefficient, variable=variable)
+
+
+def _single_term_record(coefficient: float, variable: str = "QDEF") -> ConstraintRecord:
+    """A minimal single-term HQ record built directly, no ``Dadger`` fixture —
+    only ``lowers_to_bound``'s classification is under test."""
+    return ConstraintRecord(
+        family="HQ",
+        constraint_id=1,
+        stage_start=0,
+        stage_end=0,
+        terms=(_term(coefficient, variable),),
+        bounds={},
+        per_block=True,
+    )
 
 
 def test_re_single_term_lowers_to_generation_bound() -> None:
@@ -108,6 +186,53 @@ def test_re_multi_term_lowers_to_generic() -> None:
     assert not rec.is_single_term
     assert not lowers_to_bound(rec)
     assert rec in census.to_generic
+
+
+def test_re_thermal_only_read() -> None:
+    """FT-only participation (no FU) still produces a term, not skipped_no_terms."""
+    dadger = _FakeDadger(
+        re=_decl((10, 1, 2)),
+        ft=_ft((10, 1, 5, 1.0, 1)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["RE"], 10)
+    assert len(rec.terms) == 1
+    assert rec.terms[0].variable == "thermal_generation"
+    assert rec.terms[0].submarket == 1
+
+
+def test_re_interchange_only_is_generic() -> None:
+    """FI-only participation (no FU) reads an interchange term and stays generic."""
+    dadger = _FakeDadger(
+        re=_decl((11, 1, 1)),
+        fi=_fi((11, "SE", "S", 1.0, 1)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["RE"], 11)
+    assert len(rec.terms) == 1
+    term = rec.terms[0]
+    assert term.variable == "interchange"
+    assert term.submarket_de == "SE"
+    assert term.submarket_para == "S"
+    assert rec in census.to_generic
+
+
+def test_re_all_three_registers() -> None:
+    """FU + FT + FI on the same RE merge into three distinct terms."""
+    dadger = _FakeDadger(
+        re=_decl((12, 1, 1)),
+        fu=_coeff((12, 21, 1.0, 1, float("nan")), freq=True),
+        ft=_ft((12, 1, 5, 1.0, 1)),
+        fi=_fi((12, "SE", "S", 1.0, 1)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["RE"], 12)
+    assert len(rec.terms) == 3
+    assert {t.variable for t in rec.terms} == {
+        "generation",
+        "thermal_generation",
+        "interchange",
+    }
 
 
 def test_hq_qdef_single_lowers_to_outflow_bound() -> None:
@@ -154,6 +279,20 @@ def test_hq_mixed_flow_variables_one_plant_is_multi_term_generic() -> None:
     assert not lowers_to_bound(rec)
 
 
+def test_non_unit_single_term_is_generic() -> None:
+    """A single QDEF term with a non-unit coefficient (``0.5·QDEF ≤ U`` means
+    ``QDEF ≤ 2U``) must not lower to a face-value bound — it routes to the
+    generic emitter, which honours the coefficient."""
+    record = _single_term_record(0.5)
+    assert not lowers_to_bound(record)
+
+
+def test_unit_negative_single_term_lowers_to_bound() -> None:
+    """``|coef| == 1`` still lowers to a bound when the sign is negative."""
+    record = _single_term_record(-1.0)
+    assert lowers_to_bound(record)
+
+
 def test_hv_varm_single_lowers_to_storage_bound() -> None:
     dadger = _FakeDadger(
         hv=_decl((7, 1, 2)),
@@ -170,31 +309,59 @@ def test_hv_varm_single_lowers_to_storage_bound() -> None:
     assert rec.bounds[0].upper == (900.0,)
 
 
-def test_he_energy_over_ree_is_always_generic() -> None:
+def test_he_percentage_is_lower_bound() -> None:
+    """``tipo_limite = 2`` (percentage of the REE's max stored energy) is a lower
+    limit — the unit flag never selects which side the limit lands on."""
     dadger = _FakeDadger(
-        he=pd.DataFrame(
-            [(100, 1, 20.0, 2, 3370.0)],
-            columns=[
-                "codigo_restricao",
-                "estagio",
-                "limite",
-                "tipo_limite",
-                "valor_penalidade",
-            ],
-        ),
-        cm=pd.DataFrame(
-            [(100, 3, 1.0)],
-            columns=["codigo_restricao", "codigo_ree", "coeficiente"],
-        ),
+        he=_he((7, 1, 20.0, 2, 0, 1, "PRODRHE.DAT", 3370.0, 1)),
+        cm=_cm((7, 3, 1.0)),
     )
     census = read_constraints(dadger)
-    rec = _only(census.by_family["HE"], 100)
+    rec = _only(census.by_family["HE"], 7)
+    assert rec.bounds[0].lower == (20.0,)
+    assert rec.bounds[0].upper == (None,)
+
+
+def test_he_absolute_is_lower_bound() -> None:
+    """``tipo_limite = 1`` (absolute MWmes) lands on the same lower side as
+    ``tipo_limite = 2`` — same side, different unit."""
+    dadger = _FakeDadger(
+        he=_he((7, 1, 500.0, 1, 0, 1, "PRODRHE.DAT", 3370.0, 1)),
+        cm=_cm((7, 3, 1.0)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["HE"], 7)
+    assert rec.bounds[0].lower == (500.0,)
+    assert rec.bounds[0].upper == (None,)
+
+
+def test_he_metadata_captured() -> None:
+    dadger = _FakeDadger(
+        he=_he((7, 1, 20.0, 2, 0, 1, "PRODRHE.DAT", 1234.5, 1)),
+        cm=_cm((7, 3, 1.0)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["HE"], 7)
+    assert rec.he_meta is not None
+    assert rec.he_meta.forma_calculo_produtibilidades == 0
+    assert rec.he_meta.arquivo_produtibilidades == "PRODRHE.DAT"
+    assert rec.he_meta.valor_penalidade == 1234.5
+    assert rec.he_meta.tipo_penalidade == 1
+
+
+def test_he_is_generic() -> None:
+    dadger = _FakeDadger(
+        he=_he((7, 1, 20.0, 2, 0, 1, "PRODRHE.DAT", 3370.0, 1)),
+        cm=_cm((7, 3, 1.0)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["HE"], 7)
+    assert rec.family == "HE"
+    assert rec.per_block is False
     assert rec.terms[0].variable == "energy"
     assert rec.is_single_term  # one REE …
     assert not lowers_to_bound(rec)  # … but energy has no bounds axis
-    assert rec.tipo_limite == 2
-    assert rec.penalty == 3370.0
-    assert rec.bounds[0].lower == (20.0,)  # tipo_limite 2 => a floor
+    assert rec in census.to_generic
 
 
 def test_sparse_limits_forward_fill_over_stage_range() -> None:
@@ -250,3 +417,84 @@ def test_frequency_split_plant_contributes_two_terms() -> None:
     assert not rec.is_single_term  # … split across two frequencies
     assert {t.frequency for t in rec.terms} == {50.0, 60.0}
     assert not lowers_to_bound(rec)
+
+
+def test_fe_line_warns_under_read(tmp_path: Path) -> None:
+    """An ``FE`` participation line warns the electrical model may be
+    under-read, and names no specific constraint id."""
+    dadger_path = tmp_path / "dadger.rv0"
+    dadger_path.write_text(
+        "RE    10    1    2\nFE    10   21  1.0\n", encoding="latin-1"
+    )
+
+    diagnostics = detect_unreadable_electrical(dadger_path)
+
+    assert len(diagnostics) == 1
+    diag = diagnostics[0]
+    assert diag.severity is Severity.WARNING
+    assert "FE" in diag.summary
+    assert "under-read" in diag.summary
+    assert "10" not in diag.summary  # no specific constraint id named
+
+
+def test_rha_lines_warn(tmp_path: Path) -> None:
+    """``HA``/``LA``/``CA`` lines warn the RHA family is unconverted, and a
+    mnemonic buried mid-line (not the leading token) never triggers it."""
+    dadger_path = tmp_path / "dadger.rv0"
+    dadger_path.write_text(
+        "HA    1    2\n"
+        "LA    1    2\n"
+        "CA    1    2\n"
+        "RE  10   1   2   XCA field\n",  # "XCA" leading token must not match
+        encoding="latin-1",
+    )
+
+    diagnostics = detect_unreadable_electrical(dadger_path)
+
+    assert len(diagnostics) == 1
+    diag = diagnostics[0]
+    assert diag.severity is Severity.WARNING
+    assert "RHA" in diag.summary or "HA/LA/CA" in diag.summary
+    assert "not" in diag.summary
+
+
+def test_clean_deck_no_findings(tmp_path: Path) -> None:
+    """No ``FE``/``HA``/``LA``/``CA`` leading tokens yields an empty list; a
+    ``CA``-like substring inside another field must not trigger a false
+    positive."""
+    dadger_path = tmp_path / "dadger.rv0"
+    dadger_path.write_text(
+        "RE    10    1    2\n"
+        "FU    10   21  1.0\n"
+        "some field carrying a CA substring mid-line\n",
+        encoding="latin-1",
+    )
+
+    assert detect_unreadable_electrical(dadger_path) == []
+
+
+def test_libs_indices_warns(tmp_path: Path) -> None:
+    """``indices.csv`` listing ``RESTRICAO-ELETRICA-ESPECIAL`` warns; a deck
+    without that row, and a deck with no ``indices.csv`` at all, return
+    ``None``."""
+    libs_dir = tmp_path / "with_libs"
+    libs_dir.mkdir()
+    (libs_dir / "indices.csv").write_text(
+        "RESTRICAO-ELETRICA-ESPECIAL;Descricao;lib_restricao-eletrica-especial.csv\n",
+        encoding="latin-1",
+    )
+    diagnostic = detect_libs_electrical(libs_dir)
+    assert diagnostic is not None
+    assert diagnostic.severity is Severity.WARNING
+
+    clean_dir = tmp_path / "without_libs"
+    clean_dir.mkdir()
+    (clean_dir / "indices.csv").write_text(
+        "HIDRELETRICA-CADASTRO-RESERVATORIO-CURVAJUSANTE;Descricao;polinjus.csv\n",
+        encoding="latin-1",
+    )
+    assert detect_libs_electrical(clean_dir) is None
+
+    missing_dir = tmp_path / "missing_indices"
+    missing_dir.mkdir()
+    assert detect_libs_electrical(missing_dir) is None
