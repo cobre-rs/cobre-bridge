@@ -32,6 +32,15 @@ hours vary per stage) that a stage-invariant cobre expression cannot carry,
 so ``emit_rhq_rhv_generics`` detects one and skips the constraint with a
 ``WARNING`` instead of guessing a coefficient (see the E5 scalar-parameter
 plumbing).
+
+``HE`` (RHE stored-energy) constraints are emitted by
+``emit_rhe_generics`` (E5, ticket-018): unlike the three families above, it
+owns its own model-agnostic productivity reconstruction (the shared
+``productivity.stored_energy_productivity`` primitive, driven over the
+operated-cascade walk this module imports from ``decomp/hydro.py``) rather
+than reading a bounds axis off the register directly — the RHS is a
+whole-REE stored-energy sum, not a per-plant limit, so it needs the
+per-stage accumulated productivity to convert reservoir storage to energy.
 """
 
 from __future__ import annotations
@@ -43,7 +52,10 @@ import pyarrow as pa
 
 from cobre_bridge.decomp.cadastro import effective_storage_range
 from cobre_bridge.decomp.constraint_registers import StageBounds
+from cobre_bridge.decomp.hydro import _downstream_operated
+from cobre_bridge.decomp.scalar_parameters import rho_acum_name
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.productivity import stored_energy_productivity
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -865,3 +877,360 @@ def emit_rhq_rhv_generics(
             calendar=calendar,
         )
     return builder.result()
+
+
+#: The slack penalty (R$/MWh) an RHE constraint falls back to when its own
+#: ``valor_penalidade`` is missing or non-positive — mirrors the source
+#: model's VminOP ``penalty <= 0 -> 1000.0`` fallback
+#: (``converters/constraints.py::convert_vminop_constraints``).
+_RHE_DEFAULT_PENALTY = 1000.0
+
+#: Unit-conversion constants for the DECOMP stage-hours energy factor
+#: (:func:`_rhe_energy_factor`): seconds per hour and cubic meters per cubic
+#: hectometer.
+_SECONDS_PER_HOUR = 3600.0
+_M3_PER_HM3 = 1_000_000.0
+
+
+class RheResult(NamedTuple):
+    """Result of :func:`emit_rhe_generics`.
+
+    ``result`` is the usual :class:`GenericConstraintResult` (``None`` when
+    no RHE constraint survives). ``rho_acum_overrides`` maps every cobre
+    hydro id *actually referenced* by a surviving RHE expression to its
+    per-stage integrated ρ_acum in MWmês/hm³ — the override contract
+    ``decomp.scalar_parameters.build_decomp_scalar_parameters`` consumes so
+    the LP's ``@rho_acum_h{id}`` coefficient matches the RHS this emitter
+    computes. Empty when ``result`` is ``None``.
+    """
+
+    result: GenericConstraintResult | None
+    rho_acum_overrides: dict[int, list[float]]
+
+
+def _is_stored_energy_reservoir(effective: EffectiveCadastro, code: int) -> bool:
+    """True iff the source model counts plant *code*'s storage in a REE's
+    stored energy.
+
+    Mirrors ``converters/constraints.py::_is_stored_energy_reservoir``:
+    strictly monthly-regulating reservoirs (``tipo_regulacao == "M"``) with
+    usable storage (``volume_maximo > volume_minimo``), read off the *base*
+    cadastro. Run-of-river (``"D"``) and special-regime (``"S"``) plants are
+    excluded even when their accumulated cascade productivity is positive.
+    """
+    if code not in effective.base.index:
+        return False
+    if str(effective.base.loc[code, "tipo_regulacao"]).strip() != "M":
+        return False
+    vol_min = float(effective.base.loc[code, "volume_minimo"])
+    vol_max = float(effective.base.loc[code, "volume_maximo"])
+    return vol_max - vol_min > 0.0
+
+
+def _rhe_energy_factor(stage: OperativeStage) -> float:
+    """The DECOMP stage-hours ``ρ_acum·hm³ -> MWmês`` divisor for *stage*.
+
+    ``_SECONDS_PER_HOUR * stage.total_hours / _M3_PER_HM3``, built from the
+    stage's *real* hours (168 for a weekly stage, ~730 for a monthly one) —
+    **never** a fixed month length and **never** the source model's
+    calendar-month ``_vminop_energy_factor``.
+
+    For a **percentage** limit (``tipo_limite == 2``) the factor cancels
+    between the RHE expression's LHS (the ``@rho_acum_h{id}`` coefficient) and
+    this module's RHS (``ρ_acum_energy·volume_maximo``), so there it only sets
+    the slack's energy units (and thus the effective R$/MWh penalty). For an
+    **absolute** limit (``tipo_limite == 1``) it does **not** cancel: it is a
+    load-bearing ``MW/(m³/s) -> MWmês/hm³`` conversion that fixes the binding
+    storage threshold (``storage_bind = limite·factor / Σ acc``), so it must
+    not be dropped.
+    """
+    return _SECONDS_PER_HOUR * stage.total_hours / _M3_PER_HM3
+
+
+def _per_stage_own_integrated_rho(
+    effective: EffectiveCadastro, code: int, n_stages: int
+) -> list[float]:
+    """Per-stage own stored-energy productivity (MW/(m³/s)) for plant *code*.
+
+    Builds a per-stage ``hidr``-shaped row from *effective* — copying
+    ``effective.base.loc[code]`` and overwriting the five
+    ``a{i}_volume_cota`` coefficients
+    (:meth:`~cobre_bridge.decomp.cadastro.EffectiveCadastro.cota_polynomial`)
+    and ``canal_fuga_medio``/``volume_minimo``/``volume_maximo``/
+    ``volume_referencia`` (:meth:`~cobre_bridge.decomp.cadastro.
+    EffectiveCadastro.value`) — then calls
+    :func:`~cobre_bridge.productivity.stored_energy_productivity` on it,
+    which itself branches on ``tipo_regulacao`` (the volume-integrated EARM
+    ρ for ``"M"``, the point ρ at ``volume_referencia`` for ``"D"``/``"S"``).
+    A plant with no per-stage override on any of these falls through to the
+    base row at every stage, so this collapses to a stage-invariant series —
+    the common case.
+    """
+    values: list[float] = []
+    for stage_index in range(n_stages):
+        hreg = effective.base.loc[code].copy()
+        coeffs = effective.cota_polynomial(code, stage_index)
+        for i in range(5):
+            hreg[f"a{i}_volume_cota"] = coeffs[i]
+        hreg["canal_fuga_medio"] = effective.value(
+            code, "canal_fuga_medio", stage_index
+        )
+        hreg["volume_minimo"] = effective.value(code, "volume_minimo", stage_index)
+        hreg["volume_maximo"] = effective.value(code, "volume_maximo", stage_index)
+        hreg["volume_referencia"] = effective.value(
+            code, "volume_referencia", stage_index
+        )
+        values.append(stored_energy_productivity(hreg))
+    return values
+
+
+def _per_stage_rho_acum_energy(
+    effective: EffectiveCadastro,
+    operated: set[int],
+    calendar: Sequence[OperativeStage],
+) -> dict[int, list[float]]:
+    """Per-stage cascade-summed ρ_acum (MWmês/hm³) for every operated hydro.
+
+    For each stage, builds the stage-representative operated-cascade
+    topology (``_downstream_operated(effective, code, operated,
+    stage_index=...)``, imported from :mod:`cobre_bridge.decomp.hydro`) and
+    topologically accumulates ``acc[code] = own[code][s] + (acc[downstream]
+    if downstream is not None else 0.0)`` — a memoized DAG walk mirroring
+    the source model's ``_cascade_sum``/``compute_per_stage_acc_productivities`` —
+    over **every** operated hydro, not only REE members (a member's ρ_acum
+    includes downstream own values from non-member plants). Each stage's
+    accumulated sum is then divided by :func:`_rhe_energy_factor` to convert
+    MW/(m³/s) to MWmês/hm³.
+    """
+    n_stages = len(calendar)
+    own: dict[int, list[float]] = {
+        code: _per_stage_own_integrated_rho(effective, code, n_stages)
+        for code in operated
+    }
+    result: dict[int, list[float]] = {code: [0.0] * n_stages for code in operated}
+    for stage in calendar:
+        s = stage.index
+        downstream_at_s = {
+            code: _downstream_operated(effective, code, operated, stage_index=s)
+            for code in operated
+        }
+        acc: dict[int, float] = {}
+
+        def _accumulate(code: int) -> float:
+            if code in acc:
+                return acc[code]
+            downstream = downstream_at_s.get(code)
+            downstream_acc = _accumulate(downstream) if downstream is not None else 0.0
+            acc[code] = own[code][s] + downstream_acc
+            return acc[code]
+
+        for code in operated:
+            _accumulate(code)
+        factor = _rhe_energy_factor(stage)
+        for code in operated:
+            result[code][s] = acc[code] / factor
+    return result
+
+
+def _emit_rhe_no_storage_plants(record: ConstraintRecord) -> None:
+    """Emit the shared ``decomp-rhe-no-storage-plants`` WARNING.
+
+    Mirrors ``_emit_rhv_varm_uncadastred``'s skip-not-partial pattern: an HE
+    record whose REE(s) yield no stored-energy reservoir at all contributes
+    no constraint (not a partial one).
+    """
+    emit(
+        Diagnostic(
+            code="decomp-rhe-no-storage-plants",
+            severity=Severity.WARNING,
+            category="Special constraints",
+            title="RHE constraint's REE has no stored-energy reservoir",
+            summary=(
+                f"HE constraint {record.constraint_id} bounds the stored "
+                "energy of a REE with no monthly-regulating ('M') "
+                "reservoir carrying usable storage; the constraint cannot "
+                "be lowered to a generic constraint."
+            ),
+            remediation=(
+                f"HE constraint {record.constraint_id} is skipped; check "
+                "that its REE(s) have at least one cadastred stored-energy "
+                "reservoir mapped via the UH register."
+            ),
+        )
+    )
+
+
+def _emit_rhe_default_penalty(record: ConstraintRecord, penalty: float | None) -> None:
+    """Emit the shared ``decomp-rhe-default-penalty`` WARNING, naming the record."""
+    emit(
+        Diagnostic(
+            code="decomp-rhe-default-penalty",
+            severity=Severity.WARNING,
+            category="Special constraints",
+            title="RHE constraint has no positive penalty",
+            summary=(
+                f"HE constraint {record.constraint_id} declares a "
+                f"valor_penalidade of {penalty!r} (must be > 0); using the "
+                f"default {_RHE_DEFAULT_PENALTY}."
+            ),
+            remediation=(
+                "Check the HE register's valor_penalidade column for "
+                f"constraint {record.constraint_id}."
+            ),
+        )
+    )
+
+
+def _emit_rhe_unknown_tipo_limite(
+    record: ConstraintRecord, tipo_limite: int | None
+) -> None:
+    """Emit the shared ``decomp-rhe-unknown-tipo-limite`` WARNING, naming the record."""
+    emit(
+        Diagnostic(
+            code="decomp-rhe-unknown-tipo-limite",
+            severity=Severity.WARNING,
+            category="Special constraints",
+            title="RHE constraint has an unrecognized tipo_limite",
+            summary=(
+                f"HE constraint {record.constraint_id} declares "
+                f"tipo_limite={tipo_limite!r} (expected 1 or 2); treating "
+                "the limit as absolute MWmes."
+            ),
+            remediation=(
+                "Check the HE register's tipo_limite column for constraint "
+                f"{record.constraint_id}."
+            ),
+        )
+    )
+
+
+def emit_rhe_generics(
+    census: ConstraintCensus,
+    id_map: DecompIdMap,
+    effective: EffectiveCadastro,
+    hydro_to_ree: Mapping[int, int],
+    calendar: Sequence[OperativeStage],
+    start_id: int,
+) -> RheResult:
+    """Emit every generic ``HE`` (RHE stored-energy) constraint.
+
+    Iterates ``census.to_generic`` filtered to ``record.family == "HE"``.
+    Each record's ``energy`` terms name a REE (``term.code``) with a CM ±1
+    sign (``term.coefficient``); the participating plants for that REE are
+    its *hydro_to_ree* members filtered to stored-energy reservoirs
+    (:func:`_is_stored_energy_reservoir`) and to codes resolvable via
+    ``id_map.hydro_id`` (a member absent from the id map is skipped, not
+    fatal). A record whose terms yield **no** participating reservoir at
+    all is skipped whole (:func:`_emit_rhe_no_storage_plants`,
+    skip-not-partial) — never a partial constraint.
+
+    The expression sums ``@rho_acum_h{id} * hydro_storage(id)`` over every
+    participating reservoir, signed by its REE's CM coefficient
+    (:func:`_format_expression`); the RHS is absolute stored energy
+    directly — **no floor offset** (unlike the E4 RHV emitter's ``VARM``
+    floor: ``hydro_storage`` is already the absolute stage-final storage) —
+    computed per the record's ``tipo_limite``: ``1`` treats ``limite`` as an
+    absolute MWmês bound directly; ``2`` treats it as a percentage of the
+    participating reservoirs' summed ``ρ_acum_energy · volume_maximo`` (the
+    manual §2.4 form — deliberately *not* the source model's VminOP
+    ``pct·useful + dead`` form); any other value is treated as absolute
+    with a WARNING. The slack penalty is ``record.he_meta.valor_penalidade``
+    when positive, else :data:`_RHE_DEFAULT_PENALTY` with a WARNING
+    (mirroring the source model's ``penalty <= 0 -> 1000.0`` fallback) — RHE is soft
+    per its own penalty, never ``BIG_M``.
+
+    Reads no ``dadger``; *hydro_to_ree* and *start_id* arrive from the
+    caller (E7). Returns :class:`RheResult`: ``result`` is
+    ``builder.result()`` (``None`` when no RHE constraint survives);
+    ``rho_acum_overrides`` maps every referenced cobre hydro id to its
+    per-stage ρ_acum (MWmês/hm³) — unreferenced hydros keep cobre's
+    ``computed`` default, mirroring the source model's emitter
+    ``all_referenced_ids`` gate.
+    """
+    operated = set(id_map.hydro_codes)
+    rho_acum_energy = _per_stage_rho_acum_energy(effective, operated, calendar)
+
+    ree_to_hydros: dict[int, list[int]] = {}
+    for code, ree_code in hydro_to_ree.items():
+        ree_to_hydros.setdefault(ree_code, []).append(code)
+
+    builder = _GenericBuilder(start_id)
+    all_referenced_ids: set[int] = set()
+
+    for record in census.to_generic:
+        if record.family != "HE":
+            continue
+
+        expr_terms: list[tuple[float, str]] = []
+        participating_codes: list[int] = []
+        record_referenced_ids: set[int] = set()
+
+        for term in record.terms:
+            for code in sorted(ree_to_hydros.get(term.code, [])):
+                if not _is_stored_energy_reservoir(effective, code):
+                    continue
+                try:
+                    hid = id_map.hydro_id(code)
+                except KeyError:
+                    continue
+                expr_terms.append(
+                    (
+                        term.coefficient,
+                        f"@{rho_acum_name(hid)} * hydro_storage({hid})",
+                    )
+                )
+                participating_codes.append(code)
+                record_referenced_ids.add(hid)
+
+        expression = _format_expression(expr_terms)
+        if expression is None:
+            _emit_rhe_no_storage_plants(record)
+            continue
+
+        penalty = (
+            record.he_meta.valor_penalidade if record.he_meta is not None else None
+        )
+        if penalty is None or penalty <= 0.0:
+            _emit_rhe_default_penalty(record, penalty)
+            penalty = _RHE_DEFAULT_PENALTY
+
+        tipo_limite = record.tipo_limite
+        if tipo_limite not in (1, 2):
+            _emit_rhe_unknown_tipo_limite(record, tipo_limite)
+
+        new_bounds: dict[int, StageBounds] = {}
+        for stage_index, stage_bounds in record.bounds.items():
+            limite = stage_bounds.lower[0]
+            if limite is None:
+                new_bounds[stage_index] = StageBounds(lower=(None,), upper=(None,))
+                continue
+            if tipo_limite == 2:
+                total_energy = sum(
+                    rho_acum_energy[code][stage_index]
+                    * effective.value(code, "volume_maximo", stage_index)
+                    for code in participating_codes
+                )
+                rhs = (limite / 100.0) * total_energy
+            else:
+                rhs = limite
+            new_bounds[stage_index] = StageBounds(lower=(rhs,), upper=(None,))
+
+        builder.add_two_sided(
+            name=f"RHE_{record.constraint_id}",
+            description=f"RHE stored-energy constraint {record.constraint_id}",
+            expression=expression,
+            big_m=penalty,
+            record=dataclasses.replace(record, bounds=new_bounds),
+            calendar=calendar,
+        )
+        all_referenced_ids.update(record_referenced_ids)
+
+    result = builder.result()
+    if result is None:
+        return RheResult(None, {})
+
+    rho_acum_overrides = {
+        hid: list(rho_acum_energy[id_map.hydro_codes[hid]])
+        for hid in sorted(all_referenced_ids)
+    }
+    return RheResult(result, rho_acum_overrides)
