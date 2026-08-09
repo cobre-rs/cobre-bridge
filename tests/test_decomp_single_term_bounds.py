@@ -49,7 +49,9 @@ def _census(*records: ConstraintRecord) -> ConstraintCensus:
 
 @pytest.fixture
 def id_map() -> DecompIdMap:
-    return DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(5,))
+    return DecompIdMap(
+        bus_codes=(1,), bus_names=("SE",), hydro_codes=(5,), thermal_codes=(5,)
+    )
 
 
 @pytest.fixture
@@ -91,7 +93,7 @@ def test_re_single_block_generation_bound(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, calendar, effective
+        _census(record), id_map, {}, calendar, effective
     )
 
     assert len(contributions) == 1
@@ -117,7 +119,7 @@ def test_re_negative_coefficient_flips_sides(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, calendar, effective
+        _census(record), id_map, {}, calendar, effective
     )
 
     assert len(contributions) == 1
@@ -136,7 +138,7 @@ def test_re_two_block_emits_per_block_contributions(
     calendar = [_stage(0, 2)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, calendar, effective
+        _census(record), id_map, {}, calendar, effective
     )
 
     by_block = {c.block_id: c for c in contributions}
@@ -145,6 +147,101 @@ def test_re_two_block_emits_per_block_contributions(
     assert by_block[0].upper == 100.0
     assert by_block[1].lower == 20.0
     assert by_block[1].upper == 200.0
+
+
+def _ft_record(
+    *,
+    constraint_id: int,
+    coefficient: float = 1.0,
+    bounds: dict[int, StageBounds],
+    code: int = 5,
+) -> ConstraintRecord:
+    return ConstraintRecord(
+        family="RE",
+        constraint_id=constraint_id,
+        stage_start=min(bounds),
+        stage_end=max(bounds),
+        terms=(
+            ConstraintTerm(
+                code=code, coefficient=coefficient, variable="thermal_generation"
+            ),
+        ),
+        bounds=bounds,
+        per_block=True,
+    )
+
+
+def test_ft_thermal_single_block_generation_bound(
+    id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """A single-term ``FT`` RE lowers to a ``family="thermal"`` contribution
+    on the cobre ``generation`` axis, resolved via ``id_map.thermal_id`` (M1,
+    epic-06/ticket-019)."""
+    record = _ft_record(
+        constraint_id=30,
+        bounds={0: StageBounds(lower=(50.0,), upper=(212.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), id_map, {}, calendar, effective
+    )
+
+    assert len(contributions) == 1
+    contribution = contributions[0]
+    assert contribution.family == "thermal"
+    assert contribution.entity_id == 0
+    assert contribution.stage_id == 0
+    assert contribution.block_id == 0
+    assert contribution.axis == "generation"
+    assert contribution.lower == 50.0
+    assert contribution.upper == 212.0
+    assert contribution.contributor == "RE_30"
+
+
+def test_ft_thermal_two_block_emits_per_block_contributions(
+    id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    record = _ft_record(
+        constraint_id=31,
+        bounds={0: StageBounds(lower=(10.0, 20.0), upper=(100.0, 200.0))},
+    )
+    calendar = [_stage(0, 2)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), id_map, {}, calendar, effective
+    )
+
+    by_block = {c.block_id: c for c in contributions}
+    assert set(by_block) == {0, 1}
+    assert by_block[0].family == "thermal"
+    assert by_block[0].axis == "generation"
+    assert by_block[0].lower == 10.0
+    assert by_block[0].upper == 100.0
+    assert by_block[1].lower == 20.0
+    assert by_block[1].upper == 200.0
+
+
+def test_re_hydro_regression_still_family_hydro(
+    id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """Regression: a single-hydro-generation RE (the pre-existing ``FU``
+    path) still lowers to a ``family="hydro"`` contribution now that the RE
+    branch discriminates on the term variable rather than assuming hydro."""
+    record = _re_record(
+        constraint_id=32,
+        coefficient=1.0,
+        bounds={0: StageBounds(lower=(50.0,), upper=(212.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), id_map, {}, calendar, effective
+    )
+
+    assert len(contributions) == 1
+    assert contributions[0].family == "hydro"
+    assert contributions[0].axis == "generation"
 
 
 def test_absent_both_sides_emits_no_contribution(
@@ -158,7 +255,7 @@ def test_absent_both_sides_emits_no_contribution(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, calendar, effective
+        _census(record), id_map, {}, calendar, effective
     )
 
     assert contributions == []
@@ -182,7 +279,34 @@ def test_unhandled_family_raises(
     calendar = [_stage(0, 1)]
 
     with pytest.raises(ValueError, match="RHA"):
-        single_term_bound_contributions(_census(record), id_map, calendar, effective)
+        single_term_bound_contributions(
+            _census(record), id_map, {}, calendar, effective
+        )
+
+
+def test_re_unexpected_bounded_variable_raises(
+    id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """An RE ``to_bounds`` record whose single term is neither
+    ``"generation"`` nor ``"thermal_generation"`` fails loud instead of
+    silently dropping the bound — this shape is not produced by the reader
+    today (``_BOUNDS_AXIS`` has no such RE entry), but the dispatch must not
+    silently accept one."""
+    record = ConstraintRecord(
+        family="RE",
+        constraint_id=33,
+        stage_start=0,
+        stage_end=0,
+        terms=(ConstraintTerm(code=5, coefficient=1.0, variable="QDEF"),),
+        bounds={0: StageBounds(lower=(0.0,), upper=(100.0,))},
+        per_block=True,
+    )
+    calendar = [_stage(0, 1)]
+
+    with pytest.raises(ValueError, match="QDEF"):
+        single_term_bound_contributions(
+            _census(record), id_map, {}, calendar, effective
+        )
 
 
 @pytest.fixture
@@ -219,7 +343,7 @@ def test_hq_qdef_lowers_to_outflow(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, calendar, effective
+        _census(record), hq_id_map, {}, calendar, effective
     )
 
     assert len(contributions) == 1
@@ -245,7 +369,7 @@ def test_hq_qtur_lowers_to_turbined(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, calendar, effective
+        _census(record), hq_id_map, {}, calendar, effective
     )
 
     assert len(contributions) == 1
@@ -266,7 +390,7 @@ def test_hq_per_block_outflow_contributions(
     calendar = [_stage(0, 2)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, calendar, effective
+        _census(record), hq_id_map, {}, calendar, effective
     )
 
     by_block = {c.block_id: c for c in contributions}
@@ -295,7 +419,7 @@ def test_hq_qdef_and_qtur_coexist_on_one_plant(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(qdef, qtur), hq_id_map, calendar, effective
+        _census(qdef, qtur), hq_id_map, {}, calendar, effective
     )
 
     by_axis = {c.axis: c for c in contributions}
@@ -306,6 +430,80 @@ def test_hq_qdef_and_qtur_coexist_on_one_plant(
     assert by_axis["turbined"].entity_id == 0
     assert by_axis["turbined"].upper == 150.0
     assert by_axis["turbined"].contributor == "HQ_165"
+
+
+@pytest.fixture
+def qbom_id_map() -> DecompIdMap:
+    """The QBOM cases resolve their entity id through ``pumping_station_ids``,
+    never ``id_map.hydro_id``, so this fixture carries no hydro code."""
+    return DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+
+
+def _qbom_record(
+    *,
+    constraint_id: int,
+    bounds: dict[int, StageBounds],
+    code: int = 30,
+) -> ConstraintRecord:
+    return ConstraintRecord(
+        family="HQ",
+        constraint_id=constraint_id,
+        stage_start=min(bounds),
+        stage_end=max(bounds),
+        terms=(ConstraintTerm(code=code, coefficient=1.0, variable="QBOM"),),
+        bounds=bounds,
+        per_block=True,
+    )
+
+
+def test_hq_qbom_lowers_to_pumping_flow_bound(
+    qbom_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """A single-term ``QBOM`` RHQ lowers to a pumping ``flow`` bound resolved
+    through ``pumping_station_ids`` (M2, epic-06/ticket-020)."""
+    record = _qbom_record(
+        constraint_id=166,
+        bounds={0: StageBounds(lower=(5.0,), upper=(80.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), qbom_id_map, {30: 0}, calendar, effective
+    )
+
+    assert len(contributions) == 1
+    contribution = contributions[0]
+    assert contribution.family == "pumping"
+    assert contribution.entity_id == 0
+    assert contribution.stage_id == 0
+    assert contribution.block_id == 0
+    assert contribution.axis == "flow"
+    assert contribution.lower == 5.0
+    assert contribution.upper == 80.0
+    assert contribution.contributor == "HQ_166"
+
+
+def test_hq_qbom_no_station_warns_and_skips(
+    qbom_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """A QBOM term whose code has no matching pumping station is dropped —
+    skip-not-partial, never a raw ``KeyError`` and never a fall-back to a
+    generic constraint."""
+    record = _qbom_record(
+        constraint_id=166,
+        bounds={0: StageBounds(lower=(5.0,), upper=(80.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    with dx.collect() as collected:
+        contributions = single_term_bound_contributions(
+            _census(record), qbom_id_map, {}, calendar, effective
+        )
+
+    assert contributions == []
+    warnings = [d for d in collected if d.severity is Severity.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].code == "decomp-rhq-qbom-no-station"
 
 
 def _hv_hidr_frame(
@@ -351,7 +549,7 @@ def test_hv_varm_additive_floor_plus_lv(hv_id_map: DecompIdMap) -> None:
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, calendar, effective
+        _census(record), hv_id_map, {}, calendar, effective
     )
 
     assert len(contributions) == 1
@@ -383,7 +581,7 @@ def test_hv_varm_uses_per_stage_effective_floor(hv_id_map: DecompIdMap) -> None:
     calendar = [_stage(0, 1), _stage(1, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, calendar, effective
+        _census(record), hv_id_map, {}, calendar, effective
     )
 
     by_stage = {c.stage_id: c for c in contributions}
@@ -407,7 +605,7 @@ def test_hv_varm_negative_coefficient_flips_then_adds_floor(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, calendar, effective
+        _census(record), hv_id_map, {}, calendar, effective
     )
 
     assert len(contributions) == 1
@@ -427,7 +625,7 @@ def test_hv_varm_uncadastred_plant_warns_and_skips(hv_id_map: DecompIdMap) -> No
 
     with dx.collect() as collected:
         contributions = single_term_bound_contributions(
-            _census(record), hv_id_map, calendar, effective
+            _census(record), hv_id_map, {}, calendar, effective
         )
 
     assert contributions == []

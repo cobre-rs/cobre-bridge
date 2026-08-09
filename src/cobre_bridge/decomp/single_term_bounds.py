@@ -23,7 +23,7 @@ from cobre_bridge.decomp.cadastro import effective_storage_range
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.constraint_registers import (
@@ -36,8 +36,11 @@ if TYPE_CHECKING:
 
 #: RHQ ``CQ.tipo`` flow -> cobre hydro bound axis, mirroring the reader's
 #: ``constraint_registers._BOUNDS_AXIS`` QDEF/QTUR entries. Keep the two
-#: mappings consistent; a future flow ``tipo`` gaining a bound axis updates
-#: both.
+#: mappings consistent for a *hydro* flow axis; a future hydro flow ``tipo``
+#: gaining a bound axis updates both. ``QBOM`` is the one asymmetry: it
+#: joined ``_BOUNDS_AXIS`` in M2 (ticket-020) but is a *pumping*-entity axis,
+#: not a hydro one, so it is dispatched to
+#: :func:`_qbom_pumping_contributions` instead of living in this mapping.
 _HQ_AXIS_BY_VARIABLE: dict[str, str] = {"QDEF": "outflow", "QTUR": "turbined"}
 
 
@@ -62,18 +65,19 @@ def _sided_bounds(
     return (None if upper is None else -upper, None if lower is None else -lower)
 
 
-def _per_block_hydro_contributions(
+def _per_block_contributions(
     record: ConstraintRecord,
-    hydro_id: int,
+    family: str,
+    entity_id: int,
     axis: str,
     contributor: str,
     calendar: Sequence[OperativeStage],
 ) -> list[BoundContribution]:
-    """The shared per-block emission loop for a single-term hydro bound.
+    """The shared per-block emission loop for a single-term entity bound.
 
     Iterates every declared stage in ``record.bounds`` and, within it, every
     block up to the stage's *real* block count
-    (``len(calendar[stage_index].block_hours)`) — never the raw
+    (``len(calendar[stage_index].block_hours)``) — never the raw
     ``StageBounds`` slot count, which LU carries up to 5 slots wide
     regardless of the stage's actual block count. A ``block_id`` at or past
     ``len(stage_bounds.lower)`` is skipped (no declared slot for it), and a
@@ -95,8 +99,8 @@ def _per_block_hydro_contributions(
                 continue
             contributions.append(
                 BoundContribution(
-                    family="hydro",
-                    entity_id=hydro_id,
+                    family=family,
+                    entity_id=entity_id,
                     stage_id=stage_index,
                     block_id=block_id,
                     axis=axis,
@@ -116,8 +120,30 @@ def _re_generation_contributions(
     """One RE single-hydro-generation constraint -> hydro ``generation`` bounds."""
     code = record.terms[0].code
     hydro_id = id_map.hydro_id(code)
-    return _per_block_hydro_contributions(
-        record, hydro_id, "generation", f"RE_{record.constraint_id}", calendar
+    return _per_block_contributions(
+        record, "hydro", hydro_id, "generation", f"RE_{record.constraint_id}", calendar
+    )
+
+
+def _ft_thermal_contributions(
+    record: ConstraintRecord,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> list[BoundContribution]:
+    """One RE single-thermal-generation constraint -> thermal ``generation`` bounds.
+
+    Mirrors :func:`_re_generation_contributions`, but the term's ``code`` is a
+    thermal ``codigo_usina`` (an ``FT`` term), so it resolves via
+    ``id_map.thermal_id`` rather than ``id_map.hydro_id``.
+    """
+    thermal_id = id_map.thermal_id(record.terms[0].code)
+    return _per_block_contributions(
+        record,
+        "thermal",
+        thermal_id,
+        "generation",
+        f"RE_{record.constraint_id}",
+        calendar,
     )
 
 
@@ -135,8 +161,53 @@ def _hq_flow_contributions(
     term = record.terms[0]
     axis = _HQ_AXIS_BY_VARIABLE[term.variable]
     hydro_id = id_map.hydro_id(term.code)
-    return _per_block_hydro_contributions(
-        record, hydro_id, axis, f"HQ_{record.constraint_id}", calendar
+    return _per_block_contributions(
+        record, "hydro", hydro_id, axis, f"HQ_{record.constraint_id}", calendar
+    )
+
+
+def _qbom_pumping_contributions(
+    record: ConstraintRecord,
+    pumping_station_ids: Mapping[int, int],
+    calendar: Sequence[OperativeStage],
+) -> list[BoundContribution]:
+    """One RHQ single ``QBOM`` constraint -> pumping ``flow`` bounds.
+
+    A ``QBOM`` term's ``code`` is a pumping-station ``codigo_usina``, not a
+    hydro code, so it resolves through *pumping_station_ids* rather than
+    ``id_map.hydro_id``. A code absent from *pumping_station_ids* emits a
+    ``WARNING`` diagnostic and is skipped entirely — skip-not-partial,
+    mirroring ``constraints.py::_emit_rhq_qbom_no_station`` — rather than
+    raising a raw ``KeyError`` or falling back to a generic constraint.
+    """
+    code = record.terms[0].code
+    if code not in pumping_station_ids:
+        emit(
+            Diagnostic(
+                code="decomp-rhq-qbom-no-station",
+                severity=Severity.WARNING,
+                category="Special constraints",
+                title="RHQ QBOM term has no matching pumping station",
+                summary=(
+                    f"HQ constraint {record.constraint_id} carries a QBOM "
+                    f"term for plant code {code}, which has no matching "
+                    "pumping station; the constraint is skipped."
+                ),
+                remediation=(
+                    f"HQ constraint {record.constraint_id} is skipped; check "
+                    f"that plant code {code} is declared as a pumping "
+                    "station."
+                ),
+            )
+        )
+        return []
+    return _per_block_contributions(
+        record,
+        "pumping",
+        pumping_station_ids[code],
+        "flow",
+        f"HQ_{record.constraint_id}",
+        calendar,
     )
 
 
@@ -151,7 +222,7 @@ def _hv_storage_contributions(
     Storage is a stage-level axis (unlike RE/RHQ's per-block axes), so every
     contribution carries ``block_id=None`` — the accumulator raises on a
     ``block_id`` reaching the ``storage`` axis, so this does not route through
-    :func:`_per_block_hydro_contributions`.
+    :func:`_per_block_contributions`.
 
     The source model's ``LV`` limits are relative to the plant's useful
     volume; cobre's ``min/max_storage_hm3`` are absolute. The sign map
@@ -216,32 +287,64 @@ def _hv_storage_contributions(
 def single_term_bound_contributions(
     census: ConstraintCensus,
     id_map: DecompIdMap,
+    pumping_station_ids: Mapping[int, int],
     calendar: Sequence[OperativeStage],
     effective: EffectiveCadastro,
 ) -> list[BoundContribution]:
     """Lower every ``census.to_bounds`` record to its entity bound contributions.
 
-    Dispatches on ``record.family``: ``"RE"`` lowers to hydro ``generation``
-    bounds, ``"HQ"`` lowers to hydro ``outflow``/``turbined`` bounds, ``"HV"``
-    lowers to hydro ``storage`` bounds. Any other family raises ``ValueError``
-    naming it. ``effective`` feeds the ``HV`` handler's per-stage floor and
-    cadastro guard; neither the RE nor the HQ path reads it.
+    Dispatches on ``record.family``: ``"RE"`` lowers to a ``generation`` bound
+    on either the hydro (``FU``/``generation``) or the thermal
+    (``FT``/``thermal_generation``) entity named by its single term — any
+    other bounded RE variable raises ``ValueError`` naming it. ``"HQ"``
+    further dispatches on its single term's variable: ``QBOM`` lowers to a
+    pumping ``flow`` bound via :func:`_qbom_pumping_contributions` (resolved
+    through *pumping_station_ids*, never ``id_map.hydro_id`` — its ``code``
+    is a pumping-station code, not a hydro one); everything else
+    (``QDEF``/``QTUR``) lowers to hydro ``outflow``/``turbined`` bounds via
+    :func:`_hq_flow_contributions`. ``"HV"`` lowers to hydro ``storage``
+    bounds. Any other family raises ``ValueError`` naming it.
+    *pumping_station_ids* feeds only the ``HQ`` ``QBOM`` path — required, not
+    defaulted, so a forgotten wiring fails loud instead of silently dropping
+    every QBOM bound; *effective* feeds only the ``HV`` handler's per-stage
+    floor and cadastro guard. Neither the RE path nor the ``QDEF``/``QTUR``
+    HQ path reads either.
 
     Raises
     ------
     KeyError
-        Propagated from ``id_map.hydro_id`` when an RE/HQ/HV term names a
-        code the id map does not know (a real reader/id-map mismatch).
+        Propagated from ``id_map.hydro_id``/``id_map.thermal_id`` when an
+        RE/HQ/HV term names a code the id map does not know (a real
+        reader/id-map mismatch).
     ValueError
         When a ``to_bounds`` record carries a family other than ``"RE"``/
-        ``"HQ"``/``"HV"``.
+        ``"HQ"``/``"HV"``, or an ``"RE"`` record whose single term's variable
+        is neither ``"generation"`` nor ``"thermal_generation"``.
     """
     contributions: list[BoundContribution] = []
     for record in census.to_bounds:
         if record.family == "RE":
-            contributions.extend(_re_generation_contributions(record, id_map, calendar))
+            variable = record.terms[0].variable
+            if variable == "generation":
+                contributions.extend(
+                    _re_generation_contributions(record, id_map, calendar)
+                )
+            elif variable == "thermal_generation":
+                contributions.extend(
+                    _ft_thermal_contributions(record, id_map, calendar)
+                )
+            else:
+                raise ValueError(
+                    "single_term_bound_contributions: unhandled RE bounded "
+                    f"variable {variable!r}"
+                )
         elif record.family == "HQ":
-            contributions.extend(_hq_flow_contributions(record, id_map, calendar))
+            if record.terms[0].variable == "QBOM":
+                contributions.extend(
+                    _qbom_pumping_contributions(record, pumping_station_ids, calendar)
+                )
+            else:
+                contributions.extend(_hq_flow_contributions(record, id_map, calendar))
         elif record.family == "HV":
             contributions.extend(
                 _hv_storage_contributions(record, id_map, calendar, effective)

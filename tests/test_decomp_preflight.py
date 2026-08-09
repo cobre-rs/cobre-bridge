@@ -18,11 +18,11 @@ from idecomp.decomp.modelos.dadger import (
 )
 
 from cobre_bridge.decomp.cadastro import (
+    _SCALAR_AC_SPECS,
     APPLIED_AC_CLASSES,
     UNINGESTABLE_AC_CLASSES,
     CadastroResolutionReport,
     OutOfHorizon,
-    _SCALAR_AC_SPECS,
 )
 from cobre_bridge.decomp.preflight import (
     _ALL_AC_CLASSES,

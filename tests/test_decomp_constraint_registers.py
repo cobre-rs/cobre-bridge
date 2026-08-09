@@ -6,10 +6,12 @@ Synthetic-fixture only — a fake ``Dadger`` returns pandas DataFrames shaped li
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
+from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintRecord,
     ConstraintTerm,
@@ -18,7 +20,20 @@ from cobre_bridge.decomp.constraint_registers import (
     lowers_to_bound,
     read_constraints,
 )
+from cobre_bridge.decomp.constraints import emit_re_generics, emit_rhq_rhv_generics
+from cobre_bridge.decomp.id_map import DecompIdMap
+from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.diagnostics import Severity
+
+
+def _stage(index: int, n_blocks: int) -> OperativeStage:
+    return OperativeStage(
+        index=index,
+        start_date=date(2026, 7, 4),
+        end_date=date(2026, 7, 11),
+        season_id=6,
+        block_hours=tuple(168.0 / n_blocks for _ in range(n_blocks)),
+    )
 
 
 class _FakeDadger:
@@ -201,6 +216,43 @@ def test_re_thermal_only_read() -> None:
     assert rec.terms[0].submarket == 1
 
 
+def test_re_thermal_only_single_term_lowers_to_generation_bound() -> None:
+    """A single-term ``FT`` RE (no ``FU``/``FI``) lowers to a thermal
+    ``generation`` bound: the record moves into ``to_bounds`` and out of
+    ``to_generic`` (M1 — see ``epic-06/ticket-019``)."""
+    dadger = _FakeDadger(
+        re=_decl((10, 1, 2)),
+        ft=_ft((10, 1, 5, 1.0, 1)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["RE"], 10)
+    assert rec.terms[0].variable == "thermal_generation"
+    assert lowers_to_bound(rec)
+    assert rec in census.to_bounds
+    assert rec not in census.to_generic
+
+
+def test_re_thermal_only_no_double_emission() -> None:
+    """The same FT-only census never reaches ``emit_re_generics``: once the
+    reader moves it to ``to_bounds``, the generic emitter's ``to_generic``
+    filter no longer sees it, so it emits nothing (no special-casing needed
+    in ``constraints.py`` — the split moving out of ``to_generic`` is the
+    whole mechanism)."""
+    dadger = _FakeDadger(
+        re=_decl((10, 1, 2)),
+        ft=_ft((10, 1, 5, 1.0, 1)),
+    )
+    census = read_constraints(dadger)
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), thermal_codes=(5,))
+    calendar = [_stage(0, 1), _stage(1, 1)]
+
+    result = emit_re_generics(
+        census, id_map, {}, big_m=0.0, calendar=calendar, start_id=0
+    )
+
+    assert result is None
+
+
 def test_re_interchange_only_is_generic() -> None:
     """FI-only participation (no FU) reads an interchange term and stays generic."""
     dadger = _FakeDadger(
@@ -245,6 +297,48 @@ def test_hq_qdef_single_lowers_to_outflow_bound() -> None:
     rec = _only(census.by_family["HQ"], 5)
     assert rec.terms[0].variable == "QDEF"
     assert lowers_to_bound(rec)
+
+
+def test_hq_qbom_single_lowers_to_pumping_bound() -> None:
+    """A single-term ``QBOM`` RHQ lowers to a pumping ``flow`` bound: the
+    record moves into ``to_bounds`` and out of ``to_generic`` (M2 —
+    epic-06/ticket-020)."""
+    dadger = _FakeDadger(
+        hq=_decl((5, 1, 1)),
+        cq=_coeff((5, 30, 1.0, 1, "QBOM"), tipo=True),
+        lq=_lu((5, 1, 5.0, 80.0, 5.0, 80.0, 5.0, 80.0)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["HQ"], 5)
+    assert rec.terms[0].variable == "QBOM"
+    assert lowers_to_bound(rec) is True
+    assert rec in census.to_bounds
+    assert rec not in census.to_generic
+
+
+def test_hq_qbom_no_double_emission() -> None:
+    """The same QBOM-only census never reaches ``emit_rhq_rhv_generics``:
+    once the reader moves it to ``to_bounds``, the generic emitter's
+    ``to_generic`` filter (``family in ("HQ", "HV")``) no longer sees it, so
+    it returns ``None`` (no special-casing needed in ``constraints.py`` —
+    the split moving out of ``to_generic`` is the whole mechanism)."""
+    dadger = _FakeDadger(
+        hq=_decl((5, 1, 1)),
+        cq=_coeff((5, 30, 1.0, 1, "QBOM"), tipo=True),
+        lq=_lu((5, 1, 5.0, 80.0, 5.0, 80.0, 5.0, 80.0)),
+    )
+    census = read_constraints(dadger)
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    df = pd.DataFrame({5: {}}).T
+    df.index.name = "codigo_usina"
+    effective = EffectiveCadastro(base=df, n_stages=1, stage_varying={})
+    calendar = [_stage(0, 1)]
+
+    result = emit_rhq_rhv_generics(
+        census, id_map, {}, effective, big_m=0.0, calendar=calendar, start_id=0
+    )
+
+    assert result is None
 
 
 def test_hq_qdes_single_stays_generic_no_bound_axis() -> None:

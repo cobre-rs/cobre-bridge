@@ -376,7 +376,7 @@ class _GenericBuilder:
         For a per-block record, bound rows are emitted for
         ``range(min(len(stage_bounds.lower), len(calendar[stage].block_hours)))``
         blocks per declared stage (mirroring
-        ``single_term_bounds._per_block_hydro_contributions``'s clamp); for a
+        ``single_term_bounds._per_block_contributions``'s clamp); for a
         stage-level record (``record.per_block is False``), one row per
         declared stage is emitted with ``block_id=None``.
         """
