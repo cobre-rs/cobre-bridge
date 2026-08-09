@@ -25,10 +25,10 @@ Each *term* carries its own variable: an ``HQ`` constraint may mix flow variable
 per-term property, not a per-constraint one. A constraint therefore lowers to an
 entity **bound** only when it is a *single term*, its coefficient is ``±1``, and
 its variable has a cobre bounds axis — this covers hydro generation (``FU``),
-thermal generation (``FT``), and pumping flow (``QBOM``); every other shape
-(multiple terms, a non-unit coefficient, an unbounded variable such as
-diversion (``QDES``) or spillage (``QVER``), or the ``HE`` energy sum) becomes
-a **generic constraint**.
+thermal generation (``FT``), pumping flow (``QBOM``), and the ``HQ`` flow
+family (``QDEF``/``QTUR``/``QDES``/``QVER``); every other shape (multiple
+terms, a non-unit coefficient, or the ``HE`` energy sum) becomes a **generic
+constraint**.
 
 This module only reads, joins, and classifies. The lowering itself lives in the
 bounds emitters and the generic-constraints emitter (E4). See
@@ -65,17 +65,19 @@ _MAX_BLOCK_SLOTS = 5
 #: family-agnostic *membership* set: the only consumer is `lowers_to_bound`'s
 #: `variable in _BOUNDS_AXIS` test, so the values are never read (do not
 #: convert this to a family-keyed structure — nothing consumes it). Pumping
-#: (QBOM) lowers to `pumping_bounds` min/max_m3s (M2, ticket-020). Diversion
-#: (QDES) and spillage (QVER) still have no bound column, so a single-term
-#: constraint on either of those still stays generic (M3/M5,
-#: ticket-021/ticket-022, cobre-blocked).
+#: (QBOM) lowers to `pumping_bounds` min/max_m3s (M2, ticket-020); diversion
+#: (QDES) and spillage (QVER) lower to the two-sided hydro `diversion`/
+#: `spillage` axes (M3/M5, ticket-021/ticket-022) now that cobre's
+#: generic-constraint-authoring epic-01 has landed both.
 _BOUNDS_AXIS: dict[str, str] = {
     "generation": "generation",  # RE FU (hydro)   -> min/max_generation_mw
     "thermal_generation": "generation",  # RE FT (thermal) -> min/max_generation_mw
-    "QDEF": "outflow",  # HQ defluencia -> min/max_outflow_m3s
-    "QTUR": "turbined",  # HQ turbinado  -> min/max_turbined_m3s
-    "QBOM": "flow",  # HQ pumped flow -> pumping_bounds min/max_m3s
-    "VARM": "storage",  # HV volume     -> min/max_storage_hm3
+    "QDEF": "outflow",  # HQ defluencia   -> min/max_outflow_m3s
+    "QTUR": "turbined",  # HQ turbinado    -> min/max_turbined_m3s
+    "QDES": "diversion",  # HQ desvio       -> min/max_diversion_m3s
+    "QVER": "spillage",  # HQ vertimento   -> min/max_spillage_m3s
+    "QBOM": "flow",  # HQ pumped flow  -> pumping_bounds min/max_m3s
+    "VARM": "storage",  # HV volume       -> min/max_storage_hm3
 }
 
 
@@ -189,10 +191,11 @@ def lowers_to_bound(record: ConstraintRecord) -> bool:
     bounds axis; otherwise it is a generic constraint.
 
     A non-unit coefficient (e.g. ``0.5·QDEF``) is not a face-value bound — it
-    must reach the generic emitter, which honours the coefficient. Diversion
-    (``QDES``), spillage (``QVER``), and the ``HE`` energy sum have no bound
-    column, so they stay generic even as a single unit term; pumping
-    (``QBOM``) does have one (``pumping_bounds``, M2) and lowers accordingly.
+    must reach the generic emitter, which honours the coefficient. The ``HE``
+    energy sum has no bound column, so it always stays generic. Pumping
+    (``QBOM``, M2), diversion (``QDES``, M3), and spillage (``QVER``, M5)
+    each have one and lower to their respective entity axis as a single unit
+    term.
     """
     return (
         record.is_single_term

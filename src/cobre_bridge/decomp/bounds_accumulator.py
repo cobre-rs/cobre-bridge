@@ -64,9 +64,11 @@ class AxisSpec:
     """Static description of one cobre bound axis for one entity family.
 
     ``lower_column``/``upper_column`` are the exact cobre parquet column names
-    for that side, or ``None`` when the axis has no bound on that side (e.g.
-    diversion is upper-only). ``block_eligible`` is ``False`` for axes cobre
-    rejects a ``block_id`` on (stage-level only, e.g. storage).
+    for that side, or ``None`` when the axis has no bound on that side (a
+    one-sided axis — none of the currently registered axes are, but
+    :func:`intersect` still enforces it for one that is). ``block_eligible``
+    is ``False`` for axes cobre rejects a ``block_id`` on (stage-level only,
+    e.g. storage).
     """
 
     family: str
@@ -77,9 +79,8 @@ class AxisSpec:
 
 #: The cobre bound axes this accumulator knows about, keyed by
 #: ``(family, axis)``. Covers exactly the verified cobre axes — do not invent
-#: axes cobre lacks (there is no ``min_diversion_m3s``, no spillage axis, and
-#: no net line-exchange axis; lines are emitted by ``convert_lines``, not this
-#: accumulator).
+#: axes cobre lacks (there is no net line-exchange axis; lines are emitted by
+#: ``convert_lines``, not this accumulator).
 AXES: Mapping[tuple[str, str], AxisSpec] = {
     ("hydro", "turbined"): AxisSpec(
         family="hydro",
@@ -107,8 +108,14 @@ AXES: Mapping[tuple[str, str], AxisSpec] = {
     ),
     ("hydro", "diversion"): AxisSpec(
         family="hydro",
-        lower_column=None,
+        lower_column="min_diversion_m3s",
         upper_column="max_diversion_m3s",
+        block_eligible=True,
+    ),
+    ("hydro", "spillage"): AxisSpec(
+        family="hydro",
+        lower_column="min_spillage_m3s",
+        upper_column="max_spillage_m3s",
         block_eligible=True,
     ),
     ("thermal", "generation"): AxisSpec(
@@ -180,10 +187,11 @@ def intersect(
     Raises
     ------
     ValueError
-        When ``spec.lower_column`` is ``None`` (an upper-only axis, e.g.
-        diversion) and some contribution supplies an effective lower — a
-        lower bound cannot land on an upper-only axis; the message names the
-        axis and the offending contributors. Also when an effective lower and
+        When ``spec.lower_column`` is ``None`` (a one-sided, upper-only axis
+        — none of the currently registered axes are, but the guard stands
+        for one that is) and some contribution supplies an effective lower —
+        a lower bound cannot land on an upper-only axis; the message names
+        the axis and the offending contributors. Also when an effective lower and
         an effective upper both survive and the lower exceeds the upper past
         float noise — the message names every contributing label and the
         conflicting values.
@@ -354,9 +362,9 @@ def resolve(
 #: into. Every non-key column is float64-nullable: a cell that resolves no
 #: contribution on some axis simply carries ``null`` there, distinct from a
 #: genuine ``0.0`` bound. ``HYDRO_BOUNDS_SCHEMA`` widens ``decomp/bounds.py``'s
-#: ``_HYDRO_BOUNDS_SCHEMA`` to every hydro axis in :data:`AXES` — deliberately
-#: omitting ``min_diversion_m3s`` and any spillage column, neither of which
-#: cobre has yet.
+#: ``_HYDRO_BOUNDS_SCHEMA`` to every hydro axis in :data:`AXES`, including the
+#: two-sided diversion and spillage axes cobre's generic-constraint-authoring
+#: epic-01 landed.
 HYDRO_BOUNDS_SCHEMA = pa.schema(
     [
         pa.field("hydro_id", pa.int32(), nullable=False),
@@ -370,7 +378,10 @@ HYDRO_BOUNDS_SCHEMA = pa.schema(
         pa.field("max_generation_mw", pa.float64(), nullable=True),
         pa.field("min_storage_hm3", pa.float64(), nullable=True),
         pa.field("max_storage_hm3", pa.float64(), nullable=True),
+        pa.field("min_diversion_m3s", pa.float64(), nullable=True),
         pa.field("max_diversion_m3s", pa.float64(), nullable=True),
+        pa.field("min_spillage_m3s", pa.float64(), nullable=True),
+        pa.field("max_spillage_m3s", pa.float64(), nullable=True),
     ]
 )
 

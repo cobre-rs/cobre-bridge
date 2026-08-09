@@ -175,8 +175,8 @@ def test_d_plant_storage_collapses_to_vol_ref() -> None:
         "max_storage_hm3": 300.0,
     }
 
-    table = convert_storage_bounds(effective, _ID_MAP_SINGLE, _calendar(2))
-    assert table.num_rows == 0
+    contributions = convert_storage_bounds(effective, _ID_MAP_SINGLE, _calendar(2))
+    assert contributions == []
 
 
 # ---------------------------------------------------------------------------

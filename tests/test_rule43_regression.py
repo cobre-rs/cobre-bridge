@@ -33,12 +33,28 @@ agrees with itself; it independently re-derives the same cobre-side
 relative tolerance cobre's ``ENVELOPE_TOLERANCE`` uses (see
 ``emission_checks._tolerance`` for the mirrored form).
 
-DECOMP has no exposure to rule 43 at all: its ``hydro_bounds`` writer
-never emits ``max_turbined_m3s``/``max_generation_mw`` — only
-``min_outflow_m3s`` per stage. That is asserted here too, structurally,
-as a tripwire: if a future DECOMP ticket starts emitting either guarded
-column, this assertion fails and forces rule 43's scan to be extended to
-DECOMP.
+DECOMP had no exposure to rule 43 before epic-07 (ticket-023): its
+``hydro_bounds`` writer emitted only ``min_outflow_m3s``/storage columns
+per stage. That nil exposure was pinned here as a structural tripwire —
+the tripwire has since fired, exactly as designed: ticket-023 wired the
+RE/RHQ single-term bound producers into the E2 accumulator, so
+``hydro_bounds`` now also carries real ``max_turbined_m3s`` (RHQ ``QTUR``)
+and ``max_generation_mw`` (RE ``FU``) rows for both real example decks.
+``TestDecompRule43Exposure`` below extends the scan
+(``TestNewaveRule43NoRaising``'s own approach) to DECOMP. Firing the
+tripwire surfaced a real cross-source mismatch on both decks' BELO MONTE
+registration (hydro code 288): an RE ``FU`` constraint (``RE_654``/
+``RE_655``) declares an 11000 MW ceiling above its own head-derated
+declared ``max_generation_mw`` (9777.776 MW on ``decomp-jul-26-rv3``,
+10999.998413 MW, i.e. nameplate to within float rounding, on
+``decomp-set-24-rv0`` — consistent with a head-dependent achievable
+capacity varying by study date against a fixed nameplate ceiling).
+ticket-023c resolved this: ``single_term_bounds._re_generation_contributions``
+now clamps every RE-derived ``max_generation_mw`` upper to the plant's own
+declared capacity (the looser RE ceiling becomes non-binding, LP-neutral),
+so the tracked BELO MONTE exception this test used to allowlist is gone —
+DECOMP now holds to the same zero-tolerance bar as the NEWAVE side, and any
+raising row, on any plant, fails this guard loud.
 """
 
 from __future__ import annotations
@@ -96,6 +112,8 @@ _DECOMP_JUL_26 = Path("example/decomp-jul-26-rv3")
 _EXPECTED_PRESENT_COLUMNS: dict[Path, frozenset[str]] = {
     _NEWAVE_RODADA: frozenset({"max_turbined_m3s"}),
     _NEWAVE_RODADA_2001: frozenset({"max_turbined_m3s", "max_generation_mw"}),
+    _DECOMP_JUL_26: frozenset({"max_turbined_m3s", "max_generation_mw"}),
+    _DECOMP_SET_24: frozenset({"max_turbined_m3s", "max_generation_mw"}),
 }
 
 
@@ -131,11 +149,19 @@ def _declared_envelope(
 
 @dataclass(frozen=True)
 class ColumnScan:
-    """Rule-43 scan result for one guarded column against one deck."""
+    """Rule-43 scan result for one guarded column against one deck.
+
+    ``raising_hydro_ids`` names *which* hydro ids raised the column (deduped
+    across every stage/block row) — ``raising_count`` is the row count,
+    ``len(raising_hydro_ids)`` the distinct-plant count, named in a raising
+    assertion's failure message so a regression identifies its plant
+    without a second debugging pass.
+    """
 
     present: bool
     raising_count: int
     non_null_count: int
+    raising_hydro_ids: frozenset[int] = frozenset()
 
 
 def _scan_hydro_bounds(
@@ -163,6 +189,7 @@ def _scan_hydro_bounds(
         values = table[column].to_pylist()
         non_null_count = table.num_rows - table[column].null_count
         raising_count = 0
+        raising_hydro_ids: set[int] = set()
         for row_index, hydro_id in enumerate(hydro_ids):
             entry = declared.get(hydro_id)
             if entry is None:
@@ -175,8 +202,12 @@ def _scan_hydro_bounds(
                 continue
             if value > declared_value + _tolerance(declared_value):
                 raising_count += 1
+                raising_hydro_ids.add(hydro_id)
         scans[column] = ColumnScan(
-            present=True, raising_count=raising_count, non_null_count=non_null_count
+            present=True,
+            raising_count=raising_count,
+            non_null_count=non_null_count,
+            raising_hydro_ids=frozenset(raising_hydro_ids),
         )
 
     return table.num_rows, scans
@@ -253,13 +284,15 @@ class TestNewaveRule43NoRaising:
             )
 
 
-class TestDecompRule43NilExposure:
-    """AC #3: DECOMP's ``hydro_bounds`` carries neither guarded column at
-    all — a structural tripwire, not a value scan, since DECOMP's exposure
-    to rule 43 is nil by construction (only ``min_outflow_m3s`` is written
-    per stage). If a future DECOMP ticket starts emitting either column,
-    this assertion fails and forces rule 43's scan to be extended to
-    DECOMP.
+class TestDecompRule43Exposure:
+    """AC #3 (epic-07, ticket-023 fired the tripwire this class used to be):
+    DECOMP's ``hydro_bounds`` now genuinely carries both guarded columns
+    (RE ``FU`` -> ``max_generation_mw``, RHQ ``QTUR`` -> ``max_turbined_m3s``),
+    so this mirrors ``TestNewaveRule43NoRaising``'s own scan exactly — no
+    tracked exception (ticket-023c's clamp retired the one BELO MONTE
+    exception this class used to allowlist; see the module docstring). Any
+    raising row, on any plant, still fails this guard loud, exactly like the
+    NEWAVE side.
     """
 
     @pytest.mark.parametrize(
@@ -274,20 +307,36 @@ class TestDecompRule43NilExposure:
         from cobre_bridge.decomp.pipeline import convert_decomp_case
 
         dst = tmp_path / deck.name
-        convert_decomp_case(deck, dst)
+        convert_decomp_case(deck, dst)  # must not raise (ticket-023c)
 
-        table = pq.read_table(dst / "constraints" / "hydro_bounds.parquet")
-        assert table.num_rows > 0, (
-            f"expected a non-empty hydro_bounds for real deck {deck}; an "
-            "empty table cannot exercise the nil-exposure tripwire"
+        hydros_json = json.loads((dst / "system" / "hydros.json").read_text())
+        rows_scanned, scans = _scan_hydro_bounds(
+            hydros_json, dst / "constraints" / "hydro_bounds.parquet"
         )
 
-        for column in _GUARDED_COLUMNS:
-            if column not in table.column_names:
-                continue
-            assert table[column].null_count == table.num_rows, (
-                f"{column} is present in {deck}'s hydro_bounds and carries "
-                f"{table.num_rows - table[column].null_count} non-null value(s) — "
-                "DECOMP's rule-43 exposure is no longer nil; extend the "
-                "rule-43 scan (TestNewaveRule43NoRaising's approach) to DECOMP"
+        assert rows_scanned > 0, (
+            f"expected a non-empty hydro_bounds for real deck {deck}; an "
+            "empty table cannot exercise this guard"
+        )
+
+        present_columns = frozenset(
+            column for column, scan in scans.items() if scan.present
+        )
+        assert present_columns == _EXPECTED_PRESENT_COLUMNS[deck], (
+            f"{deck} now exposes guarded column(s) "
+            f"{present_columns - _EXPECTED_PRESENT_COLUMNS[deck]} not previously "
+            f"present, or dropped {_EXPECTED_PRESENT_COLUMNS[deck] - present_columns} "
+            "that used to be present — update this test's expectation if the "
+            "schema change is intentional, otherwise investigate a regression"
+        )
+
+        for column in present_columns:
+            scan = scans[column]
+            assert scan.raising_count == 0, (
+                f"{scan.raising_count} hydro_bounds row(s) — hydro id(s) "
+                f"{sorted(scan.raising_hydro_ids)} — raise {column} above "
+                f"the plant's own declared value on {deck} (cobre rule 43); "
+                "ticket-023c's clamp should make this impossible for RE "
+                "FU-derived max_generation_mw rows, so a raise here is a "
+                "genuine new regression"
             )

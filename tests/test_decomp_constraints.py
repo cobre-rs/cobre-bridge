@@ -308,6 +308,8 @@ def _hq_record(
 
 
 def test_generic_builder_two_sided_round_trip() -> None:
+    """A genuine band (both sides bounded) is ONE F3 constraint with both
+    endpoints on the same row — no ``<=``/``>=`` id pair (AC1/AC2)."""
     record = _hq_record(
         constraint_id=3,
         bounds={0: StageBounds(lower=(10.0,), upper=(90.0,))},
@@ -326,25 +328,21 @@ def test_generic_builder_two_sided_round_trip() -> None:
     result = builder.result()
 
     assert result is not None
-    assert len(result.constraints) == 2
-    by_id = {c["id"]: c for c in result.constraints}
-    assert set(by_id) == {7, 8}
-    assert by_id[7]["sense"] == "<="
-    assert by_id[8]["sense"] == ">="
-    for c in result.constraints:
-        assert c["slack"] == {"enabled": True, "penalty": 45000.0}
-        assert c["expression"] == "hydro_outflow(0)"
+    assert len(result.constraints) == 1
+    constraint = result.constraints[0]
+    assert constraint["id"] == 7
+    assert set(constraint) == {"id", "name", "description", "expression", "slack"}
+    assert constraint["slack"] == {"enabled": True, "penalty": 45000.0}
+    assert constraint["expression"] == "hydro_outflow(0)"
 
     assert result.bounds.schema.equals(_GENERIC_BOUNDS_SCHEMA)
     rows = result.bounds.to_pylist()
-    assert len(rows) == 2
-    by_cid = {r["constraint_id"]: r for r in rows}
-    assert by_cid[7]["bound"] == 90.0
-    assert by_cid[7]["block_id"] == 0
-    assert by_cid[7]["stage_id"] == 0
-    assert by_cid[8]["bound"] == 10.0
-    assert by_cid[8]["block_id"] == 0
-    assert by_cid[8]["stage_id"] == 0
+    assert len(rows) == 1
+    assert rows[0]["constraint_id"] == 7
+    assert rows[0]["stage_id"] == 0
+    assert rows[0]["block_id"] == 0
+    assert rows[0]["bound_lower"] == 10.0
+    assert rows[0]["bound_upper"] == 90.0
 
 
 def test_generic_builder_upper_only_yields_single_le_constraint() -> None:
@@ -368,10 +366,11 @@ def test_generic_builder_upper_only_yields_single_le_constraint() -> None:
     assert result is not None
     assert len(result.constraints) == 1
     assert result.constraints[0]["id"] == 0
-    assert result.constraints[0]["sense"] == "<="
+    assert "sense" not in result.constraints[0]
     rows = result.bounds.to_pylist()
     assert len(rows) == 1
-    assert rows[0]["bound"] == 90.0
+    assert rows[0]["bound_upper"] == 90.0
+    assert rows[0]["bound_lower"] is None
 
 
 def test_generic_builder_lower_only_yields_single_ge_constraint() -> None:
@@ -395,10 +394,11 @@ def test_generic_builder_lower_only_yields_single_ge_constraint() -> None:
     assert result is not None
     assert len(result.constraints) == 1
     assert result.constraints[0]["id"] == 0
-    assert result.constraints[0]["sense"] == ">="
+    assert "sense" not in result.constraints[0]
     rows = result.bounds.to_pylist()
     assert len(rows) == 1
-    assert rows[0]["bound"] == 10.0
+    assert rows[0]["bound_lower"] == 10.0
+    assert rows[0]["bound_upper"] is None
 
 
 def test_generic_builder_all_unbounded_yields_no_result() -> None:
@@ -452,9 +452,11 @@ def test_generic_builder_per_block_clamp_to_calendar() -> None:
     assert result is not None
     rows = result.bounds.to_pylist()
     assert {r["block_id"] for r in rows} == {0}
-    by_cid = {r["constraint_id"]: r for r in rows}
-    assert by_cid[0]["bound"] == 10.0
-    assert by_cid[1]["bound"] == 1.0
+    # Only block 0's slot survives the clamp, so exactly one row — carrying
+    # both endpoints, since block 0 is bounded on both sides.
+    assert len(rows) == 1
+    assert rows[0]["bound_lower"] == 1.0
+    assert rows[0]["bound_upper"] == 10.0
 
 
 def test_generic_builder_bounded_slot_only_beyond_block_count_emits_no_orphan() -> None:
@@ -541,8 +543,10 @@ def test_generic_builder_ids_thread_across_calls() -> None:
     result = builder.result()
 
     assert result is not None
+    # record_a is genuinely two-sided (one id under F3); record_b is
+    # upper-only (also one id) -> two ids total, not three.
     ids = sorted(c["id"] for c in result.constraints)
-    assert ids == [7, 8, 9]
+    assert ids == [7, 8]
 
 
 # ---------------------------------------------------------------------------
@@ -585,17 +589,16 @@ def test_emit_re_generics_mixed_hydro_interchange_round_trip(
     )
 
     assert result is not None
-    assert len(result.constraints) == 2
-    for constraint in result.constraints:
-        assert constraint["expression"] == "hydro_generation(0) - line_direct(3)"
-        assert constraint["slack"] == {"enabled": True, "penalty": 45000.0}
-    by_sense = {c["sense"]: c for c in result.constraints}
-    assert set(by_sense) == {"<=", ">="}
+    assert len(result.constraints) == 1
+    constraint = result.constraints[0]
+    assert constraint["expression"] == "hydro_generation(0) - line_direct(3)"
+    assert constraint["slack"] == {"enabled": True, "penalty": 45000.0}
+    assert set(constraint) == {"id", "name", "description", "expression", "slack"}
 
     rows = result.bounds.to_pylist()
-    by_cid = {r["constraint_id"]: r["bound"] for r in rows}
-    assert by_cid[by_sense["<="]["id"]] == 500.0
-    assert by_cid[by_sense[">="]["id"]] == 100.0
+    assert len(rows) == 1
+    assert rows[0]["bound_lower"] == 100.0
+    assert rows[0]["bound_upper"] == 500.0
 
 
 def test_emit_re_generics_gnl_thermal_skips_and_warns(id_map: DecompIdMap) -> None:
@@ -798,17 +801,15 @@ def test_emit_rhq_rhv_generics_rhq_multi_term_round_trip(
     )
 
     assert result is not None
-    assert len(result.constraints) == 2
-    for constraint in result.constraints:
-        assert constraint["expression"] == "hydro_outflow(0) + hydro_diversion(0)"
-        assert constraint["slack"] == {"enabled": True, "penalty": 45000.0}
-    by_sense = {c["sense"]: c for c in result.constraints}
-    assert set(by_sense) == {"<=", ">="}
+    assert len(result.constraints) == 1
+    constraint = result.constraints[0]
+    assert constraint["expression"] == "hydro_outflow(0) + hydro_diversion(0)"
+    assert constraint["slack"] == {"enabled": True, "penalty": 45000.0}
 
     rows = result.bounds.to_pylist()
-    by_cid = {r["constraint_id"]: r["bound"] for r in rows}
-    assert by_cid[by_sense["<="]["id"]] == 200.0
-    assert by_cid[by_sense[">="]["id"]] == 50.0
+    assert len(rows) == 1
+    assert rows[0]["bound_lower"] == 50.0
+    assert rows[0]["bound_upper"] == 200.0
 
 
 def test_emit_rhq_rhv_generics_rhq_single_qbom_via_pumping_map(
@@ -909,11 +910,12 @@ def test_emit_rhq_rhv_generics_rhv_multi_varm_additive_floor() -> None:
     assert len(result.constraints) == 1
     constraint = result.constraints[0]
     assert constraint["expression"] == "hydro_storage(0) + hydro_storage(1)"
-    assert constraint["sense"] == ">="
+    assert set(constraint) == {"id", "name", "description", "expression", "slack"}
 
     rows = result.bounds.to_pylist()
     assert len(rows) == 1
-    assert rows[0]["bound"] == 310.0
+    assert rows[0]["bound_lower"] == 310.0
+    assert rows[0]["bound_upper"] is None
     assert rows[0]["block_id"] is None
     assert rows[0]["stage_id"] == 0
 

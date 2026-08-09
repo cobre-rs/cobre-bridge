@@ -312,6 +312,25 @@ def convert_lines(
     )
 
 
+def pumping_station_id_map(dadger: Dadger) -> dict[int, int]:
+    """``{codigo_usina: 0-based pumping-station id}`` — the single authority
+    for ``UE`` id assignment.
+
+    The id is the row's position in ``codigo_usina``-sorted order — exactly
+    what :func:`convert_pumping_stations` assigns via ``len(stations)``.
+    ``single_term_bounds.single_term_bound_contributions``'s ``QBOM`` path
+    resolves its pumping-station entity id through this same map (its
+    ``pumping_station_ids`` argument), since the QBOM term's ``code`` is a
+    pumping-station ``codigo_usina``, not a hydro one (epic-07,
+    ticket-023).
+    """
+    ue = dadger.ue(df=True)
+    if ue is None or ue.empty:
+        return {}
+    codes = sorted(int(c) for c in ue["codigo_usina"])
+    return {code: station_id for station_id, code in enumerate(codes)}
+
+
 def convert_pumping_stations(
     dadger: Dadger,
     id_map: DecompIdMap,
@@ -320,21 +339,25 @@ def convert_pumping_stations(
     """Convert the ``UE`` pumping stations (1:1).
 
     Water is lifted from the downstream plant to the upstream one; both
-    must be operated plants.
+    must be operated plants. Station ids come from
+    :func:`pumping_station_id_map`, the single authority for ``UE`` id
+    assignment.
     """
     ue = dadger.ue(df=True)
     if ue is None or ue.empty:
         return {"$schema": _PUMPING_SCHEMA_URL, "pumping_stations": []}
 
+    station_ids = pumping_station_id_map(dadger)
     op_date = start_date.isoformat()
     stations: list[dict] = []
     for _, row in ue.sort_values("codigo_usina").iterrows():
+        code = int(row["codigo_usina"])
         name = str(row["nome_usina"]).strip()
         source = int(row["codigo_usina_jusante"])
         destination = int(row["codigo_usina_montante"])
         stations.append(
             {
-                "id": len(stations),
+                "id": station_ids[code],
                 "name": name,
                 "operational_start_date": op_date,
                 "bus_id": id_map.bus_id(int(row["codigo_submercado"])),

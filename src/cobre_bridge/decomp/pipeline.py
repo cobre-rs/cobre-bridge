@@ -22,9 +22,18 @@ from idecomp.decomp import Dadger, Vazoes
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge import emission_checks
+from cobre_bridge.converters.constraints import (
+    _SCHEMA_URL as _GENERIC_CONSTRAINTS_SCHEMA_URL,
+)
 from cobre_bridge.decomp import bounds as bounds_conv
+from cobre_bridge.decomp import (
+    bounds_accumulator,
+    constraint_registers,
+    single_term_bounds,
+)
 from cobre_bridge.decomp import cadastro as cadastro_conv
 from cobre_bridge.decomp import config as config_conv
+from cobre_bridge.decomp import constraints as constraints_conv
 from cobre_bridge.decomp import contracts as contracts_conv
 from cobre_bridge.decomp import group_bounds as group_bounds_conv
 from cobre_bridge.decomp import hydro as hydro_conv
@@ -35,6 +44,10 @@ from cobre_bridge.decomp import scenarios as scenarios_conv
 from cobre_bridge.decomp import temporal as temporal_conv
 from cobre_bridge.decomp import thermal as thermal_conv
 from cobre_bridge.decomp.id_map import DecompIdMap
+from cobre_bridge.decomp.scalar_parameters import (
+    build_decomp_scalar_parameters,
+    write_scalar_parameters,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -114,6 +127,43 @@ def _write_parquet(path: Path, table: pa.Table) -> None:
     # TRACKED COBRE-GAP WORKAROUND (C3): the solver's parquet reader is
     # built without snappy; zstd until the compression contract is settled.
     pq.write_table(table, path, compression="zstd")
+
+
+def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.Table:
+    """Fold *cost_table* (``thermal.py``'s ``cost_per_mwh`` side-table) onto
+    *thermal_bounds* (the accumulator's resolved ``THERMAL_BOUNDS_SCHEMA``
+    table), restoring the ``cost_per_mwh`` column ``convert_thermal_bounds``
+    carries alongside rather than through its bound contributions.
+
+    A full outer merge on ``(thermal_id, stage_id, block_id)`` — not a
+    left-join keyed off *thermal_bounds* — because a ``(thermal, stage)``
+    whose generation bound resolved entirely to per-block contributions
+    (every block non-uniform, so ``resolve()`` never materializes a
+    ``block_id = None`` row for it, per the module's replace-vs-intersect
+    discipline) still needs a row to carry that stage's cost: a strict left
+    join would have nothing in *thermal_bounds* to attach it to and silently
+    drop the value. The outer merge instead adds a ``block_id = None`` row
+    with every bound column ``null`` for exactly that case. Per-block rows
+    always get ``null`` cost, since the cost table never carries a
+    non-``None`` ``block_id``.
+    """
+    key = ["thermal_id", "stage_id", "block_id"]
+    bounds_df = thermal_bounds.to_pandas()
+    cost_df = cost_table.to_pandas()
+    for frame in (bounds_df, cost_df):
+        frame["block_id"] = frame["block_id"].astype("Int64")
+    merged = bounds_df.merge(cost_df, on=key, how="outer")
+
+    schema = pa.schema(
+        [
+            *bounds_accumulator.THERMAL_BOUNDS_SCHEMA,
+            pa.field("cost_per_mwh", pa.float64(), nullable=True),
+        ]
+    )
+    return pa.table(
+        {field.name: pa.array(merged[field.name], type=field.type) for field in schema},
+        schema=schema,
+    )
 
 
 def _describe_emission_check_errors(errors: list[dx.Diagnostic]) -> str:
@@ -219,8 +269,8 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         If the post-emission self-checks (cobre 0.13 rules 43/41/45/38/36 and
         the ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
         find an ``ERROR``-severity violation in the converted artifacts. An
-        ``INFO`` finding (e.g. rule 43's "not applicable" report, always the
-        case for DECOMP) never raises.
+        ``INFO`` finding (e.g. rule 43's "not applicable" report, emitted when
+        no hydro-bounds capacity column is populated) never raises.
     """
     if dst.exists() and any(dst.iterdir()) and not force:
         raise FileExistsError(f"{dst} already contains files; pass force to overwrite")
@@ -390,18 +440,62 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     )
 
     constraints = dst / "constraints"
-    thermal_bounds_table = thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
-    hydro_bounds = bounds_conv.convert_hydro_bounds(dadger, id_map, calendar, effective)
-    # epic-02 (cadastro overrides): fold the per-stage storage-bound
-    # overrides (sparse wherever a stage's effective volume envelope
-    # tightens/widens past the plant's outer envelope) into the same
-    # hydro_bounds table the RQ/UH minimum-outflow rows populate — both share
-    # _HYDRO_BOUNDS_SCHEMA (ticket-005), so every consumer below (the
-    # self-check BoundFamily entry, the parquet write) sees one combined
-    # table, exactly as if a single emitter had produced it.
-    storage_bounds = bounds_conv.convert_storage_bounds(effective, id_map, calendar)
-    hydro_bounds = pa.concat_tables([hydro_bounds, storage_bounds]).sort_by(
-        [("hydro_id", "ascending"), ("stage_id", "ascending")]
+    # epic-07 (special-constraints pipeline wiring, ticket-023): every
+    # per-entity bound — the legacy RQ/UH minimum-outflow, the per-stage
+    # storage envelope, the CT thermal generation bounds, and the RE/RHQ/RHV
+    # single-term special-constraint bounds — is collected as
+    # bounds_accumulator.BoundContribution objects and resolved through
+    # exactly ONE resolve() + build_bound_tables() pass, so a new special
+    # constraint colliding with a legacy bound on the same (entity, stage,
+    # block) cell correctly intersects instead of producing the
+    # two-rows-same-column parquet cobre rejects. read_constraints/
+    # pumping_station_id_map are read once here and reused by ticket-023b
+    # (generic constraints).
+    census = constraint_registers.read_constraints(dadger)
+    pumping_ids = network_conv.pumping_station_id_map(dadger)
+    thermal_generation_contribs, thermal_cost_table = (
+        thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
+    )
+    # ticket-023c/boundary-review-fix-1: the RE `FU` single-hydro-generation
+    # and the RHQ `QTUR`/turbined bound producers each clamp their emitted
+    # upper to the plant's own declared max_generation_mw/max_turbined_m3s,
+    # so a looser source-declared ceiling on either axis (a real
+    # cross-source mismatch — see BELO MONTE's RE ceiling on both real
+    # decks) never trips cobre rule 43
+    # (emission_checks.check_hydro_bounds_no_raising, self-checked below).
+    # Read the same way that check reads hydros_dict: hydro id -> its
+    # generation.max_generation_mw/max_turbined_m3s.
+    hydro_capacities: dict[int, single_term_bounds.HydroCapacities] = {
+        hydro["id"]: single_term_bounds.HydroCapacities(
+            max_generation_mw=hydro["generation"]["max_generation_mw"],
+            max_turbined_m3s=hydro["generation"]["max_turbined_m3s"],
+        )
+        for hydro in hydros_dict["hydros"]
+    }
+    contribs = [
+        *bounds_conv.convert_hydro_bounds(dadger, id_map, calendar, effective),
+        *bounds_conv.convert_storage_bounds(effective, id_map, calendar),
+        *thermal_generation_contribs,
+        *single_term_bounds.single_term_bound_contributions(
+            census, id_map, pumping_ids, calendar, effective, hydro_capacities
+        ),
+    ]
+    block_counts = {stage.index: len(stage.block_hours) for stage in calendar}
+    bound_tables = bounds_accumulator.build_bound_tables(
+        bounds_accumulator.resolve(contribs, block_counts)
+    )
+    _bound_sort_keys = [
+        ("stage_id", "ascending"),
+        ("block_id", "ascending"),
+    ]
+    hydro_bounds = bound_tables.hydro.sort_by(
+        [("hydro_id", "ascending"), *_bound_sort_keys]
+    )
+    thermal_bounds_table = _rejoin_thermal_cost(
+        bound_tables.thermal, thermal_cost_table
+    ).sort_by([("thermal_id", "ascending"), *_bound_sort_keys])
+    pumping_bounds_table = bound_tables.pumping.sort_by(
+        [("pumping_station_id", "ascending"), *_bound_sort_keys]
     )
     # ticket-026/027: B8 per-group per-stage availability (installed × MP ×
     # FD, capped by the ρ_eq·q_max hydraulic ceiling) for every plant,
@@ -485,10 +579,12 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     # Post-emission self-checks (cobre 0.13 rules 43, 41, 45, 38, 36, and the
     # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
     # the in-memory artifacts, run before the constraint tables are written.
-    # DECOMP writes max_turbined_m3s/max_generation_mw only on the entity
-    # (hydro_bounds carries min_outflow_m3s only), so the rule-43 check below
-    # is always "not applicable" here — reported explicitly, not silently
-    # skipped. See cobre_bridge.emission_checks for the rule scope.
+    # hydro_bounds now carries max_turbined_m3s/max_generation_mw whenever a
+    # single-term special constraint (e.g. an RE FU generation ceiling) lowers
+    # to one, so the rule-43 check below is genuinely reachable — it raises
+    # when such a bound exceeds the entity's own declared capacity, and only
+    # reports "not applicable" when no capacity column is populated at all.
+    # See cobre_bridge.emission_checks for the rule scope.
     #
     # Unlike the NEWAVE pipeline (whose caller, convert_newave_case, opens one
     # dx.collect() around the whole conversion and returns every diagnostic on
@@ -512,6 +608,9 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
             group_column="hydro_unit_group_id",
         ),
         emission_checks.BoundFamily("Contract", "contract_id", contract_bounds_table),
+        emission_checks.BoundFamily(
+            "Pumping", "pumping_station_id", pumping_bounds_table
+        ),
     ]
     with dx.collect() as check_diagnostics:
         emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds)
@@ -537,6 +636,8 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     _write_parquet(constraints / "line_bounds.parquet", line_bounds)
     if hydro_bounds.num_rows:
         _write_parquet(constraints / "hydro_bounds.parquet", hydro_bounds)
+    if pumping_bounds_table.num_rows:
+        _write_parquet(constraints / "pumping_bounds.parquet", pumping_bounds_table)
     if group_bounds.num_rows:
         _write_parquet(constraints / "hydro_unit_group_bounds.parquet", group_bounds)
     if contracts:
@@ -544,10 +645,89 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     if contract_bounds_table.num_rows:
         _write_parquet(constraints / "contract_bounds.parquet", contract_bounds_table)
 
+    # epic-07 (special-constraints pipeline wiring, ticket-023b): emit every
+    # RE/RHQ/RHV/RHE special constraint that did NOT lower to an entity bound
+    # (`census.to_generic`, read once by ticket-023 above) as a Cobre generic
+    # constraint, over one shared 0-based constraint-id allocator so ids
+    # never collide across emitters regardless of which family produced
+    # them. The three emitters run in this fixed order (E7); `big_m`,
+    # `line_map`, and `hydro_to_ree` are shared inputs every emitter needs
+    # but none of them reads the deck to build for itself.
+    big_m = constraints_conv.big_m_penalty(deficit_cost)
+    line_map = constraints_conv.build_fi_line_map(lines_doc["lines"])
+    uh = dadger.uh(df=True)
+    operated_uh = uh[uh["volume_inicial"].notna()]
+    hydro_to_ree = {
+        int(row["codigo_usina"]): int(row["codigo_ree"])
+        for _, row in operated_uh.iterrows()
+    }
+
+    generic_constraints: list[dict] = []
+    generic_bound_tables: list[pa.Table] = []
+    next_generic_id = 0
+
+    re_generics = constraints_conv.emit_re_generics(
+        census, id_map, line_map, big_m, calendar, next_generic_id
+    )
+    if re_generics is not None:
+        generic_constraints.extend(re_generics.constraints)
+        generic_bound_tables.append(re_generics.bounds)
+        next_generic_id += len(re_generics.constraints)
+
+    rhq_rhv_generics = constraints_conv.emit_rhq_rhv_generics(
+        census, id_map, pumping_ids, effective, big_m, calendar, next_generic_id
+    )
+    if rhq_rhv_generics is not None:
+        generic_constraints.extend(rhq_rhv_generics.constraints)
+        generic_bound_tables.append(rhq_rhv_generics.bounds)
+        next_generic_id += len(rhq_rhv_generics.constraints)
+
+    rhe_generics = constraints_conv.emit_rhe_generics(
+        census, id_map, effective, hydro_to_ree, calendar, next_generic_id
+    )
+    if rhe_generics.result is not None:
+        generic_constraints.extend(rhe_generics.result.constraints)
+        generic_bound_tables.append(rhe_generics.result.bounds)
+        next_generic_id += len(rhe_generics.result.constraints)
+
+    if generic_constraints:
+        _write_json(
+            constraints / "generic_constraints.json",
+            {
+                "$schema": _GENERIC_CONSTRAINTS_SCHEMA_URL,
+                "constraints": generic_constraints,
+            },
+        )
+        _write_parquet(
+            constraints / "generic_constraint_bounds.parquet",
+            pa.concat_tables(generic_bound_tables),
+        )
+
+    # E5 (ticket-017/018): every `@rho_acum_h{id}` sigil a surviving RHE
+    # expression references must resolve, or cobre fails to load the case --
+    # write scalar_parameters.json whenever any RHE constraint survives,
+    # never only when another generic family also happens to be present.
+    if rhe_generics.rho_acum_overrides:
+        write_scalar_parameters(
+            dst,
+            build_decomp_scalar_parameters(
+                [id_map.hydro_id(code) for code in id_map.hydro_codes],
+                rhe_generics.rho_acum_overrides,
+            ),
+        )
+
+    # E1: the FE/RHA/LIBs-electrical detection diagnostics each surface
+    # once, through the structured sink, alongside the flat deferral warning
+    # below (ticket-024 dedups the matching clause out of that warning).
+    for detection in constraint_registers.detect_unreadable_electrical(files.dadger):
+        dx.emit(detection, logger=_LOG)
+    libs_detection = constraint_registers.detect_libs_electrical(src)
+    if libs_detection is not None:
+        dx.emit(libs_detection, logger=_LOG)
+
     _LOG.warning(
         "deferred at this milestone: GNL anticipation (dadgnl%s), boundary "
-        "FCF (importer), windowed inflow inputs (solver 0.13), flow/volume/"
-        "electrical constraint families (generic-constraints emitter)",
+        "FCF (importer), windowed inflow inputs (solver 0.13)",
         " present" if files.dadgnl is not None else " absent",
     )
     _LOG.info(

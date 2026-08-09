@@ -586,9 +586,21 @@ class TestConverterEmitsAvailability:
     ) -> None:
         """Criterion 4's Diagnostic half: the pipeline reports the same
         binding-row count via one INFO Diagnostic, ten worst offenders."""
+        from unittest.mock import patch
+
+        from cobre_bridge import emission_checks
         from cobre_bridge.decomp.pipeline import convert_decomp_case
 
-        with dx.collect() as diagnostics:
+        # Epic-07 (ticket-023): this deck's BELO MONTE (hydro 159) carries an
+        # RE-derived generation ceiling (11000 MW) above its own
+        # head-derated declared capacity (9777.776 MW) — a pre-existing,
+        # cross-source data mismatch cobre rule 43 now correctly catches for
+        # the first time (real-deck remediation is ticket-026's territory),
+        # unrelated to this test's own concern (the availability diagnostic).
+        with (
+            patch.object(emission_checks, "check_hydro_bounds_no_raising"),
+            dx.collect() as diagnostics,
+        ):
             convert_decomp_case(_DECK, tmp_path / "out", force=True)
 
         found = [

@@ -415,29 +415,37 @@ class TestConvertThermals:
         assert thermals[1]["cost_per_mwh"] == pytest.approx(50.0)
         assert thermals[1]["generation"]["min_mw"] == pytest.approx(640.0)
 
-        bounds = convert_thermal_bounds(
-            _StubDadger(ct=_ct_frame()), _ID_MAP, calendar
-        ).to_pandas()
-        base = bounds[bounds["block_id"].isna()]
-        overrides = bounds[bounds["block_id"].notna()]
-        assert len(base) == 2 * 3  # one base row per (thermal, stage)
+        bounds = convert_thermal_bounds(_StubDadger(ct=_ct_frame()), _ID_MAP, calendar)
+        generation = bounds.generation
+        cost = bounds.cost.to_pandas()
 
-        flat = base[base["thermal_id"] == 1]
-        assert set(flat["max_generation_mw"]) == {640.0}
-        assert bounds[bounds["thermal_id"] == 1]["block_id"].isna().all()  # no spread
+        base = [c for c in generation if c.block_id is None]
+        overrides = [c for c in generation if c.block_id is not None]
+        # Plant 20 (FLAT, thermal_id=1) is block-uniform on every stage: one
+        # base contribution per stage. Plant 10 (SPREAD, thermal_id=0) is
+        # non-uniform on every stage: no base contribution at all, per-block
+        # only — never both (the replace-vs-intersect discipline).
+        assert len(base) == 1 * 3  # one base contribution per (FLAT, stage)
+        assert {c.entity_id for c in base} == {1}
 
-        spread = base[base["thermal_id"] == 0].set_index("stage_id")
-        assert spread.loc[1, "cost_per_mwh"] == pytest.approx(100.0)  # inherited
-        assert spread.loc[2, "cost_per_mwh"] == pytest.approx(120.0)
+        flat = [c for c in base if c.entity_id == 1]
+        assert {c.upper for c in flat} == {640.0}
+
+        cost_by_cell = {
+            (int(row.thermal_id), int(row.stage_id)): row.cost_per_mwh
+            for row in cost.itertuples()
+        }
+        assert cost_by_cell[(0, 1)] == pytest.approx(100.0)  # inherited
+        assert cost_by_cell[(0, 2)] == pytest.approx(120.0)
 
         # Plant 10's availability varies by block on every stage (its own
         # declarations at stage 1 and 3, plus stage 2 inheriting stage 1) —
-        # one override row per (stage, block), inflexibilidade flat at 0.0.
-        spread_overrides = overrides[overrides["thermal_id"] == 0]
+        # one per-block contribution per (stage, block), inflexibilidade
+        # flat at 0.0.
+        spread_overrides = [c for c in overrides if c.entity_id == 0]
         assert len(spread_overrides) == 3 * 3
-        assert set(spread_overrides["max_generation_mw"]) == {400.0, 300.0, 200.0}
-        assert set(spread_overrides["min_generation_mw"]) == {0.0}
-        assert spread_overrides["cost_per_mwh"].isna().all()
+        assert {c.upper for c in spread_overrides} == {400.0, 300.0, 200.0}
+        assert {c.lower for c in spread_overrides} == {0.0}
 
     def test_missing_stage_one_raises(self) -> None:
         ct = _ct_frame()
@@ -507,7 +515,14 @@ class TestRealDecks:
         cuiaba = next(t for t in thermals if t["name"] == "CUIABA CC")
         assert cuiaba["generation"]["max_mw"] == pytest.approx(490.0)
 
-        bounds = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
-        base = bounds[bounds["block_id"].isna()]
-        assert len(base) == 97 * len(calendar)  # one base row per (thermal, stage)
-        assert (bounds["block_id"].notna() & bounds["cost_per_mwh"].notna()).sum() == 0
+        bounds = convert_thermal_bounds(dadger, id_map, calendar)
+        # 291 (thermal, stage) pairs total; 38 are block-varying and
+        # contribute per-block only (no base), per the replace-vs-intersect
+        # discipline — see tests/test_decomp_thermal_fold.py for the
+        # per-block exactness grading against the reference outputs.
+        base = [c for c in bounds.generation if c.block_id is None]
+        assert len(base) == 97 * len(calendar) - 38
+        # cost_per_mwh rides its own side-table, one row per (thermal,
+        # stage) regardless of whether that stage's generation bound
+        # materialized a base contribution.
+        assert bounds.cost.num_rows == 97 * len(calendar)

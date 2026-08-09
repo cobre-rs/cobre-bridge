@@ -11,7 +11,6 @@ metrics_grid).
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -19,6 +18,7 @@ import pandas as pd
 from cobre_bridge.constraint_expr import evaluate_constraint_expressions
 from cobre_bridge.dashboard.tabs.constraints_utils import (
     build_constraints_summary_table,
+    derive_constraint_shape,
 )
 from cobre_bridge.ui.html import (
     escape_attr,
@@ -123,20 +123,29 @@ def _build_metrics_row(data: DashboardData) -> str:
 def _compute_violation_zones(
     p10: list[float],
     p90: list[float],
-    bound: list[float],
-    sense: str,
+    bound_lower: list[float | None],
+    bound_upper: list[float | None],
 ) -> list[dict[str, int]]:
-    """Compute contiguous stage index intervals where the band crosses the bound.
+    """Compute contiguous stage index intervals where the band crosses either bound.
 
-    For ``>=`` sense (VminOP): violation where ``p10[i] < bound[i]``.
-    For ``<=`` sense (RE, AGRINT): violation where ``p90[i] > bound[i]``.
-    NaN bound values are skipped (no violation at those stages).
+    Two-sided per-(stage, block) test: a stage is violated when its floor is
+    breached (``bound_lower[i] is not None and p10[i] < bound_lower[i]``) OR
+    its ceiling is breached (``bound_upper[i] is not None and p90[i] >
+    bound_upper[i]``) — either condition alone flags the stage, and both may
+    fire simultaneously. This one test correctly covers every F3 shape a
+    per-row bound can take: ``">="`` (lower-only — only the floor term can
+    fire), ``"<="`` (upper-only — only the ceiling term can fire), ``"=="``
+    (both populated and equal — either deviation direction is a violation),
+    and a genuine two-sided ``"range"`` (both populated and distinct — floor
+    and ceiling are independent breaches). A stage with neither endpoint
+    populated (both ``None``) carries no bound at that stage and is never a
+    violation; it closes any open zone the same way a gap used to.
 
     Args:
         p10: List of p10 LHS values per stage.
         p90: List of p90 LHS values per stage.
-        bound: List of RHS bound values per stage (may contain NaN).
-        sense: Constraint sense string; ``">="`` or ``"<="``.
+        bound_lower: Per-stage floor (``bound_lower``), ``None`` where unbounded.
+        bound_upper: Per-stage ceiling (``bound_upper``), ``None`` where unbounded.
 
     Returns:
         List of ``{"start": start_idx, "end": end_idx}`` dicts, one per
@@ -151,19 +160,16 @@ def _compute_violation_zones(
     zone_start = 0
 
     for i in range(n):
-        b = bound[i] if i < len(bound) else float("nan")
-        if math.isnan(b):
-            # NaN bound: close any open zone before this gap
+        lo = bound_lower[i] if i < len(bound_lower) else None
+        hi = bound_upper[i] if i < len(bound_upper) else None
+        if lo is None and hi is None:
+            # No bound at this stage: close any open zone before this gap.
             if in_zone:
                 violations.append({"start": zone_start, "end": i - 1})
                 in_zone = False
             continue
 
-        if sense == ">=":
-            violated = p10[i] < b
-        else:
-            # "<=" and all other senses
-            violated = p90[i] > b
+        violated = (lo is not None and p10[i] < lo) or (hi is not None and p90[i] > hi)
 
         if violated and not in_zone:
             in_zone = True
@@ -187,23 +193,33 @@ def _build_constraint_lhs_data(
     """Build the JSON-serialisable LHS percentile data for all constraints.
 
     Precomputes p10/p50/p90 of LHS across scenarios per stage for every
-    constraint, extracts bound values per stage, and computes violation
-    zone intervals.
+    constraint, resolves each stage's bound endpoint(s) directly from its
+    own ``gc_bounds`` row, and computes violation zone intervals.
 
     Args:
-        constraints: List of constraint dicts with keys ``id``, ``name``,
-            ``sense``.
+        constraints: List of constraint dicts with keys ``id``, ``name``. F3
+            constraints are sense-free; the displayed ``sense`` label is
+            derived from *gc_bounds* via :func:`derive_constraint_shape` for
+            the dropdown/legend only — it does not drive which endpoint(s)
+            are plotted or violation-tested (see ``bound_lower``/
+            ``bound_upper`` below).
         lhs_df: DataFrame with columns ``constraint_id``, ``scenario_id``,
             ``stage_id``, ``block_id``, ``lhs_value``.
         gc_bounds: DataFrame with columns ``constraint_id``, ``stage_id``,
-            ``block_id``, ``bound``.
+            ``block_id``, ``bound_lower``, ``bound_upper`` (the F3 sense-free
+            interval; see :mod:`cobre_bridge.generic_constraint_format`).
         stage_labels: Stage id to human-readable label mapping.
 
     Returns:
         Dict with keys ``stages`` (list[int]), ``xlabels`` (list[str]), and
         ``constraints`` (dict mapping str(constraint_id) to per-constraint
         entry dicts).  Each entry contains ``name``, ``sense``, ``lhs_p10``,
-        ``lhs_p50``, ``lhs_p90``, ``bound``, ``violations``.
+        ``lhs_p50``, ``lhs_p90``, ``bound``, ``bound_lower``, ``bound_upper``,
+        ``violations``. ``bound`` is the legacy single-value series (the
+        ceiling when a stage has one, else the floor — unchanged for every
+        single-sided constraint); ``bound_lower``/``bound_upper`` are the raw
+        per-stage endpoints, both populated wherever a stage carries a
+        genuine two-sided ``"range"`` bound.
     """
     # Derive a common sorted stage list
     if not lhs_df.empty:
@@ -220,7 +236,6 @@ def _build_constraint_lhs_data(
     for c in constraints:
         cid = c["id"]
         name = c["name"]
-        sense = c["sense"]
 
         # --- LHS percentiles ---
         sub = (
@@ -247,32 +262,61 @@ def _build_constraint_lhs_data(
             p50 = [0.0] * n_stages
             p90 = [0.0] * n_stages
 
-        # --- Bound values ---
+        # --- Bound endpoints, resolved per (stage, block) row ---
         bounds_c = (
             gc_bounds[gc_bounds["constraint_id"] == cid]
             if not gc_bounds.empty
             else pd.DataFrame()
         )
+        # `sense` is a per-constraint display label only (see
+        # `derive_constraint_shape`'s docstring) — it does not choose which
+        # endpoint(s) are read below. Each stage's own bound_lower/bound_upper
+        # are read directly, so a genuine two-sided "range" row (a live
+        # DECOMP RE/HQ/HV path) keeps both endpoints, and a stage whose own
+        # direction differs from the constraint's dominant one is never
+        # dropped.
+        sense = derive_constraint_shape(bounds_c)
+        bound_lower_vals: list[float | None] = []
+        bound_upper_vals: list[float | None] = []
         if not bounds_c.empty:
             if bounds_c["block_id"].isna().all():
-                b_by_stage = bounds_c.set_index("stage_id")["bound"]
+                by_stage = bounds_c.set_index("stage_id")
             else:
-                b_by_stage = bounds_c[bounds_c["block_id"] == 0.0].set_index(
-                    "stage_id"
-                )["bound"]
-            bound_vals: list[float] = []
+                by_stage = bounds_c[bounds_c["block_id"] == 0.0].set_index("stage_id")
+            lower_by_stage = by_stage["bound_lower"]
+            upper_by_stage = by_stage["bound_upper"]
             for s in all_stages:
-                raw = b_by_stage.get(s, float("nan"))
-                bound_vals.append(
-                    None if math.isnan(float(raw)) else round(float(raw), 4)
-                )  # type: ignore[arg-type]
+                # `.get` on an all-null column (an unbounded side across
+                # every stage) can hand back a bare Python `None` rather
+                # than a float NaN, so the null check is `pd.isna` (which
+                # handles both) rather than `math.isnan(float(...))`.
+                lo_raw = lower_by_stage.get(s, float("nan"))
+                hi_raw = upper_by_stage.get(s, float("nan"))
+                lo = None if pd.isna(lo_raw) else round(float(lo_raw), 4)
+                hi = None if pd.isna(hi_raw) else round(float(hi_raw), 4)
+                bound_lower_vals.append(lo)
+                bound_upper_vals.append(hi)
         else:
-            bound_vals = [None] * n_stages  # type: ignore[list-item]
+            bound_lower_vals = [None] * n_stages
+            bound_upper_vals = [None] * n_stages
 
-        # --- Violation zones ---
-        # Convert None to NaN for violation computation
-        bound_for_viol = [float("nan") if v is None else float(v) for v in bound_vals]
-        violations = _compute_violation_zones(p10, p90, bound_for_viol, sense)
+        # Legacy single-value series: the ceiling when a stage has one, else
+        # the floor. Identical to today's values for every single-sided
+        # constraint (only one side is ever populated, so this always picks
+        # it); for a two-sided "range" stage it keeps the ceiling, matching
+        # the pre-fix value exactly — the floor is now additionally exposed
+        # via `bound_lower` rather than dropped.
+        bound_vals: list[float | None] = [
+            hi if hi is not None else lo
+            for lo, hi in zip(bound_lower_vals, bound_upper_vals, strict=True)
+        ]
+
+        # --- Violation zones: two-sided per-stage test (see
+        # `_compute_violation_zones`) — flags a floor breach, a ceiling
+        # breach, or both, independently at each stage.
+        violations = _compute_violation_zones(
+            p10, p90, bound_lower_vals, bound_upper_vals
+        )
 
         constraints_data[str(cid)] = {
             "name": name,
@@ -281,6 +325,8 @@ def _build_constraint_lhs_data(
             "lhs_p50": p50,
             "lhs_p90": p90,
             "bound": bound_vals,
+            "bound_lower": bound_lower_vals,
+            "bound_upper": bound_upper_vals,
             "violations": violations,
         }
 
@@ -364,6 +410,24 @@ function updateConstraintChart() {
       line: {color: '#DC4C4C', width: 1.5, dash: 'dash'}
     }
   ];
+
+  // `bound` already carries the ceiling wherever a stage has one, else the
+  // floor (see `_build_constraint_lhs_data`) -- identical to a single-sided
+  // constraint's only line. A genuine two-sided "range" stage additionally
+  // populates `bound_lower` with a value distinct from `bound`; only then
+  // is a second dashed floor line drawn, so single-sided constraints render
+  // exactly one bound line, unchanged.
+  var hasDistinctFloor = (cdata.bound_lower || []).some(function(lo, i) {
+    return lo !== null && lo !== cdata.bound[i];
+  });
+  if (hasDistinctFloor) {
+    traces.push({
+      x: xlabels,
+      y: cdata.bound_lower,
+      name: 'Bound Floor',
+      line: {color: '#B8860B', width: 1.5, dash: 'dot'}
+    });
+  }
 
   var shapes = (cdata.violations || []).map(function(v) {
     return {

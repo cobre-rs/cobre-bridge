@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from idecomp.decomp.modelos import dadger as _dadger_models
 
+from cobre_bridge.decomp import constraint_registers
 from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
 from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
 from cobre_bridge.errors import diagnostic_from_exception
@@ -373,6 +374,90 @@ def _ac_coverage(
     return checks, diagnostics
 
 
+def _special_constraint_coverage(
+    dadger: object, files: object
+) -> tuple[list[CheckItem], list[Diagnostic]]:
+    """Classify the deck's special constraints into converted (RE/HQ/HV/HE,
+    split into bounds-lowered vs generic-emitted) and deferred (``FE``/RHA/
+    LIBs-electrical), so an operator sees at a glance what the conversion
+    will and will not carry — without running a conversion.
+
+    A pure read of *dadger* (through the same census
+    :func:`~cobre_bridge.decomp.constraint_registers.read_constraints` the
+    pipeline consumes) and *files* (whose ``dadger`` path feeds the E1
+    unreadable-electrical scan, and whose parent deck directory feeds the
+    LIBs-electrical scan) — no conversion, no emitter.
+
+    Always returns exactly one passing summary :class:`CheckItem` (coverage
+    never blocks conversion, mirroring :func:`_ac_coverage`) plus a
+    diagnostic per bucket that is non-empty: an ``INFO`` for the converted
+    split — present whenever the deck declares at least one special
+    constraint — reporting the bounds-lowered/generic-emitted counts as
+    probes (per spec §10, never a hard-coded oracle), plus a ``WARNING`` per
+    present deferred surface. The deferred diagnostics are produced verbatim
+    by the E1 detection helpers
+    (:func:`~cobre_bridge.decomp.constraint_registers.detect_unreadable_electrical`
+    / :func:`~cobre_bridge.decomp.constraint_registers.detect_libs_electrical`)
+    — never re-derived here.
+    """
+    census = constraint_registers.read_constraints(dadger)  # type: ignore[arg-type]
+
+    bounds_by_family: dict[str, int] = {}
+    generic_by_family: dict[str, int] = {}
+    for record in census.to_bounds:
+        bounds_by_family[record.family] = bounds_by_family.get(record.family, 0) + 1
+    for record in census.to_generic:
+        generic_by_family[record.family] = generic_by_family.get(record.family, 0) + 1
+    present_families = sorted(
+        fam for fam, records in census.by_family.items() if records
+    )
+
+    n_bounds = len(census.to_bounds)
+    n_generic = len(census.to_generic)
+
+    checks = [
+        CheckItem(
+            label="Special-constraint coverage",
+            passed=True,
+            detail=(
+                f"{n_bounds} record(s) lowered to bounds, {n_generic} "
+                f"emitted as generic constraints, {len(present_families)} "
+                "family(ies) present in the deck"
+            ),
+        )
+    ]
+    diagnostics: list[Diagnostic] = []
+
+    if present_families:
+        breakdown = "; ".join(
+            f"{fam} {bounds_by_family.get(fam, 0)} bound(s)/"
+            f"{generic_by_family.get(fam, 0)} generic"
+            for fam in present_families
+        )
+        diagnostics.append(
+            Diagnostic(
+                code="decomp-special-constraints-converted",
+                severity=Severity.INFO,
+                category=_CONTEXT,
+                title="Special constraints read and classified",
+                summary=(
+                    f"The deck declares special constraints in "
+                    f"{len(present_families)} family(ies): {n_bounds} "
+                    f"record(s) lower to an entity bound, {n_generic} emit "
+                    f"as a generic constraint ({breakdown})."
+                ),
+            )
+        )
+
+    dadger_path = files.dadger  # type: ignore[attr-defined]
+    diagnostics.extend(constraint_registers.detect_unreadable_electrical(dadger_path))
+    libs_diagnostic = constraint_registers.detect_libs_electrical(dadger_path.parent)
+    if libs_diagnostic is not None:
+        diagnostics.append(libs_diagnostic)
+
+    return checks, diagnostics
+
+
 def run_decomp_preflight(src: Path) -> PreflightResult:
     """Validate the deck at *src*, writing nothing and raising nothing.
 
@@ -489,6 +574,10 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
             cov_checks, cov_diags = _ac_coverage(dadger, cadastro_report)
             checks.extend(cov_checks)
             diagnostics.extend(cov_diags)
+
+        sc_checks, sc_diags = _special_constraint_coverage(dadger, files)
+        checks.extend(sc_checks)
+        diagnostics.extend(sc_diags)
 
     diagnostics.extend(_deferred_inventory(dadger, files))
 

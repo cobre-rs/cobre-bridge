@@ -848,14 +848,27 @@ def load_output_metadata(case_dir: Path) -> OutputMetadata:
 
 @dataclasses.dataclass
 class GenericConstraintData:
-    """Generic-constraint definitions and their resolved bounds (optional)."""
+    """Generic-constraint definitions and their resolved bounds (optional).
+
+    F3 shape: ``constraints`` dicts carry no ``sense`` key, and ``bounds``
+    has nullable ``bound_lower``/``bound_upper`` endpoint columns instead of
+    a single ``bound`` column (see
+    :mod:`cobre_bridge.generic_constraint_format`). Readers derive the
+    displayed direction from the endpoints via
+    :func:`cobre_bridge.dashboard.tabs.constraints_utils.derive_constraint_shape`.
+    """
 
     constraints: list[dict]
     bounds: pd.DataFrame
 
 
 def load_generic_constraints(case_dir: Path) -> GenericConstraintData:
-    """Load constraints/generic_constraints.json and the bounds parquet."""
+    """Load constraints/generic_constraints.json and the bounds parquet.
+
+    The bounds parquet is read verbatim (whatever columns the converter
+    wrote — the F3 ``bound_lower``/``bound_upper`` pair, not a single
+    ``bound`` column); no column selection happens here.
+    """
     gc_path = case_dir / "constraints" / "generic_constraints.json"
     constraints: list[dict] = []
     if gc_path.exists():

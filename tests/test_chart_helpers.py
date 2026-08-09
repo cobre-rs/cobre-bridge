@@ -1511,17 +1511,27 @@ def test_report_thermal_productivity_tab_matches_golden(
 
 def _constraints_perf_fixture_pct() -> PercentileData:
     """PercentileData with non-empty constraint + performance frames."""
+    # F3, sense-free: both constraints are ``>=`` (lower-only endpoint), matching
+    # the pre-F3 fixture's sense so the golden HTML label stays unchanged.
     gc_constraints = [
-        {"id": 0, "name": "RE_1", "sense": ">="},
-        {"id": 1, "name": "AGRINT_1", "sense": ">="},
+        {"id": 0, "name": "RE_1"},
+        {"id": 1, "name": "AGRINT_1"},
     ]
     gc_bounds = pl.DataFrame(
         {
             "constraint_id": [0, 0, 1, 1],
             "stage_id": [0, 1, 0, 1],
             "block_id": [0, 0, 0, 0],
-            "bound": [500.0, 520.0, 300.0, 310.0],
-        }
+            "bound_lower": [500.0, 520.0, 300.0, 310.0],
+            "bound_upper": [None, None, None, None],
+        },
+        schema={
+            "constraint_id": pl.Int64,
+            "stage_id": pl.Int64,
+            "block_id": pl.Int64,
+            "bound_lower": pl.Float64,
+            "bound_upper": pl.Float64,
+        },
     )
     gc_lhs_newave = pl.DataFrame(
         {

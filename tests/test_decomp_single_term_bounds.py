@@ -3,10 +3,12 @@
 Synthetic ``ConstraintCensus``/``ConstraintRecord``/``StageBounds`` only — no
 deck, no ``example/`` read, no ``import cobre``. Covers the coefficient-sign
 side map, the per-block emission loop's block-count clamp, the "both sides
-absent" skip, the RHQ ``QDEF``/``QTUR`` axis lowering (including their
-coexistence on one plant), the RHV ``VARM`` additive floor conversion
-(including the per-stage effective floor and the no-cadastro warning-skip),
-and the fail-loud dispatcher on an unhandled family.
+absent" skip, the RHQ ``QDEF``/``QTUR``/``QDES``/``QVER`` axis lowering
+(including their coexistence on one plant and, for ``QDES``/``QVER``, the
+``lowers_to_bound`` single-unit-term vs multi-term/non-unit-coefficient
+classification — epic-06/ticket-021+022), the RHV ``VARM`` additive floor
+conversion (including the per-stage effective floor and the no-cadastro
+warning-skip), and the fail-loud dispatcher on an unhandled family.
 """
 
 from __future__ import annotations
@@ -23,9 +25,13 @@ from cobre_bridge.decomp.constraint_registers import (
     ConstraintRecord,
     ConstraintTerm,
     StageBounds,
+    lowers_to_bound,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.single_term_bounds import single_term_bound_contributions
+from cobre_bridge.decomp.single_term_bounds import (
+    HydroCapacities,
+    single_term_bound_contributions,
+)
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.diagnostics import Severity
 
@@ -62,6 +68,23 @@ def effective() -> EffectiveCadastro:
     return EffectiveCadastro(base=df, n_stages=1, stage_varying={})
 
 
+def _capacities(
+    hydro_id: int = 0,
+    *,
+    max_generation_mw: float = 0.0,
+    max_turbined_m3s: float = 0.0,
+) -> dict[int, HydroCapacities]:
+    """One hydro's ``HydroCapacities`` map, keyed by *hydro_id* — the shape
+    ``single_term_bound_contributions`` requires. A test sets only the axis
+    its scenario actually clamps against; the other axis defaults to ``0.0``
+    (unread by that scenario)."""
+    return {
+        hydro_id: HydroCapacities(
+            max_generation_mw=max_generation_mw, max_turbined_m3s=max_turbined_m3s
+        )
+    }
+
+
 def _re_record(
     *,
     constraint_id: int,
@@ -93,7 +116,12 @@ def test_re_single_block_generation_bound(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective
+        _census(record),
+        id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_generation_mw=1_000.0),
     )
 
     assert len(contributions) == 1
@@ -119,7 +147,12 @@ def test_re_negative_coefficient_flips_sides(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective
+        _census(record),
+        id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_generation_mw=1_000.0),
     )
 
     assert len(contributions) == 1
@@ -138,7 +171,12 @@ def test_re_two_block_emits_per_block_contributions(
     calendar = [_stage(0, 2)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective
+        _census(record),
+        id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_generation_mw=1_000.0),
     )
 
     by_block = {c.block_id: c for c in contributions}
@@ -184,7 +222,7 @@ def test_ft_thermal_single_block_generation_bound(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective
+        _census(record), id_map, {}, calendar, effective, {}
     )
 
     assert len(contributions) == 1
@@ -209,7 +247,7 @@ def test_ft_thermal_two_block_emits_per_block_contributions(
     calendar = [_stage(0, 2)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective
+        _census(record), id_map, {}, calendar, effective, {}
     )
 
     by_block = {c.block_id: c for c in contributions}
@@ -236,7 +274,12 @@ def test_re_hydro_regression_still_family_hydro(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective
+        _census(record),
+        id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_generation_mw=1_000.0),
     )
 
     assert len(contributions) == 1
@@ -255,7 +298,12 @@ def test_absent_both_sides_emits_no_contribution(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective
+        _census(record),
+        id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_generation_mw=1_000.0),
     )
 
     assert contributions == []
@@ -280,7 +328,7 @@ def test_unhandled_family_raises(
 
     with pytest.raises(ValueError, match="RHA"):
         single_term_bound_contributions(
-            _census(record), id_map, {}, calendar, effective
+            _census(record), id_map, {}, calendar, effective, {}
         )
 
 
@@ -305,7 +353,114 @@ def test_re_unexpected_bounded_variable_raises(
 
     with pytest.raises(ValueError, match="QDEF"):
         single_term_bound_contributions(
-            _census(record), id_map, {}, calendar, effective
+            _census(record), id_map, {}, calendar, effective, {}
+        )
+
+
+def test_re_ceiling_above_capacity_clamps_upper(
+    id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """AC1: an RE ceiling above the plant's declared capacity is clamped
+    down to that capacity — mirroring the real cross-source mismatch
+    (a plant's RE ceiling above its own declared, head-derated
+    ``max_generation_mw``) — while the lower bound passes through
+    unchanged."""
+    record = _re_record(
+        constraint_id=12,
+        coefficient=1.0,
+        bounds={0: StageBounds(lower=(50.0,), upper=(11_000.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record),
+        id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_generation_mw=9_777.776),
+    )
+
+    assert len(contributions) == 1
+    assert contributions[0].lower == 50.0
+    assert contributions[0].upper == 9_777.776
+
+
+def test_re_ceiling_at_capacity_is_not_clamped_and_emits_no_diagnostic(
+    id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """AC2: a ceiling at (or below) capacity passes through unchanged —
+    including the boundary case where the ceiling exactly equals the
+    capacity — and no clamp diagnostic is emitted."""
+    record = _re_record(
+        constraint_id=12,
+        coefficient=1.0,
+        bounds={0: StageBounds(lower=(50.0,), upper=(212.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    with dx.collect() as collected:
+        contributions = single_term_bound_contributions(
+            _census(record),
+            id_map,
+            {},
+            calendar,
+            effective,
+            _capacities(max_generation_mw=212.0),
+        )
+
+    assert len(contributions) == 1
+    assert contributions[0].upper == 212.0
+    assert [d for d in collected if d.code == "decomp-re-generation-clamped"] == []
+
+
+def test_re_clamp_emits_diagnostic_naming_plant_ceiling_and_capacity(
+    id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """AC3: a firing clamp is captured, inside ``dx.collect()``, as a
+    ``decomp-re-generation-clamped`` Diagnostic naming the plant, the RE
+    ceiling, and the declared capacity."""
+    record = _re_record(
+        constraint_id=12,
+        coefficient=1.0,
+        bounds={0: StageBounds(lower=(None,), upper=(11_000.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    with dx.collect() as collected:
+        single_term_bound_contributions(
+            _census(record),
+            id_map,
+            {},
+            calendar,
+            effective,
+            _capacities(max_generation_mw=9_777.776),
+        )
+
+    clamped = [d for d in collected if d.code == "decomp-re-generation-clamped"]
+    assert len(clamped) == 1
+    assert clamped[0].severity is Severity.WARNING
+    assert "Hydro 0" in clamped[0].summary  # the plant
+    assert "11000.0" in clamped[0].summary  # the RE ceiling
+    assert "9777.776" in clamped[0].summary  # the declared capacity
+
+
+def test_re_missing_capacity_entry_raises(
+    id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """A hydro id absent from ``hydro_capacities`` is a wiring bug — the map
+    is required, not defaulted, so the lookup fails loud with ``KeyError``
+    rather than silently skipping the clamp."""
+    record = _re_record(
+        constraint_id=12,
+        coefficient=1.0,
+        bounds={0: StageBounds(lower=(50.0,), upper=(212.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    with pytest.raises(KeyError):
+        single_term_bound_contributions(
+            _census(record), id_map, {}, calendar, effective, {}
         )
 
 
@@ -320,13 +475,14 @@ def _hq_record(
     variable: str,
     bounds: dict[int, StageBounds],
     code: int = 182,
+    coefficient: float = 1.0,
 ) -> ConstraintRecord:
     return ConstraintRecord(
         family="HQ",
         constraint_id=constraint_id,
         stage_start=min(bounds),
         stage_end=max(bounds),
-        terms=(ConstraintTerm(code=code, coefficient=1.0, variable=variable),),
+        terms=(ConstraintTerm(code=code, coefficient=coefficient, variable=variable),),
         bounds=bounds,
         per_block=True,
     )
@@ -343,7 +499,7 @@ def test_hq_qdef_lowers_to_outflow(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective
+        _census(record), hq_id_map, {}, calendar, effective, {}
     )
 
     assert len(contributions) == 1
@@ -369,7 +525,12 @@ def test_hq_qtur_lowers_to_turbined(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective
+        _census(record),
+        hq_id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_turbined_m3s=150.0),
     )
 
     assert len(contributions) == 1
@@ -377,6 +538,133 @@ def test_hq_qtur_lowers_to_turbined(
     assert contribution.axis == "turbined"
     assert contribution.lower is None
     assert contribution.upper == 150.0
+
+
+def test_hq_qtur_ceiling_above_capacity_clamps_upper(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """Boundary-review fix 1: a QTUR ceiling above the plant's declared
+    ``max_turbined_m3s`` is clamped down to that capacity — mirroring the RE
+    ``generation`` clamp for the identical rule-43 exposure (``QTUR`` ceiling
+    exceeding a head-derated ``max_turbined_m3s`` declared elsewhere) —
+    while the lower bound passes through unchanged."""
+    record = _hq_record(
+        constraint_id=164,
+        variable="QTUR",
+        bounds={0: StageBounds(lower=(30.0,), upper=(973.2,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record),
+        hq_id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_turbined_m3s=972.0),
+    )
+
+    assert len(contributions) == 1
+    assert contributions[0].lower == 30.0
+    assert contributions[0].upper == 972.0
+
+
+def test_hq_qtur_ceiling_at_capacity_is_not_clamped_and_emits_no_diagnostic(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """A QTUR ceiling at (or below) capacity passes through unchanged —
+    including the boundary case where the ceiling exactly equals the
+    capacity — and no clamp diagnostic is emitted."""
+    record = _hq_record(
+        constraint_id=164,
+        variable="QTUR",
+        bounds={0: StageBounds(lower=(None,), upper=(150.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    with dx.collect() as collected:
+        contributions = single_term_bound_contributions(
+            _census(record),
+            hq_id_map,
+            {},
+            calendar,
+            effective,
+            _capacities(max_turbined_m3s=150.0),
+        )
+
+    assert len(contributions) == 1
+    assert contributions[0].upper == 150.0
+    assert [d for d in collected if d.code == "decomp-qtur-turbined-clamped"] == []
+
+
+def test_hq_qtur_clamp_emits_diagnostic_naming_plant_ceiling_and_capacity(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """A firing QTUR clamp is captured, inside ``dx.collect()``, as a
+    ``decomp-qtur-turbined-clamped`` Diagnostic naming the plant, the QTUR
+    ceiling, and the declared capacity."""
+    record = _hq_record(
+        constraint_id=164,
+        variable="QTUR",
+        bounds={0: StageBounds(lower=(None,), upper=(973.2,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    with dx.collect() as collected:
+        single_term_bound_contributions(
+            _census(record),
+            hq_id_map,
+            {},
+            calendar,
+            effective,
+            _capacities(max_turbined_m3s=972.0),
+        )
+
+    clamped = [d for d in collected if d.code == "decomp-qtur-turbined-clamped"]
+    assert len(clamped) == 1
+    assert clamped[0].severity is Severity.WARNING
+    assert "Hydro 0" in clamped[0].summary  # the plant
+    assert "973.2" in clamped[0].summary  # the QTUR ceiling
+    assert "972.0" in clamped[0].summary  # the declared capacity
+
+
+def test_hq_qtur_missing_capacity_entry_raises(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """A hydro id absent from ``hydro_capacities`` is a wiring bug — the map
+    is required, not defaulted, so the ``QTUR``/``turbined`` clamp lookup
+    fails loud with ``KeyError`` rather than silently skipping the clamp."""
+    record = _hq_record(
+        constraint_id=164,
+        variable="QTUR",
+        bounds={0: StageBounds(lower=(None,), upper=(150.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    with pytest.raises(KeyError):
+        single_term_bound_contributions(
+            _census(record), hq_id_map, {}, calendar, effective, {}
+        )
+
+
+def test_hq_qdef_does_not_read_hydro_capacities(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """QDEF is not a rule-43 axis, so it never indexes ``hydro_capacities`` —
+    an empty map (which would ``KeyError`` on the QTUR path) is fine here."""
+    record = _hq_record(
+        constraint_id=164,
+        variable="QDEF",
+        bounds={0: StageBounds(lower=(30.0,), upper=(None,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), hq_id_map, {}, calendar, effective, {}
+    )
+
+    assert len(contributions) == 1
+    assert contributions[0].axis == "outflow"
 
 
 def test_hq_per_block_outflow_contributions(
@@ -390,7 +678,7 @@ def test_hq_per_block_outflow_contributions(
     calendar = [_stage(0, 2)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective
+        _census(record), hq_id_map, {}, calendar, effective, {}
     )
 
     by_block = {c.block_id: c for c in contributions}
@@ -419,7 +707,12 @@ def test_hq_qdef_and_qtur_coexist_on_one_plant(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(qdef, qtur), hq_id_map, {}, calendar, effective
+        _census(qdef, qtur),
+        hq_id_map,
+        {},
+        calendar,
+        effective,
+        _capacities(max_turbined_m3s=150.0),
     )
 
     by_axis = {c.axis: c for c in contributions}
@@ -430,6 +723,224 @@ def test_hq_qdef_and_qtur_coexist_on_one_plant(
     assert by_axis["turbined"].entity_id == 0
     assert by_axis["turbined"].upper == 150.0
     assert by_axis["turbined"].contributor == "HQ_165"
+
+
+def test_hq_qdes_lowers_to_diversion(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """AC1 (ticket-021): a single ``±1`` ``QDES`` record with ``L <= QDES <=
+    U`` emits a hydro ``diversion`` contribution with the sign-mapped
+    ``(lower, upper)`` — here the identity map, since the coefficient is
+    ``+1``."""
+    record = _hq_record(
+        constraint_id=200,
+        variable="QDES",
+        bounds={0: StageBounds(lower=(10.0,), upper=(40.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), hq_id_map, {}, calendar, effective, {}
+    )
+
+    assert len(contributions) == 1
+    contribution = contributions[0]
+    assert contribution.family == "hydro"
+    assert contribution.entity_id == 0
+    assert contribution.stage_id == 0
+    assert contribution.block_id == 0
+    assert contribution.axis == "diversion"
+    assert contribution.lower == 10.0
+    assert contribution.upper == 40.0
+    assert contribution.contributor == "HQ_200"
+
+
+def test_hq_qdes_negative_coefficient_flips_sides(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """AC1 (ticket-021), sign-mapped: ``-1*QDES in [L, U]`` becomes
+    ``QDES in [-U, -L]`` on the diversion axis."""
+    record = _hq_record(
+        constraint_id=200,
+        variable="QDES",
+        bounds={0: StageBounds(lower=(10.0,), upper=(40.0,))},
+        coefficient=-1.0,
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), hq_id_map, {}, calendar, effective, {}
+    )
+
+    assert len(contributions) == 1
+    assert contributions[0].axis == "diversion"
+    assert contributions[0].lower == -40.0
+    assert contributions[0].upper == -10.0
+
+
+def test_hq_qver_lowers_to_spillage(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """AC1 (ticket-022): a single ``±1`` ``QVER`` record lowers to a hydro
+    ``spillage`` contribution with the sign-mapped ``(lower, upper)``."""
+    record = _hq_record(
+        constraint_id=201,
+        variable="QVER",
+        bounds={0: StageBounds(lower=(5.0,), upper=(60.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), hq_id_map, {}, calendar, effective, {}
+    )
+
+    assert len(contributions) == 1
+    contribution = contributions[0]
+    assert contribution.family == "hydro"
+    assert contribution.entity_id == 0
+    assert contribution.stage_id == 0
+    assert contribution.block_id == 0
+    assert contribution.axis == "spillage"
+    assert contribution.lower == 5.0
+    assert contribution.upper == 60.0
+    assert contribution.contributor == "HQ_201"
+
+
+def test_hq_qver_negative_coefficient_flips_sides(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """AC1 (ticket-022), sign-mapped, mirroring the QDES case above."""
+    record = _hq_record(
+        constraint_id=201,
+        variable="QVER",
+        bounds={0: StageBounds(lower=(5.0,), upper=(60.0,))},
+        coefficient=-1.0,
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(record), hq_id_map, {}, calendar, effective, {}
+    )
+
+    assert len(contributions) == 1
+    assert contributions[0].axis == "spillage"
+    assert contributions[0].lower == -60.0
+    assert contributions[0].upper == -5.0
+
+
+def test_hq_qdef_qdes_qver_all_coexist_on_one_plant(
+    hq_id_map: DecompIdMap, effective: EffectiveCadastro
+) -> None:
+    """The four ``HQ`` flow tipos routed through the same
+    ``_hq_flow_contributions``/``_HQ_AXIS_BY_VARIABLE`` lookup all land on
+    distinct axes for the same plant and all survive."""
+    qdef = _hq_record(
+        constraint_id=164,
+        variable="QDEF",
+        bounds={0: StageBounds(lower=(30.0,), upper=(None,))},
+    )
+    qdes = _hq_record(
+        constraint_id=200,
+        variable="QDES",
+        bounds={0: StageBounds(lower=(10.0,), upper=(40.0,))},
+    )
+    qver = _hq_record(
+        constraint_id=201,
+        variable="QVER",
+        bounds={0: StageBounds(lower=(5.0,), upper=(60.0,))},
+    )
+    calendar = [_stage(0, 1)]
+
+    contributions = single_term_bound_contributions(
+        _census(qdef, qdes, qver), hq_id_map, {}, calendar, effective, {}
+    )
+
+    by_axis = {c.axis: c for c in contributions}
+    assert set(by_axis) == {"outflow", "diversion", "spillage"}
+    assert by_axis["diversion"].lower == 10.0
+    assert by_axis["diversion"].upper == 40.0
+    assert by_axis["spillage"].lower == 5.0
+    assert by_axis["spillage"].upper == 60.0
+
+
+def test_qdes_single_unit_term_lowers_to_bound() -> None:
+    """AC3 (ticket-021): ``lowers_to_bound`` returns ``True`` for a single
+    ``±1`` ``QDES`` term — the classifier ``single_term_bound_contributions``
+    is downstream of."""
+    record = ConstraintRecord(
+        family="HQ",
+        constraint_id=200,
+        stage_start=0,
+        stage_end=0,
+        terms=(ConstraintTerm(code=182, coefficient=1.0, variable="QDES"),),
+        bounds={0: StageBounds(lower=(10.0,), upper=(40.0,))},
+        per_block=True,
+    )
+    assert lowers_to_bound(record)
+
+
+def test_qdes_multi_term_does_not_lower_to_bound() -> None:
+    """AC3 (ticket-021): a multi-term ``QDES`` constraint stays generic."""
+    record = ConstraintRecord(
+        family="HQ",
+        constraint_id=200,
+        stage_start=0,
+        stage_end=0,
+        terms=(
+            ConstraintTerm(code=182, coefficient=1.0, variable="QDES"),
+            ConstraintTerm(code=183, coefficient=1.0, variable="QDES"),
+        ),
+        bounds={0: StageBounds(lower=(10.0,), upper=(40.0,))},
+        per_block=True,
+    )
+    assert not lowers_to_bound(record)
+
+
+def test_qdes_non_unit_coefficient_does_not_lower_to_bound() -> None:
+    """AC3 (ticket-021): a non-unit-coefficient single ``QDES`` term stays
+    generic."""
+    record = ConstraintRecord(
+        family="HQ",
+        constraint_id=200,
+        stage_start=0,
+        stage_end=0,
+        terms=(ConstraintTerm(code=182, coefficient=0.5, variable="QDES"),),
+        bounds={0: StageBounds(lower=(10.0,), upper=(40.0,))},
+        per_block=True,
+    )
+    assert not lowers_to_bound(record)
+
+
+def test_qver_single_unit_term_lowers_to_bound() -> None:
+    """AC2 (ticket-022): ``lowers_to_bound`` returns ``True`` for a single
+    ``±1`` ``QVER`` term."""
+    record = ConstraintRecord(
+        family="HQ",
+        constraint_id=201,
+        stage_start=0,
+        stage_end=0,
+        terms=(ConstraintTerm(code=182, coefficient=-1.0, variable="QVER"),),
+        bounds={0: StageBounds(lower=(5.0,), upper=(60.0,))},
+        per_block=True,
+    )
+    assert lowers_to_bound(record)
+
+
+def test_qver_multi_term_does_not_lower_to_bound() -> None:
+    """AC2 (ticket-022): a multi-term ``QVER`` constraint stays generic."""
+    record = ConstraintRecord(
+        family="HQ",
+        constraint_id=201,
+        stage_start=0,
+        stage_end=0,
+        terms=(
+            ConstraintTerm(code=182, coefficient=1.0, variable="QVER"),
+            ConstraintTerm(code=183, coefficient=1.0, variable="QVER"),
+        ),
+        bounds={0: StageBounds(lower=(5.0,), upper=(60.0,))},
+        per_block=True,
+    )
+    assert not lowers_to_bound(record)
 
 
 @pytest.fixture
@@ -468,7 +979,7 @@ def test_hq_qbom_lowers_to_pumping_flow_bound(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), qbom_id_map, {30: 0}, calendar, effective
+        _census(record), qbom_id_map, {30: 0}, calendar, effective, {}
     )
 
     assert len(contributions) == 1
@@ -497,7 +1008,7 @@ def test_hq_qbom_no_station_warns_and_skips(
 
     with dx.collect() as collected:
         contributions = single_term_bound_contributions(
-            _census(record), qbom_id_map, {}, calendar, effective
+            _census(record), qbom_id_map, {}, calendar, effective, {}
         )
 
     assert contributions == []
@@ -549,7 +1060,7 @@ def test_hv_varm_additive_floor_plus_lv(hv_id_map: DecompIdMap) -> None:
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, {}, calendar, effective
+        _census(record), hv_id_map, {}, calendar, effective, {}
     )
 
     assert len(contributions) == 1
@@ -581,7 +1092,7 @@ def test_hv_varm_uses_per_stage_effective_floor(hv_id_map: DecompIdMap) -> None:
     calendar = [_stage(0, 1), _stage(1, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, {}, calendar, effective
+        _census(record), hv_id_map, {}, calendar, effective, {}
     )
 
     by_stage = {c.stage_id: c for c in contributions}
@@ -605,7 +1116,7 @@ def test_hv_varm_negative_coefficient_flips_then_adds_floor(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, {}, calendar, effective
+        _census(record), hv_id_map, {}, calendar, effective, {}
     )
 
     assert len(contributions) == 1
@@ -625,7 +1136,7 @@ def test_hv_varm_uncadastred_plant_warns_and_skips(hv_id_map: DecompIdMap) -> No
 
     with dx.collect() as collected:
         contributions = single_term_bound_contributions(
-            _census(record), hv_id_map, {}, calendar, effective
+            _census(record), hv_id_map, {}, calendar, effective, {}
         )
 
     assert contributions == []

@@ -66,6 +66,17 @@ if TYPE_CHECKING:
 #: cases require cobre >= this version. The manifest records it (single source
 #: of truth) and the ``--validate`` gate uses it to decide whether the installed
 #: cobre-python is new enough to validate the output.
+#:
+#: PENDING BUMP: the generic-constraint output (``generic_constraints.json`` +
+#: ``generic_constraint_bounds.parquet``) now targets cobre's **F3** sense-free
+#: interval format (no ``sense`` key; ``bound_lower``/``bound_upper`` in place of
+#: a single ``bound`` column) — see ``cobre_bridge.generic_constraint_format``.
+#: F3 lives on cobre's ``feat/generic-constraint-authoring`` branch and has not
+#: been tagged/released yet, so there is no released version number to pin to;
+#: the installed editable ``cobre-python`` still reports ``0.13.0``, which is why
+#: this constant is unchanged for now. Bump ``MIN_COBRE_VERSION`` (and the
+#: ``cobre-python`` pin in ``pyproject.toml``) to the real F3 release version as
+#: soon as cobre tags one — do not guess a number in the meantime.
 MIN_COBRE_VERSION = "0.13.0"
 
 

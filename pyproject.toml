@@ -28,6 +28,16 @@ dev = [
     "ruff",
     "jsonschema",
 ]
+# NOTE: the generic-constraint output (generic_constraints.json +
+# generic_constraint_bounds.parquet) now targets cobre's F3 sense-free interval
+# format (no `sense` key; bound_lower/bound_upper in place of a single `bound`
+# column). F3 lives on cobre's `feat/generic-constraint-authoring` branch and is
+# not yet a tagged release, so there is no released version to pin to; bumping
+# this constraint now would make `pip install -e ".[dev]"` unresolvable against
+# the only cobre-python build that exists (an editable 0.13.0 checkout of that
+# branch). Once cobre tags the F3 release, hard-bump both extras below to it
+# (and MIN_COBRE_VERSION in src/cobre_bridge/cli.py in lockstep) — do not guess
+# a version number in the interim.
 validation = [
     "cobre-python>=0.13,<0.14",
 ]

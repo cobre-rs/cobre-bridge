@@ -341,8 +341,10 @@ def test_hq_qbom_no_double_emission() -> None:
     assert result is None
 
 
-def test_hq_qdes_single_stays_generic_no_bound_axis() -> None:
-    """Spillage has no cobre bounds axis — a single QDES term is still generic."""
+def test_hq_qdes_single_lowers_to_diversion_bound() -> None:
+    """A single-term ``QDES`` RHQ lowers to a two-sided hydro ``diversion``
+    bound (M3 — epic-06/ticket-021), now that cobre's
+    generic-constraint-authoring epic-01 landed ``min_diversion_m3s``."""
     dadger = _FakeDadger(
         hq=_decl((6, 1, 1)),
         cq=_coeff((6, 31, 1.0, 1, "QDES"), tipo=True),
@@ -351,8 +353,28 @@ def test_hq_qdes_single_stays_generic_no_bound_axis() -> None:
     census = read_constraints(dadger)
     rec = _only(census.by_family["HQ"], 6)
     assert rec.is_single_term
-    assert not lowers_to_bound(rec)
-    assert rec in census.to_generic
+    assert rec.terms[0].variable == "QDES"
+    assert lowers_to_bound(rec)
+    assert rec in census.to_bounds
+    assert rec not in census.to_generic
+
+
+def test_hq_qver_single_lowers_to_spillage_bound() -> None:
+    """A single-term ``QVER`` RHQ lowers to a two-sided hydro ``spillage``
+    bound (M5 — epic-06/ticket-022), now that cobre's
+    generic-constraint-authoring epic-01 landed ``min/max_spillage_m3s``."""
+    dadger = _FakeDadger(
+        hq=_decl((9, 1, 1)),
+        cq=_coeff((9, 31, 1.0, 1, "QVER"), tipo=True),
+        lq=_lu((9, 1, 0.0, 50.0, 0.0, 50.0, 0.0, 50.0)),
+    )
+    census = read_constraints(dadger)
+    rec = _only(census.by_family["HQ"], 9)
+    assert rec.is_single_term
+    assert rec.terms[0].variable == "QVER"
+    assert lowers_to_bound(rec)
+    assert rec in census.to_bounds
+    assert rec not in census.to_generic
 
 
 def test_hq_mixed_flow_variables_one_plant_is_multi_term_generic() -> None:
@@ -385,6 +407,20 @@ def test_unit_negative_single_term_lowers_to_bound() -> None:
     """``|coef| == 1`` still lowers to a bound when the sign is negative."""
     record = _single_term_record(-1.0)
     assert lowers_to_bound(record)
+
+
+def test_non_unit_single_term_qdes_is_generic() -> None:
+    """A non-unit ``QDES`` coefficient stays generic too — the coefficient
+    check applies uniformly across the whole ``_BOUNDS_AXIS`` membership,
+    diversion included."""
+    record = _single_term_record(0.5, variable="QDES")
+    assert not lowers_to_bound(record)
+
+
+def test_non_unit_single_term_qver_is_generic() -> None:
+    """Same as above for ``QVER`` — the coefficient check is variable-agnostic."""
+    record = _single_term_record(0.5, variable="QVER")
+    assert not lowers_to_bound(record)
 
 
 def test_hv_varm_single_lowers_to_storage_bound() -> None:

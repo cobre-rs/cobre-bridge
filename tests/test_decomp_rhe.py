@@ -155,12 +155,13 @@ def test_emit_rhe_generics_absolute_round_trip() -> None:
     assert len(result.result.constraints) == 1
     constraint = result.result.constraints[0]
     assert constraint["expression"] == "@rho_acum_h0 * hydro_storage(0)"
-    assert constraint["sense"] == ">="
+    assert set(constraint) == {"id", "name", "description", "expression", "slack"}
     assert constraint["slack"] == {"enabled": True, "penalty": 250.0}
 
     rows = result.result.bounds.to_pylist()
     assert len(rows) == 1
-    assert rows[0]["bound"] == 50.0
+    assert rows[0]["bound_lower"] == 50.0
+    assert rows[0]["bound_upper"] is None
     assert rows[0]["block_id"] is None
     assert rows[0]["stage_id"] == 0
 
@@ -205,7 +206,8 @@ def test_emit_rhe_generics_percentage_rhs() -> None:
     assert len(rows) == 1
     expected_rho = 0.01 * 100 / (3600.0 * 730.0 / 1e6)
     expected_bound = 0.20 * expected_rho * 1000.0
-    assert rows[0]["bound"] == pytest.approx(expected_bound)
+    assert rows[0]["bound_lower"] == pytest.approx(expected_bound)
+    assert rows[0]["bound_upper"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +553,8 @@ def test_emit_rhe_generics_unknown_tipo_limite_treated_as_absolute_and_warns() -
 
     assert result.result is not None
     rows = result.result.bounds.to_pylist()
-    assert rows[0]["bound"] == 50.0
+    assert rows[0]["bound_lower"] == 50.0
+    assert rows[0]["bound_upper"] is None
     warnings = [d for d in collected if d.severity is Severity.WARNING]
     assert len(warnings) == 1
     assert warnings[0].code == "decomp-rhe-unknown-tipo-limite"

@@ -8,6 +8,7 @@ import pandas as pd
 import polars as pl
 
 from cobre_bridge.comparators import analyze
+from cobre_bridge.comparators.constraints_compare import ResolvedBound
 from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
@@ -3454,7 +3455,7 @@ def constraints_comparison_chart(
     constraints: list[dict],
     lhs_newave: pl.DataFrame,
     lhs_cobre: pl.DataFrame,
-    bound_by_constraint: dict[int, dict[int, float]],
+    bound_by_constraint: dict[int, dict[int, ResolvedBound]],
 ) -> str:
     """Per-constraint small-multiples comparing the source model vs Cobre LHS vs bound.
 
@@ -3474,7 +3475,8 @@ def constraints_comparison_chart(
     bound_by_constraint:
         Output of
         :func:`cobre_bridge.comparators.constraints_compare.per_stage_bounds`
-        — maps ``constraint_id`` to ``{stage_id: bound}``.
+        — maps ``constraint_id`` to ``{stage_id: ResolvedBound}`` (the
+        resolved limit value plus its derived shape label).
 
     Returns
     -------
@@ -3521,7 +3523,11 @@ def constraints_comparison_chart(
     for idx, c in enumerate(renderable):
         cid = int(c["id"])
         name = c["name"]
-        sense = c.get("sense", "<=")
+        cid_bounds = bound_by_constraint.get(cid, {})
+        # F3 constraints are sense-free; the shape (">="/"<="/"=="/"range") is
+        # whatever per_stage_bounds derived from the resolved bound endpoints,
+        # not a removed `sense` field.
+        shape = next((rb.shape for rb in cid_bounds.values()), "<=")
         panel = panels[idx]
         row_i = panel.row
         ax_idx = idx + 1
@@ -3537,7 +3543,7 @@ def constraints_comparison_chart(
         }
         layout[ya_key] = {
             "domain": panel.y_domain,
-            "title": f"{name} ({sense})",
+            "title": f"{name} ({shape})",
             "anchor": xa,
         }
 
@@ -3545,14 +3551,14 @@ def constraints_comparison_chart(
         stages = sorted(
             set(nw_by_cid.get(cid, {}).keys())
             | set(cb_by_cid.get(cid, {}).keys())
-            | set(bound_by_constraint.get(cid, {}).keys())
+            | set(cid_bounds.keys())
         )
         if not stages:
             continue
 
         nw_y = [nw_by_cid.get(cid, {}).get(s) for s in stages]
         cb_y = [cb_by_cid.get(cid, {}).get(s) for s in stages]
-        bound_y = [bound_by_constraint.get(cid, {}).get(s) for s in stages]
+        bound_y = [cid_bounds[s].value if s in cid_bounds else None for s in stages]
 
         # The source model LHS line (only where defined).
         nw_x_present = [s for s, v in zip(stages, nw_y) if v is not None]

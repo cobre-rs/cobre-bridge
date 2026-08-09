@@ -8,36 +8,75 @@ that layout so it cannot silently drift back to a trailing ``block_id``.
 
 The schema constant governs the written column order (each writer passes it as
 ``pa.table(..., schema=...)``), so asserting on the schema names asserts on the
-parquet layout.
+parquet layout. Since epic-07 (ticket-023) the hydro/thermal/pumping *bound*
+schemas live on the E2 accumulator (``bounds_accumulator``), not on the
+individual converters — ``bounds.py``/``thermal.py``/``network.py`` emit
+``BoundContribution`` lists the accumulator fans into these tables, and
+``thermal.py`` keeps only its own ``cost_per_mwh`` side-table schema (cost is
+not a bound axis, so it never reaches the accumulator).
 """
 
 from __future__ import annotations
 
-from cobre_bridge.decomp.bounds import _HYDRO_BOUNDS_SCHEMA
+from cobre_bridge.decomp.bounds_accumulator import (
+    HYDRO_BOUNDS_SCHEMA,
+    PUMPING_BOUNDS_SCHEMA,
+    THERMAL_BOUNDS_SCHEMA,
+)
 from cobre_bridge.decomp.group_bounds import _HYDRO_UNIT_GROUP_BOUNDS_SCHEMA
 from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
-from cobre_bridge.decomp.thermal import _THERMAL_BOUNDS_SCHEMA
+from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA
 
 
 def test_hydro_bounds_index_columns_precede_values() -> None:
-    assert _HYDRO_BOUNDS_SCHEMA.names == [
+    assert HYDRO_BOUNDS_SCHEMA.names == [
         "hydro_id",
         "stage_id",
         "block_id",
         "min_outflow_m3s",
+        "max_outflow_m3s",
+        "min_turbined_m3s",
+        "max_turbined_m3s",
+        "min_generation_mw",
+        "max_generation_mw",
         "min_storage_hm3",
         "max_storage_hm3",
+        "min_diversion_m3s",
+        "max_diversion_m3s",
+        "min_spillage_m3s",
+        "max_spillage_m3s",
     ]
 
 
 def test_thermal_bounds_index_columns_precede_values() -> None:
-    assert _THERMAL_BOUNDS_SCHEMA.names == [
+    assert THERMAL_BOUNDS_SCHEMA.names == [
         "thermal_id",
         "stage_id",
         "block_id",
         "min_generation_mw",
         "max_generation_mw",
+    ]
+
+
+def test_thermal_cost_side_table_index_columns_precede_values() -> None:
+    """``cost_per_mwh`` rides alongside the accumulator, not through it
+    (it is not a registered bound axis) — this pins its own side-table
+    schema, which the pipeline rejoins onto the resolved thermal bounds."""
+    assert _THERMAL_COST_SCHEMA.names == [
+        "thermal_id",
+        "stage_id",
+        "block_id",
         "cost_per_mwh",
+    ]
+
+
+def test_pumping_bounds_index_columns_precede_values() -> None:
+    assert PUMPING_BOUNDS_SCHEMA.names == [
+        "pumping_station_id",
+        "stage_id",
+        "block_id",
+        "min_m3s",
+        "max_m3s",
     ]
 
 

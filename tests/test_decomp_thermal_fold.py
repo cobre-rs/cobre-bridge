@@ -1,10 +1,15 @@
 """Grades the per-block thermal bounds against the reference run.
 
 The source model declares thermal bounds per block. ``convert_thermal_bounds``
-emits a stage-level base row (hours-weighted, unchanged from the earlier
-interim fold) plus sparse per-block override rows wherever a stage's blocks
-actually differ, so the resolution that fold used to throw away is now
-reproduced exactly. Two questions matter and they are different:
+contributes, per ``(thermal, stage)``, either a stage-level base contribution
+(hours-weighted, unchanged from the earlier interim fold) when the stage's
+blocks are uniform, or sparse per-block contributions (no base) when they are
+not — never both (epic-07, ticket-023's replace-vs-intersect discipline), so
+the resolution that fold used to throw away is now reproduced exactly. Every
+test below resolves those contributions through the same
+``bounds_accumulator.resolve``/``build_bound_tables`` + cost-rejoin pass
+``pipeline.convert_decomp_case`` uses, so it grades exactly what lands in
+``thermal_bounds.parquet``. Two questions matter and they are different:
 
 1. **Does the reconstructed per-block bound match reality?** Take the emitted
    table's effective bound for every ``(plant, stage, block)`` cell (the
@@ -31,17 +36,42 @@ own must-run misallocation and capacity over-allowance are both exactly zero.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import pandas as pd
 import polars as pl
 import pytest
 
 from cobre_bridge.comparators.decomp_readers import read_dec_oper_usit
+from cobre_bridge.decomp.bounds_accumulator import build_bound_tables, resolve
+from cobre_bridge.decomp.pipeline import _rejoin_thermal_cost
+from cobre_bridge.decomp.thermal import convert_thermal_bounds
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from idecomp.decomp import Dadger
+
+    from cobre_bridge.decomp.id_map import DecompIdMap
+    from cobre_bridge.decomp.temporal import OperativeStage
 
 _DECK = Path("example/decomp-jul-26-rv3")
 _needs_deck = pytest.mark.skipif(
     not (_DECK / "saidas" / "dec_oper_usit.csv").exists(),
     reason="reference deck outputs not present",
 )
+
+
+def _resolved_bounds_frame(
+    dadger: Dadger, id_map: DecompIdMap, calendar: Sequence[OperativeStage]
+) -> pd.DataFrame:
+    """The exact ``thermal_bounds.parquet`` shape ``pipeline.py`` writes:
+    ``convert_thermal_bounds``'s generation contributions resolved through
+    the accumulator, with ``cost_per_mwh`` rejoined from its side-table."""
+    bounds = convert_thermal_bounds(dadger, id_map, calendar)
+    block_counts = {stage.index: len(stage.block_hours) for stage in calendar}
+    resolved = build_bound_tables(resolve(bounds.generation, block_counts)).thermal
+    return _rejoin_thermal_cost(resolved, bounds.cost).to_pandas()
 
 
 def _reference_blocks() -> pl.DataFrame:
@@ -80,20 +110,21 @@ class TestThermalFold:
 
         Anything else means the converter and the reference disagree about
         the stage a block belongs to or the weight it carries. Scoped to the
-        base (``block_id = None``) rows — the per-block override rows added
-        by this ticket carry no stage-level fold to compare here.
+        base (``block_id = None``) rows that actually carry a generation
+        bound — a block-varying stage's own ``block_id = None`` row (if any)
+        carries only ``cost_per_mwh`` (see the module docstring's rejoin
+        note) and has no stage-level fold to compare here.
         """
         from idecomp.decomp import Dadger
 
         from cobre_bridge.decomp.id_map import DecompIdMap
         from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-        from cobre_bridge.decomp.thermal import convert_thermal_bounds
 
         dadger = Dadger.read(str(_DECK / "dadger.rv3"))
         id_map = DecompIdMap.from_dadger(dadger)
         calendar = operative_calendar_from_dadger(dadger)
-        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
-        ours = table[table["block_id"].isna()]
+        table = _resolved_bounds_frame(dadger, id_map, calendar)
+        ours = table[table["block_id"].isna() & table["max_generation_mw"].notna()]
 
         reference = _reference_fold(_reference_blocks()).to_pandas()
         reference["thermal_id"] = reference["codigo_usina"].map(
@@ -126,12 +157,11 @@ class TestThermalFold:
 
         from cobre_bridge.decomp.id_map import DecompIdMap
         from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-        from cobre_bridge.decomp.thermal import convert_thermal_bounds
 
         dadger = Dadger.read(str(_DECK / "dadger.rv3"))
         id_map = DecompIdMap.from_dadger(dadger)
         calendar = operative_calendar_from_dadger(dadger)
-        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+        table = _resolved_bounds_frame(dadger, id_map, calendar)
 
         base = table[table["block_id"].isna()][
             ["thermal_id", "stage_id", "min_generation_mw", "max_generation_mw"]
@@ -199,13 +229,13 @@ class TestThermalFold:
 
         from cobre_bridge.decomp.id_map import DecompIdMap
         from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-        from cobre_bridge.decomp.thermal import _ct_dense, convert_thermal_bounds
+        from cobre_bridge.decomp.thermal import _ct_dense
 
         dadger = Dadger.read(str(_DECK / "dadger.rv3"))
         id_map = DecompIdMap.from_dadger(dadger)
         calendar = operative_calendar_from_dadger(dadger)
         plants = _ct_dense(dadger, calendar)
-        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+        table = _resolved_bounds_frame(dadger, id_map, calendar)
 
         overrides = table[table["block_id"].notna()]
         override_lookup = {
@@ -244,13 +274,13 @@ class TestThermalFold:
 
         from cobre_bridge.decomp.id_map import DecompIdMap
         from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-        from cobre_bridge.decomp.thermal import _ct_dense, convert_thermal_bounds
+        from cobre_bridge.decomp.thermal import _ct_dense
 
         dadger = Dadger.read(str(_DECK / "dadger.rv3"))
         id_map = DecompIdMap.from_dadger(dadger)
         calendar = operative_calendar_from_dadger(dadger)
         plants = _ct_dense(dadger, calendar)
-        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+        table = _resolved_bounds_frame(dadger, id_map, calendar)
 
         override_pairs = {
             (int(r.thermal_id), int(r.stage_id))
@@ -275,12 +305,11 @@ class TestThermalFold:
 
         from cobre_bridge.decomp.id_map import DecompIdMap
         from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-        from cobre_bridge.decomp.thermal import convert_thermal_bounds
 
         dadger = Dadger.read(str(_DECK / "dadger.rv3"))
         id_map = DecompIdMap.from_dadger(dadger)
         calendar = operative_calendar_from_dadger(dadger)
-        table = convert_thermal_bounds(dadger, id_map, calendar).to_pandas()
+        table = _resolved_bounds_frame(dadger, id_map, calendar)
 
         overrides = table[table["block_id"].notna()]
         assert len(overrides) > 0, "no override rows found; nothing to grade"

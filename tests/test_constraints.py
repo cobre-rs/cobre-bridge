@@ -23,6 +23,7 @@ from cobre_bridge.converters.constraints import (
 )
 from cobre_bridge.converters.network import C_M3S2HM3
 from cobre_bridge.converters.scalar_parameters import build_scalar_parameters
+from cobre_bridge.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 
@@ -572,6 +573,76 @@ class TestConvertElectricConstraints:
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
         assert convert_electric_constraints(case, id_map) is None
 
+    def test_two_sided_bound_yields_two_single_sided_f3_constraints(
+        self, tmp_path: Path
+    ) -> None:
+        """A constraint code with both a lower and upper limit produces two
+        F3 constraint objects sharing one expression/name (the reader's
+        ``lim_inf``/``lim_sup`` are independent declarations, not one band —
+        unlike the DECOMP ``_GenericBuilder``, which does collapse a genuine
+        band into one id). Each keeps today's row semantics: one endpoint
+        populated, the other null (AC1/AC2)."""
+        from unittest.mock import MagicMock
+
+        indices = tmp_path / "indices.csv"
+        indices.write_text(
+            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+            encoding="latin-1",
+        )
+        re_path = tmp_path / "restricao-eletrica.csv"
+        re_path.write_text(
+            "RE;1;1.0ger_usih(10)\n"
+            "RE-HORIZ-PER;1;2020/01;2020/12\n"
+            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+            encoding="latin-1",
+        )
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+
+        sistema = MagicMock()
+        sistema.limites_intercambio = None
+        sistema.custo_deficit = None
+
+        case = make_case(tmp_path, dger=dger, sistema=sistema, re_dat=None)
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+        result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        constraints, bounds = result
+        assert len(constraints) == 2
+        for c in constraints:
+            assert set(c) == {"id", "name", "description", "expression", "slack"}
+            assert c["name"] == "RE_1"
+
+        rows = bounds.to_pylist()
+        by_cid: dict[int, list[dict]] = {}
+        for row in rows:
+            by_cid.setdefault(row["constraint_id"], []).append(row)
+        assert len(by_cid) == 2
+
+        lower_rows = [
+            r for rs in by_cid.values() for r in rs if r["bound_lower"] is not None
+        ]
+        upper_rows = [
+            r for rs in by_cid.values() for r in rs if r["bound_upper"] is not None
+        ]
+        # Every row is single-sided: the opposite endpoint is null.
+        assert all(r["bound_upper"] is None for r in lower_rows)
+        assert all(r["bound_lower"] is None for r in upper_rows)
+        assert {r["bound_lower"] for r in lower_rows} == {50.0}
+        assert {r["bound_upper"] for r in upper_rows} == {200.0}
+        # The two ids partition the rows: the lower-only id never carries an
+        # upper-only row and vice versa.
+        lower_ids = {r["constraint_id"] for r in lower_rows}
+        upper_ids = {r["constraint_id"] for r in upper_rows}
+        assert lower_ids != upper_ids
+        assert lower_ids | upper_ids == set(by_cid)
+
 
 # ---------------------------------------------------------------------------
 # convert_agrint_constraints tests
@@ -657,8 +728,8 @@ class TestConvertAgrintConstraints:
         constraints, bounds_table = result
         assert len(constraints) == 2
 
-    def test_constraint_sense_is_lte(self, tmp_path: Path) -> None:
-        """All AGRINT constraints have sense '<='."""
+    def test_constraint_has_no_sense_key(self, tmp_path: Path) -> None:
+        """AGRINT constraint objects have exactly cobre's F3 sense-free keys."""
         agrint_path = tmp_path / "agrint.dat"
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
@@ -676,7 +747,7 @@ class TestConvertAgrintConstraints:
 
         assert result is not None
         for c in result[0]:
-            assert c["sense"] == "<="
+            assert set(c) == {"id", "name", "description", "expression", "slack"}
             assert c["slack"]["enabled"] is False
 
     def test_start_id_offset_applied(self, tmp_path: Path) -> None:
@@ -703,7 +774,7 @@ class TestConvertAgrintConstraints:
         assert ids_5 == [i + 5 for i in ids_0]
 
     def test_bounds_table_schema(self, tmp_path: Path) -> None:
-        """Bounds table has correct schema with block_id column."""
+        """Bounds table has the F3 schema (bound_lower/bound_upper, no bound)."""
         agrint_path = tmp_path / "agrint.dat"
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
@@ -722,12 +793,7 @@ class TestConvertAgrintConstraints:
         assert result is not None
         _, bounds_table = result
         assert isinstance(bounds_table, pa.Table)
-        assert set(bounds_table.schema.names) == {
-            "constraint_id",
-            "stage_id",
-            "block_id",
-            "bound",
-        }
+        assert set(bounds_table.schema.names) == set(GENERIC_BOUNDS_COLUMNS)
 
     def test_post_study_freezes_at_last_study_value(self, tmp_path: Path) -> None:
         """Post-study AGRINT limits freeze at the last study stage value and ignore
@@ -770,7 +836,13 @@ class TestConvertAgrintConstraints:
 
         assert result is not None
         _, bounds = result
-        b0 = bounds.to_pandas().query("block_id == 0").set_index("stage_id")["bound"]
+        # Every AGRINT constraint is a `<=` ceiling, so its value lives in
+        # `bound_upper`; `bound_lower` is always null.
+        b0 = (
+            bounds.to_pandas()
+            .query("block_id == 0")
+            .set_index("stage_id")["bound_upper"]
+        )
         # Study (0–11): 10000.
         assert b0[0] == 10000.0
         assert b0[11] == 10000.0

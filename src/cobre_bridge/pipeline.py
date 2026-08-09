@@ -28,6 +28,7 @@ from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import tailrace as tailrace_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
+from cobre_bridge.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
 from cobre_bridge.id_map import build_id_map
 
 logger = logging.getLogger(__name__)
@@ -674,18 +675,15 @@ def _convert_newave_case_impl(
     all_constraints: list[dict] = []
     bounds_tables: list[pa.Table] = []
 
-    # Canonical column order for the merged bounds table.
-    _BOUNDS_COLUMNS = ["constraint_id", "stage_id", "block_id", "bound"]
-
     if vminop_result is not None:
         all_constraints.extend(vminop_result.constraints_dict.get("constraints", []))
         # VminOP bounds table has no block_id column; add a null column and
-        # reorder to match the canonical schema.
+        # reorder to match the canonical F3 schema.
         vminop_bounds = vminop_result.bounds
         vminop_bounds_extended = vminop_bounds.append_column(
             pa.field("block_id", pa.int32()),
             pa.array([None] * len(vminop_bounds), type=pa.int32()),
-        ).select(_BOUNDS_COLUMNS)
+        ).select(GENERIC_BOUNDS_COLUMNS)
         bounds_tables.append(vminop_bounds_extended)
 
     if electric_result is not None:

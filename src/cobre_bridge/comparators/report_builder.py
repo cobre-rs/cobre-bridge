@@ -357,8 +357,10 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     # --- Constraints tab --- Per-constraint LHS comparison: The source-model-side LHS
     # evaluated against MEDIAS-USIH / int*.out output, Cobre-side LHS as the mean across
     # scenarios and blocks from the simulation parquet. Bounds are taken from
-    # constraints/generic_constraint_bounds.parquet (block 0 preferred when blocks
-    # disagree).
+    # constraints/generic_constraint_bounds.parquet's F3 sense-free `bound_lower`/
+    # `bound_upper` endpoints via `per_stage_bounds` (block 0 preferred when blocks
+    # disagree; the resolved `ResolvedBound.shape` — not a removed `sense` field —
+    # drives the chart's direction label, see `constraints_comparison_chart`).
     gc_constraints = cast(
         "list[dict[object, object]]", _meta_list(dataset.metadata, "gc_constraints")
     )

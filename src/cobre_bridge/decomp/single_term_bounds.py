@@ -16,6 +16,7 @@ dropping a bound.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
@@ -35,13 +36,57 @@ if TYPE_CHECKING:
 
 
 #: RHQ ``CQ.tipo`` flow -> cobre hydro bound axis, mirroring the reader's
-#: ``constraint_registers._BOUNDS_AXIS`` QDEF/QTUR entries. Keep the two
-#: mappings consistent for a *hydro* flow axis; a future hydro flow ``tipo``
-#: gaining a bound axis updates both. ``QBOM`` is the one asymmetry: it
-#: joined ``_BOUNDS_AXIS`` in M2 (ticket-020) but is a *pumping*-entity axis,
-#: not a hydro one, so it is dispatched to
+#: ``constraint_registers._BOUNDS_AXIS`` QDEF/QTUR/QDES/QVER entries. Keep the
+#: two mappings consistent for a *hydro* flow axis; a future hydro flow
+#: ``tipo`` gaining a bound axis updates both. ``QBOM`` is the one asymmetry:
+#: it joined ``_BOUNDS_AXIS`` in M2 (ticket-020) but is a *pumping*-entity
+#: axis, not a hydro one, so it is dispatched to
 #: :func:`_qbom_pumping_contributions` instead of living in this mapping.
-_HQ_AXIS_BY_VARIABLE: dict[str, str] = {"QDEF": "outflow", "QTUR": "turbined"}
+_HQ_AXIS_BY_VARIABLE: dict[str, str] = {
+    "QDEF": "outflow",
+    "QTUR": "turbined",
+    "QDES": "diversion",
+    "QVER": "spillage",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class HydroCapacities:
+    """One hydro's declared ``generation`` envelope from ``hydros.json``.
+
+    ``max_generation_mw``/``max_turbined_m3s`` are read the same way cobre
+    rule 43 (``emission_checks.check_hydro_bounds_no_raising``) reads
+    ``hydros.json``'s ``generation`` block — the exact scalars a single-term
+    bound's upper-bound clamp compares against on each of the two rule-43-
+    guarded axes.
+    """
+
+    max_generation_mw: float
+    max_turbined_m3s: float
+
+
+def _clamp_upper_to_capacity(
+    contributions: list[BoundContribution], cap: float
+) -> tuple[list[BoundContribution], list[float]]:
+    """Clamp every contribution's ``upper`` to *cap*, ``lower`` untouched.
+
+    Shared by the RE ``generation`` clamp and the HQ ``QTUR``/``turbined``
+    clamp — both guard a cobre rule-43 axis the same way: a contribution
+    whose upper is already at or below *cap* passes through unchanged;
+    one above it is replaced (:func:`dataclasses.replace`) with *cap*.
+    Returns the clamped contributions alongside the pre-clamp ceilings that
+    actually got lowered (empty when nothing needed clamping), so the caller
+    can decide whether to emit a diagnostic.
+    """
+    clamped: list[BoundContribution] = []
+    ceilings: list[float] = []
+    for contribution in contributions:
+        if contribution.upper is None or contribution.upper <= cap:
+            clamped.append(contribution)
+            continue
+        ceilings.append(contribution.upper)
+        clamped.append(dataclasses.replace(contribution, upper=cap))
+    return clamped, ceilings
 
 
 def _sided_bounds(
@@ -116,13 +161,60 @@ def _re_generation_contributions(
     record: ConstraintRecord,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    hydro_capacities: Mapping[int, HydroCapacities],
 ) -> list[BoundContribution]:
-    """One RE single-hydro-generation constraint -> hydro ``generation`` bounds."""
+    """One RE single-hydro-generation constraint -> hydro ``generation`` bounds.
+
+    The RE ceiling and the plant's own declared ``max_generation_mw`` (in
+    *hydro_capacities*, keyed the same way cobre rule 43 —
+    ``emission_checks.check_hydro_bounds_no_raising`` — reads it from
+    ``hydros.json``) are two independent sources that can disagree: on both
+    real decks probed (a monthly and a weekly deck), BELO MONTE carries an
+    RE ceiling of 11000 MW above its own declared, head-derated capacity.
+    cobre rule 43 rejects any bound-table upper above an entity's declared
+    capacity, so every contribution's ``upper`` is clamped
+    (:func:`_clamp_upper_to_capacity`) to ``min(ceiling, capacity)`` — the
+    declared capacity is authoritative, and a looser RE ceiling becomes
+    non-binding, LP-neutral. Only ``upper`` is clamped; ``lower`` passes
+    through unchanged (rule 43 only guards a raised ceiling). A
+    ``decomp-re-generation-clamped`` diagnostic is emitted once per record
+    whenever the clamp actually changes at least one contribution's upper —
+    a ceiling above capacity is a real cross-source inconsistency worth
+    surfacing, not silently absorbing.
+    """
     code = record.terms[0].code
     hydro_id = id_map.hydro_id(code)
-    return _per_block_contributions(
+    cap = hydro_capacities[hydro_id].max_generation_mw
+    contributions = _per_block_contributions(
         record, "hydro", hydro_id, "generation", f"RE_{record.constraint_id}", calendar
     )
+
+    clamped_contributions, clamp_ceilings = _clamp_upper_to_capacity(contributions, cap)
+
+    if clamp_ceilings:
+        emit(
+            Diagnostic(
+                code="decomp-re-generation-clamped",
+                severity=Severity.WARNING,
+                category="Special constraints",
+                title="RE generation ceiling clamped to declared capacity",
+                summary=(
+                    f"Hydro {hydro_id} (source code {code}) carries an RE "
+                    f"generation ceiling (constraint {record.constraint_id}) "
+                    f"of {max(clamp_ceilings)} MW across "
+                    f"{len(clamp_ceilings)} stage/block cell(s), above its "
+                    f"declared max_generation_mw of {cap} MW; the emitted "
+                    "upper bound is clamped down to the declared capacity."
+                ),
+                remediation=(
+                    "The RE ceiling is looser than the plant's declared "
+                    "capacity, so the clamp is LP-neutral. Reconcile the "
+                    "two sources (e.g. nameplate vs. head-derated capacity) "
+                    "if this mismatch is unexpected."
+                ),
+            )
+        )
+    return clamped_contributions
 
 
 def _ft_thermal_contributions(
@@ -135,6 +227,14 @@ def _ft_thermal_contributions(
     Mirrors :func:`_re_generation_contributions`, but the term's ``code`` is a
     thermal ``codigo_usina`` (an ``FT`` term), so it resolves via
     ``id_map.thermal_id`` rather than ``id_map.hydro_id``.
+
+    Unlike the hydro path, this does **not** clamp its ``upper`` to a
+    declared thermal capacity: both real decks probed (rv3 and
+    decomp-set-24-rv0) carry zero ``RE``->``thermal_generation`` records —
+    ``FT`` never appears as a single-term-bound RE term on either — so there
+    is no real ceiling-above-capacity case to clamp, and adding one here
+    would be speculative code with nothing to exercise it. Revisit if a
+    future deck is found to declare one.
     """
     thermal_id = id_map.thermal_id(record.terms[0].code)
     return _per_block_contributions(
@@ -151,19 +251,68 @@ def _hq_flow_contributions(
     record: ConstraintRecord,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    hydro_capacities: Mapping[int, HydroCapacities],
 ) -> list[BoundContribution]:
-    """One RHQ single-flow constraint -> hydro ``outflow``/``turbined`` bounds.
+    """One RHQ single-flow constraint -> a hydro flow-band bound.
 
-    ``QDEF`` lowers to ``outflow``, ``QTUR`` to ``turbined`` — a QDEF and a
-    QTUR constraint on the same plant land on different axes and both
-    survive (the accumulator keys on axis).
+    Routes by ``_HQ_AXIS_BY_VARIABLE[term.variable]``: ``QDEF`` lowers to
+    ``outflow``, ``QTUR`` to ``turbined``, ``QDES`` (diverted flow) to
+    ``diversion``, and ``QVER`` (spilled flow) to ``spillage`` — a family-
+    agnostic dict lookup, not a hardcoded branch, so a QDEF and a QDES
+    constraint (or any other pair of these four) on the same plant land on
+    different axes and both survive (the accumulator keys on axis).
+
+    ``QTUR``'s emitted ``turbined`` upper is clamped
+    (:func:`_clamp_upper_to_capacity`) to the plant's declared
+    ``max_turbined_m3s`` (in *hydro_capacities*) — mirroring
+    :func:`_re_generation_contributions`'s ``max_generation_mw`` clamp for
+    the identical reason: ``max_turbined_m3s`` is head-derated too, so a
+    source ceiling can exceed it just as an RE ceiling can exceed
+    ``max_generation_mw`` (rv3's hydro 17 sits 0.1% below its own declared
+    value — close enough that a slightly looser source ceiling would trip
+    cobre rule 43, which guards both columns). Only ``QTUR``/``turbined`` is
+    clamped: ``QDEF``/``QDES``/``QVER`` (outflow/diversion/spillage) are not
+    rule-43 axes, so they pass through :func:`_per_block_contributions`
+    unmodified. A ``decomp-qtur-turbined-clamped`` diagnostic is emitted
+    once per record whenever the clamp actually changes at least one
+    contribution's upper.
     """
     term = record.terms[0]
     axis = _HQ_AXIS_BY_VARIABLE[term.variable]
     hydro_id = id_map.hydro_id(term.code)
-    return _per_block_contributions(
+    contributions = _per_block_contributions(
         record, "hydro", hydro_id, axis, f"HQ_{record.constraint_id}", calendar
     )
+    if axis != "turbined":
+        return contributions
+
+    cap = hydro_capacities[hydro_id].max_turbined_m3s
+    clamped_contributions, clamp_ceilings = _clamp_upper_to_capacity(contributions, cap)
+
+    if clamp_ceilings:
+        emit(
+            Diagnostic(
+                code="decomp-qtur-turbined-clamped",
+                severity=Severity.WARNING,
+                category="Special constraints",
+                title="QTUR turbined ceiling clamped to declared capacity",
+                summary=(
+                    f"Hydro {hydro_id} (source code {term.code}) carries a "
+                    f"QTUR turbined ceiling (constraint {record.constraint_id}) "
+                    f"of {max(clamp_ceilings)} m3/s across "
+                    f"{len(clamp_ceilings)} stage/block cell(s), above its "
+                    f"declared max_turbined_m3s of {cap} m3/s; the emitted "
+                    "upper bound is clamped down to the declared capacity."
+                ),
+                remediation=(
+                    "The QTUR ceiling is looser than the plant's declared "
+                    "capacity, so the clamp is LP-neutral. Reconcile the "
+                    "two sources (e.g. nameplate vs. head-derated capacity) "
+                    "if this mismatch is unexpected."
+                ),
+            )
+        )
+    return clamped_contributions
 
 
 def _qbom_pumping_contributions(
@@ -290,6 +439,7 @@ def single_term_bound_contributions(
     pumping_station_ids: Mapping[int, int],
     calendar: Sequence[OperativeStage],
     effective: EffectiveCadastro,
+    hydro_capacities: Mapping[int, HydroCapacities],
 ) -> list[BoundContribution]:
     """Lower every ``census.to_bounds`` record to its entity bound contributions.
 
@@ -301,21 +451,31 @@ def single_term_bound_contributions(
     pumping ``flow`` bound via :func:`_qbom_pumping_contributions` (resolved
     through *pumping_station_ids*, never ``id_map.hydro_id`` — its ``code``
     is a pumping-station code, not a hydro one); everything else
-    (``QDEF``/``QTUR``) lowers to hydro ``outflow``/``turbined`` bounds via
+    (``QDEF``/``QTUR``/``QDES``/``QVER``) lowers to a hydro
+    ``outflow``/``turbined``/``diversion``/``spillage`` bound via
     :func:`_hq_flow_contributions`. ``"HV"`` lowers to hydro ``storage``
     bounds. Any other family raises ``ValueError`` naming it.
     *pumping_station_ids* feeds only the ``HQ`` ``QBOM`` path — required, not
     defaulted, so a forgotten wiring fails loud instead of silently dropping
     every QBOM bound; *effective* feeds only the ``HV`` handler's per-stage
-    floor and cadastro guard. Neither the RE path nor the ``QDEF``/``QTUR``
-    HQ path reads either.
+    floor and cadastro guard; *hydro_capacities* feeds the ``FU``/
+    ``generation`` RE path's ``max_generation_mw`` clamp (see
+    :func:`_re_generation_contributions`) and the ``HQ``/``QTUR``/
+    ``turbined`` path's ``max_turbined_m3s`` clamp (see
+    :func:`_hq_flow_contributions`) — both cobre rule-43-guarded axes, both
+    required-not-defaulted for the same fail-loud reason: a hydro id the map
+    does not cover is a wiring bug, not a data gap, so it raises ``KeyError``
+    rather than skipping the clamp. Neither the ``QDEF``/``QDES``/``QVER``
+    HQ paths nor the ``FT``/``thermal_generation`` RE path read it.
 
     Raises
     ------
     KeyError
         Propagated from ``id_map.hydro_id``/``id_map.thermal_id`` when an
         RE/HQ/HV term names a code the id map does not know (a real
-        reader/id-map mismatch).
+        reader/id-map mismatch), or from *hydro_capacities* when it has no
+        entry for a hydro id the id map just resolved (a wiring mismatch
+        between the two maps' sources).
     ValueError
         When a ``to_bounds`` record carries a family other than ``"RE"``/
         ``"HQ"``/``"HV"``, or an ``"RE"`` record whose single term's variable
@@ -327,7 +487,9 @@ def single_term_bound_contributions(
             variable = record.terms[0].variable
             if variable == "generation":
                 contributions.extend(
-                    _re_generation_contributions(record, id_map, calendar)
+                    _re_generation_contributions(
+                        record, id_map, calendar, hydro_capacities
+                    )
                 )
             elif variable == "thermal_generation":
                 contributions.extend(
@@ -344,7 +506,9 @@ def single_term_bound_contributions(
                     _qbom_pumping_contributions(record, pumping_station_ids, calendar)
                 )
             else:
-                contributions.extend(_hq_flow_contributions(record, id_map, calendar))
+                contributions.extend(
+                    _hq_flow_contributions(record, id_map, calendar, hydro_capacities)
+                )
         elif record.family == "HV":
             contributions.extend(
                 _hv_storage_contributions(record, id_map, calendar, effective)

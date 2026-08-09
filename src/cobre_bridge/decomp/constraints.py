@@ -6,8 +6,11 @@ special constraint into ones that lower to a plain entity bound
 an unbounded variable (spillage, diversion, pumping), a non-unit
 coefficient, or a whole-cascade energy sum — which needs cobre's
 **generic** constraint wire format instead: a flat ``expression`` string, a
-``sense``/``slack{enabled, penalty}`` pair, and a companion per-
-``(constraint_id, stage_id, block_id)`` bounds table.
+``slack{enabled, penalty}`` pair, and a companion per-
+``(constraint_id, stage_id, block_id)`` bounds table carrying cobre's F3
+sense-free interval endpoints (``bound_lower``/``bound_upper`` — see
+:mod:`cobre_bridge.generic_constraint_format`) instead of a ``sense``/
+``bound`` pair.
 
 This module stands up that shared scaffolding: the per-term expression-token
 dispatch (``_variable_token``), the ``FI``-interchange line resolver
@@ -55,6 +58,10 @@ from cobre_bridge.decomp.constraint_registers import StageBounds
 from cobre_bridge.decomp.hydro import _downstream_operated
 from cobre_bridge.decomp.scalar_parameters import rho_acum_name
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.generic_constraint_format import (
+    GENERIC_BOUNDS_COLUMNS,
+    sense_to_interval,
+)
 from cobre_bridge.productivity import stored_energy_productivity
 
 if TYPE_CHECKING:
@@ -74,26 +81,44 @@ class GenericConstraintResult(NamedTuple):
     """Result of a generic-constraint emitter.
 
     ``constraints`` is the list of constraint dicts (``{"id", "name",
-    "description", "expression", "sense", "slack"}``); ``bounds`` is the
+    "description", "expression", "slack"}`` — cobre's F3 sense-free shape,
+    see :mod:`cobre_bridge.generic_constraint_format`); ``bounds`` is the
     per-``(constraint_id, stage_id, block_id)`` bounds table honouring
-    :data:`_GENERIC_BOUNDS_SCHEMA`.
+    :data:`_GENERIC_BOUNDS_SCHEMA` (nullable ``bound_lower``/``bound_upper``
+    endpoints, no single ``bound``).
     """
 
     constraints: list[dict]
     bounds: pa.Table
 
 
-#: Schema for the generic-constraint bounds table. ``block_id`` is nullable:
-#: ``None`` means "all blocks" (a stage-level constraint, or a per-block one
-#: whose bound applies uniformly).
+#: Schema for the generic-constraint bounds table (F3 shape: see
+#: :data:`~cobre_bridge.generic_constraint_format.GENERIC_BOUNDS_COLUMNS`).
+#: ``block_id`` is nullable: ``None`` means "all blocks" (a stage-level
+#: constraint, or a per-block one whose bound applies uniformly).
+#: ``bound_lower``/``bound_upper`` are both nullable; the null-pattern
+#: encodes direction (lower-only, upper-only, or a genuine band with both
+#: populated) instead of a ``sense`` label.
 _GENERIC_BOUNDS_SCHEMA = pa.schema(
     [
         pa.field("constraint_id", pa.int32(), nullable=False),
         pa.field("stage_id", pa.int32(), nullable=False),
         pa.field("block_id", pa.int32(), nullable=True),
-        pa.field("bound", pa.float64(), nullable=False),
+        pa.field("bound_lower", pa.float64(), nullable=True),
+        pa.field("bound_upper", pa.float64(), nullable=True),
     ]
 )
+# Keep this schema's field names in lockstep with the shared F3 column list —
+# a silent drift here would desync this module from the shared mapping helper.
+# A plain `assert` is stripped under `python -O`, which would silently drop
+# this load-bearing drift guard, so it is an explicit raise instead.
+if _GENERIC_BOUNDS_SCHEMA.names != list(GENERIC_BOUNDS_COLUMNS):
+    raise RuntimeError(
+        "decomp/constraints.py: _GENERIC_BOUNDS_SCHEMA field names "
+        f"{_GENERIC_BOUNDS_SCHEMA.names!r} have drifted from the shared "
+        f"GENERIC_BOUNDS_COLUMNS {list(GENERIC_BOUNDS_COLUMNS)!r} — update "
+        "one to match the other."
+    )
 
 #: The unbounded sentinel, mirroring ``decomp/bounds_accumulator._UNBOUNDED``:
 #: a bound whose magnitude is at or past this value carries no real limit.
@@ -337,14 +362,38 @@ def _format_expression(terms: Sequence[tuple[float, str]]) -> str | None:
     return " ".join(parts)
 
 
+def _slot_endpoints(
+    lower: float | None, upper: float | None
+) -> tuple[float | None, float | None]:
+    """Resolve one (stage, block) slot's raw (lower, upper) to F3 endpoints.
+
+    Each bounded side is independent — this is not a single ``sense``, it is
+    the union of an optional ``">="`` floor and an optional ``"<="``
+    ceiling — so a genuinely two-sided slot keeps both endpoints. Each
+    bounded side is fed through :func:`sense_to_interval` for its own
+    direction, keeping only the half of that call's result the side
+    actually populates; an unbounded (``None``/``±1e21``) side stays
+    ``None``.
+    """
+    bound_lower: float | None = None
+    bound_upper: float | None = None
+    if lower is not None and _is_bounded(lower):
+        bound_lower = sense_to_interval(">=", lower)[0]
+    if upper is not None and _is_bounded(upper):
+        bound_upper = sense_to_interval("<=", upper)[1]
+    return bound_lower, bound_upper
+
+
 class _GenericBuilder:
     """Assembles two-sided generic constraints sharing one 0-based id space.
 
     ``start_id`` is the first id this builder assigns; later emitters thread
     a running ``start_id`` across every builder so ids never collide (E7).
-    Each :meth:`add_two_sided` call may append zero, one, or two constraint
-    dicts plus their companion bounds rows; :meth:`result` packages
-    everything added so far into a :class:`GenericConstraintResult`.
+    Each :meth:`add_two_sided` call appends zero or one constraint dict
+    (cobre's F3 interval carries both a limit's endpoints on a single
+    constraint, so a two-sided limit never needs two) plus that
+    constraint's companion bounds rows; :meth:`result` packages everything
+    added so far into a :class:`GenericConstraintResult`.
     """
 
     def __init__(self, start_id: int) -> None:
@@ -353,7 +402,8 @@ class _GenericBuilder:
         self._bound_cids: list[int] = []
         self._bound_stages: list[int] = []
         self._bound_blocks: list[int | None] = []
-        self._bound_values: list[float] = []
+        self._bound_lowers: list[float | None] = []
+        self._bound_uppers: list[float | None] = []
 
     def add_two_sided(
         self,
@@ -365,13 +415,20 @@ class _GenericBuilder:
         record: ConstraintRecord,
         calendar: Sequence[OperativeStage],
     ) -> None:
-        """Emit the ``<=``/``>=`` pair for a two-sided limit ``L <= expr <= U``.
+        """Emit one generic constraint for a two-sided limit ``L <= expr <= U``.
 
-        A ``sense="<="`` constraint is added iff *record* carries any bounded
-        upper limit; a separate ``sense=">="`` constraint is added iff it
-        carries any bounded lower limit. Both share *expression* — the
-        coefficient already lives there, so neither RHS is sign-flipped.
-        Adds nothing (not even an id) when neither side is ever bounded.
+        cobre's F3 interval model carries both endpoints on a single
+        constraint (nullable ``bound_lower``/``bound_upper``, direction
+        encoded by the null-pattern — see
+        :mod:`cobre_bridge.generic_constraint_format`), so a band no longer
+        needs the pre-F3 ``<=``/``>=`` id pair: one id, and one row per
+        bounded (stage, block) slot, always suffice. A slot bounded on only
+        one side resolves that side through
+        :func:`~cobre_bridge.generic_constraint_format.sense_to_interval`
+        (the single direction is already known); a slot bounded on both
+        sides is a genuine band and keeps both endpoints on that same row.
+        Adds nothing (not even an id) when no slot is ever bounded on
+        either side.
 
         For a per-block record, bound rows are emitted for
         ``range(min(len(stage_bounds.lower), len(calendar[stage].block_hours)))``
@@ -382,7 +439,7 @@ class _GenericBuilder:
         """
         # Enumerate the exact (stage, block) slots that will carry a bound row —
         # per-block slots clamped to each stage's real block count, or one
-        # stage-level slot (block_id=None). The header (<=/>=) decision below
+        # stage-level slot (block_id=None). The "any slot bounded" check below
         # MUST be taken over these SAME clamped slots as the row emission: a
         # bounded slot beyond the block count is dropped, so scanning the raw
         # (up-to-5-wide) StageBounds would append a constraint dict with no
@@ -402,71 +459,29 @@ class _GenericBuilder:
                     (stage_index, None, stage_bounds.lower[0], stage_bounds.upper[0])
                 )
 
-        any_upper = any(_is_bounded(u) for _, _, _, u in slots)
-        any_lower = any(_is_bounded(lo) for _, _, lo, _ in slots)
-        if not any_upper and not any_lower:
+        bounded_slots = [
+            slot for slot in slots if _is_bounded(slot[2]) or _is_bounded(slot[3])
+        ]
+        if not bounded_slots:
             return
 
-        slack = {"enabled": True, "penalty": big_m}
-        upper_id: int | None = None
-        lower_id: int | None = None
-
-        if any_upper:
-            upper_id = self._start_id + len(self._constraints)
-            self._constraints.append(
-                {
-                    "id": upper_id,
-                    "name": name,
-                    "description": description,
-                    "expression": expression,
-                    "sense": "<=",
-                    "slack": slack,
-                }
-            )
-        if any_lower:
-            lower_id = self._start_id + len(self._constraints)
-            self._constraints.append(
-                {
-                    "id": lower_id,
-                    "name": name,
-                    "description": description,
-                    "expression": expression,
-                    "sense": ">=",
-                    "slack": slack,
-                }
-            )
-
-        for stage_index, block_id, lower, upper in slots:
-            self._add_bound_rows(
-                upper_id=upper_id,
-                lower_id=lower_id,
-                stage_id=stage_index,
-                block_id=block_id,
-                lower=lower,
-                upper=upper,
-            )
-
-    def _add_bound_rows(
-        self,
-        *,
-        upper_id: int | None,
-        lower_id: int | None,
-        stage_id: int,
-        block_id: int | None,
-        lower: float | None,
-        upper: float | None,
-    ) -> None:
-        """Append one bounds row per bounded side that has a matching id."""
-        if upper_id is not None and upper is not None and _is_bounded(upper):
-            self._bound_cids.append(upper_id)
-            self._bound_stages.append(stage_id)
+        constraint_id = self._start_id + len(self._constraints)
+        self._constraints.append(
+            {
+                "id": constraint_id,
+                "name": name,
+                "description": description,
+                "expression": expression,
+                "slack": {"enabled": True, "penalty": big_m},
+            }
+        )
+        for stage_index, block_id, lower, upper in bounded_slots:
+            bound_lower, bound_upper = _slot_endpoints(lower, upper)
+            self._bound_cids.append(constraint_id)
+            self._bound_stages.append(stage_index)
             self._bound_blocks.append(block_id)
-            self._bound_values.append(upper)
-        if lower_id is not None and lower is not None and _is_bounded(lower):
-            self._bound_cids.append(lower_id)
-            self._bound_stages.append(stage_id)
-            self._bound_blocks.append(block_id)
-            self._bound_values.append(lower)
+            self._bound_lowers.append(bound_lower)
+            self._bound_uppers.append(bound_upper)
 
     def result(self) -> GenericConstraintResult | None:
         """Package everything added so far, or ``None`` if nothing was added."""
@@ -477,7 +492,8 @@ class _GenericBuilder:
                 "constraint_id": pa.array(self._bound_cids, type=pa.int32()),
                 "stage_id": pa.array(self._bound_stages, type=pa.int32()),
                 "block_id": pa.array(self._bound_blocks, type=pa.int32()),
-                "bound": pa.array(self._bound_values, type=pa.float64()),
+                "bound_lower": pa.array(self._bound_lowers, type=pa.float64()),
+                "bound_upper": pa.array(self._bound_uppers, type=pa.float64()),
             },
             schema=_GENERIC_BOUNDS_SCHEMA,
         )

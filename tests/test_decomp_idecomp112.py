@@ -209,26 +209,23 @@ class TestConvertHydroBounds:
 
     def test_rq_percentages_and_uh_priority(self) -> None:
         calendar = _calendar()
-        table = convert_hydro_bounds(
+        contributions = convert_hydro_bounds(
             self._dadger(), _ID_MAP, calendar, self._effective(calendar)
-        ).to_pandas()
-        # Base row only (block_id = None) — the backward-compatible
-        # hours-weighted per-stage value; the RQ percentages (100, 100, 0)
-        # are non-uniform, so per-block override rows are also emitted
-        # (covered by tests/test_decomp_rq_bounds.py).
-        plant1 = table[(table["hydro_id"] == 0) & (table["block_id"].isna())].set_index(
-            "stage_id"
         )
-        # Weekly stages: (100·15 + 100·64 + 0·89)/168 = 47.02 % of 40 m³/s.
-        weekly_pct = (100.0 * 15 + 100.0 * 64) / 168.0
-        assert plant1.loc[0, "min_outflow_m3s"] == pytest.approx(
-            weekly_pct / 100.0 * 40.0
-        )
+        # The RQ percentages (100, 100, 0) are non-uniform on every stage, so
+        # plant 1 contributes per-block only (block_id = 0..2), no base
+        # contribution (covered in depth by tests/test_decomp_rq_bounds.py).
+        plant1_stage0 = {
+            c.block_id: c.lower
+            for c in contributions
+            if c.entity_id == 0 and c.stage_id == 0
+        }
+        assert plant1_stage0 == {0: 40.0, 1: 40.0, 2: 0.0}
         # UH-declared value has priority, fixed for all stages.
-        plant2 = table[table["hydro_id"] == 1]
-        assert set(plant2["min_outflow_m3s"]) == {25.0}
-        # REE 2 has no RQ record: no rows for plant 5.
-        assert 2 not in set(table["hydro_id"])
+        plant2 = [c.lower for c in contributions if c.entity_id == 1]
+        assert set(plant2) == {25.0}
+        # REE 2 has no RQ record: no contributions for plant 5.
+        assert 2 not in {c.entity_id for c in contributions}
 
     def test_ac_vazmin_override_applies(self) -> None:
         calendar = _calendar()
@@ -236,13 +233,19 @@ class TestConvertHydroBounds:
             calendar,
             stage_varying={(1, "vazao_minima_historica"): (0.0,) * len(calendar)},
         )
-        table = convert_hydro_bounds(
+        contributions = convert_hydro_bounds(
             self._dadger(), _ID_MAP, calendar, effective
-        ).to_pandas()
-        # Plant 1's historical minimum overridden to zero: no rows.
-        assert 0 not in set(table["hydro_id"])
+        )
+        # Plant 1's historical minimum overridden to zero: no contributions.
+        assert 0 not in {c.entity_id for c in contributions}
 
-    def test_qdef_plants_skipped(self) -> None:
+    def test_qdef_windowed_plant_still_contributes_its_rq_default(self) -> None:
+        """Retired (ticket-023, epic-07): ``convert_hydro_bounds`` no longer
+        skips a plant with an explicit ``QDEF`` flow window — that window's
+        own ``outflow`` contribution now comes from
+        ``single_term_bounds.single_term_bound_contributions`` (RHQ), and the
+        accumulator intersects the two on the same ``(hydro, stage, block)``
+        cell rather than one replacing the other (AC7)."""
         cq = pd.DataFrame(
             [
                 {
@@ -255,10 +258,10 @@ class TestConvertHydroBounds:
             ]
         )
         calendar = _calendar()
-        table = convert_hydro_bounds(
+        contributions = convert_hydro_bounds(
             self._dadger(cq=cq), _ID_MAP, calendar, self._effective(calendar)
-        ).to_pandas()
-        assert 0 not in set(table["hydro_id"])
+        )
+        assert 0 in {c.entity_id for c in contributions}
 
 
 class TestRenovaveis:
