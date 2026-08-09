@@ -39,6 +39,7 @@ from cobre_bridge.verdict import (
     compare_summary,
     convert_summary,
     dashboard_summary,
+    decomp_compare_summary,
 )
 
 if TYPE_CHECKING:
@@ -1408,14 +1409,14 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
         raise typer.Exit(code=2) from exc
 
     if args.json_output:
-        payload = {
-            "schema_version": 1,
-            "command": "compare decomp",
-            "stages": comparison.stage_count,
-            "summary": comparison.summary.to_dicts(),
-            "unmapped": comparison.unmapped,
-        }
-        print(json.dumps(payload, indent=2, default=float))
+        status = "ok" if not comparison.rows.is_empty() else "no-comparable-rows"
+        _emit_convert_json(
+            build_verdict(
+                "compare decomp",
+                status,
+                decomp_compare_summary(comparison),
+            )
+        )
         return
 
     render_decomp_comparison(comparison)

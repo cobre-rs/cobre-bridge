@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from cobre_bridge.comparators.decomp_results import DecompComparison
     from cobre_bridge.comparators.verdict import CompareVerdict
     from cobre_bridge.diagnostics import Diagnostic
 
@@ -138,6 +139,26 @@ def compare_summary(verdict: CompareVerdict) -> dict[str, object]:
         "worst_variable": None if all_within_tol else verdict.worst_variable,
         "worst_smape": 0.0 if all_within_tol else verdict.worst_smape,
         "all_within_tol": all_within_tol,
+    }
+
+
+def decomp_compare_summary(comparison: DecompComparison) -> dict[str, object]:
+    """The ``compare decomp`` command's ``summary`` block — per-variable rows.
+
+    Returns ``{"stages", "variables", "unmapped"}`` in that order. ``stages`` is
+    :attr:`DecompComparison.stage_count`; ``variables`` is
+    ``comparison.summary.to_dicts()`` verbatim — polars' ``to_dicts()`` already
+    yields JSON-native ``int``/``float``/``str``/``None`` cells, so the rows are
+    passed through unchanged; ``unmapped`` mirrors
+    :attr:`DecompComparison.unmapped` with every entity id coerced to ``int``.
+    """
+    return {
+        "stages": int(comparison.stage_count),
+        "variables": comparison.summary.to_dicts(),
+        "unmapped": {
+            level: [int(code) for code in codes]
+            for level, codes in comparison.unmapped.items()
+        },
     }
 
 

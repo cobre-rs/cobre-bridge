@@ -206,14 +206,19 @@ class TestCompareDecompCommand:
     """The ``compare decomp`` subcommand, with the comparison itself stubbed."""
 
     @staticmethod
-    def _invoke(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> Any:
+    def _invoke(
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+        comparison: DecompComparison | None = None,
+    ) -> Any:
         from typer.testing import CliRunner
 
         from cobre_bridge.cli import app
 
+        resolved = comparison if comparison is not None else _fake_comparison()
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.compare_decomp_results",
-            lambda *_args, **_kwargs: _fake_comparison(),
+            lambda *_args, **_kwargs: resolved,
         )
         return CliRunner().invoke(app, argv)
 
@@ -235,10 +240,40 @@ class TestCompareDecompCommand:
         )
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
+        assert list(payload.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
         assert payload["command"] == "compare decomp"
-        assert payload["stages"] == 1
-        assert {row["level"] for row in payload["summary"]} == {"hydro", "thermal"}
-        assert payload["unmapped"]["thermal"] == [86, 224]
+        assert payload["status"] == "ok"
+        summary = payload["summary"]
+        assert list(summary.keys()) == ["stages", "variables", "unmapped"]
+        assert summary["stages"] == 1
+        assert {row["level"] for row in summary["variables"]} == {"hydro", "thermal"}
+        assert summary["unmapped"]["thermal"] == [86, 224]
+
+    def test_json_reports_no_comparable_rows_when_comparison_is_empty(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        empty_rows = _fake_comparison().rows.clear()
+        empty_comparison = DecompComparison(
+            rows=empty_rows,
+            summary=_summarize(empty_rows),
+            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
+            unmapped={"hydro": [], "thermal": [], "bus": []},
+        )
+        result = self._invoke(
+            ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"],
+            monkeypatch,
+            comparison=empty_comparison,
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "no-comparable-rows"
+        assert payload["summary"]["variables"] == []
 
     def test_unreadable_output_exits_two(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
