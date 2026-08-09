@@ -597,14 +597,13 @@ class TestConverterEmitsAvailability:
         # cross-source data mismatch cobre rule 43 now correctly catches for
         # the first time (real-deck remediation is ticket-026's territory),
         # unrelated to this test's own concern (the availability diagnostic).
-        with (
-            patch.object(emission_checks, "check_hydro_bounds_no_raising"),
-            dx.collect() as diagnostics,
-        ):
-            convert_decomp_case(_DECK, tmp_path / "out", force=True)
+        with patch.object(emission_checks, "check_hydro_bounds_no_raising"):
+            report = convert_decomp_case(_DECK, tmp_path / "out", force=True)
 
         found = [
-            d for d in diagnostics if d.code == "hydro-availability-hydraulic-cap-binds"
+            d
+            for d in report.diagnostics
+            if d.code == "hydro-availability-hydraulic-cap-binds"
         ]
         assert len(found) == 1
         diagnostic = found[0]

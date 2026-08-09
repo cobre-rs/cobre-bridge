@@ -2051,6 +2051,248 @@ class TestCliInProcess:
         assert "external-solver interoperability" in stderr
         assert "Validation warning:" in stderr
 
+    def test_convert_decomp_success_shows_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful ``convert decomp`` prints the ``✓ Converted ...`` summary."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "✓ Converted 3 hydros" in stdout
+
+    def test_convert_decomp_warning_diagnostic_renders_rollup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``WARNING`` diagnostic on the report renders the notes roll-up + title."""
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        warning = Diagnostic(
+            code="decomp-some-warning",
+            severity=Severity.WARNING,
+            category="Conversion",
+            title="A DECOMP warning",
+            summary="heads up",
+        )
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            diagnostics=[warning],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "Conversion notes:" in stderr
+        assert "A DECOMP warning" in stderr
+
+    def test_convert_decomp_json_success_emits_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``convert decomp --json`` emits the unified verdict envelope."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["command"] == "convert decomp"
+        assert doc["status"] == "ok"
+        assert set(doc["summary"]) >= {"hydros", "thermals", "buses", "lines", "stages"}
+
+    def test_convert_decomp_json_failure_emits_error_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A conversion failure under ``--json`` emits ``status == "error"``; exit 1."""
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            side_effect=ValueError("bad"),
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        doc = json.loads(stdout)
+        assert doc["status"] == "error"
+
+    def test_convert_decomp_diagnostics_json_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--diagnostics-json`` writes the report-shaped sidecar (summary + findings)."""
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            diagnostics=[
+                Diagnostic(
+                    code="decomp-some-warning",
+                    severity=Severity.WARNING,
+                    category="Conversion",
+                    title="A DECOMP warning",
+                    summary="heads up",
+                )
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--diagnostics-json",
+                    str(json_path),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert json_path.exists()
+        payload = json.loads(json_path.read_text())
+        assert set(payload) == {"summary", "diagnostics"}
+        assert payload["summary"]["hydros"] == 3
+        assert [d["code"] for d in payload["diagnostics"]] == ["decomp-some-warning"]
+
+    def test_convert_decomp_diagnostics_json_coexists_with_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sidecar and ``--json`` are independent: stdout verdict AND file written."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--diagnostics-json",
+                    str(json_path),
+                    "--json",
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        # stdout is exactly the unified verdict object …
+        doc = json.loads(stdout)
+        assert doc["command"] == "convert decomp"
+        # … and the sidecar was written all the same.
+        assert json_path.exists()
+        assert set(json.loads(json_path.read_text())) == {"summary", "diagnostics"}
+
+    def test_convert_decomp_no_diagnostics_json_writes_no_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Absent the flag, no sidecar file is created."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert not json_path.exists()
+
     def test_convert_decomp_validate_whitelists_interop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

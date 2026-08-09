@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,8 +49,25 @@ from cobre_bridge.decomp.scalar_parameters import (
     build_decomp_scalar_parameters,
     write_scalar_parameters,
 )
+from cobre_bridge.pipeline import (
+    ConversionReport,
+    _finalize_diagnostics,
+    _WarningCollector,
+)
 
 _LOG = logging.getLogger(__name__)
+
+#: Coarse conversion phases reported to an optional ``on_phase`` callback (drives the
+#: CLI progress bar). The order matches the boundaries in
+#: :func:`_convert_decomp_case_impl`; the count is the progress-bar total.
+DECOMP_CONVERSION_PHASE_LABELS: tuple[str, ...] = (
+    "Discovering deck",
+    "Converting entities",
+    "Converting scenarios",
+    "Resolving bounds",
+    "Converting constraints",
+    "Writing outputs",
+)
 
 #: Same logger name ``emission_checks`` itself logs to when no diagnostics
 #: sink is active — used to re-emit each collected finding below so a
@@ -319,8 +337,28 @@ def _diversion_channels(
     return channels, unresolved
 
 
-def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
+def convert_decomp_case(
+    src: Path,
+    dst: Path,
+    *,
+    force: bool = False,
+    on_phase: Callable[[str], None] | None = None,
+) -> ConversionReport:
     """Convert one deck revision into a Cobre case directory.
+
+    Mirrors the NEWAVE twin ``convert_newave_case``'s return contract: wraps
+    the conversion in a top-level :func:`cobre_bridge.diagnostics.collect`
+    sink and a package-logger ``_WarningCollector`` so every structured
+    ``dx.emit`` finding *and* every residual ``logger.warning`` string is
+    captured, then returns them as one de-duplicated
+    :class:`~cobre_bridge.pipeline.ConversionReport`.
+
+    Returns
+    -------
+    ConversionReport
+        Summary of what was converted: the five entity/stage counts, a
+        ``diagnostics`` list of every structured finding, and a ``warnings``
+        list of the WARNING-severity summaries.
 
     Raises
     ------
@@ -329,11 +367,48 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         the ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
         find an ``ERROR``-severity violation in the converted artifacts. An
         ``INFO`` finding (e.g. rule 43's "not applicable" report, emitted when
-        no hydro-bounds capacity column is populated) never raises.
+        no hydro-bounds capacity column is populated) never raises. No report
+        is returned on this path.
     """
+    collector = _WarningCollector()
+    pkg_logger = logging.getLogger("cobre_bridge")
+    pkg_logger.addHandler(collector)
+    try:
+        # Structured diagnostics emitted by converters (and the inner
+        # emission-self-check re-emit loop below) land in ``collected``; any
+        # remaining ``logger.warning`` strings (the deferral warning, the
+        # topology non-itemized warning) are picked up by ``collector`` and
+        # bridged below, so every warning still surfaces.
+        with dx.collect() as collected:
+            report = _convert_decomp_case_impl(src, dst, force=force, on_phase=on_phase)
+    finally:
+        pkg_logger.removeHandler(collector)
+    report.diagnostics = _finalize_diagnostics(collected, collector.messages)
+    # Backward-compatible flat WARNING strings derived from the diagnostics.
+    report.warnings = [
+        d.summary for d in report.diagnostics if d.severity is dx.Severity.WARNING
+    ]
+    return report
+
+
+def _convert_decomp_case_impl(
+    src: Path,
+    dst: Path,
+    *,
+    force: bool = False,
+    on_phase: Callable[[str], None] | None = None,
+) -> ConversionReport:
+    """Run the DECOMP conversion pipeline (warning capture handled by the wrapper).
+
+    ``on_phase`` (when given) is called once at each boundary in
+    :data:`DECOMP_CONVERSION_PHASE_LABELS`, so the CLI can advance a progress bar
+    without the pipeline knowing anything about rendering.
+    """
+    step = on_phase if on_phase is not None else (lambda _label: None)
     if dst.exists() and any(dst.iterdir()) and not force:
         raise FileExistsError(f"{dst} already contains files; pass force to overwrite")
 
+    step("Discovering deck")
     files = discover_decomp_files(src)
     _LOG.info("converting %s (revision %s)", src, files.revision)
 
@@ -391,6 +466,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
 
     dst.mkdir(parents=True, exist_ok=True)
 
+    step("Converting entities")
     _write_json(
         dst / "config.json",
         config_conv.convert_config(dadger, len(fan_probabilities)),
@@ -421,9 +497,8 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     )
 
     system = dst / "system"
-    _write_json(
-        system / "buses.json", network_conv.convert_buses(dadger, id_map, start_date)
-    )
+    buses_doc = network_conv.convert_buses(dadger, id_map, start_date)
+    _write_json(system / "buses.json", buses_doc)
     hydros_dict = hydro_conv.convert_hydros(dadger, hidr, id_map, start_date, effective)
     # hydros.json is written after the bound tables are resolved (below): a
     # plant carrying a positive QDES diversion floor (min_diversion_m3s > 0)
@@ -450,6 +525,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     )
     _write_json(system / "non_controllable_sources.json", ncs_registry)
 
+    step("Converting scenarios")
     scenarios = dst / "scenarios"
     _write_parquet(
         scenarios / "inflow_seasonal_stats.parquet",
@@ -517,6 +593,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     # two-rows-same-column parquet cobre rejects. read_constraints/
     # pumping_station_id_map are read once here and reused by ticket-023b
     # (generic constraints).
+    step("Resolving bounds")
     census = constraint_registers.read_constraints(dadger)
     pumping_ids = network_conv.pumping_station_id_map(dadger)
     thermal_generation_contribs, thermal_cost_table = (
@@ -602,6 +679,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     # group's own declared envelope — so cobre rule 45 (a group-bound max_*
     # may not exceed that group's declared max) is now reachable; its mirror
     # is wired into the self-check block below.
+    step("Converting constraints")
     availability_values, availability_deltas = (
         hydro_conv.convert_hydro_group_availability(
             dadger, hidr, id_map, calendar, effective
@@ -684,17 +762,14 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     # reports "not applicable" when no capacity column is populated at all.
     # See cobre_bridge.emission_checks for the rule scope.
     #
-    # Unlike the NEWAVE pipeline (whose caller, convert_newave_case, opens one
-    # dx.collect() around the whole conversion and returns every diagnostic on
-    # the ConversionReport for the CLI to render and gate on), this simpler
-    # DECOMP entry point has no report object a caller could inspect
-    # afterwards — so an ERROR-severity finding here must fail the conversion
-    # outright rather than degrade to a log line a caller could easily miss.
-    # The local dx.collect() only exists so this function can inspect
-    # severity; every collected finding is then re-emitted via dx.emit() so a
-    # caller that already has its own sink open (e.g. a test wrapping this
-    # call in dx.collect()) still observes it exactly as it would have
-    # without this wiring, and a standalone call still logs it.
+    # An ERROR-severity finding mirrors a cobre load invariant the converted
+    # case would fail, so it fails the conversion outright (the raise below)
+    # rather than surfacing only as a diagnostic on the returned report. The
+    # local dx.collect() exists so this function can inspect severity; every
+    # collected finding is then re-emitted via dx.emit() so the wrapper's
+    # outer sink (and thus the returned ConversionReport) still records it,
+    # and a standalone call with no sink still logs it.
+    step("Writing outputs")
     bound_families = [
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds),
         emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
@@ -835,4 +910,12 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         len(id_map.thermal_codes),
         len(calendar),
         len(fan_probabilities),
+    )
+
+    return ConversionReport(
+        hydro_count=len(hydros_dict["hydros"]),
+        thermal_count=len(thermals_dict["thermals"]),
+        bus_count=len(buses_doc["buses"]),
+        line_count=len(lines_doc["lines"]),
+        stage_count=len(calendar),
     )

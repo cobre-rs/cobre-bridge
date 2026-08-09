@@ -1295,11 +1295,19 @@ _DECOMP_VALIDATION_WHITELIST: tuple[str, ...] = ("external-solver interoperabili
 
 
 def _run_decomp_conversion(args: SimpleNamespace) -> None:
-    """Execute the convert decomp subcommand; ``ValueError`` also covers an
-    ERROR-severity post-emission self-check finding (cobre 0.13 rules
-    43/41/36/block_id-range) — ``convert_decomp_case`` raises it with a
-    message naming the failing rule(s) and entities, already mapped to
-    exit 1 by this except tuple with no dedicated branch needed.
+    """Execute the convert decomp subcommand.
+
+    Structurally mirrors ``_run_newave_conversion``, minus the dry-run and
+    provenance-manifest blocks (out of scope for this ticket; see
+    epic-03/ticket-006): a TTY phase bar over the DECOMP phases, the
+    ``✓ Converted …`` summary, grouped diagnostic panels, and a unified
+    ``--json`` verdict.
+
+    A broad ``except Exception`` (rather than a fixed exception tuple) also
+    covers an ERROR-severity post-emission self-check finding (cobre rules
+    43/41/45/38/36 + the block_id-range rule) — ``convert_decomp_case`` raises a
+    ``ValueError`` naming the failing rule(s) and entities, mapped to exit 1
+    like every other conversion failure.
 
     ``--validate`` runs after a successful conversion via the shared
     ``_run_cobre_validation`` helper (mirroring ``convert newave``), with the
@@ -1308,26 +1316,72 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     validation exits 2, giving ``convert decomp`` the same 0/1/2 exit-code
     set as ``convert newave``.
     """
-    from cobre_bridge.decomp.pipeline import convert_decomp_case
+    from cobre_bridge.decomp.pipeline import (
+        DECOMP_CONVERSION_PHASE_LABELS,
+        convert_decomp_case,
+    )
+
+    out_console = get_console(no_color=args.no_color)
+    err_console = get_console(stderr=True, no_color=args.no_color)
 
     try:
-        convert_decomp_case(args.src, args.dst, force=args.force)
-    except (FileNotFoundError, FileExistsError, ValueError) as exc:
-        logging.getLogger("cobre_bridge.cli").error("DECOMP conversion failed: %s", exc)
-        raise typer.Exit(code=1) from exc
+        with conversion_progress(
+            len(DECOMP_CONVERSION_PHASE_LABELS),
+            verbose=args.verbose > 0,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ) as step:
+            report: ConversionReport = convert_decomp_case(
+                args.src, args.dst, force=args.force, on_phase=step
+            )
+    except Exception as exc:  # noqa: BLE001
+        diag = diagnostic_from_exception(exc, context="Conversion")
+        if args.json_output:
+            _emit_convert_json(
+                build_verdict(
+                    "convert decomp",
+                    _convert_status([diag], success="ok"),
+                    _convert_verdict_summary(None),
+                    [diag],
+                )
+            )
+        else:
+            render_diagnostics([diag], console=err_console, quiet=args.quiet)
+        raise typer.Exit(code=1)
 
-    if not args.validate:
-        return
+    # Build the convert ``summary`` + ``status`` up front; ``--validate`` may
+    # later append a ``summary["validation"]`` sub-object (under --json), and the
+    # verdict is emitted to stdout only after validation has run so that block is
+    # populated. ``status`` is diagnostics-only and is NOT touched by validation.
+    summary = _convert_verdict_summary(report)
+    status = _convert_status(report.diagnostics, success="ok")
 
-    err_console = get_console(stderr=True, no_color=args.no_color)
-    validation_failed = _run_cobre_validation(
-        args.dst,
-        command="convert decomp",
-        summary={},
-        json_output=False,
-        err_console=err_console,
-        whitelist_substrings=_DECOMP_VALIDATION_WHITELIST,
-    )
+    if not args.json_output:
+        if not args.quiet:
+            render_conversion_summary(report, console=out_console)
+        render_diagnostics(report.diagnostics, console=err_console, quiet=args.quiet)
+
+    if args.diagnostics_json is not None:
+        # The --diagnostics-json sidecar coexists with --json (both can be set).
+        _write_diagnostics_json(report, args.diagnostics_json, console=err_console)
+
+    validation_failed = False
+    if args.validate:
+        validation_failed = _run_cobre_validation(
+            args.dst,
+            command="convert decomp",
+            summary=summary,
+            json_output=args.json_output,
+            err_console=err_console,
+            whitelist_substrings=_DECOMP_VALIDATION_WHITELIST,
+        )
+
+    # Emit the --json verdict now (after validation has populated ``summary``).
+    if args.json_output:
+        _emit_convert_json(
+            build_verdict("convert decomp", status, summary, report.diagnostics)
+        )
+
     if validation_failed:
         raise typer.Exit(code=2)
 
@@ -1352,6 +1406,24 @@ def _convert_decomp(
             help="After conversion, validate the output with the cobre package.",
         ),
     ] = False,
+    diagnostics_json: Annotated[
+        Path | None,
+        typer.Option(
+            "--diagnostics-json",
+            metavar="PATH",
+            help="Also write the conversion diagnostics (counts + findings) as JSON.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit a single machine-readable JSON verdict to stdout and "
+                "suppress the human (Rich) rendering."
+            ),
+        ),
+    ] = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1369,6 +1441,8 @@ def _convert_decomp(
             dst=dst,
             force=force,
             validate=validate,
+            diagnostics_json=diagnostics_json,
+            json_output=json_output,
             verbose=verbose,
             log_file=log_file,
             no_color=no_color,

@@ -38,6 +38,7 @@ from cobre_bridge.decomp.scenarios import (
 )
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
+from cobre_bridge.diagnostics import Diagnostic
 
 _RV3_DECK = Path("example/decomp-jul-26-rv3")
 
@@ -296,6 +297,54 @@ class TestPipeline:
             convert_decomp_case(tmp_path, tmp_path / "out")
 
 
+class TestPhaseLabels:
+    """ticket-004 (epic-02): ``DECOMP_CONVERSION_PHASE_LABELS`` + the
+    ``on_phase`` progress callback, mirroring the source model's own
+    ``CONVERSION_PHASE_LABELS``/``on_phase`` wiring."""
+
+    def test_decomp_conversion_phase_labels_is_the_expected_tuple(self) -> None:
+        from cobre_bridge.decomp.pipeline import DECOMP_CONVERSION_PHASE_LABELS
+
+        assert DECOMP_CONVERSION_PHASE_LABELS == (
+            "Discovering deck",
+            "Converting entities",
+            "Converting scenarios",
+            "Resolving bounds",
+            "Converting constraints",
+            "Writing outputs",
+        )
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_rv3_on_phase_callback_receives_every_label_once_in_order(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import (
+            DECOMP_CONVERSION_PHASE_LABELS,
+            convert_decomp_case,
+        )
+
+        labels: list[str] = []
+        dst = tmp_path / "case"
+        convert_decomp_case(_RV3_DECK, dst, on_phase=labels.append)
+
+        assert labels == list(DECOMP_CONVERSION_PHASE_LABELS)
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_rv3_no_on_phase_still_returns_a_report_without_raising(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import ConversionReport, convert_decomp_case
+
+        dst = tmp_path / "case"
+        report = convert_decomp_case(_RV3_DECK, dst)
+
+        assert isinstance(report, ConversionReport)
+
+
 class TestEmissionCheckWiring:
     """The post-emission self-checks (ticket-016, epic-04) run inside
     ``convert_decomp_case``, before the constraint writes."""
@@ -317,13 +366,30 @@ class TestEmissionCheckWiring:
         row down to the declared capacity, so ``convert_decomp_case`` no
         longer raises the rule-43 ``hydro-bounds-raises-declared-capacity``
         error on it, and a ``decomp-re-generation-clamped`` diagnostic
-        records the clamp instead."""
+        records the clamp instead.
+
+        ticket-003: ``convert_decomp_case`` now owns its own ``dx.collect()``
+        and returns a ``ConversionReport``, so this reads
+        ``report.diagnostics`` instead of wrapping the call in its own outer
+        sink (which would now be shadowed and see nothing). Also covers
+        AC-1/AC-2: every entity/stage count on the report is ``> 0``, and the
+        report carries the ``cadastro-overrides-applied`` INFO diagnostic
+        plus at least one WARNING-severity diagnostic (the bridged deferral
+        warning)."""
         from cobre_bridge import diagnostics as dx
         from cobre_bridge.decomp.pipeline import convert_decomp_case
 
         dst = tmp_path / "case"
-        with dx.collect() as collected:
-            convert_decomp_case(_RV3_DECK, dst)  # must not raise
+        report = convert_decomp_case(_RV3_DECK, dst)  # must not raise
+
+        assert report.hydro_count > 0
+        assert report.thermal_count > 0
+        assert report.bus_count > 0
+        assert report.line_count > 0
+        assert report.stage_count > 0
+
+        assert any(d.code == "cadastro-overrides-applied" for d in report.diagnostics)
+        assert any(d.severity is dx.Severity.WARNING for d in report.diagnostics)
 
         hydros = json.loads((dst / "system" / "hydros.json").read_text())["hydros"]
         belo_monte = next(h for h in hydros if h["id"] == 159)
@@ -340,11 +406,15 @@ class TestEmissionCheckWiring:
         assert all(v == pytest.approx(capacity) for v in belo_monte_ceilings)
 
         errors = [
-            d for d in collected if d.code == "hydro-bounds-raises-declared-capacity"
+            d
+            for d in report.diagnostics
+            if d.code == "hydro-bounds-raises-declared-capacity"
         ]
         assert errors == []
 
-        clamped = [d for d in collected if d.code == "decomp-re-generation-clamped"]
+        clamped = [
+            d for d in report.diagnostics if d.code == "decomp-re-generation-clamped"
+        ]
         assert clamped
         assert any("Hydro 159" in d.summary for d in clamped)
 
@@ -761,6 +831,7 @@ def _run_cadastro_pipeline(
     to_generic: tuple[ConstraintRecord, ...] = (),
     unreadable_electrical: tuple[object, ...] = (),
     libs_electrical: object | None = None,
+    diagnostics_out: list[Diagnostic] | None = None,
 ) -> Path:
     """Run ``convert_decomp_case`` against the fully synthetic mock deck
     above, patching every converter this ticket does not wire to a canned
@@ -774,6 +845,12 @@ def _run_cadastro_pipeline(
     detection helpers the same way — both otherwise patched to their
     empty/absent default so this shared fixture keeps regressing the
     ticket-008/023 combine logic it was built for, undisturbed.
+
+    *diagnostics_out* (ticket-003): ``convert_decomp_case`` now owns its own
+    top-level ``dx.collect()``, so a caller-side ``with dx.collect():``
+    wrapped around this helper would be shadowed and see nothing. A caller
+    that needs the run's diagnostics passes a list here; it is extended in
+    place with ``report.diagnostics`` after the (patched) conversion returns.
     """
     from cobre_bridge.decomp.pipeline import DecompFiles, convert_decomp_case
 
@@ -899,7 +976,9 @@ def _run_cadastro_pipeline(
         for target, value in patches.items():
             stack.enter_context(patch(target, return_value=value))
         dst = tmp_path / "case"
-        convert_decomp_case(Path("unused-src"), dst)
+        report = convert_decomp_case(Path("unused-src"), dst)
+    if diagnostics_out is not None:
+        diagnostics_out.extend(report.diagnostics)
     return dst
 
 
@@ -980,7 +1059,12 @@ class TestCadastroPipelineWiring:
         self, tmp_path: Path
     ) -> None:
         """The resolution-report summary is a single INFO diagnostic naming
-        ``volume_maximo`` among the applied overrides."""
+        ``volume_maximo`` among the applied overrides.
+
+        ticket-003: ``convert_decomp_case`` now owns its own top-level
+        ``dx.collect()``, so this reads the diagnostics via
+        ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
+        ``dx.collect()`` (which would be shadowed and see nothing)."""
         from cobre_bridge import diagnostics as dx
 
         ac_volmax_frame = pd.DataFrame(
@@ -994,8 +1078,10 @@ class TestCadastroPipelineWiring:
                 }
             ]
         )
-        with dx.collect() as collected:
-            _run_cadastro_pipeline(tmp_path, ac_volmax_frame=ac_volmax_frame)
+        collected: list[dx.Diagnostic] = []
+        _run_cadastro_pipeline(
+            tmp_path, ac_volmax_frame=ac_volmax_frame, diagnostics_out=collected
+        )
 
         cadastro_diagnostics = [
             d for d in collected if d.code == "cadastro-overrides-applied"
@@ -1212,7 +1298,12 @@ class TestGenericConstraintWiring:
         self, tmp_path: Path
     ) -> None:
         """AC4: the E1 FE/RHA/LIBs-electrical detection diagnostics are
-        captured by an outer ``dx.collect()``, not only logged."""
+        captured on the returned ``ConversionReport``, not only logged.
+
+        ticket-003: ``convert_decomp_case`` now owns its own top-level
+        ``dx.collect()``, so this reads the diagnostics via
+        ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
+        ``dx.collect()`` (which would be shadowed and see nothing)."""
         from cobre_bridge import diagnostics as dx
 
         fe_diagnostic = dx.Diagnostic(
@@ -1237,13 +1328,14 @@ class TestGenericConstraintWiring:
             summary="synthetic LIBs finding",
         )
 
-        with dx.collect() as collected:
-            _run_cadastro_pipeline(
-                tmp_path,
-                ac_volmax_frame=None,
-                unreadable_electrical=(fe_diagnostic, rha_diagnostic),
-                libs_electrical=libs_diagnostic,
-            )
+        collected: list[dx.Diagnostic] = []
+        _run_cadastro_pipeline(
+            tmp_path,
+            ac_volmax_frame=None,
+            unreadable_electrical=(fe_diagnostic, rha_diagnostic),
+            libs_electrical=libs_diagnostic,
+            diagnostics_out=collected,
+        )
 
         codes = {d.code for d in collected}
         assert {
@@ -1327,7 +1419,15 @@ class TestDeferralWarning:
         """AC3: a deck with FE/RHA/LIBs surfaces reports them exactly once,
         through ticket-023b's structured ``Diagnostic``s -- the flat
         deferral warning must not also name them (the warning text and the
-        ``dx`` sink are disjoint on these items)."""
+        ``dx`` sink are disjoint on these items).
+
+        ticket-003: ``convert_decomp_case`` now owns its own top-level
+        ``dx.collect()``, so the diagnostics half reads
+        ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
+        ``dx.collect()`` (which would be shadowed and see nothing); the
+        deferral-warning half still reads ``caplog`` unchanged, since that
+        warning is a plain ``logger.warning`` call independent of the
+        ``dx`` sink."""
         from cobre_bridge import diagnostics as dx
 
         fe_diagnostic = dx.Diagnostic(
@@ -1352,15 +1452,14 @@ class TestDeferralWarning:
             summary="synthetic LIBs finding",
         )
 
-        with (
-            dx.collect() as collected,
-            caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"),
-        ):
+        collected: list[dx.Diagnostic] = []
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
             _run_cadastro_pipeline(
                 tmp_path,
                 ac_volmax_frame=None,
                 unreadable_electrical=(fe_diagnostic, rha_diagnostic),
                 libs_electrical=libs_diagnostic,
+                diagnostics_out=collected,
             )
 
         codes = {d.code for d in collected}
