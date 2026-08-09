@@ -601,7 +601,7 @@ def _convert_newave_case_impl(
         all_hydro_ids,
         rho_acum_per_stage_overrides=rho_acum_overrides or None,
     )
-    _write_json(dst / "system" / "scalar_parameters.json", scalar_parameters_dict)
+    _write_json(dst / "constraints" / "generic_parameters.json", scalar_parameters_dict)
 
     # ------------------------------------------------------------------
     # 6. Write Parquet files.

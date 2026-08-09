@@ -260,6 +260,65 @@ def _topology_relink_diagnostic(
     )
 
 
+def _diversion_channels(
+    hydro_bounds: pa.Table,
+    id_map: DecompIdMap,
+    effective: cadastro_conv.EffectiveCadastro,
+) -> tuple[dict[int, dict], list[int]]:
+    """Cobre ``diversion`` channels for hydros carrying a positive diversion floor.
+
+    A single-term QDES limit lowers to a ``min_diversion_m3s`` row; cobre couples
+    a positive floor to a declared diversion channel (without one, diversion is
+    pinned ``[0, 0]`` and any positive floor is infeasible). The source deck
+    already declares the channel — read into ``effective.diversions`` — so this
+    returns, keyed by cobre hydro id, the ``{downstream_id, max_flow_m3s}`` entry
+    for every floored hydro whose channel resolves (a numeric limit and a
+    downstream plant that survives into the case). Its second element lists the
+    cobre ids of any floored hydro whose channel does NOT resolve — a genuine
+    gap the caller surfaces rather than emitting an invalid case silently.
+
+    Only floored hydros get a channel: an unconstrained diverter keeps
+    ``diversion = null`` (its diversion stays pinned ``[0, 0]``, unchanged), so
+    no plant's LP feasible region moves except the ones the floor already binds.
+    """
+    if "min_diversion_m3s" not in hydro_bounds.column_names:
+        return {}, []
+    columns = hydro_bounds.select(["hydro_id", "min_diversion_m3s"]).to_pydict()
+    floored_ids = {
+        int(hydro_id)
+        for hydro_id, floor in zip(
+            columns["hydro_id"], columns["min_diversion_m3s"], strict=True
+        )
+        if floor is not None and floor > 0.0
+    }
+    if not floored_ids:
+        return {}, []
+    code_by_id = {id_map.hydro_id(code): code for code in id_map.hydro_codes}
+    operated_codes = set(id_map.hydro_codes)
+    channels: dict[int, dict] = {}
+    unresolved: list[int] = []
+    for hydro_id in sorted(floored_ids):
+        code = code_by_id.get(hydro_id)
+        channel = None
+        if code is not None:
+            for stage in range(effective.n_stages):
+                channel = effective.diversion(code, stage)
+                if channel is not None:
+                    break
+        if (
+            channel is None
+            or channel.limit is None
+            or channel.downstream not in operated_codes
+        ):
+            unresolved.append(hydro_id)
+            continue
+        channels[hydro_id] = {
+            "downstream_id": id_map.hydro_id(channel.downstream),
+            "max_flow_m3s": float(channel.limit),
+        }
+    return channels, unresolved
+
+
 def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     """Convert one deck revision into a Cobre case directory.
 
@@ -366,7 +425,11 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
         system / "buses.json", network_conv.convert_buses(dadger, id_map, start_date)
     )
     hydros_dict = hydro_conv.convert_hydros(dadger, hidr, id_map, start_date, effective)
-    _write_json(system / "hydros.json", hydros_dict)
+    # hydros.json is written after the bound tables are resolved (below): a
+    # plant carrying a positive QDES diversion floor (min_diversion_m3s > 0)
+    # must also declare its diversion channel, or cobre rejects the floor as
+    # infeasible against the channel-less [0, 0] pin. That coupling can only be
+    # applied once the resolved hydro_bounds are in hand.
     lines_doc, line_bounds = network_conv.convert_lines(
         dadger, id_map, calendar, start_date
     )
@@ -424,7 +487,10 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
             ncs_stats,
             entity_column="ncs_id",
             value_in="mean",
-            value_out="value",
+            # cobre's clean break (0.14) removed the legacy ``value`` alias for
+            # the NCS availability column; the sole accepted spelling is now
+            # ``availability_factor`` (external inflow/load keep value_m3s/value_mw).
+            value_out="availability_factor",
             scenario_counts=scenario_counts,
         ),
     )
@@ -491,6 +557,38 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
     hydro_bounds = bound_tables.hydro.sort_by(
         [("hydro_id", "ascending"), *_bound_sort_keys]
     )
+    # Attach the diversion channel to every hydro that carries a positive
+    # diversion floor, then write hydros.json (its write was deferred from the
+    # system-file block above for exactly this). cobre couples the two: a
+    # `min_diversion_m3s > 0` row is infeasible unless the hydro also declares a
+    # `diversion` channel. The source deck already carries the channel (read
+    # into `effective.diversions`); this is the only place both the resolved
+    # floor and the channel are in hand.
+    diversion_channels, diversion_floor_no_channel = _diversion_channels(
+        hydro_bounds, id_map, effective
+    )
+    for hydro in hydros_dict["hydros"]:
+        channel = diversion_channels.get(hydro["id"])
+        if channel is not None:
+            hydro["diversion"] = channel
+    if diversion_floor_no_channel:
+        dx.emit(
+            dx.Diagnostic(
+                code="decomp-diversion-floor-no-channel",
+                severity=dx.Severity.WARNING,
+                category="Diversion",
+                title="Diversion floor without a resolvable channel",
+                summary=(
+                    f"{len(diversion_floor_no_channel)} hydro(s) "
+                    f"({sorted(diversion_floor_no_channel)}) carry a positive "
+                    "min_diversion_m3s floor but no resolvable diversion channel "
+                    "(absent/limitless channel or an unmapped downstream plant); "
+                    "cobre rejects the case until the channel is supplied."
+                ),
+            ),
+            logger=_LOG,
+        )
+    _write_json(system / "hydros.json", hydros_dict)
     thermal_bounds_table = _rejoin_thermal_cost(
         bound_tables.thermal, thermal_cost_table
     ).sort_by([("thermal_id", "ascending"), *_bound_sort_keys])
@@ -705,7 +803,7 @@ def convert_decomp_case(src: Path, dst: Path, *, force: bool = False) -> None:
 
     # E5 (ticket-017/018): every `@rho_acum_h{id}` sigil a surviving RHE
     # expression references must resolve, or cobre fails to load the case --
-    # write scalar_parameters.json whenever any RHE constraint survives,
+    # write generic_parameters.json whenever any RHE constraint survives,
     # never only when another generic family also happens to be present.
     if rhe_generics.rho_acum_overrides:
         write_scalar_parameters(

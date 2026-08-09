@@ -1,4 +1,4 @@
-"""DECOMP writer for ``system/scalar_parameters.json`` (ticket-017, epic-05).
+"""DECOMP writer for ``constraints/generic_parameters.json`` (ticket-017, epic-05).
 
 RHE (``HE``/``CM``) constraints are stored-energy generics of the VminOP
 shape ``Σ_{p∈REE} @rho_acum_h{id} * hydro_storage(id) >= limite``
@@ -41,18 +41,19 @@ __all__ = [
     "rho_acum_name",
 ]
 
-# Live path on cobre feat/rung1-tree (load_scalar_parameters_json ->
-# case_dir/system/scalar_parameters.json). The G11 design-§7 rename to
-# constraints/generic_parameters.json has NOT landed there; switch this one
-# constant when it does.
-_SCALAR_PARAMETERS_RELPATH = Path("system") / "scalar_parameters.json"
+# Live path on cobre's feat/generic-constraint-authoring branch
+# (load_scalar_parameters_json -> case_dir/constraints/generic_parameters.json).
+# The G11 design-§7 rename from the old system/scalar_parameters.json landed
+# there (cobre epic-05, clean break — the old path is now rejected); the JSON
+# shape is unchanged. Pending its tagged release (see MIN_COBRE_VERSION).
+_SCALAR_PARAMETERS_RELPATH = Path("constraints") / "generic_parameters.json"
 
 
 def build_decomp_scalar_parameters(
     hydro_ids: Iterable[int],
     rho_acum_per_stage_overrides: Mapping[int, Sequence[float]] | None = None,
 ) -> dict:
-    """Return the ``scalar_parameters.json`` dict for a DECOMP case.
+    """Return the ``generic_parameters.json`` dict for a DECOMP case.
 
     Thin delegation to
     :func:`cobre_bridge.converters.scalar_parameters.build_scalar_parameters`
@@ -69,9 +70,9 @@ def build_decomp_scalar_parameters(
 
 
 def write_scalar_parameters(dst: Path, params: dict) -> Path:
-    """Write *params* to ``dst/system/scalar_parameters.json`` and return it.
+    """Write *params* to ``dst/constraints/generic_parameters.json`` and return it.
 
-    Creates the ``system/`` directory if absent. Mirrors
+    Creates the ``constraints/`` directory if absent. Mirrors
     ``decomp/pipeline.py``'s ``_write_json`` formatting (``indent=2``,
     ``ensure_ascii=False``). Any ``OSError`` from the filesystem propagates —
     the caller owns diagnostics for write failures.

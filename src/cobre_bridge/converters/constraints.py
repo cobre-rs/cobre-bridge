@@ -506,7 +506,7 @@ def convert_vminop_constraints(
     # gen = ρ·Q point productivity at v_65 that the LP uses.  We compute that integrated
     # cascade here and use it both for the per-stage RHS bound *and* (via the return
     # value) to override the `@rho_acum_h{id}` scalar parameter in
-    # scalar_parameters.json so the LP's constraint coefficient matches the source
+    # generic_parameters.json so the LP's constraint coefficient matches the source
     # model.  Without the override the LHS would use cobre's default point ρ_acum and
     # silently drift from the RHS by ~10% on plants with non-trivial head swing.
     acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)

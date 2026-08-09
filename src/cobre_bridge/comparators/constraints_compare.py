@@ -483,12 +483,12 @@ def _is_vminop(constraint: dict) -> bool:
 
 
 def _load_rho_acum_overrides(cobre_case_dir: Path) -> dict[int, dict[int, float]]:
-    """Load per-stage ρ_acum overrides from ``system/scalar_parameters.json``.
+    """Load per-stage ρ_acum overrides from ``constraints/generic_parameters.json``.
 
     Returns ``{hydro_id: {stage_id: ρ_acum}}`` where ρ_acum is the energy-scaled
     coefficient (MWmonth/hm³) the VminOP LP uses, so ρ·storage[hm³] is MWmonth.
     """
-    path = cobre_case_dir / "system" / "scalar_parameters.json"
+    path = cobre_case_dir / "constraints" / "generic_parameters.json"
     out: dict[int, dict[int, float]] = {}
     if not path.exists():
         return out
@@ -496,7 +496,7 @@ def _load_rho_acum_overrides(cobre_case_dir: Path) -> dict[int, dict[int, float]
         with path.open() as f:
             params = json.load(f).get("scalar_parameters", [])
     except (OSError, json.JSONDecodeError) as exc:
-        _LOG.warning("scalar_parameters.json could not be parsed: %s", exc)
+        _LOG.warning("generic_parameters.json could not be parsed: %s", exc)
         return out
     for entry in params:
         m = re.fullmatch(r"rho_acum_h(\d+)", str(entry.get("name", "")))

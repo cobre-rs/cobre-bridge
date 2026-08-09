@@ -3,7 +3,7 @@ epic-05).
 
 Tier-1: pure Python, no ``example/`` deck, no ``import cobre``. Exercises the
 thin delegation to ``converters.scalar_parameters.build_scalar_parameters``
-and the ``system/scalar_parameters.json`` write round-trip.
+and the ``constraints/generic_parameters.json`` write round-trip.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def test_write_scalar_parameters_round_trip(tmp_path: Path) -> None:
 
     written = write_scalar_parameters(tmp_path, params)
 
-    assert written == tmp_path / "system" / "scalar_parameters.json"
+    assert written == tmp_path / "constraints" / "generic_parameters.json"
     assert written.exists()
     assert json.loads(written.read_text()) == params
 

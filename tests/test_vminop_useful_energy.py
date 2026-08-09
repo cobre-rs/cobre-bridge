@@ -45,11 +45,12 @@ def _build_case(tmp_path: Path) -> tuple[Path, Path]:
     """
     case = tmp_path / "case"
     (case / "system").mkdir(parents=True)
+    (case / "constraints").mkdir(parents=True)
     out = case / "output"
     sim = out / "simulation" / "hydros" / "scenario_id=0000"
     sim.mkdir(parents=True)
 
-    (case / "system" / "scalar_parameters.json").write_text(
+    (case / "constraints" / "generic_parameters.json").write_text(
         json.dumps(
             {
                 "scalar_parameters": [
@@ -258,7 +259,7 @@ def test_re_agrint_rows_pass_through_untouched(tmp_path: Path) -> None:
 
 
 def test_missing_inputs_degrade_gracefully(tmp_path: Path) -> None:
-    # No scalar_parameters.json / hydros.json → original frames returned as-is.
+    # No generic_parameters.json / hydros.json → original frames returned as-is.
     empty_case = tmp_path / "empty"
     (empty_case / "system").mkdir(parents=True)
     out = empty_case / "output"

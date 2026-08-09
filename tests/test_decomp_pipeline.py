@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 
 from cobre_bridge.cli import app
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.cadastro import DiversionChannel, EffectiveCadastro
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
     ConstraintRecord,
@@ -28,6 +28,7 @@ from cobre_bridge.decomp.constraint_registers import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
+from cobre_bridge.decomp.pipeline import _diversion_channels
 from cobre_bridge.decomp.scenarios import (
     convert_external_inflows,
     convert_inflow_stats_identity,
@@ -261,6 +262,14 @@ class TestPipeline:
         assert external.num_rows == len(hydros) * (1 + 1 + 353)
         # External NCS library: 32 sources × (trunk col + trunk col + 353 fan).
         ext_ncs = pq.read_table(dst / "scenarios" / "external_ncs_scenarios.parquet")
+        # cobre's 0.14 clean break renamed the NCS availability column
+        # `value` -> `availability_factor` (the sole accepted spelling).
+        assert set(ext_ncs.column_names) == {
+            "stage_id",
+            "scenario_id",
+            "ncs_id",
+            "availability_factor",
+        }
         n_ncs = len(
             json.loads((dst / "system" / "non_controllable_sources.json").read_text())[
                 "non_controllable_sources"
@@ -1146,7 +1155,7 @@ class TestGenericConstraintWiring:
         assert not (dst / "constraints" / "generic_constraint_bounds.parquet").exists()
 
     def test_rhe_rho_acum_sigil_matches_the_rhs_it_drove(self, tmp_path: Path) -> None:
-        """AC3: the ``@rho_acum_h{id}`` LHS sigil ``scalar_parameters.json``
+        """AC3: the ``@rho_acum_h{id}`` LHS sigil ``generic_parameters.json``
         declares for a referenced hydro resolves to the SAME per-stage value
         ``emit_rhe_generics`` used to compute that same constraint's own RHS
         (a percentage-of-EARM limit, so the RHS genuinely depends on it) —
@@ -1165,9 +1174,9 @@ class TestGenericConstraintWiring:
         )
         assert referenced_hids == [0, 1]  # both fixture plants (REE 1)
 
-        params = json.loads((dst / "system" / "scalar_parameters.json").read_text())[
-            "scalar_parameters"
-        ]
+        params = json.loads(
+            (dst / "constraints" / "generic_parameters.json").read_text()
+        )["scalar_parameters"]
         per_stage_by_hid = {
             hid: dict(
                 next(
@@ -1368,3 +1377,87 @@ class TestDeferralWarning:
         )
         for needle in ("FE electrical participation", "RHA family", "LIBs electrical"):
             assert needle not in deferral
+
+
+class TestDiversionChannels:
+    """``_diversion_channels`` couples a positive QDES diversion floor to the
+    source-model diversion channel cobre requires for it (BILLINGS/PIMENTAL in
+    the real decks)."""
+
+    @staticmethod
+    def _id_map() -> DecompIdMap:
+        # hydro_id(code) == hydro_codes.index(code): 118 -> 0, 119 -> 1.
+        return DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(118, 119))
+
+    @staticmethod
+    def _effective(diversions: dict, n_stages: int = 2) -> EffectiveCadastro:
+        return EffectiveCadastro(
+            base=pd.DataFrame(),
+            n_stages=n_stages,
+            stage_varying={},
+            diversions=diversions,
+        )
+
+    @staticmethod
+    def _bounds(hydro_id: int, min_diversion: float | None) -> pa.Table:
+        return pa.table(
+            {
+                "hydro_id": pa.array([hydro_id], type=pa.int32()),
+                "min_diversion_m3s": pa.array([min_diversion], type=pa.float64()),
+            }
+        )
+
+    def test_floored_hydro_with_channel_gets_the_channel(self) -> None:
+        channel = DiversionChannel(downstream=119, limit=100.0)
+        channels, unresolved = _diversion_channels(
+            self._bounds(0, 6.0),
+            self._id_map(),
+            self._effective({118: (channel, channel)}),
+        )
+        assert channels == {0: {"downstream_id": 1, "max_flow_m3s": 100.0}}
+        assert unresolved == []
+
+    def test_floored_hydro_without_channel_is_unresolved(self) -> None:
+        channels, unresolved = _diversion_channels(
+            self._bounds(0, 6.0), self._id_map(), self._effective({})
+        )
+        assert channels == {}
+        assert unresolved == [0]
+
+    def test_channel_with_no_limit_is_unresolved(self) -> None:
+        channel = DiversionChannel(downstream=119, limit=None)
+        channels, unresolved = _diversion_channels(
+            self._bounds(0, 6.0),
+            self._id_map(),
+            self._effective({118: (channel, channel)}),
+        )
+        assert channels == {}
+        assert unresolved == [0]
+
+    def test_channel_to_unmapped_downstream_is_unresolved(self) -> None:
+        channel = DiversionChannel(downstream=999, limit=100.0)
+        channels, unresolved = _diversion_channels(
+            self._bounds(0, 6.0),
+            self._id_map(),
+            self._effective({118: (channel, channel)}),
+        )
+        assert channels == {}
+        assert unresolved == [0]
+
+    def test_zero_floor_gets_no_channel(self) -> None:
+        channel = DiversionChannel(downstream=119, limit=100.0)
+        channels, unresolved = _diversion_channels(
+            self._bounds(0, 0.0),
+            self._id_map(),
+            self._effective({118: (channel, channel)}),
+        )
+        assert channels == {}
+        assert unresolved == []
+
+    def test_absent_diversion_column_returns_empty(self) -> None:
+        table = pa.table({"hydro_id": pa.array([0], type=pa.int32())})
+        channels, unresolved = _diversion_channels(
+            table, self._id_map(), self._effective({})
+        )
+        assert channels == {}
+        assert unresolved == []
