@@ -93,6 +93,12 @@ def _make_stage_labels(n_stages: int = 3) -> dict[int, str]:
     return {i: months[i] for i in range(n_stages)}
 
 
+def _make_stage_dates(n_stages: int = 3) -> dict[int, str]:
+    """Return a stage_dates dict (ISO YYYY-MM-DD x-positions)."""
+    dates = ["2024-01-01", "2024-02-01", "2024-03-01"]
+    return {i: dates[i] for i in range(n_stages)}
+
+
 def _make_line_meta(line_ids: list[int] | None = None) -> list[dict]:
     """Return line metadata with source/target bus IDs and capacities."""
     if line_ids is None:
@@ -148,6 +154,7 @@ def _make_mock_data(
     data.line_bounds = _make_line_bounds(line_ids)
     data.names = _make_names(line_ids)
     data.stage_labels = _make_stage_labels()
+    data.stage_dates = _make_stage_dates()
     data.bus_names = {0: "Bus Alpha", 1: "Bus Beta", 2: "Bus Gamma"}
     data.bh_df = _make_bh_df()
     data.exchanges_lf = _make_exchanges_lf(line_ids)
@@ -203,8 +210,9 @@ def test_build_line_explorer_contains_select_and_divs() -> None:
     bh_df = _make_bh_df(3)
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels(3)
+    stage_dates = _make_stage_dates(3)
 
-    html = build_line_explorer(exchanges_lf, names, stage_labels, bh_df)
+    html = build_line_explorer(exchanges_lf, names, stage_labels, stage_dates, bh_df)
 
     assert 'id="nw-select"' in html
     assert 'id="nw-net"' in html
@@ -219,8 +227,9 @@ def test_build_line_explorer_has_two_options() -> None:
     bh_df = _make_bh_df(3)
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels(3)
+    stage_dates = _make_stage_dates(3)
 
-    html = build_line_explorer(exchanges_lf, names, stage_labels, bh_df)
+    html = build_line_explorer(exchanges_lf, names, stage_labels, stage_dates, bh_df)
 
     assert html.count("<option") == 2
 
@@ -231,8 +240,9 @@ def test_build_line_explorer_embeds_js_data() -> None:
     bh_df = _make_bh_df()
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
-    html = build_line_explorer(exchanges_lf, names, stage_labels, bh_df)
+    html = build_line_explorer(exchanges_lf, names, stage_labels, stage_dates, bh_df)
 
     assert "NW_DATA" in html
     assert "NW_LABELS" in html
@@ -245,8 +255,9 @@ def test_build_line_explorer_auto_trigger() -> None:
     bh_df = _make_bh_df()
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
-    html = build_line_explorer(exchanges_lf, names, stage_labels, bh_df)
+    html = build_line_explorer(exchanges_lf, names, stage_labels, stage_dates, bh_df)
 
     assert "DOMContentLoaded" in html
 
@@ -257,8 +268,9 @@ def test_build_line_explorer_empty_exchanges_returns_no_data() -> None:
     bh_df = _make_bh_df()
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
-    html = build_line_explorer(exchanges_lf, names, stage_labels, bh_df)
+    html = build_line_explorer(exchanges_lf, names, stage_labels, stage_dates, bh_df)
 
     assert "<p>" in html
     assert "nw-select" not in html
@@ -279,11 +291,12 @@ def test_build_line_explorer_bounds_in_data() -> None:
     bh_df = _make_bh_df(3)
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels(3)
+    stage_dates = _make_stage_dates(3)
     line_bounds = _make_line_bounds([0, 1], n_stages=3)
     line_meta = _make_line_meta([0, 1])
 
     html = build_line_explorer(
-        exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
+        exchanges_lf, names, stage_labels, stage_dates, bh_df, line_bounds, line_meta
     )
 
     # nw-util chart div was removed
@@ -308,11 +321,12 @@ def test_build_line_explorer_net_and_bound_keys() -> None:
     bh_df = _make_bh_df(3)
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels(3)
+    stage_dates = _make_stage_dates(3)
     line_bounds = _make_line_bounds([0, 1], n_stages=3)
     line_meta = _make_line_meta([0, 1])
 
     html = build_line_explorer(
-        exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
+        exchanges_lf, names, stage_labels, stage_dates, bh_df, line_bounds, line_meta
     )
 
     # Extract NW_DATA JSON from the embedded script
@@ -363,6 +377,7 @@ def test_build_line_explorer_bound_values() -> None:
     bh_df = _make_bh_df(3)
     names = {("lines", 0): "Line 0"}
     stage_labels = _make_stage_labels(3)
+    stage_dates = _make_stage_dates(3)
 
     # line_meta: direct_capacity_mw=100, reverse_capacity_mw=80
     # => upper_bound = +100, lower_bound = -80 for every stage
@@ -382,7 +397,7 @@ def test_build_line_explorer_bound_values() -> None:
     )
 
     html = build_line_explorer(
-        exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
+        exchanges_lf, names, stage_labels, stage_dates, bh_df, line_bounds, line_meta
     )
 
     match = re.search(r"const NW_DATA = (\{.*?\});", html, re.DOTALL)
@@ -403,11 +418,12 @@ def test_build_line_explorer_bound_lines_in_js() -> None:
     bh_df = _make_bh_df(3)
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels(3)
+    stage_dates = _make_stage_dates(3)
     line_bounds = _make_line_bounds([0, 1], n_stages=3)
     line_meta = _make_line_meta([0, 1])
 
     html = build_line_explorer(
-        exchanges_lf, names, stage_labels, bh_df, line_bounds, line_meta
+        exchanges_lf, names, stage_labels, stage_dates, bh_df, line_bounds, line_meta
     )
 
     # Bound data is now rendered as traces on the single nw-net chart
@@ -431,9 +447,10 @@ def test_build_heatmap_with_line_bounds_returns_plotly_html() -> None:
     line_meta = _make_line_meta([0, 1])
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
     html = build_heatmap(
-        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, stage_dates, bh_df
     )
 
     # Should contain plotly div content
@@ -449,10 +466,11 @@ def test_build_heatmap_does_not_raise() -> None:
     line_meta = _make_line_meta([0, 1])
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
     # No exception expected
     html = build_heatmap(
-        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, stage_dates, bh_df
     )
     assert isinstance(html, str)
 
@@ -467,10 +485,11 @@ def test_build_heatmap_without_line_bounds_falls_back_to_line_meta() -> None:
     line_meta = _make_line_meta([0, 1])
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
     # Must not raise even with empty bounds
     html = build_heatmap(
-        exchanges_lf, empty_bounds, line_meta, names, stage_labels, bh_df
+        exchanges_lf, empty_bounds, line_meta, names, stage_labels, stage_dates, bh_df
     )
     assert isinstance(html, str)
     assert html  # non-empty
@@ -484,9 +503,10 @@ def test_build_heatmap_empty_exchanges_returns_no_data() -> None:
     line_meta = _make_line_meta([0, 1])
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
     html = build_heatmap(
-        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, stage_dates, bh_df
     )
 
     assert "<p>" in html
@@ -510,9 +530,10 @@ def test_build_heatmap_single_trace() -> None:
     line_meta = _make_line_meta([0, 1])
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
     html = build_heatmap(
-        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, stage_dates, bh_df
     )
 
     # Plotly serialises as: Plotly.newPlot(el, [<traces>], <layout>, ...)
@@ -532,9 +553,10 @@ def test_build_heatmap_no_subplots() -> None:
     line_meta = _make_line_meta([0, 1])
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
     html = build_heatmap(
-        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, stage_dates, bh_df
     )
 
     assert "Direct Utilization" not in html
@@ -549,9 +571,10 @@ def test_build_heatmap_title_contains_net() -> None:
     line_meta = _make_line_meta([0, 1])
     names = _make_names([0, 1])
     stage_labels = _make_stage_labels()
+    stage_dates = _make_stage_dates()
 
     html = build_heatmap(
-        exchanges_lf, line_bounds, line_meta, names, stage_labels, bh_df
+        exchanges_lf, line_bounds, line_meta, names, stage_labels, stage_dates, bh_df
     )
 
     assert "Net" in html

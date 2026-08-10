@@ -22,6 +22,7 @@ from cobre_bridge import diagnostics as dx
 from cobre_bridge.dashboard.data import (
     _aggregate_timing_by_iteration,
     _correct_wall_times_from_convergence,
+    _normalize_output_columns,
     entity_name,
     load_entity_metadata,
     load_hydro_bus_map,
@@ -120,6 +121,33 @@ def test_load_stage_labels_returns_formatted_labels(tmp_path: Path) -> None:
 
     assert result[0] == "Jan 2024"
     assert result[1] == "Feb 2024"
+
+
+def test_load_stage_labels_weekly_stages_use_day_resolution(tmp_path: Path) -> None:
+    """Stages sharing a calendar month (weekly week/month decks) must not
+    collapse onto one month-only x-axis point — each gets a day-resolution
+    label from its own start date.
+    """
+    stages_json = {
+        "stages": [
+            {"id": 0, "start_date": "2026-03-14"},
+            {"id": 1, "start_date": "2026-03-21"},
+            {"id": 2, "start_date": "2026-03-28"},
+            {"id": 3, "start_date": "2026-04-04"},
+        ]
+    }
+    _write_json(tmp_path / "stages.json", stages_json)
+
+    result = load_stage_labels(tmp_path)
+
+    # Three stages fall in March; month-only labels would all read "Mar 2026".
+    assert result == {
+        0: "14 Mar 2026",
+        1: "21 Mar 2026",
+        2: "28 Mar 2026",
+        3: "04 Apr 2026",
+    }
+    assert len(set(result.values())) == 4
 
 
 def test_load_stage_labels_missing_file_returns_empty(tmp_path: Path) -> None:
@@ -1832,3 +1860,67 @@ class TestSectionLoaders:
         assert data.block_hours == temporal.block_hours
         assert data.discount_rate == temporal.discount_rate
         assert data.line_meta == temporal.line_meta
+
+
+# ---------------------------------------------------------------------------
+# _normalize_output_columns — cobre 0.14 diagnostic-output axis renames
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_output_columns_maps_014_solver_axes() -> None:
+    """0.14 ``stage_id``/``opening_index`` map to the dashboard's legacy names."""
+    df = pd.DataFrame(
+        {
+            "stage_id": [0, 1, None],
+            "opening_index": [0, None, 2],
+            "lp_solves": [3, 4, 5],
+        }
+    )
+    out = _normalize_output_columns(df)
+    assert "stage" in out.columns and "stage_id" not in out.columns
+    assert "opening" in out.columns and "opening_index" not in out.columns
+    # A NULL stage/opening survives as NaN (not refilled to a -1 sentinel), so
+    # the chart layer's ``>= 0`` filters and ``notna()`` checks keep working.
+    assert out["stage"].isna().sum() == 1
+    assert out["opening"].isna().sum() == 1
+
+
+def test_normalize_output_columns_maps_014_convergence_upper_bound() -> None:
+    """0.14 ``upper_bound`` maps to ``upper_bound_mean``; ``upper_bound_std`` kept."""
+    df = pd.DataFrame(
+        {
+            "iteration": [0, 1],
+            "upper_bound": [1.5e9, 1.4e9],
+            "upper_bound_std": [1.0e7, None],
+            "upper_bound_kind": ["statistical", "exact"],
+        }
+    )
+    out = _normalize_output_columns(df)
+    assert "upper_bound_mean" in out.columns and "upper_bound" not in out.columns
+    # The prefix-sharing std/kind columns must not be swept up by the rename.
+    assert "upper_bound_std" in out.columns
+    assert "upper_bound_kind" in out.columns
+
+
+def test_normalize_output_columns_leaves_pre_014_frame_unchanged() -> None:
+    """A 0.13 frame already carries the legacy names — pass through untouched."""
+    df = pd.DataFrame(
+        {"stage": [0, 1], "upper_bound_mean": [1.0, 2.0], "upper_bound_std": [0.1, 0.1]}
+    )
+    out = _normalize_output_columns(df)
+    assert list(out.columns) == ["stage", "upper_bound_mean", "upper_bound_std"]
+
+
+def test_normalize_output_columns_does_not_clobber_existing_legacy_name() -> None:
+    """If both spellings are present the legacy column wins (no overwrite)."""
+    df = pd.DataFrame({"stage": [7], "stage_id": [0]})
+    out = _normalize_output_columns(df)
+    # ``stage`` already exists, so ``stage_id`` is not renamed onto it.
+    assert out["stage"].tolist() == [7]
+    assert "stage_id" in out.columns
+
+
+def test_normalize_output_columns_empty_frame() -> None:
+    """An empty (absent-file) frame is returned as-is."""
+    empty = pd.DataFrame()
+    assert _normalize_output_columns(empty).empty

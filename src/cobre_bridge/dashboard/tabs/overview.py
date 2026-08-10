@@ -28,7 +28,9 @@ from cobre_bridge.ui.html import (
 )
 from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS,
+    apply_stage_date_axis,
     apply_standard_layout,
+    stage_x_dates,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import COLORS, GENERATION_COLORS
@@ -391,11 +393,11 @@ def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
             continue
 
         stages = sorted(stage_mw.keys())
-        xlabels = stage_x_labels(stages, data.stage_labels)
+        xdates = stage_x_dates(stages, data.stage_dates)
         yvals = [stage_mw[s] for s in stages]
         fig.add_trace(
             go.Scatter(
-                x=xlabels,
+                x=xdates,
                 y=yvals,
                 name=label,
                 stackgroup="gen",
@@ -420,6 +422,12 @@ def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
             font=dict(size=11),
         ),
         margin=MARGIN_DEFAULTS,
+    )
+    all_stages = sorted(data.stage_dates)
+    apply_stage_date_axis(
+        fig,
+        stage_x_dates(all_stages, data.stage_dates),
+        stage_x_labels(all_stages, data.stage_labels),
     )
     return fig
 

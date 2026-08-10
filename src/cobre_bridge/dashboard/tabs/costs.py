@@ -47,7 +47,9 @@ from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
 from cobre_bridge.ui.plotly_helpers import (
+    apply_stage_date_axis,
     apply_standard_layout,
+    stage_x_dates,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import BUS_COLORS, COLORS
@@ -382,8 +384,8 @@ def _render_cost_composition(data: DashboardData) -> str:
     # Mean across scenarios per stage
     mean_by_stage = grouped.groupby("stage_id")[group_cols].mean().reset_index()
     stages = sorted(mean_by_stage["stage_id"].tolist())
-    xlabels = stage_x_labels(stages, data.stage_labels)
-    mean_by_stage["_x"] = mean_by_stage["stage_id"].map(dict(zip(stages, xlabels)))
+    xdates = stage_x_dates(stages, data.stage_dates)
+    mean_by_stage["_x"] = mean_by_stage["stage_id"].map(dict(zip(stages, xdates)))
 
     fig = go.Figure()
     for group_name in COST_GROUPS:
@@ -428,6 +430,12 @@ def _render_cost_composition(data: DashboardData) -> str:
             font=dict(size=11),
         ),
         margin=_MARGIN,
+    )
+    all_stages = sorted(data.stage_dates)
+    apply_stage_date_axis(
+        fig,
+        stage_x_dates(all_stages, data.stage_dates),
+        stage_x_labels(all_stages, data.stage_labels),
     )
 
     chart_html = make_chart_card(
@@ -513,6 +521,7 @@ def _build_composition_data(data: DashboardData) -> dict | None:
 
     stages = sorted(by_stage_scen["stage_id"].unique().tolist())
     xlabels = stage_x_labels(stages, data.stage_labels)
+    xdates = stage_x_dates(stages, data.stage_dates)
 
     # --- Category view ---
     grouped = group_costs(by_stage_scen, cost_cols)
@@ -577,7 +586,8 @@ def _build_composition_data(data: DashboardData) -> dict | None:
         "category": category,
         "component": component,
         "total": total,
-        "stages": xlabels,
+        "stages": xdates,
+        "stage_labels": xlabels,
         "colors": colors,
     }
 
@@ -670,7 +680,7 @@ function updateCostsComposition() {
 
   var layout = {
     title: {text: 'Cost Composition by Stage (undiscounted mean)', font: {size: 13}, x: 0.02},
-    xaxis: {title: 'Stage'},
+    xaxis: {title: 'Stage', type: 'date', tickmode: 'array', tickvals: d.stages, ticktext: d.stage_labels},
     yaxis: {title: 'Cost (R$)'},
     legend: {orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'center', x: 0.5, font: {size: 11}},
     margin: {l: 60, r: 20, t: 60, b: 50},
@@ -737,8 +747,8 @@ def _render_category_evolution(data: DashboardData) -> str:
     ]
 
     stages = sorted(grouped["stage_id"].unique().tolist())
-    xlabels = stage_x_labels(stages, data.stage_labels)
-    stage_to_x = dict(zip(stages, xlabels))
+    xdates = stage_x_dates(stages, data.stage_dates)
+    stage_to_x = dict(zip(stages, xdates))
 
     fig = go.Figure()
     for group_name in group_cols:
@@ -754,6 +764,12 @@ def _render_category_evolution(data: DashboardData) -> str:
         fig,
         xaxis_title="Stage",
         yaxis_title="Cost (R$)",
+    )
+    all_stages = sorted(data.stage_dates)
+    apply_stage_date_axis(
+        fig,
+        stage_x_dates(all_stages, data.stage_dates),
+        stage_x_labels(all_stages, data.stage_labels),
     )
 
     chart_html = make_chart_card(
@@ -826,8 +842,8 @@ def _render_spot_price(data: DashboardData) -> str:
         )
 
     stages = sorted(weighted["stage_id"].unique().to_list())
-    xlabels = stage_x_labels(stages, data.stage_labels)
-    stage_to_x = dict(zip(stages, xlabels))
+    xdates = stage_x_dates(stages, data.stage_dates)
+    stage_to_x = dict(zip(stages, xdates))
 
     n_buses = len(bus_ids)
     n_cols = 2
@@ -870,6 +886,12 @@ def _render_spot_price(data: DashboardData) -> str:
     for ax in fig.layout:
         if str(ax).startswith("yaxis"):
             fig.layout[ax].title = "R$/MWh"  # type: ignore[index]
+    all_stages = sorted(data.stage_dates)
+    apply_stage_date_axis(
+        fig,
+        stage_x_dates(all_stages, data.stage_dates),
+        stage_x_labels(all_stages, data.stage_labels),
+    )
 
     chart_html = make_chart_card(
         fig,
@@ -932,7 +954,7 @@ def _chart_violation_timeline(data: DashboardData) -> go.Figure | None:
     )
 
     stages = sorted(by_stage["stage_id"].tolist())
-    xlabels = stage_x_labels(stages, data.stage_labels)
+    xdates = stage_x_dates(stages, data.stage_dates)
 
     fig = go.Figure()
     has_trace = False
@@ -943,7 +965,7 @@ def _chart_violation_timeline(data: DashboardData) -> go.Figure | None:
         label = col.replace("_cost", "").replace("_", " ").title()
         fig.add_trace(
             go.Scatter(
-                x=xlabels,
+                x=xdates,
                 y=by_stage[col].tolist(),
                 name=label,
                 mode="lines",
@@ -966,6 +988,12 @@ def _chart_violation_timeline(data: DashboardData) -> go.Figure | None:
             font=dict(size=11),
         ),
         margin=_MARGIN,
+    )
+    all_stages = sorted(data.stage_dates)
+    apply_stage_date_axis(
+        fig,
+        stage_x_dates(all_stages, data.stage_dates),
+        stage_x_labels(all_stages, data.stage_labels),
     )
     return fig
 

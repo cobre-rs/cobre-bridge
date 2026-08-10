@@ -34,7 +34,9 @@ from cobre_bridge.ui.html import (
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
+    apply_stage_date_axis,
     apply_standard_layout,
+    stage_x_dates,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import COLORS, hex_to_rgba
@@ -339,6 +341,7 @@ def _chart_system_inflow(
     hist_system: pd.DataFrame,
     synth_system: pd.DataFrame,
     stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
 ) -> go.Figure:
     """Build the system-wide historical vs synthetic inflow figure.
 
@@ -356,26 +359,26 @@ def _chart_system_inflow(
 
     if not hist_system.empty:
         h = hist_system.sort_values("stage_id")
-        x_labels = stage_x_labels(h["stage_id"].tolist(), stage_labels)
+        x_dates = stage_x_dates(h["stage_id"].tolist(), stage_dates)
         _add_mean_std_band(
             fig,
             h["stage_id"].tolist(),
             h["mean_m3s"].tolist(),
             h["std_m3s"].fillna(0.0).tolist(),
-            x_labels,
+            x_dates,
             "Historical",
             _HIST_COLOR,
         )
 
     if not synth_system.empty:
         s = synth_system.sort_values("stage_id")
-        x_labels = stage_x_labels(s["stage_id"].tolist(), stage_labels)
+        x_dates = stage_x_dates(s["stage_id"].tolist(), stage_dates)
         _add_mean_std_band(
             fig,
             s["stage_id"].tolist(),
             s["mean_m3s"].tolist(),
             s["std_m3s"].fillna(0.0).tolist(),
-            x_labels,
+            x_dates,
             "Synthetic",
             _SYNTH_COLOR,
         )
@@ -394,6 +397,12 @@ def _chart_system_inflow(
         margin=MARGIN_DEFAULTS,
         template="plotly_white",
     )
+    _all = sorted(stage_dates)
+    apply_stage_date_axis(
+        fig,
+        stage_x_dates(_all, stage_dates),
+        stage_x_labels(_all, stage_labels),
+    )
     return fig
 
 
@@ -402,6 +411,7 @@ def _chart_bus_facet(
     synth_by_bus: dict[int, pd.DataFrame],
     bus_names: dict[int, str],
     stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
     bus_ids: list[int],
 ) -> go.Figure:
     """Build a 2x2 faceted subplot for up to 4 buses.
@@ -439,13 +449,13 @@ def _chart_bus_facet(
 
         if not h.empty:
             h = h.sort_values("stage_id")
-            x_labels = stage_x_labels(h["stage_id"].tolist(), stage_labels)
+            x_dates = stage_x_dates(h["stage_id"].tolist(), stage_dates)
             _add_mean_std_band(
                 fig,
                 h["stage_id"].tolist(),
                 h["mean_m3s"].tolist(),
                 h["std_m3s"].fillna(0.0).tolist(),
-                x_labels,
+                x_dates,
                 "Historical",
                 _HIST_COLOR,
                 row=row,
@@ -454,13 +464,13 @@ def _chart_bus_facet(
 
         if not s.empty:
             s = s.sort_values("stage_id")
-            x_labels = stage_x_labels(s["stage_id"].tolist(), stage_labels)
+            x_dates = stage_x_dates(s["stage_id"].tolist(), stage_dates)
             _add_mean_std_band(
                 fig,
                 s["stage_id"].tolist(),
                 s["mean_m3s"].tolist(),
                 s["std_m3s"].fillna(0.0).tolist(),
-                x_labels,
+                x_dates,
                 "Synthetic",
                 _SYNTH_COLOR,
                 row=row,
@@ -482,6 +492,12 @@ def _chart_bus_facet(
         margin=dict(l=50, r=20, t=60, b=10),
         template="plotly_white",
     )
+    _all = sorted(stage_dates)
+    apply_stage_date_axis(
+        fig,
+        stage_x_dates(_all, stage_dates),
+        stage_x_labels(_all, stage_labels),
+    )
     return fig
 
 
@@ -490,6 +506,7 @@ def _chart_hydro_explorer(
     synth_per_hydro: dict[int, pd.DataFrame],
     hydro_meta: dict[int, dict],
     stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
 ) -> go.Figure:
     """Build a per-hydro explorer figure with dropdown menu.
 
@@ -521,13 +538,13 @@ def _chart_hydro_explorer(
         h = hist_per_hydro.get(hydro_id, pd.DataFrame())
         if not h.empty:
             h = h.sort_values("stage_id")
-            x_labels = stage_x_labels(h["stage_id"].tolist(), stage_labels)
+            x_dates = stage_x_dates(h["stage_id"].tolist(), stage_dates)
             _add_mean_std_band(
                 fig,
                 h["stage_id"].tolist(),
                 h["mean_m3s"].tolist(),
                 h["std_m3s"].fillna(0.0).tolist(),
-                x_labels,
+                x_dates,
                 "Historical",
                 _HIST_COLOR,
             )
@@ -535,13 +552,13 @@ def _chart_hydro_explorer(
         s = synth_per_hydro.get(hydro_id, pd.DataFrame())
         if not s.empty:
             s = s.sort_values("stage_id")
-            x_labels = stage_x_labels(s["stage_id"].tolist(), stage_labels)
+            x_dates = stage_x_dates(s["stage_id"].tolist(), stage_dates)
             _add_mean_std_band(
                 fig,
                 s["stage_id"].tolist(),
                 s["mean_m3s"].tolist(),
                 s["std_m3s"].fillna(0.0).tolist(),
-                x_labels,
+                x_dates,
                 "Synthetic",
                 _SYNTH_COLOR,
             )
@@ -602,6 +619,12 @@ def _chart_hydro_explorer(
                 "type": "dropdown",
             }
         ],
+    )
+    _all = sorted(stage_dates)
+    apply_stage_date_axis(
+        fig,
+        stage_x_dates(_all, stage_dates),
+        stage_x_labels(_all, stage_labels),
     )
     return fig
 
@@ -1380,7 +1403,9 @@ def _render_section_a(data: DashboardData) -> str:
     synth_stats = _compute_synthetic_stats(data)
     synth_system = _aggregate_system(synth_stats)
 
-    fig = _chart_system_inflow(hist_system, synth_system, data.stage_labels)
+    fig = _chart_system_inflow(
+        hist_system, synth_system, data.stage_labels, data.stage_dates
+    )
     content = make_chart_card(
         fig, "System-Wide Inflow (Historical vs Synthetic)", "v2-stoch-system-inflow"
     )
@@ -1441,6 +1466,7 @@ def _render_section_b(data: DashboardData) -> str:
         synth_by_bus,
         data.bus_names,
         data.stage_labels,
+        data.stage_dates,
         bus_ids_to_show,
     )
     content = make_chart_card(
@@ -1490,6 +1516,9 @@ def _render_section_c(data: DashboardData) -> str:
             entry["hist_labels"] = stage_x_labels(
                 h["stage_id"].tolist(), data.stage_labels
             )
+            entry["hist_dates"] = stage_x_dates(
+                h["stage_id"].tolist(), data.stage_dates
+            )
             entry["hist_mean"] = h["mean_m3s"].tolist()
             entry["hist_std"] = h["std_m3s"].fillna(0.0).tolist()
 
@@ -1499,6 +1528,9 @@ def _render_section_c(data: DashboardData) -> str:
             entry["synth_stages"] = s["stage_id"].tolist()
             entry["synth_labels"] = stage_x_labels(
                 s["stage_id"].tolist(), data.stage_labels
+            )
+            entry["synth_dates"] = stage_x_dates(
+                s["stage_id"].tolist(), data.stage_dates
             )
             entry["synth_mean"] = s["mean_m3s"].tolist()
             entry["synth_std"] = s["std_m3s"].fillna(0.0).tolist()
@@ -1562,28 +1594,28 @@ function _renderStochHydro(containerId, entry) {{
     if (entry.hist_mean) {{
         var hUpper = entry.hist_mean.map(function(m,i){{ return m + entry.hist_std[i]; }});
         var hLower = entry.hist_mean.map(function(m,i){{ return m - entry.hist_std[i]; }});
-        traces.push({{x:entry.hist_labels, y:hUpper, mode:'lines',
+        traces.push({{x:entry.hist_dates, y:hUpper, mode:'lines',
             line:{{width:0}}, showlegend:false, hoverinfo:'skip',
             legendgroup:'hist'}});
-        traces.push({{x:entry.hist_labels, y:hLower, mode:'lines',
+        traces.push({{x:entry.hist_dates, y:hLower, mode:'lines',
             line:{{width:0}}, fill:'tonexty',
             fillcolor:'rgba(74,144,184,0.15)', showlegend:false,
             hoverinfo:'skip', legendgroup:'hist'}});
-        traces.push({{x:entry.hist_labels, y:entry.hist_mean, mode:'lines',
+        traces.push({{x:entry.hist_dates, y:entry.hist_mean, mode:'lines',
             name:'Historical', line:{{color:'{hist_color}',width:2}},
             legendgroup:'hist'}});
     }}
     if (entry.synth_mean) {{
         var sUpper = entry.synth_mean.map(function(m,i){{ return m + entry.synth_std[i]; }});
         var sLower = entry.synth_mean.map(function(m,i){{ return m - entry.synth_std[i]; }});
-        traces.push({{x:entry.synth_labels, y:sUpper, mode:'lines',
+        traces.push({{x:entry.synth_dates, y:sUpper, mode:'lines',
             line:{{width:0}}, showlegend:false, hoverinfo:'skip',
             legendgroup:'synth'}});
-        traces.push({{x:entry.synth_labels, y:sLower, mode:'lines',
+        traces.push({{x:entry.synth_dates, y:sLower, mode:'lines',
             line:{{width:0}}, fill:'tonexty',
             fillcolor:'rgba(245,158,11,0.15)', showlegend:false,
             hoverinfo:'skip', legendgroup:'synth'}});
-        traces.push({{x:entry.synth_labels, y:entry.synth_mean, mode:'lines',
+        traces.push({{x:entry.synth_dates, y:entry.synth_mean, mode:'lines',
             name:'Synthetic', line:{{color:'{synth_color}',width:2}},
             legendgroup:'synth'}});
     }}
@@ -1591,7 +1623,9 @@ function _renderStochHydro(containerId, entry) {{
         height: chartHeight,
         title: {{text: 'Inflow — ' + entry.name, font:{{size:13}},
                  x:0.02, xanchor:'left'}},
-        xaxis: {{title:'Stage'}},
+        xaxis: {{title:'Stage', type:'date', tickmode:'array',
+                 tickvals:(entry.hist_dates||entry.synth_dates),
+                 ticktext:(entry.hist_labels||entry.synth_labels)}},
         yaxis: {{title:'Inflow (m³/s)'}},
         legend: {{orientation:'h', yanchor:'bottom', y:1.02,
                   xanchor:'center', x:0.5, font:{{size:11}}}},

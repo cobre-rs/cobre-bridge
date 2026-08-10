@@ -210,6 +210,7 @@ def _make_mock_data(
     data = MagicMock()
     data.non_fictitious_bus_ids = non_fictitious_bus_ids
     data.stage_labels = {0: "Jan 2024", 1: "Feb 2024", 2: "Mar 2024"}
+    data.stage_dates = {0: "2024-01-01", 1: "2024-02-01", 2: "2024-03-01"}
     data.stage_hours = {0: 744.0, 1: 672.0, 2: 744.0}
     data.block_hours = {(0, 0): 744.0, (1, 0): 672.0, (2, 0): 744.0}
     data.bh_df = pl.DataFrame(
@@ -750,6 +751,9 @@ def _make_mock_data_full(
     data = MagicMock()
     data.non_fictitious_bus_ids = non_fictitious_bus_ids
     data.stage_labels = stage_labels
+    data.stage_dates = {
+        k: f"2024-01-{i + 1:02d}" for i, k in enumerate(sorted(stage_labels))
+    }
     data.stage_hours = stage_hours
     data.block_hours = block_hours
     data.bh_df = bh_df

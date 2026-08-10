@@ -100,9 +100,13 @@ def _chart_convergence_hero(conv: pd.DataFrame) -> go.Figure:
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # Upper bound std band (drawn first so it appears under lines)
-    ub_upper = conv["upper_bound_mean"] + conv["upper_bound_std"]
-    ub_lower = conv["upper_bound_mean"] - conv["upper_bound_std"]
+    # Upper bound std band (drawn first so it appears under lines). cobre 0.14
+    # leaves ``upper_bound_std`` NULL for an exact (enumerated) upper bound, so a
+    # missing std collapses the band to a zero width — the line still renders
+    # instead of vanishing into NaN.
+    ub_std = conv["upper_bound_std"].fillna(0.0)
+    ub_upper = conv["upper_bound_mean"] + ub_std
+    ub_lower = conv["upper_bound_mean"] - ub_std
 
     fig.add_trace(
         go.Scatter(

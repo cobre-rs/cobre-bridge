@@ -232,6 +232,26 @@ def test_chart_convergence_hero_button_labels() -> None:
     assert labels == ["All", "Last 200", "Last 100", "Last 50"]
 
 
+def test_chart_convergence_hero_null_upper_bound_std_collapses_band() -> None:
+    """cobre 0.14 leaves ``upper_bound_std`` NULL for an exact (enumerated)
+    upper bound; the ±std band must collapse to the mean line rather than
+    render NaN y-values that break the trace."""  # noqa: E501
+    import math
+
+    conv = _make_conv(6)
+    conv["upper_bound_std"] = float("nan")  # exact-bound: no statistical std
+    fig = _chart_convergence_hero(conv)
+    band_traces = [t for t in fig.data if t.name in ("UB -std", "UB ±std Band")]
+    assert band_traces, "expected the ±std band traces to be present"
+    for trace in band_traces:
+        ys = [y for y in trace.y if y is not None]
+        assert ys and not any(math.isnan(y) for y in ys)
+    # With a zero-width band each edge equals the mean upper bound.
+    means = conv["upper_bound_mean"].tolist()
+    for trace in band_traces:
+        assert list(trace.y) == means
+
+
 # ---------------------------------------------------------------------------
 # test_render_with_empty_cut_selection
 # ---------------------------------------------------------------------------

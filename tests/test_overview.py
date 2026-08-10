@@ -140,6 +140,7 @@ def _make_mock_data(
     data.conv = conv if conv is not None else _make_conv_df()
     data.costs = costs if costs is not None else _make_costs_df()
     data.stage_labels = {0: "Jan 2024", 1: "Feb 2024", 2: "Mar 2024"}
+    data.stage_dates = {0: "2024-01-01", 1: "2024-02-01", 2: "2024-03-01"}
     data.stage_hours = {0: 744.0, 1: 672.0, 2: 744.0}
     data.hydros_lf = _make_mock_lf(12_000.0)
     data.thermals_lf = _make_mock_lf(8_000.0)

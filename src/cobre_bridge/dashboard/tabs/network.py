@@ -30,7 +30,9 @@ from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
 from cobre_bridge.ui.plotly_helpers import (
+    apply_stage_date_axis,
     fig_to_html,
+    stage_x_dates,
     stage_x_labels,
 )
 
@@ -54,6 +56,7 @@ def build_line_explorer(
     exchanges_lf: pl.LazyFrame,
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
     bh_df: pl.DataFrame,
     line_bounds: pd.DataFrame | None = None,
     line_meta: list[dict] | None = None,
@@ -103,6 +106,7 @@ def build_line_explorer(
 
     stages = sorted(ex0["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
+    xdates = stage_x_dates(stages, stage_dates)
     line_ids = sorted(ex0["line_id"].unique().to_list())
 
     # Build capacity bounds per (line, stage)
@@ -178,6 +182,7 @@ def build_line_explorer(
     )
     data_json = json_for_script(line_data)
     labels_json = json_for_script(xlabels)
+    dates_json = json_for_script(xdates)
 
     chart_html = (
         '<div class="chart-grid-single">'
@@ -200,19 +205,22 @@ def build_line_explorer(
         + data_json
         + ";\nconst NW_LABELS = "
         + labels_json
+        + ";\nconst NW_DATES = "
+        + dates_json
         + ";\n"
         + r"""
 function _nw_band(lbl, p10, p90, color) {
-  return {x: NW_LABELS.concat(NW_LABELS.slice().reverse()),
+  return {x: NW_DATES.concat(NW_DATES.slice().reverse()),
           y: p90.concat(p10.slice().reverse()),
           fill:'toself', fillcolor:color, line:{color:'rgba(0,0,0,0)'},
           name:lbl, showlegend:true, hoverinfo:'skip'};
 }
 function _nw_line(nm, y, c, w, dash) {
-  return {x:NW_LABELS, y:y, name:nm, mode:'lines',
+  return {x:NW_DATES, y:y, name:nm, mode:'lines',
           line:{color:c, width:w||2, dash:dash||'solid'}};
 }
 var _NW_L = {hovermode:'x unified', margin:{l:60,r:20,t:60,b:60},
+             xaxis:{type:'date', tickmode:'array', tickvals:NW_DATES, ticktext:NW_LABELS},
              legend:{orientation:'h',yanchor:'bottom',y:1.02,
                      xanchor:'center',x:0.5,font:{size:11}}};
 var _NW_C = {responsive:true};
@@ -228,7 +236,7 @@ function updateNetworkDetail() {
     _nw_line('P90', d.net_p90, '#4A90B8', 1, 'dot'),
     _nw_line('Upper Bound', d.upper_bound, '#DC4C4C', 1.5, 'dash'),
     _nw_line('Lower Bound', d.lower_bound, '#DC4C4C', 1.5, 'dash'),
-    {x:NW_LABELS, y:Array(NW_LABELS.length).fill(0),
+    {x:NW_DATES, y:Array(NW_DATES.length).fill(0),
      name:'Zero', line:{color:'gray',width:1,dash:'dot'}, showlegend:false}
   ];
   var layout = Object.assign({}, _NW_L, {
@@ -255,6 +263,7 @@ def build_heatmap(
     line_meta: list[dict],
     names: dict[tuple[str, int], str],
     stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
     bh_df: pl.DataFrame,
 ) -> str:
     """Build a single net capacity utilisation heatmap.
@@ -342,6 +351,7 @@ def build_heatmap(
     line_ids = sorted(flow_data["line_id"].unique().to_list())
     stages = sorted(flow_data["stage_id"].unique().to_list())
     xlabels = stage_x_labels(stages, stage_labels)
+    xdates = stage_x_dates(stages, stage_dates)
     ynames = [entity_name(names, "lines", lid) for lid in line_ids]
 
     z_net: list[list[float]] = []
@@ -369,7 +379,7 @@ def build_heatmap(
     fig.add_trace(
         go.Heatmap(
             z=z_net,
-            x=xlabels,
+            x=xdates,
             y=ynames,
             colorscale="RdYlGn_r",
             zmin=0,
@@ -384,6 +394,7 @@ def build_heatmap(
         height=max(300, len(line_ids) * 60 + 120),
         margin=_MARGIN,
     )
+    apply_stage_date_axis(fig, xdates, xlabels)
     return wrap_chart(fig_to_html(fig, unified_hover=False))
 
 
@@ -605,6 +616,7 @@ def render(data: DashboardData) -> str:
             data.exchanges_lf,
             data.names,
             data.stage_labels,
+            data.stage_dates,
             data.bh_df,
             data.line_bounds,
             data.line_meta,
