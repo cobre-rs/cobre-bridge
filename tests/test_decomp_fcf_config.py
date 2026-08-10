@@ -28,18 +28,19 @@ class _Dadger:
 
 class TestConvertConfigStateSpace:
     def test_convert_config_emits_inflow_lag_depth_12(self) -> None:
-        result = convert_config(_Dadger(), n_terminal_scenarios=259)  # type: ignore[arg-type]
+        result = convert_config(_Dadger())  # type: ignore[arg-type]
 
         assert result["state_space"] == {"inflow_lag_depth": 12}
         assert _INFLOW_LAG_DEPTH == 12
 
-    def test_convert_config_training_enumerated_simulation_sampled(self) -> None:
-        result = convert_config(_Dadger(), n_terminal_scenarios=259)  # type: ignore[arg-type]
+    def test_convert_config_training_and_simulation_enumerated(self) -> None:
+        result = convert_config(_Dadger())  # type: ignore[arg-type]
 
         # Training enumerates the explicit trunk-plus-fan node graph; every
         # stochastic class is external — inflow (the tree), load, and NCS.
         # cobre's scheme-aware load membership admits a deterministic (std = 0)
-        # external load class (it standardizes to eta = 0).
+        # external load class (it standardizes to eta = 0). The seed is
+        # schema-required for external schemes (inert at run time here).
         expected_training = {
             "selection": {"method": "enumerated"},
             "stopping_rules": [
@@ -53,11 +54,12 @@ class TestConvertConfigStateSpace:
                 "ncs": {"scheme": "external"},
             },
         }
-        # Simulation is sampled (C10 workaround) until cobre wires
-        # branching-census simulation.
+        # Simulation is the exact weighted census over the branching graph
+        # (cobre 0.14+ wires it; the old C9 sampled fallback is retired). With
+        # no simulation.scenario_source, cobre inherits training's external one.
         expected_simulation = {
             "enabled": True,
-            "selection": {"method": "sampled", "num_scenarios": 259},
+            "selection": {"method": "enumerated"},
         }
 
         assert result["training"] == expected_training

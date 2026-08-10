@@ -46,18 +46,24 @@ _CONFIG_SCHEMA_URL = (
 _INFLOW_LAG_DEPTH = 12
 
 
-def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
+def convert_config(dadger: Dadger) -> dict:
     """Build ``config.json``: state space depth, Gap + NI stopping rules,
     external scenario sources, simulation on.
 
-    Training uses ``selection = {"method": "enumerated"}``: the explicit
-    trunk-plus-fan node graph enumerates every root-to-leaf path, so the
-    forward-pass count is derived from the graph. Simulation uses ``sampled``
-    with ``n_terminal_scenarios`` as a TRACKED COBRE-GAP WORKAROUND (C9):
-    cobre 0.14 cannot yet execute enumerated (weighted-census) simulation over
-    a *branching* graph — only a single-realization tree — so an enumerated
-    simulation aborts. Sampling the fan width approximates the census until
-    cobre wires branching-census simulation (epic-06/epic-14).
+    Both training and simulation use ``selection = {"method": "enumerated"}``:
+    the explicit trunk-plus-fan node graph enumerates every root-to-leaf path,
+    so training runs the full forward/backward census and simulation runs the
+    exact per-node-probability weighted census (cobre 0.14+ wires the
+    branching-graph census simulation, retiring the earlier ``sampled`` fallback
+    tracked as C9). The simulation omits its own ``scenario_source`` and inherits
+    training's external one.
+
+    ``scenario_source.seed`` is required by cobre's schema whenever any class
+    uses the external (or out_of_sample / historical) scheme, so it is always
+    emitted even though it is inert at run time here: with every class external
+    (a deterministic replay of the explicit tree) and enumerated selection,
+    there is no random draw for the seed to control. It is derived from the
+    study start date for stability.
 
     ``state_space.inflow_lag_depth`` is fixed at 12 (P3/D8): under
     no-folding, the source model's boundary cuts carry lag coefficients out
@@ -77,17 +83,6 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
     dt = dadger.dt
     seed = int(dt.ano) * 10000 + int(dt.mes) * 100 + int(dt.dia)
 
-    _LOG.warning(
-        "TRACKED COBRE-GAP WORKAROUND (C9): cobre 0.14 executes enumerated "
-        "selection only on a single-realization tree; a branching graph's "
-        "weighted-census SIMULATION is not wired, so simulation falls back to "
-        "sampled selection over the %d terminal-fan scenarios "
-        "(~/git/cobre/plans/conversion-found-improvements.md). Training stays "
-        "enumerated (it runs the full census). Remove when cobre wires "
-        "branching-census simulation (epic-06/epic-14).",
-        n_terminal_scenarios,
-    )
-
     return {
         "$schema": _CONFIG_SCHEMA_URL,
         "state_space": {"inflow_lag_depth": _INFLOW_LAG_DEPTH},
@@ -102,7 +97,8 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
             # scheme-aware load membership admits an external load class
             # regardless of σ (a deterministic std = 0 load standardizes to
             # eta = 0), so load is external here rather than the former
-            # in-sample-with-null-std workaround.
+            # in-sample-with-null-std workaround. The seed is schema-required
+            # for external schemes (inert here — see the docstring).
             "scenario_source": {
                 "seed": seed,
                 "inflow": {"scheme": "external"},
@@ -112,12 +108,7 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
         },
         "simulation": {
             "enabled": True,
-            # C9 workaround: sampled (not enumerated) until cobre wires
-            # branching-census simulation — see the module note above.
-            "selection": {
-                "method": "sampled",
-                "num_scenarios": n_terminal_scenarios,
-            },
+            "selection": {"method": "enumerated"},
         },
     }
 

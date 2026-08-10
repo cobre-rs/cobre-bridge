@@ -522,7 +522,7 @@ def _convert_decomp_case_impl(
     step("Converting entities")
     _write_json(
         dst / "config.json",
-        config_conv.convert_config(dadger, len(fan_probabilities)),
+        config_conv.convert_config(dadger),
     )
     stages_dict = temporal_conv.convert_stages(
         calendar, annual_discount_rate=tx, fan_probabilities=fan_probabilities
