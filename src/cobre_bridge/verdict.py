@@ -142,16 +142,40 @@ def compare_summary(verdict: CompareVerdict) -> dict[str, object]:
     }
 
 
-def decomp_compare_summary(comparison: DecompComparison) -> dict[str, object]:
+def decomp_compare_summary(
+    comparison: DecompComparison, tolerance: float
+) -> dict[str, object]:
     """The ``compare decomp`` command's ``summary`` block — per-variable rows.
 
-    Returns ``{"stages", "variables", "unmapped"}`` in that order. ``stages`` is
+    Returns ``{"stages", "variables", "unmapped", "within_tol", "total",
+    "all_within_tol"}`` in that order. ``stages`` is
     :attr:`DecompComparison.stage_count`; ``variables`` is
     ``comparison.summary.to_dicts()`` verbatim — polars' ``to_dicts()`` already
     yields JSON-native ``int``/``float``/``str``/``None`` cells, so the rows are
     passed through unchanged; ``unmapped`` mirrors
     :attr:`DecompComparison.unmapped` with every entity id coerced to ``int``.
+
+    The trailing three keys mirror :func:`compare_summary`'s headline fields so
+    the two compare commands' summaries are symmetric. They thread NO new
+    comparison science: a (level, variable) group is within tolerance iff
+    *every* one of its rows in :attr:`DecompComparison.rows` already satisfies
+    ``smape_pct / 100.0 <= tolerance`` — the per-row sMAPE percentage
+    ``DecompComparison.rows`` already carries, folded with a plain Python loop
+    (no polars import needed) rather than recomputed. ``within_tol`` counts the
+    groups that pass; ``total`` is the group count; ``all_within_tol`` is
+    ``True`` iff ``total > 0`` and every group passes. For an empty comparison
+    this yields ``within_tol=0``, ``total=0``, ``all_within_tol=False``.
     """
+    within_by_group: dict[tuple[str, str], bool] = {}
+    for row in comparison.rows.iter_rows(named=True):
+        key = (row["level"], row["variable"])
+        passes = (row["smape_pct"] / 100.0) <= tolerance
+        within_by_group[key] = within_by_group.get(key, True) and passes
+
+    total = len(within_by_group)
+    within_tol = sum(1 for passes in within_by_group.values() if passes)
+    all_within_tol = total > 0 and within_tol == total
+
     return {
         "stages": int(comparison.stage_count),
         "variables": comparison.summary.to_dicts(),
@@ -159,6 +183,9 @@ def decomp_compare_summary(comparison: DecompComparison) -> dict[str, object]:
             level: [int(code) for code in codes]
             for level, codes in comparison.unmapped.items()
         },
+        "within_tol": within_tol,
+        "total": total,
+        "all_within_tol": all_within_tol,
     }
 
 

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`compare decomp --json` now emits a within-tolerance `status`.** A new
+  `--tolerance` option (env `COBRE_BRIDGE_RESULTS_TOLERANCE`, default `1e-2`,
+  same precedence chain as `compare newave`'s `--tolerance`) drives it: `status`
+  is now `ok`/`mismatch`/`no-comparable-rows` (was `ok`/`no-comparable-rows`) —
+  `mismatch` when any compared variable's per-row sMAPE exceeds the tolerance,
+  `ok` when every variable is within it, `no-comparable-rows` unchanged for an
+  empty comparison. The `summary` object gains `within_tol`/`total`/
+  `all_within_tol` (mirroring `compare newave`'s `summary`), appended after the
+  existing `stages`/`variables`/`unmapped` keys. Backward-compatible: only new
+  keys were added, `schema_version` is unchanged, and the command still always
+  exits 0 regardless of status.
+
 ## [0.12.0] - 2026-07-22
 
 Syncs the bridge to the **cobre 0.12.0** ecosystem release (skipping the 0.11.x

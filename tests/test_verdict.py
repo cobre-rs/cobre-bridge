@@ -240,16 +240,23 @@ class TestDecompCompareSummary:
     def test_two_rows_returns_key_order_and_values(self) -> None:
         comparison = _fake_decomp_comparison()
 
-        result = decomp_compare_summary(comparison)
+        result = decomp_compare_summary(comparison, tolerance=1e-2)
 
-        assert list(result.keys()) == ["stages", "variables", "unmapped"]
+        assert list(result.keys()) == [
+            "stages",
+            "variables",
+            "unmapped",
+            "within_tol",
+            "total",
+            "all_within_tol",
+        ]
         assert result["stages"] == comparison.stage_count
         assert result["variables"] == comparison.summary.to_dicts()
         assert result["unmapped"] == {"hydro": [7], "thermal": [], "bus": []}
 
     def test_two_rows_round_trips_through_json(self) -> None:
         comparison = _fake_decomp_comparison()
-        result = decomp_compare_summary(comparison)
+        result = decomp_compare_summary(comparison, tolerance=1e-2)
 
         round_tripped = json.loads(json.dumps(result))
 
@@ -258,8 +265,11 @@ class TestDecompCompareSummary:
     def test_empty_comparison_returns_zero_stages_and_no_variables(self) -> None:
         comparison = _empty_decomp_comparison()
 
-        result = decomp_compare_summary(comparison)
+        result = decomp_compare_summary(comparison, tolerance=1e-2)
 
         assert result["stages"] == 0
         assert result["variables"] == []
         assert result["unmapped"] == {"hydro": [], "thermal": [], "bus": []}
+        assert result["within_tol"] == 0
+        assert result["total"] == 0
+        assert result["all_within_tol"] is False

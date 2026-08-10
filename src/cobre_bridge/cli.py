@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.comparators.decomp_results import DecompComparison
     from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
@@ -1521,6 +1522,63 @@ def _convert_decomp(
     )
 
 
+def _export_decomp_artifacts(
+    comparison: DecompComparison,
+    *,
+    raw_formats: list[str] | None,
+    decomp_dir: Path,
+    cobre_output_dir: Path,
+    tolerance: float,
+    out_dir_arg: Path | None,
+    quiet_status: bool = False,
+) -> tuple[set[str], Path]:
+    """Resolve ``--format`` and write the machine-readable comparison artifacts.
+
+    Used by `compare decomp`; the source-deck sibling of
+    :func:`_export_compare_artifacts`. Returns the requested formats and the
+    resolved out_dir so the handler can reuse them.
+
+    An invalid ``--format`` token exits 2 (clean stderr). A write failure must
+    NOT change the comparison exit code, so an ``OSError`` is warned and
+    swallowed.
+
+    *quiet_status* (set by ``--json``) gates ONLY the ``Artifacts written to …``
+    stdout status line so stdout stays pure JSON; the file export still runs and
+    the ``OSError`` write-failure warning still reaches stderr.
+    """
+    from cobre_bridge.comparators.decomp_export import write_decomp_artifacts
+
+    try:
+        formats = _parse_formats(raw_formats)
+    except ValueError as exc:
+        render_error(str(exc))
+        raise typer.Exit(code=2)
+
+    out_dir: Path = out_dir_arg or (cobre_output_dir / "comparison_artifacts")
+    export_formats = formats & {"csv", "parquet", "json"}
+
+    try:
+        write_decomp_artifacts(
+            comparison,
+            command="compare decomp",
+            decomp_dir=decomp_dir,
+            cobre_output_dir=cobre_output_dir,
+            tolerance=tolerance,
+            out_dir=out_dir,
+            formats=sorted(export_formats),
+        )
+        if not quiet_status:
+            print_status(f"Artifacts written to {out_dir}")
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to write artifacts: {exc}",
+            console=get_console(stderr=True),
+            style="#F5A623",
+        )
+
+    return formats, out_dir
+
+
 def _run_decomp_comparison(args: SimpleNamespace) -> None:
     """Execute the compare decomp subcommand.
 
@@ -1552,18 +1610,49 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
         )
         raise typer.Exit(code=2) from exc
 
-    if args.json_output:
-        status = "ok" if not comparison.rows.is_empty() else "no-comparable-rows"
-        _emit_convert_json(
-            build_verdict(
-                "compare decomp",
-                status,
-                decomp_compare_summary(comparison),
-            )
-        )
-        return
+    _resolve_compare_settings(args)
 
-    render_decomp_comparison(comparison)
+    if not args.json_output:
+        render_decomp_comparison(comparison)
+
+    formats, out_dir = _export_decomp_artifacts(
+        comparison,
+        raw_formats=args.format,
+        decomp_dir=args.decomp_dir,
+        cobre_output_dir=args.cobre_output_dir,
+        tolerance=args.tolerance,
+        out_dir_arg=args.out_dir,
+        quiet_status=args.json_output,
+    )
+
+    # HTML report (opt-in via --format html / all). The file is still written
+    # under --json (it is a --format artifact); only its stdout advisory is
+    # routed to stderr so stdout stays pure JSON.
+    if "html" in formats:
+        from cobre_bridge.comparators.decomp_html_report import (
+            build_decomp_comparison_report,
+        )
+
+        html = build_decomp_comparison_report(comparison)
+        report_path = out_dir / "report.html"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(html, encoding="utf-8")
+        print_status(
+            f"HTML report written to {report_path}",
+            console=get_console(stderr=True) if args.json_output else None,
+        )
+
+    if args.json_output:
+        # ``status`` REFLECTS divergence (within-tolerance verdict), but the
+        # exit code is DECOUPLED from it — this command always exits 0,
+        # mirroring ``compare newave``. An empty comparison has no rows to
+        # judge, so it keeps the E1 data-availability status instead.
+        summary = decomp_compare_summary(comparison, args.tolerance)
+        if comparison.rows.is_empty():
+            status = "no-comparable-rows"
+        else:
+            status = "ok" if summary["all_within_tol"] else "mismatch"
+        _emit_convert_json(build_verdict("compare decomp", status, summary))
 
 
 @compare_app.command("decomp")
@@ -1574,6 +1663,19 @@ def _compare_decomp(
     cobre_output_dir: Annotated[
         Path, typer.Argument(help="Path to the Cobre output directory.")
     ],
+    tolerance: Annotated[
+        float | None,
+        typer.Option(
+            envvar="COBRE_BRIDGE_RESULTS_TOLERANCE",
+            help=(
+                "Relative tolerance for the within-tolerance verdict (default "
+                "1e-2; overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or "
+                "cobre-bridge.toml)."
+            ),
+        ),
+    ] = None,
+    fmt: _FormatOpt = None,
+    out_dir: _OutDirOpt = None,
     json_output: Annotated[
         bool,
         typer.Option(
@@ -1598,6 +1700,9 @@ def _compare_decomp(
         SimpleNamespace(
             decomp_dir=decomp_dir,
             cobre_output_dir=cobre_output_dir,
+            format=fmt,
+            out_dir=out_dir,
+            tolerance=tolerance,
             json_output=json_output,
             verbose=verbose,
             log_file=log_file,

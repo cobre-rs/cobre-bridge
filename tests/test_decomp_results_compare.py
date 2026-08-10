@@ -9,6 +9,7 @@ from typing import Any
 import polars as pl
 import pytest
 
+from cobre_bridge.comparators.decomp_html_report import build_decomp_comparison_report
 from cobre_bridge.comparators.decomp_results import (
     _HYDRO_VARIABLES,
     DecompComparison,
@@ -18,6 +19,7 @@ from cobre_bridge.comparators.decomp_results import (
     _summarize,
     _tidy,
 )
+from cobre_bridge.verdict import decomp_compare_summary
 
 
 def _source_frame() -> pl.DataFrame:
@@ -202,6 +204,107 @@ def _fake_comparison() -> DecompComparison:
     )
 
 
+class TestBuildDecompComparisonReport:
+    """``build_decomp_comparison_report`` renders the same frames as the console."""
+
+    def test_populated_comparison_renders_all_three_frames(self) -> None:
+        comparison = _fake_comparison()
+
+        report = build_decomp_comparison_report(comparison)
+
+        assert "<!DOCTYPE html>" in report
+        assert "Operation comparison" in report
+        assert "generation" in report
+        assert "Final bounds" in report
+
+    def test_unmapped_codes_appear_in_the_report(self) -> None:
+        """``unmapped={"thermal": [86, 224]}`` in the fixture must surface."""
+        report = build_decomp_comparison_report(_fake_comparison())
+
+        assert "86" in report
+        assert "224" in report
+
+    def test_empty_comparison_short_circuits_without_raising(self) -> None:
+        empty_rows = _fake_comparison().rows.clear()
+        comparison = DecompComparison(
+            rows=empty_rows,
+            summary=_summarize(empty_rows),
+            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
+            unmapped={"hydro": [], "thermal": [], "bus": []},
+        )
+
+        report = build_decomp_comparison_report(comparison)
+
+        assert "no comparable rows" in report
+        assert "<!DOCTYPE html>" in report
+
+
+class TestDecompCompareSummaryTolerance:
+    """The within-tolerance verdict keys ``decomp_compare_summary`` appends."""
+
+    def test_mixed_fixture_has_one_variable_exceeding_tolerance(self) -> None:
+        """Hydro's ``smape_pct == 10.5`` exceeds 1e-2; thermal's ``0.0`` is within."""
+        comparison = _fake_comparison()
+
+        summary = decomp_compare_summary(comparison, tolerance=1e-2)
+
+        assert list(summary.keys()) == [
+            "stages",
+            "variables",
+            "unmapped",
+            "within_tol",
+            "total",
+            "all_within_tol",
+        ]
+        assert summary["total"] == 2
+        assert summary["within_tol"] == 1
+        assert summary["all_within_tol"] is False
+
+    def test_all_rows_within_tolerance_report_all_within_tol_true(self) -> None:
+        rows = pl.DataFrame(
+            {
+                "level": ["hydro", "thermal"],
+                "variable": ["generation", "generation"],
+                "unit": ["MW", "MW"],
+                "entity_id": [0, 0],
+                "entity_name": ["A", "T"],
+                "stage_id": [0, 0],
+                "source": [100.0, 20.0],
+                "cobre": [100.0, 20.0],
+                "delta": [0.0, 0.0],
+                "delta_pct": [0.0, 0.0],
+                "smape_pct": [0.0, 0.0],
+            }
+        )
+        comparison = DecompComparison(
+            rows=rows,
+            summary=_summarize(rows),
+            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
+            unmapped={"hydro": [], "thermal": [], "bus": []},
+        )
+
+        summary = decomp_compare_summary(comparison, tolerance=1e-2)
+
+        assert summary["total"] == 2
+        assert summary["within_tol"] == 2
+        assert summary["all_within_tol"] is True
+
+    def test_empty_comparison_reports_zero_totals(self) -> None:
+        empty_rows = _fake_comparison().rows.clear()
+        comparison = DecompComparison(
+            rows=empty_rows,
+            summary=_summarize(empty_rows),
+            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
+            unmapped={"hydro": [], "thermal": [], "bus": []},
+        )
+
+        summary = decomp_compare_summary(comparison, tolerance=1e-2)
+
+        assert summary["within_tol"] == 0
+        assert summary["total"] == 0
+        assert summary["all_within_tol"] is False
+
+
 class TestCompareDecompCommand:
     """The ``compare decomp`` subcommand, with the comparison itself stubbed."""
 
@@ -235,6 +338,8 @@ class TestCompareDecompCommand:
     def test_json_carries_the_summary_and_unmapped_codes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """At the default tolerance (1e-2), hydro's ``smape_pct == 10.5`` exceeds
+        it while thermal's ``0.0`` does not, so the fixture reports a mismatch."""
         result = self._invoke(
             ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"], monkeypatch
         )
@@ -248,12 +353,43 @@ class TestCompareDecompCommand:
             "diagnostics",
         ]
         assert payload["command"] == "compare decomp"
-        assert payload["status"] == "ok"
+        assert payload["status"] == "mismatch"
         summary = payload["summary"]
-        assert list(summary.keys()) == ["stages", "variables", "unmapped"]
+        assert list(summary.keys()) == [
+            "stages",
+            "variables",
+            "unmapped",
+            "within_tol",
+            "total",
+            "all_within_tol",
+        ]
         assert summary["stages"] == 1
         assert {row["level"] for row in summary["variables"]} == {"hydro", "thermal"}
         assert summary["unmapped"]["thermal"] == [86, 224]
+        assert summary["within_tol"] == 1
+        assert summary["total"] == 2
+        assert summary["all_within_tol"] is False
+
+    def test_json_status_is_ok_under_a_loose_tolerance(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A looser ``--tolerance`` flips the same fixture's mismatch to ok."""
+        result = self._invoke(
+            [
+                "compare",
+                "decomp",
+                str(tmp_path),
+                str(tmp_path),
+                "--tolerance",
+                "0.5",
+                "--json",
+            ],
+            monkeypatch,
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "ok"
+        assert payload["summary"]["all_within_tol"] is True
 
     def test_json_reports_no_comparable_rows_when_comparison_is_empty(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -274,6 +410,9 @@ class TestCompareDecompCommand:
         payload = json.loads(result.stdout)
         assert payload["status"] == "no-comparable-rows"
         assert payload["summary"]["variables"] == []
+        assert payload["summary"]["within_tol"] == 0
+        assert payload["summary"]["total"] == 0
+        assert payload["summary"]["all_within_tol"] is False
 
     def test_unreadable_output_exits_two(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -292,6 +431,88 @@ class TestCompareDecompCommand:
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]
         )
         assert result.exit_code == 2
+
+    def test_writes_artifacts_to_the_default_out_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cobre_output_dir = tmp_path / "cobre"
+        result = self._invoke(
+            ["compare", "decomp", str(tmp_path), str(cobre_output_dir)], monkeypatch
+        )
+        assert result.exit_code == 0
+        artifacts = cobre_output_dir / "comparison_artifacts"
+        assert (artifacts / "comparison.parquet").exists()
+        assert (artifacts / "comparison.json").exists()
+
+    def test_format_and_out_dir_flags_with_json_keep_stdout_pure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cobre_output_dir = tmp_path / "cobre"
+        other = tmp_path / "other"
+        result = self._invoke(
+            [
+                "compare",
+                "decomp",
+                str(tmp_path),
+                str(cobre_output_dir),
+                "--format",
+                "json",
+                "--out-dir",
+                str(other),
+                "--json",
+            ],
+            monkeypatch,
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["command"] == "compare decomp"
+        assert (other / "summary.json").exists()
+        assert "Artifacts written to" not in result.stdout
+
+    def test_format_html_writes_a_self_contained_report(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "artifacts"
+        result = self._invoke(
+            [
+                "compare",
+                "decomp",
+                str(tmp_path),
+                str(tmp_path),
+                "--format",
+                "html",
+                "--out-dir",
+                str(out_dir),
+            ],
+            monkeypatch,
+        )
+        assert result.exit_code == 0
+        report_path = out_dir / "report.html"
+        assert report_path.exists()
+        assert "Operation comparison" in report_path.read_text(encoding="utf-8")
+
+    def test_format_html_advisory_routes_to_stderr_under_json(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "artifacts"
+        result = self._invoke(
+            [
+                "compare",
+                "decomp",
+                str(tmp_path),
+                str(tmp_path),
+                "--format",
+                "html",
+                "--out-dir",
+                str(out_dir),
+                "--json",
+            ],
+            monkeypatch,
+        )
+        assert result.exit_code == 0
+        assert (out_dir / "report.html").exists()
+        json.loads(result.stdout)  # stdout carries only the JSON verdict
+        assert "HTML report written to" not in result.stdout
 
     def test_partition_missing_output_exits_two(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
