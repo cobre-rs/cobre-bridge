@@ -681,8 +681,16 @@ def convert_hydros(
     id_map: DecompIdMap,
     start_date: date,
     effective: EffectiveCadastro,
+    travel_time_hours: dict[int, float] | None = None,
 ) -> dict:
     """Build ``hydros.json`` for the operated plants.
+
+    *travel_time_hours* (``{plant code: hours}``, from
+    :func:`cobre_bridge.decomp.travel_time.convert_travel_time`) stamps the
+    ``VI`` water travel time onto each arc plant's entry; a plant absent from it
+    — or the whole map being ``None`` — emits no ``travel_time_hours`` key
+    (cobre defaults it to instantaneous). The key is emitted only when the plant
+    also has a downstream arc for the delay to act on.
 
     ``max_generation_mw`` is the installed (un-derated, ``TEIF``/``IP``-free)
     max-over-stages envelope of the AC-adjusted rated unit-power sum,
@@ -792,6 +800,8 @@ def convert_hydros(
             },
             "unit_groups": unit_groups,
         }
+        if travel_time_hours and code in travel_time_hours and downstream is not None:
+            entry["travel_time_hours"] = travel_time_hours[code]
         hydros.append(entry)
 
     affected_codes = set(effective.machine_conjunto_counts) | {
@@ -836,6 +846,40 @@ def convert_hydros(
     return {"$schema": _SCHEMA_URL, "hydros": hydros}
 
 
+def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> float:
+    """The ``UH`` ``volume_inicial`` percentage resolved to hm³ at stage 0.
+
+    ``pct`` is a percentage of the *initial stage's* effective useful volume,
+    not the plant's outer envelope, so the range is read from
+    :func:`~cobre_bridge.decomp.cadastro.effective_storage_range` at stage
+    ``0``. A run-of-river (``D``) plant's stage-0 range is already the
+    single-point collapse ``(vol_ref, vol_ref)`` (ticket-018), so its initial
+    value is ``vol_ref`` regardless of *pct*. Shared by
+    :func:`convert_initial_storage` (the initial condition) and
+    :func:`_operated_initial_volumes` (the generation-productivity anchor) so
+    both resolve a plant's initial volume identically.
+    """
+    v_min, v_max = effective_storage_range(effective, code, 0)
+    return min(max(v_min + (pct / 100.0) * (v_max - v_min), v_min), v_max)
+
+
+def _operated_initial_volumes(
+    dadger: Dadger, effective: EffectiveCadastro
+) -> dict[int, float]:
+    """``{code: initial reservoir volume hm³}`` for every operated ``UH`` plant.
+
+    The volume :func:`convert_energy_productivity` anchors each plant's
+    generation productivity on — the same value :func:`convert_initial_storage`
+    emits as the initial condition (both via :func:`_initial_volume_hm3`).
+    """
+    return {
+        int(row["codigo_usina"]): _initial_volume_hm3(
+            effective, int(row["codigo_usina"]), float(row["volume_inicial"])
+        )
+        for _, row in _operated_uh(dadger).iterrows()
+    }
+
+
 def convert_initial_storage(
     dadger: Dadger,
     hidr: pd.DataFrame,
@@ -844,22 +888,15 @@ def convert_initial_storage(
 ) -> list[dict]:
     """Initial reservoir volumes from ``UH`` (% of useful → hm³).
 
-    ``volume_inicial`` is a percentage of the *initial stage's* effective
-    useful volume, not the plant's outer envelope, so the min/max here are
-    read from :func:`~cobre_bridge.decomp.cadastro.effective_storage_range`
-    at stage ``0``. A run-of-river (``D``) plant's stage-0 range is already
-    the single-point collapse ``(vol_ref, vol_ref)`` (ticket-018), so its
-    initial value is ``vol_ref`` regardless of the declared ``UH``
-    percentage.
+    The percentage is resolved by :func:`_initial_volume_hm3` against the
+    stage-0 effective useful volume (run-of-river plants collapse to their
+    reference volume — ticket-018).
     """
     operated = _operated_uh(dadger)
     storage: list[dict] = []
     for _, row in operated.iterrows():
         code = int(row["codigo_usina"])
-        v_min, v_max = effective_storage_range(effective, code, 0)
-        pct = float(row["volume_inicial"])
-        value = v_min + (pct / 100.0) * (v_max - v_min)
-        value = min(max(value, v_min), v_max)
+        value = _initial_volume_hm3(effective, code, float(row["volume_inicial"]))
         storage.append({"hydro_id": id_map.hydro_id(code), "value_hm3": value})
         dead = row.get("volume_morto_inicial")
         if not pd.isna(dead):
@@ -914,24 +951,37 @@ def _mean_cota_from_coeffs(coeffs: Sequence[float], v_lo: float, v_hi: float) ->
 
 
 def _equivalent_productivity_mw_per_m3s(
-    effective: EffectiveCadastro, code: int, stage_index: int
+    effective: EffectiveCadastro,
+    code: int,
+    stage_index: int,
+    reference_volume_hm3: float | None = None,
 ) -> float:
     """``ρ_eq = ρ_esp · h_net`` for one plant at one stage.
 
-    The gross head is the volume-averaged upstream cota over the **full**
-    operating range (``volume_minimo``..``volume_maximo``) minus the mean
-    tailrace level, with the hydraulic-loss model applied — the same
-    full-range construction the other converter family uses for its
-    constant-productivity plants, for **every** regulation class (no
-    ``tipo_regulacao`` branch: validated against the source model's own
-    reported equivalent productivity to median 0.01% across every class —
-    see the module docstring). Every input is read at *stage_index* through
-    *effective*, so an ``AC PROESP``/``PERHID``/``JUSMED``/``COTVOL``/
-    ``VOLMIN``/``VOLMAX`` override shifts this stage's ρ_eq; ``tipo_perda``
-    carries no ``AC`` register of its own and stays a base read. Factored out
-    so :func:`convert_energy_productivity` (the penalties input, stage-0
-    only) and :func:`convert_hydro_group_availability` (the B8 hydraulic
-    cap, per-stage) always agree on the same plant's stage-*stage_index* ρ_eq.
+    The gross head is an upstream cota minus the mean tailrace level, with the
+    hydraulic-loss model applied. The cota anchor depends on
+    *reference_volume_hm3*:
+
+    * ``None`` (the engolimento anchor) — the volume-averaged cota over the
+      **full** operating range (``volume_minimo``..``volume_maximo``). This is
+      the value the head-aware ``max_turbined`` envelope and
+      :func:`convert_hydro_group_availability`'s B8 hydraulic cap consume,
+      validated against the source model's ``Qtur Maxima``; it stays on the
+      full-range mean so that path is unchanged.
+    * a volume (the **generation** anchor) — the cota at that single volume.
+      :func:`convert_energy_productivity` passes the plant's initial reservoir
+      volume because the source model anchors each plant's hydro production
+      function (FPHA) at the initial volume ± a fit window (manual §3.4.6.4,
+      ``FP`` fields 10-11), **not** the full-range mean. For a reservoir
+      starting far from mid-range the two heads differ materially — validated
+      against ``dec_oper_usih`` effective productivity, the initial-volume
+      anchor cuts the reservoir median error 4.3% -> 2.6% and the worst case
+      (BARRA BONITA, 87% full) 22.7% -> 5.9%.
+
+    Every other input is read at *stage_index* through *effective*, so an
+    ``AC PROESP``/``PERHID``/``JUSMED``/``COTVOL``/``VOLMIN``/``VOLMAX``
+    override shifts this stage's ρ_eq; ``tipo_perda`` carries no ``AC`` register
+    of its own and stays a base read.
     """
     v_min = effective.value(code, "volume_minimo", stage_index)
     v_max = effective.value(code, "volume_maximo", stage_index)
@@ -940,7 +990,11 @@ def _equivalent_productivity_mw_per_m3s(
     perdas = effective.value(code, "perdas", stage_index)
     tipo_perda = int(effective.base.loc[code, "tipo_perda"])
     coeffs = effective.cota_polynomial(code, stage_index)
-    h_gross = _mean_cota_from_coeffs(coeffs, v_min, v_max) - cf
+    if reference_volume_hm3 is None:
+        cota = _mean_cota_from_coeffs(coeffs, v_min, v_max)
+    else:
+        cota = _eval_cota_from_coeffs(coeffs, reference_volume_hm3)
+    h_gross = cota - cf
     h_net = max(_apply_hydraulic_loss(h_gross, tipo_perda, perdas), 0.0)
     return rho_esp * h_net
 
@@ -948,23 +1002,32 @@ def _equivalent_productivity_mw_per_m3s(
 def convert_energy_productivity(
     effective: EffectiveCadastro,
     id_map: DecompIdMap,
+    initial_volumes: dict[int, float] | None = None,
 ) -> pa.Table:
-    """Per-plant stage-0 equivalent productivity.
+    """Per-plant equivalent generation productivity, anchored at initial volume.
 
-    ``ρ_eq = ρ_esp · h_net`` at the initial stage — see
-    :func:`_equivalent_productivity_mw_per_m3s`. Emits exactly one value per
-    plant (``stage_id`` stays ``None``): cobre's DECOMP ``constant_
-    productivity`` production model and :func:`convert_penalties` both
-    consume one ρ_eq per plant, so a plant whose head/productivity inputs
-    carry a mid-horizon ``AC`` override still only contributes its stage-0
-    effective value here — the per-stage variation instead feeds
+    ``ρ_eq = ρ_esp · h_net`` with the head taken at the plant's **initial
+    reservoir volume** — the source model's FPHA fit anchor (see
+    :func:`_equivalent_productivity_mw_per_m3s`). *initial_volumes*
+    (``{code: hm³}``, from :func:`_operated_initial_volumes`) supplies that
+    anchor; a plant absent from it — or the whole map being ``None`` — falls
+    back to the full-range mean anchor (``reference_volume_hm3=None``), the
+    pre-FPHA-fix behaviour. Emits exactly one value per plant (``stage_id``
+    stays ``None``): cobre's DECOMP ``constant_productivity`` production model
+    and :func:`convert_penalties` both consume one ρ_eq per plant. The
+    per-stage head variation instead feeds
     :func:`convert_hydro_group_availability`'s own hydraulic ceiling.
     """
+    vols = initial_volumes or {}
     hydro_ids: list[int] = []
     values: list[float] = []
     for code in id_map.hydro_codes:
         hydro_ids.append(id_map.hydro_id(code))
-        values.append(_equivalent_productivity_mw_per_m3s(effective, code, 0))
+        values.append(
+            _equivalent_productivity_mw_per_m3s(
+                effective, code, 0, reference_volume_hm3=vols.get(code)
+            )
+        )
 
     return pa.table(
         {

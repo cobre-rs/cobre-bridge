@@ -812,6 +812,9 @@ class _CadastroDadger:
     def uh(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
         return self._uh
 
+    def vi(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return None
+
     def ac(
         self,
         codigo_usina: int | None = None,  # noqa: ARG002
@@ -1533,9 +1536,10 @@ class TestDeferralWarning:
     def test_still_names_the_genuinely_deferred_items(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """AC2: GNL anticipation, boundary FCF, and windowed inflow inputs
-        stay named, and the ``dadgnl`` present/absent interpolation still
-        reflects the (mocked, absent-``dadgnl``) fixture deck."""
+        """AC2: GNL anticipation, boundary FCF, windowed inflow inputs, and
+        water travel time (VI) stay named, and the ``dadgnl``/``VI``
+        present/absent interpolations still reflect the (mocked, both-absent)
+        fixture deck."""
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
             _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
 
@@ -1547,6 +1551,7 @@ class TestDeferralWarning:
         assert "GNL anticipation (dadgnl absent)" in deferral
         assert "boundary FCF" in deferral
         assert "windowed inflow inputs" in deferral
+        assert "water travel time (VI absent)" in deferral
 
     def test_fe_rha_libs_are_reported_once_through_the_dx_sink_not_the_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

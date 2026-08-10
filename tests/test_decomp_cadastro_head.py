@@ -490,3 +490,51 @@ def test_no_override_is_byte_identical() -> None:
     for stage_index in range(3):
         entry = values[(hydro_id, 0, stage_index)]
         assert entry.max_generation_mw == expected_hydraulic_mw
+
+
+# ---------------------------------------------------------------------------
+# FPHA anchor: generation productivity takes head at the initial volume.
+# ---------------------------------------------------------------------------
+
+
+def test_generation_productivity_anchors_at_initial_volume() -> None:
+    """The generation ρ_eq takes head at the plant's initial volume (the source
+    model's FPHA fit anchor, manual §3.4.6.4), not the full-range mean. For a
+    reservoir starting high on a rising cota curve, that is a higher head — and
+    a higher productivity — than the mid-range mean would give.
+    """
+    vmin, vmax = 100.0, 500.0
+    # Rising cota: 220 m at vmin, 300 m at vmax; mean over the range = 260 m.
+    coeffs = (200.0, 0.2, 0.0, 0.0, 0.0)
+    cf, rho_esp = 20.0, 0.01
+    hidr = _hidr_frame(
+        {1: _plant_row(vmin=vmin, vmax=vmax, cota=coeffs, cf=cf, rho_esp=rho_esp)}
+    )
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
+    effective = EffectiveCadastro(base=hidr, n_stages=1, stage_varying={})
+    hydro_id = id_map.hydro_id(1)
+
+    v_initial = 460.0  # 90% full
+    expected_init = rho_esp * ((coeffs[0] + coeffs[1] * v_initial) - cf)
+
+    def antideriv(v: float) -> float:
+        return coeffs[0] * v + coeffs[1] * v * v / 2.0
+
+    mean_cota = (antideriv(vmax) - antideriv(vmin)) / (vmax - vmin)
+    expected_mean = rho_esp * (mean_cota - cf)
+
+    anchored = (
+        convert_energy_productivity(effective, id_map, {1: v_initial})
+        .to_pandas()
+        .set_index("hydro_id")["equivalent_productivity_mw_per_m3s"][hydro_id]
+    )
+    # No map -> full-range mean fallback (the engolimento/legacy anchor).
+    fallback = (
+        convert_energy_productivity(effective, id_map)
+        .to_pandas()
+        .set_index("hydro_id")["equivalent_productivity_mw_per_m3s"][hydro_id]
+    )
+
+    assert anchored == pytest.approx(expected_init)
+    assert fallback == pytest.approx(expected_mean)
+    assert anchored > fallback  # rising cota + high fill => higher than the mean

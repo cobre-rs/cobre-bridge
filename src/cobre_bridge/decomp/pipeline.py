@@ -44,6 +44,7 @@ from cobre_bridge.decomp import network as network_conv
 from cobre_bridge.decomp import scenarios as scenarios_conv
 from cobre_bridge.decomp import temporal as temporal_conv
 from cobre_bridge.decomp import thermal as thermal_conv
+from cobre_bridge.decomp import travel_time as travel_time_conv
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.scalar_parameters import (
     build_decomp_scalar_parameters,
@@ -524,7 +525,14 @@ def _convert_decomp_case_impl(
     )
     _write_json(dst / "stages.json", stages_dict)
 
-    productivity = hydro_conv.convert_energy_productivity(effective, id_map)
+    # FPHA-anchor fidelity: the source model fits each plant's hydro production
+    # function around its initial reservoir volume, so the constant-productivity
+    # ρ_eq is anchored there too (not the full-range mean) — see
+    # hydro._equivalent_productivity_mw_per_m3s.
+    initial_volumes = hydro_conv._operated_initial_volumes(dadger, effective)
+    productivity = hydro_conv.convert_energy_productivity(
+        effective, id_map, initial_volumes
+    )
     deficit_costs = network_conv._bus_deficit_costs(dadger)
     deficit_cost = max(deficit_costs.values()) if deficit_costs else 0.0
     _write_json(
@@ -534,6 +542,18 @@ def _convert_decomp_case_impl(
             productivity["equivalent_productivity_mw_per_m3s"].to_pylist(),
         ),
     )
+    # TRACKED COBRE-GAP WORKAROUND (VI water travel time): the converter
+    # (decomp/travel_time.py) is complete and `cobre validate` accepts the
+    # emitted travel_time_hours + past_defluences, but cobre's transit-bucket
+    # cut generation currently produces an invalid cut that blows the lower
+    # bound past the upper bound (a large negative gap that cobre clamps to
+    # zero and mistakes for convergence, stopping on a corrupted policy). So VI
+    # is DEFERRED alongside GNL and the boundary FCF: detected for the deferral
+    # warning below, but not emitted. Restore by wiring convert_travel_time back
+    # into hydros.json + initial_conditions.past_defluences once the cobre bug
+    # is fixed. Removal condition tracked in
+    # ~/git/cobre/plans/conversion-found-improvements.md (C-travel-time).
+    has_travel_time = bool(travel_time_conv.read_travel_times(dadger))
     _write_json(
         dst / "initial_conditions.json",
         {
@@ -951,8 +971,10 @@ def _convert_decomp_case_impl(
 
     _LOG.warning(
         "deferred at this milestone: GNL anticipation (dadgnl%s), boundary "
-        "FCF (importer), windowed inflow inputs (solver 0.13)",
+        "FCF (importer), windowed inflow inputs (solver 0.13), water travel "
+        "time (VI%s)",
         " present" if files.dadgnl is not None else " absent",
+        " present" if has_travel_time else " absent",
     )
     _LOG.info(
         "converted %d buses, %d hydros, %d thermals, %d stages, terminal fan %d",
