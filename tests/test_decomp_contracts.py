@@ -830,8 +830,8 @@ def test_integrated_json_schema_and_parquet_roundtrip(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    not _COBRE_BIN.exists(),
-    reason="cobre binary not present (~/git/cobre/target/release/cobre required)",
+    not (_COBRE_BIN.exists() and _RV0_DECK.exists() and _RV3_DECK.exists()),
+    reason="cobre binary or a real deck (rv0/rv3) not present",
 )
 def test_real_decks_still_validate_clean(tmp_path: Path) -> None:
     """Regression guard: both real decks still convert to a case ``cobre
@@ -856,8 +856,8 @@ def test_real_decks_still_validate_clean(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    not _COBRE_BIN.exists(),
-    reason="cobre binary not present (~/git/cobre/target/release/cobre required)",
+    not (_COBRE_BIN.exists() and _RV3_DECK.exists()),
+    reason="cobre binary or the real rv3 deck not present",
 )
 def test_synthetic_contracts_validate_in_a_real_case(tmp_path: Path) -> None:
     """Overwrite a real rv3 conversion's two contract files with the
