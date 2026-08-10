@@ -58,12 +58,12 @@ def convert_config(dadger: Dadger) -> dict:
     tracked as C9). The simulation omits its own ``scenario_source`` and inherits
     training's external one.
 
-    ``scenario_source.seed`` is required by cobre's schema whenever any class
-    uses the external (or out_of_sample / historical) scheme, so it is always
-    emitted even though it is inert at run time here: with every class external
-    (a deterministic replay of the explicit tree) and enumerated selection,
-    there is no random draw for the seed to control. It is derived from the
-    study start date for stability.
+    ``scenario_source.seed`` is a fixed ``0``. A seed controls random sampling;
+    with every class ``external`` (a deterministic replay of the explicit tree)
+    and ``enumerated`` selection nothing samples, so the value is inert — but
+    cobre's schema requires the field whenever any class is external, so a
+    constant placeholder is emitted rather than a study-varying value that would
+    misleadingly imply a meaningful random draw.
 
     ``state_space.inflow_lag_depth`` is fixed at 12 (P3/D8): under
     no-folding, the source model's boundary cuts carry lag coefficients out
@@ -80,9 +80,6 @@ def convert_config(dadger: Dadger) -> dict:
         ni,
     )
 
-    dt = dadger.dt
-    seed = int(dt.ano) * 10000 + int(dt.mes) * 100 + int(dt.dia)
-
     return {
         "$schema": _CONFIG_SCHEMA_URL,
         "state_space": {"inflow_lag_depth": _INFLOW_LAG_DEPTH},
@@ -97,10 +94,10 @@ def convert_config(dadger: Dadger) -> dict:
             # scheme-aware load membership admits an external load class
             # regardless of σ (a deterministic std = 0 load standardizes to
             # eta = 0), so load is external here rather than the former
-            # in-sample-with-null-std workaround. The seed is schema-required
-            # for external schemes (inert here — see the docstring).
+            # in-sample-with-null-std workaround. seed is a schema-required
+            # inert placeholder (0) — external + enumerated never samples.
             "scenario_source": {
-                "seed": seed,
+                "seed": 0,
                 "inflow": {"scheme": "external"},
                 "load": {"scheme": "external"},
                 "ncs": {"scheme": "external"},

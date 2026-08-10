@@ -39,8 +39,9 @@ class TestConvertConfigStateSpace:
         # Training enumerates the explicit trunk-plus-fan node graph; every
         # stochastic class is external — inflow (the tree), load, and NCS.
         # cobre's scheme-aware load membership admits a deterministic (std = 0)
-        # external load class (it standardizes to eta = 0). The seed is
-        # schema-required for external schemes (inert at run time here).
+        # external load class (it standardizes to eta = 0). The seed is a
+        # schema-required inert placeholder fixed at 0 (external + enumerated
+        # never samples).
         expected_training = {
             "selection": {"method": "enumerated"},
             "stopping_rules": [
@@ -48,7 +49,7 @@ class TestConvertConfigStateSpace:
                 {"type": "iteration_limit", "limit": 250},
             ],
             "scenario_source": {
-                "seed": 20260718,
+                "seed": 0,
                 "inflow": {"scheme": "external"},
                 "load": {"scheme": "external"},
                 "ncs": {"scheme": "external"},
