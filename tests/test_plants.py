@@ -17,10 +17,12 @@ from cobre_bridge.dashboard.tabs.plants import (
     TAB_ID,
     TAB_LABEL,
     TAB_ORDER,
+    _block_hours_dict,
     _build_hydro_json,
     _build_thermal_json,
     _compute_hydro_percentiles,
     _compute_thermal_percentiles,
+    _weighted_lp_generation_bounds,
     build_hydro_explorer,
     build_thermal_explorer,
     can_render,
@@ -82,6 +84,19 @@ def _make_bh_df(
                 }
             )
     return pl.DataFrame(rows)
+
+
+def _make_block_hours(
+    n_stages: int = 2,
+    n_blocks: int = 1,
+    hours_per_block: float = 720.0,
+) -> dict[tuple[int, int], float]:
+    """Return a ``(stage_id, block_id) -> hours`` map matching _make_bh_df."""
+    return {
+        (stage_id, block_id): hours_per_block
+        for stage_id in range(n_stages)
+        for block_id in range(n_blocks)
+    }
 
 
 def _make_hydro_meta(hydro_ids: list[int] | None = None) -> dict[int, dict]:
@@ -266,10 +281,11 @@ def test_build_hydro_json_with_bounds_has_stor_keys() -> None:
         hydro_meta=hydro_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+        stage_dates={0: "2024-01-01", 1: "2024-02-01"},
         bus_names={0: "Bus-A", 1: "Bus-B"},
         hydro_bounds=hydro_bounds,
         lp_bounds=lp_bounds,
+        block_hours=_make_block_hours(n_stages=2),
     )
 
     # Plant 0 (has bounds) — must have non-empty arrays
@@ -302,10 +318,11 @@ def test_build_hydro_json_with_lp_bounds_has_gen_keys() -> None:
         hydro_meta=hydro_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels={},
+        stage_dates={},
         bus_names={0: "Bus-A"},
         hydro_bounds=pd.DataFrame(),
         lp_bounds=lp_bounds,
+        block_hours=_make_block_hours(n_stages=2),
     )
 
     entry = hydro_data["0"]
@@ -328,10 +345,11 @@ def test_build_hydro_json_sorted_alphabetically() -> None:
         hydro_meta=hydro_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels={},
+        stage_dates={},
         bus_names={},
         hydro_bounds=pd.DataFrame(),
         lp_bounds=pd.DataFrame(),
+        block_hours=_make_block_hours(n_stages=2),
     )
 
     assert hydro_data["0"]["name"] == "Agua Vermelha"
@@ -350,10 +368,11 @@ def test_build_hydro_json_outflow_is_turbined_plus_spillage() -> None:
         hydro_meta=hydro_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels={},
+        stage_dates={},
         bus_names={0: "Bus-A"},
         hydro_bounds=pd.DataFrame(),
         lp_bounds=pd.DataFrame(),
+        block_hours=_make_block_hours(n_stages=3),
     )
 
     entry = hydro_data["0"]
@@ -371,7 +390,7 @@ def test_build_hydro_explorer_empty_meta_returns_no_data_paragraph() -> None:
         hydros_lf=pl.LazyFrame(),
         hydro_meta={},
         bus_names={},
-        stage_labels={},
+        stage_dates={},
         bh_df=pl.DataFrame({"stage_id": [], "block_id": [], "_bh": []}),
         hydro_bounds=pd.DataFrame(),
         lp_bounds=pd.DataFrame(),
@@ -396,7 +415,7 @@ def test_build_hydro_explorer_normal_contains_expected_ids() -> None:
         hydros_lf=hydros_lf,
         hydro_meta=hydro_meta,
         bus_names={0: "Bus-A", 1: "Bus-B"},
-        stage_labels={0: "Jan 2024", 1: "Feb 2024", 2: "Mar 2024"},
+        stage_dates={0: "2024-01-01", 1: "2024-02-01", 2: "2024-03-01"},
         bh_df=bh_df,
         hydro_bounds=hydro_bounds,
         lp_bounds=lp_bounds,
@@ -434,7 +453,7 @@ def test_build_hydro_explorer_has_two_table_rows() -> None:
         hydros_lf=hydros_lf,
         hydro_meta=hydro_meta,
         bus_names={0: "Bus-A", 1: "Bus-B"},
-        stage_labels={},
+        stage_dates={},
         bh_df=bh_df,
         hydro_bounds=pd.DataFrame(),
         lp_bounds=pd.DataFrame(),
@@ -459,7 +478,7 @@ def test_build_hydro_explorer_rows_sorted_alphabetically() -> None:
         hydros_lf=hydros_lf,
         hydro_meta=hydro_meta,
         bus_names={},
-        stage_labels={},
+        stage_dates={},
         bh_df=bh_df,
         hydro_bounds=pd.DataFrame(),
         lp_bounds=pd.DataFrame(),
@@ -483,7 +502,7 @@ def test_build_hydro_explorer_bounds_json_embedded() -> None:
         hydros_lf=hydros_lf,
         hydro_meta=hydro_meta,
         bus_names={0: "Bus-A"},
-        stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+        stage_dates={0: "2024-01-01", 1: "2024-02-01"},
         bh_df=bh_df,
         hydro_bounds=hydro_bounds,
         lp_bounds=pd.DataFrame(),
@@ -504,7 +523,7 @@ def test_build_hydro_explorer_empty_bounds_skips_bound_keys() -> None:
         hydros_lf=hydros_lf,
         hydro_meta=hydro_meta,
         bus_names={0: "Bus-A"},
-        stage_labels={},
+        stage_dates={},
         bh_df=bh_df,
         hydro_bounds=pd.DataFrame(),
         lp_bounds=pd.DataFrame(),
@@ -663,9 +682,10 @@ def test_build_thermal_json_with_lp_bounds_has_gen_max() -> None:
         thermal_meta=thermal_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+        stage_dates={0: "2024-01-01", 1: "2024-02-01"},
         bus_names={0: "Bus-A", 1: "Bus-B"},
         lp_bounds=lp_bounds,
+        block_hours=_make_block_hours(n_stages=2),
     )
 
     # Plant 0 — gen_max must be populated with 450.0 values
@@ -692,9 +712,10 @@ def test_build_thermal_json_sorted_alphabetically() -> None:
         thermal_meta=thermal_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels={},
+        stage_dates={},
         bus_names={},
         lp_bounds=pd.DataFrame(),
+        block_hours=_make_block_hours(n_stages=2),
     )
 
     assert thermal_data["0"]["name"] == "Angra 1"
@@ -713,14 +734,169 @@ def test_build_thermal_json_empty_lp_bounds() -> None:
         thermal_meta=thermal_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels={},
+        stage_dates={},
         bus_names={0: "Bus-A"},
         lp_bounds=pd.DataFrame(),
+        block_hours=_make_block_hours(n_stages=2),
     )
 
     entry = thermal_data["0"]
     assert entry["gen_min"] == []
     assert entry["gen_max"] == []
+
+
+# ---------------------------------------------------------------------------
+# 8b. _weighted_lp_generation_bounds — block-hours weighting
+# ---------------------------------------------------------------------------
+
+
+def _angra_like_lp_bounds() -> pd.DataFrame:
+    """LP-bounds dump for a must-run thermal fixed per block at 568/544/516 MW.
+
+    Mirrors cobre's ``bounds.parquet``: a stage-level fallback row (block_id
+    NULL, from the plant's thermals.json default) plus one override row per
+    block, for both gen_min (6) and gen_max (7). All blocks are overridden, so
+    the stage-level 460 is never in force.
+    """
+    rows: list[dict] = [
+        {
+            "entity_type_code": 1,
+            "entity_id": 0,
+            "stage_id": 2,
+            "block_id": None,
+            "bound_type_code": 6,
+            "bound_value": 460.0,
+        },
+        {
+            "entity_type_code": 1,
+            "entity_id": 0,
+            "stage_id": 2,
+            "block_id": None,
+            "bound_type_code": 7,
+            "bound_value": 460.0,
+        },
+    ]
+    for block_id, mw in [(0, 568.0), (1, 544.0), (2, 516.0)]:
+        rows.append(
+            {
+                "entity_type_code": 1,
+                "entity_id": 0,
+                "stage_id": 2,
+                "block_id": block_id,
+                "bound_type_code": 6,
+                "bound_value": mw,
+            }
+        )
+        rows.append(
+            {
+                "entity_type_code": 1,
+                "entity_id": 0,
+                "stage_id": 2,
+                "block_id": block_id,
+                "bound_type_code": 7,
+                "bound_value": mw,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_weighted_lp_generation_bounds_per_block_is_hours_weighted() -> None:
+    """Per-block bounds collapse to the block-hours weighted mean, not last-block.
+
+    ANGRA-1 regression: 568/544/516 MW over 24/67/77 h -> 534.5952, NOT the 516
+    the old block_id-ignoring collapse produced.
+    """
+    lp_bounds = _angra_like_lp_bounds()
+    block_hours = {(2, 0): 24.0, (2, 1): 67.0, (2, 2): 77.0}
+
+    result = _weighted_lp_generation_bounds(lp_bounds, 1, block_hours)
+
+    expected = (568.0 * 24 + 544.0 * 67 + 516.0 * 77) / 168.0
+    assert abs(result[0][2][7] - expected) < 1e-9
+    assert abs(result[0][2][6] - expected) < 1e-9
+    # Must not be the naive last-block value.
+    assert abs(result[0][2][7] - 516.0) > 1.0
+
+
+def test_weighted_lp_generation_bounds_stage_level_passthrough() -> None:
+    """A stage-level-only row (block_id NULL) is returned unchanged."""
+    lp_bounds = pd.DataFrame(
+        [
+            {
+                "entity_type_code": 1,
+                "entity_id": 0,
+                "stage_id": 0,
+                "block_id": None,
+                "bound_type_code": 7,
+                "bound_value": 300.0,
+            },
+        ]
+    )
+    result = _weighted_lp_generation_bounds(lp_bounds, 1, {(0, 0): 720.0})
+    assert result[0][0][7] == 300.0
+
+
+def test_weighted_lp_generation_bounds_no_block_column_is_stage_level() -> None:
+    """A frame with no block_id column is treated as entirely stage-level."""
+    lp_bounds = _make_thermal_lp_bounds(
+        thermal_ids=[0], n_stages=2, bound_type_code=7, bound_value=450.0
+    )
+    assert "block_id" not in lp_bounds.columns
+    result = _weighted_lp_generation_bounds(lp_bounds, 1, _make_block_hours(n_stages=2))
+    assert result[0][0][7] == 450.0
+    assert result[0][1][7] == 450.0
+
+
+def test_weighted_lp_generation_bounds_empty_frame() -> None:
+    """An empty lp_bounds frame yields an empty mapping (no crash)."""
+    assert _weighted_lp_generation_bounds(pd.DataFrame(), 1, {}) == {}
+
+
+def test_build_thermal_json_per_block_bound_matches_weighted_generation() -> None:
+    """The gen_max line must equal the block-hours weighted generation.
+
+    End-to-end guard for the ANGRA-1 "534.5952 > 516" false violation: a
+    must-run plant fixed at 568/544/516 MW per block has a 534.5952 MW
+    hours-weighted dispatch, and its plotted bound must sit at the same value —
+    not at the last block's 516 MW cap.
+    """
+    thermal_meta = _make_thermal_meta([0])
+    thermals_lf = pl.DataFrame(
+        [
+            {
+                "scenario_id": 0,
+                "stage_id": 2,
+                "block_id": b,
+                "thermal_id": 0,
+                "generation_mw": mw,
+                "generation_cost": 0.0,
+                "generation_mwh": 0.0,
+            }
+            for b, mw in [(0, 568.0), (1, 544.0), (2, 516.0)]
+        ]
+    ).lazy()
+    bh_df = pl.DataFrame(
+        {"stage_id": [2, 2, 2], "block_id": [0, 1, 2], "_bh": [24.0, 67.0, 77.0]}
+    )
+    percentiles = _compute_thermal_percentiles(thermals_lf, bh_df)
+
+    thermal_data, _ = _build_thermal_json(
+        thermal_meta=thermal_meta,
+        percentiles=percentiles,
+        stages=[2],
+        stage_dates={2: "2024-01-01"},
+        bus_names={0: "Bus-A"},
+        lp_bounds=_angra_like_lp_bounds(),
+        block_hours=_block_hours_dict(bh_df),
+    )
+
+    entry = thermal_data["0"]
+    expected = (568.0 * 24 + 544.0 * 67 + 516.0 * 77) / 168.0
+    assert abs(entry["gen_max"][0] - expected) < 1e-3
+    assert abs(entry["gen_min"][0] - expected) < 1e-3
+    # The block-hours weighted generation must not exceed its (weighted) bound.
+    assert entry["gen_p50"][0] <= entry["gen_max"][0] + 1e-6
+    assert abs(entry["gen_max"][0] - 516.0) > 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +909,7 @@ def test_build_thermal_explorer_empty_meta_returns_no_data_paragraph() -> None:
         thermals_lf=pl.LazyFrame(),
         thermal_meta={},
         bus_names={},
-        stage_labels={},
+        stage_dates={},
         lp_bounds=pd.DataFrame(),
         bh_df=pl.DataFrame({"stage_id": [], "block_id": [], "_bh": []}),
     )
@@ -760,7 +936,7 @@ def test_build_thermal_explorer_normal_contains_expected_ids() -> None:
         thermals_lf=thermals_lf,
         thermal_meta=thermal_meta,
         bus_names={0: "Bus-A", 1: "Bus-B"},
-        stage_labels={0: "Jan 2024", 1: "Feb 2024", 2: "Mar 2024"},
+        stage_dates={0: "2024-01-01", 1: "2024-02-01", 2: "2024-03-01"},
         lp_bounds=lp_bounds,
         bh_df=bh_df,
     )
@@ -790,7 +966,7 @@ def test_build_thermal_explorer_has_two_table_rows() -> None:
         thermals_lf=thermals_lf,
         thermal_meta=thermal_meta,
         bus_names={0: "Bus-A", 1: "Bus-B"},
-        stage_labels={},
+        stage_dates={},
         lp_bounds=pd.DataFrame(),
         bh_df=bh_df,
     )
@@ -813,7 +989,7 @@ def test_build_thermal_explorer_rows_sorted_alphabetically() -> None:
         thermals_lf=thermals_lf,
         thermal_meta=thermal_meta,
         bus_names={},
-        stage_labels={},
+        stage_dates={},
         lp_bounds=pd.DataFrame(),
         bh_df=bh_df,
     )
@@ -848,7 +1024,7 @@ def test_render_contains_subtab_structure() -> None:
     data.hydro_meta = hydro_meta
     data.thermal_meta = thermal_meta
     data.bus_names = {0: "Bus-A"}
-    data.stage_labels = {0: "Jan 2024", 1: "Feb 2024"}
+    data.stage_dates = {0: "2024-01-01", 1: "2024-02-01"}
     data.hydro_bounds = pd.DataFrame()
     data.lp_bounds = pd.DataFrame()
 
@@ -897,7 +1073,7 @@ def test_render_band_toggle_checkbox() -> None:
     data.hydro_meta = hydro_meta
     data.thermal_meta = {}
     data.bus_names = {0: "Bus-A"}
-    data.stage_labels = {0: "Jan 2024", 1: "Feb 2024"}
+    data.stage_dates = {0: "2024-01-01", 1: "2024-02-01"}
     data.hydro_bounds = pd.DataFrame()
     data.lp_bounds = pd.DataFrame()
 
@@ -920,7 +1096,7 @@ def test_render_band_toggle_js_variable() -> None:
     data.hydro_meta = hydro_meta
     data.thermal_meta = {}
     data.bus_names = {0: "Bus-A"}
-    data.stage_labels = {0: "Jan 2024", 1: "Feb 2024"}
+    data.stage_dates = {0: "2024-01-01", 1: "2024-02-01"}
     data.hydro_bounds = pd.DataFrame()
     data.lp_bounds = pd.DataFrame()
 
@@ -939,7 +1115,7 @@ def test_render_hydro_detail_respects_band_var() -> None:
         hydros_lf=hydros_lf,
         hydro_meta=hydro_meta,
         bus_names={0: "Bus-A"},
-        stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+        stage_dates={0: "2024-01-01", 1: "2024-02-01"},
         bh_df=bh_df,
         hydro_bounds=pd.DataFrame(),
         lp_bounds=pd.DataFrame(),
@@ -964,7 +1140,7 @@ def test_render_thermal_detail_respects_band_var() -> None:
         thermals_lf=thermals_lf,
         thermal_meta=thermal_meta,
         bus_names={0: "Bus-A"},
-        stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+        stage_dates={0: "2024-01-01", 1: "2024-02-01"},
         lp_bounds=pd.DataFrame(),
         bh_df=bh_df,
     )
