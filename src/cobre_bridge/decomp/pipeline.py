@@ -51,6 +51,7 @@ from cobre_bridge.decomp.scalar_parameters import (
 )
 from cobre_bridge.pipeline import (
     ConversionReport,
+    _clear_dst_contents,
     _finalize_diagnostics,
     _WarningCollector,
 )
@@ -131,20 +132,6 @@ def discover_decomp_files(src: Path) -> DecompFiles:
         dadgnl=dadgnl,
         renovaveis=renovaveis,
     )
-
-
-def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
-
-
-def _write_parquet(path: Path, table: pa.Table) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # TRACKED COBRE-GAP WORKAROUND (C3): the solver's parquet reader is
-    # built without snappy; zstd until the compression contract is settled.
-    pq.write_table(table, path, compression="zstd")
 
 
 def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.Table:
@@ -343,6 +330,7 @@ def convert_decomp_case(
     *,
     force: bool = False,
     on_phase: Callable[[str], None] | None = None,
+    dry_run: bool = False,
 ) -> ConversionReport:
     """Convert one deck revision into a Cobre case directory.
 
@@ -352,6 +340,13 @@ def convert_decomp_case(
     ``dx.emit`` finding *and* every residual ``logger.warning`` string is
     captured, then returns them as one de-duplicated
     :class:`~cobre_bridge.pipeline.ConversionReport`.
+
+    Parameters
+    ----------
+    dry_run:
+        When ``True``, run the full in-memory conversion but write nothing to
+        *dst* (no files, no subdirectories). The would-write paths are still
+        recorded in :attr:`~cobre_bridge.pipeline.ConversionReport.would_write_paths`.
 
     Returns
     -------
@@ -369,7 +364,17 @@ def convert_decomp_case(
         ``INFO`` finding (e.g. rule 43's "not applicable" report, emitted when
         no hydro-bounds capacity column is populated) never raises. No report
         is returned on this path.
+    FileExistsError
+        If *dst* already exists, is non-empty, and ``force`` is not set.
     """
+    # This refusal must run before the clearing try/except below: it is a
+    # "do not touch dst" guard, not a mid-write failure, so it must never
+    # reach ``_clear_dst_contents`` and delete a pre-existing, unrelated case
+    # (mirrors the source model's own NEWAVE-twin ordering, which performs
+    # this check ahead of its own write/clear try block).
+    if dst.exists() and any(dst.iterdir()) and not force:
+        raise FileExistsError(f"{dst} already contains files; pass force to overwrite")
+
     collector = _WarningCollector()
     pkg_logger = logging.getLogger("cobre_bridge")
     pkg_logger.addHandler(collector)
@@ -380,7 +385,20 @@ def convert_decomp_case(
         # topology non-itemized warning) are picked up by ``collector`` and
         # bridged below, so every warning still surfaces.
         with dx.collect() as collected:
-            report = _convert_decomp_case_impl(src, dst, force=force, on_phase=on_phase)
+            report = _convert_decomp_case_impl(
+                src, dst, force=force, on_phase=on_phase, dry_run=dry_run
+            )
+    except BaseException:
+        # The write phase is a sequence of independent file writes with no
+        # rollback, so a failure partway through can leave a subset of the
+        # output files behind. Remove the known pipeline outputs so a
+        # half-written case is never mistaken for a complete one and a plain
+        # (no --force) re-run is not refused as "destination not empty".
+        # Skipped under a dry run: nothing was written, and dst may be a
+        # pre-existing populated directory the user never asked to clear.
+        if not dry_run:
+            _clear_dst_contents(dst)
+        raise
     finally:
         pkg_logger.removeHandler(collector)
     report.diagnostics = _finalize_diagnostics(collected, collector.messages)
@@ -397,17 +415,19 @@ def _convert_decomp_case_impl(
     *,
     force: bool = False,
     on_phase: Callable[[str], None] | None = None,
+    dry_run: bool = False,
 ) -> ConversionReport:
     """Run the DECOMP conversion pipeline (warning capture handled by the wrapper).
 
     ``on_phase`` (when given) is called once at each boundary in
     :data:`DECOMP_CONVERSION_PHASE_LABELS`, so the CLI can advance a progress bar
     without the pipeline knowing anything about rendering.
+
+    When ``dry_run`` is ``True``, the build phases run exactly as for a real run,
+    but the write phase creates no directories and writes no files; the paths that
+    would have been written are still accumulated and recorded on the report.
     """
     step = on_phase if on_phase is not None else (lambda _label: None)
-    if dst.exists() and any(dst.iterdir()) and not force:
-        raise FileExistsError(f"{dst} already contains files; pass force to overwrite")
-
     step("Discovering deck")
     files = discover_decomp_files(src)
     _LOG.info("converting %s (revision %s)", src, files.revision)
@@ -464,7 +484,35 @@ def _convert_decomp_case_impl(
 
     tx = float(dadger.tx.taxa) / 100.0
 
-    dst.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        dst.mkdir(parents=True, exist_ok=True)
+
+    # Every output path is routed through ``_write_json`` / ``_write_parquet`` so
+    # the would-write listing and the dry-run gate live in exactly one place each,
+    # rather than guarding ~24 individual write sites. Local closures (not module-
+    # level helpers) so each carries this call's own *dry_run* and *would_write*
+    # without threading them through every call site.
+    would_write: list[Path] = []
+
+    def _write_json(path: Path, data: dict) -> None:
+        would_write.append(path)
+        if dry_run:
+            _LOG.debug("would write %s", path)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+
+    def _write_parquet(path: Path, table: pa.Table) -> None:
+        would_write.append(path)
+        if dry_run:
+            _LOG.debug("would write %s", path)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # TRACKED COBRE-GAP WORKAROUND (C3): the solver's parquet reader is
+        # built without snappy; zstd until the compression contract is settled.
+        pq.write_table(table, path, compression="zstd")
 
     step("Converting entities")
     _write_json(
@@ -881,12 +929,15 @@ def _convert_decomp_case_impl(
     # write generic_parameters.json whenever any RHE constraint survives,
     # never only when another generic family also happens to be present.
     if rhe_generics.rho_acum_overrides:
-        write_scalar_parameters(
-            dst,
-            build_decomp_scalar_parameters(
-                [id_map.hydro_id(code) for code in id_map.hydro_codes],
-                rhe_generics.rho_acum_overrides,
-            ),
+        would_write.append(
+            write_scalar_parameters(
+                dst,
+                build_decomp_scalar_parameters(
+                    [id_map.hydro_id(code) for code in id_map.hydro_codes],
+                    rhe_generics.rho_acum_overrides,
+                ),
+                dry_run=dry_run,
+            )
         )
 
     # E1: the FE/RHA/LIBs-electrical detection diagnostics each surface
@@ -918,4 +969,5 @@ def _convert_decomp_case_impl(
         bus_count=len(buses_doc["buses"]),
         line_count=len(lines_doc["lines"]),
         stage_count=len(calendar),
+        would_write_paths=[str(p) for p in would_write],
     )

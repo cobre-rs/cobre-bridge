@@ -43,15 +43,17 @@ from cobre_bridge.verdict import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from rich.console import Console
 
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
+    from cobre_bridge.newave_files import NewaveFiles
     from cobre_bridge.pipeline import ConversionReport
 
 
@@ -726,6 +728,7 @@ def _run_cobre_validation(
 
 def _run_newave_conversion(args: SimpleNamespace) -> None:
     """Execute the convert newave subcommand."""
+    from cobre_bridge.newave_files import NewaveFiles
     from cobre_bridge.pipeline import (
         CONVERSION_PHASE_LABELS,
         _clear_dst_contents,
@@ -837,7 +840,14 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
 
     # Provenance manifest, always written on a successful conversion. Notes go
     # to err_console (stderr) so the --json stdout verdict stays byte-deterministic.
-    _write_conversion_manifest(report, src, dst, console=err_console)
+    _write_conversion_manifest(
+        report,
+        src,
+        dst,
+        command="convert newave",
+        discover=NewaveFiles.from_directory,
+        console=err_console,
+    )
 
     # When --validate and --json are combined, the human validation messages stay
     # on err_console (stderr) exactly as without --json, and the machine-readable
@@ -975,14 +985,21 @@ def _write_diagnostics_json(
 
 
 def _write_conversion_manifest(
-    report: ConversionReport, src: Path, dst: Path, *, console: Console
+    report: ConversionReport,
+    src: Path,
+    dst: Path,
+    *,
+    command: str,
+    discover: Callable[[Path], NewaveFiles | DecompFiles],
+    console: Console,
 ) -> None:
     """Write the conversion provenance manifest into ``dst`` as JSON.
 
-    Rediscovers the source-model input files to hash, builds a
-    :class:`ConversionManifest` from the bridge version/git SHA, the entity
-    counts in *report*, and its diagnostics, then writes it to
-    ``dst / "conversion_manifest.json"``.
+    Rediscovers the source-model input files via *discover* (each command
+    passes its own files-dataclass constructor) to hash, builds a
+    :class:`ConversionManifest` labelled with *command* from the bridge
+    version/git SHA, the entity counts in *report*, and its diagnostics, then
+    writes it to ``dst / "conversion_manifest.json"``.
 
     Both a discovery failure and a write failure are reported as warnings and
     swallowed — the conversion itself already succeeded, so neither changes the
@@ -993,10 +1010,9 @@ def _write_conversion_manifest(
         hash_input_files,
         summarize_diagnostics,
     )
-    from cobre_bridge.newave_files import NewaveFiles
 
     try:
-        files = NewaveFiles.from_directory(src)
+        files = discover(src)
     except OSError as exc:
         print_status(
             f"Warning: failed to discover source files for conversion manifest: {exc}",
@@ -1018,7 +1034,7 @@ def _write_conversion_manifest(
     # mandatory hydro ``unit_groups`` array with the top-level ``bus_id`` removed
     # (cobre 0.13.0+), so the output is only loadable by cobre >= MIN_COBRE_VERSION.
     manifest = ConversionManifest.create(
-        "convert newave",
+        command,
         src,
         dst,
         entity_counts=entity_counts,
@@ -1297,11 +1313,10 @@ _DECOMP_VALIDATION_WHITELIST: tuple[str, ...] = ("external-solver interoperabili
 def _run_decomp_conversion(args: SimpleNamespace) -> None:
     """Execute the convert decomp subcommand.
 
-    Structurally mirrors ``_run_newave_conversion``, minus the dry-run and
-    provenance-manifest blocks (out of scope for this ticket; see
-    epic-03/ticket-006): a TTY phase bar over the DECOMP phases, the
-    ``✓ Converted …`` summary, grouped diagnostic panels, and a unified
-    ``--json`` verdict.
+    Structurally mirrors ``_run_newave_conversion``: a TTY phase bar over the
+    DECOMP phases, the ``✓ Converted …`` summary, grouped diagnostic panels, a
+    ``--dry-run`` branch, a provenance-manifest write, and a unified ``--json``
+    verdict.
 
     A broad ``except Exception`` (rather than a fixed exception tuple) also
     covers an ERROR-severity post-emission self-check finding (cobre rules
@@ -1319,6 +1334,7 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     from cobre_bridge.decomp.pipeline import (
         DECOMP_CONVERSION_PHASE_LABELS,
         convert_decomp_case,
+        discover_decomp_files,
     )
 
     out_console = get_console(no_color=args.no_color)
@@ -1332,7 +1348,11 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
             no_color=args.no_color,
         ) as step:
             report: ConversionReport = convert_decomp_case(
-                args.src, args.dst, force=args.force, on_phase=step
+                args.src,
+                args.dst,
+                force=args.force,
+                on_phase=step,
+                dry_run=args.dry_run,
             )
     except Exception as exc:  # noqa: BLE001
         diag = diagnostic_from_exception(exc, context="Conversion")
@@ -1349,6 +1369,34 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
             render_diagnostics([diag], console=err_console, quiet=args.quiet)
         raise typer.Exit(code=1)
 
+    if args.dry_run:
+        # Dry run: report the would-write listing only; touch nothing on disk
+        # (no diagnostics-json sidecar, no validation).
+        if args.json_output:
+            summary = _convert_verdict_summary(report)
+            summary["would_write"] = sorted(
+                Path(p).relative_to(args.dst).as_posix()
+                for p in report.would_write_paths
+            )
+            status = _convert_status(report.diagnostics, success="dry-run")
+            _emit_convert_json(
+                build_verdict("convert decomp", status, summary, report.diagnostics)
+            )
+        else:
+            if not args.quiet:
+                _render_dry_run_summary(report, console=out_console)
+            render_diagnostics(
+                report.diagnostics, console=err_console, quiet=args.quiet
+            )
+        if args.validate:
+            print_status(
+                "Note: --validate is ignored under --dry-run"
+                " (nothing was written to validate).",
+                console=err_console,
+                style="#F5A623",
+            )
+        return
+
     # Build the convert ``summary`` + ``status`` up front; ``--validate`` may
     # later append a ``summary["validation"]`` sub-object (under --json), and the
     # verdict is emitted to stdout only after validation has run so that block is
@@ -1364,6 +1412,17 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     if args.diagnostics_json is not None:
         # The --diagnostics-json sidecar coexists with --json (both can be set).
         _write_diagnostics_json(report, args.diagnostics_json, console=err_console)
+
+    # Provenance manifest, always written on a successful conversion. Notes go
+    # to err_console (stderr) so the --json stdout verdict stays byte-deterministic.
+    _write_conversion_manifest(
+        report,
+        args.src,
+        args.dst,
+        command="convert decomp",
+        discover=discover_decomp_files,
+        console=err_console,
+    )
 
     validation_failed = False
     if args.validate:
@@ -1424,6 +1483,16 @@ def _convert_decomp(
             ),
         ),
     ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Run the full conversion in memory and report what would be "
+                "written, without creating or modifying the destination directory."
+            ),
+        ),
+    ] = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1443,6 +1512,7 @@ def _convert_decomp(
             validate=validate,
             diagnostics_json=diagnostics_json,
             json_output=json_output,
+            dry_run=dry_run,
             verbose=verbose,
             log_file=log_file,
             no_color=no_color,

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import jsonschema
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -88,6 +89,22 @@ def _uniform_calendar() -> list[OperativeStage]:
 
 def _bus_id_map() -> DecompIdMap:
     return DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"))
+
+
+# ticket-007 (epic-03): ``decomp/pipeline.py`` no longer exposes module-level
+# ``_write_json``/``_write_parquet`` helpers (they became dry-run-aware
+# closures local to ``_convert_decomp_case_impl``), so
+# ``test_synthetic_contracts_validate_in_a_real_case`` below carries its own
+# minimal writers to overwrite the two files after a real conversion. The
+# case's ``system/``/``constraints/`` directories already exist post-
+# conversion, so neither writer needs to create them.
+def _write_json(path: Path, data: dict) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=False)
+
+
+def _write_parquet(path: Path, table: pa.Table) -> None:
+    pq.write_table(table, path, compression="zstd")
 
 
 def _contract_row(
@@ -850,11 +867,7 @@ def test_synthetic_contracts_validate_in_a_real_case(tmp_path: Path) -> None:
     checked below against the converted case's own ``buses.json`` rather than
     assumed, since only an id that genuinely exists there proves anything.
     """
-    from cobre_bridge.decomp.pipeline import (
-        _write_json,
-        _write_parquet,
-        convert_decomp_case,
-    )
+    from cobre_bridge.decomp.pipeline import convert_decomp_case
 
     dst = tmp_path / "case"
     convert_decomp_case(_RV3_DECK, dst, force=True)

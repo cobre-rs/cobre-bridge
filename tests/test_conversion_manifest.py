@@ -98,6 +98,49 @@ def test_hash_input_files_unreadable_file_records_none(tmp_path: Path) -> None:
     assert dger_entry["path"] == str(missing)
 
 
+def test_hash_input_files_hashes_decomp_files_and_skips_revision(
+    tmp_path: Path,
+) -> None:
+    """``hash_input_files`` also serves ``DecompFiles``: the ``revision`` str
+    field and the absent optionals are skipped; the three required paths are
+    hashed."""
+    from cobre_bridge.decomp.pipeline import DecompFiles
+
+    dadger_bytes = b"dadger-stub-\x00\x01"
+    vazoes_bytes = b"vazoes-stub-\xff\xfe"
+    hidr_bytes = b"hidr-stub-binary"
+    dadger_path = tmp_path / "dadger.rv0"
+    vazoes_path = tmp_path / "vazoes.rv0"
+    hidr_path = tmp_path / "hidr.dat"
+    dadger_path.write_bytes(dadger_bytes)
+    vazoes_path.write_bytes(vazoes_bytes)
+    hidr_path.write_bytes(hidr_bytes)
+
+    files = DecompFiles(
+        revision="rv0",
+        dadger=dadger_path,
+        vazoes=vazoes_path,
+        hidr=hidr_path,
+        dadgnl=None,
+        renovaveis=None,
+    )
+
+    entries = hash_input_files(files)
+    by_field = {entry["field"]: entry for entry in entries}
+
+    assert by_field["dadger"]["sha256"] == hashlib.sha256(dadger_bytes).hexdigest()
+    assert by_field["dadger"]["size_bytes"] == len(dadger_bytes)
+    assert by_field["vazoes"]["sha256"] == hashlib.sha256(vazoes_bytes).hexdigest()
+    assert by_field["vazoes"]["size_bytes"] == len(vazoes_bytes)
+    assert by_field["hidr"]["sha256"] == hashlib.sha256(hidr_bytes).hexdigest()
+    assert by_field["hidr"]["size_bytes"] == len(hidr_bytes)
+
+    present_fields = set(by_field)
+    assert "revision" not in present_fields
+    assert "dadgnl" not in present_fields
+    assert "renovaveis" not in present_fields
+
+
 def test_create_sets_version_git_and_timestamp() -> None:
     manifest = ConversionManifest.create(
         "convert newave",

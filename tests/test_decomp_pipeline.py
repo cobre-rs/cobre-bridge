@@ -28,7 +28,7 @@ from cobre_bridge.decomp.constraint_registers import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
-from cobre_bridge.decomp.pipeline import _diversion_channels
+from cobre_bridge.decomp.pipeline import ConversionReport, _diversion_channels
 from cobre_bridge.decomp.scenarios import (
     convert_external_inflows,
     convert_inflow_stats_identity,
@@ -832,6 +832,8 @@ def _run_cadastro_pipeline(
     unreadable_electrical: tuple[object, ...] = (),
     libs_electrical: object | None = None,
     diagnostics_out: list[Diagnostic] | None = None,
+    dry_run: bool = False,
+    report_out: list[ConversionReport] | None = None,
 ) -> Path:
     """Run ``convert_decomp_case`` against the fully synthetic mock deck
     above, patching every converter this ticket does not wire to a canned
@@ -851,6 +853,11 @@ def _run_cadastro_pipeline(
     wrapped around this helper would be shadowed and see nothing. A caller
     that needs the run's diagnostics passes a list here; it is extended in
     place with ``report.diagnostics`` after the (patched) conversion returns.
+
+    *dry_run* (ticket-007) threads straight through to ``convert_decomp_case``.
+    *report_out*, mirroring *diagnostics_out*'s out-param shape, lets a caller
+    inspect the full returned ``ConversionReport`` (e.g. ``would_write_paths``)
+    without changing this helper's ``Path``-only return type.
     """
     from cobre_bridge.decomp.pipeline import DecompFiles, convert_decomp_case
 
@@ -976,9 +983,11 @@ def _run_cadastro_pipeline(
         for target, value in patches.items():
             stack.enter_context(patch(target, return_value=value))
         dst = tmp_path / "case"
-        report = convert_decomp_case(Path("unused-src"), dst)
+        report = convert_decomp_case(Path("unused-src"), dst, dry_run=dry_run)
     if diagnostics_out is not None:
         diagnostics_out.extend(report.diagnostics)
+    if report_out is not None:
+        report_out.append(report)
     return dst
 
 
@@ -1368,6 +1377,131 @@ class TestGenericConstraintWiring:
         doc = json.loads((dst / "constraints" / "generic_constraints.json").read_text())
         assert doc["$schema"] == source_constraints_conv._SCHEMA_URL
         assert set(doc) == {"$schema", "constraints"}
+
+
+class TestDryRun:
+    """ticket-007 (epic-03): ``dry_run`` threads through both DECOMP write
+    seams (the in-impl ``_write_json``/``_write_parquet`` closures and the
+    ``write_scalar_parameters`` seam) and the partial-write cleanup arm."""
+
+    def test_dry_run_writes_nothing_and_records_would_write_paths(
+        self, tmp_path: Path
+    ) -> None:
+        report_out: list[ConversionReport] = []
+        dst = _run_cadastro_pipeline(
+            tmp_path, ac_volmax_frame=None, dry_run=True, report_out=report_out
+        )
+
+        assert not dst.exists()
+        [report] = report_out
+        assert str(dst / "config.json") in report.would_write_paths
+        assert str(dst / "stages.json") in report.would_write_paths
+
+    def test_dry_run_defers_generic_parameters_but_records_its_path(
+        self, tmp_path: Path
+    ) -> None:
+        """A surviving RHE record (ticket-018) drives
+        ``write_scalar_parameters`` -- under ``dry_run=True`` it must defer
+        the write while still recording the path, proving the second write
+        seam (outside the ``_write_json``/``_write_parquet`` closures) is
+        dry-run-aware too."""
+        report_out: list[ConversionReport] = []
+        dst = _run_cadastro_pipeline(
+            tmp_path,
+            ac_volmax_frame=None,
+            to_generic=(_synthetic_rhe_record(),),
+            dry_run=True,
+            report_out=report_out,
+        )
+
+        assert not (dst / "constraints" / "generic_parameters.json").exists()
+        [report] = report_out
+        assert (
+            str(dst / "constraints" / "generic_parameters.json")
+            in report.would_write_paths
+        )
+
+    def test_real_run_failure_clears_partial_writes(self, tmp_path: Path) -> None:
+        """A mid-conversion failure on a real run removes the known outputs
+        already written before the raise, so a plain (no ``--force``) retry
+        is not refused as "destination not empty"."""
+        from cobre_bridge.decomp import pipeline as decomp_pipeline
+
+        dst = tmp_path / "case"
+
+        def _fake_impl(*args: object, **kwargs: object) -> ConversionReport:
+            dst.mkdir(parents=True, exist_ok=True)
+            (dst / "config.json").write_text("{}", encoding="utf-8")
+            raise ValueError("boom")
+
+        with (
+            patch.object(
+                decomp_pipeline, "_convert_decomp_case_impl", side_effect=_fake_impl
+            ),
+            pytest.raises(ValueError, match="boom"),
+        ):
+            decomp_pipeline.convert_decomp_case(tmp_path / "src", dst)
+
+        assert not (dst / "config.json").exists()
+
+    def test_dry_run_failure_preserves_pre_existing_dst_contents(
+        self, tmp_path: Path
+    ) -> None:
+        """A dry-run failure must never clear ``dst``: it wrote nothing, and
+        ``dst`` may be a pre-existing populated directory the user never
+        asked to clear. ``config.json`` is one of ``_clear_dst_contents``'s
+        own removal-list names, so its survival proves cleanup was skipped
+        entirely, not merely that this particular name was spared.
+
+        ``force=True`` here only clears the unrelated non-empty-``dst``
+        refusal guard (now checked up front by ``convert_decomp_case``
+        itself, ahead of the mocked impl) so this test can reach and isolate
+        the failure-clearing behavior under ``dry_run`` that it actually
+        targets; see ``test_real_run_against_populated_dst_refuses_without_clearing``
+        for the refusal-guard behavior on its own."""
+        from cobre_bridge.decomp import pipeline as decomp_pipeline
+
+        dst = tmp_path / "case"
+        dst.mkdir()
+        existing = dst / "config.json"
+        existing.write_text("keep me", encoding="utf-8")
+
+        def _fake_impl(*args: object, **kwargs: object) -> ConversionReport:
+            raise ValueError("boom")
+
+        with (
+            patch.object(
+                decomp_pipeline, "_convert_decomp_case_impl", side_effect=_fake_impl
+            ),
+            pytest.raises(ValueError, match="boom"),
+        ):
+            decomp_pipeline.convert_decomp_case(
+                tmp_path / "src", dst, dry_run=True, force=True
+            )
+
+        assert existing.read_text(encoding="utf-8") == "keep me"
+
+    def test_real_run_against_populated_dst_refuses_without_clearing(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for the epic-03 data-loss bug: the non-empty/``force``
+        refusal must fire before the clearing ``try``/``except`` so a plain
+        (no ``--force``) run against a pre-existing, populated ``dst`` raises
+        cleanly and never deletes the user's existing case. Exercises the
+        real guard (no mocking of ``_convert_decomp_case_impl``), since a
+        guard living inside the mocked-out implementation would not be
+        caught by a test that replaces it with a fake."""
+        from cobre_bridge.decomp.pipeline import convert_decomp_case
+
+        dst = tmp_path / "case"
+        dst.mkdir()
+        existing = dst / "config.json"
+        existing.write_bytes(b"keep me")
+
+        with pytest.raises(FileExistsError, match="force"):
+            convert_decomp_case(tmp_path / "src", dst)
+
+        assert existing.read_bytes() == b"keep me"
 
 
 class TestDeferralWarning:

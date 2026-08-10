@@ -132,6 +132,19 @@ def _make_fake_newave_dir(tmp_path: Path) -> Path:
     return newave_dir
 
 
+def _make_fake_decomp_dir(tmp_path: Path) -> Path:
+    """Create a minimal discoverable deck directory: ``caso.dat`` naming ``rv0``,
+    plus ``dadger``/``vazoes``/``hidr`` stubs. ``discover_decomp_files`` only
+    stats/globs these, never parses them."""
+    decomp_dir = tmp_path / "decomp_case"
+    decomp_dir.mkdir()
+    (decomp_dir / "caso.dat").write_text("rv0\n")
+    (decomp_dir / "dadger.rv0").write_text("stub")
+    (decomp_dir / "vazoes.rv0").write_text("stub")
+    (decomp_dir / "hidr.dat").write_text("stub")
+    return decomp_dir
+
+
 # ---------------------------------------------------------------------------
 # ConversionReport
 # ---------------------------------------------------------------------------
@@ -2340,6 +2353,278 @@ class TestCliInProcess:
         validate.assert_called_once()
         assert "external-solver interoperability" not in stderr
         assert "Validation warning:" not in stderr
+
+    def test_convert_decomp_dry_run_writes_nothing_to_dst(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run`` into an empty dst writes nothing and exits 0."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        # No destination directory is created and nothing is written.
+        assert not dst.exists() or list(dst.iterdir()) == []
+        assert "Dry run — no files written" in stdout
+        assert "config.json" in stdout
+
+    def test_convert_decomp_dry_run_json_document_is_deterministic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --json`` emits a sorted, dst-relative would-write document."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        # Deliberately unsorted absolute paths under dst.
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[
+                str(dst / "system" / "hydros.json"),
+                str(dst / "config.json"),
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run", "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        # would_write moves UNDER summary; only the five envelope keys at the top.
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert "would_write" not in doc
+        assert doc["command"] == "convert decomp"
+        assert doc["status"] == "dry-run"
+        assert doc["summary"] == {
+            "hydros": 3,
+            "thermals": 2,
+            "buses": 1,
+            "lines": 0,
+            "stages": 4,
+            # dst-relative, forward-slash, sorted.
+            "would_write": ["config.json", "system/hydros.json"],
+        }
+
+    def test_convert_decomp_dry_run_with_validate_emits_note_and_skips_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --validate`` skips validation and notes it on stderr."""
+        import builtins
+
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        real_import = builtins.__import__
+
+        def _guard_import(name: str, *args: object, **kwargs: object) -> object:
+            # No cobre validation import may be attempted under --dry-run.
+            if name == "cobre.io" or name.startswith("cobre.io"):
+                raise AssertionError("validation must not import cobre under --dry-run")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch.object(builtins, "__import__", _guard_import),
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run", "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "--validate is ignored under --dry-run" in stderr
+        # No validation output of any kind reached stderr.
+        assert "Validation" not in stderr
+
+    def test_convert_decomp_dry_run_writes_no_diagnostics_json_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --diagnostics-json`` writes no sidecar: the dry-run branch
+        returns before the sidecar block runs."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--dry-run",
+                    "--diagnostics-json",
+                    str(json_path),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert not json_path.exists()
+
+    def test_convert_decomp_manifest_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful ``convert decomp`` leaves a valid provenance manifest."""
+        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        manifest_path = dst / "conversion_manifest.json"
+        assert manifest_path.exists()
+        manifest = ConversionManifest.from_json(manifest_path)
+        assert manifest.command == "convert decomp"
+        assert manifest.entity_counts == {
+            "hydros": 3,
+            "thermals": 2,
+            "buses": 1,
+            "lines": 0,
+            "stages": 4,
+        }
+        # The stub deck's dadger/vazoes/hidr files were discovered and hashed.
+        assert manifest.input_files
+
+    def test_convert_decomp_manifest_records_min_cobre_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DECOMP manifest's ``min_cobre_version`` tracks the CLI constant."""
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        manifest = ConversionManifest.from_json(dst / "conversion_manifest.json")
+        assert manifest.min_cobre_version == MIN_COBRE_VERSION
+
+    def test_convert_decomp_dry_run_writes_no_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run`` writes no provenance manifest: the dry-run branch
+        returns before the manifest-write block runs."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert not (dst / "conversion_manifest.json").exists()
 
 
 class TestCompareDatasetWiring:
