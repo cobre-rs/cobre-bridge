@@ -99,6 +99,7 @@ from cobre_bridge.converters.hydro import (
     _PRODUCTION_MODELS_SCHEMA_URL,
     _SCHEMA_URL,
     _apply_hydraulic_loss,
+    _fpha_efficiency,
     build_mirror_unit_group,
 )
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
@@ -682,8 +683,19 @@ def convert_hydros(
     start_date: date,
     effective: EffectiveCadastro,
     travel_time_hours: dict[int, float] | None = None,
+    fpha_codes: set[int] | None = None,
 ) -> dict:
     """Build ``hydros.json`` for the operated plants.
+
+    *fpha_codes* (from :func:`cobre_bridge.decomp.fpha.fpha_eligible_codes`)
+    selects the plants emitted with cobre's computed-FPHA generation model:
+    their ``generation.model`` is ``"fpha"`` and they carry the turbine
+    ``efficiency`` (η = ρ_esp / K), the ``specific_productivity_mw_per_m3s_per_m``
+    cobre derives ρ_eq from, and an inline constant ``tailrace`` (the
+    ``canal_fuga_medio`` fallback used when ``tailrace_curves.parquet`` carries
+    no family for the plant). Plants absent from it — or the whole set being
+    ``None`` — keep the constant-productivity model whose ρ_eq rides in
+    ``hydro_energy_productivity.parquet``.
 
     *travel_time_hours* (``{plant code: hours}``, from
     :func:`cobre_bridge.decomp.travel_time.convert_travel_time`) stamps the
@@ -751,6 +763,7 @@ def convert_hydros(
             raise ValueError(f"UH plant {code} is not in the hydro registry")
         hreg = hidr.loc[code]
         name = str(hreg["nome_usina"]).strip()
+        is_fpha = fpha_codes is not None and code in fpha_codes
         downstream = _downstream_operated(effective, code, operated_codes)
         min_storage_hm3, max_storage_hm3 = storage_envelope(effective, code)
         if str(hreg.get("tipo_regulacao", "")).strip() == "D" and float(
@@ -792,7 +805,7 @@ def convert_hydros(
                 "max_outflow_m3s": None,
             },
             "generation": {
-                "model": "constant_productivity",
+                "model": "fpha" if is_fpha else "constant_productivity",
                 "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": max_turbined,
                 "min_generation_mw": 0.0,
@@ -800,6 +813,32 @@ def convert_hydros(
             },
             "unit_groups": unit_groups,
         }
+        if is_fpha:
+            rho_esp = effective.value(code, "produtibilidade_especifica", 0)
+            entry["specific_productivity_mw_per_m3s_per_m"] = rho_esp
+            entry["efficiency"] = {
+                "type": "constant",
+                "value": _fpha_efficiency(rho_esp, name),
+            }
+            # Inline constant tailrace = mean canal de fuga: cobre's FPHA
+            # fallback for a plant whose tailrace_curves.parquet family is
+            # absent (all this deck's FPHA plants do carry a family, so it is
+            # only a safety net).
+            cf = effective.value(code, "canal_fuga_medio", 0)
+            if cf > 0.0:
+                entry["tailrace"] = {"type": "polynomial", "coefficients": [cf]}
+            # Penstock hydraulic losses — a computed FPHA requires the field
+            # (cobre rejects an FPHA plant without it). tipo_perda 1 = a % of
+            # gross head (factor); 2 = constant metres; anything else / no loss
+            # emits an explicit lossless factor so the required field is present.
+            perdas = effective.value(code, "perdas", 0)
+            tipo_perda = int(effective.base.loc[code, "tipo_perda"])
+            if tipo_perda == 1 and perdas > 0.0:
+                entry["hydraulic_losses"] = {"type": "factor", "value": perdas / 100.0}
+            elif tipo_perda == 2 and perdas > 0.0:
+                entry["hydraulic_losses"] = {"type": "constant", "value_m": perdas}
+            else:
+                entry["hydraulic_losses"] = {"type": "factor", "value": 0.0}
         if travel_time_hours and code in travel_time_hours and downstream is not None:
             entry["travel_time_hours"] = travel_time_hours[code]
         hydros.append(entry)
@@ -1003,6 +1042,7 @@ def convert_energy_productivity(
     effective: EffectiveCadastro,
     id_map: DecompIdMap,
     initial_volumes: dict[int, float] | None = None,
+    exclude_codes: set[int] | None = None,
 ) -> pa.Table:
     """Per-plant equivalent generation productivity, anchored at initial volume.
 
@@ -1012,16 +1052,24 @@ def convert_energy_productivity(
     (``{code: hm³}``, from :func:`_operated_initial_volumes`) supplies that
     anchor; a plant absent from it — or the whole map being ``None`` — falls
     back to the full-range mean anchor (``reference_volume_hm3=None``), the
-    pre-FPHA-fix behaviour. Emits exactly one value per plant (``stage_id``
-    stays ``None``): cobre's DECOMP ``constant_productivity`` production model
-    and :func:`convert_penalties` both consume one ρ_eq per plant. The
+    pre-FPHA-fix behaviour.
+
+    *exclude_codes* omits those plants from the emitted table — used for the
+    ``hydro_energy_productivity.parquet`` write to drop the FPHA plants, which
+    carry ``model: "fpha"`` and would be a double-supply (cobre rejects a plant
+    that has both a computed FPHA and a parquet ρ_eq). Left ``None`` (every
+    plant emitted) the full list still feeds :func:`convert_penalties`' system
+    ρ_avg/ρ_max, so the penalty scale is unchanged by the FPHA split. The
     per-stage head variation instead feeds
     :func:`convert_hydro_group_availability`'s own hydraulic ceiling.
     """
     vols = initial_volumes or {}
+    excluded = exclude_codes or set()
     hydro_ids: list[int] = []
     values: list[float] = []
     for code in id_map.hydro_codes:
+        if code in excluded:
+            continue
         hydro_ids.append(id_map.hydro_id(code))
         values.append(
             _equivalent_productivity_mw_per_m3s(
@@ -1308,22 +1356,42 @@ def convert_hydro_group_availability(
     return values, deltas
 
 
-def convert_production_models(id_map: DecompIdMap) -> dict:
-    """Constant-productivity production models for every operated plant."""
-    return {
-        "$schema": _PRODUCTION_MODELS_SCHEMA_URL,
-        "production_models": [
+def convert_production_models(
+    id_map: DecompIdMap,
+    fpha_configs: dict[int, dict] | None = None,
+    reference_volumes: dict[int, dict] | None = None,
+) -> dict:
+    """Per-plant production-model selection.
+
+    A plant in *fpha_configs* (``{code: fpha_config}``, from the pipeline via
+    :func:`cobre_bridge.decomp.fpha.fitting_window`) is emitted as ``model:
+    "fpha"`` — cobre fits the production function from the plant geometry
+    (``hydro_geometry.parquet``) + tailrace families (``tailrace_curves.parquet``)
+    over the config's ``fitting_window`` — with its ``reference_volume`` (from
+    *reference_volumes*, the initial-volume anchor) setting the FPHA reference /
+    backwater level. Every other operated plant keeps ``constant_productivity``,
+    its ρ_eq riding in ``hydro_energy_productivity.parquet``. *fpha_configs* and
+    *reference_volumes* are pre-built by the pipeline so this module needs no
+    import from :mod:`cobre_bridge.decomp.fpha` (which imports it).
+    """
+    fpha_configs = fpha_configs or {}
+    reference_volumes = reference_volumes or {}
+    models: list[dict] = []
+    for code in id_map.hydro_codes:
+        stage_range: dict = {"start_stage_id": 0, "end_stage_id": None}
+        if code in fpha_configs:
+            stage_range["model"] = "fpha"
+            stage_range["fpha_config"] = fpha_configs[code]
+            reference_volume = reference_volumes.get(code)
+            if reference_volume is not None:
+                stage_range["reference_volume"] = reference_volume
+        else:
+            stage_range["model"] = "constant_productivity"
+        models.append(
             {
                 "hydro_id": id_map.hydro_id(code),
                 "selection_mode": "stage_ranges",
-                "stage_ranges": [
-                    {
-                        "start_stage_id": 0,
-                        "end_stage_id": None,
-                        "model": "constant_productivity",
-                    }
-                ],
+                "stage_ranges": [stage_range],
             }
-            for code in id_map.hydro_codes
-        ],
-    }
+        )
+    return {"$schema": _PRODUCTION_MODELS_SCHEMA_URL, "production_models": models}

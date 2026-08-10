@@ -123,6 +123,7 @@ def test_hash_input_files_hashes_decomp_files_and_skips_revision(
         hidr=hidr_path,
         dadgnl=None,
         renovaveis=None,
+        polinjus=None,
     )
 
     entries = hash_input_files(files)

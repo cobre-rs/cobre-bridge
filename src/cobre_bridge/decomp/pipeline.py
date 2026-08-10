@@ -36,6 +36,7 @@ from cobre_bridge.decomp import cadastro as cadastro_conv
 from cobre_bridge.decomp import config as config_conv
 from cobre_bridge.decomp import constraints as constraints_conv
 from cobre_bridge.decomp import contracts as contracts_conv
+from cobre_bridge.decomp import fpha as fpha_conv
 from cobre_bridge.decomp import group_bounds as group_bounds_conv
 from cobre_bridge.decomp import hydro as hydro_conv
 from cobre_bridge.decomp import load as load_conv
@@ -88,6 +89,7 @@ class DecompFiles:
     hidr: Path
     dadgnl: Path | None
     renovaveis: Path | None
+    polinjus: Path | None
 
 
 def discover_decomp_files(src: Path) -> DecompFiles:
@@ -124,6 +126,7 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     hidr = find("hidr", required=True)
     dadgnl = find("dadgnl", required=False)
     renovaveis = find("renovaveis", required=False)
+    polinjus = find("polinjus", required=False)
     assert dadger is not None and vazoes is not None and hidr is not None
     return DecompFiles(
         revision=revision,
@@ -132,6 +135,7 @@ def discover_decomp_files(src: Path) -> DecompFiles:
         hidr=hidr,
         dadgnl=dadgnl,
         renovaveis=renovaveis,
+        polinjus=polinjus,
     )
 
 
@@ -526,12 +530,32 @@ def _convert_decomp_case_impl(
     _write_json(dst / "stages.json", stages_dict)
 
     # FPHA-anchor fidelity: the source model fits each plant's hydro production
-    # function around its initial reservoir volume, so the constant-productivity
-    # ρ_eq is anchored there too (not the full-range mean) — see
-    # hydro._equivalent_productivity_mw_per_m3s.
+    # function around its initial reservoir volume. FPHA-eligible reservoirs get
+    # cobre's computed-FPHA model (geometry + tailrace families, fit over a
+    # ±window around the initial volume); the rest keep constant productivity,
+    # whose ρ_eq is likewise anchored at the initial volume (not the full-range
+    # mean) — see hydro._equivalent_productivity_mw_per_m3s and decomp/fpha.py.
     initial_volumes = hydro_conv._operated_initial_volumes(dadger, effective)
+    fpha_codes = fpha_conv.fpha_eligible_codes(effective, id_map)
+    fpha_configs: dict[int, dict] = {}
+    reference_volumes: dict[int, dict] = {}
+    for code in fpha_codes:
+        vmin, vmax = cadastro_conv.effective_storage_range(effective, code, 0)
+        v_init = initial_volumes.get(code, vmin)
+        fpha_configs[code] = {
+            "source": "computed",
+            "fitting_window": fpha_conv.fitting_window(v_init, vmin, vmax),
+        }
+        reference_volumes[code] = {"volume_hm3": v_init}
+
+    # penalties.json takes the full per-plant ρ_eq list (system ρ_avg/ρ_max);
+    # the parquet omits FPHA plants (cobre computes their ρ_eq, so a parquet row
+    # would double-supply it).
     productivity = hydro_conv.convert_energy_productivity(
         effective, id_map, initial_volumes
+    )
+    productivity_parquet = hydro_conv.convert_energy_productivity(
+        effective, id_map, initial_volumes, exclude_codes=fpha_codes
     )
     deficit_costs = network_conv._bus_deficit_costs(dadger)
     deficit_cost = max(deficit_costs.values()) if deficit_costs else 0.0
@@ -567,7 +591,9 @@ def _convert_decomp_case_impl(
     system = dst / "system"
     buses_doc = network_conv.convert_buses(dadger, id_map, start_date)
     _write_json(system / "buses.json", buses_doc)
-    hydros_dict = hydro_conv.convert_hydros(dadger, hidr, id_map, start_date, effective)
+    hydros_dict = hydro_conv.convert_hydros(
+        dadger, hidr, id_map, start_date, effective, fpha_codes=fpha_codes
+    )
     # hydros.json is written after the bound tables are resolved (below): a
     # plant carrying a positive QDES diversion floor (min_diversion_m3s > 0)
     # must also declare its diversion channel, or cobre rejects the floor as
@@ -585,9 +611,20 @@ def _convert_decomp_case_impl(
     _write_json(system / "thermals.json", thermals_dict)
     _write_json(
         system / "hydro_production_models.json",
-        hydro_conv.convert_production_models(id_map),
+        hydro_conv.convert_production_models(id_map, fpha_configs, reference_volumes),
     )
-    _write_parquet(system / "hydro_energy_productivity.parquet", productivity)
+    _write_parquet(system / "hydro_energy_productivity.parquet", productivity_parquet)
+    # FPHA geometry + tailrace inputs cobre fits the production function from.
+    _write_parquet(
+        system / "hydro_geometry.parquet",
+        fpha_conv.convert_hydro_geometry(effective, id_map),
+    )
+    tailrace_table = fpha_conv.convert_tailrace_curves(
+        fpha_conv.read_polinjus(files.polinjus) if files.polinjus is not None else None,
+        id_map,
+    )
+    if tailrace_table is not None:
+        _write_parquet(system / "tailrace_curves.parquet", tailrace_table)
     ncs_registry = ncs_conv.convert_non_controllable_sources(
         dadger, id_map, calendar, start_date, renovaveis
     )

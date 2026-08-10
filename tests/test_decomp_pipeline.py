@@ -746,6 +746,13 @@ def _cadastro_plant_row(
         "a2_volume_cota": 0.0,
         "a3_volume_cota": 0.0,
         "a4_volume_cota": 0.0,
+        # cota→area coefficients: this reservoir is FPHA-eligible (non-degenerate
+        # cota + rho_esp > 0), so convert_hydro_geometry reads these.
+        "a0_cota_area": 1.0,
+        "a1_cota_area": 0.0,
+        "a2_cota_area": 0.0,
+        "a3_cota_area": 0.0,
+        "a4_cota_area": 0.0,
         "canal_fuga_medio": 20.0,
         "produtibilidade_especifica": 0.009,
         "tipo_perda": 0,
@@ -872,6 +879,7 @@ def _run_cadastro_pipeline(
         hidr=Path("unused/hidr.dat"),
         dadgnl=None,
         renovaveis=None,
+        polinjus=None,
     )
     dadger = _CadastroDadger(ac_volmax_frame)
     hidr = _cadastro_hidr_frame()
