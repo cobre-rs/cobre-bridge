@@ -1560,6 +1560,7 @@ class TestDeferralWarning:
         assert "boundary FCF" in deferral
         assert "windowed inflow inputs" in deferral
         assert "water travel time (VI absent)" in deferral
+        assert "reservoir evaporation (absent)" in deferral
 
     def test_fe_rha_libs_are_reported_once_through_the_dx_sink_not_the_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
