@@ -218,17 +218,18 @@ def test_jusmed_override_applies_all_stages() -> None:
 
 
 def test_cotvol_polynomial_forward_fills() -> None:
-    """AC2: ``ACCOTVOL`` ``ordem`` 0..4 rows dated ``AGO semana 1`` (the
-    3-stage calendar's index-2 stage) replace the plant's forebay-cota
-    polynomial from that stage forward; a missing ``ordem`` in the override
-    group defaults its coefficient to ``0.0``; the earlier stages still read
-    the base ``a{0..4}_volume_cota``.
+    """AC2: ``ACCOTVOL`` ``ordem`` 1..5 rows (the raw 1-based coefficient
+    index idecomp surfaces; the reader normalises it to a 0-based tuple slot)
+    dated ``AGO semana 1`` (the 3-stage calendar's index-2 stage) replace the
+    plant's forebay-cota polynomial from that stage forward; a missing
+    ``ordem`` in the override group defaults its coefficient to ``0.0``; the
+    earlier stages still read the base ``a{0..4}_volume_cota``.
     """
     hidr = _hidr_frame({1: _plant_row(cota=(100.0, 1.0, 0.0, 0.0, 0.0))})
     override_rows = [
         {
             "codigo_usina": 1,
-            "ordem": 0,
+            "ordem": 1,  # a0
             "coeficiente": 50.0,
             "mes": "AGO",
             "semana": 1.0,
@@ -236,13 +237,13 @@ def test_cotvol_polynomial_forward_fills() -> None:
         },
         {
             "codigo_usina": 1,
-            "ordem": 1,
+            "ordem": 2,  # a1
             "coeficiente": 2.0,
             "mes": "AGO",
             "semana": 1.0,
             "ano": 2026.0,
         },
-        # ordem 2..4 omitted -> default to 0.0.
+        # ordem 3..5 (a2..a4) omitted -> default to 0.0.
     ]
     dadger = _FakeDadger({ACCOTVOL: pd.DataFrame(override_rows)})
     effective, report = build_effective_cadastro(dadger, hidr, _calendar())
@@ -251,6 +252,52 @@ def test_cotvol_polynomial_forward_fills() -> None:
     assert effective.cota_polynomial(1, 1) == (100.0, 1.0, 0.0, 0.0, 0.0)
     assert effective.cota_polynomial(1, 2) == (50.0, 2.0, 0.0, 0.0, 0.0)
     assert report.applied["cota_volume"] == 1
+
+
+def test_cotvol_single_constant_override_lands_in_a0() -> None:
+    """Regression: a run-of-river plant whose ``ACCOTVOL`` override is a
+    single constant forebay level (only ``ordem`` 1 present, the rest 0)
+    must land that level in the a0 constant term, not a1. The real deck
+    encodes fixed-level plants (JIRAU/BELO MONTE) exactly this way; treating
+    the 1-based ``ordem`` as a 0-based slot turned a 90 m level into
+    ``90·volume`` and inflated the head ~1000x.
+    """
+    hidr = _hidr_frame({1: _plant_row(cota=(66.35, 0.0207, -8e-6, 0.0, 0.0))})
+    override_rows = [
+        {
+            "codigo_usina": 1,
+            "ordem": ordem,
+            "coeficiente": coeff,
+            "mes": "AGO",
+            "semana": 1.0,
+            "ano": 2026.0,
+        }
+        for ordem, coeff in ((1, 90.0), (2, 0.0), (3, 0.0), (4, 0.0), (5, 0.0))
+    ]
+    dadger = _FakeDadger({ACCOTVOL: pd.DataFrame(override_rows)})
+    effective, _ = build_effective_cadastro(dadger, hidr, _calendar())
+
+    # Constant polynomial: cota == 90.0 m at every volume, not 90·V.
+    assert effective.cota_polynomial(1, 2) == (90.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def test_cotvol_ordem_out_of_range_raises() -> None:
+    """A coefficient ``ordem`` outside the 1..5 range is a malformed register
+    and is rejected, never silently dropped or mis-slotted.
+    """
+    rows = [
+        {
+            "codigo_usina": 1,
+            "ordem": 0,  # 0 is out of the 1-based 1..5 range
+            "coeficiente": 90.0,
+            "mes": "AGO",
+            "semana": 1.0,
+            "ano": 2026.0,
+        }
+    ]
+    dadger = _FakeDadger({ACCOTVOL: pd.DataFrame(rows)})
+    with pytest.raises(ValueError, match="outside the expected 1..5 range"):
+        _read_polynomial_overrides(dadger, _calendar(), ACCOTVOL, "cota_volume")
 
 
 def test_cotvol_out_of_horizon_reported_not_dropped() -> None:
@@ -266,7 +313,7 @@ def test_cotvol_out_of_horizon_reported_not_dropped() -> None:
             "semana": None,
             "ano": 2026.0,
         }
-        for ordem in range(5)
+        for ordem in range(1, 6)
     ]
     dadger = _FakeDadger({ACCOTVOL: pd.DataFrame(rows)})
     records, out_of_horizon = _read_polynomial_overrides(
