@@ -2,11 +2,12 @@
 
 The inflow file carries the deterministic trunk (weekly forecasts, one
 scenario per weekly stage) and the terminal fan (generated scenarios with
-per-node probabilities). Values are natural flows per gauging station;
-they become per-plant incrementals by subtracting the direct *operated*
-upstream stations (water routed through non-operated intermediates is
-attributed to the next operated plant, matching the registry cascade
-walk).
+per-node probabilities). DECOMP's inflow file is the *arquivo de vazões
+incrementais*: each gauging-station column already holds the plant's own
+incremental (local) inflow, so each plant's value is read straight through
+from its (post-``AC NUMPOS``) gauge column — no upstream subtraction.
+cobre re-derives the natural flow at each plant by routing upstream
+releases down the ``downstream_id`` cascade.
 
 The tree is emitted node-natively: every stage draws its openings from
 ``external_inflow_scenarios.parquet`` (trunk column 0, terminal fan
@@ -83,14 +84,21 @@ def _incremental_values(
     row: pd.Series,
     id_map: DecompIdMap,
     station_by_code: dict[int, str],
-    parents: dict[int, list[int]],
 ) -> list[float]:
-    """Natural station flows → per-plant incrementals, in hydro-id order."""
-    natural = {code: float(row[station]) for code, station in station_by_code.items()}
-    return [
-        natural[code] - sum(natural[u] for u in parents[code])
-        for code in id_map.hydro_codes
-    ]
+    """Per-plant incremental inflows in hydro-id order.
+
+    DECOMP's inflow file is the *arquivo de vazões incrementais*: each
+    gauging-station column already holds the plant's own incremental (local)
+    inflow, so the value is read straight through — no upstream subtraction.
+    Verified against the deck's ``dec_oper_usih`` reported
+    ``vazao_incremental``: the direct per-posto read matches every operated
+    plant to 0 m³/s, and the reported natural flow reconstructs exactly as the
+    running sum of these incrementals down each cascade. (DECOMP operates
+    every plant — no fictitious/non-operated intermediates — so there is no
+    upstream drainage to re-attribute downstream; ``station_by_code`` already
+    resolves any ``AC NUMPOS`` gauge relink.)
+    """
+    return [float(row[station_by_code[code]]) for code in id_map.hydro_codes]
 
 
 def _tree_values(
@@ -100,7 +108,7 @@ def _tree_values(
     calendar: Sequence[OperativeStage],
 ) -> dict[tuple[int, int], list[float]]:
     """``{(stage_index, scenario_index): incrementals}`` for the whole tree."""
-    station_by_code, parents = _incremental_context(effective, id_map)
+    station_by_code, _ = _incremental_context(effective, id_map)
     terminal = len(calendar) - 1
 
     previsoes = vazoes.previsoes
@@ -119,9 +127,7 @@ def _tree_values(
                 f"trunk forecast stage {int(row['estagio'])} outside the "
                 f"weekly range (1..{terminal})"
             )
-        values[(stage_index, 0)] = _incremental_values(
-            row, id_map, station_by_code, parents
-        )
+        values[(stage_index, 0)] = _incremental_values(row, id_map, station_by_code)
 
     cenarios = vazoes.cenarios_gerados
     if cenarios is None or cenarios.empty:
@@ -135,7 +141,7 @@ def _tree_values(
                 "deck needs the node-graph work"
             )
         values[(stage_index, int(row["cenario"]) - 1)] = _incremental_values(
-            row, id_map, station_by_code, parents
+            row, id_map, station_by_code
         )
     return values
 
@@ -146,8 +152,9 @@ def convert_external_inflows(
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
 ) -> pa.Table:
-    """``external_inflow_scenarios.parquet``: the tree in natural units, off
-    the *effective* (post-``AC NUMJUS``/``NUMPOS``) topology (ticket-014)."""
+    """``external_inflow_scenarios.parquet``: the tree of per-plant incremental
+    inflows, read off each plant's *effective* (post-``AC NUMPOS``) gauge
+    column (ticket-014)."""
     values = _tree_values(vazoes, effective, id_map, calendar)
 
     stage_ids: list[int] = []
@@ -261,7 +268,7 @@ def convert_inflow_stats_identity(
     """Identity stats (μ = 0, σ = 1) — the explicit-inflow convention.
 
     The stochastic model is plumbing here: with these values the
-    standardized noise is the natural inflow itself, and no fan stage can
+    standardized noise is the incremental inflow itself, and no fan stage can
     hit the zero-σ pathology.
     """
     hydro_ids: list[int] = []

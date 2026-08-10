@@ -109,11 +109,12 @@ class TestScenarioEmitters:
         # 4 tree nodes × 2 hydros.
         assert len(table) == 8
         trunk = table[(table["stage_id"] == 0) & (table["hydro_id"] == 1)]
-        # Plant 2's incremental subtracts its operated upstream (plant 1).
-        assert trunk["value_m3s"].iloc[0] == pytest.approx(150.0 - 100.0)
+        # DECOMP's inflow file is already incremental per gauge column, so
+        # plant 2's value passes through directly (no upstream subtraction).
+        assert trunk["value_m3s"].iloc[0] == pytest.approx(150.0)
         fan = table[(table["stage_id"] == 2) & (table["scenario_id"] == 1)]
         assert fan[fan["hydro_id"] == 0]["value_m3s"].iloc[0] == pytest.approx(120.0)
-        assert fan[fan["hydro_id"] == 1]["value_m3s"].iloc[0] == pytest.approx(60.0)
+        assert fan[fan["hydro_id"] == 1]["value_m3s"].iloc[0] == pytest.approx(180.0)
 
     def test_identity_stats(self) -> None:
         stats = convert_inflow_stats_identity(_ID_MAP, _calendar()).to_pandas()
