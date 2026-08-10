@@ -1358,13 +1358,18 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     except Exception as exc:  # noqa: BLE001
         diag = diagnostic_from_exception(exc, context="Conversion")
         if args.json_output:
+            # Pipeline failure: ``report`` is None, so counts are zeroed and the
+            # dry-run path has an empty would-write listing. ``status`` is "error"
+            # because ``diagnostic_from_exception`` yields an ERROR-severity diag.
+            diagnostics = [diag]
+            summary = _convert_verdict_summary(None)
+            if args.dry_run:
+                summary["would_write"] = []
+                status = _convert_status(diagnostics, success="dry-run")
+            else:
+                status = _convert_status(diagnostics, success="ok")
             _emit_convert_json(
-                build_verdict(
-                    "convert decomp",
-                    _convert_status([diag], success="ok"),
-                    _convert_verdict_summary(None),
-                    [diag],
-                )
+                build_verdict("convert decomp", status, summary, diagnostics)
             )
         else:
             render_diagnostics([diag], console=err_console, quiet=args.quiet)

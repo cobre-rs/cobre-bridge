@@ -2443,6 +2443,39 @@ class TestCliInProcess:
             "would_write": ["config.json", "system/hydros.json"],
         }
 
+    def test_convert_decomp_dry_run_json_failure_has_would_write_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A conversion failure under ``--dry-run --json`` still carries the
+        ``would_write`` key (parity with ``convert newave``): a consumer that
+        reads ``summary["would_write"]`` on any dry-run verdict must not
+        KeyError just because the conversion failed.
+        """
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            side_effect=ValueError("bad"),
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run", "--json"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["command"] == "convert decomp"
+        assert doc["summary"]["would_write"] == []
+
     def test_convert_decomp_dry_run_with_validate_emits_note_and_skips_validation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
