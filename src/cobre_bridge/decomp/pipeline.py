@@ -19,13 +19,14 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from idecomp.decomp import Dadger, Vazoes
+from idecomp.decomp import Dadger, Dadgnl, Vazoes
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge import emission_checks
 from cobre_bridge.converters.constraints import (
     _SCHEMA_URL as _GENERIC_CONSTRAINTS_SCHEMA_URL,
 )
+from cobre_bridge.decomp import anticipated as anticipated_conv
 from cobre_bridge.decomp import bounds as bounds_conv
 from cobre_bridge.decomp import (
     bounds_accumulator,
@@ -578,15 +579,13 @@ def _convert_decomp_case_impl(
     # is fixed. Removal condition tracked in
     # ~/git/cobre/plans/conversion-found-improvements.md (C-travel-time).
     has_travel_time = bool(travel_time_conv.read_travel_times(dadger))
-    _write_json(
-        dst / "initial_conditions.json",
-        {
-            "storage": hydro_conv.convert_initial_storage(
-                dadger, hidr, id_map, effective
-            ),
-            "filling_storage": [],
-        },
-    )
+    # Built here but written below (after GNL): an anticipated GNL fleet extends
+    # it with the left/right temporal-boundary arrays, and those need the thermal
+    # ids assigned when thermals.json is built.
+    initial_conditions_doc: dict = {
+        "storage": hydro_conv.convert_initial_storage(dadger, hidr, id_map, effective),
+        "filling_storage": [],
+    }
 
     system = dst / "system"
     buses_doc = network_conv.convert_buses(dadger, id_map, start_date)
@@ -608,7 +607,43 @@ def _convert_decomp_case_impl(
         network_conv.convert_pumping_stations(dadger, id_map, start_date),
     )
     thermals_dict = thermal_conv.convert_thermals(dadger, id_map, calendar, start_date)
+    # GNL (fuel-constrained) thermals are declared in dadgnl, absent from CT, so
+    # the thermal converter never sees them. Read the commitment model and emit
+    # the created thermals plus their anticipated ring: the mandatory left
+    # boundary (past_anticipated_commitments) and any post-horizon deliveries as
+    # the right boundary (future_anticipated_deliveries + post_study_stages.json).
+    gnl_model = (
+        anticipated_conv.read_gnl_model(Dadgnl.read(str(files.dadgnl)))
+        if files.dadgnl is not None
+        else None
+    )
+    if gnl_model is not None:
+        gnl = anticipated_conv.convert_gnl(
+            gnl_model,
+            first_thermal_id=max(t["id"] for t in thermals_dict["thermals"]) + 1,
+            bus_id_of=id_map.bus_id,
+            stages=stages_dict["stages"],
+        )
+        thermals_dict["thermals"].extend(gnl.thermals)
+        thermals_dict["thermals"].sort(key=lambda t: t["id"])
+        if gnl.past_anticipated_commitments:
+            initial_conditions_doc["past_anticipated_commitments"] = (
+                gnl.past_anticipated_commitments
+            )
+        if gnl.future_anticipated_deliveries:
+            initial_conditions_doc["future_anticipated_deliveries"] = (
+                gnl.future_anticipated_deliveries
+            )
+        if gnl.post_study_stages is not None:
+            _write_json(dst / "post_study_stages.json", gnl.post_study_stages)
+        _LOG.info(
+            "emitted %d GNL anticipated thermal(s) from dadgnl; %d post-horizon "
+            "deliver(y/ies)",
+            len(gnl.thermals),
+            len(gnl.future_anticipated_deliveries),
+        )
     _write_json(system / "thermals.json", thermals_dict)
+    _write_json(dst / "initial_conditions.json", initial_conditions_doc)
     _write_json(
         system / "hydro_production_models.json",
         hydro_conv.convert_production_models(id_map, fpha_configs, reference_volumes),
@@ -1020,10 +1055,8 @@ def _convert_decomp_case_impl(
         and bool((uh_df["evaporacao"].fillna(0) != 0).any())
     )
     _LOG.warning(
-        "deferred at this milestone: GNL anticipation (dadgnl%s), boundary "
-        "FCF (importer), windowed inflow inputs (solver 0.13), water travel "
-        "time (VI%s), reservoir evaporation (%s)",
-        " present" if files.dadgnl is not None else " absent",
+        "deferred at this milestone: boundary FCF (importer), windowed inflow "
+        "inputs (solver 0.13), water travel time (VI%s), reservoir evaporation (%s)",
         " present" if has_travel_time else " absent",
         "present" if has_evaporation else "absent",
     )

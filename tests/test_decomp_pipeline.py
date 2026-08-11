@@ -1544,10 +1544,10 @@ class TestDeferralWarning:
     def test_still_names_the_genuinely_deferred_items(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """AC2: GNL anticipation, boundary FCF, windowed inflow inputs, and
-        water travel time (VI) stay named, and the ``dadgnl``/``VI``
-        present/absent interpolations still reflect the (mocked, both-absent)
-        fixture deck."""
+        """AC2: boundary FCF, windowed inflow inputs, and water travel time (VI)
+        stay named, and the ``VI`` present/absent interpolation still reflects
+        the (mocked, absent) fixture deck. GNL anticipation is no longer
+        deferred — it is emitted (ticket-003) — so it must NOT appear here."""
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
             _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
 
@@ -1556,7 +1556,7 @@ class TestDeferralWarning:
             for r in caplog.records
             if "deferred at this milestone" in r.message
         )
-        assert "GNL anticipation (dadgnl absent)" in deferral
+        assert "GNL" not in deferral  # emitted now, not deferred
         assert "boundary FCF" in deferral
         assert "windowed inflow inputs" in deferral
         assert "water travel time (VI absent)" in deferral
