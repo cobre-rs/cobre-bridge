@@ -9,6 +9,7 @@ DataFrames (their fixed shapes make ``df=True`` well-formed).
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 import pandas as pd
@@ -332,3 +333,35 @@ def test_convert_gnl_no_post_horizon_delivery_yields_no_post_study() -> None:
     assert e.future_anticipated_deliveries == []
     assert e.post_study_stages is None
     assert len(e.past_anticipated_commitments) == 1  # left boundary still mandatory
+
+
+def test_convert_gnl_clamps_committed_above_capability(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # gl geracao and tg disponibilidade are independent; a commitment above the
+    # plant's max_mw is clamped into [min_mw, max_mw] (both boundaries) + warned,
+    # so cobre never rejects an out-of-bounds pin.
+    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    model = GnlCommitmentModel(
+        thermals=(santa,),
+        commitments={
+            86: GnlCommitment(
+                86,
+                (
+                    GnlStageCommitment(1, date(2026, 3, 14), 900.0, 168.0),
+                    GnlStageCommitment(8, date(2026, 5, 2), 0.0, 0.0),
+                    GnlStageCommitment(9, date(2026, 5, 9), 900.0, 0.0),
+                ),
+            )
+        },
+        weeks_per_month={},
+    )
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.anticipated"):
+        e = convert_gnl(
+            model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        )
+
+    assert e.past_anticipated_commitments[0]["value_mw"] == 500.0  # 900 -> max 500
+    assert e.future_anticipated_deliveries[0]["min_mw"] == 500.0
+    assert e.future_anticipated_deliveries[0]["max_mw"] == 500.0
+    assert any("clamped" in r.message for r in caplog.records)

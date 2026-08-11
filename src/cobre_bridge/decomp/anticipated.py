@@ -3,11 +3,15 @@
 The source model declares its GNL thermals entirely in ``dadgnl`` — a separate
 file from the ``CT`` thermal registry the main thermal converter reads — so
 these plants are invisible to ``decomp/thermal.py`` and must be modelled here.
-This module is the **pure read/model layer**: it turns ``dadgnl`` into a
-structured commitment model and does nothing else — no ``cobre`` import, no
-filesystem writes, no :class:`~cobre_bridge.diagnostics.Diagnostic`, no clamping
-into bounds (a conversion-site policy) and no decision about lead declaration or
-ring placement (the emission track's job). It returns data only.
+The **read/model layer** (:func:`read_gnl_model` and its helpers) is pure: it
+turns ``dadgnl`` into a structured commitment model and does nothing else — no
+``cobre`` import, no filesystem writes, no clamping, no decision about lead
+declaration or ring placement; it returns the true committed values as data. The
+**emission layer** (:func:`convert_gnl`) turns that model into cobre's
+anticipated-dispatch inputs and owns the bounds policy the reader defers: it
+clamps committed MW into each plant's ``[min_mw, max_mw]`` capability, warning
+(via the module logger) on an out-of-range value, so the converted case never
+pins a delivery cobre would reject.
 
 ``dadgnl`` has three register families:
 
@@ -37,6 +41,7 @@ count.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -47,6 +52,8 @@ if TYPE_CHECKING:
 
     import pandas as pd
     from idecomp.decomp import Dadgnl
+
+_LOG = logging.getLogger(__name__)
 
 _NONZERO_TOLERANCE = 1e-9
 
@@ -327,6 +334,41 @@ def _lead_stage_count(committed_by_study_stage: Sequence[float]) -> int:
     return max(last_nonzero + 1, 1)
 
 
+def _clamp_committed(value: float, thermal: GnlThermal, context: str) -> float:
+    """Clamp a committed MW into the plant's ``[min_mw, max_mw]`` capability.
+
+    The emission site owns bounds policy (the reader returns the true committed
+    values): the source model's ``gl`` geração and ``tg`` disponibilidade are
+    independent fields, so a commitment can exceed capability, and a delivery
+    pinned outside the plant's static generation bounds is rejected by cobre's
+    semantic validator. It is clamped into range with a warning instead —
+    mirroring the sibling NEWAVE path (``converters/initial_conditions.py``).
+    """
+    lo, hi = thermal.min_mw, thermal.max_mw
+    if lo > hi:
+        _LOG.warning(
+            "GNL %s: inflexibility %.4g > availability %.4g (degenerate bounds); "
+            "clamping commitments to <= %.4g",
+            thermal.name,
+            lo,
+            hi,
+            hi,
+        )
+        lo = hi
+    clamped = min(max(value, lo), hi)
+    if abs(clamped - value) > _NONZERO_TOLERANCE:
+        _LOG.warning(
+            "GNL %s: committed %.4g MW (%s) outside [%.4g, %.4g]; clamped to %.4g",
+            thermal.name,
+            value,
+            context,
+            lo,
+            hi,
+            clamped,
+        )
+    return clamped
+
+
 def _delivery_window_end(stages: Sequence[GnlStageCommitment], i: int) -> date:
     """End of ``stages[i]``'s delivery window, from the estágio cadence.
 
@@ -428,11 +470,16 @@ def convert_gnl(
                     "thermal_id": tid,
                     "start_date": stages[j]["start_date"],
                     "end_date": stages[j]["end_date"],
-                    "value_mw": folded[j],
+                    "value_mw": _clamp_committed(
+                        folded[j], thermal, f"in-horizon study stage {j}"
+                    ),
                 }
             )
         for i, c in enumerate(commitment.stages):
             if c.start_date >= horizon_end and abs(c.committed_mw) > _NONZERO_TOLERANCE:
+                committed = _clamp_committed(
+                    c.committed_mw, thermal, f"delivery {c.start_date.isoformat()}"
+                )
                 future.append(
                     {
                         "thermal_id": tid,
@@ -440,8 +487,8 @@ def convert_gnl(
                         "delivery_end": _delivery_window_end(
                             commitment.stages, i
                         ).isoformat(),
-                        "min_mw": c.committed_mw,
-                        "max_mw": c.committed_mw,
+                        "min_mw": committed,
+                        "max_mw": committed,
                     }
                 )
 
