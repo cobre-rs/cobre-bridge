@@ -141,8 +141,11 @@ def test_import_boundary_fcf_patches_policy_boundary(
         "path": "boundary",
         "source_stage": 10,
     }
-    # the rest of the case's config sections must survive the patch untouched
-    assert "state_space" in config
+    # The importer reserves the cut-derived inflow-lag depth (convert_config
+    # emits no state_space); this individualized deck's boundary cuts carry
+    # pi_qafl terms, so a positive depth is patched in.
+    assert config["state_space"]["inflow_lag_depth"] >= 1
+    # the convert_config sections must survive the policy.boundary patch untouched
     assert "training" in config
     assert "simulation" in config
 

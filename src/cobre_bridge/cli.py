@@ -1302,11 +1302,14 @@ def _convert_newave(
 
 
 #: Warning substring that marks the P3 lag-blind stage shape
-#: (``state_variables.inflow_lags = false`` on every stage, alongside a
-#: positive ``inflow_lag_depth`` — see ``decomp/temporal.py::stage_records``)
-#: as deliberate external-solver interoperability, not a misconfiguration.
-#: Matched via :func:`_partition_validation_warnings` against cobre's stable
-#: substring (never the volatile message prefix); see
+#: (``state_variables.inflow_lags = false`` on every stage — see
+#: ``decomp/temporal.py::stage_records`` — alongside the positive
+#: ``inflow_lag_depth`` the boundary-FCF importer reserves) as deliberate
+#: external-solver interoperability, not a misconfiguration. Only arises once a
+#: boundary FCF is imported: a plain conversion emits no ``inflow_lag_depth``,
+#: so cobre resolves a zero depth and this warning never fires. Matched via
+#: :func:`_partition_validation_warnings` against cobre's stable substring
+#: (never the volatile message prefix); see
 #: ``cobre-io/src/validation/semantic/stages.rs``.
 _DECOMP_VALIDATION_WHITELIST: tuple[str, ...] = ("external-solver interoperability",)
 

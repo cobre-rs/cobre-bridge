@@ -1,11 +1,20 @@
 """Run configuration and penalties for DECOMP-like decks.
 
-``config.json`` carries the fixed ``state_space.inflow_lag_depth`` (P3/D8),
-the deck's ``GP`` convergence criterion as a **relative** ``Gap`` stopping
-rule (``relative_tolerance``, matching DECOMP's ``Zsup/Zinf - 1 <= GP``
-convergence; cobre auto-injects a ``BoundStalling`` companion so an
-unattainable tolerance degrades to a diagnosed stall), the deck-faithful
-``NI`` iteration backstop, and the external scenario schemes.
+``config.json`` carries the deck's ``GP`` convergence criterion as a
+**relative** ``Gap`` stopping rule (``relative_tolerance``, matching DECOMP's
+``Zsup/Zinf - 1 <= GP`` convergence; cobre auto-injects a ``BoundStalling``
+companion so an unattainable tolerance degrades to a diagnosed stall), the
+deck-faithful ``NI`` iteration backstop, and the external scenario schemes.
+
+No ``state_space.inflow_lag_depth`` is emitted. Under a deferred boundary FCF
+the external white-noise inflow model contributes no inflow-lag state, so cobre
+resolves a zero depth and reserving lag slots would be dead state (and would
+raise cobre's lag-blind-stage advisory for nothing). The inflow-lag depth is a
+property of the *boundary policy*: the boundary-FCF importer
+(``fcf/__init__.py``) reserves exactly the depth the loaded cuts reference — and
+only when a boundary policy is actually imported. cobre is slated to infer that
+depth from the checkpoint itself, retiring even the importer's patch (see
+``~/git/cobre/plans/state-space-inflow-lag-depth-inference-spec.md``).
 
 ``penalties.json`` reuses the shared ρ-scaled hydro penalty construction
 with the deck's deficit cost and the converted productivities — the same
@@ -38,17 +47,10 @@ _CONFIG_SCHEMA_URL = (
     "/schemas/config.schema.json"
 )
 
-# D8: the boundary cut's deepest lag term sets the state-space depth cobre
-# must reserve, so the emitted config declares it explicitly rather than
-# leaving cobre to infer one. The source model's boundary cuts carry
-# ``pi_qafl`` lag coefficients out to depth 12, so a smaller value would
-# drop lag coefficients cobre would then reject at load.
-_INFLOW_LAG_DEPTH = 12
-
 
 def convert_config(dadger: Dadger) -> dict:
-    """Build ``config.json``: state space depth, Gap + NI stopping rules,
-    external scenario sources, simulation on.
+    """Build ``config.json``: Gap + NI stopping rules, external scenario
+    sources, simulation on.
 
     Both training and simulation use ``selection = {"method": "enumerated"}``:
     the explicit trunk-plus-fan node graph enumerates every root-to-leaf path,
@@ -65,10 +67,11 @@ def convert_config(dadger: Dadger) -> dict:
     constant placeholder is emitted rather than a study-varying value that would
     misleadingly imply a meaningful random draw.
 
-    ``state_space.inflow_lag_depth`` is fixed at 12 (P3/D8): under
-    no-folding, the source model's boundary cuts carry lag coefficients out
-    to depth 12, so cobre's bookkeeping must reserve that many lag slots for
-    the terminal boundary cut to price.
+    No ``state_space`` block is emitted: the inflow-lag depth is a property of
+    the boundary policy, not the case inputs. With the boundary FCF deferred the
+    external inflow model needs no lag state, so cobre resolves a zero depth; the
+    boundary-FCF importer reserves the cut-derived depth when a boundary is
+    actually imported (see the module docstring).
     """
     ni = int(dadger.ni.iteracoes or 500)
     gp = float(dadger.gp.data[0])
@@ -82,7 +85,6 @@ def convert_config(dadger: Dadger) -> dict:
 
     return {
         "$schema": _CONFIG_SCHEMA_URL,
-        "state_space": {"inflow_lag_depth": _INFLOW_LAG_DEPTH},
         "training": {
             "selection": {"method": "enumerated"},
             "stopping_rules": [

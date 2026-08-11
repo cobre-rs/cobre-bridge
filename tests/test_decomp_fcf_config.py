@@ -1,11 +1,8 @@
-"""Tests for the DECOMP config emitter's ``state_space`` section."""
+"""Tests for the DECOMP config emitter (``convert_config``)."""
 
 from __future__ import annotations
 
-from cobre_bridge.decomp.config import (
-    _INFLOW_LAG_DEPTH,
-    convert_config,
-)
+from cobre_bridge.decomp.config import convert_config
 
 
 class _Ni:
@@ -27,11 +24,15 @@ class _Dadger:
 
 
 class TestConvertConfigStateSpace:
-    def test_convert_config_emits_inflow_lag_depth_12(self) -> None:
+    def test_convert_config_omits_state_space(self) -> None:
+        # The inflow-lag depth is a property of the boundary policy, not the
+        # case inputs. With the boundary FCF deferred cobre resolves a zero
+        # depth, so no ``state_space`` block is emitted (reserving lag slots
+        # would be dead state); the boundary-FCF importer patches the
+        # cut-derived depth in only when a boundary is actually imported.
         result = convert_config(_Dadger())  # type: ignore[arg-type]
 
-        assert result["state_space"] == {"inflow_lag_depth": 12}
-        assert _INFLOW_LAG_DEPTH == 12
+        assert "state_space" not in result
 
     def test_convert_config_training_and_simulation_enumerated(self) -> None:
         result = convert_config(_Dadger())  # type: ignore[arg-type]

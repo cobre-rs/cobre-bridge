@@ -31,7 +31,11 @@ from cobre_bridge.decomp.fcf.bootstrap import (
     bootstrap_terminal_manifest,
     ensure_writer_binding,
 )
-from cobre_bridge.decomp.fcf.cortes import read_cortes, summarize_cut_families
+from cobre_bridge.decomp.fcf.cortes import (
+    read_cortes,
+    required_inflow_lag_depth,
+    summarize_cut_families,
+)
 from cobre_bridge.decomp.fcf.mapper import map_boundary_cuts
 from cobre_bridge.decomp.fcf.writer import (
     build_metadata,
@@ -148,6 +152,34 @@ def _patch_policy_boundary(config_path: Path, *, source_stage: int) -> None:
         handle.write("\n")
 
 
+def _patch_inflow_lag_depth(config_path: Path, *, depth: int) -> None:
+    """Set ``["state_space"]["inflow_lag_depth"]`` in ``config_path``.
+
+    ``decomp/config.py`` emits no ``state_space`` block: with the boundary FCF
+    deferred, the external inflow model needs no lag state and cobre resolves a
+    zero depth. The inflow-lag depth is a property of the *boundary policy*, so
+    it is reserved here — and only here — when a boundary FCF is imported, to
+    exactly the depth the loaded cuts reference (``depth`` =
+    :func:`~cobre_bridge.decomp.fcf.cortes.required_inflow_lag_depth`). Sizing
+    the reserved lag state to the cuts lets the bootstrap manifest (and the
+    final run's terminal cut) hold the boundary policy's conditioning history.
+
+    Must run before :func:`bootstrap_terminal_manifest`, whose 1-iteration pass
+    resolves the terminal manifest the cuts are mapped onto. cobre is slated to
+    infer this depth from the checkpoint itself, retiring this patch (see
+    ``~/git/cobre/plans/state-space-inflow-lag-depth-inference-spec.md``).
+
+    Mirrors :func:`_patch_policy_boundary`'s read-modify-write and JSON
+    formatting so the patched file matches the rest of the case byte-for-byte.
+    """
+    with config_path.open(encoding="utf-8") as handle:
+        config = json.load(handle)
+    config.setdefault("state_space", {})["inflow_lag_depth"] = depth
+    with config_path.open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+
+
 def import_boundary_fcf(
     case_dir: Path,
     cortesh_path: Path | None,
@@ -223,6 +255,23 @@ def import_boundary_fcf(
     # here, at the boundary between the numpy-sourced reader and the
     # JSON/cobre-FFI payloads this function builds below.
     boundary_stage = int(cuts.boundary_stage)
+
+    # Reserve inflow-lag state to the depth the boundary cuts actually
+    # reference, BEFORE the bootstrap pass resolves the terminal manifest the
+    # cuts are mapped onto (`convert_config` emits no `state_space`, so cobre
+    # would otherwise size zero lag slots and the mapping would have nowhere to
+    # land the pi_qafl terms). A boundary that prices no lag state (depth 0)
+    # needs no reservation — and cobre rejects an explicit 0.
+    lag_depth = required_inflow_lag_depth(summarize_cut_families(cuts))
+    if lag_depth >= 1:
+        _patch_inflow_lag_depth(case_dir / "config.json", depth=lag_depth)
+        _LOG.info(
+            "boundary FCF references inflow-lag state to depth %d; reserving "
+            "state_space.inflow_lag_depth=%d (derived from the source cuts, not "
+            "a fixed constant)",
+            lag_depth,
+            lag_depth,
+        )
 
     ensure_writer_binding()
     import cobre
