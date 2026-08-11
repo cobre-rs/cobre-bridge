@@ -54,10 +54,12 @@ class _StubDadgnl:
         gl_registers: list[_GlReg],
         tg_rows: list[dict],
         gs_rows: list[dict],
+        nl_rows: list[dict] | None = None,
     ) -> None:
         self._gl = gl_registers
         self._tg = pd.DataFrame(tg_rows)
         self._gs = pd.DataFrame(gs_rows)
+        self._nl = pd.DataFrame(nl_rows or [])
 
     def gl(self, df: bool = False) -> list[_GlReg]:
         return list(self._gl)
@@ -67,6 +69,9 @@ class _StubDadgnl:
 
     def gs(self, df: bool = False) -> pd.DataFrame:
         return self._gs
+
+    def nl(self, df: bool = False) -> pd.DataFrame:
+        return self._nl
 
 
 def _tg_row(
@@ -201,11 +206,33 @@ def test_weeks_per_month_from_gs() -> None:
     assert isinstance(model, GnlCommitmentModel)
 
 
+def test_nl_lags_read_per_plant() -> None:
+    gl = [_GlReg(86, 9, "09052026", [500.0], [500.0])]
+    tg = [_tg_row(86, "SANTA CRUZ"), _tg_row(224, "PSERGIPE I", sub=3)]
+    nl = [
+        {"codigo_usina": 86, "codigo_submercado": 1, "lag": 2},
+        {"codigo_usina": 224, "codigo_submercado": 3, "lag": 2},
+    ]
+    model = read_gnl_model(_StubDadgnl(gl, tg, [], nl))
+
+    assert model is not None
+    assert model.nl_lag_months == {86: 2, 224: 2}
+
+
+def test_nl_lags_empty_when_block_absent() -> None:
+    gl = [_GlReg(86, 9, "09052026", [500.0], [500.0])]
+    model = read_gnl_model(_StubDadgnl(gl, [_tg_row(86, "SANTA CRUZ")], []))
+
+    assert model is not None
+    assert model.nl_lag_months == {}
+
+
 # --------------------------------------------------------------------------
 # Emission (convert_gnl)
 # --------------------------------------------------------------------------
 
-# Two study stages, horizon ends 2026-05-01 (mirrors decomp-mar-26-rv2's shape).
+# decomp-mar-26-rv2's operative calendar: 3 weekly March stages (168 h each) + 1
+# monthly April stage (648 h), horizon ends 2026-05-01 (cumulative 1152 h).
 _EMIT_STAGES = [
     {
         "start_date": "2026-03-14",
@@ -214,16 +241,27 @@ _EMIT_STAGES = [
     },
     {
         "start_date": "2026-03-21",
+        "end_date": "2026-03-28",
+        "blocks": [{"hours": 168.0}],
+    },
+    {
+        "start_date": "2026-03-28",
+        "end_date": "2026-04-04",
+        "blocks": [{"hours": 168.0}],
+    },
+    {
+        "start_date": "2026-04-04",
         "end_date": "2026-05-01",
-        "blocks": [{"hours": 984.0}],
+        "blocks": [{"hours": 648.0}],
     },
 ]
 _BUS_OF = {1: 0, 3: 2}.get
 
 
 def _emit_model() -> GnlCommitmentModel:
-    """SANTA CRUZ (86): zero in-horizon + 500 MW post-horizon (2026-05-09);
-    PSERGIPE I (224): registry-only, no committed delivery."""
+    """SANTA CRUZ (86): zero in-horizon + 500 MW post-horizon (2026-05-09), a
+    2-month dispatch-anticipation lag; PSERGIPE I (224): registry-only, no
+    committed delivery, same 2-month lag (inert)."""
     santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
     pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
     return GnlCommitmentModel(
@@ -245,6 +283,7 @@ def _emit_model() -> GnlCommitmentModel:
             ),
         },
         weeks_per_month={},
+        nl_lag_months={86: 2, 224: 2},
     )
 
 
@@ -260,30 +299,35 @@ def test_convert_gnl_creates_thermals_with_ids_and_anticipated_config() -> None:
     assert santa["bus_id"] == 0
     assert santa["cost_per_mwh"] == 199.22
     assert santa["generation"] == {"min_mw": 0.0, "max_mw": 500.0}
-    # All in-horizon geracao is 0 -> K=1 -> lead = study stage 0 hours.
-    assert santa["anticipated_config"] == {"lead_time_hours": 168.0}
+    # SANTA CRUZ delivers post-horizon (2026-05-09) with a 2-month nl lag, so its
+    # physical lead is derived from that lag against the calendar: the delivery
+    # window ends 2026-05-16 (1512 h from the study start) and the decision lands
+    # in the first (early-March) stage [0, 168 h) -> H = 1512 - 168 = 1344 h. This
+    # is the fix: NOT the old committed-footprint 168 h that dropped the delivery.
+    assert santa["anticipated_config"] == {"lead_time_hours": 1344.0}
+    # PSERGIPE has no post-horizon delivery -> horizon-bounded footprint lead.
+    assert e.thermals[1]["anticipated_config"] == {"lead_time_hours": 168.0}
 
 
-def test_convert_gnl_left_boundary_mandatory_and_tiles_k_stages() -> None:
+def test_convert_gnl_left_boundary_tiles_the_h_derived_leading_stages() -> None:
     e = convert_gnl(
         _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
     )
-    # Both anticipated thermals get a commitment window (K=1 -> study stage 0),
-    # zero MW since in-horizon geracao is 0.
-    assert e.past_anticipated_commitments == [
-        {
-            "thermal_id": 94,
-            "start_date": "2026-03-14",
-            "end_date": "2026-03-21",
-            "value_mw": 0.0,
-        },
-        {
-            "thermal_id": 95,
-            "start_date": "2026-03-14",
-            "end_date": "2026-03-21",
-            "value_mw": 0.0,
-        },
+    santa = [p for p in e.past_anticipated_commitments if p["thermal_id"] == 94]
+    pserg = [p for p in e.past_anticipated_commitments if p["thermal_id"] == 95]
+    # SANTA CRUZ's lead (1344 h) reaches past the horizon, so cobre treats every
+    # study stage as pre-study-committed: all 4 stages tiled (0 MW, in-horizon
+    # geracao is 0), matching lead_delivery_stage_count(1344) = 4.
+    assert [p["start_date"] for p in santa] == [
+        "2026-03-14",
+        "2026-03-21",
+        "2026-03-28",
+        "2026-04-04",
     ]
+    assert all(p["value_mw"] == 0.0 for p in santa)
+    # PSERGIPE's footprint lead (168 h) tiles only the leading stage.
+    assert len(pserg) == 1
+    assert pserg[0]["start_date"] == "2026-03-14"
 
 
 def test_convert_gnl_right_boundary_delivery_and_post_study() -> None:
@@ -327,6 +371,7 @@ def test_convert_gnl_no_post_horizon_delivery_yields_no_post_study() -> None:
             )
         },
         weeks_per_month={},
+        nl_lag_months={224: 2},
     )
     e = convert_gnl(model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES)
 
@@ -355,6 +400,7 @@ def test_convert_gnl_clamps_committed_above_capability(
             )
         },
         weeks_per_month={},
+        nl_lag_months={86: 2},
     )
     with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.anticipated"):
         e = convert_gnl(
@@ -365,3 +411,69 @@ def test_convert_gnl_clamps_committed_above_capability(
     assert e.future_anticipated_deliveries[0]["min_mw"] == 500.0
     assert e.future_anticipated_deliveries[0]["max_mw"] == 500.0
     assert any("clamped" in r.message for r in caplog.records)
+
+
+def _post_horizon_model(lag_months: int) -> GnlCommitmentModel:
+    """SANTA CRUZ delivering 500 MW post-horizon (2026-05-09) with a given lag."""
+    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    return GnlCommitmentModel(
+        thermals=(santa,),
+        commitments={
+            86: GnlCommitment(
+                86,
+                (
+                    GnlStageCommitment(8, date(2026, 5, 2), 0.0, 0.0),
+                    GnlStageCommitment(9, date(2026, 5, 9), 500.0, 0.0),
+                ),
+            )
+        },
+        weeks_per_month={},
+        nl_lag_months={86: lag_months},
+    )
+
+
+@pytest.mark.parametrize(
+    ("lag_months", "expected_lead"),
+    [
+        # delivery window ends 2026-05-16 = 1512 h from the study start; the lead
+        # is 1512 h minus the cumulative hours through the decision stage (the
+        # operative stage `lag` months before 2026-05-16):
+        (1, 1512.0 - 1152.0),  # 2026-04-16 -> April stage [504, 1152) -> H = 360
+        (2, 1512.0 - 168.0),  # 2026-03-16 -> stage 0 [0, 168)      -> H = 1344
+    ],
+)
+def test_convert_gnl_nl_lag_sets_physical_lead_time(
+    lag_months: int, expected_lead: float
+) -> None:
+    """The nl dispatch-anticipation lag (in months), resolved against the deck
+    calendar, sets lead_time_hours so cobre's end-anchored decider lands on the
+    operative stage `lag` months before the post-horizon delivery."""
+    e = convert_gnl(
+        _post_horizon_model(lag_months),
+        first_thermal_id=94,
+        bus_id_of=_BUS_OF,
+        stages=_EMIT_STAGES,
+    )
+    assert e.thermals[0]["anticipated_config"]["lead_time_hours"] == expected_lead
+
+
+def test_convert_gnl_pre_study_decision_delivery_skipped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A post-horizon delivery whose nl-implied decision predates the study is
+    not emitted as an in-study-decided future delivery (cobre would drop it);
+    it warns and falls back to the horizon-bounded footprint lead."""
+    # lag 6 months: 2026-05-16 - 6 months = 2025-11-16, well before the study.
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.anticipated"):
+        e = convert_gnl(
+            _post_horizon_model(6),
+            first_thermal_id=94,
+            bus_id_of=_BUS_OF,
+            stages=_EMIT_STAGES,
+        )
+
+    assert e.future_anticipated_deliveries == []
+    assert e.post_study_stages is None
+    # Footprint fallback stays within the horizon (never > 1152 h).
+    assert e.thermals[0]["anticipated_config"]["lead_time_hours"] <= 1152.0
+    assert any("decided before the study horizon" in r.message for r in caplog.records)

@@ -26,6 +26,9 @@ pins a delivery cobre would reject.
   is **not** usable (the ragged per-block lists raise "All arrays must be of the
   same length"); the registers are iterated directly instead.
 * ``gs`` — the weeks-per-month calendar map (``mes`` → ``semanas``).
+* ``nl`` — the per-plant dispatch-anticipation lag in whole months
+  (``codigo_usina`` → ``lag``): a plant's dispatch is decided ``lag`` months
+  ahead of its delivery, and this is what sizes its physical ``lead_time_hours``.
 
 A commitment's delivery date decides its boundary: delivered in-study it is a
 left-boundary ``past_anticipated_commitment``; delivered after the study horizon
@@ -110,11 +113,19 @@ class GnlCommitment:
 
 @dataclass(frozen=True)
 class GnlCommitmentModel:
-    """The GNL registry, its committed dispatch, and the weeks-per-month map."""
+    """The GNL registry, its committed dispatch, and the weeks-per-month map.
+
+    ``nl_lag_months`` is the ``nl`` block's per-plant dispatch-anticipation lag
+    (``{codigo_usina: months}``): the number of months by which a GNL plant's
+    dispatch is decided ahead of its delivery (the LNG supply lead time). It is
+    what sets each anticipated thermal's physical ``lead_time_hours`` — a plant
+    absent from ``nl`` has no declared lead.
+    """
 
     thermals: tuple[GnlThermal, ...]
     commitments: dict[int, GnlCommitment]
     weeks_per_month: dict[int, int]
+    nl_lag_months: dict[int, int]
 
 
 def _as_floats(value: object) -> list[float]:
@@ -215,6 +226,7 @@ def read_gnl_model(dadgnl: Dadgnl) -> GnlCommitmentModel | None:
         thermals=thermals,
         commitments=commitments,
         weeks_per_month=_read_weeks_per_month(dadgnl),
+        nl_lag_months=_read_nl_lags(dadgnl),
     )
 
 
@@ -293,6 +305,20 @@ def _read_weeks_per_month(dadgnl: Dadgnl) -> dict[int, int]:
     if frame is None or frame.empty:
         return {}
     return {int(row["mes"]): int(row["semanas"]) for _, row in frame.iterrows()}
+
+
+def _read_nl_lags(dadgnl: Dadgnl) -> dict[int, int]:
+    """The ``nl`` dispatch-anticipation lags ``{codigo_usina: months}``.
+
+    Each ``nl`` register carries ``codigo_usina``, ``codigo_submercado`` and
+    ``lag`` (whole months of dispatch anticipation). Unlike ``gl``, ``nl`` is a
+    fixed-shape register, so ``nl(df=True)`` is well-formed. Empty when the deck
+    declares no ``nl`` block.
+    """
+    frame = dadgnl.nl(df=True)
+    if frame is None or frame.empty:
+        return {}
+    return {int(row["codigo_usina"]): int(row["lag"]) for _, row in frame.iterrows()}
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +412,134 @@ def _delivery_window_end(stages: Sequence[GnlStageCommitment], i: int) -> date:
     return cur + timedelta(days=7)
 
 
+def _subtract_months(d: date, months: int) -> date:
+    """``d`` shifted back ``months`` whole calendar months, day-preserving.
+
+    The day is clamped to the target month's length (e.g. 31 Mar − 1 month →
+    28/29 Feb), so the result is always a valid date.
+    """
+    total = d.year * 12 + (d.month - 1) - months
+    year, month = divmod(total, 12)
+    month += 1
+    first_of_next = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    last_day = (first_of_next - timedelta(days=1)).day
+    return date(year, month, min(d.day, last_day))
+
+
+def _lead_time_hours(
+    anchor_end: date,
+    lag_months: int,
+    horizon_start: date,
+    stage_spans: Sequence[tuple[date, date]],
+    cumulative_hours: Sequence[float],
+) -> tuple[float, bool]:
+    """Physical ``lead_time_hours`` (``H``) for an anticipated GNL plant.
+
+    cobre resolves an anticipated commitment's in-study decider **end-anchored**:
+    ``decider`` = the operative stage containing ``window_end_hours − H`` on the
+    cumulative operative-hours clock, with a boundary tie resolving to the
+    earlier stage (``lead_time/mod.rs``). To land the decider on the source
+    model's *decision stage* — the operative stage ``lag_months`` before the
+    delivery — ``H`` is set so ``window_end_hours − H`` equals the **end**
+    boundary of that stage (the tie then resolves onto it)::
+
+        H = window_end_hours − cumulative_hours[decision_stage + 1]
+
+    ``window_end_hours`` is the wall-clock hours from ``horizon_start`` to
+    ``anchor_end`` (matching cobre's ``hours_between``) and ``cumulative_hours``
+    are the cumulative operative-stage boundaries (matching cobre's
+    ``study_stage_durations``), so ``window_end_hours − H`` reproduces cobre's
+    boundary exactly. Returns ``(H, decided_pre_study)``; ``decided_pre_study``
+    is ``True`` when the decision date precedes ``horizon_start`` (decided before
+    the study — out of the in-study lead's reach), in which case ``H`` is
+    anchored at the first stage so the value stays a valid physical lead.
+    """
+    window_end_hours = (anchor_end - horizon_start).days * 24.0
+    decision_date = _subtract_months(anchor_end, lag_months)
+    if decision_date < horizon_start:
+        return window_end_hours - cumulative_hours[1], True
+    decision_stage = len(stage_spans) - 1
+    for m, (s_start, s_end) in enumerate(stage_spans):
+        if s_start <= decision_date < s_end:
+            decision_stage = m
+            break
+    return window_end_hours - cumulative_hours[decision_stage + 1], False
+
+
+def _lead_delivery_stage_count(
+    lead_hours: float, cumulative_hours: Sequence[float]
+) -> int:
+    """Leading study stages cobre treats as pre-study-committed for lead ``H``.
+
+    Mirrors cobre-io's ``lead_delivery_stage_count`` for ``LeadTime``: the count
+    of leading stages whose stage-end cumulative hours are ``<= H`` (tie-
+    inclusive). The bridge tiles exactly these with
+    ``past_anticipated_commitments`` so the left boundary matches the depth cobre
+    derives from ``H`` — for a lead reaching past the horizon this is every study
+    stage.
+    """
+    count = 0
+    for boundary in cumulative_hours[1:]:
+        if boundary > lead_hours:
+            break
+        count += 1
+    return count
+
+
+def _anticipation_lead_hours(
+    thermal: GnlThermal,
+    commitment: GnlCommitment,
+    lag_months: int | None,
+    footprint_stages: int,
+    post_horizon: Sequence[int],
+    horizon_start: date,
+    stage_spans: Sequence[tuple[date, date]],
+    stage_hours: Sequence[float],
+    cumulative_hours: Sequence[float],
+) -> float:
+    """A GNL plant's ``anticipated_config.lead_time_hours`` (physical ``H``).
+
+    A plant with a **post-horizon** committed delivery is the right-boundary
+    case: its lead is the physical dispatch-anticipation span implied by the
+    ``nl`` lag (:func:`_lead_time_hours`), anchored on the earliest post-horizon
+    delivery whose ``nl``-implied decision still lands in-study — this lead may
+    exceed the study horizon (the delivery is post-horizon), which is exactly
+    what places the decider ``lag`` months back. (cobre-io's semantic validator
+    must exempt a plant with ``future_anticipated_deliveries`` from its
+    ``lead_time <= horizon`` check for such a case to validate — see the
+    right-boundary spec §4.3; a purely-in-study lead below stays horizon-bounded.)
+
+    A plant with **no** post-horizon delivery (purely in-study, or an inert
+    all-zero registry plant) keeps the committed-footprint lead (the leading
+    ``footprint_stages`` stages' cumulative hours) — a horizon-bounded value the
+    in-study ring already validates. A plant carrying a post-horizon delivery but
+    no ``nl`` lag (the source model normally declares one for every GNL plant),
+    or whose every post-horizon decision predates the study, likewise falls back
+    to the footprint lead.
+    """
+    footprint = sum(stage_hours[:footprint_stages])
+    if not post_horizon:
+        return footprint
+    if lag_months is None:
+        _LOG.warning(
+            "GNL %s: post-horizon delivery but no nl dispatch-anticipation lag; "
+            "falling back to the committed-footprint lead",
+            thermal.name,
+        )
+        return footprint
+    for i in post_horizon:
+        lead_hours, decided_pre_study = _lead_time_hours(
+            _delivery_window_end(commitment.stages, i),
+            lag_months,
+            horizon_start,
+            stage_spans,
+            cumulative_hours,
+        )
+        if not decided_pre_study:
+            return lead_hours
+    return footprint
+
+
 def convert_gnl(
     model: GnlCommitmentModel,
     *,
@@ -398,17 +552,24 @@ def convert_gnl(
     Each GNL plant is *created* (absent from ``CT``) with a dense id assigned
     after the existing thermals (``first_thermal_id`` onward, ascending by code)
     and marked anticipated via ``anticipated_config = {"lead_time_hours": H}``,
-    where ``H`` is the cumulative hours of the plant's leading ``K`` study stages
-    (``K`` from :func:`_lead_stage_count`; cobre's ``lead_delivery_stage_count``
-    recovers the same ``K`` from ``H`` because ``H`` equals the ``K``-stage
-    cumulative-hours boundary). Every anticipated thermal then gets:
+    where ``H`` is the plant's **physical dispatch-anticipation lead** derived
+    from its ``nl`` lag (:func:`_anticipation_lead_hours` /
+    :func:`_lead_time_hours`) — the decision→delivery span that lands cobre's
+    end-anchored in-study decider on the operative stage ``lag`` months before
+    the delivery. (This single ``H`` drives *both* cobre roles: the in-study ring
+    depth and each post-horizon delivery's decider.) Every anticipated thermal
+    then gets:
 
-    * ``past_anticipated_commitments`` tiling study stages ``[0, K)`` with the
-      hours-weighted committed MW folded from the (weekly) ``gl`` deliveries onto
-      each study stage (explicit ``0`` where none) — the mandatory left boundary;
+    * ``past_anticipated_commitments`` tiling study stages ``[0, K)`` (``K`` from
+      :func:`_lead_stage_count`) with the hours-weighted committed MW folded from
+      the (weekly) ``gl`` deliveries onto each study stage (explicit ``0`` where
+      none) — the mandatory left boundary;
     * ``future_anticipated_deliveries`` for each delivery landing on/after the
       study-horizon end, pinned ``min_mw == max_mw == committed_mw`` over
-      ``[start, start + stage span)`` — the right boundary.
+      ``[start, start + stage span)`` — the right boundary. A delivery whose
+      ``nl``-implied decision predates the study is skipped with a warning (its
+      pre-study left-boundary treatment is deferred), never emitted as a window
+      cobre would silently drop.
 
     All post-horizon deliveries share one ``post_study_stages`` calendar, split
     at every delivery boundary so each delivery covers whole stages (cobre
@@ -426,6 +587,12 @@ def convert_gnl(
         for s in stages
     ]
     stage_hours = [sum(float(b["hours"]) for b in s["blocks"]) for s in stages]
+    # Cumulative operative-stage boundaries S_0=0, S_1, .., S_n, matching cobre's
+    # `cumulative_stage_boundaries(study_stage_durations)` — the clock the
+    # anticipated-delivery decider is resolved against.
+    cumulative_hours = [0.0]
+    for h in stage_hours:
+        cumulative_hours.append(cumulative_hours[-1] + h)
 
     gnl_id = {t.code: first_thermal_id + i for i, t in enumerate(model.thermals)}
 
@@ -450,7 +617,28 @@ def convert_gnl(
                 sum(h * mw for h, mw in windows) / total_h if total_h > 0 else 0.0
             )
 
-        k = _lead_stage_count(folded)
+        footprint_stages = _lead_stage_count(folded)
+        post_horizon = [
+            i
+            for i, c in enumerate(commitment.stages)
+            if c.start_date >= horizon_end and abs(c.committed_mw) > _NONZERO_TOLERANCE
+        ]
+        lag_months = model.nl_lag_months.get(thermal.code)
+        lead_hours = _anticipation_lead_hours(
+            thermal,
+            commitment,
+            lag_months,
+            footprint_stages,
+            post_horizon,
+            horizon_start,
+            stage_spans,
+            stage_hours,
+            cumulative_hours,
+        )
+        # The left boundary tiles exactly the leading stages cobre derives from
+        # ``H`` (:func:`_lead_delivery_stage_count`), so an NL-lag lead that
+        # reaches past the horizon still lands a coherent past-commitment tiling.
+        tile_k = _lead_delivery_stage_count(lead_hours, cumulative_hours)
         thermals.append(
             {
                 "id": tid,
@@ -459,12 +647,12 @@ def convert_gnl(
                 "bus_id": bus_id_of(thermal.submarket_code),
                 "cost_per_mwh": thermal.cost_per_mwh,
                 "generation": {"min_mw": thermal.min_mw, "max_mw": thermal.max_mw},
-                "anticipated_config": {"lead_time_hours": sum(stage_hours[:k])},
+                "anticipated_config": {"lead_time_hours": lead_hours},
                 "entry_stage_id": None,
                 "exit_stage_id": None,
             }
         )
-        for j in range(k):
+        for j in range(tile_k):
             past.append(
                 {
                     "thermal_id": tid,
@@ -475,22 +663,40 @@ def convert_gnl(
                     ),
                 }
             )
-        for i, c in enumerate(commitment.stages):
-            if c.start_date >= horizon_end and abs(c.committed_mw) > _NONZERO_TOLERANCE:
-                committed = _clamp_committed(
-                    c.committed_mw, thermal, f"delivery {c.start_date.isoformat()}"
+        for i in post_horizon:
+            c = commitment.stages[i]
+            delivery_end = _delivery_window_end(commitment.stages, i)
+            if lag_months is not None:
+                _, decided_pre_study = _lead_time_hours(
+                    delivery_end,
+                    lag_months,
+                    horizon_start,
+                    stage_spans,
+                    cumulative_hours,
                 )
-                future.append(
-                    {
-                        "thermal_id": tid,
-                        "delivery_start": c.start_date.isoformat(),
-                        "delivery_end": _delivery_window_end(
-                            commitment.stages, i
-                        ).isoformat(),
-                        "min_mw": committed,
-                        "max_mw": committed,
-                    }
-                )
+                if decided_pre_study:
+                    _LOG.warning(
+                        "GNL %s: post-horizon delivery %s was decided before the "
+                        "study horizon (nl lag %d months); its pre-study "
+                        "(left-boundary) treatment is deferred, so it is not "
+                        "emitted as an in-study-decided future delivery",
+                        thermal.name,
+                        c.start_date.isoformat(),
+                        lag_months,
+                    )
+                    continue
+            committed = _clamp_committed(
+                c.committed_mw, thermal, f"delivery {c.start_date.isoformat()}"
+            )
+            future.append(
+                {
+                    "thermal_id": tid,
+                    "delivery_start": c.start_date.isoformat(),
+                    "delivery_end": delivery_end.isoformat(),
+                    "min_mw": committed,
+                    "max_mw": committed,
+                }
+            )
 
     past.sort(key=lambda w: (w["thermal_id"], w["start_date"]))
     future.sort(key=lambda d: (d["thermal_id"], d["delivery_start"]))
