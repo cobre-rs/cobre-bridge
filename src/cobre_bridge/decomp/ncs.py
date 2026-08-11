@@ -21,6 +21,7 @@ this same id space.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -281,33 +282,47 @@ def _pee_series(
 
     values: dict[tuple[int, int, int], dict[int, float]] = {}
     for _, row in ger.iterrows():
-        first = int(row["estagio_inicial"])
-        last = int(row["estagio_final"])
-        for estagio in range(first, last + 1):
-            stage_index = estagio - 1
-            if not 0 <= stage_index < len(calendar):
-                raise ValueError(
-                    f"renewable generation at stage {estagio} outside the "
-                    f"calendar (1..{len(calendar)})"
-                )
-            key = (int(row["codigo_pee"]), stage_index, int(row["patamar"]) - 1)
-            values.setdefault(key, {})[int(row["cenario"])] = float(row["geracao"])
+        # The PEE-GER-PER-PAT-CEN card is single-período: one `estagio` per row.
+        # (idecomp < 1.14.1 mis-modelled it as an estagio_inicial/estagio_final
+        # range, which left `geracao` unreadable — see
+        # plans/idecomp-renovaveis-pee-ger-layout-spec.md; requires idecomp >= 1.14.1.)
+        estagio = int(row["estagio"])
+        stage_index = estagio - 1
+        if not 0 <= stage_index < len(calendar):
+            raise ValueError(
+                f"renewable generation at stage {estagio} outside the "
+                f"calendar (1..{len(calendar)})"
+            )
+        key = (int(row["codigo_pee"]), stage_index, int(row["patamar"]) - 1)
+        values.setdefault(key, {})[int(row["cenario"])] = float(row["geracao"])
 
     per_park: dict[int, dict[int, list[float]]] = {}
     for (code, stage_index, block), by_scenario in values.items():
-        top = max(by_scenario.values())
-        bottom = min(by_scenario.values())
-        if top - bottom > 1e-9 * max(abs(top), 1.0):
-            raise ValueError(
-                f"renewable park {code} stage {stage_index + 1} block "
-                f"{block + 1}: generation varies across scenarios "
-                f"({bottom}..{top}); per-scenario renewables need the "
-                "external availability class — not converted yet"
+        scenario_values = list(by_scenario.values())
+        # DECOMP renewables are deterministic: every scenario carries the same
+        # generation for a (park, stage, block). A per-scenario spread is a deck
+        # typo (e.g. one scenario's value fat-fingered), not real stochasticity —
+        # so recover the majority (modal) value, robust to a single stray entry,
+        # and warn rather than crash or trust the outlier (the max).
+        representative = Counter(scenario_values).most_common(1)[0][0]
+        spread = max(scenario_values) - min(scenario_values)
+        if spread > 1e-9 * max(abs(representative), 1.0):
+            _LOG.warning(
+                "renewable park %d stage %d block %d: generation is not identical "
+                "across %d scenarios (%.6g..%.6g) — DECOMP renewables are "
+                "deterministic, so this is a deck typo; using the modal value %.6g",
+                code,
+                stage_index + 1,
+                block + 1,
+                len(scenario_values),
+                min(scenario_values),
+                max(scenario_values),
+                representative,
             )
         stage_blocks = per_park.setdefault(code, {}).setdefault(
             stage_index, [0.0] * len(calendar[stage_index].block_hours)
         )
-        stage_blocks[block] = top
+        stage_blocks[block] = representative
 
     series: list[_PqSeries] = []
     for offset, code in enumerate(sorted(per_park)):
