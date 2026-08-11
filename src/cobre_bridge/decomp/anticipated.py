@@ -1,69 +1,64 @@
-"""The source model's GNL commitment reader (``dadgnl``: ``tg``/``gl``/``gs``).
+"""Read the source model's GNL (fuel-constrained) anticipated dispatch.
 
-A GNL (fuel-constrained) thermal is declared entirely in ``dadgnl``, never in
-the ``CT`` registry ``decomp/thermal.py::convert_thermals`` reads — GNL codes
-are simply absent from ``CT``. This module reads ``dadgnl``'s three tables
-into a plant registry (:class:`GnlThermal`) and a per-stage committed
-dispatch (:class:`GnlCommitment`), bundled as :class:`GnlCommitmentModel`.
+The source model declares its GNL thermals entirely in ``dadgnl`` — a separate
+file from the ``CT`` thermal registry the main thermal converter reads — so
+these plants are invisible to ``decomp/thermal.py`` and must be modelled here.
+This module is the **pure read/model layer**: it turns ``dadgnl`` into a
+structured commitment model and does nothing else — no ``cobre`` import, no
+filesystem writes, no :class:`~cobre_bridge.diagnostics.Diagnostic`, no clamping
+into bounds (a conversion-site policy) and no decision about lead declaration or
+ring placement (the emission track's job). It returns data only.
 
-It decides nothing about the lead declaration or ring placement (see the
-epic's ticket-002) and performs no I/O beyond the accessor calls on an
-already-loaded ``dadgnl``: the caller owns ``Dadgnl.read``, cobre emission,
-and bounds clamping (ticket-003).
+``dadgnl`` has three register families:
 
-The three tables (verified via ``.tg/.gl/.gs(df=True)``):
+* ``tg`` — the GNL thermal registry (one row per plant): ``codigo_usina``,
+  ``codigo_submercado``, ``nome``, and per-block ``cvu`` (fuel cost, $/MWh),
+  ``disponibilidade`` (max MW), ``inflexibilidade`` (min MW). Fixed 3-block shape,
+  so ``tg(df=True)`` is well-formed.
+* ``gl`` — the committed weekly dispatch: one register per ``(codigo_usina,
+  estagio)`` carrying ``data_inicio`` (the delivery-stage start date, a
+  ``ddmmyyyy`` string), a per-block ``duracao`` list, and a per-block ``geracao``
+  (committed MW) list. Block counts vary across weekly stages, so ``gl(df=True)``
+  is **not** usable (the ragged per-block lists raise "All arrays must be of the
+  same length"); the registers are iterated directly instead.
+* ``gs`` — the weeks-per-month calendar map (``mes`` → ``semanas``).
 
-* ``tg`` — the GNL plant registry: ``codigo_submercado, codigo_usina,
-  estagio, nome, cvu_1..N, disponibilidade_1..N, inflexibilidade_1..N``.
-  Identical block-field shape to ``CT`` (sparse by stage; stage 1
-  mandatory). Only the stage-1 row is read here — :class:`GnlThermal`
-  carries the plant's static registry data, not a per-stage bounds series.
-* ``gl`` — the committed weekly dispatch: ``codigo_submercado,
-  codigo_usina, data_inicio, estagio, duracao_1..N, geracao_1..N``. Every
-  declared stage is kept (no forward-fill; a stage's absence means no
-  commitment that week).
-* ``gs`` — ``{mes: semanas}``, carried through verbatim.
+A commitment's delivery date decides its boundary: delivered in-study it is a
+left-boundary ``past_anticipated_commitment``; delivered after the study horizon
+it is a right-boundary ``future_anticipated_delivery`` (priced against
+``post_study_stages``). This module records the parsed ``date`` per stage so the
+emission track can make that split; it does not make it here.
 
-Block weighting
----------------
-The registry's ``cost_per_mwh``/``min_mw``/``max_mw`` are hours-weighted by
-the deck's stage-1 block hours
-(:func:`cobre_bridge.decomp.temporal.hours_weighted` — the same convention
-``decomp/thermal.py`` uses for ``CT``). The commitment's per-stage committed
-MW is instead self-normalising against ``gl``'s *own* ``duracao_b`` — not the
-calendar's block hours — so a plant's committed MWh is preserved exactly
-regardless of any block-count skew between ``gl`` and the calendar::
-
-    MW_eq = Σ_b (duracao_b / Σ_b duracao_b) · geracao_b
-
-Activation (gate G6)
----------------------
-There is no dger-equivalent flag for GNL commitment in the source model
-(``dadger`` has no ``.gl`` accessor); the gate is purely data-driven:
-``dadgnl`` present, ``gl(df=True)`` non-empty, and at least one nonzero
-``geracao_*`` value. See :func:`is_gnl_enabled`.
+Committed MW per stage is the block-duration-weighted mean of ``geracao`` over
+that stage's own ``duracao`` blocks (``Σ_b duracao_b·geracao_b / Σ_b duracao_b``),
+self-normalising so the committed MWh is preserved exactly regardless of block
+count.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 
-import pandas as pd
-
-from cobre_bridge.decomp.temporal import hours_weighted
-
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
+    import pandas as pd
     from idecomp.decomp import Dadgnl
 
-    from cobre_bridge.decomp.temporal import OperativeStage
+_NONZERO_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
 class GnlThermal:
-    """One GNL plant's static registry data (``tg``'s stage-1 row)."""
+    """One GNL plant's registry data (from ``tg``), block-weighted to a scalar.
+
+    ``cost_per_mwh``/``min_mw``/``max_mw`` come from the plant's ``cvu`` /
+    ``inflexibilidade`` / ``disponibilidade`` block values, weighted by its
+    stage-1 ``gl`` block durations (uniform when the plant has no ``gl`` stage-1
+    register or the block counts disagree). No clamping — the emission site owns
+    bounds policy.
+    """
 
     code: int
     name: str
@@ -74,173 +69,214 @@ class GnlThermal:
 
 
 @dataclass(frozen=True)
-class GnlCommitment:
-    """One GNL plant's committed weekly dispatch (``gl``).
+class GnlStageCommitment:
+    """One ``gl`` register: a committed MW at one delivery stage, with its date.
 
-    ``committed_mw_by_stage`` is keyed by 1-based ``estagio``; a plant with
-    no ``gl`` rows (registry-only) carries an empty dict, never omitted.
+    ``start_date`` is the parsed ``data_inicio`` (the delivery stage's start);
+    the emission track compares it against the study horizon to route the
+    commitment to the left or right temporal boundary. ``committed_mw`` is the
+    block-duration-weighted mean of that register's ``geracao``.
+    """
+
+    estagio: int
+    start_date: date
+    committed_mw: float
+
+
+@dataclass(frozen=True)
+class GnlCommitment:
+    """One plant's committed dispatch across every ``gl`` stage it declares.
+
+    ``stages`` is ascending by ``estagio`` and may be empty for a plant present
+    in ``tg`` but absent from ``gl`` (registry-only, no committed dispatch —
+    never dropped, never fabricated).
     """
 
     code: int
-    committed_mw_by_stage: dict[int, float]
+    stages: tuple[GnlStageCommitment, ...]
 
 
 @dataclass(frozen=True)
 class GnlCommitmentModel:
-    """The bundled GNL registry + commitments + weeks-per-month map."""
+    """The GNL registry, its committed dispatch, and the weeks-per-month map."""
 
     thermals: tuple[GnlThermal, ...]
     commitments: dict[int, GnlCommitment]
     weeks_per_month: dict[int, int]
 
 
-def is_gnl_enabled(dadgnl: Dadgnl | None) -> bool:
-    """Gate G6: is the source model's GNL commitment data active?
+def _as_floats(value: object) -> list[float]:
+    """Coerce a register field to a list of floats (scalar → 1-list, None → [])."""
+    if value is None:
+        return []
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return [float(v) for v in value]
+    return [float(value)]  # type: ignore[arg-type]
 
-    True when *dadgnl* is present, its ``gl`` table is non-empty, and it
-    carries at least one nonzero ``geracao_*`` value. There is no
-    dger-equivalent flag to check (``dadger`` has no ``.gl`` accessor); the
-    gate is entirely data-driven.
+
+def _block_weighted_mean(values: Sequence[float], weights: Sequence[float]) -> float:
+    """``Σ w·v / Σ w`` over aligned blocks; uniform mean when weights are unusable.
+
+    Falls back to the plain mean of ``values`` when ``weights`` is empty, sums to
+    zero, or has a different length than ``values`` — the value must survive a
+    missing/degenerate block-hours vector rather than vanish.
+    """
+    if not values:
+        return 0.0
+    if len(weights) == len(values):
+        total_w = sum(weights)
+        if total_w > 0.0:
+            return sum(v * w for v, w in zip(values, weights, strict=True)) / total_w
+    return sum(values) / len(values)
+
+
+def _parse_data_inicio(raw: object) -> date:
+    """Parse a ``gl`` register's ``data_inicio`` into a :class:`datetime.date`.
+
+    Accepts an already-parsed ``date``, or a ``ddmmyyyy`` string / integer (the
+    on-file form, e.g. ``"14032026"`` → 2026-03-14). Integers are zero-padded to
+    eight digits first, so a dropped leading-zero day (``4042026``) parses as
+    ``2026-04-04``.
+    """
+    if isinstance(raw, date):
+        return raw
+    text = f"{int(raw):08d}" if isinstance(raw, int) else str(raw).strip()
+    if len(text) != 8 or not text.isdigit():
+        raise ValueError(f"unparseable gl data_inicio {raw!r} (expected ddmmyyyy)")
+    day, month, year = int(text[0:2]), int(text[2:4]), int(text[4:8])
+    return date(year, month, day)
+
+
+def is_gnl_enabled(dadgnl: Dadgnl | None) -> bool:
+    """Whether ``dadgnl`` declares any committed GNL dispatch (the G6 gate).
+
+    ``True`` iff ``dadgnl`` is present and at least one ``gl`` register carries a
+    nonzero ``geracao``. There is no source-model ``dger``-equivalent activation
+    flag for GNL, so presence of real committed generation is the gate. A deck
+    with only a ``tg`` registry (or all-zero ``gl``) is treated as GNL-off.
     """
     if dadgnl is None:
         return False
-    gl = dadgnl.gl(df=True)
-    if gl is None or gl.empty:
+    registers = dadgnl.gl()
+    if not registers:
         return False
-    geracao_columns = [c for c in gl.columns if c.startswith("geracao_")]
-    for column in geracao_columns:
-        for value in gl[column]:
-            if not pd.isna(value) and float(value) != 0.0:
-                return True
-    return False
+    return any(
+        abs(g) > _NONZERO_TOLERANCE
+        for register in registers
+        for g in _as_floats(register.geracao)
+    )
 
 
-def read_gnl_model(
-    dadgnl: Dadgnl,
-    calendar: Sequence[OperativeStage],
-) -> GnlCommitmentModel | None:
-    """Read ``dadgnl`` into a :class:`GnlCommitmentModel`, or ``None`` when
-    the activation gate (G6, see :func:`is_gnl_enabled`) is off.
+def read_gnl_model(dadgnl: Dadgnl) -> GnlCommitmentModel | None:
+    """Read ``dadgnl`` into a :class:`GnlCommitmentModel`, or ``None`` if GNL-off.
 
-    ``calendar`` supplies the stage-1 block hours the ``tg`` registry's
-    static values are weighted over; it plays no role in the ``gl``
-    commitment weighting (self-normalising against ``gl``'s own
-    ``duracao`` — see the module docstring).
+    Returns ``None`` when :func:`is_gnl_enabled` is ``False``. Otherwise builds
+    the ``tg`` registry (ascending by code), the ``gl`` commitments (keyed by
+    code, ascending by ``estagio``, each stage carrying its parsed delivery date
+    and block-weighted committed MW), and the ``gs`` weeks-per-month map.
+
+    Raises
+    ------
+    ValueError
+        If a ``gl`` register names a ``codigo_usina`` with no ``tg`` registry
+        entry (a committed dispatch for an unknown plant — a malformed deck).
     """
     if not is_gnl_enabled(dadgnl):
         return None
 
-    thermals = _read_registry(dadgnl.tg(df=True), calendar)
-    commitments = _read_commitments(dadgnl.gl(df=True), thermals)
-    weeks_per_month = _read_weeks_per_month(dadgnl.gs(df=True))
+    registry = _read_tg_registry(dadgnl)
+    stage1_weights = _stage1_block_hours(dadgnl)
+    thermals = tuple(
+        _build_gnl_thermal(row, stage1_weights.get(int(row["codigo_usina"])))
+        for _, row in registry.sort_values("codigo_usina").iterrows()
+    )
+    known_codes = {t.code for t in thermals}
+
+    commitments = _read_gl_commitments(dadgnl, known_codes)
+    # Registry-only plants (in tg, absent from gl) still get an empty commitment.
+    for thermal in thermals:
+        commitments.setdefault(
+            thermal.code, GnlCommitment(code=thermal.code, stages=())
+        )
 
     return GnlCommitmentModel(
         thermals=thermals,
         commitments=commitments,
-        weeks_per_month=weeks_per_month,
+        weeks_per_month=_read_weeks_per_month(dadgnl),
     )
 
 
-def _blocks(prefix: str, row: pd.Series, n: int) -> list[float]:
-    """Read *n* 1-based ``{prefix}_k`` columns off *row*, ``NaN`` -> ``0.0``.
+def _read_tg_registry(dadgnl: Dadgnl) -> pd.DataFrame:
+    """The one-row-per-plant ``tg`` registry (stage-1 base), as a DataFrame."""
+    frame = dadgnl.tg(df=True)
+    # One registry row per plant: the earliest stage carries the base cadastro.
+    return frame.sort_values(["codigo_usina", "estagio"]).drop_duplicates(
+        "codigo_usina", keep="first"
+    )
 
-    Mirrors ``decomp/thermal.py::_ct_dense``'s ``_blocks`` closure — a
-    missing patamar (fewer columns declared for this row than for the
-    table's widest row) contributes a zero-duration, zero-value block,
-    which is inert under both the hours-weighted mean and the
-    self-normalising commitment mean below.
+
+def _stage1_block_hours(dadgnl: Dadgnl) -> dict[int, list[float]]:
+    """Each plant's stage-1 ``gl`` block durations, for weighting the registry."""
+    weights: dict[int, list[float]] = {}
+    for register in dadgnl.gl():
+        if int(register.estagio) == 1:
+            weights.setdefault(int(register.codigo_usina), _as_floats(register.duracao))
+    return weights
+
+
+def _build_gnl_thermal(row: pd.Series, block_hours: list[float] | None) -> GnlThermal:
+    """Assemble one :class:`GnlThermal` from a ``tg`` row + stage-1 block hours."""
+    weights = block_hours or []
+    cvu = [float(row[f"cvu_{b}"]) for b in (1, 2, 3)]
+    disp = [float(row[f"disponibilidade_{b}"]) for b in (1, 2, 3)]
+    inflex = [float(row[f"inflexibilidade_{b}"]) for b in (1, 2, 3)]
+    return GnlThermal(
+        code=int(row["codigo_usina"]),
+        name=str(row["nome"]).strip(),
+        submarket_code=int(row["codigo_submercado"]),
+        cost_per_mwh=_block_weighted_mean(cvu, weights),
+        min_mw=_block_weighted_mean(inflex, weights),
+        max_mw=_block_weighted_mean(disp, weights),
+    )
+
+
+def _read_gl_commitments(
+    dadgnl: Dadgnl, known_codes: set[int]
+) -> dict[int, GnlCommitment]:
+    """Build ``{code: GnlCommitment}`` by iterating ``gl`` registers.
+
+    Iterates registers (never ``gl(df=True)`` — the ragged per-block lists make
+    it unusable). Each register contributes one :class:`GnlStageCommitment` with
+    its parsed date and block-weighted committed MW.
     """
-    return [
-        0.0 if pd.isna(row[f"{prefix}_{k}"]) else float(row[f"{prefix}_{k}"])
-        for k in range(1, n + 1)
-    ]
-
-
-def _read_registry(
-    tg: pd.DataFrame | None,
-    calendar: Sequence[OperativeStage],
-) -> tuple[GnlThermal, ...]:
-    """Build the ascending-by-code GNL registry from ``tg``'s stage-1 rows."""
-    if tg is None or tg.empty:
-        return ()
-
-    first_stage = calendar[0]
-    n_blocks = len(first_stage.block_hours)
-
-    thermals: list[GnlThermal] = []
-    for code, group in tg.groupby("codigo_usina", sort=True):
-        code_int = int(code)
-        stage_one = group[group["estagio"] == 1]
-        if stage_one.empty:
+    by_code: dict[int, list[GnlStageCommitment]] = {}
+    for register in dadgnl.gl():
+        code = int(register.codigo_usina)
+        if code not in known_codes:
             raise ValueError(
-                f"GNL plant {code_int} does not declare stage 1 in tg; "
-                "sparse-stage inheritance has no base"
+                f"gl declares a committed dispatch for code {code} with no tg "
+                "registry entry (a dispatch for an unknown plant)"
             )
-        row = stage_one.iloc[0]
-        thermals.append(
-            GnlThermal(
-                code=code_int,
-                name=str(row["nome"]).strip(),
-                submarket_code=int(row["codigo_submercado"]),
-                cost_per_mwh=hours_weighted(_blocks("cvu", row, n_blocks), first_stage),
-                min_mw=hours_weighted(
-                    _blocks("inflexibilidade", row, n_blocks), first_stage
-                ),
-                max_mw=hours_weighted(
-                    _blocks("disponibilidade", row, n_blocks), first_stage
-                ),
+        geracao = _as_floats(register.geracao)
+        duracao = _as_floats(register.duracao)
+        by_code.setdefault(code, []).append(
+            GnlStageCommitment(
+                estagio=int(register.estagio),
+                start_date=_parse_data_inicio(register.data_inicio),
+                committed_mw=_block_weighted_mean(geracao, duracao),
             )
         )
-    thermals.sort(key=lambda t: t.code)
-    return tuple(thermals)
-
-
-def _block_weighted_mw(geracao: Sequence[float], duracao: Sequence[float]) -> float:
-    """Self-normalising block-weighted mean committed MW.
-
-    ``Σ_b (duracao_b / Σ_b duracao_b) · geracao_b`` — weighted by *duracao*
-    itself rather than the calendar's block hours, so a plant's committed
-    MWh is preserved exactly regardless of any block-count skew.
-    """
-    total_duracao = sum(duracao)
-    return sum(g * d for g, d in zip(geracao, duracao, strict=True)) / total_duracao
-
-
-def _read_commitments(
-    gl: pd.DataFrame | None,
-    thermals: tuple[GnlThermal, ...],
-) -> dict[int, GnlCommitment]:
-    """Build one :class:`GnlCommitment` per registry code from ``gl``.
-
-    Every code in *thermals* gets an entry — a registry-only code (no
-    ``gl`` rows) still gets a :class:`GnlCommitment` with an empty
-    ``committed_mw_by_stage``, never dropped, never fabricated.
-    """
-    registry_codes = {t.code for t in thermals}
-    by_stage: dict[int, dict[int, float]] = {code: {} for code in registry_codes}
-
-    if gl is not None and not gl.empty:
-        n_blocks = sum(1 for c in gl.columns if c.startswith("duracao_"))
-        for _, row in gl.iterrows():
-            code = int(row["codigo_usina"])
-            if code not in registry_codes:
-                raise ValueError(
-                    f"gl dispatches GNL plant {code}, which is absent from "
-                    "the tg registry"
-                )
-            stage = int(row["estagio"])
-            duracao = _blocks("duracao", row, n_blocks)
-            geracao = _blocks("geracao", row, n_blocks)
-            by_stage[code][stage] = _block_weighted_mw(geracao, duracao)
-
     return {
-        code: GnlCommitment(code=code, committed_mw_by_stage=stages)
-        for code, stages in by_stage.items()
+        code: GnlCommitment(
+            code=code, stages=tuple(sorted(stages, key=lambda s: s.estagio))
+        )
+        for code, stages in by_code.items()
     }
 
 
-def _read_weeks_per_month(gs: pd.DataFrame | None) -> dict[int, int]:
-    """Verbatim ``{mes: semanas}`` map from ``gs``."""
-    if gs is None or gs.empty:
+def _read_weeks_per_month(dadgnl: Dadgnl) -> dict[int, int]:
+    """The ``gs`` weeks-per-month map ``{mes: semanas}`` (empty when absent)."""
+    frame = dadgnl.gs(df=True)
+    if frame is None or frame.empty:
         return {}
-    return {int(row["mes"]): int(row["semanas"]) for _, row in gs.iterrows()}
+    return {int(row["mes"]): int(row["semanas"]) for _, row in frame.iterrows()}
