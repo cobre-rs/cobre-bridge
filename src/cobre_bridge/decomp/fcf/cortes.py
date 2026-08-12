@@ -275,10 +275,6 @@ def _build_header(cortesh: Cortesh, *, boundary_stage: int) -> CortesHeader:
             f"1..{n_max_plants}: {indices}"
         )
     plant_codes = tuple(int(code) for code in uhes["codigo_usina"])
-    if len(plant_codes) != n_plants:
-        raise ValueError(
-            f"plant_codes length {len(plant_codes)} != n_plants {n_plants}"
-        )
 
     submercado_codes = tuple(
         int(code) for code in cortesh.dados_submercados["codigo_submercado"]

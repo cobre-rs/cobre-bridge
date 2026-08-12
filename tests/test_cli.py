@@ -1722,7 +1722,7 @@ class TestCliInProcess:
 
         def _guard_import(name: str, *args: object, **kwargs: object) -> object:
             # No cobre validation import may be attempted under --dry-run.
-            if name == "cobre.io" or name.startswith("cobre.io"):
+            if name.startswith("cobre.io"):
                 raise AssertionError("validation must not import cobre under --dry-run")
             return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -2514,7 +2514,7 @@ class TestCliInProcess:
 
         def _guard_import(name: str, *args: object, **kwargs: object) -> object:
             # No cobre validation import may be attempted under --dry-run.
-            if name == "cobre.io" or name.startswith("cobre.io"):
+            if name.startswith("cobre.io"):
                 raise AssertionError("validation must not import cobre under --dry-run")
             return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
