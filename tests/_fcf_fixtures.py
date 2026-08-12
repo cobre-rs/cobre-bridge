@@ -120,20 +120,25 @@ def make_slot(
     subindex: int,
     *,
     was_active: bool = True,
-    delivery_anchor: int = -1,
+    delivery_date: int = -2147483648,
 ) -> dict[str, object]:
     """One hand-authored terminal-manifest slot dict.
 
-    Carries `was_active` and `delivery_anchor` alongside the positional key
-    (`entity_type`, `entity_id`, `subindex`) — `cobre.write_policy_checkpoint`
-    rejects a slot missing either field.
+    Carries `was_active` and `delivery_date` alongside the positional key
+    (`entity_type`, `entity_id`, `subindex`). `delivery_date` is the CBVF
+    checkpoint format's field (see `fcf/capability.py`) — the branch wheel's
+    `PyEntitySlot` reads this key, not the pre-schema-break `delivery_anchor`
+    (which it silently ignores, falling back to the default below). The
+    default `-2147483648` is `i32::MIN`, cobre's sentinel for "no delivery
+    date" — the same value `write_policy_checkpoint` itself defaults to when
+    a slot omits the key.
     """
     return {
         "entity_type": entity_type,
         "entity_id": entity_id,
         "subindex": subindex,
         "was_active": was_active,
-        "delivery_anchor": delivery_anchor,
+        "delivery_date": delivery_date,
     }
 
 

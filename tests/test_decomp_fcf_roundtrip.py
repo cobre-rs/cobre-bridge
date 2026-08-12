@@ -454,6 +454,32 @@ def test_synthetic_roundtrip_theta_sweep(tmp_path: Path) -> None:
         )
 
 
+@requires_cobre_python
+@requires_writer_binding
+def test_synthetic_roundtrip_carries_delivery_date(tmp_path: Path) -> None:
+    """D5 — the CBVF write->load round trip carries `delivery_date`, no deck
+    and no cobre binary.
+
+    Authors a one-plant, one-cut synthetic checkpoint via
+    `synthetic_roundtrip` and asserts the reloaded terminal
+    `entity_manifest[0]` dict contains the `delivery_date` key (the CBVF
+    schema-break field `make_slot` now emits) and that
+    `metadata["producer"]["cost_scale_factor"] == 1.0` survives the round
+    trip (guards the legacy 10**6-scale marker from silently reappearing).
+    """
+    plant_codes = (10,)
+    id_map = make_id_map(plant_codes)
+    manifest = make_manifest([make_slot(_HYDRO_STORAGE, 0, 0)])
+    record = make_cut_record(pi_varm=(3.0,), rhs=100.0, cut_id=1, iteration=1)
+    cuts = make_boundary_cuts(plant_codes, (record,))
+
+    reloaded = synthetic_roundtrip(tmp_path / "boundary", cuts, manifest, id_map)
+
+    entry = reloaded["stage_cuts"][0]
+    assert "delivery_date" in entry["entity_manifest"][0]
+    assert reloaded["metadata"]["producer"]["cost_scale_factor"] == 1.0
+
+
 # ---------------------------------------------------------------------------
 # Tier 3 — real deck + local cobre binary (dev-only smoke; skips on CI).
 # ---------------------------------------------------------------------------

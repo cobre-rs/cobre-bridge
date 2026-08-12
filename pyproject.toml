@@ -11,7 +11,10 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 dependencies = [
     "idecomp>=1.14.2",
-    "inewave>=1.15.0",
+    # NOTE: floor is 1.15.1, not 1.15.0 — 1.15.1 is the first inewave release
+    # whose `Cortes.from_cortesh(..., por_estagio=True)` correctly decodes the
+    # hybrid production cortes (D2); 1.15.0 silently mis-decodes it.
+    "inewave>=1.15.1",
     "pyarrow>=24.0.0",
     "pandas>=3.0.3",
     "plotly>=6.8.0",
