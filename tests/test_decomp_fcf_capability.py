@@ -134,6 +134,5 @@ def test_ensure_boundary_fcf_capability_passes_against_branch_wheel(
     """
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
-    # AC 2: against the branch wheel the guard returns (does not raise).
     ensure_boundary_fcf_capability()
     assert list(tmp_path.iterdir()) == []
