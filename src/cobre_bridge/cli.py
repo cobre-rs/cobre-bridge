@@ -1455,12 +1455,13 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
             )
         return
 
-    # Build the convert ``summary`` + ``status`` up front; ``--validate`` may
-    # later append a ``summary["validation"]`` sub-object (under --json), and the
-    # verdict is emitted to stdout only after validation has run so that block is
-    # populated. ``status`` is diagnostics-only and is NOT touched by validation.
+    # Build the convert ``summary`` up front; ``--validate`` may later append a
+    # ``summary["validation"]`` sub-object (under --json), and the verdict is
+    # emitted to stdout only after validation has run so that block is
+    # populated. ``status`` is computed at emission time (below) from the
+    # merged converter + boundary-FCF diagnostics, since the latter are not
+    # known until the boundary-FCF block below has run.
     summary = _convert_verdict_summary(report)
-    status = _convert_status(report.diagnostics, success="ok")
 
     if not args.json_output:
         if not args.quiet:
@@ -1490,7 +1491,19 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     # funnel through this one broad ``except`` — mapped to exit 1 like every
     # other conversion-step failure — rather than the ``--validate`` exit-2
     # idiom, since this is a conversion step, not a validation gate.
+    #
+    # The importer call runs inside a ``dx.collect()`` sink (deferred Epic-03
+    # review finding) so its ``Diagnostic``s — the cut-family summary, the
+    # D3-dropped source-only plants, and the GNL anticipated-ring deviation —
+    # reach the Rich panels and the ``--json`` verdict instead of degrading to
+    # invisible log records. ``boundary_diagnostics``/``fcf_diags`` default to
+    # ``[]`` so a disabled or pre-sink-reached failure still yields a valid
+    # (empty) merge below.
+    boundary_diagnostics: list[Diagnostic] = []
     if args.boundary_fcf:
+        from cobre_bridge import diagnostics as dx
+
+        fcf_diags: list[Diagnostic] = []
         try:
             deck_files = discover_decomp_files(args.src)
             if deck_files.cortesh is None or deck_files.cortes is None:
@@ -1515,7 +1528,7 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
             ensure_boundary_fcf_capability()
             cobre_bin = _resolve_decomp_cobre_bin(args.cobre_bin)
 
-            with tempfile.TemporaryDirectory() as work_dir:
+            with dx.collect() as fcf_diags, tempfile.TemporaryDirectory() as work_dir:
                 import_boundary_fcf(
                     args.dst,
                     deck_files.cortesh,
@@ -1529,7 +1542,7 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
                 )
         except Exception as exc:  # noqa: BLE001
             diag = diagnostic_from_exception(exc, context="Boundary FCF import")
-            failure_diagnostics = [*report.diagnostics, diag]
+            failure_diagnostics = [*report.diagnostics, *fcf_diags, diag]
             if args.json_output:
                 _emit_convert_json(
                     build_verdict(
@@ -1540,9 +1553,12 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
                     )
                 )
             else:
-                render_diagnostics([diag], console=err_console, quiet=args.quiet)
+                render_diagnostics(
+                    [*fcf_diags, diag], console=err_console, quiet=args.quiet
+                )
             raise typer.Exit(code=1)
         else:
+            boundary_diagnostics = list(fcf_diags)
             # C8 surfacing (D7, TRACKED COBRE-GAP WORKAROUND — see
             # ``fcf/__init__.py::_patch_policy_boundary`` and ~/git/cobre/
             # plans/conversion-found-improvements.md): until cobre resolves
@@ -1560,6 +1576,14 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
                 "path": "boundary",
                 "run_constraint": run_constraint,
             }
+            if not args.json_output:
+                # boundary_diagnostics only: ``report.diagnostics`` was
+                # already rendered above (the converter's own panel), so
+                # this renders solely the importer's captured diagnostics —
+                # never a double-render of the same findings.
+                render_diagnostics(
+                    boundary_diagnostics, console=err_console, quiet=args.quiet
+                )
 
     validation_failed = False
     if args.validate:
@@ -1573,9 +1597,20 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
         )
 
     # Emit the --json verdict now (after validation has populated ``summary``).
+    # ``status``/``diagnostics`` are the merge of the converter's own findings
+    # and the boundary-FCF importer's (empty when ``--boundary-fcf`` was not
+    # requested, or the sink never captured anything) — importer diagnostics
+    # are INFO-only, so the recomputed status stays "ok" whenever the
+    # converter's own diagnostics allow it.
     if args.json_output:
+        combined_diagnostics = [*report.diagnostics, *boundary_diagnostics]
         _emit_convert_json(
-            build_verdict("convert decomp", status, summary, report.diagnostics)
+            build_verdict(
+                "convert decomp",
+                _convert_status(combined_diagnostics, success="ok"),
+                summary,
+                combined_diagnostics,
+            )
         )
 
     if validation_failed:

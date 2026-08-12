@@ -213,7 +213,7 @@ def _mock_deck_and_cut_seams(
     monkeypatch.setitem(sys.modules, "cobre", SimpleNamespace(__version__="0.13.0"))
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.discover_decomp_files",
-        lambda _deck_dir: SimpleNamespace(dadger=Path("dadger.rv0")),
+        lambda _deck_dir: SimpleNamespace(dadger=Path("dadger.rv0"), dadgnl=None),
     )
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.Dadger",

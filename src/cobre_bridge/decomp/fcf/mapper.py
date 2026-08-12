@@ -5,15 +5,21 @@ terminal ``entity_manifest`` — the target case's per-slot state-vector
 layout. This module maps each of the source model's boundary cuts
 (``fcf/cortes.py``'s :class:`~cobre_bridge.decomp.fcf.cortes.BoundaryCuts`,
 ticket-002) onto that layout: storage terms join by plant code, inflow-lag
-terms join 1:1 by calendar-month lag slot, and transit-bucket / GNL-
-anticipated-ring slots are left at coefficient 0 (the GNL ring is epic 3's
-job). A source plant with no match in the target manifest is dropped (D3),
-never folded into a neighbour, and recorded in
-:class:`MappingResult.dropped` for the diagnostics layer (epic 4) to render.
+terms join 1:1 by calendar-month lag slot, and — when the caller supplies a
+:class:`GnlRingPlan` — GNL-anticipated-ring terms join each target's dated
+ring slot(s) via a chain-rule patamar sum over ``pi_gnl`` (ticket-009). A
+source plant with no match in the target manifest is dropped (D3), never
+folded into a neighbour, and recorded in :class:`MappingResult.dropped` for
+the diagnostics layer (epic 4) to render; a GNL source/target term with no
+live counterpart is dropped the same way into
+:class:`MappingResult.gnl_dropped`. ``HydroTransitBucket`` slots, and any
+``AnticipatedThermalState`` ring slot with no resolved target (including the
+undated sentinel slot), are left at an explicit coefficient ``0.0``.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -32,6 +38,11 @@ _HYDRO_TRANSIT_BUCKET = 3
 
 #: `HydroStorage`'s `subindex` is always 0 (policy.fbs: one slot per plant).
 _STORAGE_SUBINDEX = 0
+
+#: cobre's `i32::MIN` sentinel for "no delivery date" — the undated
+#: `AnticipatedThermalState` slot (the in-study anticipation, already priced
+#: by the converter's `past_anticipated_commitments`), never a GNL target.
+_DELIVERY_DATE_SENTINEL = -2147483648
 
 
 @dataclass(frozen=True)
@@ -73,11 +84,67 @@ class DroppedTerm:
 
 
 @dataclass(frozen=True)
+class GnlThermalTarget:
+    """One GNL thermal's ring membership: which `pi_gnl` axes feed it.
+
+    ``thermal_id`` is the cobre ring `entity_id`; ``submercado`` is the
+    1-based source submercado index matching the `pi_gnl` sbm-major column
+    layout (`cortes.py::_gnl_columns`); ``nl_lag`` is the plant's 1-based
+    dispatch-anticipation lag — the `pi_gnl` lag-axis index whose coefficient
+    lands on this thermal's ring slot(s) [ASSUMPTION B].
+    """
+
+    thermal_id: int
+    submercado: int
+    nl_lag: int
+
+
+@dataclass(frozen=True)
+class GnlRingPlan:
+    """The resolved submercado -> GNL-thermal membership for one deck.
+
+    Built by the importer (ticket-010) from the deck's own GNL declarations;
+    this module never derives it — see the module docstring's deck-free
+    contract.
+    """
+
+    targets: tuple[GnlThermalTarget, ...]
+
+
+@dataclass(frozen=True)
+class GnlDroppedTerm:
+    """A GNL source/target term that reached no live dated ring slot.
+
+    ``thermal_id`` is ``None`` for a source-submercado drop (no
+    :class:`GnlThermalTarget` claims that submercado at all) and the
+    resolved thermal id for a target-side drop (out-of-range
+    lag/submercado, or a thermal with no dated ring slot). ``coefficient``
+    is a representative value for the diagnostics layer (ticket-010) to
+    report — the summed source coefficient for a source-submercado drop,
+    ``0.0`` for a target-side drop (no source coefficient is attributable to
+    a target that never resolves). Recorded once per unresolvable
+    (submercado, lag) or target, never folded into a neighbour (D3-like).
+    """
+
+    thermal_id: int | None
+    submercado: int
+    nl_lag: int
+    coefficient: float
+    reason: str
+
+
+@dataclass(frozen=True)
 class MappingResult:
-    """The mapped cuts plus every D3-dropped source-only plant term."""
+    """The mapped cuts plus every D3-dropped source-only term.
+
+    ``dropped`` carries storage/lag source-only plants; ``gnl_dropped``
+    (defaulted, so pre-ticket-009 constructions keep working) carries GNL
+    source-submercado and target terms with no live dated ring slot.
+    """
 
     cuts: tuple[MappedCut, ...]
     dropped: tuple[DroppedTerm, ...]
+    gnl_dropped: tuple[GnlDroppedTerm, ...] = ()
 
 
 def _default_lag_slot_of(depth: int) -> int:
@@ -113,6 +180,32 @@ def _index_manifest(manifest: TerminalManifest) -> dict[tuple[int, int, int], in
         ): position
         for position, slot in enumerate(manifest.entity_manifest)
     }
+
+
+def _index_gnl_ring(
+    manifest: TerminalManifest,
+) -> dict[int, tuple[tuple[int, int, int], ...]]:
+    """Index the target manifest's `AnticipatedThermalState` ring by thermal id.
+
+    Unlike `_index_manifest` (which discards `delivery_date` and would
+    silently collapse a thermal's sentinel and dated slots onto the same
+    key), this keeps every `(subindex, delivery_date, position)` triple per
+    `entity_id` so the GNL placement can tell a dated slot from the undated
+    sentinel. A separate index from `_index_manifest`'s
+    `(entity_type, entity_id, subindex) -> position` contract, which the
+    storage/lag path still depends on unchanged.
+    """
+    by_thermal: dict[int, list[tuple[int, int, int]]] = {}
+    for position, slot in enumerate(manifest.entity_manifest):
+        if _slot_int(slot, "entity_type") != _ANTICIPATED_THERMAL_STATE:
+            continue
+        thermal_id = _slot_int(slot, "entity_id")
+        subindex = _slot_int(slot, "subindex")
+        delivery_date = _slot_int(slot, "delivery_date")
+        by_thermal.setdefault(thermal_id, []).append(
+            (subindex, delivery_date, position)
+        )
+    return {thermal_id: tuple(slots) for thermal_id, slots in by_thermal.items()}
 
 
 def _lag_subindex_bound(slot_positions: Mapping[tuple[int, int, int], int]) -> int:
@@ -186,20 +279,154 @@ def _resolve_storage_targets(
     return resolved, tuple(dropped)
 
 
+def _resolve_gnl_targets(
+    cuts: BoundaryCuts,
+    ring_index: Mapping[int, tuple[tuple[int, int, int], ...]],
+    gnl_plan: GnlRingPlan | None,
+) -> tuple[dict[int, tuple[int, ...]], tuple[GnlDroppedTerm, ...]]:
+    """Resolve each GNL target's ring position(s) and `pi_gnl` columns once.
+
+    Mirrors `_resolve_storage_targets`'s "resolve once, write per record"
+    split: cut-invariant, computed exactly once regardless of how many
+    records `cuts` carries. Returns `resolved: {ring position -> tuple of
+    pi_gnl flat-column indices to sum}` plus every GNL drop.
+
+    Returns `({}, ())` — no GNL mapping at all — when `gnl_plan` is `None`,
+    `cuts` has no records, the source deck carries no GNL lag axis
+    (`lag_maximo_gnl == 0`), or the boundary's `pi_gnl` is empty (a
+    non-GNL deck).
+
+    Raises
+    ------
+    ValueError
+        If `len(cuts.records[0].pi_gnl)` is not a multiple of
+        `n_patamares * lag_maximo_gnl` — a reader/plan layout
+        inconsistency, named explicitly rather than silently truncated or
+        padded.
+    """
+    n_patamares = cuts.header.n_patamares
+    lag_maximo_gnl = cuts.header.lag_maximo_gnl
+    if gnl_plan is None or not cuts.records or lag_maximo_gnl == 0:
+        return {}, ()
+    width = len(cuts.records[0].pi_gnl)
+    if width == 0:
+        return {}, ()
+
+    block = n_patamares * lag_maximo_gnl
+    if width % block != 0:
+        raise ValueError(
+            f"pi_gnl width {width} is not a multiple of n_patamares "
+            f"({n_patamares}) * lag_maximo_gnl ({lag_maximo_gnl}) = {block}"
+        )
+    n_submercados = width // block
+
+    def col(submercado: int, patamar: int, lag: int) -> int:
+        """Flat pi_gnl column for (submercado, patamar, lag), 1-based axes."""
+        return ((submercado - 1) * n_patamares + (patamar - 1)) * lag_maximo_gnl + (
+            lag - 1
+        )
+
+    resolved: dict[int, tuple[int, ...]] = {}
+    dropped: list[GnlDroppedTerm] = []
+    targeted_submercados: set[int] = set()
+
+    for target in gnl_plan.targets:
+        if not (1 <= target.submercado <= n_submercados) or not (
+            1 <= target.nl_lag <= lag_maximo_gnl
+        ):
+            dropped.append(
+                GnlDroppedTerm(
+                    thermal_id=target.thermal_id,
+                    submercado=target.submercado,
+                    nl_lag=target.nl_lag,
+                    coefficient=0.0,
+                    reason="lag/submercado out of pi_gnl range",
+                )
+            )
+            continue
+        targeted_submercados.add(target.submercado)
+        dated = tuple(
+            position
+            for _subindex, delivery_date, position in ring_index.get(
+                target.thermal_id, ()
+            )
+            if delivery_date != _DELIVERY_DATE_SENTINEL
+        )
+        if not dated:
+            dropped.append(
+                GnlDroppedTerm(
+                    thermal_id=target.thermal_id,
+                    submercado=target.submercado,
+                    nl_lag=target.nl_lag,
+                    coefficient=0.0,
+                    reason="no dated ring slot for thermal",
+                )
+            )
+            continue
+        cols = tuple(
+            col(target.submercado, patamar, target.nl_lag)
+            for patamar in range(1, n_patamares + 1)
+        )
+        for position in dated:
+            resolved[position] = cols
+
+    # Source-submercado drops (D3-like): a submercado no target claims, but
+    # whose pi_gnl carries a nonzero coefficient on some active record, has
+    # a source term with no live GNL thermal to receive it.
+    active_records = tuple(record for record in cuts.records if record.is_active)
+    for submercado in range(1, n_submercados + 1):
+        if submercado in targeted_submercados:
+            continue
+        for lag in range(1, lag_maximo_gnl + 1):
+            lag_cols = tuple(
+                col(submercado, patamar, lag) for patamar in range(1, n_patamares + 1)
+            )
+            first_nonzero = next(
+                (
+                    record
+                    for record in active_records
+                    if any(record.pi_gnl[c] != 0.0 for c in lag_cols)
+                ),
+                None,
+            )
+            if first_nonzero is None:
+                continue
+            dropped.append(
+                GnlDroppedTerm(
+                    thermal_id=None,
+                    submercado=submercado,
+                    nl_lag=lag,
+                    coefficient=math.fsum(first_nonzero.pi_gnl[c] for c in lag_cols),
+                    reason="no GNL thermal in submercado",
+                )
+            )
+
+    return resolved, tuple(dropped)
+
+
 def map_boundary_cuts(
     cuts: BoundaryCuts,
     manifest: TerminalManifest,
     id_map: DecompIdMap,
     *,
     lag_slot_of: Callable[[int], int] = _default_lag_slot_of,
+    gnl_plan: GnlRingPlan | None = None,
 ) -> MappingResult:
     """Map every cut in `cuts.records` onto `manifest`'s state-vector layout.
 
     Storage terms join by plant code (`HydroStorage`, D3-drop on a
     source-only plant); inflow-lag terms join 1:1 by `lag_slot_of` onto
-    `HydroInflowLag`; `HydroTransitBucket` and `AnticipatedThermalState`
-    (the GNL ring — epic 3's job, not this ticket's) slots are left at an
-    explicit `0.0`. `intercept` is the source record's `rhs`, carried
+    `HydroInflowLag`. When `gnl_plan` is given, each `AnticipatedThermalState`
+    ring slot named by one of its targets' dated slot(s) carries the
+    chain-rule patamar sum `Σ_p pi_gnl[col(s,p,nl_lag)]` (`math.fsum`, order-
+    independent); a target with no dated ring slot, or a source submercado
+    with no matching target, is dropped and recorded in
+    `MappingResult.gnl_dropped`, never folded onto a neighbour.
+    `HydroTransitBucket` slots, the sentinel (undated) `AnticipatedThermalState`
+    slot, and every ring slot with no resolved target are left at an
+    explicit `0.0` regardless of `gnl_plan`; `gnl_plan=None` (the default)
+    leaves the entire ring at `0.0`, byte-for-byte matching this function's
+    pre-GNL behaviour. `intercept` is the source record's `rhs`, carried
     verbatim (never re-derived from alpha/x-hat). Produces one `MappedCut`
     per source record, active or not — active-frontier selection is
     ticket-008's writer concern, not the mapper's.
@@ -211,9 +438,10 @@ def map_boundary_cuts(
         terminal-manifest read bug — never raised for a merely-absent
         `HydroInflowLag`/`HydroTransitBucket`/`AnticipatedThermalState`
         family, a legitimate case shape); if `lag_slot_of` returns a
-        subindex out of range for the manifest's `HydroInflowLag` slots; or
-        if a mapped coefficient vector's length disagrees with
-        `manifest.state_dimension`.
+        subindex out of range for the manifest's `HydroInflowLag` slots; if
+        `gnl_plan` is given and `cuts`' `pi_gnl` width is not a multiple of
+        `n_patamares * lag_maximo_gnl`; or if a mapped coefficient vector's
+        length disagrees with `manifest.state_dimension`.
     """
     slot_positions = _index_manifest(manifest)
     if not any(entity_type == _HYDRO_STORAGE for entity_type, _, _ in slot_positions):
@@ -225,6 +453,9 @@ def map_boundary_cuts(
     resolved_storage, dropped = _resolve_storage_targets(cuts, id_map, slot_positions)
     lag_bound = _lag_subindex_bound(slot_positions)
     lag_subindices = _validated_lag_subindices(lag_slot_of, lag_bound)
+
+    gnl_ring_index = _index_gnl_ring(manifest)
+    resolved_gnl, gnl_dropped = _resolve_gnl_targets(cuts, gnl_ring_index, gnl_plan)
 
     mapped_cuts: list[MappedCut] = []
     for record in cuts.records:
@@ -240,6 +471,11 @@ def map_boundary_cuts(
                 )
                 if lag_position is not None:
                     coefficients[lag_position] = plant_lags[depth_index]
+
+        for gnl_position, gnl_cols in resolved_gnl.items():
+            coefficients[gnl_position] = math.fsum(
+                record.pi_gnl[column] for column in gnl_cols
+            )
 
         if len(coefficients) != manifest.state_dimension:
             raise ValueError(
@@ -258,4 +494,6 @@ def map_boundary_cuts(
             )
         )
 
-    return MappingResult(cuts=tuple(mapped_cuts), dropped=dropped)
+    return MappingResult(
+        cuts=tuple(mapped_cuts), dropped=dropped, gnl_dropped=gnl_dropped
+    )

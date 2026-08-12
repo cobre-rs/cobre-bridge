@@ -26,11 +26,34 @@ import pytest
 from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
-from cobre_bridge.decomp.fcf import _emit_import_diagnostics, import_boundary_fcf
-from cobre_bridge.decomp.fcf.cortes import read_cortes, summarize_cut_families
-from cobre_bridge.decomp.fcf.mapper import DroppedTerm, MappingResult
+from cobre_bridge.decomp.anticipated import GnlCommitmentModel, GnlThermal
+from cobre_bridge.decomp.fcf import (
+    _emit_import_diagnostics,
+    _gnl_targets_from,
+    import_boundary_fcf,
+)
+from cobre_bridge.decomp.fcf.cortes import (
+    BoundaryCuts,
+    read_cortes,
+    summarize_cut_families,
+)
+from cobre_bridge.decomp.fcf.mapper import (
+    DroppedTerm,
+    GnlRingPlan,
+    GnlThermalTarget,
+    MappingResult,
+    map_boundary_cuts,
+)
 from cobre_bridge.decomp.pipeline import convert_decomp_case
-from tests._fcf_fixtures import make_boundary_cuts, make_cut_record, make_mapped_cut
+from tests._fcf_fixtures import (
+    make_boundary_cuts,
+    make_cortes_header,
+    make_cut_record,
+    make_id_map,
+    make_manifest,
+    make_mapped_cut,
+    make_slot,
+)
 
 # Real, gitignored deck + local cobre build (see example/README.md and
 # tests/test_decomp_fcf_bootstrap.py's identical constants) — CI has
@@ -317,3 +340,177 @@ def test_import_boundary_fcf_no_cut_files_is_noop(
     assert result is None
     assert not (case_dir / "boundary").exists()
     assert "boundary FCF skipped" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ticket-010: GnlRingPlan build (`_gnl_targets_from`) + the per-cut GNL
+# deviation diagnostic. All tier-1: pure Python, no deck, no cobre binary.
+# The entity_type code is restated locally rather than importing the
+# mapper module's private constant — mirrors ``test_decomp_fcf_mapper.py``'s
+# identical convention.
+# ---------------------------------------------------------------------------
+
+_HYDRO_STORAGE = 0
+_ANTICIPATED_THERMAL_STATE = 2
+
+
+def _gnl_row(width: int, nonzero: dict[int, float]) -> tuple[float, ...]:
+    """A `pi_gnl` flat vector of `width` zeros with `nonzero` columns set."""
+    row = [0.0] * width
+    for column, value in nonzero.items():
+        row[column] = value
+    return tuple(row)
+
+
+def _make_gnl_model(
+    thermals: tuple[GnlThermal, ...], nl_lag_months: dict[int, int]
+) -> GnlCommitmentModel:
+    """A minimal `GnlCommitmentModel` carrying only the ring-plan join surface."""
+    return GnlCommitmentModel(
+        thermals=thermals,
+        commitments={},
+        weeks_per_month={},
+        nl_lag_months=nl_lag_months,
+    )
+
+
+def _make_gnl_thermal(code: int, submarket_code: int) -> GnlThermal:
+    """A minimal `GnlThermal`; cost/bounds are irrelevant to the ring join."""
+    return GnlThermal(
+        code=code,
+        name=f"GNL-{code}",
+        submarket_code=submarket_code,
+        cost_per_mwh=0.0,
+        min_mw=0.0,
+        max_mw=0.0,
+    )
+
+
+def test_gnl_targets_from_maps_codes_to_ids() -> None:
+    """AC — the READBACK join: code 86 -> id 94 (SE, lag 2), code 224 -> id 95
+    (NE, lag 1), ascending by code."""
+    model = _make_gnl_model(
+        (_make_gnl_thermal(86, 1), _make_gnl_thermal(224, 3)),
+        {86: 2, 224: 1},
+    )
+    thermals_doc = {
+        "thermals": [
+            {"id": 1, "name": "not-gnl"},
+            {"id": 94, "name": "GNL-86", "anticipated_config": {}},
+            {"id": 95, "name": "GNL-224", "anticipated_config": {}},
+        ]
+    }
+
+    plan = _gnl_targets_from(model, thermals_doc)
+
+    assert plan == GnlRingPlan(
+        (
+            GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),
+            GnlThermalTarget(thermal_id=95, submercado=3, nl_lag=1),
+        )
+    )
+
+
+def test_gnl_targets_from_count_mismatch_raises() -> None:
+    """AC — a thermals.json GNL-fleet count that disagrees with the dadgnl
+    registry count raises loudly, naming both counts, rather than silently
+    mis-zipping ids onto the wrong codes."""
+    model = _make_gnl_model(
+        (_make_gnl_thermal(86, 1), _make_gnl_thermal(224, 3)),
+        {86: 2, 224: 1},
+    )
+    thermals_doc = {
+        "thermals": [
+            {"id": 94, "anticipated_config": {}},
+            {"id": 95, "anticipated_config": {}},
+            {"id": 96, "anticipated_config": {}},
+        ]
+    }
+
+    with pytest.raises(ValueError, match="GNL fleet must match exactly"):
+        _gnl_targets_from(model, thermals_doc)
+
+
+def test_gnl_targets_from_skips_plant_without_nl_lag(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC — a plant absent from ``nl_lag_months`` is skipped (its ring stays
+    at coefficient 0.0 via the mapper's own drop path), never raised on, with
+    a single INFO note naming it."""
+    model = _make_gnl_model(
+        (_make_gnl_thermal(86, 1), _make_gnl_thermal(224, 3)),
+        {224: 1},  # 86 declares no nl dispatch-anticipation lag
+    )
+    thermals_doc = {
+        "thermals": [
+            {"id": 94, "anticipated_config": {}},
+            {"id": 95, "anticipated_config": {}},
+        ]
+    }
+
+    with caplog.at_level(logging.INFO):
+        plan = _gnl_targets_from(model, thermals_doc)
+
+    assert plan == GnlRingPlan(
+        (GnlThermalTarget(thermal_id=95, submercado=3, nl_lag=1),)
+    )
+    assert "GNL-86" in caplog.text
+
+
+def test_emit_import_diagnostics_gnl_deviation_fires() -> None:
+    """AC — for (submercado 1, lag 2) with col(1,p,2) = (0.1, 0.2, 0.3), the
+    deviation diagnostic's row reports carried sum 0.6 and patamar spread
+    (0.3 - 0.1) / 0.6. ``mapping`` is produced by the real
+    ``map_boundary_cuts`` (ticket-009's mapper), never hand-built, so the
+    diagnostic is exercised against the same placement it reports on.
+    """
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=2, n_patamares=3, submercado_codes=(1,)
+    )
+    # col(1,p,2) for p=1..3 -> flat indices 1, 3, 5 (P=3, L=2):
+    # col(s,p,l) = ((s-1)*3 + (p-1))*2 + (l-1).
+    pi_gnl = _gnl_row(6, {1: 0.1, 3: 0.2, 5: 0.3})
+    record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
+
+    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping, gnl_plan)
+
+    codes = [diagnostic.code for diagnostic in sink]
+    assert codes == [
+        "boundary-fcf-cut-family-summary",
+        "boundary-fcf-gnl-anticipated-deviation",
+    ]
+    deviation = sink[1]
+    assert deviation.severity is dx.Severity.INFO
+    assert deviation.table is not None
+    row = next(r for r in deviation.table.rows if r[0] == 1 and r[1] == 2)
+    assert row[2] == pytest.approx(0.6)
+    assert row[3] == pytest.approx((0.3 - 0.1) / 0.6)
+
+
+def test_emit_import_diagnostics_gnl_deviation_gated_off_without_plan() -> None:
+    """AC — ``gnl_plan=None`` (the default) gates the deviation diagnostic
+    off entirely: the sink carries only the pre-ticket-010 diagnostic(s),
+    unchanged."""
+    cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
+    mapping = MappingResult(
+        cuts=(make_mapped_cut(coefficients=(1.5,), intercept=10.0),), dropped=()
+    )
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping)
+
+    assert [diagnostic.code for diagnostic in sink] == [
+        "boundary-fcf-cut-family-summary"
+    ]

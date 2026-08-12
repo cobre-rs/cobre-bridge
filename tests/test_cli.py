@@ -2939,6 +2939,131 @@ class TestCliInProcess:
         mock_import.assert_not_called()
         assert not dst.exists() or list(dst.iterdir()) == []
 
+    def test_convert_decomp_boundary_fcf_importer_diagnostics_reach_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ticket-010 (D): the importer runs inside a ``dx.collect()`` sink,
+        so a ``Diagnostic`` it emits — here the GNL anticipated-ring
+        deviation — reaches the ``--json`` verdict's ``diagnostics`` array.
+        This test fails against the pre-sink CLI (no ``dx.collect()``
+        wrapping ``import_boundary_fcf``), proving the deferred Epic-03 gap
+        is closed."""
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+        fake_cobre_bin = tmp_path / "fake-cobre-bin"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        def _fake_import(*args: object, **kwargs: object) -> Path:
+            dx.emit(
+                dx.Diagnostic(
+                    code="boundary-fcf-gnl-anticipated-deviation",
+                    severity=dx.Severity.INFO,
+                    category="Boundary FCF",
+                    title="GNL anticipated ring carries a per-patamar sum",
+                    summary="synthetic deviation diagnostic for the sink test",
+                )
+            )
+            return dst / "boundary"
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                side_effect=_fake_import,
+            ),
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--boundary-fcf",
+                    "--cobre-bin",
+                    str(fake_cobre_bin),
+                    "--json",
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        codes = {d["code"] for d in doc["diagnostics"]}
+        assert "boundary-fcf-gnl-anticipated-deviation" in codes
+        # ``status`` stays "ok": the importer's diagnostic is INFO-severity,
+        # so surfacing it never flips the verdict outcome.
+        assert doc["status"] == "ok"
+
+    def test_convert_decomp_boundary_fcf_importer_diagnostics_render_panel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ticket-010 (D): the same emitting mock, without ``--json`` — the
+        diagnostic's title renders on stderr (the Rich panel), and the
+        existing happy-path C8-recipe assertions still hold (no
+        double-render, no exit-code change)."""
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+        fake_cobre_bin = tmp_path / "fake-cobre-bin"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        def _fake_import(*args: object, **kwargs: object) -> Path:
+            dx.emit(
+                dx.Diagnostic(
+                    code="boundary-fcf-gnl-anticipated-deviation",
+                    severity=dx.Severity.INFO,
+                    category="Boundary FCF",
+                    title="GNL anticipated ring carries a per-patamar sum",
+                    summary="synthetic deviation diagnostic for the sink test",
+                )
+            )
+            return dst / "boundary"
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                side_effect=_fake_import,
+            ),
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--boundary-fcf",
+                    "--cobre-bin",
+                    str(fake_cobre_bin),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "GNL anticipated ring carries a per-patamar sum" in stderr
+        # The C8 run-recipe note still surfaces (happy-path behaviour intact).
+        assert f"cobre run {dst}" in stderr
+        assert f"--output={dst}" in stderr
+
 
 class TestCompareDatasetWiring:
     """ticket-008: compare handlers sourced from the canonical dataset.

@@ -20,13 +20,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from idecomp.decomp import Dadger
+from idecomp.decomp import Dadger, Dadgnl
 from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.decomp.anticipated import read_gnl_model
 from cobre_bridge.decomp.fcf.bootstrap import (
     bootstrap_terminal_manifest,
     ensure_writer_binding,
@@ -36,26 +38,195 @@ from cobre_bridge.decomp.fcf.cortes import (
     required_inflow_lag_depth,
     summarize_cut_families,
 )
-from cobre_bridge.decomp.fcf.mapper import map_boundary_cuts
+from cobre_bridge.decomp.fcf.mapper import (
+    GnlRingPlan,
+    GnlThermalTarget,
+    map_boundary_cuts,
+)
 from cobre_bridge.decomp.fcf.writer import (
     build_metadata,
     build_stage_cuts_payload,
     write_boundary_checkpoint,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.pipeline import discover_decomp_files
+from cobre_bridge.decomp.pipeline import DecompFiles, discover_decomp_files
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
+    from cobre_bridge.decomp.anticipated import GnlCommitmentModel
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
     from cobre_bridge.decomp.fcf.mapper import MappingResult
 
 _LOG = logging.getLogger(__name__)
 
 
-def _emit_import_diagnostics(cuts: BoundaryCuts, mapping: MappingResult) -> None:
-    """Surface the importer's two documented, accepted approximations.
+def _gnl_targets_from(
+    model: GnlCommitmentModel, thermals_doc: Mapping[str, object]
+) -> GnlRingPlan | None:
+    """Build the submercado -> GNL-thermal ring plan from the deck + case.
+
+    Joins ``model.thermals`` (ascending by ``code``, read from ``dadgnl``'s
+    ``tg`` registry by :func:`~cobre_bridge.decomp.anticipated.read_gnl_model`
+    — reconciled with, never re-derived) onto the converted case's GNL
+    thermal ids: ``thermals_doc["thermals"]`` entries carrying
+    ``anticipated_config``, sorted ascending, are exactly
+    ``convert_decomp_case``'s ``first_thermal_id + i`` assignment (ascending
+    by code — see ``decomp/pipeline.py``/``decomp/anticipated.py::convert_gnl``).
+    Zipping the two ascending-by-code sequences positionally reproduces that
+    assignment exactly, without re-deriving it.
+
+    A plant absent from ``model.nl_lag_months`` has no dispatch-anticipation
+    lag to key its ring slot(s) on (no ``pi_gnl`` lag axis), so it is
+    *skipped* — its ring stays at coefficient ``0.0`` via the mapper's own
+    D3-like drop path — with a single INFO log line naming every skipped
+    plant, never raised on. Returns ``None`` when every plant is skipped (no
+    live target at all).
+
+    Raises
+    ------
+    ValueError
+        If the converted case's GNL-fleet count (``thermals_doc["thermals"]``
+        entries carrying ``anticipated_config``) disagrees with the
+        ``dadgnl`` registry's thermal count — a converter/reader
+        inconsistency that would otherwise silently mis-zip ids onto the
+        wrong codes.
+    """
+    thermals_entries = thermals_doc["thermals"]
+    if not isinstance(thermals_entries, list):
+        raise TypeError(
+            f"thermals.json 'thermals' is {type(thermals_entries).__name__}, not a list"
+        )
+    gnl_ids = sorted(
+        int(entry["id"])
+        for entry in thermals_entries
+        if isinstance(entry, dict) and "anticipated_config" in entry
+    )
+    codes = sorted(thermal.code for thermal in model.thermals)
+    if len(gnl_ids) != len(codes):
+        raise ValueError(
+            f"thermals.json carries {len(gnl_ids)} GNL thermal(s) "
+            "(anticipated_config), but the dadgnl registry declares "
+            f"{len(codes)} thermal(s); the GNL fleet must match exactly"
+        )
+    id_of = dict(zip(codes, gnl_ids, strict=True))
+
+    targets: list[GnlThermalTarget] = []
+    skipped: list[str] = []
+    for thermal in model.thermals:
+        lag = model.nl_lag_months.get(thermal.code)
+        if lag is None:
+            skipped.append(thermal.name)
+            continue
+        targets.append(
+            GnlThermalTarget(
+                thermal_id=id_of[thermal.code],
+                submercado=thermal.submarket_code,
+                nl_lag=lag,
+            )
+        )
+
+    if skipped:
+        _LOG.info(
+            "%d GNL plant(s) declare no nl dispatch-anticipation lag, so "
+            "their AnticipatedThermalState ring slot(s) stay at coefficient "
+            "0.0 (no pi_gnl lag axis to key on): %s",
+            len(skipped),
+            ", ".join(skipped),
+        )
+
+    return GnlRingPlan(tuple(targets)) if targets else None
+
+
+def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan | None:
+    """Read the deck's ``dadgnl`` and build the GNL ring plan, or ``None``.
+
+    Deck-reading wrapper around :func:`_gnl_targets_from`: returns ``None``
+    when the deck carries no ``dadgnl`` file at all, or when
+    :func:`~cobre_bridge.decomp.anticipated.read_gnl_model` reports the deck
+    is GNL-off (no committed dispatch, the G6 gate) — reconciled with that
+    reader's own gate, never re-derived here.
+    """
+    if deck_files.dadgnl is None:
+        return None
+    model = read_gnl_model(Dadgnl.read(str(deck_files.dadgnl)))
+    if model is None:
+        return None
+    thermals_path = case_dir / "system" / "thermals.json"
+    with thermals_path.open(encoding="utf-8") as handle:
+        thermals_doc = json.load(handle)
+    return _gnl_targets_from(model, thermals_doc)
+
+
+def _gnl_deviation_rows(
+    cuts: BoundaryCuts, gnl_plan: GnlRingPlan
+) -> list[tuple[int, int, float, float]]:
+    """The pre-fan-out patamar spread carried into each live GNL ring group.
+
+    Mirrors ``mapper.py::_resolve_gnl_targets``'s ``col(s, p, l)`` flat-column
+    formula exactly — never the placement/drop logic itself, which stays the
+    mapper's job — to recompute, from the raw ``pi_gnl`` coefficients, how
+    far each active cut's per-patamar sensitivities deviate from the uniform
+    rate cobre's hours-weighted fan-out reconstructs. For each unique
+    ``(submercado, lag)`` pair named by ``gnl_plan.targets``, returns
+    ``(submercado, lag, carried_sum, spread)`` from whichever active record
+    maximises the spread ``(max_p c_p - min_p c_p) / |sum_p c_p|`` (guarded
+    to ``0.0`` when ``|sum_p c_p| <= 1e-9``) — a worst-case snapshot, not an
+    aggregate across records. Skips a group whose ``(submercado, lag)`` falls
+    outside ``cuts``' own ``pi_gnl`` shape (the mapper already records that as
+    a target-side ``GnlDroppedTerm``).
+
+    Returns rows sorted ascending by ``(submercado, lag)``; empty when
+    ``cuts`` has no active records, or the boundary carries no GNL block
+    (``lag_maximo_gnl == 0`` or an empty/misshapen ``pi_gnl``).
+    """
+    n_patamares = cuts.header.n_patamares
+    lag_maximo_gnl = cuts.header.lag_maximo_gnl
+    active_records = tuple(record for record in cuts.records if record.is_active)
+    if not active_records or lag_maximo_gnl == 0:
+        return []
+    width = len(active_records[0].pi_gnl)
+    block = n_patamares * lag_maximo_gnl
+    if width == 0 or block == 0 or width % block != 0:
+        return []
+    n_submercados = width // block
+
+    def col(submercado: int, patamar: int, lag: int) -> int:
+        """Flat pi_gnl column for (submercado, patamar, lag), 1-based axes."""
+        return ((submercado - 1) * n_patamares + (patamar - 1)) * lag_maximo_gnl + (
+            lag - 1
+        )
+
+    groups = sorted({(target.submercado, target.nl_lag) for target in gnl_plan.targets})
+    rows: list[tuple[int, int, float, float]] = []
+    for submercado, lag in groups:
+        if not (1 <= submercado <= n_submercados) or not (1 <= lag <= lag_maximo_gnl):
+            continue
+        cols = tuple(
+            col(submercado, patamar, lag) for patamar in range(1, n_patamares + 1)
+        )
+        best_sum = 0.0
+        best_spread = 0.0
+        for record in active_records:
+            values = tuple(record.pi_gnl[c] for c in cols)
+            total = math.fsum(values)
+            spread = (
+                (max(values) - min(values)) / abs(total) if abs(total) > 1e-9 else 0.0
+            )
+            if spread >= best_spread:
+                best_spread = spread
+                best_sum = total
+        rows.append((submercado, lag, best_sum, best_spread))
+    return rows
+
+
+def _emit_import_diagnostics(
+    cuts: BoundaryCuts,
+    mapping: MappingResult,
+    gnl_plan: GnlRingPlan | None = None,
+) -> None:
+    """Surface the importer's documented, accepted approximations.
 
     Always emits ``boundary-fcf-cut-family-summary`` — the importer always
     authors cuts, so the family triage (built from
@@ -63,14 +234,21 @@ def _emit_import_diagnostics(cuts: BoundaryCuts, mapping: MappingResult) -> None
     re-implemented here) is always informative. Additionally emits
     ``boundary-fcf-source-only-plants-dropped`` when ``mapping.dropped`` is
     non-empty — a source-only plant has no target ``HydroStorage`` slot, so
-    its storage/lag terms are omitted (D3: dropped, never folded).
+    its storage/lag terms are omitted (D3: dropped, never folded). When
+    ``gnl_plan`` is given and the boundary carries a GNL block
+    (``cuts.header.lag_maximo_gnl > 0``), additionally emits
+    ``boundary-fcf-gnl-anticipated-deviation`` — the per-``(submercado, lag)``
+    pre-fan-out patamar spread the mapper's chain-rule sum collapses (see
+    :func:`_gnl_deviation_rows`); ``gnl_plan=None`` (the default) gates it off
+    entirely, so pre-ticket-010 2-arg callers are unchanged.
 
     Pure side effect via :func:`cobre_bridge.diagnostics.emit`: reads
-    ``cuts``/``mapping`` but does not alter either, so it can run before the
-    checkpoint is written without changing the checkpoint bytes or the
-    importer's return value. Mirrors ``decomp/pipeline.py``'s gated-INFO-
-    ``Diagnostic`` idiom; relies on the ambient-sink/log-fallback contract of
-    ``diagnostics.emit`` rather than opening its own ``dx.collect()`` sink.
+    ``cuts``/``mapping``/``gnl_plan`` but does not alter any of them, so it
+    can run before the checkpoint is written without changing the checkpoint
+    bytes or the importer's return value. Mirrors ``decomp/pipeline.py``'s
+    gated-INFO-``Diagnostic`` idiom; relies on the ambient-sink/log-fallback
+    contract of ``diagnostics.emit`` rather than opening its own
+    ``dx.collect()`` sink.
     """
     summary = summarize_cut_families(cuts)
     dx.emit(
@@ -120,6 +298,55 @@ def _emit_import_diagnostics(cuts: BoundaryCuts, mapping: MappingResult) -> None
                         for term in mapping.dropped
                     ],
                     justify=["right", "right"],
+                ),
+            ),
+            logger=_LOG,
+        )
+
+    if gnl_plan is not None and cuts.header.lag_maximo_gnl > 0:
+        rows = _gnl_deviation_rows(cuts, gnl_plan)
+        dropped_source_terms = [
+            term for term in mapping.gnl_dropped if term.thermal_id is None
+        ]
+        max_spread = max((row[3] for row in rows), default=0.0)
+        dx.emit(
+            dx.Diagnostic(
+                code="boundary-fcf-gnl-anticipated-deviation",
+                severity=dx.Severity.INFO,
+                category="Boundary FCF",
+                title="GNL anticipated ring carries a per-patamar sum",
+                summary=(
+                    f"max pre-fan-out patamar spread {max_spread:.4g} across "
+                    f"{len(rows)} live GNL ring target group(s); "
+                    f"{len(dropped_source_terms)} source submercado GNL "
+                    "term(s) dropped (no live thermal in that submercado)"
+                ),
+                table=dx.DiagnosticTable(
+                    columns=[
+                        "Submercado",
+                        "Lag",
+                        "Σ pi_gnl (carried)",
+                        "Patamar spread",
+                        "Dropped",
+                    ],
+                    rows=[
+                        [
+                            submercado,
+                            lag,
+                            round(carried_sum, 6),
+                            round(spread, 6),
+                            len(dropped_source_terms),
+                        ]
+                        for submercado, lag, carried_sum, spread in rows
+                    ],
+                    justify=["right", "right", "right", "right", "right"],
+                ),
+                remediation=(
+                    "The bridge carries a single per-patamar sum into each "
+                    "anticipated ring slot; cobre re-derives per-block "
+                    "coefficients via hours-weighted fan-out — an accepted, "
+                    "documented approximation (TRACKED COBRE-GAP C12, "
+                    "~/git/cobre/plans/conversion-found-improvements.md)"
                 ),
             ),
             logger=_LOG,
@@ -206,13 +433,17 @@ def import_boundary_fcf(
     3. Checks the writer binding, then runs a 1-iteration ``cobre_bin`` pass
        on a copy of ``case_dir`` (under ``work_dir``) to read back its
        terminal state-vector layout.
-    4. Maps every boundary cut onto that layout (storage terms by plant code,
-       inflow-lag terms by calendar-month lag depth; the
-       ``AnticipatedThermalState`` GNL ring and ``HydroTransitBucket`` slots
-       are left at coefficient 0 — epic 3's job, not this one's).
-    5. Surfaces the mapping's two documented approximations as ``Diagnostic``s
+    4. Builds the deck's GNL ring plan (:func:`_build_gnl_ring_plan`) and maps
+       every boundary cut onto that layout: storage terms by plant code,
+       inflow-lag terms by calendar-month lag depth, and
+       ``AnticipatedThermalState`` GNL-ring terms via the plan's chain-rule
+       patamar sum; ``HydroTransitBucket`` slots are left at coefficient 0
+       regardless (epic 5's job, not this one's).
+    5. Surfaces the mapping's documented approximations as ``Diagnostic``s
        (:func:`_emit_import_diagnostics`): the always-on cut-family triage,
-       and — gated on non-empty — the D3-dropped source-only plants.
+       the D3-dropped source-only plants (gated on non-empty), and — when the
+       deck carries a GNL block — the per-``(submercado, lag)`` deviation the
+       ring's chain-rule sum collapses.
     6. Assembles and writes ``case_dir/boundary/{metadata.json,
        cuts/stage_NNN.bin, basis/}``, then patches ``case_dir/config.json``'s
        ``["policy"]["boundary"]`` to point at it.
@@ -277,8 +508,9 @@ def import_boundary_fcf(
     import cobre
 
     manifest = bootstrap_terminal_manifest(case_dir, cobre_bin, work_dir=work_dir)
-    mapping = map_boundary_cuts(cuts, manifest, id_map)
-    _emit_import_diagnostics(cuts, mapping)
+    gnl_plan = _build_gnl_ring_plan(case_dir, deck_files)
+    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+    _emit_import_diagnostics(cuts, mapping, gnl_plan)
 
     stage_cuts_payload = build_stage_cuts_payload(
         mapping, manifest, stage_id=boundary_stage

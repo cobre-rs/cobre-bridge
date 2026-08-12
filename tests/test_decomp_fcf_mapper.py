@@ -6,9 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from cobre_bridge.decomp.fcf.mapper import DroppedTerm, map_boundary_cuts
+from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
+from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
+from cobre_bridge.decomp.fcf.mapper import (
+    DroppedTerm,
+    GnlRingPlan,
+    GnlThermalTarget,
+    map_boundary_cuts,
+)
+from cobre_bridge.decomp.id_map import DecompIdMap
 from tests._fcf_fixtures import (
     make_boundary_cuts,
+    make_cortes_header,
     make_cut_record,
     make_id_map,
     make_manifest,
@@ -24,6 +33,14 @@ _HYDRO_STORAGE = 0
 _HYDRO_INFLOW_LAG = 1
 _ANTICIPATED_THERMAL_STATE = 2
 _HYDRO_TRANSIT_BUCKET = 3
+
+
+def _gnl_row(width: int, nonzero: dict[int, float]) -> tuple[float, ...]:
+    """A `pi_gnl` flat vector of `width` zeros with `nonzero` columns set."""
+    row = [0.0] * width
+    for column, value in nonzero.items():
+        row[column] = value
+    return tuple(row)
 
 
 def test_map_storage_places_pi_varm_at_hydro_slots() -> None:
@@ -162,3 +179,147 @@ def test_synthetic_roundtrip_preserves_coeffs(tmp_path: Path) -> None:
     reloaded_cut = reloaded["stage_cuts"][0]["cuts"][0]
     assert reloaded_cut["intercept"] == record.rhs
     assert reloaded_cut["coefficients"][0:3] == [2.5, 0.75, 0.0]
+
+
+def _make_gnl_ring_fixture(
+    pi_gnl: tuple[float, ...],
+) -> tuple[BoundaryCuts, TerminalManifest, DecompIdMap, GnlRingPlan]:
+    """The READBACK-shaped ring (thermal 94: sentinel + dated; thermal 95:
+    dated; thermal 96: dated but untargeted) over a `P=3, L=2, S=4` GNL
+    block, plus the `GnlRingPlan` targeting 94 (submercado 1, lag 2) and 95
+    (submercado 3, lag 1). No source hydro plants — the GNL placement is
+    independent of the storage/lag families, only their manifest guard
+    (`>= 1 HydroStorage slot`) must be satisfied.
+    """
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # position 0: unrelated dummy
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0),  # position 1: sentinel
+            make_slot(
+                _ANTICIPATED_THERMAL_STATE, 94, 1, delivery_date=20260501
+            ),  # position 2: dated
+            make_slot(
+                _ANTICIPATED_THERMAL_STATE, 95, 0, delivery_date=20260401
+            ),  # position 3: dated
+            make_slot(
+                _ANTICIPATED_THERMAL_STATE, 96, 0, delivery_date=20260601
+            ),  # position 4: dated but untargeted by the plan
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=2, n_patamares=3, submercado_codes=(1, 2, 3, 4)
+    )
+    record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    plan = GnlRingPlan((GnlThermalTarget(94, 1, 2), GnlThermalTarget(95, 3, 1)))
+    return cuts, manifest, id_map, plan
+
+
+def test_map_gnl_places_chain_rule_sum_on_dated_slots() -> None:
+    # col(1,p,2) for p=1..3 -> flat indices 1, 3, 5; col(3,p,1) -> 12, 14, 16
+    # (P=3, L=2): col(s,p,l) = ((s-1)*3 + (p-1))*2 + (l-1).
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
+
+    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+
+    mapped = result.cuts[0]
+    assert mapped.coefficients[2] == pytest.approx(0.6)  # thermal 94, dated
+    assert mapped.coefficients[3] == pytest.approx(7.0)  # thermal 95, dated
+
+
+def test_map_gnl_sentinel_and_nontarget_slots_stay_zero() -> None:
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
+
+    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+
+    mapped = result.cuts[0]
+    assert mapped.coefficients[1] == 0.0  # thermal 94, sentinel slot
+    assert mapped.coefficients[4] == 0.0  # thermal 96, absent from the plan
+
+
+def test_map_gnl_drops_submercado_without_thermal() -> None:
+    # col(2,p,1) for p=1..3 -> flat indices 6, 8, 10 (submercado 2, lag 1);
+    # neither target claims submercado 2, and submercados 1/3's own targeted
+    # columns are all zero here.
+    pi_gnl = _gnl_row(24, {6: 10.0, 8: 20.0, 10: 40.0})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
+
+    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+
+    matches = [
+        term
+        for term in result.gnl_dropped
+        if term.thermal_id is None
+        and term.submercado == 2
+        and term.nl_lag == 1
+        and term.reason == "no GNL thermal in submercado"
+    ]
+    assert len(matches) == 1
+    assert matches[0].coefficient == pytest.approx(70.0)
+    # Neither targeted thermal's dated slot was altered by the drop.
+    assert result.cuts[0].coefficients[2] == 0.0
+    assert result.cuts[0].coefficients[3] == 0.0
+
+
+def test_map_gnl_drops_target_with_no_dated_slot() -> None:
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0),  # sentinel only
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=1, n_patamares=1, submercado_codes=(1,)
+    )
+    record = make_cut_record(pi_varm=(), pi_gnl=(5.0,))
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    plan = GnlRingPlan((GnlThermalTarget(94, 1, 1),))
+
+    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+
+    assert any(
+        term.thermal_id == 94 and "no dated ring slot" in term.reason
+        for term in result.gnl_dropped
+    )
+    assert result.cuts[0].coefficients[1] == 0.0  # sentinel slot untouched
+
+
+def test_map_gnl_plan_none_is_noop() -> None:
+    id_map = make_id_map((10,))
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+        ]
+    )
+    cuts = make_boundary_cuts((10,), (make_cut_record(pi_varm=(9.0,)),))
+
+    result = map_boundary_cuts(cuts, manifest, id_map)
+
+    assert result.gnl_dropped == ()
+    assert result.cuts[0].coefficients[0] == 9.0
+    assert result.cuts[0].coefficients[1] == 0.0
+
+
+def test_map_gnl_rejects_bad_pi_gnl_width() -> None:
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=2, n_patamares=3, submercado_codes=(1,)
+    )
+    # n_patamares * lag_maximo_gnl == 6; width 7 is not a multiple of it.
+    record = make_cut_record(pi_varm=(), pi_gnl=(0.0,) * 7)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    plan = GnlRingPlan((GnlThermalTarget(94, 1, 1),))
+
+    with pytest.raises(ValueError, match="pi_gnl width"):
+        map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
