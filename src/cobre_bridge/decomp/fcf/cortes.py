@@ -204,36 +204,81 @@ def required_inflow_lag_depth(summary: CutFamilySummary) -> int:
 def read_cortesh(path: Path) -> CortesHeader:
     """Read ``cortesh.dat`` into a :class:`CortesHeader`.
 
-    Raises ``ValueError`` if the deck is not individualized
-    (``tipo_agregacao_caso != 1``) — the importer only supports
-    plant-space cuts — or if ``indice_usina`` is not a contiguous
-    ``1..n_plants`` range.
+    Resolves the deck's own individualized boundary stage
+    (``estagio_individualizado_inicial``) to drive :func:`_build_header`'s
+    per-stage gate for this standalone read. A production deck for the
+    source model is routinely **hybrid** (``tipo_agregacao_caso == 0``):
+    aggregated stages up to some point, individualized (plant-space) stages
+    after it — this reader accepts both that shape and a fully-
+    individualized deck (``tipo_agregacao_caso == 1``), and excludes
+    fictitious (accounting-only) plants from the returned
+    ``n_plants``/``plant_codes``.
+
+    Raises ``ValueError`` if the deck's own ``estagio_individualizado_inicial``
+    stage is not itself within the declared individualized band (not
+    expected from a valid deck; defensive), or if the retained
+    non-fictitious ``indice_usina`` values are not unique and within
+    ``1..numero_maximo_uhes``.
     """
-    return _build_header(Cortesh.read(str(path)))
+    cortesh = Cortesh.read(str(path))
+    return _build_header(
+        cortesh, boundary_stage=cortesh.estagio_individualizado_inicial
+    )
 
 
-def _build_header(cortesh: Cortesh) -> CortesHeader:
+def _build_header(cortesh: Cortesh, *, boundary_stage: int) -> CortesHeader:
     """Build a :class:`CortesHeader` from an already-loaded ``Cortesh``.
 
-    Shared by :func:`read_cortesh` (which loads the file itself) and
-    :func:`read_cortes` (which receives the raw ``Cortesh`` the caller
-    already loaded, so it can also resolve the consolidated archive's
-    global chain-head index).
+    Gates on whether ``boundary_stage`` itself is individualized rather than
+    on the deck's overall aggregation mode: accepts both a fully-
+    individualized deck (``tipo_agregacao_caso == 1``) and a hybrid deck
+    (``tipo_agregacao_caso == 0``) whose ``boundary_stage`` falls inside the
+    declared individualized band (``estagio_individualizado_inicial``..
+    ``estagio_individualizado_final``) — a production deck for the source
+    model routinely runs aggregated stages up to some point and
+    individualized (plant-space, real boundary-cut coefficients) stages
+    after it.
+
+    Fictitious (accounting-only) plants in ``dados_uhes`` carry no cut
+    columns in the record file, so they are excluded from
+    ``n_plants``/``plant_codes``; the non-fictitious subset legitimately
+    has holes in the deck-wide ``1..numero_maximo_uhes`` ``indice_usina``
+    range (contiguity holds only over *all* plants, not the non-fictitious
+    subset).
+
+    Shared by :func:`read_cortesh` (which loads the file itself and
+    resolves the deck's own individualized boundary stage) and
+    :func:`read_cortes` (which passes its resolved boundary stage — trailer-
+    derived or caller-supplied — and also resolves the consolidated
+    archive's global chain-head index).
     """
-    if cortesh.tipo_agregacao_caso != 1:
+    band_start = cortesh.estagio_individualizado_inicial
+    band_end = cortesh.estagio_individualizado_final
+    if not (band_start <= boundary_stage <= band_end):
         raise ValueError(
-            "the importer only supports individualized (plant-space) "
-            f"cuts; observed tipo_agregacao_caso={cortesh.tipo_agregacao_caso}"
+            f"boundary_stage {boundary_stage} is outside the individualized "
+            f"band [{band_start}, {band_end}]; the importer only reads "
+            "plant-space cuts at an individualized boundary stage"
         )
 
-    n_plants = cortesh.numero_maximo_uhes
-    uhes = cortesh.dados_uhes.sort_values("indice_usina")
+    n_max_plants = cortesh.numero_maximo_uhes
+    uhes = cortesh.dados_uhes[cortesh.dados_uhes["ficticia"] == 0].sort_values(
+        "indice_usina"
+    )
     indices = [int(value) for value in uhes["indice_usina"]]
-    if indices != list(range(1, n_plants + 1)):
+    n_plants = len(indices)
+    if len(set(indices)) != n_plants or any(
+        not (1 <= index <= n_max_plants) for index in indices
+    ):
         raise ValueError(
-            f"indice_usina is not a contiguous 1..{n_plants} range: {indices}"
+            "non-fictitious indice_usina values are not unique and within "
+            f"1..{n_max_plants}: {indices}"
         )
     plant_codes = tuple(int(code) for code in uhes["codigo_usina"])
+    if len(plant_codes) != n_plants:
+        raise ValueError(
+            f"plant_codes length {len(plant_codes)} != n_plants {n_plants}"
+        )
 
     submercado_codes = tuple(
         int(code) for code in cortesh.dados_submercados["codigo_submercado"]
@@ -418,6 +463,9 @@ def read_cortes(
     build its own header (:func:`_build_header`, the same logic
     :func:`read_cortesh` uses) and resolve the consolidated archive's
     global chain-head index from ``cortesh.ultimo_registro_cortes_estagio``.
+    The header is built from the *resolved* boundary stage below (trailer-
+    derived or caller-supplied), which also drives :func:`_build_header`'s
+    individualized-band gate and its fictitious-plant exclusion.
 
     Detects the file shape automatically:
 
@@ -432,13 +480,15 @@ def read_cortes(
       ``cortesh.ultimo_registro_cortes_estagio`` before reading with
       ``por_estagio=False``.
 
-    Raises ``ValueError`` if a ``pi_mx_sar_uhe*`` coefficient is nonzero, if
-    the file size is not a multiple of the header's record size, or (for the
-    consolidated archive) if ``boundary_stage`` is missing or has no unique
-    ``estudo`` row in ``cortesh.ultimo_registro_cortes_estagio``.
+    Raises ``ValueError`` if the resolved boundary stage falls outside the
+    deck's individualized band, if a ``pi_mx_sar_uhe*`` coefficient is
+    nonzero, if the file size is not a multiple of the header's record
+    size, or (for the consolidated archive) if ``boundary_stage`` is
+    missing or has no unique ``estudo`` row in
+    ``cortesh.ultimo_registro_cortes_estagio``.
     """
-    header = _build_header(cortesh)
-    trailer = _read_trailer(cortes_path, header.record_size)
+    record_size = cortesh.tamanho_registro_individualizado
+    trailer = _read_trailer(cortes_path, record_size)
 
     resolved_boundary_stage: int
     if trailer is not None:
@@ -449,6 +499,7 @@ def read_cortes(
             ) * 12 + cut_stage_month
         else:
             resolved_boundary_stage = boundary_stage
+        header = _build_header(cortesh, boundary_stage=resolved_boundary_stage)
         cortes = Cortes.from_cortesh(str(cortes_path), cortesh, por_estagio=True)
     else:
         if boundary_stage is None:
@@ -458,6 +509,7 @@ def read_cortes(
                 "DECOMP coupling stage"
             )
         resolved_boundary_stage = boundary_stage
+        header = _build_header(cortesh, boundary_stage=resolved_boundary_stage)
         indice_ultimo_corte = _resolve_global_chain_head(cortesh, boundary_stage)
         cortes = Cortes.from_cortesh(
             str(cortes_path),

@@ -18,13 +18,14 @@ from unittest.mock import patch
 
 import pandas as pd  # type: ignore[import-untyped]  # pandas-stubs not installed
 import pytest
-from inewave.newave import Cortesh
+from inewave.newave import Cortes, Cortesh
 
 from cobre_bridge.decomp.fcf.cortes import (
     BoundaryCuts,
     CortesHeader,
     CutFamilySummary,
     StageCutRecord,
+    _build_header,
     _read_trailer,
     read_cortes,
     read_cortesh,
@@ -39,6 +40,8 @@ _NEWAVE_RODADA = Path("example/newave_rodada/cortesh.dat")
 _NEWAVE_RODADA_CORTES = Path("example/newave_rodada/cortes.dat")
 _DECOMP_SET_24 = Path("example/decomp-set-24-rv0/cortesh.dat")
 _DECOMP_SET_24_CORTES = Path("example/decomp-set-24-rv0/cortes-010.dat")
+_DECOMP_MAR26 = Path("example/decomp-mar-26-rv2/cortesh.dat")
+_DECOMP_MAR26_CORTES = Path("example/decomp-mar-26-rv2/cortes-004.dat")
 
 _NONZERO = 1e-9
 
@@ -71,6 +74,25 @@ def test_read_cortesh_gnl_deck_header() -> None:
     assert header.n_patamares == 3
 
 
+@pytest.mark.skipif(
+    not _DECOMP_MAR26.exists(), reason="decomp-mar-26-rv2 deck not present"
+)
+def test_read_cortesh_hybrid_deck_header() -> None:
+    header = read_cortesh(_DECOMP_MAR26)
+
+    # No `tipo_agregacao_caso`/contiguity raise: `read_cortesh` accepted this
+    # hybrid deck (aggregated stages up to the individualized band, then
+    # plant-space cuts) and excluded its fictitious plants.
+    assert header.n_plants == 159
+    assert len(header.plant_codes) == 159
+
+    cortesh = Cortesh.read(str(_DECOMP_MAR26))
+    expected_gnl_width = (
+        cortesh.numero_submercados * header.n_patamares * header.lag_maximo_gnl
+    )
+    assert expected_gnl_width == 24
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -96,18 +118,90 @@ def test_read_cortesh_exposes_stage_chain_heads(path: Path) -> None:
     assert all(isinstance(value, int) for value in header.last_cut_record_by_stage)
 
 
-def test_read_cortesh_rejects_non_individualized() -> None:
-    class _FakeCortesh:
-        tipo_agregacao_caso = 2
+def test_build_header_rejects_boundary_stage_outside_individualized_band() -> None:
+    """The per-stage gate names the individualized band it rejected against.
 
-    with (
-        patch(
-            "cobre_bridge.decomp.fcf.cortes.Cortesh.read",
-            return_value=_FakeCortesh(),
-        ),
-        pytest.raises(ValueError, match="individualized"),
-    ):
-        read_cortesh(Path("unused-cortesh.dat"))
+    Only the band attributes are needed on the fake: the gate check runs
+    before any ``dados_uhes``/plant access, so the raise fires without ever
+    touching the rest of the (deliberately absent) ``Cortesh`` surface.
+    """
+
+    class _FakeCortesh:
+        estagio_individualizado_inicial = 3
+        estagio_individualizado_final = 14
+
+    with pytest.raises(ValueError, match=r"\[3, 14\]"):
+        _build_header(_FakeCortesh(), boundary_stage=2)  # type: ignore[arg-type]
+
+
+def _hybrid_fake_cortesh_169_plants_10_ficticia() -> object:
+    """A synthetic hybrid ``Cortesh`` (mirrors production ``mar-26-rv2`` shape).
+
+    169 plants total, 10 of them fictitious (indices 5, 12, 20, 33, 47, 58,
+    69, 81, 95, 110 — deliberately including 5 and 12 so the non-fictitious
+    subset has holes at both), leaving 159 non-fictitious. ``tipo_agregacao_caso
+    == 0`` (hybrid) with an individualized band of ``[3, 14]``.
+    """
+    all_indices = list(range(1, 170))
+    ficticia_indices = {5, 12, 20, 33, 47, 58, 69, 81, 95, 110}
+    assert len(ficticia_indices) == 10
+
+    class _FakeCortesh:
+        tipo_agregacao_caso = 0
+        numero_maximo_uhes = 169
+        dados_uhes = pd.DataFrame(
+            {
+                "indice_usina": all_indices,
+                "codigo_usina": [index * 1000 for index in all_indices],
+                "ficticia": [
+                    1 if index in ficticia_indices else 0 for index in all_indices
+                ],
+            }
+        )
+        dados_submercados = pd.DataFrame({"codigo_submercado": [1, 2]})
+        numero_patamares = 3
+        lag_maximo_gnl = 2
+        numero_submercados = 2
+        tamanho_registro_individualizado = 1500
+        estagio_individualizado_inicial = 3
+        estagio_individualizado_final = 14
+        ultimo_registro_cortes_estagio = pd.DataFrame(
+            {
+                "tipo_estagio": ["estudo"],
+                "estagio": [4],
+                "indice_ultimo_corte": [1],
+            }
+        )
+
+    return _FakeCortesh()
+
+
+def test_build_header_hybrid_excludes_fictitious_plants() -> None:
+    header = _build_header(
+        _hybrid_fake_cortesh_169_plants_10_ficticia(),  # type: ignore[arg-type]
+        boundary_stage=4,
+    )
+
+    assert header.n_plants == 159
+    assert len(header.plant_codes) == 159
+    assert header.individualized is True
+
+
+def test_build_header_hybrid_tolerates_indice_usina_holes() -> None:
+    # Fictitious plants sit at indice_usina 5 and 12 (among others); the
+    # non-fictitious subset skips them without raising the old
+    # "indice_usina is not a contiguous 1..N range" error.
+    header = _build_header(
+        _hybrid_fake_cortesh_169_plants_10_ficticia(),  # type: ignore[arg-type]
+        boundary_stage=4,
+    )
+
+    # codigo_usina == indice_usina * 1000, so the excluded fictitious slots'
+    # codes (5000, 12000) must be absent from the retained plant_codes, and
+    # the retained codes stay in ascending indice_usina slot order.
+    assert 5000 not in header.plant_codes
+    assert 12000 not in header.plant_codes
+    assert list(header.plant_codes) == sorted(header.plant_codes)
 
 
 def test_read_cortesh_synthetic_preserves_slot_order() -> None:
@@ -115,13 +209,19 @@ def test_read_cortesh_synthetic_preserves_slot_order() -> None:
         tipo_agregacao_caso = 1
         numero_maximo_uhes = 3
         dados_uhes = pd.DataFrame(
-            {"indice_usina": [1, 2, 3], "codigo_usina": [30, 10, 20]}
+            {
+                "indice_usina": [1, 2, 3],
+                "codigo_usina": [30, 10, 20],
+                "ficticia": [0, 0, 0],
+            }
         )
         dados_submercados = pd.DataFrame({"codigo_submercado": [1]})
         numero_patamares = 3
         lag_maximo_gnl = 2
         numero_submercados = 1
         tamanho_registro_individualizado = 112
+        estagio_individualizado_inicial = 1
+        estagio_individualizado_final = 12
         ultimo_registro_cortes_estagio = pd.DataFrame(
             {
                 "tipo_estagio": ["estudo"],
@@ -139,6 +239,9 @@ def test_read_cortesh_synthetic_preserves_slot_order() -> None:
     assert isinstance(header, CortesHeader)
     # Slot order (indice_usina 1,2,3), not sorted by codigo_usina (30,10,20).
     assert header.plant_codes == (30, 10, 20)
+    # No fictitious plants in this deck: n_plants/plant_codes equal the full
+    # plant set — the fully-individualized, no-fictitious case is
+    # regression-safe under the fictitious-exclusion + band-gate rework.
     assert header.n_plants == 3
     assert header.lag_maximo_gnl == 2
     assert header.individualized is True
@@ -250,16 +353,44 @@ def test_read_cortes_gnl_boundary_stage_and_gnl_block() -> None:
     assert fully_nonzero_records >= 9990
 
 
+@pytest.mark.skipif(
+    not _DECOMP_MAR26.exists() or not _DECOMP_MAR26_CORTES.exists(),
+    reason="decomp-mar-26-rv2 deck not present",
+)
+def test_read_cortes_hybrid_boundary_stage_and_shapes() -> None:
+    cortesh = Cortesh.read(str(_DECOMP_MAR26))
+    # Trailer-derived boundary stage (the single-stage export path, matching
+    # the importer's own call), not a caller-supplied one.
+    boundary = read_cortes(_DECOMP_MAR26_CORTES, cortesh, boundary_stage=None)
+
+    assert boundary.boundary_stage == 4
+    assert len(boundary.records) == 10000
+
+    # `Cortes.from_cortesh` names the header's plant-space columns plus 4
+    # per-cut provenance columns: 1 (rhs) + 159 (pi_varm) + 159*12
+    # (pi_qafl) + 159 (pi_mx_sar) + 24 (pi_gnl) + 4 provenance == 2255.
+    raw = Cortes.from_cortesh(str(_DECOMP_MAR26_CORTES), cortesh, por_estagio=True)
+    assert raw.cortes is not None
+    assert raw.cortes.shape == (10000, 2255)
+
+    sar_cols = [f"pi_mx_sar_uhe{code}" for code in boundary.header.plant_codes]
+    assert raw.cortes[sar_cols].abs().to_numpy().max() < _NONZERO
+
+
 def test_read_cortes_rejects_nonzero_sar(tmp_path: Path) -> None:
     class _FakeCortesh:
         tipo_agregacao_caso = 1
         numero_maximo_uhes = 1
-        dados_uhes = pd.DataFrame({"indice_usina": [1], "codigo_usina": [4]})
+        dados_uhes = pd.DataFrame(
+            {"indice_usina": [1], "codigo_usina": [4], "ficticia": [0]}
+        )
         dados_submercados = pd.DataFrame({"codigo_submercado": [1]})
         numero_patamares = 3
         lag_maximo_gnl = 0
         numero_submercados = 1
         tamanho_registro_individualizado = 32
+        estagio_individualizado_inicial = 1
+        estagio_individualizado_final = 12
         ultimo_registro_cortes_estagio = pd.DataFrame(
             {
                 "tipo_estagio": ["estudo"],
@@ -303,12 +434,16 @@ def test_read_cortes_synthetic_records_and_trailer_stage(tmp_path: Path) -> None
     class _FakeCortesh:
         tipo_agregacao_caso = 1
         numero_maximo_uhes = 1
-        dados_uhes = pd.DataFrame({"indice_usina": [1], "codigo_usina": [4]})
+        dados_uhes = pd.DataFrame(
+            {"indice_usina": [1], "codigo_usina": [4], "ficticia": [0]}
+        )
         dados_submercados = pd.DataFrame({"codigo_submercado": [1]})
         numero_patamares = 3
         lag_maximo_gnl = 0
         numero_submercados = 1
         tamanho_registro_individualizado = 32
+        estagio_individualizado_inicial = 1
+        estagio_individualizado_final = 12
         ultimo_registro_cortes_estagio = pd.DataFrame(
             {
                 "tipo_estagio": ["estudo"],
@@ -434,6 +569,28 @@ def test_summarize_families_gnl_matches_probed_facts() -> None:
     )  # AC robust floor
 
     assert summary.rhs_max >= summary.rhs_min > 0
+
+
+@pytest.mark.skipif(
+    not _DECOMP_MAR26.exists() or not _DECOMP_MAR26_CORTES.exists(),
+    reason="decomp-mar-26-rv2 deck not present",
+)
+def test_summarize_families_hybrid_matches_probed_facts() -> None:
+    cortesh = Cortesh.read(str(_DECOMP_MAR26))
+    boundary = read_cortes(_DECOMP_MAR26_CORTES, cortesh, boundary_stage=None)
+
+    summary = summarize_cut_families(boundary)
+
+    assert summary.n_active_cuts == len(boundary.records) == 10000
+    assert summary.storage_nonzero_plants == 159
+    assert summary.gnl_nonzero_slots == 24
+    assert len(summary.lag_nonzero_by_depth) == 12
+
+    # RHS scale is on the order of 1e9-1e10 (byte-exact `from_cortesh`
+    # measurement, 2026-08-12: rhs_max ~= 3.73e9) — an order-of-magnitude
+    # tolerance so a benign scale nuance does not make the smoke brittle.
+    assert summary.rhs_max >= summary.rhs_min > 0
+    assert 1e9 <= summary.rhs_max <= 1e10
 
 
 def test_summarize_families_empty_records_raises() -> None:
