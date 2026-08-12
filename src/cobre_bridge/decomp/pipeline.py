@@ -99,6 +99,68 @@ class DecompFiles:
     #: when the deck carries none. Defaults to ``None`` so every pre-existing
     #: ``DecompFiles(...)`` call site keeps constructing without it.
     libs_restricao_eletrica: Path | None = None
+    #: The deck's boundary-FCF header file (``cortesh.dat``), resolved via
+    #: :func:`_resolve_fc_record_path` (the deck's ``FC NEWV21`` record) or,
+    #: failing that, the ``cortesh*`` glob idiom; ``None`` when the deck
+    #: carries no boundary FCF (ticket-007). Defaults to ``None`` for the
+    #: same back-compat reason as ``libs_restricao_eletrica`` above.
+    cortesh: Path | None = None
+    #: The deck's boundary-FCF cut-record file: a single-stage partition
+    #: export (``cortes-<estagio>.dat``, preferred) or the consolidated
+    #: archive (``cortes.dat``), resolved via :func:`_resolve_fc_record_path`
+    #: (the deck's ``FC NEWCUT`` record) or the glob idiom; ``None`` when
+    #: absent (ticket-007).
+    cortes: Path | None = None
+
+
+#: ``FC`` register ``tipo`` mnemonics (``idecomp.decomp.Dadger.fc()``) naming
+#: the boundary-FCF header and cut-record files respectively.
+_FC_TIPO_CORTESH = "NEWV21"
+_FC_TIPO_CORTES = "NEWCUT"
+
+
+def _resolve_fc_record_path(dadger: Path, deck_dir: Path, *, tipo: str) -> Path | None:
+    """Resolve one boundary-FCF file named by the deck's ``FC`` register.
+
+    A lightweight fixed-width text scan of *dadger* — mirroring
+    :func:`~cobre_bridge.decomp.constraint_registers.resolve_libs_electrical_path`'s
+    own text-scan idiom for a deck-relative file named by an index entry —
+    rather than a full :class:`idecomp.decomp.Dadger` parse (the caller
+    re-parses *dadger* structurally right after discovery returns;
+    duplicating that heavier, structured parse here would be wasted work and
+    would need to guard against whatever exception surface a malformed
+    dadger raises through it). The ``FC`` register
+    (``idecomp.decomp.modelos.dadger.FC``) is fixed-width: identifier at
+    columns 0:4, ``tipo`` mnemonic at columns 4:10, ``caminho`` at columns
+    14:214 — confirmed against ``example/decomp-mar-26-rv2/dadger.rv2``'s own
+    ``FC  NEWV21    cortesh.dat`` / ``FC  NEWCUT    cortes-004.dat`` lines.
+    Resolves ``caminho`` (which may be a relative path, including
+    parent-directory references, e.g. ``../../cortesh.dat``) against
+    *deck_dir*.
+
+    Never raises: returns ``None`` — falling through to the glob idiom —
+    when *dadger* is unreadable, carries no ``FC`` record for *tipo*, or the
+    named path does not resolve to an existing file. Plain string slicing
+    cannot itself raise, so no malformed-content exception handling is
+    needed beyond the ``OSError`` guard on the read itself.
+    """
+    try:
+        text = dadger.read_text(encoding="latin-1")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line[:4] != "FC  " or line[4:10].strip().upper() != tipo:
+            continue
+        caminho = line[14:214].strip()
+        if not caminho:
+            continue
+        # `.resolve()` collapses any `..` in `caminho` (e.g. `../../cortesh.dat`)
+        # so the returned path is a plain, normalized filesystem path rather
+        # than one carrying the FC record's own relative-path spelling.
+        candidate = (deck_dir / caminho).resolve()
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def discover_decomp_files(src: Path) -> DecompFiles:
@@ -117,13 +179,19 @@ def discover_decomp_files(src: Path) -> DecompFiles:
             if line.strip() and not line.strip().startswith("&")
         ]
 
-    def find(prefix: str, required: bool) -> Path | None:
+    def find(prefix: str, required: bool, *, exclude: str | None = None) -> Path | None:
+        def is_candidate(name: str) -> bool:
+            lname = name.lower()
+            return lname.startswith(prefix) and (
+                exclude is None or not lname.startswith(exclude)
+            )
+
         for name in names:
-            if name.lower().startswith(prefix):
+            if is_candidate(name):
                 path = src / name
                 if path.is_file():
                     return path
-        matches = sorted(src.glob(f"{prefix}*"))
+        matches = sorted(p for p in src.glob(f"{prefix}*") if is_candidate(p.name))
         if matches:
             return matches[0]
         if required:
@@ -137,6 +205,22 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     renovaveis = find("renovaveis", required=False)
     polinjus = find("polinjus", required=False)
     assert dadger is not None and vazoes is not None and hidr is not None
+    # cortesh/cortes (ticket-007): prefer the deck's own FC record over the
+    # glob idiom (its caminho may point outside `src`, e.g. `../../cortesh.dat`,
+    # which the glob fallback below could never find); the `cortes-` prefix is
+    # checked before the broader `cortes` prefix so a single-stage partition
+    # export (`cortes-<estagio>.dat`) always wins over the consolidated
+    # `cortes.dat` archive when both are present, matching `fcf/cortes.py`'s
+    # own trailer-based shape detection. `exclude="cortesh"` keeps the broader
+    # `cortes` glob from mistaking the header file for the record file.
+    cortesh = _resolve_fc_record_path(dadger, src, tipo=_FC_TIPO_CORTESH) or find(
+        "cortesh", required=False
+    )
+    cortes = (
+        _resolve_fc_record_path(dadger, src, tipo=_FC_TIPO_CORTES)
+        or find("cortes-", required=False)
+        or find("cortes", required=False, exclude="cortesh")
+    )
     return DecompFiles(
         revision=revision,
         dadger=dadger,
@@ -146,6 +230,8 @@ def discover_decomp_files(src: Path) -> DecompFiles:
         renovaveis=renovaveis,
         polinjus=polinjus,
         libs_restricao_eletrica=constraint_registers.resolve_libs_electrical_path(src),
+        cortesh=cortesh,
+        cortes=cortes,
     )
 
 

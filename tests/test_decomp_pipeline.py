@@ -1709,3 +1709,129 @@ class TestDiversionChannels:
         )
         assert channels == {}
         assert unresolved == []
+
+
+def _fc_line(tipo: str, caminho: str) -> str:
+    """One fixed-width ``FC`` register line: identifier at columns 0:4,
+    ``tipo`` mnemonic at 4:10, ``caminho`` from column 14 -- matching
+    ``idecomp.decomp.modelos.dadger.FC``'s own layout (confirmed against
+    ``example/decomp-mar-26-rv2/dadger.rv2``'s real ``FC  NEWV21
+    cortesh.dat`` line)."""
+    return f"FC  {tipo:<6}    {caminho}"
+
+
+class TestDiscoverDecompFilesBoundaryFcf:
+    """TICKET-007: ``discover_decomp_files`` resolves the deck's optional
+    boundary-FCF cut files (``cortesh``/``cortes``), gated on their presence
+    -- the discovery prerequisite for wiring the boundary-FCF importer
+    (ticket-008) behind ``--boundary-fcf``. Mirrors
+    ``TestDiscoverDecompFilesLibsElectrical``'s synthetic-deck-dir fixture
+    pattern (``tests/test_decomp_libs_electrical_pipeline.py``)."""
+
+    @staticmethod
+    def _minimal_deck(deck_dir: Path, *, dadger_text: str = "") -> None:
+        (deck_dir / "caso.dat").write_text("rv0", encoding="latin-1")
+        (deck_dir / "rv0").write_text(
+            "dadger.rv0\nvazoes.rv0\nhidr.dat\n", encoding="latin-1"
+        )
+        (deck_dir / "dadger.rv0").write_text(dadger_text, encoding="latin-1")
+        (deck_dir / "vazoes.rv0").write_text("", encoding="latin-1")
+        (deck_dir / "hidr.dat").write_text("", encoding="latin-1")
+
+    def test_cortesh_and_cortes_resolved_when_present(self, tmp_path: Path) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        self._minimal_deck(tmp_path)
+        (tmp_path / "cortesh.dat").write_text("", encoding="latin-1")
+        (tmp_path / "cortes-004.dat").write_text("", encoding="latin-1")
+
+        files = discover_decomp_files(tmp_path)
+
+        assert files.cortesh == tmp_path / "cortesh.dat"
+        assert files.cortes == tmp_path / "cortes-004.dat"
+
+    def test_cortesh_and_cortes_none_when_absent(self, tmp_path: Path) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        self._minimal_deck(tmp_path)
+
+        files = discover_decomp_files(tmp_path)
+
+        assert files.cortesh is None
+        assert files.cortes is None
+
+    def test_cortes_prefers_single_stage_export_over_consolidated_archive(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        self._minimal_deck(tmp_path)
+        (tmp_path / "cortesh.dat").write_text("", encoding="latin-1")
+        (tmp_path / "cortes.dat").write_text("", encoding="latin-1")
+        (tmp_path / "cortes-004.dat").write_text("", encoding="latin-1")
+
+        files = discover_decomp_files(tmp_path)
+
+        assert files.cortes == tmp_path / "cortes-004.dat"
+
+    def test_cortesh_resolved_via_fc_record_outside_deck_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """The ``FC`` record's own ``caminho`` may be a relative path
+        pointing outside the deck directory (e.g. a shared upstream run
+        directory); the glob idiom alone could never find it there."""
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        deck_dir = tmp_path / "deck"
+        deck_dir.mkdir()
+        shared_dir = tmp_path / "shared"
+        shared_dir.mkdir()
+        target = shared_dir / "cortesh.dat"
+        target.write_text("", encoding="latin-1")
+
+        self._minimal_deck(
+            deck_dir,
+            dadger_text=_fc_line("NEWV21", "../shared/cortesh.dat") + "\n",
+        )
+
+        files = discover_decomp_files(deck_dir)
+
+        assert files.cortesh == target
+
+    def test_fc_record_naming_missing_file_falls_back_to_glob(
+        self, tmp_path: Path
+    ) -> None:
+        """A malformed/stale ``FC`` record (naming a file that does not
+        exist) must never raise -- discovery falls through to the deck-local
+        glob idiom instead."""
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        self._minimal_deck(
+            tmp_path,
+            dadger_text=_fc_line("NEWV21", "does-not-exist.dat") + "\n",
+        )
+        target = tmp_path / "cortesh.dat"
+        target.write_text("", encoding="latin-1")
+
+        files = discover_decomp_files(tmp_path)
+
+        assert files.cortesh == target
+
+    def test_decomp_files_still_constructs_without_the_new_fields(self) -> None:
+        """Every pre-existing ``DecompFiles(...)`` call site (this ticket
+        touches none of them) keeps constructing unchanged -- both new
+        fields default to ``None``."""
+        from cobre_bridge.decomp.pipeline import DecompFiles
+
+        files = DecompFiles(
+            revision="rv0",
+            dadger=Path("dadger.rv0"),
+            vazoes=Path("vazoes.rv0"),
+            hidr=Path("hidr.dat"),
+            dadgnl=None,
+            renovaveis=None,
+            polinjus=None,
+        )
+
+        assert files.cortesh is None
+        assert files.cortes is None

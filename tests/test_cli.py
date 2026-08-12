@@ -145,6 +145,17 @@ def _make_fake_decomp_dir(tmp_path: Path) -> Path:
     return decomp_dir
 
 
+def _make_fake_decomp_dir_with_cuts(tmp_path: Path) -> Path:
+    """Like :func:`_make_fake_decomp_dir`, plus stub ``cortesh``/``cortes``
+    files so the real (unmocked) ``discover_decomp_files`` resolves both via
+    its glob fallback — the boundary-FCF gating path only globs/stats these,
+    never parses their contents."""
+    decomp_dir = _make_fake_decomp_dir(tmp_path)
+    (decomp_dir / "cortesh.rv0").write_text("stub")
+    (decomp_dir / "cortes.rv0").write_text("stub")
+    return decomp_dir
+
+
 # ---------------------------------------------------------------------------
 # ConversionReport
 # ---------------------------------------------------------------------------
@@ -2658,6 +2669,275 @@ class TestCliInProcess:
 
         assert code == 0
         assert not (dst / "conversion_manifest.json").exists()
+
+    # ------------------------------------------------------------------
+    # --boundary-fcf / --cobre-bin (ticket-008)
+    # ------------------------------------------------------------------
+
+    def test_convert_decomp_boundary_fcf_default_off_is_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``--boundary-fcf``, the importer never runs and no
+        ``boundary/`` directory is written (default OFF, unchanged behaviour)."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        mock_import.assert_not_called()
+        assert not (dst / "boundary").exists()
+
+    def test_convert_decomp_boundary_fcf_happy_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--boundary-fcf`` with cut files present imports with
+        ``cost_scale_factor=1.0``, exits 0, surfaces the C8 run recipe on
+        stderr, and the ``--json`` verdict carries ``summary["boundary_fcf"]``."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+        fake_cobre_bin = tmp_path / "fake-cobre-bin"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch(
+                "cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"
+            ) as mock_capability,
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                return_value=dst / "boundary",
+            ) as mock_import,
+        ):
+            code, stdout, stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--boundary-fcf",
+                    "--cobre-bin",
+                    str(fake_cobre_bin),
+                    "--json",
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        mock_capability.assert_called_once()
+        mock_import.assert_called_once()
+        assert mock_import.call_args.kwargs["cost_scale_factor"] == 1.0
+        assert mock_import.call_args.kwargs["cobre_bin"] == fake_cobre_bin
+        assert mock_import.call_args.args[0] == dst
+        # C8 recipe surfaced on stderr regardless of --json.
+        assert f"cobre run {dst}" in stderr
+        assert f"--output={dst}" in stderr
+        doc = json.loads(stdout)
+        assert doc["summary"]["boundary_fcf"] == {
+            "imported": True,
+            "path": "boundary",
+            "run_constraint": f"--output={dst}",
+        }
+
+    def test_convert_decomp_boundary_fcf_missing_cortes_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--boundary-fcf`` on a deck with no cortes files exits 1, and
+        stderr names the missing cortes files."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)  # no cortesh/cortes files
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--boundary-fcf"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        assert "cortes" in stderr
+        assert "cortesh" in stderr
+        mock_import.assert_not_called()
+        assert not (dst / "boundary").exists()
+
+    def test_convert_decomp_boundary_fcf_capability_guard_failure_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing capability probe exits 1 with the branch-wheel remediation."""
+        from cobre_bridge.decomp.fcf.capability import REMEDIATION
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch(
+                "cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability",
+                side_effect=RuntimeError(REMEDIATION),
+            ),
+            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--boundary-fcf",
+                    "--cobre-bin",
+                    str(tmp_path / "fake-cobre-bin"),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 1
+        assert "feat/cobre-gnl-boundary-pricing" in stderr
+        mock_import.assert_not_called()
+
+    def test_convert_decomp_boundary_fcf_runs_before_validate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The boundary-FCF import runs BEFORE ``--validate``; a validation
+        failure still exits 2 once the import already succeeded."""
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        call_order: list[str] = []
+
+        def _fake_import(*args: object, **kwargs: object) -> Path:
+            call_order.append("import_boundary_fcf")
+            return dst / "boundary"
+
+        def _fake_validate(*args: object, **kwargs: object) -> dict[str, object]:
+            call_order.append("validate")
+            return {"valid": False, "warnings": [], "errors": ["boom"]}
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version",
+            lambda: MIN_COBRE_VERSION,
+        )
+        self._inject_cobre_io(monkeypatch, MagicMock(side_effect=_fake_validate))
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                side_effect=_fake_import,
+            ),
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--boundary-fcf",
+                    "--cobre-bin",
+                    str(tmp_path / "fake-cobre-bin"),
+                    "--validate",
+                ],
+                monkeypatch,
+            )
+
+        assert code == 2
+        assert call_order == ["import_boundary_fcf", "validate"]
+
+    def test_convert_decomp_boundary_fcf_ignored_under_dry_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --boundary-fcf`` imports nothing and notes it on stderr."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--dry-run",
+                    "--boundary-fcf",
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "--boundary-fcf is ignored under --dry-run" in stderr
+        mock_import.assert_not_called()
+        assert not dst.exists() or list(dst.iterdir()) == []
 
 
 class TestCompareDatasetWiring:
