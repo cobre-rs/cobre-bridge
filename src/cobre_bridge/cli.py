@@ -416,7 +416,7 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
         # code is DECOUPLED from it — this command always exits 0. An empty
         # dataset → ``all_within_tol`` False → ``status`` "mismatch".
         verdict = build_compare_verdict(dataset)
-        status = "mismatch" if not verdict.all_within_tol else "ok"
+        status = "ok" if verdict.all_within_tol else "mismatch"
         _emit_convert_json(
             build_verdict("compare newave", status, compare_summary(verdict))
         )
