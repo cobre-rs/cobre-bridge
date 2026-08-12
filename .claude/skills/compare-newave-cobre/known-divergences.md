@@ -67,47 +67,6 @@ Trace any real mismatch in these to a converter (`src/cobre_bridge/converters/`)
 (`comparators/`) — comparator reimplementations have produced false positives before (see
 _Comparator false positives_).
 
-- **LP variable bounds** — the feasible region. Compared by `compare bounds` (absolute
-  tolerance). If the bounds already differ, downstream result differences follow; check
-  bounds first when a result divergence is unexplained.
-- **Load / net load / non-controllable generation** — trusted by construction. Do **not**
-  spend triage effort distrusting them; focus on the dispatchable side.
-- **Security-curve levels** (% per REE) and the **curve penalty cost** (the curva CUSTO in
-  R$/MWh). The curve constraint is on the **linear** stored energy
-  `Σ ρ_acum · (storage − vmin)`, with `ρ_acum` converted to **MWmês/hm³** (the
-  hm³↔(m³/s)·month factor ≈ 2.63 = 730·3600/1e6); both sides hold that linear energy at the
-  curve. **Validate `VIOL_CAR` against this linear energy, not NEWAVE's reported nonlinear
-  `EARMF`** (the head-dependent physical energy, a few percent lower mid-storage) — see
-  _Comparator false positives_.
-- **Penalty-conversion productivities**, matching `pmo.dat`'s applied values: flow/storage
-  micro-penalties (VAZMIN / TURBMN / TURBMX / spillage / turbined) use the **mean equivalent
-  productivity** (`PROD_MEDIA_SIN`); withdrawal (DESVIO) and evaporation use the **max
-  accumulated productivity at maximum head** (`MAX_PRODTACUM_SIN`). These are **uniform
-  system-wide**, not per-plant.
-- **Per-plant hydro generation and productivity** — validate via the **operational**
-  `GHIDUH / QTURUH` (NEWAVE) vs Cobre `equivalent_productivity_mw_per_m3s`, **not** the
-  `pmo.produtibilidades_equivalentes` diagnostic table (which uses a different tailrace
-  convention and will read a few percent off).
-- **Per-plant thermal generation** — via **`GTERMTOT` (= `GTERM` + `GTMIN`)**, the SIN total;
-  `GTERM` alone is generation _above_ must-run minimum and under-reports each plant.
-- **Per-stage min-outflow / min-generation floors** — converted identically (Cobre min-outflow
-  = `modif.dat` VAZMIN where present, else `hidr.dat` `vazao_minima_historica`, which NEWAVE
-  also enforces); plants that violate on one side violate on the other.
-- **Evaporation** — volume-coupled on both sides (mm coefficient × area(storage) via the
-  cota-area-volume curve); the coefficients come from `hidr` `evaporacao_{MES}`. Evaporated
-  _volume_ differs only when storage differs (a symptom, not a cause).
-- **Exchange limits** (per-stage, from `sistema.dat`) match; the exchange penalty is a
-  tie-breaker micro-penalty with no measurable cost footprint (recover it from the dual, not
-  the cost — see gotchas).
-- **Inflows and water conservation** (turbined + spilled). Inflows match; a turbine↔spill
-  swap that conserves water is a reallocation, not a missing/extra quantity (see below).
-- **Discounting** matches within rounding — Cobre discounts by **actual elapsed days**
-  (`1/(1+r)^(Δdays/365.25)`), NEWAVE by nominal month/12; the per-stage factor difference is
-  negligible (well under 0.1 %), not a divergence source.
-- **Total operation cost** — within the structural band of the next section. Compare via the
-  `pmo.dat` NPV breakdown and per-stage `COPER` vs Cobre `immediate_cost`; do **not** read
-  `MEDIAS-SIN` `DEFT`/`CDEF` (see gotchas).
-
 ---
 
 ## What always differs by construction (expected — explain, don't chase)
@@ -243,18 +202,7 @@ non-negativity defaults to `truncation_with_penalty`; cut selection defaults to 
 
 ### Comparator false positives — check the comparator before the converter
 
-When a divergence looks structural, suspect the comparison code before the converter. Past
-false positives:
-
-- A **reader defaulting a layout parameter** that was legitimately zero (e.g. a GNL lag
-  count), misaligning every derived coefficient. Rule: never default a legitimate `0` to a
-  nonzero — validate against the file.
-- A comparator **plotting a different quantity on each side** — e.g. NEWAVE's reported
-  _nonlinear_ stored energy (`EARMF`) against Cobre's _linear_ curve energy, producing a
-  spurious "NEWAVE below the bound without penalty." The curve constraint is linear on both
-  sides; the converter was correct.
-- A docstring claiming an **apples-to-apples pairing that isn't** (e.g. `CTERM` ↔
-  `thermal_cost`, which differ by the GNL fuel).
+When a divergence looks structural, suspect the comparison code before the converter.
 
 ---
 
@@ -263,94 +211,13 @@ false positives:
 The strongest way to separate a **real converter difference** from **emergent dual
 degeneracy** is to shrink the case until the divergence either vanishes or isolates.
 
-- **The spot-price lens.** Spot price (CMO) exact ⟺ the **dispatch** matches (a real,
-  cost-bearing agreement). Spot diverging ⟺ a genuine operational difference. Per-plant
-  **water-value** scatter alone, with spot/generation exact, is almost always cost-neutral
-  dual degeneracy (see the storage-allocation entry) — not a converter bug.
-- **Reduce to a self-contained cascade or single REE** (one that has no cross-REE flows), with
-  a hand-scaled load that keeps a meaningful scarcity regime (CMO > 0, not pinned). A faithful
-  conversion makes a small case **exact** (spot 0.0 %, per-plant water values ratio ≈ 1.0); the
-  full-case scatter then reveals itself as degeneracy that **compounds with reservoir count**,
-  not a converter error. Remove one suspected degenerate plant (set it `NC`) and re-compare — if
-  the rest snap to tolerance, that plant was a degenerate-dual hotspot.
-- **Build gotchas when reducing a NEWAVE deck:**
-  - The `MERCADO` load field in `sistema.dat` is **fixed-width, right-aligned** — editing it by
-    substitution can silently truncate (e.g. `22000` → `2200`); splice into the exact columns.
-  - A minimal deck can make NEWAVE **SIGABRT in its post-run teardown** ("double free") after it
-    has already converged and written valid `pmo.dat`/`forward.dat`/`cortes.dat`. Common trigger:
-    an **electric restriction (`restricao-eletrica.csv`) referencing plants absent** from the
-    reduced case — replace it with an inert valid restriction (a present plant, ±1e30 limits;
-    LIBS rejects a fully-empty file). Make `roda.sh` tolerate the crash (don't `set -e` through
-    it) and run `nwlistop` manually to produce the `MEDIAS` files for `compare`.
-
 ---
 
 ## Magnitude and reading gotchas
 
-- **Tolerances differ by comparison.** Bounds tolerance is **absolute**; results tolerance is
-  **relative**. State which value you used — a "match" at `1e-1` is not a match at `1e-3`.
-- **Sort by |Δ|, not count.** One large structural divergence outweighs many near-tolerance
-  ones; a large _relative_ error on a tiny quantity is usually noise — check absolute scale
-  and `WithinTol`/`sMAPE`.
-- **Cost agreement ≠ operation agreement.** Near-zero-priced quantities (excess, spill/turbine
-  split) are invisible to the cost breakdown — check operation results too.
-- **Deficit:** do **not** use `MEDIAS-SIN` `DEFT`/`CDEF` — they are mis-scaled, much smaller
-  than the true deficit (a NEWAVE reporting-unit artifact). Use the **pmo.dat NPV breakdown**
-  plus per-stage **`COPER`** vs Cobre **`immediate_cost`** (note `COPER` is in 10⁶ R$,
-  `immediate_cost` in R$ — a match shows as a ratio ≈ 1e6).
-- **Per-plant thermal:** `GTERMTOT`, not `GTERM`. **Thermal cost:** `CTERM` ≠ `thermal_cost`
-  (GNL) — use `immediate_cost`.
-- **Productivity:** validate via operational `GHIDUH/QTURUH`, not the pmo
-  `produtibilidades_equivalentes` reference table.
-- **Cobre per-block parquets** (hydro/thermal sim) are **per load block** — always weight by
-  `stages.json` `blocks[].hours` (or use `generation_mwh / Σ hours`). Unweighted block means
-  fabricate false "Cobre excess / phantom water" findings.
-- **Tie-breaker micro-penalties** (exchange, spillage, turbined) are buried in noise in the
-  **cost** — recover and validate them from the **dual / marginal** instead (by KKT the
-  relevant dual is bounded by the penalty, so its magnitude caps at the penalty value).
-- **Energy excess reads zero?** Confirm `penalties.json` `excess_cost` wasn't bumped above its
-  stock micro-penalty as a diagnostic — an inflated value **masks** real excess rather than
-  fixing it (the excess is structural; see the Energy-excess entry).
-
 ---
 
 ## Reference — decode recipes (generic tooling)
-
-- **`pmo.dat` is the penalty/cost ground truth** (the _applied_ penalties and the NPV cost
-  breakdown). Prefer it over reconstructions.
-- **`forward.dat`** — NEWAVE's binary forward dump, full precision per scenario
-  (`custo_operacao`, `custo_geracao_termica`, every physical violation quantity). Decode dims
-  from `forwarh.dat` (`tamanho_registro`, series count, REE/submarket/patamar counts);
-  `n_stages = filesize / record_size / n_series`. **Per-plant ordering is critical:** pass
-  exactly the simulated hydro plants (`confhd` existing `EX`, minus `FICT.*`) — extra rows
-  corrupt every per-plant field after the hydro block. Sum per-patamar contributions for the
-  stage value. `custo_geracao_termica` freezes at the last study month through the post-study
-  tail, so `op − thermal` only isolates non-thermal cost _within_ the study horizon.
-- **FCF cuts** — the cost-to-go the policy _builds_; drop to these for a water-value / future-cost
-  gap. Decoders and aligners live in `investigations/` (`newave_cut_investigation.py`,
-  `cobre_cut_investigation.py`, `compare_cuts.py`, `compare_states.py`).
-  - **NEWAVE:** `inewave.newave.Cortesh.read(cortesh.dat)` gives the header (`tamanho_corte`,
-    last-cut index per stage). Then `Cortes.read(cortes.dat, tamanho_registro=<tamanho_corte>,
-indice_ultimo_corte=…, codigos_rees=[]  (EMPTY ⇒ the individualized per-plant branch),
-codigos_uhes=<hydro codes>, codigos_submercados=[…], ordem_maxima_parp=…,
-numero_patamares_carga=…, lag_maximo_gnl=<from adterm, 0 if anticipation off>)` → a frame of
-    `rhs` + `pi_varm_uhe{code}` (∂FCF/∂storage, per **useful** volume) + `pi_qafl…` (inflow-lag
-    duals; **0** in deterministic mode). Record = 4 int32 + N float64, `N = n_uhes·(parp_order+1)+2`.
-    Filter `iteracao_construcao > 0` for real cuts.
-  - **Cobre:** `flatc -t ~/git/cobre/crates/cobre-io/schemas/policy.fbs --root-type StageCuts
---raw-binary -- output/policy/cuts/stage_NNN.bin` → JSON `cuts[]{intercept, coefficients[],
-iteration, is_active}`; coefficient order follows `state_dictionary.json` (state index →
-    hydro entity_id, storage in hm³).
-  - **Units:** Cobre cut FCF/coef ×1e6 → R$. NEWAVE cut FCF ×(stage hours ≈ 730) → R$; its
-    `pi_varm` is per useful-volume. **Compare the FCF as a function:** evaluate each model's full
-    cut set at a **shared** storage state and compare the future-cost _values_ — a per-plant
-    gradient compare is noisy because the binding cut sits at a different iteration / trial point
-    on each side. **Stage map:** the cut/FCF offset differs from the results offset by one.
-- **Per-plant NEWAVE generation:** thermal from `MEDIAS-USIT` (`GTMIN`/`GTERM`/`GTERMTOT`),
-  hydro from `MEDIAS-USIH` (`VARMUH` is storage **relative to the operative minimum**; `VEVAPUH`
-  /`VRETIRUH` are monthly **volumes in hm³** — ÷ the ≈2.63 factor to compare against Cobre m³/s).
-  With a single simulation series, MEDIAS equals the exact scenario. Stage map: MEDIAS stage =
-  Cobre stage + offset (`nw_offset` = min stage in `MEDIAS-SIN`).
 
 ---
 
