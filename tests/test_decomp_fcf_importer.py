@@ -21,6 +21,7 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1011,3 +1012,73 @@ def test_import_boundary_fcf_mar26rv2_run_load_blocked_by_live_target_enumeratio
         f"cobre run failed (exit {completed.returncode}):\n"
         f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
+
+
+@_skip_mar26_e2e
+def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
+    tmp_path: Path,
+) -> None:
+    """Ticket-012 -- the real operator CLI command, driven as a subprocess.
+
+    Neither ticket-008 (CLI wiring, ``import_boundary_fcf`` mocked) nor
+    ticket-013 (the two tests above, which call the real importer as a
+    *library* function) exercises the actual, documented
+    ``cobre-bridge convert decomp ... --boundary-fcf`` command end to end.
+    This test closes that seam: it drives the command as a subprocess
+    (``sys.executable -m cobre_bridge.cli``, hermetic against PATH) on the
+    real mar-26-rv2 deck with the real ``cobre-gnlbp`` binary, and proves the
+    CLI-surface facts the library-level tests cannot -- exit 0, the authored
+    ``boundary/`` + ``config.json`` wiring, the ``--json`` verdict's
+    ``summary["boundary_fcf"]``, and, via a coarse reload of the authored
+    checkpoint, that the CLI path produced a *populated* GNL ring rather than
+    all zeros. It deliberately does not re-run ``cobre validate`` or
+    ``cobre run``, and does not re-assert the per-thermal covered/uncovered
+    placement identity -- both stay owned by the two ticket-013 tests above.
+    """
+    dst = tmp_path / "converted"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "cobre_bridge.cli",
+            "convert",
+            "decomp",
+            str(_MAR26_DECK),
+            str(dst),
+            "--boundary-fcf",
+            "--cobre-bin",
+            str(_MAR26_COBRE_BIN),
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"convert decomp --boundary-fcf exited {completed.returncode}:\n"
+        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+    )
+
+    assert (dst / "boundary" / "metadata.json").is_file()
+    config = json.loads((dst / "config.json").read_text(encoding="utf-8"))
+    assert config["policy"]["boundary"] == {"path": "boundary", "source_stage": 4}
+
+    doc = json.loads(completed.stdout)
+    assert doc["summary"]["boundary_fcf"] == {
+        "imported": True,
+        "path": "boundary",
+        "run_constraint": f"--output={dst}",
+    }
+
+    import cobre
+
+    policy = cobre.results.load_policy(dst, policy_subdir="boundary")
+    terminal = max(policy["stage_cuts"], key=lambda stage: stage["stage_id"])
+    entity_manifest = terminal["entity_manifest"]
+    first_cut = terminal["cuts"][0]
+    assert any(
+        slot["entity_type"] == _ANTICIPATED_THERMAL_STATE
+        and first_cut["coefficients"][position] != 0.0
+        for position, slot in enumerate(entity_manifest)
+    ), "no nonzero AnticipatedThermalState coefficient in the terminal cut"

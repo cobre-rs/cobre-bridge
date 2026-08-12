@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, CortesHeader, StageCutRecord
-from cobre_bridge.decomp.fcf.mapper import MappedCut, map_boundary_cuts
+from cobre_bridge.decomp.fcf.mapper import GnlRingPlan, MappedCut, map_boundary_cuts
 from cobre_bridge.decomp.fcf.writer import (
     build_metadata,
     build_stage_cuts_payload,
@@ -187,6 +187,7 @@ def synthetic_roundtrip(
     *,
     stage_id: int = 10,
     cost_scale_factor: float = 1.0,
+    gnl_plan: GnlRingPlan | None = None,
 ) -> dict[str, Any]:
     """Map, write, and reload a synthetic boundary checkpoint; no deck, no
     cobre binary.
@@ -196,7 +197,10 @@ def synthetic_roundtrip(
     `boundary_dir`, then returns the reloaded policy dict verbatim. `cobre`
     is imported lazily, inside this function body, so the rest of the
     module stays importable without the optional cobre-python wheel — only
-    call this from a `@requires_cobre_python`-guarded test.
+    call this from a `@requires_cobre_python`-guarded test. `gnl_plan`
+    defaults to `None`, forwarded verbatim to `map_boundary_cuts`, so every
+    existing caller keeps leaving the GNL ring at `0.0` unchanged; pass it to
+    exercise a populated ring.
 
     Raises
     ------
@@ -206,7 +210,7 @@ def synthetic_roundtrip(
     """
     import cobre
 
-    mapping = map_boundary_cuts(cuts, manifest, id_map)
+    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
     stage_cuts_payload = build_stage_cuts_payload(mapping, manifest, stage_id=stage_id)
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
     metadata = build_metadata(
