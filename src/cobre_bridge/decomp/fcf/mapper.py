@@ -6,15 +6,19 @@ layout. This module maps each of the source model's boundary cuts
 (``fcf/cortes.py``'s :class:`~cobre_bridge.decomp.fcf.cortes.BoundaryCuts`,
 ticket-002) onto that layout: storage terms join by plant code, inflow-lag
 terms join 1:1 by calendar-month lag slot, and — when the caller supplies a
-:class:`GnlRingPlan` — GNL-anticipated-ring terms join each target's dated
-ring slot(s) via a chain-rule patamar sum over ``pi_gnl`` (ticket-009). A
+:class:`GnlRingPlan` — GNL-anticipated-ring terms join each target's
+*covered* dated ring slot(s) via a chain-rule patamar sum over ``pi_gnl``
+(ticket-009; narrowed to covered post-horizon lanes only by ticket-013). A
 source plant with no match in the target manifest is dropped (D3), never
 folded into a neighbour, and recorded in :class:`MappingResult.dropped` for
 the diagnostics layer (epic 4) to render; a GNL source/target term with no
-live counterpart is dropped the same way into
+live counterpart — including a dated ring slot whose delivery falls before
+:attr:`GnlRingPlan.post_horizon_start` (a non-covered, K=0-lead lane cobre
+will not accept a coefficient on) — is dropped the same way into
 :class:`MappingResult.gnl_dropped`. ``HydroTransitBucket`` slots, and any
 ``AnticipatedThermalState`` ring slot with no resolved target (including the
-undated sentinel slot), are left at an explicit coefficient ``0.0``.
+undated sentinel slot and every non-covered dated slot), are left at an
+explicit coefficient ``0.0``.
 """
 
 from __future__ import annotations
@@ -105,10 +109,19 @@ class GnlRingPlan:
 
     Built by the importer (ticket-010) from the deck's own GNL declarations;
     this module never derives it — see the module docstring's deck-free
-    contract.
+    contract. ``post_horizon_start`` (ticket-013) is the earliest post-study
+    stage start, as a ``YYYYMMDD`` int, computed by the importer from
+    ``post_study_stages.json`` — this module stays deck-free and never reads
+    that file itself, only the threaded-in int. A dated ring slot is
+    *covered* (receives the `pi_gnl` coefficient) when
+    ``post_horizon_start is None`` (no filter — the pre-ticket-013 default,
+    so every existing construction keeps placing on all dated slots) or its
+    ``delivery_date >= post_horizon_start``; otherwise it is *non-covered*
+    and dropped (see :func:`_resolve_gnl_targets`).
     """
 
     targets: tuple[GnlThermalTarget, ...]
+    post_horizon_start: int | None = None
 
 
 @dataclass(frozen=True)
@@ -279,6 +292,22 @@ def _resolve_storage_targets(
     return resolved, tuple(dropped)
 
 
+def _first_active_gnl_sum(cuts: BoundaryCuts, cols: tuple[int, ...]) -> float:
+    """The chain-rule `Σ_p pi_gnl[cols]` from `cuts`' first active record.
+
+    A representative value for a non-covered dated slot's `GnlDroppedTerm`
+    (ticket-013) — the sum that WOULD have been placed had the slot been
+    covered — mirroring `_resolve_storage_targets`'s representative-`beta`
+    convention. `0.0` when `cuts` carries no active record at all (never
+    raised on; the diagnostics layer reports a representative figure, not a
+    load-bearing one).
+    """
+    for record in cuts.records:
+        if record.is_active:
+            return math.fsum(record.pi_gnl[column] for column in cols)
+    return 0.0
+
+
 def _resolve_gnl_targets(
     cuts: BoundaryCuts,
     ring_index: Mapping[int, tuple[tuple[int, int, int], ...]],
@@ -290,6 +319,17 @@ def _resolve_gnl_targets(
     split: cut-invariant, computed exactly once regardless of how many
     records `cuts` carries. Returns `resolved: {ring position -> tuple of
     pi_gnl flat-column indices to sum}` plus every GNL drop.
+
+    A target's dated ring slot(s) split into *covered* (`delivery_date >=
+    gnl_plan.post_horizon_start`, or `post_horizon_start is None` — no
+    filter) and *non-covered* (`delivery_date < post_horizon_start`,
+    ticket-013): only covered slots land in `resolved`; each non-covered slot
+    is dropped into the returned `GnlDroppedTerm`s (reason names the
+    post-study horizon), staying at coefficient `0.0` exactly like the
+    existing GNL drops — never folded onto a neighbour. A target with dated
+    slots that are *all* non-covered still gets the non-covered drop path,
+    never the "no dated ring slot for thermal" reason (that one is reserved
+    for a target with zero dated slots at all).
 
     Returns `({}, ())` — no GNL mapping at all — when `gnl_plan` is `None`,
     `cuts` has no records, the source deck carries no GNL lag axis
@@ -346,7 +386,7 @@ def _resolve_gnl_targets(
             continue
         targeted_submercados.add(target.submercado)
         dated = tuple(
-            position
+            (delivery_date, position)
             for _subindex, delivery_date, position in ring_index.get(
                 target.thermal_id, ()
             )
@@ -363,12 +403,38 @@ def _resolve_gnl_targets(
                 )
             )
             continue
+
+        post_horizon_start = gnl_plan.post_horizon_start
+        covered = tuple(
+            position
+            for delivery_date, position in dated
+            if post_horizon_start is None or delivery_date >= post_horizon_start
+        )
+        has_uncovered = any(
+            post_horizon_start is not None and delivery_date < post_horizon_start
+            for delivery_date, _position in dated
+        )
+
         cols = tuple(
             col(target.submercado, patamar, target.nl_lag)
             for patamar in range(1, n_patamares + 1)
         )
-        for position in dated:
+        for position in covered:
             resolved[position] = cols
+
+        if has_uncovered:
+            dropped.append(
+                GnlDroppedTerm(
+                    thermal_id=target.thermal_id,
+                    submercado=target.submercado,
+                    nl_lag=target.nl_lag,
+                    coefficient=_first_active_gnl_sum(cuts, cols),
+                    reason=(
+                        "delivery before post-study horizon (non-covered "
+                        "post-horizon lane)"
+                    ),
+                )
+            )
 
     # Source-submercado drops (D3-like): a submercado no target claims, but
     # whose pi_gnl carries a nonzero coefficient on some active record, has
@@ -417,19 +483,23 @@ def map_boundary_cuts(
     Storage terms join by plant code (`HydroStorage`, D3-drop on a
     source-only plant); inflow-lag terms join 1:1 by `lag_slot_of` onto
     `HydroInflowLag`. When `gnl_plan` is given, each `AnticipatedThermalState`
-    ring slot named by one of its targets' dated slot(s) carries the
-    chain-rule patamar sum `Σ_p pi_gnl[col(s,p,nl_lag)]` (`math.fsum`, order-
-    independent); a target with no dated ring slot, or a source submercado
-    with no matching target, is dropped and recorded in
-    `MappingResult.gnl_dropped`, never folded onto a neighbour.
-    `HydroTransitBucket` slots, the sentinel (undated) `AnticipatedThermalState`
-    slot, and every ring slot with no resolved target are left at an
-    explicit `0.0` regardless of `gnl_plan`; `gnl_plan=None` (the default)
-    leaves the entire ring at `0.0`, byte-for-byte matching this function's
-    pre-GNL behaviour. `intercept` is the source record's `rhs`, carried
-    verbatim (never re-derived from alpha/x-hat). Produces one `MappedCut`
-    per source record, active or not — active-frontier selection is
-    ticket-008's writer concern, not the mapper's.
+    ring slot named by one of its targets' *covered* dated slot(s) — i.e.
+    `delivery_date >= gnl_plan.post_horizon_start`, or every dated slot when
+    `post_horizon_start is None` — carries the chain-rule patamar sum
+    `Σ_p pi_gnl[col(s,p,nl_lag)]` (`math.fsum`, order-independent); a target
+    with no dated ring slot, a dated slot whose delivery falls before the
+    post-study horizon (a non-covered, K=0-lead lane cobre rejects a
+    coefficient on — ticket-013), or a source submercado with no matching
+    target, is dropped and recorded in `MappingResult.gnl_dropped`, never
+    folded onto a neighbour. `HydroTransitBucket` slots, the sentinel
+    (undated) `AnticipatedThermalState` slot, and every ring slot with no
+    resolved (covered) target are left at an explicit `0.0` regardless of
+    `gnl_plan`; `gnl_plan=None` (the default) leaves the entire ring at
+    `0.0`, byte-for-byte matching this function's pre-GNL behaviour.
+    `intercept` is the source record's `rhs`, carried verbatim (never
+    re-derived from alpha/x-hat). Produces one `MappedCut` per source
+    record, active or not — active-frontier selection is ticket-008's
+    writer concern, not the mapper's.
 
     Raises
     ------

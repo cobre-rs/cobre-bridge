@@ -61,6 +61,15 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 
+#: (ticket-013 Requirement C.3 / Finding 3) below this floor, a GNL deviation
+#: group's carried Σ is treated as numerically vanished — its relative spread
+#: `(max_p c_p - min_p c_p) / |Σ_p c_p|` would otherwise inflate into noise
+#: (observed: a Σ=-4e-05 group reported spread 0.25 while the weight-carrying
+#: Σ=-4412 group's spread was only ~0.09) — so such a group is excluded from
+#: the `boundary-fcf-gnl-anticipated-deviation` diagnostic's relative
+#: `max_spread` HEADLINE only; its per-row table values are unaffected.
+_GNL_DEVIATION_SUM_FLOOR = 1e-6
+
 
 def _gnl_targets_from(
     model: GnlCommitmentModel, thermals_doc: Mapping[str, object]
@@ -139,6 +148,33 @@ def _gnl_targets_from(
     return GnlRingPlan(tuple(targets)) if targets else None
 
 
+def _post_horizon_start(case_dir: Path) -> int | None:
+    """The earliest post-study stage start, as a ``YYYYMMDD`` int, or ``None``.
+
+    Reads ``case_dir / "post_study_stages.json"`` (the
+    ``decomp/anticipated.py::GnlEmission.post_study_stages`` payload,
+    written by ``decomp/pipeline.py`` only when some GNL delivery lands
+    post-horizon). Returns ``None`` when the file is absent or its
+    ``stages`` list is empty — a case shape as legitimate as "no post-study
+    horizon at all"; the mapper's ``GnlRingPlan.post_horizon_start=None``
+    disables the covered-lane filter entirely for that case (ticket-013).
+
+    A malformed ``start_date`` string is NOT swallowed here: the
+    ``ValueError`` from ``int(...)`` propagates verbatim rather than
+    silently disabling the filter — a corrupt horizon is a real problem,
+    never a "no horizon" case.
+    """
+    path = case_dir / "post_study_stages.json"
+    if not path.is_file():
+        return None
+    with path.open(encoding="utf-8") as handle:
+        doc = json.load(handle)
+    stages = doc.get("stages", [])
+    if not stages:
+        return None
+    return min(int(stage["start_date"].replace("-", "")) for stage in stages)
+
+
 def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan | None:
     """Read the deck's ``dadgnl`` and build the GNL ring plan, or ``None``.
 
@@ -146,7 +182,10 @@ def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan
     when the deck carries no ``dadgnl`` file at all, or when
     :func:`~cobre_bridge.decomp.anticipated.read_gnl_model` reports the deck
     is GNL-off (no committed dispatch, the G6 gate) — reconciled with that
-    reader's own gate, never re-derived here.
+    reader's own gate, never re-derived here. Otherwise threads
+    :func:`_post_horizon_start` into the resolved plan so
+    ``fcf/mapper.py::_resolve_gnl_targets`` restricts placement to covered
+    post-horizon lanes (ticket-013) without itself reading any deck file.
     """
     if deck_files.dadgnl is None:
         return None
@@ -156,12 +195,15 @@ def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan
     thermals_path = case_dir / "system" / "thermals.json"
     with thermals_path.open(encoding="utf-8") as handle:
         thermals_doc = json.load(handle)
-    return _gnl_targets_from(model, thermals_doc)
+    plan = _gnl_targets_from(model, thermals_doc)
+    if plan is None:
+        return None
+    return GnlRingPlan(plan.targets, post_horizon_start=_post_horizon_start(case_dir))
 
 
 def _gnl_deviation_rows(
     cuts: BoundaryCuts, gnl_plan: GnlRingPlan
-) -> list[tuple[int, int, float, float]]:
+) -> list[tuple[int, int, float, float, float]]:
     """The pre-fan-out patamar spread carried into each live GNL ring group.
 
     Mirrors ``mapper.py::_resolve_gnl_targets``'s ``col(s, p, l)`` flat-column
@@ -170,12 +212,16 @@ def _gnl_deviation_rows(
     far each active cut's per-patamar sensitivities deviate from the uniform
     rate cobre's hours-weighted fan-out reconstructs. For each unique
     ``(submercado, lag)`` pair named by ``gnl_plan.targets``, returns
-    ``(submercado, lag, carried_sum, spread)`` from whichever active record
-    maximises the spread ``(max_p c_p - min_p c_p) / |sum_p c_p|`` (guarded
-    to ``0.0`` when ``|sum_p c_p| <= 1e-9``) — a worst-case snapshot, not an
-    aggregate across records. Skips a group whose ``(submercado, lag)`` falls
-    outside ``cuts``' own ``pi_gnl`` shape (the mapper already records that as
-    a target-side ``GnlDroppedTerm``).
+    ``(submercado, lag, carried_sum, relative_spread, absolute_spread)`` from
+    whichever active record maximises the relative spread
+    ``(max_p c_p - min_p c_p) / |sum_p c_p|`` (guarded to ``0.0`` when
+    ``|sum_p c_p| <= 1e-9``) — a worst-case snapshot, not an aggregate across
+    records; ``absolute_spread`` (``max_p c_p - min_p c_p``, ticket-013
+    Requirement C.3) is that same selected record's un-normalised spread, so
+    a caller can report it alongside the relative figure without the
+    near-zero-Σ inflation the ratio alone is prone to. Skips a group whose
+    ``(submercado, lag)`` falls outside ``cuts``' own ``pi_gnl`` shape (the
+    mapper already records that as a target-side ``GnlDroppedTerm``).
 
     Returns rows sorted ascending by ``(submercado, lag)``; empty when
     ``cuts`` has no active records, or the boundary carries no GNL block
@@ -199,7 +245,7 @@ def _gnl_deviation_rows(
         )
 
     groups = sorted({(target.submercado, target.nl_lag) for target in gnl_plan.targets})
-    rows: list[tuple[int, int, float, float]] = []
+    rows: list[tuple[int, int, float, float, float]] = []
     for submercado, lag in groups:
         if not (1 <= submercado <= n_submercados) or not (1 <= lag <= lag_maximo_gnl):
             continue
@@ -208,16 +254,17 @@ def _gnl_deviation_rows(
         )
         best_sum = 0.0
         best_spread = 0.0
+        best_abs_spread = 0.0
         for record in active_records:
             values = tuple(record.pi_gnl[c] for c in cols)
             total = math.fsum(values)
-            spread = (
-                (max(values) - min(values)) / abs(total) if abs(total) > 1e-9 else 0.0
-            )
+            abs_spread = max(values) - min(values)
+            spread = abs_spread / abs(total) if abs(total) > 1e-9 else 0.0
             if spread >= best_spread:
                 best_spread = spread
                 best_sum = total
-        rows.append((submercado, lag, best_sum, best_spread))
+                best_abs_spread = abs_spread
+        rows.append((submercado, lag, best_sum, best_spread, best_abs_spread))
     return rows
 
 
@@ -239,7 +286,12 @@ def _emit_import_diagnostics(
     (``cuts.header.lag_maximo_gnl > 0``), additionally emits
     ``boundary-fcf-gnl-anticipated-deviation`` — the per-``(submercado, lag)``
     pre-fan-out patamar spread the mapper's chain-rule sum collapses (see
-    :func:`_gnl_deviation_rows`); ``gnl_plan=None`` (the default) gates it off
+    :func:`_gnl_deviation_rows`), headlined as a relative/absolute spread
+    pair (the relative figure excludes a near-zero-Σ group per
+    ``_GNL_DEVIATION_SUM_FLOOR``, ticket-013 Requirement C.3) plus a
+    dropped-coverage count read verbatim from ``mapping.gnl_dropped``
+    (source-submercado drops plus, since ticket-013, non-covered
+    dated-slot drops); ``gnl_plan=None`` (the default) gates it off
     entirely, so pre-ticket-010 2-arg callers are unchanged.
 
     Pure side effect via :func:`cobre_bridge.diagnostics.emit`: reads
@@ -257,19 +309,19 @@ def _emit_import_diagnostics(
             severity=dx.Severity.INFO,
             category="Boundary FCF",
             title=f"Boundary FCF authors {summary.n_active_cuts} cut(s)",
+            # (Finding 1, ticket-013 Requirement C.1) `lag_nonzero_by_depth` is
+            # the one fact not already in this string; every other figure a
+            # `notes` bullet used to restate (n_active_cuts, storage_nonzero_
+            # plants, rhs_min/max) is already here, so `notes` is dropped
+            # rather than duplicating them. Full-precision RHS belongs in
+            # `--diagnostics-json`, not a duplicate human bullet.
             summary=(
                 f"{summary.n_active_cuts} active cut(s) authored from the "
                 f"source model's boundary cuts; {summary.storage_nonzero_plants} "
-                "plant(s) carry a nonzero storage coefficient, RHS range "
-                f"[{summary.rhs_min:.6g}, {summary.rhs_max:.6g}]"
+                "plant(s) carry a nonzero storage coefficient; nonzero "
+                f"inflow-lag plants by depth {summary.lag_nonzero_by_depth}; "
+                f"RHS range [{summary.rhs_min:.6g}, {summary.rhs_max:.6g}]"
             ),
-            notes=[
-                f"n_active_cuts={summary.n_active_cuts}",
-                f"storage_nonzero_plants={summary.storage_nonzero_plants}",
-                f"lag_nonzero_by_depth={summary.lag_nonzero_by_depth}",
-                f"rhs_min={summary.rhs_min!r}",
-                f"rhs_max={summary.rhs_max!r}",
-            ],
         ),
         logger=_LOG,
     )
@@ -305,10 +357,24 @@ def _emit_import_diagnostics(
 
     if gnl_plan is not None and cuts.header.lag_maximo_gnl > 0:
         rows = _gnl_deviation_rows(cuts, gnl_plan)
-        dropped_source_terms = [
-            term for term in mapping.gnl_dropped if term.thermal_id is None
+        # "Dropped" is every GNL term that reached no *covered* target: a
+        # source submercado with no live thermal at all (`thermal_id is
+        # None`), or (ticket-013) a target's dated slot dropped for falling
+        # before the post-study horizon (reason names it) — read straight
+        # from `mapping.gnl_dropped`, never recomputing the covered/
+        # uncovered split independently here.
+        dropped_coverage_terms = [
+            term
+            for term in mapping.gnl_dropped
+            if term.thermal_id is None or "post-study horizon" in term.reason
         ]
-        max_spread = max((row[3] for row in rows), default=0.0)
+        # See `_GNL_DEVIATION_SUM_FLOOR`'s docstring: a near-zero-Σ group is
+        # excluded from the relative headline only (its row still renders
+        # below); the absolute spread has no such denominator and is
+        # reported unfiltered.
+        headline_rows = [row for row in rows if abs(row[2]) >= _GNL_DEVIATION_SUM_FLOOR]
+        max_relative_spread = max((row[3] for row in headline_rows), default=0.0)
+        max_absolute_spread = max((row[4] for row in rows), default=0.0)
         dx.emit(
             dx.Diagnostic(
                 code="boundary-fcf-gnl-anticipated-deviation",
@@ -316,10 +382,14 @@ def _emit_import_diagnostics(
                 category="Boundary FCF",
                 title="GNL anticipated ring carries a per-patamar sum",
                 summary=(
-                    f"max pre-fan-out patamar spread {max_spread:.4g} across "
-                    f"{len(rows)} live GNL ring target group(s); "
-                    f"{len(dropped_source_terms)} source submercado GNL "
-                    "term(s) dropped (no live thermal in that submercado)"
+                    f"max pre-fan-out patamar spread {max_relative_spread:.4g} "
+                    f"relative / {max_absolute_spread:.4g} absolute across "
+                    f"{len(rows)} live GNL ring target group(s) (a group whose "
+                    f"carried Σ is below {_GNL_DEVIATION_SUM_FLOOR:g} is excluded "
+                    "from the relative headline); "
+                    f"{len(dropped_coverage_terms)} GNL term(s) dropped for "
+                    "no covered target (no live thermal in that submercado, "
+                    "or delivery before the post-study horizon)"
                 ),
                 table=dx.DiagnosticTable(
                     columns=[
@@ -327,26 +397,12 @@ def _emit_import_diagnostics(
                         "Lag",
                         "Σ pi_gnl (carried)",
                         "Patamar spread",
-                        "Dropped",
                     ],
                     rows=[
-                        [
-                            submercado,
-                            lag,
-                            round(carried_sum, 6),
-                            round(spread, 6),
-                            len(dropped_source_terms),
-                        ]
-                        for submercado, lag, carried_sum, spread in rows
+                        [submercado, lag, round(carried_sum, 6), round(spread, 6)]
+                        for submercado, lag, carried_sum, spread, _abs_spread in rows
                     ],
-                    justify=["right", "right", "right", "right", "right"],
-                ),
-                remediation=(
-                    "The bridge carries a single per-patamar sum into each "
-                    "anticipated ring slot; cobre re-derives per-block "
-                    "coefficients via hours-weighted fan-out — an accepted, "
-                    "documented approximation (TRACKED COBRE-GAP C12, "
-                    "~/git/cobre/plans/conversion-found-improvements.md)"
+                    justify=["right", "right", "right", "right"],
                 ),
             ),
             logger=_LOG,

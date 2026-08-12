@@ -18,6 +18,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,7 @@ from cobre_bridge.decomp.anticipated import GnlCommitmentModel, GnlThermal
 from cobre_bridge.decomp.fcf import (
     _emit_import_diagnostics,
     _gnl_targets_from,
+    _post_horizon_start,
     import_boundary_fcf,
 )
 from cobre_bridge.decomp.fcf.cortes import (
@@ -245,15 +248,12 @@ def test_import_boundary_fcf_emits_diagnostics(
     cortesh = Cortesh.read(str(_CORTESH))
     cuts = read_cortes(_CORTES, cortesh, boundary_stage=None)
     summary = summarize_cut_families(cuts)
-    assert f"n_active_cuts={summary.n_active_cuts}" in summary_diagnostic.notes
-    assert (
-        f"storage_nonzero_plants={summary.storage_nonzero_plants}"
-        in summary_diagnostic.notes
-    )
-    assert (
-        f"lag_nonzero_by_depth={summary.lag_nonzero_by_depth}"
-        in summary_diagnostic.notes
-    )
+    # ticket-013 Requirement C.1: the figures live in `summary` now, not a
+    # separate restating `notes` bullet (dropped as duplicate bloat).
+    assert summary_diagnostic.notes == []
+    assert str(summary.n_active_cuts) in summary_diagnostic.summary
+    assert str(summary.storage_nonzero_plants) in summary_diagnostic.summary
+    assert str(summary.lag_nonzero_by_depth) in summary_diagnostic.summary
 
 
 def test_emit_import_diagnostics_ac1_ac2_from_synthetic() -> None:
@@ -288,15 +288,12 @@ def test_emit_import_diagnostics_ac1_ac2_from_synthetic() -> None:
 
     summary_diagnostic = by_code["boundary-fcf-cut-family-summary"]
     summary = summarize_cut_families(cuts)
-    assert f"n_active_cuts={summary.n_active_cuts}" in summary_diagnostic.notes
-    assert (
-        f"storage_nonzero_plants={summary.storage_nonzero_plants}"
-        in summary_diagnostic.notes
-    )
-    assert (
-        f"lag_nonzero_by_depth={summary.lag_nonzero_by_depth}"
-        in summary_diagnostic.notes
-    )
+    # ticket-013 Requirement C.1: the figures live in `summary` now, not a
+    # separate restating `notes` bullet (dropped as duplicate bloat).
+    assert summary_diagnostic.notes == []
+    assert str(summary.n_active_cuts) in summary_diagnostic.summary
+    assert str(summary.storage_nonzero_plants) in summary_diagnostic.summary
+    assert str(summary.lag_nonzero_by_depth) in summary_diagnostic.summary
 
 
 def test_emit_import_diagnostics_no_dropped_gates_dropped_diagnostic_off() -> None:
@@ -514,3 +511,487 @@ def test_emit_import_diagnostics_gnl_deviation_gated_off_without_plan() -> None:
     assert [diagnostic.code for diagnostic in sink] == [
         "boundary-fcf-cut-family-summary"
     ]
+
+
+# ---------------------------------------------------------------------------
+# ticket-013: covered-lane filter. `_post_horizon_start` (tier-1, no deck, no
+# cobre binary) + the deviation diagnostic's dropped-coverage count reading
+# the new uncovered-lane drops from `mapping.gnl_dropped`; plus one tier-3
+# `@skipif` e2e boundary-load smoke against the real `decomp-mar-26-rv2`
+# deck + the `feat/cobre-gnl-boundary-pricing` branch binary.
+# ---------------------------------------------------------------------------
+
+
+def test_post_horizon_start_returns_earliest_stage(tmp_path: Path) -> None:
+    """AC 3 — the earliest ``stages[i].start_date`` becomes a ``YYYYMMDD``
+    int, regardless of the list's own order."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "post_study_stages.json").write_text(
+        json.dumps(
+            {
+                "stages": [
+                    {"start_date": "2026-05-09", "duration_hours": 168.0},
+                    {"start_date": "2026-05-01", "duration_hours": 192.0},
+                ],
+                "thermal_bounds": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _post_horizon_start(case_dir) == 20260501
+
+
+def test_post_horizon_start_none_when_file_absent(tmp_path: Path) -> None:
+    """AC 3 — no ``post_study_stages.json`` at all returns ``None``."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    assert _post_horizon_start(case_dir) is None
+
+
+def test_post_horizon_start_none_when_stages_empty(tmp_path: Path) -> None:
+    """AC 3 — an empty ``stages`` list is the same "no horizon" case as an
+    absent file."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "post_study_stages.json").write_text(
+        json.dumps({"stages": [], "thermal_bounds": []}), encoding="utf-8"
+    )
+
+    assert _post_horizon_start(case_dir) is None
+
+
+def test_post_horizon_start_malformed_start_date_propagates(tmp_path: Path) -> None:
+    """Error Handling — a corrupt ``start_date`` is NOT silently downgraded
+    to "no horizon"; the ``ValueError`` from ``int(...)`` propagates
+    verbatim."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "post_study_stages.json").write_text(
+        json.dumps({"stages": [{"start_date": "not-a-date"}]}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError):
+        _post_horizon_start(case_dir)
+
+
+def test_emit_import_diagnostics_gnl_deviation_dropped_count_includes_uncovered_lane() -> (
+    None
+):
+    """AC 4 — the ``boundary-fcf-gnl-anticipated-deviation`` diagnostic's
+    dropped-coverage count includes a covered-lane drop produced by a
+    ``post_horizon_start`` that makes a target's only dated slot uncovered
+    -- read straight from ``mapping.gnl_dropped``, never recomputed
+    independently in the diagnostic.
+    """
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260401),
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=2, n_patamares=3, submercado_codes=(1,)
+    )
+    # col(1,p,2) for p=1..3 -> flat indices 1, 3, 5 (P=3, L=2).
+    pi_gnl = _gnl_row(6, {1: 0.1, 3: 0.2, 5: 0.3})
+    record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    # thermal 94's only dated slot (20260401) is before this post_horizon_start
+    # (20260501) -- non-covered, so the mapper drops it rather than placing it.
+    gnl_plan = GnlRingPlan(
+        (GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),),
+        post_horizon_start=20260501,
+    )
+
+    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+    assert any(
+        term.thermal_id == 94 and "post-study horizon" in term.reason
+        for term in mapping.gnl_dropped
+    )
+    assert mapping.cuts[0].coefficients[1] == 0.0  # dropped, stays at 0.0
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping, gnl_plan)
+
+    deviation = next(
+        d for d in sink if d.code == "boundary-fcf-gnl-anticipated-deviation"
+    )
+    assert deviation.table is not None
+    assert "1 GNL term(s) dropped" in deviation.summary
+    # ticket-013 Requirement C.2: no per-row `Dropped` column; the count
+    # above is the only place it is reported.
+    assert deviation.table.columns == [
+        "Submercado",
+        "Lag",
+        "Σ pi_gnl (carried)",
+        "Patamar spread",
+    ]
+    assert all(len(row) == 4 for row in deviation.table.rows)
+
+
+def test_emit_import_diagnostics_c1_panel1_notes_deduped() -> None:
+    """Ticket-013 AC C.1 — Panel 1's `notes` no longer restate `summary`.
+
+    `lag_nonzero_by_depth` is the one fact `notes` used to carry that
+    `summary` did not already state; folded into `summary`, `notes` is now
+    empty rather than restating `n_active_cuts`/`storage_nonzero_plants`/
+    `rhs_min`/`rhs_max`.
+    """
+    cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
+    mapping = MappingResult(
+        cuts=(make_mapped_cut(coefficients=(1.5,), intercept=10.0),), dropped=()
+    )
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping)
+
+    summary_diagnostic = next(
+        d for d in sink if d.code == "boundary-fcf-cut-family-summary"
+    )
+    summary = summarize_cut_families(cuts)
+    assert summary_diagnostic.notes == []
+    assert str(summary.lag_nonzero_by_depth) in summary_diagnostic.summary
+    for stale_bullet in (
+        f"n_active_cuts={summary.n_active_cuts}",
+        f"storage_nonzero_plants={summary.storage_nonzero_plants}",
+        f"rhs_min={summary.rhs_min!r}",
+        f"rhs_max={summary.rhs_max!r}",
+    ):
+        assert stale_bullet not in summary_diagnostic.notes
+
+
+def test_emit_import_diagnostics_c2_panel3_no_dropped_column() -> None:
+    """Ticket-013 AC C.2 — Panel 3's table drops the constant `Dropped`
+    column; the dropped count stays in `summary` only.
+    """
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=2, n_patamares=3, submercado_codes=(1,)
+    )
+    pi_gnl = _gnl_row(6, {1: 0.1, 3: 0.2, 5: 0.3})
+    record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
+    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping, gnl_plan)
+
+    deviation = next(
+        d for d in sink if d.code == "boundary-fcf-gnl-anticipated-deviation"
+    )
+    assert deviation.table is not None
+    assert deviation.table.columns == [
+        "Submercado",
+        "Lag",
+        "Σ pi_gnl (carried)",
+        "Patamar spread",
+    ]
+    assert deviation.table.justify == ["right", "right", "right", "right"]
+    assert "0 GNL term(s) dropped" in deviation.summary
+
+
+def test_emit_import_diagnostics_c3_headline_excludes_near_zero_sum_group() -> None:
+    """Ticket-013 AC C.3 — a near-zero-Σ group's inflated relative spread
+    does not dominate the `max_spread` HEADLINE; the weight-carrying
+    group's spread does, and an absolute spread is reported alongside.
+
+    Mirrors the observed real-deck shape (a `Σ~-4412` group at spread
+    `~0.09` vs. a `Σ~-4e-05` group at spread `0.25`) with round synthetic
+    numbers: group `(submercado 1, lag 1)` carries substantial weight
+    (`Σ=-3200`, relative spread `0.0625`); group `(submercado 2, lag 1)`
+    carries a near-zero sum (`Σ=1e-07`, relative spread `1.0`) — below
+    `_GNL_DEVIATION_SUM_FLOOR` (`1e-6`), so it is excluded from the
+    headline even though its own relative spread is far larger. The
+    per-row table still carries both groups' own values.
+    """
+    header = make_cortes_header(
+        (), lag_maximo_gnl=1, n_patamares=3, submercado_codes=(1, 2)
+    )
+    # col(s,p,1) = (s-1)*3 + (p-1): submercado 1 -> cols 0,1,2; submercado 2
+    # -> cols 3,4,5 (lag_maximo_gnl=1 collapses the lag axis to a single
+    # column per patamar).
+    pi_gnl = (-1000.0, -1000.0, -1200.0, 0.0, 0.0, 1e-7)
+    record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=0.0)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    gnl_plan = GnlRingPlan(
+        (
+            GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=1),
+            GnlThermalTarget(thermal_id=95, submercado=2, nl_lag=1),
+        )
+    )
+    mapping = MappingResult(
+        cuts=(make_mapped_cut(coefficients=(0.0,), intercept=0.0),),
+        dropped=(),
+        gnl_dropped=(),
+    )
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping, gnl_plan)
+
+    deviation = next(
+        d for d in sink if d.code == "boundary-fcf-gnl-anticipated-deviation"
+    )
+    assert deviation.table is not None
+    rows_by_group = {(row[0], row[1]): row for row in deviation.table.rows}
+    assert rows_by_group[(1, 1)][3] == pytest.approx(0.0625)
+    assert rows_by_group[(2, 1)][3] == pytest.approx(1.0)
+
+    # The headline is the weight-carrying group's relative spread (0.0625)
+    # and the overall absolute spread (200, from the same group) — never
+    # the near-zero-Σ group's inflated 1.0 relative figure.
+    assert "spread 0.0625 relative / 200 absolute" in deviation.summary
+
+
+def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
+    """Ticket-013 AC C.4 — Panel 3 no longer carries a `remediation`
+    footer; the C12 ledger row (`~/git/cobre/plans/conversion-found-
+    improvements.md`) is the record now, not a runtime paragraph.
+    """
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=2, n_patamares=3, submercado_codes=(1,)
+    )
+    pi_gnl = _gnl_row(6, {1: 0.1, 3: 0.2, 5: 0.3})
+    record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
+    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping, gnl_plan)
+
+    deviation = next(
+        d for d in sink if d.code == "boundary-fcf-gnl-anticipated-deviation"
+    )
+    assert deviation.remediation is None
+
+
+# The real, gitignored `decomp-mar-26-rv2` deck (the empirical READBACK deck
+# named by this ticket's Context) + the `feat/cobre-gnl-boundary-pricing`
+# branch worktree binary -- a DIFFERENT deck/binary pair from the
+# `decomp-set-24-rv0` / `~/git/cobre` constants above (that deck predates the
+# GNL-ring/boundary-pricing work this ticket fixes). CI has neither, so this
+# is a dev-only tier-3 smoke, mirroring `_HAS_E2E_DEPS`/`_skip_e2e` above.
+_MAR26_DECK = Path("example/decomp-mar-26-rv2")
+_MAR26_CORTESH = _MAR26_DECK / "cortesh.dat"
+_MAR26_CORTES = _MAR26_DECK / "cortes-004.dat"
+_MAR26_COBRE_BIN = Path.home() / "git" / "cobre-gnlbp" / "target" / "release" / "cobre"
+_HAS_MAR26_E2E_DEPS = (
+    _MAR26_COBRE_BIN.exists() and _MAR26_DECK.exists() and _HAS_WRITER_BINDING
+)
+_MAR26_SKIP_REASON = (
+    f"requires the cobre-gnlbp binary ({_MAR26_COBRE_BIN}), the "
+    f"decomp-mar-26-rv2 deck ({_MAR26_DECK}), and the write_policy_checkpoint "
+    "writer binding"
+)
+_skip_mar26_e2e = pytest.mark.skipif(not _HAS_MAR26_E2E_DEPS, reason=_MAR26_SKIP_REASON)
+
+#: Descriptive pin for the run-load residual `test_import_boundary_fcf_
+#: mar26rv2_run_load_blocked_...` below xfails: cobre's boundary-load
+#: re-derives its "boundary policy target" list live from the case's own
+#: thermals.json/post_study_stages.json and rejects a terminal
+#: AnticipatedThermalState slot whose live anticipation lead has already
+#: resolved to K=0 -- independent of the covered-lane filter's coefficient
+#: (proven by patching the written checkpoint's own delivery_date to the
+#: sentinel and observing the identical rejection).
+_RUN_LOAD_XFAIL_REASON = (
+    "cobre boundary-load re-derives policy targets live and rejects thermal "
+    "95's K=0-lead terminal slot (delivery 20260401 before the post-study "
+    "horizon); independent of the checkpoint payload"
+)
+
+
+@dataclass(frozen=True)
+class _Mar26ImportedCase:
+    """The mar-26-rv2 case, boundary-imported once, shared by the tests below."""
+
+    case_dir: Path
+    boundary_dir: Path
+
+
+@pytest.fixture(scope="module")
+def mar26rv2_imported_case(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> _Mar26ImportedCase:
+    """Convert ``decomp-mar-26-rv2`` and import its own boundary FCF, once.
+
+    Module-scoped and shared by both tests below (mirrors ``imported_case``
+    above): the ~20 s convert + bootstrap pass runs exactly once regardless
+    of how many assertions exercise its result. Neither consuming test
+    mutates this fixture's ``case_dir`` in place -- the run-load test copies
+    it into its own scratch directory first -- so test order never matters.
+    """
+    if not _HAS_MAR26_E2E_DEPS:
+        pytest.skip(_MAR26_SKIP_REASON)
+
+    root = tmp_path_factory.mktemp("fcf_importer_mar26rv2_e2e")
+    case_dir = root / "converted"
+    convert_decomp_case(_MAR26_DECK, case_dir, force=True)
+
+    boundary_dir = import_boundary_fcf(
+        case_dir,
+        _MAR26_CORTESH,
+        _MAR26_CORTES,
+        cobre_bin=_MAR26_COBRE_BIN,
+        work_dir=root / "work",
+        cost_scale_factor=1.0,
+    )
+    assert boundary_dir is not None
+    return _Mar26ImportedCase(case_dir=case_dir, boundary_dir=boundary_dir)
+
+
+def _dated_ring_position(
+    entity_manifest: list[dict[str, object]],
+    thermal_id: int,
+    *,
+    covered: bool,
+    post_horizon_start: int,
+) -> int:
+    """The position of `thermal_id`'s covered/non-covered dated ring slot.
+
+    Scans a reloaded checkpoint's `entity_manifest` (never hardcoding a
+    position, since that shifts whenever an unrelated converter output
+    changes the case's state dimension) for the `AnticipatedThermalState`
+    slot matching `thermal_id` whose `delivery_date` is dated (not the
+    sentinel) and on the requested side of `post_horizon_start`.
+    """
+    for position, slot in enumerate(entity_manifest):
+        delivery_date = slot["delivery_date"]
+        if not isinstance(delivery_date, int):
+            continue
+        if (
+            slot["entity_type"] == _ANTICIPATED_THERMAL_STATE
+            and slot["entity_id"] == thermal_id
+            and delivery_date != -2147483648
+            and (delivery_date >= post_horizon_start) == covered
+        ):
+            return position
+    raise AssertionError(
+        f"no {'covered' if covered else 'non-covered'} dated ring slot for "
+        f"thermal {thermal_id} in the reloaded entity_manifest"
+    )
+
+
+@_skip_mar26_e2e
+def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
+    mar26rv2_imported_case: _Mar26ImportedCase,
+) -> None:
+    """Ticket-013 AC 5 (re-scoped) -- the achievable, passing facts.
+
+    The authored boundary places `0.0` at thermal 95's non-covered
+    `20260401` slot and a nonzero coefficient at thermal 94's covered
+    `20260501` slot (read back from the actual written checkpoint, never
+    the mapper's own bookkeeping -- mirrors `test_decomp_fcf_roundtrip.py`'s
+    oracle convention), and `cobre validate`'s CASE-structural check (buses/
+    hydros/thermals/lines/stages/penalties/etc., the first `Validation: N
+    errors` line it prints) reports `0`. `cobre validate` has no `--output`
+    flag (confirmed via `--help`); on this branch it also runs a *second*,
+    later pass that tries to open the boundary checkpoint at
+    `case_dir/output/boundary` (the same output_dir default C8 documents for
+    `run`), which -- independent of ticket-013 -- fails to find it there
+    (the checkpoint lives at `case_dir/boundary`) and flips the process's
+    overall exit code to 1. That second pass is C8 manifesting in `validate`
+    too, not the run-load residual the sibling test below pins, so this
+    test asserts on the case-structural line's own count, never the
+    process's aggregate exit code.
+    """
+    case_dir = mar26rv2_imported_case.case_dir
+    import cobre
+
+    horizon_start = _post_horizon_start(case_dir)
+    assert horizon_start is not None
+
+    policy = cobre.results.load_policy(case_dir, policy_subdir="boundary")
+    terminal = max(policy["stage_cuts"], key=lambda stage: stage["stage_id"])
+    entity_manifest = terminal["entity_manifest"]
+    first_cut = terminal["cuts"][0]
+
+    covered_position = _dated_ring_position(
+        entity_manifest, 94, covered=True, post_horizon_start=horizon_start
+    )
+    uncovered_position = _dated_ring_position(
+        entity_manifest, 95, covered=False, post_horizon_start=horizon_start
+    )
+    assert first_cut["coefficients"][uncovered_position] == 0.0
+    assert first_cut["coefficients"][covered_position] != 0.0
+
+    completed = subprocess.run(
+        [str(_MAR26_COBRE_BIN), "validate", str(case_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    case_validation = re.search(r"Validation: (\d+) errors", completed.stdout)
+    assert case_validation is not None, (
+        f"no 'Validation: N errors' line in stdout:\n{completed.stdout}"
+    )
+    assert case_validation.group(1) == "0", (
+        f"case-structural validation reported {case_validation.group(1)} "
+        f"error(s):\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+    )
+
+
+@_skip_mar26_e2e
+@pytest.mark.xfail(strict=True, reason=_RUN_LOAD_XFAIL_REASON)
+def test_import_boundary_fcf_mar26rv2_run_load_blocked_by_live_target_enumeration(
+    mar26rv2_imported_case: _Mar26ImportedCase, tmp_path: Path
+) -> None:
+    """Ticket-013 AC 5 (re-scoped) -- pins the residual this ticket's
+    covered-lane filter cannot reach: a fresh ``cobre run <dst> --output
+    <dst>`` (the C8 recipe, 1-iteration) still aborts at boundary-load with
+    "no resolved delivery interval", because cobre re-derives its boundary
+    policy targets live rather than reading them from the authored
+    checkpoint. ``strict=True`` so this flips to a hard failure -- forcing
+    the marker's removal -- the day cobre's side of this is fixed.
+
+    Copies the shared fixture's case into a private scratch directory
+    first (never mutating ``mar26rv2_imported_case.case_dir`` in place),
+    consistent with ``fcf/bootstrap.py``'s own scratch-copy convention.
+    """
+    scratch_case = tmp_path / "case"
+    shutil.copytree(mar26rv2_imported_case.case_dir, scratch_case)
+
+    config_path = scratch_case / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["training"]["stopping_rules"] = [{"type": "iteration_limit", "limit": 1}]
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            str(_MAR26_COBRE_BIN),
+            "run",
+            str(scratch_case),
+            "--output",
+            str(scratch_case),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    combined_output = completed.stdout + completed.stderr
+    assert "no resolved delivery interval" not in combined_output, (
+        f"cobre run rejected the boundary (exit {completed.returncode}):\n"
+        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+    )
+    assert completed.returncode == 0, (
+        f"cobre run failed (exit {completed.returncode}):\n"
+        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+    )

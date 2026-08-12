@@ -184,6 +184,8 @@ def test_synthetic_roundtrip_preserves_coeffs(tmp_path: Path) -> None:
 
 def _make_gnl_ring_fixture(
     pi_gnl: tuple[float, ...],
+    *,
+    post_horizon_start: int | None = None,
 ) -> tuple[BoundaryCuts, TerminalManifest, DecompIdMap, GnlRingPlan]:
     """The READBACK-shaped ring (thermal 94: sentinel + dated; thermal 95:
     dated; thermal 96: dated but untargeted) over a `P=3, L=2, S=4` GNL
@@ -213,7 +215,10 @@ def _make_gnl_ring_fixture(
     )
     record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
     cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
-    plan = GnlRingPlan((GnlThermalTarget(94, 1, 2), GnlThermalTarget(95, 3, 1)))
+    plan = GnlRingPlan(
+        (GnlThermalTarget(94, 1, 2), GnlThermalTarget(95, 3, 1)),
+        post_horizon_start=post_horizon_start,
+    )
     return cuts, manifest, id_map, plan
 
 
@@ -228,6 +233,63 @@ def test_map_gnl_places_chain_rule_sum_on_dated_slots() -> None:
     mapped = result.cuts[0]
     assert mapped.coefficients[2] == pytest.approx(0.6)  # thermal 94, dated
     assert mapped.coefficients[3] == pytest.approx(7.0)  # thermal 95, dated
+
+
+def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
+    """Ticket-013 AC 1 — the empirical `mar-26-rv2` READBACK shape: thermal
+    94's `20260501` dated slot is covered (`>= post_horizon_start`) and
+    keeps the chain-rule sum; thermal 95's `20260401` dated slot is
+    *before* the post-study horizon (non-covered) and is dropped, staying
+    at `0.0`, with a `GnlDroppedTerm` naming the post-study horizon —
+    exactly the ring shape that made `cobre run` reject the boundary
+    (thermal 95, delivery `20260401`, before horizon `20260501`).
+    """
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(
+        pi_gnl, post_horizon_start=20260501
+    )
+
+    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+
+    mapped = result.cuts[0]
+    assert mapped.coefficients[2] == pytest.approx(0.6)  # thermal 94, covered
+    assert mapped.coefficients[3] == 0.0  # thermal 95, uncovered -> dropped
+
+    matches = [
+        term
+        for term in result.gnl_dropped
+        if term.thermal_id == 95
+        and term.submercado == 3
+        and term.nl_lag == 1
+        and "post-study horizon" in term.reason
+    ]
+    assert len(matches) == 1
+    assert matches[0].coefficient == pytest.approx(7.0)
+    # The "all dated slots uncovered" case is the uncovered-drop above, not
+    # the pre-existing "no dated ring slot for thermal" reason (that one is
+    # reserved for a target with zero dated slots at all).
+    assert not any(
+        term.thermal_id == 95 and "no dated ring slot" in term.reason
+        for term in result.gnl_dropped
+    )
+
+
+def test_map_gnl_post_horizon_start_none_is_old_behavior() -> None:
+    """Ticket-013 AC 2 — `post_horizon_start=None` (the default) disables
+    the covered-lane filter entirely: both dated slots populate exactly as
+    ticket-009's pre-ticket-013 behavior, and no covered-lane drop fires.
+    """
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(
+        pi_gnl, post_horizon_start=None
+    )
+
+    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+
+    mapped = result.cuts[0]
+    assert mapped.coefficients[2] == pytest.approx(0.6)  # thermal 94, dated
+    assert mapped.coefficients[3] == pytest.approx(7.0)  # thermal 95, dated
+    assert not any("post-study horizon" in term.reason for term in result.gnl_dropped)
 
 
 def test_map_gnl_sentinel_and_nontarget_slots_stay_zero() -> None:
