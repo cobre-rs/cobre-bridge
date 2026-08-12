@@ -130,13 +130,19 @@ class GnlDroppedTerm:
 
     ``thermal_id`` is ``None`` for a source-submercado drop (no
     :class:`GnlThermalTarget` claims that submercado at all) and the
-    resolved thermal id for a target-side drop (out-of-range
-    lag/submercado, or a thermal with no dated ring slot). ``coefficient``
-    is a representative value for the diagnostics layer (ticket-010) to
-    report — the summed source coefficient for a source-submercado drop,
-    ``0.0`` for a target-side drop (no source coefficient is attributable to
-    a target that never resolves). Recorded once per unresolvable
-    (submercado, lag) or target, never folded into a neighbour (D3-like).
+    resolved thermal id for a target-side drop — out-of-range
+    lag/submercado, a thermal with no dated ring slot at all, or
+    (ticket-013) a dated slot whose ``delivery_date`` falls before the
+    post-study horizon (a non-covered lane). ``coefficient`` is a
+    representative value for the diagnostics layer (ticket-010) to report:
+    the summed source coefficient for a source-submercado drop; for most
+    target-side drops it is ``0.0`` (no source coefficient is attributable
+    to a target that never resolves at all) — EXCEPT the non-covered
+    post-horizon-lane drop, whose column set *does* resolve, so it carries
+    the representative summed ``pi_gnl`` coefficient that WOULD have been
+    placed had the slot been covered (see ``_first_active_gnl_sum``).
+    Recorded once per unresolvable (submercado, lag) or target, never
+    folded into a neighbour (D3-like).
     """
 
     thermal_id: int | None

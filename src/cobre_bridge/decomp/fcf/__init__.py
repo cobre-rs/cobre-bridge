@@ -61,14 +61,18 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 
-#: (ticket-013 Requirement C.3 / Finding 3) below this floor, a GNL deviation
-#: group's carried Σ is treated as numerically vanished — its relative spread
-#: `(max_p c_p - min_p c_p) / |Σ_p c_p|` would otherwise inflate into noise
-#: (observed: a Σ=-4e-05 group reported spread 0.25 while the weight-carrying
-#: Σ=-4412 group's spread was only ~0.09) — so such a group is excluded from
+#: (ticket-013 Requirement C.3 / Finding 3) a GNL deviation group whose
+#: carried |Σ| is below this FRACTION of the panel's own max |Σ| is treated
+#: as numerically vanished relative to the group that actually carries
+#: weight — its relative spread `(max_p c_p - min_p c_p) / |Σ_p c_p|` would
+#: otherwise inflate into noise (observed: a Σ≈-4e-05 group reported spread
+#: 0.25 while the weight-carrying Σ=-4412 group's spread was only ~0.09; an
+#: earlier fixed-magnitude floor of `1e-6` was ~40x too small to exclude
+#: that 4e-05 group, since `4e-05 >= 1e-6` — an absolute floor cannot track
+#: how "small" a Σ is without knowing the panel's own scale). Excluded from
 #: the `boundary-fcf-gnl-anticipated-deviation` diagnostic's relative
 #: `max_spread` HEADLINE only; its per-row table values are unaffected.
-_GNL_DEVIATION_SUM_FLOOR = 1e-6
+_GNL_DEVIATION_REL_FLOOR = 1e-3
 
 
 def _gnl_targets_from(
@@ -288,7 +292,7 @@ def _emit_import_diagnostics(
     pre-fan-out patamar spread the mapper's chain-rule sum collapses (see
     :func:`_gnl_deviation_rows`), headlined as a relative/absolute spread
     pair (the relative figure excludes a near-zero-Σ group per
-    ``_GNL_DEVIATION_SUM_FLOOR``, ticket-013 Requirement C.3) plus a
+    ``_GNL_DEVIATION_REL_FLOOR``, ticket-013 Requirement C.3) plus a
     dropped-coverage count read verbatim from ``mapping.gnl_dropped``
     (source-submercado drops plus, since ticket-013, non-covered
     dated-slot drops); ``gnl_plan=None`` (the default) gates it off
@@ -368,12 +372,26 @@ def _emit_import_diagnostics(
             for term in mapping.gnl_dropped
             if term.thermal_id is None or "post-study horizon" in term.reason
         ]
-        # See `_GNL_DEVIATION_SUM_FLOOR`'s docstring: a near-zero-Σ group is
-        # excluded from the relative headline only (its row still renders
-        # below); the absolute spread has no such denominator and is
-        # reported unfiltered.
-        headline_rows = [row for row in rows if abs(row[2]) >= _GNL_DEVIATION_SUM_FLOOR]
-        max_relative_spread = max((row[3] for row in headline_rows), default=0.0)
+        # See `_GNL_DEVIATION_REL_FLOOR`'s docstring: a group carrying less
+        # than that fraction of the panel's own max |Σ| is excluded from the
+        # relative headline only (its row still renders below); the absolute
+        # spread has no such denominator and is reported unfiltered. Guard
+        # the degenerate case where every group's |Σ| is itself ~0 (no
+        # group carries any real weight at all) — no group qualifies for a
+        # meaningful relative headline, which then reports "n/a" rather than
+        # a misleading 0.
+        max_abs_sum = max((abs(row[2]) for row in rows), default=0.0)
+        if max_abs_sum <= 1e-12:
+            headline_rows: list[tuple[int, int, float, float, float]] = []
+        else:
+            headline_rows = [
+                row
+                for row in rows
+                if abs(row[2]) >= _GNL_DEVIATION_REL_FLOOR * max_abs_sum
+            ]
+        relative_headline = (
+            f"{max(row[3] for row in headline_rows):.4g}" if headline_rows else "n/a"
+        )
         max_absolute_spread = max((row[4] for row in rows), default=0.0)
         dx.emit(
             dx.Diagnostic(
@@ -382,11 +400,11 @@ def _emit_import_diagnostics(
                 category="Boundary FCF",
                 title="GNL anticipated ring carries a per-patamar sum",
                 summary=(
-                    f"max pre-fan-out patamar spread {max_relative_spread:.4g} "
+                    f"max pre-fan-out patamar spread {relative_headline} "
                     f"relative / {max_absolute_spread:.4g} absolute across "
-                    f"{len(rows)} live GNL ring target group(s) (a group whose "
-                    f"carried Σ is below {_GNL_DEVIATION_SUM_FLOOR:g} is excluded "
-                    "from the relative headline); "
+                    f"{len(rows)} live GNL ring target group(s) (a group "
+                    f"carrying less than {_GNL_DEVIATION_REL_FLOOR:g} of the "
+                    "panel's max |Σ| is excluded from the relative headline); "
                     f"{len(dropped_coverage_terms)} GNL term(s) dropped for "
                     "no covered target (no live thermal in that submercado, "
                     "or delivery before the post-study horizon)"

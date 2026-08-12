@@ -573,7 +573,7 @@ def test_post_horizon_start_malformed_start_date_propagates(tmp_path: Path) -> N
         json.dumps({"stages": [{"start_date": "not-a-date"}]}), encoding="utf-8"
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="invalid literal for int"):
         _post_horizon_start(case_dir)
 
 
@@ -702,18 +702,21 @@ def test_emit_import_diagnostics_c2_panel3_no_dropped_column() -> None:
 
 
 def test_emit_import_diagnostics_c3_headline_excludes_near_zero_sum_group() -> None:
-    """Ticket-013 AC C.3 — a near-zero-Σ group's inflated relative spread
-    does not dominate the `max_spread` HEADLINE; the weight-carrying
-    group's spread does, and an absolute spread is reported alongside.
+    """Ticket-013 AC C.3 — a noisy group's inflated relative spread does not
+    dominate the `max_spread` HEADLINE; the weight-carrying group's spread
+    does, and an absolute spread is reported alongside.
 
-    Mirrors the observed real-deck shape (a `Σ~-4412` group at spread
-    `~0.09` vs. a `Σ~-4e-05` group at spread `0.25`) with round synthetic
-    numbers: group `(submercado 1, lag 1)` carries substantial weight
-    (`Σ=-3200`, relative spread `0.0625`); group `(submercado 2, lag 1)`
-    carries a near-zero sum (`Σ=1e-07`, relative spread `1.0`) — below
-    `_GNL_DEVIATION_SUM_FLOOR` (`1e-6`), so it is excluded from the
-    headline even though its own relative spread is far larger. The
-    per-row table still carries both groups' own values.
+    Uses the REAL-DECK magnitudes cited by the epic-04 review that exposed
+    the earlier fixed-magnitude floor's bug (`1e-6` failed to exclude a
+    `4e-05` group, since `4e-05 >= 1e-6`): group `(submercado 1, lag 1)`
+    carries the real weight (`Σ=-4412.0`, relative spread `392/4412 ≈
+    0.0888`, matching the observed `~0.09`); group `(submercado 2, lag 1)`
+    is the noisy one (`Σ=-4e-05`, relative spread `0.25`, matching the
+    observed `0.25` exactly). `_GNL_DEVIATION_REL_FLOOR` (`1e-3`, a
+    *fraction of the panel's own max |Σ|*) excludes the noisy group from
+    the headline (`4e-05 < 1e-3 * 4412.0`) even though its own relative
+    spread is far larger than the weight-carrying group's; the per-row
+    table still carries both groups' own values unfiltered.
     """
     header = make_cortes_header(
         (), lag_maximo_gnl=1, n_patamares=3, submercado_codes=(1, 2)
@@ -721,7 +724,11 @@ def test_emit_import_diagnostics_c3_headline_excludes_near_zero_sum_group() -> N
     # col(s,p,1) = (s-1)*3 + (p-1): submercado 1 -> cols 0,1,2; submercado 2
     # -> cols 3,4,5 (lag_maximo_gnl=1 collapses the lag axis to a single
     # column per patamar).
-    pi_gnl = (-1000.0, -1000.0, -1200.0, 0.0, 0.0, 1e-7)
+    # Group 1 (weight-carrying): sum -1340-1340-1732 = -4412.0; abs spread
+    # -1340-(-1732) = 392.0; relative 392/4412 ≈ 0.0888 (observed ~0.09).
+    # Group 2 (noisy): sum -1e-05-1e-05-2e-05 = -4e-05; abs spread
+    # -1e-05-(-2e-05) = 1e-05; relative 1e-05/4e-05 = 0.25 (observed exactly).
+    pi_gnl = (-1340.0, -1340.0, -1732.0, -1e-05, -1e-05, -2e-05)
     record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=0.0)
     cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
     gnl_plan = GnlRingPlan(
@@ -744,13 +751,22 @@ def test_emit_import_diagnostics_c3_headline_excludes_near_zero_sum_group() -> N
     )
     assert deviation.table is not None
     rows_by_group = {(row[0], row[1]): row for row in deviation.table.rows}
-    assert rows_by_group[(1, 1)][3] == pytest.approx(0.0625)
-    assert rows_by_group[(2, 1)][3] == pytest.approx(1.0)
+    # `round(..., 6)` in the table rendering can perturb the raw ratio by up
+    # to 5e-7, so use an absolute tolerance rather than the (much tighter)
+    # relative default.
+    assert rows_by_group[(1, 1)][3] == pytest.approx(392.0 / 4412.0, abs=1e-6)
+    assert rows_by_group[(2, 1)][3] == pytest.approx(0.25, abs=1e-6)
 
-    # The headline is the weight-carrying group's relative spread (0.0625)
-    # and the overall absolute spread (200, from the same group) — never
-    # the near-zero-Σ group's inflated 1.0 relative figure.
-    assert "spread 0.0625 relative / 200 absolute" in deviation.summary
+    # The headline is the weight-carrying group's relative spread (~0.0888)
+    # and the panel's overall absolute spread (392, from the same group) —
+    # never the noisy group's inflated 0.25 relative figure, even though
+    # 0.25 > 0.0888 on its own.
+    expected_relative = f"{392.0 / 4412.0:.4g}"
+    expected_absolute = f"{392.0:.4g}"
+    assert (
+        f"spread {expected_relative} relative / {expected_absolute} absolute"
+        in deviation.summary
+    )
 
 
 def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
