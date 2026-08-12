@@ -7,8 +7,10 @@ own convention: no ``example/`` read, no ``import cobre`` at module scope.
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable, Mapping
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -30,6 +32,7 @@ from cobre_bridge.decomp.libs_electrical import (
 from cobre_bridge.decomp.libs_electrical_emit import (
     LibsElectricalResult,
     _cobre_token,
+    _resolve_interc_bus,
     build_electrical_expression,
     emit_libs_electrical_generics,
 )
@@ -96,6 +99,67 @@ def test_cobre_token_ener_interc_reverse_orientation() -> None:
 def test_cobre_token_ener_interc_no_line_warns_and_returns_none() -> None:
     id_map = DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"))
     term = ParsedTerm(coefficient=1.0, token="ener_interc", args=(1, 2))
+    with dx.collect() as sink:
+        result = _cobre_token(term, id_map, {}, {}, {})
+    assert result is None
+    assert len(sink) == 1
+    assert sink[0].severity is dx.Severity.WARNING
+
+
+# ---------------------------------------------------------------------------
+# _resolve_interc_bus + ener_interc's transshipment (IV) fallback (TICKET-018)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_interc_bus_declared_code_returns_bus_id() -> None:
+    id_map = DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"))
+    assert _resolve_interc_bus(2, id_map) == 1
+
+
+def test_resolve_interc_bus_unknown_code_returns_transhipment_bus_id() -> None:
+    # No hardcoded code value: ANY code absent from bus_codes falls back to
+    # the transshipment bus.
+    id_map = DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"))
+    assert id_map.transhipment_bus_id == 2
+    assert _resolve_interc_bus(6, id_map) == 2
+    assert _resolve_interc_bus(-1, id_map) == 2
+
+
+def test_cobre_token_ener_interc_transshipment_operand_resolves_direct() -> None:
+    # AC1: code 6 is NOT a declared SB code; with line_map holding the
+    # transshipment<->SE line, _cobre_token resolves it (not a drop).
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    line_map = {(id_map.transhipment_bus_id, 0): 7}
+    term = ParsedTerm(coefficient=1.0, token="ener_interc", args=(6, 1))
+    assert _cobre_token(term, id_map, {}, {}, line_map) == "line_direct(7)"
+
+
+def test_cobre_token_ener_interc_transshipment_operand_resolves_reverse() -> None:
+    # AC2: the reverse-argument-order call resolves the SAME line, with the
+    # opposite orientation token.
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    line_map = {(id_map.transhipment_bus_id, 0): 7}
+    term = ParsedTerm(coefficient=1.0, token="ener_interc", args=(1, 6))
+    assert _cobre_token(term, id_map, {}, {}, line_map) == "line_reverse(7)"
+
+
+def test_cobre_token_ener_interc_declared_codes_fallback_not_taken() -> None:
+    # AC3: both operands are declared SB codes -- the transshipment fallback
+    # must never be consulted, even with a decoy line keyed at the
+    # transshipment bus that would resolve to a DIFFERENT line id if the
+    # fallback wrongly fired for a declared code.
+    id_map = DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"))
+    line_map = {(0, 1): 9, (id_map.transhipment_bus_id, 1): 99}
+    term = ParsedTerm(coefficient=1.0, token="ener_interc", args=(1, 2))
+    assert _cobre_token(term, id_map, {}, {}, line_map) == "line_direct(9)"
+
+
+def test_cobre_token_ener_interc_unknown_code_no_transshipment_line_drops() -> None:
+    # AC4: a non-SB code resolves to the transshipment bus, but line_map has
+    # no line for that pair -- the fallback never fabricates a line; the
+    # existing skip-not-partial drop still applies.
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    term = ParsedTerm(coefficient=1.0, token="ener_interc", args=(6, 1))
     with dx.collect() as sink:
         result = _cobre_token(term, id_map, {}, {}, {})
     assert result is None
@@ -840,3 +904,142 @@ def test_emit_propagates_plain_value_error_not_unrecognized_token() -> None:
             )
 
     assert not isinstance(exc_info.value, UnrecognizedElectricalToken)
+
+
+# ---------------------------------------------------------------------------
+# unrecognized-token containment widened to active_cells (TICKET-017)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_unrecognized_token_in_activation_rule_defers_one_restriction() -> None:
+    # AC1 (ticket-017): an undeclared identifier in a restriction's
+    # ACTIVATION RULE -- not its bound/expression -- must be contained the
+    # same way: active_cells' own UnrecognizedElectricalToken now sits
+    # inside the per-restriction guard, so it drops only that restriction; a
+    # fully resolvable sibling (no habilita) still converts.
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
+    calendar = _emit_calendar(1, n_blocks=1)
+    rule_broken = _restriction(720, "ger_usih(1)", "<=", "500", habilita=20)
+    resolvable = _restriction(721, "ger_usih(1)", "<=", "500")
+    model = LibsElectricalModel(
+        expressions={},
+        aliases={},
+        restrictions={720: rule_broken, 721: resolvable},
+        rules={20: "peq_N_PCHgd_N >= 50000"},
+    )
+    a_h = AvailablePower(overlay={}, rated_envelope={})
+
+    with dx.collect() as sink:
+        result = emit_libs_electrical_generics(
+            model,
+            id_map,
+            lambda s, b: _dict_context({}),
+            a_h,
+            calendar,
+            {},
+            {},
+            {},
+            big_m=999.0,
+            start_id=0,
+        )
+
+    assert result.converted_codes == (721,)
+    assert result.deferred["unrecognized-token"] == (720,)
+    assert result.generic is not None
+    names = [c["name"] for c in result.generic.constraints]
+    assert names == ["LIBS_ELEC_721"]
+
+    warnings = [d for d in sink if d.severity is dx.Severity.WARNING]
+    assert len(warnings) == 1
+    assert "720" in warnings[0].summary
+    assert "peq_N_PCHgd_N" in warnings[0].summary
+
+
+def test_emit_malformed_activation_rule_propagates_value_error() -> None:
+    # AC2 (ticket-017): a malformed-DSL activation rule (unbalanced parens,
+    # not an undeclared identifier) must still fail loud, never be swallowed
+    # by the widened UnrecognizedElectricalToken-specific guard.
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
+    calendar = _emit_calendar(1, n_blocks=1)
+    restriction = _restriction(722, "ger_usih(1)", "<=", "500", habilita=30)
+    model = LibsElectricalModel(
+        expressions={},
+        aliases={},
+        restrictions={722: restriction},
+        rules={30: "demanda(3 >= 5"},
+    )
+    a_h = AvailablePower(overlay={}, rated_envelope={})
+
+    with pytest.raises(ValueError, match="unbalanced parentheses") as exc_info:
+        emit_libs_electrical_generics(
+            model,
+            id_map,
+            lambda s, b: _dict_context({}),
+            a_h,
+            calendar,
+            {},
+            {},
+            {},
+            big_m=999.0,
+            start_id=0,
+        )
+
+    assert not isinstance(exc_info.value, UnrecognizedElectricalToken)
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: the real deck + the local cobre binary, guarded exactly like
+# tests/test_decomp_fcf_roundtrip.py.
+# ---------------------------------------------------------------------------
+
+_DECK = Path("example/decomp-abr-26-lpp")
+_COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
+_HAS_E2E_DEPS = _COBRE_BIN.exists() and (_DECK / "caso.dat").exists()
+_skip_e2e = pytest.mark.skipif(
+    not _HAS_E2E_DEPS,
+    reason=f"requires the local cobre binary ({_COBRE_BIN}) and the {_DECK} deck",
+)
+
+#: Pre-ticket-018 ``unresolved-bucket-a`` count on this deck -- measured by
+#: stashing this ticket's ``_resolve_interc_bus`` fix (``git stash push --
+#: src/cobre_bridge/decomp/libs_electrical_emit.py``) and reconverting: 20
+#: (of which 10 are the IV-transshipment ``ener_interc`` restrictions this
+#: ticket now resolves). Pinned here so the test proves the fix's DIRECTION
+#: on the real deck without re-running the pre-fix code path inside the test
+#: itself.
+_PRE_TICKET_018_UNRESOLVED_BUCKET_A = 20
+
+
+@_skip_e2e
+def test_abr_26_lpp_ener_interc_transshipment_resolves_and_validates(
+    tmp_path: Path,
+) -> None:
+    """AC5: converting the real deck now resolves the IV-transshipment
+    ``ener_interc`` operands via ``_resolve_interc_bus``, so
+    ``deferred["unresolved-bucket-a"]`` strictly decreases versus the
+    pre-ticket-018 baseline, and ``cobre validate`` on the converted case
+    still exits 0."""
+    from cobre_bridge.decomp.pipeline import convert_decomp_case
+
+    dst = tmp_path / "decomp-abr-26-lpp-converted"
+    report = convert_decomp_case(_DECK, dst, force=True)
+
+    census = [
+        d for d in report.diagnostics if d.code == "decomp-libs-electrical-converted"
+    ]
+    assert len(census) == 1
+    [diagnostic] = census
+    assert diagnostic.table is not None
+    counts = dict(diagnostic.table.rows)
+    assert counts["unresolved-bucket-a"] < _PRE_TICKET_018_UNRESOLVED_BUCKET_A
+
+    result = subprocess.run(
+        [str(_COBRE_BIN), "validate", str(dst)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"cobre validate failed (exit {result.returncode}):\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )

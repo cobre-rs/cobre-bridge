@@ -141,6 +141,26 @@ def _emit_unrecognized_token(code: int, err: UnrecognizedElectricalToken) -> Non
     )
 
 
+def _resolve_interc_bus(code: int, id_map: DecompIdMap) -> int:
+    """Resolve one ``ener_interc`` operand submarket code to a bus id.
+
+    Returns ``id_map.bus_id(code)`` when *code* is a declared SB submarket
+    code; otherwise returns ``id_map.transhipment_bus_id``. The IV
+    transshipment bus is the ONLY converter-created bus without an SB code
+    (:class:`~cobre_bridge.decomp.id_map.DecompIdMap`'s own invariant), so an
+    operand code absent from ``bus_codes`` can only name it — never a
+    hardcoded code value.
+
+    This never raises: the caller's two-probe ``line_map`` lookup is what
+    keeps the fallback safe — a genuinely-unknown code that is NOT the IV
+    node resolves here but still has no matching line, so it still drops via
+    the existing skip-not-partial path.
+    """
+    if code in id_map.bus_codes:
+        return id_map.bus_id(code)
+    return id_map.transhipment_bus_id
+
+
 def _cobre_token(
     term: ParsedTerm,
     id_map: DecompIdMap,
@@ -159,10 +179,13 @@ def _cobre_token(
       bus=conjh_bus_by_code_group[(x, y)])`` — the frequency-split
       generation selector (Itaipu ``(66, 1)``/``(66, 2)`` -> its IV/SE bus).
     - ``ener_interc(a, b)`` -> a two-probe direct/reverse line lookup on
-      *line_map*, keyed by ``(id_map.bus_id(a), id_map.bus_id(b))`` — the
-      same direct/reverse convention as ``constraints.resolve_fi_term``, but
-      keyed on the numeric submarket codes ``ener_interc`` carries, never
-      submarket names.
+      *line_map*, keyed by ``(_resolve_interc_bus(a, id_map),
+      _resolve_interc_bus(b, id_map))`` — the same direct/reverse convention
+      as ``constraints.resolve_fi_term``, but keyed on the numeric submarket
+      codes ``ener_interc`` carries, never submarket names. An operand code
+      that is not a declared SB code resolves to the IV transshipment bus
+      (:func:`_resolve_interc_bus`); the line-lookup miss path still guards
+      against a genuinely-unknown code with no matching transshipment line.
     - ``ener_comerc(c)`` -> not on the target deck; always ``None`` (deferred).
 
     Returns ``None`` — after emitting one ``Severity.WARNING``
@@ -223,12 +246,8 @@ def _cobre_token(
 
     if term.token == "ener_interc":
         submarket_a, submarket_b = term.args
-        try:
-            bus_a = id_map.bus_id(submarket_a)
-            bus_b = id_map.bus_id(submarket_b)
-        except KeyError:
-            _emit_bucket_a_unresolved(term, map_name="the bus id map")
-            return None
+        bus_a = _resolve_interc_bus(submarket_a, id_map)
+        bus_b = _resolve_interc_bus(submarket_b, id_map)
         if (bus_a, bus_b) in line_map:
             return f"line_direct({line_map[(bus_a, bus_b)]})"
         if (bus_b, bus_a) in line_map:
@@ -394,13 +413,15 @@ def emit_libs_electrical_generics(
       loud, never silently pick one). An unresolved bucket-A token (already
       WARNED) drops the whole restriction — ``deferred["unresolved-bucket-a"]``.
     - A well-formed but undeclared identifier anywhere in the restriction's
-      (expanded) formula (:class:`~cobre_bridge.decomp.libs_electrical.
-      UnrecognizedElectricalToken`, raised from inside ``assemble_bound``'s
-      or ``build_electrical_expression``'s own ``parse_linear_expression``
-      call — TICKET-015) drops **only this restriction** —
+      (expanded) formula OR its activation rule (:class:`~cobre_bridge.
+      decomp.libs_electrical.UnrecognizedElectricalToken`, raised from
+      inside ``active_cells``'s, ``assemble_bound``'s, or
+      ``build_electrical_expression``'s own ``parse_linear_expression``
+      call — TICKET-015/017) drops **only this restriction** —
       ``deferred["unrecognized-token"]`` — WARNed here and skipped, never
       aborting the rest of the deck. A malformed-DSL ``ValueError`` (not
-      this subclass) is NOT caught here and still propagates, fail-loud.
+      this subclass) — including ``active_cells``' dangling-``HABILITA``
+      guard — is NOT caught here and still propagates, fail-loud.
     - The surviving expression and per-active-cell bound values feed a
       synthesized :class:`~cobre_bridge.decomp.constraint_registers.
       ConstraintRecord` (``family="LIBS_ELEC"``, ``per_block=True``,
@@ -429,12 +450,12 @@ def emit_libs_electrical_generics(
 
     for code in sorted(model.restrictions):
         restriction = model.restrictions[code]
-        cells = active_cells(restriction, model, context_factory, calendar)
-        if not cells:
-            deferred["inactive"].append(code)
-            continue
-
         try:
+            cells = active_cells(restriction, model, context_factory, calendar)
+            if not cells:
+                deferred["inactive"].append(code)
+                continue
+
             assembled_by_cell: dict[tuple[int, int], AssembledBound] = {}
             bucket_bc_unresolved = False
             for stage_index, block_index in sorted(cells):

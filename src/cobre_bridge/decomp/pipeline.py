@@ -347,9 +347,9 @@ def _libs_electrical_census_diagnostic(
     long-form electrical file -- how many restrictions converted to a cobre
     generic constraint, and how many were dropped, broken down by
     :class:`~cobre_bridge.decomp.libs_electrical_emit.LibsElectricalResult`'s
-    three drop reasons (``inactive``/``unresolved-bucket-bc``/
-    ``unresolved-bucket-a``, each already carrying its own per-restriction
-    WARNING/INFO diagnostic).
+    four drop reasons (``inactive``/``unrecognized-token``/
+    ``unresolved-bucket-bc``/``unresolved-bucket-a``, each already carrying
+    its own per-restriction WARNING/INFO diagnostic).
 
     This supersedes the flat ``decomp-libs-electrical-present`` warning for
     the converted subset (:func:`_convert_decomp_case_impl` suppresses that
