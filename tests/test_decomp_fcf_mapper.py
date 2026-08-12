@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,7 @@ _ANTICIPATED_THERMAL_STATE = 2
 _HYDRO_TRANSIT_BUCKET = 3
 
 
-def _gnl_row(width: int, nonzero: dict[int, float]) -> tuple[float, ...]:
+def _gnl_row(width: int, nonzero: Mapping[int, float]) -> tuple[float, ...]:
     """A `pi_gnl` flat vector of `width` zeros with `nonzero` columns set."""
     row = [0.0] * width
     for column, value in nonzero.items():

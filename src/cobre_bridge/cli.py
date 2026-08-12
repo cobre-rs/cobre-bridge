@@ -956,13 +956,24 @@ def _emit_convert_json(document: dict[str, object]) -> None:
 
 
 def _write_diagnostics_json(
-    report: ConversionReport, path: Path, *, console: Console
+    report: ConversionReport,
+    path: Path,
+    *,
+    diagnostics: Sequence[Diagnostic] | None = None,
+    console: Console,
 ) -> None:
     """Write the conversion counts + diagnostics to *path* as JSON.
+
+    ``diagnostics`` defaults to ``report.diagnostics`` (the plain
+    ``convert newave``/``convert decomp`` contract); a caller with additional
+    findings not yet folded into ``report`` — e.g. ``convert decomp
+    --boundary-fcf``'s importer diagnostics — passes the combined list
+    explicitly so the sidecar matches the ``--json`` verdict's merge.
 
     A write failure is reported but does not change the exit code — the conversion
     itself already succeeded.
     """
+    resolved_diagnostics = report.diagnostics if diagnostics is None else diagnostics
     payload = {
         "summary": {
             "hydros": report.hydro_count,
@@ -971,7 +982,7 @@ def _write_diagnostics_json(
             "lines": report.line_count,
             "stages": report.stage_count,
         },
-        "diagnostics": [d.to_dict() for d in report.diagnostics],
+        "diagnostics": [d.to_dict() for d in resolved_diagnostics],
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1468,9 +1479,13 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
             render_conversion_summary(report, console=out_console)
         render_diagnostics(report.diagnostics, console=err_console, quiet=args.quiet)
 
-    if args.diagnostics_json is not None:
-        # The --diagnostics-json sidecar coexists with --json (both can be set).
-        _write_diagnostics_json(report, args.diagnostics_json, console=err_console)
+    # The --diagnostics-json sidecar write is deferred until AFTER the
+    # boundary-FCF block below (both on its success and its failure path) so
+    # it can serialize the combined converter + boundary-FCF diagnostic set —
+    # mirroring the --json verdict's merge — instead of the converter-only
+    # snapshot a write at this point would capture. When --boundary-fcf is
+    # off (or never reaches the sink), ``boundary_diagnostics`` stays empty
+    # and the sidecar content is unchanged from a converter-only write.
 
     # Provenance manifest, always written on a successful conversion. Notes go
     # to err_console (stderr) so the --json stdout verdict stays byte-deterministic.
@@ -1543,6 +1558,17 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
         except Exception as exc:  # noqa: BLE001
             diag = diagnostic_from_exception(exc, context="Boundary FCF import")
             failure_diagnostics = [*report.diagnostics, *fcf_diags, diag]
+            if args.diagnostics_json is not None:
+                # The sidecar carries the same merged set as the failure
+                # verdict below: the converter's own findings, whatever the
+                # importer's sink captured before it raised, and the failure
+                # diagnostic itself.
+                _write_diagnostics_json(
+                    report,
+                    args.diagnostics_json,
+                    diagnostics=failure_diagnostics,
+                    console=err_console,
+                )
             if args.json_output:
                 _emit_convert_json(
                     build_verdict(
@@ -1585,6 +1611,24 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
                     boundary_diagnostics, console=err_console, quiet=args.quiet
                 )
 
+    # The merge of the converter's own findings and the boundary-FCF
+    # importer's (empty when ``--boundary-fcf`` was not requested, or the
+    # sink never captured anything). Computed once here so both the
+    # ``--diagnostics-json`` sidecar and the ``--json`` verdict below emit the
+    # identical merged set.
+    combined_diagnostics = [*report.diagnostics, *boundary_diagnostics]
+
+    if args.diagnostics_json is not None:
+        # The --diagnostics-json sidecar coexists with --json (both can be
+        # set); it always carries the same merged diagnostics as the
+        # eventual verdict, on the success path handled here.
+        _write_diagnostics_json(
+            report,
+            args.diagnostics_json,
+            diagnostics=combined_diagnostics,
+            console=err_console,
+        )
+
     validation_failed = False
     if args.validate:
         validation_failed = _run_cobre_validation(
@@ -1597,13 +1641,10 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
         )
 
     # Emit the --json verdict now (after validation has populated ``summary``).
-    # ``status``/``diagnostics`` are the merge of the converter's own findings
-    # and the boundary-FCF importer's (empty when ``--boundary-fcf`` was not
-    # requested, or the sink never captured anything) — importer diagnostics
-    # are INFO-only, so the recomputed status stays "ok" whenever the
-    # converter's own diagnostics allow it.
+    # ``status`` is recomputed from ``combined_diagnostics`` (importer
+    # diagnostics are INFO-only, so this stays "ok" whenever the converter's
+    # own diagnostics allow it).
     if args.json_output:
-        combined_diagnostics = [*report.diagnostics, *boundary_diagnostics]
         _emit_convert_json(
             build_verdict(
                 "convert decomp",

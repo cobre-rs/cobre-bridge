@@ -556,14 +556,16 @@ class TestConvertNewaweCasePipeline:
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
 
-        with patch(
-            "cobre_bridge.pipeline.NewaveCase.from_directory",
-            side_effect=FileNotFoundError(
-                f"Required NEWAVE file not found in {src}: hidr.dat"
+        with (
+            patch(
+                "cobre_bridge.pipeline.NewaveCase.from_directory",
+                side_effect=FileNotFoundError(
+                    f"Required NEWAVE file not found in {src}: hidr.dat"
+                ),
             ),
+            pytest.raises(FileNotFoundError) as exc_info,
         ):
-            with pytest.raises(FileNotFoundError) as exc_info:
-                convert_newave_case(src, dst)
+            convert_newave_case(src, dst)
         assert "hidr.dat" in str(exc_info.value)
 
     def test_dry_run_does_not_call_write_table(self, tmp_path: Path) -> None:
@@ -3064,6 +3066,125 @@ class TestCliInProcess:
         assert f"cobre run {dst}" in stderr
         assert f"--output={dst}" in stderr
 
+    def test_convert_decomp_boundary_fcf_importer_diagnostics_reach_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Epic-04 boundary-review finding #2: the same emitting mock as
+        ``..._reach_json``, but without ``--json`` and with
+        ``--diagnostics-json`` — the importer's ``Diagnostic`` (captured by
+        the ``dx.collect()`` sink) must reach the sidecar file too, not just
+        the ``--json`` stdout verdict. This test fails against the pre-fix
+        CLI, where the sidecar is written BEFORE the boundary-FCF block runs
+        and therefore only ever contains ``report.diagnostics``."""
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+        fake_cobre_bin = tmp_path / "fake-cobre-bin"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        def _fake_import(*args: object, **kwargs: object) -> Path:
+            dx.emit(
+                dx.Diagnostic(
+                    code="boundary-fcf-gnl-anticipated-deviation",
+                    severity=dx.Severity.INFO,
+                    category="Boundary FCF",
+                    title="GNL anticipated ring carries a per-patamar sum",
+                    summary="synthetic deviation diagnostic for the sink test",
+                )
+            )
+            return dst / "boundary"
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                side_effect=_fake_import,
+            ),
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--boundary-fcf",
+                    "--cobre-bin",
+                    str(fake_cobre_bin),
+                    "--diagnostics-json",
+                    str(json_path),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert json_path.exists()
+        payload = json.loads(json_path.read_text())
+        codes = {d["code"] for d in payload["diagnostics"]}
+        assert "boundary-fcf-gnl-anticipated-deviation" in codes
+
+    def test_convert_decomp_diagnostics_json_unchanged_without_boundary_fcf(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guard: a plain ``convert decomp --diagnostics-json`` (no
+        ``--boundary-fcf``) sidecar is exactly ``report.diagnostics`` —
+        deferring the sidecar write past the (here, no-op) boundary-FCF
+        block must not regress the existing contract."""
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = tmp_path / "decomp_src"
+        src.mkdir()
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            diagnostics=[
+                Diagnostic(
+                    code="decomp-some-warning",
+                    severity=Severity.WARNING,
+                    category="Conversion",
+                    title="A DECOMP warning",
+                    summary="heads up",
+                )
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--diagnostics-json",
+                    str(json_path),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        payload = json.loads(json_path.read_text())
+        assert set(payload) == {"summary", "diagnostics"}
+        assert [d["code"] for d in payload["diagnostics"]] == ["decomp-some-warning"]
+
 
 class TestCompareDatasetWiring:
     """ticket-008: compare handlers sourced from the canonical dataset.
@@ -3684,13 +3805,15 @@ class TestConversionWarningCapture:
 
         pkg_logger = logging.getLogger("cobre_bridge")
         handlers_before = list(pkg_logger.handlers)
-        with patch.object(
-            pipeline,
-            "_convert_newave_case_impl",
-            side_effect=RuntimeError("boom"),
+        with (
+            patch.object(
+                pipeline,
+                "_convert_newave_case_impl",
+                side_effect=RuntimeError("boom"),
+            ),
+            pytest.raises(RuntimeError, match="boom"),
         ):
-            with pytest.raises(RuntimeError, match="boom"):
-                convert_newave_case(tmp_path, tmp_path)
+            convert_newave_case(tmp_path, tmp_path)
 
         # The capture handler must be removed in the finally block, leaving the
         # package logger's handler list exactly as it was.
@@ -3719,9 +3842,11 @@ class TestConversionWarningCapture:
             (d / "system" / "hydros.json").write_text("{}")
             raise RuntimeError("disk full mid-write")
 
-        with patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl):
-            with pytest.raises(RuntimeError, match="disk full"):
-                convert_newave_case(tmp_path, dst)
+        with (
+            patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl),
+            pytest.raises(RuntimeError, match="disk full"),
+        ):
+            convert_newave_case(tmp_path, dst)
 
         # No pipeline outputs survive — dst holds no half-written case.
         assert not (dst / "config.json").exists()
