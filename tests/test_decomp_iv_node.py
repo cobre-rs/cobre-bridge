@@ -22,6 +22,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.libs_electrical import read_carga_ande
 from cobre_bridge.decomp.load import convert_load_factors, convert_load_stats
@@ -33,6 +34,7 @@ from cobre_bridge.decomp.network import (
     convert_lines,
 )
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
+from cobre_bridge.diagnostics import Severity
 
 _ITAIPU_CODE = 66
 
@@ -208,6 +210,72 @@ class TestAppendIvSeLine:
 
         assert extended_doc["lines"][0]["id"] == 0
         assert extended_bounds.num_rows == len(calendar)
+
+    def test_dedup_skip_when_pair_already_wired(self) -> None:
+        """AC1: the deck's own ``IA`` register already connects the pair
+        (either orientation) -- the call is a no-op and emits exactly one
+        ``Severity.INFO`` diagnostic naming the existing line."""
+        calendar = _calendar()
+        start = calendar[0].start_date
+        existing_line = {
+            "id": 0,
+            "name": "SE-IV",
+            "operational_start_date": start.isoformat(),
+            "source_bus_id": 0,
+            "target_bus_id": 5,
+            "capacity": {"direct_mw": 4000.0, "reverse_mw": 3500.0},
+        }
+        lines_doc = {"$schema": "irrelevant", "lines": [existing_line]}
+        line_bounds = _LINE_BOUNDS_SCHEMA.empty_table()
+
+        with dx.collect() as collected:
+            result_doc, result_bounds = append_iv_se_line(
+                lines_doc,
+                line_bounds,
+                calendar,
+                start,
+                # Reversed orientation vs. the existing line -- the deck's
+                # IA register may declare either direction.
+                source_bus_id=5,
+                target_bus_id=0,
+                capacity_mw=99999.0,
+            )
+
+        assert result_doc is lines_doc
+        assert result_bounds is line_bounds
+        assert len(result_doc["lines"]) == 1
+
+        infos = [d for d in collected if d.severity is Severity.INFO]
+        assert len(infos) == 1
+        assert infos[0].code == "decomp-iv-se-line-already-wired"
+        assert "0" in infos[0].summary
+        assert "SE-IV" in infos[0].summary
+
+    def test_islanded_synthesize_emits_no_info(self) -> None:
+        """AC2: no existing line between the pair -- the line is
+        synthesized as before (pre-ticket behavior) and no diagnostic is
+        emitted."""
+        calendar = _calendar()
+        start = calendar[0].start_date
+        lines_doc = {"$schema": "irrelevant", "lines": []}
+        line_bounds = _LINE_BOUNDS_SCHEMA.empty_table()
+
+        with dx.collect() as collected:
+            extended_doc, extended_bounds = append_iv_se_line(
+                lines_doc,
+                line_bounds,
+                calendar,
+                start,
+                source_bus_id=5,
+                target_bus_id=0,
+                capacity_mw=99999.0,
+            )
+
+        assert len(extended_doc["lines"]) == 1
+        assert extended_doc["lines"][0]["id"] == 0
+        assert extended_doc["lines"][0]["name"] == "IV-SE"
+        assert extended_bounds.num_rows == len(calendar)
+        assert collected == []
 
 
 class TestItaipu50HzCapacity:

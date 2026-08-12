@@ -26,6 +26,7 @@ from cobre_bridge.converters.network import (
     _BUSES_SCHEMA_URL,
     _LINES_SCHEMA_URL,
 )
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -365,10 +366,20 @@ def append_iv_se_line(
 ) -> tuple[dict, pa.Table]:
     """Append the converter-created ``IV-SE`` line to a :func:`convert_lines` result.
 
-    Unconditional on its own: the caller decides whether Itaipu (code 66) is
-    operated and only calls this when it is (ticket-007), so a deck that
-    never operates Itaipu stays byte-identical to today. The new line's id
-    is the next free id after every ``IA`` line
+    Unconditional on Itaipu detection alone: the caller decides whether
+    Itaipu (code 66) is operated and only calls this when it is
+    (ticket-007), so a deck that never operates Itaipu stays byte-identical
+    to today. But before synthesizing, this checks whether *lines_doc*
+    already carries a line connecting *source_bus_id* and *target_bus_id*
+    (as an unordered pair -- the deck's own ``IA`` line may run either
+    direction). When one exists, the ``IV`` bus is not islanded: the deck's
+    own line already wires it, and carries the source model's own capacity
+    rather than the unbounded sentinel, so this is a no-op (ticket-016) --
+    *lines_doc*/*line_bounds* are returned unchanged and one
+    ``Severity.INFO`` diagnostic names the existing line.
+
+    Otherwise (the genuinely-islanded case) it synthesizes exactly as
+    before: the new line's id is the next free id after every ``IA`` line
     (``len(lines_doc["lines"])``), so the existing lines are never
     renumbered and ``constraints.build_fi_line_map`` stays stable.
 
@@ -379,6 +390,34 @@ def append_iv_se_line(
     the source model declares no separate reverse limit for this
     converter-created link.
     """
+    pair = frozenset({source_bus_id, target_bus_id})
+    existing_line = next(
+        (
+            line
+            for line in lines_doc["lines"]
+            if frozenset({line["source_bus_id"], line["target_bus_id"]}) == pair
+        ),
+        None,
+    )
+    if existing_line is not None:
+        emit(
+            Diagnostic(
+                code="decomp-iv-se-line-already-wired",
+                severity=Severity.INFO,
+                category="Special constraints",
+                title="SE<->IV line already wired by the deck",
+                summary=(
+                    "The deck's own IA register already connects buses "
+                    f"{source_bus_id} and {target_bus_id} via line "
+                    f"{existing_line['id']} ({existing_line['name']!r}); "
+                    "the converter-created IV-SE line is not synthesized "
+                    "and the deck's line -- with its own real capacity -- "
+                    "is used instead."
+                ),
+            )
+        )
+        return lines_doc, line_bounds
+
     line_id = len(lines_doc["lines"])
     new_line = {
         "id": line_id,

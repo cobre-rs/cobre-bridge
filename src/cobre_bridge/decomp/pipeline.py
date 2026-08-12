@@ -32,6 +32,7 @@ from cobre_bridge.decomp import bounds as bounds_conv
 from cobre_bridge.decomp import (
     bounds_accumulator,
     constraint_registers,
+    libs_electrical_emit,
     single_term_bounds,
 )
 from cobre_bridge.decomp import cadastro as cadastro_conv
@@ -93,6 +94,11 @@ class DecompFiles:
     dadgnl: Path | None
     renovaveis: Path | None
     polinjus: Path | None
+    #: The deck's LIBs-era electrical-constraint file (ticket-013), resolved
+    #: via :func:`constraint_registers.resolve_libs_electrical_path`; ``None``
+    #: when the deck carries none. Defaults to ``None`` so every pre-existing
+    #: ``DecompFiles(...)`` call site keeps constructing without it.
+    libs_restricao_eletrica: Path | None = None
 
 
 def discover_decomp_files(src: Path) -> DecompFiles:
@@ -139,6 +145,7 @@ def discover_decomp_files(src: Path) -> DecompFiles:
         dadgnl=dadgnl,
         renovaveis=renovaveis,
         polinjus=polinjus,
+        libs_restricao_eletrica=constraint_registers.resolve_libs_electrical_path(src),
     )
 
 
@@ -330,6 +337,52 @@ def _diversion_channels(
             "max_flow_m3s": float(channel.limit),
         }
     return channels, unresolved
+
+
+def _libs_electrical_census_diagnostic(
+    result: libs_electrical_emit.LibsElectricalResult,
+) -> dx.Diagnostic:
+    """The ``decomp-libs-electrical-converted`` INFO diagnostic (ticket-013):
+    the authoritative per-restriction census for the deck's LIBs-era
+    long-form electrical file -- how many restrictions converted to a cobre
+    generic constraint, and how many were dropped, broken down by
+    :class:`~cobre_bridge.decomp.libs_electrical_emit.LibsElectricalResult`'s
+    three drop reasons (``inactive``/``unresolved-bucket-bc``/
+    ``unresolved-bucket-a``, each already carrying its own per-restriction
+    WARNING/INFO diagnostic).
+
+    This supersedes the flat ``decomp-libs-electrical-present`` warning for
+    the converted subset (:func:`_convert_decomp_case_impl` suppresses that
+    warning once a model converts) -- this is the one place a caller reads
+    how much of the entry actually converted, so no "not converted" claim
+    survives over it.
+    """
+    n_converted = len(result.converted_codes)
+    n_dropped = sum(len(codes) for codes in result.deferred.values())
+    rows: list[list[object]] = [["Converted", n_converted]]
+    rows.extend(
+        [reason, len(codes)] for reason, codes in sorted(result.deferred.items())
+    )
+    return dx.Diagnostic(
+        code="decomp-libs-electrical-converted",
+        severity=dx.Severity.INFO,
+        category="Special constraints",
+        title=(
+            f"LIBs electrical constraints converted "
+            f"({n_converted}/{n_converted + n_dropped})"
+        ),
+        summary=(
+            f"{n_converted} of {n_converted + n_dropped} LIBs-era long-form "
+            "electrical restriction(s) converted to a cobre generic "
+            "constraint; the rest were dropped (see table for the "
+            "per-reason breakdown)."
+        ),
+        table=dx.DiagnosticTable(
+            columns=["Outcome", "Count"],
+            rows=rows,
+            justify=["left", "right"],
+        ),
+    )
 
 
 def convert_decomp_case(
@@ -610,11 +663,12 @@ def _convert_decomp_case_impl(
         dadger, id_map, calendar, start_date
     )
     if itaipu_operated:
-        # ticket-007: the SE<->IV line is unconditional whenever Itaipu is
-        # operated (independent of whether the RI register carrying
-        # carga_ande is present) -- without it, the IV bus (ticket-006's 50
-        # Hz relocation target) is islanded and cobre validate rejects the
-        # case.
+        # When Itaipu is operated (ticket-006 relocates its 50 Hz group to the
+        # IV bus), the IV bus needs a connection to SE. append_iv_se_line
+        # synthesizes an SE<->IV line only when the deck's own IA register does
+        # NOT already wire IV<->SE; when it does (as on most Itaipu decks), the
+        # helper reuses that line -- its real operational capacity -- and adding
+        # a second one would make cobre reject the duplicate.
         itaipu_submercado = int(hidr.loc[hydro_conv._ITAIPU_CODE, "submercado"])
         lines_doc, line_bounds = network_conv.append_iv_se_line(
             lines_doc,
@@ -1017,6 +1071,24 @@ def _convert_decomp_case_impl(
         for _, row in operated_uh.iterrows()
     }
 
+    # ticket-013: read the deck's LIBs-era electrical-constraint file (the
+    # indices.csv RESTRICAO-ELETRICA-ESPECIAL entry, resolved by
+    # discover_decomp_files) exactly once here -- both the narrowed
+    # detect_libs_electrical decision and the 4th generic-constraint emitter
+    # link below thread this same `libs_electrical_model`, so neither can
+    # disagree about whether the deck's long-form subset converted.
+    # `read_libs_electrical` itself returns `None` for a short-form-only
+    # (RE/RE-* or date-indexed) file -- that fallback stays on
+    # detect_libs_electrical's flat warning (OQ-4).
+    libs_electrical_model: libs_electrical_conv.LibsElectricalModel | None = None
+    if files.libs_restricao_eletrica is not None:
+        from idecomp.libs.restricoes import Restricoes
+
+        restricoes = Restricoes.read(str(files.libs_restricao_eletrica))
+        libs_electrical_model = libs_electrical_conv.read_libs_electrical(
+            restricoes, calendar
+        )
+
     generic_constraints: list[dict] = []
     generic_bound_tables: list[pa.Table] = []
     next_generic_id = 0
@@ -1044,6 +1116,46 @@ def _convert_decomp_case_impl(
         generic_constraints.extend(rhe_generics.result.constraints)
         generic_bound_tables.append(rhe_generics.result.bounds)
         next_generic_id += len(rhe_generics.result.constraints)
+
+    # ticket-013 (E9 wiring): the 4th generic-constraint emitter link -- every
+    # LIBs-era long-form electrical restriction that resolved
+    # (`libs_electrical_model`, read once above), spliced after RHE so the
+    # unconditional write block below picks it up automatically, identical in
+    # shape to the three links above. Built only when the deck actually
+    # carries a long-form model, since none of these inputs are otherwise
+    # needed.
+    libs_electrical_result: libs_electrical_emit.LibsElectricalResult | None = None
+    if libs_electrical_model is not None:
+        context_factory = libs_electrical_conv.build_data_context(
+            libs_electrical_model, dadger, id_map, calendar
+        )
+        a_h = libs_electrical_conv.build_available_power(
+            availability_values, hidr, id_map, effective
+        )
+        ncs_id_by_pee_code = ncs_conv.build_pee_ncs_id_map(
+            dadger, id_map, calendar, renovaveis
+        )
+        conjh_bus_by_code_group = {
+            (id_map.hydro_codes[entry["id"]], group_index): group["bus_id"]
+            for entry in hydros_dict["hydros"]
+            for group_index, group in enumerate(entry["unit_groups"], start=1)
+        }
+        libs_electrical_result = libs_electrical_emit.emit_libs_electrical_generics(
+            libs_electrical_model,
+            id_map,
+            context_factory,
+            a_h,
+            calendar,
+            ncs_id_by_pee_code,
+            conjh_bus_by_code_group,
+            line_map,
+            big_m,
+            next_generic_id,
+        )
+        if libs_electrical_result.generic is not None:
+            generic_constraints.extend(libs_electrical_result.generic.constraints)
+            generic_bound_tables.append(libs_electrical_result.generic.bounds)
+            next_generic_id += len(libs_electrical_result.generic.constraints)
 
     if generic_constraints:
         _write_json(
@@ -1079,9 +1191,17 @@ def _convert_decomp_case_impl(
     # below (ticket-024 dedups the matching clause out of that warning).
     for detection in constraint_registers.detect_unreadable_electrical(files.dadger):
         dx.emit(detection, logger=_LOG)
+    # ticket-013: the flat presence warning is narrowed to the subset
+    # `libs_electrical_model` (read once above) did NOT convert -- a
+    # short-form-only (RE/RE-*, date-indexed) file, or no long-form card at
+    # all despite the indices.csv entry (OQ-4). Once the long-form subset
+    # converts, the census INFO below is authoritative and this flat warning
+    # would otherwise be a stale "not converted" claim over that subset.
     libs_detection = constraint_registers.detect_libs_electrical(src)
-    if libs_detection is not None:
+    if libs_detection is not None and libs_electrical_model is None:
         dx.emit(libs_detection, logger=_LOG)
+    if libs_electrical_result is not None:
+        dx.emit(_libs_electrical_census_diagnostic(libs_electrical_result), logger=_LOG)
 
     # Reservoir evaporation (UH flag + hidr monthly coefficients) is DEFERRED as
     # a TRACKED COBRE-GAP: cobre's evaporation model deposits the full monthly

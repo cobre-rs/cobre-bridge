@@ -18,6 +18,7 @@ from cobre_bridge.decomp.group_bounds import GroupBoundEntry
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.libs_electrical import (
     ActivationRule,
+    AssembledBound,
     AvailablePower,
     AvailablePowerSource,
     Bucket,
@@ -28,7 +29,13 @@ from cobre_bridge.decomp.libs_electrical import (
     ElectricalRestriction,
     LibsElectricalModel,
     ParsedTerm,
+    PeriodPatamarOverride,
+    UnrecognizedElectricalToken,
     ViolationTreatment,
+    _effective_inequacao_sides,
+    _fold_formula_bound,
+    _fold_inequacao_bound,
+    _fold_reserve_disp_usih,
     _UnresolvableBucketBTerm,
     _UnresolvableDispUsih,
     active_cells,
@@ -462,20 +469,53 @@ def test_cyclic_named_expression_reference_raises_value_error() -> None:
 
 def test_unbalanced_parentheses_raises_value_error() -> None:
     model = _model()
-    with pytest.raises(ValueError, match="ger_usih"):
+    with pytest.raises(ValueError, match="ger_usih") as exc_info:
         parse_linear_expression("ger_usih(261", model)
+    # AC2 (ticket-015): malformed syntax stays a plain ValueError, never the
+    # well-formed-but-undeclared-identifier subclass.
+    assert not isinstance(exc_info.value, UnrecognizedElectricalToken)
 
 
 def test_non_numeric_function_argument_raises_value_error() -> None:
     model = _model()
-    with pytest.raises(ValueError, match="abc"):
+    with pytest.raises(ValueError, match="abc") as exc_info:
         parse_linear_expression("ger_usih(abc)", model)
+    assert not isinstance(exc_info.value, UnrecognizedElectricalToken)
 
 
-def test_unrecognized_bare_identifier_raises_value_error() -> None:
+def test_trailing_operator_with_no_operand_raises_plain_value_error() -> None:
+    # AC2 (ticket-015): a trailing '+' with no following operand is
+    # malformed syntax, not an unrecognized identifier -- stays fail-loud as
+    # a plain ValueError.
     model = _model()
-    with pytest.raises(ValueError, match="ZZTOP"):
+    with pytest.raises(ValueError) as exc_info:
+        parse_linear_expression("ger_usih(1) +", model)
+    assert not isinstance(exc_info.value, UnrecognizedElectricalToken)
+
+
+def test_unrecognized_bare_identifier_raises_unrecognized_electrical_token() -> None:
+    # AC1 (ticket-015): a well-formed but undeclared identifier raises the
+    # dedicated subclass -- still an instance of ValueError, so any existing
+    # pytest.raises(ValueError) contract keeps passing.
+    model = _model()
+    with pytest.raises(UnrecognizedElectricalToken, match="ZZTOP") as exc_info:
         parse_linear_expression("ZZTOP", model)
+    assert isinstance(exc_info.value, ValueError)
+
+
+def test_unrecognized_token_message_names_identifier_and_expression() -> None:
+    # AC1 (ticket-015): the ticket's own motivating example -- an undeclared
+    # peq_*gd_* MMGD token alongside a resolvable ger_usih(...) term. The
+    # message must name both the offending identifier and the enclosing
+    # expression, so a diagnostic built from it is actionable.
+    model = _model()
+    text = "peq_N_PCHgd_N + ger_usih(1)"
+    with pytest.raises(UnrecognizedElectricalToken) as exc_info:
+        parse_linear_expression(text, model)
+    assert isinstance(exc_info.value, ValueError)
+    message = str(exc_info.value)
+    assert "peq_N_PCHgd_N" in message
+    assert text in message
 
 
 def test_se_preserved_as_one_structural_term() -> None:
@@ -931,7 +971,13 @@ def test_build_data_context_alias_with_no_value_raises_unresolvable() -> None:
         ctx(ParsedTerm(coefficient=1.0, token="alias", alias_name="MMGDSIN"))
 
 
-def _inequacao(code: int, lhs: str, operator: str, rhs: str) -> ElectricalRestriction:
+def _inequacao(
+    code: int,
+    lhs: str,
+    operator: str,
+    rhs: str,
+    overrides: tuple[PeriodPatamarOverride, ...] = (),
+) -> ElectricalRestriction:
     return ElectricalRestriction(
         code=code,
         lhs=lhs,
@@ -939,7 +985,7 @@ def _inequacao(code: int, lhs: str, operator: str, rhs: str) -> ElectricalRestri
         rhs=rhs,
         is_formula=False,
         limits={},
-        overrides=(),
+        overrides=overrides,
     )
 
 
@@ -960,16 +1006,26 @@ def _formula(
 def test_assemble_bound_inequacao_upper_only_from_rhs_bucket_b() -> None:
     restriction = _inequacao(285, "ger_usih(285)", "<=", "11000 - 0.04*val_demanda(3)")
     ctx = _dict_context({"val_demanda(3)": 5000.0})
-    assert assemble_bound(restriction, _model(), 0, 0, ctx) == (None, 10800.0)
+    assert assemble_bound(restriction, _model(), 0, 0, ctx) == AssembledBound(
+        terms=(ParsedTerm(coefficient=1.0, token="ger_usih", args=(285,)),),
+        lower=None,
+        upper=10800.0,
+    )
 
 
 def test_assemble_bound_formula_two_sided_sentinel_maps_to_none() -> None:
     restriction = _formula(
         401, "ger_usih(285)+ger_usih(287)", {(0, None): (None, 6300.0)}
     )
-    assert assemble_bound(restriction, _model(), 0, 0, _dict_context({})) == (
-        None,
-        6300.0,
+    assert assemble_bound(
+        restriction, _model(), 0, 0, _dict_context({})
+    ) == AssembledBound(
+        terms=(
+            ParsedTerm(coefficient=1.0, token="ger_usih", args=(285,)),
+            ParsedTerm(coefficient=1.0, token="ger_usih", args=(287,)),
+        ),
+        lower=None,
+        upper=6300.0,
     )
 
 
@@ -980,7 +1036,42 @@ def test_assemble_bound_negates_a_lhs_bucket_b_term_sign_discipline() -> None:
     # ger_usih(5) >= -300.
     restriction = _inequacao(42, "ger_usih(5) + val_demanda(1)", ">=", "0")
     ctx = _dict_context({"val_demanda(1)": 300.0})
-    assert assemble_bound(restriction, _model(), 0, 0, ctx) == (-300.0, None)
+    assert assemble_bound(restriction, _model(), 0, 0, ctx) == AssembledBound(
+        terms=(ParsedTerm(coefficient=1.0, token="ger_usih", args=(5,)),),
+        lower=-300.0,
+        upper=None,
+    )
+
+
+def test_assemble_bound_moves_rhs_bucket_a_term_to_lhs_negated() -> None:
+    # AC2: a plain INEQUACAO carrying a bucket-A term on the RHS (spec §2b's
+    # +0.06*ger_pee(11)) must surface it on AssembledBound.terms with its
+    # sign flipped -- reading restriction.rhs verbatim would reproduce the
+    # A1 sign hazard for this shape too.
+    restriction = _inequacao(403, "ger_usih(1)", "<=", "1000 + 0.06*ger_pee(11)")
+    result = assemble_bound(restriction, _model(), 0, 0, _dict_context({}))
+    assert result == AssembledBound(
+        terms=(
+            ParsedTerm(coefficient=1.0, token="ger_usih", args=(1,)),
+            ParsedTerm(coefficient=-0.06, token="ger_pee", args=(11,)),
+        ),
+        lower=None,
+        upper=1000.0,
+    )
+
+
+def test_assemble_bound_reserve_single_plant_sign_proof() -> None:
+    # AC1 (the A1 fix): disp_usih(1) - ger_usih(1) >= R, A_h(1) = 1000,
+    # R = 300 -> ger_usih(1) <= 700, with a POSITIVE surviving coefficient --
+    # a generation cap, never an inverted lower bound.
+    restriction = _inequacao(407, "disp_usih(1) - ger_usih(1)", ">=", "300")
+    a_h = AvailablePower(overlay={(1, 0): 1000.0}, rated_envelope={})
+    result = assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+    assert result == AssembledBound(
+        terms=(ParsedTerm(coefficient=1.0, token="ger_usih", args=(1,)),),
+        lower=None,
+        upper=700.0,
+    )
 
 
 def test_assemble_bound_drops_and_warns_on_unresolvable_carga_ande() -> None:
@@ -999,6 +1090,101 @@ def test_assemble_bound_drops_and_warns_on_unresolvable_carga_ande() -> None:
     assert sink[0].severity is dx.Severity.WARNING
     assert "carga_ande" in sink[0].summary
     assert "999" in sink[0].summary
+
+
+# ---------------------------------------------------------------------------
+# TICKET-014 — INEQUACAO-PERIODO-PATAMAR override precedence
+# ---------------------------------------------------------------------------
+
+
+def test_effective_inequacao_sides_no_matching_override_returns_base() -> None:
+    restriction = _inequacao(500, "ger_usih(1)", "<=", "5000")
+    assert _effective_inequacao_sides(restriction, 0, 1) == (
+        "ger_usih(1)",
+        "<=",
+        "5000",
+    )
+
+
+def test_effective_inequacao_sides_later_declared_override_wins_tie() -> None:
+    # Requirement 3: two rows tie on specificity (both exact-patamar 1) for
+    # the same cell -- the later-declared one wins.
+    first = PeriodPatamarOverride(0, 3, 1, "ger_usih(1)", "<=", "6000")
+    second = PeriodPatamarOverride(0, 3, 1, "ger_usih(1)", "<=", "7000")
+    restriction = _inequacao(
+        501, "ger_usih(1)", "<=", "5000", overrides=(first, second)
+    )
+    assert _effective_inequacao_sides(restriction, 1, 1) == (
+        "ger_usih(1)",
+        "<=",
+        "7000",
+    )
+
+
+def test_assemble_bound_period_patamar_override_applies_only_to_matching_cell() -> None:
+    # AC1: base X<=5000, override for stages 1-2 patamar 1 (X<=6000). At
+    # (stage 1, block 0 = patamar 1) the override matches; at (stage 1,
+    # block 1 = patamar 2) no override matches this patamar, so the base
+    # constant applies.
+    override = PeriodPatamarOverride(1, 2, 1, "ger_usih(9)", "<=", "6000")
+    restriction = _inequacao(502, "ger_usih(9)", "<=", "5000", overrides=(override,))
+    model = _model()
+    ctx = _dict_context({})
+
+    overridden = assemble_bound(restriction, model, 1, 0, ctx)
+    base_applies = assemble_bound(restriction, model, 1, 1, ctx)
+
+    assert overridden is not None
+    assert overridden.upper == 6000.0
+    assert base_applies is not None
+    assert base_applies.upper == 5000.0
+
+
+def test_assemble_bound_exact_patamar_override_beats_na_patamar_override() -> None:
+    # AC2: an exact-patamar override (patamar=1, X<=6000) and an NA-patamar
+    # override (patamar=None, X<=5500) both cover the same stage -- the
+    # exact-patamar one wins at patamar 1.
+    exact = PeriodPatamarOverride(0, 5, 1, "ger_usih(9)", "<=", "6000")
+    na = PeriodPatamarOverride(0, 5, None, "ger_usih(9)", "<=", "5500")
+    restriction = _inequacao(503, "ger_usih(9)", "<=", "5000", overrides=(na, exact))
+    model = _model()
+    ctx = _dict_context({})
+
+    result = assemble_bound(restriction, model, 2, 0, ctx)
+
+    assert result is not None
+    assert result.upper == 6000.0
+
+
+def test_assemble_bound_period_patamar_override_flips_operator() -> None:
+    # AC3: base X>=100, override X<=900 -- the returned interval must
+    # reflect the override's operator (upper=900, lower=None), not the
+    # base's ">=" (which would have set lower=100, upper=None).
+    override = PeriodPatamarOverride(0, 1, None, "ger_usih(9)", "<=", "900")
+    restriction = _inequacao(504, "ger_usih(9)", ">=", "100", overrides=(override,))
+    model = _model()
+    ctx = _dict_context({})
+
+    result = assemble_bound(restriction, model, 0, 0, ctx)
+
+    assert result is not None
+    assert result.upper == 900.0
+    assert result.lower is None
+
+
+def test_assemble_bound_empty_overrides_matches_pre_ticket_base_fold() -> None:
+    # AC4: an empty overrides tuple must be byte-identical to folding
+    # restriction.lhs/.operator/.rhs verbatim (the pre-ticket behavior),
+    # for a cell nowhere near any override range.
+    restriction = _inequacao(505, "ger_usih(9)", "<=", "1000 - 0.02*val_demanda(1)")
+    ctx = _dict_context({"val_demanda(1)": 400.0})
+    model = _model()
+    lhs_partition = classify_terms(parse_linear_expression(restriction.lhs, model))
+    assert restriction.rhs is not None
+    rhs_partition = classify_terms(parse_linear_expression(restriction.rhs, model))
+    expected = _fold_inequacao_bound(restriction, ctx, lhs_partition, rhs_partition)
+
+    assert assemble_bound(restriction, model, 3, 2, ctx) == expected
 
 
 def test_evaluate_se_folds_a_pure_bucket_b_selected_branch() -> None:
@@ -1216,12 +1402,21 @@ _RESERVE_LHS = "disp_usih(261) + disp_usih(262) - ger_usih(261) - ger_usih(262)"
 
 
 def test_assemble_bound_disp_usih_reserve_rewrites_to_gen_cap() -> None:
-    # AC1: disp_usih(261)+disp_usih(262)-ger_usih(261)-ger_usih(262) >= 500,
-    # A_h = {261: 1000, 262: 800} -> ger_usih(261)+ger_usih(262) <= 1300.
+    # disp_usih(261)+disp_usih(262)-ger_usih(261)-ger_usih(262) >= 500,
+    # A_h = {261: 1000, 262: 800} -> ger_usih(261)+ger_usih(262) <= 1300, with
+    # both surviving ger_usih terms carrying a POSITIVE coefficient (the A1
+    # fix: restriction.lhs itself carries them negative).
     restriction = _inequacao(402, _RESERVE_LHS, ">=", "500")
     a_h = AvailablePower(overlay={(261, 0): 1000.0, (262, 0): 800.0}, rated_envelope={})
     result = assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
-    assert result == (None, 1300.0)
+    assert result == AssembledBound(
+        terms=(
+            ParsedTerm(coefficient=1.0, token="ger_usih", args=(261,)),
+            ParsedTerm(coefficient=1.0, token="ger_usih", args=(262,)),
+        ),
+        lower=None,
+        upper=1300.0,
+    )
 
 
 def test_assemble_bound_disp_usih_emits_one_fidelity_diagnostic_per_substitution() -> (
@@ -1233,7 +1428,9 @@ def test_assemble_bound_disp_usih_emits_one_fidelity_diagnostic_per_substitution
     with dx.collect() as sink:
         result = assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
 
-    assert result == (None, 1300.0)
+    assert result is not None
+    assert result.lower is None
+    assert result.upper == 1300.0
     assert len(sink) == 2
     for diagnostic in sink:
         assert diagnostic.severity is dx.Severity.INFO
@@ -1328,3 +1525,61 @@ def test_assemble_bound_formula_with_disp_usih_raises_value_error() -> None:
     restriction = _formula(420, "disp_usih(1)", {(0, None): (None, 100.0)})
     with pytest.raises(ValueError, match="FORMULA"):
         assemble_bound(restriction, _model(), 0, 0, _dict_context({}))
+
+
+# ---------------------------------------------------------------------------
+# AC3: the three folds share the harmonized pre-computed-partitions
+# signature -- none re-parses restriction.lhs/.rhs a second time (TICKET-011)
+# ---------------------------------------------------------------------------
+
+
+def test_fold_formula_bound_never_reparses_lhs() -> None:
+    # A malformed lhs would raise if _fold_formula_bound parsed it itself;
+    # it must instead use only the pre-computed lhs_partition, exactly as
+    # assemble_bound's own parse of "ger_usih(285)" would have classified it.
+    restriction = _formula(
+        421, "not a valid !! expression", {(0, None): (None, 6300.0)}
+    )
+    lhs_partition = classify_terms(parse_linear_expression("ger_usih(285)", _model()))
+    result = _fold_formula_bound(restriction, 0, 1, _dict_context({}), lhs_partition)
+    assert result == AssembledBound(
+        terms=(ParsedTerm(coefficient=1.0, token="ger_usih", args=(285,)),),
+        lower=None,
+        upper=6300.0,
+    )
+
+
+def test_fold_inequacao_bound_never_reparses_lhs_or_rhs() -> None:
+    restriction = _inequacao(
+        422, "not a valid !! expression", "<=", "also not valid !!"
+    )
+    lhs_partition = classify_terms(parse_linear_expression("ger_usih(1)", _model()))
+    rhs_partition = classify_terms(parse_linear_expression("500", _model()))
+    result = _fold_inequacao_bound(
+        restriction, _dict_context({}), lhs_partition, rhs_partition
+    )
+    assert result == AssembledBound(
+        terms=(ParsedTerm(coefficient=1.0, token="ger_usih", args=(1,)),),
+        lower=None,
+        upper=500.0,
+    )
+
+
+def test_fold_reserve_disp_usih_takes_precomputed_partitions() -> None:
+    # Already harmonized pre-ticket-011 (code-reviewer's paired minor
+    # finding) -- this pins the shared signature shape against the other
+    # two folds, now that all three match.
+    restriction = _inequacao(423, "disp_usih(1) - ger_usih(1)", ">=", "300")
+    lhs_partition = classify_terms(
+        parse_linear_expression("disp_usih(1) - ger_usih(1)", _model())
+    )
+    rhs_partition = classify_terms(parse_linear_expression("300", _model()))
+    a_h = AvailablePower(overlay={(1, 0): 1000.0}, rated_envelope={})
+    result = _fold_reserve_disp_usih(
+        restriction, 0, a_h, _dict_context({}), lhs_partition, rhs_partition
+    )
+    assert result == AssembledBound(
+        terms=(ParsedTerm(coefficient=1.0, token="ger_usih", args=(1,)),),
+        lower=None,
+        upper=700.0,
+    )

@@ -33,9 +33,12 @@ out of scope (kept on the detect+warn fallback).
 interface against the source model's per-(stage,block) demand/``carga_ande``/
 alias data; :func:`assemble_bound` folds a restriction's bucket-B (input-data)
 terms, from both sides and sign-aware, into its per-(stage,block) numeric
-bound, leaving its bucket-A (decision) terms untouched; :func:`evaluate_se`
-resolves a structural ``se(cond, X, Y)`` term the same way, reusing the
-activation-rule engine for ``cond``.
+bound, returning the surviving bucket-A (decision) terms as a sign-canonical
+:class:`AssembledBound` — verbatim for a FORMULA restriction, but with any
+RHS bucket-A term moved onto the LHS (negated) for a plain INEQUACAO, so a
+caller never has to re-derive which side/sign a term ended up on;
+:func:`evaluate_se` resolves a structural ``se(cond, X, Y)`` term the same
+way, reusing the activation-rule engine for ``cond``.
 
 Bucket C (``disp_usih``, available power) has no cobre decision-variable
 counterpart, so it never stays structural: :func:`build_available_power`
@@ -58,7 +61,7 @@ from __future__ import annotations
 import operator
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -121,8 +124,9 @@ class PeriodPatamarOverride:
     Overrides the parent restriction's constant ``lhs op rhs`` for its own
     ``[stage_start, stage_end]`` range and ``patamar`` (``None`` = all
     blocks). All three sides are the raw DSL strings verbatim; the source
-    model's precedence rule (période-patamar overrides the constant) is a
-    later resolution ticket's job.
+    model's precedence rule (période-patamar overrides the constant) is
+    applied by :func:`_effective_inequacao_sides`, consumed from
+    :func:`assemble_bound` — not here.
     """
 
     stage_start: int
@@ -646,6 +650,53 @@ class ParsedTerm:
     branch_false: str | None = None
 
 
+@dataclass(frozen=True)
+class AssembledBound:
+    """The result of folding one restriction's bucket-B/-C terms into a
+    per-(stage,block) numeric bound (:func:`assemble_bound`), sign-canonical
+    for cobre.
+
+    ``terms`` is the surviving bucket-A (decision) expression, already in
+    cobre's single-LHS form: ``lower <= Σ terms <= upper``. Each of
+    :func:`assemble_bound`'s three folds gets there differently — a FORMULA
+    restriction's LHS bucket-A terms verbatim, a plain INEQUACAO's LHS
+    bucket-A terms plus its RHS bucket-A terms moved over and sign-flipped,
+    a ``disp_usih`` reserve's ``ger_usih`` terms sign-flipped to match the
+    reserve->gen-cap rewrite's operator flip — so a caller reading ``terms``
+    never has to know which shape produced it, and never reproduces the A1
+    sign hazard of reading ``restriction.lhs``/``.rhs`` verbatim instead.
+    """
+
+    terms: tuple[ParsedTerm, ...]
+    lower: float | None
+    upper: float | None
+
+
+def _negate(term: ParsedTerm) -> ParsedTerm:
+    """*term* with its coefficient sign flipped, every other field verbatim."""
+    return replace(term, coefficient=-term.coefficient)
+
+
+class UnrecognizedElectricalToken(ValueError):
+    """A well-formed but undeclared bare identifier (spec §3): neither a
+    declared ``EXPRESSAO-ELETRICA`` named expression, a declared
+    ``ALIAS-ELETRICO`` data alias, nor a member of
+    :data:`_BUILTIN_BARE_TOKENS`.
+
+    Raised only from :meth:`_ExpressionParser._parse_bare_name`'s
+    undeclared-identifier branch (TICKET-015) — never from a malformed-DSL
+    raise (unbalanced parentheses, a non-numeric coefficient/argument,
+    unexpected trailing content), which stays a plain :class:`ValueError`
+    and remains fail-loud. A :class:`ValueError` subclass so an existing
+    ``pytest.raises(ValueError)`` contract still holds, but distinct so the
+    emitter's per-restriction skip-not-partial boundary
+    (``libs_electrical_emit.emit_libs_electrical_generics``) can contain
+    exactly this "well-formed but undeclared identifier" case to the one
+    restriction that references it, without catching (and so silently
+    masking) a genuine malformed-DSL bug as a routine drop.
+    """
+
+
 class _ExpressionParser:
     """Character-position recursive-descent parser for one DSL expression string.
 
@@ -852,7 +903,7 @@ class _ExpressionParser:
             return [ParsedTerm(coefficient=scale, token=_ALIAS_TOKEN, alias_name=name)]
         if name in _BUILTIN_BARE_TOKENS:
             return [ParsedTerm(coefficient=scale, token=name)]
-        raise ValueError(
+        raise UnrecognizedElectricalToken(
             f"unrecognized identifier {name!r} in electrical expression "
             f"{self._text!r} (not a declared named expression, data alias, or "
             "built-in bare token)"
@@ -910,10 +961,16 @@ def parse_linear_expression(
 
     Raises
     ------
+    UnrecognizedElectricalToken
+        On a bare identifier that is well-formed but undeclared — neither a
+        named expression, a data alias, nor a built-in bare token (a
+        :class:`ValueError` subclass; TICKET-015's per-restriction
+        skip-not-partial signal — see its own docstring).
     ValueError
-        On a cyclic named-expression/``re(R)`` reference, or a malformed token
-        (unbalanced parentheses, a non-numeric coefficient/argument, an
-        unrecognized identifier, or unexpected trailing content).
+        On a cyclic named-expression/``re(R)`` reference, or a malformed
+        token (unbalanced parentheses, a non-numeric coefficient/argument,
+        or unexpected trailing content) — genuinely malformed DSL, which
+        stays fail-loud and is never caught as a routine drop.
     """
     return _ExpressionParser(text, model, _seen).parse()
 
@@ -1525,13 +1582,16 @@ def evaluate_se(
 
 def _fold_formula_bound(
     restriction: ElectricalRestriction,
-    model: LibsElectricalModel,
     stage_index: int,
     patamar: int,
     ctx: DataContext,
-) -> tuple[float | None, float | None]:
+    lhs_partition: Mapping[Bucket, list[ParsedTerm]],
+) -> AssembledBound:
     """Fold a FORMULA restriction's LHS bucket-B sum into its per-(stage,
-    patamar) two-sided limit.
+    patamar) two-sided limit, keeping its LHS bucket-A terms verbatim as the
+    surviving structural expression — a FORMULA restriction is already in
+    cobre's single-LHS ``lower <= expr <= upper`` shape, so no sign flip is
+    ever needed here (spec §1).
 
     ``restriction.limits`` is looked up at an exact ``(stage_index,
     patamar)`` match, falling back to the ``NA`` (all-blocks,
@@ -1541,6 +1601,10 @@ def _fold_formula_bound(
     bucket-B sum onto them keeps its bucket-A/-C terms untouched: ``lower <=
     lhs_A + lhs_B <= upper`` becomes ``lower - lhs_B <= lhs_A <= upper -
     lhs_B``.
+
+    *lhs_partition* is *restriction.lhs* already parsed and classified
+    (:func:`assemble_bound` computes it once and passes it to every fold —
+    this helper never re-parses ``restriction.lhs`` itself).
 
     Raises
     ------
@@ -1558,45 +1622,92 @@ def _fold_formula_bound(
             f"stage {stage_index}, patamar {patamar}"
         )
     lower, upper = limit
-    lhs_partition = classify_terms(parse_linear_expression(restriction.lhs, model))
     lhs_b_sum = _evaluate_side(lhs_partition[Bucket.B], ctx)
-    return (
-        None if lower is None else lower - lhs_b_sum,
-        None if upper is None else upper - lhs_b_sum,
+    return AssembledBound(
+        terms=tuple(lhs_partition[Bucket.A]),
+        lower=None if lower is None else lower - lhs_b_sum,
+        upper=None if upper is None else upper - lhs_b_sum,
     )
+
+
+def _effective_inequacao_sides(
+    restriction: ElectricalRestriction, stage_index: int, patamar: int
+) -> tuple[str, str, str]:
+    """The ``(lhs, operator, rhs)`` DSL strings in effect for one INEQUACAO
+    restriction's ``(stage_index, patamar)`` cell (spec §3's precedence:
+    ``période-patamar > data-patamar > constante``).
+
+    Scans :attr:`ElectricalRestriction.overrides` for rows whose
+    ``[stage_start, stage_end]`` range contains *stage_index*: an exact
+    ``patamar == patamar`` match wins over a ``patamar is None`` (all-blocks)
+    match — mirroring :func:`_resolve_alias_value`'s exact-then-``NA``
+    idiom — and when neither matches, the restriction's own constant ``lhs
+    op rhs`` applies. When two rows tie on specificity for this cell (two
+    exact matches, or two ``NA`` matches), the later-declared one wins:
+    :attr:`ElectricalRestriction.overrides` preserves the reader's row
+    order, and this scan keeps overwriting its per-tier candidate as it
+    walks forward, so the last match at each tier is always the one kept.
+
+    The source model's third precedence tier, data-patamar overrides, never
+    appears on this deck's cards (only période-patamar and the constant do)
+    and is not synthesized here.
+    """
+    assert restriction.operator is not None  # INEQUACAO invariant
+    assert restriction.rhs is not None  # INEQUACAO invariant
+    exact: PeriodPatamarOverride | None = None
+    na: PeriodPatamarOverride | None = None
+    for override in restriction.overrides:
+        if not override.stage_start <= stage_index <= override.stage_end:
+            continue
+        if override.patamar == patamar:
+            exact = override
+        elif override.patamar is None:
+            na = override
+    chosen = exact if exact is not None else na
+    if chosen is None:
+        return restriction.lhs, restriction.operator, restriction.rhs
+    return chosen.lhs, chosen.operator, chosen.rhs
 
 
 def _fold_inequacao_bound(
     restriction: ElectricalRestriction,
-    model: LibsElectricalModel,
     ctx: DataContext,
-) -> tuple[float | None, float | None]:
+    lhs_partition: Mapping[Bucket, list[ParsedTerm]],
+    rhs_partition: Mapping[Bucket, list[ParsedTerm]],
+) -> AssembledBound:
     """Fold an INEQUACAO restriction's bucket-B terms — both sides,
-    sign-aware — into its operator's F3 interval.
+    sign-aware — into its operator's F3 interval, and move any RHS bucket-A
+    term onto the LHS, sign-flipped, so the surviving expression is cobre's
+    single-LHS form (spec §1 — the A1 sign hazard's plain-INEQUACAO half:
+    ``lhs op rhs`` with a bucket-A term on the RHS must not be read as if it
+    were already on the LHS).
 
-    Parses and classifies (:func:`parse_linear_expression` +
-    :func:`classify_terms`) both ``lhs`` and ``rhs``, sums each side's
-    bucket-B contribution (:func:`_evaluate_side`), and combines them with
-    bucket-A normalized onto the LHS (epic-01-boundary carry-forward 4.3):
-    ``bound = Σ_{B∩RHS} − Σ_{B∩LHS}``. :func:`~cobre_bridge.
+    Sums each side's bucket-B contribution (:func:`_evaluate_side`) and
+    combines them with bucket-A normalized onto the LHS (epic-01-boundary
+    carry-forward 4.3): ``bound = Σ_{B∩RHS} − Σ_{B∩LHS}``. :func:`~cobre_bridge.
     generic_constraint_format.sense_to_interval` then maps *restriction*'s
     operator onto the F3 ``(lower, upper)`` shape (``>=`` lower-only, ``<=``
     upper-only, ``==`` both endpoints equal to *bound*).
 
+    *lhs_partition*/*rhs_partition* are already-parsed-and-classified sides
+    (:func:`assemble_bound` computes them once and passes them to every
+    fold — this helper never re-parses either side itself); *restriction*'s
+    own ``operator`` must match whichever sides fed *lhs_partition*/
+    *rhs_partition* — for an INEQUACAO restriction that carries
     ``RESTRICAO-ELETRICA-INEQUACAO-PERIODO-PATAMAR`` overrides
-    (:attr:`ElectricalRestriction.overrides`) are read (ticket-001) but not
-    consumed here — their precedence over the constant ``lhs op rhs`` (see
-    :class:`PeriodPatamarOverride`'s docstring) is outside this ticket's
-    Requirements/Acceptance Criteria and is left for whichever ticket
-    resolves it.
+    (:attr:`ElectricalRestriction.overrides`), that is the override
+    precedence :func:`assemble_bound` already resolved via
+    :func:`_effective_inequacao_sides`, not necessarily the restriction's
+    own constant sides.
     """
     assert restriction.operator is not None  # INEQUACAO invariant
-    assert restriction.rhs is not None  # INEQUACAO invariant
-    lhs_partition = classify_terms(parse_linear_expression(restriction.lhs, model))
-    rhs_partition = classify_terms(parse_linear_expression(restriction.rhs, model))
     lhs_b_sum = _evaluate_side(lhs_partition[Bucket.B], ctx)
     rhs_b_sum = _evaluate_side(rhs_partition[Bucket.B], ctx)
-    return sense_to_interval(restriction.operator, rhs_b_sum - lhs_b_sum)
+    lower, upper = sense_to_interval(restriction.operator, rhs_b_sum - lhs_b_sum)
+    terms = tuple(lhs_partition[Bucket.A]) + tuple(
+        _negate(term) for term in rhs_partition[Bucket.A]
+    )
+    return AssembledBound(terms=terms, lower=lower, upper=upper)
 
 
 def assemble_bound(
@@ -1606,20 +1717,36 @@ def assemble_bound(
     block_index: int,
     ctx: DataContext,
     a_h: AvailablePower | None = None,
-) -> tuple[float | None, float | None] | None:
+) -> AssembledBound | None:
     """Fold *restriction*'s bucket-B (input-data) and bucket-C (``disp_usih``,
     available power) terms into its per-(stage,block) numeric bound, leaving
-    only its bucket-A (decision) terms structural (spec §4c; the bucket-C
+    only its bucket-A (decision) terms structural — and sign-canonical for
+    cobre — in the returned :class:`AssembledBound` (spec §4c; the bucket-C
     fold is TICKET-010's reserve->gen-cap rewrite — see this module's header).
 
-    A FORMULA restriction's per-(stage,patamar) two-sided limit is reduced by
-    its LHS's bucket-B sum (:func:`_fold_formula_bound`) — it never carries a
-    ``disp_usih`` term (the documented reserve pattern is INEQUACAO-shaped
-    only; a FORMULA restriction with a bucket-C term raises, below). An
-    INEQUACAO restriction with no bucket-C term is folded sign-aware into its
-    operator's F3 interval the ticket-008 way (:func:`_fold_inequacao_bound`);
-    one that carries a ``disp_usih`` term (on either side) is folded via
-    :func:`_fold_reserve_disp_usih` instead, which requires *a_h*.
+    Classifies *restriction.lhs* (and, for a FORMULA restriction, only
+    *.lhs* — it has no ``.rhs``) exactly once via :func:`classify_terms`,
+    then dispatches the resulting partitions to one of three folds, none of
+    which re-parses either side a second time: a FORMULA restriction's
+    per-(stage,patamar) two-sided limit is reduced by its LHS's bucket-B
+    sum, its LHS bucket-A terms kept verbatim (:func:`_fold_formula_bound`)
+    — it never carries a ``disp_usih`` term (the documented reserve pattern
+    is INEQUACAO-shaped only; a FORMULA restriction with a bucket-C term
+    raises, below). An INEQUACAO restriction classifies its *effective*
+    ``(lhs, operator, rhs)`` instead — :func:`_effective_inequacao_sides`
+    resolves any ``RESTRICAO-ELETRICA-INEQUACAO-PERIODO-PATAMAR`` override
+    in effect at this cell (spec §3's precedence: exact-patamar >
+    NA-patamar > the restriction's own constant sides) before classification
+    ever runs, so a cell with no matching override classifies the constant
+    sides verbatim and one with a matching override classifies that
+    override's sides instead. With no bucket-C term, the effective sides
+    fold sign-aware into the effective operator's F3 interval, moving any
+    RHS bucket-A term onto the LHS negated (:func:`_fold_inequacao_bound`);
+    with a ``disp_usih`` term (on either side), they fold via
+    :func:`_fold_reserve_disp_usih` instead, which requires *a_h* and
+    negates the surviving ``ger_usih`` terms to match its operator flip —
+    both dispatch/guard branches are unchanged by the override; only the
+    sides they classify are.
 
     *ctx* must already be scoped to this ``(stage_index, block_index)`` cell
     — the shape :func:`build_data_context`'s returned factory produces.
@@ -1663,11 +1790,14 @@ def assemble_bound(
                     "(TICKET-010) only covers the documented INEQUACAO "
                     "reserve pattern"
                 )
-            return _fold_formula_bound(restriction, model, stage_index, patamar, ctx)
+            return _fold_formula_bound(
+                restriction, stage_index, patamar, ctx, lhs_partition
+            )
 
-        assert restriction.rhs is not None  # INEQUACAO invariant
-        lhs_partition = classify_terms(parse_linear_expression(restriction.lhs, model))
-        rhs_partition = classify_terms(parse_linear_expression(restriction.rhs, model))
+        lhs, op, rhs = _effective_inequacao_sides(restriction, stage_index, patamar)
+        effective = replace(restriction, lhs=lhs, operator=op, rhs=rhs)
+        lhs_partition = classify_terms(parse_linear_expression(lhs, model))
+        rhs_partition = classify_terms(parse_linear_expression(rhs, model))
         if lhs_partition[Bucket.C] or rhs_partition[Bucket.C]:
             if a_h is None:
                 raise ValueError(
@@ -1675,9 +1805,9 @@ def assemble_bound(
                     "term but no AvailablePower lookup was supplied"
                 )
             return _fold_reserve_disp_usih(
-                restriction, stage_index, a_h, ctx, lhs_partition, rhs_partition
+                effective, stage_index, a_h, ctx, lhs_partition, rhs_partition
             )
-        return _fold_inequacao_bound(restriction, model, ctx)
+        return _fold_inequacao_bound(effective, ctx, lhs_partition, rhs_partition)
     except _UnresolvableBucketBTerm as err:
         emit(
             Diagnostic(
@@ -2076,7 +2206,7 @@ def _fold_reserve_disp_usih(
     ctx: DataContext,
     lhs_partition: Mapping[Bucket, list[ParsedTerm]],
     rhs_partition: Mapping[Bucket, list[ParsedTerm]],
-) -> tuple[float | None, float | None]:
+) -> AssembledBound:
     """Fold an INEQUACAO restriction's bucket-C ``disp_usih`` terms into its
     numeric bound, realizing the documented reserve->gen-cap rewrite (this
     module's header):
@@ -2091,9 +2221,12 @@ def _fold_reserve_disp_usih(
     opposite coefficient (``-c``) — the documented reserve SIGN structure
     (this module's header / TICKET-010's CRITICAL pitfall). Substituting
     ``disp_usih(h) -> A_h`` (:func:`resolve_disp_usih`) and multiplying the
-    whole relation by ``-1`` (so every surviving ``ger_usih`` term carries a
-    positive coefficient) flips the operator's sense; any bucket-B terms on
-    either side fold into the same bound the ticket-008 way.
+    whole relation by ``-1`` — realized on the returned
+    :class:`AssembledBound` by negating every surviving ``ger_usih`` term
+    (this is the A1 fix: a caller reading ``restriction.lhs`` verbatim would
+    keep its original negative coefficient, silently inverting the bound) —
+    flips the operator's sense; any bucket-B terms on either side fold into
+    the same bound the ticket-008 way.
 
     Raises
     ------
@@ -2165,4 +2298,7 @@ def _fold_reserve_disp_usih(
     lhs_b_sum = _evaluate_side(lhs_partition[Bucket.B], ctx)
     rhs_b_sum = _evaluate_side(rhs_partition[Bucket.B], ctx)
     bound_value = reserve_sum + lhs_b_sum - rhs_b_sum
-    return sense_to_interval(_flip_operator(restriction.operator), bound_value)
+    lower, upper = sense_to_interval(_flip_operator(restriction.operator), bound_value)
+    return AssembledBound(
+        terms=tuple(_negate(term) for term in ger_terms), lower=lower, upper=upper
+    )

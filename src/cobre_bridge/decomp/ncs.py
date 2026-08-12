@@ -254,6 +254,69 @@ def convert_ncs_factors(
     return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": entries}
 
 
+def _sorted_pee_codes(
+    renovaveis: Renovaveis, calendar: Sequence[OperativeStage]
+) -> list[int]:
+    """Every declared renewable park's ``codigo_pee``, sorted — the ncs_id
+    assignment order :func:`_pee_series` (the NCS series writer) and
+    :func:`build_pee_ncs_id_map` (the public ``codigo_pee -> ncs_id`` map)
+    share, so neither enumeration can drift from the other.
+
+    A code is "declared" here iff it appears on at least one
+    ``PEE-GER-PER-PAT-CEN`` row (mirrors :func:`_pee_series`'s own
+    ``per_park`` keys, without building its per-(stage,block) generation).
+
+    Returns ``[]`` when the deck carries no ``PEE-CAD``/``PEE-GER`` card at
+    all (mirrors :func:`_pee_series`'s own no-op guard).
+
+    Raises
+    ------
+    ValueError
+        When a row's ``estagio`` falls outside *calendar*.
+    """
+    cad = renovaveis.pee_cad(df=True)
+    ger = renovaveis.pee_ger_per_pat_cen(df=True)
+    if cad is None or cad.empty or ger is None or ger.empty:
+        return []
+
+    n_stages = len(calendar)
+    codes: set[int] = set()
+    for _, row in ger.iterrows():
+        estagio = int(row["estagio"])
+        if not 1 <= estagio <= n_stages:
+            raise ValueError(
+                f"renewable generation at stage {estagio} outside the "
+                f"calendar (1..{n_stages})"
+            )
+        codes.add(int(row["codigo_pee"]))
+    return sorted(codes)
+
+
+def build_pee_ncs_id_map(
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+    renovaveis: Renovaveis | None,
+) -> dict[int, int]:
+    """Public ``codigo_pee -> ncs_id`` map for the emitter (ticket-011), sharing
+    :func:`_pee_series`'s ordering via :func:`_sorted_pee_codes`.
+
+    ``ncs_id`` continues the ``PQ`` series' id space (:func:`_pq_series`'s
+    count is the offset), then :func:`_sorted_pee_codes`'s sorted-by-code
+    order — the exact same two facts :func:`_pee_series` itself combines, so
+    a park's id here always matches the id its own :class:`_PqSeries` gets.
+
+    Returns ``{}`` when *renovaveis* is ``None`` or the deck declares no
+    renewable parks (mirrors :func:`_all_series`'s "no renovaveis -> PQ
+    only" convention).
+    """
+    if renovaveis is None:
+        return {}
+    first_ncs_id = len(_pq_series(dadger, id_map, calendar))
+    sorted_codes = _sorted_pee_codes(renovaveis, calendar)
+    return {code: first_ncs_id + offset for offset, code in enumerate(sorted_codes)}
+
+
 def _pee_series(
     renovaveis: Renovaveis,
     id_map: DecompIdMap,
@@ -272,6 +335,11 @@ def _pee_series(
     ger = renovaveis.pee_ger_per_pat_cen(df=True)
     if cad is None or cad.empty or ger is None or ger.empty:
         return []
+
+    sorted_codes = _sorted_pee_codes(renovaveis, calendar)
+    ncs_id_by_code = {
+        code: first_ncs_id + offset for offset, code in enumerate(sorted_codes)
+    }
 
     names = {
         int(r["codigo_pee"]): str(r["nome_pee"]).strip() for _, r in cad.iterrows()
@@ -325,7 +393,7 @@ def _pee_series(
         stage_blocks[block] = representative
 
     series: list[_PqSeries] = []
-    for offset, code in enumerate(sorted(per_park)):
+    for code in sorted_codes:
         stages = per_park[code]
         if 0 not in stages:
             raise ValueError(
@@ -341,7 +409,7 @@ def _pee_series(
             raise ValueError(f"renewable park {code} has no subsystem record")
         series.append(
             _PqSeries(
-                ncs_id=first_ncs_id + offset,
+                ncs_id=ncs_id_by_code[code],
                 name=f"{names.get(code, f'PEE_{code}')}_{sub_code}",
                 bus_id=id_map.bus_id(sub_code),
                 per_stage_blocks=tuple(dense),
