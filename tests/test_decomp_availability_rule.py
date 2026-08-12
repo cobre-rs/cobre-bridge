@@ -761,6 +761,10 @@ class TestItaipuSplitGroups:
         ``max_turbined_m3s`` is head-corrected (ticket-017, per-conjunto
         cap: :func:`_itaipu_conjunto_head_corrected`), and the entity's
         ``max_turbined_m3s`` is their sum, per :func:`_build_split_unit_groups`.
+        Group id 0 (50 Hz) is unconditionally relocated to the ``IV``
+        transshipment bus; group id 1 (60 Hz) stays on the plant's own SE
+        bus (ticket-006) — the relocation moves no envelope quantity, only
+        the 50 Hz cell's ``bus_id``.
         """
         dadger, hidr, id_map, calendar, effective = _load_deck()
         doc = convert_hydros(
@@ -783,7 +787,9 @@ class TestItaipuSplitGroups:
         q_head_expected = _itaipu_conjunto_head_corrected(
             hidr, effective, calendar, rho_by_hydro_id, hydro_id
         )
-        expected_bus = id_map.bus_id(1)
+        # id 0 (50 Hz) -> IV transshipment bus; id 1 (60 Hz) -> the plant's
+        # own SE bus (ticket-006, unconditional whenever Itaipu is operated).
+        expected_bus_by_group = {0: id_map.transhipment_bus_id, 1: id_map.bus_id(1)}
         for group in sorted(groups, key=lambda g: g["id"]):
             _, p_expected = conjuntos[group["id"]]
             assert group["max_generation_mw"] == pytest.approx(p_expected, abs=1e-6)
@@ -793,8 +799,11 @@ class TestItaipuSplitGroups:
             )
             assert group["min_generation_mw"] == 0.0
             assert group["min_turbined_m3s"] == 0.0
-            assert group["bus_id"] == expected_bus
+            assert group["bus_id"] == expected_bus_by_group[group["id"]]
 
+        # Envelope unchanged by the relabel: the summed plant envelope is
+        # exactly what it was before the bus relocation (only the 50 Hz
+        # group's own bus_id moved).
         gen = itaipu["generation"]
         assert gen["max_generation_mw"] == pytest.approx(14000.0, abs=1e-6)
         assert gen["max_turbined_m3s"] == pytest.approx(sum(q_head_expected), abs=1e-6)

@@ -41,6 +41,7 @@ from cobre_bridge.decomp import contracts as contracts_conv
 from cobre_bridge.decomp import fpha as fpha_conv
 from cobre_bridge.decomp import group_bounds as group_bounds_conv
 from cobre_bridge.decomp import hydro as hydro_conv
+from cobre_bridge.decomp import libs_electrical as libs_electrical_conv
 from cobre_bridge.decomp import load as load_conv
 from cobre_bridge.decomp import ncs as ncs_conv
 from cobre_bridge.decomp import network as network_conv
@@ -449,6 +450,12 @@ def _convert_decomp_case_impl(
         renovaveis = Renovaveis.read(str(files.renovaveis))
 
     id_map = DecompIdMap.from_dadger(dadger)
+    # ticket-007: Itaipu's split-plant topology (ticket-006) needs a
+    # synthesized SE<->IV line and, only when the deck carries the data,
+    # the ANDE load on the IV bus -- both driven by this single
+    # Itaipu(66)-operated check, computed once and reused by both wiring
+    # sites below.
+    itaipu_operated = hydro_conv._ITAIPU_CODE in id_map.hydro_codes
     calendar = temporal_conv.operative_calendar_from_dadger(dadger)
     # epic-02/epic-03 (cadastro overrides): the per-stage-effective view of
     # the registry, folding in any temporal AC VOLMIN/VOLMAX/VAZMIN override —
@@ -602,6 +609,22 @@ def _convert_decomp_case_impl(
     lines_doc, line_bounds = network_conv.convert_lines(
         dadger, id_map, calendar, start_date
     )
+    if itaipu_operated:
+        # ticket-007: the SE<->IV line is unconditional whenever Itaipu is
+        # operated (independent of whether the RI register carrying
+        # carga_ande is present) -- without it, the IV bus (ticket-006's 50
+        # Hz relocation target) is islanded and cobre validate rejects the
+        # case.
+        itaipu_submercado = int(hidr.loc[hydro_conv._ITAIPU_CODE, "submercado"])
+        lines_doc, line_bounds = network_conv.append_iv_se_line(
+            lines_doc,
+            line_bounds,
+            calendar,
+            start_date,
+            source_bus_id=id_map.transhipment_bus_id,
+            target_bus_id=id_map.bus_id(itaipu_submercado),
+            capacity_mw=network_conv._itaipu_50hz_capacity_mw(dadger),
+        )
     _write_json(system / "lines.json", lines_doc)
     _write_json(
         system / "pumping_stations.json",
@@ -676,11 +699,29 @@ def _convert_decomp_case_impl(
         scenarios / "external_inflow_scenarios.parquet",
         scenarios_conv.convert_external_inflows(vazoes, effective, id_map, calendar),
     )
-    load_stats = load_conv.convert_load_stats(dadger, id_map, calendar)
+    # ticket-007: the IV bus's carga_ande load is gated on the dadger RI
+    # register being present -- independent of (and additional to) the
+    # unconditional Itaipu-operated line above. An Itaipu deck with no RI
+    # register (read_carga_ande returns {}) converts gracefully: the line
+    # exists, but the IV bus stays at zero load.
+    extra_bus_loads: dict[tuple[int, int], list[float]] | None = None
+    if itaipu_operated:
+        carga_ande = libs_electrical_conv.read_carga_ande(dadger, calendar)
+        if carga_ande:
+            iv_bus = id_map.transhipment_bus_id
+            extra_bus_loads = {
+                (iv_bus, stage_index): values
+                for stage_index, values in carga_ande.items()
+            }
+    load_stats = load_conv.convert_load_stats(
+        dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+    )
     _write_parquet(scenarios / "load_seasonal_stats.parquet", load_stats)
     _write_json(
         scenarios / "load_factors.json",
-        load_conv.convert_load_factors(dadger, id_map, calendar),
+        load_conv.convert_load_factors(
+            dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+        ),
     )
     ncs_stats = ncs_conv.convert_ncs_stats(dadger, id_map, calendar, renovaveis)
     _write_parquet(scenarios / "non_controllable_stats.parquet", ncs_stats)

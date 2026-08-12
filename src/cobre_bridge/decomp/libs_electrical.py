@@ -28,6 +28,29 @@ and reuses this same parser for its comparison operands. This module only
 reads the period-keyed long-form cards; the short-form ``RE``/``RE-*`` and
 the date-indexed ``-HORIZONTE-DATA``/``-FORMULA-DATA-PATAMAR`` variants are
 out of scope (kept on the detect+warn fallback).
+
+:func:`build_data_context` resolves the activation engine's :data:`DataContext`
+interface against the source model's per-(stage,block) demand/``carga_ande``/
+alias data; :func:`assemble_bound` folds a restriction's bucket-B (input-data)
+terms, from both sides and sign-aware, into its per-(stage,block) numeric
+bound, leaving its bucket-A (decision) terms untouched; :func:`evaluate_se`
+resolves a structural ``se(cond, X, Y)`` term the same way, reusing the
+activation-rule engine for ``cond``.
+
+Bucket C (``disp_usih``, available power) has no cobre decision-variable
+counterpart, so it never stays structural: :func:`build_available_power`
+builds the maintenance-aware per-(plant,stage) :class:`AvailablePower`
+lookup and :func:`resolve_disp_usih` reads one plant's value from it;
+:func:`assemble_bound` folds every ``disp_usih`` substitution into the same
+numeric bound as bucket B, realizing the documented reserve->gen-cap
+rewrite (``Σ_h(disp_usih(h) − ger_usih(h)) >= R`` -> ``Σ_h ger_usih(h) <=
+Σ_h A_h − R``) so only bucket-A terms ever survive structurally.
+
+:func:`active_cells` ties the activation-rule engine to the restriction's
+horizonte and ticket-008's per-(stage,block) data-context factory, producing
+the exact set of ``(stage_index, block_index)`` cells a restriction is
+active in — the set the emitter (a later ticket) uses to decide which cells
+get a bound row at all, as distinct from what that bound's value is.
 """
 
 from __future__ import annotations
@@ -41,11 +64,20 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from cobre_bridge.decomp.hydro import _rated_envelope
+from cobre_bridge.decomp.load import _per_stage_block_loads
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.generic_constraint_format import sense_to_interval
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from idecomp.decomp import Dadger
     from idecomp.libs.restricoes import Restricoes
 
+    from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.group_bounds import GroupBoundEntry
+    from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
 #: DECOMP's unbounded-side sentinel on two-sided limit columns is exactly
@@ -476,6 +508,86 @@ def read_libs_electrical(
         restrictions=restrictions,
         rules=rules,
     )
+
+
+#: idecomp's ``df=True`` accessor expands a per-patamar list column into
+#: ``carga_ande_1``, ``carga_ande_2``, ... (one per patamar slot, mirroring
+#: ``DP``'s ``carga_1``/``IA``'s ``limite_de_para_1`` convention); a row's own
+#: slots beyond its declared patamar count read back as ``NaN``. This pattern
+#: discovers however many patamar-slot columns the installed idecomp emits,
+#: rather than hardcoding a slot count.
+_CARGA_ANDE_COLUMN = re.compile(r"^carga_ande_(\d+)$")
+
+
+def read_carga_ande(
+    dadger: Dadger,
+    calendar: Sequence[OperativeStage],
+) -> dict[int, list[float]]:
+    """Read the ``RI`` (restrição de Itaipu) register's ``carga_ande``
+    per-patamar list into a dense, forward-filled per-(stage,block) series.
+
+    ``carga_ande`` (the ANDE / Itaipu-import load) is a per-(estágio,
+    patamar) list on the deck's ``RI`` register. Each row's list is trimmed
+    of any trailing ``NaN`` (idecomp's fixed-width patamar slots beyond the
+    row's own declared patamar count) and the resulting length validated
+    against the calendar's own per-stage block count. Declared stages
+    forward-fill across *calendar* (estágio 1 mandatory as the inheritance
+    base, mirroring ``network._ia_dense``'s idiom) — a deck that declares
+    only a handful of stages still yields one entry per calendar stage.
+
+    Returns ``{}`` when the deck carries no ``RI`` register at all (a deck
+    with no Itaipu import); callers then place no ``IV`` load and resolve any
+    ``carga_ande`` reference to a fail-loud diagnostic (ticket-008).
+
+    Raises
+    ------
+    ValueError
+        When a declared row's ``estagio`` falls outside the calendar
+        (:func:`_stage_index`), when a row's own patamar-value count does not
+        match the calendar's block count for that stage (naming the stage
+        index and both counts), or when the deck carries an ``RI`` row but
+        none at estágio 1 (no inheritance base).
+    """
+    ri = dadger.ri(df=True)
+    if ri is None or ri.empty:
+        return {}
+
+    n_stages = len(calendar)
+    indexed_columns: list[tuple[int, str]] = []
+    for column in ri.columns:
+        match = _CARGA_ANDE_COLUMN.match(column)
+        if match is not None:
+            indexed_columns.append((int(match.group(1)), column))
+    patamar_columns = [column for _, column in sorted(indexed_columns)]
+
+    declared: dict[int, list[float]] = {}
+    for _, row in ri.iterrows():
+        stage_index = _stage_index(int(row["estagio"]), n_stages, "RI carga_ande")
+        values = [row[column] for column in patamar_columns]
+        while values and pd.isna(values[-1]):
+            values.pop()
+        n_blocks = len(calendar[stage_index].block_hours)
+        if len(values) != n_blocks:
+            raise ValueError(
+                f"RI carga_ande stage {stage_index}: {len(values)} patamares "
+                f"declared vs {n_blocks} blocks in the calendar"
+            )
+        declared[stage_index] = [float(value) for value in values]
+
+    if 0 not in declared:
+        raise ValueError(
+            "RI carga_ande: no row declares estágio 1; sparse-stage "
+            "inheritance has no base"
+        )
+
+    per_stage: list[list[float]] = []
+    for stage in calendar:
+        per_stage.append(
+            declared.get(stage.index, per_stage[-1] if per_stage else declared[0])
+        )
+    return {
+        stage.index: values for stage, values in zip(calendar, per_stage, strict=True)
+    }
 
 
 #: Built-in bare (argument-less) input-data tokens (spec §0/§3). A bare name not
@@ -1123,8 +1235,21 @@ def _parse_comparison(conjunct: str, model: LibsElectricalModel) -> Comparison:
 
 def _evaluate_side(terms: Sequence[ParsedTerm], context: DataContext) -> float:
     """Sum one :class:`Comparison` side's ``coefficient * context(term)``
-    over its operand terms."""
-    return sum(term.coefficient * context(term) for term in terms)
+    over its operand terms.
+
+    A bare numeric constant (``term.token == _CONST_TOKEN``) is read
+    straight from ``term.coefficient`` rather than through *context*: a
+    conforming context already returns ``1.0`` for it (ticket-004's
+    documented convention), so this changes nothing for one, but it closes
+    the handshake so a non-conforming context can never silently double- or
+    zero-apply a constant (epic-01-boundary carry-forward 4.2).
+    """
+    return sum(
+        term.coefficient
+        if term.token == _CONST_TOKEN
+        else term.coefficient * context(term)
+        for term in terms
+    )
 
 
 def evaluate_rule(rule: ActivationRule, context: DataContext) -> bool:
@@ -1160,3 +1285,884 @@ def is_always_active(rule: ActivationRule) -> bool:
     restriction's own ``horizonte``.
     """
     return len(rule.comparisons) == 0
+
+
+# ---------------------------------------------------------------------------
+# TICKET-008 — bucket-B substitution + per-(stage,block) bound assembly
+# ---------------------------------------------------------------------------
+
+
+class _UnresolvableBucketBTerm(Exception):
+    """Internal control-flow signal: one bucket-B term's data lookup failed
+    at a (stage, block) cell (spec §4c requirement 4) — a ``carga_ande``
+    reference with no ``RI`` register, a ``demanda``/``val_demanda``
+    reference to an unknown submarket, or an ``alias`` reference with no
+    value at or before the cell.
+
+    Deliberately not a :class:`ValueError`: :func:`evaluate_se` raises a
+    genuine ``ValueError`` for an unrecognized/decision-bearing ``se(...)``
+    shape, and that failure must propagate (fail loud), never be caught and
+    turned into a drop. :func:`assemble_bound` is the only place that
+    catches this signal, converting it into a ``Severity.WARNING``
+    :class:`Diagnostic` and dropping the whole constraint (skip-not-partial)
+    rather than emitting a partial bound.
+    """
+
+
+def _resolve_alias_value(
+    alias: ElectricalAlias, stage_index: int, patamar: int
+) -> float | None:
+    """Resolve one ``ALIAS-ELETRICO``'s value at ``(stage_index, patamar)``.
+
+    At the current stage, an exact ``patamar`` match wins over the ``NA``
+    (all-blocks, ``patamar=None``) entry; when the current stage carries
+    neither, the value is inherited from the closest earlier stage that
+    declares one (checked with the same exact-then-``NA`` precedence) —
+    mirroring ``constraint_registers._forward_fill_bounds``'s "most recently
+    declared at or before" idiom, generalized with the patamar/``NA``
+    precedence applied at each candidate stage.
+
+    Returns ``None`` when *alias* declares no value at or before
+    *stage_index* at all.
+    """
+    for candidate in range(stage_index, -1, -1):
+        if (candidate, patamar) in alias.values:
+            return alias.values[(candidate, patamar)]
+        if (candidate, None) in alias.values:
+            return alias.values[(candidate, None)]
+    return None
+
+
+def _block_load(
+    demand: Mapping[tuple[int, int], list[float]],
+    bus_id: int,
+    stage_index: int,
+    block_index: int,
+) -> float:
+    """One bus's block load at ``(stage_index, block_index)``, or ``0.0``
+    when the deck's ``DP`` declares no row for that (bus, stage) — mirrors
+    ``load.convert_load_stats``'s "a bus absent from ``DP`` carries zero
+    load" rule."""
+    block_loads = demand.get((bus_id, stage_index))
+    return 0.0 if block_loads is None else block_loads[block_index]
+
+
+def _submarket_bus_id(id_map: DecompIdMap, term: ParsedTerm) -> int:
+    """Map a ``demanda``/``val_demanda`` term's submarket code
+    (``term.args[0]``) to its 0-based bus id.
+
+    Raises
+    ------
+    _UnresolvableBucketBTerm
+        When the code is not a declared subsystem (:meth:`DecompIdMap.
+        bus_id` raises ``KeyError``) — spec §4c requirement 4's "unknown
+        submarket" case.
+    """
+    code = term.args[0]
+    try:
+        return id_map.bus_id(code)
+    except KeyError as err:
+        raise _UnresolvableBucketBTerm(
+            f"{term.token}({code}) references unknown submarket {code}"
+        ) from err
+
+
+def build_data_context(
+    model: LibsElectricalModel,
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> Callable[[int, int], DataContext]:
+    """Build the per-(stage,block) :data:`DataContext` factory that drives
+    :func:`assemble_bound` (this ticket) and ticket-009's activation gate.
+
+    :data:`DataContext` (ticket-004's ``Callable[[ParsedTerm], float]``) is
+    defined for exactly *one* ``(stage_index, block_index)`` cell — see its
+    own docstring — and *build_data_context*'s own signature carries no such
+    cell, so it returns a **factory**: call the returned closure with a cell
+    to get back the :data:`DataContext` scoped to it, ready to hand to
+    :func:`assemble_bound`/:func:`evaluate_rule`. The submarket-demand map
+    (:func:`~cobre_bridge.decomp.load._per_stage_block_loads`) and the
+    ``carga_ande`` series (:func:`read_carga_ande`) are each read once and
+    captured — along with *model* — in the returned closure, rather than
+    re-read per cell.
+
+    Resolves every bucket-B token (spec §4c):
+
+    - ``demanda(X)``/``val_demanda(X)`` — submarket ``X``'s (the deck's
+      ``codigo_submercado``) block load, ``0.0`` when ``DP`` declares no row
+      for that (bus, stage);
+    - ``demanda_sin``/``val_demanda_sin`` — the block load summed over every
+      declared submarket;
+    - ``carga_ande`` — the ticket-005 series;
+    - an ``alias`` token — the model alias's value
+      (:func:`_resolve_alias_value`: stage-inherited, ``NA``-patamar applies
+      to all blocks);
+    - the numeric-constant token — ``1.0``, never the constant's own value
+      (epic-01-boundary carry-forward 4.2): the value already lives in
+      ``term.coefficient``, which :func:`_evaluate_side` applies directly;
+    - a ``se(cond, X, Y)`` conditional — :func:`evaluate_se`.
+
+    Raises
+    ------
+    _UnresolvableBucketBTerm
+        From the returned per-cell context, when a ``demanda``/
+        ``val_demanda`` term names an unknown submarket, a ``carga_ande``
+        term is referenced but the deck declares no ``RI`` register (or no
+        series for that stage), or an ``alias`` term has no value at or
+        before the cell. :func:`assemble_bound` is the sole catcher —
+        turning this into a ``Severity.WARNING`` diagnostic and dropping the
+        constraint (skip-not-partial), never a silently wrong bound.
+    """
+    demand = _per_stage_block_loads(dadger, id_map, calendar)
+    carga_ande_series = read_carga_ande(dadger, calendar)
+    n_submarkets = len(id_map.bus_codes)
+
+    def context_for_cell(stage_index: int, block_index: int) -> DataContext:
+        def resolve(term: ParsedTerm) -> float:
+            if term.token == _CONST_TOKEN:
+                return 1.0
+            if term.token in ("demanda", "val_demanda"):
+                bus_id = _submarket_bus_id(id_map, term)
+                return _block_load(demand, bus_id, stage_index, block_index)
+            if term.token in ("demanda_sin", "val_demanda_sin"):
+                return sum(
+                    _block_load(demand, bus_id, stage_index, block_index)
+                    for bus_id in range(n_submarkets)
+                )
+            if term.token == "carga_ande":
+                values = carga_ande_series.get(stage_index)
+                if values is None:
+                    raise _UnresolvableBucketBTerm(
+                        "carga_ande referenced but the deck declares no RI "
+                        f"register (or no series for stage {stage_index})"
+                    )
+                return values[block_index]
+            if term.token == _ALIAS_TOKEN:
+                assert term.alias_name is not None  # parser invariant
+                alias = model.aliases[term.alias_name]
+                patamar = block_index + 1
+                value = _resolve_alias_value(alias, stage_index, patamar)
+                if value is None:
+                    raise _UnresolvableBucketBTerm(
+                        f"alias {term.alias_name!r} has no value at stage "
+                        f"{stage_index} (patamar {patamar}) or any earlier "
+                        "stage"
+                    )
+                return value
+            if term.token == _SE_TOKEN:
+                return evaluate_se(term, model, stage_index, block_index, resolve)
+            raise ValueError(
+                f"build_data_context: cannot resolve bucket-B token {term.token!r}"
+            )
+
+        return resolve
+
+    return context_for_cell
+
+
+def evaluate_se(
+    term: ParsedTerm,
+    model: LibsElectricalModel,
+    stage_index: int,
+    block_index: int,
+    ctx: DataContext,
+) -> float:
+    """Evaluate one structural ``se(cond, X, Y)`` term to a float for one
+    (stage, block) cell.
+
+    ``cond`` is parsed and evaluated by reusing ticket-004's activation-rule
+    engine (:func:`parse_activation_rule` + :func:`evaluate_rule`) — the
+    same comparison grammar an activation rule's own condition uses —
+    selecting :attr:`ParsedTerm.branch_true` when it evaluates ``True``,
+    else :attr:`ParsedTerm.branch_false`.
+
+    The selected branch is then parsed (:func:`parse_linear_expression`) and
+    classified (:func:`classify_terms`). Per epic-01-boundary carry-forward
+    4.1, a selected branch is only safe to fold to a single float when it is
+    entirely bucket B (input data): folding a branch that carries a
+    bucket-A (cobre decision) or bucket-C (``disp_usih``) term would fold
+    that term into a plain number and silently drop it from the LP. ``se``
+    does not appear on the target deck (spec §2b: gating is via
+    ``REGRA-ATIVACAO``, not inline ``se()``), so this guard is defensive
+    hardening, not a gap in coverage — keeping a decision-bearing branch's
+    bucket-A/-C terms structural (folding only its bucket-B terms, the way
+    :func:`assemble_bound` does for a whole restriction) is a future
+    ticket's job; this fails loud instead.
+
+    Raises
+    ------
+    ValueError
+        When *term* is not a ``se`` term or is missing its condition/branch
+        text (a caller contract violation — the parser always populates all
+        three for a ``se`` token), or when the selected branch carries any
+        non-bucket-B term (naming it and the cell).
+    """
+    if term.token != _SE_TOKEN:
+        raise ValueError(f"evaluate_se: expected a 'se' term, got {term.token!r}")
+    if term.condition is None or term.branch_true is None or term.branch_false is None:
+        raise ValueError(
+            f"evaluate_se: 'se' term is missing condition/branches: {term!r}"
+        )
+
+    rule = parse_activation_rule(term.condition, model)
+    selected_text = term.branch_true if evaluate_rule(rule, ctx) else term.branch_false
+    branch_terms = parse_linear_expression(selected_text, model)
+    partition = classify_terms(branch_terms)
+    decision_terms = partition[Bucket.A] + partition[Bucket.C]
+    if decision_terms:
+        offender = decision_terms[0]
+        raise ValueError(
+            f"evaluate_se: at stage {stage_index}, block {block_index}, "
+            f"se(...) selected branch {selected_text!r} carries a decision "
+            f"term ({offender.token!r}, bucket {classify_term(offender).name}); "
+            "folding a decision-bearing branch to a number would silently "
+            "drop it from the LP — structural handling of a decision-bearing "
+            "se branch is out of scope here (fail loud instead)"
+        )
+    return _evaluate_side(partition[Bucket.B], ctx)
+
+
+def _fold_formula_bound(
+    restriction: ElectricalRestriction,
+    model: LibsElectricalModel,
+    stage_index: int,
+    patamar: int,
+    ctx: DataContext,
+) -> tuple[float | None, float | None]:
+    """Fold a FORMULA restriction's LHS bucket-B sum into its per-(stage,
+    patamar) two-sided limit.
+
+    ``restriction.limits`` is looked up at an exact ``(stage_index,
+    patamar)`` match, falling back to the ``NA`` (all-blocks,
+    ``patamar=None``) entry for that stage. The limit's two endpoints are
+    already numeric (DECOMP's ``±1E+31`` sentinel already normalized to
+    ``None`` by the reader — see :func:`_opt_bound`); moving the LHS's
+    bucket-B sum onto them keeps its bucket-A/-C terms untouched: ``lower <=
+    lhs_A + lhs_B <= upper`` becomes ``lower - lhs_B <= lhs_A <= upper -
+    lhs_B``.
+
+    Raises
+    ------
+    ValueError
+        When *restriction* declares no limit at all for this cell (a
+        caller-contract violation — *stage_index* should always fall inside
+        the restriction's active horizon).
+    """
+    limit = restriction.limits.get((stage_index, patamar))
+    if limit is None:
+        limit = restriction.limits.get((stage_index, None))
+    if limit is None:
+        raise ValueError(
+            f"restriction {restriction.code}: no FORMULA limit declared for "
+            f"stage {stage_index}, patamar {patamar}"
+        )
+    lower, upper = limit
+    lhs_partition = classify_terms(parse_linear_expression(restriction.lhs, model))
+    lhs_b_sum = _evaluate_side(lhs_partition[Bucket.B], ctx)
+    return (
+        None if lower is None else lower - lhs_b_sum,
+        None if upper is None else upper - lhs_b_sum,
+    )
+
+
+def _fold_inequacao_bound(
+    restriction: ElectricalRestriction,
+    model: LibsElectricalModel,
+    ctx: DataContext,
+) -> tuple[float | None, float | None]:
+    """Fold an INEQUACAO restriction's bucket-B terms — both sides,
+    sign-aware — into its operator's F3 interval.
+
+    Parses and classifies (:func:`parse_linear_expression` +
+    :func:`classify_terms`) both ``lhs`` and ``rhs``, sums each side's
+    bucket-B contribution (:func:`_evaluate_side`), and combines them with
+    bucket-A normalized onto the LHS (epic-01-boundary carry-forward 4.3):
+    ``bound = Σ_{B∩RHS} − Σ_{B∩LHS}``. :func:`~cobre_bridge.
+    generic_constraint_format.sense_to_interval` then maps *restriction*'s
+    operator onto the F3 ``(lower, upper)`` shape (``>=`` lower-only, ``<=``
+    upper-only, ``==`` both endpoints equal to *bound*).
+
+    ``RESTRICAO-ELETRICA-INEQUACAO-PERIODO-PATAMAR`` overrides
+    (:attr:`ElectricalRestriction.overrides`) are read (ticket-001) but not
+    consumed here — their precedence over the constant ``lhs op rhs`` (see
+    :class:`PeriodPatamarOverride`'s docstring) is outside this ticket's
+    Requirements/Acceptance Criteria and is left for whichever ticket
+    resolves it.
+    """
+    assert restriction.operator is not None  # INEQUACAO invariant
+    assert restriction.rhs is not None  # INEQUACAO invariant
+    lhs_partition = classify_terms(parse_linear_expression(restriction.lhs, model))
+    rhs_partition = classify_terms(parse_linear_expression(restriction.rhs, model))
+    lhs_b_sum = _evaluate_side(lhs_partition[Bucket.B], ctx)
+    rhs_b_sum = _evaluate_side(rhs_partition[Bucket.B], ctx)
+    return sense_to_interval(restriction.operator, rhs_b_sum - lhs_b_sum)
+
+
+def assemble_bound(
+    restriction: ElectricalRestriction,
+    model: LibsElectricalModel,
+    stage_index: int,
+    block_index: int,
+    ctx: DataContext,
+    a_h: AvailablePower | None = None,
+) -> tuple[float | None, float | None] | None:
+    """Fold *restriction*'s bucket-B (input-data) and bucket-C (``disp_usih``,
+    available power) terms into its per-(stage,block) numeric bound, leaving
+    only its bucket-A (decision) terms structural (spec §4c; the bucket-C
+    fold is TICKET-010's reserve->gen-cap rewrite — see this module's header).
+
+    A FORMULA restriction's per-(stage,patamar) two-sided limit is reduced by
+    its LHS's bucket-B sum (:func:`_fold_formula_bound`) — it never carries a
+    ``disp_usih`` term (the documented reserve pattern is INEQUACAO-shaped
+    only; a FORMULA restriction with a bucket-C term raises, below). An
+    INEQUACAO restriction with no bucket-C term is folded sign-aware into its
+    operator's F3 interval the ticket-008 way (:func:`_fold_inequacao_bound`);
+    one that carries a ``disp_usih`` term (on either side) is folded via
+    :func:`_fold_reserve_disp_usih` instead, which requires *a_h*.
+
+    *ctx* must already be scoped to this ``(stage_index, block_index)`` cell
+    — the shape :func:`build_data_context`'s returned factory produces.
+    *stage_index*/*block_index* are used here to select *restriction*'s own
+    per-cell limit/patamar, not to re-scope *ctx*. *a_h* is required exactly
+    when *restriction* carries a bucket-C term; a restriction with none never
+    touches it, so existing ticket-008 callers pass nothing.
+
+    Returns ``None`` — after emitting one ``Severity.WARNING``
+    :class:`Diagnostic` naming the unresolvable term and the cell — when a
+    bucket-B term cannot be resolved (:class:`_UnresolvableBucketBTerm` from
+    *ctx*) or a bucket-C ``disp_usih`` term's available power cannot be
+    resolved (:class:`_UnresolvableDispUsih` from *a_h*, Requirement 5): the
+    whole constraint is dropped rather than emitted with a partial bound
+    (skip-not-partial), mirroring ``constraints.py``'s resolver diagnostics.
+
+    Raises
+    ------
+    ValueError
+        When a FORMULA restriction carries no limit at all for this cell,
+        when a FORMULA restriction carries a bucket-C term (out of the
+        documented pattern's scope), when an INEQUACAO restriction carries a
+        bucket-C term but *a_h* is ``None``, when a restriction uses
+        ``disp_usih`` outside the documented reserve sign structure
+        (:func:`_fold_reserve_disp_usih`'s CRITICAL-pitfall guard), or
+        propagated from :func:`~cobre_bridge.generic_constraint_format.
+        sense_to_interval` on an unrecognized INEQUACAO operator — none of
+        these is the resolver-unresolvable case this function otherwise
+        catches.
+    """
+    patamar = block_index + 1
+    try:
+        if restriction.is_formula:
+            lhs_partition = classify_terms(
+                parse_linear_expression(restriction.lhs, model)
+            )
+            if lhs_partition[Bucket.C]:
+                raise ValueError(
+                    f"restriction {restriction.code}: a FORMULA restriction "
+                    "carries a disp_usih term; the reserve->gen-cap rewrite "
+                    "(TICKET-010) only covers the documented INEQUACAO "
+                    "reserve pattern"
+                )
+            return _fold_formula_bound(restriction, model, stage_index, patamar, ctx)
+
+        assert restriction.rhs is not None  # INEQUACAO invariant
+        lhs_partition = classify_terms(parse_linear_expression(restriction.lhs, model))
+        rhs_partition = classify_terms(parse_linear_expression(restriction.rhs, model))
+        if lhs_partition[Bucket.C] or rhs_partition[Bucket.C]:
+            if a_h is None:
+                raise ValueError(
+                    f"restriction {restriction.code} carries a disp_usih "
+                    "term but no AvailablePower lookup was supplied"
+                )
+            return _fold_reserve_disp_usih(
+                restriction, stage_index, a_h, ctx, lhs_partition, rhs_partition
+            )
+        return _fold_inequacao_bound(restriction, model, ctx)
+    except _UnresolvableBucketBTerm as err:
+        emit(
+            Diagnostic(
+                code="decomp-electrical-bucket-b-unresolved",
+                severity=Severity.WARNING,
+                category="Special constraints",
+                title="Electrical restriction input-data term could not be resolved",
+                summary=(
+                    f"Electrical restriction {restriction.code} at stage "
+                    f"{stage_index}, block {block_index} could not resolve "
+                    f"an input-data term ({err}); the constraint is skipped "
+                    "rather than emitted with a partial bound."
+                ),
+                remediation=(
+                    "Check the source model's data feeding this restriction "
+                    f"(restriction {restriction.code}, stage {stage_index}, "
+                    f"block {block_index}); the constraint is skipped."
+                ),
+            )
+        )
+        return None
+    except _UnresolvableDispUsih as err:
+        emit(
+            Diagnostic(
+                code="decomp-electrical-disp-usih-unresolved",
+                severity=Severity.WARNING,
+                category="Special constraints",
+                title="disp_usih available power could not be resolved",
+                summary=(
+                    f"Electrical restriction {restriction.code} at stage "
+                    f"{stage_index}, block {block_index} could not resolve a "
+                    f"disp_usih available-power term ({err}); the "
+                    "constraint is skipped rather than emitted with a "
+                    "partial bound."
+                ),
+                remediation=(
+                    "Check the source model's cadastro/maintenance data for "
+                    f"the plant named in restriction {restriction.code}'s "
+                    "disp_usih term; the constraint is skipped."
+                ),
+            )
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# TICKET-009 — per-(stage,block) activation-gate evaluation
+# ---------------------------------------------------------------------------
+
+
+def _restriction_horizon(
+    restriction: ElectricalRestriction, calendar: Sequence[OperativeStage]
+) -> tuple[int, int]:
+    """*restriction*'s horizonte stage range, defaulting to the full
+    calendar when either endpoint is ``None`` (no
+    ``RESTRICAO-ELETRICA-HORIZONTE-PERIODO`` row for it) — mirrors "no
+    ``HABILITA`` -> always active" (:func:`is_always_active`): an absent
+    horizonte is "no restriction on which stages", not "inactive
+    everywhere"."""
+    start = restriction.stage_start if restriction.stage_start is not None else 0
+    end = (
+        restriction.stage_end
+        if restriction.stage_end is not None
+        else len(calendar) - 1
+    )
+    return start, end
+
+
+def active_cells(
+    restriction: ElectricalRestriction,
+    model: LibsElectricalModel,
+    context_factory: Callable[[int, int], DataContext],
+    calendar: Sequence[OperativeStage],
+) -> set[tuple[int, int]]:
+    """The set of ``(stage_index, block_index)`` cells where *restriction* is
+    active: its horizonte stage range intersected with the cells where its
+    activation rule evaluates ``True``.
+
+    Resolves *restriction*'s rule once — from its ``habilita`` binding
+    (looked up in ``model.rules`` and parsed with
+    :func:`parse_activation_rule`), or the vacuous always-active rule
+    (:func:`is_always_active`) when ``habilita`` is ``None`` — then evaluates
+    it **per (stage, block)** cell (OQ-5): every block of every in-horizonte
+    stage is checked independently via :func:`evaluate_rule`, so a
+    demand-band rule that holds only in the heavy-load block activates only
+    that block, never the light blocks of the same stage. This
+    per-(stage,block) granularity is the faithful default this ticket
+    adopts; confirming that no restriction in the source model instead needs
+    coarser stage-only (all-or-no-block) granularity is a later census's job
+    (ticket-013), not this function's.
+
+    *context_factory* is ticket-008's :func:`build_data_context` return
+    value — a per-cell **factory**, not a single :data:`DataContext` — since
+    a :data:`DataContext` is scoped to exactly one ``(stage_index,
+    block_index)`` cell (see its own docstring) and this function evaluates
+    the rule at every in-horizonte cell independently. For each candidate
+    cell this calls ``context_factory(stage_index, block_index)`` to obtain
+    that cell's :data:`DataContext`, then hands it to :func:`evaluate_rule`.
+    This keeps *active_cells* pure given *context_factory*: no deck I/O
+    beyond whatever *context_factory*'s own closure already reads once
+    (requirement 5) — and when the rule is the always-active one,
+    *context_factory* is never even called, since every in-horizonte cell is
+    active regardless of its data.
+
+    When the rule evaluates ``False`` in **every** in-horizonte cell, the
+    returned set is empty and this function itself emits one
+    ``Severity.INFO`` :class:`~cobre_bridge.diagnostics.Diagnostic` naming
+    *restriction* (mirroring ``constraint_registers``'s dropped-restriction
+    skip logging, as a diagnostic here rather than a bare log record). The
+    eventual caller (a later ticket's emitter) has not landed yet, so this
+    is the self-contained, directly-testable place to raise it (via
+    :func:`~cobre_bridge.diagnostics.collect`) — that caller will simply add
+    no bound rows for an empty set and does not need to emit this diagnostic
+    itself.
+
+    The activation rule's ``==``/``!=`` comparisons
+    (:func:`evaluate_rule`/``_COMPARISON_FUNCS``) are exact float equality,
+    with no tolerance — an intentional, faithful choice already made at the
+    rule engine (ticket-004) and left unchanged here; a census confirming no
+    real rule gates on ``==``/``!=`` over a computed demand sum is a later
+    ticket's concern, not a reason to relax the comparison here.
+
+    Raises
+    ------
+    ValueError
+        When *restriction*'s ``habilita`` names a ``regra_id`` absent from
+        ``model.rules`` — a dangling activation reference must fail loud,
+        naming both the restriction and the missing rule id.
+    """
+    if restriction.habilita is None:
+        rule = ActivationRule(comparisons=())
+    else:
+        rule_text = model.rules.get(restriction.habilita)
+        if rule_text is None:
+            raise ValueError(
+                f"restriction {restriction.code}: HABILITA names activation "
+                f"rule {restriction.habilita}, which is absent from the "
+                "model's rules"
+            )
+        rule = parse_activation_rule(rule_text, model)
+
+    always_active = is_always_active(rule)
+    stage_start, stage_end = _restriction_horizon(restriction, calendar)
+
+    cells: set[tuple[int, int]] = set()
+    for stage_index in range(stage_start, stage_end + 1):
+        n_blocks = len(calendar[stage_index].block_hours)
+        for block_index in range(n_blocks):
+            if always_active or evaluate_rule(
+                rule, context_factory(stage_index, block_index)
+            ):
+                cells.add((stage_index, block_index))
+
+    if not cells:
+        emit(
+            Diagnostic(
+                code="decomp-electrical-restriction-inactive",
+                severity=Severity.INFO,
+                category="Special constraints",
+                title="Electrical restriction inactive across its horizon",
+                summary=(
+                    f"Electrical restriction {restriction.code} evaluated "
+                    "false in every in-horizon (stage, block) cell within "
+                    f"stages {stage_start}-{stage_end}; no bound is emitted "
+                    "for it."
+                ),
+                remediation=(
+                    "Check the source model's activation rule and demand "
+                    f"data feeding restriction {restriction.code}; the "
+                    "restriction carries no active cell and is dropped."
+                ),
+            )
+        )
+    return cells
+
+
+# ---------------------------------------------------------------------------
+# TICKET-010 — bucket-C ``disp_usih`` reserve -> gen-cap reformulation
+# ---------------------------------------------------------------------------
+
+
+class AvailablePowerSource(Enum):
+    """Which tier resolved one plant/stage's ``disp_usih`` available power
+    (``A_h``), per Requirement 1's PRIMARY-vs-FALLBACK OQ-2 decision (this
+    module's header): the maintenance-aware availability overlay (the
+    PRIMARY source :func:`build_available_power` sums), or the un-derated
+    rated envelope (the FALLBACK — used only where the overlay carries no
+    entry, never as the primary source)."""
+
+    OVERLAY = "overlay"
+    RATED_ENVELOPE = "rated_envelope"
+
+
+class _UnresolvableDispUsih(Exception):
+    """Internal control-flow signal: one bucket-C ``disp_usih`` term's
+    available power could not be resolved from *either*
+    :class:`AvailablePower` tier (Requirement 5) — the plant is absent from
+    both the availability overlay and the rated-envelope fallback.
+
+    Deliberately not a :class:`ValueError`, mirroring
+    :class:`_UnresolvableBucketBTerm`: :func:`assemble_bound` is the sole
+    catcher, converting this into a ``Severity.WARNING`` :class:`Diagnostic`
+    and dropping the whole constraint (skip-not-partial) rather than
+    emitting a partial bound.
+    """
+
+
+@dataclass(frozen=True)
+class AvailablePower:
+    """Per-(plant code, stage_index) maintenance-aware available power
+    (``A_h``) — the reference-head constant this module's header pins for
+    the ``disp_usih`` reformulation (OQ-2, approved for a weekly/monthly
+    reserve margin).
+
+    ``overlay`` is the PRIMARY source, keyed by the plant's deck code (never
+    its ``hydro_id``, since :func:`resolve_disp_usih` resolves a term by the
+    code it was parsed with): ``convert_hydro_group_availability``'s
+    per-(hydro, group, stage) ``availability_mw`` (``installed × MP × FD``,
+    hydraulic-capped), summed across a plant's unit-groups per stage.
+    ``rated_envelope`` is the FALLBACK ONLY, keyed by deck code: the
+    un-derated ``_rated_envelope`` ``max_generation`` for a plant/stage the
+    overlay carries no entry for — never read as the primary source
+    (Requirement 1's pitfall).
+    """
+
+    overlay: Mapping[tuple[int, int], float]
+    rated_envelope: Mapping[int, float]
+
+    def resolve(
+        self, code: int, stage_index: int
+    ) -> tuple[float, AvailablePowerSource]:
+        """*code*'s ``A_h`` at *stage_index*, and which tier produced it.
+
+        Tries the maintenance-aware overlay first (the PRIMARY source);
+        falls back to the un-derated rated envelope only when the overlay
+        carries no entry for this exact ``(code, stage_index)`` — never the
+        other way around.
+
+        Raises
+        ------
+        _UnresolvableDispUsih
+            When *code* is absent from *both* tiers (Requirement 5).
+        """
+        overlay_value = self.overlay.get((code, stage_index))
+        if overlay_value is not None:
+            return overlay_value, AvailablePowerSource.OVERLAY
+        fallback_value = self.rated_envelope.get(code)
+        if fallback_value is not None:
+            return fallback_value, AvailablePowerSource.RATED_ENVELOPE
+        raise _UnresolvableDispUsih(
+            f"plant {code} has no available power at stage {stage_index} "
+            "(absent from both the availability overlay and the rated "
+            "envelope)"
+        )
+
+
+def build_available_power(
+    overlay: Mapping[tuple[int, int, int], GroupBoundEntry],
+    hidr: pd.DataFrame,
+    id_map: DecompIdMap,
+    effective: EffectiveCadastro,
+) -> AvailablePower:
+    """Build the :class:`AvailablePower` lookup (Requirement 1) from
+    :func:`~cobre_bridge.decomp.hydro.convert_hydro_group_availability`'s raw
+    per-(hydro_id, hydro_unit_group_id, stage_id) *overlay*.
+
+    Sums each entry's ``max_generation_mw`` across a plant's unit-groups per
+    stage, re-keying the ``hydro_id`` it is stored under onto the plant's own
+    deck code (:meth:`~cobre_bridge.decomp.id_map.DecompIdMap.hydro_id`'s
+    inverse) — :func:`resolve_disp_usih` resolves a parsed ``disp_usih(code)``
+    term by that same deck code, never by ``hydro_id``. A group with no entry
+    at a given stage contributes nothing to the sum: *overlay* is sparse by
+    construction (only stores a value where the maintenance-derated figure
+    falls below that group's own declared envelope — spec's B8 "only where it
+    differs" convention), so a stage/group absent from it means "no further
+    restriction beyond the rated envelope", not "zero" — which is exactly
+    what the :meth:`AvailablePower.resolve` fallback then supplies.
+
+    Precomputes the FALLBACK tier for every declared hydro plant
+    (:attr:`~cobre_bridge.decomp.id_map.DecompIdMap.hydro_codes`) via
+    :func:`~cobre_bridge.decomp.hydro._rated_envelope`'s ``max_generation`` —
+    the un-derated rated envelope — so :meth:`AvailablePower.resolve` never
+    needs *hidr*/*effective* itself at resolve time.
+    """
+    code_by_hydro_id = {id_map.hydro_id(code): code for code in id_map.hydro_codes}
+
+    overlay_sums: dict[tuple[int, int], float] = {}
+    for (hydro_id, _group_id, stage_id), entry in overlay.items():
+        if entry.max_generation_mw is None:
+            continue
+        code = code_by_hydro_id.get(hydro_id)
+        if code is None:
+            continue
+        key = (code, stage_id)
+        overlay_sums[key] = overlay_sums.get(key, 0.0) + float(
+            entry.max_generation_mw  # type: ignore[arg-type]
+        )
+
+    rated_envelope = {
+        code: _rated_envelope(hidr.loc[code], code, effective)[1]
+        for code in id_map.hydro_codes
+    }
+
+    return AvailablePower(overlay=overlay_sums, rated_envelope=rated_envelope)
+
+
+def resolve_disp_usih(term: ParsedTerm, stage_index: int, a_h: AvailablePower) -> float:
+    """*term*'s (a bucket-C ``disp_usih`` term) plant's ``A_h`` at
+    *stage_index* (Requirement 2) — the value :func:`build_available_power`
+    resolved: the per-plant availability-overlay sum when present, else the
+    rated-envelope fallback.
+
+    Raises
+    ------
+    _UnresolvableDispUsih
+        Propagated from :meth:`AvailablePower.resolve` when the plant is
+        absent from *both* tiers.
+    """
+    value, _source = a_h.resolve(term.args[0], stage_index)
+    return value
+
+
+def _flip_operator(sense: str) -> str:
+    """The sense-flipped counterpart of one INEQUACAO comparison operator.
+
+    Multiplying an inequality by ``-1`` swaps ``>=``/``<=`` and leaves
+    ``==`` unchanged — exactly the operator-side half of the reserve->gen-cap
+    rewrite (:func:`_fold_reserve_disp_usih`).
+
+    Raises
+    ------
+    ValueError
+        When *sense* is not one of ``">="``, ``"<="``, ``"=="`` — mirroring
+        :func:`~cobre_bridge.generic_constraint_format.sense_to_interval`.
+    """
+    if sense == ">=":
+        return "<="
+    if sense == "<=":
+        return ">="
+    if sense == "==":
+        return "=="
+    raise ValueError(f"_flip_operator: unknown operator {sense!r}")
+
+
+def _emit_disp_usih_substitution(
+    restriction_code: int,
+    plant_code: int,
+    stage_index: int,
+    a_h_value: float,
+    source: AvailablePowerSource,
+) -> None:
+    """Emit the spec-§4b fidelity diagnostic for one ``disp_usih -> A_h``
+    substitution (Requirement 3), naming the plant code, the stage, the
+    ``A_h`` value used, and which :class:`AvailablePowerSource` tier
+    produced it (Requirement 1's "log which was used").
+
+    ``Severity.INFO`` for the maintenance-aware overlay (the intended
+    primary path); ``Severity.WARNING`` for the un-derated rated-envelope
+    fallback — a second approximation stacked on top of the reference-head
+    one, worth flagging more loudly than the primary path.
+    """
+    severity = (
+        Severity.INFO if source is AvailablePowerSource.OVERLAY else Severity.WARNING
+    )
+    source_label = (
+        "the maintenance-aware availability overlay"
+        if source is AvailablePowerSource.OVERLAY
+        else "the un-derated rated-envelope fallback"
+    )
+    emit(
+        Diagnostic(
+            code="decomp-electrical-disp-usih-substituted",
+            severity=severity,
+            category="Special constraints",
+            title="disp_usih resolved to a reference-head available-power constant",
+            summary=(
+                f"Restriction {restriction_code}: disp_usih({plant_code}) at "
+                f"stage {stage_index} substituted A_h={a_h_value:g} MW, from "
+                f"{source_label}."
+            ),
+            remediation=(
+                "This reformulates the reserve constraint into a generation "
+                "cap at a fixed reference-head available-power value "
+                "(OQ-2, this module's header); check the source model's "
+                f"maintenance/availability data for plant {plant_code} if "
+                "this value seems stale."
+            ),
+        )
+    )
+
+
+def _fold_reserve_disp_usih(
+    restriction: ElectricalRestriction,
+    stage_index: int,
+    a_h: AvailablePower,
+    ctx: DataContext,
+    lhs_partition: Mapping[Bucket, list[ParsedTerm]],
+    rhs_partition: Mapping[Bucket, list[ParsedTerm]],
+) -> tuple[float | None, float | None]:
+    """Fold an INEQUACAO restriction's bucket-C ``disp_usih`` terms into its
+    numeric bound, realizing the documented reserve->gen-cap rewrite (this
+    module's header):
+
+    .. code-block:: text
+
+        Σ_h (disp_usih(h) − ger_usih(h)) >= R
+            -> Σ_h ger_usih(h) <= Σ_h A_h − R
+
+    Every ``disp_usih(h)`` term (coefficient ``c``) on the LHS must be
+    paired with a ``ger_usih(h)`` term also on the LHS carrying the exact
+    opposite coefficient (``-c``) — the documented reserve SIGN structure
+    (this module's header / TICKET-010's CRITICAL pitfall). Substituting
+    ``disp_usih(h) -> A_h`` (:func:`resolve_disp_usih`) and multiplying the
+    whole relation by ``-1`` (so every surviving ``ger_usih`` term carries a
+    positive coefficient) flips the operator's sense; any bucket-B terms on
+    either side fold into the same bound the ticket-008 way.
+
+    Raises
+    ------
+    ValueError
+        When *restriction* uses ``disp_usih`` outside this documented
+        pattern: a bucket-C or bucket-A term on the RHS, a bucket-A term on
+        the LHS that is not ``ger_usih``, more than one ``ger_usih`` term
+        for the same plant, a ``disp_usih(h)`` with no paired ``ger_usih(h)``
+        of the exact opposite coefficient, or a ``ger_usih(h)`` with no
+        paired ``disp_usih(h)`` — the CRITICAL pitfall this ticket calls
+        out: fail loud rather than silently mis-rewrite a shape the pattern
+        does not cover.
+    _UnresolvableDispUsih
+        Propagated from :func:`resolve_disp_usih` when a paired plant's
+        ``A_h`` cannot be resolved from either :class:`AvailablePower` tier
+        (Requirement 5) — the caller (:func:`assemble_bound`) is the sole
+        catcher.
+    """
+    assert restriction.operator is not None  # INEQUACAO invariant
+
+    if rhs_partition[Bucket.C] or rhs_partition[Bucket.A]:
+        raise ValueError(
+            f"restriction {restriction.code}: the disp_usih reserve pattern "
+            "requires its ger_usih/disp_usih pair on the LHS; the RHS "
+            "carries a decision or disp_usih term"
+        )
+
+    disp_terms = lhs_partition[Bucket.C]
+    ger_terms = lhs_partition[Bucket.A]
+    non_ger_terms = [term for term in ger_terms if term.token != "ger_usih"]
+    if non_ger_terms:
+        raise ValueError(
+            f"restriction {restriction.code}: the disp_usih reserve pattern "
+            "requires every paired decision term to be ger_usih; found "
+            f"{non_ger_terms[0].token!r}"
+        )
+
+    ger_by_plant = {term.args[0]: term for term in ger_terms}
+    if len(ger_by_plant) != len(ger_terms):
+        raise ValueError(
+            f"restriction {restriction.code}: the disp_usih reserve pattern "
+            "requires at most one ger_usih term per plant"
+        )
+
+    reserve_sum = 0.0
+    for disp_term in disp_terms:
+        code = disp_term.args[0]
+        ger_term = ger_by_plant.pop(code, None)
+        if ger_term is None or ger_term.coefficient != -disp_term.coefficient:
+            raise ValueError(
+                f"restriction {restriction.code}: disp_usih({code}) is not "
+                "paired with a ger_usih term of the exact opposite "
+                "coefficient — outside the documented reserve pattern"
+            )
+        a_h_value, source = a_h.resolve(code, stage_index)
+        reserve_sum += disp_term.coefficient * a_h_value
+        _emit_disp_usih_substitution(
+            restriction.code, code, stage_index, a_h_value, source
+        )
+
+    if ger_by_plant:
+        leftover_code = next(iter(ger_by_plant))
+        raise ValueError(
+            f"restriction {restriction.code}: ger_usih({leftover_code}) has "
+            "no paired disp_usih term — outside the documented reserve "
+            "pattern"
+        )
+
+    lhs_b_sum = _evaluate_side(lhs_partition[Bucket.B], ctx)
+    rhs_b_sum = _evaluate_side(rhs_partition[Bucket.B], ctx)
+    bound_value = reserve_sum + lhs_b_sum - rhs_b_sum
+    return sense_to_interval(_flip_operator(restriction.operator), bound_value)

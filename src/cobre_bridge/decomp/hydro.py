@@ -604,7 +604,7 @@ def _build_split_unit_groups(
     hreg: pd.Series,
     code: int,
     name: str,
-    bus_id: int,
+    group_bus_ids: Sequence[int],
     frequencies: list[float],
     effective: EffectiveCadastro,
 ) -> tuple[list[dict[str, object]], float, float]:
@@ -618,8 +618,16 @@ def _build_split_unit_groups(
     that conjunto's own head-corrected envelope
     (:func:`_conjunto_head_corrected_envelope`, ticket-017) — each group has
     only its own conjunto's installed power to draw on, so the power cap
-    inside that function is per-group, never plant-wide. All groups sit on
-    *bus_id*, the plant's own bus (no per-group bus on this deck).
+    inside that function is per-group, never plant-wide. Group ``i`` sits on
+    ``group_bus_ids[i]`` — a per-group bus, not necessarily the plant's own
+    bus: :func:`convert_hydros` relocates Itaipu's 50 Hz group to the ``IV``
+    transshipment bus while keeping its 60 Hz group on the plant's own bus.
+
+    Raises
+    ------
+    ValueError
+        Naming both counts, if *frequencies* and *group_bus_ids* disagree in
+        length — a mis-wired split must fail loud, not silently colocate.
 
     Returns the groups plus their summed ``(max_turbined_m3s,
     max_generation_mw)``: :func:`convert_hydros` declares the plant's own
@@ -628,6 +636,11 @@ def _build_split_unit_groups(
     two groups' own per-stage machine-set changes (if any) need not peak on
     the same stage.
     """
+    if len(frequencies) != len(group_bus_ids):
+        raise ValueError(
+            f"plant {code}: {len(frequencies)} split frequencies but "
+            f"{len(group_bus_ids)} per-group buses were supplied"
+        )
     groups: list[dict[str, object]] = []
     total_turbined = 0.0
     total_generation = 0.0
@@ -638,7 +651,7 @@ def _build_split_unit_groups(
         groups.append(
             build_mirror_unit_group(
                 name=name,
-                bus_id=bus_id,
+                bus_id=group_bus_ids[i],
                 min_generation_mw=0.0,
                 max_generation_mw=p,
                 min_turbined_m3s=0.0,
@@ -733,9 +746,14 @@ def convert_hydros(
     construction — cobre rule 41 holds even though the two groups' own
     per-stage machine-set changes (if any) need not peak on the same stage,
     nor their head-corrected flows peak on the same stage as their rated
-    power. The entity ``reservoir`` block is the plant's outer per-stage
-    storage envelope (:func:`storage_envelope`), so per-stage bound
-    overrides (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
+    power. Itaipu's 50 Hz group (group id 0) is placed on
+    ``id_map.transhipment_bus_id`` — the ``IV`` transshipment bus — rather
+    than the plant's own submercado bus; the 60 Hz group (group id 1) stays
+    on the plant's own bus. This relocation is unconditional whenever Itaipu
+    is operated (ticket-006). The entity ``reservoir`` block is the plant's
+    outer per-stage storage envelope (:func:`storage_envelope`), so
+    per-stage bound overrides
+    (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
     always sit inside it. Per-family ``AC`` coverage is reported by
     ``check decomp`` (:mod:`cobre_bridge.decomp.preflight`), not logged here.
     """
@@ -773,8 +791,16 @@ def convert_hydros(
         bus_id = id_map.bus_id(int(hreg["submercado"]))
         if code == _ITAIPU_CODE:
             frequencies = _split_plant_frequencies(hreg, code, effective, mp, fd)
+            # Unconditional 50 Hz -> IV relocation (ticket-006): Itaipu's 50 Hz
+            # unit group (group id 0, the lower of the two ascending
+            # frequencies) is moved to the transshipment bus so cobre's
+            # HydroGeneration{bus} selector can separate the two groups; the
+            # 60 Hz group (group id 1) stays on the plant's own SE bus
+            # (already computed above as `bus_id`).
+            se_bus = bus_id
+            iv_bus = id_map.transhipment_bus_id
             unit_groups, max_turbined, max_generation = _build_split_unit_groups(
-                hreg, code, name, bus_id, frequencies, effective
+                hreg, code, name, [iv_bus, se_bus], frequencies, effective
             )
         else:
             _, max_generation = _rated_envelope(hreg, code, effective)

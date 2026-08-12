@@ -6,14 +6,20 @@ like idecomp's ``df=True`` accessors, so these run in CI with no real deck.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.decomp.group_bounds import GroupBoundEntry
+from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.libs_electrical import (
     ActivationRule,
+    AvailablePower,
+    AvailablePowerSource,
     Bucket,
     Comparison,
     DataContext,
@@ -23,13 +29,22 @@ from cobre_bridge.decomp.libs_electrical import (
     LibsElectricalModel,
     ParsedTerm,
     ViolationTreatment,
+    _UnresolvableBucketBTerm,
+    _UnresolvableDispUsih,
+    active_cells,
+    assemble_bound,
+    build_available_power,
+    build_data_context,
     classify_term,
     classify_terms,
     evaluate_rule,
+    evaluate_se,
     is_always_active,
     parse_activation_rule,
     parse_linear_expression,
+    read_carga_ande,
     read_libs_electrical,
+    resolve_disp_usih,
 )
 from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -296,18 +311,23 @@ def _model(
     expressions: dict[str, str] | None = None,
     aliases: tuple[str, ...] = (),
     restrictions: dict[int, str] | None = None,
+    alias_values: dict[str, dict[tuple[int, int | None], float]] | None = None,
 ) -> LibsElectricalModel:
     """A minimal hand-built model for parser tests: named expressions keyed by
     ``{name: formula}``, bare alias names (their per-(stage,patamar) values are
-    irrelevant to the parser, which never resolves them), and restrictions
-    keyed by ``{code: lhs}`` (used only to exercise ``re(R)`` expansion)."""
+    irrelevant to the parser, which never resolves them, but relevant to
+    ticket-008's ``build_data_context`` -- supply them via *alias_values*,
+    keyed by alias name), and restrictions keyed by ``{code: lhs}`` (used only
+    to exercise ``re(R)`` expansion)."""
     return LibsElectricalModel(
         expressions={
             name: ElectricalExpression(code=i, name=name, formula=formula)
             for i, (name, formula) in enumerate((expressions or {}).items())
         },
         aliases={
-            name: ElectricalAlias(code=i, name=name, values={})
+            name: ElectricalAlias(
+                code=i, name=name, values=(alias_values or {}).get(name, {})
+            )
             for i, name in enumerate(aliases)
         },
         restrictions={
@@ -715,3 +735,596 @@ def test_is_always_active_false_for_a_parsed_rule() -> None:
     model = _model()
     rule = parse_activation_rule("demanda_sin >= 50000", model)
     assert is_always_active(rule) is False
+
+
+# ---------------------------------------------------------------------------
+# read_carga_ande (TICKET-005)
+# ---------------------------------------------------------------------------
+
+
+class _StubDadger:
+    """Return a preset ``ri`` DataFrame (or ``None``) — the module's first
+    ``Dadger`` test double."""
+
+    def __init__(self, ri: pd.DataFrame | None) -> None:
+        self._ri = ri
+
+    def ri(self, df: bool = True) -> pd.DataFrame | None:
+        return self._ri
+
+
+def _ri(*rows: tuple, n_patamares: int) -> pd.DataFrame:
+    """``RI`` rows shaped exactly as idecomp's ``df=True`` accessor expands
+    them: ``(codigo_usina, estagio, codigo_submercado, carga_ande_1, ...,
+    carga_ande_n)``."""
+    columns = ["codigo_usina", "estagio", "codigo_submercado"] + [
+        f"carga_ande_{k}" for k in range(1, n_patamares + 1)
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _ri_stage(index: int, *, n_blocks: int) -> OperativeStage:
+    return OperativeStage(
+        index=index,
+        start_date=date(2026, 7, 4),
+        end_date=date(2026, 7, 11),
+        season_id=6,
+        block_hours=tuple(24.0 for _ in range(n_blocks)),
+    )
+
+
+def _ri_calendar(n_stages: int, *, n_blocks: int) -> list[OperativeStage]:
+    return [_ri_stage(i, n_blocks=n_blocks) for i in range(n_stages)]
+
+
+def test_carga_ande_single_stage_inherited_forward_across_calendar() -> None:
+    stub = _StubDadger(_ri((66, 1, 1, 3505.0, 3332.0, 2817.5), n_patamares=3))
+    calendar = _ri_calendar(6, n_blocks=3)
+    result = read_carga_ande(stub, calendar)
+    assert set(result) == {0, 1, 2, 3, 4, 5}
+    for values in result.values():
+        assert values == [3505.0, 3332.0, 2817.5]
+
+
+def test_carga_ande_multi_stage_sparse_inheritance() -> None:
+    stub = _StubDadger(
+        _ri((66, 1, 1, 100.0, 100.0), (66, 3, 1, 200.0, 200.0), n_patamares=2)
+    )
+    calendar = _ri_calendar(4, n_blocks=2)
+    result = read_carga_ande(stub, calendar)
+    assert result[0] == [100.0, 100.0]
+    assert result[1] == [100.0, 100.0]
+    assert result[2] == [200.0, 200.0]
+    assert result[3] == [200.0, 200.0]
+
+
+def test_carga_ande_no_ri_register_returns_empty_dict() -> None:
+    stub = _StubDadger(None)
+    assert read_carga_ande(stub, _ri_calendar(6, n_blocks=3)) == {}
+
+
+def test_carga_ande_block_count_mismatch_raises_value_error() -> None:
+    stub = _StubDadger(_ri((66, 2, 1, 111.0, 222.0), n_patamares=2))
+    calendar = _ri_calendar(4, n_blocks=3)
+    with pytest.raises(ValueError) as exc_info:
+        read_carga_ande(stub, calendar)
+    message = str(exc_info.value)
+    # estagio 2 -> 0-based stage index 1
+    assert "1" in message
+    assert "2" in message
+    assert "3" in message
+
+
+def test_carga_ande_missing_estagio_1_raises_value_error() -> None:
+    stub = _StubDadger(_ri((66, 3, 1, 200.0, 200.0), n_patamares=2))
+    calendar = _ri_calendar(4, n_blocks=2)
+    with pytest.raises(ValueError, match="estágio 1"):
+        read_carga_ande(stub, calendar)
+
+
+# ---------------------------------------------------------------------------
+# build_data_context / assemble_bound / evaluate_se (TICKET-008)
+# ---------------------------------------------------------------------------
+
+
+class _StubElectricalDadger:
+    """Return a preset ``dp``/``ri`` DataFrame (or ``None``) for each
+    ``Dadger`` accessor ``build_data_context`` reads -- mirrors
+    ``_StubRestricoes``'s generic-accessor shape."""
+
+    def __init__(self, **frames: pd.DataFrame) -> None:
+        self._frames = frames
+
+    def __getattr__(self, name: str):  # noqa: ANN204 - test double
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def accessor(df: bool = True) -> pd.DataFrame | None:
+            return self._frames.get(name)
+
+        return accessor
+
+
+def _dp(*rows: tuple, n_patamares: int) -> pd.DataFrame:
+    """``DP`` rows shaped as idecomp's ``df=True`` accessor: (codigo_submercado,
+    estagio, numero_patamares, carga_1, ..., carga_n)."""
+    columns = ["codigo_submercado", "estagio", "numero_patamares"] + [
+        f"carga_{k}" for k in range(1, n_patamares + 1)
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def test_build_data_context_demanda_sin_and_demanda_submarket() -> None:
+    id_map = DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"))
+    calendar = _ri_calendar(1, n_blocks=2)
+    dadger = _StubElectricalDadger(
+        dp=_dp(
+            (1, 1, 2, 1000.0, 900.0),
+            (2, 1, 2, 500.0, 400.0),
+            n_patamares=2,
+        )
+    )
+    ctx = build_data_context(_model(), dadger, id_map, calendar)(0, 0)
+    assert ctx(ParsedTerm(coefficient=1.0, token="demanda_sin")) == 1500.0
+    assert ctx(ParsedTerm(coefficient=1.0, token="demanda", args=(1,))) == 1000.0
+
+
+def test_build_data_context_carga_ande_resolves_the_series() -> None:
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    calendar = _ri_calendar(1, n_blocks=2)
+    dadger = _StubElectricalDadger(
+        dp=_dp((1, 1, 2, 0.0, 0.0), n_patamares=2),
+        ri=_ri((66, 1, 1, 50.0, 60.0), n_patamares=2),
+    )
+    ctx0 = build_data_context(_model(), dadger, id_map, calendar)(0, 0)
+    ctx1 = build_data_context(_model(), dadger, id_map, calendar)(0, 1)
+    term = ParsedTerm(coefficient=1.0, token="carga_ande")
+    assert ctx0(term) == 50.0
+    assert ctx1(term) == 60.0
+
+
+def test_build_data_context_alias_stage_inherited_with_na_patamar_fallback() -> None:
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    calendar = _ri_calendar(3, n_blocks=2)
+    dadger = _StubElectricalDadger(dp=_dp((1, 1, 2, 0.0, 0.0), n_patamares=2))
+    model = _model(
+        aliases=("MMGDSIN",),
+        alias_values={"MMGDSIN": {(0, None): 100.0, (2, 1): 500.0}},
+    )
+    factory = build_data_context(model, dadger, id_map, calendar)
+    term = ParsedTerm(coefficient=1.0, token="alias", alias_name="MMGDSIN")
+    # stage 0: no exact patamar entry, NA (all-blocks) covers both blocks.
+    assert factory(0, 0)(term) == 100.0
+    assert factory(0, 1)(term) == 100.0
+    # stage 1: nothing declared -- inherits stage 0's NA entry.
+    assert factory(1, 0)(term) == 100.0
+    # stage 2: an exact patamar-1 entry overrides the inherited NA default.
+    assert factory(2, 0)(term) == 500.0
+
+
+def test_build_data_context_constant_resolves_to_one_not_its_value() -> None:
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    calendar = _ri_calendar(1, n_blocks=1)
+    dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 0.0), n_patamares=1))
+    ctx = build_data_context(_model(), dadger, id_map, calendar)(0, 0)
+    # epic-01-boundary carry-forward 4.2: the constant's own value lives in
+    # the term's coefficient; ctx must return 1.0, never the value itself.
+    assert ctx(ParsedTerm(coefficient=42.0, token="__const__")) == 1.0
+
+
+def test_build_data_context_unknown_submarket_raises_unresolvable() -> None:
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    calendar = _ri_calendar(1, n_blocks=1)
+    dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 0.0), n_patamares=1))
+    ctx = build_data_context(_model(), dadger, id_map, calendar)(0, 0)
+    with pytest.raises(_UnresolvableBucketBTerm, match="99"):
+        ctx(ParsedTerm(coefficient=1.0, token="demanda", args=(99,)))
+
+
+def test_build_data_context_alias_with_no_value_raises_unresolvable() -> None:
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    calendar = _ri_calendar(1, n_blocks=1)
+    dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 0.0), n_patamares=1))
+    model = _model(aliases=("MMGDSIN",))  # no values declared at all
+    ctx = build_data_context(model, dadger, id_map, calendar)(0, 0)
+    with pytest.raises(_UnresolvableBucketBTerm, match="MMGDSIN"):
+        ctx(ParsedTerm(coefficient=1.0, token="alias", alias_name="MMGDSIN"))
+
+
+def _inequacao(code: int, lhs: str, operator: str, rhs: str) -> ElectricalRestriction:
+    return ElectricalRestriction(
+        code=code,
+        lhs=lhs,
+        operator=operator,
+        rhs=rhs,
+        is_formula=False,
+        limits={},
+        overrides=(),
+    )
+
+
+def _formula(
+    code: int, lhs: str, limits: dict[tuple[int, int | None], tuple]
+) -> ElectricalRestriction:
+    return ElectricalRestriction(
+        code=code,
+        lhs=lhs,
+        operator=None,
+        rhs=None,
+        is_formula=True,
+        limits=limits,
+        overrides=(),
+    )
+
+
+def test_assemble_bound_inequacao_upper_only_from_rhs_bucket_b() -> None:
+    restriction = _inequacao(285, "ger_usih(285)", "<=", "11000 - 0.04*val_demanda(3)")
+    ctx = _dict_context({"val_demanda(3)": 5000.0})
+    assert assemble_bound(restriction, _model(), 0, 0, ctx) == (None, 10800.0)
+
+
+def test_assemble_bound_formula_two_sided_sentinel_maps_to_none() -> None:
+    restriction = _formula(
+        401, "ger_usih(285)+ger_usih(287)", {(0, None): (None, 6300.0)}
+    )
+    assert assemble_bound(restriction, _model(), 0, 0, _dict_context({})) == (
+        None,
+        6300.0,
+    )
+
+
+def test_assemble_bound_negates_a_lhs_bucket_b_term_sign_discipline() -> None:
+    # epic-01-boundary carry-forward 4.3: a bucket-B term on the LHS must be
+    # negated when it moves to the bound side, not just summed in verbatim.
+    # ger_usih(5) + val_demanda(1) >= 0, val_demanda(1) = 300 <=>
+    # ger_usih(5) >= -300.
+    restriction = _inequacao(42, "ger_usih(5) + val_demanda(1)", ">=", "0")
+    ctx = _dict_context({"val_demanda(1)": 300.0})
+    assert assemble_bound(restriction, _model(), 0, 0, ctx) == (-300.0, None)
+
+
+def test_assemble_bound_drops_and_warns_on_unresolvable_carga_ande() -> None:
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+    calendar = _ri_calendar(1, n_blocks=1)
+    dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 1000.0), n_patamares=1))
+    model = _model()
+    cell_ctx = build_data_context(model, dadger, id_map, calendar)(0, 0)
+    restriction = _inequacao(999, "carga_ande", ">=", "100")
+
+    with dx.collect() as sink:
+        result = assemble_bound(restriction, model, 0, 0, cell_ctx)
+
+    assert result is None
+    assert len(sink) == 1
+    assert sink[0].severity is dx.Severity.WARNING
+    assert "carga_ande" in sink[0].summary
+    assert "999" in sink[0].summary
+
+
+def test_evaluate_se_folds_a_pure_bucket_b_selected_branch() -> None:
+    model = _model()
+    term = parse_linear_expression("se(demanda_sin > 1000, val_demanda(1), 0)", model)[
+        0
+    ]
+    ctx = _dict_context({"demanda_sin": 1500.0, "val_demanda(1)": 300.0})
+    assert evaluate_se(term, model, 0, 0, ctx) == 300.0
+
+
+def test_evaluate_se_raises_on_decision_bearing_selected_branch() -> None:
+    # epic-01-boundary carry-forward 4.1: a se(...) selected branch carrying
+    # a bucket-A/-C term cannot be folded to a float without silently
+    # dropping that term from the LP -- fail loud instead.
+    model = _model()
+    term = parse_linear_expression("se(demanda_sin > 1000, ger_usih(1), 0)", model)[0]
+    ctx = _dict_context({"demanda_sin": 1500.0})
+    with pytest.raises(ValueError, match="ger_usih"):
+        evaluate_se(term, model, 0, 0, ctx)
+
+
+# ---------------------------------------------------------------------------
+# active_cells (TICKET-009)
+# ---------------------------------------------------------------------------
+
+
+def _restriction_with_horizon(
+    code: int,
+    *,
+    stage_start: int | None,
+    stage_end: int | None,
+    habilita: int | None,
+) -> ElectricalRestriction:
+    """A minimal INEQUACAO restriction carrying only the fields
+    ``active_cells`` reads: ``habilita``/horizonte. ``lhs``/``operator``/
+    ``rhs`` are irrelevant placeholders -- ``active_cells`` never parses
+    them, only the activation rule text."""
+    return ElectricalRestriction(
+        code=code,
+        lhs="ger_usih(1)",
+        operator=">=",
+        rhs="0",
+        is_formula=False,
+        limits={},
+        overrides=(),
+        stage_start=stage_start,
+        stage_end=stage_end,
+        habilita=habilita,
+    )
+
+
+def _demanda_sin_context_factory(
+    values: Mapping[tuple[int, int], float],
+) -> Callable[[int, int], DataContext]:
+    """A per-cell :data:`DataContext` factory (ticket-008's shape) over a
+    dict of ``demanda_sin`` values keyed by ``(stage_index, block_index)``;
+    a cell absent from *values* defaults to ``0.0``."""
+
+    def factory(stage_index: int, block_index: int) -> DataContext:
+        return _dict_context(
+            {"demanda_sin": values.get((stage_index, block_index), 0.0)}
+        )
+
+    return factory
+
+
+def test_active_cells_band_gated_returns_single_cell() -> None:
+    model = LibsElectricalModel(
+        expressions={},
+        aliases={},
+        restrictions={},
+        rules={10: "demanda_sin >= 50000"},
+    )
+    restriction = _restriction_with_horizon(
+        701, stage_start=0, stage_end=1, habilita=10
+    )
+    calendar = _ri_calendar(2, n_blocks=2)
+    factory = _demanda_sin_context_factory(
+        {
+            (0, 0): 60000.0,
+            (0, 1): 40000.0,
+            (1, 0): 40000.0,
+            (1, 1): 40000.0,
+        }
+    )
+    assert active_cells(restriction, model, factory, calendar) == {(0, 0)}
+
+
+def test_active_cells_no_habilita_active_in_every_horizon_cell() -> None:
+    model = LibsElectricalModel(expressions={}, aliases={}, restrictions={}, rules={})
+    restriction = _restriction_with_horizon(
+        702, stage_start=0, stage_end=1, habilita=None
+    )
+    calendar = _ri_calendar(2, n_blocks=2)
+    # No cell data at all -- an always-active rule must never even consult
+    # the context factory.
+    factory = _demanda_sin_context_factory({})
+    assert active_cells(restriction, model, factory, calendar) == {
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+    }
+
+
+def test_active_cells_no_horizon_declared_defaults_to_full_calendar() -> None:
+    model = LibsElectricalModel(expressions={}, aliases={}, restrictions={}, rules={})
+    restriction = _restriction_with_horizon(
+        705, stage_start=None, stage_end=None, habilita=None
+    )
+    calendar = _ri_calendar(2, n_blocks=2)
+    factory = _demanda_sin_context_factory({})
+    assert active_cells(restriction, model, factory, calendar) == {
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+    }
+
+
+def test_active_cells_inactive_everywhere_returns_empty_and_emits_info() -> None:
+    model = LibsElectricalModel(
+        expressions={},
+        aliases={},
+        restrictions={},
+        rules={10: "demanda_sin >= 50000"},
+    )
+    restriction = _restriction_with_horizon(
+        703, stage_start=0, stage_end=1, habilita=10
+    )
+    calendar = _ri_calendar(2, n_blocks=2)
+    # Every cell defaults to 0.0 -- the rule is false everywhere in-horizon.
+    factory = _demanda_sin_context_factory({})
+
+    with dx.collect() as sink:
+        result = active_cells(restriction, model, factory, calendar)
+
+    assert result == set()
+    assert len(sink) == 1
+    assert sink[0].severity is dx.Severity.INFO
+    assert "703" in sink[0].summary
+
+
+def test_active_cells_dangling_habilita_raises_value_error_naming_both() -> None:
+    model = LibsElectricalModel(expressions={}, aliases={}, restrictions={}, rules={})
+    restriction = _restriction_with_horizon(
+        704, stage_start=0, stage_end=1, habilita=999
+    )
+    calendar = _ri_calendar(2, n_blocks=2)
+    factory = _demanda_sin_context_factory({})
+
+    with pytest.raises(ValueError) as exc_info:
+        active_cells(restriction, model, factory, calendar)
+    message = str(exc_info.value)
+    assert "704" in message
+    assert "999" in message
+
+
+# ---------------------------------------------------------------------------
+# AvailablePower / resolve_disp_usih / build_available_power (TICKET-010)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_disp_usih_returns_overlay_sum_when_present() -> None:
+    a_h = AvailablePower(overlay={(261, 0): 1000.0}, rated_envelope={261: 500.0})
+    term = ParsedTerm(coefficient=1.0, token="disp_usih", args=(261,))
+    assert resolve_disp_usih(term, 0, a_h) == 1000.0
+
+
+def test_resolve_disp_usih_returns_rated_envelope_fallback_when_absent() -> None:
+    a_h = AvailablePower(overlay={}, rated_envelope={261: 1500.0})
+    term = ParsedTerm(coefficient=1.0, token="disp_usih", args=(261,))
+    assert resolve_disp_usih(term, 0, a_h) == 1500.0
+
+
+def test_available_power_resolve_raises_disp_usih_unresolvable_from_both_tiers() -> (
+    None
+):
+    a_h = AvailablePower(overlay={}, rated_envelope={})
+    with pytest.raises(_UnresolvableDispUsih, match="999"):
+        a_h.resolve(999, 0)
+
+
+def test_build_available_power_for_disp_usih_sums_overlay_and_falls_back() -> None:
+    # code 261 -> hydro_id 0 (two unit-groups summed at stage 0); code 262 ->
+    # hydro_id 1, with only a max_turbined_m3s overlay entry (no generation
+    # override) -- it must fall back to the (mocked) rated envelope, never
+    # read the un-derated envelope as the primary source.
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(261, 262))
+    overlay = {
+        (0, 0, 0): GroupBoundEntry(max_generation_mw=900.0),
+        (0, 1, 0): GroupBoundEntry(max_generation_mw=100.0),
+        (1, 0, 0): GroupBoundEntry(max_turbined_m3s=50.0),
+    }
+    hidr = pd.DataFrame(index=[261, 262])
+
+    with patch(
+        "cobre_bridge.decomp.libs_electrical._rated_envelope",
+        return_value=(0.0, 1500.0),
+    ):
+        a_h = build_available_power(overlay, hidr, id_map, effective=object())
+
+    assert a_h.overlay == {(261, 0): 1000.0}
+    assert a_h.rated_envelope == {261: 1500.0, 262: 1500.0}
+    assert a_h.resolve(261, 0) == (1000.0, AvailablePowerSource.OVERLAY)
+    assert a_h.resolve(262, 0) == (1500.0, AvailablePowerSource.RATED_ENVELOPE)
+
+
+# ---------------------------------------------------------------------------
+# assemble_bound bucket-C disp_usih reserve -> gen-cap fold (TICKET-010)
+# ---------------------------------------------------------------------------
+
+_RESERVE_LHS = "disp_usih(261) + disp_usih(262) - ger_usih(261) - ger_usih(262)"
+
+
+def test_assemble_bound_disp_usih_reserve_rewrites_to_gen_cap() -> None:
+    # AC1: disp_usih(261)+disp_usih(262)-ger_usih(261)-ger_usih(262) >= 500,
+    # A_h = {261: 1000, 262: 800} -> ger_usih(261)+ger_usih(262) <= 1300.
+    restriction = _inequacao(402, _RESERVE_LHS, ">=", "500")
+    a_h = AvailablePower(overlay={(261, 0): 1000.0, (262, 0): 800.0}, rated_envelope={})
+    result = assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+    assert result == (None, 1300.0)
+
+
+def test_assemble_bound_disp_usih_emits_one_fidelity_diagnostic_per_substitution() -> (
+    None
+):
+    restriction = _inequacao(402, _RESERVE_LHS, ">=", "500")
+    a_h = AvailablePower(overlay={(261, 0): 1000.0, (262, 0): 800.0}, rated_envelope={})
+
+    with dx.collect() as sink:
+        result = assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+
+    assert result == (None, 1300.0)
+    assert len(sink) == 2
+    for diagnostic in sink:
+        assert diagnostic.severity is dx.Severity.INFO
+
+    first, second = sink
+    assert "261" in first.summary
+    assert "1000" in first.summary
+    assert "stage 0" in first.summary
+    assert "262" in second.summary
+    assert "800" in second.summary
+    assert "stage 0" in second.summary
+
+
+def test_assemble_bound_disp_usih_uses_warning_severity_for_rated_envelope_fallback() -> (
+    None
+):
+    restriction = _inequacao(285, "disp_usih(285) - ger_usih(285)", ">=", "0")
+    a_h = AvailablePower(overlay={}, rated_envelope={285: 400.0})
+
+    with dx.collect() as sink:
+        assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+
+    assert len(sink) == 1
+    assert sink[0].severity is dx.Severity.WARNING
+    assert "285" in sink[0].summary
+    assert "400" in sink[0].summary
+
+
+def test_assemble_bound_disp_usih_unresolvable_plant_drops_and_warns() -> None:
+    restriction = _inequacao(403, "disp_usih(999) - ger_usih(999)", ">=", "100")
+    a_h = AvailablePower(overlay={}, rated_envelope={})
+
+    with dx.collect() as sink:
+        result = assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+
+    assert result is None
+    assert len(sink) == 1
+    assert sink[0].severity is dx.Severity.WARNING
+    assert "999" in sink[0].summary
+    assert "403" in sink[0].summary
+
+
+def test_assemble_bound_disp_usih_without_available_power_raises_value_error() -> None:
+    restriction = _inequacao(404, "disp_usih(1) - ger_usih(1)", ">=", "0")
+    with pytest.raises(ValueError, match="AvailablePower"):
+        assemble_bound(restriction, _model(), 0, 0, _dict_context({}))
+
+
+def test_assemble_bound_disp_usih_on_rhs_raises_value_error() -> None:
+    # CRITICAL pitfall guard: the reserve pattern requires disp_usih paired
+    # with ger_usih on the LHS -- a disp_usih on the RHS is outside it.
+    restriction = _inequacao(405, "ger_usih(1)", ">=", "disp_usih(1)")
+    a_h = AvailablePower(overlay={(1, 0): 100.0}, rated_envelope={})
+    with pytest.raises(ValueError, match="RHS"):
+        assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+
+
+def test_assemble_bound_disp_usih_unpaired_ger_usih_raises_value_error() -> None:
+    # CRITICAL pitfall guard: a ger_usih term with no matching disp_usih is
+    # outside the documented reserve pattern.
+    restriction = _inequacao(406, "disp_usih(1) - ger_usih(1) + ger_usih(2)", ">=", "0")
+    a_h = AvailablePower(overlay={(1, 0): 500.0}, rated_envelope={})
+    with pytest.raises(ValueError, match="ger_usih\\(2\\)"):
+        assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+
+
+def test_assemble_bound_disp_usih_mismatched_coefficient_raises_value_error() -> None:
+    # CRITICAL pitfall guard: the paired ger_usih coefficient must be the
+    # exact opposite of disp_usih's -- a magnitude mismatch is outside the
+    # documented sign structure, not silently rewritten.
+    restriction = _inequacao(410, "disp_usih(1) - 2*ger_usih(1)", ">=", "0")
+    a_h = AvailablePower(overlay={}, rated_envelope={})
+    with pytest.raises(ValueError, match="disp_usih\\(1\\)"):
+        assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+
+
+def test_assemble_bound_disp_usih_non_ger_usih_decision_term_raises_value_error() -> (
+    None
+):
+    # CRITICAL pitfall guard: the documented pattern only pairs disp_usih
+    # with ger_usih -- a different bucket-A token alongside it is outside
+    # the pattern, not silently folded.
+    restriction = _inequacao(411, "disp_usih(1) - ger_usit(5)", ">=", "0")
+    a_h = AvailablePower(overlay={(1, 0): 100.0}, rated_envelope={})
+    with pytest.raises(ValueError, match="ger_usit"):
+        assemble_bound(restriction, _model(), 0, 0, _dict_context({}), a_h)
+
+
+def test_assemble_bound_formula_with_disp_usih_raises_value_error() -> None:
+    # The documented reserve->gen-cap rewrite only covers the INEQUACAO
+    # shape; a FORMULA restriction carrying disp_usih is out of pattern.
+    restriction = _formula(420, "disp_usih(1)", {(0, None): (None, 100.0)})
+    with pytest.raises(ValueError, match="FORMULA"):
+        assemble_bound(restriction, _model(), 0, 0, _dict_context({}))
