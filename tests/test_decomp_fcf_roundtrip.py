@@ -539,7 +539,6 @@ def roundtrip_case(tmp_path_factory: pytest.TempPathFactory) -> _RoundTripCase:
         case_dir,
         _CORTESH,
         _CORTES,
-        cobre_bin=_COBRE_BIN,
         work_dir=root / "work",
         cost_scale_factor=1.0,
     )

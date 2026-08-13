@@ -525,7 +525,6 @@ def import_boundary_fcf(
     cortesh_path: Path | None,
     cortes_path: Path | None,
     *,
-    cobre_bin: Path,
     work_dir: Path,
     cost_scale_factor: float,
 ) -> Path | None:
@@ -543,9 +542,10 @@ def import_boundary_fcf(
     2. Reads the header (``cortesh_path``) and the boundary-stage cut records
        (``cortes_path``), deriving the boundary stage from the cut file's own
        trailer when it is a single-stage partition export.
-    3. Checks the writer binding, then runs a 1-iteration ``cobre_bin`` pass
-       on a copy of ``case_dir`` (under ``work_dir``) to read back its
-       terminal state-vector layout.
+    3. Checks the writer binding, then runs a 1-iteration in-process
+       ``cobre.run.run`` pass on ``case_dir`` (checkpoint under ``work_dir``,
+       the case is never mutated) to read back its terminal state-vector
+       layout.
     4. Builds the deck's GNL ring plan (:func:`_build_gnl_ring_plan`) and maps
        every boundary cut onto that layout: storage terms by plant code,
        inflow-lag terms by calendar-month lag depth, and
@@ -575,7 +575,7 @@ def import_boundary_fcf(
     RuntimeError
         Propagated verbatim from ``fcf.bootstrap``'s ``ensure_writer_binding``
         (writer binding missing) or ``bootstrap_terminal_manifest`` (the
-        bootstrap ``cobre_bin run`` failed or its checkpoint was malformed).
+        in-process ``cobre.run.run`` failed or its checkpoint was malformed).
     ValueError
         Propagated verbatim from the cut reader (``fcf/cortes.py``, e.g. a
         non-individualized deck or a nonzero SAR coefficient), the mapper
@@ -620,7 +620,7 @@ def import_boundary_fcf(
     ensure_writer_binding()
     import cobre
 
-    manifest = bootstrap_terminal_manifest(case_dir, cobre_bin, work_dir=work_dir)
+    manifest = bootstrap_terminal_manifest(case_dir, work_dir=work_dir)
     gnl_plan = _build_gnl_ring_plan(case_dir, deck_files)
     cost_unit_hours = _coupling_stage_hours(case_dir)
     mapping = map_boundary_cuts(

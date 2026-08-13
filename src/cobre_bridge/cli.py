@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import sys
 import tempfile
 import webbrowser
@@ -1327,37 +1326,6 @@ def _convert_newave(
 _DECOMP_VALIDATION_WHITELIST: tuple[str, ...] = ("external-solver interoperability",)
 
 
-def _resolve_decomp_cobre_bin(cobre_bin: Path | None) -> Path:
-    """Resolve the ``cobre`` binary the ``--boundary-fcf`` bootstrap pass runs.
-
-    ``--cobre-bin`` wins verbatim when given. Otherwise: ``cobre`` on ``PATH``
-    (:func:`shutil.which`), then the documented development worktree binary
-    (``~/git/cobre-gnlbp/target/release/cobre`` — the ``feat/cobre-gnl-
-    boundary-pricing`` branch build the boundary-FCF importer's bootstrap
-    pass requires; see ``docs/decomp-boundary-fcf-build.md``).
-
-    Raises
-    ------
-    ValueError
-        If *cobre_bin* is ``None`` and neither fallback resolves to an
-        existing file. Caught by the caller's broad boundary-FCF ``except``
-        block, mapping to exit 1 like every other boundary-FCF failure.
-    """
-    if cobre_bin is not None:
-        return cobre_bin
-    which = shutil.which("cobre")
-    if which is not None:
-        return Path(which)
-    worktree_bin = Path.home() / "git" / "cobre-gnlbp" / "target" / "release" / "cobre"
-    if worktree_bin.is_file():
-        return worktree_bin
-    raise ValueError(
-        "--boundary-fcf requires a cobre binary: none found on PATH and the "
-        f"documented development worktree binary ({worktree_bin}) does not "
-        "exist; pass --cobre-bin explicitly."
-    )
-
-
 def _run_decomp_conversion(args: SimpleNamespace) -> None:
     """Execute the convert decomp subcommand.
 
@@ -1372,12 +1340,13 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     ``ValueError`` naming the failing rule(s) and entities, mapped to exit 1
     like every other conversion failure.
 
-    When ``--boundary-fcf`` is set, the boundary-FCF importer runs after the
+    Unless ``--no-fcf`` is set, the boundary-FCF importer runs after the
     manifest write and BEFORE ``--validate`` (so validation sees the patched
-    ``config.json``): cut-file discovery, the capability probe, then
-    ``import_boundary_fcf`` — any failure (cut files absent, capability
-    probe, or the importer itself) exits 1 via the same
-    ``diagnostic_from_exception`` mapping as a conversion failure. A
+    ``config.json``) whenever the deck declares its cut files: the capability
+    probe, then ``import_boundary_fcf``. A deck with no cut files simply
+    converts without a boundary FCF (an INFO note, not an error); a capability
+    or importer failure exits 1 via the same ``diagnostic_from_exception``
+    mapping as a conversion failure. A
     successful import surfaces the C8 ``cobre run ... --output <case_dir>``
     recipe and a ``summary["boundary_fcf"]`` sub-object.
 
@@ -1457,9 +1426,9 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
                 console=err_console,
                 style="#F5A623",
             )
-        if args.boundary_fcf:
+        if not args.no_fcf:
             print_status(
-                "Note: --boundary-fcf is ignored under --dry-run"
+                "Note: boundary FCF import is skipped under --dry-run"
                 " (nothing was written to import into).",
                 console=err_console,
                 style="#F5A623",
@@ -1515,40 +1484,41 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     # ``[]`` so a disabled or pre-sink-reached failure still yields a valid
     # (empty) merge below.
     boundary_diagnostics: list[Diagnostic] = []
-    if args.boundary_fcf:
+    # The boundary FCF is imported by default; ``--no-fcf`` skips the whole
+    # step (and its deck re-discovery). With it on, the deck's own FC records
+    # (or the cortes* glob) locate the cut files; a deck that declares none
+    # simply converts without a boundary FCF (an INFO note, not an error).
+    deck_files = discover_decomp_files(args.src) if not args.no_fcf else None
+    fcf_cut_files_present = (
+        deck_files is not None
+        and deck_files.cortesh is not None
+        and deck_files.cortes is not None
+    )
+    if not args.no_fcf and not fcf_cut_files_present:
+        print_status(
+            "Note: the deck declares no cortes/cortesh files; converting "
+            "without a boundary FCF.",
+            console=err_console,
+            style="#F5A623",
+        )
+    if fcf_cut_files_present:
+        assert deck_files is not None  # narrowed by fcf_cut_files_present
         from cobre_bridge import diagnostics as dx
 
         fcf_diags: list[Diagnostic] = []
         try:
-            deck_files = discover_decomp_files(args.src)
-            if deck_files.cortesh is None or deck_files.cortes is None:
-                missing = [
-                    name
-                    for name, resolved in (
-                        ("cortesh", deck_files.cortesh),
-                        ("cortes", deck_files.cortes),
-                    )
-                    if resolved is None
-                ]
-                raise ValueError(
-                    "--boundary-fcf was requested but the deck has no cortes "
-                    f"files (missing: {', '.join(missing)})"
-                )
-
             from cobre_bridge.decomp.fcf import import_boundary_fcf
             from cobre_bridge.decomp.fcf.capability import (
                 ensure_boundary_fcf_capability,
             )
 
             ensure_boundary_fcf_capability()
-            cobre_bin = _resolve_decomp_cobre_bin(args.cobre_bin)
 
             with dx.collect() as fcf_diags, tempfile.TemporaryDirectory() as work_dir:
                 import_boundary_fcf(
                     args.dst,
                     deck_files.cortesh,
                     deck_files.cortes,
-                    cobre_bin=cobre_bin,
                     work_dir=Path(work_dir),
                     # Never None: a None cost_scale_factor triggers cobre's
                     # legacy 1e6 scaling — the source cuts are authored in
@@ -1706,32 +1676,20 @@ def _convert_decomp(
             ),
         ),
     ] = False,
-    boundary_fcf: Annotated[
+    no_fcf: Annotated[
         bool,
         typer.Option(
-            "--boundary-fcf",
+            "--no-fcf",
             help=(
-                "After conversion, import the deck's boundary FCF (cortes/"
-                "cortesh) as a terminal-stage cobre policy checkpoint. "
-                "Requires cut files in the deck and a capable cobre wheel; "
-                "runs a real 1-iteration cobre pass, so this is slow. "
-                "Ignored under --dry-run."
+                "Skip importing the deck's boundary FCF. By default, when the "
+                "deck declares cortes/cortesh files (its FC records), they are "
+                "imported as a terminal-stage cobre policy checkpoint via an "
+                "in-process 1-iteration cobre pass (slow; requires cobre-python). "
+                "Pass this for a quick conversion without the terminal FCF. "
+                "The FCF is always skipped under --dry-run."
             ),
         ),
     ] = False,
-    cobre_bin: Annotated[
-        Path | None,
-        typer.Option(
-            "--cobre-bin",
-            metavar="PATH",
-            help=(
-                "Path to the cobre binary used by --boundary-fcf's bootstrap "
-                "pass. Defaults to cobre on PATH, then the documented "
-                "development worktree binary "
-                "(~/git/cobre-gnlbp/target/release/cobre)."
-            ),
-        ),
-    ] = None,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1741,7 +1699,8 @@ def _convert_decomp(
 
     Loop-closing subset: the exchange network, renewables card file, and GNL
     anticipation are deferred and reported as warnings. The boundary FCF is
-    also deferred by default, but ``--boundary-fcf`` opts into importing it.
+    imported by default whenever the deck declares its cut files; ``--no-fcf``
+    skips it.
     """
     _configure_logging(verbose, log_file)
     _run_decomp_conversion(
@@ -1753,8 +1712,7 @@ def _convert_decomp(
             diagnostics_json=diagnostics_json,
             json_output=json_output,
             dry_run=dry_run,
-            boundary_fcf=boundary_fcf,
-            cobre_bin=cobre_bin,
+            no_fcf=no_fcf,
             verbose=verbose,
             log_file=log_file,
             no_color=no_color,

@@ -2083,8 +2083,7 @@ class TestCliInProcess:
         """A successful ``convert decomp`` prints the ``✓ Converted ...`` summary."""
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         fake_report = ConversionReport(
@@ -2110,8 +2109,7 @@ class TestCliInProcess:
         from cobre_bridge.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         warning = Diagnostic(
@@ -2149,8 +2147,7 @@ class TestCliInProcess:
         """``convert decomp --json`` emits the unified verdict envelope."""
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         fake_report = ConversionReport(
@@ -2183,8 +2180,7 @@ class TestCliInProcess:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A conversion failure under ``--json`` emits ``status == "error"``; exit 1."""
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         with patch(
@@ -2207,8 +2203,7 @@ class TestCliInProcess:
         from cobre_bridge.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
         json_path = tmp_path / "diag.json"
 
@@ -2258,8 +2253,7 @@ class TestCliInProcess:
         """The sidecar and ``--json`` are independent: stdout verdict AND file written."""
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
         json_path = tmp_path / "diag.json"
 
@@ -2298,8 +2292,7 @@ class TestCliInProcess:
         """Absent the flag, no sidecar file is created."""
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
         json_path = tmp_path / "diag.json"
 
@@ -2331,9 +2324,9 @@ class TestCliInProcess:
         ``test_convert_newave_validate_unchanged_by_helper`` above).
         """
         from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         monkeypatch.setattr(
@@ -2356,7 +2349,13 @@ class TestCliInProcess:
             ),
         )
 
-        with patch("cobre_bridge.decomp.pipeline.convert_decomp_case"):
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
             code, _stdout, stderr = self._invoke_main(
                 ["convert", "decomp", str(src), str(dst), "--validate"],
                 monkeypatch,
@@ -2373,8 +2372,7 @@ class TestCliInProcess:
         """``--dry-run`` into an empty dst writes nothing and exits 0."""
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         fake_report = ConversionReport(
@@ -2407,8 +2405,7 @@ class TestCliInProcess:
         """``--dry-run --json`` emits a sorted, dst-relative would-write document."""
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         # Deliberately unsorted absolute paths under dst.
@@ -2464,8 +2461,7 @@ class TestCliInProcess:
         reads ``summary["would_write"]`` on any dry-run verdict must not
         KeyError just because the conversion failed.
         """
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         with patch(
@@ -2497,8 +2493,7 @@ class TestCliInProcess:
 
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         fake_report = ConversionReport(
@@ -2542,8 +2537,7 @@ class TestCliInProcess:
         returns before the sidecar block runs."""
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
         json_path = tmp_path / "diag.json"
 
@@ -2673,18 +2667,18 @@ class TestCliInProcess:
         assert not (dst / "conversion_manifest.json").exists()
 
     # ------------------------------------------------------------------
-    # --boundary-fcf / --cobre-bin (ticket-008)
+    # Boundary FCF (default on; --no-fcf opts out; in-process, no --cobre-bin)
     # ------------------------------------------------------------------
 
-    def test_convert_decomp_boundary_fcf_default_off_is_noop(
+    def test_convert_decomp_no_fcf_skips_import(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Without ``--boundary-fcf``, the importer never runs and no
-        ``boundary/`` directory is written (default OFF, unchanged behaviour)."""
+        """``--no-fcf`` skips the importer even when the deck declares cut
+        files: no ``boundary/`` directory, and the deck is never re-discovered
+        for the FCF gate."""
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
         dst = tmp_path / "dst"
 
         fake_report = ConversionReport(
@@ -2699,7 +2693,7 @@ class TestCliInProcess:
             patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
         ):
             code, _stdout, _stderr = self._invoke_main(
-                ["convert", "decomp", str(src), str(dst)],
+                ["convert", "decomp", str(src), str(dst), "--no-fcf"],
                 monkeypatch,
             )
 
@@ -2710,14 +2704,13 @@ class TestCliInProcess:
     def test_convert_decomp_boundary_fcf_happy_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--boundary-fcf`` with cut files present imports with
+        """With cut files present (the default), the importer runs with
         ``cost_scale_factor=1.0``, exits 0, surfaces the C8 run recipe on
         stderr, and the ``--json`` verdict carries ``summary["boundary_fcf"]``."""
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
         dst = tmp_path / "dst"
-        fake_cobre_bin = tmp_path / "fake-cobre-bin"
 
         fake_report = ConversionReport(
             hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
@@ -2737,16 +2730,7 @@ class TestCliInProcess:
             ) as mock_import,
         ):
             code, stdout, stderr = self._invoke_main(
-                [
-                    "convert",
-                    "decomp",
-                    str(src),
-                    str(dst),
-                    "--boundary-fcf",
-                    "--cobre-bin",
-                    str(fake_cobre_bin),
-                    "--json",
-                ],
+                ["convert", "decomp", str(src), str(dst), "--json"],
                 monkeypatch,
             )
 
@@ -2754,7 +2738,7 @@ class TestCliInProcess:
         mock_capability.assert_called_once()
         mock_import.assert_called_once()
         assert mock_import.call_args.kwargs["cost_scale_factor"] == 1.0
-        assert mock_import.call_args.kwargs["cobre_bin"] == fake_cobre_bin
+        assert "cobre_bin" not in mock_import.call_args.kwargs
         assert mock_import.call_args.args[0] == dst
         # C8 recipe surfaced on stderr regardless of --json.
         assert f"cobre run {dst}" in stderr
@@ -2766,11 +2750,12 @@ class TestCliInProcess:
             "run_constraint": f"--output={dst}",
         }
 
-    def test_convert_decomp_boundary_fcf_missing_cortes_exits_1(
+    def test_convert_decomp_missing_cortes_skips_fcf(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--boundary-fcf`` on a deck with no cortes files exits 1, and
-        stderr names the missing cortes files."""
+        """A deck that declares no cortes files converts with exit 0 and an
+        INFO note (not an error): the importer never runs and no ``boundary/``
+        directory is written."""
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir(tmp_path)  # no cortesh/cortes files
@@ -2788,13 +2773,12 @@ class TestCliInProcess:
             patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
         ):
             code, _stdout, stderr = self._invoke_main(
-                ["convert", "decomp", str(src), str(dst), "--boundary-fcf"],
+                ["convert", "decomp", str(src), str(dst)],
                 monkeypatch,
             )
 
-        assert code == 1
-        assert "cortes" in stderr
-        assert "cortesh" in stderr
+        assert code == 0
+        assert "no cortes/cortesh files" in stderr
         mock_import.assert_not_called()
         assert not (dst / "boundary").exists()
 
@@ -2824,15 +2808,7 @@ class TestCliInProcess:
             patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
         ):
             code, _stdout, stderr = self._invoke_main(
-                [
-                    "convert",
-                    "decomp",
-                    str(src),
-                    str(dst),
-                    "--boundary-fcf",
-                    "--cobre-bin",
-                    str(tmp_path / "fake-cobre-bin"),
-                ],
+                ["convert", "decomp", str(src), str(dst)],
                 monkeypatch,
             )
 
@@ -2883,26 +2859,18 @@ class TestCliInProcess:
             ),
         ):
             code, _stdout, _stderr = self._invoke_main(
-                [
-                    "convert",
-                    "decomp",
-                    str(src),
-                    str(dst),
-                    "--boundary-fcf",
-                    "--cobre-bin",
-                    str(tmp_path / "fake-cobre-bin"),
-                    "--validate",
-                ],
+                ["convert", "decomp", str(src), str(dst), "--validate"],
                 monkeypatch,
             )
 
         assert code == 2
         assert call_order == ["import_boundary_fcf", "validate"]
 
-    def test_convert_decomp_boundary_fcf_ignored_under_dry_run(
+    def test_convert_decomp_fcf_skipped_under_dry_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--dry-run --boundary-fcf`` imports nothing and notes it on stderr."""
+        """``--dry-run`` skips the boundary FCF import and notes it on stderr,
+        even when the deck declares cut files."""
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
@@ -2925,19 +2893,12 @@ class TestCliInProcess:
             patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
         ):
             code, _stdout, stderr = self._invoke_main(
-                [
-                    "convert",
-                    "decomp",
-                    str(src),
-                    str(dst),
-                    "--dry-run",
-                    "--boundary-fcf",
-                ],
+                ["convert", "decomp", str(src), str(dst), "--dry-run"],
                 monkeypatch,
             )
 
         assert code == 0
-        assert "--boundary-fcf is ignored under --dry-run" in stderr
+        assert "boundary FCF import is skipped under --dry-run" in stderr
         mock_import.assert_not_called()
         assert not dst.exists() or list(dst.iterdir()) == []
 
@@ -2955,7 +2916,6 @@ class TestCliInProcess:
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
         dst = tmp_path / "dst"
-        fake_cobre_bin = tmp_path / "fake-cobre-bin"
 
         fake_report = ConversionReport(
             hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
@@ -2990,9 +2950,6 @@ class TestCliInProcess:
                     "decomp",
                     str(src),
                     str(dst),
-                    "--boundary-fcf",
-                    "--cobre-bin",
-                    str(fake_cobre_bin),
                     "--json",
                 ],
                 monkeypatch,
@@ -3018,7 +2975,6 @@ class TestCliInProcess:
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
         dst = tmp_path / "dst"
-        fake_cobre_bin = tmp_path / "fake-cobre-bin"
 
         fake_report = ConversionReport(
             hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
@@ -3053,9 +3009,6 @@ class TestCliInProcess:
                     "decomp",
                     str(src),
                     str(dst),
-                    "--boundary-fcf",
-                    "--cobre-bin",
-                    str(fake_cobre_bin),
                 ],
                 monkeypatch,
             )
@@ -3081,7 +3034,6 @@ class TestCliInProcess:
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
         dst = tmp_path / "dst"
-        fake_cobre_bin = tmp_path / "fake-cobre-bin"
         json_path = tmp_path / "diag.json"
 
         fake_report = ConversionReport(
@@ -3117,9 +3069,6 @@ class TestCliInProcess:
                     "decomp",
                     str(src),
                     str(dst),
-                    "--boundary-fcf",
-                    "--cobre-bin",
-                    str(fake_cobre_bin),
                     "--diagnostics-json",
                     str(json_path),
                 ],
@@ -3132,18 +3081,16 @@ class TestCliInProcess:
         codes = {d["code"] for d in payload["diagnostics"]}
         assert "boundary-fcf-gnl-anticipated-deviation" in codes
 
-    def test_convert_decomp_diagnostics_json_unchanged_without_boundary_fcf(
+    def test_convert_decomp_diagnostics_json_unchanged_without_fcf(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Guard: a plain ``convert decomp --diagnostics-json`` (no
-        ``--boundary-fcf``) sidecar is exactly ``report.diagnostics`` —
-        deferring the sidecar write past the (here, no-op) boundary-FCF
-        block must not regress the existing contract."""
+        """Guard: a ``convert decomp --diagnostics-json --no-fcf`` sidecar is
+        exactly ``report.diagnostics`` — deferring the sidecar write past the
+        (here, skipped) boundary-FCF block must not regress the contract."""
         from cobre_bridge.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
         json_path = tmp_path / "diag.json"
 
@@ -3176,6 +3123,7 @@ class TestCliInProcess:
                     str(dst),
                     "--diagnostics-json",
                     str(json_path),
+                    "--no-fcf",
                 ],
                 monkeypatch,
             )

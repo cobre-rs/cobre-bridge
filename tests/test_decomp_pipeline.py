@@ -668,7 +668,17 @@ class TestCli:
         with patch("cobre_bridge.decomp.pipeline.convert_decomp_case") as mock_convert:
             result = runner.invoke(
                 app,
-                ["convert", "decomp", str(tmp_path), str(tmp_path / "out"), "--force"],
+                # --no-fcf: the empty tmp_path is not a discoverable deck, and
+                # this test only asserts the pipeline is invoked (convert is
+                # mocked), so skip the default boundary-FCF discovery/import.
+                [
+                    "convert",
+                    "decomp",
+                    str(tmp_path),
+                    str(tmp_path / "out"),
+                    "--force",
+                    "--no-fcf",
+                ],
             )
         assert result.exit_code == 0
         mock_convert.assert_called_once()
@@ -1723,8 +1733,8 @@ def _fc_line(tipo: str, caminho: str) -> str:
 class TestDiscoverDecompFilesBoundaryFcf:
     """TICKET-007: ``discover_decomp_files`` resolves the deck's optional
     boundary-FCF cut files (``cortesh``/``cortes``), gated on their presence
-    -- the discovery prerequisite for wiring the boundary-FCF importer
-    (ticket-008) behind ``--boundary-fcf``. Mirrors
+    -- the discovery prerequisite for the boundary-FCF importer, which
+    ``convert decomp`` now runs by default (``--no-fcf`` opts out). Mirrors
     ``TestDiscoverDecompFilesLibsElectrical``'s synthetic-deck-dir fixture
     pattern (``tests/test_decomp_libs_electrical_pipeline.py``)."""
 

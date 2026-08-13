@@ -132,7 +132,6 @@ def imported_case(
         case_dir,
         _CORTESH,
         _CORTES,
-        cobre_bin=_COBRE_BIN,
         work_dir=root / "work",
         cost_scale_factor=1.0,
     )
@@ -227,7 +226,6 @@ def test_import_boundary_fcf_emits_diagnostics(
             case_dir,
             _CORTESH,
             _CORTES,
-            cobre_bin=_COBRE_BIN,
             work_dir=root / "work",
             cost_scale_factor=1.0,
         )
@@ -332,7 +330,6 @@ def test_import_boundary_fcf_no_cut_files_is_noop(
             case_dir,
             None,
             None,
-            cobre_bin=Path("/nonexistent/cobre"),
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
@@ -932,7 +929,6 @@ def mar26rv2_imported_case(
         case_dir,
         _MAR26_CORTESH,
         _MAR26_CORTES,
-        cobre_bin=_MAR26_COBRE_BIN,
         work_dir=root / "work",
         cost_scale_factor=1.0,
     )
@@ -1089,7 +1085,7 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
     Neither ticket-008 (CLI wiring, ``import_boundary_fcf`` mocked) nor
     ticket-013 (the two tests above, which call the real importer as a
     *library* function) exercises the actual, documented
-    ``cobre-bridge convert decomp ... --boundary-fcf`` command end to end.
+    ``cobre-bridge convert decomp`` command (boundary FCF on by default) end to end.
     This test closes that seam: it drives the command as a subprocess
     (``sys.executable -m cobre_bridge.cli``, hermetic against PATH) on the
     real mar-26-rv2 deck with the real ``cobre-gnlbp`` binary, and proves the
@@ -1103,6 +1099,9 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
     """
     dst = tmp_path / "converted"
 
+    # The boundary FCF is imported by default now (the deck declares its cut
+    # files), so no flag is needed; the bootstrap runs in-process via
+    # cobre-python, so there is no --cobre-bin to pass.
     completed = subprocess.run(
         [
             sys.executable,
@@ -1112,9 +1111,6 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
             "decomp",
             str(_MAR26_DECK),
             str(dst),
-            "--boundary-fcf",
-            "--cobre-bin",
-            str(_MAR26_COBRE_BIN),
             "--json",
         ],
         text=True,
@@ -1122,7 +1118,7 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
         check=False,
     )
     assert completed.returncode == 0, (
-        f"convert decomp --boundary-fcf exited {completed.returncode}:\n"
+        f"convert decomp (default boundary FCF) exited {completed.returncode}:\n"
         f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
 

@@ -132,7 +132,6 @@ def imported_case(
         case_dir,
         _CORTESH,
         _CORTES,
-        cobre_bin=_COBRE_BIN,
         work_dir=root / "work",
         cost_scale_factor=1.0,
     )
@@ -352,7 +351,6 @@ def test_import_boundary_fcf_logs_c8_workaround(
             case_dir,
             tmp_path / "deck" / "cortesh.dat",
             tmp_path / "deck" / "cortes-010.dat",
-            cobre_bin=Path("unused-cobre-bin"),
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
@@ -413,7 +411,6 @@ def test_import_boundary_fcf_rejects_storageless_manifest(
             case_dir,
             tmp_path / "deck" / "cortesh.dat",
             tmp_path / "deck" / "cortes-010.dat",
-            cobre_bin=Path("unused-cobre-bin"),
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
@@ -493,9 +490,7 @@ def test_manifest_identity_guard_matches_fresh_bootstrap(
     boundary_free_case = root / "converted"
     convert_decomp_case(_DECK, boundary_free_case, force=True)
 
-    fresh = bootstrap_terminal_manifest(
-        boundary_free_case, _COBRE_BIN, work_dir=root / "work"
-    )
+    fresh = bootstrap_terminal_manifest(boundary_free_case, work_dir=root / "work")
 
     authored_policy = cobre.results.load_policy(
         imported_case.case_dir, policy_subdir="boundary"
