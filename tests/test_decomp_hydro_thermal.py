@@ -12,6 +12,8 @@ import pytest
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.hydro import (
     _build_split_unit_groups,
+    _evaporation_coefficients_mm,
+    _evaporation_flag_codes,
     convert_energy_productivity,
     convert_hydros,
     convert_initial_storage,
@@ -20,6 +22,85 @@ from cobre_bridge.decomp.hydro import (
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import convert_thermal_bounds, convert_thermals
+
+_EVAPORATION_COLUMNS = (
+    "evaporacao_JAN",
+    "evaporacao_FEV",
+    "evaporacao_MAR",
+    "evaporacao_ABR",
+    "evaporacao_MAI",
+    "evaporacao_JUN",
+    "evaporacao_JUL",
+    "evaporacao_AGO",
+    "evaporacao_SET",
+    "evaporacao_OUT",
+    "evaporacao_NOV",
+    "evaporacao_DEZ",
+)
+
+
+def _evaporation_hidr(rows: dict[int, list[float]]) -> pd.DataFrame:
+    """A ``hidr``-shaped frame carrying only the 12 monthly evaporation columns."""
+    df = pd.DataFrame(
+        {
+            code: dict(zip(_EVAPORATION_COLUMNS, vals, strict=True))
+            for code, vals in rows.items()
+        }
+    ).T
+    df.index.name = "codigo_usina"
+    return df
+
+
+class TestEvaporationEmission:
+    """Reservoir-evaporation conversion (C11 fixed in cobre 0.14): the per-plant
+    UH ``evaporacao`` flag switches it on; the 12 monthly mm rates come from
+    ``hidr.dat`` in calendar order (Jan..Dec)."""
+
+    def test_coefficients_are_hidr_months_jan_to_dec(self) -> None:
+        hidr = _evaporation_hidr({7: [0, 2, 29, 40, 51, 46, 32, 23, 24, 15, 4, 7]})
+        assert _evaporation_coefficients_mm(hidr, 7) == [
+            0.0,
+            2.0,
+            29.0,
+            40.0,
+            51.0,
+            46.0,
+            32.0,
+            23.0,
+            24.0,
+            15.0,
+            4.0,
+            7.0,
+        ]
+
+    def test_all_zero_months_is_none(self) -> None:
+        hidr = _evaporation_hidr({7: [0.0] * 12})
+        assert _evaporation_coefficients_mm(hidr, 7) is None
+
+    def test_absent_plant_is_none(self) -> None:
+        hidr = _evaporation_hidr({7: [1.0] * 12})
+        assert _evaporation_coefficients_mm(hidr, 99) is None
+
+    def test_missing_columns_is_none_not_keyerror(self) -> None:
+        # A hidr frame without the evaporation columns (e.g. a partial fixture)
+        # yields None rather than raising, so a stray UH flag never crashes.
+        hidr = pd.DataFrame({7: {"volume_maximo": 100.0}}).T
+        hidr.index.name = "codigo_usina"
+        assert _evaporation_coefficients_mm(hidr, 7) is None
+
+    def test_flag_codes_reads_uh_evaporacao(self) -> None:
+        uh = pd.DataFrame(
+            [
+                {"codigo_usina": 1, "evaporacao": 1},
+                {"codigo_usina": 2, "evaporacao": 0},
+                {"codigo_usina": 3, "evaporacao": 1},
+            ]
+        )
+        assert _evaporation_flag_codes(_StubDadger(uh=uh)) == {1, 3}
+
+    def test_flag_codes_absent_column_is_empty(self) -> None:
+        assert _evaporation_flag_codes(_StubDadger(uh=pd.DataFrame())) == set()
+
 
 _RV3_DECK = Path("example/decomp-jul-26-rv3")
 

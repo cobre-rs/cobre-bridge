@@ -1556,8 +1556,9 @@ class TestDeferralWarning:
     ) -> None:
         """AC2: boundary FCF, windowed inflow inputs, and water travel time (VI)
         stay named, and the ``VI`` present/absent interpolation still reflects
-        the (mocked, absent) fixture deck. GNL anticipation is no longer
-        deferred — it is emitted (ticket-003) — so it must NOT appear here."""
+        the (mocked, absent) fixture deck. GNL anticipation and reservoir
+        evaporation are no longer deferred — both are emitted now — so neither
+        must appear here."""
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
             _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
 
@@ -1567,10 +1568,10 @@ class TestDeferralWarning:
             if "deferred at this milestone" in r.message
         )
         assert "GNL" not in deferral  # emitted now, not deferred
+        assert "evaporation" not in deferral  # emitted now (C11 fixed in cobre)
         assert "boundary FCF" in deferral
         assert "windowed inflow inputs" in deferral
         assert "water travel time (VI absent)" in deferral
-        assert "reservoir evaporation (absent)" in deferral
 
     def test_fe_rha_libs_are_reported_once_through_the_dx_sink_not_the_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

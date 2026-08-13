@@ -1289,24 +1289,14 @@ def _convert_decomp_case_impl(
     if libs_electrical_result is not None:
         dx.emit(_libs_electrical_census_diagnostic(libs_electrical_result), logger=_LOG)
 
-    # Reservoir evaporation (UH flag + hidr monthly coefficients) is DEFERRED as
-    # a TRACKED COBRE-GAP: cobre's evaporation model deposits the full monthly
-    # coefficient per stage regardless of stage duration (correct for monthly
-    # stages, but ~4.35x over for this deck's weekly stages — see C11 in
-    # ~/git/cobre/plans/conversion-found-improvements.md). The 12 monthly
-    # coefficients + hydro_geometry.parquet make it a direct mapping to restore
-    # once cobre scales the coefficient by the stage's fraction of its month.
-    uh_df = dadger.uh(df=True)
-    has_evaporation = (
-        uh_df is not None
-        and "evaporacao" in uh_df.columns
-        and bool((uh_df["evaporacao"].fillna(0) != 0).any())
-    )
+    # Reservoir evaporation is now CONVERTED (convert_hydros emits the per-plant
+    # `evaporation.coefficients_mm` from the UH flag + hidr's monthly rates);
+    # cobre >= 0.14 scales each stage to its calendar-month share (the C11 fix),
+    # so it is no longer a deferred cobre-gap.
     _LOG.warning(
         "deferred at this milestone: boundary FCF (importer), windowed inflow "
-        "inputs (solver 0.13), water travel time (VI%s), reservoir evaporation (%s)",
+        "inputs (solver 0.13), water travel time (VI%s)",
         " present" if has_travel_time else " absent",
-        "present" if has_evaporation else "absent",
     )
     _LOG.info(
         "converted %d buses, %d hydros, %d thermals, %d stages, terminal fan %d",

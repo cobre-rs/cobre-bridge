@@ -689,6 +689,60 @@ def _frequency_row(
     return rows.iloc[0]
 
 
+#: ``hidr.dat``'s 12 monthly reservoir-evaporation columns in calendar order
+#: (Jan..Dec) — cobre's ``evaporation.coefficients_mm`` is index 0 = January.
+_EVAPORATION_MONTH_COLUMNS = (
+    "evaporacao_JAN",
+    "evaporacao_FEV",
+    "evaporacao_MAR",
+    "evaporacao_ABR",
+    "evaporacao_MAI",
+    "evaporacao_JUN",
+    "evaporacao_JUL",
+    "evaporacao_AGO",
+    "evaporacao_SET",
+    "evaporacao_OUT",
+    "evaporacao_NOV",
+    "evaporacao_DEZ",
+)
+
+
+def _evaporation_flag_codes(dadger: Dadger) -> set[int]:
+    """Plant codes whose ``UH`` register sets the reservoir-evaporation flag.
+
+    DECOMP models a plant's evaporation only when its ``UH`` ``evaporacao``
+    flag is set; a plant absent from this set is emitted with no evaporation
+    regardless of the coefficients ``hidr.dat`` may carry.
+    """
+    uh = dadger.uh(df=True)
+    if uh is None or "evaporacao" not in uh.columns or "codigo_usina" not in uh.columns:
+        return set()
+    return set(uh.loc[uh["evaporacao"].fillna(0) != 0, "codigo_usina"].astype(int))
+
+
+def _evaporation_coefficients_mm(hidr: pd.DataFrame, code: int) -> list[float] | None:
+    """The plant's 12 monthly evaporation coefficients [mm/month], Jan..Dec,
+    from ``hidr.dat`` — or ``None`` when the plant is absent or every month is
+    zero (nothing to model).
+
+    cobre (>= 0.14) computes the evaporation-outflow model internally from
+    these monthly rates and the reservoir area geometry
+    (``hydro_geometry.parquet``, emitted by the FPHA path), scaling each stage
+    to its ``stage_hours / month_hours`` share of the calendar month — the C11
+    fix (pre-0.14 deposited a whole month's evaporation on every stage). The
+    bridge supplies only the monthly mm rates.
+    """
+    if code not in hidr.index or not all(
+        column in hidr.columns for column in _EVAPORATION_MONTH_COLUMNS
+    ):
+        return None
+    row = hidr.loc[code]
+    coefficients = [float(row[column]) for column in _EVAPORATION_MONTH_COLUMNS]
+    if not any(coefficients):
+        return None
+    return coefficients
+
+
 def convert_hydros(
     dadger: Dadger,
     hidr: pd.DataFrame,
@@ -775,6 +829,7 @@ def convert_hydros(
 
     op_date = start_date.isoformat()
     hydros: list[dict] = []
+    evaporation_codes = _evaporation_flag_codes(dadger)
     n_runofriver_collapsed = 0
     for code in id_map.hydro_codes:
         if code not in hidr.index:
@@ -867,6 +922,10 @@ def convert_hydros(
                 entry["hydraulic_losses"] = {"type": "factor", "value": 0.0}
         if travel_time_hours and code in travel_time_hours and downstream is not None:
             entry["travel_time_hours"] = travel_time_hours[code]
+        if code in evaporation_codes:
+            evaporation_mm = _evaporation_coefficients_mm(hidr, code)
+            if evaporation_mm is not None:
+                entry["evaporation"] = {"coefficients_mm": evaporation_mm}
         hydros.append(entry)
 
     affected_codes = set(effective.machine_conjunto_counts) | {
