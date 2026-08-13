@@ -231,6 +231,14 @@ def _mock_deck_and_cut_seams(
         "cobre_bridge.decomp.fcf.read_cortes",
         lambda *_args, **_kwargs: fake_cuts,
     )
+    # The coupling-stage-hours read (case_dir/stages.json) is a case-reading
+    # seam like the deck ones above; these binary-free orchestration cases
+    # carry only a minimal config.json, so stub it to a fixed 648 h rather than
+    # author a full stages.json.
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf._coupling_stage_hours",
+        lambda _case_dir: 648.0,
+    )
     monkeypatch.setattr("cobre_bridge.decomp.fcf.ensure_writer_binding", lambda: None)
 
 

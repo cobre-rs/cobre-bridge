@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
 from cobre_bridge.decomp.fcf.mapper import (
@@ -26,6 +27,10 @@ from tests._fcf_fixtures import (
     synthetic_roundtrip,
 )
 from tests.conftest import requires_cobre_python
+
+# Inflow-lag (pi_qafl) coefficients take an extra × C_M3S2HM3 beyond MONTH_HOURS
+# (cobre's inflow-lag state is m³/s, not Hm³); storage/rhs/GNL take × MONTH_HOURS.
+_LAG_FACTOR = MONTH_HOURS * C_M3S2HM3
 
 # cobre `policy.fbs` entity_type codes (see ticket-005's Current State) — a
 # stable external contract, restated locally rather than importing the
@@ -65,16 +70,18 @@ def test_map_storage_places_pi_varm_at_hydro_slots() -> None:
         (10, 20), (make_cut_record(pi_varm=(3.0, 5.0), rhs=100.0),)
     )
 
-    result = map_boundary_cuts(cuts, manifest, id_map)
+    result = map_boundary_cuts(cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS)
 
     assert result.dropped == ()
     assert len(result.cuts) == 1
     mapped = result.cuts[0]
     assert len(mapped.coefficients) == manifest.state_dimension
-    assert mapped.coefficients[0] == 3.0
-    assert mapped.coefficients[1] == 5.0
+    # Storage coefficients and the intercept are scaled to cobre cost units
+    # by MONTH_HOURS (the source's ($·mês)/h -> $ conversion); zero slots stay 0.
+    assert mapped.coefficients[0] == pytest.approx(3.0 * MONTH_HOURS)
+    assert mapped.coefficients[1] == pytest.approx(5.0 * MONTH_HOURS)
     assert mapped.coefficients[2:] == (0.0,) * 13
-    assert mapped.intercept == 100.0
+    assert mapped.intercept == pytest.approx(100.0 * MONTH_HOURS)
 
 
 def test_map_drops_source_only_plant_with_diagnostic_record() -> None:
@@ -83,11 +90,13 @@ def test_map_drops_source_only_plant_with_diagnostic_record() -> None:
     manifest = make_manifest([make_slot(_HYDRO_STORAGE, 0, 0)])
     cuts = make_boundary_cuts((10, 20), (make_cut_record(pi_varm=(3.0, 7.0)),))
 
-    result = map_boundary_cuts(cuts, manifest, id_map)
+    result = map_boundary_cuts(cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS)
 
+    # `dropped` reports the source coefficient in source units (diagnostic,
+    # never scaled); the kept storage coefficient is scaled by MONTH_HOURS.
     assert result.dropped == (DroppedTerm(plant_code=20, beta=7.0),)
     assert len(result.cuts) == 1
-    assert result.cuts[0].coefficients == (3.0,)
+    assert result.cuts[0].coefficients == (pytest.approx(3.0 * MONTH_HOURS),)
 
 
 def test_map_lags_one_to_one() -> None:
@@ -109,12 +118,14 @@ def test_map_lags_one_to_one() -> None:
         (10,), (make_cut_record(pi_varm=(0.0,), pi_qafl=(lags,)),)
     )
 
-    result = map_boundary_cuts(cuts, manifest, id_map, lag_slot_of=lambda d: d - 1)
+    result = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, lag_slot_of=lambda d: d - 1
+    )
 
     assert result.dropped == ()
     mapped = result.cuts[0]
-    assert mapped.coefficients[1] == 1.0  # lag depth 1 -> subindex 0
-    assert mapped.coefficients[2] == 2.0  # lag depth 2 -> subindex 1
+    assert mapped.coefficients[1] == pytest.approx(1.0 * _LAG_FACTOR)  # depth 1
+    assert mapped.coefficients[2] == pytest.approx(2.0 * _LAG_FACTOR)  # depth 2
 
 
 def test_map_zeroes_buckets_and_gnl_ring() -> None:
@@ -128,12 +139,12 @@ def test_map_zeroes_buckets_and_gnl_ring() -> None:
     )
     cuts = make_boundary_cuts((10,), (make_cut_record(pi_varm=(9.0,)),))
 
-    result = map_boundary_cuts(cuts, manifest, id_map)
+    result = map_boundary_cuts(cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS)
 
     for mapped in result.cuts:
         assert mapped.coefficients[1] == 0.0
         assert mapped.coefficients[2] == 0.0
-    assert result.cuts[0].coefficients[0] == 9.0
+    assert result.cuts[0].coefficients[0] == pytest.approx(9.0 * MONTH_HOURS)
 
 
 def test_map_rejects_out_of_range_lag_slot() -> None:
@@ -148,7 +159,9 @@ def test_map_rejects_out_of_range_lag_slot() -> None:
     cuts = make_boundary_cuts((10,), (make_cut_record(pi_varm=(1.0,)),))
 
     with pytest.raises(ValueError, match="out of range"):
-        map_boundary_cuts(cuts, manifest, id_map, lag_slot_of=lambda d: d)
+        map_boundary_cuts(
+            cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, lag_slot_of=lambda d: d
+        )
 
 
 @requires_cobre_python
@@ -178,8 +191,11 @@ def test_synthetic_roundtrip_preserves_coeffs(tmp_path: Path) -> None:
     reloaded = synthetic_roundtrip(tmp_path / "boundary", cuts, manifest, id_map)
 
     reloaded_cut = reloaded["stage_cuts"][0]["cuts"][0]
-    assert reloaded_cut["intercept"] == record.rhs
-    assert reloaded_cut["coefficients"][0:3] == [2.5, 0.75, 0.0]
+    # pos 0 = storage (× MONTH_HOURS); pos 1 = inflow-lag depth 1 (× _LAG_FACTOR).
+    assert reloaded_cut["intercept"] == pytest.approx(record.rhs * MONTH_HOURS)
+    assert reloaded_cut["coefficients"][0:3] == pytest.approx(
+        [2.5 * MONTH_HOURS, 0.75 * _LAG_FACTOR, 0.0]
+    )
 
 
 def _make_gnl_ring_fixture(
@@ -228,11 +244,13 @@ def test_map_gnl_places_chain_rule_sum_on_dated_slots() -> None:
     pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
     cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
 
-    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+    result = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+    )
 
     mapped = result.cuts[0]
-    assert mapped.coefficients[2] == pytest.approx(0.6)  # thermal 94, dated
-    assert mapped.coefficients[3] == pytest.approx(7.0)  # thermal 95, dated
+    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS)  # 94 dated
+    assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS)  # 95 dated
 
 
 def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
@@ -249,10 +267,12 @@ def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
         pi_gnl, post_horizon_start=20260501
     )
 
-    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+    result = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+    )
 
     mapped = result.cuts[0]
-    assert mapped.coefficients[2] == pytest.approx(0.6)  # thermal 94, covered
+    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS)  # 94 covered
     assert mapped.coefficients[3] == 0.0  # thermal 95, uncovered -> dropped
 
     matches = [
@@ -284,11 +304,13 @@ def test_map_gnl_post_horizon_start_none_is_old_behavior() -> None:
         pi_gnl, post_horizon_start=None
     )
 
-    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+    result = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+    )
 
     mapped = result.cuts[0]
-    assert mapped.coefficients[2] == pytest.approx(0.6)  # thermal 94, dated
-    assert mapped.coefficients[3] == pytest.approx(7.0)  # thermal 95, dated
+    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS)  # 94, dated
+    assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS)  # 95, dated
     assert not any("post-study horizon" in term.reason for term in result.gnl_dropped)
 
 
@@ -296,7 +318,9 @@ def test_map_gnl_sentinel_and_nontarget_slots_stay_zero() -> None:
     pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
     cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
 
-    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+    result = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+    )
 
     mapped = result.cuts[0]
     assert mapped.coefficients[1] == 0.0  # thermal 94, sentinel slot
@@ -310,7 +334,9 @@ def test_map_gnl_drops_submercado_without_thermal() -> None:
     pi_gnl = _gnl_row(24, {6: 10.0, 8: 20.0, 10: 40.0})
     cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
 
-    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+    result = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+    )
 
     matches = [
         term
@@ -342,7 +368,9 @@ def test_map_gnl_drops_target_with_no_dated_slot() -> None:
     cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
     plan = GnlRingPlan((GnlThermalTarget(94, 1, 1),))
 
-    result = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+    result = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+    )
 
     assert any(
         term.thermal_id == 94 and "no dated ring slot" in term.reason
@@ -361,10 +389,10 @@ def test_map_gnl_plan_none_is_noop() -> None:
     )
     cuts = make_boundary_cuts((10,), (make_cut_record(pi_varm=(9.0,)),))
 
-    result = map_boundary_cuts(cuts, manifest, id_map)
+    result = map_boundary_cuts(cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS)
 
     assert result.gnl_dropped == ()
-    assert result.cuts[0].coefficients[0] == 9.0
+    assert result.cuts[0].coefficients[0] == pytest.approx(9.0 * MONTH_HOURS)
     assert result.cuts[0].coefficients[1] == 0.0
 
 
@@ -385,4 +413,6 @@ def test_map_gnl_rejects_bad_pi_gnl_width() -> None:
     plan = GnlRingPlan((GnlThermalTarget(94, 1, 1),))
 
     with pytest.raises(ValueError, match="pi_gnl width"):
-        map_boundary_cuts(cuts, manifest, id_map, gnl_plan=plan)
+        map_boundary_cuts(
+            cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+        )

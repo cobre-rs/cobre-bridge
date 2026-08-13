@@ -29,8 +29,10 @@ import pytest
 from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.converters.network import MONTH_HOURS
 from cobre_bridge.decomp.anticipated import GnlCommitmentModel, GnlThermal
 from cobre_bridge.decomp.fcf import (
+    _coupling_stage_hours,
     _emit_import_diagnostics,
     _gnl_targets_from,
     _post_horizon_start,
@@ -479,7 +481,9 @@ def test_emit_import_diagnostics_gnl_deviation_fires() -> None:
     cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
     gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
 
-    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+    mapping = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=gnl_plan
+    )
 
     with dx.collect() as sink:
         _emit_import_diagnostics(cuts, mapping, gnl_plan)
@@ -578,6 +582,62 @@ def test_post_horizon_start_malformed_start_date_propagates(tmp_path: Path) -> N
         _post_horizon_start(case_dir)
 
 
+def _write_stages(case_dir: Path, stages: list[dict[str, object]]) -> None:
+    """Write a minimal ``stages.json`` (only the ``blocks[].hours`` the
+    coupling-hours helper reads) into ``case_dir``."""
+    (case_dir / "stages.json").write_text(
+        json.dumps({"stages": stages}), encoding="utf-8"
+    )
+
+
+def test_coupling_stage_hours_sums_last_stage_blocks(tmp_path: Path) -> None:
+    """The coupling-hours factor is the FINAL stage's summed block hours — the
+    648 h April coupling period here, not an earlier weekly stage or a fixed
+    730 h month."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_stages(
+        case_dir,
+        [
+            {"blocks": [{"hours": 30.0}, {"hours": 74.0}, {"hours": 64.0}]},  # 168
+            {"blocks": [{"hours": 108.0}, {"hours": 261.0}, {"hours": 279.0}]},  # 648
+        ],
+    )
+
+    assert _coupling_stage_hours(case_dir) == pytest.approx(648.0)
+
+
+def test_coupling_stage_hours_missing_file_raises(tmp_path: Path) -> None:
+    """A boundary import cannot scale coefficients without the coupling stage's
+    duration — an absent ``stages.json`` is a hard error, never a silent 0/730."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    with pytest.raises(ValueError, match="stages.json not found"):
+        _coupling_stage_hours(case_dir)
+
+
+def test_coupling_stage_hours_empty_stages_raises(tmp_path: Path) -> None:
+    """An empty ``stages`` list has no coupling stage to read hours from."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_stages(case_dir, [])
+
+    with pytest.raises(ValueError, match="carries no stages"):
+        _coupling_stage_hours(case_dir)
+
+
+def test_coupling_stage_hours_nonpositive_raises(tmp_path: Path) -> None:
+    """A final stage with no positive block hours (e.g. an empty ``blocks``)
+    cannot scale the cut coefficients — a hard error, not a divide-by-zero."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_stages(case_dir, [{"blocks": []}])
+
+    with pytest.raises(ValueError, match="non-positive total block hours"):
+        _coupling_stage_hours(case_dir)
+
+
 def test_emit_import_diagnostics_gnl_deviation_dropped_count_includes_uncovered_lane() -> (
     None
 ):
@@ -608,7 +668,9 @@ def test_emit_import_diagnostics_gnl_deviation_dropped_count_includes_uncovered_
         post_horizon_start=20260501,
     )
 
-    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+    mapping = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=gnl_plan
+    )
     assert any(
         term.thermal_id == 94 and "post-study horizon" in term.reason
         for term in mapping.gnl_dropped
@@ -683,7 +745,9 @@ def test_emit_import_diagnostics_c2_panel3_no_dropped_column() -> None:
     record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
     cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
     gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
-    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+    mapping = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=gnl_plan
+    )
 
     with dx.collect() as sink:
         _emit_import_diagnostics(cuts, mapping, gnl_plan)
@@ -789,7 +853,9 @@ def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
     record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
     cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
     gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
-    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+    mapping = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=gnl_plan
+    )
 
     with dx.collect() as sink:
         _emit_import_diagnostics(cuts, mapping, gnl_plan)

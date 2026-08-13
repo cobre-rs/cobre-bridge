@@ -27,12 +27,53 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cobre_bridge.converters.network import C_M3S2HM3
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
     from cobre_bridge.decomp.id_map import DecompIdMap
+
+# --- FCF cost-unit conversion -------------------------------------------------
+# The source's individualized cut coefficients carry three unit conventions (see
+# ``nwlistcf.rel``'s ``UNIDADES DE MEDIDA`` header): ``RHS [($·mês)/h]`` and
+# ``PIVARM``/``PIAFL [($·mês)/(Hm³·h)]`` are a *per-hour* rate with an implicit
+# monthly normalization, and ``PIGTAD`` (the GNL / anticipated-thermal term,
+# ``pi_gnl``) is an energy price ``[$/MWh]`` — none of them a plain cost. cobre's
+# terminal future cost enters an objective already in ``$`` (the same base as the
+# converted immediate costs), so every FCF term must be brought to ``$`` over the
+# coupling stage's hours. :func:`map_boundary_cuts` takes that hour count as
+# ``cost_unit_hours`` — the terminal/coupling stage's actual duration, which is
+# how the source integrates its per-hour future-cost rate at the coupling
+# (empirically it reproduces the source's ``E(CF)`` to ~2-3%, where a fixed 730-h
+# month overshoots by ~15% on a short coupling period). Without any factor the
+# loaded FCF is ~700× too small, cobre under-values stored water by three orders
+# of magnitude, drains the reservoirs, and the boundary policy is numerically
+# inert.
+#
+# The intercept and storage (``PIVARM``) terms take ``× cost_unit_hours`` alone:
+# ``× cost_unit_hours`` integrates the per-hour rate and the storage state is
+# already Hm³. The GNL (``PIGTAD``) term *also* takes ``× cost_unit_hours`` alone,
+# but for a different reason — it is ``$/MWh`` and cobre's anticipated-thermal
+# state is a MWmed dispatch (``cobre-core`` ``generic_constraint.rs``: "anticipated
+# thermal unit (MW)"), so ``pi_gnl [$/MWh] × cost_unit_hours [h] = $/MWmed`` pairs
+# with that MWmed state (an energy price, so no ``C_M3S2HM3``). The inflow-lag
+# (``PIAFL``) term
+# takes an *additional* ``× C_M3S2HM3``: ``PIAFL`` is per-Hm³, so
+# ``× cost_unit_hours`` yields ``R$/Hm³`` — correct against a storage state in
+# Hm³, but cobre's *inflow-lag* state variable is a raw flow rate in **m³/s**
+# (the same physical quantity as the ``z_inflow`` column, stored unscaled in the
+# state vector). Converting ``R$/Hm³ → R$/(m³/s)`` multiplies by the fixed
+# Hm³-per-(m³/s) month factor :data:`~cobre_bridge.converters.network.C_M3S2HM3`
+# (``= 2.628``, the source's monthly inflow-volume convention, per the SDDP
+# review): a 1 m³/s recent inflow represents 2.628 Hm³ of monthly volume, so it
+# carries 2.628× the R$/Hm³ water value. Storage must NOT take this factor and
+# the lag must not omit it — either asymmetry mis-prices the terminal water value
+# and biases the cost-to-go. (For this deck the binding terminal cuts carry no
+# nonzero ``PIAFL`` at the wet plants, so the extra 2.628 is inert at θ — it is
+# applied for dimensional correctness at other states and in the interior cuts.)
 
 #: cobre `policy.fbs` entity_type codes (confirmed against `policy_export.rs`).
 _HYDRO_STORAGE = 0
@@ -56,8 +97,11 @@ class MappedCut:
     ``coefficients`` is a full-length vector aligned to
     ``TerminalManifest.state_dimension`` — every target slot has an
     explicit coefficient, never merely unset. ``intercept`` is the source
-    record's ``rhs`` carried verbatim (already the ``alpha - beta'xhat``
-    form; never re-derived, per §2.1). ``cut_id``, ``iteration``,
+    record's ``rhs`` (the ``alpha - beta'xhat`` form; never re-derived, per
+    §2.1). The intercept and every coefficient are scaled to cobre's cost
+    units by :func:`map_boundary_cuts`'s ``cost_unit_hours`` — intercept,
+    storage, and GNL by ``× cost_unit_hours`` and inflow-lag by an additional
+    ``× C_M3S2HM3`` (see the module header). ``cut_id``, ``iteration``,
     ``forward_pass_index``, and ``is_active`` are the source
     ``StageCutRecord``'s provenance fields, carried verbatim so the
     checkpoint writer (ticket-008) has every field it needs without
@@ -481,10 +525,19 @@ def map_boundary_cuts(
     manifest: TerminalManifest,
     id_map: DecompIdMap,
     *,
+    cost_unit_hours: float,
     lag_slot_of: Callable[[int], int] = _default_lag_slot_of,
     gnl_plan: GnlRingPlan | None = None,
 ) -> MappingResult:
     """Map every cut in `cuts.records` onto `manifest`'s state-vector layout.
+
+    `cost_unit_hours` is the coupling (terminal) stage's duration in hours: the
+    source model's FCF coefficients are a per-hour cost rate (``($·mês)/h`` etc.,
+    see the module header), so every mapped term is scaled to cobre's plain-$
+    objective units by integrating over these hours. The intercept, storage, and
+    GNL terms take ``× cost_unit_hours``; the inflow-lag term takes an additional
+    ``× C_M3S2HM3`` because cobre's inflow-lag state is a m³/s flow rate, not the
+    Hm³ volume ``PIAFL`` is defined against (see the module header).
 
     Storage terms join by plant code (`HydroStorage`, D3-drop on a
     source-only plant); inflow-lag terms join 1:1 by `lag_slot_of` onto
@@ -502,10 +555,13 @@ def map_boundary_cuts(
     resolved (covered) target are left at an explicit `0.0` regardless of
     `gnl_plan`; `gnl_plan=None` (the default) leaves the entire ring at
     `0.0`, byte-for-byte matching this function's pre-GNL behaviour.
-    `intercept` is the source record's `rhs`, carried verbatim (never
-    re-derived from alpha/x-hat). Produces one `MappedCut` per source
-    record, active or not — active-frontier selection is ticket-008's
-    writer concern, not the mapper's.
+    `intercept` is the source record's `rhs` (never re-derived from
+    alpha/x-hat); it and every coefficient are then scaled to cobre's cost
+    units by `cost_unit_hours` per family — intercept/storage/GNL by
+    ``× cost_unit_hours``, inflow-lag by an additional ``× C_M3S2HM3`` for
+    cobre's m³/s inflow-lag state (see the module header). Produces one
+    `MappedCut` per source record, active or not — active-frontier selection
+    is ticket-008's writer concern, not the mapper's.
 
     Raises
     ------
@@ -533,11 +589,20 @@ def map_boundary_cuts(
     gnl_ring_index = _index_gnl_ring(manifest)
     resolved_gnl, gnl_dropped = _resolve_gnl_targets(cuts, gnl_ring_index, gnl_plan)
 
+    # Cost-unit factors (see the module header): the intercept/storage/GNL terms
+    # integrate the per-hour source rate over the coupling stage's hours; the
+    # inflow-lag term additionally converts cobre's m³/s lag state to the Hm³
+    # `PIAFL` is defined against.
+    cost_unit_factor = cost_unit_hours
+    inflow_lag_factor = cost_unit_hours * C_M3S2HM3
+
     mapped_cuts: list[MappedCut] = []
     for record in cuts.records:
         coefficients = [0.0] * manifest.state_dimension
         for plant_index, (hydro_id, storage_position) in resolved_storage.items():
-            coefficients[storage_position] = record.pi_varm[plant_index]
+            coefficients[storage_position] = (
+                record.pi_varm[plant_index] * cost_unit_factor
+            )
             if lag_bound == 0:
                 continue
             plant_lags = record.pi_qafl[plant_index]
@@ -546,11 +611,14 @@ def map_boundary_cuts(
                     (_HYDRO_INFLOW_LAG, hydro_id, subindex)
                 )
                 if lag_position is not None:
-                    coefficients[lag_position] = plant_lags[depth_index]
+                    coefficients[lag_position] = (
+                        plant_lags[depth_index] * inflow_lag_factor
+                    )
 
         for gnl_position, gnl_cols in resolved_gnl.items():
-            coefficients[gnl_position] = math.fsum(
-                record.pi_gnl[column] for column in gnl_cols
+            coefficients[gnl_position] = (
+                math.fsum(record.pi_gnl[column] for column in gnl_cols)
+                * cost_unit_factor
             )
 
         if len(coefficients) != manifest.state_dimension:
@@ -561,7 +629,7 @@ def map_boundary_cuts(
 
         mapped_cuts.append(
             MappedCut(
-                intercept=record.rhs,
+                intercept=record.rhs * cost_unit_factor,
                 coefficients=tuple(coefficients),
                 cut_id=record.cut_id,
                 iteration=record.iteration,

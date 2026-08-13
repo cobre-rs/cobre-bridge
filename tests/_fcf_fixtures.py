@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from cobre_bridge.converters.network import MONTH_HOURS
 from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, CortesHeader, StageCutRecord
 from cobre_bridge.decomp.fcf.mapper import GnlRingPlan, MappedCut, map_boundary_cuts
@@ -187,6 +188,7 @@ def synthetic_roundtrip(
     *,
     stage_id: int = 10,
     cost_scale_factor: float = 1.0,
+    cost_unit_hours: float = MONTH_HOURS,
     gnl_plan: GnlRingPlan | None = None,
 ) -> dict[str, Any]:
     """Map, write, and reload a synthetic boundary checkpoint; no deck, no
@@ -210,7 +212,9 @@ def synthetic_roundtrip(
     """
     import cobre
 
-    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+    mapping = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=cost_unit_hours, gnl_plan=gnl_plan
+    )
     stage_cuts_payload = build_stage_cuts_payload(mapping, manifest, stage_id=stage_id)
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
     metadata = build_metadata(

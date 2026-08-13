@@ -31,6 +31,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from cobre_bridge.converters.network import MONTH_HOURS
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
 from cobre_bridge.decomp.fcf.mapper import GnlRingPlan, GnlThermalTarget
 from tests._fcf_fixtures import (
@@ -203,13 +204,23 @@ def test_synthetic_gnl_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     assert non_covered_position is not None
     assert sentinel_position is not None
 
-    expected_covered_sum = math.fsum(
-        pi_gnl[
-            _col(
-                1, patamar, 2, n_patamares=_N_PATAMARES, lag_maximo_gnl=_LAG_MAXIMO_GNL
-            )
-        ]
-        for patamar in range(1, _N_PATAMARES + 1)
+    # The authored coefficient is the chain-rule pi_gnl sum scaled to cobre
+    # cost units by MONTH_HOURS (fcf.mapper's ($·mês)/h -> $ conversion),
+    # matching the mapper's `math.fsum(...) * MONTH_HOURS` order exactly.
+    expected_covered_sum = (
+        math.fsum(
+            pi_gnl[
+                _col(
+                    1,
+                    patamar,
+                    2,
+                    n_patamares=_N_PATAMARES,
+                    lag_maximo_gnl=_LAG_MAXIMO_GNL,
+                )
+            ]
+            for patamar in range(1, _N_PATAMARES + 1)
+        )
+        * MONTH_HOURS
     )
 
     assert coefficients[covered_position] == expected_covered_sum

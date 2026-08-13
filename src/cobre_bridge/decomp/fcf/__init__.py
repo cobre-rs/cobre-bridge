@@ -179,6 +179,45 @@ def _post_horizon_start(case_dir: Path) -> int | None:
     return min(int(stage["start_date"].replace("-", "")) for stage in stages)
 
 
+def _coupling_stage_hours(case_dir: Path) -> float:
+    """The coupling (terminal) stage's total duration in hours, from ``stages.json``.
+
+    The source model's FCF coefficients are a *per-hour* cost rate (see
+    ``fcf/mapper.py``'s header): the source integrates that rate over its
+    coupling period's actual hours to obtain the future-cost value, so the
+    mapper needs those same hours (``cost_unit_hours``) to reproduce it in
+    cobre's plain-$ objective. The boundary FCF attaches at the end of the last
+    modelled stage, so the coupling period is the final ``stages.json`` stage;
+    its duration is the sum of its blocks' ``hours`` (a weekly deck's ~168 h,
+    or the coupling month's post-exclusion hours — e.g. 648 h for a 27-day
+    April). Using the actual stage hours (not a fixed 730-h month) reproduces
+    the source's ``E(CF)`` to ~2-3 %, where a fixed month overshoots by ~15 %
+    on a short coupling period.
+
+    Raises
+    ------
+    ValueError
+        If ``stages.json`` is missing, carries no stages, or the final stage
+        has no positive block-hours — a boundary import cannot scale the cut
+        coefficients to a cost without the coupling stage's duration.
+    """
+    path = case_dir / "stages.json"
+    if not path.is_file():
+        raise ValueError(f"stages.json not found at {path}; cannot scale boundary FCF")
+    with path.open(encoding="utf-8") as handle:
+        doc = json.load(handle)
+    stages = doc.get("stages", [])
+    if not stages:
+        raise ValueError(f"{path} carries no stages; cannot scale boundary FCF")
+    hours = math.fsum(float(block["hours"]) for block in stages[-1].get("blocks", []))
+    if hours <= 0.0:
+        raise ValueError(
+            f"{path} final stage has non-positive total block hours ({hours}); "
+            "cannot scale boundary FCF"
+        )
+    return hours
+
+
 def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan | None:
     """Read the deck's ``dadgnl`` and build the GNL ring plan, or ``None``.
 
@@ -583,7 +622,17 @@ def import_boundary_fcf(
 
     manifest = bootstrap_terminal_manifest(case_dir, cobre_bin, work_dir=work_dir)
     gnl_plan = _build_gnl_ring_plan(case_dir, deck_files)
-    mapping = map_boundary_cuts(cuts, manifest, id_map, gnl_plan=gnl_plan)
+    cost_unit_hours = _coupling_stage_hours(case_dir)
+    mapping = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=cost_unit_hours, gnl_plan=gnl_plan
+    )
+    _LOG.info(
+        "scaling boundary FCF coefficients to cobre cost units over the "
+        "coupling stage's %.0f h (the source's per-hour cut rate integrated "
+        "over the coupling period; inflow-lag additionally x C_M3S2HM3 for "
+        "cobre's m3/s lag state)",
+        cost_unit_hours,
+    )
     _emit_import_diagnostics(cuts, mapping, gnl_plan)
 
     stage_cuts_payload = build_stage_cuts_payload(
