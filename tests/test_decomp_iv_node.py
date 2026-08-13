@@ -34,7 +34,6 @@ from cobre_bridge.decomp.network import (
     convert_lines,
 )
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
-from cobre_bridge.diagnostics import Severity
 
 _ITAIPU_CODE = 66
 
@@ -213,8 +212,9 @@ class TestAppendIvSeLine:
 
     def test_dedup_skip_when_pair_already_wired(self) -> None:
         """AC1: the deck's own ``IA`` register already connects the pair
-        (either orientation) -- the call is a no-op and emits exactly one
-        ``Severity.INFO`` diagnostic naming the existing line."""
+        (either orientation) -- the call is a silent no-op, returning the
+        docs unchanged with no duplicate line and no diagnostic (a line here
+        is expected, so the reuse needs no announcement)."""
         calendar = _calendar()
         start = calendar[0].start_date
         existing_line = {
@@ -244,12 +244,7 @@ class TestAppendIvSeLine:
         assert result_doc is lines_doc
         assert result_bounds is line_bounds
         assert len(result_doc["lines"]) == 1
-
-        infos = [d for d in collected if d.severity is Severity.INFO]
-        assert len(infos) == 1
-        assert infos[0].code == "decomp-iv-se-line-already-wired"
-        assert "0" in infos[0].summary
-        assert "SE-IV" in infos[0].summary
+        assert collected == []
 
     def test_islanded_synthesize_emits_no_info(self) -> None:
         """AC2: no existing line between the pair -- the line is

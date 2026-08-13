@@ -324,14 +324,20 @@ def test_cotvol_out_of_horizon_reported_not_dropped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC3: per-stage rho_eq shifts the B8 hydraulic ceiling.
+# AC3: per-stage rho_eq no longer caps generation (availability owns the
+# generation cap; the head-corrected turbined-flow cap owns the physical
+# hydraulic limit).
 # ---------------------------------------------------------------------------
 
 
-def test_per_stage_rho_eq_shifts_hydraulic_cap() -> None:
-    """AC3: a plant's ``PROESP`` doubles from stage 1 onward — the B8
-    hydraulic ceiling (``rho_eq(stage) x q_max``) reflects the doubled value
-    from stage 1 forward, while stage 0 still uses the base rho_eq.
+def test_per_stage_rho_eq_does_not_cap_generation() -> None:
+    """A plant's ``PROESP`` doubles from stage 1 onward, so its per-stage
+    ρ_eq doubles too — but that no longer lowers ``max_generation_mw``. The
+    generation cap is the installed × MP × FD availability (head-independent),
+    and the physical hydraulic limit binds through the head-corrected
+    turbined-flow cap instead. With no MP/FD derate here the availability
+    equals the rated envelope, so no lowered generation overlay is emitted at
+    any stage.
     """
     hidr = _hidr_frame(
         {
@@ -355,16 +361,14 @@ def test_per_stage_rho_eq_shifts_hydraulic_cap() -> None:
     )
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
 
-    values, _ = convert_hydro_group_availability(
+    values = convert_hydro_group_availability(
         _StubDadger(), hidr, id_map, _calendar(), effective
     )
     hydro_id = id_map.hydro_id(1)
 
-    # h_gross = 100 - 20 = 80; stage 0: rho_eq = 0.01 x 80 = 0.8 -> 80 MW.
-    assert values[(hydro_id, 0, 0)].max_generation_mw == pytest.approx(80.0)
-    # stage 1: PROESP doubles to 0.02 -> rho_eq = 1.6 -> 160 MW.
-    assert values[(hydro_id, 0, 1)].max_generation_mw == pytest.approx(160.0)
-    assert values[(hydro_id, 0, 2)].max_generation_mw == pytest.approx(160.0)
+    for stage_index in range(3):
+        entry = values.get((hydro_id, 0, stage_index))
+        assert entry is None or entry.max_generation_mw is None
 
 
 # ---------------------------------------------------------------------------
@@ -441,10 +445,12 @@ def test_rho_eq_uses_full_range_for_all_classes() -> None:
 
 def test_no_override_is_byte_identical() -> None:
     """AC5: with no head/productivity override at all, the emitted rho_eq
-    and every B8 hydraulic-cap overlay value equal the pre-ticket
-    base-registry formula bit-for-bit — reconstructed here independently via
-    the same shared row-level helpers (``_mean_cota_over_volume``,
-    ``_apply_hydraulic_loss``) the pre-ticket formula itself called.
+    equals the pre-ticket base-registry formula bit-for-bit — reconstructed
+    here independently via the same shared row-level helpers
+    (``_mean_cota_over_volume``, ``_apply_hydraulic_loss``) the pre-ticket
+    formula itself called. The head no longer feeds a generation cap, so the
+    B8 overlay emits no lowered ``max_generation_mw`` (availability, at the
+    rated envelope here, owns that column).
     """
     hidr = _hidr_frame(
         {
@@ -479,17 +485,16 @@ def test_no_override_is_byte_identical() -> None:
     table = convert_energy_productivity(effective, id_map).to_pandas()
     assert table["equivalent_productivity_mw_per_m3s"].iloc[0] == expected_rho_eq
 
-    values, _ = convert_hydro_group_availability(
+    values = convert_hydro_group_availability(
         _StubDadger(), hidr, id_map, _calendar(), effective
     )
     hydro_id = id_map.hydro_id(1)
-    q_max = 100.0  # 2 machines x 50 m3/s
-    p_max = 400.0  # 2 machines x 200 MW
-    expected_hydraulic_mw = expected_rho_eq * q_max
-    assert expected_hydraulic_mw < p_max  # the hydraulic ceiling binds here
+    # Availability (no MP/FD derate) equals the rated envelope, so no lowered
+    # generation overlay is emitted — the head-derived hydraulic value no
+    # longer caps generation.
     for stage_index in range(3):
-        entry = values[(hydro_id, 0, stage_index)]
-        assert entry.max_generation_mw == expected_hydraulic_mw
+        entry = values.get((hydro_id, 0, stage_index))
+        assert entry is None or entry.max_generation_mw is None
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,6 @@ from cobre_bridge.converters.network import (
     _BUSES_SCHEMA_URL,
     _LINES_SCHEMA_URL,
 )
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -375,8 +374,7 @@ def append_iv_se_line(
     direction). When one exists, the ``IV`` bus is not islanded: the deck's
     own line already wires it, and carries the source model's own capacity
     rather than the unbounded sentinel, so this is a no-op (ticket-016) --
-    *lines_doc*/*line_bounds* are returned unchanged and one
-    ``Severity.INFO`` diagnostic names the existing line.
+    *lines_doc*/*line_bounds* are returned unchanged.
 
     Otherwise (the genuinely-islanded case) it synthesizes exactly as
     before: the new line's id is the next free id after every ``IA`` line
@@ -400,22 +398,8 @@ def append_iv_se_line(
         None,
     )
     if existing_line is not None:
-        emit(
-            Diagnostic(
-                code="decomp-iv-se-line-already-wired",
-                severity=Severity.INFO,
-                category="Special constraints",
-                title="SE<->IV line already wired by the deck",
-                summary=(
-                    "The deck's own IA register already connects buses "
-                    f"{source_bus_id} and {target_bus_id} via line "
-                    f"{existing_line['id']} ({existing_line['name']!r}); "
-                    "the converter-created IV-SE line is not synthesized "
-                    "and the deck's line -- with its own real capacity -- "
-                    "is used instead."
-                ),
-            )
-        )
+        # The deck's own IA register already wires this pair (with its real
+        # capacity), so the converter-created IV-SE line is a no-op here.
         return lines_doc, line_bounds
 
     line_id = len(lines_doc["lines"])

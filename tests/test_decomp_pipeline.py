@@ -974,10 +974,7 @@ def _run_cadastro_pipeline(
         ),
         "cobre_bridge.decomp.pipeline"
         ".bounds_conv.convert_hydro_bounds": baseline_hydro_bounds,
-        "cobre_bridge.decomp.pipeline.hydro_conv.convert_hydro_group_availability": (
-            {},
-            [],
-        ),
+        "cobre_bridge.decomp.pipeline.hydro_conv.convert_hydro_group_availability": {},
         "cobre_bridge.decomp.pipeline.contracts_conv.read_contracts": [],
         # epic-07 (ticket-023): the mock deck (_CadastroDadger) exposes no
         # RE/HQ/HV/UE accessors, so the special-constraint census and the
@@ -1526,21 +1523,40 @@ class TestDryRun:
         assert existing.read_bytes() == b"keep me"
 
 
+_READ_TRAVEL_TIMES = "cobre_bridge.decomp.pipeline.travel_time_conv.read_travel_times"
+
+
 class TestDeferralWarning:
-    """ticket-024: the flat ``deferred at this milestone`` warning names only
-    what genuinely remains deferred at this milestone (GNL anticipation,
-    boundary FCF, windowed inflow inputs). E3-E6 now convert every readable
-    RE/RHQ/RHV/RHE family, so the old "flow/volume/electrical constraint
-    families" clause is dropped; the FE/RHA/LIBs surfaces ticket-023b already
-    reports through the structured ``dx`` sink must not be named here too.
+    """The flat ``deferred at this milestone`` warning now names ONLY water
+    travel time, and only when the deck actually carries a ``VI`` register.
+    Boundary FCF is imported by default, reservoir evaporation is converted
+    (cobre >= 0.14's C11 fix), and windowed inflow inputs do not apply to the
+    external explicit tree the DECOMP path emits — so none of those are
+    deferred, and a deck with no travel time emits no deferral warning at all.
     """
 
-    def test_drops_the_now_converted_family_clause(
+    def test_no_warning_when_nothing_is_deferred(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """AC1: no "flow/volume/electrical constraint families" (or
-        equivalent special-constraint) clause survives."""
+        """The mock deck carries no VI travel-time register, so nothing is
+        deferred and no ``deferred at this milestone`` warning is emitted."""
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
+            _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
+
+        assert not [
+            r for r in caplog.records if "deferred at this milestone" in r.message
+        ]
+
+    def test_names_only_water_travel_time_when_present(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """With a VI register present, the warning fires naming water travel
+        time alone — never boundary FCF, windowed inflow inputs, GNL
+        anticipation, or reservoir evaporation (all emitted, not deferred)."""
+        with (
+            caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"),
+            patch(_READ_TRAVEL_TIMES, return_value={1: 24.0}),
+        ):
             _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
 
         deferral = next(
@@ -1548,46 +1564,23 @@ class TestDeferralWarning:
             for r in caplog.records
             if "deferred at this milestone" in r.message
         )
-        assert "flow/volume/electrical constraint families" not in deferral
-        assert "generic-constraints emitter" not in deferral
+        assert "water travel time (VI present)" in deferral
+        for absent in ("boundary FCF", "windowed inflow", "GNL", "evaporation"):
+            assert absent not in deferral
 
-    def test_still_names_the_genuinely_deferred_items(
+    def test_fe_rha_libs_are_reported_through_the_dx_sink_not_the_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """AC2: boundary FCF, windowed inflow inputs, and water travel time (VI)
-        stay named, and the ``VI`` present/absent interpolation still reflects
-        the (mocked, absent) fixture deck. GNL anticipation and reservoir
-        evaporation are no longer deferred — both are emitted now — so neither
-        must appear here."""
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
-            _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
-
-        deferral = next(
-            r.message
-            for r in caplog.records
-            if "deferred at this milestone" in r.message
-        )
-        assert "GNL" not in deferral  # emitted now, not deferred
-        assert "evaporation" not in deferral  # emitted now (C11 fixed in cobre)
-        assert "boundary FCF" in deferral
-        assert "windowed inflow inputs" in deferral
-        assert "water travel time (VI absent)" in deferral
-
-    def test_fe_rha_libs_are_reported_once_through_the_dx_sink_not_the_warning(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """AC3: a deck with FE/RHA/LIBs surfaces reports them exactly once,
-        through ticket-023b's structured ``Diagnostic``s -- the flat
-        deferral warning must not also name them (the warning text and the
+        """A deck with FE/RHA/LIBs surfaces reports them exactly once, through
+        ticket-023b's structured ``Diagnostic``s -- even when the deferral
+        warning fires (VI present here), it names only water travel time,
+        never these special-constraint surfaces (the warning text and the
         ``dx`` sink are disjoint on these items).
 
-        ticket-003: ``convert_decomp_case`` now owns its own top-level
+        ticket-003: ``convert_decomp_case`` owns its own top-level
         ``dx.collect()``, so the diagnostics half reads
         ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
-        ``dx.collect()`` (which would be shadowed and see nothing); the
-        deferral-warning half still reads ``caplog`` unchanged, since that
-        warning is a plain ``logger.warning`` call independent of the
-        ``dx`` sink."""
+        ``dx.collect()`` (which would be shadowed and see nothing)."""
         from cobre_bridge import diagnostics as dx
 
         fe_diagnostic = dx.Diagnostic(
@@ -1613,7 +1606,10 @@ class TestDeferralWarning:
         )
 
         collected: list[dx.Diagnostic] = []
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
+        with (
+            caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"),
+            patch(_READ_TRAVEL_TIMES, return_value={1: 24.0}),
+        ):
             _run_cadastro_pipeline(
                 tmp_path,
                 ac_volmax_frame=None,

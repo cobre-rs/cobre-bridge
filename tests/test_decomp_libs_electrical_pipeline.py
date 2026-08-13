@@ -479,10 +479,7 @@ def _run_libs_pipeline(
         ),
         "cobre_bridge.decomp.pipeline"
         ".bounds_conv.convert_hydro_bounds": baseline_hydro_bounds,
-        "cobre_bridge.decomp.pipeline.hydro_conv.convert_hydro_group_availability": (
-            {},
-            [],
-        ),
+        "cobre_bridge.decomp.pipeline.hydro_conv.convert_hydro_group_availability": {},
         "cobre_bridge.decomp.pipeline.contracts_conv.read_contracts": [],
         "cobre_bridge.decomp.pipeline.constraint_registers.read_constraints": (
             ConstraintCensus(by_family={}, to_bounds=(), to_generic=to_generic)

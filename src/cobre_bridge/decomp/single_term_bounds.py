@@ -65,6 +65,14 @@ class HydroCapacities:
     max_turbined_m3s: float
 
 
+#: Relative tolerance below which a source ceiling sitting above the declared
+#: capacity is treated as float-representation noise (~8x float32 epsilon). The
+#: bound is still clamped so cobre rule 43 holds, but no diagnostic is emitted:
+#: a float32 round-trip (e.g. an 11000 MW RE ceiling vs a 10999.998 MW declared
+#: capacity, ~1.4e-7 relative) is not a real cross-source inconsistency.
+_CLAMP_REPORT_REL_TOL = 1e-6
+
+
 def _clamp_upper_to_capacity(
     contributions: list[BoundContribution], cap: float
 ) -> tuple[list[BoundContribution], list[float]]:
@@ -74,17 +82,25 @@ def _clamp_upper_to_capacity(
     clamp — both guard a cobre rule-43 axis the same way: a contribution
     whose upper is already at or below *cap* passes through unchanged;
     one above it is replaced (:func:`dataclasses.replace`) with *cap*.
-    Returns the clamped contributions alongside the pre-clamp ceilings that
-    actually got lowered (empty when nothing needed clamping), so the caller
-    can decide whether to emit a diagnostic.
+
+    A ceiling above *cap* is **always** clamped (cobre rule 43 rejects any
+    upper above the declared capacity, even by a float ULP), but it is only
+    returned in the reported ``ceilings`` list — the caller's diagnostic
+    trigger — when it exceeds *cap* by more than ``_CLAMP_REPORT_REL_TOL``
+    relative. So a genuine cross-source mismatch (a looser nameplate vs.
+    head-derated capacity, MW-scale) is surfaced while float-representation
+    noise clamps silently. Returns the clamped contributions alongside those
+    materially-lowered ceilings (empty when nothing needed reporting).
     """
+    report_threshold = cap * (1.0 + _CLAMP_REPORT_REL_TOL)
     clamped: list[BoundContribution] = []
     ceilings: list[float] = []
     for contribution in contributions:
         if contribution.upper is None or contribution.upper <= cap:
             clamped.append(contribution)
             continue
-        ceilings.append(contribution.upper)
+        if contribution.upper > report_threshold:
+            ceilings.append(contribution.upper)
         clamped.append(dataclasses.replace(contribution, upper=cap))
     return clamped, ceilings
 

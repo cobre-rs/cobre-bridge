@@ -1002,10 +1002,8 @@ def _convert_decomp_case_impl(
     # may not exceed that group's declared max) is now reachable; its mirror
     # is wired into the self-check block below.
     step("Converting constraints")
-    availability_values, availability_deltas = (
-        hydro_conv.convert_hydro_group_availability(
-            dadger, hidr, id_map, calendar, effective
-        )
+    availability_values = hydro_conv.convert_hydro_group_availability(
+        dadger, hidr, id_map, calendar, effective
     )
     group_bounds = group_bounds_conv.convert_hydro_unit_group_bounds(
         availability_values, calendar
@@ -1022,57 +1020,6 @@ def _convert_decomp_case_impl(
         contracts, id_map, calendar, start_date
     )
     contract_bounds_table = contracts_conv.convert_contract_bounds(contracts, calendar)
-
-    # B8's attached measurement obligation: the hydraulic ceiling binding
-    # below the installed×MP×FD availability is an *accepted cost*, not an
-    # error — but it must be recorded, not assumed away. One INFO Diagnostic
-    # per conversion (never raises), the ten worst offenders by how far under
-    # the availability ceiling the hydraulic cap sits.
-    if availability_deltas:
-        worst = sorted(
-            availability_deltas, key=lambda row: row.pct_under, reverse=True
-        )[:10]
-        dx.emit(
-            dx.Diagnostic(
-                code="hydro-availability-hydraulic-cap-binds",
-                severity=dx.Severity.INFO,
-                category="Hydro availability",
-                title=(
-                    "Hydraulic cap binds below availability "
-                    f"({len(availability_deltas)} (hydro, stage) row(s))"
-                ),
-                summary=(
-                    f"{len(availability_deltas)} single-group (hydro, stage) row(s) "
-                    "have the ρ_eq·q_max hydraulic ceiling below installed×MP×FD; "
-                    "the emitted max_generation_mw overlay is capped to the (lower) "
-                    "hydraulic value on these rows, below the source model's "
-                    "reported availability"
-                ),
-                table=dx.DiagnosticTable(
-                    columns=[
-                        "Hydro",
-                        "Code",
-                        "Stage",
-                        "Hydraulic MW",
-                        "Availability MW",
-                        "% under",
-                    ],
-                    rows=[
-                        [
-                            row.name,
-                            row.code,
-                            row.stage_id,
-                            round(row.hydraulic_mw, 3),
-                            round(row.availability_mw, 3),
-                            round(row.pct_under, 2),
-                        ]
-                        for row in worst
-                    ],
-                    justify=["left", "right", "right", "right", "right", "right"],
-                ),
-            ),
-            logger=_LOG,
-        )
 
     # Post-emission self-checks (cobre 0.13 rules 43, 41, 45, 38, 36, and the
     # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
@@ -1289,15 +1236,15 @@ def _convert_decomp_case_impl(
     if libs_electrical_result is not None:
         dx.emit(_libs_electrical_census_diagnostic(libs_electrical_result), logger=_LOG)
 
-    # Reservoir evaporation is now CONVERTED (convert_hydros emits the per-plant
-    # `evaporation.coefficients_mm` from the UH flag + hidr's monthly rates);
-    # cobre >= 0.14 scales each stage to its calendar-month share (the C11 fix),
-    # so it is no longer a deferred cobre-gap.
-    _LOG.warning(
-        "deferred at this milestone: boundary FCF (importer), windowed inflow "
-        "inputs (solver 0.13), water travel time (VI%s)",
-        " present" if has_travel_time else " absent",
-    )
+    # Milestone-deferral warning. Boundary FCF is imported by default now (the
+    # CLI runs the importer after this converter returns), reservoir evaporation
+    # is converted (cobre >= 0.14's C11 fix), and windowed inflow inputs are a
+    # source-model concept that does not apply to the external explicit tree the
+    # DECOMP path emits — so none of those are deferred. Only VI water travel
+    # time remains deferred (a tracked cobre-gap; see the note above where it is
+    # detected), and only when the deck actually carries it.
+    if has_travel_time:
+        _LOG.warning("deferred at this milestone: water travel time (VI present)")
     _LOG.info(
         "converted %d buses, %d hydros, %d thermals, %d stages, terminal fan %d",
         id_map.n_buses,
