@@ -341,8 +341,9 @@ class GnlEmission:
     absent from ``CT``); ``past_anticipated_commitments`` and
     ``future_anticipated_deliveries`` extend ``initial_conditions.json`` (the
     left and right temporal boundary); ``post_study_stages`` is the standalone
-    ``post_study_stages.json`` payload, ``None`` when no delivery lands
-    post-horizon.
+    ``post_study_stages.json`` payload, ``None`` when the model declares no GS
+    calendar (``weeks_per_month`` empty) and non-``None`` (its ``thermal_bounds``
+    possibly empty) whenever a GS calendar exists.
     """
 
     thermals: list[dict]
@@ -560,6 +561,28 @@ def _anticipation_lead_hours(
     return footprint
 
 
+def _record_bound(
+    bounds: list[dict],
+    seen: set[tuple[int, int]],
+    tid: int,
+    idx: int,
+    thermal: GnlThermal,
+) -> None:
+    """Append a ``(tid, idx)`` ``thermal_bounds`` row once (idempotent on ``seen``)."""
+    if (tid, idx) in seen:
+        return
+    seen.add((tid, idx))
+    bounds.append(
+        {
+            "thermal_id": tid,
+            "post_study_stage_index": idx,
+            "cost_per_mwh": thermal.cost_per_mwh,
+            "min_mw": thermal.min_mw,
+            "max_mw": thermal.max_mw,
+        }
+    )
+
+
 def convert_gnl(
     model: GnlCommitmentModel,
     *,
@@ -747,17 +770,7 @@ def convert_gnl(
                 idx = _calendar_index_for_window(calendar, c.start_date, delivery_end)
                 if idx is not None:
                     pinned_calendar_indices.add(idx)
-                    if (tid, idx) not in seen_bounds:
-                        seen_bounds.add((tid, idx))
-                        bounds.append(
-                            {
-                                "thermal_id": tid,
-                                "post_study_stage_index": idx,
-                                "cost_per_mwh": thermal.cost_per_mwh,
-                                "min_mw": thermal.min_mw,
-                                "max_mw": thermal.max_mw,
-                            }
-                        )
+                    _record_bound(bounds, seen_bounds, tid, idx, thermal)
 
         # Free forward decisions: one per study stage, landing on the calendar
         # stage its nl lead maps to ([ASSUMPTION B]). A calendar stage already
@@ -794,17 +807,7 @@ def convert_gnl(
                         "max_mw": thermal.max_mw,
                     }
                 )
-                if (tid, idx) not in seen_bounds:
-                    seen_bounds.add((tid, idx))
-                    bounds.append(
-                        {
-                            "thermal_id": tid,
-                            "post_study_stage_index": idx,
-                            "cost_per_mwh": thermal.cost_per_mwh,
-                            "min_mw": thermal.min_mw,
-                            "max_mw": thermal.max_mw,
-                        }
-                    )
+                _record_bound(bounds, seen_bounds, tid, idx, thermal)
 
     past.sort(key=lambda w: (w["thermal_id"], w["start_date"]))
     future.sort(key=lambda d: (d["thermal_id"], d["delivery_start"]))
