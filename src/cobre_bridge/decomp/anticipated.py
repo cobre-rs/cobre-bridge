@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 
 _NONZERO_TOLERANCE = 1e-9
+_SATURDAY = 5  # date.weekday(); mirrors decomp/temporal.py's operative-week grid
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,12 @@ class GnlCommitment:
 @dataclass(frozen=True)
 class GnlCommitmentModel:
     """The GNL registry, its committed dispatch, and the weeks-per-month map.
+
+    ``weeks_per_month`` is the ``gs`` block's ``{month_index: weeks}`` map (the
+    number of operative weeks in each post-study month, 1-based month index
+    ascending). :func:`_build_post_study_calendar` reads its trailing
+    (highest-indexed) month to size the post-study weekly calendar — the number
+    of Saturday-aligned weekly stages the terminal FCF is priced against.
 
     ``nl_lag_months`` is the ``nl`` block's per-plant dispatch-anticipation lag
     (``{codigo_usina: months}``): the number of months by which a GNL plant's
@@ -426,6 +433,19 @@ def _subtract_months(d: date, months: int) -> date:
     return date(year, month, min(d.day, last_day))
 
 
+def _shift_month(year: int, month: int, months: int) -> tuple[int, int]:
+    """``(year, month)`` shifted forward ``months`` whole calendar months.
+
+    Sibling to :func:`_subtract_months`, but on a bare ``(year, month)`` key
+    rather than a ``date`` — there is no day to preserve. ``months`` may be
+    negative (a backward shift). Used by [ASSUMPTION B]'s study-stage ->
+    post-study-calendar lead mapping in :func:`convert_gnl`.
+    """
+    total = year * 12 + (month - 1) + months
+    year, month = divmod(total, 12)
+    return year, month + 1
+
+
 def _lead_time_hours(
     anchor_end: date,
     lag_months: int,
@@ -564,18 +584,30 @@ def convert_gnl(
       :func:`_lead_stage_count`) with the hours-weighted committed MW folded from
       the (weekly) ``gl`` deliveries onto each study stage (explicit ``0`` where
       none) — the mandatory left boundary;
-    * ``future_anticipated_deliveries`` for each delivery landing on/after the
-      study-horizon end, pinned ``min_mw == max_mw == committed_mw`` over
-      ``[start, start + stage span)`` — the right boundary. A delivery whose
-      ``nl``-implied decision predates the study is skipped with a warning (its
-      pre-study left-boundary treatment is deferred), never emitted as a window
-      cobre would silently drop.
+    * ``future_anticipated_deliveries``, both **pinned** (a prior-revision ``gl``
+      commitment landing on/after the study-horizon end, ``min_mw == max_mw ==
+      committed_mw`` over ``[start, start + stage span)``) and **free** (one per
+      study stage's forward decision, ``min_mw == thermal.min_mw`` / ``max_mw ==
+      thermal.max_mw`` — the decision cobre optimises within) — the right
+      boundary. A pinned delivery whose ``nl``-implied decision predates the
+      study is skipped with a warning (its pre-study left-boundary treatment is
+      deferred), never emitted as a window cobre would silently drop.
 
-    All post-horizon deliveries share one ``post_study_stages`` calendar, split
-    at every delivery boundary so each delivery covers whole stages (cobre
-    requires exact 1.0 coverage); each delivery's covered stage gets a
-    ``thermal_bound`` carrying the plant's ``cvu`` as ``cost_per_mwh``
-    (fuel-inclusive) and its ``[min_mw, max_mw]`` capability.
+    The right boundary is placed on the ``GS``-driven
+    :func:`_build_post_study_calendar` (``model.weeks_per_month``), never a
+    delivery-breakpoint calendar: a pinned delivery is located on the calendar
+    stage its window exactly matches; a study stage's free forward decision is
+    located on the calendar stage its ``nl`` lead maps to ([ASSUMPTION B] —
+    study month -> study month + ``lag_months``, matching within-month offset),
+    dropped with a warning when that target lies beyond the calendar. A
+    calendar stage already carrying a pinned delivery for a plant does not also
+    receive a free delivery for that plant (pinned wins — it is already
+    decided). Every referenced ``(thermal_id, post_study_stage_index)`` gets one
+    ``thermal_bounds`` row carrying the plant's ``cvu`` (fuel-inclusive) as
+    ``cost_per_mwh`` and its ``[min_mw, max_mw]`` capability, which intersects
+    both the free and pinned bounds by construction. ``post_study_stages`` is
+    ``None`` when the model declares no ``GS`` calendar (``model.weeks_per_month``
+    empty) — the deck's own signal that there is no post-study month to price.
 
     ``stages`` is the converted ``stages.json`` stage list (each a mapping with
     ``start_date``, ``end_date``, and ``blocks[].hours``).
@@ -594,11 +626,24 @@ def convert_gnl(
     for h in stage_hours:
         cumulative_hours.append(cumulative_hours[-1] + h)
 
+    # The GS-driven right-boundary calendar (ticket-002) and the study-stage ->
+    # calendar-stage lead mapping ([ASSUMPTION B]) both operate on (year, month)
+    # keys + within-month offsets, computed once here (shared by every plant).
+    calendar = _build_post_study_calendar(horizon_end, model.weeks_per_month)
+    study_month_offset = _month_and_offset([s for s, _ in stage_spans])
+    calendar_by_month = (
+        _indices_by_month([date.fromisoformat(s["start_date"]) for s in calendar])
+        if calendar
+        else {}
+    )
+
     gnl_id = {t.code: first_thermal_id + i for i, t in enumerate(model.thermals)}
 
     thermals: list[dict] = []
     past: list[dict] = []
     future: list[dict] = []
+    bounds: list[dict] = []
+    seen_bounds: set[tuple[int, int]] = set()
 
     for thermal in model.thermals:
         tid = gnl_id[thermal.code]
@@ -663,6 +708,7 @@ def convert_gnl(
                     ),
                 }
             )
+        pinned_calendar_indices: set[int] = set()
         for i in post_horizon:
             c = commitment.stages[i]
             delivery_end = _delivery_window_end(commitment.stages, i)
@@ -697,10 +743,73 @@ def convert_gnl(
                     "max_mw": committed,
                 }
             )
+            if calendar:
+                idx = _calendar_index_for_window(calendar, c.start_date, delivery_end)
+                if idx is not None:
+                    pinned_calendar_indices.add(idx)
+                    if (tid, idx) not in seen_bounds:
+                        seen_bounds.add((tid, idx))
+                        bounds.append(
+                            {
+                                "thermal_id": tid,
+                                "post_study_stage_index": idx,
+                                "cost_per_mwh": thermal.cost_per_mwh,
+                                "min_mw": thermal.min_mw,
+                                "max_mw": thermal.max_mw,
+                            }
+                        )
+
+        # Free forward decisions: one per study stage, landing on the calendar
+        # stage its nl lead maps to ([ASSUMPTION B]). A calendar stage already
+        # carrying a pinned delivery for this plant does not also get a free
+        # one — pinned wins, it is already decided.
+        if calendar and lag_months is not None:
+            for m in range(len(stage_spans)):
+                study_month, study_offset = study_month_offset[m]
+                idx = _lead_mapped_calendar_index(
+                    study_month, study_offset, lag_months, calendar_by_month
+                )
+                if idx is None:
+                    target = _shift_month(*study_month, lag_months)
+                    _LOG.warning(
+                        "GNL %s: study stage %d's forward decision (nl lag %d "
+                        "months) maps to post-study month %04d-%02d, which the "
+                        "calendar does not cover; dropping the free delivery",
+                        thermal.name,
+                        m,
+                        lag_months,
+                        target[0],
+                        target[1],
+                    )
+                    continue
+                if idx in pinned_calendar_indices:
+                    continue
+                start, end = _calendar_stage_span(calendar[idx])
+                future.append(
+                    {
+                        "thermal_id": tid,
+                        "delivery_start": start.isoformat(),
+                        "delivery_end": end.isoformat(),
+                        "min_mw": thermal.min_mw,
+                        "max_mw": thermal.max_mw,
+                    }
+                )
+                if (tid, idx) not in seen_bounds:
+                    seen_bounds.add((tid, idx))
+                    bounds.append(
+                        {
+                            "thermal_id": tid,
+                            "post_study_stage_index": idx,
+                            "cost_per_mwh": thermal.cost_per_mwh,
+                            "min_mw": thermal.min_mw,
+                            "max_mw": thermal.max_mw,
+                        }
+                    )
 
     past.sort(key=lambda w: (w["thermal_id"], w["start_date"]))
     future.sort(key=lambda d: (d["thermal_id"], d["delivery_start"]))
-    post_study = _build_post_study_stages(future, model, gnl_id, horizon_end)
+    bounds.sort(key=lambda b: (b["thermal_id"], b["post_study_stage_index"]))
+    post_study = {"stages": calendar, "thermal_bounds": bounds} if calendar else None
 
     return GnlEmission(
         thermals=thermals,
@@ -710,50 +819,140 @@ def convert_gnl(
     )
 
 
-def _build_post_study_stages(
-    future: Sequence[dict],
-    model: GnlCommitmentModel,
-    gnl_id: dict[int, int],
-    horizon_end: date,
-) -> dict | None:
-    """Post-study calendar split at every delivery boundary + per-cell bounds.
+def _build_post_study_calendar(
+    horizon_end: date, weeks_per_month: Mapping[int, int]
+) -> list[dict]:
+    """The ``GS``-driven post-study calendar: weekly stages + one monthly stage.
 
-    Returns ``None`` when no delivery lands post-horizon. The stages tile
-    contiguously from ``horizon_end``; breaking at each delivery ``start``/``end``
-    guarantees every ``future_anticipated_deliveries`` window covers whole stages
-    (cobre's exact-coverage rule). Each delivery's covered stage gets a
-    ``thermal_bound`` with the plant's ``cvu`` (fuel-inclusive) and capability.
+    ``weeks_per_month`` is the source model's ``gs`` map (``{month_index:
+    weeks}``); its trailing (highest-indexed) month is the post-study month
+    whose full weekly breakdown this calendar reproduces — ``n_weeks =
+    weeks_per_month[max(weeks_per_month)]``.
+
+    The calendar is aligned to the operative-week **Saturday** cadence (see
+    ``decomp/temporal.py``'s ``_SATURDAY`` grid), not a uniform 168 h step from
+    ``horizon_end``: the first weekly stage spans ``[horizon_end, end of the
+    first post-study operative week)``, absorbing the ``[horizon_end, first
+    Saturday)`` stub so its duration is ``168.0`` h when ``horizon_end`` is
+    itself a Saturday and greater otherwise; every following weekly stage is
+    exactly ``168.0`` h, Saturday-aligned by construction. One trailing
+    **monthly** stage then spans from the last weekly stage's end to the first
+    day of the next calendar month (exclusive).
+
+    Returns ``[]`` when ``weeks_per_month`` is empty (a legitimate "no ``GS``
+    calendar" case, not an error). Pure: no I/O, no ``cobre`` import.
     """
-    if not future:
-        return None
-    code_of = {tid: code for code, tid in gnl_id.items()}
-    thermal_of = {t.code: t for t in model.thermals}
-    breakpoints = sorted(
-        {horizon_end}
-        | {date.fromisoformat(d["delivery_start"]) for d in future}
-        | {date.fromisoformat(d["delivery_end"]) for d in future}
+    if not weeks_per_month:
+        return []
+
+    m_post = max(weeks_per_month)
+    n_weeks = weeks_per_month[m_post]
+
+    days_to_sat = (_SATURDAY - horizon_end.weekday()) % 7
+    first_week_end = horizon_end + timedelta(
+        days=7 if days_to_sat == 0 else days_to_sat + 7
     )
+
     stages = [
         {
-            "start_date": breakpoints[i].isoformat(),
-            "duration_hours": (breakpoints[i + 1] - breakpoints[i]).days * 24.0,
+            "start_date": horizon_end.isoformat(),
+            "duration_hours": (first_week_end - horizon_end).days * 24.0,
         }
-        for i in range(len(breakpoints) - 1)
     ]
-    bounds: list[dict] = []
-    for d in future:
-        thermal = thermal_of[code_of[d["thermal_id"]]]
-        ds = date.fromisoformat(d["delivery_start"])
-        de = date.fromisoformat(d["delivery_end"])
-        for idx in range(len(stages)):
-            if breakpoints[idx] >= ds and breakpoints[idx + 1] <= de:
-                bounds.append(
-                    {
-                        "thermal_id": d["thermal_id"],
-                        "post_study_stage_index": idx,
-                        "cost_per_mwh": thermal.cost_per_mwh,
-                        "min_mw": thermal.min_mw,
-                        "max_mw": thermal.max_mw,
-                    }
-                )
-    return {"stages": stages, "thermal_bounds": bounds}
+    cursor = first_week_end
+    for _ in range(n_weeks - 1):
+        week_end = cursor + timedelta(days=7)
+        stages.append(
+            {
+                "start_date": cursor.isoformat(),
+                "duration_hours": (week_end - cursor).days * 24.0,
+            }
+        )
+        cursor = week_end
+
+    # Trailing monthly stage: cursor -> the first day of the next calendar
+    # month (exclusive), mirroring _subtract_months's month-boundary idiom.
+    month_end = (
+        date(cursor.year + 1, 1, 1)
+        if cursor.month == 12
+        else date(cursor.year, cursor.month + 1, 1)
+    )
+    stages.append(
+        {
+            "start_date": cursor.isoformat(),
+            "duration_hours": (month_end - cursor).days * 24.0,
+        }
+    )
+    return stages
+
+
+def _month_and_offset(dates: Sequence[date]) -> list[tuple[tuple[int, int], int]]:
+    """Per-date ``((year, month), within-month offset)``.
+
+    ``dates`` is assumed chronologically ascending — both the study stages'
+    starts and the calendar stages' starts are, by construction — so the
+    ascending position of a date within its own ``(year, month)`` group is its
+    within-month offset: the "matching within-month week offset" of
+    [ASSUMPTION B].
+    """
+    counts: dict[tuple[int, int], int] = {}
+    result: list[tuple[tuple[int, int], int]] = []
+    for d in dates:
+        key = (d.year, d.month)
+        offset = counts.get(key, 0)
+        result.append((key, offset))
+        counts[key] = offset + 1
+    return result
+
+
+def _indices_by_month(dates: Sequence[date]) -> dict[tuple[int, int], list[int]]:
+    """Ascending indices of ``dates``, grouped by ``(year, month)``."""
+    groups: dict[tuple[int, int], list[int]] = {}
+    for idx, d in enumerate(dates):
+        groups.setdefault((d.year, d.month), []).append(idx)
+    return groups
+
+
+def _lead_mapped_calendar_index(
+    study_month: tuple[int, int],
+    study_offset: int,
+    lag_months: int,
+    calendar_by_month: Mapping[tuple[int, int], Sequence[int]],
+) -> int | None:
+    """The post-study calendar stage a study stage's forward decision maps to.
+
+    [ASSUMPTION B]: a study stage in month ``study_month`` maps to the
+    post-study calendar stage of month ``study_month + lag_months``, at the
+    same within-month offset. ``None`` when the calendar does not cover that
+    target month, or covers fewer within-month stages than ``study_offset``
+    needs — the caller drops the delivery with a warning rather than placing
+    it on a non-existent index.
+    """
+    target = _shift_month(*study_month, lag_months)
+    candidates = calendar_by_month.get(target)
+    if candidates is None or study_offset >= len(candidates):
+        return None
+    return candidates[study_offset]
+
+
+def _calendar_stage_span(stage: Mapping) -> tuple[date, date]:
+    """A calendar stage's ``[start, end)`` as parsed dates."""
+    start = date.fromisoformat(stage["start_date"])
+    return start, start + timedelta(hours=float(stage["duration_hours"]))
+
+
+def _calendar_index_for_window(
+    calendar: Sequence[Mapping], start: date, end: date
+) -> int | None:
+    """The calendar stage index whose span exactly equals ``[start, end)``.
+
+    ``None`` when no calendar stage matches exactly. A pinned prior-revision
+    delivery then contributes no ``thermal_bounds`` row and does not block a
+    free delivery on any calendar stage; real weekly deliveries share the
+    calendar's Saturday cadence (both anchored on ``horizon_end``), so this
+    always matches on a real deck — the miss case is defensive.
+    """
+    for idx, stage in enumerate(calendar):
+        if _calendar_stage_span(stage) == (start, end):
+            return idx
+    return None

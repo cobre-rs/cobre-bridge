@@ -10,7 +10,7 @@ DataFrames (their fixed shapes make ``df=True`` well-formed).
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import pytest
@@ -20,6 +20,8 @@ from cobre_bridge.decomp.anticipated import (
     GnlCommitmentModel,
     GnlStageCommitment,
     GnlThermal,
+    _build_post_study_calendar,
+    _calendar_stage_span,
     convert_gnl,
     is_gnl_enabled,
     read_gnl_model,
@@ -228,6 +230,54 @@ def test_nl_lags_empty_when_block_absent() -> None:
 
 
 # --------------------------------------------------------------------------
+# Post-study calendar (_build_post_study_calendar)
+# --------------------------------------------------------------------------
+
+
+def test_build_post_study_calendar_saturday_cadence() -> None:
+    # 2026-05-01 is a Friday; GS trailing month (3) declares 5 weeks.
+    stages = _build_post_study_calendar(date(2026, 5, 1), {1: 3, 2: 4, 3: 5})
+
+    assert [s["start_date"] for s in stages] == [
+        "2026-05-01",
+        "2026-05-09",
+        "2026-05-16",
+        "2026-05-23",
+        "2026-05-30",
+        "2026-06-06",
+    ]
+    assert stages[0]["duration_hours"] == 192.0  # stub-absorbing first week
+    assert [s["duration_hours"] for s in stages[1:5]] == [168.0] * 4
+    assert stages[5]["duration_hours"] == 600.0  # trailing month: 06-06 -> 07-01
+
+
+def test_build_post_study_calendar_is_contiguous() -> None:
+    stages = _build_post_study_calendar(date(2026, 5, 1), {1: 3, 2: 4, 3: 5})
+
+    for cur, nxt in zip(stages, stages[1:]):
+        start = date.fromisoformat(cur["start_date"])
+        end = start + timedelta(hours=cur["duration_hours"])
+        assert end == date.fromisoformat(nxt["start_date"])
+    # Every weekly stage after the stub-absorbing first starts on a Saturday.
+    for stage in stages[1:5]:
+        assert date.fromisoformat(stage["start_date"]).weekday() == 5
+
+
+def test_build_post_study_calendar_no_stub_when_horizon_end_is_saturday() -> None:
+    saturday = date(2026, 5, 2)
+    assert saturday.weekday() == 5
+
+    stages = _build_post_study_calendar(saturday, {1: 3})
+
+    assert stages[0]["start_date"] == "2026-05-02"
+    assert stages[0]["duration_hours"] == 168.0  # no stub: already Saturday-aligned
+
+
+def test_build_post_study_calendar_empty_gs_returns_empty() -> None:
+    assert _build_post_study_calendar(date(2026, 5, 1), {}) == []
+
+
+# --------------------------------------------------------------------------
 # Emission (convert_gnl)
 # --------------------------------------------------------------------------
 
@@ -258,10 +308,18 @@ _EMIT_STAGES = [
 _BUS_OF = {1: 0, 3: 2}.get
 
 
+# The GS post-study calendar shared by the emission tests below: horizon_end
+# 2026-05-01 (a Friday) -> a stub-absorbing first weekly stage, 4 more full
+# weekly stages, then one trailing monthly stage (mirrors the standalone
+# _build_post_study_calendar fixture, so both are cross-checked together).
+_EMIT_WEEKS_PER_MONTH = {1: 3, 2: 4, 3: 5}
+
+
 def _emit_model() -> GnlCommitmentModel:
     """SANTA CRUZ (86): zero in-horizon + 500 MW post-horizon (2026-05-09), a
     2-month dispatch-anticipation lag; PSERGIPE I (224): registry-only, no
-    committed delivery, same 2-month lag (inert)."""
+    committed delivery, same 2-month lag (inert but still anticipated -> still
+    gets free forward decisions synthesised onto the GS calendar)."""
     santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
     pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
     return GnlCommitmentModel(
@@ -282,7 +340,7 @@ def _emit_model() -> GnlCommitmentModel:
                 224, (GnlStageCommitment(1, date(2026, 3, 14), 0.0, 168.0),)
             ),
         },
-        weeks_per_month={},
+        weeks_per_month=_EMIT_WEEKS_PER_MONTH,
         nl_lag_months={86: 2, 224: 2},
     )
 
@@ -334,8 +392,24 @@ def test_convert_gnl_right_boundary_delivery_and_post_study() -> None:
     e = convert_gnl(
         _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
     )
-    # Only SANTA CRUZ's post-horizon 500 MW delivery; window is [start, start+7d).
-    assert e.future_anticipated_deliveries == [
+    pss = e.post_study_stages
+    assert pss is not None
+    # post_study_stages is the GS calendar verbatim (calendar-driven, not a
+    # delivery-breakpoint one) — cross-checked against the standalone builder.
+    assert pss["stages"] == _build_post_study_calendar(
+        date(2026, 5, 1), _EMIT_WEEKS_PER_MONTH
+    )
+
+    # SANTA CRUZ's prior-revision 500 MW delivery (2026-05-09 -> 05-16) stays
+    # pinned; every other delivery (both plants, every other stage) is free.
+    pinned = [
+        d
+        for d in e.future_anticipated_deliveries
+        if d["thermal_id"] == 94
+        and d["delivery_start"] == "2026-05-09"
+        and d["delivery_end"] == "2026-05-16"
+    ]
+    assert pinned == [
         {
             "thermal_id": 94,
             "delivery_start": "2026-05-09",
@@ -344,24 +418,15 @@ def test_convert_gnl_right_boundary_delivery_and_post_study() -> None:
             "max_mw": 500.0,
         }
     ]
-    pss = e.post_study_stages
-    assert pss is not None
-    # Break at horizon end + delivery boundaries: 05-01 | 05-09 | 05-16.
-    assert [s["start_date"] for s in pss["stages"]] == ["2026-05-01", "2026-05-09"]
-    # The delivery covers whole stage index 1; bound carries cvu + capability.
-    assert pss["thermal_bounds"] == [
-        {
-            "thermal_id": 94,
-            "post_study_stage_index": 1,
-            "cost_per_mwh": 199.22,
-            "min_mw": 0.0,
-            "max_mw": 500.0,
-        }
-    ]
+    free = [d for d in e.future_anticipated_deliveries if d not in pinned]
+    assert free  # the whole point of this ticket: free decisions now exist
+    assert all(d["min_mw"] < d["max_mw"] for d in free)
 
 
 def test_convert_gnl_no_post_horizon_delivery_yields_no_post_study() -> None:
-    # PSERGIPE-only model: registry, zero in-horizon, nothing post-horizon.
+    # PSERGIPE-only model with no GS calendar declared: registry, zero
+    # in-horizon, nothing post-horizon, and an empty weeks_per_month -> no
+    # calendar to place a free forward decision on either.
     pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
     model = GnlCommitmentModel(
         thermals=(pserg,),
@@ -378,6 +443,100 @@ def test_convert_gnl_no_post_horizon_delivery_yields_no_post_study() -> None:
     assert e.future_anticipated_deliveries == []
     assert e.post_study_stages is None
     assert len(e.past_anticipated_commitments) == 1  # left boundary still mandatory
+
+
+def test_convert_gnl_synthesises_free_forward_delivery() -> None:
+    """A study stage maps forward (via its nl lead) to a free post-study week."""
+    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    model = GnlCommitmentModel(
+        thermals=(santa,),
+        commitments={
+            86: GnlCommitment(
+                86, (GnlStageCommitment(1, date(2026, 3, 14), 0.0, 168.0),)
+            )
+        },
+        weeks_per_month=_EMIT_WEEKS_PER_MONTH,
+        nl_lag_months={86: 2},
+    )
+    e = convert_gnl(model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES)
+
+    calendar = _build_post_study_calendar(date(2026, 5, 1), _EMIT_WEEKS_PER_MONTH)
+    # Study stage 0 is March's first weekly stage (offset 0); +2 months lands
+    # on May's first calendar stage (also offset 0) -> calendar[0].
+    expected_start = calendar[0]["start_date"]
+    matches = [
+        d
+        for d in e.future_anticipated_deliveries
+        if d["delivery_start"] == expected_start
+    ]
+    assert len(matches) == 1
+    delivery = matches[0]
+    assert delivery["min_mw"] < delivery["max_mw"]
+    assert delivery["min_mw"] == santa.min_mw
+    assert delivery["max_mw"] == santa.max_mw
+
+
+def test_convert_gnl_prior_revision_delivery_stays_pinned() -> None:
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    santa_pinned = [
+        d
+        for d in e.future_anticipated_deliveries
+        if d["thermal_id"] == 94 and d["delivery_start"] == "2026-05-09"
+    ]
+    assert len(santa_pinned) == 1
+    assert santa_pinned[0]["min_mw"] == santa_pinned[0]["max_mw"] == 500.0
+
+    everything_else = [
+        d for d in e.future_anticipated_deliveries if d not in santa_pinned
+    ]
+    assert everything_else
+    assert all(d["min_mw"] < d["max_mw"] for d in everything_else)
+
+
+def test_convert_gnl_deliveries_tile_whole_post_study_stages() -> None:
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    pss = e.post_study_stages
+    assert pss is not None
+    stage_spans = {_calendar_stage_span(s) for s in pss["stages"]}
+
+    assert e.future_anticipated_deliveries  # non-trivial coverage check
+    for d in e.future_anticipated_deliveries:
+        window = (
+            date.fromisoformat(d["delivery_start"]),
+            date.fromisoformat(d["delivery_end"]),
+        )
+        assert window in stage_spans  # exactly one whole calendar stage
+
+
+def test_convert_gnl_thermal_bounds_intersect_delivery() -> None:
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    pss = e.post_study_stages
+    assert pss is not None
+    cost_of = {94: 199.22, 95: 321.26}
+    stage_index_of_span = {
+        _calendar_stage_span(s): idx for idx, s in enumerate(pss["stages"])
+    }
+    bound_of = {
+        (b["thermal_id"], b["post_study_stage_index"]): b for b in pss["thermal_bounds"]
+    }
+
+    assert e.future_anticipated_deliveries
+    for d in e.future_anticipated_deliveries:
+        window = (
+            date.fromisoformat(d["delivery_start"]),
+            date.fromisoformat(d["delivery_end"]),
+        )
+        idx = stage_index_of_span[window]
+        bound = bound_of[(d["thermal_id"], idx)]
+        assert bound["cost_per_mwh"] == cost_of[d["thermal_id"]]
+        assert bound["min_mw"] <= d["max_mw"]
+        assert d["min_mw"] <= bound["max_mw"]
 
 
 def test_convert_gnl_clamps_committed_above_capability(
