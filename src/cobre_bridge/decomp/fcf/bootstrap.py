@@ -84,7 +84,9 @@ class TerminalManifest:
     state_dimension: int
 
 
-def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalManifest:
+def bootstrap_terminal_manifest(
+    case_dir: Path, *, work_dir: Path, inflow_lag_depth: int = 0
+) -> TerminalManifest:
     """Run cobre for 1 iteration on ``case_dir`` and read its terminal manifest.
 
     Trains ``case_dir`` in-process via :func:`cobre.run.run`, writing the
@@ -92,6 +94,15 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
     single-iteration cap is applied through ``config_overrides``'
     in-memory deep-merge, and the ``on_iteration`` callback requests a
     cooperative stop at the first iteration boundary). Simulation is skipped.
+
+    ``inflow_lag_depth`` (when ``>= 1``) is applied as another in-memory
+    ``config_overrides`` entry so the bootstrap manifest reserves the inflow-lag
+    state slots the boundary cuts will be mapped onto — the mapper bounds-checks
+    ``pi_qafl`` placement against the manifest's ``HydroInflowLag`` slot count.
+    It is an override, never written to ``case_dir/config.json``: cobre >= 0.14
+    infers the same depth from the loaded boundary policy at run time, so the
+    shipped case declares no ``state_space.inflow_lag_depth``. At bootstrap there
+    is no boundary yet, so the depth must be supplied here explicitly.
     It then reads the emitted checkpoint back via
     :func:`cobre.results.load_policy` and returns the terminal stage's (the
     entry whose ``stage_id`` is max) ``entity_manifest`` and
@@ -114,13 +125,16 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
     import cobre
 
     output_dir = work_dir / "output"
+    config_overrides: dict[str, object] = {
+        "training.stopping_rules": [{"type": "iteration_limit", "limit": 1}]
+    }
+    if inflow_lag_depth >= 1:
+        config_overrides["state_space.inflow_lag_depth"] = inflow_lag_depth
     cobre.run.run(
         str(case_dir),
         output_dir=str(output_dir),
         skip_simulation=True,
-        config_overrides={
-            "training.stopping_rules": [{"type": "iteration_limit", "limit": 1}]
-        },
+        config_overrides=config_overrides,
         on_iteration=lambda _info: True,
     )
 

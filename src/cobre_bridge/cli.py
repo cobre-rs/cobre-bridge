@@ -1315,11 +1315,11 @@ def _convert_newave(
 
 #: Warning substring that marks the P3 lag-blind stage shape
 #: (``state_variables.inflow_lags = false`` on every stage — see
-#: ``decomp/temporal.py::stage_records`` — alongside the positive
-#: ``inflow_lag_depth`` the boundary-FCF importer reserves) as deliberate
+#: ``decomp/temporal.py::stage_records`` — alongside the positive inflow-lag
+#: depth cobre infers from the imported boundary policy) as deliberate
 #: external-solver interoperability, not a misconfiguration. Only arises once a
-#: boundary FCF is imported: a plain conversion emits no ``inflow_lag_depth``,
-#: so cobre resolves a zero depth and this warning never fires. Matched via
+#: boundary FCF is imported: a plain conversion has no boundary, so cobre
+#: resolves a zero depth and this warning never fires. Matched via
 #: :func:`_partition_validation_warnings` against cobre's stable substring
 #: (never the volatile message prefix); see
 #: ``cobre-io/src/validation/semantic/stages.rs``.
@@ -1469,7 +1469,8 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
 
     # Boundary-FCF import (opt-in, D3): runs after the manifest write and
     # BEFORE ``--validate`` so validation sees the patched ``config.json``
-    # (``policy.boundary`` + ``state_space.inflow_lag_depth``). Never runs
+    # (``policy.boundary``; cobre infers the inflow-lag depth from the boundary,
+    # so no ``state_space`` is written). Never runs
     # under ``--dry-run`` (handled above, before this point is reached).
     # Cut-files-absent, the capability probe, and the importer itself all
     # funnel through this one broad ``except`` — mapped to exit 1 like every

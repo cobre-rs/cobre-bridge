@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -169,10 +170,11 @@ def test_import_boundary_fcf_patches_policy_boundary(
         "path": "boundary",
         "source_stage": 10,
     }
-    # The importer reserves the cut-derived inflow-lag depth (convert_config
-    # emits no state_space); this individualized deck's boundary cuts carry
-    # pi_qafl terms, so a positive depth is patched in.
-    assert config["state_space"]["inflow_lag_depth"] >= 1
+    # cobre >= 0.14 infers the inflow-lag depth from the loaded boundary policy,
+    # so the importer no longer writes state_space into the shipped config; it
+    # feeds the cut-derived depth to the bootstrap run as an in-memory override
+    # (this deck's boundary cuts carry pi_qafl terms, so that depth is positive).
+    assert "state_space" not in config
     # the convert_config sections must survive the policy.boundary patch untouched
     assert "training" in config
     assert "simulation" in config
@@ -885,39 +887,28 @@ def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
     assert deviation.remediation is None
 
 
-# The real, gitignored `decomp-mar-26-rv2` deck (the empirical READBACK deck
-# named by this ticket's Context) + the `feat/cobre-gnl-boundary-pricing`
-# branch worktree binary -- a DIFFERENT deck/binary pair from the
-# `decomp-set-24-rv0` / `~/git/cobre` constants above (that deck predates the
-# GNL-ring/boundary-pricing work this ticket fixes). CI has neither, so this
-# is a dev-only tier-3 smoke, mirroring `_HAS_E2E_DEPS`/`_skip_e2e` above.
+# The real, gitignored `decomp-mar-26-rv2` deck (the empirical READBACK deck) +
+# the local cobre **develop** build. The boundary-pricing / anticipated-
+# reconciliation work has landed in develop (commits `abf73bf1` reconcile-by-
+# dated-fan-out, `7faed7a0` exempt post-horizon anticipated deliveries from the
+# lead-horizon cap), so the develop build is the correct target and equals the
+# sibling `_COBRE_BIN` above. Under the mirror-shift GNL emission the anticipation
+# lead is capped strictly below the horizon (TRACKED COBRE-GAP WORKAROUND C13,
+# `decomp/anticipated.py`), so this deck loads with no K=0 / no dropped deliveries.
+# CI has neither the deck nor the binary, so this stays a dev-only tier-3 smoke.
 _MAR26_DECK = Path("example/decomp-mar-26-rv2")
 _MAR26_CORTESH = _MAR26_DECK / "cortesh.dat"
 _MAR26_CORTES = _MAR26_DECK / "cortes-004.dat"
-_MAR26_COBRE_BIN = Path.home() / "git" / "cobre-gnlbp" / "target" / "release" / "cobre"
+_MAR26_COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
 _HAS_MAR26_E2E_DEPS = (
     _MAR26_COBRE_BIN.exists() and _MAR26_DECK.exists() and _HAS_WRITER_BINDING
 )
 _MAR26_SKIP_REASON = (
-    f"requires the cobre-gnlbp binary ({_MAR26_COBRE_BIN}), the "
+    f"requires the local cobre develop build ({_MAR26_COBRE_BIN}), the "
     f"decomp-mar-26-rv2 deck ({_MAR26_DECK}), and the write_policy_checkpoint "
     "writer binding"
 )
 _skip_mar26_e2e = pytest.mark.skipif(not _HAS_MAR26_E2E_DEPS, reason=_MAR26_SKIP_REASON)
-
-#: Descriptive pin for the run-load residual `test_import_boundary_fcf_
-#: mar26rv2_run_load_blocked_...` below xfails: cobre's boundary-load
-#: re-derives its "boundary policy target" list live from the case's own
-#: thermals.json/post_study_stages.json and rejects a terminal
-#: AnticipatedThermalState slot whose live anticipation lead has already
-#: resolved to K=0 -- independent of the covered-lane filter's coefficient
-#: (proven by patching the written checkpoint's own delivery_date to the
-#: sentinel and observing the identical rejection).
-_RUN_LOAD_XFAIL_REASON = (
-    "cobre boundary-load re-derives policy targets live and rejects thermal "
-    "95's K=0-lead terminal slot (delivery 20260401 before the post-study "
-    "horizon); independent of the checkpoint payload"
-)
 
 
 @dataclass(frozen=True)
@@ -958,6 +949,14 @@ def mar26rv2_imported_case(
     return _Mar26ImportedCase(case_dir=case_dir, boundary_dir=boundary_dir)
 
 
+def _as_text(raw: str | bytes | None) -> str:
+    """Decode a subprocess capture (``TimeoutExpired`` yields bytes even under
+    ``text=True``) to ``str``; ``None`` → ``""``."""
+    if raw is None:
+        return ""
+    return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+
+
 def _dated_ring_position(
     entity_manifest: list[dict[str, object]],
     thermal_id: int,
@@ -994,24 +993,22 @@ def _dated_ring_position(
 def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
     mar26rv2_imported_case: _Mar26ImportedCase,
 ) -> None:
-    """Ticket-013 AC 5 (re-scoped) -- the achievable, passing facts.
+    """Post-mirror-shift covered-lane + calendar + validate facts (ticket-006
+    AC4/AC5/AC7).
 
-    The authored boundary places `0.0` at thermal 95's non-covered
-    `20260401` slot and a nonzero coefficient at thermal 94's covered
-    `20260501` slot (read back from the actual written checkpoint, never
-    the mapper's own bookkeeping -- mirrors `test_decomp_fcf_roundtrip.py`'s
-    oracle convention), and `cobre validate`'s CASE-structural check (buses/
-    hydros/thermals/lines/stages/penalties/etc., the first `Validation: N
-    errors` line it prints) reports `0`. `cobre validate` has no `--output`
-    flag (confirmed via `--help`); on this branch it also runs a *second*,
-    later pass that tries to open the boundary checkpoint at
-    `case_dir/output/boundary` (the same output_dir default C8 documents for
-    `run`), which -- independent of ticket-013 -- fails to find it there
-    (the checkpoint lives at `case_dir/boundary`) and flips the process's
-    overall exit code to 1. That second pass is C8 manifesting in `validate`
-    too, not the run-load residual the sibling test below pins, so this
-    test asserts on the case-structural line's own count, never the
-    process's aggregate exit code.
+    Under the mirror-shift GNL emission every anticipated plant gets one free
+    forward delivery per study stage on the (C13-capped, H=1008) mirror calendar,
+    so BOTH thermal 94 and thermal 95 now have covered dated ring slots and
+    NEITHER has a non-covered dated slot -- superseding the old thermal-95
+    non-covered `20260401` / `== 0.0` assertion (that pre-horizon April slot no
+    longer exists). thermal 94's covered lane is priced (nonzero, finite); the
+    exact GAP-1 hours-weighted collapse `Σ_p pi_gnl[c]·h_p` is pinned by the
+    tier-1 mapper tests, so here the real-deck fact is that the lane carries a
+    real coefficient. The post-study calendar is the mirror shape. `cobre
+    validate`'s CASE-structural check (the first `Validation: N errors` line it
+    prints) reports `0`; its aggregate exit is C8-gated (a second pass looks for
+    the checkpoint at `case_dir/output/boundary`), so this asserts on the
+    structural line's own count, never the process exit code.
     """
     case_dir = mar26rv2_imported_case.case_dir
     import cobre
@@ -1024,14 +1021,43 @@ def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
     entity_manifest = terminal["entity_manifest"]
     first_cut = terminal["cuts"][0]
 
-    covered_position = _dated_ring_position(
-        entity_manifest, 94, covered=True, post_horizon_start=horizon_start
+    # AC4/AC5: BOTH plants now have a covered (post-horizon May) dated ring slot
+    # priced nonzero -- the core fix: PSERGIPE I (95) was non-covered / 0.0
+    # pre-mirror and now carries a real coefficient, exactly like thermal 94. The
+    # exact GAP-1 hours-weighted collapse is pinned by the tier-1 mapper tests;
+    # the real-deck fact asserted here is that the free-only lane is priced. The
+    # residual non-covered slot each plant still carries (the reconciliation's
+    # in-study April ring slot, `_post_horizon_start` = 20260501) stays 0.0.
+    for tid in (94, 95):
+        covered = _dated_ring_position(
+            entity_manifest, tid, covered=True, post_horizon_start=horizon_start
+        )
+        coeff = first_cut["coefficients"][covered]
+        assert coeff != 0.0, f"thermal {tid}'s covered ring lane is unpriced"
+        assert math.isfinite(coeff)
+
+        non_covered = _dated_ring_position(
+            entity_manifest, tid, covered=False, post_horizon_start=horizon_start
+        )
+        assert first_cut["coefficients"][non_covered] == 0.0
+
+    # AC7: the C13-capped H=1008 mirror calendar (study stages shifted below the
+    # horizon): a 24 h Fri->Sat stub, two Saturday weekly stages, one monthly.
+    post_study = json.loads(
+        (case_dir / "post_study_stages.json").read_text(encoding="utf-8")
     )
-    uncovered_position = _dated_ring_position(
-        entity_manifest, 95, covered=False, post_horizon_start=horizon_start
-    )
-    assert first_cut["coefficients"][uncovered_position] == 0.0
-    assert first_cut["coefficients"][covered_position] != 0.0
+    assert [s["start_date"] for s in post_study["stages"]] == [
+        "2026-05-01",
+        "2026-05-02",
+        "2026-05-09",
+        "2026-05-16",
+    ]
+    assert [s["duration_hours"] for s in post_study["stages"]] == [
+        24.0,
+        168.0,
+        168.0,
+        648.0,
+    ]
 
     completed = subprocess.run(
         [str(_MAR26_COBRE_BIN), "validate", str(case_dir)],
@@ -1050,21 +1076,29 @@ def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
 
 
 @_skip_mar26_e2e
-@pytest.mark.xfail(strict=True, reason=_RUN_LOAD_XFAIL_REASON)
-def test_import_boundary_fcf_mar26rv2_run_load_blocked_by_live_target_enumeration(
+def test_import_boundary_fcf_mar26rv2_run_loads_boundary(
     mar26rv2_imported_case: _Mar26ImportedCase, tmp_path: Path
 ) -> None:
-    """Ticket-013 AC 5 (re-scoped) -- pins the residual this ticket's
-    covered-lane filter cannot reach: a fresh ``cobre run <dst> --output
-    <dst>`` (the C8 recipe, 1-iteration) still aborts at boundary-load with
-    "no resolved delivery interval", because cobre re-derives its boundary
-    policy targets live rather than reading them from the authored
-    checkpoint. ``strict=True`` so this flips to a hard failure -- forcing
-    the marker's removal -- the day cobre's side of this is fixed.
+    """The bounded real ``cobre run`` LOADS the terminal boundary (ticket-006
+    AC3, RESOLVED under the mirror-shift emission).
 
-    Copies the shared fixture's case into a private scratch directory
-    first (never mutating ``mar26rv2_imported_case.case_dir`` in place),
-    consistent with ``fcf/bootstrap.py``'s own scratch-copy convention.
+    Pre-mirror this xfailed: the per-plant emission left an anticipated ring
+    slot at a K=0 sub-stage lead that cobre's boundary-load rejected. The
+    mirror-shift emission (single global lead, C13-capped strictly below the
+    horizon) makes every delivery's decider land in-study, so a fresh
+    ``cobre run <dst> --output <dst>`` (the C8 recipe, 1-iteration) loads the
+    boundary cleanly: no LP-builder panic, no "no resolved delivery interval",
+    no K=0 warning, no dropped ``future_anticipated_deliveries``.
+
+    Everything asserted here is printed at setup / boundary-load, which is fast;
+    the subsequent SDDP iteration over the terminal leaf is expensive, so the
+    run is given a wall budget and, if it is still iterating when that elapses,
+    the output captured so far is what the assertions inspect -- reaching
+    iteration with the boundary loaded and no panic/rejection IS the proof. If
+    it finishes inside the budget, its exit is additionally required to be 0.
+
+    Copies the shared fixture's case into a private scratch directory first
+    (never mutating ``mar26rv2_imported_case.case_dir`` in place).
     """
     scratch_case = tmp_path / "case"
     shutil.copytree(mar26rv2_imported_case.case_dir, scratch_case)
@@ -1074,28 +1108,45 @@ def test_import_boundary_fcf_mar26rv2_run_load_blocked_by_live_target_enumeratio
     config["training"]["stopping_rules"] = [{"type": "iteration_limit", "limit": 1}]
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
-    completed = subprocess.run(
-        [
-            str(_MAR26_COBRE_BIN),
-            "run",
-            str(scratch_case),
-            "--output",
-            str(scratch_case),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    argv = [
+        str(_MAR26_COBRE_BIN),
+        "run",
+        str(scratch_case),
+        "--output",
+        str(scratch_case),
+    ]
+    timed_out = False
+    returncode: int | None
+    try:
+        completed = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=60
+        )
+        combined = completed.stdout + completed.stderr
+        returncode = completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        # Setup + boundary-load finish well before the slow iteration; a timeout
+        # kill means we reached iteration -- inspect the setup output captured.
+        # (TimeoutExpired carries raw bytes even under text=True, so decode.)
+        timed_out = True
+        combined = _as_text(exc.stdout) + _as_text(exc.stderr)
+        returncode = None
 
-    combined_output = completed.stdout + completed.stderr
-    assert "no resolved delivery interval" not in combined_output, (
-        f"cobre run rejected the boundary (exit {completed.returncode}):\n"
-        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+    assert "Cuts loaded" in combined, (
+        f"cobre run did not report a boundary load (exit {returncode}):\n{combined}"
     )
-    assert completed.returncode == 0, (
-        f"cobre run failed (exit {completed.returncode}):\n"
-        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-    )
+    for forbidden in (
+        "panic",
+        "attempt to calculate the remainder with a divisor of zero",
+        "no resolved delivery interval",
+        "K=0 sub-stage lead",
+        "dropped — out of the lead's reach",
+    ):
+        assert forbidden not in combined, (
+            f"cobre run boundary-load produced {forbidden!r} (exit {returncode}):"
+            f"\n{combined}"
+        )
+    if not timed_out:
+        assert returncode == 0, f"cobre run failed (exit {returncode}):\n{combined}"
 
 
 @_skip_mar26_e2e
@@ -1110,7 +1161,7 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
     ``cobre-bridge convert decomp`` command (boundary FCF on by default) end to end.
     This test closes that seam: it drives the command as a subprocess
     (``sys.executable -m cobre_bridge.cli``, hermetic against PATH) on the
-    real mar-26-rv2 deck with the real ``cobre-gnlbp`` binary, and proves the
+    real mar-26-rv2 deck with the local cobre develop binary, and proves the
     CLI-surface facts the library-level tests cannot -- exit 0, the authored
     ``boundary/`` + ``config.json`` wiring, the ``--json`` verdict's
     ``summary["boundary_fcf"]``, and, via a coarse reload of the authored
