@@ -1,6 +1,6 @@
 """The source model output file readers for results comparison.
 
-Reads MEDIAS CSV files (hydro, thermal, system) from the ``saidas/``
+Reads MEDIAS CSV files (hydro, thermal, system) directly from the case
 directory and pmo.dat convergence/productivity data.
 
 MEDIAS files are parsed directly with Polars since inewave v1.13 does
@@ -32,28 +32,9 @@ def _find_case_insensitive(directory: Path, filename: str) -> Path | None:
     return None
 
 
-def _find_saidas_dir(newave_dir: Path) -> Path | None:
-    """Locate the ``saidas/`` subdirectory case-insensitively."""
-    lower = "saidas"
-    try:
-        for entry in newave_dir.iterdir():
-            if entry.is_dir() and entry.name.lower() == lower:
-                return entry
-    except OSError:
-        pass
-    return None
-
-
 def _find_pmo(newave_dir: Path) -> Path | None:
-    """Locate ``pmo.dat`` in the source model directory or its ``saidas/`` subdir."""
-    # Try root first, then saidas/.
-    result = _find_case_insensitive(newave_dir, "pmo.dat")
-    if result is not None:
-        return result
-    saidas = _find_saidas_dir(newave_dir)
-    if saidas is not None:
-        return _find_case_insensitive(saidas, "pmo.dat")
-    return None
+    """Locate ``pmo.dat`` directly in the source model case directory."""
+    return _find_case_insensitive(newave_dir, "pmo.dat")
 
 
 # -------------------------------------------------------------------
@@ -67,7 +48,7 @@ def _find_pmo(newave_dir: Path) -> Path | None:
 
 
 def _read_medias_csv(
-    saidas_dir: Path,
+    case_dir: Path,
     filename: str,
     variable_filter: str | None = None,
 ) -> pl.DataFrame:
@@ -91,9 +72,9 @@ def _read_medias_csv(
         }
     )
 
-    path = _find_case_insensitive(saidas_dir, filename)
+    path = _find_case_insensitive(case_dir, filename)
     if path is None:
-        _LOG.warning("%s not found in %s", filename, saidas_dir)
+        _LOG.warning("%s not found in %s", filename, case_dir)
         return empty
 
     # Try comma first (the source model v29+ format), fall back to semicolon.
@@ -235,7 +216,7 @@ def _read_medias_csv(
     return result
 
 
-def read_medias_hydro(saidas_dir: Path) -> pl.DataFrame:
+def read_medias_hydro(case_dir: Path) -> pl.DataFrame:
     """Read MEDIAS-USIH.CSV and return hydro results.
 
     Returns DataFrame with columns: ``newave_code``, ``stage``,
@@ -244,10 +225,10 @@ def read_medias_hydro(saidas_dir: Path) -> pl.DataFrame:
 
     Returns empty DataFrame if file not found.
     """
-    return _read_medias_csv(saidas_dir, "MEDIAS-USIH.CSV")
+    return _read_medias_csv(case_dir, "MEDIAS-USIH.CSV")
 
 
-def read_medias_thermal(saidas_dir: Path) -> pl.DataFrame:
+def read_medias_thermal(case_dir: Path) -> pl.DataFrame:
     """Read MEDIAS-USIT.CSV and return thermal results.
 
     Returns DataFrame with columns: ``newave_code``, ``stage``,
@@ -255,10 +236,10 @@ def read_medias_thermal(saidas_dir: Path) -> pl.DataFrame:
 
     Returns empty DataFrame if file not found.
     """
-    return _read_medias_csv(saidas_dir, "MEDIAS-USIT.CSV")
+    return _read_medias_csv(case_dir, "MEDIAS-USIT.CSV")
 
 
-def read_medias_system(saidas_dir: Path) -> pl.DataFrame:
+def read_medias_system(case_dir: Path) -> pl.DataFrame:
     """Read MEDIAS-MERC.CSV and return system/market results.
 
     Returns DataFrame with columns: ``newave_code`` (submercado code),
@@ -266,7 +247,7 @@ def read_medias_system(saidas_dir: Path) -> pl.DataFrame:
 
     Returns empty DataFrame if file not found.
     """
-    return _read_medias_csv(saidas_dir, "MEDIAS-MERC.CSV")
+    return _read_medias_csv(case_dir, "MEDIAS-MERC.CSV")
 
 
 # -------------------------------------------------------------------
@@ -480,7 +461,7 @@ def read_pmo_productivity_detail(newave_dir: Path) -> pl.DataFrame:
 _INT_FILENAME_RE = re.compile(r"^int(\d{3})(\d{3})\.out$", re.IGNORECASE)
 
 
-def read_nwlistop_intercambio(saidas_dir: Path) -> pl.DataFrame:
+def read_nwlistop_intercambio(case_dir: Path) -> pl.DataFrame:
     """Read NWLISTOP ``intXXXYYY.out`` files into long-format flow data.
 
     NWLISTOP emits one file per directional submercado pair containing
@@ -513,11 +494,11 @@ def read_nwlistop_intercambio(saidas_dir: Path) -> pl.DataFrame:
             "value": pl.Float64,
         }
     )
-    if not saidas_dir.is_dir():
+    if not case_dir.is_dir():
         return empty
 
     matches: list[tuple[int, int, Path]] = []
-    for path in saidas_dir.iterdir():
+    for path in case_dir.iterdir():
         m = _INT_FILENAME_RE.match(path.name)
         if m is None:
             continue
@@ -575,7 +556,7 @@ def read_nwlistop_intercambio(saidas_dir: Path) -> pl.DataFrame:
     )
 
 
-def read_medias_market(saidas_dir: Path) -> pl.DataFrame:
+def read_medias_market(case_dir: Path) -> pl.DataFrame:
     """Read MEDIAS-MERC.CSV with all variables in long format.
 
     Returns DataFrame with columns: ``newave_code``, ``stage``,
@@ -583,10 +564,10 @@ def read_medias_market(saidas_dir: Path) -> pl.DataFrame:
     returns CMO/DEFT, this returns all market variables for energy
     balance analysis.
     """
-    return _read_medias_csv(saidas_dir, "MEDIAS-MERC.CSV")
+    return _read_medias_csv(case_dir, "MEDIAS-MERC.CSV")
 
 
-def read_medias_sin(saidas_dir: Path) -> pl.DataFrame:
+def read_medias_sin(case_dir: Path) -> pl.DataFrame:
     """Read MEDIAS-SIN.CSV (system interconnected aggregate).
 
     Returns DataFrame with columns ``newave_code`` (always 0 for SIN),
@@ -594,10 +575,10 @@ def read_medias_sin(saidas_dir: Path) -> pl.DataFrame:
     ``EARMF`` (stored energy final, MWmes), ``ENA`` (natural energy
     inflow, MWmes), ``EARMFP`` (percentage of max storage).
     """
-    return _read_medias_csv(saidas_dir, "MEDIAS-SIN.CSV")
+    return _read_medias_csv(case_dir, "MEDIAS-SIN.CSV")
 
 
-def read_medias_ree(saidas_dir: Path) -> pl.DataFrame:
+def read_medias_ree(case_dir: Path) -> pl.DataFrame:
     """Read MEDIAS-REE.CSV (per equivalent-energy-reservoir aggregate).
 
     Returns DataFrame with columns ``newave_code`` (the REE code), ``stage`` (1-based
@@ -607,7 +588,7 @@ def read_medias_ree(saidas_dir: Path) -> pl.DataFrame:
     VminOP generic constraints bound, so it is the natural the source-model-side LHS for
     those constraints.
     """
-    return _read_medias_csv(saidas_dir, "MEDIAS-REE.CSV")
+    return _read_medias_csv(case_dir, "MEDIAS-REE.CSV")
 
 
 _MERCL_FILE_RE = re.compile(r"mercl(\d+)\.out$", re.IGNORECASE)
@@ -660,12 +641,11 @@ def read_newave_net_load_nwlistop(newave_dir: Path) -> pl.DataFrame:
             "value": pl.Float64,
         }
     )
-    saidas = _find_saidas_dir(newave_dir)
-    if saidas is None:
+    if not newave_dir.is_dir():
         return empty
     # Per-submarket files only; merclsin.out (the SIN total) has no digits and
     # is excluded by the regex.
-    files = sorted(p for p in saidas.iterdir() if _MERCL_FILE_RE.match(p.name))
+    files = sorted(p for p in newave_dir.iterdir() if _MERCL_FILE_RE.match(p.name))
     if not files:
         return empty
 

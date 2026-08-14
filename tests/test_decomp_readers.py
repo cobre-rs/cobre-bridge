@@ -17,9 +17,9 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_convergence,
 )
 
-_SAIDAS = Path("example/decomp-jul-26-rv3/saidas")
+_DECK = Path("example/decomp-jul-26-rv3")
 
-_needs_deck = pytest.mark.skipif(not _SAIDAS.is_dir(), reason="rv3 outputs not present")
+_needs_deck = pytest.mark.skipif(not _DECK.is_dir(), reason="rv3 outputs not present")
 
 
 class _StubFile:
@@ -59,7 +59,7 @@ class TestReadDecOperCore:
 class TestRealDeckReaders:
     @_needs_deck
     def test_sist_has_system_columns(self) -> None:
-        df = read_dec_oper_sist(_SAIDAS)
+        df = read_dec_oper_sist(_DECK)
         assert df.height > 0
         for column in (
             "estagio",
@@ -79,7 +79,7 @@ class TestRealDeckReaders:
 
     @_needs_deck
     def test_usih_has_water_balance_columns(self) -> None:
-        df = read_dec_oper_usih(_SAIDAS)
+        df = read_dec_oper_usih(_DECK)
         assert df.height > 0
         for column in (
             "codigo_usina",
@@ -93,7 +93,7 @@ class TestRealDeckReaders:
 
     @_needs_deck
     def test_usit_has_bound_columns(self) -> None:
-        df = read_dec_oper_usit(_SAIDAS)
+        df = read_dec_oper_usit(_DECK)
         assert df.height > 0
         for column in (
             "codigo_usina",
@@ -106,7 +106,7 @@ class TestRealDeckReaders:
 
     @_needs_deck
     def test_interc_has_flow_columns(self) -> None:
-        df = read_dec_oper_interc(_SAIDAS)
+        df = read_dec_oper_interc(_DECK)
         assert df.height > 0
         for column in (
             "codigo_submercado_de",
@@ -118,7 +118,7 @@ class TestRealDeckReaders:
 
     @_needs_deck
     def test_relato_convergence(self) -> None:
-        df = read_relato_convergence(_SAIDAS)
+        df = read_relato_convergence(_DECK)
         assert df.height > 0
         for column in ("iteracao", "zinf", "zsup", "gap_percentual"):
             assert column in df.columns

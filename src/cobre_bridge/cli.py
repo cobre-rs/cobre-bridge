@@ -1858,7 +1858,11 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
 @compare_app.command("decomp")
 def _compare_decomp(
     decomp_dir: Annotated[
-        Path, typer.Argument(help="Path to the DECOMP deck directory (has saidas/).")
+        Path,
+        typer.Argument(
+            help="Path to the DECOMP deck directory (deck + dec_oper_*.csv "
+            "result files, all directly in it)."
+        ),
     ],
     cobre_output_dir: Annotated[
         Path, typer.Argument(help="Path to the Cobre output directory.")
@@ -1915,7 +1919,11 @@ def _compare_decomp(
 @compare_app.command("newave")
 def _compare_newave(
     newave_dir: Annotated[
-        Path, typer.Argument(help="Path to the NEWAVE case directory (has saidas/).")
+        Path,
+        typer.Argument(
+            help="Path to the NEWAVE case directory (case + MEDIAS-*.CSV "
+            "result files, all directly in it)."
+        ),
     ],
     cobre_output_dir: Annotated[
         Path, typer.Argument(help="Path to the Cobre output directory.")

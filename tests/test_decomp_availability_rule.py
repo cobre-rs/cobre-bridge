@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 _DECK = Path("example/decomp-jul-26-rv3")
 _needs_deck = pytest.mark.skipif(
-    not (_DECK / "saidas" / "dec_oper_usih.csv").exists(),
+    not (_DECK / "dec_oper_usih.csv").exists(),
     reason="reference deck outputs not present",
 )
 
@@ -74,7 +74,7 @@ def _registers() -> tuple[dict, dict]:
 
 
 def _reported() -> pl.DataFrame:
-    stage_rows = read_dec_oper_usih(_DECK / "saidas").filter(
+    stage_rows = read_dec_oper_usih(_DECK).filter(
         pl.col("patamar").is_null()
     )
     return (

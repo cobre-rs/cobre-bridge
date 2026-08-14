@@ -79,7 +79,7 @@ from cobre_bridge.emission_checks import (
 
 _DECK = Path("example/decomp-jul-26-rv3")
 _needs_deck = pytest.mark.skipif(
-    not (_DECK / "saidas" / "dec_oper_usit.csv").exists(),
+    not (_DECK / "dec_oper_usit.csv").exists(),
     reason="reference deck outputs not present",
 )
 

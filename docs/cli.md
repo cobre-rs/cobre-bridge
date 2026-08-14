@@ -100,7 +100,8 @@ Convert a DECOMP deck revision to a Cobre case directory.
 
 Loop-closing subset: the exchange network, renewables card file, and GNL
 anticipation are deferred and reported as warnings. The boundary FCF is
-also deferred by default, but ``--boundary-fcf`` opts into importing it.
+imported by default whenever the deck declares its cut files; ``--no-fcf``
+skips it.
 
 **Usage**:
 
@@ -120,8 +121,7 @@ $ cobre-bridge convert decomp [OPTIONS] {src} {dst}
 * `--diagnostics-json PATH`: Also write the conversion diagnostics (counts + findings) as JSON.
 * `--json`: Emit a single machine-readable JSON verdict to stdout and suppress the human (Rich) rendering.
 * `--dry-run`: Run the full conversion in memory and report what would be written, without creating or modifying the destination directory.
-* `--boundary-fcf`: After conversion, import the deck&#x27;s boundary FCF (cortes/cortesh) as a terminal-stage cobre policy checkpoint. Requires cut files in the deck and a capable cobre wheel; runs a real 1-iteration cobre pass, so this is slow. Ignored under --dry-run.
-* `--cobre-bin PATH`: Path to the cobre binary used by --boundary-fcf&#x27;s bootstrap pass. Defaults to cobre on PATH, then the documented development worktree binary (~/git/cobre-gnlbp/target/release/cobre).
+* `--no-fcf`: Skip importing the deck&#x27;s boundary FCF. By default, when the deck declares cortes/cortesh files (its FC records), they are imported as a terminal-stage cobre policy checkpoint via an in-process 1-iteration cobre pass (slow; requires cobre-python). Pass this for a quick conversion without the terminal FCF. The FCF is always skipped under --dry-run.
 * `-v, --verbose`: Increase console log verbosity (-v INFO, -vv DEBUG).  [default: 0]
 * `--log-file PATH`: Write the full DEBUG log to PATH (the console verbosity is unaffected).
 * `--no-color`: Disable coloured output (also honoured via the NO_COLOR env var).
@@ -161,7 +161,7 @@ $ cobre-bridge compare decomp [OPTIONS] {decomp_dir} {cobre_output_dir}
 
 **Arguments**:
 
-* `decomp_dir`: Path to the DECOMP deck directory (has saidas/).  [required]
+* `decomp_dir`: Path to the DECOMP deck directory (deck + dec_oper_*.csv result files, all directly in it).  [required]
 * `cobre_output_dir`: Path to the Cobre output directory.  [required]
 
 **Options**:
@@ -190,7 +190,7 @@ $ cobre-bridge compare newave [OPTIONS] {newave_dir} {cobre_output_dir}
 
 **Arguments**:
 
-* `newave_dir`: Path to the NEWAVE case directory (has saidas/).  [required]
+* `newave_dir`: Path to the NEWAVE case directory (case + MEDIAS-*.CSV result files, all directly in it).  [required]
 * `cobre_output_dir`: Path to the Cobre output directory.  [required]
 
 **Options**:

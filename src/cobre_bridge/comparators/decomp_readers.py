@@ -1,7 +1,7 @@
 """DECOMP output readers for results comparison.
 
 Reads the ``dec_oper_*.csv`` operation tables and the convergence report
-from a DECOMP ``saidas/`` directory via ``idecomp``, returning Polars
+from a DECOMP case directory via ``idecomp``, returning Polars
 frames with the source's native column names (1-based ``estagio``,
 node/scenario indices as written). Alignment onto Cobre entity ids and
 stage indices happens in the comparison layer, not here.
@@ -42,14 +42,14 @@ class _TableReader(Protocol):
 
 
 def _read_dec_oper(
-    saidas_dir: Path,
+    case_dir: Path,
     filename: str,
     reader_cls: _TableReader,
 ) -> pl.DataFrame:
     """Read one ``dec_oper_*`` table, rejecting missing or empty parses."""
-    path = _find_case_insensitive(saidas_dir, filename)
+    path = _find_case_insensitive(case_dir, filename)
     if path is None:
-        raise FileNotFoundError(f"{filename} not found in {saidas_dir}")
+        raise FileNotFoundError(f"{filename} not found in {case_dir}")
     table = reader_cls.read(str(path)).tabela
     if table is None or table.empty:
         raise ValueError(
@@ -60,39 +60,39 @@ def _read_dec_oper(
     return pl.from_pandas(table)
 
 
-def read_dec_oper_sist(saidas_dir: Path) -> pl.DataFrame:
+def read_dec_oper_sist(case_dir: Path) -> pl.DataFrame:
     """Per-(stage, node, scenario, block, submarket) system operation.
 
     Includes demand, generation by family (hydro/thermal/anticipated/wind/
     small plants), exchanges, the Itaipu 50/60 Hz split, deficit, stored
     energy, and the marginal cost (``cmo``).
     """
-    return _read_dec_oper(saidas_dir, "dec_oper_sist.csv", DecOperSist)
+    return _read_dec_oper(case_dir, "dec_oper_sist.csv", DecOperSist)
 
 
-def read_dec_oper_usih(saidas_dir: Path) -> pl.DataFrame:
+def read_dec_oper_usih(case_dir: Path) -> pl.DataFrame:
     """Per-hydro operation: storage, flows (natural/incremental/turbined/
     spilled/withdrawn/evaporated), generation, and available capacity
     (``potencia_disponivel_MW`` — the availability-rule oracle)."""
-    return _read_dec_oper(saidas_dir, "dec_oper_usih.csv", DecOperUsih)
+    return _read_dec_oper(case_dir, "dec_oper_usih.csv", DecOperUsih)
 
 
-def read_dec_oper_usit(saidas_dir: Path) -> pl.DataFrame:
+def read_dec_oper_usit(case_dir: Path) -> pl.DataFrame:
     """Per-thermal operation: generation with its effective min/max bounds
     and incremental cost."""
-    return _read_dec_oper(saidas_dir, "dec_oper_usit.csv", DecOperUsit)
+    return _read_dec_oper(case_dir, "dec_oper_usit.csv", DecOperUsit)
 
 
-def read_dec_oper_interc(saidas_dir: Path) -> pl.DataFrame:
+def read_dec_oper_interc(case_dir: Path) -> pl.DataFrame:
     """Per-exchange operation: origin/destination flows, losses, and the
     effective capacity."""
-    return _read_dec_oper(saidas_dir, "dec_oper_interc.csv", DecOperInterc)
+    return _read_dec_oper(case_dir, "dec_oper_interc.csv", DecOperInterc)
 
 
-def _find_relato(saidas_dir: Path) -> Path | None:
+def _find_relato(case_dir: Path) -> Path | None:
     """Locate the revision-suffixed general report (``relato.rvN``)."""
     try:
-        for entry in sorted(saidas_dir.iterdir()):
+        for entry in sorted(case_dir.iterdir()):
             if entry.is_file() and _RELATO_PATTERN.match(entry.name):
                 return entry
     except OSError:
@@ -100,12 +100,12 @@ def _find_relato(saidas_dir: Path) -> Path | None:
     return None
 
 
-def read_relato_convergence(saidas_dir: Path) -> pl.DataFrame:
+def read_relato_convergence(case_dir: Path) -> pl.DataFrame:
     """Read the convergence table (``iteracao``, ``zinf``, ``zsup``,
     ``gap_percentual``, …) from the general report."""
-    path = _find_relato(saidas_dir)
+    path = _find_relato(case_dir)
     if path is None:
-        raise FileNotFoundError(f"no relato.rvN found in {saidas_dir}")
+        raise FileNotFoundError(f"no relato.rvN found in {case_dir}")
     table = Relato.read(str(path)).convergencia
     if table is None or table.empty:
         raise ValueError(f"{path} has no convergence table")

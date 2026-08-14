@@ -1,7 +1,8 @@
 """Side-by-side comparison of a DECOMP run against its converted Cobre run.
 
 This is the minimal slice: it aligns the source model's shipped operation
-tables (``saidas/dec_oper_*.csv``) onto Cobre's simulation output and reports
+tables (``dec_oper_*.csv``, directly in the deck directory) onto Cobre's
+simulation output and reports
 per-variable divergence. No tolerance verdict and no HTML — the point is that
 both sides are read, aligned, and compared on the same quantities.
 
@@ -263,7 +264,7 @@ def _summarize(rows: pl.DataFrame) -> pl.DataFrame:
 def _convergence(decomp_dir: Path, cobre_output_dir: Path) -> pl.DataFrame:
     """Put both bound sequences side by side, one row per iteration index."""
     try:
-        source = read_relato_convergence(decomp_dir / "saidas")
+        source = read_relato_convergence(decomp_dir)
     except (FileNotFoundError, ValueError) as exc:
         _LOG.warning("No source-model convergence table: %s", exc)
         source = pl.DataFrame()
@@ -299,7 +300,7 @@ def _convergence(decomp_dir: Path, cobre_output_dir: Path) -> pl.DataFrame:
 def _hydro_side(
     decomp_dir: Path, id_map_hydro: dict[int, int]
 ) -> tuple[pl.DataFrame, list[int]]:
-    frame = _stage_rows(read_dec_oper_usih(decomp_dir / "saidas"))
+    frame = _stage_rows(read_dec_oper_usih(decomp_dir))
     columns = [v.source_column for v in _HYDRO_VARIABLES]
     aggregated = _scenario_mean(frame, "estagio", columns, entity_column="codigo_usina")
     return _map_entities(aggregated, "codigo_usina", id_map_hydro)
@@ -308,7 +309,7 @@ def _hydro_side(
 def _thermal_side(
     decomp_dir: Path, id_map_thermal: dict[int, int]
 ) -> tuple[pl.DataFrame, list[int]]:
-    frame = _stage_rows(read_dec_oper_usit(decomp_dir / "saidas"))
+    frame = _stage_rows(read_dec_oper_usit(decomp_dir))
     columns = [v.source_column for v in _THERMAL_VARIABLES]
     aggregated = _scenario_mean(frame, "estagio", columns, entity_column="codigo_usina")
     return _map_entities(aggregated, "codigo_usina", id_map_thermal)
@@ -317,7 +318,7 @@ def _thermal_side(
 def _bus_side(
     decomp_dir: Path, id_map_bus: dict[int, int]
 ) -> tuple[pl.DataFrame, list[int]]:
-    frame = _stage_rows(read_dec_oper_sist(decomp_dir / "saidas"))
+    frame = _stage_rows(read_dec_oper_sist(decomp_dir))
     columns = [v.source_column for v in _BUS_VARIABLES]
     aggregated = _scenario_mean(
         frame, "estagio", columns, entity_column="codigo_submercado"
@@ -380,9 +381,10 @@ def compare_decomp_results(
 ) -> DecompComparison:
     """Compare a source-model run against the Cobre run of its converted case.
 
-    ``decomp_dir`` is the deck directory (it must contain ``saidas/`` and the
-    deck files needed to rebuild the id map); ``cobre_output_dir`` is Cobre's
-    output directory, whose case directory supplies the entity registries.
+    ``decomp_dir`` is the deck directory (it must contain the ``dec_oper_*.csv``
+    result tables and the deck files needed to rebuild the id map, all directly
+    in that directory); ``cobre_output_dir`` is Cobre's output directory, whose
+    case directory supplies the entity registries.
     """
     from idecomp.decomp import Dadger
 
