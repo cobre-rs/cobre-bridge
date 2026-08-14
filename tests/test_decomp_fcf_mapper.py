@@ -29,8 +29,14 @@ from tests._fcf_fixtures import (
 from tests.conftest import requires_cobre_python
 
 # Inflow-lag (pi_qafl) coefficients take an extra × C_M3S2HM3 beyond MONTH_HOURS
-# (cobre's inflow-lag state is m³/s, not Hm³); storage/rhs/GNL take × MONTH_HOURS.
+# (cobre's inflow-lag state is m³/s, not Hm³); storage/rhs take × MONTH_HOURS.
 _LAG_FACTOR = MONTH_HOURS * C_M3S2HM3
+
+# `_make_gnl_ring_fixture` always builds an `n_patamares=3` header; a uniform
+# split of `MONTH_HOURS` across those 3 coupling blocks reproduces the
+# pre-ticket-001 plain-sum-times-total-hours GNL value exactly ÷ 3 (see
+# `test_map_gnl_uniform_blocks_is_sum_over_n_patamares`).
+_UNIFORM_GNL_BLOCK_HOURS = (MONTH_HOURS / 3, MONTH_HOURS / 3, MONTH_HOURS / 3)
 
 # cobre `policy.fbs` entity_type codes (see ticket-005's Current State) — a
 # stable external contract, restated locally rather than importing the
@@ -245,12 +251,19 @@ def test_map_gnl_places_chain_rule_sum_on_dated_slots() -> None:
     cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
 
     result = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
     )
 
     mapped = result.cuts[0]
-    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS)  # 94 dated
-    assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS)  # 95 dated
+    # Uniform per-block hours reproduce the pre-ticket-001 plain sum ÷
+    # n_patamares (3) — see test_map_gnl_uniform_blocks_is_sum_over_n_patamares.
+    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS / 3)  # 94 dated
+    assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS / 3)  # 95 dated
 
 
 def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
@@ -268,11 +281,16 @@ def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
     )
 
     result = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
     )
 
     mapped = result.cuts[0]
-    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS)  # 94 covered
+    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS / 3)  # 94 covered
     assert mapped.coefficients[3] == 0.0  # thermal 95, uncovered -> dropped
 
     matches = [
@@ -305,12 +323,17 @@ def test_map_gnl_post_horizon_start_none_is_old_behavior() -> None:
     )
 
     result = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
     )
 
     mapped = result.cuts[0]
-    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS)  # 94, dated
-    assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS)  # 95, dated
+    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS / 3)  # 94, dated
+    assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS / 3)  # 95, dated
     assert not any("post-study horizon" in term.reason for term in result.gnl_dropped)
 
 
@@ -319,7 +342,12 @@ def test_map_gnl_sentinel_and_nontarget_slots_stay_zero() -> None:
     cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
 
     result = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
     )
 
     mapped = result.cuts[0]
@@ -335,7 +363,12 @@ def test_map_gnl_drops_submercado_without_thermal() -> None:
     cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
 
     result = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
     )
 
     matches = [
@@ -413,6 +446,76 @@ def test_map_gnl_rejects_bad_pi_gnl_width() -> None:
     plan = GnlRingPlan((GnlThermalTarget(94, 1, 1),))
 
     with pytest.raises(ValueError, match="pi_gnl width"):
+        map_boundary_cuts(
+            cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
+        )
+
+
+def test_map_gnl_weights_pi_gnl_by_coupling_block_hours() -> None:
+    """AC 1 — the GNL coefficient is the f64-exact per-block weighted sum
+    `Σ_p pi_gnl[p] · h_p`, not a uniform-hours collapse."""
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
+    h1, h2, h3 = 100.0, 200.0, 428.0
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=plan,
+        coupling_block_hours=(h1, h2, h3),
+    )
+
+    mapped = result.cuts[0]
+    assert mapped.coefficients[2] == pytest.approx(0.1 * h1 + 0.2 * h2 + 0.3 * h3)
+    assert mapped.coefficients[3] == pytest.approx(1.0 * h1 + 2.0 * h2 + 4.0 * h3)
+
+
+def test_map_gnl_uniform_blocks_is_sum_over_n_patamares() -> None:
+    """AC 2 — uniform per-block hours give exactly `1/n_patamares` of the
+    pre-fix plain-sum-times-total-hours value."""
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
+    )
+
+    mapped = result.cuts[0]
+    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS / 3)
+    assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS / 3)
+
+
+def test_map_gnl_rejects_block_hours_length_mismatch() -> None:
+    """AC 3 — `len(coupling_block_hours) != n_patamares` (here 4 vs 3) raises,
+    naming the observed vs expected length."""
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
+
+    with pytest.raises(ValueError, match="coupling_block_hours"):
+        map_boundary_cuts(
+            cuts,
+            manifest,
+            id_map,
+            cost_unit_hours=MONTH_HOURS,
+            gnl_plan=plan,
+            coupling_block_hours=(MONTH_HOURS / 4,) * 4,
+        )
+
+
+def test_map_gnl_requires_block_hours_when_placing() -> None:
+    """AC 3 — `coupling_block_hours=None` with a placing `gnl_plan` raises,
+    rather than silently falling back to the pre-fix plain-sum behaviour."""
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(pi_gnl)
+
+    with pytest.raises(ValueError, match="coupling_block_hours"):
         map_boundary_cuts(
             cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
         )

@@ -1,10 +1,11 @@
 """GNL ring round-trip identity test for the boundary FCF mapper (epic 5).
 
 Epic 4 wired ``map_boundary_cuts(..., gnl_plan=GnlRingPlan | None)`` to place
-the chain-rule patamar sum ``Σ_p pi_gnl[col(s, p, l)]`` (``math.fsum``) onto
-the terminal ring's *covered* dated ``AnticipatedThermalState`` slots, and
-ticket-013's covered-lane filter drops that sum to ``0.0`` on any dated slot
-whose ``delivery_date`` falls before the post-study horizon. Two existing
+the per-block hours-weighted patamar sum ``Σ_p pi_gnl[col(s, p, l)] · h_p``
+(``math.fsum``, ticket-001) onto the terminal ring's *covered* dated
+``AnticipatedThermalState`` slots, and ticket-013's covered-lane filter drops
+that sum to ``0.0`` on any dated slot whose ``delivery_date`` falls before
+the post-study horizon. Two existing
 tests in ``tests/test_decomp_fcf_roundtrip.py`` prove the mapper's
 storage/lag legs end to end via a synthetic ``map -> write -> load_policy``
 round trip cross-checked against a *non-circular* oracle; this module is the
@@ -31,7 +32,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from cobre_bridge.converters.network import MONTH_HOURS
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
 from cobre_bridge.decomp.fcf.mapper import GnlRingPlan, GnlThermalTarget
 from tests._fcf_fixtures import (
@@ -65,6 +65,12 @@ _SUBMERCADO_3_LAG_1_VALUES = (100.0, 200.0, 300.0)
 #: The post-study horizon: thermal 94's dated slot (20260501) is covered,
 #: thermal 95's (20260401) is not.
 _POST_HORIZON_START = 20260501
+
+#: Non-uniform coupling per-block hours (patamar order) — deliberately
+#: distinct across patamares so the round trip actually exercises the
+#: per-block weighting (ticket-001), not merely the uniform-split special
+#: case that collapses to the pre-fix plain-sum-times-total-hours value.
+_COUPLING_BLOCK_HOURS = (100.0, 200.0, 300.0)
 
 
 def _col(
@@ -149,9 +155,9 @@ def test_synthetic_gnl_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     `synthetic_roundtrip`, and checks the reloaded coefficients — located by
     scanning the reloaded `entity_manifest`, never the mapper's own
     bookkeeping — against this module's independent `_col`/`math.fsum`
-    oracle: the covered slot equals the chain-rule patamar sum of its three
-    source `pi_gnl` columns; the non-covered and sentinel slots are exactly
-    `0.0`.
+    oracle: the covered slot equals the per-block hours-weighted sum of its
+    three source `pi_gnl` columns against `_COUPLING_BLOCK_HOURS`
+    (ticket-001); the non-covered and sentinel slots are exactly `0.0`.
     """
     header = make_cortes_header(
         (),
@@ -184,7 +190,12 @@ def test_synthetic_gnl_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     )
 
     reloaded = synthetic_roundtrip(
-        tmp_path / "boundary", cuts, manifest, id_map, gnl_plan=gnl_plan
+        tmp_path / "boundary",
+        cuts,
+        manifest,
+        id_map,
+        gnl_plan=gnl_plan,
+        coupling_block_hours=_COUPLING_BLOCK_HOURS,
     )
 
     entry = reloaded["stage_cuts"][0]
@@ -204,23 +215,24 @@ def test_synthetic_gnl_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     assert non_covered_position is not None
     assert sentinel_position is not None
 
-    # The authored coefficient is the chain-rule pi_gnl sum scaled to cobre
-    # cost units by MONTH_HOURS (fcf.mapper's ($·mês)/h -> $ conversion),
-    # matching the mapper's `math.fsum(...) * MONTH_HOURS` order exactly.
-    expected_covered_sum = (
-        math.fsum(
-            pi_gnl[
-                _col(
-                    1,
-                    patamar,
-                    2,
-                    n_patamares=_N_PATAMARES,
-                    lag_maximo_gnl=_LAG_MAXIMO_GNL,
-                )
-            ]
-            for patamar in range(1, _N_PATAMARES + 1)
+    # The authored coefficient is the per-block hours-weighted pi_gnl sum
+    # (ticket-001) — `Σ_p pi_gnl[col(1, p, 2)] · coupling_block_hours[p]` —
+    # matching the mapper's `math.fsum(pi_gnl[c] * h for c, h in zip(...))`
+    # order exactly.
+    expected_covered_sum = math.fsum(
+        pi_gnl[
+            _col(
+                1,
+                patamar,
+                2,
+                n_patamares=_N_PATAMARES,
+                lag_maximo_gnl=_LAG_MAXIMO_GNL,
+            )
+        ]
+        * hours
+        for patamar, hours in zip(
+            range(1, _N_PATAMARES + 1), _COUPLING_BLOCK_HOURS, strict=True
         )
-        * MONTH_HOURS
     )
 
     assert coefficients[covered_position] == expected_covered_sum

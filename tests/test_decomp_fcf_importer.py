@@ -350,6 +350,13 @@ def test_import_boundary_fcf_no_cut_files_is_noop(
 _HYDRO_STORAGE = 0
 _ANTICIPATED_THERMAL_STATE = 2
 
+#: Every GNL fixture below builds an `n_patamares=3` header; a uniform split
+#: of `MONTH_HOURS` across those 3 coupling blocks is enough to satisfy
+#: `map_boundary_cuts`'s `coupling_block_hours` guard (ticket-001) — none of
+#: these tests assert on the placed GNL coefficient's magnitude, only on the
+#: deviation diagnostic, which recomputes straight from the raw `pi_gnl`.
+_UNIFORM_GNL_BLOCK_HOURS = (MONTH_HOURS / 3, MONTH_HOURS / 3, MONTH_HOURS / 3)
+
 
 def _gnl_row(width: int, nonzero: dict[int, float]) -> tuple[float, ...]:
     """A `pi_gnl` flat vector of `width` zeros with `nonzero` columns set."""
@@ -479,7 +486,12 @@ def test_emit_import_diagnostics_gnl_deviation_fires() -> None:
     gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
 
     mapping = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=gnl_plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=gnl_plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
     )
 
     with dx.collect() as sink:
@@ -743,7 +755,12 @@ def test_emit_import_diagnostics_c2_panel3_no_dropped_column() -> None:
     cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
     gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
     mapping = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=gnl_plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=gnl_plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
     )
 
     with dx.collect() as sink:
@@ -851,7 +868,12 @@ def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
     cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
     gnl_plan = GnlRingPlan((GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),))
     mapping = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=gnl_plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=gnl_plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
     )
 
     with dx.collect() as sink:

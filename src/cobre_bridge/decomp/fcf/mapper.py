@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from cobre_bridge.converters.network import C_M3S2HM3
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
@@ -48,19 +48,25 @@ if TYPE_CHECKING:
 # ``cost_unit_hours`` — the terminal/coupling stage's actual duration, which is
 # how the source integrates its per-hour future-cost rate at the coupling
 # (empirically it reproduces the source's ``E(CF)`` to ~2-3%, where a fixed 730-h
-# month overshoots by ~15% on a short coupling period). Without any factor the
-# loaded FCF is ~700× too small, cobre under-values stored water by three orders
-# of magnitude, drains the reservoirs, and the boundary policy is numerically
-# inert.
+# month overshoots by ~15% on a short coupling period). The GNL term needs those
+# same hours split *per coupling block* (``coupling_block_hours``, patamar order)
+# rather than summed — see the next paragraph. Without any factor the loaded FCF
+# is ~700× too small, cobre under-values stored water by three orders of
+# magnitude, drains the reservoirs, and the boundary policy is numerically inert.
 #
 # The intercept and storage (``PIVARM``) terms take ``× cost_unit_hours`` alone:
 # ``× cost_unit_hours`` integrates the per-hour rate and the storage state is
-# already Hm³. The GNL (``PIGTAD``) term *also* takes ``× cost_unit_hours`` alone,
-# but for a different reason — it is ``$/MWh`` and cobre's anticipated-thermal
-# state is a MWmed dispatch (``cobre-core`` ``generic_constraint.rs``: "anticipated
-# thermal unit (MW)"), so ``pi_gnl [$/MWh] × cost_unit_hours [h] = $/MWmed`` pairs
-# with that MWmed state (an energy price, so no ``C_M3S2HM3``). The inflow-lag
-# (``PIAFL``) term
+# already Hm³. The GNL (``PIGTAD``) term takes a *per-block, hours-weighted*
+# collapse instead of that flat ``× cost_unit_hours`` — ``pi_gnl`` is an energy
+# price ``$/MWh`` pricing cobre's anticipated-thermal ring state, a flat power
+# dispatch ``G`` [MW] (``cobre-core`` ``generic_constraint.rs``: "anticipated
+# thermal unit (MW)"). The energy delivered in coupling block ``p`` is ``G · h_p``,
+# so the chain rule gives ``∂E(CF)/∂G = Σ_p pi_gnl[p] · h_p`` — the coupling
+# stage's *per-block* hours in patamar order (``coupling_block_hours``), never its
+# total (``cost_unit_hours`` alone would over-count the GNL term by
+# ``n_patamares``, since ``pi_gnl`` already carries one coefficient per patamar).
+# No ``C_M3S2HM3`` here either way — ``pi_gnl``'s energy pricing needs no
+# Hm³-to-m³/s conversion. The inflow-lag (``PIAFL``) term
 # takes an *additional* ``× C_M3S2HM3``: ``PIAFL`` is per-Hm³, so
 # ``× cost_unit_hours`` yields ``R$/Hm³`` — correct against a storage state in
 # Hm³, but cobre's *inflow-lag* state variable is a raw flow rate in **m³/s**
@@ -99,9 +105,10 @@ class MappedCut:
     explicit coefficient, never merely unset. ``intercept`` is the source
     record's ``rhs`` (the ``alpha - beta'xhat`` form; never re-derived, per
     §2.1). The intercept and every coefficient are scaled to cobre's cost
-    units by :func:`map_boundary_cuts`'s ``cost_unit_hours`` — intercept,
-    storage, and GNL by ``× cost_unit_hours`` and inflow-lag by an additional
-    ``× C_M3S2HM3`` (see the module header). ``cut_id``, ``iteration``,
+    units by :func:`map_boundary_cuts` — intercept and storage by
+    ``× cost_unit_hours``, inflow-lag by an additional ``× C_M3S2HM3``, and
+    GNL by the per-block ``coupling_block_hours`` hours-weighted collapse
+    (see the module header). ``cut_id``, ``iteration``,
     ``forward_pass_index``, and ``is_active`` are the source
     ``StageCutRecord``'s provenance fields, carried verbatim so the
     checkpoint writer (ticket-008) has every field it needs without
@@ -528,40 +535,52 @@ def map_boundary_cuts(
     cost_unit_hours: float,
     lag_slot_of: Callable[[int], int] = _default_lag_slot_of,
     gnl_plan: GnlRingPlan | None = None,
+    coupling_block_hours: Sequence[float] | None = None,
 ) -> MappingResult:
     """Map every cut in `cuts.records` onto `manifest`'s state-vector layout.
 
     `cost_unit_hours` is the coupling (terminal) stage's duration in hours: the
     source model's FCF coefficients are a per-hour cost rate (``($·mês)/h`` etc.,
     see the module header), so every mapped term is scaled to cobre's plain-$
-    objective units by integrating over these hours. The intercept, storage, and
-    GNL terms take ``× cost_unit_hours``; the inflow-lag term takes an additional
+    objective units by integrating over these hours. The intercept and storage
+    terms take ``× cost_unit_hours``; the inflow-lag term takes an additional
     ``× C_M3S2HM3`` because cobre's inflow-lag state is a m³/s flow rate, not the
-    Hm³ volume ``PIAFL`` is defined against (see the module header).
+    Hm³ volume ``PIAFL`` is defined against (see the module header). The GNL term
+    instead takes the *per-block* hours-weighted collapse
+    `Σ_p pi_gnl[p] · coupling_block_hours[p]` — `pi_gnl` is a `$/MWh` energy
+    price on a flat-power ring state, so the coupling stage's total hours would
+    over-count it by `n_patamares` (see the module header's derivation).
 
     Storage terms join by plant code (`HydroStorage`, D3-drop on a
     source-only plant); inflow-lag terms join 1:1 by `lag_slot_of` onto
     `HydroInflowLag`. When `gnl_plan` is given, each `AnticipatedThermalState`
     ring slot named by one of its targets' *covered* dated slot(s) — i.e.
     `delivery_date >= gnl_plan.post_horizon_start`, or every dated slot when
-    `post_horizon_start is None` — carries the chain-rule patamar sum
-    `Σ_p pi_gnl[col(s,p,nl_lag)]` (`math.fsum`, order-independent); a target
-    with no dated ring slot, a dated slot whose delivery falls before the
-    post-study horizon (a non-covered, K=0-lead lane cobre rejects a
-    coefficient on — ticket-013), or a source submercado with no matching
-    target, is dropped and recorded in `MappingResult.gnl_dropped`, never
-    folded onto a neighbour. `HydroTransitBucket` slots, the sentinel
+    `post_horizon_start is None` — carries the hours-weighted patamar sum
+    `Σ_p pi_gnl[col(s,p,nl_lag)] · coupling_block_hours[p]` (`math.fsum`,
+    order-independent); a target with no dated ring slot, a dated slot whose
+    delivery falls before the post-study horizon (a non-covered, K=0-lead lane
+    cobre rejects a coefficient on — ticket-013), or a source submercado with
+    no matching target, is dropped and recorded in `MappingResult.gnl_dropped`,
+    never folded onto a neighbour. `HydroTransitBucket` slots, the sentinel
     (undated) `AnticipatedThermalState` slot, and every ring slot with no
     resolved (covered) target are left at an explicit `0.0` regardless of
     `gnl_plan`; `gnl_plan=None` (the default) leaves the entire ring at
-    `0.0`, byte-for-byte matching this function's pre-GNL behaviour.
-    `intercept` is the source record's `rhs` (never re-derived from
-    alpha/x-hat); it and every coefficient are then scaled to cobre's cost
-    units by `cost_unit_hours` per family — intercept/storage/GNL by
-    ``× cost_unit_hours``, inflow-lag by an additional ``× C_M3S2HM3`` for
-    cobre's m³/s inflow-lag state (see the module header). Produces one
-    `MappedCut` per source record, active or not — active-frontier selection
-    is ticket-008's writer concern, not the mapper's.
+    `0.0`, byte-for-byte matching this function's pre-GNL behaviour, and never
+    requires `coupling_block_hours` (see the guard below). `intercept` is the
+    source record's `rhs` (never re-derived from alpha/x-hat); it and every
+    coefficient are then scaled to cobre's cost units per family —
+    intercept/storage by ``× cost_unit_hours``, inflow-lag by an additional
+    ``× C_M3S2HM3`` for cobre's m³/s inflow-lag state, and GNL by the
+    per-block `coupling_block_hours` collapse above (see the module header).
+    Produces one `MappedCut` per source record, active or not —
+    active-frontier selection is ticket-008's writer concern, not the
+    mapper's.
+
+    `coupling_block_hours` is the coupling stage's per-block hours in patamar
+    order — required whenever `gnl_plan` resolves at least one live ring
+    target (`resolved_gnl` non-empty); `None` is only valid when no GNL
+    coefficient is placed (no `gnl_plan`, or every target dropped).
 
     Raises
     ------
@@ -572,7 +591,9 @@ def map_boundary_cuts(
         family, a legitimate case shape); if `lag_slot_of` returns a
         subindex out of range for the manifest's `HydroInflowLag` slots; if
         `gnl_plan` is given and `cuts`' `pi_gnl` width is not a multiple of
-        `n_patamares * lag_maximo_gnl`; or if a mapped coefficient vector's
+        `n_patamares * lag_maximo_gnl`; if a GNL coefficient would be placed
+        and `coupling_block_hours` is `None` or its length disagrees with
+        `cuts.header.n_patamares`; or if a mapped coefficient vector's
         length disagrees with `manifest.state_dimension`.
     """
     slot_positions = _index_manifest(manifest)
@@ -589,10 +610,33 @@ def map_boundary_cuts(
     gnl_ring_index = _index_gnl_ring(manifest)
     resolved_gnl, gnl_dropped = _resolve_gnl_targets(cuts, gnl_ring_index, gnl_plan)
 
-    # Cost-unit factors (see the module header): the intercept/storage/GNL terms
+    # The GNL branch needs the coupling stage's per-block hours (patamar
+    # order), never merely its total, to weight each pi_gnl patamar column
+    # independently (see the module header). Validated once here, next to
+    # `resolved_gnl` itself, rather than inside the per-record loop below —
+    # mirrors `_resolve_storage_targets`/`_validated_lag_subindices`'s
+    # "resolve/validate once, write per record" split. A `gnl_plan` that
+    # resolves no live target (`resolved_gnl` empty) needs no per-block hours
+    # at all, so `coupling_block_hours=None` is never an error in that case.
+    if resolved_gnl:
+        if coupling_block_hours is None:
+            raise ValueError(
+                "GNL ring placement requires coupling_block_hours (the "
+                "coupling stage's per-block hours in patamar order), but "
+                "none was given"
+            )
+        if len(coupling_block_hours) != cuts.header.n_patamares:
+            raise ValueError(
+                f"coupling_block_hours has {len(coupling_block_hours)} "
+                f"block(s), but cuts.header.n_patamares expects "
+                f"{cuts.header.n_patamares}"
+            )
+
+    # Cost-unit factors (see the module header): the intercept/storage terms
     # integrate the per-hour source rate over the coupling stage's hours; the
     # inflow-lag term additionally converts cobre's m³/s lag state to the Hm³
-    # `PIAFL` is defined against.
+    # `PIAFL` is defined against. The GNL term is scaled separately, per
+    # coupling block, inside the per-record loop below.
     cost_unit_factor = cost_unit_hours
     inflow_lag_factor = cost_unit_hours * C_M3S2HM3
 
@@ -616,9 +660,18 @@ def map_boundary_cuts(
                     )
 
         for gnl_position, gnl_cols in resolved_gnl.items():
-            coefficients[gnl_position] = (
-                math.fsum(record.pi_gnl[column] for column in gnl_cols)
-                * cost_unit_factor
+            # Hours-weighted collapse (ticket-001): `pi_gnl` prices an energy
+            # state, so each patamar column is weighted by that patamar's own
+            # coupling-block hours, not by the coupling stage's total hours.
+            # `coupling_block_hours` is guaranteed non-None here — validated
+            # above whenever `resolved_gnl` is non-empty.
+            coefficients[gnl_position] = math.fsum(
+                record.pi_gnl[column] * hours
+                for column, hours in zip(
+                    gnl_cols,
+                    coupling_block_hours,  # type: ignore[arg-type]
+                    strict=True,
+                )
             )
 
         if len(coefficients) != manifest.state_dimension:

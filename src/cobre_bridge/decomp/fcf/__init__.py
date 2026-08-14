@@ -179,27 +179,27 @@ def _post_horizon_start(case_dir: Path) -> int | None:
     return min(int(stage["start_date"].replace("-", "")) for stage in stages)
 
 
-def _coupling_stage_hours(case_dir: Path) -> float:
-    """The coupling (terminal) stage's total duration in hours, from ``stages.json``.
+def _final_stage_block_hours(case_dir: Path) -> list[float]:
+    """The coupling (terminal) stage's per-block hours, in file order, from
+    ``stages.json``.
 
-    The source model's FCF coefficients are a *per-hour* cost rate (see
-    ``fcf/mapper.py``'s header): the source integrates that rate over its
-    coupling period's actual hours to obtain the future-cost value, so the
-    mapper needs those same hours (``cost_unit_hours``) to reproduce it in
-    cobre's plain-$ objective. The boundary FCF attaches at the end of the last
-    modelled stage, so the coupling period is the final ``stages.json`` stage;
-    its duration is the sum of its blocks' ``hours`` (a weekly deck's ~168 h,
-    or the coupling month's post-exclusion hours — e.g. 648 h for a 27-day
-    April). Using the actual stage hours (not a fixed 730-h month) reproduces
-    the source's ``E(CF)`` to ~2-3 %, where a fixed month overshoots by ~15 %
-    on a short coupling period.
+    The boundary FCF attaches at the end of the last modelled stage, so the
+    coupling period is the final ``stages.json`` stage. Returns its per-block
+    ``hours`` values in file order — patamar order, matching the source
+    model's own cut axis (a weekly deck's ~168 h split across blocks, or the
+    coupling month's post-exclusion hours — e.g. 648 h for a 27-day April) —
+    so :func:`~cobre_bridge.decomp.fcf.mapper.map_boundary_cuts`'s GNL branch
+    can weight each ``pi_gnl`` patamar column by its own coupling block's
+    hours (ticket-001), rather than the stage's total.
+    :func:`_coupling_stage_hours` sums this same vector for the
+    intercept/storage/inflow-lag terms.
 
     Raises
     ------
     ValueError
         If ``stages.json`` is missing, carries no stages, or the final stage
-        has no positive block-hours — a boundary import cannot scale the cut
-        coefficients to a cost without the coupling stage's duration.
+        has no positive total block-hours — a boundary import cannot scale
+        the cut coefficients to a cost without the coupling stage's duration.
     """
     path = case_dir / "stages.json"
     if not path.is_file():
@@ -209,13 +209,36 @@ def _coupling_stage_hours(case_dir: Path) -> float:
     stages = doc.get("stages", [])
     if not stages:
         raise ValueError(f"{path} carries no stages; cannot scale boundary FCF")
-    hours = math.fsum(float(block["hours"]) for block in stages[-1].get("blocks", []))
-    if hours <= 0.0:
+    hours = [float(block["hours"]) for block in stages[-1].get("blocks", [])]
+    total = math.fsum(hours)
+    if total <= 0.0:
         raise ValueError(
-            f"{path} final stage has non-positive total block hours ({hours}); "
+            f"{path} final stage has non-positive total block hours ({total}); "
             "cannot scale boundary FCF"
         )
     return hours
+
+
+def _coupling_stage_hours(case_dir: Path) -> float:
+    """The coupling (terminal) stage's total duration in hours, from ``stages.json``.
+
+    The source model's FCF coefficients are a *per-hour* cost rate (see
+    ``fcf/mapper.py``'s header): the source integrates that rate over its
+    coupling period's actual hours to obtain the future-cost value, so the
+    mapper needs those same hours (``cost_unit_hours``) to reproduce it in
+    cobre's plain-$ objective. Using the actual stage hours (not a fixed 730-h
+    month) reproduces the source's ``E(CF)`` to ~2-3 %, where a fixed month
+    overshoots by ~15 % on a short coupling period.
+
+    A thin ``math.fsum`` wrapper over :func:`_final_stage_block_hours` — see
+    that function for the per-block vector and the validation the two share.
+
+    Raises
+    ------
+    ValueError
+        Propagated verbatim from :func:`_final_stage_block_hours`.
+    """
+    return math.fsum(_final_stage_block_hours(case_dir))
 
 
 def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan | None:
@@ -549,9 +572,9 @@ def import_boundary_fcf(
     4. Builds the deck's GNL ring plan (:func:`_build_gnl_ring_plan`) and maps
        every boundary cut onto that layout: storage terms by plant code,
        inflow-lag terms by calendar-month lag depth, and
-       ``AnticipatedThermalState`` GNL-ring terms via the plan's chain-rule
-       patamar sum; ``HydroTransitBucket`` slots are left at coefficient 0
-       regardless (epic 5's job, not this one's).
+       ``AnticipatedThermalState`` GNL-ring terms via the plan's per-block
+       hours-weighted patamar sum (ticket-001); ``HydroTransitBucket`` slots
+       are left at coefficient 0 regardless (epic 5's job, not this one's).
     5. Surfaces the mapping's documented approximations as ``Diagnostic``s
        (:func:`_emit_import_diagnostics`): the always-on cut-family triage,
        the D3-dropped source-only plants (gated on non-empty), and — when the
@@ -622,9 +645,18 @@ def import_boundary_fcf(
 
     manifest = bootstrap_terminal_manifest(case_dir, work_dir=work_dir)
     gnl_plan = _build_gnl_ring_plan(case_dir, deck_files)
-    cost_unit_hours = _coupling_stage_hours(case_dir)
+    # Read stages.json's per-block hours once; cost_unit_hours (the
+    # intercept/storage/inflow-lag scale) is this same vector's sum, never a
+    # second stages.json read (ticket-001).
+    coupling_block_hours = _final_stage_block_hours(case_dir)
+    cost_unit_hours = math.fsum(coupling_block_hours)
     mapping = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=cost_unit_hours, gnl_plan=gnl_plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=cost_unit_hours,
+        gnl_plan=gnl_plan,
+        coupling_block_hours=coupling_block_hours,
     )
     _LOG.info(
         "scaling boundary FCF coefficients to cobre cost units over the "

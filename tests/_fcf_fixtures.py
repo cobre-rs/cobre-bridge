@@ -190,6 +190,7 @@ def synthetic_roundtrip(
     cost_scale_factor: float = 1.0,
     cost_unit_hours: float = MONTH_HOURS,
     gnl_plan: GnlRingPlan | None = None,
+    coupling_block_hours: Sequence[float] | None = None,
 ) -> dict[str, Any]:
     """Map, write, and reload a synthetic boundary checkpoint; no deck, no
     cobre binary.
@@ -202,7 +203,13 @@ def synthetic_roundtrip(
     call this from a `@requires_cobre_python`-guarded test. `gnl_plan`
     defaults to `None`, forwarded verbatim to `map_boundary_cuts`, so every
     existing caller keeps leaving the GNL ring at `0.0` unchanged; pass it to
-    exercise a populated ring.
+    exercise a populated ring. `coupling_block_hours` defaults to `None`; when
+    `None` and `gnl_plan` is given, a uniform split
+    `[cost_unit_hours / n_patamares] * n_patamares` is derived so a
+    GNL-exercising caller need not hand-compute the per-block vector for the
+    common uniform case — a storage-only caller (`gnl_plan=None`) is
+    untouched, since the mapper never requires `coupling_block_hours` when no
+    GNL coefficient is placed.
 
     Raises
     ------
@@ -212,8 +219,17 @@ def synthetic_roundtrip(
     """
     import cobre
 
+    if coupling_block_hours is None and gnl_plan is not None:
+        n_patamares = cuts.header.n_patamares
+        coupling_block_hours = (cost_unit_hours / n_patamares,) * n_patamares
+
     mapping = map_boundary_cuts(
-        cuts, manifest, id_map, cost_unit_hours=cost_unit_hours, gnl_plan=gnl_plan
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=cost_unit_hours,
+        gnl_plan=gnl_plan,
+        coupling_block_hours=coupling_block_hours,
     )
     stage_cuts_payload = build_stage_cuts_payload(mapping, manifest, stage_id=stage_id)
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
