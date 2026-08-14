@@ -801,8 +801,8 @@ def _convert_decomp_case_impl(
         if gnl.post_study_stages is not None:
             _write_json(dst / "post_study_stages.json", gnl.post_study_stages)
         _LOG.info(
-            "emitted %d GNL anticipated thermal(s) from dadgnl; %d post-horizon "
-            "deliver(y/ies)",
+            "emitted %d GNL anticipated thermal(s) from dadgnl; %d future "
+            "anticipated deliver(y/ies)",
             len(gnl.thermals),
             len(gnl.future_anticipated_deliveries),
         )

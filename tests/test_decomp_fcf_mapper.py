@@ -312,6 +312,33 @@ def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
     )
 
 
+def test_map_gnl_all_dated_slots_covered_drops_nothing() -> None:
+    """Ticket-005 — the post-GAP-2 shape: `post_horizon_start` is enabled
+    (non-`None`) but both targets' dated slots are `>= post_horizon_start`,
+    so the covered-lane filter drops nothing. Locks the invariant that
+    enabling the filter on an all-covered ring is a no-op versus
+    `post_horizon_start=None` (`test_map_gnl_post_horizon_start_none_is_old_behavior`).
+    """
+    pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
+    cuts, manifest, id_map, plan = _make_gnl_ring_fixture(
+        pi_gnl, post_horizon_start=20260401
+    )
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
+    )
+
+    mapped = result.cuts[0]
+    assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS / 3)  # 94, dated
+    assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS / 3)  # 95, dated
+    assert not any("post-study horizon" in term.reason for term in result.gnl_dropped)
+
+
 def test_map_gnl_post_horizon_start_none_is_old_behavior() -> None:
     """Ticket-013 AC 2 — `post_horizon_start=None` (the default) disables
     the covered-lane filter entirely: both dated slots populate exactly as

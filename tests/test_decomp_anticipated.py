@@ -423,6 +423,35 @@ def test_convert_gnl_right_boundary_delivery_and_post_study() -> None:
     assert all(d["min_mw"] < d["max_mw"] for d in free)
 
 
+def test_convert_gnl_no_delivery_precedes_calendar_start() -> None:
+    """Emission invariant the covered-lane filter (ticket-013) relies on: every
+    emitted delivery -- pinned or free -- lands on or after the post-study
+    calendar's first stage start, the same minimum
+    `fcf/__init__.py::_post_horizon_start` returns. Exercised via
+    `_emit_model()`, which includes PSERGIPE I (95): a zero-committed-delivery
+    plant that receives only free forward decisions, so the "GS calendar
+    declared, no committed post-horizon delivery" case is covered.
+    """
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    pss = e.post_study_stages
+    assert pss is not None
+    min_calendar_start = min(s["start_date"] for s in pss["stages"])
+
+    assert e.future_anticipated_deliveries
+    assert all(
+        d["delivery_start"] >= min_calendar_start
+        for d in e.future_anticipated_deliveries
+    )
+
+    pserg_deliveries = [
+        d for d in e.future_anticipated_deliveries if d["thermal_id"] == 95
+    ]
+    assert pserg_deliveries  # the zero-commitment plant is covered, not dropped
+    assert all(d["delivery_start"] >= min_calendar_start for d in pserg_deliveries)
+
+
 def test_convert_gnl_no_post_horizon_delivery_yields_no_post_study() -> None:
     # PSERGIPE-only model with no GS calendar declared: registry, zero
     # in-horizon, nothing post-horizon, and an empty weeks_per_month -> no

@@ -8,7 +8,7 @@ import re
 from contextlib import ExitStack
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pyarrow as pa
@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from cobre_bridge.cli import app
+from cobre_bridge.decomp.anticipated import GnlEmission
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.cadastro import DiversionChannel, EffectiveCadastro
 from cobre_bridge.decomp.constraint_registers import (
@@ -855,6 +856,8 @@ def _run_cadastro_pipeline(
     diagnostics_out: list[Diagnostic] | None = None,
     dry_run: bool = False,
     report_out: list[ConversionReport] | None = None,
+    gnl_emission: GnlEmission | None = None,
+    convert_gnl_mock_out: list[MagicMock] | None = None,
 ) -> Path:
     """Run ``convert_decomp_case`` against the fully synthetic mock deck
     above, patching every converter this ticket does not wire to a canned
@@ -879,6 +882,21 @@ def _run_cadastro_pipeline(
     *report_out*, mirroring *diagnostics_out*'s out-param shape, lets a caller
     inspect the full returned ``ConversionReport`` (e.g. ``would_write_paths``)
     without changing this helper's ``Path``-only return type.
+
+    *gnl_emission* (ticket-004, epic-03) drives the pipeline's GNL wiring
+    block (``pipeline.py``'s ``files.dadgnl is not None`` branch), which every
+    other caller skips by leaving *gnl_emission* at its ``None`` default. When
+    supplied: ``files.dadgnl`` points at a placeholder path so the branch is
+    entered; ``Dadger.Dadgnl.read``/``anticipated_conv.read_gnl_model`` are
+    patched to a sentinel non-``None`` model (their own decode logic is out of
+    scope — ``tests/test_decomp_anticipated.py`` owns it);
+    ``anticipated_conv.convert_gnl`` is patched to return *gnl_emission*
+    verbatim; and ``thermal_conv.convert_thermals`` is swapped from the empty
+    default to a single CT thermal (id ``0``) so ``first_thermal_id`` (``max(id)
+    + 1``) resolves to ``1`` instead of raising on an empty sequence.
+    *convert_gnl_mock_out*, mirroring *diagnostics_out*'s out-param shape, lets
+    a caller recover the ``convert_gnl`` mock (and thus its call args) after
+    the patched run — populated only alongside *gnl_emission*.
     """
     from cobre_bridge.decomp.pipeline import DecompFiles, convert_decomp_case
 
@@ -887,7 +905,7 @@ def _run_cadastro_pipeline(
         dadger=Path("unused/dadger.rv0"),
         vazoes=Path("unused/vazoes.rv0"),
         hidr=Path("unused/hidr.dat"),
-        dadgnl=None,
+        dadgnl=Path("unused/dadgnl.rv0") if gnl_emission is not None else None,
         renovaveis=None,
         polinjus=None,
     )
@@ -998,9 +1016,30 @@ def _run_cadastro_pipeline(
             libs_electrical
         ),
     }
+    if gnl_emission is not None:
+        # ticket-004: route the GNL wiring block (pipeline.py:779-810) through
+        # its own patches rather than the empty/absent default above —
+        # convert_gnl's own decode/placement logic stays out of scope
+        # (tests/test_decomp_anticipated.py owns it), only the routing of its
+        # *return value* into the written case files is under test here.
+        patches["cobre_bridge.decomp.pipeline.Dadgnl.read"] = object()
+        patches["cobre_bridge.decomp.pipeline.anticipated_conv.read_gnl_model"] = (
+            object()
+        )
+        patches["cobre_bridge.decomp.pipeline.anticipated_conv.convert_gnl"] = (
+            gnl_emission
+        )
+        patches["cobre_bridge.decomp.pipeline.thermal_conv.convert_thermals"] = {
+            "thermals": [{"id": 0}]
+        }
     with ExitStack() as stack:
+        entered: dict[str, MagicMock] = {}
         for target, value in patches.items():
-            stack.enter_context(patch(target, return_value=value))
+            entered[target] = stack.enter_context(patch(target, return_value=value))
+        if convert_gnl_mock_out is not None:
+            convert_gnl_mock_out.append(
+                entered["cobre_bridge.decomp.pipeline.anticipated_conv.convert_gnl"]
+            )
         dst = tmp_path / "case"
         report = convert_decomp_case(Path("unused-src"), dst, dry_run=dry_run)
     if diagnostics_out is not None:
@@ -1008,6 +1047,149 @@ def _run_cadastro_pipeline(
     if report_out is not None:
         report_out.append(report)
     return dst
+
+
+# ticket-004 (epic-03): two hand-built ``GnlEmission`` fixtures driving
+# ``TestGnlWiring`` below via ``_run_cadastro_pipeline``'s ``gnl_emission``
+# param — no real ``dadgnl`` deck, no ``convert_gnl`` execution (it is
+# mocked). "Populated" carries a non-empty right boundary (a pinned,
+# post-horizon delivery); "empty-right-boundary" mirrors a GS-calendar-only
+# plant (e.g. PSERGIPE I) that declares free deliveries in-study but commits
+# none post-horizon.
+_POPULATED_GNL_EMISSION = GnlEmission(
+    thermals=[
+        {"id": 1, "name": "GNL A", "anticipated_config": {"lead_time_hours": 168.0}},
+        {"id": 2, "name": "GNL B", "anticipated_config": {"lead_time_hours": 336.0}},
+    ],
+    past_anticipated_commitments=[
+        {"thermal_id": 1, "stage_id": 0, "mw": 50.0},
+        {"thermal_id": 2, "stage_id": 0, "mw": 30.0},
+    ],
+    future_anticipated_deliveries=[
+        {"thermal_id": 1, "stage_id": 12, "min_mw": 50.0, "max_mw": 50.0},
+        {"thermal_id": 2, "stage_id": 12, "min_mw": 0.0, "max_mw": 100.0},
+    ],
+    post_study_stages={
+        "stages": [{"id": 12, "start_date": "2027-07-06"}],
+        "thermal_bounds": [{"thermal_id": 1, "stage_id": 12, "max_mw": 50.0}],
+    },
+)
+
+_EMPTY_RIGHT_BOUNDARY_GNL_EMISSION = GnlEmission(
+    thermals=[
+        {"id": 1, "name": "GNL A", "anticipated_config": {"lead_time_hours": 168.0}},
+    ],
+    past_anticipated_commitments=[{"thermal_id": 1, "stage_id": 0, "mw": 20.0}],
+    future_anticipated_deliveries=[],
+    post_study_stages={
+        "stages": [{"id": 12, "start_date": "2027-07-06"}],
+        "thermal_bounds": [],
+    },
+)
+
+
+class TestGnlWiring:
+    """ticket-004 (epic-03): regression-guard the pre-existing GNL wiring
+    block (``pipeline.py:779-810``). Epic 02 reworked ``convert_gnl`` to
+    synthesise a GS-driven post-study calendar and free (not just pinned)
+    forward deliveries, but the pipeline call site already carried the
+    unchanged ``GnlEmission`` shape to disk — no tier-1 test exercised it,
+    since the mock deck's ``DecompFiles`` always carried ``dadgnl=None``.
+    These tests drive the block via ``_run_cadastro_pipeline``'s
+    ``gnl_emission`` param without a real ``dadgnl`` deck or a real
+    ``convert_gnl`` call (mocked)."""
+
+    def test_convert_gnl_called_with_first_thermal_id_bus_id_of_and_stages(
+        self, tmp_path: Path
+    ) -> None:
+        """``first_thermal_id`` resolves to 1 past the single mocked CT
+        thermal (id 0); ``bus_id_of`` is the run's own ``id_map.bus_id``;
+        ``stages`` is the exact list written to ``stages.json``."""
+        convert_gnl_mock_out: list[MagicMock] = []
+        dst = _run_cadastro_pipeline(
+            tmp_path,
+            ac_volmax_frame=None,
+            gnl_emission=_POPULATED_GNL_EMISSION,
+            convert_gnl_mock_out=convert_gnl_mock_out,
+        )
+
+        [convert_gnl_mock] = convert_gnl_mock_out
+        convert_gnl_mock.assert_called_once()
+        call_kwargs = convert_gnl_mock.call_args.kwargs
+        assert call_kwargs["first_thermal_id"] == 1
+        assert call_kwargs["bus_id_of"] == _CADASTRO_ID_MAP.bus_id
+        written_stages = json.loads((dst / "stages.json").read_text())["stages"]
+        assert call_kwargs["stages"] == written_stages
+
+    def test_populated_emission_routes_thermals_and_both_boundaries(
+        self, tmp_path: Path
+    ) -> None:
+        """Every created GNL thermal id lands in ``thermals.json``, sorted
+        ascending; both boundaries land in ``initial_conditions.json``
+        verbatim."""
+        dst = _run_cadastro_pipeline(
+            tmp_path, ac_volmax_frame=None, gnl_emission=_POPULATED_GNL_EMISSION
+        )
+
+        thermal_ids = [
+            t["id"]
+            for t in json.loads((dst / "system" / "thermals.json").read_text())[
+                "thermals"
+            ]
+        ]
+        assert thermal_ids == sorted(thermal_ids)
+        assert {1, 2}.issubset(set(thermal_ids))
+
+        initial_conditions = json.loads((dst / "initial_conditions.json").read_text())
+        assert (
+            initial_conditions["past_anticipated_commitments"]
+            == _POPULATED_GNL_EMISSION.past_anticipated_commitments
+        )
+        assert (
+            initial_conditions["future_anticipated_deliveries"]
+            == _POPULATED_GNL_EMISSION.future_anticipated_deliveries
+        )
+
+    def test_empty_right_boundary_writes_post_study_stages_and_omits_key(
+        self, tmp_path: Path
+    ) -> None:
+        """A GS-calendar-only plant (empty ``future_anticipated_deliveries``,
+        empty ``post_study_stages["thermal_bounds"]``) still gets
+        ``post_study_stages.json`` (non-``None`` calendar), but
+        ``initial_conditions.json`` carries no
+        ``future_anticipated_deliveries`` key at all (the block only sets it
+        when truthy)."""
+        dst = _run_cadastro_pipeline(
+            tmp_path,
+            ac_volmax_frame=None,
+            gnl_emission=_EMPTY_RIGHT_BOUNDARY_GNL_EMISSION,
+        )
+
+        post_study = json.loads((dst / "post_study_stages.json").read_text())
+        assert post_study["thermal_bounds"] == []
+        expected_post_study = _EMPTY_RIGHT_BOUNDARY_GNL_EMISSION.post_study_stages
+        assert expected_post_study is not None
+        assert post_study["stages"] == expected_post_study["stages"]
+
+        initial_conditions = json.loads((dst / "initial_conditions.json").read_text())
+        assert "future_anticipated_deliveries" not in initial_conditions
+
+    def test_summary_log_names_future_anticipated_not_post_horizon(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The summary log's future-delivery count is worded "future
+        anticipated deliver(y/ies)" (it counts free + pinned deliveries),
+        never the old "post-horizon deliver(y/ies)"."""
+        with caplog.at_level(logging.INFO, logger="cobre_bridge.decomp.pipeline"):
+            _run_cadastro_pipeline(
+                tmp_path, ac_volmax_frame=None, gnl_emission=_POPULATED_GNL_EMISSION
+            )
+
+        future_matches = [
+            r for r in caplog.records if "future anticipated deliver" in r.message
+        ]
+        assert len(future_matches) == 1
+        assert not any("post-horizon deliver" in r.message for r in caplog.records)
 
 
 class TestCadastroPipelineWiring:
