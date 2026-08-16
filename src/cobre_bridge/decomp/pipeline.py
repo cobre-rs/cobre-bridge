@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -423,6 +423,73 @@ def _diversion_channels(
             "max_flow_m3s": float(channel.limit),
         }
     return channels, unresolved
+
+
+def _base_diversion_channels(
+    effective: cadastro_conv.EffectiveCadastro,
+    id_map: DecompIdMap,
+    hydro_capacities: Mapping[int, single_term_bounds.HydroCapacities],
+    already_bounded_ids: set[int],
+    stage_ids: Sequence[int],
+) -> tuple[dict[int, dict], list[bounds_accumulator.BoundContribution]]:
+    """Diversion channels + ``max_diversion`` bounds for BASE ``desvio`` diverters.
+
+    A base ``desvio`` (the ``hidr`` field) with neither an ``AC DESVIO`` limit
+    nor a QDES single-term bound leaves cobre's diversion column pinned
+    ``[0, 0]`` (``max_diversion_m3s`` defaults to 0), stranding any downstream
+    plant fed *solely* by that diversion -- e.g. MOXOTO's spill-side split to
+    P.AFONSO 4, which otherwise receives no water and generates 0 MW. This
+    declares the channel and opens the diversion column up to the receiving
+    plant's turbine capacity (the flow it can actually pass to generation), so
+    the diverted water reaches the downstream plant.
+
+    Skips any diverter whose diversion axis is already bounded
+    (``already_bounded_ids`` -- a QDES/``AC DESVIO`` floor already handled by
+    :func:`_diversion_channels`), so this only *adds* the previously-unmodelled
+    base channels and never overrides an explicit source limit. Returns the
+    ``{downstream_id, max_flow_m3s}`` channel per source cobre id and the
+    per-stage ``diversion`` bound contributions to fold into the accumulator.
+    """
+    operated = set(id_map.hydro_codes)
+    channels: dict[int, dict] = {}
+    contribs: list[bounds_accumulator.BoundContribution] = []
+    for code in sorted(id_map.hydro_codes):
+        if not effective.has_diversion(code):
+            continue
+        source_id = id_map.hydro_id(code)
+        if source_id in already_bounded_ids:
+            continue
+        channel = None
+        for stage in range(effective.n_stages):
+            channel = effective.diversion(code, stage)
+            if channel is not None:
+                break
+        if channel is None or channel.downstream not in operated:
+            continue
+        downstream_id = id_map.hydro_id(channel.downstream)
+        # A base `desvio` carries no explicit flow limit; cap the channel at the
+        # receiving plant's turbine capacity (what it can turn into generation).
+        cap = channel.limit
+        if cap is None:
+            cap = hydro_capacities[downstream_id].max_turbined_m3s
+        if cap is None or cap <= 0.0:
+            continue
+        cap = float(cap)
+        channels[source_id] = {"downstream_id": downstream_id, "max_flow_m3s": cap}
+        contribs.extend(
+            bounds_accumulator.BoundContribution(
+                family="hydro",
+                entity_id=source_id,
+                stage_id=stage_id,
+                block_id=None,
+                axis="diversion",
+                lower=0.0,
+                upper=cap,
+                contributor="base-desvio",
+            )
+            for stage_id in stage_ids
+        )
+    return channels, contribs
 
 
 def _libs_electrical_census_diagnostic(
@@ -945,6 +1012,23 @@ def _convert_decomp_case_impl(
             census, id_map, pumping_ids, calendar, effective, hydro_capacities
         ),
     ]
+    # Base `desvio` diverters carry no QDES flow bound, so cobre pins their
+    # diversion column to [0, 0] and strands any plant fed solely by the
+    # diversion (e.g. MOXOTO -> P.AFONSO 4, which otherwise generates 0 MW).
+    # Give the still-unbounded ones a max_diversion bound + a routed channel.
+    _diversion_bounded_ids = {
+        contrib.entity_id
+        for contrib in contribs
+        if contrib.family == "hydro" and contrib.axis == "diversion"
+    }
+    base_diversion_channels, base_diversion_contribs = _base_diversion_channels(
+        effective,
+        id_map,
+        hydro_capacities,
+        _diversion_bounded_ids,
+        [stage.index for stage in calendar],
+    )
+    contribs.extend(base_diversion_contribs)
     block_counts = {stage.index: len(stage.block_hours) for stage in calendar}
     bound_tables = bounds_accumulator.build_bound_tables(
         bounds_accumulator.resolve(contribs, block_counts)
@@ -967,9 +1051,29 @@ def _convert_decomp_case_impl(
         hydro_bounds, id_map, effective
     )
     for hydro in hydros_dict["hydros"]:
-        channel = diversion_channels.get(hydro["id"])
+        channel = diversion_channels.get(hydro["id"]) or base_diversion_channels.get(
+            hydro["id"]
+        )
         if channel is not None:
             hydro["diversion"] = channel
+    if base_diversion_channels:
+        dx.emit(
+            dx.Diagnostic(
+                code="decomp-base-diversion-modeled",
+                severity=dx.Severity.INFO,
+                category="Diversion",
+                title="Base diversion channels modeled",
+                summary=(
+                    f"{len(base_diversion_channels)} hydro(s) "
+                    f"({sorted(base_diversion_channels)}) carry a base diversion "
+                    "channel with no explicit flow limit; each was given a "
+                    "diversion channel capped at the receiving plant's turbine "
+                    "capacity so the diverted water reaches the downstream plant "
+                    "(otherwise that plant is stranded with no inflow)."
+                ),
+            ),
+            logger=_LOG,
+        )
     if diversion_floor_no_channel:
         dx.emit(
             dx.Diagnostic(

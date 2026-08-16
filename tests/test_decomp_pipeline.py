@@ -29,7 +29,11 @@ from cobre_bridge.decomp.constraint_registers import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
-from cobre_bridge.decomp.pipeline import ConversionReport, _diversion_channels
+from cobre_bridge.decomp.pipeline import (
+    ConversionReport,
+    _base_diversion_channels,
+    _diversion_channels,
+)
 from cobre_bridge.decomp.scenarios import (
     convert_external_inflows,
     convert_inflow_stats_identity,
@@ -37,6 +41,7 @@ from cobre_bridge.decomp.scenarios import (
     deterministic_external_scenarios,
     terminal_fan_probabilities,
 )
+from cobre_bridge.decomp.single_term_bounds import HydroCapacities
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
 from cobre_bridge.diagnostics import Diagnostic
@@ -1898,6 +1903,98 @@ class TestDiversionChannels:
         )
         assert channels == {}
         assert unresolved == []
+
+
+class TestBaseDiversionChannels:
+    """``_base_diversion_channels`` models the BASE ``desvio`` diversions that
+    carry no QDES flow bound (e.g. MOXOTO -> P.AFONSO 4): without them cobre pins
+    the diversion column to ``[0, 0]`` and the downstream plant is stranded."""
+
+    @staticmethod
+    def _id_map() -> DecompIdMap:
+        # 173 (MOXOTO source) -> 0, 175 (P.AFONSO 4 receiver) -> 1.
+        return DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(173, 175))
+
+    @staticmethod
+    def _effective(diversions: dict, n_stages: int = 2) -> EffectiveCadastro:
+        return EffectiveCadastro(
+            base=pd.DataFrame(),
+            n_stages=n_stages,
+            stage_varying={},
+            diversions=diversions,
+        )
+
+    @staticmethod
+    def _caps() -> dict[int, HydroCapacities]:
+        return {
+            0: HydroCapacities(max_generation_mw=400.0, max_turbined_m3s=2120.5),
+            1: HydroCapacities(max_generation_mw=2462.4, max_turbined_m3s=2406.8),
+        }
+
+    def test_base_channel_capped_at_receiver_turbine(self) -> None:
+        channel = DiversionChannel(downstream=175, limit=None)
+        channels, contribs = _base_diversion_channels(
+            self._effective({173: (channel, channel)}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids=set(),
+            stage_ids=[0, 1],
+        )
+        assert channels == {0: {"downstream_id": 1, "max_flow_m3s": 2406.8}}
+        # one diversion contribution per stage, opened [0, receiver-turbine]
+        assert [
+            (c.entity_id, c.stage_id, c.axis, c.lower, c.upper) for c in contribs
+        ] == [
+            (0, 0, "diversion", 0.0, 2406.8),
+            (0, 1, "diversion", 0.0, 2406.8),
+        ]
+
+    def test_ac_limit_channel_uses_the_explicit_limit(self) -> None:
+        channel = DiversionChannel(downstream=175, limit=500.0)
+        channels, contribs = _base_diversion_channels(
+            self._effective({173: (channel, channel)}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids=set(),
+            stage_ids=[0, 1],
+        )
+        assert channels == {0: {"downstream_id": 1, "max_flow_m3s": 500.0}}
+        assert all(c.upper == 500.0 for c in contribs)
+
+    def test_already_bounded_source_is_skipped(self) -> None:
+        channel = DiversionChannel(downstream=175, limit=None)
+        channels, contribs = _base_diversion_channels(
+            self._effective({173: (channel, channel)}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids={0},
+            stage_ids=[0, 1],
+        )
+        assert channels == {}
+        assert contribs == []
+
+    def test_unmapped_downstream_is_skipped(self) -> None:
+        channel = DiversionChannel(downstream=999, limit=None)
+        channels, contribs = _base_diversion_channels(
+            self._effective({173: (channel, channel)}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids=set(),
+            stage_ids=[0, 1],
+        )
+        assert channels == {}
+        assert contribs == []
+
+    def test_no_diversion_returns_empty(self) -> None:
+        channels, contribs = _base_diversion_channels(
+            self._effective({}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids=set(),
+            stage_ids=[0, 1],
+        )
+        assert channels == {}
+        assert contribs == []
 
 
 def _fc_line(tipo: str, caminho: str) -> str:
