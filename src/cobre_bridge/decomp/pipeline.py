@@ -735,12 +735,36 @@ def _convert_decomp_case_impl(
         pq.write_table(table, path, compression="zstd")
 
     step("Converting entities")
+    # DECOMP risk aversion (CVaR): resolve the AR register / FCF-header CVaR
+    # into a per-stage cobre risk measure. When active it also drives the
+    # stopping-rule switch in convert_config (gap rule inadmissible under CVaR).
+    cvar = temporal_conv.resolve_cvar(dadger, files.cortesh)
+    if cvar is not None:
+        dx.emit(
+            dx.Diagnostic(
+                code="decomp-cvar-risk-measure",
+                severity=dx.Severity.INFO,
+                category="Risk",
+                title="CVaR risk measure converted",
+                summary=(
+                    f"The deck runs CVaR (alpha={cvar.alpha:.4g}, "
+                    f"lambda={cvar.lambda_:.4g}) from stage {cvar.from_stage_index}; "
+                    "emitted as the per-stage cobre risk_measure (the gap stopping "
+                    "rule is replaced by the iteration limit, which cobre requires "
+                    "under a non-expectation risk measure)."
+                ),
+            ),
+            logger=_LOG,
+        )
     _write_json(
         dst / "config.json",
-        config_conv.convert_config(dadger),
+        config_conv.convert_config(dadger, cvar_active=cvar is not None),
     )
     stages_dict = temporal_conv.convert_stages(
-        calendar, annual_discount_rate=tx, fan_probabilities=fan_probabilities
+        calendar,
+        annual_discount_rate=tx,
+        fan_probabilities=fan_probabilities,
+        cvar=cvar,
     )
     _write_json(dst / "stages.json", stages_dict)
 

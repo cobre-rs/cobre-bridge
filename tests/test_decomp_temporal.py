@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from cobre_bridge.decomp.config import convert_config
 from cobre_bridge.decomp.temporal import (
+    CVaRConfig,
     OperativeStage,
     build_node_graph,
     build_operative_calendar,
     convert_stages,
     operative_calendar_from_dadger,
+    resolve_cvar,
     stage_records,
 )
 
@@ -270,3 +275,92 @@ class TestFromDadger:
 
         with pytest.raises(ValueError, match="differ across"):
             operative_calendar_from_dadger(_Dadger())  # type: ignore[arg-type]
+
+
+class TestCVaRRiskMeasure:
+    """CVaR resolution + emission: the deck's ``AR`` register (or, for a blank
+    NEWAVE-inherited ``AR``, the FCF header ``cortesh.dat``) maps to cobre's
+    per-stage ``risk_measure`` and drives the stopping-rule switch."""
+
+    def _calendar(self) -> list[OperativeStage]:
+        return build_operative_calendar(date(2024, 8, 31), _RV0_HOURS)
+
+    @staticmethod
+    def _dadger_with_ar(ar: object | None) -> MagicMock:
+        d = MagicMock()
+        d.data.of_type.return_value = [] if ar is None else [ar]
+        return d
+
+    # ---- stage_records emission ----
+    def test_stage_records_applies_cvar_from_index(self) -> None:
+        cvar = CVaRConfig(from_stage_index=5, alpha=0.15, lambda_=0.4)
+        records = stage_records(self._calendar(), cvar)
+        assert [r["risk_measure"] for r in records[:5]] == ["expectation"] * 5
+        assert records[5]["risk_measure"] == {"cvar": {"alpha": 0.15, "lambda": 0.4}}
+
+    def test_stage_records_none_is_all_expectation(self) -> None:
+        records = stage_records(self._calendar(), None)
+        assert all(r["risk_measure"] == "expectation" for r in records)
+
+    # ---- resolve_cvar ----
+    def test_no_ar_register_is_expectation(self) -> None:
+        assert resolve_cvar(self._dadger_with_ar(None), None) is None
+
+    def test_explicit_ar_percent_maps_to_fraction(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=40.0, alfa=15.0)
+        assert resolve_cvar(self._dadger_with_ar(ar), None) == CVaRConfig(
+            from_stage_index=0, alpha=0.15, lambda_=0.4
+        )
+
+    def test_explicit_ar_already_fraction_not_divided(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=0.4, alfa=0.15)
+        assert resolve_cvar(self._dadger_with_ar(ar), None) == CVaRConfig(
+            from_stage_index=0, alpha=0.15, lambda_=0.4
+        )
+
+    def test_ar_starting_period_offsets_stage_index(self) -> None:
+        ar = SimpleNamespace(estagio=4, lamb=40.0, alfa=15.0)
+        cvar = resolve_cvar(self._dadger_with_ar(ar), None)
+        assert cvar is not None and cvar.from_stage_index == 3
+
+    def test_blank_ar_falls_back_to_cortesh(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=None, alfa=None)
+        with patch(
+            "cobre_bridge.decomp.temporal._cortesh_cvar", return_value=(0.15, 0.4)
+        ):
+            cvar = resolve_cvar(self._dadger_with_ar(ar), Path("cortesh.dat"))
+        assert cvar == CVaRConfig(from_stage_index=0, alpha=0.15, lambda_=0.4)
+
+    def test_blank_ar_without_cortesh_is_expectation(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=None, alfa=None)
+        assert resolve_cvar(self._dadger_with_ar(ar), None) is None
+
+    def test_zero_lambda_is_expectation(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=0.0, alfa=0.15)
+        assert resolve_cvar(self._dadger_with_ar(ar), None) is None
+
+
+class TestConvertConfigCVaR:
+    """``convert_config`` drops the gap stopping rule under CVaR (cobre rejects
+    a gap rule for any non-expectation risk measure)."""
+
+    @staticmethod
+    def _dadger() -> MagicMock:
+        d = MagicMock()
+        d.ni.iteracoes = 500
+        d.gp.data = [0.001]
+        return d
+
+    def test_expectation_keeps_gap_plus_iteration_rules(self) -> None:
+        cfg = convert_config(self._dadger(), cvar_active=False)
+        rules = cfg["training"]["stopping_rules"]
+        assert [r["type"] for r in rules] == ["gap", "iteration_limit"]
+
+    def test_cvar_uses_bound_stalling_plus_iteration_limit(self) -> None:
+        cfg = convert_config(self._dadger(), cvar_active=True)
+        rules = cfg["training"]["stopping_rules"]
+        # No gap rule (inadmissible under CVaR); a lower-bound stall converges
+        # the run, with the NI iteration limit as the backstop.
+        assert [r["type"] for r in rules] == ["bound_stalling", "iteration_limit"]
+        assert rules[0]["tolerance"] == 0.001
+        assert rules[1]["limit"] == 500

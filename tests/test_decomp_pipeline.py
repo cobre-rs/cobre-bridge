@@ -827,8 +827,17 @@ class _CadastroDadger:
     class _Tx:
         taxa = 12.0
 
+    class _Data:
+        """Register API `resolve_cvar` probes: no ``AR`` register (this mock
+        deck is risk-neutral), so CVaR resolution yields expectation."""
+
+        @staticmethod
+        def of_type(_register: type) -> list[object]:
+            return []
+
     def __init__(self, ac_volmax_frame: pd.DataFrame | None) -> None:
         self.tx = self._Tx()
+        self.data = self._Data()
         self._uh = _cadastro_uh_frame()
         self._ac_volmax_frame = ac_volmax_frame
 

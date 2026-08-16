@@ -29,6 +29,7 @@ from cobre_bridge.converters.temporal import _block_names, monthly_season_defini
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from idecomp.decomp import Dadger
 
@@ -194,7 +195,93 @@ def operative_calendar_from_dadger(dadger: Dadger) -> list[OperativeStage]:
     return build_operative_calendar(start, stage_block_hours)
 
 
-def stage_records(calendar: Sequence[OperativeStage]) -> list[dict]:
+@dataclass(frozen=True)
+class CVaRConfig:
+    """Resolved CVaR risk measure for the DECOMP study.
+
+    ``from_stage_index`` is the 0-based cobre stage from which CVaR applies
+    (DECOMP's ``AR`` starting period − 1); ``alpha`` (the worst-fraction
+    quantile — cobre's α-convention equals DECOMP's, no ``1−α`` flip) and
+    ``lambda_`` (the risk-aversion weight) are fractions in ``(0, 1]``.
+    """
+
+    from_stage_index: int
+    alpha: float
+    lambda_: float
+
+
+def _first_active(values: Sequence[float] | None) -> float | None:
+    """The first strictly-positive entry of a per-period array, or ``None``."""
+    for v in values or ():
+        if v is not None and float(v) > 0.0:
+            return float(v)
+    return None
+
+
+def _cortesh_cvar(cortesh_path: Path | None) -> tuple[float | None, float | None]:
+    """The FCF header's active ``(alpha, lambda)`` CVaR fractions.
+
+    Reads ``cortesh.dat`` (``SecaoDadosCortesh.alfa_cvar``/``lambda_cvar``,
+    already fractions), returning the first active (nonzero) pair, or
+    ``(None, None)`` when the header is absent or CVaR is disabled there.
+    """
+    if cortesh_path is None:
+        return None, None
+    from inewave.newave import Cortesh
+    from inewave.newave.modelos.cortesh import SecaoDadosCortesh
+
+    ch = Cortesh.read(str(cortesh_path))
+    sec = next((s for s in ch.data.of_type(SecaoDadosCortesh)), None)
+    if sec is None or getattr(sec, "usa_cvar", 0) != 1:
+        return None, None
+    return _first_active(sec.alfa_cvar), _first_active(sec.lambda_cvar)
+
+
+def resolve_cvar(dadger: Dadger, cortesh_path: Path | None) -> CVaRConfig | None:
+    """Resolve the DECOMP CVaR risk measure, or ``None`` for expectation.
+
+    DECOMP applies CVaR via the ``AR`` register (a starting period and, on the
+    same record, λ and α). Per the DECOMP manual §3.4.4.1, **blank** λ/α mean
+    "use the values NEWAVE employed" — carried in the FCF header ``cortesh.dat``
+    (``alfa_cvar``/``lambda_cvar``). Resolution order:
+
+    1. no ``AR`` register → expectation (``None``);
+    2. ``AR`` with explicit λ/α → those (DECOMP stores them as percentages, so a
+       value ``> 1`` is divided by 100);
+    3. ``AR`` with blank λ/α → the FCF header's fractions, if ``cortesh.dat`` is
+       present and CVaR-enabled there.
+
+    Returns ``None`` when no admissible ``(alpha, lambda)`` with both ``> 0``
+    resolves. CVaR of a deterministic (single-opening) stage collapses to
+    expectation, so applying it from ``AR``'s starting period across the
+    deterministic trunk is a no-op there and only binds the stochastic fan.
+    """
+    from idecomp.decomp.modelos.dadger import AR
+
+    ar = next((r for r in dadger.data.of_type(AR)), None)
+    if ar is None:
+        return None
+    estagio = int(ar.estagio) if ar.estagio is not None else 1
+
+    def _frac(value: float | None) -> float | None:
+        if value is None:
+            return None
+        value = float(value)
+        return value / 100.0 if value > 1.0 else value
+
+    alpha, lam = _frac(ar.alfa), _frac(ar.lamb)
+    if alpha is None or lam is None:
+        alpha_c, lam_c = _cortesh_cvar(cortesh_path)
+        alpha = alpha if alpha is not None else alpha_c
+        lam = lam if lam is not None else lam_c
+    if alpha is None or lam is None or alpha <= 0.0 or lam <= 0.0:
+        return None
+    return CVaRConfig(from_stage_index=max(0, estagio - 1), alpha=alpha, lambda_=lam)
+
+
+def stage_records(
+    calendar: Sequence[OperativeStage], cvar: CVaRConfig | None = None
+) -> list[dict]:
     """Build the ``stages.json`` stage entries for an operative calendar.
 
     Every DECOMP stage draws its openings from the external inflow library
@@ -203,10 +290,21 @@ def stage_records(calendar: Sequence[OperativeStage]) -> list[dict]:
     openings, and cobre rejects a ``num_openings`` on an external-only stage.
     State variables follow the lag-blind convention: storage only, no
     inflow-lag state (only the boundary FCF prices lags).
+
+    ``cvar`` (when the deck runs risk-averse) emits a ``{"cvar": {...}}`` risk
+    measure on every stage from ``cvar.from_stage_index`` onward, else
+    ``"expectation"``. CVaR on a deterministic stage collapses to expectation,
+    so the trunk is unaffected; only the stochastic fan is bound.
     """
     records: list[dict] = []
     for stage in calendar:
         names = _block_names(len(stage.block_hours))
+        if cvar is not None and stage.index >= cvar.from_stage_index:
+            risk_measure: object = {
+                "cvar": {"alpha": cvar.alpha, "lambda": cvar.lambda_}
+            }
+        else:
+            risk_measure = "expectation"
         records.append(
             {
                 "id": stage.index,
@@ -217,7 +315,7 @@ def stage_records(calendar: Sequence[OperativeStage]) -> list[dict]:
                     {"id": b, "name": names[b], "hours": hours}
                     for b, hours in enumerate(stage.block_hours)
                 ],
-                "risk_measure": "expectation",
+                "risk_measure": risk_measure,
                 "state_variables": {"storage": True, "inflow_lags": False},
             }
         )
@@ -282,15 +380,17 @@ def convert_stages(
     *,
     annual_discount_rate: float,
     fan_probabilities: Sequence[float],
+    cvar: CVaRConfig | None = None,
 ) -> dict:
     """Build the full ``stages.json`` dict for an operative calendar.
 
     A node-native finite-horizon graph: a deterministic trunk that fans into
     the terminal stage (see :func:`build_node_graph`), under the shared
     calendar-monthly season map. No pre-study stages: the inflow model is
-    order-0 and pre-study inflows travel as dated windows.
+    order-0 and pre-study inflows travel as dated windows. ``cvar`` (from
+    :func:`resolve_cvar`) applies the deck's CVaR risk measure per stage.
     """
-    stages = stage_records(calendar)
+    stages = stage_records(calendar, cvar)
     nodes, transitions = build_node_graph(len(stages), fan_probabilities)
     return {
         "$schema": _STAGES_SCHEMA_URL,
