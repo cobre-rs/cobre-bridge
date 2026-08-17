@@ -366,6 +366,48 @@ def _topology_relink_diagnostic(
     )
 
 
+def _merge_water_withdrawal(
+    hydro_bounds: pa.Table,
+    withdrawal: pa.Table | None,
+) -> pa.Table:
+    """Fold the ``TI`` irrigation withdrawal into ``hydro_bounds``.
+
+    ``withdrawal`` carries a per-(hydro, stage) ``water_withdrawal_m3s`` value
+    (:func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`). It joins
+    onto ``hydro_bounds`` at ``block_id = None`` — the stage-level row cobre reads
+    a stage-scoped quantity from (the same null-block convention the storage and
+    minimum-outflow bounds already use) — matching an existing null-block row for
+    that ``(hydro, stage)`` or creating one where none exists; the per-block rows
+    (``block_id`` 0..n-1) never carry a withdrawal. A ``-1`` block sentinel keys
+    the join (block ids are non-negative, and matching on a null column is not
+    portable across polars versions) and is restored to null afterward. Returns
+    ``hydro_bounds`` unchanged when the deck declares no irrigation.
+    """
+    if withdrawal is None or withdrawal.num_rows == 0:
+        return hydro_bounds
+
+    import polars as pl
+
+    _NULL_BLOCK = -1  # sentinel for the stage-level (block_id is null) row
+    hb = pl.from_arrow(hydro_bounds).with_columns(
+        pl.col("block_id").fill_null(_NULL_BLOCK)
+    )
+    w = pl.from_arrow(withdrawal).with_columns(
+        pl.lit(_NULL_BLOCK, dtype=pl.Int32).alias("block_id")
+    )
+    merged = (
+        hb.join(w, on=["hydro_id", "stage_id", "block_id"], how="full", coalesce=True)
+        .with_columns(
+            pl.when(pl.col("block_id") == _NULL_BLOCK)
+            .then(None)
+            .otherwise(pl.col("block_id"))
+            .alias("block_id")
+        )
+        .sort(["hydro_id", "stage_id", "block_id"], nulls_last=False)
+    )
+    return merged.to_arrow()
+
+
 def _diversion_channels(
     hydro_bounds: pa.Table,
     id_map: DecompIdMap,
@@ -1072,6 +1114,14 @@ def _convert_decomp_case_impl(
     ]
     hydro_bounds = bound_tables.hydro.sort_by(
         [("hydro_id", "ascending"), *_bound_sort_keys]
+    )
+    # Fold in the TI irrigation withdrawal (a consumptive water use cobre reads
+    # from hydro_bounds.water_withdrawal_m3s): water lost to irrigation is
+    # unavailable for generation, so omitting it lets cobre turbine the extra
+    # flow and over-generate. Mirrors the source model's dsvagua path.
+    hydro_bounds = _merge_water_withdrawal(
+        hydro_bounds,
+        bounds_conv.convert_irrigation_withdrawal(dadger, id_map, calendar),
     )
     # Attach the diversion channel to every hydro that carries a positive
     # diversion floor, then write hydros.json (its write was deferred from the

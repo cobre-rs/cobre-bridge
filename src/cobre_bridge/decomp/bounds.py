@@ -48,6 +48,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pandas as pd
+import pyarrow as pa
 
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
@@ -326,3 +327,96 @@ def convert_volume_espera_bounds(
             )
 
     return contributions
+
+
+#: cobre ``hydro_bounds`` column for a consumptive water withdrawal, in m³/s
+#: (positive = water removed from the plant's balance). The DECOMP ``TI``
+#: irrigation rate and the source model's ``dsvagua`` file both land here.
+_WATER_WITHDRAWAL_SCHEMA = pa.schema(
+    [
+        pa.field("hydro_id", pa.int32()),
+        pa.field("stage_id", pa.int32()),
+        pa.field("water_withdrawal_m3s", pa.float64()),
+    ]
+)
+
+
+def convert_irrigation_withdrawal(
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> pa.Table | None:
+    """Per-(hydro, stage) consumptive irrigation withdrawal from the ``TI`` register.
+
+    The ``TI`` register (*taxas de irrigação por UHE*) declares the water a hydro
+    loses to irrigation, one rate (m³/s) per study stage (``taxa_k`` → stage
+    ``k − 1``). It is a **consumptive** withdrawal — the water leaves the river
+    and is unavailable for generation downstream — so it maps 1:1 to cobre's
+    ``hydro_bounds`` ``water_withdrawal_m3s`` column, the DECOMP counterpart of
+    the source model's ``dsvagua`` water-withdrawal file
+    (:func:`cobre_bridge.converters.hydro.convert_water_withdrawal`). Omitting it
+    leaves that flow in the balance, so cobre turbines it and over-generates.
+
+    The ``TI`` rate is already a positive withdrawal, matching cobre's positive
+    ``water_withdrawal_m3s`` convention (no sign flip — unlike the source model's
+    negative-``valor`` ``dsvagua`` convention). A stage beyond the register's own
+    ``taxa`` columns repeats the last declared rate (seasonal carry-forward,
+    matching the post-study extension the load/inflow converters use); a
+    zero-withdrawal ``(hydro, stage)`` contributes no row.
+
+    Returns the table sorted by ``(hydro_id, stage_id)`` with schema
+    ``(hydro_id: int32, stage_id: int32, water_withdrawal_m3s: float64)``, or
+    ``None`` when the deck carries no ``TI`` register or no operated plant
+    withdraws (so the pipeline leaves ``hydro_bounds`` unchanged).
+    """
+    ti = dadger.ti(df=True)
+    if ti is None or ti.empty:
+        return None
+
+    taxa_columns = [
+        column
+        for _, column in sorted(
+            (int(column.split("_")[1]), column)
+            for column in ti.columns
+            if column.startswith("taxa_") and column.split("_")[1].isdigit()
+        )
+    ]
+    if not taxa_columns:
+        return None
+
+    operated = set(id_map.hydro_codes)
+    n_stages = len(calendar)
+
+    rows_hydro: list[int] = []
+    rows_stage: list[int] = []
+    rows_value: list[float] = []
+    for _, row in ti.iterrows():
+        code = int(row["codigo_usina"])
+        if code not in operated:
+            continue
+        hydro_id = id_map.hydro_id(code)
+        for stage_index in range(n_stages):
+            # Carry the last declared rate forward for any stage past the
+            # register's own columns (a no-op when they already align).
+            column = taxa_columns[min(stage_index, len(taxa_columns) - 1)]
+            value = row[column]
+            if pd.isna(value) or float(value) == 0.0:
+                continue
+            rows_hydro.append(hydro_id)
+            rows_stage.append(stage_index)
+            rows_value.append(float(value))
+
+    if not rows_hydro:
+        return None
+
+    order = sorted(range(len(rows_hydro)), key=lambda i: (rows_hydro[i], rows_stage[i]))
+    return pa.table(
+        {
+            "hydro_id": pa.array([rows_hydro[i] for i in order], type=pa.int32()),
+            "stage_id": pa.array([rows_stage[i] for i in order], type=pa.int32()),
+            "water_withdrawal_m3s": pa.array(
+                [rows_value[i] for i in order], type=pa.float64()
+            ),
+        },
+        schema=_WATER_WITHDRAWAL_SCHEMA,
+    )

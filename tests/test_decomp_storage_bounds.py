@@ -27,6 +27,7 @@ import pandas as pd
 import pytest
 
 from cobre_bridge.decomp.bounds import (
+    convert_irrigation_withdrawal,
     convert_storage_bounds,
     convert_volume_espera_bounds,
 )
@@ -154,9 +155,10 @@ def test_ve_full_percent_is_noop(
 def test_ve_absent_register_returns_empty(
     effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
 ) -> None:
-    assert convert_volume_espera_bounds(
-        _dadger_with_ve(None), id_map, calendar, effective
-    ) == []
+    assert (
+        convert_volume_espera_bounds(_dadger_with_ve(None), id_map, calendar, effective)
+        == []
+    )
 
 
 def test_ve_unoperated_plant_skipped(
@@ -165,3 +167,127 @@ def test_ve_unoperated_plant_skipped(
     # plant 999 is not in id_map.hydro_codes -> contributes nothing.
     dadger = _dadger_with_ve([{"codigo_usina": 999, "volume_1": 30.0}])
     assert convert_volume_espera_bounds(dadger, id_map, calendar, effective) == []
+
+
+# ---------------------------------------------------------------------------
+# TI (irrigation) — consumptive water withdrawal
+# ---------------------------------------------------------------------------
+
+
+def _dadger_with_ti(rows: list[dict] | None):
+    """Fake ``dadger`` exposing ``.ti(df=True)`` -> a TI frame (or ``None``)."""
+    frame = None if rows is None else pd.DataFrame(rows)
+    return SimpleNamespace(ti=lambda df=True: frame)
+
+
+def test_ti_emits_per_stage_withdrawal(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # calendar has 3 stages; taxa_1..3 map to stages 0..2 (plant 1 -> hydro_id 0).
+    dadger = _dadger_with_ti(
+        [{"codigo_usina": 1, "taxa_1": 5.0, "taxa_2": 7.0, "taxa_3": 9.0}]
+    )
+    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    assert table is not None
+    got = {
+        (h, s): v
+        for h, s, v in zip(
+            table.column("hydro_id").to_pylist(),
+            table.column("stage_id").to_pylist(),
+            table.column("water_withdrawal_m3s").to_pylist(),
+            strict=True,
+        )
+    }
+    assert got == {(0, 0): 5.0, (0, 1): 7.0, (0, 2): 9.0}
+
+
+def test_ti_zero_and_blank_skipped(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # taxa 0.0 (no withdrawal) and NaN both contribute no row.
+    dadger = _dadger_with_ti(
+        [{"codigo_usina": 1, "taxa_1": 0.0, "taxa_2": None, "taxa_3": 4.0}]
+    )
+    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    assert table is not None
+    assert table.column("stage_id").to_pylist() == [2]
+    assert table.column("water_withdrawal_m3s").to_pylist() == [4.0]
+
+
+def test_ti_carry_forward_last_rate_for_extra_stages(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # Only two taxa columns for a 3-stage calendar -> stage 2 repeats taxa_2.
+    dadger = _dadger_with_ti([{"codigo_usina": 1, "taxa_1": 5.0, "taxa_2": 7.0}])
+    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    assert table is not None
+    assert table.column("water_withdrawal_m3s").to_pylist() == [5.0, 7.0, 7.0]
+
+
+def test_ti_absent_returns_none(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    assert (
+        convert_irrigation_withdrawal(_dadger_with_ti(None), id_map, calendar) is None
+    )
+
+
+def test_ti_unoperated_plant_returns_none(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # plant 999 is not operated -> no rows -> None.
+    dadger = _dadger_with_ti([{"codigo_usina": 999, "taxa_1": 5.0}])
+    assert convert_irrigation_withdrawal(dadger, id_map, calendar) is None
+
+
+def test_merge_water_withdrawal_lands_on_null_block_row() -> None:
+    import pyarrow as pa
+
+    from cobre_bridge.decomp.pipeline import _merge_water_withdrawal
+
+    # Existing bounds: a null-block stage-0 row (min_outflow) + a per-block row.
+    hydro_bounds = pa.table(
+        {
+            "hydro_id": pa.array([1, 1, 1], pa.int32()),
+            "stage_id": pa.array([0, 0, 1], pa.int32()),
+            "block_id": pa.array([None, 0, None], pa.int32()),
+            "min_outflow_m3s": pa.array([80.0, None, 80.0], pa.float64()),
+        }
+    )
+    withdrawal = pa.table(
+        {
+            "hydro_id": pa.array([1, 1], pa.int32()),
+            "stage_id": pa.array([0, 1], pa.int32()),
+            "water_withdrawal_m3s": pa.array([5.0, 6.0], pa.float64()),
+        }
+    )
+    merged = _merge_water_withdrawal(hydro_bounds, withdrawal)
+    rows = {
+        (h, s, b): w
+        for h, s, b, w in zip(
+            merged.column("hydro_id").to_pylist(),
+            merged.column("stage_id").to_pylist(),
+            merged.column("block_id").to_pylist(),
+            merged.column("water_withdrawal_m3s").to_pylist(),
+            strict=True,
+        )
+    }
+    # Withdrawal lands on the null-block rows only; the per-block row is untouched.
+    assert rows[(1, 0, None)] == 5.0
+    assert rows[(1, 1, None)] == 6.0
+    assert rows[(1, 0, 0)] is None
+
+
+def test_merge_water_withdrawal_none_is_noop() -> None:
+    import pyarrow as pa
+
+    from cobre_bridge.decomp.pipeline import _merge_water_withdrawal
+
+    hydro_bounds = pa.table(
+        {
+            "hydro_id": pa.array([1], pa.int32()),
+            "stage_id": pa.array([0], pa.int32()),
+            "block_id": pa.array([None], pa.int32()),
+        }
+    )
+    assert _merge_water_withdrawal(hydro_bounds, None) is hydro_bounds

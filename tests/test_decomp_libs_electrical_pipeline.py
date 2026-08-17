@@ -306,6 +306,9 @@ class _MockDadger:
     def ve(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return None
 
+    def ti(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return None
+
     def dp(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
         return self._dp
 
