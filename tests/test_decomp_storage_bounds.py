@@ -291,3 +291,10 @@ def test_merge_water_withdrawal_none_is_noop() -> None:
         }
     )
     assert _merge_water_withdrawal(hydro_bounds, None) is hydro_bounds
+
+
+# EZ (percentual máximo do volume útil para acoplamento) is deliberately NOT
+# converted as an operational max-storage cap: it is an FCF-coupling formulation
+# detail, not an operational ceiling. Verified against dec_oper_usih on the
+# mar-26 deck -- DECOMP holds SERRA MESA at VutilFim% = 64.14 % at the coupling,
+# well above its EZ = 55 %, so the register does not bind the operation.
