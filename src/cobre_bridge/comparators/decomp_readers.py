@@ -124,15 +124,32 @@ def _resolve_relato(case_dir: Path) -> Path | None:
     return None
 
 
-def read_relato_convergence(case_dir: Path) -> pl.DataFrame:
-    """Read the convergence table (``iteracao``, ``zinf``, ``zsup``,
-    ``gap_percentual``, …) from the general report."""
+def _read_relato_table(case_dir: Path, attr: str) -> pl.DataFrame:
+    """Read one named pandas table off the general report (``relato.rvN``).
+
+    Resolves the relato file via `_resolve_relato` (saidas-first), reads it
+    via ``Relato.read``, and pulls the table at ``getattr(relato, attr)``.
+    Shared by every ``relato``-backed reader (convergence, energy balance,
+    and — in later tickets — costs and membership).
+    """
     path = _resolve_relato(case_dir)
     if path is None:
         raise FileNotFoundError(
             f"no relato.rvN found in {case_dir} or its saidas/ subfolder"
         )
-    table = Relato.read(str(path)).convergencia
+    table = getattr(Relato.read(str(path)), attr)
     if table is None or table.empty:
-        raise ValueError(f"{path} has no convergence table")
+        raise ValueError(f"{path} has no {attr} table")
     return pl.from_pandas(table)
+
+
+def read_relato_convergence(case_dir: Path) -> pl.DataFrame:
+    """Read the convergence table (``iteracao``, ``zinf``, ``zsup``,
+    ``gap_percentual``, …) from the general report."""
+    return _read_relato_table(case_dir, "convergencia")
+
+
+def read_relato_balance(case_dir: Path) -> pl.DataFrame:
+    """Read the per-submarket energy balance table (demand, generation by
+    source, purchase/sale, ENA, and EARM in/out) from the general report."""
+    return _read_relato_table(case_dir, "balanco_energetico")

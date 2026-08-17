@@ -11,18 +11,25 @@ from idecomp.decomp import Relato
 
 from cobre_bridge.comparators.decomp_readers import (
     _read_dec_oper,
+    _read_relato_table,
     _resolve_relato,
     _resolve_result_file,
     read_dec_oper_interc,
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
+    read_relato_balance,
     read_relato_convergence,
 )
 
 _DECK = Path("example/decomp-jul-26-rv3")
+_REDUCED_DECK = Path("example/decomp-mar-26-rv2-reduced")
 
 _needs_deck = pytest.mark.skipif(not _DECK.is_dir(), reason="rv3 outputs not present")
+_needs_reduced_deck = pytest.mark.skipif(
+    not (_REDUCED_DECK / "saidas" / "relato.rv2").is_file(),
+    reason="reduced deck outputs not present",
+)
 
 
 class _StubFile:
@@ -40,8 +47,12 @@ def _stub_reader(table: pd.DataFrame | None) -> type:
 
 
 class _StubRelatoFile:
-    def __init__(self, convergencia: pd.DataFrame | None) -> None:
-        self.convergencia = convergencia
+    """Stub for a `Relato.read(...)` result, carrying named pandas tables
+    (e.g. ``convergencia=...``, ``balanco_energetico=...``)."""
+
+    def __init__(self, **tables: pd.DataFrame | None) -> None:
+        for name, table in tables.items():
+            setattr(self, name, table)
 
 
 class TestResolveResultFile:
@@ -226,8 +237,121 @@ class TestReadRelatoConvergenceDiscovery:
             }
         )
         monkeypatch.setattr(
-            Relato, "read", staticmethod(lambda _path: _StubRelatoFile(stub_table))
+            Relato,
+            "read",
+            staticmethod(lambda _path: _StubRelatoFile(convergencia=stub_table)),
         )
         result = read_relato_convergence(tmp_path)
         assert isinstance(result, pl.DataFrame)
         assert result.height == 1
+
+
+class TestReadRelatoTable:
+    """`_read_relato_table`: shared helper behind every relato reader."""
+
+    def test_missing_relato_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="relato"):
+            _read_relato_table(tmp_path, "convergencia")
+
+    def test_none_table_raises_naming_attr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(lambda _path: _StubRelatoFile(balanco_energetico=None)),
+        )
+        with pytest.raises(ValueError, match="balanco_energetico"):
+            _read_relato_table(tmp_path, "balanco_energetico")
+
+    def test_empty_table_raises_naming_attr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(
+                lambda _path: _StubRelatoFile(balanco_energetico=pd.DataFrame())
+            ),
+        )
+        with pytest.raises(ValueError, match="balanco_energetico"):
+            _read_relato_table(tmp_path, "balanco_energetico")
+
+    def test_finds_saidas_only_relato(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "relato.rv2").touch()
+        stub_table = pd.DataFrame({"nome_submercado": ["SUDESTE"]})
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(lambda _path: _StubRelatoFile(balanco_energetico=stub_table)),
+        )
+        result = _read_relato_table(tmp_path, "balanco_energetico")
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+
+
+class TestReadRelatoBalance:
+    """`read_relato_balance`: per-submarket energy balance table."""
+
+    def test_returns_expected_columns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        stub_table = pd.DataFrame(
+            {
+                "estagio": [1],
+                "cenario": [1],
+                "nome_submercado": ["SUDESTE"],
+                "geracao_hidraulica": [1000.0],
+                "geracao_termica": [200.0],
+                "compra": [0.0],
+                "venda": [0.0],
+                "geracao_itaipu_50hz": [50.0],
+                "geracao_itaipu_60hz": [60.0],
+            }
+        )
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(lambda _path: _StubRelatoFile(balanco_energetico=stub_table)),
+        )
+        result = read_relato_balance(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        for column in (
+            "nome_submercado",
+            "geracao_hidraulica",
+            "geracao_termica",
+            "compra",
+            "venda",
+            "geracao_itaipu_50hz",
+            "geracao_itaipu_60hz",
+        ):
+            assert column in result.columns
+
+    def test_none_table_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(lambda _path: _StubRelatoFile(balanco_energetico=None)),
+        )
+        with pytest.raises(ValueError, match="balanco_energetico"):
+            read_relato_balance(tmp_path)
+
+    def test_missing_relato_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="relato"):
+            read_relato_balance(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_relato_balance(_REDUCED_DECK)
+        assert df.height > 0

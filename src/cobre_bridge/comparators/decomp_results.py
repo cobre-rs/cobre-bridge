@@ -29,7 +29,7 @@ silence.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -422,6 +422,175 @@ def _bus_side(
     return _map_entities(aggregated, "codigo_submercado", id_map_bus)
 
 
+#: ``dec_oper_sist`` columns the Energy Balance tab's reference-model overlay
+#: needs: the two generation families it sums into GHTOT/GTERM, the demand
+#: and non-controllable-generation basis for NET_LOAD, and the two system
+#: energy series (EARM/ENA). Read once via :func:`_scenario_mean` so scenario
+#: averaging matches the rest of the module (unweighted mean across nodes).
+_NW_MARKET_COLUMNS: tuple[str, ...] = (
+    "demanda_MW",
+    "geracao_hidroeletrica_MW",
+    "geracao_termica_MW",
+    "geracao_termica_antecipada_MW",
+    "geracao_eolica_MW",
+    "geracao_pequenas_usinas_MW",
+    "deficit_MW",
+    "ena_MWmes",
+    "earm_final_MWmes",
+)
+
+
+def _empty_market_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "newave_code": pl.Int64,
+            "stage": pl.Int64,
+            "variable": pl.Utf8,
+            "value": pl.Float64,
+        }
+    )
+
+
+def _energy_balance_frames(
+    decomp_dir: Path, bus_codes: dict[int, int]
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """Build the Energy Balance tab's DECOMP-side reference frames.
+
+    Returns ``(nw_market, nw_net_load, nw_sin)`` — the long
+    ``newave_code``/``stage``/``variable``/``value`` frames
+    :func:`~cobre_bridge.comparators.charts.build_energy_balance_tab` and
+    :func:`~cobre_bridge.comparators.charts.cobre_aggregate_chart` read.
+
+    Only the tokens the tab actually consumes are emitted — no dead rows:
+    ``GHTOT``/``GTERM``/``DEFT`` in ``nw_market`` (mirroring
+    ``charts._BALANCE_VARS``), ``NET_LOAD`` in ``nw_net_load``, and
+    ``EARMF``/``ENA`` in ``nw_sin``. The tab's fifth token, ``EXCESSO``
+    (system energy excess), has no DECOMP source — neither ``dec_oper_sist``
+    nor ``relato.balanco_energetico`` carries an excess/curtailment column —
+    so it is intentionally omitted rather than fabricated; that panel still
+    renders (Cobre-only, no NEWAVE overlay line), matching the tab's existing
+    graceful-degradation path for a variable absent on one side.
+
+    ``newave_code`` here is the **Cobre bus id**, not the raw DECOMP
+    ``codigo_submercado`` — ``nw_bus_names`` (ticket-002,
+    ``build_decomp_dataset``) is populated from ``read_cobre_bus_metadata``
+    and is therefore keyed by Cobre bus id, and ``build_energy_balance_tab``
+    joins ``nw_market``/``nw_net_load`` against it by that same key.
+    ``bus_codes`` (``{codigo_submercado: cobre_bus_id}``, already built by
+    ``_read_aligned_frames``) performs that translation; ``nw_sin`` needs no
+    such translation since it sums across every submarket rather than
+    keying per-bus.
+
+    D-STAGE-OFFSET: ``stage`` stays the raw 1-based ``estagio`` (unlike
+    :func:`_map_entities`, this does *not* rebase to Cobre's 0-based
+    ``stage_id``), so the consuming charts' own stage-alignment (``nw_offset
+    = 1``, set on ``PercentileData`` by ``build_decomp_dataset``) lines up.
+    """
+    frame = _stage_rows(read_dec_oper_sist(decomp_dir))
+    if frame.is_empty() or "codigo_submercado" not in frame.columns:
+        empty = _empty_market_frame()
+        return empty, empty, empty
+
+    aggregated = _scenario_mean(
+        frame, "estagio", list(_NW_MARKET_COLUMNS), entity_column="codigo_submercado"
+    )
+    present = set(aggregated.columns)
+
+    mapped = aggregated.with_columns(
+        pl.col("codigo_submercado")
+        .map_elements(lambda c: bus_codes.get(int(c)), return_dtype=pl.Int64)
+        .alias("newave_code"),
+        pl.col("estagio").cast(pl.Int64).alias("stage"),
+    ).filter(pl.col("newave_code").is_not_null())
+
+    # --- nw_market: GHTOT (hydro gen) / GTERM (live + anticipated thermal
+    # gen) / DEFT (deficit), keyed by the mapped Cobre bus id. GTERM sums the
+    # two DECOMP thermal-generation columns because Cobre's own
+    # ``thermal_gen_mw`` (the counterpart this overlays) already includes
+    # anticipated GNL generation — the same live+anticipated fold the cost
+    # breakdown applies (see charts._COST_MAP's "Thermal Generation" entry).
+    market_exprs: list[tuple[str, pl.Expr]] = []
+    if "geracao_hidroeletrica_MW" in present:
+        market_exprs.append(("GHTOT", pl.col("geracao_hidroeletrica_MW")))
+    if "geracao_termica_MW" in present and "geracao_termica_antecipada_MW" in present:
+        market_exprs.append(
+            (
+                "GTERM",
+                pl.col("geracao_termica_MW") + pl.col("geracao_termica_antecipada_MW"),
+            )
+        )
+    if "deficit_MW" in present:
+        market_exprs.append(("DEFT", pl.col("deficit_MW")))
+
+    if market_exprs and not mapped.is_empty():
+        wide = mapped.select(
+            "newave_code",
+            "stage",
+            *[expr.alias(name) for name, expr in market_exprs],
+        )
+        nw_market = wide.unpivot(
+            on=[name for name, _ in market_exprs],
+            index=["newave_code", "stage"],
+            variable_name="variable",
+            value_name="value",
+        ).with_columns(pl.col("value").cast(pl.Float64))
+    else:
+        nw_market = _empty_market_frame()
+
+    # --- nw_net_load: demand minus the non-controllable sources (wind +
+    # small plants) — the tab's NET_LOAD basis.
+    non_controllable = {"demanda_MW", "geracao_eolica_MW", "geracao_pequenas_usinas_MW"}
+    if non_controllable <= present and not mapped.is_empty():
+        nw_net_load = mapped.select(
+            "newave_code",
+            "stage",
+            pl.lit("NET_LOAD").alias("variable"),
+            (
+                pl.col("demanda_MW")
+                - pl.col("geracao_eolica_MW")
+                - pl.col("geracao_pequenas_usinas_MW")
+            )
+            .cast(pl.Float64)
+            .alias("value"),
+        )
+    else:
+        nw_net_load = _empty_market_frame()
+
+    # --- nw_sin: EARMF / ENA summed across every submarket the deck
+    # declares. The converter-created transhipment bus never appears among
+    # ``codigo_submercado`` values (D-UNITS) — it has no source-model code of
+    # its own, it is referenced only by name in ``IA`` records — so summing
+    # every row this reader returns already excludes it; no extra filter
+    # needed (mirrors the guarantee ``TestBusSideExcludesTranshipment``
+    # pins down for the tidy-comparison bus rows). ``newave_code`` is the
+    # constant SIN placeholder ``0``, matching ``read_medias_sin``'s
+    # newave-side convention. Built as a plain per-stage sum — additive by
+    # construction — so a later epic can ``pl.concat`` its own cost-series
+    # rows onto this frame instead of overwriting it.
+    system_energy = {"earm_final_MWmes", "ena_MWmes"}
+    if system_energy <= present:
+        sin_agg = aggregated.group_by("estagio").agg(
+            pl.col("earm_final_MWmes").sum().alias("EARMF"),
+            pl.col("ena_MWmes").sum().alias("ENA"),
+        )
+        nw_sin = (
+            sin_agg.unpivot(
+                on=["EARMF", "ENA"], index=["estagio"], variable_name="variable"
+            )
+            .with_columns(
+                pl.lit(0).cast(pl.Int64).alias("newave_code"),
+                pl.col("estagio").cast(pl.Int64).alias("stage"),
+                pl.col("value").cast(pl.Float64),
+            )
+            .select("newave_code", "stage", "variable", "value")
+            .sort("stage", "variable")
+        )
+    else:
+        nw_sin = _empty_market_frame()
+
+    return nw_market, nw_net_load, nw_sin
+
+
 def _map_entities(
     frame: pl.DataFrame, code_column: str, mapping: dict[int, int]
 ) -> tuple[pl.DataFrame, list[int]]:
@@ -501,6 +670,14 @@ class _AlignedDecompFrames:
     thermal_names: dict[int, str]
     bus_names: dict[int, str]
     unmapped: dict[str, list[int]]
+    # --- ticket-006: Energy Balance tab reference frames ---
+    # Long newave_code/stage/variable/value frames built by
+    # :func:`_energy_balance_frames`; defaulted so existing fixtures that
+    # construct this dataclass without them (built before this ticket) keep
+    # working unchanged.
+    nw_market: pl.DataFrame = field(default_factory=pl.DataFrame)
+    nw_net_load: pl.DataFrame = field(default_factory=pl.DataFrame)
+    nw_sin: pl.DataFrame = field(default_factory=pl.DataFrame)
 
 
 def _read_aligned_frames(
@@ -530,6 +707,7 @@ def _read_aligned_frames(
     source_hydro, unmapped_hydro = _hydro_side(decomp_dir, hydro_codes)
     source_thermal, unmapped_thermal = _thermal_side(decomp_dir, thermal_codes)
     source_bus, unmapped_bus = _bus_side(decomp_dir, bus_codes)
+    nw_market, nw_net_load, nw_sin = _energy_balance_frames(decomp_dir, bus_codes)
 
     cobre_hydro, hydro_names = _cobre_hydro(cobre_output_dir)
     cobre_thermal = cobre_readers.read_cobre_thermal_means(cobre_output_dir)
@@ -559,6 +737,9 @@ def _read_aligned_frames(
             "thermal": unmapped_thermal,
             "bus": unmapped_bus,
         },
+        nw_market=nw_market,
+        nw_net_load=nw_net_load,
+        nw_sin=nw_sin,
     )
 
 
@@ -621,10 +802,21 @@ def build_decomp_dataset(
     :class:`~cobre_bridge.comparators.results.PercentileData` fields.
 
     Per D-PERCENTILEDATA, the returned dataset's ``PercentileData`` carries
-    only the entity-name fields available at this stage (``nw_bus_names``,
-    ``nw_hydro_names``); every other field — including the percentile bands —
-    stays at its empty default, so no percentile spread is fabricated from a
-    low-scenario deterministic tree.
+    only the fields available at this stage: the entity-name dicts
+    (``nw_bus_names``, ``nw_hydro_names``), the cobre-side bus percentile
+    band (``bus``, from :func:`cobre_readers.read_cobre_bus_percentiles`),
+    and — as of ticket-006 — the Energy Balance tab's reference frames
+    (``nw_market``, ``nw_net_load``, ``nw_sin``, from
+    :func:`_energy_balance_frames`) and cobre-side aggregates
+    (``bus_aggregates``, ``cobre_bus_meta``, ``cobre_hydro_means``, each read
+    verbatim from the matching ``cobre_readers`` function). ``nw_offset=1``
+    (D-STAGE-OFFSET): DECOMP's ``estagio`` is 1-based from the deck's first
+    stage, unlike the source model's arbitrary calendar-month-numbered
+    MEDIAS stage, so the fixed offset is always 1 rather than derived from
+    the data. Every other field stays at its empty default, and ``bus``
+    itself stays empty whenever the Cobre run has no percentile output (e.g.
+    the deterministic 2-node tree) — no percentile spread is ever
+    fabricated.
 
     Args:
         decomp_dir: The deck directory (results resolved via the ticket-001
@@ -670,6 +862,15 @@ def build_decomp_dataset(
     pct = PercentileData(
         nw_bus_names=aligned.bus_names,
         nw_hydro_names=aligned.hydro_names,
+        bus=cobre_readers.read_cobre_bus_percentiles(cobre_output_dir),
+        nw_market=aligned.nw_market,
+        nw_net_load=aligned.nw_net_load,
+        nw_sin=aligned.nw_sin,
+        # D-STAGE-OFFSET: fixed at 1, not derived — see the docstring above.
+        nw_offset=1,
+        bus_aggregates=cobre_readers.read_cobre_bus_aggregates(cobre_output_dir),
+        cobre_bus_meta=cobre_readers.read_cobre_bus_metadata(cobre_output_dir),
+        cobre_hydro_means=cobre_readers.read_cobre_hydro_means(cobre_output_dir),
     )
     dataset = build_results_dataset(results, pct, tolerance)
     dataset.metadata["unmapped"] = {
