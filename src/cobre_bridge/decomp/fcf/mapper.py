@@ -80,6 +80,28 @@ if TYPE_CHECKING:
 # and biases the cost-to-go. (For this deck the binding terminal cuts carry no
 # nonzero ``PIAFL`` at the wet plants, so the extra 2.628 is inert at θ — it is
 # applied for dimensional correctness at other states and in the interior cuts.)
+#
+# --- Inflow-lag mean fold (deviation-vs-raw reconciliation) -------------------
+# The source's PAR(p) inflow-lag term prices the inflow *deviation from the
+# seasonal mean* — its state is the increment ``Q_ℓ - μ_ℓ`` about the long-term
+# mean ``μ_ℓ`` (the MLT), not the absolute inflow (reference manual §5.1.9.2:
+# energies are computed on incremental inflows). But cobre evaluates the loaded
+# cut at its *raw* inflow-lag state ``Q_ℓ`` (the PAR lag coefficients are stored
+# "in original units"; the standardized ``σ·η`` form lives only in the forward
+# inflow model, not the loaded cut). Feeding raw ``Q_ℓ`` against a coefficient
+# built for the deviation over-subtracts ``Σ_ℓ PIAFL_ℓ·μ_ℓ`` and over-drains the
+# reservoirs (observed: converged thermal −19.6→−35.5 %, spot −35.4→−55.9 %).
+# The fix folds the mean into the intercept instead of touching cobre's state:
+# with ``μ_ℓ`` supplied per plant per lag (``map_boundary_cuts``'s
+# ``inflow_lag_means``, built by ``decomp/inflow_mlt.py``), each cut's RHS is
+# reduced by ``Σ_ℓ (PIAFL_scaled_ℓ)·μ_ℓ`` so the loaded cut reads
+# ``RHS - Σ PIAFL·μ + Σ PIAFL·Q = RHS + Σ PIAFL·(Q - μ)`` — deviation-correct at
+# the raw state, per scenario and per lag. ``σ`` is not needed: ``PIAFL`` is
+# per-Hm³ (``1/σ`` is already inside it), so only the means matter. The fold uses
+# the *scaled* coefficient (``× cost_unit_hours × C_M3S2HM3``) and ``μ_ℓ`` in
+# m³/s (cobre's raw lag-state units), and folds only the lag terms actually
+# placed — a dropped plant/lag contributes nothing, so the RHS can never carry a
+# mean cobre will not offset with a matching ``Σ PIAFL·Q`` term.
 
 #: cobre `policy.fbs` entity_type codes (confirmed against `policy_export.rs`).
 _HYDRO_STORAGE = 0
@@ -104,11 +126,13 @@ class MappedCut:
     ``TerminalManifest.state_dimension`` — every target slot has an
     explicit coefficient, never merely unset. ``intercept`` is the source
     record's ``rhs`` (the ``alpha - beta'xhat`` form; never re-derived, per
-    §2.1). The intercept and every coefficient are scaled to cobre's cost
-    units by :func:`map_boundary_cuts` — intercept and storage by
-    ``× cost_unit_hours``, inflow-lag by an additional ``× C_M3S2HM3``, and
-    GNL by the per-block ``coupling_block_hours`` hours-weighted collapse
-    (see the module header). ``cut_id``, ``iteration``,
+    §2.1), scaled to cobre's cost units and — when :func:`map_boundary_cuts`
+    is given ``inflow_lag_means`` — reduced by the seasonal-mean fold
+    ``Σ placed_lag_coef · mu`` (see the module header). The intercept and every
+    coefficient are scaled to cobre's cost units by :func:`map_boundary_cuts` —
+    intercept and storage by ``× cost_unit_hours``, inflow-lag by an additional
+    ``× C_M3S2HM3``, and GNL by the per-block ``coupling_block_hours``
+    hours-weighted collapse (see the module header). ``cut_id``, ``iteration``,
     ``forward_pass_index``, and ``is_active`` are the source
     ``StageCutRecord``'s provenance fields, carried verbatim so the
     checkpoint writer (ticket-008) has every field it needs without
@@ -536,6 +560,7 @@ def map_boundary_cuts(
     lag_slot_of: Callable[[int], int] = _default_lag_slot_of,
     gnl_plan: GnlRingPlan | None = None,
     coupling_block_hours: Sequence[float] | None = None,
+    inflow_lag_means: Mapping[int, Sequence[float]] | None = None,
 ) -> MappingResult:
     """Map every cut in `cuts.records` onto `manifest`'s state-vector layout.
 
@@ -568,8 +593,9 @@ def map_boundary_cuts(
     `gnl_plan`; `gnl_plan=None` (the default) leaves the entire ring at
     `0.0`, byte-for-byte matching this function's pre-GNL behaviour, and never
     requires `coupling_block_hours` (see the guard below). `intercept` is the
-    source record's `rhs` (never re-derived from alpha/x-hat); it and every
-    coefficient are then scaled to cobre's cost units per family —
+    source record's `rhs` (never re-derived from alpha/x-hat), scaled to cobre's
+    cost units and then reduced by the `inflow_lag_means` fold below; every
+    coefficient is likewise scaled to cobre's cost units per family —
     intercept/storage by ``× cost_unit_hours``, inflow-lag by an additional
     ``× C_M3S2HM3`` for cobre's m³/s inflow-lag state, and GNL by the
     per-block `coupling_block_hours` collapse above (see the module header).
@@ -581,6 +607,18 @@ def map_boundary_cuts(
     order — required whenever `gnl_plan` resolves at least one live ring
     target (`resolved_gnl` non-empty); `None` is only valid when no GNL
     coefficient is placed (no `gnl_plan`, or every target dropped).
+
+    `inflow_lag_means` folds the seasonal-mean inflow into the cut RHS (see the
+    module header): `{hydro_id: (mu_depth1, …, mu_depth12)}` in m³/s, one
+    12-vector per plant aligned to the boundary cut's lag-depth axis (built by
+    `decomp/inflow_mlt.py::coupling_lag_means`). The source prices the inflow
+    *deviation* `Q - mu`, but cobre evaluates the loaded cut at its raw lag
+    state `Q`, so for every lag coefficient actually placed the intercept is
+    reduced by `placed_coef · mu[depth]`, making the loaded cut
+    `RHS_scaled - Σ coef·mu + Σ coef·Q = RHS_scaled + Σ coef·(Q - mu)`. Summed
+    over exactly the placed (plant, lag) terms, so a dropped plant or lag never
+    contributes to the fold. `None` (the default) folds nothing — the intercept
+    is the plain scaled `rhs` — byte-for-byte the pre-fold behaviour.
 
     Raises
     ------
@@ -643,6 +681,13 @@ def map_boundary_cuts(
     mapped_cuts: list[MappedCut] = []
     for record in cuts.records:
         coefficients = [0.0] * manifest.state_dimension
+        # Mean-fold accumulator (see the module header + `inflow_lag_means`): the
+        # source prices the inflow *deviation* Q - mu, but cobre evaluates the
+        # loaded cut at its raw lag state Q, so the seasonal mean is folded into
+        # the intercept. Summed per record over exactly the lag coefficients
+        # actually placed, so a dropped plant/lag contributes nothing to the
+        # fold either — the fold can never reference a term cobre won't apply.
+        rhs_fold = 0.0
         for plant_index, (hydro_id, storage_position) in resolved_storage.items():
             coefficients[storage_position] = (
                 record.pi_varm[plant_index] * cost_unit_factor
@@ -650,14 +695,18 @@ def map_boundary_cuts(
             if lag_bound == 0:
                 continue
             plant_lags = record.pi_qafl[plant_index]
+            plant_means = (
+                inflow_lag_means.get(hydro_id) if inflow_lag_means is not None else None
+            )
             for depth_index, subindex in enumerate(lag_subindices):
                 lag_position = slot_positions.get(
                     (_HYDRO_INFLOW_LAG, hydro_id, subindex)
                 )
                 if lag_position is not None:
-                    coefficients[lag_position] = (
-                        plant_lags[depth_index] * inflow_lag_factor
-                    )
+                    lag_coefficient = plant_lags[depth_index] * inflow_lag_factor
+                    coefficients[lag_position] = lag_coefficient
+                    if plant_means is not None:
+                        rhs_fold += lag_coefficient * plant_means[depth_index]
 
         for gnl_position, gnl_cols in resolved_gnl.items():
             # Hours-weighted collapse (ticket-001): `pi_gnl` prices an energy
@@ -682,7 +731,7 @@ def map_boundary_cuts(
 
         mapped_cuts.append(
             MappedCut(
-                intercept=record.rhs * cost_unit_factor,
+                intercept=record.rhs * cost_unit_factor - rhs_fold,
                 coefficients=tuple(coefficients),
                 cut_id=record.cut_id,
                 iteration=record.iteration,

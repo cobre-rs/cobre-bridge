@@ -134,6 +134,133 @@ def test_map_lags_one_to_one() -> None:
     assert mapped.coefficients[2] == pytest.approx(2.0 * _LAG_FACTOR)  # depth 2
 
 
+def test_map_inflow_lag_means_folds_rhs() -> None:
+    # The seasonal-mean fold reduces the intercept by Σ placed_lag_coef·μ, so
+    # the loaded cut prices the raw lag state as the deviation Q - μ. The
+    # coefficients themselves are untouched.
+    id_map = make_id_map((10,))
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),
+            *[make_slot(_HYDRO_INFLOW_LAG, 0, lag) for lag in range(12)],
+        ]
+    )
+    lags = (1.0, 2.0) + (0.0,) * 10
+    cuts = make_boundary_cuts(
+        (10,), (make_cut_record(pi_varm=(0.0,), pi_qafl=(lags,), rhs=5.0),)
+    )
+    means = {0: (100.0, 50.0) + (0.0,) * 10}
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        lag_slot_of=lambda d: d - 1,
+        inflow_lag_means=means,
+    )
+
+    mapped = result.cuts[0]
+    # Coefficients unchanged by the fold.
+    assert mapped.coefficients[1] == pytest.approx(1.0 * _LAG_FACTOR)
+    assert mapped.coefficients[2] == pytest.approx(2.0 * _LAG_FACTOR)
+    # Intercept reduced by Σ (placed_coef · μ) over the two nonzero depths.
+    expected_fold = 1.0 * _LAG_FACTOR * 100.0 + 2.0 * _LAG_FACTOR * 50.0
+    assert mapped.intercept == pytest.approx(5.0 * MONTH_HOURS - expected_fold)
+
+
+def test_map_inflow_lag_means_none_is_noop() -> None:
+    # Default (no means) leaves the intercept at the plain scaled rhs — the
+    # pre-fold behaviour — byte-for-byte.
+    id_map = make_id_map((10,))
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),
+            *[make_slot(_HYDRO_INFLOW_LAG, 0, lag) for lag in range(12)],
+        ]
+    )
+    lags = (1.0, 2.0) + (0.0,) * 10
+    cuts = make_boundary_cuts(
+        (10,), (make_cut_record(pi_varm=(0.0,), pi_qafl=(lags,), rhs=5.0),)
+    )
+
+    result = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, lag_slot_of=lambda d: d - 1
+    )
+
+    assert result.cuts[0].intercept == pytest.approx(5.0 * MONTH_HOURS)
+
+
+def test_map_inflow_lag_means_only_folds_placed_lags() -> None:
+    # A plant with a storage slot but NO inflow-lag slots in the manifest has no
+    # lag coefficient placed, so its mean must not fold — the fold can never
+    # reference a term cobre will not apply. Plant 10 (hydro_id 0) carries the
+    # full 12-slot lag family; plant 20 (hydro_id 1) has storage only.
+    id_map = make_id_map((10, 20))
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),
+            make_slot(_HYDRO_STORAGE, 1, 0),
+            *[make_slot(_HYDRO_INFLOW_LAG, 0, lag) for lag in range(12)],
+        ]
+    )
+    lags10 = (1.0,) + (0.0,) * 11
+    lags20 = (4.0,) + (0.0,) * 11
+    cuts = make_boundary_cuts(
+        (10, 20),
+        (make_cut_record(pi_varm=(0.0, 0.0), pi_qafl=(lags10, lags20), rhs=5.0),),
+    )
+    # Plant 20 (hydro_id 1) has a μ, but no lag slot → must not fold.
+    means = {0: (100.0,) + (0.0,) * 11, 1: (999.0,) + (0.0,) * 11}
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        lag_slot_of=lambda d: d - 1,
+        inflow_lag_means=means,
+    )
+
+    # Only plant 10's depth-1 lag is placed and folded; plant 20's μ is inert.
+    expected_fold = 1.0 * _LAG_FACTOR * 100.0
+    assert result.cuts[0].intercept == pytest.approx(5.0 * MONTH_HOURS - expected_fold)
+
+
+def test_map_inflow_lag_means_skips_dropped_plant() -> None:
+    # A source-only plant (dropped, no target storage slot) must not fold its
+    # μ: its lag terms are never placed, so its mean can carry no RHS shift.
+    id_map = make_id_map((10,))  # plant 20 is unknown → dropped
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),
+            *[make_slot(_HYDRO_INFLOW_LAG, 0, lag) for lag in range(12)],
+        ]
+    )
+    lags10 = (1.0,) + (0.0,) * 11
+    lags20 = (7.0,) + (0.0,) * 11
+    cuts = make_boundary_cuts(
+        (10, 20),
+        (make_cut_record(pi_varm=(0.0, 0.0), pi_qafl=(lags10, lags20), rhs=5.0),),
+    )
+    # hydro_id 1 (plant 20) has a μ, but plant 20 is dropped, so it must not
+    # affect the fold; only plant 10's (hydro_id 0) depth-1 μ folds.
+    means = {0: (10.0,) + (0.0,) * 11, 1: (999.0,) + (0.0,) * 11}
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        lag_slot_of=lambda d: d - 1,
+        inflow_lag_means=means,
+    )
+
+    assert [term.plant_code for term in result.dropped] == [20]
+    expected_fold = 1.0 * _LAG_FACTOR * 10.0
+    assert result.cuts[0].intercept == pytest.approx(5.0 * MONTH_HOURS - expected_fold)
+
+
 def test_map_zeroes_buckets_and_gnl_ring() -> None:
     id_map = make_id_map((10,))
     manifest = make_manifest(

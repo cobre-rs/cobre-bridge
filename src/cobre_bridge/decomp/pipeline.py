@@ -897,18 +897,15 @@ def _convert_decomp_case_impl(
             len(gnl.future_anticipated_deliveries),
         )
     _write_json(system / "thermals.json", thermals_dict)
-    # PAR inflow-lag seed (initial_conditions.recent_observations) is GATED OFF
-    # pending the mean-reference fix. The boundary cuts price the inflow-lag
-    # state (PIAFL, 159 plants x 12 lags), so an unseeded lag state (lags = 0)
-    # is a real gap in principle. But NEWAVE's PAR cut prices the inflow
-    # *deviation from the seasonal mean* (MLT), not the absolute inflow:
-    # verified against relato.rv2 (E(CF) = 1.156e12 matches cobre's lags=0
-    # terminal FCF to ~1.7%, and is ~12% above the with-absolute-seed value).
-    # Seeding the *absolute* observations (convert_recent_observation_windows)
-    # therefore over-subtracts ~13% of the cost-to-go and over-drains; the
-    # correct seed is (observed - MLT), which needs the binary mlt.dat and a
-    # confirmed cobre inflow-lag reference convention. Until then lags=0 is the
-    # better approximation at a near-mean coupling. See the fidelity roadmap.
+    # The PAR inflow-lag seed (initial_conditions.recent_observations) is NOT
+    # written here. The boundary cuts price the inflow-lag *deviation from the
+    # seasonal mean* (MLT), not the absolute inflow, so a raw observation seed is
+    # only correct once the cut RHS is folded by that same mean. Both the mean
+    # fold and the raw seed are authored together by the boundary-FCF importer
+    # (`fcf/__init__.py::import_boundary_fcf`, which has the mlt.dat the fold
+    # needs), patched onto this file after conversion -- so they can never ship
+    # apart. A plain conversion (no boundary FCF) keeps the lag state at 0: its
+    # inflow model is order 0 (no autoregression), so the lags are inert anyway.
     _write_json(dst / "initial_conditions.json", initial_conditions_doc)
     _write_json(
         system / "hydro_production_models.json",

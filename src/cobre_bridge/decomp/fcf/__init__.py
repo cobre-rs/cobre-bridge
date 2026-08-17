@@ -24,11 +24,12 @@ import math
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from idecomp.decomp import Dadger, Dadgnl
+from idecomp.decomp import Dadger, Dadgnl, Mlt, Vazoes
 from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.anticipated import read_gnl_model
+from cobre_bridge.decomp.cadastro import build_effective_cadastro
 from cobre_bridge.decomp.fcf.bootstrap import (
     bootstrap_terminal_manifest,
     ensure_writer_binding,
@@ -48,16 +49,22 @@ from cobre_bridge.decomp.fcf.writer import (
     build_stage_cuts_payload,
     write_boundary_checkpoint,
 )
+from cobre_bridge.decomp.hydro import read_hidr
 from cobre_bridge.decomp.id_map import DecompIdMap
+from cobre_bridge.decomp.inflow_mlt import build_incremental_mlt, coupling_lag_means
 from cobre_bridge.decomp.pipeline import DecompFiles, discover_decomp_files
+from cobre_bridge.decomp.scenarios import convert_recent_observation_windows
+from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from cobre_bridge.decomp.anticipated import GnlCommitmentModel
+    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
     from cobre_bridge.decomp.fcf.mapper import MappingResult
+    from cobre_bridge.decomp.temporal import OperativeStage
 
 _LOG = logging.getLogger(__name__)
 
@@ -239,6 +246,96 @@ def _coupling_stage_hours(case_dir: Path) -> float:
         Propagated verbatim from :func:`_final_stage_block_hours`.
     """
     return math.fsum(_final_stage_block_hours(case_dir))
+
+
+def _find_mlt(deck_dir: Path) -> Path | None:
+    """Locate the deck's ``mlt.dat`` (média de longo termo), case-insensitively.
+
+    ``mlt.dat`` is not one of :class:`~cobre_bridge.decomp.pipeline.DecompFiles`'
+    resolved inputs (it feeds only the boundary FCF's inflow-lag mean fold, not
+    the conversion), so it is discovered here directly. Returns ``None`` when the
+    deck carries none.
+    """
+    for path in deck_dir.iterdir():
+        if path.is_file() and path.name.lower() == "mlt.dat":
+            return path
+    return None
+
+
+def _boundary_inflow_context(
+    deck_files: DecompFiles,
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    *,
+    coupling_month: int,
+) -> (
+    tuple[EffectiveCadastro, list[OperativeStage], dict[int, tuple[float, ...]]] | None
+):
+    """The effective cadastro, calendar, and per-plant inflow-lag mean fold.
+
+    Reads the deck's ``mlt.dat`` and builds the seasonal-mean fold vector
+    (:func:`~cobre_bridge.decomp.inflow_mlt.build_incremental_mlt` incrementalises
+    the natural MLT, :func:`~cobre_bridge.decomp.inflow_mlt.coupling_lag_means`
+    aligns it to the cut's lag-depth axis at ``coupling_month``), returning it
+    alongside the ``effective``/``calendar`` the recent-observation seed also
+    needs — the two ship together (mean fold + raw seed), sharing this one
+    cadastro build.
+
+    Returns ``None`` when the deck carries no ``mlt.dat``: without the seasonal
+    means the deviation fold cannot be applied, so the boundary FCF stays on the
+    unseeded lags-0 approximation (a logged tracked gap) rather than a raw seed
+    the RHS would fail to offset — over-draining the reservoirs.
+    """
+    mlt_path = _find_mlt(deck_files.dadger.parent)
+    if mlt_path is None:
+        _LOG.warning(
+            "no mlt.dat in %s; the boundary FCF's inflow-lag mean fold and the "
+            "recent-observation seed are both skipped (the lag state stays at 0 "
+            "-- a near-mean approximation, tracked gap), since seeding raw "
+            "inflows without the seasonal-mean fold over-drains the reservoirs",
+            deck_files.dadger.parent,
+        )
+        return None
+    hidr = read_hidr(deck_files.hidr)
+    calendar = operative_calendar_from_dadger(dadger)
+    effective, _ = build_effective_cadastro(dadger, hidr, calendar)
+    incremental_mlt = build_incremental_mlt(
+        Mlt.read(str(mlt_path)).valores, effective, id_map
+    )
+    means = coupling_lag_means(incremental_mlt, coupling_month)
+    return effective, calendar, means
+
+
+def _seed_recent_observations(
+    case_dir: Path,
+    deck_files: DecompFiles,
+    effective: EffectiveCadastro,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> int:
+    """Add ``recent_observations`` to the case's ``initial_conditions.json``.
+
+    Seeds cobre's PAR inflow-lag accumulator with the deck's pre-study observed
+    (already-incremental) inflows
+    (:func:`~cobre_bridge.decomp.scenarios.convert_recent_observation_windows`),
+    so the boundary cut's inflow-lag terms are evaluated against the real recent
+    inflows rather than 0. Written here — inside the importer, patched onto the
+    already-converted case exactly like ``config.json``'s policy boundary —
+    rather than in the conversion, so the raw seed and the RHS mean fold (which
+    offsets it) are authored together and never ship apart. Returns the number of
+    observation windows written (0 when the deck carries no observation tables).
+    """
+    windows = convert_recent_observation_windows(
+        Vazoes.read(str(deck_files.vazoes)), effective, id_map, calendar
+    )
+    ic_path = case_dir / "initial_conditions.json"
+    with ic_path.open(encoding="utf-8") as handle:
+        doc = json.load(handle)
+    doc["recent_observations"] = windows
+    with ic_path.open("w", encoding="utf-8") as handle:
+        json.dump(doc, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+    return len(windows)
 
 
 def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan | None:
@@ -541,20 +638,30 @@ def import_boundary_fcf(
        ``cobre.run.run`` pass on ``case_dir`` (checkpoint under ``work_dir``,
        the case is never mutated) to read back its terminal state-vector
        layout.
-    4. Builds the deck's GNL ring plan (:func:`_build_gnl_ring_plan`) and maps
-       every boundary cut onto that layout: storage terms by plant code,
-       inflow-lag terms by calendar-month lag depth, and
-       ``AnticipatedThermalState`` GNL-ring terms via the plan's per-block
-       hours-weighted patamar sum (ticket-001); ``HydroTransitBucket`` slots
-       are left at coefficient 0 regardless (epic 5's job, not this one's).
+    4. Builds the deck's GNL ring plan (:func:`_build_gnl_ring_plan`) and the
+       inflow-lag mean fold (:func:`_boundary_inflow_context`: the
+       incrementalised ``mlt.dat`` aligned to the cut's lag-depth axis at the
+       coupling month), then maps every boundary cut onto that layout: storage
+       terms by plant code, inflow-lag terms by calendar-month lag depth (with
+       each cut's RHS reduced by ``Σ lag_coef · mu`` so the loaded cut prices
+       the raw lag state as the *deviation* from the seasonal mean —
+       ``fcf/mapper.py``'s ``inflow_lag_means``), and ``AnticipatedThermalState``
+       GNL-ring terms via the plan's per-block hours-weighted patamar sum
+       (ticket-001); ``HydroTransitBucket`` slots are left at coefficient 0
+       regardless (epic 5's job, not this one's).
     5. Surfaces the mapping's documented approximations as ``Diagnostic``s
        (:func:`_emit_import_diagnostics`): the always-on cut-family triage,
        the D3-dropped source-only plants (gated on non-empty), and — when the
        deck carries a GNL block — the per-``(submercado, lag)`` deviation the
        ring's chain-rule sum collapses.
     6. Assembles and writes ``case_dir/boundary/{metadata.json,
-       cuts/stage_NNN.bin, basis/}``, then patches ``case_dir/config.json``'s
-       ``["policy"]["boundary"]`` to point at it.
+       cuts/stage_NNN.bin, basis/}``, patches ``case_dir/config.json``'s
+       ``["policy"]["boundary"]`` to point at it, and — when the deck carries an
+       ``mlt.dat`` (so the mean fold above was applied) — patches
+       ``case_dir/initial_conditions.json`` with the pre-study
+       ``recent_observations`` seed (:func:`_seed_recent_observations`), the raw
+       inflow-lag values the folded RHS is built to offset. Fold and seed ship
+       together or not at all.
     7. Logs the TRACKED COBRE-GAP WORKAROUND (C8) usage constraint this patch
        implies: until cobre resolves ``policy.boundary.path`` relative to
        ``case_dir`` rather than the run's ``--output`` directory, the case
@@ -611,6 +718,17 @@ def import_boundary_fcf(
         case_dir, work_dir=work_dir, inflow_lag_depth=lag_depth
     )
     gnl_plan = _build_gnl_ring_plan(case_dir, deck_files)
+    # Inflow-lag mean fold + recent-observation seed (built together, shipped
+    # together — see `_boundary_inflow_context`). The coupling month is the cut
+    # stage's own calendar month (`boundary_stage` is calendar-anchored as
+    # `(Y - Y0)*12 + M`, so `(boundary_stage - 1) % 12 + 1 == M`); the fold
+    # aligns each `pi_qafl` lag depth to `coupling_month - depth`. `None` (no
+    # mlt.dat) leaves the lag state at 0 — no fold, no seed.
+    coupling_month = ((boundary_stage - 1) % 12) + 1
+    inflow_context = _boundary_inflow_context(
+        deck_files, dadger, id_map, coupling_month=coupling_month
+    )
+    inflow_lag_means = inflow_context[2] if inflow_context is not None else None
     # Read stages.json's per-block hours once; cost_unit_hours (the
     # intercept/storage/inflow-lag scale) is this same vector's sum, never a
     # second stages.json read (ticket-001).
@@ -623,6 +741,7 @@ def import_boundary_fcf(
         cost_unit_hours=cost_unit_hours,
         gnl_plan=gnl_plan,
         coupling_block_hours=coupling_block_hours,
+        inflow_lag_means=inflow_lag_means,
     )
     _LOG.info(
         "scaling boundary FCF coefficients to cobre cost units over the "
@@ -654,6 +773,25 @@ def import_boundary_fcf(
     write_boundary_checkpoint(boundary_dir, stage_cuts_payload, metadata)
 
     _patch_policy_boundary(case_dir / "config.json", source_stage=boundary_stage)
+
+    # Seed the pre-study inflow-lag state and record the mean fold — both gated
+    # on the same mlt.dat presence as the fold above, so the raw seed never
+    # ships without the RHS mean that offsets it (`_boundary_inflow_context`).
+    if inflow_context is not None:
+        effective, calendar, _ = inflow_context
+        n_windows = _seed_recent_observations(
+            case_dir, deck_files, effective, id_map, calendar
+        )
+        _LOG.info(
+            "boundary FCF inflow-lag coupling: folded the seasonal-mean (MLT) "
+            "deviation into %d cut RHS(es) and seeded %d recent-observation "
+            "window(s) at coupling month %d, so the loaded cut prices the raw "
+            "inflow-lag state as the deviation Q - mu",
+            len(mapping.cuts),
+            n_windows,
+            coupling_month,
+        )
+
     _LOG.warning(
         "TRACKED COBRE-GAP WORKAROUND (C8): cobre resolves "
         "policy.boundary.path against the run's --output directory, not "
