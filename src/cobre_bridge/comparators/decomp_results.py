@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polars as pl
 
@@ -41,6 +42,10 @@ from cobre_bridge.comparators.decomp_readers import (
     read_dec_oper_usit,
     read_relato_convergence,
 )
+from cobre_bridge.comparators.results import PercentileData, ResultComparison
+
+if TYPE_CHECKING:
+    from cobre_bridge.comparators.dataset import ComparisonDataset
 
 _LOG = logging.getLogger(__name__)
 
@@ -76,6 +81,25 @@ _BUS_VARIABLES: tuple[_Variable, ...] = (
     _Variable("bus", "deficit", "deficit_MW", "deficit_mw", "MW"),
     _Variable("bus", "spot_price", "cmo", "spot_price", "$/MWh"),
 )
+
+#: Map each (level, ``_Variable.name``) pair to the canonical variable name
+#: the shared render/chart layer expects (``analyze.build_results_dataset``
+#: and everything downstream of it key charts off this name, not the
+#: decomp-local ``_Variable.name``). Storage is the one name that does not
+#: match its ``_Variable``/cobre-column spelling: the comparison is on
+#: *useful* volume (see the module docstring), but the canonical chart
+#: variable is still ``storage_final_hm3`` — the same name the newave-side
+#: comparator uses for its (absolute-volume) storage rows.
+_CANONICAL_VARIABLE: dict[tuple[str, str], str] = {
+    ("hydro", "generation"): "generation_mw",
+    ("hydro", "turbined"): "turbined_m3s",
+    ("hydro", "spillage"): "spillage_m3s",
+    ("hydro", "outflow"): "outflow_m3s",
+    ("hydro", "storage"): "storage_final_hm3",
+    ("thermal", "generation"): "generation_mw",
+    ("bus", "deficit"): "deficit_mw",
+    ("bus", "spot_price"): "spot_price",
+}
 
 
 @dataclass(frozen=True)
@@ -149,10 +173,23 @@ def _difference_columns() -> list[pl.Expr]:
         # Same definition as comparators.results.smape, expressed per row so a
         # near-zero reference cannot dominate the roll-up.
         pl.when(magnitude > _ZERO_FLOOR)
-        .then((pl.col("cobre") - pl.col("source")).abs() / (magnitude / 2.0) * 100.0)
+        .then(delta.abs() / (magnitude / 2.0) * 100.0)
         .otherwise(0.0)
         .alias("smape_pct"),
     ]
+
+
+def _result_diff(nw_value: float, cobre_value: float) -> tuple[float, float | None]:
+    """Absolute and relative difference for one ``ResultComparison`` row.
+
+    Mirrors :func:`cobre_bridge.comparators.results._compute_diff` exactly, so
+    the two per-variable stat kernels in play here (this module's own tidy
+    rows and the shared ``ResultComparison`` one) agree on what "the
+    difference" means.
+    """
+    abs_diff = abs(nw_value - cobre_value)
+    rel_diff = abs_diff / abs(nw_value) if abs(nw_value) > 1e-10 else None
+    return abs_diff, rel_diff
 
 
 def _tidy(
@@ -209,6 +246,65 @@ def _empty_rows() -> pl.DataFrame:
             "smape_pct": pl.Float64,
         }
     )
+
+
+def _result_comparisons(
+    source: pl.DataFrame,
+    cobre: pl.DataFrame,
+    variables: tuple[_Variable, ...],
+    *,
+    names: dict[int, str],
+) -> list[ResultComparison]:
+    """Join one level's two frames into ``ResultComparison`` rows.
+
+    Mirrors :func:`_tidy`'s join, but emits the canonical
+    :class:`~cobre_bridge.comparators.results.ResultComparison` shape
+    :func:`build_decomp_dataset` hands to
+    :func:`cobre_bridge.comparators.analyze.build_results_dataset`, keyed by
+    :data:`_CANONICAL_VARIABLE` rather than the decomp-local
+    ``_Variable.name`` :func:`_tidy` uses for its own standalone rows.
+    """
+    joined = source.join(cobre, on=["entity_id", "stage_id"], how="inner")
+    if joined.is_empty():
+        return []
+
+    applicable = [
+        var
+        for var in variables
+        if var.source_column in joined.columns and var.cobre_column in joined.columns
+    ]
+    if not applicable:
+        return []
+
+    results: list[ResultComparison] = []
+    for row in joined.iter_rows(named=True):
+        entity_id = int(row["entity_id"])
+        stage = int(row["stage_id"])
+        newave_code = int(row["newave_code"])
+        entity_name = names.get(entity_id, "")
+        for var in applicable:
+            nw_val = row[var.source_column]
+            cobre_val = row[var.cobre_column]
+            if nw_val is None or cobre_val is None:
+                continue
+            nw_value = float(nw_val)
+            cobre_value = float(cobre_val)
+            abs_diff, rel_diff = _result_diff(nw_value, cobre_value)
+            results.append(
+                ResultComparison(
+                    entity_type=var.level,
+                    entity_name=entity_name,
+                    newave_code=newave_code,
+                    cobre_id=entity_id,
+                    stage=stage,
+                    variable=_CANONICAL_VARIABLE[(var.level, var.name)],
+                    newave_value=nw_value,
+                    cobre_value=cobre_value,
+                    abs_diff=abs_diff,
+                    rel_diff=rel_diff,
+                )
+            )
+    return results
 
 
 def _summarize(rows: pl.DataFrame) -> pl.DataFrame:
@@ -329,7 +425,14 @@ def _bus_side(
 def _map_entities(
     frame: pl.DataFrame, code_column: str, mapping: dict[int, int]
 ) -> tuple[pl.DataFrame, list[int]]:
-    """Translate source codes to Cobre ids; report the codes with no mapping."""
+    """Translate source codes to Cobre ids; report the codes with no mapping.
+
+    Keeps the original code alongside the mapped ``entity_id`` (renamed to
+    the generic ``newave_code`` — D-SOURCE-TOKEN: the field name means "the
+    reference model's code", not NEWAVE-specific) so callers that need the
+    reference code back (:func:`_result_comparisons`) don't have to invert
+    ``mapping`` themselves.
+    """
     codes = {int(c) for c in frame[code_column].unique()}
     unmapped = sorted(code for code in codes if code not in mapping)
     mapped = (
@@ -337,6 +440,7 @@ def _map_entities(
             pl.col(code_column)
             .map_elements(lambda c: mapping.get(int(c)), return_dtype=pl.Int64)
             .alias("entity_id"),
+            pl.col(code_column).cast(pl.Int64).alias("newave_code"),
             # Stage ids are 0-based in Cobre and 1-based in the source deck.
             (pl.col("estagio").cast(pl.Int64) - 1).alias("stage_id"),
         )
@@ -376,15 +480,39 @@ def _cobre_hydro(cobre_output_dir: Path) -> tuple[pl.DataFrame, dict[int, str]]:
     )
 
 
-def compare_decomp_results(
+@dataclass(frozen=True)
+class _AlignedDecompFrames:
+    """One run's DECOMP-side + Cobre-side frames, aligned to Cobre ids/stages.
+
+    The shared read/align result :func:`compare_decomp_results` and
+    :func:`build_decomp_dataset` both build on, via
+    :func:`_read_aligned_frames` — deck discovery, id-map construction,
+    per-level scenario averaging, and the matching Cobre means run exactly
+    once per entry point.
+    """
+
+    source_hydro: pl.DataFrame
+    source_thermal: pl.DataFrame
+    source_bus: pl.DataFrame
+    cobre_hydro: pl.DataFrame
+    cobre_thermal: pl.DataFrame
+    cobre_bus: pl.DataFrame
+    hydro_names: dict[int, str]
+    thermal_names: dict[int, str]
+    bus_names: dict[int, str]
+    unmapped: dict[str, list[int]]
+
+
+def _read_aligned_frames(
     decomp_dir: Path, cobre_output_dir: Path
-) -> DecompComparison:
-    """Compare a source-model run against the Cobre run of its converted case.
+) -> _AlignedDecompFrames:
+    """Read and align both sides of one DECOMP-vs-Cobre comparison run.
 
     ``decomp_dir`` is the deck directory (it must contain the ``dec_oper_*.csv``
     result tables and the deck files needed to rebuild the id map, all directly
     in that directory); ``cobre_output_dir`` is Cobre's output directory, whose
-    case directory supplies the entity registries.
+    case directory supplies the entity registries. Entities the id map cannot
+    resolve are reported via ``unmapped`` rather than dropped in silence.
     """
     from idecomp.decomp import Dadger
 
@@ -416,13 +544,56 @@ def compare_decomp_results(
         for i, m in cobre_readers.read_cobre_bus_metadata(cobre_output_dir).items()
     }
 
+    return _AlignedDecompFrames(
+        source_hydro=source_hydro,
+        source_thermal=source_thermal,
+        source_bus=source_bus,
+        cobre_hydro=cobre_hydro,
+        cobre_thermal=cobre_thermal,
+        cobre_bus=cobre_bus,
+        hydro_names=hydro_names,
+        thermal_names=thermal_names,
+        bus_names=bus_names,
+        unmapped={
+            "hydro": unmapped_hydro,
+            "thermal": unmapped_thermal,
+            "bus": unmapped_bus,
+        },
+    )
+
+
+def compare_decomp_results(
+    decomp_dir: Path, cobre_output_dir: Path
+) -> DecompComparison:
+    """Compare a source-model run against the Cobre run of its converted case.
+
+    ``decomp_dir`` is the deck directory (it must contain the ``dec_oper_*.csv``
+    result tables and the deck files needed to rebuild the id map, all directly
+    in that directory); ``cobre_output_dir`` is Cobre's output directory, whose
+    case directory supplies the entity registries.
+    """
+    aligned = _read_aligned_frames(decomp_dir, cobre_output_dir)
+
     rows = pl.concat(
         [
-            _tidy(source_hydro, cobre_hydro, _HYDRO_VARIABLES, names=hydro_names),
             _tidy(
-                source_thermal, cobre_thermal, _THERMAL_VARIABLES, names=thermal_names
+                aligned.source_hydro,
+                aligned.cobre_hydro,
+                _HYDRO_VARIABLES,
+                names=aligned.hydro_names,
             ),
-            _tidy(source_bus, cobre_bus, _BUS_VARIABLES, names=bus_names),
+            _tidy(
+                aligned.source_thermal,
+                aligned.cobre_thermal,
+                _THERMAL_VARIABLES,
+                names=aligned.thermal_names,
+            ),
+            _tidy(
+                aligned.source_bus,
+                aligned.cobre_bus,
+                _BUS_VARIABLES,
+                names=aligned.bus_names,
+            ),
         ]
     )
 
@@ -430,9 +601,79 @@ def compare_decomp_results(
         rows=rows,
         summary=_summarize(rows),
         convergence=_convergence(decomp_dir, cobre_output_dir),
-        unmapped={
-            "hydro": unmapped_hydro,
-            "thermal": unmapped_thermal,
-            "bus": unmapped_bus,
-        },
+        unmapped=aligned.unmapped,
     )
+
+
+def build_decomp_dataset(
+    decomp_dir: Path, cobre_output_dir: Path, *, tolerance: float = 1e-2
+) -> ComparisonDataset:
+    """Build the canonical results dataset for the current 8 DECOMP variables.
+
+    Shares the read/align step with :func:`compare_decomp_results` (via
+    :func:`_read_aligned_frames`), but emits the canonical
+    :class:`~cobre_bridge.comparators.results.ResultComparison` shape and
+    assembles it through the shared, source-agnostic
+    :func:`~cobre_bridge.comparators.analyze.build_results_dataset` stat
+    kernel — instead of the standalone tidy/summary frames
+    :class:`DecompComparison` renders. This is the reuse engine every later
+    epic extends by filling more
+    :class:`~cobre_bridge.comparators.results.PercentileData` fields.
+
+    Per D-PERCENTILEDATA, the returned dataset's ``PercentileData`` carries
+    only the entity-name fields available at this stage (``nw_bus_names``,
+    ``nw_hydro_names``); every other field — including the percentile bands —
+    stays at its empty default, so no percentile spread is fabricated from a
+    low-scenario deterministic tree.
+
+    Args:
+        decomp_dir: The deck directory (results resolved via the ticket-001
+            union discovery).
+        cobre_output_dir: Cobre's output directory.
+        tolerance: Relative tolerance forwarded to the summary builder.
+
+    Returns:
+        The validated dataset. ``metadata["unmapped"]`` carries the per-level
+        (hydro/thermal/bus) reference codes the id map could not resolve, so
+        they survive into the dataset instead of being silently dropped.
+    """
+    from cobre_bridge.comparators.analyze import build_results_dataset
+
+    aligned = _read_aligned_frames(decomp_dir, cobre_output_dir)
+
+    results: list[ResultComparison] = []
+    results.extend(
+        _result_comparisons(
+            aligned.source_hydro,
+            aligned.cobre_hydro,
+            _HYDRO_VARIABLES,
+            names=aligned.hydro_names,
+        )
+    )
+    results.extend(
+        _result_comparisons(
+            aligned.source_thermal,
+            aligned.cobre_thermal,
+            _THERMAL_VARIABLES,
+            names=aligned.thermal_names,
+        )
+    )
+    results.extend(
+        _result_comparisons(
+            aligned.source_bus,
+            aligned.cobre_bus,
+            _BUS_VARIABLES,
+            names=aligned.bus_names,
+        )
+    )
+
+    pct = PercentileData(
+        nw_bus_names=aligned.bus_names,
+        nw_hydro_names=aligned.hydro_names,
+    )
+    dataset = build_results_dataset(results, pct, tolerance)
+    dataset.metadata["unmapped"] = {
+        level: [int(code) for code in codes]
+        for level, codes in aligned.unmapped.items()
+    }
+    return dataset

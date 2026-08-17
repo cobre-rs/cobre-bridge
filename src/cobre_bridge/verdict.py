@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from cobre_bridge.comparators.dataset import ComparisonDataset
     from cobre_bridge.comparators.decomp_results import DecompComparison
     from cobre_bridge.comparators.verdict import CompareVerdict
     from cobre_bridge.diagnostics import Diagnostic
@@ -187,6 +188,44 @@ def decomp_compare_summary(
         "total": total,
         "all_within_tol": all_within_tol,
     }
+
+
+def decomp_dataset_summary(
+    dataset: ComparisonDataset, tolerance: float
+) -> dict[str, object]:
+    """The ``compare decomp`` command's dataset-sourced ``summary`` block.
+
+    Supersedes :func:`decomp_compare_summary` at the ``compare decomp --json``
+    call site only (D-STRANGLER: the old summary stays for now, still
+    exercised by its own tests; E8 retires it). Returns the shared headline
+    fields from :func:`compare_summary` (``within_tol``, ``total``,
+    ``worst_variable``, ``worst_smape``, ``all_within_tol`` — sourced via
+    :func:`~cobre_bridge.comparators.verdict.build_compare_verdict`, so the
+    headline is computed once from ``dataset.summary`` and matches
+    ``compare newave``'s) PLUS the three DECOMP-specific keys read straight
+    from *dataset*, in this fixed order: ``stages`` (the count of distinct
+    ``dataset.tidy["stage"]`` values), ``variables``
+    (``dataset.summary.to_dicts()`` verbatim), and ``unmapped``
+    (``dataset.metadata["unmapped"]``, with every entity id coerced to
+    ``int``).
+
+    *tolerance* is accepted only for call-site symmetry with
+    :func:`decomp_compare_summary` — it is not consumed here because
+    ``dataset.summary``'s ``within_tol_rate`` (which
+    :func:`~cobre_bridge.comparators.verdict.build_compare_verdict` reads) was
+    already computed against a tolerance when the caller built *dataset*
+    (e.g. via ``build_decomp_dataset(..., tolerance=...)``).
+    """
+    from cobre_bridge.comparators.verdict import build_compare_verdict
+
+    summary = dict(compare_summary(build_compare_verdict(dataset)))
+    summary["stages"] = int(dataset.tidy["stage"].n_unique())
+    summary["variables"] = dataset.summary.to_dicts()
+    summary["unmapped"] = {
+        level: [int(code) for code in codes]
+        for level, codes in dataset.metadata["unmapped"].items()
+    }
+    return summary
 
 
 def dashboard_summary(output: str, size_kb: float) -> dict[str, object]:

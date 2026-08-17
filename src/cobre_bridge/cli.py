@@ -28,6 +28,7 @@ from cobre_bridge.ui.console import (
     make_table,
     print_status,
     render_checklist,
+    render_compare_verdict,
     render_conversion_summary,
     render_decomp_comparison,
     render_diagnostics,
@@ -40,7 +41,7 @@ from cobre_bridge.verdict import (
     compare_summary,
     convert_summary,
     dashboard_summary,
-    decomp_compare_summary,
+    decomp_dataset_summary,
 )
 
 if TYPE_CHECKING:
@@ -1788,8 +1789,17 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
     not read would be worse than stopping.
     """
     from cobre_bridge.comparators.cobre_readers import CobreReadError
-    from cobre_bridge.comparators.decomp_results import compare_decomp_results
+    from cobre_bridge.comparators.decomp_results import (
+        build_decomp_dataset,
+        compare_decomp_results,
+    )
+    from cobre_bridge.comparators.verdict import build_compare_verdict
     from cobre_bridge.errors import CobrePartitionMissingError
+
+    # Resolved before the read (unlike the pre-dataset ordering) so
+    # ``build_decomp_dataset`` below gets a concrete tolerance rather than the
+    # raw, possibly-``None`` CLI value — mirrors ``_run_newave_comparison``.
+    _resolve_compare_settings(args)
 
     try:
         with spinner(
@@ -1799,6 +1809,9 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
             no_color=args.no_color,
         ):
             comparison = compare_decomp_results(args.decomp_dir, args.cobre_output_dir)
+            dataset = build_decomp_dataset(
+                args.decomp_dir, args.cobre_output_dir, tolerance=args.tolerance
+            )
     except (
         CobreReadError,
         CobrePartitionMissingError,
@@ -1810,9 +1823,8 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
         )
         raise typer.Exit(code=2) from exc
 
-    _resolve_compare_settings(args)
-
     if not args.json_output:
+        render_compare_verdict(build_compare_verdict(dataset))
         render_decomp_comparison(comparison)
 
     formats, out_dir = _export_decomp_artifacts(
@@ -1843,12 +1855,16 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
         )
 
     if args.json_output:
-        # ``status`` REFLECTS divergence (within-tolerance verdict), but the
+        # ``status`` REFLECTS divergence (the shared headline verdict), but the
         # exit code is DECOUPLED from it — this command always exits 0,
-        # mirroring ``compare newave``. An empty comparison has no rows to
-        # judge, so it keeps the E1 data-availability status instead.
-        summary = decomp_compare_summary(comparison, args.tolerance)
-        if comparison.rows.is_empty():
+        # mirroring ``compare newave``. An empty dataset has no rows to judge,
+        # so it keeps the E1 data-availability status instead.
+        #
+        # D-STRANGLER: ``decomp_dataset_summary`` supersedes
+        # ``decomp_compare_summary`` at THIS call site only — the legacy
+        # summary (and its own tests) stay untouched until E8.
+        summary = decomp_dataset_summary(dataset, args.tolerance)
+        if dataset.tidy.is_empty():
             status = "no-comparable-rows"
         else:
             status = "ok" if summary["all_within_tol"] else "mismatch"

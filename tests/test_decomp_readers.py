@@ -7,9 +7,12 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 import pytest
+from idecomp.decomp import Relato
 
 from cobre_bridge.comparators.decomp_readers import (
     _read_dec_oper,
+    _resolve_relato,
+    _resolve_result_file,
     read_dec_oper_interc,
     read_dec_oper_sist,
     read_dec_oper_usih,
@@ -36,10 +39,84 @@ def _stub_reader(table: pd.DataFrame | None) -> type:
     return _Reader
 
 
+class _StubRelatoFile:
+    def __init__(self, convergencia: pd.DataFrame | None) -> None:
+        self.convergencia = convergencia
+
+
+class TestResolveResultFile:
+    """`_resolve_result_file`: saidas-first, case-insensitive discovery."""
+
+    def test_saidas_only(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        target = saidas / "dec_oper_ree.csv"
+        target.touch()
+        assert _resolve_result_file(tmp_path, "dec_oper_ree.csv") == target
+
+    def test_root_only_no_saidas_directory(self, tmp_path: Path) -> None:
+        target = tmp_path / "dec_oper_sist.csv"
+        target.touch()
+        assert _resolve_result_file(tmp_path, "dec_oper_sist.csv") == target
+
+    def test_prefers_saidas_when_both_present(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        saidas_copy = saidas / "dec_oper_sist.csv"
+        saidas_copy.touch()
+        (tmp_path / "dec_oper_sist.csv").touch()
+        assert _resolve_result_file(tmp_path, "dec_oper_sist.csv") == saidas_copy
+
+    def test_case_insensitive_in_saidas(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        target = saidas / "DEC_OPER_SIST.CSV"
+        target.touch()
+        assert _resolve_result_file(tmp_path, "dec_oper_sist.csv") == target
+
+    def test_absent_from_both_returns_none(self, tmp_path: Path) -> None:
+        assert _resolve_result_file(tmp_path, "dec_oper_ree.csv") is None
+
+
+class TestResolveRelato:
+    """`_resolve_relato`: same saidas-first precedence for relato.rvN."""
+
+    def test_saidas_only(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        target = saidas / "relato.rv2"
+        target.touch()
+        assert _resolve_relato(tmp_path) == target
+
+    def test_root_only_no_saidas_directory(self, tmp_path: Path) -> None:
+        target = tmp_path / "relato.rv2"
+        target.touch()
+        assert _resolve_relato(tmp_path) == target
+
+    def test_absent_from_both_returns_none(self, tmp_path: Path) -> None:
+        assert _resolve_relato(tmp_path) is None
+
+
 class TestReadDecOperCore:
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="dec_oper_sist.csv"):
             _read_dec_oper(tmp_path, "dec_oper_sist.csv", _stub_reader(None))
+
+    def test_missing_file_names_both_locations(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError) as exc_info:
+            _read_dec_oper(tmp_path, "dec_oper_ree.csv", _stub_reader(None))
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas" in message
+
+    def test_found_in_saidas_only(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_sist.csv").touch()
+        table = pd.DataFrame({"estagio": [1, 2], "cmo": [10.0, 12.0]})
+        result = _read_dec_oper(tmp_path, "dec_oper_sist.csv", _stub_reader(table))
+        assert isinstance(result, pl.DataFrame)
+        assert result.shape == (2, 2)
 
     def test_empty_parse_raises(self, tmp_path: Path) -> None:
         (tmp_path / "dec_oper_sist.csv").touch()
@@ -129,3 +206,28 @@ class TestRealDeckReaders:
     def test_relato_missing_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="relato"):
             read_relato_convergence(tmp_path)
+
+
+class TestReadRelatoConvergenceDiscovery:
+    """Tier-1: `read_relato_convergence` resolves a `saidas/`-only report."""
+
+    def test_finds_saidas_only_relato(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "relato.rv2").touch()
+        stub_table = pd.DataFrame(
+            {
+                "iteracao": [1],
+                "zinf": [1.0],
+                "zsup": [1.0],
+                "gap_percentual": [0.0],
+            }
+        )
+        monkeypatch.setattr(
+            Relato, "read", staticmethod(lambda _path: _StubRelatoFile(stub_table))
+        )
+        result = read_relato_convergence(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1

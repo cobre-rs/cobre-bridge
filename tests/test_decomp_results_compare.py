@@ -9,17 +9,29 @@ from typing import Any
 import polars as pl
 import pytest
 
+from cobre_bridge.comparators.dataset import (
+    SUMMARY_SCHEMA,
+    TIDY_SCHEMA,
+    ComparisonDataset,
+)
 from cobre_bridge.comparators.decomp_html_report import build_decomp_comparison_report
 from cobre_bridge.comparators.decomp_results import (
+    _BUS_VARIABLES,
+    _CANONICAL_VARIABLE,
     _HYDRO_VARIABLES,
+    _THERMAL_VARIABLES,
     DecompComparison,
+    _AlignedDecompFrames,
     _map_entities,
+    _result_comparisons,
     _scenario_mean,
     _stage_rows,
     _summarize,
     _tidy,
+    build_decomp_dataset,
+    compare_decomp_results,
 )
-from cobre_bridge.verdict import decomp_compare_summary
+from cobre_bridge.verdict import decomp_compare_summary, decomp_dataset_summary
 
 
 def _source_frame() -> pl.DataFrame:
@@ -77,6 +89,14 @@ class TestMapEntities:
         mapped, unmapped = _map_entities(frame, "codigo_usina", {10: 4})
         assert mapped["entity_id"].to_list() == [4]
         assert unmapped == [99]
+
+    def test_keeps_the_original_code_as_newave_code(self) -> None:
+        """``build_decomp_dataset`` needs the reference code back to fill
+        ``ResultComparison.newave_code`` -- ``_map_entities`` must not drop it
+        once it has been used to derive ``entity_id``."""
+        frame = pl.DataFrame({"estagio": [1, 2], "codigo_usina": [10, 10]})
+        mapped, _unmapped = _map_entities(frame, "codigo_usina", {10: 4})
+        assert mapped["newave_code"].to_list() == [10, 10]
 
 
 class TestTidyAndSummary:
@@ -146,6 +166,317 @@ class TestTidyAndSummary:
         assert _summarize(rows).is_empty()
 
 
+class TestResultComparisons:
+    """``_result_comparisons`` is the ``ResultComparison`` counterpart of
+    ``_tidy``, feeding ``build_decomp_dataset`` instead of ``DecompComparison``."""
+
+    def _pair(self) -> tuple[pl.DataFrame, pl.DataFrame]:
+        source = pl.DataFrame(
+            {
+                "entity_id": [0, 1],
+                "newave_code": [10, 11],
+                "stage_id": [0, 0],
+                "geracao_MW": [100.0, 50.0],
+            }
+        )
+        cobre = pl.DataFrame(
+            {
+                "entity_id": [0, 1],
+                "stage_id": [0, 0],
+                "generation_mw": [90.0, 50.0],
+            }
+        )
+        return source, cobre
+
+    def test_emits_one_result_comparison_per_row_with_the_canonical_variable(
+        self,
+    ) -> None:
+        source, cobre = self._pair()
+        results = _result_comparisons(
+            source, cobre, _HYDRO_VARIABLES, names={0: "A", 1: "B"}
+        )
+        assert {r.variable for r in results} == {"generation_mw"}
+        by_id = {r.cobre_id: r for r in results}
+        assert by_id[0].newave_code == 10
+        assert by_id[0].entity_name == "A"
+        assert by_id[0].entity_type == "hydro"
+        assert by_id[0].stage == 0
+        assert by_id[0].newave_value == 100.0
+        assert by_id[0].cobre_value == 90.0
+        assert by_id[0].abs_diff == pytest.approx(10.0)
+        assert by_id[0].rel_diff == pytest.approx(0.1)
+        assert by_id[1].newave_code == 11
+        assert by_id[1].abs_diff == pytest.approx(0.0)
+
+    def test_variables_missing_on_either_side_are_skipped(self) -> None:
+        source, cobre = self._pair()
+        results = _result_comparisons(source, cobre, _HYDRO_VARIABLES, names={})
+        # Only generation's columns are present in both frames.
+        assert {r.variable for r in results} == {"generation_mw"}
+
+    def test_empty_join_yields_no_results(self) -> None:
+        source = pl.DataFrame(
+            {
+                "entity_id": [0],
+                "newave_code": [10],
+                "stage_id": [0],
+                "geracao_MW": [1.0],
+            }
+        )
+        cobre = pl.DataFrame(
+            {"entity_id": [9], "stage_id": [9], "generation_mw": [1.0]}
+        )
+        assert _result_comparisons(source, cobre, _HYDRO_VARIABLES, names={}) == []
+
+    def test_canonical_variable_covers_all_eight_today_variables(self) -> None:
+        """D-SOURCE-TOKEN-adjacent guard: every ``_Variable`` spec this module
+        ships must resolve to a canonical chart name -- a spec with no entry
+        would raise a ``KeyError`` deep inside ``_result_comparisons``."""
+        all_vars = _HYDRO_VARIABLES + _THERMAL_VARIABLES + _BUS_VARIABLES
+        assert len(all_vars) == 8
+        canonical_names = {_CANONICAL_VARIABLE[(v.level, v.name)] for v in all_vars}
+        assert canonical_names == {
+            "generation_mw",
+            "turbined_m3s",
+            "spillage_m3s",
+            "outflow_m3s",
+            "storage_final_hm3",
+            "deficit_mw",
+            "spot_price",
+        }
+
+
+def _aligned_fixture() -> _AlignedDecompFrames:
+    """One hydro plant, one thermal plant, one bus -- already aligned to Cobre
+    ids/stages, matching the shape :func:`_read_aligned_frames` returns."""
+    source_hydro = pl.DataFrame(
+        {
+            "entity_id": [0, 1],
+            "newave_code": [10, 20],
+            "stage_id": [0, 0],
+            "geracao_MW": [120.0, 60.0],
+            "vazao_turbinada_m3s": [80.0, 40.0],
+            "vazao_vertida_m3s": [0.0, 0.0],
+            "vazao_defluente_m3s": [80.0, 40.0],
+            "volume_util_final_hm3": [500.0, 300.0],
+        }
+    )
+    cobre_hydro = pl.DataFrame(
+        {
+            "entity_id": [0, 1],
+            "stage_id": [0, 0],
+            "generation_mw": [110.0, 60.0],
+            "turbined_m3s": [78.0, 40.0],
+            "spillage_m3s": [0.0, 0.0],
+            "outflow_m3s": [78.0, 40.0],
+            "useful_storage_hm3": [480.0, 300.0],
+        }
+    )
+    source_thermal = pl.DataFrame(
+        {
+            "entity_id": [0],
+            "newave_code": [5],
+            "stage_id": [0],
+            "geracao_MW": [30.0],
+        }
+    )
+    cobre_thermal = pl.DataFrame(
+        {"entity_id": [0], "stage_id": [0], "generation_mw": [28.0]}
+    )
+    source_bus = pl.DataFrame(
+        {
+            "entity_id": [0],
+            "newave_code": [1],
+            "stage_id": [0],
+            "deficit_MW": [0.0],
+            "cmo": [45.0],
+        }
+    )
+    cobre_bus = pl.DataFrame(
+        {"entity_id": [0], "stage_id": [0], "deficit_mw": [0.0], "spot_price": [44.0]}
+    )
+    return _AlignedDecompFrames(
+        source_hydro=source_hydro,
+        source_thermal=source_thermal,
+        source_bus=source_bus,
+        cobre_hydro=cobre_hydro,
+        cobre_thermal=cobre_thermal,
+        cobre_bus=cobre_bus,
+        hydro_names={0: "A", 1: "B"},
+        thermal_names={0: "T"},
+        bus_names={0: "SE"},
+        unmapped={"hydro": [], "thermal": [86, 224], "bus": []},
+    )
+
+
+def _patch_aligned_frames(
+    monkeypatch: pytest.MonkeyPatch, aligned: _AlignedDecompFrames
+) -> None:
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results._read_aligned_frames",
+        lambda *_args, **_kwargs: aligned,
+    )
+    # ``compare_decomp_results`` also reads the convergence report directly
+    # (outside ``_read_aligned_frames``); stub it so the parity fixture never
+    # has to touch a real deck/output directory.
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results._convergence",
+        lambda *_args, **_kwargs: pl.DataFrame(schema={"iteration": pl.Int64}),
+    )
+
+
+class TestBuildDecompDataset:
+    """``build_decomp_dataset`` assembles the canonical dataset for the
+    current 8 DECOMP variables via the shared ``_read_aligned_frames`` seam."""
+
+    def test_dataset_validates_with_the_eight_canonical_variables(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        dataset.validate()
+        assert set(dataset.summary["variable"].to_list()) == {
+            "generation_mw",
+            "turbined_m3s",
+            "spillage_m3s",
+            "outflow_m3s",
+            "storage_final_hm3",
+            "deficit_mw",
+            "spot_price",
+        }
+
+    def test_tidy_sources_are_newave_and_cobre_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert set(dataset.tidy["source"].unique().to_list()) == {"newave", "cobre"}
+
+    def test_hydro_storage_rows_compare_useful_volume(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The cobre-side value must be ``useful_storage_hm3`` (already
+        ``storage_final_hm3 - min_storage_hm3`` upstream in ``_cobre_hydro``),
+        not the raw absolute ``storage_final_hm3``."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        cobre_storage = (
+            dataset.tidy.filter(
+                (pl.col("variable") == "storage_final_hm3")
+                & (pl.col("source") == "cobre")
+            )
+            .sort("entity_id")["value"]
+            .to_list()
+        )
+        assert cobre_storage == [480.0, 300.0]
+
+    def test_unmapped_codes_surface_in_metadata_and_are_excluded_from_tidy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata["unmapped"] == {
+            "hydro": [],
+            "thermal": [86, 224],
+            "bus": [],
+        }
+        thermal_codes = {
+            r.newave_code
+            for r in dataset.metadata["results"]
+            if r.entity_type == "thermal"
+        }
+        assert 86 not in thermal_codes
+        assert 224 not in thermal_codes
+
+    def test_calls_the_shared_stat_kernel_not_a_local_reimplementation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``top_divergences``/``footer_counts`` are only populated by
+        ``analyze.build_results_dataset``, so their presence is proof that
+        function ran instead of a locally re-derived summary."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert "top_divergences" in dataset.metadata
+        assert "footer_counts" in dataset.metadata
+
+    def test_empty_comparison_returns_a_schema_valid_empty_dataset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        fixture = _aligned_fixture()
+        empty = _AlignedDecompFrames(
+            source_hydro=fixture.source_hydro.clear(),
+            source_thermal=fixture.source_thermal.clear(),
+            source_bus=fixture.source_bus.clear(),
+            cobre_hydro=fixture.cobre_hydro.clear(),
+            cobre_thermal=fixture.cobre_thermal.clear(),
+            cobre_bus=fixture.cobre_bus.clear(),
+            hydro_names={},
+            thermal_names={},
+            bus_names={},
+            unmapped={"hydro": [], "thermal": [], "bus": []},
+        )
+        _patch_aligned_frames(monkeypatch, empty)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        dataset.validate()
+        assert dataset.tidy.is_empty()
+        assert dataset.summary.is_empty()
+        assert dataset.metadata["unmapped"] == {
+            "hydro": [],
+            "thermal": [],
+            "bus": [],
+        }
+
+
+class TestBuildDecompDatasetParityWithLegacyComparison:
+    """No drift from the migration: on the same aligned fixture,
+    ``build_decomp_dataset`` and the legacy ``compare_decomp_results`` must
+    report the same per-(entity, stage) newave/cobre values."""
+
+    def test_every_legacy_row_has_a_matching_dataset_pair(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        legacy = compare_decomp_results(tmp_path, tmp_path)
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert legacy.rows.height > 0  # the fixture must exercise real rows
+        for row in legacy.rows.iter_rows(named=True):
+            canonical = _CANONICAL_VARIABLE[(row["level"], row["variable"])]
+            match = dataset.tidy.filter(
+                (pl.col("entity_type") == row["level"])
+                & (pl.col("variable") == canonical)
+                & (pl.col("entity_id") == row["entity_id"])
+                & (pl.col("stage") == row["stage_id"])
+            )
+            newave_value = match.filter(pl.col("source") == "newave")["value"].to_list()
+            cobre_value = match.filter(pl.col("source") == "cobre")["value"].to_list()
+            assert newave_value == pytest.approx([row["source"]])
+            assert cobre_value == pytest.approx([row["cobre"]])
+
+    def test_unmapped_dict_is_identical_between_entry_points(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        legacy = compare_decomp_results(tmp_path, tmp_path)
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata["unmapped"] == legacy.unmapped
+
+
 class TestComparisonRecord:
     def test_stage_count_counts_distinct_stages(self) -> None:
         rows = pl.DataFrame(
@@ -202,6 +533,141 @@ def _fake_comparison() -> DecompComparison:
         ),
         unmapped={"hydro": [], "thermal": [86, 224], "bus": []},
     )
+
+
+def _fake_dataset(*, all_within_tol: bool = False) -> ComparisonDataset:
+    """The canonical-dataset counterpart of ``_fake_comparison``: two stages,
+    two variables. ``generation_mw`` always matches; ``turbined_m3s`` diverges
+    unless *all_within_tol* asks for a fully-passing dataset instead."""
+    tidy = pl.DataFrame(
+        {
+            "entity_type": ["hydro", "hydro", "hydro", "hydro"],
+            "entity_id": [0, 0, 0, 0],
+            "entity_name": ["A", "A", "A", "A"],
+            "bus": [-1, -1, -1, -1],
+            "stage": [0, 0, 1, 1],
+            "block": [-1, -1, -1, -1],
+            "variable": [
+                "generation_mw",
+                "generation_mw",
+                "turbined_m3s",
+                "turbined_m3s",
+            ],
+            "source": ["newave", "cobre", "newave", "cobre"],
+            "value": [100.0, 100.0, 100.0, 100.0 if all_within_tol else 90.0],
+        },
+        schema=TIDY_SCHEMA,
+    )
+    turbined_within_tol_rate = 1.0 if all_within_tol else 0.0
+    turbined_smape = 0.0 if all_within_tol else 0.12
+    summary = pl.DataFrame(
+        {
+            "variable": ["generation_mw", "turbined_m3s"],
+            "count": [1, 1],
+            "mean_abs_diff": [0.0, 0.0 if all_within_tol else 10.0],
+            "max_abs_diff": [0.0, 0.0 if all_within_tol else 10.0],
+            "mean_smape": [0.0, turbined_smape],
+            "max_smape": [0.0, turbined_smape],
+            "within_tol_rate": [1.0, turbined_within_tol_rate],
+            "correlation": [1.0, 0.9],
+        },
+        schema=SUMMARY_SCHEMA,
+    )
+    return ComparisonDataset(
+        tidy=tidy,
+        summary=summary,
+        metadata={"unmapped": {"hydro": [], "thermal": [86, 224], "bus": []}},
+    )
+
+
+def _empty_fake_dataset() -> ComparisonDataset:
+    return ComparisonDataset(
+        tidy=pl.DataFrame(schema=TIDY_SCHEMA),
+        summary=pl.DataFrame(schema=SUMMARY_SCHEMA),
+        metadata={"unmapped": {"hydro": [], "thermal": [], "bus": []}},
+    )
+
+
+class TestDecompDatasetSummary:
+    """``decomp_dataset_summary`` -- the superset ``--json`` payload builder
+    that supersedes ``decomp_compare_summary`` at the ``compare decomp``
+    call site (the legacy summary itself is untouched, per D-STRANGLER)."""
+
+    def test_returns_the_superset_shape_in_the_documented_key_order(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert list(summary.keys()) == [
+            "within_tol",
+            "total",
+            "worst_variable",
+            "worst_smape",
+            "all_within_tol",
+            "stages",
+            "variables",
+            "unmapped",
+        ]
+
+    def test_headline_fields_match_build_compare_verdict(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["within_tol"] == 1
+        assert summary["total"] == 2
+        assert summary["worst_variable"] == "turbined_m3s"
+        assert summary["worst_smape"] == pytest.approx(0.12)
+        assert summary["all_within_tol"] is False
+
+    def test_stages_counts_distinct_tidy_stage_values(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["stages"] == 2
+
+    def test_variables_is_the_dataset_summary_verbatim(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["variables"] == dataset.summary.to_dicts()
+
+    def test_unmapped_is_sourced_from_dataset_metadata_with_int_codes(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["unmapped"] == {"hydro": [], "thermal": [86, 224], "bus": []}
+        assert all(
+            isinstance(code, int)
+            for codes in summary["unmapped"].values()
+            for code in codes
+        )
+
+    def test_all_within_tol_dataset_reports_no_worst_clause(self) -> None:
+        dataset = _fake_dataset(all_within_tol=True)
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["within_tol"] == 2
+        assert summary["total"] == 2
+        assert summary["all_within_tol"] is True
+        assert summary["worst_variable"] is None
+        assert summary["worst_smape"] == 0.0
+
+    def test_empty_dataset_reports_zero_totals_and_no_stages(self) -> None:
+        dataset = _empty_fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["within_tol"] == 0
+        assert summary["total"] == 0
+        assert summary["all_within_tol"] is False
+        assert summary["stages"] == 0
+        assert summary["variables"] == []
+        assert summary["unmapped"] == {"hydro": [], "thermal": [], "bus": []}
 
 
 class TestBuildDecompComparisonReport:
@@ -313,15 +779,23 @@ class TestCompareDecompCommand:
         argv: list[str],
         monkeypatch: pytest.MonkeyPatch,
         comparison: DecompComparison | None = None,
+        dataset: ComparisonDataset | None = None,
     ) -> Any:
         from typer.testing import CliRunner
 
         from cobre_bridge.cli import app
 
-        resolved = comparison if comparison is not None else _fake_comparison()
+        resolved_comparison = (
+            comparison if comparison is not None else _fake_comparison()
+        )
+        resolved_dataset = dataset if dataset is not None else _fake_dataset()
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.compare_decomp_results",
-            lambda *_args, **_kwargs: resolved,
+            lambda *_args, **_kwargs: resolved_comparison,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            lambda *_args, **_kwargs: resolved_dataset,
         )
         return CliRunner().invoke(app, argv)
 
@@ -335,11 +809,42 @@ class TestCompareDecompCommand:
         assert "Operation comparison" in result.stdout
         assert "Final bounds" in result.stdout
 
+    def test_headline_leads_stdout_on_a_diverging_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The shared ``build_compare_verdict`` headline, from ``_fake_dataset``'s
+        mismatch (1/2 within tol, worst ``turbined_m3s`` at 12% sMAPE), leads
+        stdout ahead of the legacy per-variable table."""
+        result = self._invoke(
+            ["compare", "decomp", str(tmp_path), str(tmp_path)], monkeypatch
+        )
+        assert result.exit_code == 0
+        lines = result.stdout.splitlines()
+        assert lines[0] == "⚠ 1/2 variables within tol — worst: turbined_m3s sMAPE 12%"
+        assert "Operation comparison" in result.stdout
+        assert result.stdout.index("Operation comparison") > result.stdout.index(
+            lines[0]
+        )
+
+    def test_headline_leads_stdout_when_all_within_tol(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        result = self._invoke(
+            ["compare", "decomp", str(tmp_path), str(tmp_path)],
+            monkeypatch,
+            dataset=_fake_dataset(all_within_tol=True),
+        )
+        assert result.exit_code == 0
+        lines = result.stdout.splitlines()
+        assert lines[0] == "✓ 2/2 variables within tol"
+        assert "Operation comparison" in result.stdout
+
     def test_json_carries_the_summary_and_unmapped_codes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """At the default tolerance (1e-2), hydro's ``smape_pct == 10.5`` exceeds
-        it while thermal's ``0.0`` does not, so the fixture reports a mismatch."""
+        """``_fake_dataset``'s ``turbined_m3s`` row (``within_tol_rate=0.0``)
+        diverges while ``generation_mw`` (``within_tol_rate=1.0``) does not, so
+        the default fixture reports a mismatch."""
         result = self._invoke(
             ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"], monkeypatch
         )
@@ -356,35 +861,37 @@ class TestCompareDecompCommand:
         assert payload["status"] == "mismatch"
         summary = payload["summary"]
         assert list(summary.keys()) == [
+            "within_tol",
+            "total",
+            "worst_variable",
+            "worst_smape",
+            "all_within_tol",
             "stages",
             "variables",
             "unmapped",
-            "within_tol",
-            "total",
-            "all_within_tol",
         ]
-        assert summary["stages"] == 1
-        assert {row["level"] for row in summary["variables"]} == {"hydro", "thermal"}
-        assert summary["unmapped"]["thermal"] == [86, 224]
         assert summary["within_tol"] == 1
         assert summary["total"] == 2
+        assert summary["worst_variable"] == "turbined_m3s"
+        assert summary["worst_smape"] == pytest.approx(0.12)
         assert summary["all_within_tol"] is False
+        assert summary["stages"] == 2
+        assert {row["variable"] for row in summary["variables"]} == {
+            "generation_mw",
+            "turbined_m3s",
+        }
+        assert summary["unmapped"]["thermal"] == [86, 224]
 
-    def test_json_status_is_ok_under_a_loose_tolerance(
+    def test_json_status_is_ok_when_dataset_reports_all_within_tol(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A looser ``--tolerance`` flips the same fixture's mismatch to ok."""
+        """When the dataset's ``within_tol_rate`` is 1.0 for every variable
+        (the tolerance was already applied upstream when the caller built the
+        dataset), the CLI reports ``ok``."""
         result = self._invoke(
-            [
-                "compare",
-                "decomp",
-                str(tmp_path),
-                str(tmp_path),
-                "--tolerance",
-                "0.5",
-                "--json",
-            ],
+            ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"],
             monkeypatch,
+            dataset=_fake_dataset(all_within_tol=True),
         )
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
@@ -405,10 +912,12 @@ class TestCompareDecompCommand:
             ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"],
             monkeypatch,
             comparison=empty_comparison,
+            dataset=_empty_fake_dataset(),
         )
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
         assert payload["status"] == "no-comparable-rows"
+        assert payload["summary"]["stages"] == 0
         assert payload["summary"]["variables"] == []
         assert payload["summary"]["within_tol"] == 0
         assert payload["summary"]["total"] == 0

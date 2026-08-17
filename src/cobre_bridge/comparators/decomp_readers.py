@@ -41,15 +41,34 @@ class _TableReader(Protocol):
     def read(path: str) -> _TableFile: ...
 
 
+def _resolve_result_file(case_dir: Path, filename: str) -> Path | None:
+    """Resolve *filename* case-insensitively, preferring ``saidas/`` over
+    the deck root.
+
+    DECOMP ships its full result export under the deck's ``saidas/``
+    subfolder; the deck root carries only a curated subset. A file present
+    in both locations is taken from ``saidas/``. A missing ``saidas/``
+    directory is a silent miss, not an error.
+    """
+    for base in (case_dir / "saidas", case_dir):
+        if base.is_dir():
+            hit = _find_case_insensitive(base, filename)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _read_dec_oper(
     case_dir: Path,
     filename: str,
     reader_cls: _TableReader,
 ) -> pl.DataFrame:
     """Read one ``dec_oper_*`` table, rejecting missing or empty parses."""
-    path = _find_case_insensitive(case_dir, filename)
+    path = _resolve_result_file(case_dir, filename)
     if path is None:
-        raise FileNotFoundError(f"{filename} not found in {case_dir}")
+        raise FileNotFoundError(
+            f"{filename} not found in {case_dir} or its saidas/ subfolder"
+        )
     table = reader_cls.read(str(path)).tabela
     if table is None or table.empty:
         raise ValueError(
@@ -89,23 +108,30 @@ def read_dec_oper_interc(case_dir: Path) -> pl.DataFrame:
     return _read_dec_oper(case_dir, "dec_oper_interc.csv", DecOperInterc)
 
 
-def _find_relato(case_dir: Path) -> Path | None:
-    """Locate the revision-suffixed general report (``relato.rvN``)."""
-    try:
-        for entry in sorted(case_dir.iterdir()):
-            if entry.is_file() and _RELATO_PATTERN.match(entry.name):
-                return entry
-    except OSError:
-        pass
+def _resolve_relato(case_dir: Path) -> Path | None:
+    """Locate the revision-suffixed general report (``relato.rvN``),
+    preferring ``saidas/`` over the deck root (same precedence as
+    `_resolve_result_file`)."""
+    for base in (case_dir / "saidas", case_dir):
+        if not base.is_dir():
+            continue
+        try:
+            for entry in sorted(base.iterdir()):
+                if entry.is_file() and _RELATO_PATTERN.match(entry.name):
+                    return entry
+        except OSError:
+            pass
     return None
 
 
 def read_relato_convergence(case_dir: Path) -> pl.DataFrame:
     """Read the convergence table (``iteracao``, ``zinf``, ``zsup``,
     ``gap_percentual``, …) from the general report."""
-    path = _find_relato(case_dir)
+    path = _resolve_relato(case_dir)
     if path is None:
-        raise FileNotFoundError(f"no relato.rvN found in {case_dir}")
+        raise FileNotFoundError(
+            f"no relato.rvN found in {case_dir} or its saidas/ subfolder"
+        )
     table = Relato.read(str(path)).convergencia
     if table is None or table.empty:
         raise ValueError(f"{path} has no convergence table")
