@@ -261,6 +261,79 @@ def test_map_inflow_lag_means_skips_dropped_plant() -> None:
     assert result.cuts[0].intercept == pytest.approx(5.0 * MONTH_HOURS - expected_fold)
 
 
+def test_map_complexo_replicates_coefficients_onto_components() -> None:
+    # A NEWAVE complexo (code 99, not operated) resolves via CX onto two DECOMP
+    # components (codes 10, 11 -> hydro_ids 0, 1). Its storage + inflow-lag
+    # coefficients replicate onto EACH component (full value), and each folds
+    # its own seasonal mean.
+    id_map = make_id_map((10, 11))
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # position 0
+            make_slot(_HYDRO_STORAGE, 1, 0),  # position 1
+            *[make_slot(_HYDRO_INFLOW_LAG, 0, lag) for lag in range(12)],  # 2..13
+            *[make_slot(_HYDRO_INFLOW_LAG, 1, lag) for lag in range(12)],  # 14..25
+        ]
+    )
+    lags = (3.0,) + (0.0,) * 11
+    cuts = make_boundary_cuts(
+        (99,), (make_cut_record(pi_varm=(2.0,), pi_qafl=(lags,), rhs=5.0),)
+    )
+    means = {0: (100.0,) + (0.0,) * 11, 1: (50.0,) + (0.0,) * 11}
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        lag_slot_of=lambda d: d - 1,
+        inflow_lag_means=means,
+        complexo_components={99: [10, 11]},
+    )
+
+    assert result.dropped == ()  # complexo resolved via CX, not dropped
+    mapped = result.cuts[0]
+    # Storage coefficient replicated onto BOTH components (full value each).
+    assert mapped.coefficients[0] == pytest.approx(2.0 * MONTH_HOURS)
+    assert mapped.coefficients[1] == pytest.approx(2.0 * MONTH_HOURS)
+    # Depth-1 lag replicated onto both components' lag slots.
+    assert mapped.coefficients[2] == pytest.approx(3.0 * _LAG_FACTOR)
+    assert mapped.coefficients[14] == pytest.approx(3.0 * _LAG_FACTOR)
+    # Each component folds its OWN seasonal mean: Σ placed_lag_coef · μ.
+    expected_fold = 3.0 * _LAG_FACTOR * 100.0 + 3.0 * _LAG_FACTOR * 50.0
+    assert mapped.intercept == pytest.approx(5.0 * MONTH_HOURS - expected_fold)
+
+
+def test_map_complexo_dropped_when_no_operated_component() -> None:
+    # A complexo whose CX components are all unknown to id_map resolves onto no
+    # live target -> dropped (D3), like any source-only plant.
+    id_map = make_id_map((10,))
+    manifest = make_manifest([make_slot(_HYDRO_STORAGE, 0, 0)])
+    cuts = make_boundary_cuts((99,), (make_cut_record(pi_varm=(2.0,)),))
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        complexo_components={99: [20, 21]},
+    )
+
+    assert [term.plant_code for term in result.dropped] == [99]
+
+
+def test_map_complexo_none_leaves_complexo_dropped() -> None:
+    # Without a complexo map, a complexo code (not operated) is dropped exactly
+    # as before — byte-for-byte the pre-CX behaviour.
+    id_map = make_id_map((10,))
+    manifest = make_manifest([make_slot(_HYDRO_STORAGE, 0, 0)])
+    cuts = make_boundary_cuts((99,), (make_cut_record(pi_varm=(2.0,)),))
+
+    result = map_boundary_cuts(cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS)
+
+    assert [term.plant_code for term in result.dropped] == [99]
+
+
 def test_map_zeroes_buckets_and_gnl_ring() -> None:
     id_map = make_id_map((10,))
     manifest = make_manifest(

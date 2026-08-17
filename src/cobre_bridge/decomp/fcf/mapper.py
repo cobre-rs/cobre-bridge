@@ -341,35 +341,74 @@ def _validated_lag_subindices(
     return subindices
 
 
+def _component_codes(
+    plant_code: int,
+    id_map: DecompIdMap,
+    complexo_components: Mapping[int, Sequence[int]] | None,
+) -> tuple[int, ...]:
+    """The DECOMP plant code(s) a source header code resolves onto.
+
+    An operated plant is its own single component. A NEWAVE *complexo* code —
+    absent from the DECOMP model but listed in `complexo_components` (the `CX`
+    register: a complexo aggregates several DECOMP plants that share its future
+    cost) — resolves onto its component plants, so the complexo's cut
+    coefficients replicate onto each (see :func:`_resolve_storage_targets`). An
+    unknown code that is neither operated nor a complexo resolves onto nothing
+    (dropped).
+    """
+    try:
+        id_map.hydro_id(plant_code)
+    except KeyError:
+        if complexo_components is not None:
+            return tuple(complexo_components.get(plant_code, ()))
+        return ()
+    return (plant_code,)
+
+
 def _resolve_storage_targets(
     cuts: BoundaryCuts,
     id_map: DecompIdMap,
     slot_positions: Mapping[tuple[int, int, int], int],
-) -> tuple[dict[int, tuple[int, int]], tuple[DroppedTerm, ...]]:
-    """Resolve each source plant's `(hydro_id, storage position)` once.
+    complexo_components: Mapping[int, Sequence[int]] | None = None,
+) -> tuple[dict[int, tuple[tuple[int, int], ...]], tuple[DroppedTerm, ...]]:
+    """Resolve each source plant's target `(hydro_id, storage position)` slot(s).
 
-    A plant is dropped (D3) when its code is unknown to `id_map` (a
-    `KeyError` from `hydro_id`) or when the target manifest has no matching
-    `HydroStorage` slot for the resolved id — either way, the plant's
-    storage *and* inflow-lag terms are omitted from every mapped cut, never
-    folded into a neighbour.
+    Normally a source plant maps 1:1 to its own cobre id, so its value is a
+    one-tuple `((hydro_id, position),)`. A NEWAVE *complexo* header code
+    (absent from `id_map` but present in `complexo_components` — the `CX`
+    register) maps **1→many** onto its DECOMP component plants: the complexo's
+    coefficients are replicated onto EACH component's slot, so the sum over the
+    components reconstructs the complexo's aggregate cut term (the complexo's
+    aggregate storage/inflow state is the sum of its components' — see the
+    module header). Each component gets the *full* coefficient (a
+    sum-decomposition, not a split).
+
+    A source plant/complexo is dropped (D3) only when it resolves onto no live
+    target at all — an unknown code that is neither operated nor a complexo, or
+    a complexo whose every component is unknown to `id_map` or lacks a
+    `HydroStorage` slot. Its storage *and* inflow-lag terms are then omitted
+    from every mapped cut, never folded into a neighbour. A component that
+    individually lacks a `HydroStorage` slot is skipped without dropping the
+    whole complexo.
     """
     representative_varm = cuts.records[0].pi_varm if cuts.records else ()
-    resolved: dict[int, tuple[int, int]] = {}
+    resolved: dict[int, tuple[tuple[int, int], ...]] = {}
     dropped: list[DroppedTerm] = []
     for plant_index, plant_code in enumerate(cuts.header.plant_codes):
-        try:
-            hydro_id = id_map.hydro_id(plant_code)
-        except KeyError:
+        targets: list[tuple[int, int]] = []
+        for component_code in _component_codes(plant_code, id_map, complexo_components):
+            try:
+                hydro_id = id_map.hydro_id(component_code)
+            except KeyError:
+                continue
+            position = slot_positions.get((_HYDRO_STORAGE, hydro_id, _STORAGE_SUBINDEX))
+            if position is not None:
+                targets.append((hydro_id, position))
+        if targets:
+            resolved[plant_index] = tuple(targets)
+        else:
             beta = representative_varm[plant_index] if representative_varm else 0.0
             dropped.append(DroppedTerm(plant_code=plant_code, beta=beta))
-            continue
-        position = slot_positions.get((_HYDRO_STORAGE, hydro_id, _STORAGE_SUBINDEX))
-        if position is None:
-            beta = representative_varm[plant_index] if representative_varm else 0.0
-            dropped.append(DroppedTerm(plant_code=plant_code, beta=beta))
-            continue
-        resolved[plant_index] = (hydro_id, position)
     return resolved, tuple(dropped)
 
 
@@ -561,6 +600,7 @@ def map_boundary_cuts(
     gnl_plan: GnlRingPlan | None = None,
     coupling_block_hours: Sequence[float] | None = None,
     inflow_lag_means: Mapping[int, Sequence[float]] | None = None,
+    complexo_components: Mapping[int, Sequence[int]] | None = None,
 ) -> MappingResult:
     """Map every cut in `cuts.records` onto `manifest`'s state-vector layout.
 
@@ -620,6 +660,18 @@ def map_boundary_cuts(
     contributes to the fold. `None` (the default) folds nothing — the intercept
     is the plain scaled `rhs` — byte-for-byte the pre-fold behaviour.
 
+    `complexo_components` maps a NEWAVE *complexo* header code to its DECOMP
+    component plant codes (the `CX` register — a complexo aggregates several
+    DECOMP plants that share one future cost). A complexo code (absent from
+    `id_map`) would otherwise be dropped; given this map, its cut coefficients
+    are **replicated onto each component** (storage on each component's storage
+    slot, inflow-lag on each component's lag slots, both scaled and folded
+    exactly as an ordinary plant's), so the sum over the components reconstructs
+    the complexo's aggregate term (aggregate state = Σ component states — a
+    sum-decomposition, each gets the full coefficient, not `coef/N`). `None`
+    (the default) leaves complexo codes dropped, byte-for-byte the pre-CX
+    behaviour.
+
     Raises
     ------
     ValueError
@@ -641,7 +693,9 @@ def map_boundary_cuts(
             "terminal-manifest read must carry at least the storage family"
         )
 
-    resolved_storage, dropped = _resolve_storage_targets(cuts, id_map, slot_positions)
+    resolved_storage, dropped = _resolve_storage_targets(
+        cuts, id_map, slot_positions, complexo_components
+    )
     lag_bound = _lag_subindex_bound(slot_positions)
     lag_subindices = _validated_lag_subindices(lag_slot_of, lag_bound)
 
@@ -688,25 +742,31 @@ def map_boundary_cuts(
         # actually placed, so a dropped plant/lag contributes nothing to the
         # fold either — the fold can never reference a term cobre won't apply.
         rhs_fold = 0.0
-        for plant_index, (hydro_id, storage_position) in resolved_storage.items():
-            coefficients[storage_position] = (
-                record.pi_varm[plant_index] * cost_unit_factor
-            )
-            if lag_bound == 0:
-                continue
+        for plant_index, targets in resolved_storage.items():
+            # `targets` is one slot for an ordinary plant, or several for a
+            # complexo (CX): the same coefficient replicates onto every
+            # component, so `Σ` over them reconstructs the complexo's aggregate
+            # term (aggregate state = Σ component states — module header).
+            storage_coefficient = record.pi_varm[plant_index] * cost_unit_factor
             plant_lags = record.pi_qafl[plant_index]
-            plant_means = (
-                inflow_lag_means.get(hydro_id) if inflow_lag_means is not None else None
-            )
-            for depth_index, subindex in enumerate(lag_subindices):
-                lag_position = slot_positions.get(
-                    (_HYDRO_INFLOW_LAG, hydro_id, subindex)
+            for hydro_id, storage_position in targets:
+                coefficients[storage_position] = storage_coefficient
+                if lag_bound == 0:
+                    continue
+                plant_means = (
+                    inflow_lag_means.get(hydro_id)
+                    if inflow_lag_means is not None
+                    else None
                 )
-                if lag_position is not None:
-                    lag_coefficient = plant_lags[depth_index] * inflow_lag_factor
-                    coefficients[lag_position] = lag_coefficient
-                    if plant_means is not None:
-                        rhs_fold += lag_coefficient * plant_means[depth_index]
+                for depth_index, subindex in enumerate(lag_subindices):
+                    lag_position = slot_positions.get(
+                        (_HYDRO_INFLOW_LAG, hydro_id, subindex)
+                    )
+                    if lag_position is not None:
+                        lag_coefficient = plant_lags[depth_index] * inflow_lag_factor
+                        coefficients[lag_position] = lag_coefficient
+                        if plant_means is not None:
+                            rhs_fold += lag_coefficient * plant_means[depth_index]
 
         for gnl_position, gnl_cols in resolved_gnl.items():
             # Hours-weighted collapse (ticket-001): `pi_gnl` prices an energy

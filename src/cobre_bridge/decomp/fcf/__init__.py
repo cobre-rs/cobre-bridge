@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -246,6 +247,39 @@ def _coupling_stage_hours(case_dir: Path) -> float:
         Propagated verbatim from :func:`_final_stage_block_hours`.
     """
     return math.fsum(_final_stage_block_hours(case_dir))
+
+
+#: A ``CX`` register line: ``CX <complexo_code> <component_code>``. idecomp
+#: exposes no typed accessor for ``CX``, so it is parsed directly.
+_CX_LINE = re.compile(r"^CX\s+(\d+)\s+(\d+)")
+
+
+def _read_complexo_map(dadger_path: Path) -> dict[int, list[int]]:
+    """Parse the deck's ``CX`` register into ``{complexo_code: [component_codes]}``.
+
+    The ``CX`` register (*acoplamento de usinas que representam complexos no
+    NEWAVE com o DECOMP*) maps a NEWAVE **complexo** — an aggregated plant
+    carrying a single set of future-cost coefficients in the boundary cuts — to
+    the individual DECOMP plants that share it. The boundary cut header prices
+    the complexo (which is absent from the DECOMP model), so
+    :func:`~cobre_bridge.decomp.fcf.mapper.map_boundary_cuts` replicates its
+    coefficients onto these components. Each ``CX <complexo> <component>`` line
+    appends ``component`` to ``complexo``'s list; returns an empty map when the
+    deck carries no ``CX`` register or the file is absent (the importer's own
+    ``Dadger.read`` validates the deck's presence upstream — this raw pass only
+    reads the ``CX`` lines idecomp does not model).
+    """
+    complexo_map: dict[int, list[int]] = {}
+    if not dadger_path.is_file():
+        return complexo_map
+    with dadger_path.open(encoding="latin-1") as handle:
+        for line in handle:
+            match = _CX_LINE.match(line)
+            if match is not None:
+                complexo_map.setdefault(int(match.group(1)), []).append(
+                    int(match.group(2))
+                )
+    return complexo_map
 
 
 def _find_mlt(deck_dir: Path) -> Path | None:
@@ -734,6 +768,11 @@ def import_boundary_fcf(
     # second stages.json read (ticket-001).
     coupling_block_hours = _final_stage_block_hours(case_dir)
     cost_unit_hours = math.fsum(coupling_block_hours)
+    # CX register (complexo -> DECOMP components): the header prices a NEWAVE
+    # complexo absent from the DECOMP model, so its coefficients replicate onto
+    # the individual plants that share it (see map_boundary_cuts) rather than
+    # being dropped.
+    complexo_components = _read_complexo_map(deck_files.dadger)
     mapping = map_boundary_cuts(
         cuts,
         manifest,
@@ -742,6 +781,7 @@ def import_boundary_fcf(
         gnl_plan=gnl_plan,
         coupling_block_hours=coupling_block_hours,
         inflow_lag_means=inflow_lag_means,
+        complexo_components=complexo_components,
     )
     _LOG.info(
         "scaling boundary FCF coefficients to cobre cost units over the "
