@@ -1419,6 +1419,109 @@ def convert_hydro_group_availability(
     return values
 
 
+#: The two Itaipu frequency-half minimum-generation floors on the ``RI``
+#: register, keyed by the split-plant group id they bound (0 = 50 Hz, 1 =
+#: 60 Hz, matching :func:`_build_split_unit_groups`'s ascending-frequency
+#: ordering). Each value is the ``RI`` column prefix whose per-patamar slots
+#: (``…_1``.. ``…_5``) carry that half's floor.
+_ITAIPU_MIN_GENERATION_PREFIXES: tuple[tuple[int, str], ...] = (
+    (0, "geracao_minima_50_hz"),
+    (1, "geracao_minima_60_hz"),
+)
+
+
+def convert_itaipu_frequency_min_generation(
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> dict[tuple[int, int, int], list[float]]:
+    """Itaipu's per-frequency minimum-generation floors from the ``RI`` register.
+
+    DECOMP's ``RI`` (restrição de Itaipu) register carries a must-run floor on
+    each Itaipu frequency half: ``geracao_minima_50_hz`` on the 50 Hz group
+    (which serves the Paraguay/ANDE load plus its surplus into SE) and
+    ``geracao_minima_60_hz`` on the 60 Hz group (on the plant's own bus). Each
+    is a per-(estágio, patamar) list, forward-filled across the calendar the
+    same way :func:`~cobre_bridge.decomp.libs_electrical.read_carga_ande` fills
+    the co-located ``carga_ande`` load. In DECOMP the 50 Hz floor binds (the
+    50 Hz half sits exactly at it), so dropping it lets the converted case
+    under-run Itaipu's 50 Hz half and backfill the ANDE load from the rest of
+    the system through the ``IV`` bus's lines.
+
+    Returns ``{(hydro_id, hydro_unit_group_id, stage_index): [MW per block]}``
+    for the two Itaipu groups, ready to merge into the
+    ``hydro_unit_group_bounds`` overlay's ``min_generation_mw`` column
+    (:func:`~cobre_bridge.decomp.group_bounds.convert_hydro_unit_group_bounds`).
+    Returns ``{}`` when the deck operates no Itaipu or carries no ``RI``
+    register (a deck with no Itaipu import).
+
+    Raises
+    ------
+    ValueError
+        When a declared row's ``estagio`` falls outside the calendar, when a
+        frequency half's patamar-value count does not match the calendar's
+        block count for that stage, or when the register declares a frequency
+        half but no estágio-1 row for it (no forward-fill base) -- the same
+        fail-loud contract as ``read_carga_ande``.
+    """
+    if _ITAIPU_CODE not in id_map.hydro_codes:
+        return {}
+    ri = dadger.ri(df=True)
+    if ri is None or ri.empty:
+        return {}
+
+    hydro_id = id_map.hydro_id(_ITAIPU_CODE)
+    n_stages = len(calendar)
+    result: dict[tuple[int, int, int], list[float]] = {}
+    for group_id, prefix in _ITAIPU_MIN_GENERATION_PREFIXES:
+        patamar_columns = [
+            column
+            for _, column in sorted(
+                (int(column[len(prefix) + 1 :]), column)
+                for column in ri.columns
+                if column.startswith(f"{prefix}_")
+                and column[len(prefix) + 1 :].isdigit()
+            )
+        ]
+        if not patamar_columns:
+            continue
+
+        declared: dict[int, list[float]] = {}
+        for _, row in ri.iterrows():
+            stage_index = int(row["estagio"]) - 1
+            if not 0 <= stage_index < n_stages:
+                raise ValueError(
+                    f"RI {prefix} período {int(row['estagio'])} outside the "
+                    f"calendar (1..{n_stages})"
+                )
+            values = [row[column] for column in patamar_columns]
+            while values and pd.isna(values[-1]):
+                values.pop()
+            n_blocks = len(calendar[stage_index].block_hours)
+            if len(values) != n_blocks:
+                raise ValueError(
+                    f"RI {prefix} stage {stage_index}: {len(values)} patamares "
+                    f"declared vs {n_blocks} blocks in the calendar"
+                )
+            declared[stage_index] = [float(value) for value in values]
+
+        if 0 not in declared:
+            raise ValueError(
+                f"RI {prefix}: no row declares estágio 1; sparse-stage "
+                "inheritance has no base"
+            )
+
+        per_stage: list[list[float]] = []
+        for stage in calendar:
+            per_stage.append(
+                declared.get(stage.index, per_stage[-1] if per_stage else declared[0])
+            )
+        for stage, values in zip(calendar, per_stage, strict=True):
+            result[(hydro_id, group_id, stage.index)] = values
+
+    return result
+
+
 def convert_production_models(
     id_map: DecompIdMap,
     fpha_configs: dict[int, dict] | None = None,

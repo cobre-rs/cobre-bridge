@@ -286,15 +286,24 @@ class _MockDadger:
     class _Tx:
         taxa = 12.0
 
+    class _Data:
+        @staticmethod
+        def of_type(_register: type) -> list:
+            return []
+
     def __init__(self) -> None:
         self.tx = self._Tx()
         self._uh = _uh_frame()
         self._dp = _dp_frame()
+        self.data = self._Data()
 
     def uh(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
         return self._uh
 
     def vi(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return None
+
+    def ve(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return None
 
     def dp(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
@@ -470,6 +479,8 @@ def _run_libs_pipeline(
         },
         "cobre_bridge.decomp.pipeline"
         ".scenarios_conv.convert_external_inflows": external_inflow_table,
+        "cobre_bridge.decomp.pipeline"
+        ".scenarios_conv.convert_recent_observation_windows": [],
         "cobre_bridge.decomp.pipeline.load_conv.convert_load_stats": load_stats_table,
         "cobre_bridge.decomp.pipeline.load_conv.convert_load_factors": {},
         "cobre_bridge.decomp.pipeline.ncs_conv.convert_ncs_stats": ncs_stats_table,

@@ -23,11 +23,17 @@ branch-edge probabilities on the ``policy_graph`` (see
 from __future__ import annotations
 
 import logging
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge.converters.inflow_windows import (
+    format_observation_windows,
+    month_window,
+    previous_months,
+)
 from cobre_bridge.decomp.hydro import _downstream_operated
 
 if TYPE_CHECKING:
@@ -99,6 +105,90 @@ def _incremental_values(
     resolves any ``AC NUMPOS`` gauge relink.)
     """
     return [float(row[station_by_code[code]]) for code in id_map.hydro_codes]
+
+
+def convert_recent_observation_windows(
+    vazoes: Vazoes,
+    effective: EffectiveCadastro,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> list[dict]:
+    """``initial_conditions.recent_observations``: the deck's pre-study observed
+    inflows (full preceding months + the partial study-start month's weeks) as
+    non-overlapping windows, seeding cobre's PAR inflow-lag accumulator.
+
+    DECOMP's ``vazoes`` carries two observation tables, natural inflow per posto
+    (each posto column is the plant's own incremental, :func:`_incremental_values`):
+
+    - ``observacoes_mensais`` — the ``N`` full calendar months preceding the
+      study, ``mes`` chronological oldest-first (``mes = N`` is the month
+      immediately before the study-start month; verified against the deck's
+      seasonal signal), and
+    - ``observacoes_semanais`` — the ``W`` weeks of the partial study-start
+      month before the study begins, ``semana`` oldest-first.
+
+    Emitted as ``[start, end)`` windows per hydro: the weekly windows are 7-day,
+    Saturday-aligned, ending at the study start; the monthly windows are full
+    calendar months, with the most recent clipped to end where the weekly
+    windows begin so no two windows overlap (a cobre requirement; adjacent
+    ``start == previous end`` is fine). cobre casts these onto the monthly
+    inflow-lag periods to seed the ``p`` lags before stage 0
+    (``derive_inflow_seeds``); the forward pass then supplies the study's own
+    inflows to complete the accumulator at the coupling.
+
+    The monthly history is deliberately routed here and **not** to
+    ``scenarios/inflow_history.parquet``: cobre fits AR seasonal statistics from
+    that file (needs ≥ 2 observations per season), which the single-realization
+    DECOMP tendency cannot satisfy — ``recent_observations`` is the pure lag
+    seed, never AR-fit input. Returns ``[]`` when the deck carries neither table.
+    """
+    monthly = vazoes.observacoes_mensais
+    weekly = vazoes.observacoes_semanais
+    has_monthly = monthly is not None and not monthly.empty
+    has_weekly = weekly is not None and not weekly.empty
+    if not has_monthly and not has_weekly:
+        return []
+
+    station_by_code, _ = _incremental_context(effective, id_map)
+    study_start = calendar[0].start_date
+    rows: list[tuple[int, date, date, float]] = []
+
+    # Weekly windows: 7-day, ending at the study start, oldest first. Their
+    # earliest start is where the monthly history must stop to avoid overlap.
+    weekly_floor = study_start
+    if has_weekly:
+        ordered_weeks = weekly.sort_values("semana")
+        n_weeks = len(ordered_weeks)
+        weekly_floor = study_start - timedelta(days=n_weeks * 7)
+        for offset, (_, row) in enumerate(ordered_weeks.iterrows()):
+            start = study_start - timedelta(days=(n_weeks - offset) * 7)
+            end = study_start - timedelta(days=(n_weeks - offset - 1) * 7)
+            for hydro_id, value in enumerate(
+                _incremental_values(row, id_map, station_by_code)
+            ):
+                rows.append((hydro_id, start, end, value))
+
+    # Monthly windows: full calendar months, the most recent clipped to abut
+    # the weekly floor (a month fully inside the weekly span is dropped).
+    if has_monthly:
+        ordered_months = monthly.sort_values("mes")
+        months = previous_months(
+            study_start.year, study_start.month, len(ordered_months)
+        )
+        for (year, month), (_, row) in zip(
+            months, ordered_months.iterrows(), strict=True
+        ):
+            start, end = month_window(year, month)
+            if start >= weekly_floor:
+                continue
+            end = min(end, weekly_floor)
+            for hydro_id, value in enumerate(
+                _incremental_values(row, id_map, station_by_code)
+            ):
+                rows.append((hydro_id, start, end, value))
+
+    rows.sort(key=lambda entry: (entry[0], entry[1]))
+    return format_observation_windows(rows)
 
 
 def _tree_values(

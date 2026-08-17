@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pyarrow as pa
@@ -736,8 +736,9 @@ def _convert_decomp_case_impl(
 
     step("Converting entities")
     # DECOMP risk aversion (CVaR): resolve the AR register / FCF-header CVaR
-    # into a per-stage cobre risk measure. When active it also drives the
-    # stopping-rule switch in convert_config (gap rule inadmissible under CVaR).
+    # into a per-stage cobre risk measure, emitted uniformly across all stages
+    # (temporal.stage_records) so cobre admits the gap stopping rule under CVaR
+    # with enumerated forwards (it computes the exact risk-adjusted upper bound).
     cvar = temporal_conv.resolve_cvar(dadger, files.cortesh)
     if cvar is not None:
         dx.emit(
@@ -748,18 +749,16 @@ def _convert_decomp_case_impl(
                 title="CVaR risk measure converted",
                 summary=(
                     f"The deck runs CVaR (alpha={cvar.alpha:.4g}, "
-                    f"lambda={cvar.lambda_:.4g}) from stage {cvar.from_stage_index}; "
-                    "emitted as the per-stage cobre risk_measure (the gap stopping "
-                    "rule is replaced by the iteration limit, which cobre requires "
-                    "under a non-expectation risk measure)."
+                    f"lambda={cvar.lambda_:.4g}); DECOMP starts it at stage "
+                    f"{cvar.from_stage_index} but it is emitted uniformly on every "
+                    "stage (it collapses to expectation on the deterministic trunk), "
+                    "so cobre's gap stopping rule stays admissible under the "
+                    "risk-adjusted enumerated upper bound."
                 ),
             ),
             logger=_LOG,
         )
-    _write_json(
-        dst / "config.json",
-        config_conv.convert_config(dadger, cvar_active=cvar is not None),
-    )
+    _write_json(dst / "config.json", config_conv.convert_config(dadger))
     stages_dict = temporal_conv.convert_stages(
         calendar,
         annual_discount_rate=tx,
@@ -898,6 +897,18 @@ def _convert_decomp_case_impl(
             len(gnl.future_anticipated_deliveries),
         )
     _write_json(system / "thermals.json", thermals_dict)
+    # PAR inflow-lag seed (initial_conditions.recent_observations) is GATED OFF
+    # pending the mean-reference fix. The boundary cuts price the inflow-lag
+    # state (PIAFL, 159 plants x 12 lags), so an unseeded lag state (lags = 0)
+    # is a real gap in principle. But NEWAVE's PAR cut prices the inflow
+    # *deviation from the seasonal mean* (MLT), not the absolute inflow:
+    # verified against relato.rv2 (E(CF) = 1.156e12 matches cobre's lags=0
+    # terminal FCF to ~1.7%, and is ~12% above the with-absolute-seed value).
+    # Seeding the *absolute* observations (convert_recent_observation_windows)
+    # therefore over-subtracts ~13% of the cost-to-go and over-drains; the
+    # correct seed is (observed - MLT), which needs the binary mlt.dat and a
+    # confirmed cobre inflow-lag reference convention. Until then lags=0 is the
+    # better approximation at a near-mean coupling. See the fidelity roadmap.
     _write_json(dst / "initial_conditions.json", initial_conditions_doc)
     _write_json(
         system / "hydro_production_models.json",
@@ -1031,6 +1042,7 @@ def _convert_decomp_case_impl(
     contribs = [
         *bounds_conv.convert_hydro_bounds(dadger, id_map, calendar, effective),
         *bounds_conv.convert_storage_bounds(effective, id_map, calendar),
+        *bounds_conv.convert_volume_espera_bounds(dadger, id_map, calendar, effective),
         *thermal_generation_contribs,
         *single_term_bounds.single_term_bound_contributions(
             census, id_map, pumping_ids, calendar, effective, hydro_capacities
@@ -1133,6 +1145,23 @@ def _convert_decomp_case_impl(
     availability_values = hydro_conv.convert_hydro_group_availability(
         dadger, hidr, id_map, calendar, effective
     )
+    # ticket-007 companion: Itaipu's RI per-frequency must-run floors
+    # (geracao_minima_50/60_hz) overlay the same per-group table as the
+    # availability max caps. The 50 Hz floor binds in DECOMP (its 50 Hz half
+    # sits exactly at it), so without it the converted case under-runs Itaipu's
+    # 50 Hz half and backfills the ANDE load through the IV bus's lines. Merged
+    # into the availability entries (min on the same (hydro, group, stage) row
+    # as the availability max) rather than emitted as a second table.
+    if itaipu_operated:
+        for key, min_generation in hydro_conv.convert_itaipu_frequency_min_generation(
+            dadger, id_map, calendar
+        ).items():
+            existing = availability_values.get(key)
+            availability_values[key] = (
+                replace(existing, min_generation_mw=min_generation)
+                if existing is not None
+                else group_bounds_conv.GroupBoundEntry(min_generation_mw=min_generation)
+            )
     group_bounds = group_bounds_conv.convert_hydro_unit_group_bounds(
         availability_values, calendar
     )

@@ -249,3 +249,80 @@ def convert_storage_bounds(
             )
 
     return contributions
+
+
+def convert_volume_espera_bounds(
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+    effective: EffectiveCadastro,
+) -> list[BoundContribution]:
+    """Per-stage max-storage contributions from the ``VE`` (volume de espera).
+
+    The ``VE`` register (manual §3.4.6.15) declares a flood-control storage
+    ceiling for a hydro *with reservoir*, as a percentage of the plant's
+    **useful** volume for each of the study's ``N`` stages (``volume_k`` →
+    stage ``k − 1``). It is a **hard** maximum-storage limit — the register
+    carries no penalty field — so the reservoir may not fill above it, which
+    forces releases during the flood season (verified: DECOMP pins ITAPARICA
+    at its 55.1 % VE ceiling every flood-season stage). cobre has no other
+    input for it, so it is emitted here as a per-stage ``max_storage_hm3``
+    upper bound in absolute hm³ (``env_min + VE% · (env_max − env_min)``, the
+    same ``volume útil`` base the source reports storage against), one-sided
+    (no lower — the floor stays the plant's own), and composed by the
+    accumulator's min-of-uppers so it only ever tightens the declared
+    reservoir ceiling.
+
+    Sparse by construction: a stage whose VE ceiling is not strictly below the
+    plant's storage envelope max (a ``VE = 100 %`` no-op, or a blank field)
+    contributes nothing, and neither does a plant absent from the register or
+    without a useful-volume reservoir.
+    """
+    ve = dadger.ve(df=True)
+    if ve is None or ve.empty:
+        return []
+
+    stage_columns = [
+        column
+        for _, column in sorted(
+            (int(column.split("_")[1]), column)
+            for column in ve.columns
+            if column.startswith("volume_") and column.split("_")[1].isdigit()
+        )
+    ]
+    operated = set(id_map.hydro_codes)
+    n_stages = len(calendar)
+
+    contributions: list[BoundContribution] = []
+    for _, row in ve.iterrows():
+        code = int(row["codigo_usina"])
+        if code not in operated:
+            continue
+        env_min, env_max = storage_envelope(effective, code)
+        useful = env_max - env_min
+        if useful <= 0.0:
+            continue
+        hydro_id = id_map.hydro_id(code)
+        for stage_index in range(min(n_stages, len(stage_columns))):
+            pct = row[stage_columns[stage_index]]
+            if pd.isna(pct):
+                continue
+            ceiling = env_min + float(pct) / 100.0 * useful
+            # Only tightens: a VE ≥ the envelope max is a no-op, and the
+            # bound must never *raise* the declared ceiling.
+            if ceiling >= env_max or not _floats_differ(ceiling, env_max):
+                continue
+            contributions.append(
+                BoundContribution(
+                    family="hydro",
+                    entity_id=hydro_id,
+                    stage_id=stage_index,
+                    block_id=None,
+                    axis="storage",
+                    lower=None,
+                    upper=ceiling,
+                    contributor="VE",
+                )
+            )
+
+    return contributions

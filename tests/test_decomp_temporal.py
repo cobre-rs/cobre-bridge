@@ -292,11 +292,16 @@ class TestCVaRRiskMeasure:
         return d
 
     # ---- stage_records emission ----
-    def test_stage_records_applies_cvar_from_index(self) -> None:
+    def test_stage_records_applies_cvar_uniformly(self) -> None:
+        # Emitted on EVERY stage (uniform), regardless of the AR starting
+        # period: CVaR collapses to expectation on the deterministic trunk, and
+        # cobre's gap rule under CVaR+enumerated requires a uniform measure.
         cvar = CVaRConfig(from_stage_index=5, alpha=0.15, lambda_=0.4)
         records = stage_records(self._calendar(), cvar)
-        assert [r["risk_measure"] for r in records[:5]] == ["expectation"] * 5
-        assert records[5]["risk_measure"] == {"cvar": {"alpha": 0.15, "lambda": 0.4}}
+        assert all(
+            r["risk_measure"] == {"cvar": {"alpha": 0.15, "lambda": 0.4}}
+            for r in records
+        )
 
     def test_stage_records_none_is_all_expectation(self) -> None:
         records = stage_records(self._calendar(), None)
@@ -340,9 +345,12 @@ class TestCVaRRiskMeasure:
         assert resolve_cvar(self._dadger_with_ar(ar), None) is None
 
 
-class TestConvertConfigCVaR:
-    """``convert_config`` drops the gap stopping rule under CVaR (cobre rejects
-    a gap rule for any non-expectation risk measure)."""
+class TestConvertConfigStoppingRules:
+    """``convert_config`` emits the deck's GP as a relative gap stopping rule
+    (with the NI iteration backstop) unconditionally — the faithful analogue of
+    DECOMP's ``Zsup/Zinf-1 <= GP`` convergence. It is admissible under CVaR too:
+    cobre computes the exact risk-adjusted upper bound under enumerated forwards,
+    and ``stage_records`` emits CVaR uniformly so the measure is stage-uniform."""
 
     @staticmethod
     def _dadger() -> MagicMock:
@@ -351,16 +359,9 @@ class TestConvertConfigCVaR:
         d.gp.data = [0.001]
         return d
 
-    def test_expectation_keeps_gap_plus_iteration_rules(self) -> None:
-        cfg = convert_config(self._dadger(), cvar_active=False)
+    def test_emits_gap_plus_iteration_rules(self) -> None:
+        cfg = convert_config(self._dadger())
         rules = cfg["training"]["stopping_rules"]
         assert [r["type"] for r in rules] == ["gap", "iteration_limit"]
-
-    def test_cvar_uses_bound_stalling_plus_iteration_limit(self) -> None:
-        cfg = convert_config(self._dadger(), cvar_active=True)
-        rules = cfg["training"]["stopping_rules"]
-        # No gap rule (inadmissible under CVaR); a lower-bound stall converges
-        # the run, with the NI iteration limit as the backstop.
-        assert [r["type"] for r in rules] == ["bound_stalling", "iteration_limit"]
-        assert rules[0]["tolerance"] == 0.001
+        assert rules[0]["relative_tolerance"] == 0.001
         assert rules[1]["limit"] == 500

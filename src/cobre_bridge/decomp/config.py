@@ -48,16 +48,22 @@ _CONFIG_SCHEMA_URL = (
 )
 
 
-def convert_config(dadger: Dadger, *, cvar_active: bool = False) -> dict:
+def convert_config(dadger: Dadger) -> dict:
     """Build ``config.json``: Gap + NI stopping rules, external scenario
     sources, simulation on.
 
-    When ``cvar_active`` (the deck runs a CVaR risk measure, see
-    :func:`cobre_bridge.decomp.temporal.resolve_cvar`), the ``gap`` stopping
-    rule is dropped in favour of the ``NI`` iteration limit alone: cobre
-    rejects a gap rule under any non-expectation risk measure (the risk-adjusted
-    lower bound and the risk-neutral simulation upper bound do not bracket, so a
-    persistent negative "gap" is expected, not convergence).
+    The ``gap`` stopping rule (relative ``GP``) is emitted unconditionally —
+    the faithful analogue of DECOMP's own ``Zsup/Zinf − 1 ≤ GP`` convergence,
+    which is itself risk-adjusted. It is admissible under a CVaR risk measure
+    too: under enumerated forwards cobre computes the exact *risk-adjusted*
+    upper bound (``setup/mod.rs``, cobre commit landing the enumerated CVaR
+    UB), which brackets the risk-adjusted lower bound, provided the risk
+    measure is **uniform across all stages** — which
+    :func:`cobre_bridge.decomp.temporal.stage_records` guarantees by emitting
+    the CVaR measure on every stage (``reject_gap_under_nonuniform_risk``).
+    Requires that cobre build; an older cobre without the enumerated
+    risk-adjusted UB rejects a gap rule under CVaR and would need a
+    ``bound_stalling`` fallback instead.
 
     Both training and simulation use ``selection = {"method": "enumerated"}``:
     the explicit trunk-plus-fan node graph enumerates every root-to-leaf path,
@@ -82,36 +88,17 @@ def convert_config(dadger: Dadger, *, cvar_active: bool = False) -> dict:
     """
     ni = int(dadger.ni.iteracoes or 500)
     gp = float(dadger.gp.data[0])
-    if cvar_active:
-        _LOG.info(
-            "CVaR risk measure active; the Gap stopping rule is inadmissible "
-            "(cobre rejects it under a non-expectation risk measure), so "
-            "converging on a lower-bound stall (tolerance=GP=%g) with the deck's "
-            "NI=%d iteration backstop",
-            gp,
-            ni,
-        )
-        # A gap rule is inadmissible under CVaR (the risk-adjusted lower bound
-        # and the risk-neutral upper bound do not bracket), but a bound-stalling
-        # rule is: it watches the lower bound, which does converge under CVaR.
-        # Reuse the deck's GP as the relative stall tolerance so a CVaR case
-        # still stops on convergence rather than always grinding to NI.
-        stopping_rules = [
-            {"type": "bound_stalling", "iterations": 10, "tolerance": gp},
-            {"type": "iteration_limit", "limit": ni},
-        ]
-    else:
-        _LOG.info(
-            "emitting the deck's GP=%g as a relative Gap stopping rule "
-            "(relative_tolerance, DECOMP's Zsup/Zinf-1 <= GP convergence); cobre "
-            "auto-injects a BoundStalling companion, with the NI=%d iteration backstop",
-            gp,
-            ni,
-        )
-        stopping_rules = [
-            {"type": "gap", "relative_tolerance": gp},
-            {"type": "iteration_limit", "limit": ni},
-        ]
+    _LOG.info(
+        "emitting the deck's GP=%g as a relative Gap stopping rule "
+        "(relative_tolerance, DECOMP's Zsup/Zinf-1 <= GP convergence); cobre "
+        "auto-injects a BoundStalling companion, with the NI=%d iteration backstop",
+        gp,
+        ni,
+    )
+    stopping_rules = [
+        {"type": "gap", "relative_tolerance": gp},
+        {"type": "iteration_limit", "limit": ni},
+    ]
 
     return {
         "$schema": _CONFIG_SCHEMA_URL,

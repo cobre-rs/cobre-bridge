@@ -199,10 +199,14 @@ def operative_calendar_from_dadger(dadger: Dadger) -> list[OperativeStage]:
 class CVaRConfig:
     """Resolved CVaR risk measure for the DECOMP study.
 
-    ``from_stage_index`` is the 0-based cobre stage from which CVaR applies
-    (DECOMP's ``AR`` starting period − 1); ``alpha`` (the worst-fraction
-    quantile — cobre's α-convention equals DECOMP's, no ``1−α`` flip) and
-    ``lambda_`` (the risk-aversion weight) are fractions in ``(0, 1]``.
+    ``from_stage_index`` is the 0-based cobre stage from which DECOMP's ``AR``
+    register starts CVaR (starting period − 1). It is recorded for the
+    conversion diagnostic only: :func:`stage_records` emits the measure
+    *uniformly* across all stages (CVaR collapses to expectation on the
+    deterministic trunk, and cobre's gap rule under CVaR requires a uniform
+    measure), so the starting period does not gate emission. ``alpha`` (the
+    worst-fraction quantile — cobre's α-convention equals DECOMP's, no ``1−α``
+    flip) and ``lambda_`` (the risk-aversion weight) are fractions in ``(0, 1]``.
     """
 
     from_stage_index: int
@@ -292,14 +296,21 @@ def stage_records(
     inflow-lag state (only the boundary FCF prices lags).
 
     ``cvar`` (when the deck runs risk-averse) emits a ``{"cvar": {...}}`` risk
-    measure on every stage from ``cvar.from_stage_index`` onward, else
-    ``"expectation"``. CVaR on a deterministic stage collapses to expectation,
-    so the trunk is unaffected; only the stochastic fan is bound.
+    measure on **every** stage, else ``"expectation"`` on every stage. The
+    measure is emitted uniformly rather than only from ``cvar.from_stage_index``
+    onward for two coincident reasons: CVaR on a deterministic (single-opening)
+    stage collapses to expectation, so a uniform emission is identical in
+    effect to gating it at DECOMP's ``AR`` starting period (only the stochastic
+    fan is actually bound); and cobre admits the ``gap`` stopping rule under
+    CVaR + enumerated forwards only when the risk measure is **uniform across
+    all stages** (``setup/mod.rs::reject_gap_under_nonuniform_risk``) — a
+    per-stage mix of expectation and CVaR would force the ``bound_stalling``
+    fallback instead.
     """
     records: list[dict] = []
     for stage in calendar:
         names = _block_names(len(stage.block_hours))
-        if cvar is not None and stage.index >= cvar.from_stage_index:
+        if cvar is not None:
             risk_measure: object = {
                 "cvar": {"alpha": cvar.alpha, "lambda": cvar.lambda_}
             }

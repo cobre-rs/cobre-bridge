@@ -21,11 +21,15 @@ into the ``hydro_bounds`` parquet rows.
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.bounds import convert_storage_bounds
+from cobre_bridge.decomp.bounds import (
+    convert_storage_bounds,
+    convert_volume_espera_bounds,
+)
 from cobre_bridge.decomp.cadastro import EffectiveCadastro, storage_envelope
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
@@ -100,3 +104,64 @@ def test_convert_storage_bounds_no_stage_varying_volumes_emits_no_contributions(
     no_override = EffectiveCadastro(base=_hidr_frame(), n_stages=3, stage_varying={})
     contributions = convert_storage_bounds(no_override, id_map, calendar)
     assert contributions == []
+
+
+# ---------------------------------------------------------------------------
+# VE (volume de espera) — flood-control hard max-storage ceiling
+# ---------------------------------------------------------------------------
+
+
+def _dadger_with_ve(rows: list[dict] | None):
+    """Fake ``dadger`` exposing ``.ve(df=True)`` -> a VE frame (or ``None``)."""
+    frame = None if rows is None else pd.DataFrame(rows)
+    return SimpleNamespace(ve=lambda df=True: frame)
+
+
+def test_ve_emits_percent_of_useful_upper_only(
+    effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # plant 1 envelope = (20, 250) per the fixtures (volume_maximo raised to 250
+    # at stage 2), useful = 230. VE 50% at stage 0 -> ceiling 20 + 0.5*230 = 135.
+    dadger = _dadger_with_ve(
+        [{"codigo_usina": 1, "volume_1": 50.0, "volume_2": 100.0, "volume_3": None}]
+    )
+    contribs = convert_volume_espera_bounds(dadger, id_map, calendar, effective)
+    # stage 0: 50% tightens (135 < 250) -> emitted; stage 1: 100% is a no-op
+    # (ceiling == env_max); stage 2: blank -> skipped.
+    assert len(contribs) == 1
+    c = contribs[0]
+    assert (c.family, c.axis, c.entity_id, c.stage_id, c.block_id) == (
+        "hydro",
+        "storage",
+        0,
+        0,
+        None,
+    )
+    assert c.lower is None
+    assert c.upper == 20.0 + 0.5 * 230.0
+    assert c.contributor == "VE"
+
+
+def test_ve_full_percent_is_noop(
+    effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    dadger = _dadger_with_ve(
+        [{"codigo_usina": 1, "volume_1": 100.0, "volume_2": 100.0, "volume_3": 100.0}]
+    )
+    assert convert_volume_espera_bounds(dadger, id_map, calendar, effective) == []
+
+
+def test_ve_absent_register_returns_empty(
+    effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    assert convert_volume_espera_bounds(
+        _dadger_with_ve(None), id_map, calendar, effective
+    ) == []
+
+
+def test_ve_unoperated_plant_skipped(
+    effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # plant 999 is not in id_map.hydro_codes -> contributes nothing.
+    dadger = _dadger_with_ve([{"codigo_usina": 999, "volume_1": 30.0}])
+    assert convert_volume_espera_bounds(dadger, id_map, calendar, effective) == []

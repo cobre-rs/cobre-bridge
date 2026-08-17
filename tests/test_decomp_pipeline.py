@@ -847,6 +847,9 @@ class _CadastroDadger:
     def vi(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return None
 
+    def ve(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return None
+
     def ac(
         self,
         codigo_usina: int | None = None,  # noqa: ARG002
@@ -997,6 +1000,8 @@ def _run_cadastro_pipeline(
         },
         "cobre_bridge.decomp.pipeline"
         ".scenarios_conv.convert_external_inflows": external_inflow_table,
+        "cobre_bridge.decomp.pipeline"
+        ".scenarios_conv.convert_recent_observation_windows": [],
         "cobre_bridge.decomp.pipeline.load_conv.convert_load_stats": load_stats_table,
         "cobre_bridge.decomp.pipeline.load_conv.convert_load_factors": {},
         "cobre_bridge.decomp.pipeline.ncs_conv.convert_ncs_stats": ncs_stats_table,
