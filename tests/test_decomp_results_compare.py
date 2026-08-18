@@ -38,7 +38,6 @@ from cobre_bridge.comparators.decomp_results import (
     _PRODUCTIVITY_TURBINED_EPS,
     _THERMAL_VARIABLES,
     _UNSUPPORTED_TERM_VARIABLES,
-    DecompComparison,
     _AlignedDecompFrames,
     _build_line_id_map,
     _bus_side,
@@ -76,12 +75,9 @@ from cobre_bridge.comparators.decomp_results import (
     _stage_frame_to_lookup,
     _stage_rows,
     _storage_lookup,
-    _summarize,
     _term_lookup_value,
-    _tidy,
     _union_cost_rows,
     build_decomp_dataset,
-    compare_decomp_results,
 )
 from cobre_bridge.comparators.report_builder import build_comparison_report
 from cobre_bridge.comparators.results import ResultComparison
@@ -91,7 +87,7 @@ from cobre_bridge.decomp.constraint_registers import (
     ConstraintTerm,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.verdict import decomp_compare_summary, decomp_dataset_summary
+from cobre_bridge.verdict import decomp_dataset_summary
 
 
 def _source_frame() -> pl.DataFrame:
@@ -187,76 +183,9 @@ class TestMapEntities:
         assert mapped["newave_code"].to_list() == [10, 10]
 
 
-class TestTidyAndSummary:
-    def _pair(self) -> tuple[pl.DataFrame, pl.DataFrame]:
-        source = pl.DataFrame(
-            {
-                "entity_id": [0, 1],
-                "stage_id": [0, 0],
-                "geracao_MW": [100.0, 50.0],
-            }
-        )
-        cobre = pl.DataFrame(
-            {
-                "entity_id": [0, 1],
-                "stage_id": [0, 0],
-                "generation_mw": [90.0, 50.0],
-            }
-        )
-        return source, cobre
-
-    def test_tidy_rows_carry_both_sides_and_the_difference(self) -> None:
-        source, cobre = self._pair()
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={0: "A", 1: "B"})
-        generation = rows.filter(pl.col("variable") == "generation").sort("entity_id")
-        assert generation["source"].to_list() == [100.0, 50.0]
-        assert generation["cobre"].to_list() == [90.0, 50.0]
-        assert generation["delta"].to_list() == [-10.0, 0.0]
-        assert generation["delta_pct"].to_list() == [pytest.approx(-10.0), 0.0]
-        assert generation["entity_name"].to_list() == ["A", "B"]
-
-    def test_variables_missing_on_either_side_are_skipped(self) -> None:
-        source, cobre = self._pair()
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={})
-        # Only generation is present in both frames.
-        assert set(rows["variable"]) == {"generation"}
-
-    def test_summary_totals_and_worst_entity(self) -> None:
-        source, cobre = self._pair()
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={0: "A", 1: "B"})
-        summary = _summarize(rows)
-        assert len(summary) == 1
-        row = summary.to_dicts()[0]
-        assert row["n"] == 2
-        assert row["source_total"] == 150.0
-        assert row["cobre_total"] == 140.0
-        assert row["delta_total"] == -10.0
-        assert row["delta_total_pct"] == pytest.approx(-100.0 / 15.0)
-        assert row["worst_entity"] == "A"
-
-    def test_zero_versus_zero_reads_as_agreement(self) -> None:
-        source = pl.DataFrame({"entity_id": [0], "stage_id": [0], "geracao_MW": [0.0]})
-        cobre = pl.DataFrame(
-            {"entity_id": [0], "stage_id": [0], "generation_mw": [0.0]}
-        )
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={})
-        assert rows["smape_pct"].to_list() == [0.0]
-        assert rows["delta_pct"].to_list() == [None]
-
-    def test_empty_join_yields_an_empty_but_typed_frame(self) -> None:
-        source = pl.DataFrame({"entity_id": [0], "stage_id": [0], "geracao_MW": [1.0]})
-        cobre = pl.DataFrame(
-            {"entity_id": [9], "stage_id": [9], "generation_mw": [1.0]}
-        )
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={})
-        assert rows.is_empty()
-        assert "smape_pct" in rows.columns
-        assert _summarize(rows).is_empty()
-
-
 class TestResultComparisons:
-    """``_result_comparisons`` is the ``ResultComparison`` counterpart of
-    ``_tidy``, feeding ``build_decomp_dataset`` instead of ``DecompComparison``."""
+    """``_result_comparisons`` joins one level's two frames into the
+    ``ResultComparison`` rows that feed ``build_decomp_dataset``."""
 
     def _pair(self) -> tuple[pl.DataFrame, pl.DataFrame]:
         source = pl.DataFrame(
@@ -403,13 +332,6 @@ def _patch_aligned_frames(
     monkeypatch.setattr(
         "cobre_bridge.comparators.decomp_results._read_aligned_frames",
         lambda *_args, **_kwargs: aligned,
-    )
-    # ``compare_decomp_results`` also reads the convergence report directly
-    # (outside ``_read_aligned_frames``); stub it so the parity fixture never
-    # has to touch a real deck/output directory.
-    monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results._convergence",
-        lambda *_args, **_kwargs: pl.DataFrame(schema={"iteration": pl.Int64}),
     )
     # ticket-006: ``build_decomp_dataset`` also calls
     # ``read_cobre_bus_aggregates`` directly (outside ``_read_aligned_frames``).
@@ -2331,54 +2253,6 @@ class TestBuildDecompDatasetConvergence:
         html = build_comparison_report(dataset)
         assert "Convergence" in html
         assert "Cobre Lower" in html
-
-
-class TestBuildDecompDatasetParityWithLegacyComparison:
-    """No drift from the migration: on the same aligned fixture,
-    ``build_decomp_dataset`` and the legacy ``compare_decomp_results`` must
-    report the same per-(entity, stage) newave/cobre values."""
-
-    def test_every_legacy_row_has_a_matching_dataset_pair(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        _patch_aligned_frames(monkeypatch, _aligned_fixture())
-
-        legacy = compare_decomp_results(tmp_path, tmp_path)
-        dataset = build_decomp_dataset(tmp_path, tmp_path)
-
-        assert legacy.rows.height > 0  # the fixture must exercise real rows
-        for row in legacy.rows.iter_rows(named=True):
-            canonical = _CANONICAL_VARIABLE[(row["level"], row["variable"])]
-            match = dataset.tidy.filter(
-                (pl.col("entity_type") == row["level"])
-                & (pl.col("variable") == canonical)
-                & (pl.col("entity_id") == row["entity_id"])
-                & (pl.col("stage") == row["stage_id"])
-            )
-            newave_value = match.filter(pl.col("source") == "newave")["value"].to_list()
-            cobre_value = match.filter(pl.col("source") == "cobre")["value"].to_list()
-            assert newave_value == pytest.approx([row["source"]])
-            assert cobre_value == pytest.approx([row["cobre"]])
-
-    def test_unmapped_dict_is_identical_between_entry_points(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """``build_decomp_dataset`` and the legacy comparison must agree on
-        every level ``_read_aligned_frames`` reports. ``"line"``/``"ree"``/
-        ``"evaporation"`` are ticket-008/ticket-018/ticket-020 additions
-        sourced outside ``_read_aligned_frames`` (the legacy comparison never
-        gained line, REE, or evaporation rows), so they are compared
-        separately rather than folded into the shared-levels equality."""
-        _patch_aligned_frames(monkeypatch, _aligned_fixture())
-
-        legacy = compare_decomp_results(tmp_path, tmp_path)
-        dataset = build_decomp_dataset(tmp_path, tmp_path)
-
-        dataset_unmapped = dict(dataset.metadata["unmapped"])
-        assert dataset_unmapped.pop("line") == []
-        assert dataset_unmapped.pop("ree") == []
-        assert dataset_unmapped.pop("evaporation") == []
-        assert dataset_unmapped == legacy.unmapped
 
 
 # ---------------------------------------------------------------------------
@@ -5333,67 +5207,9 @@ class TestBuildDecompDatasetConstraintsE2E:
         assert "Plotly.newPlot" in constraints_tab
 
 
-class TestComparisonRecord:
-    def test_stage_count_counts_distinct_stages(self) -> None:
-        rows = pl.DataFrame(
-            {
-                "level": ["hydro"] * 3,
-                "variable": ["generation"] * 3,
-                "unit": ["MW"] * 3,
-                "entity_id": [0, 0, 1],
-                "entity_name": ["A", "A", "B"],
-                "stage_id": [0, 1, 1],
-                "source": [1.0, 2.0, 3.0],
-                "cobre": [1.0, 2.0, 3.0],
-                "delta": [0.0, 0.0, 0.0],
-                "delta_pct": [0.0, 0.0, 0.0],
-                "smape_pct": [0.0, 0.0, 0.0],
-            }
-        )
-        comparison = DecompComparison(
-            rows=rows,
-            summary=_summarize(rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
-        assert comparison.stage_count == 2
-
-
-def _fake_comparison() -> DecompComparison:
-    rows = pl.DataFrame(
-        {
-            "level": ["hydro", "thermal"],
-            "variable": ["generation", "generation"],
-            "unit": ["MW", "MW"],
-            "entity_id": [0, 0],
-            "entity_name": ["A", "T"],
-            "stage_id": [0, 0],
-            "source": [100.0, 20.0],
-            "cobre": [90.0, 20.0],
-            "delta": [-10.0, 0.0],
-            "delta_pct": [-10.0, 0.0],
-            "smape_pct": [10.5, 0.0],
-        }
-    )
-    return DecompComparison(
-        rows=rows,
-        summary=_summarize(rows),
-        convergence=pl.DataFrame(
-            {
-                "iteration": [1, 2],
-                "source_lower": [1.0, 2.0],
-                "source_upper": [3.0, 3.0],
-                "cobre_lower": [10.0, None],
-                "cobre_upper": [30.0, None],
-            }
-        ),
-        unmapped={"hydro": [], "thermal": [86, 224], "bus": []},
-    )
-
-
 def _fake_dataset(*, all_within_tol: bool = False) -> ComparisonDataset:
-    """The canonical-dataset counterpart of ``_fake_comparison``: two stages,
-    two variables. ``generation_mw`` always matches; ``turbined_m3s`` diverges
+    """A canonical two-stage, two-variable dataset for the ``compare decomp``
+    CLI tests. ``generation_mw`` always matches; ``turbined_m3s`` diverges
     unless *all_within_tol* asks for a fully-passing dataset instead."""
     tidy = pl.DataFrame(
         {
@@ -5445,9 +5261,8 @@ def _empty_fake_dataset() -> ComparisonDataset:
 
 
 class TestDecompDatasetSummary:
-    """``decomp_dataset_summary`` -- the superset ``--json`` payload builder
-    that supersedes ``decomp_compare_summary`` at the ``compare decomp``
-    call site (the legacy summary itself is untouched, per D-STRANGLER)."""
+    """``decomp_dataset_summary`` -- the ``compare decomp --json`` payload
+    builder, sourced entirely from the canonical ``ComparisonDataset``."""
 
     def test_returns_the_superset_shape_in_the_documented_key_order(self) -> None:
         dataset = _fake_dataset()
@@ -5526,126 +5341,51 @@ class TestDecompDatasetSummary:
         assert summary["unmapped"] == {"hydro": [], "thermal": [], "bus": []}
 
 
-class TestDecompCompareSummaryTolerance:
-    """The within-tolerance verdict keys ``decomp_compare_summary`` appends."""
-
-    def test_mixed_fixture_has_one_variable_exceeding_tolerance(self) -> None:
-        """Hydro's ``smape_pct == 10.5`` exceeds 1e-2; thermal's ``0.0`` is within."""
-        comparison = _fake_comparison()
-
-        summary = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        assert list(summary.keys()) == [
-            "stages",
-            "variables",
-            "unmapped",
-            "within_tol",
-            "total",
-            "all_within_tol",
-        ]
-        assert summary["total"] == 2
-        assert summary["within_tol"] == 1
-        assert summary["all_within_tol"] is False
-
-    def test_all_rows_within_tolerance_report_all_within_tol_true(self) -> None:
-        rows = pl.DataFrame(
-            {
-                "level": ["hydro", "thermal"],
-                "variable": ["generation", "generation"],
-                "unit": ["MW", "MW"],
-                "entity_id": [0, 0],
-                "entity_name": ["A", "T"],
-                "stage_id": [0, 0],
-                "source": [100.0, 20.0],
-                "cobre": [100.0, 20.0],
-                "delta": [0.0, 0.0],
-                "delta_pct": [0.0, 0.0],
-                "smape_pct": [0.0, 0.0],
-            }
-        )
-        comparison = DecompComparison(
-            rows=rows,
-            summary=_summarize(rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
-
-        summary = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        assert summary["total"] == 2
-        assert summary["within_tol"] == 2
-        assert summary["all_within_tol"] is True
-
-    def test_empty_comparison_reports_zero_totals(self) -> None:
-        empty_rows = _fake_comparison().rows.clear()
-        comparison = DecompComparison(
-            rows=empty_rows,
-            summary=_summarize(empty_rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
-
-        summary = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        assert summary["within_tol"] == 0
-        assert summary["total"] == 0
-        assert summary["all_within_tol"] is False
-
-
 class TestCompareDecompCommand:
-    """The ``compare decomp`` subcommand, with the comparison itself stubbed."""
+    """The ``compare decomp`` subcommand, with the dataset build stubbed."""
 
     @staticmethod
     def _invoke(
         argv: list[str],
         monkeypatch: pytest.MonkeyPatch,
-        comparison: DecompComparison | None = None,
         dataset: ComparisonDataset | None = None,
     ) -> Any:
         from typer.testing import CliRunner
 
         from cobre_bridge.cli import app
 
-        resolved_comparison = (
-            comparison if comparison is not None else _fake_comparison()
-        )
         resolved_dataset = dataset if dataset is not None else _fake_dataset()
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.compare_decomp_results",
-            lambda *_args, **_kwargs: resolved_comparison,
-        )
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
             lambda *_args, **_kwargs: resolved_dataset,
         )
         return CliRunner().invoke(app, argv)
 
-    def test_renders_tables_and_exits_zero(
+    def test_renders_headline_and_exits_zero(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """ticket-023: the legacy per-variable table and bounds table renderer
+        is retired; the shared ``build_compare_verdict`` headline is the sole
+        terminal summary."""
         result = self._invoke(
             ["compare", "decomp", str(tmp_path), str(tmp_path)], monkeypatch
         )
         assert result.exit_code == 0
-        assert "Operation comparison" in result.stdout
-        assert "Final bounds" in result.stdout
+        assert "Operation comparison" not in result.stdout
+        assert "Final bounds" not in result.stdout
 
     def test_headline_leads_stdout_on_a_diverging_run(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """The shared ``build_compare_verdict`` headline, from ``_fake_dataset``'s
-        mismatch (1/2 within tol, worst ``turbined_m3s`` at 12% sMAPE), leads
-        stdout ahead of the legacy per-variable table."""
+        mismatch (1/2 within tol, worst ``turbined_m3s`` at 12% sMAPE), is the
+        first line of stdout."""
         result = self._invoke(
             ["compare", "decomp", str(tmp_path), str(tmp_path)], monkeypatch
         )
         assert result.exit_code == 0
         lines = result.stdout.splitlines()
         assert lines[0] == "⚠ 1/2 variables within tol — worst: turbined_m3s sMAPE 12%"
-        assert "Operation comparison" in result.stdout
-        assert result.stdout.index("Operation comparison") > result.stdout.index(
-            lines[0]
-        )
 
     def test_headline_leads_stdout_when_all_within_tol(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -5658,7 +5398,6 @@ class TestCompareDecompCommand:
         assert result.exit_code == 0
         lines = result.stdout.splitlines()
         assert lines[0] == "✓ 2/2 variables within tol"
-        assert "Operation comparison" in result.stdout
 
     def test_json_carries_the_summary_and_unmapped_codes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -5722,17 +5461,9 @@ class TestCompareDecompCommand:
     def test_json_reports_no_comparable_rows_when_comparison_is_empty(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        empty_rows = _fake_comparison().rows.clear()
-        empty_comparison = DecompComparison(
-            rows=empty_rows,
-            summary=_summarize(empty_rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
         result = self._invoke(
             ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"],
             monkeypatch,
-            comparison=empty_comparison,
             dataset=_empty_fake_dataset(),
         )
         assert result.exit_code == 0
@@ -5747,7 +5478,7 @@ class TestCompareDecompCommand:
     def test_unreadable_output_exits_two(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        def _boom(*_args: object, **_kwargs: object) -> DecompComparison:
+        def _boom(*_args: object, **_kwargs: object) -> ComparisonDataset:
             raise FileNotFoundError("dec_oper_sist.csv not found")
 
         from typer.testing import CliRunner
@@ -5755,7 +5486,7 @@ class TestCompareDecompCommand:
         from cobre_bridge.cli import app
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.compare_decomp_results", _boom
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset", _boom
         )
         result = CliRunner().invoke(
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]
@@ -5866,7 +5597,7 @@ class TestCompareDecompCommand:
 
         sim_dir = tmp_path / "cobre" / "simulation" / "hydro_bus_generation"
 
-        def _boom(*_args: object, **_kwargs: object) -> DecompComparison:
+        def _boom(*_args: object, **_kwargs: object) -> ComparisonDataset:
             raise CobrePartitionMissingError(
                 f"Cobre output partition not found: {sim_dir}. The "
                 "hydro_bus_generation partition is produced by cobre "
@@ -5880,7 +5611,7 @@ class TestCompareDecompCommand:
         from cobre_bridge.cli import app
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.compare_decomp_results", _boom
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset", _boom
         )
         result = CliRunner().invoke(
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]

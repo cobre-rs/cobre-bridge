@@ -2055,7 +2055,9 @@ def productivity_comparison_scatter(
     return _plotly_div(traces, layout)
 
 
-def productivity_per_stage_chart(per_stage: pl.DataFrame) -> str:
+def productivity_per_stage_chart(
+    per_stage: pl.DataFrame, reference_label: str = "NEWAVE"
+) -> str:
     """Per-plant realized productivity (generation / turbined) across stages.
 
     Productivity is **constant within a stage but varies across stages** in both models,
@@ -2097,7 +2099,7 @@ def productivity_per_stage_chart(per_stage: pl.DataFrame) -> str:
 
     variables = [(var_key, "Realized productivity — Gen / Turbined (MW per m³/s)")]
     return _build_interactive_detail_html(
-        js_plants, variables, "prodstage", "Reservoir"
+        js_plants, variables, "prodstage", "Reservoir", reference_label
     )
 
 

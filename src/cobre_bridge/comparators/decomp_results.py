@@ -140,28 +140,6 @@ _CANONICAL_VARIABLE: dict[tuple[str, str], str] = {
 }
 
 
-@dataclass(frozen=True)
-class DecompComparison:
-    """Aligned comparison of one source-model run against one Cobre run.
-
-    ``rows`` is tidy — one row per (level, variable, entity, stage) with both
-    values and their difference. ``summary`` rolls that up per variable, and
-    ``convergence`` puts the two bound sequences side by side.
-    """
-
-    rows: pl.DataFrame
-    summary: pl.DataFrame
-    convergence: pl.DataFrame
-    unmapped: dict[str, list[int]]
-
-    @property
-    def stage_count(self) -> int:
-        """Number of distinct stages that carry at least one compared row."""
-        if self.rows.is_empty():
-            return 0
-        return int(self.rows["stage_id"].n_unique())
-
-
 def _stage_rows(frame: pl.DataFrame) -> pl.DataFrame:
     """Keep the source model's own stage-aggregate rows (``patamar`` null).
 
@@ -211,25 +189,6 @@ def _scenario_mean(
     )
 
 
-def _difference_columns() -> list[pl.Expr]:
-    """Δ and its relative form, with a floor so ~0 vs ~0 reads as agreement."""
-    delta = pl.col("cobre") - pl.col("source")
-    magnitude = pl.col("source").abs() + pl.col("cobre").abs()
-    return [
-        delta.alias("delta"),
-        pl.when(pl.col("source").abs() > _ZERO_FLOOR)
-        .then(delta / pl.col("source").abs() * 100.0)
-        .otherwise(None)
-        .alias("delta_pct"),
-        # Same definition as comparators.results.smape, expressed per row so a
-        # near-zero reference cannot dominate the roll-up.
-        pl.when(magnitude > _ZERO_FLOOR)
-        .then(delta.abs() / (magnitude / 2.0) * 100.0)
-        .otherwise(0.0)
-        .alias("smape_pct"),
-    ]
-
-
 def _result_diff(nw_value: float, cobre_value: float) -> tuple[float, float | None]:
     """Absolute and relative difference for one ``ResultComparison`` row.
 
@@ -243,62 +202,6 @@ def _result_diff(nw_value: float, cobre_value: float) -> tuple[float, float | No
     return abs_diff, rel_diff
 
 
-def _tidy(
-    source: pl.DataFrame,
-    cobre: pl.DataFrame,
-    variables: tuple[_Variable, ...],
-    *,
-    names: dict[int, str],
-) -> pl.DataFrame:
-    """Join one level's two frames into tidy per-variable rows."""
-    joined = source.join(cobre, on=["entity_id", "stage_id"], how="inner")
-    if joined.is_empty():
-        return _empty_rows()
-
-    parts: list[pl.DataFrame] = []
-    for var in variables:
-        if var.source_column not in joined.columns:
-            continue
-        if var.cobre_column not in joined.columns:
-            _LOG.info("Cobre output has no %s column; skipping", var.cobre_column)
-            continue
-        part = joined.select(
-            pl.lit(var.level).alias("level"),
-            pl.lit(var.name).alias("variable"),
-            pl.lit(var.unit).alias("unit"),
-            pl.col("entity_id"),
-            pl.col("entity_id")
-            .map_elements(lambda i: names.get(int(i), ""), return_dtype=pl.Utf8)
-            .alias("entity_name"),
-            pl.col("stage_id"),
-            pl.col(var.source_column).cast(pl.Float64).alias("source"),
-            pl.col(var.cobre_column).cast(pl.Float64).alias("cobre"),
-        ).with_columns(_difference_columns())
-        parts.append(part)
-
-    if not parts:
-        return _empty_rows()
-    return pl.concat(parts)
-
-
-def _empty_rows() -> pl.DataFrame:
-    return pl.DataFrame(
-        schema={
-            "level": pl.Utf8,
-            "variable": pl.Utf8,
-            "unit": pl.Utf8,
-            "entity_id": pl.Int64,
-            "entity_name": pl.Utf8,
-            "stage_id": pl.Int64,
-            "source": pl.Float64,
-            "cobre": pl.Float64,
-            "delta": pl.Float64,
-            "delta_pct": pl.Float64,
-            "smape_pct": pl.Float64,
-        }
-    )
-
-
 def _result_comparisons(
     source: pl.DataFrame,
     cobre: pl.DataFrame,
@@ -308,12 +211,11 @@ def _result_comparisons(
 ) -> list[ResultComparison]:
     """Join one level's two frames into ``ResultComparison`` rows.
 
-    Mirrors :func:`_tidy`'s join, but emits the canonical
+    Emits the canonical
     :class:`~cobre_bridge.comparators.results.ResultComparison` shape
     :func:`build_decomp_dataset` hands to
     :func:`cobre_bridge.comparators.analyze.build_results_dataset`, keyed by
-    :data:`_CANONICAL_VARIABLE` rather than the decomp-local
-    ``_Variable.name`` :func:`_tidy` uses for its own standalone rows.
+    :data:`_CANONICAL_VARIABLE`.
     """
     joined = source.join(cobre, on=["entity_id", "stage_id"], how="inner")
     if joined.is_empty():
@@ -432,92 +334,6 @@ def _hydro_productivity_results(
             )
         )
     return productivity
-
-
-def _summarize(rows: pl.DataFrame) -> pl.DataFrame:
-    """Roll tidy rows up to one line per (level, variable)."""
-    if rows.is_empty():
-        return pl.DataFrame(
-            schema={
-                "level": pl.Utf8,
-                "variable": pl.Utf8,
-                "unit": pl.Utf8,
-                "n": pl.UInt32,
-                "source_total": pl.Float64,
-                "cobre_total": pl.Float64,
-                "delta_total": pl.Float64,
-                "delta_total_pct": pl.Float64,
-                "smape_pct": pl.Float64,
-                "worst_entity": pl.Utf8,
-                "worst_delta": pl.Float64,
-            }
-        )
-
-    worst = (
-        rows.sort(pl.col("delta").abs(), descending=True, nulls_last=True)
-        .group_by("level", "variable")
-        .agg(
-            pl.col("entity_name").first().alias("worst_entity"),
-            pl.col("delta").first().alias("worst_delta"),
-        )
-    )
-    return (
-        rows.group_by("level", "variable")
-        .agg(
-            pl.col("unit").first(),
-            pl.len().alias("n").cast(pl.UInt32),
-            pl.col("source").sum().alias("source_total"),
-            pl.col("cobre").sum().alias("cobre_total"),
-            pl.col("smape_pct").mean().alias("smape_pct"),
-        )
-        .with_columns(
-            (pl.col("cobre_total") - pl.col("source_total")).alias("delta_total")
-        )
-        .with_columns(
-            pl.when(pl.col("source_total").abs() > _ZERO_FLOOR)
-            .then(pl.col("delta_total") / pl.col("source_total").abs() * 100.0)
-            .otherwise(None)
-            .alias("delta_total_pct")
-        )
-        .join(worst, on=["level", "variable"], how="left")
-        .sort("level", "variable")
-    )
-
-
-def _convergence(decomp_dir: Path, cobre_output_dir: Path) -> pl.DataFrame:
-    """Put both bound sequences side by side, one row per iteration index."""
-    try:
-        source = read_relato_convergence(decomp_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        _LOG.warning("No source-model convergence table: %s", exc)
-        source = pl.DataFrame()
-
-    cobre = cobre_readers.read_cobre_convergence(cobre_output_dir)
-
-    frames: list[pl.DataFrame] = []
-    if not source.is_empty():
-        columns = {c.lower(): c for c in source.columns}
-        selected = [
-            pl.col(columns["iteracao"]).cast(pl.Int64).alias("iteration"),
-            pl.col(columns["zinf"]).cast(pl.Float64).alias("source_lower"),
-            pl.col(columns["zsup"]).cast(pl.Float64).alias("source_upper"),
-        ]
-        frames.append(source.select(selected))
-    if not cobre.is_empty():
-        frames.append(
-            cobre.select(
-                pl.col("iteration").cast(pl.Int64),
-                pl.col("lower_bound").alias("cobre_lower"),
-                pl.col("upper_bound_mean").alias("cobre_upper"),
-            )
-        )
-
-    if not frames:
-        return pl.DataFrame(schema={"iteration": pl.Int64})
-    combined = frames[0]
-    for frame in frames[1:]:
-        combined = combined.join(frame, on="iteration", how="full", coalesce=True)
-    return combined.sort("iteration")
 
 
 #: Canonical convergence-chart schema -- matches
@@ -1546,11 +1362,10 @@ def _cobre_hydro(cobre_output_dir: Path) -> tuple[pl.DataFrame, dict[int, str]]:
 class _AlignedDecompFrames:
     """One run's DECOMP-side + Cobre-side frames, aligned to Cobre ids/stages.
 
-    The shared read/align result :func:`compare_decomp_results` and
-    :func:`build_decomp_dataset` both build on, via
+    The shared read/align result :func:`build_decomp_dataset` builds on, via
     :func:`_read_aligned_frames` — deck discovery, id-map construction,
     per-level scenario averaging, and the matching Cobre means run exactly
-    once per entry point.
+    once.
     """
 
     source_hydro: pl.DataFrame
@@ -1633,49 +1448,6 @@ def _read_aligned_frames(
         nw_market=nw_market,
         nw_net_load=nw_net_load,
         nw_sin=nw_sin,
-    )
-
-
-def compare_decomp_results(
-    decomp_dir: Path, cobre_output_dir: Path
-) -> DecompComparison:
-    """Compare a source-model run against the Cobre run of its converted case.
-
-    ``decomp_dir`` is the deck directory (it must contain the ``dec_oper_*.csv``
-    result tables and the deck files needed to rebuild the id map, all directly
-    in that directory); ``cobre_output_dir`` is Cobre's output directory, whose
-    case directory supplies the entity registries.
-    """
-    aligned = _read_aligned_frames(decomp_dir, cobre_output_dir)
-
-    rows = pl.concat(
-        [
-            _tidy(
-                aligned.source_hydro,
-                aligned.cobre_hydro,
-                _HYDRO_VARIABLES,
-                names=aligned.hydro_names,
-            ),
-            _tidy(
-                aligned.source_thermal,
-                aligned.cobre_thermal,
-                _THERMAL_VARIABLES,
-                names=aligned.thermal_names,
-            ),
-            _tidy(
-                aligned.source_bus,
-                aligned.cobre_bus,
-                _BUS_VARIABLES,
-                names=aligned.bus_names,
-            ),
-        ]
-    )
-
-    return DecompComparison(
-        rows=rows,
-        summary=_summarize(rows),
-        convergence=_convergence(decomp_dir, cobre_output_dir),
-        unmapped=aligned.unmapped,
     )
 
 
@@ -2852,14 +2624,11 @@ def build_decomp_dataset(
 ) -> ComparisonDataset:
     """Build the canonical results dataset for the current 8 DECOMP variables.
 
-    Shares the read/align step with :func:`compare_decomp_results` (via
-    :func:`_read_aligned_frames`), but emits the canonical
-    :class:`~cobre_bridge.comparators.results.ResultComparison` shape and
-    assembles it through the shared, source-agnostic
+    Reads and aligns both sides via :func:`_read_aligned_frames`, then emits
+    the canonical :class:`~cobre_bridge.comparators.results.ResultComparison`
+    shape and assembles it through the shared, source-agnostic
     :func:`~cobre_bridge.comparators.analyze.build_results_dataset` stat
-    kernel — instead of the standalone tidy/summary frames
-    :class:`DecompComparison` renders. This is the reuse engine every later
-    epic extends by filling more
+    kernel. This is the reuse engine every later epic extends by filling more
     :class:`~cobre_bridge.comparators.results.PercentileData` fields.
 
     Per D-PERCENTILEDATA, the returned dataset's ``PercentileData`` carries
@@ -2886,9 +2655,8 @@ def build_decomp_dataset(
     :func:`_union_cost_rows` rather than overwriting them. As of ticket-012,
     ``nw_convergence``/``cobre_convergence`` carry the Overview tab's
     Convergence overlay (see :func:`_decomp_convergence_frame` and
-    :func:`cobre_readers.read_cobre_convergence`) — a source-side canonical
-    frame distinct from the legacy :class:`DecompComparison`'s
-    ``convergence`` join. As of ticket-013, the Performance tab's timing
+    :func:`cobre_readers.read_cobre_convergence`). As of ticket-013, the
+    Performance tab's timing
     metadata is filled: ``nw_tim_stages``/``nw_tim_iterations`` (see
     :func:`_decomp_tim_stages`/:func:`_decomp_tim_iterations`, sourced from
     ``decomp.tim``/``relato.convergencia``), ``nw_max_stage`` (see

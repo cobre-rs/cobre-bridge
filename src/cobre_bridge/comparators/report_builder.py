@@ -730,7 +730,7 @@ def build_comparison_report(
         )
         # Reuses the shared per-plant dropdown widget (same as the hydro/thermal
         # detail tabs), so every reservoir is selectable — not a fixed subset.
-        prod_parts.append(productivity_per_stage_chart(per_stage_df))
+        prod_parts.append(productivity_per_stage_chart(per_stage_df, reference_label))
 
     if not prod_df.is_empty():
         prod_parts.append(section_title("Productivity Building Blocks"))

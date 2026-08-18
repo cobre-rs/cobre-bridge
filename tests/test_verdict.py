@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import json
-
-import polars as pl
 import pytest
 
-from cobre_bridge.comparators.decomp_results import DecompComparison
 from cobre_bridge.comparators.verdict import CompareVerdict
 from cobre_bridge.diagnostics import Diagnostic, Severity
 from cobre_bridge.verdict import (
@@ -17,88 +13,7 @@ from cobre_bridge.verdict import (
     compare_summary,
     convert_summary,
     dashboard_summary,
-    decomp_compare_summary,
 )
-
-
-def _fake_decomp_comparison() -> DecompComparison:
-    """A tiny two-row comparison of the source model against the converted case."""
-    rows = pl.DataFrame(
-        {
-            "level": ["hydro", "thermal"],
-            "variable": ["generation", "generation"],
-            "unit": ["MW", "MW"],
-            "entity_id": [0, 1],
-            "entity_name": ["A", "B"],
-            "stage_id": [0, 1],
-            "source": [100.0, 20.0],
-            "cobre": [90.0, 20.0],
-            "delta": [-10.0, 0.0],
-            "delta_pct": [-10.0, 0.0],
-            "smape_pct": [10.5, 0.0],
-        }
-    )
-    summary = pl.DataFrame(
-        {
-            "level": ["hydro", "thermal"],
-            "variable": ["generation", "generation"],
-            "unit": ["MW", "MW"],
-            "n": [1, 1],
-            "source_total": [100.0, 20.0],
-            "cobre_total": [90.0, 20.0],
-            "delta_total": [-10.0, 0.0],
-            "delta_total_pct": [-10.0, 0.0],
-            "smape_pct": [10.5, 0.0],
-            "worst_entity": ["A", "B"],
-            "worst_delta": [-10.0, 0.0],
-        }
-    )
-    return DecompComparison(
-        rows=rows,
-        summary=summary,
-        convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-        unmapped={"hydro": [7], "thermal": [], "bus": []},
-    )
-
-
-def _empty_decomp_comparison() -> DecompComparison:
-    """A comparison with no aligned rows (nothing on both sides mapped)."""
-    empty_rows = pl.DataFrame(
-        schema={
-            "level": pl.Utf8,
-            "variable": pl.Utf8,
-            "unit": pl.Utf8,
-            "entity_id": pl.Int64,
-            "entity_name": pl.Utf8,
-            "stage_id": pl.Int64,
-            "source": pl.Float64,
-            "cobre": pl.Float64,
-            "delta": pl.Float64,
-            "delta_pct": pl.Float64,
-            "smape_pct": pl.Float64,
-        }
-    )
-    empty_summary = pl.DataFrame(
-        schema={
-            "level": pl.Utf8,
-            "variable": pl.Utf8,
-            "unit": pl.Utf8,
-            "n": pl.UInt32,
-            "source_total": pl.Float64,
-            "cobre_total": pl.Float64,
-            "delta_total": pl.Float64,
-            "delta_total_pct": pl.Float64,
-            "smape_pct": pl.Float64,
-            "worst_entity": pl.Utf8,
-            "worst_delta": pl.Float64,
-        }
-    )
-    return DecompComparison(
-        rows=empty_rows,
-        summary=empty_summary,
-        convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-        unmapped={"hydro": [], "thermal": [], "bus": []},
-    )
 
 
 def _info_diagnostic() -> Diagnostic:
@@ -234,42 +149,3 @@ class TestCompareSummary:
         assert result["all_within_tol"] is False
         assert result["worst_variable"] == "storage"
         assert result["worst_smape"] == pytest.approx(0.04)
-
-
-class TestDecompCompareSummary:
-    def test_two_rows_returns_key_order_and_values(self) -> None:
-        comparison = _fake_decomp_comparison()
-
-        result = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        assert list(result.keys()) == [
-            "stages",
-            "variables",
-            "unmapped",
-            "within_tol",
-            "total",
-            "all_within_tol",
-        ]
-        assert result["stages"] == comparison.stage_count
-        assert result["variables"] == comparison.summary.to_dicts()
-        assert result["unmapped"] == {"hydro": [7], "thermal": [], "bus": []}
-
-    def test_two_rows_round_trips_through_json(self) -> None:
-        comparison = _fake_decomp_comparison()
-        result = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        round_tripped = json.loads(json.dumps(result))
-
-        assert round_tripped == result
-
-    def test_empty_comparison_returns_zero_stages_and_no_variables(self) -> None:
-        comparison = _empty_decomp_comparison()
-
-        result = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        assert result["stages"] == 0
-        assert result["variables"] == []
-        assert result["unmapped"] == {"hydro": [], "thermal": [], "bus": []}
-        assert result["within_tol"] == 0
-        assert result["total"] == 0
-        assert result["all_within_tol"] is False

@@ -30,7 +30,6 @@ from cobre_bridge.ui.console import (
     render_checklist,
     render_compare_verdict,
     render_conversion_summary,
-    render_decomp_comparison,
     render_diagnostics,
     render_error,
     spinner,
@@ -52,7 +51,6 @@ if TYPE_CHECKING:
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
-    from cobre_bridge.comparators.decomp_results import DecompComparison
     from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
@@ -234,9 +232,11 @@ def _export_compare_artifacts(
 ) -> tuple[set[str], Path]:
     """Resolve ``--format`` and write the machine-readable comparison artifacts.
 
-    Used by `compare newave`. Returns the requested
-    formats and the resolved out_dir so the handler can run its own HTML branch
-    and exit-code logic.
+    Shared by `compare newave` and `compare decomp` (``newave_dir`` names the
+    source-case directory generically — the manifest field itself is
+    reused across both callers). Returns the requested formats and the
+    resolved out_dir so the handler can run its own HTML branch and
+    exit-code logic.
 
     An invalid ``--format`` token exits 2 (clean stderr). A write failure must
     NOT change the comparison exit code, so an ``OSError`` is warned and
@@ -1723,63 +1723,6 @@ def _convert_decomp(
     )
 
 
-def _export_decomp_artifacts(
-    comparison: DecompComparison,
-    *,
-    raw_formats: list[str] | None,
-    decomp_dir: Path,
-    cobre_output_dir: Path,
-    tolerance: float,
-    out_dir_arg: Path | None,
-    quiet_status: bool = False,
-) -> tuple[set[str], Path]:
-    """Resolve ``--format`` and write the machine-readable comparison artifacts.
-
-    Used by `compare decomp`; the source-deck sibling of
-    :func:`_export_compare_artifacts`. Returns the requested formats and the
-    resolved out_dir so the handler can reuse them.
-
-    An invalid ``--format`` token exits 2 (clean stderr). A write failure must
-    NOT change the comparison exit code, so an ``OSError`` is warned and
-    swallowed.
-
-    *quiet_status* (set by ``--json``) gates ONLY the ``Artifacts written to …``
-    stdout status line so stdout stays pure JSON; the file export still runs and
-    the ``OSError`` write-failure warning still reaches stderr.
-    """
-    from cobre_bridge.comparators.decomp_export import write_decomp_artifacts
-
-    try:
-        formats = _parse_formats(raw_formats)
-    except ValueError as exc:
-        render_error(str(exc))
-        raise typer.Exit(code=2)
-
-    out_dir: Path = out_dir_arg or (cobre_output_dir / "comparison_artifacts")
-    export_formats = formats & {"csv", "parquet", "json"}
-
-    try:
-        write_decomp_artifacts(
-            comparison,
-            command="compare decomp",
-            decomp_dir=decomp_dir,
-            cobre_output_dir=cobre_output_dir,
-            tolerance=tolerance,
-            out_dir=out_dir,
-            formats=sorted(export_formats),
-        )
-        if not quiet_status:
-            print_status(f"Artifacts written to {out_dir}")
-    except OSError as exc:
-        print_status(
-            f"Warning: failed to write artifacts: {exc}",
-            console=get_console(stderr=True),
-            style="#F5A623",
-        )
-
-    return formats, out_dir
-
-
 def _run_decomp_comparison(args: SimpleNamespace) -> None:
     """Execute the compare decomp subcommand.
 
@@ -1789,10 +1732,7 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
     not read would be worse than stopping.
     """
     from cobre_bridge.comparators.cobre_readers import CobreReadError
-    from cobre_bridge.comparators.decomp_results import (
-        build_decomp_dataset,
-        compare_decomp_results,
-    )
+    from cobre_bridge.comparators.decomp_results import build_decomp_dataset
     from cobre_bridge.comparators.verdict import build_compare_verdict
     from cobre_bridge.errors import CobrePartitionMissingError
 
@@ -1808,7 +1748,6 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
             quiet=args.quiet,
             no_color=args.no_color,
         ):
-            comparison = compare_decomp_results(args.decomp_dir, args.cobre_output_dir)
             dataset = build_decomp_dataset(
                 args.decomp_dir, args.cobre_output_dir, tolerance=args.tolerance
             )
@@ -1825,12 +1764,12 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
 
     if not args.json_output:
         render_compare_verdict(build_compare_verdict(dataset))
-        render_decomp_comparison(comparison)
 
-    formats, out_dir = _export_decomp_artifacts(
-        comparison,
+    formats, out_dir = _export_compare_artifacts(
+        dataset,
+        command="compare decomp",
         raw_formats=args.format,
-        decomp_dir=args.decomp_dir,
+        newave_dir=args.decomp_dir,
         cobre_output_dir=args.cobre_output_dir,
         tolerance=args.tolerance,
         out_dir_arg=args.out_dir,
@@ -1859,10 +1798,6 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
         # exit code is DECOUPLED from it — this command always exits 0,
         # mirroring ``compare newave``. An empty dataset has no rows to judge,
         # so it keeps the E1 data-availability status instead.
-        #
-        # D-STRANGLER: ``decomp_dataset_summary`` supersedes
-        # ``decomp_compare_summary`` at THIS call site only — the legacy
-        # summary (and its own tests) stay untouched until E8.
         summary = decomp_dataset_summary(dataset, args.tolerance)
         if dataset.tidy.is_empty():
             status = "no-comparable-rows"
@@ -1914,6 +1849,15 @@ def _compare_decomp(
     """Compare a DECOMP run's published operation against Cobre's simulation.
 
     Informational: always exits 0, reporting divergences without failing.
+
+    Two caveats apply to the generated report. First, the Overview tab's NPV
+    cost cards compare DECOMP's undiscounted-nominal costs against Cobre's
+    time-discounted costs: DECOMP's own cost report carries no per-stage
+    discount factor, so none is fabricated on that side, and the two totals
+    are not on the same time-value footing. Second, percentile bands are
+    omitted (or labelled low-N where one would otherwise appear) for a
+    deterministic tree with too few scenarios to report a spread without
+    synthesizing it.
     """
     _configure_logging(verbose, log_file)
     _run_decomp_comparison(
