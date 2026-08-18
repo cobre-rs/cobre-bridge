@@ -561,7 +561,6 @@ def _read_penalid(case: NewaveCase) -> dict[int, dict[str, float]]:
         ree_code = int(row["codigo_ree_submercado"])
         valor = row["valor_R$_MWh"]
 
-        # Skip NaN values.
         if pd.isna(valor):
             continue
 
@@ -583,9 +582,7 @@ _KTURB_BY_TIPO_TURBINA: dict[int, float] = {0: 0.5, 1: 0.5, 2: 0.2, 3: 0.5}
 
 def _clamp_outage_pct(value: float, label: str, plant_name: str) -> float:
     """Clamp TEIF/IP percentages into ``[0, 100]`` and warn on overshoot."""
-    if math.isnan(value):
-        return 0.0
-    if value < 0.0:
+    if math.isnan(value) or value < 0.0:
         return 0.0
     if value > 100.0:
         _LOG.warning(
@@ -898,6 +895,68 @@ def _reduced_caps(
     return max_turbined, max_generation
 
 
+def build_mirror_unit_group(
+    *,
+    name: str,
+    bus_id: int,
+    min_generation_mw: float,
+    max_generation_mw: float,
+    min_turbined_m3s: float,
+    max_turbined_m3s: float,
+    group_id: int = 0,
+) -> dict[str, object]:
+    """Build one "mirror" unit group for a hydro plant.
+
+    cobre requires every hydro to declare a non-empty ``unit_groups`` array
+    (``RawUnitGroup``, all seven fields present). For the ordinary,
+    single-group plant every caller in the bridge emits, the group's bounds
+    *mirror* the plant's own generation envelope verbatim — no clamping, no
+    zeroing of minima, no recomputation — and with a single group,
+    ``sum(group maxima) == plant maximum`` holds trivially, which is exactly
+    what cobre rule 41 checks, so the rule is satisfied by construction.
+
+    A plant whose halves are maintained independently (e.g. a two-frequency
+    split) instead calls this twice, once per physically separate group,
+    passing each group's own conjunto-backed bounds (not the plant's) and a
+    distinct ``group_id`` — the caller is responsible for the group maxima
+    still summing to the plant envelope (rule 41) and for the ids being
+    unique within the plant (cobre rule 39; the overlay is id-addressed, so
+    array order is never load-bearing — see ``decomp/group_bounds.py``).
+
+    Parameters
+    ----------
+    name:
+        The plant name, used verbatim as the group name.
+    bus_id:
+        The group's bus id (the plant's own bus for every group, when every
+        group sits on the same bus).
+    min_generation_mw, max_generation_mw:
+        The group's generation bounds in MW.
+    min_turbined_m3s, max_turbined_m3s:
+        The group's turbined-flow bounds in m^3/s.
+    group_id:
+        The group's ``id``. Defaults to ``0`` — unit-group ids are dense and
+        0-based within a plant, and a single mirror group is the plant's
+        only (hence first) group. Pass a distinct value for each group of a
+        multi-group plant.
+
+    Returns
+    -------
+    dict[str, object]
+        Exactly the seven ``RawUnitGroup`` keys required by
+        ``hydros.schema.json`` — no extras.
+    """
+    return {
+        "id": group_id,
+        "name": name,
+        "bus_id": bus_id,
+        "min_generation_mw": min_generation_mw,
+        "max_generation_mw": max_generation_mw,
+        "min_turbined_m3s": min_turbined_m3s,
+        "max_turbined_m3s": max_turbined_m3s,
+    }
+
+
 def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     """Read ``hidr.dat`` and apply permanent MODIF.DAT overrides.
 
@@ -955,6 +1014,39 @@ def _unit_ramp_summary(
         for c, stages in sorted(by_conjunto.items())
     ]
     return "; ".join(parts)
+
+
+def _per_stage_turbined_envelope(
+    case: NewaveCase, id_map: NewaveIdMap
+) -> dict[int, float]:
+    """Return ``{cobre_hydro_id: max per-stage max_turbined_m3s}`` from the
+    head-corrected per-stage table.
+
+    Delegates to :func:`convert_turbined_bounds_head_corrected` — the exact
+    function the pipeline uses to emit the per-(hydro, stage)
+    ``hydro_bounds`` rows — instead of re-deriving the per-stage head. This is
+    what lets :func:`convert_hydros` raise its declared
+    ``generation.max_turbined_m3s`` to cover every emitted per-stage row
+    (cobre rule 43) with zero risk of the two ever drifting apart: they are
+    two views of the same table, not two formulas that happen to agree today.
+
+    Returns an empty dict when no plant has a per-stage head (no CFUGA/CMONT
+    temporal overrides and no seasonal ``VOLREF_SAZ`` row), so callers must
+    treat a missing key as "no per-stage variation", not as zero.
+    """
+    table = convert_turbined_bounds_head_corrected(case, id_map)
+    if table is None:
+        return {}
+    envelope: dict[int, float] = {}
+    for hydro_id, value in zip(
+        table["hydro_id"].to_pylist(),
+        table["max_turbined_m3s"].to_pylist(),
+        strict=True,
+    ):
+        current = envelope.get(hydro_id)
+        if current is None or value > current:
+            envelope[hydro_id] = value
+    return envelope
 
 
 def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
@@ -1016,6 +1108,15 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro, filling_codes=filling_codes)
+
+    # Per-hydro envelope over the head-corrected per-stage turbined caps that
+    # convert_turbined_bounds_head_corrected emits into hydro_bounds.parquet.
+    # cobre rule 43 forbids any hydro_bounds row from raising max_turbined_m3s
+    # above the plant's own declared value, so the reference-head value below
+    # must be raised to cover every emitted per-stage row (ticket-015b). Empty
+    # for a hydro with no per-stage head variation, which keeps its declared
+    # value unchanged.
+    turbined_envelope = _per_stage_turbined_envelope(case, id_map)
 
     # Collect study plant codes for temporal override extraction.
     existing = case.active_hydros
@@ -1186,16 +1287,29 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         #     derated power undershoots it). This loose ceiling never binds
         #     before the head-corrected turbined cap, so a plant reaches its
         #     turbined limit, not nameplate power.
-        max_turbined = _compute_max_turbined_head_corrected(hreg, name)[0]
+        #
+        # The declaration itself is the ENVELOPE over that reference-head value
+        # and every per-stage head-corrected cap this hydro emits into
+        # hydro_bounds (ticket-015b): a plant with per-stage head variation
+        # (MODIF.DAT CFUGA/CMONT or seasonal VOLREF_SAZ) can turbine more at a
+        # higher-head stage than at the reference head, and cobre rule 43
+        # forbids a hydro_bounds row from exceeding the plant's own declared
+        # value. A hydro with no per-stage variation is absent from
+        # ``turbined_envelope`` and keeps its reference-head value unchanged.
+        cobre_hydro_id = id_map.hydro_id(newave_code)
+        max_turbined_reference = _compute_max_turbined_head_corrected(hreg, name)[0]
+        envelope_value = turbined_envelope.get(cobre_hydro_id)
+        max_turbined = (
+            max_turbined_reference
+            if envelope_value is None
+            else max(max_turbined_reference, envelope_value)
+        )
         max_generation = _compute_max_turbined_rated(hreg)[1]
 
         # Minimum outflow from historical minimum (may have been overridden by MODIF).
         vazao_min_hist = hreg.get("vazao_minima_historica")
-        min_outflow = (
-            float(vazao_min_hist)
-            if vazao_min_hist and float(vazao_min_hist) > 0
-            else 0.0
-        )
+        vazao_min_hist_val = float(vazao_min_hist) if vazao_min_hist else 0.0
+        min_outflow = vazao_min_hist_val if vazao_min_hist_val > 0 else 0.0
 
         # VAZMINT temporal overrides are now emitted as per-stage bounds in
         # hydro_bounds.parquet via convert_storage_bounds().  The static
@@ -1320,11 +1434,16 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             if not math.isnan(cf_val) and cf_val > 0.0:
                 tailrace = {"type": "polynomial", "coefficients": [cf_val]}
 
+        evaporation: dict | None = None
+        if has_evaporation:
+            evaporation = {"coefficients_mm": evap_coeffs}
+            if evap_reference_volumes is not None:
+                evaporation["reference_volumes_hm3"] = evap_reference_volumes
+
         hydro_entry: dict = {
-            "id": id_map.hydro_id(newave_code),
+            "id": cobre_hydro_id,
             "name": name,
             "operational_start_date": operational_start_date,
-            "bus_id": bus_id,
             "downstream_id": downstream_id,
             "reservoir": {
                 "min_storage_hm3": vol_min,
@@ -1341,19 +1460,18 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 "min_generation_mw": min_generation,
                 "max_generation_mw": max_generation,
             },
+            "unit_groups": [
+                build_mirror_unit_group(
+                    name=name,
+                    bus_id=bus_id,
+                    min_generation_mw=min_generation,
+                    max_generation_mw=max_generation,
+                    min_turbined_m3s=0.0,
+                    max_turbined_m3s=max_turbined,
+                )
+            ],
             "specific_productivity_mw_per_m3s_per_m": rho_esp,
-            "evaporation": (
-                {
-                    "coefficients_mm": evap_coeffs,
-                    **(
-                        {"reference_volumes_hm3": evap_reference_volumes}
-                        if evap_reference_volumes is not None
-                        else {}
-                    ),
-                }
-                if has_evaporation
-                else None
-            ),
+            "evaporation": evaporation,
             "tailrace": tailrace,
             "diversion": None,
             "filling": filling,
@@ -1881,14 +1999,13 @@ def _per_stage_drop_overrides(
     active_cmont: float | None = None
     for stage_id in range(total_stages):
         if stage_id == 0:
-            for past_stage in sorted(s for s in events_by_stage if s <= 0):
-                for cfuga_val, cmont_val in events_by_stage[past_stage]:
-                    if cfuga_val is not None:
-                        active_cfuga = cfuga_val
-                    if cmont_val is not None:
-                        active_cmont = cmont_val
-        if stage_id in events_by_stage and stage_id > 0:
-            for cfuga_val, cmont_val in events_by_stage[stage_id]:
+            applicable_stages = sorted(s for s in events_by_stage if s <= 0)
+        elif stage_id in events_by_stage:
+            applicable_stages = [stage_id]
+        else:
+            applicable_stages = []
+        for past_stage in applicable_stages:
+            for cfuga_val, cmont_val in events_by_stage[past_stage]:
                 if cfuga_val is not None:
                     active_cfuga = cfuga_val
                 if cmont_val is not None:
@@ -2329,6 +2446,16 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
     heights: list[float] = []
     areas: list[float] = []
 
+    def _eval_poly(coeffs: list[float], x: np.ndarray) -> np.ndarray:
+        """Evaluate a 4th-degree polynomial: c0 + c1*x + ... + c4*x^4."""
+        return (
+            coeffs[0]
+            + coeffs[1] * x
+            + coeffs[2] * x**2
+            + coeffs[3] * x**3
+            + coeffs[4] * x**4
+        )
+
     for newave_code in id_map.all_hydro_codes:
         if newave_code not in cadastro.index:
             _LOG.warning(
@@ -2353,16 +2480,6 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
 
         # Polynomial coefficients for height -> area (m -> km2).
         ca_coeffs = [float(hreg[f"a{i}_cota_area"]) for i in range(5)]
-
-        def _eval_poly(coeffs: list[float], x: np.ndarray) -> np.ndarray:
-            """Evaluate a 4th-degree polynomial: c0 + c1*x + ... + c4*x^4."""
-            return (
-                coeffs[0]
-                + coeffs[1] * x
-                + coeffs[2] * x**2
-                + coeffs[3] * x**3
-                + coeffs[4] * x**4
-            )
 
         cobre_id = id_map.hydro_id(newave_code)
 
@@ -2499,7 +2616,6 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
             cur = plant_downstream.get(cur, 0)
         return None
 
-    # Group by (codigo_usina, data) and sum valor.
     grouped = df.groupby(["codigo_usina", "data"], as_index=False)["valor"].sum()
 
     # Accumulate by (hydro_id, stage_id) so propagated NC entries merge
@@ -2561,7 +2677,7 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
                 continue
 
             have = existing_stages.get(hid, set())
-            for s in range(0, num_total_stages):
+            for s in range(num_total_stages):
                 if s in have:
                     continue
                 total_month = start_month + s
@@ -2691,6 +2807,9 @@ def convert_storage_bounds(
     # MODIF/GHMIN row. Drives the ramp-wins de-dup pass before the table build.
     is_ramp_vals: list[bool] = []
 
+    def _identity(val: float) -> float:
+        return val
+
     plant_codes_with_data = set(temporal_overrides) | set(ghmin_by_plant_stage)
     for newave_code in sorted(plant_codes_with_data):
         overrides = temporal_overrides.get(newave_code, [])
@@ -2717,15 +2836,8 @@ def convert_storage_bounds(
         vol_max = float(hreg["volume_maximo"])
         useful = vol_max - vol_min
 
-        def _pct_to_hm3(
-            pct: float,
-            _u: float = useful,
-            _vm: float = vol_min,
-        ) -> float:
-            return _vm + (pct / 100.0) * _u
-
-        def _identity(val: float) -> float:
-            return val
+        def _pct_to_hm3(pct: float) -> float:
+            return vol_min + (pct / 100.0) * useful
 
         # Storage bounds (percentage -> hm³). Seasonal post-study iff the
         # corresponding dger flag is set; otherwise freeze.
@@ -2844,7 +2956,7 @@ def convert_storage_bounds(
             # 0-cap rows for every in-study stage [0, total_stages) — it never
             # operates in-study, so every stage is pre-operating.
             full_online_sid = max(max(usid, entry_sid) for _c, usid in unit_rows)
-            for s in range(0, min(full_online_sid, total_stages)):
+            for s in range(min(full_online_sid, total_stages)):
                 online = online_machines(unit_rows, entry_sid, s)
                 mt, mg = _reduced_caps(hreg, online, name)
                 hydro_ids.append(hydro_id)

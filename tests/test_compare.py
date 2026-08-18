@@ -7,17 +7,14 @@ alignment, computation, comparison, and report generation.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import polars as pl
 import pyarrow as pa
 import pytest
 
-from cobre_bridge.comparators.alignment import (
-    EntityAlignment,
-    HydroEntity,
-    ThermalEntity,
-)
 from cobre_bridge.comparators.bounds import (
     BoundComparison,
     _bounds_match,
@@ -28,7 +25,6 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     build_results_summary,
 )
-from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import make_case
 
 # -------------------------------------------------------------------
@@ -68,36 +64,6 @@ class TestBoundsHelpers:
 
 
 class TestResultsComparison:
-    @staticmethod
-    def _make_alignment() -> EntityAlignment:
-        return EntityAlignment(
-            hydros=[
-                HydroEntity(
-                    newave_code=1,
-                    cobre_id=0,
-                    name="PLANT_A",
-                    has_reservoir=True,
-                ),
-            ],
-            thermals=[
-                ThermalEntity(
-                    newave_code=10,
-                    cobre_id=0,
-                    name="THERMAL_A",
-                ),
-            ],
-            lines=[],
-            num_newave_stages=3,
-        )
-
-    @staticmethod
-    def _make_id_map() -> NewaveIdMap:
-        return NewaveIdMap(
-            subsystem_ids=[1],
-            hydro_codes=[1],
-            thermal_codes=[10],
-        )
-
     def test_build_results_summary_empty(self) -> None:
         summary = build_results_summary([])
         assert summary.total == 0
@@ -771,6 +737,7 @@ class TestBoundsFromInputs:
                 "stage_id": pa.array([0], pa.int32()),
                 "direct_mw": pa.array([500.0], pa.float64()),
                 "reverse_mw": pa.array([300.0], pa.float64()),
+                "block_id": pa.array([None], pa.int32()),
             }
         )
         case = make_case(tmp_path)
@@ -782,6 +749,41 @@ class TestBoundsFromInputs:
 
         assert result[(0, 0, "direct_flow_max")] == 500.0
         assert result[(0, 0, "reverse_flow_max")] == 300.0
+
+    def test_compute_line_bounds_ignores_per_block_override_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """A per-block override row must not shadow the stage-level base row.
+
+        Regression test: before the ``block_id is None`` filter was added,
+        building the result dict by iterating every row (base row then block
+        rows) let the last-seen row for a given (line_id, stage_id) silently
+        overwrite the base capacity — collapsing to a block's absolute MW
+        instead of the line's declared capacity.
+        """
+        from cobre_bridge.comparators.bounds_from_inputs import compute_line_bounds
+
+        table = pa.table(
+            {
+                "line_id": pa.array([0, 0], pa.int32()),
+                "stage_id": pa.array([0, 0], pa.int32()),
+                "direct_mw": pa.array([500.0, 450.0], pa.float64()),
+                "reverse_mw": pa.array([300.0, 270.0], pa.float64()),
+                "block_id": pa.array([None, 0], pa.int32()),
+            }
+        )
+        case = make_case(tmp_path)
+        with patch(
+            "cobre_bridge.converters.network.convert_line_bounds",
+            return_value=table,
+        ):
+            result = compute_line_bounds(case, MagicMock())
+
+        # The base row's capacity (500.0 / 300.0), not the block row's
+        # (450.0 / 270.0), must survive.
+        assert result[(0, 0, "direct_flow_max")] == 500.0
+        assert result[(0, 0, "reverse_flow_max")] == 300.0
+        assert len(result) == 2
 
 
 class TestCompareHydrosProductivity:
@@ -1063,6 +1065,55 @@ class TestEdgeCases:
         assert read_cobre_convergence(fake_dir).is_empty()
         assert read_cobre_hydro_metadata(fake_dir) == {}
 
+    def test_cobre_convergence_reads_014_upper_bound(self, tmp_path: Path) -> None:
+        """cobre 0.14 renamed ``upper_bound_mean`` -> ``upper_bound`` (with a
+        sibling ``upper_bound_std``/``upper_bound_kind``).  The reader must map
+        ``upper_bound`` into the canonical ``upper_bound_mean`` slot and must
+        NOT let the prefix-sharing ``_std``/``_kind`` columns hijack it — the
+        failure mode is a silently empty convergence frame."""
+        import polars as pl
+
+        from cobre_bridge.comparators.cobre_readers import read_cobre_convergence
+
+        training = tmp_path / "training"
+        training.mkdir()
+        pl.DataFrame(
+            {
+                "iteration": [1, 2],
+                "lower_bound": [10.0, 20.0],
+                "upper_bound_std": [1.0, 0.5],
+                "upper_bound_kind": ["statistical", "statistical"],
+                "upper_bound": [15.0, 22.0],
+            }
+        ).write_parquet(training / "convergence.parquet")
+
+        df = read_cobre_convergence(tmp_path)
+        assert not df.is_empty()
+        assert df["iteration"].to_list() == [1, 2]
+        assert df["lower_bound"].to_list() == [10.0, 20.0]
+        assert df["upper_bound_mean"].to_list() == [15.0, 22.0]
+
+    def test_cobre_convergence_reads_legacy_upper_bound_mean(
+        self, tmp_path: Path
+    ) -> None:
+        """The legacy ``upper_bound_mean`` spelling still reads (back-compat)."""
+        import polars as pl
+
+        from cobre_bridge.comparators.cobre_readers import read_cobre_convergence
+
+        training = tmp_path / "training"
+        training.mkdir()
+        pl.DataFrame(
+            {
+                "iteration": [1],
+                "lower_bound": [10.0],
+                "upper_bound_mean": [15.0],
+            }
+        ).write_parquet(training / "convergence.parquet")
+
+        df = read_cobre_convergence(tmp_path)
+        assert df["upper_bound_mean"].to_list() == [15.0]
+
     def test_empty_alignment_produces_no_results(self) -> None:
         """Alignment with no entities produces empty comparison."""
         summary = build_results_summary([])
@@ -1236,10 +1287,9 @@ class TestCompareResultsReturnsDataset:
     """``compare_results`` returns a validated ``ComparisonDataset`` (ticket-022).
 
     Drives the REAL ``compare_results`` with every reader patched to empty so the
-    return-type contract is exercised end-to-end without any case files: The source
-    model saidas is absent (``_find_saidas_dir`` -> ``None``), every Cobre/the source
-    model reader returns an empty frame/dict, and the generic-constraint loaders are
-    empty.
+    return-type contract is exercised end-to-end without any case files: every
+    Cobre and source-model reader (MEDIAS / nwlistop / pmo included) returns an
+    empty frame/dict, and the generic-constraint loaders are empty.
     """
 
     @staticmethod
@@ -1251,8 +1301,17 @@ class TestCompareResultsReturnsDataset:
         empty_pl = pl.DataFrame
         empty_pd = lambda *a, **k: __import__("pandas").DataFrame()  # noqa: E731
 
-        # The source model saidas absent -> all saidas-guarded branches are skipped.
-        monkeypatch.setattr(nr + "_find_saidas_dir", lambda _d: None)
+        # The source-model MEDIAS / nwlistop readers return empty (no result
+        # files in the case dir); the MEDIAS block still runs (no saidas/ gate).
+        for name in (
+            "read_medias_hydro",
+            "read_medias_thermal",
+            "read_medias_system",
+            "read_medias_market",
+            "read_medias_sin",
+            "read_nwlistop_intercambio",
+        ):
+            monkeypatch.setattr(nr + name, lambda *a, **k: empty_pl())
 
         # Frame-returning Cobre readers.
         for name in (
@@ -1278,12 +1337,13 @@ class TestCompareResultsReturnsDataset:
             monkeypatch.setattr(cr + name, lambda *a, **k: empty_pl())
         # Dict / scalar Cobre readers.
         monkeypatch.setattr(cr + "read_cobre_hydro_metadata", lambda *a, **k: {})
+        monkeypatch.setattr(cr + "read_cobre_hydro_bus_labels", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_thermal_metadata", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_bus_metadata", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_cost_breakdown", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_training_duration", lambda *a, **k: 0.0)
 
-        # The source model readers (only the non-saidas ones are reached).
+        # The remaining source-model readers (pmo / net-load / tim).
         monkeypatch.setattr(nr + "read_pmo_convergence", lambda *a, **k: empty_pl())
         monkeypatch.setattr(
             nr + "read_pmo_productivity_detail", lambda *a, **k: empty_pl()
@@ -1788,3 +1848,313 @@ class TestEvaluateLhsCobre:
 
         result = evaluate_lhs_cobre([], Path("/out"))
         assert result.is_empty()
+
+
+# -------------------------------------------------------------------
+# ticket-028: comparator readers -> F3 (derive shape from the interval)
+# -------------------------------------------------------------------
+
+
+class TestShapeFromBounds:
+    """AC2: unit tests for the F3 inverse-mapping helper."""
+
+    def test_lower_only_is_ge(self) -> None:
+        from cobre_bridge.generic_constraint_format import shape_from_bounds
+
+        assert shape_from_bounds(10.0, None) == ">="
+
+    def test_upper_only_is_le(self) -> None:
+        from cobre_bridge.generic_constraint_format import shape_from_bounds
+
+        assert shape_from_bounds(None, 10.0) == "<="
+
+    def test_both_equal_is_eq(self) -> None:
+        from cobre_bridge.generic_constraint_format import shape_from_bounds
+
+        assert shape_from_bounds(7.0, 7.0) == "=="
+
+    def test_both_unequal_is_range(self) -> None:
+        from cobre_bridge.generic_constraint_format import shape_from_bounds
+
+        assert shape_from_bounds(1.0, 10.0) == "range"
+
+    def test_both_none_raises_value_error(self) -> None:
+        from cobre_bridge.generic_constraint_format import shape_from_bounds
+
+        with pytest.raises(ValueError, match="at least one endpoint"):
+            shape_from_bounds(None, None)
+
+
+class TestGenericConstraintF3Loaders:
+    """AC1/AC4: the loaders consume F3's sense-free JSON + interval parquet."""
+
+    def test_bounds_loader_missing_file_has_no_bound_column(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.comparators.constraints_compare import (
+            _load_generic_constraint_bounds,
+        )
+
+        df = _load_generic_constraint_bounds(tmp_path)
+        assert "bound" not in df.columns
+        assert {"bound_lower", "bound_upper"}.issubset(set(df.columns))
+
+    def test_bounds_loader_reads_f3_parquet_endpoints(self, tmp_path: Path) -> None:
+        import pyarrow.parquet as pq
+
+        from cobre_bridge.comparators.constraints_compare import (
+            _load_generic_constraint_bounds,
+        )
+
+        constraints_dir = tmp_path / "constraints"
+        constraints_dir.mkdir()
+        pq.write_table(
+            pa.table(
+                {
+                    "constraint_id": pa.array([0], type=pa.int32()),
+                    "stage_id": pa.array([0], type=pa.int32()),
+                    "block_id": pa.array([0], type=pa.int32()),
+                    "bound_lower": pa.array([10.0], type=pa.float64()),
+                    "bound_upper": pa.array([None], type=pa.float64()),
+                }
+            ),
+            constraints_dir / "generic_constraint_bounds.parquet",
+        )
+
+        df = _load_generic_constraint_bounds(tmp_path)
+        assert "bound" not in df.columns
+        assert df["bound_lower"].to_list() == [10.0]
+        assert df["bound_upper"].to_list() == [None]
+
+    def test_constraints_loader_parses_sense_free_json(self, tmp_path: Path) -> None:
+        import json
+
+        from cobre_bridge.comparators.constraints_compare import (
+            _load_generic_constraints,
+        )
+
+        constraints_dir = tmp_path / "constraints"
+        constraints_dir.mkdir()
+        (constraints_dir / "generic_constraints.json").write_text(
+            json.dumps(
+                {
+                    "constraints": [
+                        {
+                            "id": 0,
+                            "name": "RE_1",
+                            "expression": "hydro_generation(0)",
+                            "description": "Electric restriction",
+                        }
+                    ]
+                }
+            )
+        )
+
+        constraints = _load_generic_constraints(tmp_path)
+        assert len(constraints) == 1
+        assert "sense" not in constraints[0]
+        assert constraints[0]["name"] == "RE_1"
+
+
+class TestPerStageBoundsResolution:
+    """AC3 (unit half): per_stage_bounds resolves the endpoint the pre-F3
+    single ``bound`` column used to hold, for every constraint direction."""
+
+    @staticmethod
+    def _f3_bounds() -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "constraint_id": [0, 0, 1, 1, 2, 2],
+                "stage_id": [0, 1, 0, 1, 0, 1],
+                "block_id": [0, 0, 0, 0, 0, 0],
+                # cid 0: >= (VminOP-style)  -> lower-only
+                # cid 1: <= (AGRINT-style)  -> upper-only
+                # cid 2: == (equality)      -> both endpoints equal
+                "bound_lower": [500.0, 520.0, None, None, 300.0, 300.0],
+                "bound_upper": [None, None, 200.0, 210.0, 300.0, 300.0],
+            }
+        )
+
+    def test_resolves_ge_from_lower_endpoint(self) -> None:
+        from cobre_bridge.comparators.constraints_compare import per_stage_bounds
+
+        resolved = per_stage_bounds(self._f3_bounds())
+        assert resolved[0][0].value == 500.0
+        assert resolved[0][0].shape == ">="
+        assert resolved[0][1].value == 520.0
+
+    def test_resolves_le_from_upper_endpoint(self) -> None:
+        from cobre_bridge.comparators.constraints_compare import per_stage_bounds
+
+        resolved = per_stage_bounds(self._f3_bounds())
+        assert resolved[1][0].value == 200.0
+        assert resolved[1][0].shape == "<="
+        assert resolved[1][1].value == 210.0
+
+    def test_resolves_eq_from_either_endpoint(self) -> None:
+        from cobre_bridge.comparators.constraints_compare import per_stage_bounds
+
+        resolved = per_stage_bounds(self._f3_bounds())
+        assert resolved[2][0].value == 300.0
+        assert resolved[2][0].shape == "=="
+
+
+class TestAC3NumericRegressionAcrossF3Migration:
+    """AC3 (integration half): an F3 case whose constraints round-trip
+    unchanged from the pre-F3 ``(sense, bound)`` content produces identical
+    per-stage evaluated limits and pass/fail verdicts to the pre-F3
+    comparison — same numbers, new column layout."""
+
+    def test_f3_limits_and_verdicts_match_pre_f3_content(self, tmp_path: Path) -> None:
+        import pyarrow.parquet as pq
+
+        from cobre_bridge.comparators.constraints_compare import (
+            _load_generic_constraint_bounds,
+            per_stage_bounds,
+        )
+        from cobre_bridge.generic_constraint_format import sense_to_interval
+
+        # Pre-F3 ground truth this case is migrated from: constraint 0 is a
+        # VminOP-style `>=` security-curve floor; constraint 1 is an
+        # AGRINT-style `<=` ceiling. These are the exact (sense, value) pairs
+        # a pre-F3 case would have carried in its single `bound` column.
+        pre_f3_bound = {
+            (0, 0): (">=", 500.0),
+            (0, 1): (">=", 520.0),
+            (1, 0): ("<=", 200.0),
+            (1, 1): ("<=", 200.0),
+        }
+        lhs = {(0, 0): 510.0, (0, 1): 515.0, (1, 0): 190.0, (1, 1): 205.0}
+
+        constraints_dir = tmp_path / "constraints"
+        constraints_dir.mkdir()
+        cids: list[int] = []
+        stages: list[int] = []
+        blocks: list[int] = []
+        lowers: list[float | None] = []
+        uppers: list[float | None] = []
+        for (cid, stage), (sense, value) in pre_f3_bound.items():
+            lo, up = sense_to_interval(sense, value)
+            cids.append(cid)
+            stages.append(stage)
+            blocks.append(0)
+            lowers.append(lo)
+            uppers.append(up)
+        pq.write_table(
+            pa.table(
+                {
+                    "constraint_id": pa.array(cids, type=pa.int32()),
+                    "stage_id": pa.array(stages, type=pa.int32()),
+                    "block_id": pa.array(blocks, type=pa.int32()),
+                    "bound_lower": pa.array(lowers, type=pa.float64()),
+                    "bound_upper": pa.array(uppers, type=pa.float64()),
+                }
+            ),
+            constraints_dir / "generic_constraint_bounds.parquet",
+        )
+
+        gc_bounds = _load_generic_constraint_bounds(tmp_path)
+        assert "bound" not in gc_bounds.columns
+        resolved = per_stage_bounds(gc_bounds)
+
+        for (cid, stage), (sense, value) in pre_f3_bound.items():
+            rb = resolved[cid][stage]
+            # Identical per-stage evaluated limit to the pre-F3 single
+            # `bound` column value.
+            assert rb.value == value
+            assert rb.shape == sense
+            # Identical pass/fail verdict to what a pre-F3 comparison
+            # (LHS vs. the single (sense, bound) pair) would have reached.
+            lhs_value = lhs[(cid, stage)]
+            pre_f3_pass = lhs_value >= value if sense == ">=" else lhs_value <= value
+            f3_pass = (
+                lhs_value >= rb.value if rb.shape == ">=" else lhs_value <= rb.value
+            )
+            assert f3_pass == pre_f3_pass
+
+
+class TestConstraintsChartShapeLabelFromBounds:
+    """AC4 (chart half): the chart title derives the shape label from the
+    resolved bounds via `shape_from_bounds`, not from a removed `sense`
+    field on the (now sense-free) constraint dict."""
+
+    def test_chart_title_uses_shape_derived_from_bounds(self) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.charts import constraints_comparison_chart
+        from cobre_bridge.comparators.constraints_compare import ResolvedBound
+
+        constraints = [{"id": 0, "name": "VminOP_X"}]  # sense-free (F3)
+        lhs_newave = pl.DataFrame(
+            {"constraint_id": [0], "stage_id": [0], "lhs_value": [510.0]}
+        )
+        lhs_cobre = pl.DataFrame(
+            {"constraint_id": [0], "stage_id": [0], "lhs_value": [508.0]}
+        )
+        bound_by_constraint = {0: {0: ResolvedBound(500.0, ">=")}}
+
+        html = constraints_comparison_chart(
+            constraints, lhs_newave, lhs_cobre, bound_by_constraint
+        )
+        # json_for_script escapes `>` as `>` before embedding in <script>.
+        assert "VminOP_X (\\u003e=)" in html
+
+    def test_chart_title_defaults_when_no_bound_data(self) -> None:
+        import polars as pl
+
+        from cobre_bridge.comparators.charts import constraints_comparison_chart
+
+        constraints = [{"id": 0, "name": "RE_1"}]
+        lhs_newave = pl.DataFrame(
+            {"constraint_id": [0], "stage_id": [0], "lhs_value": [10.0]}
+        )
+        lhs_cobre = pl.DataFrame(
+            schema={
+                "constraint_id": pl.Int32,
+                "stage_id": pl.Int32,
+                "lhs_value": pl.Float64,
+            }
+        )
+
+        # No bound entries for cid 0 -> the "<=" default (matching the old
+        # `c.get("sense", "<=")` fallback) is used.
+        html = constraints_comparison_chart(constraints, lhs_newave, lhs_cobre, {})
+        assert "RE_1 (\\u003c=)" in html
+
+
+_BOUND_ACCESS_RE = re.compile(
+    r'\.col\(\s*["\']bound["\']\s*\)|\[\s*["\']bound["\']\s*\]|\.get\(\s*["\']bound["\']'
+)
+_SENSE_ACCESS_RE = re.compile(
+    r'\.col\(\s*["\']sense["\']\s*\)|\[\s*["\']sense["\']\s*\]|\.get\(\s*["\']sense["\']'
+)
+
+
+class TestNoSenseOrSingleBoundColumnRemainsInComparators:
+    """AC5 grep guard: no comparator reads a removed `sense` key or a single
+    `bound` column. Matches only genuine column/dict *access* patterns
+    (``.col("bound")``, ``row["bound"]``, ``.get("bound"``) — column *names*
+    that merely contain "bound" as a substring (``bound_lower``,
+    ``bound_upper``) and unrelated string literals (e.g. charts.py's
+    ``"legendgroup": "bound"`` trace label) are not matches.
+    """
+
+    @pytest.mark.parametrize(
+        "relative_path",
+        [
+            "src/cobre_bridge/comparators/constraints_compare.py",
+            "src/cobre_bridge/comparators/charts.py",
+            "src/cobre_bridge/comparators/results.py",
+        ],
+    )
+    def test_module_has_no_sense_or_bound_column_access(
+        self, relative_path: str
+    ) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        text = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert not _BOUND_ACCESS_RE.search(text), (
+            f"{relative_path} still accesses a single `bound` column"
+        )
+        assert not _SENSE_ACCESS_RE.search(text), (
+            f"{relative_path} still accesses a `sense` key"
+        )

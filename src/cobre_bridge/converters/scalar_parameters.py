@@ -1,7 +1,7 @@
-"""Scalar parameter declarations for ``system/scalar_parameters.json``.
+"""Scalar parameter declarations for ``constraints/generic_parameters.json``.
 
-Cobre HEAD added the ``@name`` sigil for `generic_constraints.json`
-expressions and a parallel `scalar_parameters.json` file that declares
+Cobre added the ``@name`` sigil for `generic_constraints.json`
+expressions and a parallel parameters file that declares
 every parameter referenced via ``@name``. When the file is absent any
 ``@name`` token in a constraint expression causes a load-time error, so
 cobre-bridge always emits it with the per-hydro computed parameters that
@@ -18,7 +18,7 @@ hydro-storage / hydro-generation energy constraint we know of (VminOP, minimum c
 energy, EARM-based bounds, ...). The values themselves are derived by cobre from VHA
 geometry and ρ_esp at solve time — we only declare the names.
 
-See ``schemas/scalar_parameters.schema.json`` in the cobre repo for the
+See ``schemas/generic_parameters.schema.json`` in the cobre repo for the
 on-disk shape and the seven valid ``computed_spec.tag`` variants.
 """
 
@@ -28,7 +28,7 @@ from collections.abc import Iterable, Mapping, Sequence
 
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/scalar_parameters.schema.json"
+    "/schemas/generic_parameters.schema.json"
 )
 
 
@@ -46,7 +46,7 @@ def build_scalar_parameters(
     hydro_ids: Iterable[int],
     rho_acum_per_stage_overrides: Mapping[int, Sequence[float]] | None = None,
 ) -> dict:
-    """Return a ``scalar_parameters.json`` dict declaring per-hydro parameters.
+    """Return a ``generic_parameters.json`` dict declaring per-hydro parameters.
 
     ``rho_eq_h{id}`` is always emitted as ``computed`` (the LP coefficient
     is the gen = ρ·Q point productivity that cobre derives from the VHA

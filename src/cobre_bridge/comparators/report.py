@@ -156,6 +156,7 @@ def print_results_summary_from_dataset(
     dataset: ComparisonDataset,
     newave_dir: Path,
     cobre_output_dir: Path,
+    reference_label: str = "NEWAVE",
 ) -> None:
     """Print the results comparison summary (Rich table) from the canonical dataset.
 
@@ -172,14 +173,18 @@ def print_results_summary_from_dataset(
         Path to the source model case directory.
     cobre_output_dir:
         Path to the Cobre output directory.
+    reference_label:
+        Display name for the reference model in the printed header/labels.
+        Defaults to ``"NEWAVE"``, which reproduces the pre-ticket output
+        byte-for-byte; ``compare decomp`` passes ``"DECOMP"``.
     """
     out = sys.stdout
 
     render_compare_verdict(build_compare_verdict(dataset))
 
-    out.write("\nCobre vs NEWAVE Results Comparison\n")
+    out.write(f"\nCobre vs {reference_label} Results Comparison\n")
     out.write("=" * 88 + "\n")
-    out.write(f"NEWAVE case:  {newave_dir}\n")
+    out.write(f"{reference_label} case:  {newave_dir}\n")
     out.write(f"Cobre output: {cobre_output_dir}\n")
 
     # Per-variable table. WithinTol = share within the (relative) tolerance; sMAPE =

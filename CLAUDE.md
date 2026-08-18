@@ -210,6 +210,30 @@ completion, exit codes) is covered via `typer.testing.CliRunner`. An autouse
 fixture in `tests/conftest.py` snapshots/restores the `cobre_bridge` logger so a
 CliRunner invocation can't leak logging state into a later `caplog` test.
 
+### Boundary-FCF test tiers
+
+The boundary-FCF import tests (`tests/test_decomp_fcf_*.py`) sit in three
+tiers, so the suite collects and runs meaningfully in every CI job even
+without the optional `cobre-python` wheel or a real, gitignored deck under
+`example/`:
+
+- **Tier 1** — pure Python, no optional dependency. Installs with `.[dev]`
+  alone and runs on every CI job (the full 3.12/3.13/3.14 matrix). No module
+  at this tier may `import cobre` at module scope.
+- **Tier 2** — needs the `cobre-python` wheel but not the real solver binary
+  or a deck. Guarded by `tests.conftest.requires_cobre_python`
+  (`pytest.mark.skipif` on `importlib.util.find_spec("cobre") is None`); any
+  `import cobre` lives inside the guarded test/helper body, never at module
+  scope. CI installs the wheel via the `test-roundtrip` extra on the primary
+  (3.13) job only, so these tests run there and skip on 3.12/3.14.
+- **Tier 3** — needs the real solver binary and a real deck under `example/`.
+  `@pytest.mark.skipif(...)` on path existence (plus, where relevant, a
+  writer-binding check), dev-only smoke — never runs in CI, which has
+  neither.
+
+**No tier-1 or tier-2 (CI-tier) test reads `example/`.** Any test that does is
+tier 3 and must carry a `skipif` guard on that path's existence.
+
 ---
 
 ## Coding Conventions

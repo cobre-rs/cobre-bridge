@@ -4,11 +4,15 @@
 with paths under a tmp dir (no filesystem access). ``make_case`` wraps it in a
 :class:`~cobre_bridge.case.NewaveCase` and pre-fills the requested cached reader
 slots, so a converter under test reads the supplied mock objects instead of
-parsing files. Import them with ``from tests.conftest import make_case``.
+parsing files. ``hydro_with_group`` builds a 0.13-shaped ``hydros.json`` hydro
+dict (no top-level ``bus_id``, one mirror ``unit_groups`` entry) for tests that
+hand-build a hydro fixture rather than calling a converter. Import them with
+``from tests.conftest import make_case``.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,7 +23,56 @@ import pandas as pd
 import pytest
 
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.converters.hydro import build_mirror_unit_group
 from cobre_bridge.newave_files import NewaveFiles
+
+# Shared skip marker for tier-2 tests that need the optional cobre-python
+# wheel (`import cobre`). CI installs it via the `validation`/`test-roundtrip`
+# extras on the primary (3.13) job only; use ``find_spec`` (import-free) so
+# this module stays importable in a cobre-free environment. ``condition`` is
+# passed by keyword (rather than positionally) so ``.kwargs["condition"]`` is
+# introspectable, per the ticket's resolved Requirement#3-vs-AC3/4 conflict.
+# Import via ``from tests.conftest import requires_cobre_python``.
+requires_cobre_python = pytest.mark.skipif(
+    condition=importlib.util.find_spec("cobre") is None,
+    reason=(
+        "requires the optional cobre-python wheel (validation / test-roundtrip extra)"
+    ),
+)
+
+
+def has_writer_binding() -> bool:
+    """Whether an installed cobre wheel exposes ``write_policy_checkpoint``.
+
+    Checked via ``importlib.util.find_spec`` before any import — the same
+    import-free-first convention as ``requires_cobre_python`` above — so
+    calling this (or importing this module) never requires cobre to be
+    installed. A cobre wheel older than the one that added the writer
+    binding is import-able (``find_spec`` succeeds) but lacks the attribute;
+    ``requires_writer_binding`` below turns that case into a clean SKIP
+    instead of a runtime ``AttributeError``.
+    """
+    if importlib.util.find_spec("cobre") is None:
+        return False
+    import cobre
+
+    return hasattr(cobre, "write_policy_checkpoint")
+
+
+# Additional skip marker for tier-2 tests whose path calls an in-wheel
+# binding newer than the mere import-ability ``requires_cobre_python``
+# checks. Stack this alongside ``requires_cobre_python`` on any test that
+# calls ``cobre.write_policy_checkpoint`` directly (or transitively via a
+# helper that does), so an old-but-importable cobre wheel skips cleanly
+# rather than failing at runtime with ``AttributeError``.
+# Import via ``from tests.conftest import requires_writer_binding``.
+requires_writer_binding = pytest.mark.skipif(
+    condition=not has_writer_binding(),
+    reason=(
+        "requires a cobre-python wheel exposing the write_policy_checkpoint "
+        "writer binding"
+    ),
+)
 
 
 @pytest.fixture
@@ -140,3 +193,68 @@ def make_case(files_or_tmp: NewaveFiles | Path, **parsed: Any) -> NewaveCase:
         default_hidr.cadastro = pd.DataFrame()
         case.__dict__["hidr"] = default_hidr
     return case
+
+
+def hydro_with_group(
+    hydro_id: int,
+    bus_id: int,
+    *,
+    name: str | None = None,
+    min_generation_mw: float = 0.0,
+    max_generation_mw: float = 50.0,
+    min_turbined_m3s: float = 0.0,
+    max_turbined_m3s: float = 100.0,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build a 0.13-shaped ``hydros.json`` hydro dict for tests.
+
+    Matches the shape every converter now emits (cobre decisions 13/14 →
+    §7.6, §7.8, via
+    :func:`cobre_bridge.converters.hydro.build_mirror_unit_group`): no
+    top-level ``bus_id`` and a single seven-field mirror ``unit_groups``
+    entry whose four bounds equal this dict's own ``generation`` envelope
+    (cobre rule 41's mirror invariant).
+
+    Use this wherever a test needs "some hydro on bus N" rather than a
+    real converter output — it replaces a hand-rolled seven-field group
+    literal duplicated across test modules.
+
+    Parameters
+    ----------
+    hydro_id:
+        The Cobre 0-based hydro id.
+    bus_id:
+        The plant's bus id (relocated into ``unit_groups[0].bus_id``; no
+        longer emitted at the top level).
+    name:
+        The plant name. Defaults to ``f"HYDRO_{hydro_id}"``.
+    min_generation_mw, max_generation_mw, min_turbined_m3s, max_turbined_m3s:
+        The plant's generation envelope. Pass these where a test asserts
+        specific bounds, so the mirror group tracks them.
+    **extra:
+        Any additional top-level keys a test needs (``reservoir``,
+        ``outflow``, ``downstream_id``, etc.), merged in verbatim.
+    """
+    plant_name = name if name is not None else f"HYDRO_{hydro_id}"
+    hydro: dict[str, Any] = {
+        "id": hydro_id,
+        "name": plant_name,
+        "generation": {
+            "min_generation_mw": min_generation_mw,
+            "max_generation_mw": max_generation_mw,
+            "min_turbined_m3s": min_turbined_m3s,
+            "max_turbined_m3s": max_turbined_m3s,
+        },
+        "unit_groups": [
+            build_mirror_unit_group(
+                name=plant_name,
+                bus_id=bus_id,
+                min_generation_mw=min_generation_mw,
+                max_generation_mw=max_generation_mw,
+                min_turbined_m3s=min_turbined_m3s,
+                max_turbined_m3s=max_turbined_m3s,
+            )
+        ],
+    }
+    hydro.update(extra)
+    return hydro

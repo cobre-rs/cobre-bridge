@@ -27,9 +27,10 @@ from cobre_bridge.comparators.dataset import (
     ComparisonDataset,
 )
 from cobre_bridge.comparators.results import build_results_summary, smape
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     import pandas as pd
 
@@ -808,33 +809,140 @@ def per_stage_sum_from_frame(
 _FICTITIOUS_BUSES: frozenset[str] = frozenset({"NOFICT1", "NOFICT2", "NOFICT3"})
 
 
+class _BusNameLookupCache:
+    """Single-slot memo for :func:`_bus_name_lookups`, keyed by object identity.
+
+    ``report_builder.py`` threads the SAME ``hydro_meta``/``bus_meta`` pair
+    into up to 11 per-bus chart calls per comparison run (one per chart
+    variable: 6 ``hydro_per_bus_chart`` + 5 ``hydro_slack_per_bus_chart``
+    calls); each resolves every plant's bus via :func:`_bus_name_lookups`,
+    which -- for an ambiguous or empty-map condition -- emits a
+    :class:`~cobre_bridge.diagnostics.Diagnostic`. Compare has no diagnostics
+    de-dup sink, so without this cache the identical warning logs ~11x for
+    one condition.
+
+    The cache key is the actual ``(hydro_meta, bus_meta)`` object pair, not
+    just their ``id()``: holding a strong reference keeps the cached objects
+    alive, so a stale ``id()`` can never alias a different, later-allocated
+    dict -- Python cannot reuse the memory address of an object this cache
+    still references. A later call with a genuinely different pair (a new
+    comparison run) simply evicts the single slot and recomputes+re-emits,
+    so the diagnostic still fires once per run, not once ever.
+    """
+
+    def __init__(self) -> None:
+        self.meta: (
+            tuple[dict[int, dict[str, object]], dict[int, dict[str, object]]] | None
+        ) = None
+        self.result: tuple[dict[int, str], dict[int, int]] | None = None
+
+
+_lookup_cache = _BusNameLookupCache()
+
+
 def _bus_name_lookups(
     hydro_meta: dict[int, dict[str, object]],
     bus_meta: dict[int, dict[str, object]],
 ) -> tuple[dict[int, str], dict[int, int]]:
     """Build the ``bus_id -> name`` and ``plant -> bus_id`` lookups.
 
-    Shared helper for the per-bus roll-up: reproduces the two dict
-    comprehensions at ``charts.py:900-907`` / ``charts.py:1198-1205`` exactly.
-    ``bus_id_to_name`` maps each bus id to ``bus_meta[bid]["name"]`` (fallback
-    ``str(bid)``); ``hydro_to_bus`` maps each plant id to its ``bus_id``,
-    skipping plants whose ``bus_id`` is ``None``.
+    Shared helper for the per-bus roll-up. ``bus_id_to_name`` maps each bus id
+    to ``bus_meta[bid]["name"]`` (fallback ``str(bid)``).
+
+    ``hydro_to_bus`` maps each plant id to its single owning bus, sourced from
+    ``hydro_meta[hid]["bus_ids"]`` -- the distinct-``(hydro_id, bus_id)``-pair
+    label the ``simulation/hydro_bus_generation`` partition carries per plant
+    (see ``cobre_readers.read_cobre_hydro_bus_labels``). ``hydro_meta`` itself
+    (``cobre_readers.read_cobre_hydro_metadata``) carries no bus information --
+    it is plant physics only (decision B1) -- ``"bus_ids"`` is merged onto it
+    by the results-comparison orchestrator before it reaches here.
+
+    A plant with no recorded bus (``"bus_ids"`` absent or empty) is skipped,
+    matching the legacy ``bus_id is None`` skip. A plant recorded at *more
+    than one* bus (only possible once a case has genuine multi-bus hydros --
+    epic 08) is **not** collapsed onto an arbitrary one of them and **not**
+    added to every one of them either: either choice would misreport the
+    per-bus roll-up (silently dropping one bus's share, or double-counting
+    the plant's whole value at each bus it touches). It is instead excluded
+    from ``hydro_to_bus`` and a :class:`~cobre_bridge.diagnostics.Diagnostic`
+    is raised naming the plant (id and, when available, its
+    ``hydro_meta[hid]["name"]``), so the ambiguity surfaces instead of
+    quietly producing wrong numbers. If that leaves ``hydro_to_bus`` empty
+    despite a non-empty ``hydro_meta``, a second diagnostic flags the map
+    itself as unusable -- the failure mode this helper exists to make loud.
+
+    Repeated calls with the identical ``(hydro_meta, bus_meta)`` object pair
+    hit :data:`_lookup_cache` and do not re-emit (see that class's docstring).
 
     Args:
-        hydro_meta: Per-plant metadata carrying ``bus_id``; read-only.
+        hydro_meta: Per-plant metadata; read-only. The bus label, when
+            present, lives under the ``"bus_ids"`` key as a set of bus ids.
         bus_meta: Per-bus metadata carrying ``name``; read-only.
 
     Returns:
         ``(bus_id_to_name, hydro_to_bus)``.
     """
+    cached_meta = _lookup_cache.meta
+    if (
+        cached_meta is not None
+        and cached_meta[0] is hydro_meta
+        and cached_meta[1] is bus_meta
+        and _lookup_cache.result is not None
+    ):
+        return _lookup_cache.result
+
     bus_id_to_name: dict[int, str] = {
         bid: cast("str", meta.get("name", str(bid))) for bid, meta in bus_meta.items()
     }
-    hydro_to_bus: dict[int, int] = {
-        hid: cast("int", meta["bus_id"])
-        for hid, meta in hydro_meta.items()
-        if meta.get("bus_id") is not None
-    }
+
+    hydro_to_bus: dict[int, int] = {}
+    for hid, meta in hydro_meta.items():
+        raw_bus_ids = meta.get("bus_ids")
+        if not raw_bus_ids:
+            continue
+        bus_ids = {int(b) for b in cast("Iterable[int]", raw_bus_ids)}
+        if len(bus_ids) > 1:
+            name = cast("str", meta.get("name", str(hid)))
+            emit(
+                Diagnostic(
+                    code="hydro-multi-bus-ambiguous",
+                    severity=Severity.WARNING,
+                    category="Compare data",
+                    title="Hydro plant spans multiple buses",
+                    summary=(
+                        f"Hydro {hid} ({name}) is recorded at buses "
+                        f"{sorted(bus_ids)} in the hydro_bus_generation "
+                        "partition; a single plant-level value cannot be "
+                        "attributed to one bus without collapsing or "
+                        "double-counting, so it is excluded from the "
+                        "per-bus hydro charts."
+                    ),
+                    notes=[f"hydro_id: {hid}", f"bus_ids: {sorted(bus_ids)}"],
+                ),
+                logger=_LOG,
+            )
+            continue
+        hydro_to_bus[hid] = next(iter(bus_ids))
+
+    if hydro_meta and not hydro_to_bus:
+        emit(
+            Diagnostic(
+                code="hydro-to-bus-map-empty",
+                severity=Severity.WARNING,
+                category="Compare data",
+                title="No hydro plant could be mapped to a bus",
+                summary=(
+                    "hydro_meta has entries but none carry a resolvable "
+                    'single-bus "bus_ids" label; the per-bus hydro charts '
+                    "will render empty. Check that the hydro_bus_generation "
+                    "partition was read and merged for this output."
+                ),
+            ),
+            logger=_LOG,
+        )
+
+    _lookup_cache.meta = (hydro_meta, bus_meta)
+    _lookup_cache.result = (bus_id_to_name, hydro_to_bus)
     return bus_id_to_name, hydro_to_bus
 
 
@@ -849,17 +957,21 @@ def per_bus_sums_from_results(
     Pure numeric core of the per-bus accumulation in
     ``charts.hydro_per_bus_chart`` (``charts.py:904-939``). Rows are filtered to
     ``entity_type == "hydro"`` and ``variable``; each plant is mapped to its
-    owning bus via ``hydro_meta[cobre_id]["bus_id"]`` (plants with no ``bus_id``
-    are skipped), the bus name is resolved via ``bus_meta[bus_id]["name"]``
-    (fallback ``str(bus_id)``) and upper-cased, and the fictitious buses
-    ``NOFICT1/2/3`` are dropped. Surviving rows accumulate ``newave_value`` /
-    ``cobre_value`` into their ``(bus, stage)`` bucket and add ``cobre_id`` to
-    the bus's id set.
+    owning bus via ``hydro_meta[cobre_id]["bus_ids"]`` (see
+    :func:`_bus_name_lookups` -- plants with no resolvable single bus,
+    including genuinely multi-bus plants, are skipped and diagnosed there),
+    the bus name is resolved via ``bus_meta[bus_id]["name"]`` (fallback
+    ``str(bus_id)``) and upper-cased, and the fictitious buses ``NOFICT1/2/3``
+    are dropped. Surviving rows accumulate ``newave_value`` / ``cobre_value``
+    into their ``(bus, stage)`` bucket and add ``cobre_id`` to the bus's id
+    set.
 
     Args:
         results: The comparison rows; consumed verbatim (read-only).
         variable: The ``variable`` to keep.
-        hydro_meta: Per-plant metadata carrying ``bus_id``; read-only.
+        hydro_meta: Per-plant metadata; read-only. The bus label, when
+            present, lives under the ``"bus_ids"`` key (see
+            :func:`_bus_name_lookups`).
         bus_meta: Per-bus metadata carrying ``name``; read-only.
 
     Returns:
@@ -925,7 +1037,9 @@ def per_bus_sums_from_frame(
         variable: The column to sum.
         matched_ids: Optional entity filter; when given, only rows whose
             ``entity_id`` is in this set contribute.
-        hydro_meta: Per-plant metadata carrying ``bus_id``; read-only.
+        hydro_meta: Per-plant metadata; read-only. The bus label, when
+            present, lives under the ``"bus_ids"`` key (see
+            :func:`_bus_name_lookups`).
         bus_meta: Per-bus metadata carrying ``name``; read-only.
 
     Returns:
@@ -1170,12 +1284,16 @@ def bus_groups_and_pct(
     pct_by_eid: dict[int, dict[int, dict[str, object]]] = {}
     p10_col = f"{variable}_p10"
     p90_col = f"{variable}_p90"
-    if pct_df is not None and not pct_df.is_empty():
-        if p10_col in pct_df.columns and p90_col in pct_df.columns:
-            for row in pct_df.iter_rows(named=True):
-                eid = int(row["entity_id"])
-                sid = int(row["stage_id"])
-                pct_by_eid.setdefault(eid, {})[sid] = row
+    if (
+        pct_df is not None
+        and not pct_df.is_empty()
+        and p10_col in pct_df.columns
+        and p90_col in pct_df.columns
+    ):
+        for row in pct_df.iter_rows(named=True):
+            eid = int(row["entity_id"])
+            sid = int(row["stage_id"])
+            pct_by_eid.setdefault(eid, {})[sid] = row
 
     return buses, pct_by_eid
 

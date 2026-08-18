@@ -39,6 +39,8 @@ import pandas as pd
 import pyarrow as pa
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.id_map import NewaveIdMap
 
@@ -94,6 +96,26 @@ def convert_tailrace_curves(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table |
     segments = cast(
         pd.DataFrame, uh.hidreletrica_curvajusante_polinomio_segmento(df=True)
     )
+    return build_tailrace_table(families, segments, id_map.hydro_id)
+
+
+def build_tailrace_table(
+    families: pd.DataFrame | None,
+    segments: pd.DataFrame | None,
+    hydro_id_of: Callable[[int], int],
+) -> pa.Table | None:
+    """Build the ``tailrace_curves`` table from polinjus ``families``/``segments``.
+
+    The source-model-agnostic core shared by :func:`convert_tailrace_curves`
+    (which extracts the two frames from ``case.polinjus``) and the DECOMP
+    pipeline (whose ``polinjus.csv`` reads to the identical column layout via
+    ``idecomp.libs.UsinasHidreletricas``). *hydro_id_of* maps a source plant
+    code to its dense 0-based cobre id and raises ``KeyError`` for a code absent
+    from the id map (filtered fictitious plants, etc.) — those segments are
+    dropped. Returns ``None`` when there are no families/segments or none map to
+    a converted hydro (meaning "do not write the optional file"; cobre's FPHA
+    then falls back to the entity-level tailrace from ``hydros.json``).
+    """
     if families is None or segments is None or families.empty or segments.empty:
         return None
 
@@ -111,7 +133,7 @@ def convert_tailrace_curves(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table |
     for raw_code in merged["codigo_usina"].unique():
         code = int(raw_code)
         try:
-            code_to_hydro[code] = id_map.hydro_id(code)
+            code_to_hydro[code] = hydro_id_of(code)
         except KeyError:
             skipped.add(code)
     if skipped:

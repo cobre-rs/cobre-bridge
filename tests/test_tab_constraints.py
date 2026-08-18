@@ -5,15 +5,25 @@ _compute_violation_zones, _build_constraint_lhs_data, _build_lhs_section,
 _add_type_filter_and_row_attrs helpers, and the full render() path using
 MagicMock data with real polars/pandas objects for fields that get accessed
 as LazyFrames/DataFrames.
+
+Also covers the F3 sense-free migration (epic-08 ticket-029): constraint
+dicts here carry no ``sense`` key and ``gc_bounds`` fixtures carry the F3
+``bound_lower``/``bound_upper`` endpoint pair instead of a single ``bound``
+column, matching what ticket-027's writers now emit.
 """
 
 from __future__ import annotations
 
 import math
+import re
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pandas as pd
 import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
 
 import cobre_bridge.dashboard.tabs.constraints as tab_constraints
 from cobre_bridge.dashboard.tabs.constraints import (
@@ -24,6 +34,12 @@ from cobre_bridge.dashboard.tabs.constraints import (
     can_render,
     render,
 )
+from cobre_bridge.dashboard.tabs.constraints_utils import (
+    bound_value_column,
+    build_constraints_summary_table,
+    derive_constraint_shape,
+)
+from cobre_bridge.generic_constraint_format import sense_to_interval
 
 # ---------------------------------------------------------------------------
 # Helpers / data factories
@@ -31,21 +47,31 @@ from cobre_bridge.dashboard.tabs.constraints import (
 
 
 def _make_constraints(n: int = 2, ctype: str = "VminOP") -> list[dict]:
-    """Return a list of minimal constraint dicts."""
+    """Return a list of minimal constraint dicts (F3 sense-free shape)."""
     return [
         {
             "id": i,
             "name": f"{ctype}_constraint_{i}",
             "expression": f"hydro_storage({i})",
-            "sense": ">=",
             "slack": {"enabled": False},
         }
         for i in range(n)
     ]
 
 
-def _make_gc_bounds(constraint_ids: list[int], n_stages: int = 2) -> pd.DataFrame:
-    """Return a minimal gc_bounds DataFrame."""
+def _make_gc_bounds(
+    constraint_ids: list[int],
+    n_stages: int = 2,
+    sense: str = ">=",
+    value: float = 100.0,
+) -> pd.DataFrame:
+    """Return a minimal gc_bounds DataFrame in the F3 endpoint shape.
+
+    *sense*/*value* describe the pre-F3 ``(sense, bound)`` pair this fixture
+    is migrated from; :func:`sense_to_interval` maps it to the F3
+    ``bound_lower``/``bound_upper`` endpoints actually stored on disk.
+    """
+    lower, upper = sense_to_interval(sense, value)
     rows = []
     for cid in constraint_ids:
         for stage_id in range(n_stages):
@@ -54,7 +80,34 @@ def _make_gc_bounds(constraint_ids: list[int], n_stages: int = 2) -> pd.DataFram
                     "constraint_id": cid,
                     "stage_id": stage_id,
                     "block_id": float("nan"),
-                    "bound": 100.0,
+                    "bound_lower": lower,
+                    "bound_upper": upper,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _make_gc_bounds_range(
+    constraint_ids: list[int],
+    n_stages: int,
+    lower: float,
+    upper: float,
+) -> pd.DataFrame:
+    """Return a gc_bounds DataFrame with a genuine two-sided ("range") endpoint
+    pair — both ``bound_lower`` and ``bound_upper`` populated and distinct, the
+    shape DECOMP's RE/HQ/HV families emit for an ``L <= expr <= U`` band
+    (``sense_to_interval`` has no single-sense equivalent for this, unlike
+    :func:`_make_gc_bounds`)."""
+    rows = []
+    for cid in constraint_ids:
+        for stage_id in range(n_stages):
+            rows.append(
+                {
+                    "constraint_id": cid,
+                    "stage_id": stage_id,
+                    "block_id": float("nan"),
+                    "bound_lower": lower,
+                    "bound_upper": upper,
                 }
             )
     return pd.DataFrame(rows)
@@ -147,6 +200,7 @@ def _make_mock_data(
     )
     data.costs = costs if costs is not None else _make_costs(n_stages=n_stages)
     data.stage_labels = {i: f"Stage {i}" for i in range(n_stages)}
+    data.stage_dates = {i: f"2026-{i + 1:02d}-01" for i in range(n_stages)}
     data.names = {}
     # Real empty LazyFrames prevent MagicMock auto-chaining OOM
     data.hydros_lf = pl.LazyFrame()
@@ -270,14 +324,12 @@ def test_build_metrics_row_shows_active_types() -> None:
             "id": 0,
             "name": "VminOP_c1",
             "expression": "hydro_storage(0)",
-            "sense": ">=",
             "slack": {},
         },
         {
             "id": 1,
             "name": "RE_c2",
             "expression": "hydro_storage(1)",
-            "sense": "<=",
             "slack": {},
         },
     ]
@@ -301,20 +353,22 @@ def test_build_metrics_row_empty_violations_shows_zero_violated() -> None:
 
 
 def test_compute_violation_zones_ge_single_dip() -> None:
-    """>=: violation at stage index 1 where p10=80 < bound=85."""
+    """Floor-only (">="-style): violation at stage 1 where p10=80 < bound_lower=85."""
     p10 = [100.0, 80.0, 90.0]
     p90 = [110.0, 95.0, 105.0]
-    bound = [85.0, 85.0, 85.0]
-    result = _compute_violation_zones(p10, p90, bound, ">=")
+    bound_lower = [85.0, 85.0, 85.0]
+    bound_upper: list[float | None] = [None, None, None]
+    result = _compute_violation_zones(p10, p90, bound_lower, bound_upper)
     assert result == [{"start": 1, "end": 1}]
 
 
 def test_compute_violation_zones_le_single_spike() -> None:
-    """<=: violation at stage index 1 where p90=120 > bound=110."""
+    """Ceiling-only ("<="-style): violation at stage 1 where p90=120 > bound_upper=110."""
     p10 = [90.0, 90.0, 90.0]
     p90 = [100.0, 120.0, 90.0]
-    bound = [110.0, 110.0, 110.0]
-    result = _compute_violation_zones(p10, p90, bound, "<=")
+    bound_lower: list[float | None] = [None, None, None]
+    bound_upper = [110.0, 110.0, 110.0]
+    result = _compute_violation_zones(p10, p90, bound_lower, bound_upper)
     assert result == [{"start": 1, "end": 1}]
 
 
@@ -322,34 +376,50 @@ def test_compute_violation_zones_no_violations() -> None:
     """No violations when band never crosses bound."""
     p10 = [100.0, 100.0, 100.0]
     p90 = [110.0, 110.0, 110.0]
-    bound = [85.0, 85.0, 85.0]
-    result = _compute_violation_zones(p10, p90, bound, ">=")
+    bound_lower = [85.0, 85.0, 85.0]
+    bound_upper: list[float | None] = [None, None, None]
+    result = _compute_violation_zones(p10, p90, bound_lower, bound_upper)
     assert result == []
 
 
-def test_compute_violation_zones_nan_bound_skipped() -> None:
-    """Stages with NaN bound must not be counted as violations."""
+def test_compute_violation_zones_missing_bound_skipped() -> None:
+    """Stages with no bound at all (both endpoints None) must not be violations."""
     p10 = [80.0, 80.0, 80.0]
     p90 = [90.0, 90.0, 90.0]
-    bound = [85.0, float("nan"), 85.0]
-    result = _compute_violation_zones(p10, p90, bound, ">=")
-    # Stage 0 violated, NaN at 1 breaks the zone, stage 2 violated → two zones
+    bound_lower: list[float | None] = [85.0, None, 85.0]
+    bound_upper: list[float | None] = [None, None, None]
+    result = _compute_violation_zones(p10, p90, bound_lower, bound_upper)
+    # Stage 0 violated, missing bound at 1 breaks the zone, stage 2 violated → two zones
     assert result == [{"start": 0, "end": 0}, {"start": 2, "end": 2}]
 
 
 def test_compute_violation_zones_contiguous_range() -> None:
-    """>=: contiguous violation across stages 0–2 produces a single interval."""
+    """Floor-only: contiguous violation across stages 0–2 produces a single interval."""
     p10 = [70.0, 70.0, 70.0]
     p90 = [80.0, 80.0, 80.0]
-    bound = [85.0, 85.0, 85.0]
-    result = _compute_violation_zones(p10, p90, bound, ">=")
+    bound_lower = [85.0, 85.0, 85.0]
+    bound_upper: list[float | None] = [None, None, None]
+    result = _compute_violation_zones(p10, p90, bound_lower, bound_upper)
     assert result == [{"start": 0, "end": 2}]
 
 
 def test_compute_violation_zones_empty_inputs() -> None:
     """Empty input lists must return empty result without error."""
-    result = _compute_violation_zones([], [], [], ">=")
+    result = _compute_violation_zones([], [], [], [])
     assert result == []
+
+
+def test_compute_violation_zones_two_sided_range_flags_both_directions() -> None:
+    """A genuine distinct-endpoint range (``bound_lower`` != ``bound_upper``) flags
+    a below-floor breach AND an above-ceiling breach independently, in one call —
+    the two-sided test this fix adds in place of the single-sense ``>=``/``<=``
+    branch (epic-08 F3 range mishandling)."""
+    p10 = [5.0, 50.0, 50.0]
+    p90 = [5.0, 50.0, 95.0]
+    bound_lower = [10.0, 10.0, 10.0]
+    bound_upper = [90.0, 90.0, 90.0]
+    result = _compute_violation_zones(p10, p90, bound_lower, bound_upper)
+    assert result == [{"start": 0, "end": 0}, {"start": 2, "end": 2}]
 
 
 # ---------------------------------------------------------------------------
@@ -360,11 +430,17 @@ def test_compute_violation_zones_empty_inputs() -> None:
 def test_build_constraint_lhs_data_structure() -> None:
     """Returned dict must have stages, xlabels, and constraints with expected keys."""
     constraints = [
-        {"id": 0, "name": "VminOP_c0", "sense": ">="},
-        {"id": 1, "name": "RE_c1", "sense": "<="},
+        {"id": 0, "name": "VminOP_c0"},
+        {"id": 1, "name": "RE_c1"},
     ]
     lhs_df = _make_lhs_df([0, 1], n_scenarios=2, n_stages=3, lhs_value=120.0)
-    gc_bounds = _make_gc_bounds([0, 1], n_stages=3)
+    gc_bounds = pd.concat(
+        [
+            _make_gc_bounds([0], n_stages=3, sense=">="),
+            _make_gc_bounds([1], n_stages=3, sense="<="),
+        ],
+        ignore_index=True,
+    )
     stage_labels = {0: "Jan", 1: "Feb", 2: "Mar"}
 
     result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
@@ -395,7 +471,7 @@ def test_build_constraint_lhs_data_structure() -> None:
 
 def test_build_constraint_lhs_data_uniform_lhs_gives_equal_percentiles() -> None:
     """Uniform LHS across scenarios must yield p10 == p50 == p90 at every stage."""
-    constraints = [{"id": 0, "name": "VminOP_c0", "sense": ">="}]
+    constraints = [{"id": 0, "name": "VminOP_c0"}]
     lhs_df = _make_lhs_df([0], n_scenarios=3, n_stages=3, lhs_value=50.0)
     gc_bounds = _make_gc_bounds([0], n_stages=3)
     stage_labels = {0: "S0", 1: "S1", 2: "S2"}
@@ -411,7 +487,7 @@ def test_build_constraint_lhs_data_uniform_lhs_gives_equal_percentiles() -> None
 
 def test_build_constraint_lhs_data_violations_populated_for_ge() -> None:
     """>=: violations list is non-empty when p10 < bound at some stages."""
-    constraints = [{"id": 0, "name": "VminOP_c0", "sense": ">="}]
+    constraints = [{"id": 0, "name": "VminOP_c0"}]
     # lhs_value=80 < bound=100 → p10 will be 80, bound is 100 → violation everywhere
     lhs_df = _make_lhs_df([0], n_scenarios=2, n_stages=3, lhs_value=80.0)
     gc_bounds = _make_gc_bounds([0], n_stages=3)  # bound=100.0
@@ -426,7 +502,7 @@ def test_build_constraint_lhs_data_violations_populated_for_ge() -> None:
 
 def test_build_constraint_lhs_data_empty_lhs_gives_zeros() -> None:
     """Empty lhs_df must produce zero arrays for p10/p50/p90."""
-    constraints = [{"id": 0, "name": "VminOP_c0", "sense": ">="}]
+    constraints = [{"id": 0, "name": "VminOP_c0"}]
     lhs_df = pd.DataFrame(
         columns=["constraint_id", "scenario_id", "stage_id", "block_id", "lhs_value"]
     )
@@ -443,9 +519,11 @@ def test_build_constraint_lhs_data_empty_lhs_gives_zeros() -> None:
 
 def test_build_constraint_lhs_data_missing_bounds_gives_none_bound() -> None:
     """No gc_bounds rows for a constraint → bound array is all None."""
-    constraints = [{"id": 99, "name": "VminOP_c99", "sense": ">="}]
+    constraints = [{"id": 99, "name": "VminOP_c99"}]
     lhs_df = _make_lhs_df([99], n_scenarios=2, n_stages=3)
-    gc_bounds = pd.DataFrame(columns=["constraint_id", "stage_id", "block_id", "bound"])
+    gc_bounds = pd.DataFrame(
+        columns=["constraint_id", "stage_id", "block_id", "bound_lower", "bound_upper"]
+    )
     stage_labels = {0: "S0", 1: "S1", 2: "S2"}
 
     result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
@@ -453,6 +531,148 @@ def test_build_constraint_lhs_data_missing_bounds_gives_none_bound() -> None:
 
     assert all(v is None for v in entry["bound"])
     assert entry["violations"] == []
+    # Falls back to the historical `c.get("sense", "<=")` default shape.
+    assert entry["sense"] == "<="
+
+
+# ---------------------------------------------------------------------------
+# AC1: derived sense + bound value parity with a pre-F3 case (ticket-029)
+# ---------------------------------------------------------------------------
+
+
+def test_build_constraint_lhs_data_derives_ge_from_lower_endpoint() -> None:
+    """A VminOP-style floor (F3 lower-only) renders exactly like a pre-F3
+    ``sense=">="`` case: same ``">="`` label, same numeric bound."""
+    constraints = [{"id": 0, "name": "VminOP_c0"}]  # sense-free (F3)
+    lhs_df = _make_lhs_df([0], n_scenarios=2, n_stages=2, lhs_value=120.0)
+    gc_bounds = _make_gc_bounds([0], n_stages=2, sense=">=", value=500.0)
+    stage_labels = {0: "S0", 1: "S1"}
+
+    result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
+    entry = result["constraints"]["0"]
+
+    assert entry["sense"] == ">="
+    assert entry["bound"] == [500.0, 500.0]
+
+
+def test_build_constraint_lhs_data_derives_le_from_upper_endpoint() -> None:
+    """An RE/AGRINT-style ceiling (F3 upper-only) renders exactly like a
+    pre-F3 ``sense="<="`` case: same ``"<="`` label, same numeric bound."""
+    constraints = [{"id": 1, "name": "RE_c1"}]  # sense-free (F3)
+    lhs_df = _make_lhs_df([1], n_scenarios=2, n_stages=2, lhs_value=120.0)
+    gc_bounds = _make_gc_bounds([1], n_stages=2, sense="<=", value=200.0)
+    stage_labels = {0: "S0", 1: "S1"}
+
+    result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
+    entry = result["constraints"]["1"]
+
+    assert entry["sense"] == "<="
+    assert entry["bound"] == [200.0, 200.0]
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 (epic-08 boundary review): a genuine distinct-endpoint "range" band
+# (DECOMP RE/HQ/HV) must render both the floor and the ceiling and
+# violation-test both directions, instead of silently dropping the floor.
+# ---------------------------------------------------------------------------
+
+
+def test_build_constraint_lhs_data_range_flags_floor_and_ceiling() -> None:
+    """A two-sided ``L <= expr <= U`` band (distinct ``bound_lower``/
+    ``bound_upper``) must expose both endpoints — not just the ceiling — and
+    flag a below-floor breach and an above-ceiling breach independently."""
+    constraints = [{"id": 0, "name": "HQ_c0"}]
+    # 2 identical scenarios per stage so p10 == p50 == p90 == the stage's LHS
+    # value, isolating the floor/ceiling test from percentile spread.
+    lhs_values = {0: 5.0, 1: 50.0, 2: 95.0}
+    rows = [
+        {
+            "constraint_id": 0,
+            "scenario_id": sid,
+            "stage_id": stage,
+            "block_id": 0,
+            "lhs_value": val,
+        }
+        for stage, val in lhs_values.items()
+        for sid in range(2)
+    ]
+    lhs_df = pd.DataFrame(rows)
+    gc_bounds = _make_gc_bounds_range([0], n_stages=3, lower=10.0, upper=90.0)
+    stage_labels = {0: "S0", 1: "S1", 2: "S2"}
+
+    result = _build_constraint_lhs_data(constraints, lhs_df, gc_bounds, stage_labels)
+    entry = result["constraints"]["0"]
+
+    assert entry["sense"] == "range"
+    # Both endpoints are exposed at every stage — the floor is no longer
+    # silently dropped in favour of the ceiling.
+    assert entry["bound_lower"] == [10.0, 10.0, 10.0]
+    assert entry["bound_upper"] == [90.0, 90.0, 90.0]
+    # Legacy single-value field keeps the ceiling, matching the pre-fix value.
+    assert entry["bound"] == [90.0, 90.0, 90.0]
+
+    # Stage 0 (LHS=5, below the 10.0 floor) and stage 2 (LHS=95, above the
+    # 90.0 ceiling) must both be flagged; stage 1 (LHS=50, inside the band)
+    # must not be.
+    violated_stages = {
+        i for v in entry["violations"] for i in range(v["start"], v["end"] + 1)
+    }
+    assert violated_stages == {0, 2}
+
+
+class TestDeriveConstraintShapeAndBoundValueColumn:
+    """Unit coverage for the shared helpers constraints.py/constraints_utils.py
+    now use in place of the removed ``c["sense"]``/single ``bound`` column."""
+
+    def test_derives_ge_from_lower_only(self) -> None:
+        rows = pd.DataFrame(
+            {
+                "constraint_id": [0],
+                "bound_lower": [500.0],
+                "bound_upper": [float("nan")],
+            }
+        )
+        assert derive_constraint_shape(rows) == ">="
+        assert bound_value_column(">=") == "bound_lower"
+
+    def test_derives_le_from_upper_only(self) -> None:
+        rows = pd.DataFrame(
+            {
+                "constraint_id": [0],
+                "bound_lower": [float("nan")],
+                "bound_upper": [200.0],
+            }
+        )
+        assert derive_constraint_shape(rows) == "<="
+        assert bound_value_column("<=") == "bound_upper"
+
+    def test_derives_eq_from_both_equal(self) -> None:
+        rows = pd.DataFrame(
+            {
+                "constraint_id": [0],
+                "bound_lower": [300.0],
+                "bound_upper": [300.0],
+            }
+        )
+        assert derive_constraint_shape(rows) == "=="
+        assert bound_value_column("==") == "bound_lower"
+
+    def test_derives_range_from_distinct_endpoints(self) -> None:
+        """A genuine two-sided band (distinct ``bound_lower``/``bound_upper``)
+        is a live DECOMP RE/HQ/HV path, not a theoretical shape."""
+        rows = pd.DataFrame(
+            {
+                "constraint_id": [0],
+                "bound_lower": [10.0],
+                "bound_upper": [90.0],
+            }
+        )
+        assert derive_constraint_shape(rows) == "range"
+        assert bound_value_column("range") == "bound_upper"
+
+    def test_defaults_to_le_when_empty(self) -> None:
+        rows = pd.DataFrame(columns=["constraint_id", "bound_lower", "bound_upper"])
+        assert derive_constraint_shape(rows) == "<="
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +715,23 @@ def test_build_lhs_section_json_blob_has_violations_key() -> None:
     html = _build_lhs_section(data, lhs_df)
 
     assert '"violations"' in html
+
+
+def test_build_lhs_section_range_data_and_floor_trace_logic_present() -> None:
+    """A genuine two-sided range constraint's ``bound_lower``/``bound_upper``
+    reach the embedded ``GC_LHS_DATA`` blob, and the JS floor-trace logic
+    that draws the second ("Bound Floor") line is present in the script."""
+    constraints = [{"id": 0, "name": "HQ_c0"}]
+    lhs_df = _make_lhs_df([0], n_scenarios=2, n_stages=2, lhs_value=50.0)
+    gc_bounds = _make_gc_bounds_range([0], n_stages=2, lower=10.0, upper=90.0)
+    data = _make_mock_data(constraints=constraints, gc_bounds=gc_bounds, n_stages=2)
+
+    html = _build_lhs_section(data, lhs_df)
+
+    assert '"bound_lower":[10.0,10.0]' in html
+    assert '"bound_upper":[90.0,90.0]' in html
+    assert "hasDistinctFloor" in html
+    assert "Bound Floor" in html
 
 
 # ---------------------------------------------------------------------------
@@ -897,3 +1134,150 @@ class TestStorageOnlyFastPath:
         # Two stages x two blocks -> 4 rows.
         assert len(df) == 4
         assert set(df["block_id"].unique()) == {0, 1}
+
+
+# ---------------------------------------------------------------------------
+# AC1 (table half): build_constraints_summary_table derives its "Sense"
+# column + "Bound Range" from F3 endpoints (ticket-029)
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryTableDerivesSenseFromBounds:
+    """``build_constraints_summary_table`` shows the same Sense + Bound Range
+    a pre-F3 case showed, now sourced from ``bound_lower``/``bound_upper``."""
+
+    @staticmethod
+    def _violations() -> pd.DataFrame:
+        return pd.DataFrame(columns=["constraint_id", "slack_value"])
+
+    def test_ge_constraint_shows_ge_and_lower_bound_range(self) -> None:
+        constraints = [{"id": 0, "name": "VminOP_c0", "slack": {"enabled": False}}]
+        gc_bounds = _make_gc_bounds([0], n_stages=2, sense=">=", value=500.0)
+
+        html = build_constraints_summary_table(
+            constraints, gc_bounds, self._violations()
+        )
+
+        assert "<code>&gt;=</code>" in html
+        assert "500.0" in html
+
+    def test_le_constraint_shows_le_and_upper_bound_range(self) -> None:
+        constraints = [{"id": 1, "name": "RE_c1", "slack": {"enabled": False}}]
+        gc_bounds = _make_gc_bounds([1], n_stages=2, sense="<=", value=200.0)
+
+        html = build_constraints_summary_table(
+            constraints, gc_bounds, self._violations()
+        )
+
+        assert "<code>&lt;=</code>" in html
+        assert "200.0" in html
+
+    def test_no_bounds_falls_back_to_le_default(self) -> None:
+        constraints = [{"id": 2, "name": "AGRINT_c2", "slack": {"enabled": False}}]
+        gc_bounds = pd.DataFrame(
+            columns=[
+                "constraint_id",
+                "stage_id",
+                "block_id",
+                "bound_lower",
+                "bound_upper",
+            ]
+        )
+
+        html = build_constraints_summary_table(
+            constraints, gc_bounds, self._violations()
+        )
+
+        assert "<code>&lt;=</code>" in html
+
+
+# ---------------------------------------------------------------------------
+# AC2: dashboard/data.py's generic-constraint bounds loader reads the F3
+# bound_lower/bound_upper columns straight through (ticket-029)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadGenericConstraintsF3Shape:
+    """``load_generic_constraints`` reads whatever the converter wrote — the
+    F3 ``bound_lower``/``bound_upper`` pair — with no ``bound`` column."""
+
+    def test_loads_f3_bounds_parquet_verbatim(self, tmp_path: Path) -> None:
+        from cobre_bridge.dashboard.data import load_generic_constraints
+
+        constraints_dir = tmp_path / "constraints"
+        constraints_dir.mkdir()
+        (constraints_dir / "generic_constraints.json").write_text(
+            '{"constraints": [{"id": 0, "name": "VminOP_c0", '
+            '"expression": "hydro_storage(0)", "slack": {"enabled": false}}]}'
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "constraint_id": pa.array([0], type=pa.int32()),
+                    "stage_id": pa.array([0], type=pa.int32()),
+                    "block_id": pa.array([0], type=pa.int32()),
+                    "bound_lower": pa.array([500.0], type=pa.float64()),
+                    "bound_upper": pa.array([None], type=pa.float64()),
+                }
+            ),
+            constraints_dir / "generic_constraint_bounds.parquet",
+        )
+
+        result = load_generic_constraints(tmp_path)
+
+        assert "sense" not in result.constraints[0]
+        assert "bound" not in result.bounds.columns
+        assert result.bounds["bound_lower"].tolist() == [500.0]
+        assert math.isnan(result.bounds["bound_upper"].iloc[0])
+
+    def test_missing_files_give_empty_defaults(self, tmp_path: Path) -> None:
+        from cobre_bridge.dashboard.data import load_generic_constraints
+
+        result = load_generic_constraints(tmp_path)
+
+        assert result.constraints == []
+        assert result.bounds.empty
+
+
+# ---------------------------------------------------------------------------
+# AC4 grep guard: no dashboard/report reader accesses a removed `sense` key
+# or a single `bound` column (ticket-029)
+# ---------------------------------------------------------------------------
+
+_BOUND_ACCESS_RE = re.compile(
+    r'\.col\(\s*["\']bound["\']\s*\)|\[\s*["\']bound["\']\s*\]|\.get\(\s*["\']bound["\']'
+)
+_SENSE_ACCESS_RE = re.compile(
+    r'\.col\(\s*["\']sense["\']\s*\)|\[\s*["\']sense["\']\s*\]|\.get\(\s*["\']sense["\']'
+)
+
+
+class TestNoSenseOrSingleBoundColumnRemainsInDashboardOrReport:
+    """Mirrors ``TestNoSenseOrSingleBoundColumnRemainsInComparators``
+    (ticket-028, ``tests/test_compare.py``) for the ticket-029 readers:
+    matches only genuine column/dict *access* patterns (``.col("bound")``,
+    ``row["bound"]``, ``.get("bound"``) — column *names* that merely contain
+    "bound" as a substring (``bound_lower``, ``bound_upper``) are not
+    matches.
+    """
+
+    @pytest.mark.parametrize(
+        "relative_path",
+        [
+            "src/cobre_bridge/dashboard/tabs/constraints.py",
+            "src/cobre_bridge/dashboard/tabs/constraints_utils.py",
+            "src/cobre_bridge/dashboard/data.py",
+            "src/cobre_bridge/comparators/report_builder.py",
+        ],
+    )
+    def test_module_has_no_sense_or_bound_column_access(
+        self, relative_path: str
+    ) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        text = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert not _BOUND_ACCESS_RE.search(text), (
+            f"{relative_path} still accesses a single `bound` column"
+        )
+        assert not _SENSE_ACCESS_RE.search(text), (
+            f"{relative_path} still accesses a `sense` key"
+        )

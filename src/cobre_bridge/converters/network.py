@@ -33,10 +33,6 @@ _NCS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
     "/schemas/non_controllable_sources.schema.json"
 )
-_EXCHANGE_FACTORS_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/exchange_factors.schema.json"
-)
 _NCS_FACTORS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
     "/schemas/non_controllable_factors.schema.json"
@@ -129,9 +125,8 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   p_INT (0.000273) < p_PFIO = p_EVERT (0.000300)
 #   < p_TURB (0.000333) < p_CORTEOL (0.000344) < p_EXC (0.000355)
 
-MONTH_HOURS: float = (
-    730.0  # The source model convention (manual §3.24, used in C_M3S2HM3)
-)
+# The source model convention (manual §3.24, used in C_M3S2HM3)
+MONTH_HOURS: float = 730.0
 C_M3S2HM3: float = MONTH_HOURS * 3600.0 / 1e6  # = 2.628 hm³ / (m³/s · month)
 # HM3 × ρ_MW_per_m3s → MWh conversion (purely volumetric; 730 cancels here).
 HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
@@ -243,8 +238,8 @@ def _build_canonical_pair_to_line_id(
 
     Scans ALL rows of ``sistema.limites_intercambio`` (all dates) to discover
     the full set of interchange pairs.  This is the single authoritative source
-    used by ``convert_lines``, ``convert_line_bounds``, and
-    ``convert_exchange_factors`` to guarantee consistent line IDs.
+    used by ``convert_lines`` and ``convert_line_bounds`` to guarantee
+    consistent line IDs.
     """
     sistema = case.sistema
     limites_df = sistema.limites_intercambio
@@ -445,6 +440,27 @@ def convert_bus_penalty_overrides(
     )
 
 
+def _assign_flow_direction(
+    caps: dict[str, float], de: int, para: int, sentido: int, valor: float
+) -> None:
+    """Assign *valor* into the direct/reverse slot of *caps* in place.
+
+    ``sentido == 0`` is the first inewave block (de -> para) and
+    ``sentido == 1`` is the second (para -> de); canonicalized against the
+    (src, tgt) ordering with src < tgt used as the dict key.
+    """
+    if de < para:
+        if sentido == 0:
+            caps["direct_mw"] = valor
+        else:
+            caps["reverse_mw"] = valor
+    else:
+        if sentido == 0:
+            caps["reverse_mw"] = valor
+        else:
+            caps["direct_mw"] = valor
+
+
 def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     """Convert the source model interchange limits to a Cobre ``lines.json`` dict.
 
@@ -517,18 +533,7 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         if key not in pair_map:
             pair_map[key] = {"direct_mw": 0.0, "reverse_mw": 0.0}
 
-        if de < para:
-            # de -> para is the "direct" direction.
-            if sentido == 0:
-                pair_map[key]["direct_mw"] = valor
-            else:
-                pair_map[key]["reverse_mw"] = valor
-        else:
-            # de -> para is the "reverse" direction.
-            if sentido == 0:
-                pair_map[key]["reverse_mw"] = valor
-            else:
-                pair_map[key]["direct_mw"] = valor
+        _assign_flow_direction(pair_map[key], de, para, sentido, valor)
 
     # Use the shared canonical mapping for consistent line IDs.
     canonical_map = _build_canonical_pair_to_line_id(case)
@@ -1016,17 +1021,31 @@ def convert_line_bounds(
     id_map: NewaveIdMap,
 ) -> pa.Table:
     """Convert the source model interchange limits to a Cobre ``line_bounds.parquet``
-    table.
+    table, folding in the per-block exchange factors as absolute-MW override rows.
 
     Reads ``sistema.dat::limites_intercambio`` and ``dger.dat`` to produce one
-    row per (line, stage) pair with direct and reverse MW bounds.
+    stage-level base row per (line, stage) with ``block_id = None`` and direct/
+    reverse MW bounds. Cobre rule 36 treats ``block_id = None`` as a key
+    distinct from ``Some(b)``, so this base row is load-bearing: without it, a
+    stage whose blocks are all uniform would fall back to ``lines.json``'s
+    declared (stage-0) capacity for every later stage. It also reads
+    ``patamar.dat::intercambio_patamares`` — formerly emitted as a standalone
+    per-block-factor JSON document, now deleted — and folds each per-block
+    multiplicative factor into an absolute-MW override row, ``direct_mw =
+    base_direct_mw × direct_factor`` (and the reverse equivalent), per cobre
+    decision 10 (epic 02 §7.2). A block row is emitted only where it differs
+    from the base (i.e. the factor is not 1.0 for both directions); a
+    line-stage whose blocks are all uniform gets no block rows, since the base
+    row alone is equivalent.
 
     The canonical pair logic (``src < tgt``) and line ID assignment exactly
     mirror ``convert_lines`` so that line IDs are consistent.  Interchange
-    limits have no seasonalize flag, so post-study stages freeze at the last
-    study stage's bounds.  Per-block exchange bound factors from
-    ``patamar.dat::intercambio_patamares`` are emitted separately via
-    ``convert_exchange_factors``.
+    limits have no seasonalize flag, so post-study base bounds freeze at the
+    last study stage's value — but the per-block factors do **not** share
+    that freeze: they seasonally repeat the last study year's per-calendar-
+    month pattern instead (unchanged from the deleted factor emitter), so a
+    post-study stage can still carry a non-trivial block override even though
+    its base bounds are frozen at the (possibly zero) freeze-point value.
 
     Parameters
     ----------
@@ -1041,17 +1060,19 @@ def convert_line_bounds(
     -------
     pyarrow.Table
         Columns: ``line_id`` (INT32), ``stage_id`` (INT32),
-        ``direct_mw`` (DOUBLE), ``reverse_mw`` (DOUBLE).
+        ``direct_mw`` (DOUBLE), ``reverse_mw`` (DOUBLE), ``block_id``
+        (INT32, nullable — ``None`` for the stage-level base row).
     """
     sistema = case.sistema
     limites_df: pd.DataFrame | None = sistema.limites_intercambio
 
     _LINE_BOUNDS_SCHEMA = pa.schema(
         [
-            pa.field("line_id", pa.int32()),
-            pa.field("stage_id", pa.int32()),
-            pa.field("direct_mw", pa.float64()),
-            pa.field("reverse_mw", pa.float64()),
+            pa.field("line_id", pa.int32(), nullable=False),
+            pa.field("stage_id", pa.int32(), nullable=False),
+            pa.field("block_id", pa.int32(), nullable=True),
+            pa.field("direct_mw", pa.float64(), nullable=False),
+            pa.field("reverse_mw", pa.float64(), nullable=False),
         ]
     )
 
@@ -1060,6 +1081,7 @@ def convert_line_bounds(
             {
                 "line_id": pa.array([], type=pa.int32()),
                 "stage_id": pa.array([], type=pa.int32()),
+                "block_id": pa.array([], type=pa.int32()),
                 "direct_mw": pa.array([], type=pa.float64()),
                 "reverse_mw": pa.array([], type=pa.float64()),
             },
@@ -1097,18 +1119,7 @@ def convert_line_bounds(
         if key not in date_lookup:
             date_lookup[key] = {"direct_mw": 0.0, "reverse_mw": 0.0}
 
-        if de < para:
-            # de -> para is the "direct" direction.
-            if sentido == 0:
-                date_lookup[key]["direct_mw"] = valor
-            else:
-                date_lookup[key]["reverse_mw"] = valor
-        else:
-            # de -> para is the "reverse" direction.
-            if sentido == 0:
-                date_lookup[key]["reverse_mw"] = valor
-            else:
-                date_lookup[key]["direct_mw"] = valor
+        _assign_flow_direction(date_lookup[key], de, para, sentido, valor)
 
     # Build last-year lookup for post-study:
     # {(src, tgt, cal_month) -> {direct_mw, reverse_mw}} — use the latest year.
@@ -1122,10 +1133,100 @@ def convert_line_bounds(
         k: v for k, (_, v) in last_year_per_key.items()
     }
 
+    # ------------------------------------------------------------------
+    # Per-block factors (cobre decision 10, epic 02 §7.2): fold
+    # ``patamar.dat::intercambio_patamares`` into per-block direct/reverse
+    # multipliers, keyed the same way as the base lookup above so block rows
+    # can be derived as base × factor. This is the factor lookup that used to
+    # live in a now-deleted standalone converter; the pairing and the
+    # per-calendar-month post-study seasonalization are unchanged from that
+    # deleted code, only the destination (rows on this table, not a separate
+    # JSON document) is new.
+    # ------------------------------------------------------------------
+    patamar = case.patamar
+    factors_df: pd.DataFrame | None = patamar.intercambio_patamares
+
+    # {(src, tgt, year, cal_month, block_id) -> factor}; block_id is 0-based
+    # (patamar is 1-based in the source).
+    direct_factor_map: dict[tuple[int, int, int, int, int], float] = {}
+    reverse_factor_map: dict[tuple[int, int, int, int, int], float] = {}
+    num_blocks = 0
+
+    if factors_df is not None and not factors_df.empty:
+        all_blocks: set[int] = set()
+        for _, row in factors_df.iterrows():
+            de = int(row["submercado_de"])
+            para = int(row["submercado_para"])
+            val = float(row["valor"])
+            block_id = int(row["patamar"]) - 1
+            dt = row["data"]
+            yr = int(dt.year)
+            cal_month = int(dt.month)
+            all_blocks.add(block_id)
+
+            src, tgt = (de, para) if de < para else (para, de)
+            key = (src, tgt, yr, cal_month, block_id)
+            if de < para:
+                direct_factor_map[key] = val
+            else:
+                reverse_factor_map[key] = val
+
+        num_blocks = max(all_blocks) + 1
+
+    # Last-year seasonal lookups for post-study factor stages:
+    # {(src, tgt, cal_month, block_id) -> factor}
+    last_yr_direct_factor: dict[tuple[int, int, int, int], tuple[int, float]] = {}
+    last_yr_reverse_factor: dict[tuple[int, int, int, int], tuple[int, float]] = {}
+
+    for (src, tgt, yr, cal_month, block_id), val in direct_factor_map.items():
+        k4 = (src, tgt, cal_month, block_id)
+        existing = last_yr_direct_factor.get(k4)
+        if existing is None or yr > existing[0]:
+            last_yr_direct_factor[k4] = (yr, val)
+
+    for (src, tgt, yr, cal_month, block_id), val in reverse_factor_map.items():
+        k4 = (src, tgt, cal_month, block_id)
+        existing = last_yr_reverse_factor.get(k4)
+        if existing is None or yr > existing[0]:
+            last_yr_reverse_factor[k4] = (yr, val)
+
+    last_direct_factor: dict[tuple[int, int, int, int], float] = {
+        k: v for k, (_, v) in last_yr_direct_factor.items()
+    }
+    last_reverse_factor: dict[tuple[int, int, int, int], float] = {
+        k: v for k, (_, v) in last_yr_reverse_factor.items()
+    }
+
+    def _block_factors(
+        src: int, tgt: int, y: int, m: int, is_post_study: bool
+    ) -> list[tuple[int, float, float]]:
+        """Per-block (block_id, direct_factor, reverse_factor) for one
+        (src, tgt, year, month), applying the same post-study freeze-to-last-
+        seasonal-year fallback used for the base bounds above."""
+        out: list[tuple[int, float, float]] = []
+        for block_id in range(num_blocks):
+            if is_post_study:
+                d_factor = last_direct_factor.get((src, tgt, m, block_id), 1.0)
+                r_factor = last_reverse_factor.get((src, tgt, m, block_id), 1.0)
+            else:
+                key_lookup = (src, tgt, y, m, block_id)
+                d_factor = direct_factor_map.get(
+                    key_lookup,
+                    last_direct_factor.get((src, tgt, m, block_id), 1.0),
+                )
+                r_factor = reverse_factor_map.get(
+                    key_lookup,
+                    last_reverse_factor.get((src, tgt, m, block_id), 1.0),
+                )
+            out.append((block_id, d_factor, r_factor))
+        return out
+
     rows_line_id: list[int] = []
     rows_stage_id: list[int] = []
     rows_direct: list[float] = []
     rows_reverse: list[float] = []
+    rows_block_id: list[int | None] = []
+    block_rows_emitted = 0
 
     # Last study stage's (year, calendar month). Interchange limits have no
     # seasonalize flag, so the post-study tail freezes at this stage's value
@@ -1160,25 +1261,72 @@ def convert_line_bounds(
                         (src, tgt, m), {"direct_mw": 0.0, "reverse_mw": 0.0}
                     )
 
+            base_direct = caps["direct_mw"]
+            base_reverse = caps["reverse_mw"]
+
+            # Stage-level base row (block_id = None) — kept unchanged and
+            # unconditionally, per cobre rule 36.
             rows_line_id.append(line_id)
             rows_stage_id.append(stage_id)
-            rows_direct.append(caps["direct_mw"])
-            rows_reverse.append(caps["reverse_mw"])
+            rows_direct.append(base_direct)
+            rows_reverse.append(base_reverse)
+            rows_block_id.append(None)
+
+            # Per-block override rows, only where the factor differs from the
+            # base (i.e. is not 1.0 in both directions).
+            for block_id, d_factor, r_factor in _block_factors(
+                src, tgt, y, m, is_post_study
+            ):
+                if d_factor == 1.0 and r_factor == 1.0:
+                    continue
+                rows_line_id.append(line_id)
+                rows_stage_id.append(stage_id)
+                rows_direct.append(base_direct * d_factor)
+                rows_reverse.append(base_reverse * r_factor)
+                rows_block_id.append(block_id)
+                block_rows_emitted += 1
 
             m += 1
             if m > 12:
                 m = 1
                 y += 1
 
+    _LOG.info(
+        "line_bounds: emitted %d per-block override row(s) folded from "
+        "patamar.dat exchange factors (cobre decision 10), alongside %d "
+        "stage-level base row(s).",
+        block_rows_emitted,
+        len(rows_line_id) - block_rows_emitted,
+    )
+
     return pa.table(
         {
             "line_id": pa.array(rows_line_id, type=pa.int32()),
             "stage_id": pa.array(rows_stage_id, type=pa.int32()),
+            "block_id": pa.array(rows_block_id, type=pa.int32()),
             "direct_mw": pa.array(rows_direct, type=pa.float64()),
             "reverse_mw": pa.array(rows_reverse, type=pa.float64()),
         },
         schema=_LINE_BOUNDS_SCHEMA,
     )
+
+
+def _in_study_horizon(
+    dt: object, start_year: int, start_month: int, total_stages: int
+) -> bool:
+    """Return True if *dt* falls within the study + post-study horizon.
+
+    Year == ``POST_STUDY_YEAR`` marks a post-study entry (inewave convention).
+    """
+    try:
+        yr = int(dt.year)  # type: ignore[union-attr]
+        mo = int(dt.month)  # type: ignore[union-attr]
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if yr == POST_STUDY_YEAR:
+        return True
+    stage_id = (yr - start_year) * 12 + (mo - start_month)
+    return 0 <= stage_id < total_stages
 
 
 def _build_ncs_group_to_id(
@@ -1202,18 +1350,11 @@ def _build_ncs_group_to_id(
     start_year = horizon.start_year
     total_stages = horizon.total_stages
 
-    def _in_horizon(dt: object) -> bool:
-        try:
-            yr = int(dt.year)  # type: ignore[union-attr]
-            mo = int(dt.month)  # type: ignore[union-attr]
-        except (AttributeError, TypeError, ValueError):
-            return False
-        if yr == POST_STUDY_YEAR:
-            return True
-        stage_id = (yr - start_year) * 12 + (mo - start_month)
-        return 0 <= stage_id < total_stages
-
-    df_filtered = df_ncs[df_ncs["data"].apply(_in_horizon)].copy()
+    df_filtered = df_ncs[
+        df_ncs["data"].apply(
+            lambda dt: _in_study_horizon(dt, start_year, start_month, total_stages)
+        )
+    ].copy()
     groups = df_filtered.groupby(["codigo_submercado", "indice_bloco"], sort=True)
 
     result: dict[tuple[int, int], int] = {}
@@ -1267,18 +1408,11 @@ def convert_non_controllable_sources(
 
     # Filter to study + post-study horizon only.
     # Rows with year == 9999 are post-study entries in inewave convention.
-    def _in_horizon(dt: object) -> bool:
-        try:
-            yr = int(dt.year)  # type: ignore[union-attr]
-            mo = int(dt.month)  # type: ignore[union-attr]
-        except (AttributeError, TypeError, ValueError):
-            return False
-        if yr == POST_STUDY_YEAR:
-            return True
-        stage_id = (yr - start_year) * 12 + (mo - start_month)
-        return 0 <= stage_id < total_stages
-
-    df_filtered = df_ncs[df_ncs["data"].apply(_in_horizon)].copy()
+    df_filtered = df_ncs[
+        df_ncs["data"].apply(
+            lambda dt: _in_study_horizon(dt, start_year, start_month, total_stages)
+        )
+    ].copy()
 
     # The source model carries no per-source commissioning date for the aggregated
     # non-controllable generation; treat every NCS as in service since the
@@ -1337,165 +1471,6 @@ def convert_non_controllable_sources(
     return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": ncs_list}
 
 
-def convert_exchange_factors(
-    case: NewaveCase,
-    id_map: NewaveIdMap,
-) -> dict:
-    """Convert patamar.dat exchange factors to a Cobre ``exchange_factors.json`` dict.
-
-    Reads ``patamar.dat::intercambio_patamares``.  For each (line_id,
-    stage_id) pair, collects per-block direct and reverse factors from the
-    (submercado_de, submercado_para) directional rows.
-
-    The canonical pair logic and line ID assignment exactly mirror
-    ``convert_lines`` and ``convert_line_bounds``:
-    ``src, tgt = (de, para) if de < para else (para, de)`` and line IDs are
-    assigned by ``enumerate(sorted(pairs))``.
-
-    When ``de < para``, the row's factor applies to ``direct_factor``.
-    When ``de > para`` (reversed pair), the factor applies to
-    ``reverse_factor``.  Each (line_id, stage_id) entry combines factors
-    from both directions into one ``block_factors`` array.
-
-    Parameters
-    ----------
-    case:
-        Parsed the source model case.
-    id_map:
-        Entity ID map (unused directly; kept for API consistency).
-
-    Returns
-    -------
-    dict
-        JSON-serializable dict with key ``"exchange_factors"``.
-    """
-    patamar = case.patamar
-    df: pd.DataFrame | None = patamar.intercambio_patamares
-
-    if df is None or df.empty:
-        return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": []}
-
-    horizon = case.horizon
-    start_month = horizon.start_month
-    start_year = horizon.start_year
-    study_months = horizon.study_months
-    total_stages = horizon.total_stages
-
-    study_end_year = start_year + (start_month - 1 + study_months) // 12
-    study_end_month = ((start_month - 1 + study_months) % 12) + 1
-
-    pair_to_line_id = _build_canonical_pair_to_line_id(case)
-    if not pair_to_line_id:
-        return {"$schema": _EXCHANGE_FACTORS_SCHEMA_URL, "exchange_factors": []}
-
-    # Build per-(src, tgt, year, cal_month, patamar) factor lookup.
-    # Key: (src, tgt, year, cal_month, block_id) -> (direct_factor, reverse_factor)
-    # block_id is 0-based (patamar is 1-based in source).
-    FactorKey = tuple  # (src, tgt, yr, cal_month, block_id)
-    direct_map: dict[FactorKey, float] = {}
-    reverse_map: dict[FactorKey, float] = {}
-
-    for _, row in df.iterrows():
-        de = int(row["submercado_de"])
-        para = int(row["submercado_para"])
-        val = float(row["valor"])
-        block_id = int(row["patamar"]) - 1  # convert 1-based to 0-based
-        dt = row["data"]
-        yr = int(dt.year)
-        cal_month = int(dt.month)
-
-        src, tgt = (de, para) if de < para else (para, de)
-        key: FactorKey = (src, tgt, yr, cal_month, block_id)
-
-        if de < para:
-            direct_map[key] = val
-        else:
-            reverse_map[key] = val
-
-    # Determine number of blocks from the data.
-    all_blocks: set[int] = set()
-    for _, row in df.iterrows():
-        all_blocks.add(int(row["patamar"]) - 1)
-    num_blocks = max(all_blocks) + 1 if all_blocks else 1
-
-    # Build last-year seasonal lookups for post-study stages.
-    # {(src, tgt, cal_month, block_id) -> factor}
-    last_yr_direct: dict[tuple[int, int, int, int], tuple[int, float]] = {}
-    last_yr_reverse: dict[tuple[int, int, int, int], tuple[int, float]] = {}
-
-    for (src, tgt, yr, cal_month, block_id), val in direct_map.items():
-        k4 = (src, tgt, cal_month, block_id)
-        existing = last_yr_direct.get(k4)
-        if existing is None or yr > existing[0]:
-            last_yr_direct[k4] = (yr, val)
-
-    for (src, tgt, yr, cal_month, block_id), val in reverse_map.items():
-        k4 = (src, tgt, cal_month, block_id)
-        existing = last_yr_reverse.get(k4)
-        if existing is None or yr > existing[0]:
-            last_yr_reverse[k4] = (yr, val)
-
-    last_direct: dict[tuple[int, int, int, int], float] = {
-        k: v for k, (_, v) in last_yr_direct.items()
-    }
-    last_reverse: dict[tuple[int, int, int, int], float] = {
-        k: v for k, (_, v) in last_yr_reverse.items()
-    }
-
-    results: list[dict] = []
-
-    for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
-        src, tgt = pair
-        y, m = start_year, start_month
-
-        for stage_id in range(total_stages):
-            is_post_study = (y > study_end_year) or (
-                y == study_end_year and m >= study_end_month
-            )
-
-            block_factors: list[dict] = []
-            for block_id in range(num_blocks):
-                if is_post_study:
-                    d_factor = last_direct.get((src, tgt, m, block_id), 1.0)
-                    r_factor = last_reverse.get((src, tgt, m, block_id), 1.0)
-                else:
-                    key_lookup: FactorKey = (src, tgt, y, m, block_id)
-                    d_factor = direct_map.get(
-                        key_lookup,
-                        last_direct.get((src, tgt, m, block_id), 1.0),
-                    )
-                    r_factor = reverse_map.get(
-                        key_lookup,
-                        last_reverse.get((src, tgt, m, block_id), 1.0),
-                    )
-
-                block_factors.append(
-                    {
-                        "block_id": block_id,
-                        "direct_factor": d_factor,
-                        "reverse_factor": r_factor,
-                    }
-                )
-
-            results.append(
-                {
-                    "line_id": line_id,
-                    "stage_id": stage_id,
-                    "block_factors": block_factors,
-                }
-            )
-
-            m += 1
-            if m > 12:
-                m = 1
-                y += 1
-
-    return {
-        "$schema": _EXCHANGE_FACTORS_SCHEMA_URL,
-        "exchange_factors": results,
-    }
-
-
 def convert_ncs_factors(
     case: NewaveCase,
     id_map: NewaveIdMap,
@@ -1537,18 +1512,11 @@ def convert_ncs_factors(
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
 
     # Filter to study + post-study horizon (year == 9999 is post-study).
-    def _in_horizon(dt: object) -> bool:
-        try:
-            yr = int(dt.year)  # type: ignore[union-attr]
-            mo = int(dt.month)  # type: ignore[union-attr]
-        except (AttributeError, TypeError, ValueError):
-            return False
-        if yr == POST_STUDY_YEAR:
-            return True
-        stage_id = (yr - start_year) * 12 + (mo - start_month)
-        return 0 <= stage_id < total_stages
-
-    df = df[df["data"].apply(_in_horizon)].copy()
+    df = df[
+        df["data"].apply(
+            lambda dt: _in_study_horizon(dt, start_year, start_month, total_stages)
+        )
+    ].copy()
 
     if df.empty:
         return {

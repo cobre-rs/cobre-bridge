@@ -281,6 +281,10 @@ function plotlyRef(labels, values, color, name) {
 function plotlyLayout(overrides) {
     var defaults = {
         hovermode: 'x unified',
+        // Stage x-values are ISO dates (see *_DATES); a date axis spaces the
+        // stages by true calendar distance (weekly stages closer than a
+        // following monthly one). Overridable per call.
+        xaxis: { type: 'date' },
         margin: { l: 60, r: 30, t: 60, b: 50 },
         legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'center', x: 0.5, font: { size: 11 } },
         paper_bgcolor: 'rgba(0,0,0,0)',

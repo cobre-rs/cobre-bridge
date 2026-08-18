@@ -2,14 +2,67 @@
 
 The constraint-expression *domain* logic (parser, parameter resolver, LHS
 evaluator) now lives in :mod:`cobre_bridge.constraint_expr` so the dashboard and
-the comparator share one definition. This module keeps only the HTML rendering.
+the comparator share one definition. This module keeps only the HTML rendering
+plus the small F3 bound-shape derivation used to display it.
 """
 
 from __future__ import annotations
 
 import pandas as pd
 
+from cobre_bridge.generic_constraint_format import shape_from_bounds
 from cobre_bridge.ui.html import escape_text
+
+
+def derive_constraint_shape(bounds_rows: pd.DataFrame) -> str:
+    """Derive a constraint's *displayed* direction label from its F3 bound endpoints.
+
+    cobre's F3 ``generic_constraints.json`` objects are sense-free; direction
+    is encoded entirely by which endpoint(s) of ``generic_constraint_bounds
+    .parquet`` are populated (see :mod:`cobre_bridge.generic_constraint_format`).
+    DECOMP's ``RE``/``HQ``/``HV`` families genuinely emit two-sided
+    ``"range"`` rows (a single id carrying both ``bound_lower`` and
+    ``bound_upper``), and a constraint's per-row direction can vary across
+    its per-(stage, block) bound rows (e.g. an HQ/HV mix that floors some
+    stages and ceilings others). This function nonetheless returns a single
+    label taken from the *first* row with at least one populated endpoint —
+    it feeds only the compact per-constraint "Sense" summary column
+    (:func:`build_constraints_summary_table`). Numeric consumers that need
+    the real per-(stage, block) bound — the LHS-vs-Bound chart
+    (:func:`cobre_bridge.dashboard.tabs.constraints._build_constraint_lhs_data`)
+    — read ``bound_lower``/``bound_upper`` directly per row instead of
+    relying on this single derived label. Falls back to ``"<="`` — the
+    pre-F3 default sense for a constraint with no bound rows — when
+    *bounds_rows* has no such row (including when it is empty).
+    """
+    for _, row in bounds_rows.iterrows():
+        lower = row.get("bound_lower")
+        upper = row.get("bound_upper")
+        lower = None if pd.isna(lower) else float(lower)
+        upper = None if pd.isna(upper) else float(upper)
+        if lower is None and upper is None:
+            continue
+        return shape_from_bounds(lower, upper)
+    return "<="
+
+
+def bound_value_column(shape: str) -> str:
+    """Return which F3 endpoint column holds the summary display value for *shape*.
+
+    ``"<="``/``"range"`` read ``bound_upper``; ``">="``/``"=="`` read
+    ``bound_lower`` (both endpoints are equal for ``"=="``, so either would
+    do). For ``"range"`` this deliberately surfaces only the ceiling: it
+    feeds the per-constraint "Bound Range" summary column
+    (:func:`build_constraints_summary_table`), which shows one endpoint's
+    variation across stages, not the floor-to-ceiling span of a band.
+    DECOMP's ``RE``/``HQ``/``HV`` families genuinely emit ``"range"`` rows —
+    a live path, not a hypothetical one. The LHS-vs-Bound chart does **not**
+    use this function: it resolves both endpoints directly per
+    (stage, block) row so a two-sided band renders, and is violation-tested
+    on, both its floor and its ceiling (see
+    :func:`cobre_bridge.dashboard.tabs.constraints._build_constraint_lhs_data`).
+    """
+    return "bound_upper" if shape in ("<=", "range") else "bound_lower"
 
 
 def build_constraints_summary_table(
@@ -33,7 +86,6 @@ def build_constraints_summary_table(
         cid = c["id"]
         name = c["name"]
         ctype = name.split("_")[0]
-        sense = c["sense"]
         slack = c["slack"]
         slack_enabled = "Yes" if slack.get("enabled") else "No"
         penalty = (
@@ -42,11 +94,17 @@ def build_constraints_summary_table(
             else "—"
         )
         bounds_rows = gc_bounds[gc_bounds["constraint_id"] == cid]
+        sense = derive_constraint_shape(bounds_rows)
         active_stages = (
             int(bounds_rows["stage_id"].nunique()) if not bounds_rows.empty else 0
         )
-        bmin = bounds_rows["bound"].min() if not bounds_rows.empty else 0.0
-        bmax = bounds_rows["bound"].max() if not bounds_rows.empty else 0.0
+        # Coarse per-constraint summary: for a "range" row this is the
+        # ceiling's variation across stages, not the floor-to-ceiling span —
+        # the LHS-vs-Bound chart is where a band's floor AND ceiling are
+        # both rendered (see `_build_constraint_lhs_data`).
+        value_col = bound_value_column(sense)
+        bmin = bounds_rows[value_col].min() if not bounds_rows.empty else 0.0
+        bmax = bounds_rows[value_col].max() if not bounds_rows.empty else 0.0
         if abs(bmax - bmin) < 1e-6:
             bound_range = f"{bmin:,.1f}"
         else:

@@ -18,6 +18,8 @@ from cobre_bridge.cobre_io import (
     resolve_hydro_productivities,
 )
 from cobre_bridge.cost_categories import COBRE_COST_COMPONENT_COLUMNS
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.errors import CobrePartitionMissingError
 
 _LOG = logging.getLogger(__name__)
 
@@ -149,6 +151,113 @@ def _scan_simulation_entity(
         raise CobreReadError(f"Failed to scan parquets in {sim_dir}") from exc
 
     return lf
+
+
+# The seven physical columns cobre's writer puts in each
+# ``hydro_bus_generation`` data.parquet, plus ``scenario_id`` which
+# ``hive_partitioning=True`` derives from the ``scenario_id=NNNN`` partition
+# directory name rather than storing it in the file itself. Shared by the
+# present-but-empty fallback frame and the docstring below.
+_HYDRO_BUS_GENERATION_SCHEMA: dict[str, pl.DataType] = {
+    "stage_id": pl.Int32,
+    "block_id": pl.Int32,
+    "hydro_id": pl.Int32,
+    "bus_id": pl.Int32,
+    "turbined_m3s": pl.Float64,
+    "generation_mw": pl.Float64,
+    "generation_mwh": pl.Float64,
+    "scenario_id": pl.Int64,
+}
+
+
+def read_cobre_hydro_bus_generation(cobre_output_dir: Path) -> pl.LazyFrame:
+    """Scan cobre 0.13's ``simulation/hydro_bus_generation/`` partition.
+
+    Partition layout: ``simulation/hydro_bus_generation/scenario_id=NNNN/data.parquet``.
+    Returns a LazyFrame with the seven physical columns cobre writes —
+    ``stage_id``, ``block_id`` (nullable: a stage-level row has no single
+    representative block), ``hydro_id``, ``bus_id``, ``turbined_m3s``,
+    ``generation_mw``, ``generation_mwh`` — plus ``scenario_id``, which
+    ``hive_partitioning=True`` derives from the partition directory rather
+    than the file contents. ``scenario_id`` is kept (unlike the aggregated
+    ``read_cobre_*_means`` readers in this module) because this reader does
+    no aggregation of its own: per-scenario grouping/weighting is left to the
+    caller.
+
+    ``generation_mwh`` is **already hours-weighted energy** — cobre applies
+    the ``× blocks[].hours`` weighting on the writer side. Use it directly
+    for energy aggregates (e.g. ``.sum()`` per bus/stage); do **not**
+    multiply it by ``stages.json`` ``blocks[].hours`` again, or the weighting
+    is applied twice. This is the one deliberate exception to this module's
+    standing rule of weighting every per-block parquet column by block
+    hours — weight ``generation_mw`` by hours only where a genuine power
+    figure (not an energy total) is required.
+
+    Absence vs. present-but-empty (plan decision B2)
+    -------------------------------------------------
+    Unlike every other reader in this module, this one does **not** treat a
+    missing partition as "nothing to report": the compare layer switches to
+    this partition with no fallback, so absence means the output itself
+    predates the partition, not that there is no hydro-bus generation.
+
+    Raises
+    ------
+    CobrePartitionMissingError
+        If ``simulation/hydro_bus_generation/`` does not exist under
+        *cobre_output_dir*. The message names the missing directory and
+        states that the partition is produced by cobre >= 0.13.0, telling
+        the caller to re-run cobre rather than trust an empty result.
+
+    A directory that exists but holds no scenario parquet files is a
+    different, legitimate state — real, if odd — and is propagated as an
+    empty LazyFrame matching the schema above, with a ``Diagnostic``
+    recorded, instead of being conflated with absence or raised as a
+    :class:`CobreReadError`.
+    """
+    sim_dir = cobre_output_dir / "simulation" / "hydro_bus_generation"
+    if not sim_dir.is_dir():
+        raise CobrePartitionMissingError(
+            f"Cobre output partition not found: {sim_dir}. The "
+            "hydro_bus_generation partition is produced by cobre >= 0.13.0; "
+            "this output directory may predate that cobre version.",
+            path=str(sim_dir),
+        )
+
+    if next(sim_dir.rglob("*.parquet"), None) is None:
+        emit(
+            Diagnostic(
+                code="hydro-bus-generation-partition-empty",
+                severity=Severity.WARNING,
+                category="Compare data",
+                title="hydro_bus_generation partition is present but empty",
+                summary=(
+                    f"{sim_dir} exists but contains no scenario parquet "
+                    "files; treating hydro-bus generation as empty rather "
+                    "than failing the comparison."
+                ),
+                notes=[f"path: {sim_dir}"],
+            ),
+            logger=_LOG,
+        )
+        return pl.LazyFrame(schema=_HYDRO_BUS_GENERATION_SCHEMA)
+
+    lf = _scan_simulation_entity(cobre_output_dir, "hydro_bus_generation")
+    if lf is None:
+        # sim_dir.is_dir() was already confirmed above, so this is
+        # unreachable in practice; kept only to stay type-safe against
+        # _scan_simulation_entity's ``LazyFrame | None`` return.
+        return pl.LazyFrame(schema=_HYDRO_BUS_GENERATION_SCHEMA)
+
+    return lf.select(
+        pl.col("stage_id").cast(pl.Int32),
+        pl.col("block_id").cast(pl.Int32),
+        pl.col("hydro_id").cast(pl.Int32),
+        pl.col("bus_id").cast(pl.Int32),
+        pl.col("turbined_m3s").cast(pl.Float64),
+        pl.col("generation_mw").cast(pl.Float64),
+        pl.col("generation_mwh").cast(pl.Float64),
+        pl.col("scenario_id").cast(pl.Int64),
+    )
 
 
 def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
@@ -1057,20 +1166,24 @@ def _load_entity_bus_map(
     entity: str,
     id_field: str,
 ) -> dict[int, int]:
-    """Load entity_id → bus_id mapping from system JSON."""
+    """Load entity_id → bus_id mapping from system JSON.
+
+    A missing system JSON is the deliberate "optional file" case and yields
+    an empty map. A JSON that exists but cannot be parsed, or whose entries
+    lack ``bus_id``, is a genuine read failure and raises
+    :class:`CobreReadError` rather than being silently converted to an empty
+    map — that silent conversion is the defect this reader is not allowed
+    to reintroduce.
+    """
     path = _find_system_json(cobre_output_dir, f"{entity}.json")
     if path is None:
         return {}
     try:
         with path.open() as f:
             data = json.load(f)
-        return {
-            int(e["id"]): int(e["bus_id"])
-            for e in data.get(entity, [])
-            if "bus_id" in e
-        }
-    except Exception:  # noqa: BLE001
-        return {}
+        return {int(e["id"]): int(e["bus_id"]) for e in data.get(entity, [])}
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(f"Failed to read {entity} bus map from {path}") from exc
 
 
 def read_cobre_bus_aggregates(
@@ -1082,6 +1195,16 @@ def read_cobre_bus_aggregates(
     load, deficit, and excess by bus, then computes p10/p50/p90 across
     scenarios.
 
+    Hydro generation is read from cobre 0.13's
+    ``simulation/hydro_bus_generation/`` partition (see
+    :func:`read_cobre_hydro_bus_generation`), which carries ``bus_id`` per
+    row directly. Hydros no longer carry a plant-level ``bus_id`` in
+    ``system/hydros.json``, so unlike thermal/NCS there is no plant→bus map
+    for hydro; a missing partition is a real operational state (the output
+    predates cobre 0.13), not "no hydro generation", and propagates
+    :class:`~cobre_bridge.errors.CobrePartitionMissingError` to the caller
+    rather than degrading to zero.
+
     Returns DataFrame with columns: bus_id, stage_id, and for each
     variable: ``{var}_p10``, ``{var}_p50``, ``{var}_p90``.
     """
@@ -1090,10 +1213,6 @@ def read_cobre_bus_aggregates(
     # --- Bus-level variables (load, deficit, excess) ---
     bus_lf = _scan_simulation_entity(cobre_output_dir, "buses")
     bus_vars = ["load_mw", "deficit_mw", "excess_mw"]
-
-    # --- Hydro generation aggregated by bus ---
-    hydro_bus_map = _load_entity_bus_map(cobre_output_dir, "hydros", "hydro_id")
-    hydro_lf = _scan_simulation_entity(cobre_output_dir, "hydros")
 
     # --- Thermal generation aggregated by bus ---
     thermal_bus_map = _load_entity_bus_map(cobre_output_dir, "thermals", "thermal_id")
@@ -1152,6 +1271,68 @@ def read_cobre_bus_aggregates(
             )
         return per_sc.collect(engine="streaming")
 
+    def _agg_hydro_bus_generation() -> pl.DataFrame:
+        """Aggregate hydro generation by bus from the 0.13 partition.
+
+        The partition already carries ``bus_id`` per row, so — unlike
+        thermal/NCS — no plant→bus map or join is needed here.
+
+        When ``block_hours`` (``stages.json``) is available, ``generation_mwh``
+        is already hours-weighted energy per block (cobre applies that
+        weighting on the writer side), so summing it across ``hydro_id`` and
+        ``block_id`` — including any null-``block_id`` stage-level row —
+        gives the bus/stage/scenario total energy with NO re-weighting.
+        Dividing that total by the stage's total hours converts it back into
+        the same hours-weighted mean-MW figure the thermal/NCS branches
+        compute, so ``hydro_gen_mw`` stays comparable to them and to the
+        pre-migration plant-keyed total.
+
+        Without ``stages.json`` there is no stage-hours denominator to
+        convert the energy total back to a power figure, so this branch
+        mirrors every sibling aggregator in this module (``_agg_entity_by_bus``,
+        :func:`read_cobre_hydro_means`, :func:`read_cobre_thermal_means`,
+        :func:`read_cobre_bus_means`): take the ``block_id == 0`` row — cobre's
+        per-block ``generation_mw`` is already a genuine MW figure, no
+        weighting needed — and sum it across hydros per bus/stage/scenario.
+        A null-``block_id`` stage-level row does not equal ``0`` and is
+        excluded here, exactly as the sibling branches exclude every
+        non-representative block. Summing ``generation_mwh`` instead (the
+        bug this branch fixes) would silently relabel an energy total as a
+        power figure, off by the block-hours factor.
+
+        Absence of the partition is deliberately NOT caught here — a
+        missing ``simulation/hydro_bus_generation/`` directory must surface
+        :class:`CobrePartitionMissingError` to the caller of
+        :func:`read_cobre_bus_aggregates`, not degrade to zero hydro
+        generation per bus (the regression this function exists to fix).
+        """
+        lf = read_cobre_hydro_bus_generation(cobre_output_dir)
+
+        if block_hours is not None:
+            energy = lf.group_by(["scenario_id", "bus_id", "stage_id"]).agg(
+                pl.col("generation_mwh").sum().alias("_energy_mwh")
+            )
+            stage_hours = (
+                block_hours.lazy()
+                .group_by("stage_id")
+                .agg(pl.col("hours").sum().alias("_hours"))
+            )
+            per_sc = (
+                energy.join(stage_hours, on="stage_id")
+                .with_columns(
+                    (pl.col("_energy_mwh") / pl.col("_hours")).alias("hydro_gen_mw")
+                )
+                .drop("_energy_mwh", "_hours")
+            )
+        else:
+            per_sc = (
+                lf.filter(pl.col("block_id") == 0)
+                .group_by(["scenario_id", "bus_id", "stage_id"])
+                .agg(pl.col("generation_mw").sum().alias("hydro_gen_mw"))
+            )
+
+        return per_sc.collect(engine="streaming")
+
     # Collect per-scenario frames.
     frames: list[pl.DataFrame] = []
     all_vars: list[str] = []
@@ -1191,9 +1372,16 @@ def read_cobre_bus_aggregates(
             frames.append(bus_sc)
             all_vars.extend(bus_avail)
 
-    # Entity aggregations.
+    # Hydro generation: the partition already carries bus_id, so it is
+    # aggregated directly rather than through the map/join loop below —
+    # see AC1/AC5 in ticket-010: absence must raise, not silently drop out
+    # of ``frames`` the way a ``None``-returning entity aggregation would.
+    frames.append(_agg_hydro_bus_generation())
+    all_vars.append("hydro_gen_mw")
+
+    # Thermal / NCS entity aggregations (still map-and-join: those entities
+    # keep a plant-level bus_id in their system JSON).
     for lf, id_col, val_col, bmap, out in [
-        (hydro_lf, "hydro_id", "generation_mw", hydro_bus_map, "hydro_gen_mw"),
         (
             thermal_lf,
             "thermal_id",
@@ -1427,6 +1615,10 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
 
     Returns DataFrame with columns: ``iteration`` (Int64),
     ``lower_bound`` (Float64), ``upper_bound_mean`` (Float64).
+
+    The upper-bound column is read from cobre's ``upper_bound`` (0.14) or the
+    legacy ``upper_bound_mean``; either maps to the canonical
+    ``upper_bound_mean`` returned here.
     """
     empty = pl.DataFrame(
         schema={
@@ -1462,6 +1654,18 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
         elif lower == "upper_bound_mean":
             col_map[col] = "upper_bound_mean"
 
+    # cobre 0.14 renamed the statistical upper-bound column
+    # "upper_bound_mean" -> "upper_bound" (alongside a nullable
+    # "upper_bound_std" and a new "upper_bound_kind" tag).  Accept the new
+    # spelling as an exact match into our canonical "upper_bound_mean" slot,
+    # but only when the legacy column is absent, and via an exact compare so
+    # the prefix-sharing "upper_bound_std"/"upper_bound_kind" never claim it.
+    if "upper_bound_mean" not in col_map.values():
+        for col, lower in cols_lower.items():
+            if lower == "upper_bound":
+                col_map[col] = "upper_bound_mean"
+                break
+
     # Fuzzy fallback for columns not yet mapped.
     for col, lower in cols_lower.items():
         if col in col_map:
@@ -1493,13 +1697,11 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
         return empty
 
     inv_map = {v: k for k, v in col_map.items()}
-    result = df.select(
+    return df.select(
         pl.col(inv_map["iteration"]).cast(pl.Int64).alias("iteration"),
         pl.col(inv_map["lower_bound"]).cast(pl.Float64).alias("lower_bound"),
         pl.col(inv_map["upper_bound_mean"]).cast(pl.Float64).alias("upper_bound_mean"),
     )
-
-    return result
 
 
 def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
@@ -1512,7 +1714,17 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     backward compatibility with comparator/dashboard callers.
 
     Returns ``{entity_id: {"name": str, "productivity_mw_per_m3s": float | None,
-    "min_storage_hm3": float, "bus_id": int | None}}``.
+    "min_storage_hm3": float, ...}}``.
+
+    This reader's job is plant *physics* (productivity, storage, outflow/
+    generation bounds) — it does **not** carry a plant-level bus id. Hydros
+    no longer carry a plant-level ``bus_id`` in ``system/hydros.json`` under
+    cobre 0.13 (decision B1); the compare layer's plant->bus label is
+    re-sourced from the ``simulation/hydro_bus_generation/`` partition via
+    :func:`read_cobre_hydro_bus_labels` instead. Removing the key here
+    (rather than leaving it ``None``) makes a stale caller expecting it
+    break visibly (``KeyError``) instead of silently degrading to an empty
+    bus map.
     """
     hydros_path = _find_system_json(cobre_output_dir, "hydros.json")
     if hydros_path is None:
@@ -1543,7 +1755,6 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
         outflow = hydro.get("outflow", {}) or {}
         generation = hydro.get("generation", {}) or {}
 
-        bus_id = hydro.get("bus_id")
         result[entity_id] = {
             "name": name,
             "productivity_mw_per_m3s": float(prod) if prod is not None else None,
@@ -1561,10 +1772,43 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
             "max_turbined_m3s": float(generation.get("max_turbined_m3s", 0.0) or 0.0),
             "min_generation_mw": float(generation.get("min_generation_mw", 0.0) or 0.0),
             "max_generation_mw": float(generation.get("max_generation_mw", 0.0) or 0.0),
-            "bus_id": int(bus_id) if bus_id is not None else None,
+            # Deliberately no "bus_id" key: see the docstring above (B1).
         }
 
     return result
+
+
+def read_cobre_hydro_bus_labels(cobre_output_dir: Path) -> dict[int, frozenset[int]]:
+    """Derive the plant -> bus *label* map from the 0.13 hydro_bus_generation partition.
+
+    ``read_cobre_hydro_metadata`` no longer carries a plant-level ``bus_id``
+    (decision B1) — this is the correct re-source for the compare layer's
+    plant->bus label: it reads :func:`read_cobre_hydro_bus_generation` and
+    collapses it to the distinct ``(hydro_id, bus_id)`` pairs.
+
+    Returns ``{hydro_id: frozenset(bus_id, ...)}``. A plant with a single bus
+    (every real deck today) maps to a one-element ``frozenset``; a plant
+    genuinely present at more than one bus in the partition (only possible
+    once epic 08 lands multi-bus hydro support) keeps every one of its buses
+    here — callers decide how to handle that ambiguity (see
+    ``cobre_bridge.comparators.analyze._bus_name_lookups``), this reader does
+    not silently pick one.
+
+    Absence vs. present-but-empty mirrors :func:`read_cobre_hydro_bus_generation`
+    exactly (this function adds no aggregation of its own, so it inherits that
+    contract unchanged): a missing ``simulation/hydro_bus_generation/``
+    directory raises :class:`~cobre_bridge.errors.CobrePartitionMissingError`;
+    a present-but-empty partition (already diagnosed by the underlying
+    reader) yields an empty dict here.
+    """
+    lf = read_cobre_hydro_bus_generation(cobre_output_dir)
+    pairs = lf.select("hydro_id", "bus_id").unique().collect(engine="streaming")
+
+    result: dict[int, set[int]] = {}
+    for row in pairs.iter_rows(named=True):
+        result.setdefault(int(row["hydro_id"]), set()).add(int(row["bus_id"]))
+
+    return {hid: frozenset(buses) for hid, buses in result.items()}
 
 
 def read_cobre_productivity_detail(cobre_output_dir: Path) -> dict[int, dict]:

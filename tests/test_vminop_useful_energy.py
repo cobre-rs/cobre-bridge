@@ -45,11 +45,12 @@ def _build_case(tmp_path: Path) -> tuple[Path, Path]:
     """
     case = tmp_path / "case"
     (case / "system").mkdir(parents=True)
+    (case / "constraints").mkdir(parents=True)
     out = case / "output"
     sim = out / "simulation" / "hydros" / "scenario_id=0000"
     sim.mkdir(parents=True)
 
-    (case / "system" / "scalar_parameters.json").write_text(
+    (case / "constraints" / "generic_parameters.json").write_text(
         json.dumps(
             {
                 "scalar_parameters": [
@@ -98,23 +99,26 @@ def _vminop_constraint() -> dict:
         "name": "VminOP_X",
         "expression": "@rho_acum_h0 * hydro_storage(0)",
         "description": "Minimum stored energy for REE 1 (X)",
-        "sense": ">=",
     }
 
 
 def _bounds() -> pl.DataFrame:
+    # VminOP is always a lower-bound (``>=``) constraint: the F3 endpoint pair
+    # carries the stored value in ``bound_lower``, ``bound_upper`` null.
     return pl.DataFrame(
         {
             "constraint_id": [0, 0],
             "stage_id": [0, 1],
             "block_id": [0, 0],
-            "bound": [1000.0, 800.0],
+            "bound_lower": [1000.0, 800.0],
+            "bound_upper": [None, None],
         },
         schema={
             "constraint_id": pl.Int32,
             "stage_id": pl.Int32,
             "block_id": pl.Int32,
-            "bound": pl.Float64,
+            "bound_lower": pl.Float64,
+            "bound_upper": pl.Float64,
         },
     )
 
@@ -208,8 +212,11 @@ def test_bound_has_dead_energy_removed(tmp_path: Path) -> None:
         9,
     )
     # dead = ρ·Vmin = 2·100 = 200; useful bound = stored bound − dead.
-    assert _cell(bounds_out, 0, 0, "bound") == 800.0  # 1000 − 200
-    assert _cell(bounds_out, 0, 1, "bound") == 600.0  # 800 − 200
+    assert _cell(bounds_out, 0, 0, "bound_lower") == 800.0  # 1000 − 200
+    assert _cell(bounds_out, 0, 1, "bound_lower") == 600.0  # 800 − 200
+    # VminOP is single-sided (>=); the upper endpoint stays null.
+    sub = bounds_out.filter(pl.col("constraint_id") == 0)
+    assert sub["bound_upper"].is_null().all()
 
 
 def test_re_agrint_rows_pass_through_untouched(tmp_path: Path) -> None:
@@ -220,18 +227,21 @@ def test_re_agrint_rows_pass_through_untouched(tmp_path: Path) -> None:
         "expression": "hydro_generation(0)",
         "description": "Electric restriction",
     }
+    # RE/AGRINT constraints are ceilings (``<=``): upper-only endpoint.
     bounds = pl.DataFrame(
         {
             "constraint_id": [7],
             "stage_id": [0],
             "block_id": [0],
-            "bound": [500.0],
+            "bound_lower": [None],
+            "bound_upper": [500.0],
         },
         schema={
             "constraint_id": pl.Int32,
             "stage_id": pl.Int32,
             "block_id": pl.Int32,
-            "bound": pl.Float64,
+            "bound_lower": pl.Float64,
+            "bound_upper": pl.Float64,
         },
     )
     cb_in = pl.DataFrame(
@@ -243,13 +253,13 @@ def test_re_agrint_rows_pass_through_untouched(tmp_path: Path) -> None:
         [re_constraint], bounds, nw_in, cb_in, case, out, _nw_hydro(), _id_map(), 9
     )
     # No VminOP constraint → everything returned unchanged.
-    assert _cell(bounds_out, 7, 0, "bound") == 500.0
+    assert _cell(bounds_out, 7, 0, "bound_upper") == 500.0
     assert _cell(cb_out, 7, 0, "lhs_value") == 123.0
     assert nw_out.is_empty()
 
 
 def test_missing_inputs_degrade_gracefully(tmp_path: Path) -> None:
-    # No scalar_parameters.json / hydros.json → original frames returned as-is.
+    # No generic_parameters.json / hydros.json → original frames returned as-is.
     empty_case = tmp_path / "empty"
     (empty_case / "system").mkdir(parents=True)
     out = empty_case / "output"

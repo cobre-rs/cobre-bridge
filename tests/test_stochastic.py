@@ -79,6 +79,7 @@ def _make_data(
     bus_names: dict[int, str] | None = None,
     non_fictitious_bus_ids: list[int] | None = None,
     stage_labels: dict[int, str] | None = None,
+    stage_dates: dict[int, str] | None = None,
     stochastic_available: bool = True,
     noise_openings: pd.DataFrame | None = None,
     fitting_report: dict | None = None,
@@ -105,6 +106,7 @@ def _make_data(
         non_fictitious_bus_ids if non_fictitious_bus_ids is not None else []
     )
     data.stage_labels = stage_labels if stage_labels is not None else {}
+    data.stage_dates = stage_dates if stage_dates is not None else {}
     data.noise_openings = (
         noise_openings
         if noise_openings is not None
@@ -582,6 +584,7 @@ class TestRenderSectionTitles:
             bus_names={10: "Bus SE", 20: "Bus S"},
             non_fictitious_bus_ids=[10, 20],
             stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+            stage_dates={0: "2024-01-01", 1: "2024-02-01"},
             stochastic_available=True,
             noise_openings=noise_openings,
             fitting_report=fitting_report,
@@ -738,6 +741,7 @@ class TestRenderNoSyntheticData:
             bus_names={10: "Bus SE"},
             non_fictitious_bus_ids=[10],
             stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+            stage_dates={0: "2024-01-01", 1: "2024-02-01"},
         )
 
         html = render(data)
@@ -1173,6 +1177,7 @@ class TestRenderSectionsDEF:
             bus_names={10: "BusSE"},
             non_fictitious_bus_ids=[10],
             stage_labels={0: "Jan 2024", 1: "Feb 2024"},
+            stage_dates={0: "2024-01-01", 1: "2024-02-01"},
             noise_openings=noise_openings,
             fitting_report=fitting_report,
             correlation=correlation,

@@ -16,9 +16,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge import emission_checks
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
+from cobre_bridge.converters import inflow_windows
 from cobre_bridge.converters import initial_conditions as ic_conv
 from cobre_bridge.converters import network as network_conv
 from cobre_bridge.converters import scalar_parameters as scalar_params_conv
@@ -26,6 +28,7 @@ from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import tailrace as tailrace_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
+from cobre_bridge.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
 from cobre_bridge.id_map import build_id_map
 
 logger = logging.getLogger(__name__)
@@ -423,10 +426,12 @@ def _convert_newave_case_impl(
     logger.debug("Converting initial conditions")
     ic_dict = ic_conv.convert_initial_conditions(case, id_map)
 
-    logger.debug("Extracting recent inflow lags from vazpast.dat")
-    past_inflow_lags = stochastic_conv.convert_recent_inflow_lags(case, id_map)
-    if past_inflow_lags:
-        ic_dict["past_inflows"] = past_inflow_lags
+    logger.debug("Converting the hydrological tendency to conditioning windows")
+    observation_windows = inflow_windows.convert_recent_observation_windows(
+        case, id_map
+    )
+    if observation_windows:
+        ic_dict["recent_observations"] = observation_windows
 
     logger.debug("Converting inflow stats")
     inflow_table = stochastic_conv.convert_inflow_stats(case, id_map)
@@ -435,7 +440,7 @@ def _convert_newave_case_impl(
     load_table = stochastic_conv.convert_load_stats(case, id_map)
 
     logger.debug("Converting inflow history from vazoes.dat")
-    inflow_history_table = stochastic_conv.convert_inflow_history(case, id_map)
+    inflow_history_table = inflow_windows.convert_inflow_history_windows(case, id_map)
 
     logger.debug("Converting water withdrawal")
     withdrawal_table = hydro_conv.convert_water_withdrawal(case, id_map)
@@ -480,14 +485,11 @@ def _convert_newave_case_impl(
     logger.debug("Converting load factors")
     load_factors_dict = stochastic_conv.convert_load_factors(case, id_map)
 
-    logger.debug("Converting line bounds")
+    logger.debug("Converting line bounds (folds in per-block exchange factors)")
     line_bounds_table = network_conv.convert_line_bounds(case, id_map)
 
     logger.debug("Converting non-controllable sources")
     ncs_dict = network_conv.convert_non_controllable_sources(case, id_map)
-
-    logger.debug("Converting exchange factors")
-    exchange_factors_dict = network_conv.convert_exchange_factors(case, id_map)
 
     logger.debug("Converting NCS block factors")
     ncs_factors_dict = network_conv.convert_ncs_factors(case, id_map)
@@ -508,6 +510,30 @@ def _convert_newave_case_impl(
 
     logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(case, id_map)
+
+    # Merge hydro_bounds now (hoisted from the write phase below) so the
+    # post-emission self-checks see the exact table that will be written.
+    hydro_bounds_table = _merge_hydro_bounds(withdrawal_table, storage_bounds_table)
+    hydro_bounds_table = _fold_head_turbined_bounds(
+        hydro_bounds_table, head_turbined_table
+    )
+
+    # ------------------------------------------------------------------
+    # 3b. Post-emission self-checks (cobre 0.13 rules 43, 41, 36, and the
+    # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
+    # the in-memory artifacts, run before anything is written so a bad
+    # emission fails in milliseconds with bridge-side context instead of at
+    # cobre load time. See cobre_bridge.emission_checks for the rule scope.
+    # ------------------------------------------------------------------
+    bound_families = [
+        emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds_table),
+        emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
+        emission_checks.BoundFamily("Line", "line_id", line_bounds_table),
+    ]
+    emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds_table)
+    emission_checks.check_unit_group_envelope(hydros_dict)
+    emission_checks.check_bound_row_uniqueness(bound_families)
+    emission_checks.check_bound_block_id_range(stages_dict, bound_families)
 
     # ------------------------------------------------------------------
     # 4. Create the output directory structure.
@@ -553,7 +579,6 @@ def _convert_newave_case_impl(
     _write_json(dst / "system" / "lines.json", lines_dict)
     _write_json(dst / "system" / "non_controllable_sources.json", ncs_dict)
     _write_json(dst / "scenarios" / "load_factors.json", load_factors_dict)
-    _write_json(dst / "constraints" / "exchange_factors.json", exchange_factors_dict)
     _write_json(dst / "scenarios" / "non_controllable_factors.json", ncs_factors_dict)
 
     _write_json(dst / "system" / "hydro_production_models.json", production_models_dict)
@@ -576,7 +601,7 @@ def _convert_newave_case_impl(
         all_hydro_ids,
         rho_acum_per_stage_overrides=rho_acum_overrides or None,
     )
-    _write_json(dst / "system" / "scalar_parameters.json", scalar_parameters_dict)
+    _write_json(dst / "constraints" / "generic_parameters.json", scalar_parameters_dict)
 
     # ------------------------------------------------------------------
     # 6. Write Parquet files.
@@ -604,18 +629,12 @@ def _convert_newave_case_impl(
     _write_parquet(inflow_history_table, history_path)
 
     constraints_dir = dst / "constraints"
-    if not dry_run:
-        constraints_dir.mkdir(parents=True, exist_ok=True)
     line_bounds_path = constraints_dir / "line_bounds.parquet"
     _write_parquet(line_bounds_table, line_bounds_path)
 
     ncs_stats_path = dst / "scenarios" / "non_controllable_stats.parquet"
     _write_parquet(ncs_stats_table, ncs_stats_path)
 
-    hydro_bounds_table = _merge_hydro_bounds(withdrawal_table, storage_bounds_table)
-    hydro_bounds_table = _fold_head_turbined_bounds(
-        hydro_bounds_table, head_turbined_table
-    )
     if hydro_bounds_table is not None:
         hydro_bounds_path = constraints_dir / "hydro_bounds.parquet"
         _write_parquet(hydro_bounds_table, hydro_bounds_path)
@@ -656,19 +675,15 @@ def _convert_newave_case_impl(
     all_constraints: list[dict] = []
     bounds_tables: list[pa.Table] = []
 
-    # Canonical column order for the merged bounds table.
-    _BOUNDS_COLUMNS = ["constraint_id", "stage_id", "block_id", "bound"]
-
     if vminop_result is not None:
         all_constraints.extend(vminop_result.constraints_dict.get("constraints", []))
         # VminOP bounds table has no block_id column; add a null column and
-        # reorder to match the canonical schema.
+        # reorder to match the canonical F3 schema.
         vminop_bounds = vminop_result.bounds
-        n = len(vminop_bounds)
         vminop_bounds_extended = vminop_bounds.append_column(
             pa.field("block_id", pa.int32()),
-            pa.array([None] * n, type=pa.int32()),
-        ).select(_BOUNDS_COLUMNS)
+            pa.array([None] * len(vminop_bounds), type=pa.int32()),
+        ).select(GENERIC_BOUNDS_COLUMNS)
         bounds_tables.append(vminop_bounds_extended)
 
     if electric_result is not None:

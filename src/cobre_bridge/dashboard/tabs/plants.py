@@ -25,7 +25,7 @@ from cobre_bridge.ui.html import (
     wrap_chart,
 )
 from cobre_bridge.ui.js import PLANT_EXPLORER_JS, SUB_TAB_JS
-from cobre_bridge.ui.plotly_helpers import stage_x_labels
+from cobre_bridge.ui.plotly_helpers import stage_x_dates
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -67,6 +67,96 @@ _STAGE_VARS: list[str] = [
     "incremental_inflow_energy_mw",
     "equivalent_productivity_mw_per_m3s",
 ]
+
+
+def _block_hours_dict(bh_df: pl.DataFrame) -> dict[tuple[int, int], float]:
+    """Materialize the ``(stage_id, block_id) -> hours`` map from ``bh_df``.
+
+    ``bh_df`` (columns ``stage_id``, ``block_id``, ``_bh``) is the same
+    block-hours table the percentile aggregation joins on; this reuses it as the
+    weighting basis for :func:`_weighted_lp_generation_bounds` so the bound and
+    the generation series are aggregated over an identical block layout.
+    """
+    return {
+        (int(r["stage_id"]), int(r["block_id"])): float(r["_bh"])
+        for r in bh_df.iter_rows(named=True)
+    }
+
+
+def _weighted_lp_generation_bounds(
+    lp_bounds: pd.DataFrame,
+    entity_type_code: int,
+    block_hours: dict[tuple[int, int], float],
+) -> dict[int, dict[int, dict[int, float]]]:
+    """``entity_id -> stage_id -> {bound_type_code -> block-hours-weighted bound}``.
+
+    cobre's LP-bounds dump (``output/training/dictionaries/bounds.parquet``)
+    records a generation bound per ``(entity, stage, bound_type_code)`` either
+    as a single stage-level row (``block_id`` NULL, in force for every block)
+    **or** as per-block override rows (``block_id`` 0..n-1) that replace the
+    stage-level value for their own block. The simulated generation series the
+    detail charts plot against these bounds is a block-hours weighted mean over
+    the stage's blocks (see :func:`_compute_hydro_percentiles` /
+    :func:`_compute_thermal_percentiles`), so the bound has to be aggregated the
+    same way: the effective per-block bound (the override where present, else
+    the stage-level value) weighted by block hours. Collapsing the per-block
+    rows by ``bound_type_code`` alone — ignoring ``block_id`` — lets one block's
+    value stand in for the whole stage and yields a bound the plotted
+    generation appears to exceed (e.g. a must-run thermal fixed at 568/544/516
+    MW across the heavy/medium/light blocks reads as a flat 516 MW cap while its
+    534.6 MW hours-weighted mean sits above it).
+    """
+    result: dict[int, dict[int, dict[int, float]]] = {}
+    if lp_bounds.empty:
+        return result
+
+    stage_blocks: dict[int, list[tuple[int, float]]] = {}
+    for (sid, bid), hours in block_hours.items():
+        stage_blocks.setdefault(sid, []).append((bid, hours))
+
+    # entity_id -> stage_id -> btc -> (stage_level_value, {block_id: value})
+    raw: dict[int, dict[int, dict[int, tuple[float | None, dict[int, float]]]]] = {}
+    sub = lp_bounds[lp_bounds["entity_type_code"] == entity_type_code]
+    # A frame without a block_id column (or with a NULL block_id) carries only
+    # stage-level rows — every value is a base with no per-block override.
+    has_block = "block_id" in sub.columns
+    for row in sub.itertuples(index=False):
+        eid = int(row.entity_id)
+        sid = int(row.stage_id)
+        btc = int(row.bound_type_code)
+        btcs = raw.setdefault(eid, {}).setdefault(sid, {})
+        base, overrides = btcs.get(btc, (None, {}))
+        block_id = row.block_id if has_block else None
+        if block_id is None or pd.isna(block_id):
+            base = float(row.bound_value)
+        else:
+            overrides[int(block_id)] = float(row.bound_value)
+        btcs[btc] = (base, overrides)
+
+    for eid, stages in raw.items():
+        for sid, btcs in stages.items():
+            blocks = stage_blocks.get(sid, [])
+            for btc, (base, overrides) in btcs.items():
+                if not overrides:
+                    # Only a stage-level row: the weighted mean is that value.
+                    weighted = base
+                elif blocks:
+                    num = den = 0.0
+                    for bid, hours in blocks:
+                        eff = overrides.get(bid, base)
+                        if eff is None:
+                            continue
+                        num += eff * hours
+                        den += hours
+                    weighted = num / den if den else base
+                else:
+                    # No block-hours metadata for the stage: fall back to an
+                    # unweighted mean of the overrides rather than dropping them.
+                    vals = list(overrides.values())
+                    weighted = sum(vals) / len(vals)
+                if weighted is not None:
+                    result.setdefault(eid, {}).setdefault(sid, {})[btc] = weighted
+    return result
 
 
 def _compute_hydro_percentiles(
@@ -174,18 +264,19 @@ def _build_hydro_json(
     hydro_meta: dict[int, dict],
     percentiles: pl.DataFrame,
     stages: list[int],
-    stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
     bus_names: dict[int, str],
     hydro_bounds: pd.DataFrame,
     lp_bounds: pd.DataFrame,
+    block_hours: dict[tuple[int, int], float],
 ) -> tuple[dict[str, dict], list[str]]:
     """Build per-plant data dict for JS embedding.
 
-    Returns ``(hydro_data_dict, xlabels_list)`` where ``hydro_data_dict``
+    Returns ``(hydro_data_dict, xdates_list)`` where ``hydro_data_dict``
     maps string plant-id keys to dicts containing percentile arrays and
     optional bounds arrays.
     """
-    xlabels = stage_x_labels(stages, stage_labels)
+    xdates = stage_x_dates(stages, stage_dates)
     hydro_data: dict[str, dict] = {}
 
     # Pre-index percentiles by (hydro_id, stage_id)
@@ -201,19 +292,11 @@ def _build_hydro_json(
             sid = int(row["stage_id"])
             hb_index.setdefault(hid, {})[sid] = row.to_dict()
 
-    # Pre-process lp_bounds for hydro generation (entity_type_code == 0)
-    lp_index: dict[
-        int, dict[int, dict[int, float]]
-    ] = {}  # hid -> {stage_id -> {bt_code -> value}}
-    if not lp_bounds.empty:
-        lp_hydro = lp_bounds[lp_bounds["entity_type_code"] == 0]
-        for _, row in lp_hydro.iterrows():
-            hid = int(row["entity_id"])
-            sid = int(row["stage_id"])
-            btc = int(row["bound_type_code"])
-            lp_index.setdefault(hid, {}).setdefault(sid, {})[btc] = float(
-                row["bound_value"]
-            )
+    # Pre-process lp_bounds for hydro generation (entity_type_code == 0):
+    # hid -> {stage_id -> {bt_code -> block-hours-weighted bound}}. Weighting
+    # keeps the bound comparable to the block-hours weighted generation series
+    # (see _weighted_lp_generation_bounds).
+    lp_index = _weighted_lp_generation_bounds(lp_bounds, 0, block_hours)
 
     all_vars = _FLOW_VARS + _STAGE_VARS
 
@@ -304,7 +387,7 @@ def _build_hydro_json(
 
         hydro_data[str(hid)] = entry
 
-    return hydro_data, xlabels
+    return hydro_data, xdates
 
 
 def _var_short(var: str) -> str:
@@ -395,17 +478,18 @@ def _build_thermal_json(
     thermal_meta: dict[int, dict],
     percentiles: pl.DataFrame,
     stages: list[int],
-    stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
     bus_names: dict[int, str],
     lp_bounds: pd.DataFrame,
+    block_hours: dict[tuple[int, int], float],
 ) -> tuple[dict[str, dict], list[str]]:
     """Build per-plant data dict for JS embedding (thermal).
 
-    Returns ``(thermal_data_dict, xlabels_list)`` where ``thermal_data_dict``
+    Returns ``(thermal_data_dict, xdates_list)`` where ``thermal_data_dict``
     maps string plant-id keys to dicts containing percentile arrays and
     optional LP bounds arrays.
     """
-    xlabels = stage_x_labels(stages, stage_labels)
+    xdates = stage_x_dates(stages, stage_dates)
     thermal_data: dict[str, dict] = {}
 
     # Pre-index percentiles by (thermal_id, stage_id)
@@ -413,17 +497,12 @@ def _build_thermal_json(
     for row in percentiles.iter_rows(named=True):
         pct_index[(row["thermal_id"], row["stage_id"])] = row
 
-    # Pre-process lp_bounds for thermals (entity_type_code == 1)
-    lp_index: dict[int, dict[int, dict[int, float]]] = {}
-    if not lp_bounds.empty:
-        tb = lp_bounds[lp_bounds["entity_type_code"] == 1]
-        for _, row in tb.iterrows():
-            tid = int(row["entity_id"])
-            sid = int(row["stage_id"])
-            btc = int(row["bound_type_code"])
-            lp_index.setdefault(tid, {}).setdefault(sid, {})[btc] = float(
-                row["bound_value"]
-            )
+    # Pre-process lp_bounds for thermals (entity_type_code == 1):
+    # tid -> {stage_id -> {bt_code -> block-hours-weighted bound}}. Weighting
+    # keeps the bound comparable to the block-hours weighted generation series
+    # (see _weighted_lp_generation_bounds) — otherwise a must-run plant whose
+    # per-block levels differ reads as violating its own cap.
+    lp_index = _weighted_lp_generation_bounds(lp_bounds, 1, block_hours)
 
     for tid, meta in sorted(thermal_meta.items()):
         name: str = meta.get("name", str(tid))
@@ -464,14 +543,14 @@ def _build_thermal_json(
 
         thermal_data[str(tid)] = entry
 
-    return thermal_data, xlabels
+    return thermal_data, xdates
 
 
 def build_thermal_explorer(
     thermals_lf: pl.LazyFrame,
     thermal_meta: dict[int, dict],
     bus_names: dict[int, str],
-    stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
     lp_bounds: pd.DataFrame,
     bh_df: pl.DataFrame,
 ) -> str:
@@ -492,13 +571,14 @@ def build_thermal_explorer(
     if not percentiles.is_empty() and "stage_id" in percentiles.columns:
         stages = sorted(percentiles["stage_id"].unique().to_list())
 
-    thermal_data, xlabels = _build_thermal_json(
+    thermal_data, xdates = _build_thermal_json(
         thermal_meta=thermal_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels=stage_labels,
+        stage_dates=stage_dates,
         bus_names=bus_names,
         lp_bounds=lp_bounds if lp_bounds is not None else pd.DataFrame(),
+        block_hours=_block_hours_dict(bh_df),
     )
 
     options = sorted(thermal_data.items(), key=lambda x: x[1]["name"])
@@ -588,21 +668,21 @@ def build_thermal_explorer(
     # --- Embedded JS (data + render functions only — PLANT_EXPLORER_JS emitted
     #     once in render()) ---------------------------------------------------
     data_json = json_for_script(thermal_data)
-    labels_json = json_for_script(xlabels)
+    dates_json = json_for_script(xdates)
 
     inline_js = (
         "\nvar TT = "
         + data_json
         + ";\n"
-        + "var TT_LABELS = "
-        + labels_json
+        + "var TT_DATES = "
+        + dates_json
         + ";\n"
         + """
 var _TC = {responsive: true};
 
 function renderThermalDetail(containerId, d) {
   if (!d) { return; }
-  var lbl = TT_LABELS;
+  var lbl = TT_DATES;
 
   var ttGenBand = plotlyBand(lbl, d.gen_p10, d.gen_p90, 'rgba(245,166,35,0.15)', 'P10\u2013P90');
   ttGenBand.visible = _peBandVisible;
@@ -644,7 +724,7 @@ var _TT_PALETTE = ['#2196F3', '#FF9800', '#4CAF50'];
 
 function renderThermalComparison(entries, labels) {
   if (!entries || entries.length === 0) { return; }
-  var lbl = labels || TT_LABELS;
+  var lbl = labels || TT_DATES;
 
   function _buildTraces(p50key) {
     return entries.map(function(d, i) {
@@ -666,14 +746,14 @@ initPlantExplorer({
   searchInputId: 'tt-search',
   detailContainerId: 'tt-detail',
   dataVar: 'TT',
-  labelsVar: 'TT_LABELS',
+  labelsVar: 'TT_DATES',
   renderDetail: renderThermalDetail
 });
 
 initComparisonMode({
   tableId: 'tt-tbody',
   dataVar: 'TT',
-  labelsVar: 'TT_LABELS',
+  labelsVar: 'TT_DATES',
   chartIds: ['tt-gen','tt-cost','tt-energy'],
   renderComparison: renderThermalComparison,
   renderDetail: renderThermalDetail,
@@ -696,7 +776,7 @@ def build_hydro_explorer(
     hydros_lf: pl.LazyFrame,
     hydro_meta: dict[int, dict],
     bus_names: dict[int, str],
-    stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
     bh_df: pl.DataFrame,
     hydro_bounds: pd.DataFrame,
     lp_bounds: pd.DataFrame,
@@ -715,14 +795,15 @@ def build_hydro_explorer(
     if not percentiles.is_empty() and "stage_id" in percentiles.columns:
         stages = sorted(percentiles["stage_id"].unique().to_list())
 
-    hydro_data, xlabels = _build_hydro_json(
+    hydro_data, xdates = _build_hydro_json(
         hydro_meta=hydro_meta,
         percentiles=percentiles,
         stages=stages,
-        stage_labels=stage_labels,
+        stage_dates=stage_dates,
         bus_names=bus_names,
         hydro_bounds=hydro_bounds if hydro_bounds is not None else pd.DataFrame(),
         lp_bounds=lp_bounds if lp_bounds is not None else pd.DataFrame(),
+        block_hours=_block_hours_dict(bh_df),
     )
 
     options = sorted(hydro_data.items(), key=lambda x: x[1]["name"])
@@ -847,14 +928,14 @@ def build_hydro_explorer(
     # --- Embedded JS (data + render functions only — PLANT_EXPLORER_JS emitted
     #     once in render()) ---------------------------------------------------
     data_json = json_for_script(hydro_data)
-    labels_json = json_for_script(xlabels)
+    dates_json = json_for_script(xdates)
 
     inline_js = (
         "\nvar HP = "
         + data_json
         + ";\n"
-        + "var HP_LABELS = "
-        + labels_json
+        + "var HP_DATES = "
+        + dates_json
         + ";\n"
         + """
 var _HC = {responsive: true};
@@ -869,7 +950,7 @@ document.addEventListener('change', function(e) {
 
 function renderHydroDetail(containerId, d) {
   if (!d) { return; }
-  var lbl = HP_LABELS;
+  var lbl = HP_DATES;
 
   // Storage (hm3) — stage-level
   var storBand = plotlyBand(lbl, d.stor_p10, d.stor_p90, 'rgba(33,150,243,0.15)', 'P10\u2013P90');
@@ -1063,7 +1144,7 @@ var _HP_PALETTE = ['#2196F3', '#FF9800', '#4CAF50'];
 
 function renderHydroComparison(entries, labels) {
   if (!entries || entries.length === 0) { return; }
-  var lbl = labels || HP_LABELS;
+  var lbl = labels || HP_DATES;
 
   function _buildTraces(p50key) {
     return entries.map(function(d, i) {
@@ -1118,14 +1199,14 @@ initPlantExplorer({
   searchInputId: 'hp-search',
   detailContainerId: 'hp-detail',
   dataVar: 'HP',
-  labelsVar: 'HP_LABELS',
+  labelsVar: 'HP_DATES',
   renderDetail: renderHydroDetail
 });
 
 initComparisonMode({
   tableId: 'hp-tbody',
   dataVar: 'HP',
-  labelsVar: 'HP_LABELS',
+  labelsVar: 'HP_DATES',
   chartIds: ['hp-stor','hp-inflow','hp-spill','hp-evap','hp-gen','hp-turb','hp-outflow','hp-wv','hp-earm','hp-ena','hp-rhoeq','hp-wpos','hp-wneg','hp-innn'],
   renderComparison: renderHydroComparison,
   renderDetail: renderHydroDetail,
@@ -1159,7 +1240,7 @@ def render(data: DashboardData) -> str:
         hydros_lf=data.hydros_lf,
         hydro_meta=data.hydro_meta,
         bus_names=data.bus_names,
-        stage_labels=data.stage_labels,
+        stage_dates=data.stage_dates,
         bh_df=data.bh_df,
         hydro_bounds=data.hydro_bounds,
         lp_bounds=data.lp_bounds,
@@ -1168,7 +1249,7 @@ def render(data: DashboardData) -> str:
         thermals_lf=data.thermals_lf,
         thermal_meta=data.thermal_meta,
         bus_names=data.bus_names,
-        stage_labels=data.stage_labels,
+        stage_dates=data.stage_dates,
         lp_bounds=data.lp_bounds,
         bh_df=data.bh_df,
     )

@@ -36,4 +36,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
+      - if: matrix.python-version == '3.13'
+        run: pip install -e ".[test-roundtrip]"
       - run: pytest --tb=short

@@ -32,6 +32,10 @@ from cobre_bridge.converters.hydro import (
 from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.converters.temporal import _month_hours
+from cobre_bridge.generic_constraint_format import (
+    GENERIC_BOUNDS_COLUMNS,
+    sense_to_interval,
+)
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.plants import active_hydros
 from cobre_bridge.productivity import compute_productivity, stored_energy_productivity
@@ -502,7 +506,7 @@ def convert_vminop_constraints(
     # gen = ρ·Q point productivity at v_65 that the LP uses.  We compute that integrated
     # cascade here and use it both for the per-stage RHS bound *and* (via the return
     # value) to override the `@rho_acum_h{id}` scalar parameter in
-    # scalar_parameters.json so the LP's constraint coefficient matches the source
+    # generic_parameters.json so the LP's constraint coefficient matches the source
     # model.  Without the override the LHS would use cobre's default point ρ_acum and
     # silently drift from the RHS by ~10% on plants with non-trivial head swing.
     acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)
@@ -663,7 +667,6 @@ def convert_vminop_constraints(
                     f"Minimum stored energy for REE {ree_code} ({ree_name})"
                 ),
                 "expression": expression,
-                "sense": ">=",
                 "slack": {"enabled": True, "penalty": penalty},
             }
         )
@@ -728,11 +731,20 @@ def convert_vminop_constraints(
         "constraints": constraints,
     }
 
+    # VminOP is always a lower-bound (>=) constraint: every row's endpoint pair
+    # comes from the shared F3 mapping helper, so the upper endpoint is always
+    # null here.
+    bound_intervals = [sense_to_interval(">=", v) for v in bound_values]
     bounds_table = pa.table(
         {
             "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
             "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
-            "bound": pa.array(bound_values, type=pa.float64()),
+            "bound_lower": pa.array(
+                [lo for lo, _ in bound_intervals], type=pa.float64()
+            ),
+            "bound_upper": pa.array(
+                [up for _, up in bound_intervals], type=pa.float64()
+            ),
         }
     )
 
@@ -1188,7 +1200,9 @@ def convert_electric_constraints(
         A ``(constraints_list, bounds_table)`` pair, or ``None`` if no
         constraints are found.  ``bounds_table`` has schema
         ``(constraint_id: INT32, stage_id: INT32, block_id: INT32,
-        bound: DOUBLE)``.
+        bound_lower: DOUBLE, bound_upper: DOUBLE)`` — each row is
+        single-sided (a ``<=`` ceiling or a ``>=`` floor, never both), so
+        exactly one endpoint is populated per row.
     """
     # Check for data sources before reading DGER.
     re_path = _find_restricao_eletrica(case.files.directory)
@@ -1274,6 +1288,11 @@ def convert_electric_constraints(
     bound_stage_ids: list[int] = []
     bound_block_ids: list[int | None] = []
     bound_values: list[float] = []
+    # Each constraint id here is single-sided (a `<=` ceiling from `sup_id` or
+    # a `>=` floor from `inf_id`, never both), so this map lets the final
+    # bounds-table pass resolve each row's single value to the right F3
+    # endpoint via `sense_to_interval`.
+    constraint_senses: dict[int, str] = {}
 
     # Index restricao-eletrica.csv bounds by constraint code.
     csv_bounds_by_code: dict[int, list[tuple[str, str, int, float, float]]] = (
@@ -1375,25 +1394,25 @@ def convert_electric_constraints(
 
         if has_sup:
             sup_id = start_id + len(constraints)
+            constraint_senses[sup_id] = "<="
             constraints.append(
                 {
                     "id": sup_id,
                     "name": f"RE_{cod}",
                     "description": f"Electric constraint {cod}",
                     "expression": cobre_expr,
-                    "sense": "<=",
                     "slack": slack_config,
                 }
             )
         if has_inf:
             inf_id = start_id + len(constraints)
+            constraint_senses[inf_id] = ">="
             constraints.append(
                 {
                     "id": inf_id,
                     "name": f"RE_{cod}",
                     "description": f"Electric constraint {cod}",
                     "expression": cobre_expr,
-                    "sense": ">=",
                     "slack": slack_config,
                 }
             )
@@ -1436,14 +1455,29 @@ def convert_electric_constraints(
     if not constraints:
         return None
 
+    # Each row's constraint id is single-sided (see `constraint_senses`), so
+    # every row's own value maps to exactly one F3 endpoint, the other null.
+    bound_intervals = [
+        sense_to_interval(constraint_senses[cid], v)
+        for cid, v in zip(bound_constraint_ids, bound_values, strict=True)
+    ]
+    # `.select(GENERIC_BOUNDS_COLUMNS)` pins the column order to the shared
+    # F3 constant rather than this dict literal's own order, so the two stay
+    # structurally in sync with `pipeline.py`'s merge (drift would raise at
+    # `pa.concat_tables`, not silently reorder a column).
     bounds_table = pa.table(
         {
             "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
             "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
             "block_id": pa.array(bound_block_ids, type=pa.int32()),
-            "bound": pa.array(bound_values, type=pa.float64()),
+            "bound_lower": pa.array(
+                [lo for lo, _ in bound_intervals], type=pa.float64()
+            ),
+            "bound_upper": pa.array(
+                [up for _, up in bound_intervals], type=pa.float64()
+            ),
         }
-    )
+    ).select(GENERIC_BOUNDS_COLUMNS)
 
     _LOG.info(
         "Generated %d electric constraints with %d bounds "
@@ -1612,7 +1646,8 @@ def convert_agrint_constraints(
         ``agrint.dat`` is absent or contains no valid constraints.
         ``bounds_table`` has schema
         ``(constraint_id: INT32, stage_id: INT32, block_id: INT32,
-        bound: DOUBLE)``.
+        bound_lower: DOUBLE, bound_upper: DOUBLE)``. Every AGRINT constraint
+        is ``<=``, so ``bound_lower`` is always null.
     """
     if case.files.agrint is None:
         _LOG.debug("agrint.dat not found; skipping AGRINT constraints.")
@@ -1696,7 +1731,6 @@ def convert_agrint_constraints(
                 "name": f"AGRINT_{group_id}",
                 "description": f"Exchange group constraint {group_id}",
                 "expression": expression,
-                "sense": "<=",
                 "slack": {"enabled": False},
             }
         )
@@ -1757,14 +1791,23 @@ def convert_agrint_constraints(
     if not constraints:
         return None
 
+    # Every AGRINT constraint is a `<=` ceiling.
+    bound_intervals = [sense_to_interval("<=", v) for v in bound_values]
+    # `.select(GENERIC_BOUNDS_COLUMNS)` — see the electric-constraints writer
+    # above for why this pins the column order to the shared F3 constant.
     bounds_table = pa.table(
         {
             "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
             "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
             "block_id": pa.array(bound_block_ids, type=pa.int32()),
-            "bound": pa.array(bound_values, type=pa.float64()),
+            "bound_lower": pa.array(
+                [lo for lo, _ in bound_intervals], type=pa.float64()
+            ),
+            "bound_upper": pa.array(
+                [up for _, up in bound_intervals], type=pa.float64()
+            ),
         }
-    )
+    ).select(GENERIC_BOUNDS_COLUMNS)
 
     _LOG.info(
         "Generated %d AGRINT group constraints with %d bounds.",

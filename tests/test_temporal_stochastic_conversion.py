@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import calendar
 import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -184,7 +183,7 @@ class TestConvertStagesSingleBlock:
         assert block["name"] == "SINGLE"
         assert block["id"] == 0
 
-    def test_num_scenarios_from_dger(self, tmp_path) -> None:
+    def test_num_openings_from_dger(self, tmp_path) -> None:
         dger = _make_dger_mock(num_aberturas=50)
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
@@ -193,7 +192,7 @@ class TestConvertStagesSingleBlock:
 
         result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
-            assert stage["num_scenarios"] == 50
+            assert stage["num_openings"] == 50
 
     def test_discount_rate_percent_to_decimal(self, tmp_path) -> None:
         dger = _make_dger_mock(taxa_de_desconto=12.0)
@@ -415,7 +414,10 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["training"]["forward_passes"] == 20
+        assert result["training"]["selection"] == {
+            "method": "sampled",
+            "forward_passes": 20,
+        }
 
     def test_iteration_limit(self, tmp_path) -> None:
         dger = _make_dger_mock(num_max_iteracoes=200)
@@ -429,7 +431,7 @@ class TestConvertConfig:
         assert rules[0]["type"] == "iteration_limit"
         assert rules[0]["limit"] == 200
 
-    def test_backward_scheduler_opening_block_half_openings(self, tmp_path) -> None:
+    def test_backward_scheduler_by_node_half_openings(self, tmp_path) -> None:
         # block_size is ceil(num_aberturas / 2): even count halves exactly.
         dger = _make_dger_mock(num_aberturas=20)
         case = make_case(tmp_path, dger=dger)
@@ -438,7 +440,7 @@ class TestConvertConfig:
 
         result = convert_config(case)
         scheduler = result["training"]["parallelism"]["backward_scheduler"]
-        assert scheduler == {"method": "opening_block", "block_size": 10}
+        assert scheduler == {"method": "by_node", "block_size": 10}
 
     def test_backward_scheduler_block_size_rounds_up(self, tmp_path) -> None:
         # An odd opening count rounds up: ceil(21 / 2) == 11.
@@ -478,7 +480,10 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["simulation"]["num_scenarios"] == 500
+        assert result["simulation"]["selection"] == {
+            "method": "sampled",
+            "num_scenarios": 500,
+        }
 
     # -- impressao_estados_geracao_cortes / exports.states --
 
@@ -641,7 +646,7 @@ class TestConvertConfig:
         assert src["historical_years"] == [1983]
         # Simulation side stays consistent.
         assert result["simulation"]["scenario_source"]["historical_years"] == [1983]
-        assert result["simulation"]["num_scenarios"] == 1
+        assert result["simulation"]["selection"]["num_scenarios"] == 1
         # Deterministic mode also forces estimation.max_order = 0 (workaround
         # for cobre's SDDP negative-gap regression when lag-state is present)
         # and pins order_selection to "pacf" to avoid the residual annual
@@ -968,7 +973,7 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["simulation"]["num_scenarios"] == 3
+        assert result["simulation"]["selection"]["num_scenarios"] == 3
 
     def test_historical_num_scenarios_matches_range_length(self, tmp_path) -> None:
         """For a range historical_years, num_scenarios = to - from + 1."""
@@ -991,7 +996,7 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["simulation"]["num_scenarios"] == 2018 - 1932 + 1
+        assert result["simulation"]["selection"]["num_scenarios"] == 2018 - 1932 + 1
 
     def test_non_historical_num_scenarios_uses_num_series_sinteticas(
         self, tmp_path
@@ -1009,7 +1014,7 @@ class TestConvertConfig:
         from cobre_bridge.converters.temporal import convert_config
 
         result = convert_config(case)
-        assert result["simulation"]["num_scenarios"] == 2000
+        assert result["simulation"]["selection"]["num_scenarios"] == 2000
 
     # -- considera_reamostragem_cenarios / training.scenario_source --
 
@@ -1665,125 +1670,6 @@ def _make_confhd_posto_mock(posto_to_code: dict[int, int]) -> MagicMock:
     mock = MagicMock()
     mock.usinas = df
     return mock
-
-
-# ---------------------------------------------------------------------------
-# Tests: convert_recent_inflow_lags (vazpast.dat → initial_conditions)
-# ---------------------------------------------------------------------------
-
-
-class TestConvertRecentInflowLagsNoFile:
-    def test_returns_empty_when_vazpast_absent(self, tmp_path: Path) -> None:
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(make_case(tmp_path), id_map)
-        assert result == []
-
-
-class TestConvertRecentInflowLagsWithFile:
-    def test_returns_12_lags_per_hydro(self, tmp_path: Path) -> None:
-        (tmp_path / "vazpast.dat").touch()
-
-        dger_mock = MagicMock()
-        dger_mock.mes_inicio_estudo = 3  # March
-
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
-        vazpast_mock = _make_vazpast_mock(postos=[1, 2], num_months=12)
-        case = make_case(
-            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-            confhd=_make_confhd_posto_mock({1: 1, 2: 2}),
-            dger=dger_mock,
-            vazpast=vazpast_mock,
-        )
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(case, id_map)
-
-        assert len(result) == 2
-        assert all(len(e["values_m3s"]) == 12 for e in result)
-
-    def test_lag_order_march_start(self, tmp_path: Path) -> None:
-        """Study starts March: lag1=Feb, lag2=Jan, lag3=Dec, ..., lag12=Mar."""
-        (tmp_path / "vazpast.dat").touch()
-
-        dger_mock = MagicMock()
-        dger_mock.mes_inicio_estudo = 3
-
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
-
-        # Build vazpast where each month has a distinct value = month number
-        rows = [
-            {"codigo_usina": 1, "nome_usina": "P1", "mes": m, "valor": float(m * 100)}
-            for m in range(1, 13)
-        ]
-        vp_mock = MagicMock()
-        vp_mock.tendencia = pd.DataFrame(rows)
-        case = make_case(
-            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-            confhd=_make_confhd_posto_mock({1: 1}),
-            dger=dger_mock,
-            vazpast=vp_mock,
-        )
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(case, id_map)
-
-        lags = result[0]["values_m3s"]
-        # lag1=Feb(200), lag2=Jan(100), lag3=Dec(1200), lag4=Nov(1100), ...
-        assert lags[0] == 200.0  # February
-        assert lags[1] == 100.0  # January
-        assert lags[2] == 1200.0  # December
-        assert lags[11] == 300.0  # March (12 months back)
-
-    def test_unknown_plant_skipped(self, tmp_path: Path) -> None:
-        (tmp_path / "vazpast.dat").touch()
-
-        dger_mock = MagicMock()
-        dger_mock.mes_inicio_estudo = 1
-
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
-        # vazpast has plant 1 (in id_map) and plant 99 (not in id_map)
-        vazpast_mock = _make_vazpast_mock(postos=[1, 99], num_months=12)
-        case = make_case(
-            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-            confhd=_make_confhd_posto_mock({1: 1}),
-            dger=dger_mock,
-            vazpast=vazpast_mock,
-        )
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(case, id_map)
-
-        assert len(result) == 1
-        assert result[0]["hydro_id"] == 0
-
-    @patch("cobre_bridge.case.Vazpast")
-    def test_parse_failure_returns_empty(self, mock_vp_cls, tmp_path: Path) -> None:
-        """If Vazpast.read() raises, return empty list gracefully."""
-        (tmp_path / "vazpast.dat").touch()
-
-        dger_mock = MagicMock()
-        dger_mock.mes_inicio_estudo = 1
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
-
-        # vazpast left un-injected so case.vazpast parses; Vazpast.read raises.
-        mock_vp_cls.read.side_effect = RuntimeError("bad file")
-        case = make_case(
-            make_nw_files(tmp_path, vazpast=tmp_path / "vazpast.dat"),
-            confhd=_make_confhd_posto_mock({1: 1}),
-            dger=dger_mock,
-        )
-
-        from cobre_bridge.converters.stochastic import convert_recent_inflow_lags
-
-        result = convert_recent_inflow_lags(case, id_map)
-
-        assert result == []
 
 
 # ---------------------------------------------------------------------------

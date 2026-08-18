@@ -37,6 +37,7 @@ from cobre_bridge.comparators.charts import (
     productivity_blocks_table,
     productivity_comparison_scatter,
     productivity_per_stage_chart,
+    ree_energy_chart,
     system_comparison_chart,
     system_per_bus_chart,
     thermal_cost_chart,
@@ -173,7 +174,9 @@ def _results_summary_from_dataset(dataset: ComparisonDataset) -> ResultsSummary:
     )
 
 
-def build_comparison_report(dataset: ComparisonDataset) -> str:
+def build_comparison_report(
+    dataset: ComparisonDataset, reference_label: str = "NEWAVE"
+) -> str:
     """Build a complete HTML comparison report.
 
     Every tab sources its inputs from ``dataset.metadata``: the migrated tabs
@@ -188,6 +191,10 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         input (named per-tab keys plus the ``results`` list); these are
         in-memory render-only carry-overs, excluded from the serialized
         artifact (see ``RENDER_ONLY_METADATA_KEYS``).
+    reference_label:
+        Display name for the reference series (trace names, chart titles,
+        prose). Defaults to ``"NEWAVE"``, which reproduces the pre-ticket
+        output byte-for-byte; ``compare decomp`` passes ``"DECOMP"``.
 
     Returns
     -------
@@ -211,13 +218,19 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     overview_parts: list[str] = []
     nw_costs = cast("dict[str, float]", _meta_dict(dataset.metadata, "nw_costs"))
     cobre_costs = cast("dict[str, float]", _meta_dict(dataset.metadata, "cobre_costs"))
-    overview_parts.append(overview_metrics(summary, nw_costs, cobre_costs))
+    overview_parts.append(
+        overview_metrics(summary, nw_costs, cobre_costs, reference_label)
+    )
     overview_parts.append(section_title("Cost Breakdown"))
     overview_parts.append(
         chart_grid(
             [
-                wrap_chart(cost_breakdown_chart(nw_costs, cobre_costs)),
-                wrap_chart(cost_breakdown_table(nw_costs, cobre_costs)),
+                wrap_chart(
+                    cost_breakdown_chart(nw_costs, cobre_costs, reference_label)
+                ),
+                wrap_chart(
+                    cost_breakdown_table(nw_costs, cobre_costs, reference_label)
+                ),
             ],
         )
     )
@@ -231,8 +244,16 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     overview_parts.append(
         chart_grid(
             [
-                wrap_chart(immediate_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
-                wrap_chart(future_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
+                wrap_chart(
+                    immediate_cost_chart(
+                        nw_sin, cobre_stage_costs, nw_offset, reference_label
+                    )
+                ),
+                wrap_chart(
+                    future_cost_chart(
+                        nw_sin, cobre_stage_costs, nw_offset, reference_label
+                    )
+                ),
             ],
         )
     )
@@ -242,8 +263,16 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     overview_parts.append(
         chart_grid(
             [
-                wrap_chart(thermal_cost_chart(nw_sin, cobre_stage_costs, nw_offset)),
-                wrap_chart(other_costs_chart(nw_sin, cobre_stage_costs, nw_offset)),
+                wrap_chart(
+                    thermal_cost_chart(
+                        nw_sin, cobre_stage_costs, nw_offset, reference_label
+                    )
+                ),
+                wrap_chart(
+                    other_costs_chart(
+                        nw_sin, cobre_stage_costs, nw_offset, reference_label
+                    )
+                ),
             ],
         )
     )
@@ -253,7 +282,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     cb_conv = _meta_frame(dataset.metadata, "cobre_convergence")
     overview_parts.append(
         chart_grid(
-            [wrap_chart(convergence_chart(nw_conv, cb_conv))],
+            [wrap_chart(convergence_chart(nw_conv, cb_conv, reference_label))],
             single=True,
         )
     )
@@ -267,7 +296,9 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         chart_grid(
             [
                 wrap_chart(
-                    system_per_bus_chart(results, "spot_price", "CMO by Bus", bus_pct)
+                    system_per_bus_chart(
+                        results, "spot_price", "CMO by Bus", bus_pct, reference_label
+                    )
                 )
             ],
             single=True,
@@ -278,7 +309,9 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         chart_grid(
             [
                 wrap_chart(
-                    system_comparison_chart(results, "deficit_mw", "Deficit", bus_pct)
+                    system_comparison_chart(
+                        results, "deficit_mw", "Deficit", bus_pct, reference_label
+                    )
                 )
             ],
             single=True,
@@ -296,6 +329,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         ),
         cast("dict[int, str]", _meta_dict(dataset.metadata, "nw_bus_names")),
         nw_net_load=_meta_frame(dataset.metadata, "nw_net_load"),
+        reference_label=reference_label,
     )
     balance_cobre_hydro_means = _meta_frame(dataset.metadata, "cobre_hydro_means")
     balance_hydro = _meta_frame(dataset.metadata, "hydro")
@@ -318,6 +352,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                             nw_variable="EARMF",
                             nw_factor=730.0,
                             nw_offset=balance_nw_offset,
+                            reference_label=reference_label,
                         )
                     ),
                     wrap_chart(
@@ -331,6 +366,34 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                             nw_variable="ENA",
                             nw_factor=1.0,
                             nw_offset=balance_nw_offset,
+                            reference_label=reference_label,
+                        )
+                    ),
+                ]
+            )
+        )
+    # --- ticket-018: REE energy rollup (additive; absent for `compare
+    # newave` datasets, which never carry `entity_type == "ree"` rows) ---
+    ree_results = [r for r in results if r.entity_type == "ree"]
+    if ree_results:
+        energy_balance_extra.append(section_title("REE Energy (ENA / EARM)"))
+        energy_balance_extra.append(
+            chart_grid(
+                [
+                    wrap_chart(
+                        ree_energy_chart(
+                            results,
+                            "ena_mwmes",
+                            "REE Natural Inflow Energy (ENA)",
+                            reference_label,
+                        )
+                    ),
+                    wrap_chart(
+                        ree_energy_chart(
+                            results,
+                            "earm_final_mwmes",
+                            "REE Stored Energy (EARM)",
+                            reference_label,
                         )
                     ),
                 ]
@@ -348,7 +411,13 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     network_parts.append(section_title("Line Net Flow"))
     network_parts.append(
         chart_grid(
-            [wrap_chart(line_summary_chart(results, line_pct, line_bounds, line_meta))],
+            [
+                wrap_chart(
+                    line_summary_chart(
+                        results, line_pct, line_bounds, line_meta, reference_label
+                    )
+                )
+            ],
             single=True,
         )
     )
@@ -357,8 +426,10 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     # --- Constraints tab --- Per-constraint LHS comparison: The source-model-side LHS
     # evaluated against MEDIAS-USIH / int*.out output, Cobre-side LHS as the mean across
     # scenarios and blocks from the simulation parquet. Bounds are taken from
-    # constraints/generic_constraint_bounds.parquet (block 0 preferred when blocks
-    # disagree).
+    # constraints/generic_constraint_bounds.parquet's F3 sense-free `bound_lower`/
+    # `bound_upper` endpoints via `per_stage_bounds` (block 0 preferred when blocks
+    # disagree; the resolved `ResolvedBound.shape` — not a removed `sense` field —
+    # drives the chart's direction label, see `constraints_comparison_chart`).
     gc_constraints = cast(
         "list[dict[object, object]]", _meta_list(dataset.metadata, "gc_constraints")
     )
@@ -385,7 +456,11 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
             [
                 wrap_chart(
                     constraints_comparison_chart(
-                        gc_constraints, gc_lhs_nw, gc_lhs_cb, bound_lookup
+                        gc_constraints,
+                        gc_lhs_nw,
+                        gc_lhs_cb,
+                        bound_lookup,
+                        reference_label,
                     )
                 )
             ],
@@ -424,7 +499,13 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                 [
                     wrap_chart(
                         hydro_per_bus_chart(
-                            results, var, title, hydro_pct, hydro_meta, bus_meta
+                            results,
+                            var,
+                            title,
+                            hydro_pct,
+                            hydro_meta,
+                            bus_meta,
+                            reference_label,
                         )
                     )
                 ],
@@ -450,6 +531,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                 nw_factor=730.0,
                 nw_offset=nw_offset,
                 matched_ids=matched_hydro_ids or None,
+                reference_label=reference_label,
             )
         ),
         wrap_chart(
@@ -464,6 +546,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                 nw_factor=1.0,
                 nw_offset=nw_offset,
                 matched_ids=matched_hydro_ids or None,
+                reference_label=reference_label,
             )
         ),
     ]
@@ -484,7 +567,9 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         ("water_value_per_hm3", "Water Value (R$/hm³)"),
     ]:
         aggregate_charts.append(
-            wrap_chart(hydro_aggregate_chart(results, var, title, hydro_pct))
+            wrap_chart(
+                hydro_aggregate_chart(results, var, title, hydro_pct, reference_label)
+            )
         )
     hydro_parts.append(chart_grid(aggregate_charts))
 
@@ -521,6 +606,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                             hydro_meta,
                             bus_meta,
                             matched_ids=matched_hydro_ids or None,
+                            reference_label=reference_label,
                         )
                     )
                 ],
@@ -538,6 +624,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                 slack_title,
                 hydro_pct,
                 matched_ids=matched_hydro_ids or None,
+                reference_label=reference_label,
             )
         )
         for var, slack_title, has_newave in slack_specs
@@ -559,6 +646,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
             dataset.metadata, "cobre_hydro_per_stage_bounds"
         ),
         nw_hydro_slacks=_meta_frame(dataset.metadata, "nw_hydro_slacks"),
+        reference_label=reference_label,
     )
 
     # --- Thermal Operation tab ---
@@ -567,14 +655,20 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     thermal_parts.append(section_title("Thermal Generation Comparison"))
     thermal_parts.append(
         chart_grid(
-            [wrap_chart(thermal_generation_chart(results, thermal_pct))],
+            [
+                wrap_chart(
+                    thermal_generation_chart(results, thermal_pct, reference_label)
+                )
+            ],
             single=True,
         )
     )
     tab_contents["tab-thermal"] = "\n".join(thermal_parts)
 
     # --- Thermal Plant Details tab ---
-    tab_contents["tab-thermal-detail"] = build_thermal_detail_tab(results, thermal_pct)
+    tab_contents["tab-thermal-detail"] = build_thermal_detail_tab(
+        results, thermal_pct, reference_label
+    )
 
     # --- Productivity tab ---
     prod_df = _meta_frame(dataset.metadata, "productivity_detail")
@@ -584,11 +678,17 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         "Static productivity — pmo vs cobre-bridge conversion "
         "(point / equivalent / accumulated)"
     )
+    # ticket-016: the static (pmo-derived) and realized (per-stage) halves are
+    # disjoint data sources -- a source with no pmo.dat (e.g. DECOMP) can
+    # carry a non-empty ``per_stage_df`` while ``prod_df`` stays empty, and
+    # vice versa -- so each half is gated on its OWN frame, independently.
+    # Order is preserved exactly for the case both are non-empty (e.g.
+    # NEWAVE, which always has both): static title -> scatter/no-data-note ->
+    # realized title/description/chart -> building-blocks table.
+    prod_parts.append(section_title(static_title))
     if prod_df.is_empty():
-        prod_parts.append(section_title(static_title))
         prod_parts.append("<p>No productivity data available.</p>")
     else:
-        prod_parts.append(section_title(static_title))
         prod_parts.append(
             chart_grid(
                 [
@@ -597,6 +697,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                             prod_df,
                             "point",
                             "Point — pmo altura_65 vs compute_productivity",
+                            reference_label,
                         )
                     ),
                     wrap_chart(
@@ -604,6 +705,7 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                             prod_df,
                             "equivalent",
                             "Equivalent — pmo vs stored_energy_productivity",
+                            reference_label,
                         )
                     ),
                     wrap_chart(
@@ -611,25 +713,30 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                             prod_df,
                             "accumulated",
                             "Accumulated — pmo vs cobre-bridge cascade",
+                            reference_label,
                         )
                     ),
                 ]
             )
         )
+
+    if not per_stage_df.is_empty():
         prod_parts.append(section_title("Realized productivity across stages"))
         prod_parts.append(
             '<p style="color:#64748B;margin:-8px 0 12px">Productivity is constant'
             " within a stage but varies across stages, tracking the reservoir"
-            " head reached each stage — pick a reservoir to compare NEWAVE vs"
-            " Cobre.</p>"
+            f" head reached each stage — pick a reservoir to compare {reference_label}"
+            " vs Cobre.</p>"
         )
         # Reuses the shared per-plant dropdown widget (same as the hydro/thermal
         # detail tabs), so every reservoir is selectable — not a fixed subset.
         prod_parts.append(productivity_per_stage_chart(per_stage_df))
+
+    if not prod_df.is_empty():
         prod_parts.append(section_title("Productivity Building Blocks"))
         prod_parts.append(
             chart_grid(
-                [wrap_chart(productivity_blocks_table(prod_df))],
+                [wrap_chart(productivity_blocks_table(prod_df, reference_label))],
                 single=True,
             )
         )
@@ -646,15 +753,18 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
             '<p style="color:#64748B;margin:-8px 0 12px">Both solvers fit the'
             " hydro production surface GH(V, Q, S) as a set of hyperplanes; this"
             " compares the resulting surfaces at the fitting-grid nodes. Use the"
-            " NEWAVE / Cobre / Both / Difference buttons to isolate each surface"
-            " or their difference (Cobre − NEWAVE, MW); they nearly coincide at"
-            " S = 0. Spillage (S) is shown separately at the max V/Q corner."
-            " Pick a plant and stage.</p>"
+            f" {reference_label} / Cobre / Both / Difference buttons to isolate each"
+            f" surface or their difference (Cobre − {reference_label}, MW); they"
+            " nearly coincide at S = 0. Spillage (S) is shown separately at the max"
+            " V/Q corner. Pick a plant and stage.</p>"
         )
-        prod_parts.append(fpha_detail_chart(fpha_surface, fpha_spill))
+        prod_parts.append(fpha_detail_chart(fpha_surface, fpha_spill, reference_label))
         prod_parts.append(section_title("FPHA surface fidelity by plant"))
         prod_parts.append(
-            chart_grid([wrap_chart(fpha_metrics_table(fpha_metrics))], single=True)
+            chart_grid(
+                [wrap_chart(fpha_metrics_table(fpha_metrics, reference_label))],
+                single=True,
+            )
         )
 
     tab_contents["tab-productivity"] = "\n".join(prod_parts)
@@ -667,24 +777,38 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
     cb_train_secs = _meta_float(dataset.metadata, "cobre_training_seconds")
     cb_conv_perf = _meta_frame(dataset.metadata, "cobre_iteration_timing")
     perf_parts: list[str] = []
-    perf_parts.append(performance_metric_cards(nw_tim_stages, cb_train_secs))
+    perf_parts.append(
+        performance_metric_cards(nw_tim_stages, cb_train_secs, reference_label)
+    )
     perf_parts.append(section_title("Time per Iteration"))
     perf_parts.append(
         chart_grid(
-            [wrap_chart(performance_iteration_chart(nw_tim_iters, cb_conv_perf))],
+            [
+                wrap_chart(
+                    performance_iteration_chart(
+                        nw_tim_iters, cb_conv_perf, reference_label
+                    )
+                )
+            ],
             single=True,
         )
     )
     perf_parts.append(section_title("Forward / Backward Split"))
     perf_parts.append(
         chart_grid(
-            [wrap_chart(performance_fwd_bwd_split_chart(nw_tim_iters, cb_conv_perf))],
+            [
+                wrap_chart(
+                    performance_fwd_bwd_split_chart(
+                        nw_tim_iters, cb_conv_perf, reference_label
+                    )
+                )
+            ],
             single=True,
         )
     )
     tab_contents["tab-performance"] = "\n".join(perf_parts)
 
     return build_comparison_html(
-        title="Cobre vs NEWAVE Results Comparison",
+        title=f"Cobre vs {reference_label} Results Comparison",
         tab_contents=tab_contents,
     )

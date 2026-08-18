@@ -13,13 +13,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.diagnostics import Severity
+from cobre_bridge.horizon import StudyHorizon
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
-from tests.conftest import make_case, make_nw_files
+from tests.conftest import hydro_with_group, make_case, make_nw_files
 
 
 def _make_nw_files(
@@ -511,13 +514,24 @@ class TestConvertHydros:
             assert "id" in h
             assert "name" in h
             assert "operational_start_date" in h
-            assert "bus_id" in h
+            assert "bus_id" not in h
             assert "reservoir" in h
             assert "min_storage_hm3" in h["reservoir"]
             assert "max_storage_hm3" in h["reservoir"]
             assert "outflow" in h
             assert "generation" in h
             assert h["generation"]["model"] == "constant_productivity"
+            assert len(h["unit_groups"]) == 1
+            group = h["unit_groups"][0]
+            assert group.keys() == {
+                "id",
+                "name",
+                "bus_id",
+                "min_generation_mw",
+                "max_generation_mw",
+                "min_turbined_m3s",
+                "max_turbined_m3s",
+            }
 
     def test_run_of_river_S_storage_collapsed_to_vmin(self, tmp_path) -> None:
         """``tipo_regulacao='S'`` (fio-d'água) collapses storage to Vmin.
@@ -561,8 +575,9 @@ class TestConvertHydros:
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
-            # Both plants are in REE 1 -> subsystem 1 -> bus 0.
-            assert h["bus_id"] == 0
+            # Both plants are in REE 1 -> subsystem 1 -> bus 0. bus_id now
+            # lives on the mirror unit group (ticket 002), not top-level.
+            assert h["unit_groups"][0]["bus_id"] == 0
 
     def test_generation_values_match_machine_sets(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
@@ -579,6 +594,34 @@ class TestConvertHydros:
         # top-level optional field for cobre's energy-conversion pipeline.
         assert "productivity_mw_per_m3s" not in gen
         assert hydro_a["specific_productivity_mw_per_m3s_per_m"] == pytest.approx(0.9)
+
+    def test_unit_group_mirrors_generation_on_every_plant(self, tmp_path) -> None:
+        """cobre rule 41: the mirror group's four bounds equal the plant's own
+        ``generation`` bounds verbatim, for every plant (not just one)."""
+        case = _hydro_case(tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, self._make_id_map())
+        for h in result["hydros"]:
+            gen = h["generation"]
+            group = h["unit_groups"][0]
+            assert group["min_generation_mw"] == pytest.approx(gen["min_generation_mw"])
+            assert group["max_generation_mw"] == pytest.approx(gen["max_generation_mw"])
+            assert group["min_turbined_m3s"] == pytest.approx(gen["min_turbined_m3s"])
+            assert group["max_turbined_m3s"] == pytest.approx(gen["max_turbined_m3s"])
+
+    def test_output_never_regresses_to_the_0_12_shape(self, tmp_path) -> None:
+        """The real converter output has no top-level ``bus_id`` and a
+        non-empty ``unit_groups`` on every plant — the shape cobre 0.13's
+        ``hydros.schema.json`` requires (decisions 13/14), never the 0.12
+        shape asserted in ``TestLegacyHydroShapeRejectedBy013``."""
+        case = _hydro_case(tmp_path)
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        result = convert_hydros(case, self._make_id_map())
+        for h in result["hydros"]:
+            assert "bus_id" not in h
+            assert h["unit_groups"]
 
     def test_schema_key_present(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
@@ -1032,6 +1075,327 @@ def _hydro_case(
 
 
 # ---------------------------------------------------------------------------
+# max_turbined_m3s envelope declaration  (ticket-015b)
+# ---------------------------------------------------------------------------
+
+
+def _head_corrected_two_plant_cadastro() -> pd.DataFrame:
+    """Two-plant cadastro with the head-correction inputs the shared "simple"
+    fixture (``_make_hidr_cadastro``) lacks — ``queda_nominal_conjunto_*`` —
+    so ``_compute_max_turbined_head_corrected`` runs its head-corrected branch
+    instead of falling back to the plain ``Σ n·q_nom`` sum.
+
+    Both plants (USINA_A code 1, USINA_B code 2) share the same polynomial /
+    machine-set / productivity numbers on a realistic ρ_esp scale (~0.009
+    MW/(m³/s·m), not the toy 0.9 the shared fixture uses) so the installed-
+    power cap (``cap_pinst``) stays a loose ceiling and the affinity-corrected
+    flow term is what actually binds — matching the real deck behaviour the
+    ticket-015 spike found. The only thing that varies between the two plants
+    across this module's tests is whether a MODIF.DAT CFUGA record targets the
+    plant, which is exactly the "with per-stage head variation" / "without"
+    pairing acceptance criteria 5 and 6 need.
+    """
+    months = [
+        "JAN",
+        "FEV",
+        "MAR",
+        "ABR",
+        "MAI",
+        "JUN",
+        "JUL",
+        "AGO",
+        "SET",
+        "OUT",
+        "NOV",
+        "DEZ",
+    ]
+    base: dict[str, list] = {
+        "nome_usina": ["USINA_A", "USINA_B"],
+        "posto": [1, 2],
+        "submercado": [1, 1],
+        "empresa": [1, 1],
+        "codigo_usina_jusante": [pd.NA, pd.NA],
+        "desvio": [pd.NA, pd.NA],
+        "volume_minimo": [100.0, 100.0],
+        "volume_maximo": [1000.0, 1000.0],
+        "volume_referencia": [550.0, 550.0],
+        "canal_fuga_medio": [50.0, 50.0],
+        "tipo_regulacao": ["M", "M"],
+        "tipo_perda": [1, 1],
+        "perdas": [0.0, 0.0],
+        "a0_volume_cota": [300.0, 300.0],
+        "a1_volume_cota": [0.1, 0.1],
+        "a2_volume_cota": [0.0, 0.0],
+        "a3_volume_cota": [0.0, 0.0],
+        "a4_volume_cota": [0.0, 0.0],
+        "produtibilidade_especifica": [0.009, 0.009],
+        "numero_conjuntos_maquinas": [1, 1],
+        "maquinas_conjunto_1": [1, 1],
+        "maquinas_conjunto_2": [0, 0],
+        "maquinas_conjunto_3": [0, 0],
+        "maquinas_conjunto_4": [0, 0],
+        "maquinas_conjunto_5": [0, 0],
+        "potencia_nominal_conjunto_1": [1000.0, 1000.0],
+        "potencia_nominal_conjunto_2": [0.0, 0.0],
+        "potencia_nominal_conjunto_3": [0.0, 0.0],
+        "potencia_nominal_conjunto_4": [0.0, 0.0],
+        "potencia_nominal_conjunto_5": [0.0, 0.0],
+        "vazao_nominal_conjunto_1": [100.0, 100.0],
+        "vazao_nominal_conjunto_2": [0.0, 0.0],
+        "vazao_nominal_conjunto_3": [0.0, 0.0],
+        "vazao_nominal_conjunto_4": [0.0, 0.0],
+        "vazao_nominal_conjunto_5": [0.0, 0.0],
+        "queda_nominal_conjunto_1": [200.0, 200.0],
+        "queda_nominal_conjunto_2": [0.0, 0.0],
+        "queda_nominal_conjunto_3": [0.0, 0.0],
+        "queda_nominal_conjunto_4": [0.0, 0.0],
+        "queda_nominal_conjunto_5": [0.0, 0.0],
+        "vazao_minima_historica": [0.0, 0.0],
+        "teif": [0.0, 0.0],
+        "ip": [0.0, 0.0],
+        "fator_carga_maximo": [1.0, 1.0],
+        "fator_carga_minimo": [0.0, 0.0],
+    }
+    for m in months:
+        base[f"evaporacao_{m}"] = [0.0, 0.0]
+    return pd.DataFrame(base, index=pd.Index([1, 2], name="codigo_usina"))
+
+
+def _cfuga_modif_mock(code: int, *, month: int, year: int, nivel: float) -> MagicMock:
+    """A MODIF.DAT mock carrying a single CFUGA record for *code* only."""
+    usina_rec = MagicMock()
+    usina_rec.codigo = code
+    mock_modif = MagicMock()
+    mock_modif.usina.return_value = [usina_rec]
+    mock_modif.modificacoes_usina.return_value = [
+        _make_cfuga_rec(month=month, year=year, nivel=nivel)
+    ]
+    return mock_modif
+
+
+class TestConvertHydrosMaxTurbinedEnvelope:
+    """ticket-015b: declared ``max_turbined_m3s`` must rise to cover every
+    per-stage head-corrected cap ``convert_turbined_bounds_head_corrected``
+    emits for that hydro (cobre rule 43), instead of staying pinned at the
+    single reference-head value it used to declare unconditionally.
+
+    ``130.0961183125769`` (offset from the reference ``120.26013470805694``)
+    is the exact value ``_compute_max_turbined_head_corrected`` returns for
+    USINA_A's fixture with a CFUGA-override head of 338.5 m — cross-checked
+    directly against that function in
+    ``test_per_stage_envelope_exceeds_reference_head_value`` rather than
+    hand-derived, so a fixture-numbers change cannot silently desync the
+    hard-coded expectations below it.
+    """
+
+    def _make_id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+
+    def _case_with_cfuga_on_usina_a(self, tmp_path: Path, *, nivel: float = 30.0):
+        """USINA_A (code 1) carries a CFUGA override effective from stage 0
+        (month=1 matches the horizon's start month/year), so every stage of
+        the 12-stage horizon picks up the override uniformly. USINA_B
+        (code 2) carries none.
+        """
+        modif = _cfuga_modif_mock(1, month=1, year=2025, nivel=nivel)
+        return _hydro_case(
+            tmp_path,
+            cadastro=_head_corrected_two_plant_cadastro(),
+            confhd=_make_confhd_df(),
+            rees=_make_ree_df(),
+            modif=modif,
+            dger=_make_hydro_dger_mock(
+                start_year=2025, start_month=1, num_anos=1, num_anos_pos=0
+            ),
+        )
+
+    def test_per_stage_envelope_exceeds_reference_head_value(
+        self, tmp_path: Path
+    ) -> None:
+        """Sanity check on the fixture itself: the per-stage head-corrected cap
+        this CFUGA override produces genuinely exceeds the reference-head
+        value — otherwise the rest of this class would be exercising a no-op."""
+        from cobre_bridge.converters.hydro import (
+            _compute_max_turbined_head_corrected,
+            convert_turbined_bounds_head_corrected,
+        )
+
+        case = self._case_with_cfuga_on_usina_a(tmp_path)
+        hreg_a = _head_corrected_two_plant_cadastro().loc[1]
+
+        reference = _compute_max_turbined_head_corrected(hreg_a, "USINA_A")[0]
+        assert reference == pytest.approx(120.26013470805694)
+
+        table = convert_turbined_bounds_head_corrected(case, self._make_id_map())
+        assert table is not None
+        rows = [r for r in table.to_pylist() if r["hydro_id"] == 0]
+        assert len(rows) == 12  # every stage of the 1-year horizon
+        for row in rows:
+            assert row["max_turbined_m3s"] == pytest.approx(130.0961183125769)
+        assert rows[0]["max_turbined_m3s"] > reference
+
+    def test_declared_value_raised_to_per_stage_envelope(self, tmp_path: Path) -> None:
+        """AC #6: the declared value equals ``max(reference, per-stage max)``."""
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        case = self._case_with_cfuga_on_usina_a(tmp_path)
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+
+        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(
+            130.0961183125769
+        )
+
+    def test_mirror_group_matches_raised_declared_value(self, tmp_path: Path) -> None:
+        """AC #3: the mirror unit group still carries the SAME (now-raised)
+        value as ``generation.max_turbined_m3s`` — rule 41's mirror invariant
+        holds at the envelope value, not just at the un-raised reference."""
+        from cobre_bridge.converters.hydro import convert_hydros
+
+        case = self._case_with_cfuga_on_usina_a(tmp_path)
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+
+        assert hydro_a["unit_groups"][0]["max_turbined_m3s"] == pytest.approx(
+            hydro_a["generation"]["max_turbined_m3s"]
+        )
+
+    def test_plant_without_per_stage_variation_keeps_reference_value(
+        self, tmp_path: Path
+    ) -> None:
+        """AC #5: USINA_B carries no CFUGA/CMONT/VOLREF_SAZ override, so it is
+        absent from the envelope and keeps its un-raised reference-head value
+        — the CFUGA override on its sibling USINA_A must not leak into it."""
+        from cobre_bridge.converters.hydro import (
+            _compute_max_turbined_head_corrected,
+            convert_hydros,
+        )
+
+        case = self._case_with_cfuga_on_usina_a(tmp_path)
+        hreg_b = _head_corrected_two_plant_cadastro().loc[2]
+        expected_b = _compute_max_turbined_head_corrected(hreg_b, "USINA_B")[0]
+
+        result = convert_hydros(case, self._make_id_map())
+        hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
+
+        assert hydro_b["generation"]["max_turbined_m3s"] == pytest.approx(expected_b)
+        assert hydro_b["unit_groups"][0]["max_turbined_m3s"] == pytest.approx(
+            expected_b
+        )
+
+    def test_no_overrides_anywhere_keeps_declared_value_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """A hydro case with no MODIF/VOLREF_SAZ at all (the common case) must
+        declare exactly the reference-head value — the envelope lookup is a
+        pure no-op when ``convert_turbined_bounds_head_corrected`` returns
+        ``None``."""
+        from cobre_bridge.converters.hydro import (
+            _compute_max_turbined_head_corrected,
+            convert_hydros,
+        )
+
+        case = _hydro_case(
+            tmp_path,
+            cadastro=_head_corrected_two_plant_cadastro(),
+            confhd=_make_confhd_df(),
+            rees=_make_ree_df(),
+            dger=_make_hydro_dger_mock(
+                start_year=2025, start_month=1, num_anos=1, num_anos_pos=0
+            ),
+        )
+        hreg_a = _head_corrected_two_plant_cadastro().loc[1]
+        expected_a = _compute_max_turbined_head_corrected(hreg_a, "USINA_A")[0]
+
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        assert hydro_a["generation"]["max_turbined_m3s"] == pytest.approx(expected_a)
+
+    def test_per_stage_hydro_bounds_rows_unaffected_by_the_declaration_fix(
+        self, tmp_path: Path
+    ) -> None:
+        """AC #4 (LP-neutrality): the per-stage rows
+        ``convert_turbined_bounds_head_corrected`` emits for ``hydro_bounds.parquet``
+        are IDENTICAL whether or not ``convert_hydros``'s envelope-raising
+        declaration fix (ticket-015b) already ran against an equivalent case —
+        the fix only ever raises the entity-level declaration, never the
+        per-stage table. Two independently-built (but data-identical) cases
+        isolate this: one has ``convert_hydros`` run against it FIRST, the
+        other never sees ``convert_hydros`` at all, and the per-stage tables
+        must still match row for row."""
+        from cobre_bridge.converters.hydro import (
+            convert_hydros,
+            convert_turbined_bounds_head_corrected,
+        )
+
+        id_map = self._make_id_map()
+
+        case_without_declaration_fix = self._case_with_cfuga_on_usina_a(tmp_path)
+        rows_without_declaration_fix = [
+            r
+            for r in convert_turbined_bounds_head_corrected(
+                case_without_declaration_fix, id_map
+            ).to_pylist()
+            if r["hydro_id"] == 0
+        ]
+
+        case_with_declaration_fix = self._case_with_cfuga_on_usina_a(tmp_path)
+        convert_hydros(case_with_declaration_fix, id_map)  # exercises the raise
+        rows_with_declaration_fix = [
+            r
+            for r in convert_turbined_bounds_head_corrected(
+                case_with_declaration_fix, id_map
+            ).to_pylist()
+            if r["hydro_id"] == 0
+        ]
+
+        assert len(rows_without_declaration_fix) == len(rows_with_declaration_fix) == 12
+        assert rows_without_declaration_fix == rows_with_declaration_fix
+        assert all(
+            r["max_turbined_m3s"] == pytest.approx(130.0961183125769)
+            for r in rows_with_declaration_fix
+        )
+
+
+class TestPerStageTurbinedEnvelopeHelper:
+    """Unit tests for ``_per_stage_turbined_envelope`` in isolation, via a
+    mocked ``convert_turbined_bounds_head_corrected`` — the real head physics
+    are covered end-to-end by ``TestConvertHydrosMaxTurbinedEnvelope``; this
+    class only checks the max-per-hydro-id aggregation contract."""
+
+    def test_empty_dict_when_table_is_none(self) -> None:
+        from cobre_bridge.converters.hydro import _per_stage_turbined_envelope
+
+        with patch(
+            "cobre_bridge.converters.hydro.convert_turbined_bounds_head_corrected",
+            return_value=None,
+        ):
+            envelope = _per_stage_turbined_envelope(MagicMock(), MagicMock())
+
+        assert envelope == {}
+
+    def test_max_per_hydro_id_across_stages(self) -> None:
+        from cobre_bridge.converters.hydro import _per_stage_turbined_envelope
+
+        table = pa.table(
+            {
+                "hydro_id": pa.array([0, 0, 0, 1, 1], type=pa.int32()),
+                "stage_id": pa.array([0, 1, 2, 0, 1], type=pa.int32()),
+                "max_turbined_m3s": pa.array(
+                    [100.0, 150.0, 120.0, 30.0, 45.0], type=pa.float64()
+                ),
+            }
+        )
+        with patch(
+            "cobre_bridge.converters.hydro.convert_turbined_bounds_head_corrected",
+            return_value=table,
+        ):
+            envelope = _per_stage_turbined_envelope(MagicMock(), MagicMock())
+
+        assert envelope == {0: 150.0, 1: 45.0}
+
+
+# ---------------------------------------------------------------------------
 # _apply_permanent_overrides unit tests  (ticket-004)
 # ---------------------------------------------------------------------------
 
@@ -1134,8 +1498,6 @@ class TestApplyPermanentOverrides:
 
     def test_volcota_override_warns_and_skips(self, tmp_path, caplog) -> None:
         """VOLCOTA records produce a warning and are skipped gracefully."""
-        import logging
-
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         volcota_rec = MagicMock()
@@ -1159,8 +1521,6 @@ class TestApplyPermanentOverrides:
 
     def test_unknown_plant_code_skipped(self, tmp_path, caplog) -> None:
         """Plant code not in cadastro: warning logged, no crash."""
-        import logging
-
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         usina_rec = MagicMock()
@@ -1718,8 +2078,6 @@ class TestConvertStorageBoundsMaxGenColumn:
 
     def test_filling_case_includes_max_generation_column(self, tmp_path) -> None:
         """A filling plant adds a float64 max_generation_mw column after min_gen."""
-        import pyarrow as pa
-
         tbl = self._run_filling(tmp_path)
         assert tbl is not None
         assert "max_generation_mw" in tbl.column_names
@@ -2033,8 +2391,6 @@ class TestMergeHydroBoundsMaxGenColumn:
 
     def test_storage_side_max_generation_column_survives_full_join(self) -> None:
         """A storage-only max_generation_mw column appears in the merged table."""
-        import pyarrow as pa
-
         from cobre_bridge.pipeline import _merge_hydro_bounds
 
         withdrawal = pa.table(
@@ -4383,12 +4739,504 @@ class TestConvertLines:
                 assert "exchange_cost" not in ln
 
 
+# ---------------------------------------------------------------------------
+# Line bounds conversion (folds patamar.dat exchange factors into per-block
+# rows — cobre decision 10, epic-02 §7.2)
+# ---------------------------------------------------------------------------
+
+
+def _make_line_bounds_patamar_df() -> pd.DataFrame:
+    """Per-block exchange factors for line (1, 2) and line (2, 99).
+
+    Line (1, 2) [line_id=0]: block 0 has a non-uniform direct factor (0.9),
+    block 1 is uniform (1.0/1.0) and so should emit no row.
+    Line (2, 99) [line_id=2]: both blocks differ (direct and reverse).
+    Line (1, 99) [line_id=1] gets no rows at all: every block defaults to
+    factor 1.0 (uniform), so it must emit zero block rows.
+    """
+    import datetime
+
+    d = datetime.datetime(2023, 1, 1)
+    rows = [
+        # Line (1, 2): block 0 (patamar=1) direct factor 0.9; block 1 uniform.
+        {
+            "submercado_de": 1,
+            "submercado_para": 2,
+            "patamar": 1,
+            "data": d,
+            "valor": 0.9,
+        },
+        {
+            "submercado_de": 1,
+            "submercado_para": 2,
+            "patamar": 2,
+            "data": d,
+            "valor": 1.0,
+        },
+        # Line (2, 99): block 0 differs in both directions.
+        {
+            "submercado_de": 2,
+            "submercado_para": 99,
+            "patamar": 1,
+            "data": d,
+            "valor": 0.8,
+        },
+        {
+            "submercado_de": 99,
+            "submercado_para": 2,
+            "patamar": 1,
+            "data": d,
+            "valor": 0.95,
+        },
+        # Line (2, 99): block 1 differs in the direct direction only.
+        {
+            "submercado_de": 2,
+            "submercado_para": 99,
+            "patamar": 2,
+            "data": d,
+            "valor": 1.1,
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+class TestConvertLineBounds:
+    def _make_id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(
+            subsystem_ids=[1, 2, 99],
+            hydro_codes=[],
+            thermal_codes=[],
+        )
+
+    def _make_case(self, tmp_path, patamar_df: pd.DataFrame):
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2023
+        patamar = MagicMock()
+        patamar.intercambio_patamares = patamar_df
+        return make_case(
+            tmp_path, sistema=_make_sistema_mock(), dger=dger, patamar=patamar
+        )
+
+    def test_block_id_column_is_nullable_int32(self, tmp_path) -> None:
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
+        table = convert_line_bounds(case, self._make_id_map())
+        field = table.schema.field("block_id")
+        assert field.type == pa.int32()
+        assert field.nullable
+
+    def test_stage_level_base_rows_carry_none_block_id(self, tmp_path) -> None:
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
+        table = convert_line_bounds(case, self._make_id_map())
+        df = table.to_pandas()
+
+        base_rows = df[df["block_id"].isna()]
+        # One base row per (line, stage): 3 lines x 24 stages (12 study +
+        # 12 post-study, per the dger fixture below).
+        assert len(base_rows) == 3 * 24
+
+    def test_differing_block_factor_folds_into_absolute_mw(self, tmp_path) -> None:
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
+        table = convert_line_bounds(case, self._make_id_map())
+        df = table.to_pandas()
+
+        # Line 0 = (1, 2): base direct=3000.0, reverse=2500.0 at stage 0.
+        row = df[(df["line_id"] == 0) & (df["stage_id"] == 0) & (df["block_id"] == 0)]
+        assert len(row) == 1
+        assert row.iloc[0]["direct_mw"] == pytest.approx(3000.0 * 0.9, rel=1e-9)
+        assert row.iloc[0]["reverse_mw"] == pytest.approx(2500.0 * 1.0, rel=1e-9)
+
+        # Line 2 = (2, 99): base direct=1500.0, reverse=1200.0 at stage 0.
+        row_b0 = df[
+            (df["line_id"] == 2) & (df["stage_id"] == 0) & (df["block_id"] == 0)
+        ]
+        assert row_b0.iloc[0]["direct_mw"] == pytest.approx(1500.0 * 0.8, rel=1e-9)
+        assert row_b0.iloc[0]["reverse_mw"] == pytest.approx(1200.0 * 0.95, rel=1e-9)
+
+        row_b1 = df[
+            (df["line_id"] == 2) & (df["stage_id"] == 0) & (df["block_id"] == 1)
+        ]
+        assert row_b1.iloc[0]["direct_mw"] == pytest.approx(1500.0 * 1.1, rel=1e-9)
+        assert row_b1.iloc[0]["reverse_mw"] == pytest.approx(1200.0 * 1.0, rel=1e-9)
+
+    def test_uniform_block_factor_emits_no_block_row(self, tmp_path) -> None:
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
+        table = convert_line_bounds(case, self._make_id_map())
+        df = table.to_pandas()
+
+        # Line 0's block 1 (patamar=2, factor 1.0/1.0) is uniform with the
+        # base, so it must not appear.
+        rows = df[(df["line_id"] == 0) & (df["stage_id"] == 0) & (df["block_id"] == 1)]
+        assert rows.empty
+
+        # Line 1 = (1, 99) never appears in the patamar fixture: every block
+        # defaults to factor 1.0, so it must get zero block rows entirely.
+        rows = df[(df["line_id"] == 1) & df["block_id"].notna()]
+        assert rows.empty
+
+    def test_block_row_count_matches_differing_combinations(self, tmp_path) -> None:
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
+        table = convert_line_bounds(case, self._make_id_map())
+        df = table.to_pandas()
+
+        block_rows = df[df["block_id"].notna()]
+        # line 0 block 0 + line 2 blocks 0 and 1 = 3 differing combinations,
+        # each recurring twice: at stage 0 (January 2023, the fixture's dated
+        # record) and at stage 12 (January 2024). Unlike the base direct/
+        # reverse bounds — which freeze at the last study stage's value for
+        # the whole post-study tail — the factor lookup seasonally repeats by
+        # calendar month post-study (ported unchanged from the deleted
+        # ``convert_exchange_factors``), so January's factor recurs every
+        # January thereafter. 3 combinations x 2 recurrences = 6.
+        assert len(block_rows) == 6
+
+    def test_block_id_within_declared_block_count(self, tmp_path) -> None:
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
+        table = convert_line_bounds(case, self._make_id_map())
+        df = table.to_pandas()
+
+        block_rows = df[df["block_id"].notna()]
+        # The fixture declares 2 blocks (patamar 1 and 2).
+        assert (block_rows["block_id"] >= 0).all()
+        assert (block_rows["block_id"] < 2).all()
+
+    def test_no_patamar_data_emits_only_base_rows(self, tmp_path) -> None:
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        case = self._make_case(tmp_path, pd.DataFrame())
+        table = convert_line_bounds(case, self._make_id_map())
+        df = table.to_pandas()
+
+        assert df["block_id"].isna().all()
+        assert len(df) == 3 * 24
+
+
 def _make_sistema_mock() -> MagicMock:
     """Build the ``Sistema`` reader mock shared by the network tests."""
     mock_sistema = MagicMock()
     mock_sistema.custo_deficit = _make_deficit_df(n_patamares=2)
     mock_sistema.limites_intercambio = _make_intercambio_df()
     return mock_sistema
+
+
+# ---------------------------------------------------------------------------
+# Ticket 008: line_bounds migration fidelity + zero-capability.
+#
+# The synthetic shape tests above (``TestConvertLineBounds``) pin the folding
+# mechanics on a small hand-built fixture. These tests pin the two claims
+# ticket 008 exists to prove: (1) on a real deck, every per-block row equals
+# ``base_direct_mw x direct_factor`` recomputed independently from
+# ``sistema.dat``/``patamar.dat`` -- never by reading back
+# ``convert_line_bounds``'s own ``date_lookup``/``direct_factor_map`` state --
+# and (2) a synthetic zero block factor -- unrepresentable in the deleted
+# strictly-positive-factor encoding -- now converts to an ordinary
+# ``direct_mw == 0.0`` bound without raising.
+# ---------------------------------------------------------------------------
+
+_NEWAVE_LINE_BOUNDS_DECK = Path("example/newave_rodada")
+
+
+def _newave_canonical_line_pairs(
+    limites_df: pd.DataFrame,
+) -> dict[int, tuple[int, int]]:
+    """Independent line_id -> canonical (src, tgt) map: sorted pairs.
+
+    Mirrors the deterministic ID-assignment convention documented for
+    ``convert_lines``/``convert_line_bounds`` -- ID assignment is not the
+    base x factor arithmetic under test here, just how a line's identity is
+    derived from its pair, and is built fresh from the raw ``sistema.dat``
+    rows rather than by importing the converter's private helper.
+    """
+    pairs: set[tuple[int, int]] = set()
+    for _, row in limites_df.iterrows():
+        de, para = int(row["submercado_de"]), int(row["submercado_para"])
+        pairs.add((de, para) if de < para else (para, de))
+    return dict(enumerate(sorted(pairs)))
+
+
+def _newave_raw_factor_tables(
+    factors_df: pd.DataFrame,
+) -> tuple[
+    dict[tuple[int, int, int, int, int], float],
+    dict[tuple[int, int, int, int, int], float],
+    dict[tuple[int, int, int, int], float],
+    dict[tuple[int, int, int, int], float],
+]:
+    """Independent per-block direct/reverse factor tables read straight off
+    ``patamar.dat`` -- built fresh here, never touching
+    ``convert_line_bounds``'s own ``direct_factor_map``/``last_direct_factor``
+    state.
+
+    Returns ``(raw_direct, raw_reverse, latest_direct, latest_reverse)``:
+    the first two keyed ``(src, tgt, year, month, block_id)`` for an exact
+    dated hit, the last two keyed ``(src, tgt, month, block_id)`` holding the
+    most recent year on file for that calendar month (the seasonal-repeat
+    fallback the module docstring documents for post-study stages).
+    """
+    raw_direct: dict[tuple[int, int, int, int, int], float] = {}
+    raw_reverse: dict[tuple[int, int, int, int, int], float] = {}
+    for _, row in factors_df.iterrows():
+        de, para = int(row["submercado_de"]), int(row["submercado_para"])
+        block_id = int(row["patamar"]) - 1
+        year, month = int(row["data"].year), int(row["data"].month)
+        val = float(row["valor"])
+        src, tgt = (de, para) if de < para else (para, de)
+        key = (src, tgt, year, month, block_id)
+        if de < para:
+            raw_direct[key] = val
+        else:
+            raw_reverse[key] = val
+
+    def _latest_by_month(
+        raw: dict[tuple[int, int, int, int, int], float],
+    ) -> dict[tuple[int, int, int, int], float]:
+        latest: dict[tuple[int, int, int, int], tuple[int, float]] = {}
+        for (src, tgt, year, month, block_id), val in raw.items():
+            k = (src, tgt, month, block_id)
+            cur = latest.get(k)
+            if cur is None or year > cur[0]:
+                latest[k] = (year, val)
+        return {k: v for k, (_, v) in latest.items()}
+
+    return (
+        raw_direct,
+        raw_reverse,
+        _latest_by_month(raw_direct),
+        _latest_by_month(raw_reverse),
+    )
+
+
+def _newave_expected_factor(
+    raw: dict[tuple[int, int, int, int, int], float],
+    latest_by_month: dict[tuple[int, int, int, int], float],
+    src: int,
+    tgt: int,
+    year: int,
+    month: int,
+    block_id: int,
+    *,
+    is_post_study: bool,
+) -> float:
+    """The documented factor-resolution rule (``convert_line_bounds``'s own
+    docstring): post-study stages seasonally repeat the latest recorded
+    value for the same calendar month; study-period stages take an exact
+    ``(year, month)`` hit, else fall back to the same seasonal repeat, else
+    the neutral factor ``1.0`` (uniform, no override).
+    """
+    if is_post_study:
+        return latest_by_month.get((src, tgt, month, block_id), 1.0)
+    exact = raw.get((src, tgt, year, month, block_id))
+    if exact is not None:
+        return exact
+    return latest_by_month.get((src, tgt, month, block_id), 1.0)
+
+
+class TestConvertLineBoundsRealDeckFidelity:
+    """Ticket 008 acceptance criteria 1 + 4: every per-block row on a real
+    deck matches an independently recomputed ``base x factor`` to 1e-9
+    relative, and the per-block row count is asserted (not just the
+    values) against the count of genuinely differing combinations.
+
+    ``example/`` is local-only and gitignored (see ``example/README.md``),
+    so both tests skip cleanly when the deck is absent (CI).
+    """
+
+    def _load(
+        self,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, StudyHorizon]:
+        if not _NEWAVE_LINE_BOUNDS_DECK.exists():
+            pytest.skip("real deck not present")
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        case = NewaveCase.from_directory(_NEWAVE_LINE_BOUNDS_DECK)
+        # convert_line_bounds never consults id_map (verified: no
+        # `id_map.` reference in its body) -- an empty placeholder satisfies
+        # the signature without parsing hidr/confhd/conft/ree for this case.
+        table = convert_line_bounds(
+            case, NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
+        )
+        return (
+            table.to_pandas(),
+            case.sistema.limites_intercambio,
+            case.patamar.intercambio_patamares,
+            case.horizon,
+        )
+
+    def _expected_factors(
+        self,
+        limites_df: pd.DataFrame,
+        factors_df: pd.DataFrame,
+        horizon: StudyHorizon,
+    ) -> dict[tuple[int, int, int], tuple[float, float]]:
+        from cobre_bridge.horizon import build_stage_dates
+
+        pair_by_line_id = _newave_canonical_line_pairs(limites_df)
+        raw_direct, raw_reverse, latest_direct, latest_reverse = (
+            _newave_raw_factor_tables(factors_df)
+        )
+        num_blocks = int(factors_df["patamar"].max())
+        stage_dates = build_stage_dates(
+            horizon.start_year, horizon.start_month, horizon.total_stages
+        )
+
+        expected: dict[tuple[int, int, int], tuple[float, float]] = {}
+        for line_id, (src, tgt) in pair_by_line_id.items():
+            for stage_id in range(horizon.total_stages):
+                stage_date = stage_dates[stage_id]
+                is_post = horizon.is_post_study(stage_id)
+                for block_id in range(num_blocks):
+                    d_factor = _newave_expected_factor(
+                        raw_direct,
+                        latest_direct,
+                        src,
+                        tgt,
+                        stage_date.year,
+                        stage_date.month,
+                        block_id,
+                        is_post_study=is_post,
+                    )
+                    r_factor = _newave_expected_factor(
+                        raw_reverse,
+                        latest_reverse,
+                        src,
+                        tgt,
+                        stage_date.year,
+                        stage_date.month,
+                        block_id,
+                        is_post_study=is_post,
+                    )
+                    expected[(line_id, stage_id, block_id)] = (d_factor, r_factor)
+        return expected
+
+    def test_every_block_row_matches_independently_recomputed_factor(
+        self,
+    ) -> None:
+        df, limites_df, factors_df, horizon = self._load()
+        expected = self._expected_factors(limites_df, factors_df, horizon)
+
+        base_by_line_stage = {
+            (int(r.line_id), int(r.stage_id)): (r.direct_mw, r.reverse_mw)
+            for r in df[df["block_id"].isna()].itertuples()
+        }
+        block_rows = df[df["block_id"].notna()]
+        assert len(block_rows) > 0, (
+            "the real deck must exercise at least one differing block for "
+            "this fidelity check to be meaningful"
+        )
+        for r in block_rows.itertuples():
+            key = (int(r.line_id), int(r.stage_id), int(r.block_id))
+            d_factor, r_factor = expected[key]
+            base_direct, base_reverse = base_by_line_stage[key[:2]]
+            assert r.direct_mw == pytest.approx(base_direct * d_factor, rel=1e-9)
+            assert r.reverse_mw == pytest.approx(base_reverse * r_factor, rel=1e-9)
+
+    def test_block_row_count_matches_differing_combinations(self) -> None:
+        df, limites_df, factors_df, horizon = self._load()
+        expected = self._expected_factors(limites_df, factors_df, horizon)
+
+        expected_keys = {
+            key
+            for key, (d_factor, r_factor) in expected.items()
+            if d_factor != 1.0 or r_factor != 1.0
+        }
+        block_rows = df[df["block_id"].notna()]
+        emitted_keys = {
+            (int(r.line_id), int(r.stage_id), int(r.block_id))
+            for r in block_rows.itertuples()
+        }
+        assert expected_keys, (
+            "the real deck must exercise at least one differing block for "
+            "this row-count guard to be meaningful"
+        )
+        assert len(block_rows) == len(expected_keys)
+        assert emitted_keys == expected_keys
+
+
+class TestConvertLineBoundsZeroCapability:
+    """cobre decision 10 makes ``direct_mw = 0.0`` an ordinary bound. No
+    current deck ever records a zero exchange factor (measured: 1152
+    factors across the converted example cases, zero zeros, min 0.5582), so
+    only a synthetic fixture can pin the new capability (ticket 008
+    acceptance criterion 3)."""
+
+    def _make_id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(subsystem_ids=[1, 2, 99], hydro_codes=[], thermal_codes=[])
+
+    def _make_case(self, tmp_path: Path, patamar_df: pd.DataFrame) -> NewaveCase:
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2023
+        patamar = MagicMock()
+        patamar.intercambio_patamares = patamar_df
+        return make_case(
+            tmp_path, sistema=_make_sistema_mock(), dger=dger, patamar=patamar
+        )
+
+    def test_zero_block_factor_converts_without_raising(self, tmp_path: Path) -> None:
+        import datetime
+
+        from cobre_bridge.converters.network import convert_line_bounds
+
+        d = datetime.datetime(2023, 1, 1)
+        patamar_df = pd.DataFrame(
+            [
+                # Line (1, 2) [line_id=0]: block 0's direct factor is
+                # exactly zero -- a line fully out in that block, the shape
+                # the deleted strictly-positive factor encoding could never
+                # represent. Block 1 is non-zero and distinct from 1.0, to
+                # prove it is genuinely unaffected rather than coincidentally
+                # matching the base.
+                {
+                    "submercado_de": 1,
+                    "submercado_para": 2,
+                    "patamar": 1,
+                    "data": d,
+                    "valor": 0.0,
+                },
+                {
+                    "submercado_de": 1,
+                    "submercado_para": 2,
+                    "patamar": 2,
+                    "data": d,
+                    "valor": 0.75,
+                },
+            ]
+        )
+        case = self._make_case(tmp_path, patamar_df)
+
+        table = convert_line_bounds(case, self._make_id_map())  # must not raise
+        df = table.to_pandas()
+
+        # Base for line (1, 2) at stage 0: direct=3000.0, reverse=2500.0
+        # (see `_make_intercambio_df`).
+        zero_row = df[
+            (df["line_id"] == 0) & (df["stage_id"] == 0) & (df["block_id"] == 0)
+        ]
+        assert len(zero_row) == 1
+        assert zero_row.iloc[0]["direct_mw"] == 0.0
+        # The reverse direction has no patamar row for this block => factor
+        # 1.0 => untouched by the zero direct factor.
+        assert zero_row.iloc[0]["reverse_mw"] == pytest.approx(2500.0)
+
+        other_block = df[
+            (df["line_id"] == 0) & (df["stage_id"] == 0) & (df["block_id"] == 1)
+        ]
+        assert len(other_block) == 1
+        assert other_block.iloc[0]["direct_mw"] == pytest.approx(
+            3000.0 * 0.75, rel=1e-9
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4911,7 +5759,13 @@ def _ic_case(tmp_path, pct_b: float = 75.0):
     mock_confhd = MagicMock()
     mock_confhd.usinas = df
 
-    return make_case(tmp_path, hidr=mock_hidr, confhd=mock_confhd)
+    # A dger with a concrete study start so the windowed anticipated-commitment
+    # dates resolve (study stage k -> month (2024-01) + k).
+    mock_dger = MagicMock()
+    mock_dger.ano_inicio_estudo = 2024
+    mock_dger.mes_inicio_estudo = 1
+
+    return make_case(tmp_path, hidr=mock_hidr, confhd=mock_confhd, dger=mock_dger)
 
 
 class TestThermalGenerationBounds:
@@ -4975,8 +5829,21 @@ class TestAnticipatedCommitmentSeeding:
         ):
             result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
+        # Windowed records (cobre 0.14): one contiguous monthly window per
+        # leading delivery stage, zero-MW stages written explicitly.
         assert result["past_anticipated_commitments"] == [
-            {"thermal_id": 0, "values_mw": [204.5647, 0.0]}
+            {
+                "thermal_id": 0,
+                "start_date": "2024-01-01",
+                "end_date": "2024-02-01",
+                "value_mw": 204.5647,
+            },
+            {
+                "thermal_id": 0,
+                "start_date": "2024-02-01",
+                "end_date": "2024-03-01",
+                "value_mw": 0.0,
+            },
         ]
         assert "clamping" not in caplog.text
 
@@ -5002,7 +5869,9 @@ class TestAnticipatedCommitmentSeeding:
             result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
         commitments = result["past_anticipated_commitments"]
-        assert commitments[0]["values_mw"] == pytest.approx([481.27, 0.0])
+        assert [c["value_mw"] for c in commitments] == pytest.approx([481.27, 0.0])
+        assert commitments[0]["start_date"] == "2024-01-01"
+        assert commitments[0]["end_date"] == "2024-02-01"
         assert "code=86" in caplog.text
         assert "clamping" in caplog.text
 
@@ -5045,6 +5914,19 @@ class TestAnticipatedCommitmentSeeding:
 
         assert "past_anticipated_commitments" not in result
         mock_bounds.assert_not_called()
+
+    def test_delivery_window_year_and_december_wrap(self) -> None:
+        """The windowed-commitment dates wrap the year at December correctly."""
+        from cobre_bridge.converters.initial_conditions import _delivery_window
+
+        # Study starts Nov 2024.
+        assert _delivery_window(2024, 11, 0) == ("2024-11-01", "2024-12-01")
+        # k=1 is December -> exclusive end rolls into the next year.
+        assert _delivery_window(2024, 11, 1) == ("2024-12-01", "2025-01-01")
+        # k=2 crosses into the new year.
+        assert _delivery_window(2024, 11, 2) == ("2025-01-01", "2025-02-01")
+        # A multi-year lead stays aligned.
+        assert _delivery_window(2024, 11, 14) == ("2026-01-01", "2026-02-01")
 
 
 # ---------------------------------------------------------------------------
@@ -5093,8 +5975,10 @@ class TestCrossReferenceConsistency:
         valid_bus_ids = {b["id"] for b in buses_result["buses"]}
 
         for h in hydros_result["hydros"]:
-            assert h["bus_id"] in valid_bus_ids, (
-                f"Hydro '{h['name']}' has bus_id={h['bus_id']} not in buses"
+            group_bus_id = h["unit_groups"][0]["bus_id"]
+            assert group_bus_id in valid_bus_ids, (
+                f"Hydro '{h['name']}' has unit_groups[0].bus_id={group_bus_id}"
+                " not in buses"
             )
 
         for t in thermals_result["thermals"]:
@@ -5450,8 +6334,6 @@ class TestGenerateHydroGeometry:
 
     def test_produces_100_rows_per_plant(self) -> None:
         """A reservoir plant yields exactly 100 rows in the output table."""
-        import pyarrow as pa
-
         from cobre_bridge.converters.hydro import generate_hydro_geometry
 
         cadastro = _make_geometry_cadastro()
@@ -5480,8 +6362,6 @@ class TestGenerateHydroGeometry:
 
     def test_correct_schema(self) -> None:
         """Output table has the required schema with correct column types."""
-        import pyarrow as pa
-
         from cobre_bridge.converters.hydro import generate_hydro_geometry
 
         cadastro = _make_geometry_cadastro()
@@ -5495,7 +6375,6 @@ class TestGenerateHydroGeometry:
 
     def test_correct_schema_roundtrip_parquet(self, tmp_path) -> None:
         """Schema is preserved when written and read back as Parquet."""
-        import pyarrow as pa
         import pyarrow.parquet as pq
 
         from cobre_bridge.converters.hydro import generate_hydro_geometry
@@ -5604,8 +6483,6 @@ def _make_penalid_df() -> pd.DataFrame:
     Both REEs have patamar 2 rows with NaN values (unbounded tier).
     TURBMX is included to verify the "no mapping" skip path.
     """
-    import math
-
     return pd.DataFrame(
         {
             "variavel": [
@@ -5687,8 +6564,6 @@ class TestReadPenalid:
 
     def test_nan_values_are_skipped(self, tmp_path) -> None:
         """NaN cost values at patamar 1 do not appear in the output dict."""
-        import math
-
         from cobre_bridge.converters.hydro import _read_penalid
 
         df = pd.DataFrame(
@@ -5915,8 +6790,6 @@ class TestWaterWithdrawalConversion:
 
         assert result is not None
         assert result.schema.names == ["hydro_id", "stage_id", "water_withdrawal_m3s"]
-        import pyarrow as pa
-
         assert result.schema.field("hydro_id").type == pa.int32()
         assert result.schema.field("stage_id").type == pa.int32()
         assert result.schema.field("water_withdrawal_m3s").type == pa.float64()
@@ -6095,3 +6968,145 @@ class TestWaterWithdrawalConversion:
         assert result.num_rows == 1
         row = result.to_pydict()
         assert row["water_withdrawal_m3s"][0] == pytest.approx(4.0)
+
+
+class TestBuildMirrorUnitGroup:
+    """Unit tests for ``build_mirror_unit_group``."""
+
+    def test_returns_exactly_seven_keys(self) -> None:
+        """The returned dict has exactly the seven ``RawUnitGroup`` keys."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        group = build_mirror_unit_group(
+            name="PLANT",
+            bus_id=3,
+            min_generation_mw=0.0,
+            max_generation_mw=100.0,
+            min_turbined_m3s=0.0,
+            max_turbined_m3s=50.0,
+        )
+
+        assert set(group.keys()) == {
+            "id",
+            "name",
+            "bus_id",
+            "min_generation_mw",
+            "max_generation_mw",
+            "min_turbined_m3s",
+            "max_turbined_m3s",
+        }
+
+    def test_id_is_zero_and_name_unchanged(self) -> None:
+        """``id`` is always 0; ``name`` passes through verbatim."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        group = build_mirror_unit_group(
+            name="M. DE MORAES",
+            bus_id=1,
+            min_generation_mw=0.0,
+            max_generation_mw=10.0,
+            min_turbined_m3s=0.0,
+            max_turbined_m3s=5.0,
+        )
+
+        assert group["id"] == 0
+        assert group["name"] == "M. DE MORAES"
+
+    def test_bounds_pass_through_verbatim(self) -> None:
+        """All four bounds are returned unchanged, including a 0.0 minimum."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        group = build_mirror_unit_group(
+            name="PLANT",
+            bus_id=2,
+            min_generation_mw=12.5,
+            max_generation_mw=1400.0,
+            min_turbined_m3s=0.0,
+            max_turbined_m3s=980.3,
+        )
+
+        assert group["min_generation_mw"] == pytest.approx(12.5)
+        assert group["max_generation_mw"] == pytest.approx(1400.0)
+        assert group["min_turbined_m3s"] == pytest.approx(0.0)
+        assert group["max_turbined_m3s"] == pytest.approx(980.3)
+
+    def test_mirror_invariant_group_maxima_sum_to_plant_maximum(self) -> None:
+        """Nested under a plant, ``sum(group maxima) == plant maximum`` holds
+        for both ``max_turbined_m3s`` and ``max_generation_mw`` — the cobre
+        rule-41 invariant a single mirror group satisfies by construction."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        plant_max_generation_mw = 1400.0
+        plant_max_turbined_m3s = 980.3
+        plant = {
+            "name": "PLANT",
+            "max_generation_mw": plant_max_generation_mw,
+            "max_turbined_m3s": plant_max_turbined_m3s,
+            "unit_groups": [
+                build_mirror_unit_group(
+                    name="PLANT",
+                    bus_id=2,
+                    min_generation_mw=12.5,
+                    max_generation_mw=plant_max_generation_mw,
+                    min_turbined_m3s=0.0,
+                    max_turbined_m3s=plant_max_turbined_m3s,
+                )
+            ],
+        }
+
+        assert sum(
+            g["max_generation_mw"] for g in plant["unit_groups"]
+        ) == pytest.approx(plant["max_generation_mw"])
+        assert sum(
+            g["max_turbined_m3s"] for g in plant["unit_groups"]
+        ) == pytest.approx(plant["max_turbined_m3s"])
+
+    def test_keyword_only_signature_enforced(self) -> None:
+        """A positional call raises ``TypeError``."""
+        from cobre_bridge.converters.hydro import build_mirror_unit_group
+
+        with pytest.raises(TypeError):
+            build_mirror_unit_group("PLANT", 2, 0.0, 100.0, 0.0, 50.0)
+
+
+class TestLegacyHydroShapeRejectedBy013:
+    """AC5 (ticket-004): document the exact shape 0.12 produced — a hydro dict
+    with a top-level ``bus_id`` and no ``unit_groups`` — and that no converter
+    emits it anymore.
+
+    cobre 0.13's ``hydros.schema.json`` rejects that shape on load:
+    ``additionalProperties: false`` denies the stray top-level ``bus_id``
+    (decision 14 → §7.8), and ``unit_groups`` is a required, non-empty array
+    (decision 13 → §7.6). This test asserts the *shape difference* only — it
+    does not load either dict into cobre or a jsonschema validator (E4 owns
+    real schema loads).
+    """
+
+    def test_0_12_shape_has_top_level_bus_id_and_no_unit_groups(self) -> None:
+        """The exact shape 0.12 emitted for a hydro plant."""
+        legacy_0_12_hydro = {
+            "id": 0,
+            "name": "PLANT",
+            "bus_id": 3,
+            "generation": {
+                "min_generation_mw": 0.0,
+                "max_generation_mw": 50.0,
+                "min_turbined_m3s": 0.0,
+                "max_turbined_m3s": 100.0,
+            },
+        }
+
+        assert "bus_id" in legacy_0_12_hydro
+        assert "unit_groups" not in legacy_0_12_hydro
+
+    def test_0_13_shape_has_neither(self) -> None:
+        """The shape every converter emits today — via the shared test helper,
+        so this pins the helper to the same invariant the real converters
+        satisfy (no top-level ``bus_id``, one mirror ``unit_groups`` entry).
+        ``TestConvertHydros.test_output_never_regresses_to_the_0_12_shape``
+        pins the same invariant against the real converter output."""
+        modern_hydro = hydro_with_group(0, bus_id=3)
+
+        assert "bus_id" not in modern_hydro
+        assert len(modern_hydro["unit_groups"]) == 1
+        assert modern_hydro["unit_groups"][0]["bus_id"] == 3

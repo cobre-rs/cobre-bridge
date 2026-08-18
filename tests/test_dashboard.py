@@ -18,19 +18,25 @@ import pandas as pd
 import polars as pl
 import pytest
 
+from cobre_bridge import diagnostics as dx
 from cobre_bridge.dashboard.data import (
     _aggregate_timing_by_iteration,
     _correct_wall_times_from_convergence,
+    _normalize_output_columns,
     entity_name,
+    load_entity_metadata,
     load_hydro_bus_map,
     load_hydro_metadata,
     load_names,
     load_ncs_bus_map,
     load_stage_labels,
     load_thermal_metadata,
+    resolve_hydro_bus_id,
     scan_entity,
 )
 from cobre_bridge.dashboard.tabs import TAB_MODULES, get_renderable_tabs
+from cobre_bridge.errors import CobreOutputError
+from tests.conftest import hydro_with_group
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -117,6 +123,33 @@ def test_load_stage_labels_returns_formatted_labels(tmp_path: Path) -> None:
     assert result[1] == "Feb 2024"
 
 
+def test_load_stage_labels_weekly_stages_use_day_resolution(tmp_path: Path) -> None:
+    """Stages sharing a calendar month (weekly week/month decks) must not
+    collapse onto one month-only x-axis point — each gets a day-resolution
+    label from its own start date.
+    """
+    stages_json = {
+        "stages": [
+            {"id": 0, "start_date": "2026-03-14"},
+            {"id": 1, "start_date": "2026-03-21"},
+            {"id": 2, "start_date": "2026-03-28"},
+            {"id": 3, "start_date": "2026-04-04"},
+        ]
+    }
+    _write_json(tmp_path / "stages.json", stages_json)
+
+    result = load_stage_labels(tmp_path)
+
+    # Three stages fall in March; month-only labels would all read "Mar 2026".
+    assert result == {
+        0: "14 Mar 2026",
+        1: "21 Mar 2026",
+        2: "28 Mar 2026",
+        3: "04 Apr 2026",
+    }
+    assert len(set(result.values())) == 4
+
+
 def test_load_stage_labels_missing_file_returns_empty(tmp_path: Path) -> None:
     result = load_stage_labels(tmp_path)
 
@@ -155,10 +188,13 @@ def test_load_stage_labels_falls_back_to_stage_id_when_start_date_absent(
 
 
 def test_load_hydro_bus_map_returns_mapping(tmp_path: Path) -> None:
+    """AC2: 0.13-shaped hydros (unit_groups[].bus_id, no top-level bus_id)
+    resolve to the same bus ids the pre-0.13 top-level ``bus_id`` field
+    produced, proving the relocation is value-preserving."""
     hydros_json = {
         "hydros": [
-            {"id": 0, "bus_id": 10},
-            {"id": 1, "bus_id": 20},
+            hydro_with_group(0, 10),
+            hydro_with_group(1, 20),
         ]
     }
     _write_json(tmp_path / "system" / "hydros.json", hydros_json)
@@ -172,6 +208,51 @@ def test_load_hydro_bus_map_missing_file_returns_empty(tmp_path: Path) -> None:
     result = load_hydro_bus_map(tmp_path)
 
     assert result == {}
+
+
+def test_load_hydro_bus_map_omits_multi_bus_plant(tmp_path: Path) -> None:
+    """AC3: a plant whose unit_groups disagree on bus is dropped from the
+    map entirely -- neither collapsed onto one of its buses nor kept at a
+    guessed value -- and a Diagnostic is raised naming it."""
+    ambiguous = hydro_with_group(1, 10)
+    ambiguous["unit_groups"].append({**ambiguous["unit_groups"][0], "bus_id": 20})
+    hydros_json = {"hydros": [hydro_with_group(0, 5), ambiguous]}
+    _write_json(tmp_path / "system" / "hydros.json", hydros_json)
+
+    with dx.collect() as collected:
+        result = load_hydro_bus_map(tmp_path)
+
+    assert result == {0: 5}
+
+    ambiguous_diags = [d for d in collected if d.code == "hydro-unit-groups-multi-bus"]
+    assert len(ambiguous_diags) == 1
+    assert ambiguous_diags[0].severity is dx.Severity.WARNING
+    assert "1" in ambiguous_diags[0].summary
+    assert "10" in ambiguous_diags[0].summary
+    assert "20" in ambiguous_diags[0].summary
+
+
+def test_load_hydro_bus_map_missing_unit_groups_raises_named_error(
+    tmp_path: Path,
+) -> None:
+    """AC4: a hand-edited/pre-0.13 hydro with no unit_groups raises a typed
+    error naming the plant, rather than a bare KeyError."""
+    hydros_json = {"hydros": [{"id": 3, "name": "ORPHAN"}]}
+    _write_json(tmp_path / "system" / "hydros.json", hydros_json)
+
+    with pytest.raises(CobreOutputError, match=r"hydro 3 \(ORPHAN\)"):
+        load_hydro_bus_map(tmp_path)
+
+
+def test_load_hydro_bus_map_empty_unit_groups_raises_named_error(
+    tmp_path: Path,
+) -> None:
+    """AC4, empty-list variant of the missing-unit_groups guard."""
+    hydros_json = {"hydros": [{"id": 4, "name": "EMPTY_GROUPS", "unit_groups": []}]}
+    _write_json(tmp_path / "system" / "hydros.json", hydros_json)
+
+    with pytest.raises(CobreOutputError, match=r"hydro 4 \(EMPTY_GROUPS\)"):
+        load_hydro_bus_map(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -258,19 +339,21 @@ def test_load_ncs_bus_map_missing_file_returns_empty(tmp_path: Path) -> None:
 
 
 def test_load_hydro_metadata_extracts_fields(tmp_path: Path) -> None:
+    """AC2: bus id relocated into unit_groups[0].bus_id still resolves to the
+    same value (1) the pre-0.13 top-level ``bus_id`` field produced."""
     hydros_json = {
         "hydros": [
-            {
-                "id": 0,
-                "bus_id": 1,
-                "name": "Belo Monte",
-                "reservoir": {"max_storage_hm3": 5000.0, "min_storage_hm3": 100.0},
-                "generation": {
+            hydro_with_group(
+                0,
+                1,
+                name="Belo Monte",
+                reservoir={"max_storage_hm3": 5000.0, "min_storage_hm3": 100.0},
+                generation={
                     "max_generation_mw": 11000.0,
                     "productivity_mw_per_m3s": 0.08,
                     "max_turbined_m3s": 150000.0,
                 },
-            }
+            )
         ]
     }
     _write_json(tmp_path / "system" / "hydros.json", hydros_json)
@@ -290,6 +373,96 @@ def test_load_hydro_metadata_missing_file_returns_empty(tmp_path: Path) -> None:
     result = load_hydro_metadata(tmp_path)
 
     assert result == {}
+
+
+def test_load_hydro_metadata_omits_bus_id_for_multi_bus_plant(
+    tmp_path: Path,
+) -> None:
+    """AC3: a plant whose unit_groups disagree on bus keeps its non-bus
+    metadata (name, volumes, productivity, ...) but has no "bus_id" key --
+    it is not collapsed onto one of its buses -- and a Diagnostic names it."""
+    ambiguous = hydro_with_group(1, 10, name="AMBIGUOUS")
+    ambiguous["unit_groups"].append({**ambiguous["unit_groups"][0], "bus_id": 20})
+    hydros_json = {"hydros": [ambiguous]}
+    _write_json(tmp_path / "system" / "hydros.json", hydros_json)
+
+    with dx.collect() as collected:
+        result = load_hydro_metadata(tmp_path)
+
+    assert result[1]["name"] == "AMBIGUOUS"
+    assert "bus_id" not in result[1]
+
+    ambiguous_diags = [d for d in collected if d.code == "hydro-unit-groups-multi-bus"]
+    assert len(ambiguous_diags) == 1
+    assert "1" in ambiguous_diags[0].summary
+    assert "AMBIGUOUS" in ambiguous_diags[0].summary
+
+
+def test_load_hydro_metadata_missing_unit_groups_raises_named_error(
+    tmp_path: Path,
+) -> None:
+    """AC4: absent unit_groups raises the same typed error naming the plant,
+    from the metadata call site too."""
+    hydros_json = {
+        "hydros": [
+            {
+                "id": 2,
+                "name": "ORPHAN",
+                "generation": {},
+                "reservoir": {},
+            }
+        ]
+    }
+    _write_json(tmp_path / "system" / "hydros.json", hydros_json)
+
+    with pytest.raises(CobreOutputError, match=r"hydro 2 \(ORPHAN\)"):
+        load_hydro_metadata(tmp_path)
+
+
+def test_resolve_hydro_bus_id_is_the_single_shared_implementation(
+    tmp_path: Path,
+) -> None:
+    """AC5: both load_hydro_bus_map and load_hydro_metadata derive a plant's
+    bus by calling the one shared helper, rather than each inlining its own
+    copy of the unit_groups scan."""
+    hydros_json = {"hydros": [hydro_with_group(0, 7)]}
+    _write_json(tmp_path / "system" / "hydros.json", hydros_json)
+
+    with patch(
+        "cobre_bridge.dashboard.data.resolve_hydro_bus_id",
+        wraps=resolve_hydro_bus_id,
+    ) as mock_resolve:
+        bus_map = load_hydro_bus_map(tmp_path)
+        metadata = load_hydro_metadata(tmp_path)
+
+    assert mock_resolve.call_count == 2
+    assert bus_map[0] == metadata[0]["bus_id"] == 7
+
+
+def test_load_entity_metadata_emits_multi_bus_diagnostic_once(
+    tmp_path: Path,
+) -> None:
+    """FINDING-5 regression: load_entity_metadata calls both
+    load_hydro_bus_map and load_hydro_metadata over the same hydros.json.
+    The existing ambiguous-plant tests above call one loader at a time, so
+    the double emission through the real load_entity_metadata path was
+    previously untested. An ambiguous plant's
+    hydro-unit-groups-multi-bus warning must fire once per case load, not
+    once per loader."""
+    ambiguous = hydro_with_group(1, 10, name="AMBIGUOUS")
+    ambiguous["unit_groups"].append({**ambiguous["unit_groups"][0], "bus_id": 20})
+    hydros_json = {"hydros": [hydro_with_group(0, 5), ambiguous]}
+    _write_json(tmp_path / "system" / "hydros.json", hydros_json)
+
+    with dx.collect() as collected:
+        metadata = load_entity_metadata(tmp_path)
+
+    assert metadata.hydro_bus_map == {0: 5}
+    assert "bus_id" not in metadata.hydro_meta[1]
+
+    ambiguous_diags = [d for d in collected if d.code == "hydro-unit-groups-multi-bus"]
+    assert len(ambiguous_diags) == 1
+    assert "AMBIGUOUS" in ambiguous_diags[0].summary
 
 
 # ---------------------------------------------------------------------------
@@ -541,24 +714,28 @@ class TestDashboardIntegration:
         _write_json(case / "config.json", {"num_scenarios": 2, "num_stages": 2})
 
         # ---- system/ JSON files ----
+        # 0.13-shaped hydros.json (unit_groups[].bus_id, no top-level
+        # bus_id) — AC6 exercises the full DashboardData.load() pipeline,
+        # including load_hydro_bus_map/load_hydro_metadata, against this
+        # shape end-to-end (epic-03 ticket-012).
         _write_json(
             case / "system" / "hydros.json",
             {
                 "hydros": [
-                    {
-                        "id": 0,
-                        "name": "HYDRO_A",
-                        "bus_id": 0,
-                        "reservoir": {
+                    hydro_with_group(
+                        0,
+                        0,
+                        name="HYDRO_A",
+                        reservoir={
                             "max_storage_hm3": 5000.0,
                             "min_storage_hm3": 100.0,
                         },
-                        "generation": {
+                        generation={
                             "max_generation_mw": 1000.0,
                             "productivity_mw_per_m3s": 0.08,
                             "max_turbined_m3s": 12000.0,
                         },
-                    }
+                    )
                 ]
             },
         )
@@ -835,6 +1012,45 @@ class TestDashboardIntegration:
         )
 
         assert case_dir.resolve().name in html
+
+    def test_build_dashboard_with_per_block_line_bounds(
+        self, case_dir: Path, tmp_path: Path
+    ) -> None:
+        """build_dashboard() renders end-to-end on a 0.13 case whose
+        constraints/line_bounds.parquet carries per-block (block_id
+        non-null) override rows alongside the stage-level base row (AC6).
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from cobre_bridge.dashboard import build_dashboard
+        from cobre_bridge.dashboard.data import DashboardData
+
+        constraints_dir = case_dir / "constraints"
+        constraints_dir.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "line_id": pa.array([0, 0, 0], type=pa.int32()),
+                    "stage_id": pa.array([0, 0, 0], type=pa.int32()),
+                    "direct_mw": pa.array([100.0, 80.0, 120.0], type=pa.float64()),
+                    "reverse_mw": pa.array([100.0, 80.0, 120.0], type=pa.float64()),
+                    "block_id": pa.array([None, 0, 1], type=pa.int32()),
+                }
+            ),
+            constraints_dir / "line_bounds.parquet",
+        )
+
+        data = DashboardData.load(case_dir)
+        assert len(data.line_block_bounds) == 2
+        assert data.line_block_bounds["block_id"].notna().all()
+
+        output_path = tmp_path / "dashboard.html"
+        build_dashboard(case_dir, output_path)
+
+        assert output_path.exists(), "Dashboard HTML file was not written"
+        html = output_path.read_text(encoding="utf-8")
+        assert "<!DOCTYPE html>" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1189,22 +1405,81 @@ def test_load_ncs_stats_present(_v2_case: Path) -> None:
     assert "mean_mw" in data.ncs_stats.columns
 
 
-def test_load_exchange_factors_present(_v2_case: Path) -> None:
-    """exchange_factors is a list with the correct element when file exists."""
+def test_load_line_block_bounds_present(_v2_case: Path) -> None:
+    """line_block_bounds holds only the per-block (block_id non-null) rows.
+
+    Cobre 0.13 deleted the standalone per-block exchange-factor JSON document
+    and folded it into absolute-MW override rows inside line_bounds.parquet
+    (ticket-013); the stage-level base row (block_id is null) must not leak
+    into this field.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     from cobre_bridge.dashboard.data import DashboardData
 
     constraints_dir = _v2_case / "constraints"
     constraints_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(
-        constraints_dir / "exchange_factors.json",
-        {"exchange_factors": [{"line_id": 0, "stage_id": 0, "factor": 1.05}]},
+    pq.write_table(
+        pa.table(
+            {
+                "line_id": pa.array([0, 0, 0], type=pa.int32()),
+                "stage_id": pa.array([0, 0, 0], type=pa.int32()),
+                "direct_mw": pa.array([100.0, 80.0, 120.0], type=pa.float64()),
+                "reverse_mw": pa.array([100.0, 80.0, 120.0], type=pa.float64()),
+                "block_id": pa.array([None, 0, 1], type=pa.int32()),
+            }
+        ),
+        constraints_dir / "line_bounds.parquet",
     )
 
     data = DashboardData.load(_v2_case)
 
-    assert len(data.exchange_factors) == 1
-    assert data.exchange_factors[0]["line_id"] == 0
-    assert data.exchange_factors[0]["factor"] == pytest.approx(1.05)
+    assert not data.line_block_bounds.empty
+    assert len(data.line_block_bounds) == 2
+    assert data.line_block_bounds["block_id"].notna().all()
+    assert sorted(data.line_block_bounds["direct_mw"].tolist()) == [80.0, 120.0]
+
+
+def test_load_line_block_bounds_absent_is_empty_not_raising(_v2_case: Path) -> None:
+    """A case whose lines are uniform across blocks has no override rows.
+
+    Only the stage-level base row (block_id is null) is present; this is a
+    legitimate steady state (AC3), not a version problem, so it must degrade
+    to an empty frame rather than raise.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cobre_bridge.dashboard.data import DashboardData
+
+    constraints_dir = _v2_case / "constraints"
+    constraints_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "line_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "direct_mw": pa.array([100.0], type=pa.float64()),
+                "reverse_mw": pa.array([100.0], type=pa.float64()),
+                "block_id": pa.array([None], type=pa.int32()),
+            }
+        ),
+        constraints_dir / "line_bounds.parquet",
+    )
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.line_block_bounds.empty
+
+
+def test_load_line_block_bounds_no_file_is_empty_not_raising(_v2_case: Path) -> None:
+    """No line_bounds.parquet at all still yields an empty frame, not a raise."""
+    from cobre_bridge.dashboard.data import DashboardData
+
+    data = DashboardData.load(_v2_case)
+
+    assert data.line_block_bounds.empty
 
 
 # ---------------------------------------------------------------------------
@@ -1328,8 +1603,6 @@ def test_load_inflow_lags_lf_present(_v2_case: Path) -> None:
 
 def test_compute_non_fictitious_bus_ids_filters_zero_load() -> None:
     """Bus with zero mean_mw in all stages is excluded; nonzero bus is included."""
-    import pandas as pd
-
     from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
 
     load_stats = pd.DataFrame(
@@ -1347,8 +1620,6 @@ def test_compute_non_fictitious_bus_ids_filters_zero_load() -> None:
 
 def test_compute_non_fictitious_bus_ids_all_nonzero() -> None:
     """All buses with nonzero load in at least one stage are returned sorted."""
-    import pandas as pd
-
     from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
 
     load_stats = pd.DataFrame(
@@ -1366,8 +1637,6 @@ def test_compute_non_fictitious_bus_ids_all_nonzero() -> None:
 
 def test_compute_non_fictitious_bus_ids_empty_df() -> None:
     """Empty DataFrame returns an empty list."""
-    import pandas as pd
-
     from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
 
     result = compute_non_fictitious_bus_ids(pd.DataFrame())
@@ -1377,8 +1646,6 @@ def test_compute_non_fictitious_bus_ids_empty_df() -> None:
 
 def test_compute_non_fictitious_bus_ids_missing_column() -> None:
     """DataFrame missing mean_mw column returns an empty list (defensive)."""
-    import pandas as pd
-
     from cobre_bridge.dashboard.data import compute_non_fictitious_bus_ids
 
     load_stats = pd.DataFrame({"bus_id": [0, 1], "stage_id": [0, 0]})
@@ -1593,3 +1860,67 @@ class TestSectionLoaders:
         assert data.block_hours == temporal.block_hours
         assert data.discount_rate == temporal.discount_rate
         assert data.line_meta == temporal.line_meta
+
+
+# ---------------------------------------------------------------------------
+# _normalize_output_columns — cobre 0.14 diagnostic-output axis renames
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_output_columns_maps_014_solver_axes() -> None:
+    """0.14 ``stage_id``/``opening_index`` map to the dashboard's legacy names."""
+    df = pd.DataFrame(
+        {
+            "stage_id": [0, 1, None],
+            "opening_index": [0, None, 2],
+            "lp_solves": [3, 4, 5],
+        }
+    )
+    out = _normalize_output_columns(df)
+    assert "stage" in out.columns and "stage_id" not in out.columns
+    assert "opening" in out.columns and "opening_index" not in out.columns
+    # A NULL stage/opening survives as NaN (not refilled to a -1 sentinel), so
+    # the chart layer's ``>= 0`` filters and ``notna()`` checks keep working.
+    assert out["stage"].isna().sum() == 1
+    assert out["opening"].isna().sum() == 1
+
+
+def test_normalize_output_columns_maps_014_convergence_upper_bound() -> None:
+    """0.14 ``upper_bound`` maps to ``upper_bound_mean``; ``upper_bound_std`` kept."""
+    df = pd.DataFrame(
+        {
+            "iteration": [0, 1],
+            "upper_bound": [1.5e9, 1.4e9],
+            "upper_bound_std": [1.0e7, None],
+            "upper_bound_kind": ["statistical", "exact"],
+        }
+    )
+    out = _normalize_output_columns(df)
+    assert "upper_bound_mean" in out.columns and "upper_bound" not in out.columns
+    # The prefix-sharing std/kind columns must not be swept up by the rename.
+    assert "upper_bound_std" in out.columns
+    assert "upper_bound_kind" in out.columns
+
+
+def test_normalize_output_columns_leaves_pre_014_frame_unchanged() -> None:
+    """A 0.13 frame already carries the legacy names — pass through untouched."""
+    df = pd.DataFrame(
+        {"stage": [0, 1], "upper_bound_mean": [1.0, 2.0], "upper_bound_std": [0.1, 0.1]}
+    )
+    out = _normalize_output_columns(df)
+    assert list(out.columns) == ["stage", "upper_bound_mean", "upper_bound_std"]
+
+
+def test_normalize_output_columns_does_not_clobber_existing_legacy_name() -> None:
+    """If both spellings are present the legacy column wins (no overwrite)."""
+    df = pd.DataFrame({"stage": [7], "stage_id": [0]})
+    out = _normalize_output_columns(df)
+    # ``stage`` already exists, so ``stage_id`` is not renamed onto it.
+    assert out["stage"].tolist() == [7]
+    assert "stage_id" in out.columns
+
+
+def test_normalize_output_columns_empty_frame() -> None:
+    """An empty (absent-file) frame is returned as-is."""
+    empty = pd.DataFrame()
+    assert _normalize_output_columns(empty).empty

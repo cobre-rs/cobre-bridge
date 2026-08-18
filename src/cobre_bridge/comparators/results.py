@@ -110,7 +110,8 @@ class PercentileData:
     cobre_iteration_timing: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     # --- Generic constraints (RE, AGRINT, VminOP) — LHS comparison --- Constraint
-    # definitions and per-(stage, block) bound table read straight from the converted
+    # definitions (F3, sense-free) and per-(stage, block) bound table (F3 nullable
+    # ``bound_lower``/``bound_upper`` endpoints) read straight from the converted
     # Cobre case. ``lhs_newave`` evaluates each constraint's LHS against the source
     # model outputs (MEDIAS-USIH GHIDUH + int*.out interchanges) at stage_0based
     # granularity; ``lhs_cobre`` does the same against Cobre simulation parquets,
@@ -853,8 +854,6 @@ def _compare_lines(
     if nw_intercambio.is_empty() or cobre_line.is_empty():
         return results
 
-    offset = nw_offset
-
     # (nw_de, nw_para) → (cobre_line_id, name)
     matched: dict[tuple[int, int], tuple[int, str]] = {}
     for ln in alignment.lines:
@@ -870,7 +869,7 @@ def _compare_lines(
         if match is None:
             continue
         cobre_line_id, _name = match
-        stage_0based = int(row["stage"]) - offset
+        stage_0based = int(row["stage"]) - nw_offset
         if stage_0based < 0:
             continue
         nw_lookup[(cobre_line_id, stage_0based)] = float(row["value"])
@@ -1028,6 +1027,7 @@ def compare_results(
         read_cobre_convergence,
         read_cobre_cost_breakdown,
         read_cobre_fpha_planes,
+        read_cobre_hydro_bus_labels,
         read_cobre_hydro_means,
         read_cobre_hydro_metadata,
         read_cobre_hydro_per_stage_bounds,
@@ -1047,7 +1047,6 @@ def compare_results(
         read_cobre_training_duration,
     )
     from cobre_bridge.comparators.newave_readers import (
-        _find_saidas_dir,
         read_fpha_grid,
         read_fpha_planes,
         read_medias_hydro,
@@ -1070,11 +1069,22 @@ def compare_results(
     # Read entity names from both sides.
     nw_hydro_names, nw_thermal_names, nw_bus_names = read_reference_names(case)
     cobre_hydro_meta = read_cobre_hydro_metadata(cobre_output_dir)
+    # ``read_cobre_hydro_metadata`` carries plant physics only (decision B1);
+    # merge in the plant->bus *label* from the 0.13 hydro_bus_generation
+    # partition so ``dataset.metadata["cobre_hydro_meta"]`` -- the single
+    # channel report_builder.py already threads into the per-bus hydro chart
+    # helpers -- keeps carrying a bus label without those callers changing.
+    # A plant absent from the partition (e.g. it has no simulation output at
+    # all) simply gets no "bus_ids" key, matching the legacy "no bus" skip.
+    for hid, bus_ids in read_cobre_hydro_bus_labels(cobre_output_dir).items():
+        if hid in cobre_hydro_meta:
+            cobre_hydro_meta[hid]["bus_ids"] = bus_ids
     cobre_thermal_meta = read_cobre_thermal_metadata(cobre_output_dir)
     cobre_bus_meta = read_cobre_bus_metadata(cobre_output_dir)
 
-    # Locate the source model saidas directory.
-    saidas_dir = _find_saidas_dir(case.files.directory)
+    # The source-model result files (MEDIAS-*.CSV, nwlistop-*.out) live directly
+    # in the case directory (no saidas/ subfolder).
+    source_dir = case.files.directory
 
     nw_offset = 0
     nw_max_stage_1based: int | None = None
@@ -1083,8 +1093,8 @@ def compare_results(
     nw_hydro_slacks = pl.DataFrame()
 
     # --- Hydro comparison ---
-    if saidas_dir is not None:
-        nw_hydro = read_medias_hydro(saidas_dir)
+    if source_dir.is_dir():
+        nw_hydro = read_medias_hydro(source_dir)
         cobre_hydro = read_cobre_hydro_means(cobre_output_dir)
         if not cobre_hydro.is_empty():
             # Merge derived per-(hydro, stage) quantities:
@@ -1164,7 +1174,7 @@ def compare_results(
         )
 
         # --- Thermal comparison ---
-        nw_thermal = read_medias_thermal(saidas_dir)
+        nw_thermal = read_medias_thermal(source_dir)
         cobre_thermal = read_cobre_thermal_means(cobre_output_dir)
         if not nw_thermal.is_empty() and not cobre_thermal.is_empty():
             _LOG.info("Comparing thermal results...")
@@ -1175,7 +1185,7 @@ def compare_results(
             )
 
         # --- Bus/system comparison ---
-        nw_system = read_medias_system(saidas_dir)
+        nw_system = read_medias_system(source_dir)
         cobre_bus = read_cobre_bus_means(cobre_output_dir)
         if not nw_system.is_empty() and not cobre_bus.is_empty():
             _LOG.info("Comparing bus results...")
@@ -1188,7 +1198,7 @@ def compare_results(
         # int*.out files emit absolute the source model stages including pre-study
         # calendar months with all-zero values, so we reuse this offset to filter them
         # out and align the remainder with Cobre's 0-based stage_id.
-        nw_intercambio = read_nwlistop_intercambio(saidas_dir)
+        nw_intercambio = read_nwlistop_intercambio(source_dir)
         cobre_line = read_cobre_line_means(cobre_output_dir)
         if not nw_intercambio.is_empty() and not cobre_line.is_empty():
             _LOG.info("Comparing line interchange...")
@@ -1196,7 +1206,10 @@ def compare_results(
                 _compare_lines(nw_intercambio, cobre_line, alignment, nw_offset)
             )
     else:
-        _LOG.warning("NEWAVE saidas/ directory not found; skipping MEDIAS comparison.")
+        _LOG.warning(
+            "NEWAVE source result files not found in the case directory; "
+            "skipping MEDIAS comparison."
+        )
         nw_intercambio = pl.DataFrame()
         cobre_line = pl.DataFrame()
 
@@ -1296,9 +1309,9 @@ def compare_results(
     bus_aggregates = read_cobre_bus_aggregates(cobre_output_dir)
     nw_market = pl.DataFrame()
     nw_sin = pl.DataFrame()
-    if saidas_dir is not None:
-        nw_market = read_medias_market(saidas_dir)
-        nw_sin = read_medias_sin(saidas_dir)
+    if source_dir.is_dir():
+        nw_market = read_medias_market(source_dir)
+        nw_sin = read_medias_sin(source_dir)
 
     # --- the source model deterministic net load (load - NCS from sistema.dat) ---
     nw_net_load = read_newave_net_load(case.files.directory)
@@ -1371,7 +1384,7 @@ def compare_results(
     cobre_case_dir = case_dir_for(cobre_output_dir)
     gc_constraints = _load_generic_constraints(cobre_case_dir)
     gc_bounds_df = _load_generic_constraint_bounds(cobre_case_dir)
-    if gc_constraints and saidas_dir is not None:
+    if gc_constraints and source_dir.is_dir():
         _LOG.info(
             "Comparing %d generic constraints (RE/AGRINT/VminOP)...",
             len(gc_constraints),

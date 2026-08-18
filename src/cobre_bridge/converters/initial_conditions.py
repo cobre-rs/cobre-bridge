@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 import pandas as pd
 
@@ -34,6 +35,21 @@ def _filling_row(exph_df: pd.DataFrame, code: int) -> pd.Series:
     return exph_df.loc[
         (exph_df["codigo_usina"] == code) & exph_df["data_inicio_enchimento"].notna()
     ].iloc[0]
+
+
+def _delivery_window(start_year: int, start_month: int, k: int) -> tuple[str, str]:
+    """ISO ``(start_date, end_date)`` for delivery stage *k* (0-based).
+
+    Delivery stage ``k`` is the monthly study stage ``k`` months after the
+    study start; the window is ``[first-of-month, first-of-next-month)`` — the
+    exclusive end cobre's windowed-record validator expects.
+    """
+    total = (start_month - 1) + k
+    year = start_year + total // 12
+    month = total % 12 + 1
+    start = date(year, month, 1)
+    end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    return start.isoformat(), end.isoformat()
 
 
 def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
@@ -184,6 +200,9 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # than emit a case cobre would reject.
     anticipated = read_anticipated_dispatch(case)
     gen_bounds = thermal_generation_bounds(case) if anticipated else {}
+    if anticipated:
+        start_month = int(case.dger.mes_inicio_estudo)
+        start_year = int(case.dger.ano_inicio_estudo)
     past_anticipated_commitments: list[dict] = []
     for newave_code, dispatch in anticipated.items():
         try:
@@ -208,13 +227,21 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 hi,
                 ", ".join(f"{s:.4f}" for s in seeded),
             )
-        past_anticipated_commitments.append(
-            {
-                "thermal_id": thermal_id,
-                "values_mw": seeded,
-            }
-        )
-    past_anticipated_commitments.sort(key=lambda c: c["thermal_id"])
+        # cobre 0.14 takes past_anticipated_commitments as windowed records
+        # {thermal_id, start_date, end_date, value_mw}, one per leading delivery
+        # stage, tiling the plant's lead horizon exactly (strict full coverage,
+        # zero-MW stages written explicitly — a missing lead stage is rejected).
+        for k, value_mw in enumerate(seeded):
+            start_date, end_date = _delivery_window(start_year, start_month, k)
+            past_anticipated_commitments.append(
+                {
+                    "thermal_id": thermal_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "value_mw": value_mw,
+                }
+            )
+    past_anticipated_commitments.sort(key=lambda c: (c["thermal_id"], c["start_date"]))
 
     result: dict = {
         "$schema": _SCHEMA_URL,

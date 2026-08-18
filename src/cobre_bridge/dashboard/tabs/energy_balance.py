@@ -44,7 +44,9 @@ from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
 from cobre_bridge.ui.plotly_helpers import (
+    apply_stage_date_axis,
     apply_standard_layout,
+    stage_x_dates,
     stage_x_labels,
 )
 from cobre_bridge.ui.theme import BUS_COLORS, COLORS, GENERATION_COLORS
@@ -229,11 +231,12 @@ def _chart_gen_mix_hero(data: DashboardData) -> go.Figure:
 
     stages = sorted(h_gen.keys())
     xlabels = stage_x_labels(stages, data.stage_labels)
+    xdates = stage_x_dates(stages, data.stage_dates)
 
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=xlabels,
+            x=xdates,
             y=[h_gen.get(s, 0) for s in stages],
             name="Hydro",
             stackgroup="gen",
@@ -243,7 +246,7 @@ def _chart_gen_mix_hero(data: DashboardData) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=xlabels,
+            x=xdates,
             y=[t_gen.get(s, 0) for s in stages],
             name="Thermal",
             stackgroup="gen",
@@ -253,7 +256,7 @@ def _chart_gen_mix_hero(data: DashboardData) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=xlabels,
+            x=xdates,
             y=[n_gen.get(s, 0) for s in stages],
             name="NCS",
             stackgroup="gen",
@@ -263,7 +266,7 @@ def _chart_gen_mix_hero(data: DashboardData) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=xlabels,
+            x=xdates,
             y=[load_ser.get(s, 0) for s in stages],
             name="LP Load",
             line={"color": COLORS["load"], "width": 2.5, "dash": "dash"},
@@ -284,6 +287,7 @@ def _chart_gen_mix_hero(data: DashboardData) -> go.Figure:
         ),
         margin=_MARGIN,
     )
+    apply_stage_date_axis(fig, xdates, xlabels)
     return fig
 
 
@@ -379,6 +383,7 @@ def _chart_gen_by_bus(data: DashboardData) -> go.Figure:
     if not stages_all:
         stages_all = sorted(data.stage_hours.keys())
     xlabels = stage_x_labels(stages_all, data.stage_labels)
+    xdates = stage_x_dates(stages_all, data.stage_dates)
 
     def _to_map(df: pl.DataFrame, bus_id: int) -> dict[int, float]:
         sub = df.filter(pl.col("bus_id") == bus_id)
@@ -457,7 +462,7 @@ def _chart_gen_by_bus(data: DashboardData) -> go.Figure:
         ]:
             fig.add_trace(
                 go.Scatter(
-                    x=xlabels,
+                    x=xdates,
                     y=[vals.get(s, 0) for s in stages_all],
                     name=name,
                     stackgroup=f"g{bus_id}",
@@ -471,7 +476,7 @@ def _chart_gen_by_bus(data: DashboardData) -> go.Figure:
             )
         fig.add_trace(
             go.Scatter(
-                x=xlabels,
+                x=xdates,
                 y=[load_s.get(s, 0) for s in stages_all],
                 name="LP Load",
                 mode="lines",
@@ -495,6 +500,7 @@ def _chart_gen_by_bus(data: DashboardData) -> go.Figure:
         ),
         margin=dict(l=60, r=30, t=80, b=50),
     )
+    apply_stage_date_axis(fig, xdates, xlabels)
     return fig
 
 
@@ -561,6 +567,7 @@ def _render_deficit_excess(data: DashboardData) -> str:
 
         stages = sorted(raw["stage_id"].unique().to_list())
         xlabels = stage_x_labels(stages, data.stage_labels)
+        xdates = stage_x_dates(stages, data.stage_dates)
 
         for i, bus_id in enumerate(bus_ids):
             sub = (
@@ -571,8 +578,8 @@ def _render_deficit_excess(data: DashboardData) -> str:
             if sub.empty:
                 continue
             pct = compute_percentiles(sub, ["stage_id"], "_mw")
-            # Map stage_id -> x-label for display
-            pct["_x"] = pct["stage_id"].map(dict(zip(stages, xlabels)))
+            # Map stage_id -> ISO date x-position (proportional date axis)
+            pct["_x"] = pct["stage_id"].map(dict(zip(stages, xdates)))
             color = BUS_COLORS[i % len(BUS_COLORS)]
             bus_name = data.bus_names.get(bus_id, str(bus_id))
             add_mean_p50_band(fig, pct, "_x", bus_name, color)
@@ -580,6 +587,7 @@ def _render_deficit_excess(data: DashboardData) -> str:
         fig.update_layout(
             xaxis_title="Stage", yaxis_title=y_label, legend=_LEGEND, margin=_MARGIN
         )
+        apply_stage_date_axis(fig, xdates, xlabels)
         return fig
 
     deficit_fig = _bus_chart("deficit_mwh", "Deficit by Bus", "Deficit (MW)")
@@ -659,6 +667,7 @@ def _render_reservoir_storage(data: DashboardData) -> str:
         pct = compute_percentiles(df_sys, ["stage_id"], "_pct")
         stages = sorted(pct["stage_id"].tolist())
         xlabels_sys = stage_x_labels(stages, data.stage_labels)
+        xdates_sys = stage_x_dates(stages, data.stage_dates)
 
         for q_col, q_name, dash in [
             ("p10", "P10", "dot"),
@@ -667,7 +676,7 @@ def _render_reservoir_storage(data: DashboardData) -> str:
         ]:
             sys_fig.add_trace(
                 go.Scatter(
-                    x=xlabels_sys,
+                    x=xdates_sys,
                     y=pct[q_col].tolist(),
                     name=q_name,
                     mode="lines",
@@ -678,6 +687,7 @@ def _render_reservoir_storage(data: DashboardData) -> str:
                     },
                 )
             )
+        apply_stage_date_axis(sys_fig, xdates_sys, xlabels_sys)
 
     else:
         sys_fig.add_annotation(
@@ -764,6 +774,7 @@ def _render_reservoir_storage(data: DashboardData) -> str:
         )
         all_stages = sorted(bus_stor["stage_id"].unique().to_list())
         xlabels = stage_x_labels(all_stages, data.stage_labels)
+        xdates = stage_x_dates(all_stages, data.stage_dates)
 
         for idx, bus_id in enumerate(active_bus_ids):
             row = idx // n_cols_bus + 1
@@ -778,7 +789,7 @@ def _render_reservoir_storage(data: DashboardData) -> str:
                 sub["_pct"] = 0.0
 
             pct = compute_percentiles(sub, ["stage_id"], "_pct")
-            pct["_x"] = pct["stage_id"].map(dict(zip(all_stages, xlabels)))
+            pct["_x"] = pct["stage_id"].map(dict(zip(all_stages, xdates)))
             color = BUS_COLORS[idx % len(BUS_COLORS)]
             bus_name = data.bus_names.get(bus_id, str(bus_id))
             add_mean_p50_band(bus_fig, pct, "_x", bus_name, color, row=row, col=col)
@@ -796,6 +807,7 @@ def _render_reservoir_storage(data: DashboardData) -> str:
             ),
             margin=dict(l=60, r=30, t=80, b=50),
         )
+        apply_stage_date_axis(bus_fig, xdates, xlabels)
     else:
         bus_fig = go.Figure()
         bus_fig.add_annotation(
@@ -891,6 +903,7 @@ def _energy_quantiles_fig(
     value_col: str,
     *,
     stage_labels: dict[int, str],
+    stage_dates: dict[int, str],
     y_title: str,
     color: str,
     scale: float = 1.0,
@@ -917,6 +930,7 @@ def _energy_quantiles_fig(
     pct = compute_percentiles(pdf, ["stage_id"], "_scaled")
     stages = sorted(pct["stage_id"].tolist())
     xlabels = stage_x_labels(stages, stage_labels)
+    xdates = stage_x_dates(stages, stage_dates)
 
     for q_col, q_name, dash in [
         ("p10", "P10", "dot"),
@@ -925,7 +939,7 @@ def _energy_quantiles_fig(
     ]:
         fig.add_trace(
             go.Scatter(
-                x=xlabels,
+                x=xdates,
                 y=pct[q_col].tolist(),
                 name=q_name,
                 mode="lines",
@@ -951,6 +965,7 @@ def _energy_quantiles_fig(
         ),
         margin=_MARGIN,
     )
+    apply_stage_date_axis(fig, xdates, xlabels)
     return fig
 
 
@@ -975,6 +990,7 @@ def _render_stored_energy(data: DashboardData) -> str:
         sys_df,
         "stored_energy_final_mwh",
         stage_labels=data.stage_labels,
+        stage_dates=data.stage_dates,
         y_title="System EARM (GWh)",
         color=COLORS["hydro"],
         scale=1.0 / 1000.0,
@@ -1008,13 +1024,14 @@ def _render_stored_energy(data: DashboardData) -> str:
         )
         all_stages = sorted(by_bus_df["stage_id"].unique().to_list())
         xlabels = stage_x_labels(all_stages, data.stage_labels)
+        xdates = stage_x_dates(all_stages, data.stage_dates)
         for idx, bus_id in enumerate(bus_ids):
             row = idx // n_cols + 1
             col = idx % n_cols + 1
             sub = by_bus_df.filter(pl.col("bus_id") == bus_id).to_pandas().copy()
             sub["_gwh"] = sub["stored_energy_final_mwh"] / 1000.0
             pct = compute_percentiles(sub, ["stage_id"], "_gwh")
-            pct["_x"] = pct["stage_id"].map(dict(zip(all_stages, xlabels)))
+            pct["_x"] = pct["stage_id"].map(dict(zip(all_stages, xdates)))
             color = BUS_COLORS[idx % len(BUS_COLORS)]
             add_mean_p50_band(
                 bus_fig,
@@ -1039,6 +1056,7 @@ def _render_stored_energy(data: DashboardData) -> str:
             ),
             margin=dict(l=60, r=30, t=80, b=50),
         )
+        apply_stage_date_axis(bus_fig, xdates, xlabels)
         bus_card = make_chart_card(
             bus_fig,
             "EARM by Bus (GWh)",
@@ -1074,6 +1092,7 @@ def _render_inflow_energy(data: DashboardData) -> str:
         sys_df,
         "incremental_inflow_energy_mw",
         stage_labels=data.stage_labels,
+        stage_dates=data.stage_dates,
         y_title="System ENA (MW)",
         color=GENERATION_COLORS.get("hydro", COLORS["hydro"]),
     )
@@ -1246,6 +1265,7 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
     if not ncs_gen_raw.is_empty():
         stages = sorted(ncs_gen_raw["stage_id"].to_list())
         xlabels = stage_x_labels(stages, data.stage_labels)
+        xdates = stage_x_dates(stages, data.stage_dates)
         gen_map = dict(
             zip(ncs_gen_raw["stage_id"].to_list(), ncs_gen_raw["_gen_mw"].to_list())
         )
@@ -1260,7 +1280,7 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
             )
             gen_fig.add_trace(
                 go.Scatter(
-                    x=xlabels,
+                    x=xdates,
                     y=[avail_map.get(s, 0) for s in stages],
                     name="Available Capacity",
                     fill="tozeroy",
@@ -1273,7 +1293,7 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
         # Generation area (green, on top)
         gen_fig.add_trace(
             go.Scatter(
-                x=xlabels,
+                x=xdates,
                 y=[gen_map.get(s, 0) for s in stages],
                 name="NCS Generation",
                 fill="tozeroy",
@@ -1282,6 +1302,7 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
                 line={"color": GENERATION_COLORS["ncs"], "width": 2},
             )
         )
+        apply_stage_date_axis(gen_fig, xdates, xlabels)
     else:
         gen_fig.add_annotation(
             text="No data.", showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5
@@ -1543,6 +1564,8 @@ def _build_hero_section(data: DashboardData) -> str:
 
     data_json = json_for_script(hero_data)
     labels_json = json_for_script(xlabels)
+    xdates = stage_x_dates(hero_data["stages"], data.stage_dates)
+    dates_json = json_for_script(xdates)
 
     hydro_color = GENERATION_COLORS["hydro"]
     thermal_color = GENERATION_COLORS["thermal"]
@@ -1578,13 +1601,14 @@ def _build_hero_section(data: DashboardData) -> str:
         "<script>\n"
         "const EB_DATA = " + data_json + ";\n"
         "const EB_LABELS = " + labels_json + ";\n"
+        "const EB_DATES = " + dates_json + ";\n"
         f"const _EB_HYDRO_COLOR = '{hydro_color}';\n"
         f"const _EB_THERMAL_COLOR = '{thermal_color}';\n"
         f"const _EB_NCS_COLOR = '{ncs_color}';\n"
         f"const _EB_LOAD_COLOR = '{load_color}';\n"
         + r"""
 var _EB_L = {hovermode:'x unified',
-             xaxis:{title:'Stage'},
+             xaxis:{title:'Stage', type:'date', tickmode:'array', tickvals:EB_DATES, ticktext:EB_LABELS},
              yaxis:{title:'MW'},
              margin:{l:60,r:20,t:60,b:10},
              legend:{orientation:'h',yanchor:'bottom',y:1.02,
@@ -1592,17 +1616,17 @@ var _EB_L = {hovermode:'x unified',
 var _EB_C = {responsive:true};
 
 function _eb_area(nm, y, color, stack) {
-  var t = {x:EB_LABELS, y:y, name:nm, mode:'lines',
+  var t = {x:EB_DATES, y:y, name:nm, mode:'lines',
            line:{color:color}};
   if(stack) { t.stackgroup = 'gen'; }
   return t;
 }
 function _eb_line(nm, y, color, dash) {
-  return {x:EB_LABELS, y:y, name:nm, mode:'lines',
+  return {x:EB_DATES, y:y, name:nm, mode:'lines',
           line:{color:color, width:2.5, dash:dash||'solid'}};
 }
 function _eb_thin_line(nm, y, color) {
-  return {x:EB_LABELS, y:y, name:nm, mode:'lines',
+  return {x:EB_DATES, y:y, name:nm, mode:'lines',
           line:{color:color, width:1}, opacity:0.15,
           showlegend:false, hoverinfo:'skip'};
 }

@@ -246,6 +246,14 @@ def _read_converter_line_bounds(
 
     The converter output lives one level above the Cobre output directory
     (``cobre_output_dir.parent``).
+
+    Only reads rows with ``block_id`` IS NULL (the stage-level base rows),
+    mirroring ``_read_cobre_bounds`` above. ``line_bounds.parquet`` now also
+    carries per-block override rows (cobre decision 10, epic 02 §7.2); this
+    dict is keyed by ``(line_id, stage_id)`` with no block dimension, so
+    without the filter a later block row would silently overwrite the base
+    capacity for any stage with a differing block. Block-level fidelity is
+    not yet this comparison's job.
     """
     case_dir = case_dir_for(cobre_output_dir)
     path = case_dir / "constraints" / "line_bounds.parquet"
@@ -254,6 +262,7 @@ def _read_converter_line_bounds(
         return {}
 
     df = pl.read_parquet(path)
+    df = df.filter(pl.col("block_id").is_null())
     result: dict[tuple[int, int, str], float] = {}
     for row in df.iter_rows(named=True):
         lid = int(row["line_id"])
@@ -357,7 +366,6 @@ def compare_bounds(
         tolerance,
     )
 
-    # Compute the source model bounds from input files.
     _LOG.info("Computing NEWAVE bounds from input files...")
     computed_hydro = compute_hydro_bounds(case, id_map)
     computed_thermal = compute_thermal_bounds(case, id_map)
@@ -369,7 +377,6 @@ def compare_bounds(
         len(computed_line),
     )
 
-    # Read Cobre bounds.
     _LOG.info("Reading Cobre bounds...")
     cobre_bounds = _read_cobre_bounds(cobre_output_dir)
     _LOG.info("Cobre: %d bound entries", len(cobre_bounds))

@@ -11,7 +11,6 @@ the ``scenarios/`` directory of a Cobre case.
 from __future__ import annotations
 
 import logging
-from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -169,46 +168,30 @@ _LOAD_SCHEMA = pa.schema(
     ]
 )
 
-# Parquet schema for past inflow history.
-_INFLOW_HISTORY_SCHEMA = pa.schema(
-    [
-        pa.field("hydro_id", pa.int32()),
-        pa.field("date", pa.date32()),
-        pa.field("value_m3s", pa.float64()),
-    ]
-)
 
-
-def convert_recent_inflow_lags(
+def _vazpast_incremental(
     case: NewaveCase,
     id_map: NewaveIdMap,
-) -> list[dict]:
-    """Extract 12 recent inflow lags from vazpast.dat for initial_conditions.json.
+) -> dict[int, dict[int, float]]:
+    """Read the hydrological-tendency file and return incremental inflows.
 
-    Returns a list of ``{"hydro_id": int, "values_m3s": [lag1, ..., lag12]}``
-    entries conforming to the ``past_inflows`` field of the Cobre
-    ``initial_conditions.json`` schema.  ``values_m3s[0]`` is the most recent
-    lag (month immediately before study start), ``values_m3s[11]`` is the
-    oldest.
-
-    Returns an empty list if ``vazpast.dat`` is absent.
+    Returns ``{cobre_hydro_id: {calendar_month: value_m3s}}`` after the
+    posto -> plant mapping and the natural -> incremental subtraction.
+    Empty when the file is absent, unreadable, or carries no tendency data.
     """
     if case.files.vazpast is None:
         logger.debug("vazpast.dat not found; no recent inflow lags.")
-        return []
+        return {}
 
     try:
         vazpast_obj = case.vazpast
     except Exception:  # noqa: BLE001
         logger.warning("vazpast.dat could not be parsed; skipping recent lags.")
-        return []
+        return {}
 
     df_tend: pd.DataFrame | None = vazpast_obj.tendencia
     if df_tend is None or df_tend.empty:
-        return []
-
-    dger = case.dger
-    start_m = dger.mes_inicio_estudo
+        return {}
 
     # The vazpast "codigo_usina" column is actually the posto (gauging station),
     # same convention as vazoes.dat.  Map posto -> hydro_code -> cobre_id.
@@ -221,9 +204,6 @@ def convert_recent_inflow_lags(
             posto_to_cobre_id[posto] = id_map.hydro_id(code)
         except KeyError:
             pass
-
-    # Lag order: lag 1 = month before study start, ..., lag 12 = 12 months back.
-    lag_cal_months = [((start_m - 1 - i) % 12) + 1 for i in range(1, 13)]
 
     # Collect natural inflow values by posto: {posto: {cal_month: value}}.
     natural: dict[int, dict[int, float]] = {}
@@ -241,34 +221,33 @@ def convert_recent_inflow_lags(
         confhd_df, filling_codes=_case_filling_codes(case)
     )
 
-    result: list[dict] = []
+    incremental: dict[int, dict[int, float]] = {}
     for posto, nat_vals in natural.items():
         inc_vals: dict[int, float] = dict(nat_vals)
         for up_posto in upstream_map.get(posto, []):
             up_nat = natural.get(up_posto, {})
             for m in inc_vals:
                 inc_vals[m] -= up_nat.get(m, 0.0)
+        incremental[posto_to_cobre_id[posto]] = inc_vals
 
-        values_m3s = [inc_vals.get(m, 0.0) for m in lag_cal_months]
-        result.append({"hydro_id": posto_to_cobre_id[posto], "values_m3s": values_m3s})
-
-    result.sort(key=lambda e: e["hydro_id"])
-    return result
+    return incremental
 
 
-def convert_inflow_history(
+def _incremental_history(
     case: NewaveCase,
     id_map: NewaveIdMap,
-) -> pa.Table:
-    """Convert the full historical inflow series from vazoes.dat to Parquet.
+) -> tuple[int, int, dict[int, np.ndarray]]:
+    """Read the historical record and return incremental series per hydro.
 
-    Reads ``vazoes.dat`` and produces one row per (hydro, month) pair,
-    starting from January of ``ano_inicial_historico`` (from ``dger.dat``).
+    Returns ``(hist_start_year, n_rows, series_by_hydro)``: monthly
+    incremental inflow arrays (m³/s) keyed by Cobre hydro id, one entry per
+    month from January of ``hist_start_year``, truncated at the month
+    before the study start.
 
-    Returns
-    -------
-    pa.Table
-        Columns: ``hydro_id`` (INT32), ``date`` (DATE32), ``value_m3s`` (DOUBLE).
+    Raises
+    ------
+    FileNotFoundError
+        If the vazoes.dat DataFrame is absent or empty.
     """
     # vazoes.dat is large and read only here, so it stays uncached on case.files.
     vazoes_obj = Vazoes.read(case.files.vazoes)
@@ -314,35 +293,16 @@ def convert_inflow_history(
     upstream_map = _build_upstream_postos(
         confhd_df, filling_codes=_case_filling_codes(case)
     )
-    incremental_by_posto: dict[int, np.ndarray] = {}
+    incremental: dict[int, np.ndarray] = {}
     for posto, nat in natural_by_posto.items():
         inc = nat.copy()
         for up_posto in upstream_map.get(posto, []):
             up_nat = natural_by_posto.get(up_posto)
             if up_nat is not None:
                 inc = inc - up_nat
-        incremental_by_posto[posto] = inc
+        incremental[posto_to_hydro[posto]] = inc
 
-    rows_hydro_id: list[int] = []
-    rows_date: list[date] = []
-    rows_value: list[float] = []
-
-    for posto, values in incremental_by_posto.items():
-        cobre_id = posto_to_hydro[posto]
-        for i in range(n_rows):
-            y = hist_start_year + (i // 12)
-            m = (i % 12) + 1
-            rows_hydro_id.append(cobre_id)
-            rows_date.append(date(y, m, 1))
-            rows_value.append(float(values[i]))
-
-    return pa.table(
-        {
-            "hydro_id": pa.array(rows_hydro_id, type=pa.int32()),
-            "date": pa.array(rows_date, type=pa.date32()),
-            "value_m3s": pa.array(rows_value, type=pa.float64()),
-        }
-    )
+    return hist_start_year, n_rows, incremental
 
 
 def convert_inflow_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:

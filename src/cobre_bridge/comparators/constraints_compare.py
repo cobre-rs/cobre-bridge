@@ -21,6 +21,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import pandas as pd
 import polars as pl
@@ -32,6 +33,7 @@ from cobre_bridge.constraint_expr import (
     parse_expression,
     resolve_param_to_column,
 )
+from cobre_bridge.generic_constraint_format import shape_from_bounds
 from cobre_bridge.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -40,7 +42,11 @@ _LOG = logging.getLogger(__name__)
 def _load_generic_constraints(cobre_input_dir: Path) -> list[dict]:
     """Load constraint definitions from ``constraints/generic_constraints.json``.
 
-    Returns an empty list when the file is missing or malformed.
+    The F3 objects are sense-free (no ``sense`` key); direction is derived
+    from the companion bounds table's endpoints when a label is needed (see
+    :func:`per_stage_bounds` / :func:`cobre_bridge.generic_constraint_format.
+    shape_from_bounds`). Returns an empty list when the file is missing or
+    malformed.
     """
     path = cobre_input_dir / "constraints" / "generic_constraints.json"
     if not path.exists():
@@ -55,7 +61,11 @@ def _load_generic_constraints(cobre_input_dir: Path) -> list[dict]:
 
 
 def _load_generic_constraint_bounds(cobre_input_dir: Path) -> pl.DataFrame:
-    """Load bound table from ``constraints/generic_constraint_bounds.parquet``."""
+    """Load bound table from ``constraints/generic_constraint_bounds.parquet``.
+
+    F3 shape: nullable ``bound_lower``/``bound_upper`` endpoints, no single
+    ``bound`` column — even in the missing-file fallback schema below.
+    """
     path = cobre_input_dir / "constraints" / "generic_constraint_bounds.parquet"
     if not path.exists():
         return pl.DataFrame(
@@ -63,7 +73,8 @@ def _load_generic_constraint_bounds(cobre_input_dir: Path) -> pl.DataFrame:
                 "constraint_id": pl.Int32,
                 "stage_id": pl.Int32,
                 "block_id": pl.Int32,
-                "bound": pl.Float64,
+                "bound_lower": pl.Float64,
+                "bound_upper": pl.Float64,
             }
         )
     return pl.read_parquet(path)
@@ -357,18 +368,54 @@ def evaluate_lhs_cobre(
     )
 
 
+class ResolvedBound(NamedTuple):
+    """A per-(constraint, stage) F3 bound reduced to one comparison-ready limit.
+
+    ``value`` is the endpoint appropriate to the row's evaluated direction —
+    the number the numeric comparison and the chart plot, identical to what
+    the pre-F3 single ``bound`` column held. ``shape`` is the direction label
+    (``">="``/``"<="``/``"=="``/``"range"``) from
+    :func:`~cobre_bridge.generic_constraint_format.shape_from_bounds`, for
+    display only.
+    """
+
+    value: float
+    shape: str
+
+
+def _resolve_bound(lower: float | None, upper: float | None) -> ResolvedBound:
+    """Resolve one F3 bound row to a single comparison-ready limit + shape.
+
+    ``>=`` (lower-only) reads ``lower``; ``<=`` (upper-only) reads ``upper``;
+    ``==`` (both equal) reads either (they agree) — this matches the pre-F3
+    single ``bound`` column value exactly for every constraint family this
+    comparator evaluates today (RE/AGRINT/VminOP are all single-sided). A
+    genuine two-sided ``range`` has no producer feeding this comparator; the
+    upper (ceiling) endpoint is used as the documented fallback so a future
+    band constraint degrades to one visualized limit rather than raising.
+    """
+    shape = shape_from_bounds(lower, upper)
+    if shape in ("<=", "range"):
+        if upper is None:  # pragma: no cover - guaranteed by shape_from_bounds
+            raise AssertionError(f"shape {shape!r} implies a non-null upper bound")
+        return ResolvedBound(upper, shape)
+    if lower is None:  # pragma: no cover - guaranteed by shape_from_bounds
+        raise AssertionError(f"shape {shape!r} implies a non-null lower bound")
+    return ResolvedBound(lower, shape)
+
+
 def per_stage_bounds(
     gc_bounds: pl.DataFrame,
     max_stage: int | None = None,
-) -> dict[int, dict[int, float]]:
+) -> dict[int, dict[int, ResolvedBound]]:
     """Reduce per-(stage, block) bounds to one value per (constraint, stage).
 
     When per-block bounds disagree (rare; AGRINT/RE bounds are usually
     block-invariant), the block_id=0 value is preferred.  Returns
-    ``{constraint_id: {stage_id: bound}}``; stages beyond ``max_stage``
-    are dropped when ``max_stage`` is supplied.
+    ``{constraint_id: {stage_id: ResolvedBound}}``; stages beyond
+    ``max_stage`` are dropped when ``max_stage`` is supplied.
     """
-    out: dict[int, dict[int, float]] = {}
+    out: dict[int, dict[int, ResolvedBound]] = {}
     if gc_bounds.is_empty():
         return out
     df = gc_bounds
@@ -376,7 +423,7 @@ def per_stage_bounds(
         df = df.filter(pl.col("stage_id") <= max_stage)
     for cid, group in df.group_by("constraint_id"):
         cid_int = int(cid[0])
-        per_stage: dict[int, float] = {}
+        per_stage: dict[int, ResolvedBound] = {}
         if "block_id" in group.columns:
             preferred = group.filter(pl.col("block_id") == 0)
             if preferred.is_empty():
@@ -386,7 +433,9 @@ def per_stage_bounds(
         for row in preferred.iter_rows(named=True):
             stage = int(row["stage_id"])
             if stage not in per_stage:
-                per_stage[stage] = float(row["bound"])
+                per_stage[stage] = _resolve_bound(
+                    row["bound_lower"], row["bound_upper"]
+                )
         out[cid_int] = per_stage
     return out
 
@@ -434,12 +483,12 @@ def _is_vminop(constraint: dict) -> bool:
 
 
 def _load_rho_acum_overrides(cobre_case_dir: Path) -> dict[int, dict[int, float]]:
-    """Load per-stage ρ_acum overrides from ``system/scalar_parameters.json``.
+    """Load per-stage ρ_acum overrides from ``constraints/generic_parameters.json``.
 
     Returns ``{hydro_id: {stage_id: ρ_acum}}`` where ρ_acum is the energy-scaled
     coefficient (MWmonth/hm³) the VminOP LP uses, so ρ·storage[hm³] is MWmonth.
     """
-    path = cobre_case_dir / "system" / "scalar_parameters.json"
+    path = cobre_case_dir / "constraints" / "generic_parameters.json"
     out: dict[int, dict[int, float]] = {}
     if not path.exists():
         return out
@@ -447,7 +496,7 @@ def _load_rho_acum_overrides(cobre_case_dir: Path) -> dict[int, dict[int, float]
         with path.open() as f:
             params = json.load(f).get("scalar_parameters", [])
     except (OSError, json.JSONDecodeError) as exc:
-        _LOG.warning("scalar_parameters.json could not be parsed: %s", exc)
+        _LOG.warning("generic_parameters.json could not be parsed: %s", exc)
         return out
     for entry in params:
         m = re.fullmatch(r"rho_acum_h(\d+)", str(entry.get("name", "")))
@@ -613,6 +662,12 @@ def apply_vminop_useful_energy(
     gc_lhs_nw_out = pl.concat([gc_lhs_nw, nw_new]) if nw_rows else gc_lhs_nw
 
     # Subtract dead-volume energy from VminOP bounds → useful (pct·EARMX) bound.
+    # VminOP rows are always ``>=`` (see `convert_vminop_constraints`), so the
+    # writer's F3 endpoint pair always carries the stored value in
+    # ``bound_lower`` with ``bound_upper`` null — subtracting only from
+    # ``bound_lower`` is therefore exactly the pre-F3 ``bound - dead``
+    # semantics. Non-VminOP rows get a filled `dead` of 0.0, so their
+    # (possibly-null) ``bound_lower`` passes through unchanged.
     if dead_by_cs and not gc_bounds.is_empty():
         dead_df = pl.DataFrame(
             [
@@ -628,7 +683,9 @@ def apply_vminop_useful_energy(
         gc_bounds_out = (
             gc_bounds.join(dead_df, on=["constraint_id", "stage_id"], how="left")
             .with_columns(
-                (pl.col("bound") - pl.col("dead").fill_null(0.0)).alias("bound")
+                (pl.col("bound_lower") - pl.col("dead").fill_null(0.0)).alias(
+                    "bound_lower"
+                )
             )
             .drop("dead")
         )

@@ -17,9 +17,9 @@ import pandas as pd
 import polars as pl
 import pyarrow.parquet as pq
 
-from cobre_bridge.cobre_io import (
-    resolve_hydro_productivities,
-)
+from cobre_bridge.cobre_io import resolve_hydro_productivities
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.errors import CobreOutputError
 
 logger = logging.getLogger(__name__)
 
@@ -44,18 +44,12 @@ def scan_entity(case_dir: Path, entity: str) -> pl.LazyFrame:
 def load_names(case_dir: Path) -> dict[tuple[str, int], str]:
     """Load entity name mappings from system JSON files."""
     names: dict[tuple[str, int], str] = {}
-    for entity, key in [
-        ("hydros", "hydros"),
-        ("buses", "buses"),
-        ("thermals", "thermals"),
-        ("lines", "lines"),
-        ("non_controllable_sources", "non_controllable_sources"),
-    ]:
+    for entity in ("hydros", "buses", "thermals", "lines", "non_controllable_sources"):
         path = case_dir / "system" / f"{entity}.json"
         if path.exists():
             with open(path) as f:
                 data = json.load(f)
-            for item in data.get(key, []):
+            for item in data.get(entity, []):
                 names[(entity, item["id"])] = item.get("name", str(item["id"]))
     return names
 
@@ -65,24 +59,132 @@ def entity_name(names: dict[tuple[str, int], str], entity: str, eid: int) -> str
 
 
 def load_stage_labels(case_dir: Path) -> dict[int, str]:
-    """Return stage_id -> "Mon YYYY" label from stages.json."""
+    """Return stage_id -> date label from stages.json, keyed on each stage's date.
+
+    Monthly horizons (the source model's typical monthly stages) get a compact
+    ``"Mon YYYY"`` label. When a horizon packs several stages into one calendar
+    month — e.g. the weekly stages of a DECOMP week/month deck — a month-only
+    label would collapse them onto a single x-axis point, so every stage instead
+    gets a day-resolution ``"DD Mon YYYY"`` label from its own ``start_date``.
+    A stage with a missing or unparseable ``start_date`` falls back to its id.
+    """
     path = case_dir / "stages.json"
     if not path.exists():
         return {}
     with open(path) as f:
         data = json.load(f)
-    labels: dict[int, str] = {}
+
+    parsed: list[tuple[int, pd.Timestamp | None]] = []
     for stage in data.get("stages", []):
         sid = stage["id"]
         start = stage.get("start_date", "")
+        stamp: pd.Timestamp | None = None
         if start:
             try:
-                labels[sid] = pd.to_datetime(start).strftime("%b %Y")
+                stamp = pd.to_datetime(start)
             except (ValueError, TypeError):
-                labels[sid] = str(sid)
-        else:
-            labels[sid] = str(sid)
-    return labels
+                stamp = None
+        parsed.append((sid, stamp))
+
+    # If two stages share a calendar month, a month-only label would map them to
+    # the same x-axis point; drop to day resolution for the whole axis so each
+    # stage stays a distinct, date-accurate point.
+    year_months = [(s.year, s.month) for _, s in parsed if s is not None]
+    sub_monthly = len(year_months) != len(set(year_months))
+    fmt = "%d %b %Y" if sub_monthly else "%b %Y"
+
+    return {
+        sid: (stamp.strftime(fmt) if stamp is not None else str(sid))
+        for sid, stamp in parsed
+    }
+
+
+def load_stage_dates(case_dir: Path) -> dict[int, str]:
+    """Return stage_id -> ISO ``YYYY-MM-DD`` start date from stages.json.
+
+    These are the x-axis *positions* (paired with :func:`load_stage_labels`'s
+    display text as tick labels): feeding them to a Plotly ``type="date"`` axis
+    spaces the stages by their true calendar distance, so weekly stages sit
+    closer together than a following monthly stage. A stage with a missing or
+    unparseable ``start_date`` is omitted (its chart point falls back to the
+    stage-id label via the axis helper).
+    """
+    path = case_dir / "stages.json"
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        data = json.load(f)
+    dates: dict[int, str] = {}
+    for stage in data.get("stages", []):
+        start = stage.get("start_date", "")
+        if not start:
+            continue
+        try:
+            dates[stage["id"]] = pd.to_datetime(start).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            continue
+    return dates
+
+
+def resolve_hydro_bus_id(hydro: dict, *, hydros_path: Path) -> int | None:
+    """Resolve one hydro plant's bus id from its ``unit_groups`` array.
+
+    Single implementation of the pre-0.13 top-level ``hydros.json``
+    ``bus_id`` -> 0.13 ``unit_groups[].bus_id`` relocation, shared by
+    ``load_hydro_bus_map`` and ``load_hydro_metadata`` so the two never
+    disagree on a plant's bus (AC5).
+
+    - Every plant either pipeline emits today carries exactly one distinct
+      ``bus_id`` across its groups (cobre rule 41's mirror invariant) -- that
+      value is returned.
+    - A plant recorded at more than one distinct bus is **not** collapsed
+      onto an arbitrary group's bus (that would silently mislabel it) and is
+      **not** duplicated across every bus it touches either (that would
+      double-count it wherever a caller sums per bus) -- the same dilemma the
+      compare layer resolved the same way in
+      ``comparators.analyze._bus_name_lookups``. Implementation note (the
+      deliberate degraded-rendering choice for this ticket): a ``WARNING``
+      :class:`~cobre_bridge.diagnostics.Diagnostic` is emitted and ``None``
+      is returned. Callers must omit the plant from any single-bus-keyed
+      view: ``load_hydro_bus_map``'s id->bus map has no room for more than
+      one bus per plant, and ``load_hydro_metadata`` drops the ``"bus_id"``
+      key entirely so its existing ``.get("bus_id", <default>)`` call sites
+      in the dashboard tabs degrade to "unknown bus" for it. The plant's
+      non-bus metadata (name, volumes, productivity, ...) is unaffected and
+      keeps rendering in the per-plant tables that are not bus-keyed.
+    - Missing or empty ``unit_groups`` raises :class:`CobreOutputError`
+      naming the plant. This cannot happen on a real 0.13 case (cobre rejects
+      it at load), so it only guards a hand-edited or pre-0.13 file.
+    """
+    hid = hydro.get("id")
+    name = hydro.get("name", str(hid))
+    groups = hydro.get("unit_groups")
+    if not groups:
+        raise CobreOutputError(
+            f"hydro {hid} ({name}) has no unit_groups; cannot resolve its bus",
+            path=str(hydros_path),
+        )
+    bus_ids = {g["bus_id"] for g in groups}
+    if len(bus_ids) == 1:
+        return next(iter(bus_ids))
+    emit(
+        Diagnostic(
+            code="hydro-unit-groups-multi-bus",
+            severity=Severity.WARNING,
+            category="Dashboard data",
+            title="Hydro plant spans multiple buses",
+            summary=(
+                f"Hydro {hid} ({name}) has unit_groups recorded at buses "
+                f"{sorted(bus_ids)}; a single plant-level bus cannot be "
+                "chosen without collapsing onto one of them or "
+                "double-counting the plant at each, so it is omitted from "
+                "bus-keyed dashboard views."
+            ),
+            notes=[f"hydro_id: {hid}", f"bus_ids: {sorted(bus_ids)}"],
+        ),
+        logger=logger,
+    )
+    return None
 
 
 def load_hydro_bus_map(case_dir: Path) -> dict[int, int]:
@@ -91,7 +193,12 @@ def load_hydro_bus_map(case_dir: Path) -> dict[int, int]:
         return {}
     with open(path) as f:
         d = json.load(f)
-    return {h["id"]: h["bus_id"] for h in d["hydros"]}
+    result: dict[int, int] = {}
+    for h in d["hydros"]:
+        bus_id = resolve_hydro_bus_id(h, hydros_path=path)
+        if bus_id is not None:
+            result[h["id"]] = bus_id
+    return result
 
 
 def load_thermal_metadata(case_dir: Path) -> dict[int, dict]:
@@ -128,8 +235,24 @@ def load_ncs_bus_map(case_dir: Path) -> dict[int, int]:
     return {n["id"]: n["bus_id"] for n in d["non_controllable_sources"]}
 
 
-def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
+def load_hydro_metadata(
+    case_dir: Path, *, bus_map: dict[int, int] | None = None
+) -> dict[int, dict]:
     """Return hydro_id -> {bus_id, name, vol_max, vol_min, max_gen_mw, max_turbined}.
+
+    ``bus_id`` is resolved via :func:`resolve_hydro_bus_id` and is absent from
+    a plant's dict when its ``unit_groups`` disagree on a bus (see that
+    function's docstring for the degraded-rendering rationale).
+
+    *bus_map*, when supplied, is used instead of re-resolving each plant's
+    bus: :func:`load_entity_metadata` computes it once via
+    :func:`load_hydro_bus_map` and passes it here, so an ambiguous plant's
+    ``hydro-unit-groups-multi-bus`` warning is diagnosed once per case load
+    rather than once per loader (``load_hydro_bus_map`` and
+    ``load_hydro_metadata`` otherwise each resolve every plant's bus
+    independently over the same ``hydros.json``). Called standalone (the
+    default, *bus_map* omitted) this still resolves each plant's bus itself,
+    exactly as before.
 
     Productivity is read from ``hydro_energy_productivity.parquet`` (the
     cobre productivity-resolution-rules contract). Falls back through
@@ -151,8 +274,12 @@ def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
         res = h.get("reservoir", {})
         prod = productivities.get(h["id"]) or 0
         max_turbined = gen.get("max_turbined_m3s", 0)
-        result[h["id"]] = {
-            "bus_id": h["bus_id"],
+        bus_id = (
+            bus_map.get(h["id"])
+            if bus_map is not None
+            else resolve_hydro_bus_id(h, hydros_path=path)
+        )
+        entry: dict = {
             "name": h.get("name", str(h["id"])),
             "vol_max": res.get("max_storage_hm3", 0),
             "vol_min": res.get("min_storage_hm3", 0),
@@ -162,6 +289,9 @@ def load_hydro_metadata(case_dir: Path) -> dict[int, dict]:
             "productivity": prod,
             "downstream_id": h.get("downstream_id"),
         }
+        if bus_id is not None:
+            entry["bus_id"] = bus_id
+        result[h["id"]] = entry
     return result
 
 
@@ -421,6 +551,7 @@ class EntityMetadata:
 
     names: dict[tuple[str, int], str]
     stage_labels: dict[int, str]
+    stage_dates: dict[int, str]
     hydro_bus_map: dict[int, int]
     thermal_meta: dict[int, dict]
     ncs_bus_map: dict[int, int]
@@ -429,16 +560,25 @@ class EntityMetadata:
 
 
 def load_entity_metadata(case_dir: Path) -> EntityMetadata:
-    """Load entity name maps and hydro/thermal metadata dictionaries."""
+    """Load entity name maps and hydro/thermal metadata dictionaries.
+
+    ``hydro_bus_map`` is resolved once via :func:`load_hydro_bus_map` and
+    reused by :func:`load_hydro_metadata` (FINDING-5: both loaders resolve
+    every plant's bus over the same ``system/hydros.json``; without sharing
+    the map, an ambiguous plant's ``hydro-unit-groups-multi-bus`` warning
+    fires twice per dashboard build instead of once).
+    """
     names = load_names(case_dir)
     bus_names = {eid: nm for (entity, eid), nm in names.items() if entity == "buses"}
+    hydro_bus_map = load_hydro_bus_map(case_dir)
     return EntityMetadata(
         names=names,
         stage_labels=load_stage_labels(case_dir),
-        hydro_bus_map=load_hydro_bus_map(case_dir),
+        stage_dates=load_stage_dates(case_dir),
+        hydro_bus_map=hydro_bus_map,
         thermal_meta=load_thermal_metadata(case_dir),
         ncs_bus_map=load_ncs_bus_map(case_dir),
-        hydro_meta=load_hydro_metadata(case_dir),
+        hydro_meta=load_hydro_metadata(case_dir, bus_map=hydro_bus_map),
         bus_names=bus_names,
     )
 
@@ -522,8 +662,8 @@ class ScenarioInputs:
     non_fictitious_bus_ids: list[int]
     ncs_stats: pd.DataFrame
     inflow_history: pd.DataFrame
-    exchange_factors: list[dict]
     line_bounds: pd.DataFrame
+    line_block_bounds: pd.DataFrame
     hydro_bounds: pd.DataFrame
     thermal_bounds: pd.DataFrame
 
@@ -559,15 +699,22 @@ def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
         pq.read_table(ih_path).to_pandas() if ih_path.exists() else pd.DataFrame()
     )
 
-    ef_path = case_dir / "constraints" / "exchange_factors.json"
-    exchange_factors: list[dict] = []
-    if ef_path.exists():
-        with ef_path.open() as f:
-            exchange_factors = json.load(f).get("exchange_factors", [])
-
     lb_path = case_dir / "constraints" / "line_bounds.parquet"
     line_bounds = (
         pq.read_table(lb_path).to_pandas() if lb_path.exists() else pd.DataFrame()
+    )
+    # Cobre 0.13 deleted the standalone per-block exchange-factor JSON
+    # document and folded it into absolute-MW override rows inside
+    # line_bounds.parquet (see converters/network.py::convert_line_bounds):
+    # block_id is non-null only on those rows, never on the stage-level base
+    # row. Do not reconstruct a factor by dividing back through the base —
+    # that reintroduces the division cobre's decision removed and can divide
+    # by a zero base. A line-stage whose blocks are uniform legitimately has
+    # no override row, so an empty frame here is a correct steady state.
+    line_block_bounds = (
+        line_bounds[line_bounds["block_id"].notna()].reset_index(drop=True)
+        if "block_id" in line_bounds.columns
+        else pd.DataFrame()
     )
     hb_path = case_dir / "constraints" / "hydro_bounds.parquet"
     hydro_bounds = (
@@ -584,8 +731,8 @@ def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
         non_fictitious_bus_ids=non_fictitious_bus_ids,
         ncs_stats=ncs_stats,
         inflow_history=inflow_history,
-        exchange_factors=exchange_factors,
         line_bounds=line_bounds,
+        line_block_bounds=line_block_bounds,
         hydro_bounds=hydro_bounds,
         thermal_bounds=thermal_bounds,
     )
@@ -605,6 +752,44 @@ class SolverPerformance:
     lp_bounds: pd.DataFrame
 
 
+#: cobre 0.14 gave every diagnostic-output axis a single canonical spelling
+#: (``stage`` -> ``stage_id``, ``opening`` -> ``opening_index``,
+#: ``upper_bound_mean`` -> ``upper_bound``) and switched the not-applicable
+#: stage/opening marker from a ``-1`` sentinel to ``NULL``. The dashboard's chart
+#: layer was written against the pre-0.14 spellings; every raw diagnostic frame
+#: is normalized back to them at this single load choke point (mirroring
+#: :func:`cobre_bridge.comparators.cobre_readers.read_cobre_convergence`), so no
+#: chart needs to change and a pre-0.14 output directory — which already uses the
+#: legacy names — passes through untouched.
+_OUTPUT_COLUMN_ALIASES: dict[str, str] = {
+    "stage_id": "stage",
+    "opening_index": "opening",
+    "upper_bound": "upper_bound_mean",
+}
+
+
+def _normalize_output_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename cobre 0.14 canonical diagnostic columns to the dashboard's names.
+
+    A 0.14 column is renamed only when its legacy target is absent, so a
+    pre-0.14 frame (legacy names already present) is returned unchanged, and a
+    frame that shares a source name for a different concept it keeps canonical
+    elsewhere (e.g. ``bounds.parquet``'s ``stage_id``) is deliberately NOT run
+    through here. The ``-1`` -> ``NULL`` marker change needs no handling: a null
+    stage/opening reaches pandas as ``NaN``, and the chart layer's
+    ``stage >= 0`` filters drop those rows exactly as they dropped the old
+    ``-1`` rows, while its ``opening.notna()`` checks rely on the null directly.
+    """
+    if df.empty:
+        return df
+    rename = {
+        src: dst
+        for src, dst in _OUTPUT_COLUMN_ALIASES.items()
+        if src in df.columns and dst not in df.columns
+    }
+    return df.rename(columns=rename) if rename else df
+
+
 def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerformance:
     """Load solver/performance artifacts. ``conv`` (convergence) is needed to
     correct the timing wall-times. All frames fall back to empty when absent."""
@@ -620,7 +805,7 @@ def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerform
     solver_train_path = (
         case_dir / "output" / "training" / "solver" / "iterations.parquet"
     )
-    solver_train = (
+    solver_train = _normalize_output_columns(
         pq.read_table(solver_train_path).to_pandas()
         if solver_train_path.exists()
         else pd.DataFrame()
@@ -628,7 +813,7 @@ def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerform
     sim_solver_path = (
         case_dir / "output" / "simulation" / "solver" / "iterations.parquet"
     )
-    solver_sim = (
+    solver_sim = _normalize_output_columns(
         pq.read_table(sim_solver_path).to_pandas()
         if sim_solver_path.exists()
         else pd.DataFrame()
@@ -640,11 +825,11 @@ def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerform
     else:
         scaling_report = {}
     cs_path = case_dir / "output" / "training" / "cut_selection" / "iterations.parquet"
-    cut_selection = (
+    cut_selection = _normalize_output_columns(
         pq.read_table(cs_path).to_pandas() if cs_path.exists() else pd.DataFrame()
     )
     retry_path = case_dir / "output" / "training" / "solver" / "retry_histogram.parquet"
-    retry_histogram = (
+    retry_histogram = _normalize_output_columns(
         pq.read_table(retry_path).to_pandas() if retry_path.exists() else pd.DataFrame()
     )
     bounds_path = case_dir / "output" / "training" / "dictionaries" / "bounds.parquet"
@@ -750,14 +935,27 @@ def load_output_metadata(case_dir: Path) -> OutputMetadata:
 
 @dataclasses.dataclass
 class GenericConstraintData:
-    """Generic-constraint definitions and their resolved bounds (optional)."""
+    """Generic-constraint definitions and their resolved bounds (optional).
+
+    F3 shape: ``constraints`` dicts carry no ``sense`` key, and ``bounds``
+    has nullable ``bound_lower``/``bound_upper`` endpoint columns instead of
+    a single ``bound`` column (see
+    :mod:`cobre_bridge.generic_constraint_format`). Readers derive the
+    displayed direction from the endpoints via
+    :func:`cobre_bridge.dashboard.tabs.constraints_utils.derive_constraint_shape`.
+    """
 
     constraints: list[dict]
     bounds: pd.DataFrame
 
 
 def load_generic_constraints(case_dir: Path) -> GenericConstraintData:
-    """Load constraints/generic_constraints.json and the bounds parquet."""
+    """Load constraints/generic_constraints.json and the bounds parquet.
+
+    The bounds parquet is read verbatim (whatever columns the converter
+    wrote — the F3 ``bound_lower``/``bound_upper`` pair, not a single
+    ``bound`` column); no column selection happens here.
+    """
     gc_path = case_dir / "constraints" / "generic_constraints.json"
     constraints: list[dict] = []
     if gc_path.exists():
@@ -809,6 +1007,7 @@ class DashboardData:
     # Entity name/metadata dictionaries
     names: dict[tuple[str, int], str]
     stage_labels: dict[int, str]
+    stage_dates: dict[int, str]
     hydro_bus_map: dict[int, int]
     thermal_meta: dict[int, dict]
     ncs_bus_map: dict[int, int]
@@ -882,7 +1081,9 @@ class DashboardData:
     hydro_bounds: pd.DataFrame
     thermal_bounds: pd.DataFrame
     ncs_stats: pd.DataFrame
-    exchange_factors: list[dict]
+    # Per-block line_bounds override rows (block_id non-null); a case whose
+    # lines are uniform across blocks legitimately has none (ticket-013).
+    line_block_bounds: pd.DataFrame
     retry_histogram: pd.DataFrame
 
     # Summary counts
@@ -906,12 +1107,12 @@ class DashboardData:
         logger.info("Loading dashboard data from %s", case_dir)
 
         # Training convergence is required and feeds the timing wall-time fix.
-        conv = pq.read_table(
-            case_dir / "output" / "training" / "convergence.parquet"
-        ).to_pandas()
+        conv = _normalize_output_columns(
+            pq.read_table(
+                case_dir / "output" / "training" / "convergence.parquet"
+            ).to_pandas()
+        )
 
-        # Each cohesive section is read by its own loader (above) and composed
-        # into the flat aggregate below.
         temporal = load_temporal_context(case_dir)
         entities = load_entity_metadata(case_dir)
         simulation = load_simulation_data(case_dir)
@@ -959,6 +1160,7 @@ class DashboardData:
             line_bounds=scenario.line_bounds,
             names=entities.names,
             stage_labels=entities.stage_labels,
+            stage_dates=entities.stage_dates,
             hydro_bus_map=entities.hydro_bus_map,
             thermal_meta=entities.thermal_meta,
             ncs_bus_map=entities.ncs_bus_map,
@@ -999,7 +1201,7 @@ class DashboardData:
             hydro_bounds=scenario.hydro_bounds,
             thermal_bounds=scenario.thermal_bounds,
             ncs_stats=scenario.ncs_stats,
-            exchange_factors=scenario.exchange_factors,
+            line_block_bounds=scenario.line_block_bounds,
             retry_histogram=performance.retry_histogram,
             n_scenarios=n_scenarios,
             n_stages=n_stages,
