@@ -175,32 +175,6 @@ def summarize_cut_families(cuts: BoundaryCuts) -> CutFamilySummary:
     )
 
 
-def required_inflow_lag_depth(summary: CutFamilySummary) -> int:
-    """The deepest inflow-lag depth any boundary cut references, ``1``-based.
-
-    The boundary cuts price inflow-lag state only out to the deepest lag with a
-    nonzero ``pi_qafl`` coefficient (``summary.lag_nonzero_by_depth[d-1] > 0``
-    for calendar-month depth ``d`` in ``1..12``). That depth is exactly the
-    number of ``state_space.inflow_lag_depth`` slots cobre must reserve so the
-    terminal boundary cut can price its conditioning history — the bridge-side
-    equivalent of cobre's ``boundary_cut_lag_depth`` (which reads the same
-    quantity off the mapped manifest at load).
-
-    Returns ``0`` when no cut carries a nonzero lag coefficient — the boundary
-    prices no inflow-lag state, so no slots need reserving and no
-    ``inflow_lag_depth`` should be declared (cobre rejects ``0`` and resolves a
-    zero depth from an absent field).
-    """
-    return max(
-        (
-            depth
-            for depth, count in enumerate(summary.lag_nonzero_by_depth, start=1)
-            if count > 0
-        ),
-        default=0,
-    )
-
-
 def read_cortesh(path: Path) -> CortesHeader:
     """Read ``cortesh.dat`` into a :class:`CortesHeader`.
 

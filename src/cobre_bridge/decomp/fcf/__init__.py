@@ -37,7 +37,6 @@ from cobre_bridge.decomp.fcf.bootstrap import (
 )
 from cobre_bridge.decomp.fcf.cortes import (
     read_cortes,
-    required_inflow_lag_depth,
     summarize_cut_families,
 )
 from cobre_bridge.decomp.fcf.mapper import (
@@ -736,21 +735,16 @@ def import_boundary_fcf(
     # JSON/cobre-FFI payloads this function builds below.
     boundary_stage = int(cuts.boundary_stage)
 
-    # The inflow-lag state depth the boundary cuts reference. cobre >= 0.14
-    # infers this from the loaded boundary policy at run time, so the shipped
-    # config declares no `state_space.inflow_lag_depth`. But the bootstrap builds
-    # the terminal manifest BEFORE any boundary exists (nothing to infer from),
-    # so the depth is fed to its in-memory run below to reserve the lag slots the
-    # pi_qafl terms map onto — never written to config.json. A boundary pricing
-    # no lag state needs none (depth 0), and cobre rejects an explicit 0.
-    lag_depth = required_inflow_lag_depth(summarize_cut_families(cuts))
-
     ensure_writer_binding()
     import cobre
 
-    manifest = bootstrap_terminal_manifest(
-        case_dir, work_dir=work_dir, inflow_lag_depth=lag_depth
-    )
+    # No explicit inflow-lag depth is supplied to the bootstrap: cobre sizes the
+    # HydroInflowLag state block from the case's own PAR(p) model order (the same
+    # autoregressive structure the boundary cuts' pi_qafl terms derive from), so
+    # the terminal manifest already carries the slots the mapper places those
+    # terms onto. The former state_space.inflow_lag_depth override was redundant
+    # with that sizing and is rejected by cobre >= 0.14.
+    manifest = bootstrap_terminal_manifest(case_dir, work_dir=work_dir)
     gnl_plan = _build_gnl_ring_plan(case_dir, deck_files)
     # Inflow-lag mean fold + recent-observation seed (built together, shipped
     # together — see `_boundary_inflow_context`). The coupling month is the cut
