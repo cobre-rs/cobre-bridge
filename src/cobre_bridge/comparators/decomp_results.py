@@ -72,10 +72,6 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 
-#: Rows whose two values are both below this magnitude are treated as an exact
-#: match rather than a division by ~0 (physical units: MW, m³/s, hm³).
-_ZERO_FLOOR = 1e-9
-
 #: Minimum turbined flow (m³/s) for the derived gen/turbined productivity
 #: (ticket-016) to be meaningful -- mirrors
 #: :data:`cobre_bridge.comparators.results._PRODUCTIVITY_TURB_EPS`: near-zero
