@@ -200,6 +200,7 @@ def _make_mock_data(
     )
     data.costs = costs if costs is not None else _make_costs(n_stages=n_stages)
     data.stage_labels = {i: f"Stage {i}" for i in range(n_stages)}
+    data.stage_dates = {i: f"2026-{i + 1:02d}-01" for i in range(n_stages)}
     data.names = {}
     # Real empty LazyFrames prevent MagicMock auto-chaining OOM
     data.hydros_lf = pl.LazyFrame()
