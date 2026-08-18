@@ -2116,9 +2116,12 @@ class TestDecompConvergenceFrame:
         assert frame.columns == ["iteration", "lower_bound", "upper_bound_mean"]
         assert frame.schema == self._CANONICAL_SCHEMA
         assert frame["iteration"].to_list() == [1, 2, 3]
-        assert frame["lower_bound"].to_list() == pytest.approx([100.0, 150.0, 180.0])
+        # zinf/zsup (native k$) reconciled to R$ (x1e3) to match cobre's bounds.
+        assert frame["lower_bound"].to_list() == pytest.approx(
+            [100_000.0, 150_000.0, 180_000.0]
+        )
         assert frame["upper_bound_mean"].to_list() == pytest.approx(
-            [500.0, 300.0, 190.0]
+            [500_000.0, 300_000.0, 190_000.0]
         )
 
     def test_gap_and_timing_columns_are_not_carried_over(
@@ -2191,9 +2194,12 @@ class TestBuildDecompDatasetConvergence:
         nw_conv = dataset.metadata["nw_convergence"]
         assert nw_conv.columns == ["iteration", "lower_bound", "upper_bound_mean"]
         assert nw_conv["iteration"].to_list() == [1, 2, 3]
-        assert nw_conv["lower_bound"].to_list() == pytest.approx([100.0, 150.0, 180.0])
+        # native k$ zinf/zsup reconciled to R$ (x1e3).
+        assert nw_conv["lower_bound"].to_list() == pytest.approx(
+            [100_000.0, 150_000.0, 180_000.0]
+        )
         assert nw_conv["upper_bound_mean"].to_list() == pytest.approx(
-            [500.0, 300.0, 190.0]
+            [500_000.0, 300_000.0, 190_000.0]
         )
 
     def test_cobre_convergence_matches_the_reader_verbatim(

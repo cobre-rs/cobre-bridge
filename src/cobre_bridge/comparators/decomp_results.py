@@ -352,7 +352,9 @@ def _decomp_convergence_frame(decomp_dir: Path) -> pl.DataFrame:
     :func:`~cobre_bridge.comparators.charts.convergence_chart` reads on each
     side separately (not a per-iteration join shape). The
     iteration axis stays 1-based as reported, no offset -- the chart plots
-    it directly.
+    it directly. ``zinf``/``zsup`` are native k$ and are reconciled to R$
+    (:func:`reconcile_kdollars_to_reais`, x1e3) so the bounds are
+    unit-comparable to cobre's R$-denominated convergence.
 
     A missing/empty relato (``read_relato_convergence`` raising
     ``FileNotFoundError``/``ValueError``) degrades to an empty frame with
@@ -366,10 +368,14 @@ def _decomp_convergence_frame(decomp_dir: Path) -> pl.DataFrame:
         return pl.DataFrame(schema=_CONVERGENCE_SCHEMA)
 
     columns = {c.lower(): c for c in source.columns}
+    # zinf/zsup are native k$ (like every DECOMP cost); cobre's bounds are R$.
+    # Convert once via the shared factor (x1e3) so the two convergence lines are
+    # unit-comparable -- without it the DECOMP bounds sit ~1000x below cobre's.
+    k_to_r = reconcile_kdollars_to_reais(1.0)
     return source.select(
         pl.col(columns["iteracao"]).cast(pl.Int64).alias("iteration"),
-        pl.col(columns["zinf"]).cast(pl.Float64).alias("lower_bound"),
-        pl.col(columns["zsup"]).cast(pl.Float64).alias("upper_bound_mean"),
+        (pl.col(columns["zinf"]).cast(pl.Float64) * k_to_r).alias("lower_bound"),
+        (pl.col(columns["zsup"]).cast(pl.Float64) * k_to_r).alias("upper_bound_mean"),
     )
 
 
