@@ -72,6 +72,7 @@ from cobre_bridge.comparators.decomp_results import (
     _result_comparisons,
     _rhe_lhs_lookup,
     _scenario_mean,
+    _scenario_probabilities,
     _stage_frame_to_lookup,
     _stage_rows,
     _storage_lookup,
@@ -128,6 +129,111 @@ class TestScenarioMean:
         )
         out = _scenario_mean(
             frame, "estagio", ["geracao_MW"], entity_column="codigo_usina"
+        )
+        assert out["geracao_MW"].to_list() == [30.0]
+
+    def test_probability_weighted_fan_stage_differs_from_unweighted(self) -> None:
+        """A fan stage (3) with unequal (0.6/0.4) opening probabilities must
+        be weighted, not plainly averaged; a single-scenario stage (1) must
+        be unaffected -- a weighted mean over one row is that row's value."""
+        frame = pl.DataFrame(
+            {
+                "estagio": [1, 3, 3],
+                "cenario": [1, 1, 2],
+                "codigo_usina": [10, 10, 10],
+                "geracao_MW": [50.0, 100.0, 20.0],
+            }
+        )
+        probabilities = pl.DataFrame(
+            {
+                "estagio": [1, 3, 3],
+                "cenario": [1, 1, 2],
+                "probabilidade": [1.0, 0.6, 0.4],
+            }
+        )
+
+        weighted = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=probabilities,
+        )
+        unweighted = _scenario_mean(
+            frame, "estagio", ["geracao_MW"], entity_column="codigo_usina"
+        )
+
+        weighted_by_stage = dict(
+            zip(weighted["estagio"].to_list(), weighted["geracao_MW"].to_list())
+        )
+        unweighted_by_stage = dict(
+            zip(unweighted["estagio"].to_list(), unweighted["geracao_MW"].to_list())
+        )
+        # Fan stage: weighted mean = 0.6*100 + 0.4*20 = 68.0, NOT the
+        # unweighted mean(100, 20) = 60.0.
+        assert weighted_by_stage[3] == pytest.approx(0.6 * 100.0 + 0.4 * 20.0)
+        assert weighted_by_stage[3] != pytest.approx(unweighted_by_stage[3])
+        # Deterministic single-scenario stage: unaffected by weighting.
+        assert weighted_by_stage[1] == pytest.approx(unweighted_by_stage[1])
+        assert weighted_by_stage[1] == pytest.approx(50.0)
+
+    def test_none_probabilities_keeps_the_unweighted_default(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3, 3],
+                "cenario": [1, 2, 3],
+                "codigo_usina": [10, 10, 10],
+                "geracao_MW": [10.0, 20.0, 60.0],
+            }
+        )
+        out = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=None,
+        )
+        assert out["geracao_MW"].to_list() == [30.0]
+
+    def test_empty_probabilities_frame_keeps_the_unweighted_default(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3, 3],
+                "cenario": [1, 2, 3],
+                "codigo_usina": [10, 10, 10],
+                "geracao_MW": [10.0, 20.0, 60.0],
+            }
+        )
+        out = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=pl.DataFrame(),
+        )
+        assert out["geracao_MW"].to_list() == [30.0]
+
+    def test_frame_without_cenario_column_keeps_the_unweighted_default(self) -> None:
+        """A frame with no ``cenario`` column of its own (e.g. a table
+        `_stage_rows` already collapsed past the scenario axis) must ignore
+        *probabilities* entirely rather than fail trying to join on a column
+        that does not exist."""
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3, 3],
+                "codigo_usina": [10, 10, 10],
+                "geracao_MW": [10.0, 20.0, 60.0],
+            }
+        )
+        probabilities = pl.DataFrame(
+            {"estagio": [3], "cenario": [1], "probabilidade": [0.9]}
+        )
+        out = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=probabilities,
         )
         assert out["geracao_MW"].to_list() == [30.0]
 
@@ -1976,6 +2082,206 @@ class TestCostFrames:
 
         with pytest.raises(FileNotFoundError):
             _cost_frames(tmp_path)
+
+
+def _relato_costs_with_overlapping_fan_stage() -> pl.DataFrame:
+    """`_relato_costs_frame`'s weekly stages 1-2, plus a deliberately WRONG
+    row for the fan stage (3) that `_relato2_costs_frame` also covers --
+    pins that relato2 is authoritative for any stage it covers, exactly like
+    `_cost_frames`'s own union."""
+    overlapping = pl.DataFrame(
+        {
+            "estagio": [3, 3],
+            "cenario": [1, 2],
+            "probabilidade": [0.9, 0.1],  # wrong -- must be superseded
+            "custo_presente": [1.0, 1.0],
+            "custo_futuro": [1.0, 1.0],
+            "geracao_termica": [1.0, 1.0],
+            "violacao_desvio": [1.0, 1.0],
+            "penalidade_vertimento_reservatorio": [1.0, 1.0],
+            "penalidade_vertimento_fio": [1.0, 1.0],
+            "violacao_turbinamento_reservatorio": [1.0, 1.0],
+            "violacao_turbinamento_fio": [1.0, 1.0],
+            "penalidade_intercambio": [1.0, 1.0],
+        }
+    )
+    return pl.concat([_relato_costs_frame(), overlapping], how="vertical")
+
+
+class TestScenarioProbabilities:
+    """`_scenario_probabilities` -- the ``(estagio, cenario, probabilidade)``
+    lookup `_scenario_mean` consumes, built by unioning `read_relato_costs`
+    (deterministic weeks) with `read_relato2_costs` (the real, unequal fan-
+    stage opening probabilities), relato2 authoritative for any stage it
+    covers."""
+
+    def test_unions_relato_and_relato2(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_a, **_k: _relato_costs_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: _relato2_costs_frame(),
+        )
+
+        result = _scenario_probabilities(tmp_path)
+
+        rows = {
+            (int(r["estagio"]), int(r["cenario"])): r["probabilidade"]
+            for r in result.iter_rows(named=True)
+        }
+        assert rows == {
+            (1, 1): pytest.approx(0.5),
+            (1, 2): pytest.approx(0.5),
+            (2, 1): pytest.approx(0.5),
+            (2, 2): pytest.approx(0.5),
+            (3, 1): pytest.approx(0.6),
+            (3, 2): pytest.approx(0.4),
+        }
+
+    def test_relato2_is_authoritative_for_stages_it_covers(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_a, **_k: _relato_costs_with_overlapping_fan_stage(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: _relato2_costs_frame(),
+        )
+
+        result = _scenario_probabilities(tmp_path)
+
+        stage_3 = {
+            int(r["cenario"]): r["probabilidade"]
+            for r in result.filter(pl.col("estagio") == 3).iter_rows(named=True)
+        }
+        # relato2's 0.6/0.4 wins -- NOT relato's (wrong) 0.9/0.1.
+        assert stage_3 == {1: pytest.approx(0.6), 2: pytest.approx(0.4)}
+
+    def test_empty_when_neither_report_is_available(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs", _boom
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+
+        result = _scenario_probabilities(tmp_path)
+
+        assert result.is_empty()
+
+    def test_never_raises_when_relato_is_missing_but_relato2_is_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A deck with only a fan-stage report and no aggregate relato (an
+        edge case, but `_scenario_probabilities` must not propagate
+        `read_relato_costs`'s raise when relato2 alone already has data)."""
+
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs", _boom
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: _relato2_costs_frame(),
+        )
+
+        result = _scenario_probabilities(tmp_path)
+
+        assert set(result["estagio"].unique().to_list()) == {3}
+
+
+def _bus_fan_stage_frame() -> pl.DataFrame:
+    """One bus: a deterministic single-scenario stage (1) and a 2-scenario
+    fan stage (3) -- already ``_stage_rows``-shaped (patamar-null aggregate
+    rows only), matching what `read_dec_oper_sist` returns after that fold."""
+    return pl.DataFrame(
+        {
+            "estagio": [1, 3, 3],
+            "no": [1, 1, 2],
+            "cenario": [1, 1, 2],
+            "patamar": [None, None, None],
+            "codigo_submercado": [1, 1, 1],
+            "deficit_MW": [0.0, 0.0, 0.0],
+            "cmo": [40.0, 100.0, 20.0],
+        }
+    )
+
+
+class TestScenarioWeightingIntegration:
+    """Integration-style: proves the real pipeline --
+    `_scenario_probabilities` built from (mocked) relato/relato2 reports,
+    threaded through a real ``_*_side`` fold (`_bus_side`, one of this
+    module's physical-variable call sites) -- probability-weights the fan
+    stage, and degrades to the pre-existing unweighted mean when no
+    probability source is available at all."""
+
+    def _bus_codes(self) -> dict[int, int]:
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+        return {code: id_map.bus_id(code) for code in id_map.bus_codes}
+
+    def test_fan_stage_is_probability_weighted_when_a_source_is_available(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            lambda *_a, **_k: _bus_fan_stage_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_a, **_k: _relato_costs_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: _relato2_costs_frame(),
+        )
+
+        probabilities = _scenario_probabilities(tmp_path)
+        mapped, _unmapped = _bus_side(
+            tmp_path, self._bus_codes(), probabilities=probabilities
+        )
+
+        cmo_by_stage = dict(zip(mapped["stage_id"].to_list(), mapped["cmo"].to_list()))
+        # Fan stage (0-based stage_id 2): relato2's 0.6/0.4 weighted mean =
+        # 0.6*100 + 0.4*20 = 68.0, NOT the unweighted mean(100, 20) = 60.0.
+        assert cmo_by_stage[2] == pytest.approx(68.0)
+        # Deterministic stage (0-based stage_id 0): unaffected.
+        assert cmo_by_stage[0] == pytest.approx(40.0)
+
+    def test_fan_stage_stays_unweighted_when_no_probability_source_exists(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A bare deck (no relato/relato2 at all) -- `_scenario_probabilities`
+        degrades to empty, and `_bus_side` must reproduce the exact
+        pre-existing unweighted-mean value on the fan stage."""
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            lambda *_a, **_k: _bus_fan_stage_frame(),
+        )
+
+        probabilities = _scenario_probabilities(tmp_path)
+        assert probabilities.is_empty()
+
+        mapped, _unmapped = _bus_side(
+            tmp_path, self._bus_codes(), probabilities=probabilities
+        )
+
+        cmo_by_stage = dict(zip(mapped["stage_id"].to_list(), mapped["cmo"].to_list()))
+        assert cmo_by_stage[2] == pytest.approx(60.0)  # plain mean(100, 20)
+        assert cmo_by_stage[0] == pytest.approx(40.0)
 
 
 class TestUnionCostRows:
