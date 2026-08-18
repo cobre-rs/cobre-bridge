@@ -64,6 +64,18 @@ def _resolve_result_file(case_dir: Path, filename: str) -> Path | None:
     return _find_case_insensitive(case_dir, filename)
 
 
+def _finalize_table(path: Path, table: pd.DataFrame | None) -> pl.DataFrame:
+    """Reject an empty/None parse (see the module docstring), debug-log the
+    row count, and convert to Polars."""
+    if table is None or table.empty:
+        raise ValueError(
+            f"{path} parsed empty; the run's outputs look incomplete or the "
+            "file syntax is unsupported"
+        )
+    _LOG.debug("Read %s: %d rows", path.name, len(table))
+    return pl.from_pandas(table)
+
+
 def _read_dec_oper(
     case_dir: Path,
     filename: str,
@@ -73,14 +85,7 @@ def _read_dec_oper(
     path = _resolve_result_file(case_dir, filename)
     if path is None:
         raise FileNotFoundError(f"{filename} not found in {case_dir}")
-    table = reader_cls.read(str(path)).tabela
-    if table is None or table.empty:
-        raise ValueError(
-            f"{path} parsed empty; the run's outputs look incomplete or the "
-            "file syntax is unsupported"
-        )
-    _LOG.debug("Read %s: %d rows", path.name, len(table))
-    return pl.from_pandas(table)
+    return _finalize_table(path, reader_cls.read(str(path)).tabela)
 
 
 def read_dec_oper_sist(case_dir: Path) -> pl.DataFrame:
@@ -231,14 +236,7 @@ def read_decomp_tim(case_dir: Path) -> pl.DataFrame:
     path = _resolve_result_file(case_dir, "decomp.tim")
     if path is None:
         raise FileNotFoundError(f"decomp.tim not found in {case_dir}")
-    table = Decomptim.read(str(path)).tempos_etapas
-    if table is None or table.empty:
-        raise ValueError(
-            f"{path} parsed empty; the run's outputs look incomplete or the "
-            "file syntax is unsupported"
-        )
-    _LOG.debug("Read %s: %d rows", path.name, len(table))
-    return pl.from_pandas(table)
+    return _finalize_table(path, Decomptim.read(str(path)).tempos_etapas)
 
 
 def read_relato_balance(case_dir: Path) -> pl.DataFrame:
@@ -310,14 +308,7 @@ def _read_revisioned_table(
     path = _resolve_revisioned_file(case_dir, stem)
     if path is None:
         raise FileNotFoundError(f"{stem}.rvN not found in {case_dir}")
-    table = reader_cls.read(str(path)).tabela
-    if table is None or table.empty:
-        raise ValueError(
-            f"{path} parsed empty; the run's outputs look incomplete or the "
-            "file syntax is unsupported"
-        )
-    _LOG.debug("Read %s: %d rows", path.name, len(table))
-    return pl.from_pandas(table)
+    return _finalize_table(path, reader_cls.read(str(path)).tabela)
 
 
 def read_dec_desvfpha(case_dir: Path) -> pl.DataFrame:
@@ -358,14 +349,7 @@ def read_dec_estatfpha(case_dir: Path) -> pl.DataFrame:
     path = _resolve_revisioned_file(case_dir, "dec_estatfpha")
     if path is None:
         raise FileNotFoundError(f"dec_estatfpha.rvN not found in {case_dir}")
-    table = DecEstatFpha.read(str(path)).estatisticas_desvios
-    if table is None or table.empty:
-        raise ValueError(
-            f"{path} parsed empty; the run's outputs look incomplete or the "
-            "file syntax is unsupported"
-        )
-    _LOG.debug("Read %s: %d rows", path.name, len(table))
-    return pl.from_pandas(table)
+    return _finalize_table(path, DecEstatFpha.read(str(path)).estatisticas_desvios)
 
 
 def reconcile_kdollars_to_reais(value: float) -> float:
