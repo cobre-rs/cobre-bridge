@@ -28,15 +28,19 @@ silence.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pandas as pd
 import polars as pl
 
+from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators import cobre_readers
 from cobre_bridge.comparators.decomp_readers import (
+    read_dec_oper_interc,
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
@@ -46,6 +50,7 @@ from cobre_bridge.comparators.results import PercentileData, ResultComparison
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)
 
@@ -144,15 +149,28 @@ def _stage_rows(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def _scenario_mean(
-    frame: pl.DataFrame, key: str, columns: list[str], *, entity_column: str | None
+    frame: pl.DataFrame,
+    key: str,
+    columns: list[str],
+    *,
+    entity_column: str | list[str] | None,
 ) -> pl.DataFrame:
     """Average the stage rows over the source model's nodes.
 
     ``key`` is the stage column; ``entity_column`` narrows the grouping to one
-    entity per stage (``None`` for tables that are already one row per stage).
+    entity per stage: ``None`` for tables that are already one row per stage,
+    a single column name for a single-code entity, or a list of column names
+    for a composite key -- e.g. an interchange corridor's
+    ``(codigo_submercado_de, codigo_submercado_para)`` pair (ticket-007).
     """
     present = [c for c in columns if c in frame.columns]
-    group = [key] if entity_column is None else [key, entity_column]
+    if entity_column is None:
+        entity_columns: list[str] = []
+    elif isinstance(entity_column, str):
+        entity_columns = [entity_column]
+    else:
+        entity_columns = list(entity_column)
+    group = [key, *entity_columns]
     return (
         frame.group_by(group)
         .agg([pl.col(c).mean().alias(c) for c in present])
@@ -420,6 +438,443 @@ def _bus_side(
         frame, "estagio", columns, entity_column="codigo_submercado"
     )
     return _map_entities(aggregated, "codigo_submercado", id_map_bus)
+
+
+# --- ticket-007: interchange corridor -> cobre line alignment ---
+#
+# DECOMP publishes exchange per submarket-pair corridor (``dec_oper_interc``);
+# the converted Cobre case publishes exchange per directed line
+# (``system/lines.json``, read into simulation results by
+# ``cobre_readers.read_cobre_line_means`` as ``entity_id``/``stage_id``/
+# ``net_flow_mw``). The two topologies usually coincide (one deck-declared
+# exchange pair -> one cobre line), but the converter-created transhipment
+# bus (``DecompIdMap.transhipment_bus_id``) can realize a corridor as a pair
+# of legs instead of a single line -- see epic-03's "Modeling nuance"
+# section. This block reconciles the two; ticket-008 turns the result into
+# ``ResultComparison`` line rows and the Network tab metadata.
+#
+# Facts confirmed against the live code (not assumed from the ticket prose):
+# - ``system/lines.json`` line entries key their endpoints
+#   ``source_bus_id``/``target_bus_id`` (``decomp/network.py::convert_lines``,
+#   ``converters/network.py::convert_lines``) -- not ``from_bus``/``to_bus``.
+# - A cobre line's ``net_flow_mw`` is positive in its own
+#   ``source_bus_id -> target_bus_id`` direction: ``comparators/alignment.py``'s
+#   ``LineEntity`` docstring states it explicitly ("Cobre models each
+#   normalized pair as a single line where positive flow goes from
+#   source_bus to target_bus"), and ``dashboard/tabs/network.py``'s bus
+#   balance credits the *target* bus and debits the *source* bus with the
+#   same ``net_flow_mw`` value, which only holds under that convention.
+# - ``dec_oper_interc``'s real columns (``idecomp`` 1.14,
+#   ``idecomp.decomp.dec_oper_interc.DecOperInterc.tabela``) are
+#   ``codigo_submercado_de``/``codigo_submercado_para`` (not
+#   ``submercado_de``/``submercado_para``), plus ``intercambio_origem_MW``,
+#   ``intercambio_destino_MW``, and ``perdas_MW``.
+
+
+def _read_cobre_lines_index(cobre_output_dir: Path) -> dict[tuple[int, int], int]:
+    """``{(source_bus_id, target_bus_id): line_id}`` from ``system/lines.json``.
+
+    A missing ``system/lines.json`` -- e.g. a case predating the ``IA``
+    exchange-network converter (``decomp/network.py::convert_lines_placeholder``)
+    -- yields an empty index rather than raising: :func:`_corridor_line_alignment`
+    then resolves nothing, and :func:`_interc_side` reports every corridor as
+    unresolved instead of failing the comparison (the Network tab degrades to
+    empty).
+
+    [ASSUMPTION] (epic-03 Pending Decision, star topology): more than one
+    line declared between the *same ordered* bus pair makes that leg
+    ambiguous -- both are dropped from the index so any corridor that would
+    resolve through it is reported unresolved rather than guessing which
+    line applies.
+    """
+    lines_path = case_dir_for(cobre_output_dir) / "system" / "lines.json"
+    if not lines_path.exists():
+        return {}
+    with lines_path.open() as f:
+        data = json.load(f)
+
+    index: dict[tuple[int, int], int] = {}
+    ambiguous: set[tuple[int, int]] = set()
+    for line in data.get("lines", []):
+        key = (int(line["source_bus_id"]), int(line["target_bus_id"]))
+        if key in index:
+            ambiguous.add(key)
+            continue
+        index[key] = int(line["id"])
+    for key in ambiguous:
+        index.pop(key, None)
+        _LOG.warning(
+            "Multiple cobre lines declared for bus pair %s; excluding it from "
+            "the corridor alignment instead of guessing which line applies",
+            key,
+        )
+    return index
+
+
+def _resolve_leg(
+    lines_index: dict[tuple[int, int], int], bus_a: int, bus_para: int
+) -> tuple[int, int] | None:
+    """Return the ``(line_id, sign)`` leg realizing flow ``bus_a -> bus_para``.
+
+    ``sign`` orients the cobre line's own ``source_bus_id -> target_bus_id``
+    convention onto the requested direction: ``+1`` when a line already runs
+    ``bus_a -> bus_para``, ``-1`` when the matching line runs the reverse.
+    ``None`` when no cobre line connects the pair in either direction.
+    """
+    line_id = lines_index.get((bus_a, bus_para))
+    if line_id is not None:
+        return line_id, 1
+    line_id = lines_index.get((bus_para, bus_a))
+    if line_id is not None:
+        return line_id, -1
+    return None
+
+
+def _corridor_line_alignment(
+    cobre_output_dir: Path, id_map: DecompIdMap
+) -> dict[tuple[int, int], list[tuple[int, int]]]:
+    """Map every resolvable DECOMP corridor onto its cobre line leg(s).
+
+    Keyed by cobre bus-id pair ``(bus_de, bus_para)`` -- built over every
+    ordered pair of *declared* subsystem buses (the transhipment bus is
+    never a corridor endpoint in its own right, D-UNITS) -- to the ordered
+    list of cobre ``(line_id, sign)`` legs realizing it:
+
+    - a single leg when a direct cobre line connects the pair, in either
+      direction (requirement 3's "direct" branch);
+    - else the two-leg ``bus_de -> transhipment_bus_id -> bus_para`` path,
+      when both legs exist (requirement 3's transhipment branch);
+    - else the pair is simply absent from the returned mapping.
+
+    :func:`_corridor_line_alignment` itself never raises and never reports:
+    it is total in the sense of trying every declared bus pair, but a pair
+    with no realizing line(s) is left out of the dict rather than tracked
+    here. :func:`_interc_side` is the layer that turns "absent from this
+    mapping" into a reported, never-silently-dropped unresolved corridor,
+    scoped to the corridors ``dec_oper_interc`` actually carries.
+
+    [ASSUMPTION] (record per epic-03 Pending Decision): the two-leg
+    reconciliation assumes the converted case's exchange topology is a star
+    through the transhipment bus, with at most one ``de<->IV<->para`` path
+    per corridor -- guaranteed structurally here since ``DecompIdMap`` has
+    exactly one transhipment bus and :func:`_read_cobre_lines_index` drops
+    (rather than arbitrarily picks) any bus pair wired by more than one
+    line. Alternatives considered: (a) direct submarket-pair match only --
+    fails on the star topology, rejected; (b) transhipment-aware two-leg
+    reconciliation -- chosen; (c) compare at the bus-injection level instead
+    of per line -- defers to a future ticket, out of scope. A deck whose
+    exchange graph is genuinely non-star (e.g. two different corridors that
+    would need to share one leg) is not guessed at by this function -- each
+    corridor is resolved independently, so a shared leg is assigned the same
+    value by both corridors rather than an aggregate; that residual gap is a
+    known limitation of the star assumption, not something this ticket
+    reconciles further.
+    """
+    lines_index = _read_cobre_lines_index(cobre_output_dir)
+    if not lines_index:
+        return {}
+
+    transhipment = id_map.transhipment_bus_id
+    real_bus_ids = sorted({id_map.bus_id(code) for code in id_map.bus_codes})
+
+    alignment: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for bus_de in real_bus_ids:
+        for bus_para in real_bus_ids:
+            if bus_de == bus_para:
+                continue
+            direct = _resolve_leg(lines_index, bus_de, bus_para)
+            if direct is not None:
+                alignment[(bus_de, bus_para)] = [direct]
+                continue
+            leg_in = _resolve_leg(lines_index, bus_de, transhipment)
+            leg_out = _resolve_leg(lines_index, transhipment, bus_para)
+            if leg_in is not None and leg_out is not None:
+                alignment[(bus_de, bus_para)] = [leg_in, leg_out]
+    return alignment
+
+
+def _interc_side(
+    decomp_dir: Path, cobre_output_dir: Path, id_map: DecompIdMap
+) -> tuple[pl.DataFrame, list[tuple[int, int]]]:
+    """Per-(cobre ``line_id``, 0-based stage) DECOMP interchange net-flow.
+
+    Folds ``dec_oper_interc`` the way every other ``_*_side`` helper folds
+    its table -- :func:`_stage_rows`'s patamar-null aggregate, then
+    :func:`_scenario_mean` averaged over the source model's nodes, here keyed
+    by the corridor's composite ``(codigo_submercado_de,
+    codigo_submercado_para)`` pair rather than a single entity code -- aligns
+    each corridor onto its cobre line leg(s) via
+    :func:`_corridor_line_alignment`, and orients the net-flow value to each
+    leg's ``sign``. ``estagio - 1`` rebases the 1-based DECOMP stage the same
+    way :func:`_map_entities` does for every other level.
+
+    The net-flow value is ``intercambio_origem_MW`` -- the flow measured at
+    the corridor's origin, already in its own ``de -> para`` direction.
+    ``perdas_MW`` (transmission losses) is read as part of the same fold but
+    intentionally NOT subtracted from it: a cobre line has no loss model (its
+    ``net_flow_mw`` is a single, lossless figure -- see
+    ``decomp/network.py::convert_lines``), so the origin-side reading, not
+    the post-loss ``intercambio_destino_MW``, is the one quantity comparable
+    to it.
+
+    A corridor whose endpoints the id map cannot resolve, or whose resolved
+    bus pair has no entry in :func:`_corridor_line_alignment`'s mapping
+    (including every corridor when ``system/lines.json`` is absent), is
+    collected into the returned unresolved list as
+    ``(codigo_submercado_de, codigo_submercado_para)`` code pairs --
+    mirroring :func:`_map_entities`'s ``unmapped`` convention -- and excluded
+    from the returned frame. It is reported, never silently dropped.
+
+    The source model reports every physical interface as two corridor rows,
+    one per direction (e.g. both ``SE -> S`` and ``S -> SE``); both align
+    onto the very same cobre line leg with opposite ``sign``. The
+    per-``(entity_id, stage_id)`` rows built above are therefore grouped and
+    summed before being returned, collapsing each pair down to one row equal
+    to ``flow(de -> para) - flow(para -> de)`` -- exactly the net figure a
+    lossless cobre line's own ``net_flow_mw`` represents. The same grouping
+    also nets more than one corridor's contribution onto a shared two-leg
+    transhipment leg (the star-topology "shared leg" case) instead of
+    colliding as duplicate ``(entity_id, stage_id)`` keys.
+    """
+    empty = pl.DataFrame(
+        schema={
+            "entity_id": pl.Int64,
+            "stage_id": pl.Int64,
+            "net_flow_mw": pl.Float64,
+        }
+    )
+    frame = _stage_rows(read_dec_oper_interc(decomp_dir))
+    aggregated = _scenario_mean(
+        frame,
+        "estagio",
+        ["intercambio_origem_MW", "perdas_MW"],
+        entity_column=["codigo_submercado_de", "codigo_submercado_para"],
+    )
+    if aggregated.is_empty():
+        return empty, []
+
+    alignment = _corridor_line_alignment(cobre_output_dir, id_map)
+
+    unresolved: set[tuple[int, int]] = set()
+    rows: list[dict[str, float | int]] = []
+    for row in aggregated.iter_rows(named=True):
+        de_raw = row["codigo_submercado_de"]
+        para_raw = row["codigo_submercado_para"]
+        if de_raw is None or para_raw is None:
+            # The deck's own ``dec_oper_interc`` reports some corridors --
+            # the Itaipu 50 Hz "IV" node, in particular -- by
+            # ``nome_submercado_*`` only: "IV" carries no ``SB``-declared
+            # numeric code, so ``codigo_submercado_de``/``_para`` comes back
+            # null on that side. Such a corridor can never resolve through
+            # ``_corridor_line_alignment`` regardless of how it is looked up
+            # -- the transhipment bus is never an outer-loop endpoint there
+            # (D-UNITS) -- so report it with the ``-1`` "no SB code" sentinel
+            # instead of crashing on the ``int()`` cast below.
+            unresolved.add(
+                (
+                    int(de_raw) if de_raw is not None else -1,
+                    int(para_raw) if para_raw is not None else -1,
+                )
+            )
+            continue
+        de_code = int(de_raw)
+        para_code = int(para_raw)
+        try:
+            bus_de = id_map.bus_id(de_code)
+            bus_para = id_map.bus_id(para_code)
+        except KeyError:
+            unresolved.add((de_code, para_code))
+            continue
+
+        legs = alignment.get((bus_de, bus_para))
+        if legs is None:
+            unresolved.add((de_code, para_code))
+            continue
+
+        stage_id = int(row["estagio"]) - 1
+        net_flow = float(row["intercambio_origem_MW"])
+        for line_id, sign in legs:
+            rows.append(
+                {
+                    "entity_id": line_id,
+                    "stage_id": stage_id,
+                    "net_flow_mw": sign * net_flow,
+                }
+            )
+
+    if not rows:
+        return empty, sorted(unresolved)
+    result = (
+        pl.DataFrame(rows)
+        .group_by("entity_id", "stage_id")
+        .agg(pl.col("net_flow_mw").sum())
+        .cast({"entity_id": pl.Int64, "stage_id": pl.Int64, "net_flow_mw": pl.Float64})
+        .sort("entity_id", "stage_id")
+    )
+    return result, sorted(unresolved)
+
+
+# --- ticket-008: line ResultComparison rows + Network tab metadata ---
+#
+# Wires ticket-007's corridor alignment into ``build_decomp_dataset``: line
+# ``ResultComparison`` rows (mirroring ``results._compare_lines``'s emitted
+# shape) plus the three ``PercentileData`` fields the shared Network tab
+# (``report_builder``, ``charts.line_summary_chart``) consumes.
+
+
+def _line_entity_names(line_meta: list[dict], id_map: DecompIdMap) -> dict[int, str]:
+    """Display name per cobre line id, straight from ``lines.json``'s own
+    ``name`` field (built by ``decomp/network.py::convert_lines`` as
+    ``f"{pair[0]}-{pair[1]}"``).
+
+    Falls back to a bus-name pair label when an entry carries no usable
+    ``name`` -- defensive; every line the converter emits does carry one --
+    so a line's ``entity_name`` is never blank.
+    """
+    names: dict[int, str] = {}
+    for entry in line_meta:
+        line_id = int(entry["id"])
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            try:
+                src_name = id_map.bus_name(int(entry["source_bus_id"]))
+                tgt_name = id_map.bus_name(int(entry["target_bus_id"]))
+                name = f"{src_name}<->{tgt_name}"
+            except KeyError:
+                name = f"line_{line_id}"
+        names[line_id] = name
+    return names
+
+
+def _build_line_id_map(decomp_dir: Path) -> DecompIdMap | None:
+    """Best-effort id map for the corridor -> line alignment.
+
+    Mirrors :func:`_read_aligned_frames`'s own id-map construction (deck
+    discovery -> ``Dadger.read`` -> :meth:`DecompIdMap.from_dadger`), but
+    degrades to ``None`` on a missing/invalid deck instead of failing the
+    whole dataset build: the Network tab is one optional section among many
+    (ticket-008's Error Handling), and every fixture that exercises
+    ``build_decomp_dataset`` against a bare directory (every other level's
+    own tests) must keep working unchanged.
+    """
+    from idecomp.decomp import Dadger
+
+    from cobre_bridge.decomp.id_map import DecompIdMap
+    from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+    try:
+        files = discover_decomp_files(decomp_dir)
+        dadger = Dadger.read(str(files.dadger))
+        return DecompIdMap.from_dadger(dadger)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No deck available for line alignment: %s", exc)
+        return None
+
+
+def _line_result_comparisons(
+    decomp_dir: Path,
+    cobre_output_dir: Path,
+    id_map: DecompIdMap | None,
+    line_meta: list[dict],
+) -> tuple[list[ResultComparison], list[list[int]]]:
+    """Join ticket-007's aligned DECOMP line flow onto Cobre's per-line means.
+
+    Mirrors :func:`_result_comparisons`'s join shape, but keyed by cobre line
+    id rather than a source-model entity code: a single cobre line can be the
+    shared leg of more than one corridor under the star topology (epic-03's
+    two-leg transhipment path), so ``newave_code`` -- unlike every other
+    level's rows -- carries no single canonical source-model code; it stays
+    at the constant ``0`` placeholder, mirroring the SIN row's own
+    convention (:func:`_energy_balance_frames`) rather than fabricating one.
+
+    Returns ``([], [])`` when the deck could not be read (*id_map* is
+    ``None``) or the source-model interchange table is unavailable, and
+    ``([], unresolved)`` when corridors resolve but the join with Cobre's own
+    per-line means produces no row -- matching :func:`_interc_side`'s own
+    never-silently-drop convention for unresolved corridors.
+    """
+    if id_map is None:
+        return [], []
+    try:
+        source_lines, unresolved = _interc_side(decomp_dir, cobre_output_dir, id_map)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model interchange table for line alignment: %s", exc)
+        return [], []
+
+    unresolved_lists = [list(pair) for pair in unresolved]
+    cobre_lines = cobre_readers.read_cobre_line_means(cobre_output_dir)
+    if source_lines.is_empty() or cobre_lines.is_empty():
+        return [], unresolved_lists
+
+    names = _line_entity_names(line_meta, id_map)
+    joined = (
+        source_lines.rename({"net_flow_mw": "source_net_flow_mw"})
+        .join(cobre_lines, on=["entity_id", "stage_id"], how="inner")
+        .sort("entity_id", "stage_id")
+    )
+
+    results: list[ResultComparison] = []
+    for row in joined.iter_rows(named=True):
+        line_id = int(row["entity_id"])
+        nw_value = float(row["source_net_flow_mw"])
+        cobre_value = float(row["net_flow_mw"])
+        abs_diff, rel_diff = _result_diff(nw_value, cobre_value)
+        results.append(
+            ResultComparison(
+                entity_type="line",
+                entity_name=names.get(line_id, f"line_{line_id}"),
+                newave_code=0,
+                cobre_id=line_id,
+                stage=int(row["stage_id"]),
+                variable="net_flow_mw",
+                newave_value=nw_value,
+                cobre_value=cobre_value,
+                abs_diff=abs_diff,
+                rel_diff=rel_diff,
+            )
+        )
+    return results, unresolved_lists
+
+
+def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pd.DataFrame, list[dict]]:
+    """Cobre-side line capacity bounds + metadata for the Network tab.
+
+    Both are pure Cobre-case artifacts, not DECOMP-derived, so this reads
+    them exactly the way ``results.compare_results`` does for the source
+    model's own Network tab:
+
+    - ``line_bounds``: ``constraints/line_bounds.parquet`` verbatim, via
+      pandas (``charts.line_summary_chart`` indexes it with ``.iterrows()``
+      / ``row["..."]``, so it must stay pandas, never polars -- handing it a
+      polars frame makes the bounds overlay silently disappear). This is
+      already per-stage: ``decomp/network.py::convert_lines`` writes one base
+      row (``block_id`` null) per ``(line, stage)`` carrying the resolved
+      max-of-blocks ``IA`` capacity for that stage, so a case whose capacity
+      genuinely never changes across stages naturally produces identical
+      per-stage rows here -- no separate static-capacity broadcast needs
+      implementing on top.
+    - ``line_meta``: ``system/lines.json``'s ``"lines"`` list verbatim --
+      each entry's own nested ``capacity.direct_mw``/``capacity.reverse_mw``
+      is exactly the shape ``line_summary_chart`` reads.
+
+    A missing file degrades to an empty frame / empty list rather than
+    raising -- the Network tab is optional (ticket-008's Error Handling).
+    """
+    case_dir = case_dir_for(cobre_output_dir)
+
+    bounds_path = case_dir / "constraints" / "line_bounds.parquet"
+    line_bounds = (
+        pd.read_parquet(bounds_path) if bounds_path.exists() else pd.DataFrame()
+    )
+
+    lines_path = case_dir / "system" / "lines.json"
+    line_meta: list[dict] = []
+    if lines_path.exists():
+        try:
+            line_meta = json.loads(lines_path.read_text()).get("lines", [])
+        except (OSError, json.JSONDecodeError) as exc:
+            _LOG.warning("Failed to read %s: %s", lines_path, exc)
+    return line_bounds, line_meta
 
 
 #: ``dec_oper_sist`` columns the Energy Balance tab's reference-model overlay
@@ -813,10 +1268,12 @@ def build_decomp_dataset(
     (D-STAGE-OFFSET): DECOMP's ``estagio`` is 1-based from the deck's first
     stage, unlike the source model's arbitrary calendar-month-numbered
     MEDIAS stage, so the fixed offset is always 1 rather than derived from
-    the data. Every other field stays at its empty default, and ``bus``
-    itself stays empty whenever the Cobre run has no percentile output (e.g.
-    the deterministic 2-node tree) — no percentile spread is ever
-    fabricated.
+    the data. As of ticket-008, ``line``/``line_bounds``/``line_meta`` carry
+    the Network tab's cobre percentile band, per-stage capacity bounds, and
+    line metadata (see :func:`_line_bounds_and_meta`). Every other field
+    stays at its empty default, and ``bus``/``line`` themselves stay empty
+    whenever the Cobre run has no percentile output (e.g. the deterministic
+    2-node tree) — no percentile spread is ever fabricated.
 
     Args:
         decomp_dir: The deck directory (results resolved via the ticket-001
@@ -826,8 +1283,9 @@ def build_decomp_dataset(
 
     Returns:
         The validated dataset. ``metadata["unmapped"]`` carries the per-level
-        (hydro/thermal/bus) reference codes the id map could not resolve, so
-        they survive into the dataset instead of being silently dropped.
+        (hydro/thermal/bus/line) reference codes/corridors the id map or the
+        corridor alignment could not resolve, so they survive into the
+        dataset instead of being silently dropped.
     """
     from cobre_bridge.comparators.analyze import build_results_dataset
 
@@ -859,6 +1317,14 @@ def build_decomp_dataset(
         )
     )
 
+    # --- ticket-008: Network tab (line rows + line/line_bounds/line_meta) ---
+    line_bounds, line_meta = _line_bounds_and_meta(cobre_output_dir)
+    line_id_map = _build_line_id_map(decomp_dir)
+    line_results, unresolved_lines = _line_result_comparisons(
+        decomp_dir, cobre_output_dir, line_id_map, line_meta
+    )
+    results.extend(line_results)
+
     pct = PercentileData(
         nw_bus_names=aligned.bus_names,
         nw_hydro_names=aligned.hydro_names,
@@ -871,10 +1337,14 @@ def build_decomp_dataset(
         bus_aggregates=cobre_readers.read_cobre_bus_aggregates(cobre_output_dir),
         cobre_bus_meta=cobre_readers.read_cobre_bus_metadata(cobre_output_dir),
         cobre_hydro_means=cobre_readers.read_cobre_hydro_means(cobre_output_dir),
+        line=cobre_readers.read_cobre_line_percentiles(cobre_output_dir),
+        line_bounds=line_bounds,
+        line_meta=line_meta,
     )
     dataset = build_results_dataset(results, pct, tolerance)
     dataset.metadata["unmapped"] = {
         level: [int(code) for code in codes]
         for level, codes in aligned.unmapped.items()
     }
+    dataset.metadata["unmapped"]["line"] = unresolved_lines
     return dataset
