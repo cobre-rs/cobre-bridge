@@ -12,7 +12,10 @@ from idecomp.decomp import (
     DecDesvFpha,
     DecEstatFpha,
     Decomptim,
+    DecOperEvap,
     DecOperGnl,
+    DecOperRee,
+    DecOperRheSoft,
     EcoFpha,
     Relato,
 )
@@ -25,8 +28,11 @@ from cobre_bridge.comparators.decomp_readers import (
     _resolve_revisioned_file,
     read_dec_desvfpha,
     read_dec_estatfpha,
+    read_dec_oper_evap,
     read_dec_oper_gnl,
     read_dec_oper_interc,
+    read_dec_oper_ree,
+    read_dec_oper_rhesoft,
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
@@ -36,6 +42,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_convergence,
     read_relato_costs,
     read_relato_expected_cost,
+    read_relato_membership,
     reconcile_kdollars_to_reais,
 )
 
@@ -50,6 +57,14 @@ _needs_reduced_deck = pytest.mark.skipif(
 _needs_reduced_deck_tim = pytest.mark.skipif(
     not (_REDUCED_DECK / "saidas" / "decomp.tim").is_file(),
     reason="reduced deck decomp.tim not present",
+)
+_needs_reduced_deck_rhesoft = pytest.mark.skipif(
+    not (_REDUCED_DECK / "saidas" / "dec_oper_rhesoft.csv").is_file(),
+    reason="reduced deck dec_oper_rhesoft.csv not present",
+)
+_needs_reduced_deck_evap = pytest.mark.skipif(
+    not (_REDUCED_DECK / "saidas" / "dec_oper_evap.csv").is_file(),
+    reason="reduced deck dec_oper_evap.csv not present",
 )
 
 
@@ -715,6 +730,68 @@ class TestReadRelatoExpectedCost:
         assert df.height > 0
 
 
+class TestReadRelatoMembership:
+    """`read_relato_membership`: hydro -> REE -> submarket membership table."""
+
+    def test_returns_the_documented_columns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        stub_table = pd.DataFrame(
+            {
+                "codigo_usina": [1, 2],
+                "nome_usina": ["CAMARGOS", "FURNAS"],
+                "codigo_ree": [10, 10],
+                "nome_ree": ["SUDESTE", "SUDESTE"],
+                "codigo_submercado": [1, 1],
+                "nome_submercado": ["SE", "SE"],
+                "nome_submercado_newave": ["SUDESTE", "SUDESTE"],
+            }
+        )
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(
+                lambda _path: _StubRelatoFile(uhes_rees_submercados=stub_table)
+            ),
+        )
+        result = read_relato_membership(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 2
+        for column in (
+            "codigo_usina",
+            "nome_usina",
+            "codigo_ree",
+            "nome_ree",
+            "codigo_submercado",
+            "nome_submercado",
+            "nome_submercado_newave",
+        ):
+            assert column in result.columns
+
+    def test_none_table_raises_naming_attr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(lambda _path: _StubRelatoFile(uhes_rees_submercados=None)),
+        )
+        with pytest.raises(ValueError, match="uhes_rees_submercados"):
+            read_relato_membership(tmp_path)
+
+    def test_missing_relato_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="relato"):
+            read_relato_membership(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_relato_membership(_REDUCED_DECK)
+        assert df.height > 0
+        assert {"codigo_usina", "codigo_ree"} <= set(df.columns)
+
+
 class TestReadDecOperGnl:
     """`read_dec_oper_gnl`: anticipated-thermal operation, saidas-only file."""
 
@@ -764,6 +841,221 @@ class TestReadDecOperGnl:
     def test_real_deck_is_non_empty(self) -> None:
         df = read_dec_oper_gnl(_REDUCED_DECK)
         assert df.height > 0
+
+
+class TestReadDecOperRee:
+    """`read_dec_oper_ree`: per-REE energy operation (ENA / EARM)."""
+
+    def test_finds_saidas_only_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_ree.csv").touch()
+        stub_table = pd.DataFrame(
+            {
+                "estagio": [1],
+                "no": [1],
+                "cenario": [1],
+                "codigo_ree": [10],
+                "nome_ree": ["SUDESTE"],
+                "codigo_submercado": [1],
+                "nome_submercado": ["SE"],
+                "ena_MWmes": [1000.0],
+                "earm_inicial_MWmes": [5000.0],
+                "earm_inicial_percentual": [50.0],
+                "earm_final_MWmes": [4800.0],
+                "earm_final_percentual": [48.0],
+                "earm_maximo_MWmes": [10000.0],
+            }
+        )
+        monkeypatch.setattr(
+            DecOperRee,
+            "read",
+            staticmethod(lambda _path: _StubFile(stub_table)),
+        )
+        result = read_dec_oper_ree(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        for column in ("codigo_ree", "nome_ree", "ena_MWmes", "earm_final_MWmes"):
+            assert column in result.columns
+
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="dec_oper_ree.csv"):
+            read_dec_oper_ree(tmp_path)
+
+    def test_empty_parse_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "dec_oper_ree.csv").touch()
+        monkeypatch.setattr(
+            DecOperRee,
+            "read",
+            staticmethod(lambda _path: _StubFile(None)),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_dec_oper_ree(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_dec_oper_ree(_REDUCED_DECK)
+        assert df.height > 0
+        assert "patamar" not in df.columns
+
+
+class TestReadDecOperEvap:
+    """`read_dec_oper_evap`: per-hydro/stage reservoir evaporation
+    (ticket-020). Verified columns against idecomp 1.14.2's
+    ``DecOperEvap.tabela``."""
+
+    def test_finds_saidas_only_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_evap.csv").touch()
+        stub_table = pd.DataFrame(
+            {
+                "estagio": [1],
+                "no": [1],
+                "cenario": [1],
+                "codigo_usina": [10],
+                "nome_usina": ["A"],
+                "codigo_submercado": [1],
+                "codigo_ree": [100],
+                "volume_util_inicial_hm3": [500.0],
+                "volume_util_inicial_percentual": [70.0],
+                "volume_util_final_hm3": [490.0],
+                "volume_util_final_percentual": [68.0],
+                "evaporacao_modelo_hm3": [10.5],
+                "evaporacao_calculada_hm3": [10.0],
+                "desvio_absoluto_hm3": [-0.5],
+                "desvio_percentual": [-4.76],
+            }
+        )
+        monkeypatch.setattr(
+            DecOperEvap,
+            "read",
+            staticmethod(lambda _path: _StubFile(stub_table)),
+        )
+        result = read_dec_oper_evap(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        for column in (
+            "estagio",
+            "no",
+            "cenario",
+            "codigo_usina",
+            "nome_usina",
+            "codigo_submercado",
+            "codigo_ree",
+            "volume_util_inicial_hm3",
+            "volume_util_inicial_percentual",
+            "volume_util_final_hm3",
+            "volume_util_final_percentual",
+            "evaporacao_modelo_hm3",
+            "evaporacao_calculada_hm3",
+            "desvio_absoluto_hm3",
+            "desvio_percentual",
+        ):
+            assert column in result.columns
+
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="dec_oper_evap.csv"):
+            read_dec_oper_evap(tmp_path)
+
+    def test_empty_parse_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "dec_oper_evap.csv").touch()
+        monkeypatch.setattr(
+            DecOperEvap,
+            "read",
+            staticmethod(lambda _path: _StubFile(None)),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_dec_oper_evap(tmp_path)
+
+    @_needs_reduced_deck_evap
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_dec_oper_evap(_REDUCED_DECK)
+        assert df.height > 0
+        assert "patamar" not in df.columns
+        assert "evaporacao_calculada_hm3" in df.columns
+
+
+class TestReadDecOperRheSoft:
+    """`read_dec_oper_rhesoft`: RHE soft-constraint achieved LHS vs limit
+    (ticket-019)."""
+
+    def test_finds_saidas_only_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_rhesoft.csv").touch()
+        stub_table = pd.DataFrame(
+            {
+                "estagio": [4],
+                "no": [4],
+                "cenario": [1],
+                "codigo_restricao": [101],
+                "limite_MW": [10191.52],
+                "valor_MW": [34550.64],
+                "violacao_absoluta_MW": [0.0],
+                "violacao_percentual": [0.0],
+            }
+        )
+        monkeypatch.setattr(
+            DecOperRheSoft,
+            "read",
+            staticmethod(lambda _path: _StubFile(stub_table)),
+        )
+        result = read_dec_oper_rhesoft(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        for column in (
+            "estagio",
+            "no",
+            "cenario",
+            "codigo_restricao",
+            "limite_MW",
+            "valor_MW",
+            "violacao_absoluta_MW",
+            "violacao_percentual",
+        ):
+            assert column in result.columns
+
+    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="dec_oper_rhesoft.csv") as exc_info:
+            read_dec_oper_rhesoft(tmp_path)
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas" in message
+
+    def test_empty_parse_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "dec_oper_rhesoft.csv").touch()
+        monkeypatch.setattr(
+            DecOperRheSoft,
+            "read",
+            staticmethod(lambda _path: _StubFile(None)),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_dec_oper_rhesoft(tmp_path)
+
+    @_needs_reduced_deck_rhesoft
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_dec_oper_rhesoft(_REDUCED_DECK)
+        assert df.height > 0
+        for column in (
+            "codigo_restricao",
+            "limite_MW",
+            "valor_MW",
+            "violacao_absoluta_MW",
+        ):
+            assert column in df.columns
 
 
 class TestReadDecompTim:

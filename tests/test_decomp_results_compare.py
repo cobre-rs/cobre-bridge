@@ -12,11 +12,13 @@ import pandas as pd
 import polars as pl
 import pytest
 
+from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.charts import (
     _BALANCE_VARS,
     _COST_MAP,
     hydro_slack_aggregate_chart,
     performance_fwd_bwd_split_chart,
+    ree_energy_chart,
 )
 from cobre_bridge.comparators.dataset import (
     SUMMARY_SCHEMA,
@@ -27,23 +29,38 @@ from cobre_bridge.comparators.decomp_html_report import build_decomp_comparison_
 from cobre_bridge.comparators.decomp_results import (
     _BUS_VARIABLES,
     _CANONICAL_VARIABLE,
+    _CONSTRAINT_NAME_RE,
     _DEVIATION_VIOLATION_LABEL,
+    _EARM_MWH_TO_MWMES,
+    _GC_LHS_SCHEMA,
+    _HM3_TO_M3S_HOUR_FACTOR,
     _HYDRO_VARIABLES,
     _NW_COST_LABELS,
     _PRODUCTIVITY_TURBINED_EPS,
     _THERMAL_VARIABLES,
+    _UNSUPPORTED_TERM_VARIABLES,
     DecompComparison,
     _AlignedDecompFrames,
     _build_line_id_map,
     _bus_side,
+    _cobre_ree_sums,
+    _cobre_stage_hours,
     _corridor_line_alignment,
     _cost_frames,
+    _decomp_constraint_context,
     _decomp_convergence_frame,
     _decomp_max_stage,
+    _decomp_ree_frame,
     _decomp_tim_iterations,
     _decomp_tim_stages,
+    _DecompConstraintContext,
+    _DecompConstraintLookups,
     _energy_balance_frames,
+    _evap_side,
+    _evaporation_result_comparisons,
     _fpha_metrics,
+    _generic_constraint_lhs_decomp,
+    _hm3_to_m3s,
     _hydro_productivity_results,
     _interc_side,
     _line_bounds_and_meta,
@@ -52,10 +69,16 @@ from cobre_bridge.comparators.decomp_results import (
     _map_entities,
     _merge_hydro_bus_ids,
     _read_cobre_lines_index,
+    _ree_membership_map,
+    _ree_result_comparisons,
     _result_comparisons,
+    _rhe_lhs_lookup,
     _scenario_mean,
+    _stage_frame_to_lookup,
     _stage_rows,
+    _storage_lookup,
     _summarize,
+    _term_lookup_value,
     _tidy,
     _union_cost_rows,
     build_decomp_dataset,
@@ -63,6 +86,11 @@ from cobre_bridge.comparators.decomp_results import (
 )
 from cobre_bridge.comparators.report_builder import build_comparison_report
 from cobre_bridge.comparators.results import ResultComparison
+from cobre_bridge.decomp.constraint_registers import (
+    ConstraintCensus,
+    ConstraintRecord,
+    ConstraintTerm,
+)
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.verdict import decomp_compare_summary, decomp_dataset_summary
 
@@ -492,6 +520,8 @@ class TestBuildDecompDataset:
             "thermal": [86, 224],
             "bus": [],
             "line": [],
+            "ree": [],
+            "evaporation": [],
         }
         thermal_codes = {
             r.newave_code
@@ -542,6 +572,8 @@ class TestBuildDecompDataset:
             "thermal": [],
             "bus": [],
             "line": [],
+            "ree": [],
+            "evaporation": [],
         }
 
 
@@ -2333,9 +2365,10 @@ class TestBuildDecompDatasetParityWithLegacyComparison:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """``build_decomp_dataset`` and the legacy comparison must agree on
-        every level ``_read_aligned_frames`` reports. ``"line"`` is a
-        ticket-008 addition sourced outside ``_read_aligned_frames`` (the
-        legacy comparison never gained line rows), so it is compared
+        every level ``_read_aligned_frames`` reports. ``"line"``/``"ree"``/
+        ``"evaporation"`` are ticket-008/ticket-018/ticket-020 additions
+        sourced outside ``_read_aligned_frames`` (the legacy comparison never
+        gained line, REE, or evaporation rows), so they are compared
         separately rather than folded into the shared-levels equality."""
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
 
@@ -2344,6 +2377,8 @@ class TestBuildDecompDatasetParityWithLegacyComparison:
 
         dataset_unmapped = dict(dataset.metadata["unmapped"])
         assert dataset_unmapped.pop("line") == []
+        assert dataset_unmapped.pop("ree") == []
+        assert dataset_unmapped.pop("evaporation") == []
         assert dataset_unmapped == legacy.unmapped
 
 
@@ -3770,6 +3805,1533 @@ class TestBuildDecompDatasetFphaE2E:
 
         html = build_comparison_report(dataset)
         assert "Fitted production functions (FPHA)" in html
+
+
+# ---------------------------------------------------------------------------
+# ticket-018: REE energy rollup via membership + additive REE section.
+# ---------------------------------------------------------------------------
+
+
+def _ree_id_map() -> DecompIdMap:
+    """Two hydro plants (codes 10, 20 -> cobre ids 0, 1) -- matches
+    ``_aligned_fixture``'s own hydro codes/ids so the same
+    ``_patch_aligned_frames`` fixture can back both the E1 result rows and
+    the REE rollup in the same ``build_decomp_dataset`` test."""
+    return DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(10, 20))
+
+
+def _ree_membership_fixture() -> pl.DataFrame:
+    """Both fixture plants (codes 10, 20) belong to REE 100 ('SUDESTE')."""
+    return pl.DataFrame(
+        {
+            "codigo_usina": [10, 20],
+            "nome_usina": ["A", "B"],
+            "codigo_ree": [100, 100],
+            "nome_ree": ["SUDESTE", "SUDESTE"],
+            "codigo_submercado": [1, 1],
+            "nome_submercado": ["SE", "SE"],
+            "nome_submercado_newave": ["SUDESTE", "SUDESTE"],
+        }
+    )
+
+
+def _ree_dec_oper_ree_fixture() -> pl.DataFrame:
+    """One REE (100), stage 1 (1-based), two nodes -- scenario-mean
+    ``ena_MWmes=145.0``, ``earm_final_MWmes=1010.0``, deliberately offset from
+    the Cobre-side fixture's ``150.0`` / ``1000.0`` (see
+    :func:`_ree_cobre_hydro_fixture`) so the per-variable diff is
+    hand-checkable rather than trivially zero."""
+    return pl.DataFrame(
+        {
+            "estagio": [1, 1],
+            "no": [1, 2],
+            "cenario": [1, 1],
+            "codigo_ree": [100, 100],
+            "nome_ree": ["SUDESTE", "SUDESTE"],
+            "codigo_submercado": [1, 1],
+            "nome_submercado": ["SE", "SE"],
+            "ena_MWmes": [140.0, 150.0],
+            "earm_inicial_MWmes": [900.0, 900.0],
+            "earm_inicial_percentual": [70.0, 70.0],
+            "earm_final_MWmes": [1000.0, 1020.0],
+            "earm_final_percentual": [72.0, 74.0],
+            "earm_maximo_MWmes": [2000.0, 2000.0],
+        }
+    )
+
+
+def _ree_cobre_hydro_fixture() -> pl.DataFrame:
+    """Two Cobre hydro plants (ids 0, 1), one stage: ENA sums to 150.0 MW,
+    EARM sums to 730000.0 MWh -- exactly ``1000.0 * _EARM_MWH_TO_MWMES``, so
+    the MWh -> MWmes reconciliation lands on a round number."""
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1],
+            "stage_id": [0, 0],
+            "incremental_inflow_energy_mw": [90.0, 60.0],
+            "stored_energy_final_mwh": [400000.0, 330000.0],
+        }
+    )
+
+
+def _ree_aligned_fixture() -> _AlignedDecompFrames:
+    """``_aligned_fixture()`` with its ``cobre_hydro`` extended to carry the
+    ENA/EARM columns :func:`_cobre_ree_sums` reads -- the base fixture is
+    trimmed to only the columns E1's ``_HYDRO_VARIABLES`` needs."""
+    base = _aligned_fixture()
+    return dataclasses.replace(
+        base,
+        cobre_hydro=base.cobre_hydro.with_columns(
+            pl.Series("incremental_inflow_energy_mw", [90.0, 60.0]),
+            pl.Series("stored_energy_final_mwh", [400000.0, 330000.0]),
+        ),
+    )
+
+
+def _patch_ree_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wire ``read_relato_membership``/``read_dec_oper_ree`` -- outside
+    ``_read_aligned_frames`` -- to the fixtures above."""
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.read_relato_membership",
+        lambda *_a, **_k: _ree_membership_fixture(),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.read_dec_oper_ree",
+        lambda *_a, **_k: _ree_dec_oper_ree_fixture(),
+    )
+
+
+class TestReeMembershipMap:
+    """``_ree_membership_map``: ``{cobre_hydro_id: codigo_ree}`` via
+    membership, restricted to the operated hydro codes."""
+
+    def test_maps_cobre_ids_to_codigo_ree(self) -> None:
+        ree_by_cobre_id, unmapped = _ree_membership_map(
+            _ree_membership_fixture(), {10: 0, 20: 1}
+        )
+        assert ree_by_cobre_id == {0: 100, 1: 100}
+        assert unmapped == []
+
+    def test_reports_unmapped_hydro_codes_instead_of_dropping_silently(self) -> None:
+        membership = pl.DataFrame({"codigo_usina": [10], "codigo_ree": [100]})
+
+        ree_by_cobre_id, unmapped = _ree_membership_map(membership, {10: 0, 99: 5})
+
+        assert ree_by_cobre_id == {0: 100}
+        assert unmapped == [99]
+
+    def test_empty_membership_excludes_every_hydro_code(self) -> None:
+        ree_by_cobre_id, unmapped = _ree_membership_map(pl.DataFrame(), {10: 0, 20: 1})
+
+        assert ree_by_cobre_id == {}
+        assert unmapped == [10, 20]
+
+
+class TestCobreReeSums:
+    """``_cobre_ree_sums``: membership-weighted per-(codigo_ree, stage) sum
+    of Cobre hydro ENA/EARM."""
+
+    def test_sums_ena_and_earm_across_member_plants(self) -> None:
+        out = _cobre_ree_sums(_ree_cobre_hydro_fixture(), {0: 100, 1: 100})
+
+        assert out.height == 1
+        row = out.row(0, named=True)
+        assert row["entity_id"] == 100
+        assert row["stage_id"] == 0
+        assert row["ena_mw"] == pytest.approx(150.0)
+        assert row["earm_mwh"] == pytest.approx(730000.0)
+
+    def test_cobre_id_absent_from_membership_excluded_from_sum(self) -> None:
+        cobre_hydro = pl.DataFrame(
+            {
+                "entity_id": [0, 9],
+                "stage_id": [0, 0],
+                "incremental_inflow_energy_mw": [90.0, 999.0],
+                "stored_energy_final_mwh": [400000.0, 999.0],
+            }
+        )
+
+        out = _cobre_ree_sums(cobre_hydro, {0: 100})
+
+        assert out.height == 1
+        row = out.row(0, named=True)
+        assert row["ena_mw"] == pytest.approx(90.0)
+        assert row["earm_mwh"] == pytest.approx(400000.0)
+
+    def test_empty_cobre_hydro_yields_empty_frame(self) -> None:
+        assert _cobre_ree_sums(pl.DataFrame(), {0: 100}).is_empty()
+
+    def test_empty_membership_map_yields_empty_frame(self) -> None:
+        assert _cobre_ree_sums(_ree_cobre_hydro_fixture(), {}).is_empty()
+
+    def test_missing_energy_columns_degrades_to_empty_instead_of_raising(self) -> None:
+        """A ``cobre_hydro`` frame that carries no ENA/EARM columns at all --
+        e.g. the trimmed ``_aligned_fixture()`` shape other tickets' fixtures
+        use -- must degrade gracefully rather than raising a Polars
+        ``ColumnNotFoundError``."""
+        cobre_hydro = pl.DataFrame({"entity_id": [0], "stage_id": [0]})
+
+        assert _cobre_ree_sums(cobre_hydro, {0: 100}).is_empty()
+
+
+class TestDecompReeFrame:
+    """``_decomp_ree_frame``: DECOMP-side per-(codigo_ree, stage) ENA/EARM,
+    scenario-averaged, plus the REE display-name lookup."""
+
+    def test_scenario_means_and_rebases_stage(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_ree",
+            lambda *_a, **_k: _ree_dec_oper_ree_fixture(),
+        )
+
+        frame, names = _decomp_ree_frame(tmp_path)
+
+        assert frame.height == 1
+        row = frame.row(0, named=True)
+        assert row["entity_id"] == 100
+        assert row["stage_id"] == 0
+        assert row["ena_MWmes"] == pytest.approx(145.0)
+        assert row["earm_final_MWmes"] == pytest.approx(1010.0)
+        assert names == {100: "SUDESTE"}
+
+    def test_missing_table_raises(self, tmp_path: Path) -> None:
+        """``read_dec_oper_ree`` unmocked against a bare ``tmp_path`` raises
+        -- the caller (``_ree_result_comparisons``) is what degrades this to
+        an absent REE section, not this helper."""
+        with pytest.raises(FileNotFoundError):
+            _decomp_ree_frame(tmp_path)
+
+
+class TestReeResultComparisons:
+    """``_ree_result_comparisons``: the full REE rollup -- membership map,
+    scenario-averaged DECOMP side, membership-weighted Cobre side, the EARM
+    MWh -> MWmes reconciliation, and the never-silently-dropped
+    unmapped-plant diagnostic (ticket-018 requirement 4)."""
+
+    def test_ena_is_a_plain_sum_earm_is_divided_by_730(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_ree_sources(monkeypatch)
+
+        results, unmapped = _ree_result_comparisons(
+            tmp_path, _ree_cobre_hydro_fixture(), _ree_id_map()
+        )
+
+        assert unmapped == []
+        by_variable = {r.variable: r for r in results}
+        assert set(by_variable) == {"ena_mwmes", "earm_final_mwmes"}
+
+        ena = by_variable["ena_mwmes"]
+        assert ena.entity_type == "ree"
+        assert ena.entity_name == "SUDESTE"
+        assert ena.newave_code == 100
+        assert ena.cobre_id == 100
+        assert ena.stage == 0
+        assert ena.newave_value == pytest.approx(145.0)
+        assert ena.cobre_value == pytest.approx(150.0)  # plain sum, no scaling
+        assert ena.abs_diff == pytest.approx(5.0)
+
+        earm = by_variable["earm_final_mwmes"]
+        assert earm.newave_value == pytest.approx(1010.0)
+        # 730000.0 MWh / _EARM_MWH_TO_MWMES(730) == 1000.0 MWmes.
+        assert earm.cobre_value == pytest.approx(730000.0 / _EARM_MWH_TO_MWMES)
+        assert earm.cobre_value == pytest.approx(1000.0)
+        assert earm.abs_diff == pytest.approx(10.0)
+
+    def test_none_id_map_returns_no_rows_and_no_unmapped(self, tmp_path: Path) -> None:
+        results, unmapped = _ree_result_comparisons(
+            tmp_path, _ree_cobre_hydro_fixture(), None
+        )
+
+        assert results == []
+        assert unmapped == []
+
+    def test_plant_absent_from_membership_excluded_and_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: a hydro code absent from the membership table is excluded
+        from every REE sum and its code is recorded via the diagnostics
+        path, not silently dropped."""
+        # The id map declares a THIRD hydro code (30) the membership fixture
+        # never lists.
+        id_map = DecompIdMap(
+            bus_codes=(1,), bus_names=("SE",), hydro_codes=(10, 20, 30)
+        )
+        _patch_ree_sources(monkeypatch)
+
+        with dx.collect() as collected:
+            results, unmapped = _ree_result_comparisons(
+                tmp_path, _ree_cobre_hydro_fixture(), id_map
+            )
+
+        assert unmapped == [30]
+        assert len(collected) == 1
+        assert collected[0].code == "ree-membership-plant-unmapped"
+        assert "30" in " ".join(str(n) for n in collected[0].notes)
+        # The unmapped plant's cobre id (2) was never a REE member -- the
+        # sums are unaffected (still exactly the two-plant fixture's totals).
+        by_variable = {r.variable: r for r in results}
+        assert by_variable["ena_mwmes"].cobre_value == pytest.approx(150.0)
+
+    def test_no_membership_table_degrades_to_no_rows_no_diagnostic(
+        self, tmp_path: Path
+    ) -> None:
+        """A missing relato (``read_relato_membership`` raising against a
+        bare ``tmp_path``) is a genuinely unavailable REE section, not a
+        per-plant gap -- no diagnostic, just an empty result."""
+        with dx.collect() as collected:
+            results, unmapped = _ree_result_comparisons(
+                tmp_path, _ree_cobre_hydro_fixture(), _ree_id_map()
+            )
+
+        assert results == []
+        assert unmapped == []
+        assert collected == []
+
+    def test_no_dec_oper_ree_table_degrades_to_no_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_membership",
+            lambda *_a, **_k: _ree_membership_fixture(),
+        )
+        # ``read_dec_oper_ree`` left unmocked -> raises FileNotFoundError.
+
+        results, unmapped = _ree_result_comparisons(
+            tmp_path, _ree_cobre_hydro_fixture(), _ree_id_map()
+        )
+
+        assert results == []
+        assert unmapped == []
+
+
+class TestBuildDecompDatasetRee:
+    """ticket-018: fills ``results`` with ``entity_type="ree"`` rows and
+    ``dataset.metadata["unmapped"]["ree"]``."""
+
+    def test_no_deck_no_ree_rows_and_empty_unmapped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``_build_line_id_map`` returns ``None`` against a bare
+        ``tmp_path`` (no deck to read) -> no REE rollup, empty
+        ``unmapped["ree"]``, no exception, and no REE section in the report."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        ree_rows = dataset.tidy.filter(pl.col("entity_type") == "ree")
+        assert ree_rows.is_empty()
+        assert dataset.metadata["unmapped"]["ree"] == []
+        html = build_comparison_report(dataset)  # must not raise
+        assert "REE Energy" not in html
+
+    def test_both_sides_present_tidy_carries_ree_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: ``tidy`` has ``entity_type=="ree"`` rows for ``ena_mwmes`` and
+        ``earm_final_mwmes``, with ``source`` in {"newave", "cobre"}."""
+        _patch_aligned_frames(monkeypatch, _ree_aligned_fixture())
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._build_line_id_map",
+            lambda *_a, **_k: _ree_id_map(),
+        )
+        _patch_ree_sources(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        ree_rows = dataset.tidy.filter(pl.col("entity_type") == "ree")
+        assert set(ree_rows["variable"].unique().to_list()) == {
+            "ena_mwmes",
+            "earm_final_mwmes",
+        }
+        assert set(ree_rows["source"].unique().to_list()) == {"newave", "cobre"}
+        assert dataset.metadata["unmapped"]["ree"] == []
+
+    def test_report_ree_section_present_for_decomp_dataset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: ``build_comparison_report(dataset)`` renders a non-empty REE
+        energy section for a DECOMP dataset."""
+        _patch_aligned_frames(monkeypatch, _ree_aligned_fixture())
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._build_line_id_map",
+            lambda *_a, **_k: _ree_id_map(),
+        )
+        _patch_ree_sources(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)
+
+        assert "REE Energy" in html
+        balance_tab = _extract_tab_content(html, "tab-balance")
+        assert "No ena_mwmes data available." not in balance_tab
+        assert "No earm_final_mwmes data available." not in balance_tab
+        assert "Plotly.newPlot" in balance_tab
+
+
+@pytest.mark.skipif(
+    not _REDUCED_DECOMP_DECK.is_dir() or not _REDUCED_COBRE_OUTPUT.is_dir(),
+    reason="reduced deck + converted cobre output not present",
+)
+class TestBuildDecompDatasetReeE2E:
+    """Tier 3 (dev-only smoke, ticket-018): the reduced deck's real REE
+    section renders end to end. Both directories are gitignored, so this
+    never runs in CI."""
+
+    def test_ree_section_renders_on_the_real_deck(self) -> None:
+        dataset = build_decomp_dataset(_REDUCED_DECOMP_DECK, _REDUCED_COBRE_OUTPUT)
+
+        ree_rows = dataset.tidy.filter(pl.col("entity_type") == "ree")
+        assert not ree_rows.is_empty()
+        assert set(ree_rows["variable"].unique().to_list()) == {
+            "ena_mwmes",
+            "earm_final_mwmes",
+        }
+
+        html = build_comparison_report(dataset)
+        assert "REE Energy" in html
+
+
+class TestReeEnergyChart:
+    """``charts.ree_energy_chart``: mirrors ``system_comparison_chart``'s
+    aggregate-line shape, keyed on ``entity_type == "ree"``."""
+
+    def _results(self) -> list[ResultComparison]:
+        return [
+            ResultComparison(
+                entity_type="ree",
+                entity_name="SUDESTE",
+                newave_code=100,
+                cobre_id=100,
+                stage=0,
+                variable="ena_mwmes",
+                newave_value=145.0,
+                cobre_value=150.0,
+                abs_diff=5.0,
+                rel_diff=5.0 / 145.0,
+            ),
+            ResultComparison(
+                entity_type="ree",
+                entity_name="SUL",
+                newave_code=200,
+                cobre_id=200,
+                stage=0,
+                variable="ena_mwmes",
+                newave_value=50.0,
+                cobre_value=48.0,
+                abs_diff=2.0,
+                rel_diff=2.0 / 50.0,
+            ),
+        ]
+
+    def test_no_matching_rows_renders_placeholder(self) -> None:
+        html = ree_energy_chart([], "ena_mwmes", "REE ENA")
+        assert "No ena_mwmes data available." in html
+
+    def test_sums_across_matched_rees_per_stage(self) -> None:
+        html = ree_energy_chart(self._results(), "ena_mwmes", "REE ENA")
+
+        assert "Plotly.newPlot" in html
+        assert "195" in html  # 145 + 50 == 195 (newave aggregate)
+        assert "198" in html  # 150 + 48 == 198 (cobre aggregate)
+
+    def test_ignores_rows_of_a_different_variable(self) -> None:
+        html = ree_energy_chart(self._results(), "earm_final_mwmes", "REE EARM")
+        assert "No earm_final_mwmes data available." in html
+
+
+class TestReportBuilderReeSectionByteIdentityGuard:
+    """ticket-018 requirement 5: the REE section is additive and must leave
+    ``compare newave`` untouched -- it renders only when ``entity_type ==
+    "ree"`` rows exist, which a NEWAVE-shaped dataset never carries."""
+
+    def test_newave_shaped_dataset_has_no_ree_section(self) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.results import PercentileData
+
+        results = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="CAMARGOS",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=98.0,
+                abs_diff=2.0,
+                rel_diff=0.02,
+            ),
+            ResultComparison(
+                entity_type="bus",
+                entity_name="SE",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="deficit_mw",
+                newave_value=0.0,
+                cobre_value=0.0,
+                abs_diff=0.0,
+                rel_diff=None,
+            ),
+        ]
+        dataset = build_results_dataset(results, PercentileData(), 0.05)
+        assert dataset.tidy.filter(pl.col("entity_type") == "ree").is_empty()
+
+        html = build_comparison_report(dataset)
+
+        assert "REE Energy" not in html
+
+
+# ---------------------------------------------------------------------------
+# ticket-020: evaporation comparison (hydro, "evaporation_m3s") + C11 surface.
+# ---------------------------------------------------------------------------
+
+
+def _write_stages_json(case_dir: Path, stage_hours: dict[int, list[float]]) -> Path:
+    """Write a minimal ``stages.json`` -- *stage_hours* maps
+    ``stage_id -> [block_hours, ...]``. Mirrors ``test_cobre_readers.py``'s
+    own ``_write_stages_json`` helper shape, duplicated locally rather than
+    imported so this file keeps no cross-test-module dependency."""
+    data = {
+        "stages": [
+            {
+                "id": stage_id,
+                "blocks": [
+                    {"id": bid, "hours": hours} for bid, hours in enumerate(block_hours)
+                ],
+            }
+            for stage_id, block_hours in stage_hours.items()
+        ]
+    }
+    path = case_dir / "stages.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+class TestHm3ToM3s:
+    """`_hm3_to_m3s`: hm³ (stage volume) -> m³/s (mean flow), driven by the
+    stage's own hours -- ticket-020 requirement 2."""
+
+    def test_matches_the_fixed_monthly_factor_at_730_hours(self) -> None:
+        """1 m³/s sustained over a 730h month deposits exactly
+        ``converters.network.C_M3S2HM3`` (2.628 hm³); converting that volume
+        back at 730h must recover 1.0 m³/s exactly."""
+        assert _hm3_to_m3s(2.628, 730.0) == pytest.approx(1.0)
+
+    def test_sub_monthly_stage_uses_its_own_hours_not_730(self) -> None:
+        """A 168h (weekly) DECOMP stage: 1 m³/s deposits
+        168 * 3600 / 1e6 = 0.6048 hm³ over that stage -- converting back at
+        the stage's own 168h must recover 1.0 m³/s, not the ~0.23 m³/s a
+        (wrong) fixed 730h monthly divisor would yield."""
+        assert _hm3_to_m3s(0.6048, 168.0) == pytest.approx(1.0)
+        assert _hm3_to_m3s(0.6048, 730.0) == pytest.approx(168.0 / 730.0)
+
+    def test_hour_factor_matches_the_converter_side_monthly_constant(self) -> None:
+        """`_HM3_TO_M3S_HOUR_FACTOR * 730` reproduces
+        ``converters.network.C_M3S2HM3`` (2.628) -- the same physical
+        relationship, generalized from the fixed monthly constant to any
+        stage's own hours."""
+        assert _HM3_TO_M3S_HOUR_FACTOR * 730.0 == pytest.approx(2.628)
+
+
+class TestCobreStageHours:
+    """`_cobre_stage_hours`: per-stage total hours from the Cobre case's own
+    ``stages.json``, via `cobre_readers._load_block_hours` -- ticket-020."""
+
+    def test_sums_block_hours_per_stage(self, tmp_path: Path) -> None:
+        _write_stages_json(tmp_path, {0: [24.0, 144.0], 1: [168.0]})
+
+        hours = _cobre_stage_hours(tmp_path)
+
+        assert hours == {0: pytest.approx(168.0), 1: pytest.approx(168.0)}
+
+    def test_no_stages_json_returns_empty_dict(self, tmp_path: Path) -> None:
+        assert _cobre_stage_hours(tmp_path) == {}
+
+
+def _evap_dec_oper_evap_fixture() -> pl.DataFrame:
+    """One stage (``estagio=1``), two nodes, two plants (codes 10, 20 --
+    matching ``_ree_id_map()``'s hydro codes): the scenario mean is
+    ``1.2 hm³`` for plant 10 and ``2.2 hm³`` for plant 20, deliberately not
+    round numbers so the hm³ -> m³/s conversion is hand-checkable rather than
+    trivially exact."""
+    return pl.DataFrame(
+        {
+            "estagio": [1, 1, 1, 1],
+            "no": [1, 2, 1, 2],
+            "cenario": [1, 1, 1, 1],
+            "codigo_usina": [10, 10, 20, 20],
+            "nome_usina": ["A", "A", "B", "B"],
+            "evaporacao_calculada_hm3": [1.0, 1.4, 2.0, 2.4],
+        }
+    )
+
+
+def _evap_aligned_fixture() -> _AlignedDecompFrames:
+    """``_aligned_fixture()`` with its ``cobre_hydro`` extended to carry
+    ``evaporation_m3s`` -- the base fixture only carries E1's
+    ``_HYDRO_VARIABLES`` columns. Plant 0 (code 10) = 2.5 m³/s, plant 1
+    (code 20) = 3.0 m³/s."""
+    base = _aligned_fixture()
+    return dataclasses.replace(
+        base,
+        cobre_hydro=base.cobre_hydro.with_columns(
+            pl.Series("evaporation_m3s", [2.5, 3.0])
+        ),
+    )
+
+
+def _patch_evap_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stage_hours: dict[int, list[float]] | None = None,
+) -> None:
+    """Wire ``read_dec_oper_evap`` (outside ``_read_aligned_frames``) to
+    :func:`_evap_dec_oper_evap_fixture`, and ``_cobre_stage_hours`` to a
+    fixed one-stage 168h lookup unless *stage_hours* overrides it."""
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+        lambda *_a, **_k: _evap_dec_oper_evap_fixture(),
+    )
+    hours = {0: 168.0} if stage_hours is None else stage_hours
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results._cobre_stage_hours",
+        lambda *_a, **_k: hours,
+    )
+
+
+class TestEvapSide:
+    """`_evap_side`: the source model's per-(hydro, stage) evaporated volume,
+    scenario-averaged and mapped onto Cobre ids -- mirrors `_hydro_side`'s
+    own fold exactly."""
+
+    def test_scenario_means_and_maps_to_cobre_ids(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            lambda *_a, **_k: _evap_dec_oper_evap_fixture(),
+        )
+
+        frame, unmapped = _evap_side(tmp_path, {10: 0, 20: 1})
+
+        assert unmapped == []
+        by_id = {
+            int(row["entity_id"]): row["evaporacao_calculada_hm3"]
+            for row in frame.iter_rows(named=True)
+        }
+        assert by_id == {0: pytest.approx(1.2), 1: pytest.approx(2.2)}
+        assert frame["stage_id"].unique().to_list() == [0]
+
+    def test_unmapped_code_is_reported_not_dropped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            lambda *_a, **_k: _evap_dec_oper_evap_fixture(),
+        )
+
+        frame, unmapped = _evap_side(tmp_path, {10: 0})  # code 20 unmapped
+
+        assert unmapped == [20]
+        assert frame["entity_id"].to_list() == [0]
+
+    def test_missing_table_raises(self, tmp_path: Path) -> None:
+        """``read_dec_oper_evap`` unmocked against a bare ``tmp_path`` raises
+        -- the caller (``_evaporation_result_comparisons``) is what degrades
+        this to an absent evaporation section, not this helper."""
+        with pytest.raises(FileNotFoundError):
+            _evap_side(tmp_path, {10: 0})
+
+
+class TestEvaporationResultComparisons:
+    """`_evaporation_result_comparisons`: the full evaporation reconciliation
+    -- scenario-averaged source-model volume converted to m³/s via the
+    stage's own hours, joined against Cobre's ``evaporation_m3s``, with a
+    one-sided plant excluded from the pairing and counted rather than
+    silently dropped (ticket-020 requirement 5)."""
+
+    def test_paired_rows_use_the_stage_hours_conversion(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_evap_sources(monkeypatch)
+
+        results, one_sided = _evaporation_result_comparisons(
+            tmp_path,
+            tmp_path,
+            _evap_aligned_fixture().cobre_hydro,
+            _ree_id_map(),
+            {0: "A", 1: "B"},
+        )
+
+        assert one_sided == []
+        by_id = {r.cobre_id: r for r in results}
+        assert set(by_id) == {0, 1}
+
+        for r in results:
+            assert r.entity_type == "hydro"
+            assert r.variable == "evaporation_m3s"
+
+        # Plant 0 (code 10): scenario-mean 1.2 hm³ over a 168h stage.
+        assert by_id[0].newave_code == 10
+        assert by_id[0].newave_value == pytest.approx(_hm3_to_m3s(1.2, 168.0))
+        assert by_id[0].cobre_value == pytest.approx(2.5)
+        # Plant 1 (code 20): scenario-mean 2.2 hm³ over the same stage.
+        assert by_id[1].newave_code == 20
+        assert by_id[1].newave_value == pytest.approx(_hm3_to_m3s(2.2, 168.0))
+        assert by_id[1].cobre_value == pytest.approx(3.0)
+
+    def test_plant_present_only_on_cobre_side_excluded_and_counted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: a hydro present in Cobre's ``evaporation_m3s`` but absent from
+        the source model's own evaporation table is excluded from the paired
+        comparison and counted."""
+        # Source model reports evaporation for plant 10 (cobre id 0) only.
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            lambda *_a, **_k: _evap_dec_oper_evap_fixture().filter(
+                pl.col("codigo_usina") == 10
+            ),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._cobre_stage_hours",
+            lambda *_a, **_k: {0: 168.0},
+        )
+
+        with dx.collect() as collected:
+            results, one_sided = _evaporation_result_comparisons(
+                tmp_path,
+                tmp_path,
+                _evap_aligned_fixture().cobre_hydro,  # carries ids 0 AND 1
+                _ree_id_map(),
+                {0: "A", 1: "B"},
+            )
+
+        assert [r.cobre_id for r in results] == [0]
+        assert one_sided == [1]
+        assert len(collected) == 1
+        assert collected[0].code == "evaporation-plant-one-sided"
+        assert "1" in " ".join(str(n) for n in collected[0].notes)
+
+    def test_plant_present_only_on_source_side_excluded_and_counted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC (reverse direction): a hydro present in the source model's own
+        evaporation table but absent from Cobre's ``evaporation_m3s`` is
+        excluded from the paired comparison and counted."""
+        _patch_evap_sources(monkeypatch)
+        # Cobre reports evaporation_m3s for plant 0 (code 10) only.
+        cobre_hydro = _evap_aligned_fixture().cobre_hydro.filter(
+            pl.col("entity_id") == 0
+        )
+
+        with dx.collect() as collected:
+            results, one_sided = _evaporation_result_comparisons(
+                tmp_path, tmp_path, cobre_hydro, _ree_id_map(), {0: "A", 1: "B"}
+            )
+
+        assert [r.cobre_id for r in results] == [0]
+        assert one_sided == [1]
+        assert len(collected) == 1
+        assert collected[0].code == "evaporation-plant-one-sided"
+
+    def test_none_id_map_returns_no_rows_and_no_unmapped(self, tmp_path: Path) -> None:
+        results, one_sided = _evaporation_result_comparisons(
+            tmp_path, tmp_path, _evap_aligned_fixture().cobre_hydro, None, {}
+        )
+
+        assert results == []
+        assert one_sided == []
+
+    def test_no_source_evaporation_table_degrades_to_no_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """``read_dec_oper_evap`` left unmocked -> raises ``FileNotFoundError``
+        -- a genuinely unavailable section, not a per-plant gap."""
+        with dx.collect() as collected:
+            results, one_sided = _evaporation_result_comparisons(
+                tmp_path,
+                tmp_path,
+                _evap_aligned_fixture().cobre_hydro,
+                _ree_id_map(),
+                {0: "A", 1: "B"},
+            )
+
+        assert results == []
+        assert one_sided == []
+        assert collected == []
+
+    def test_no_evaporation_m3s_column_on_cobre_side_degrades_to_no_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_evap_sources(monkeypatch)
+
+        results, one_sided = _evaporation_result_comparisons(
+            tmp_path,
+            tmp_path,
+            _aligned_fixture().cobre_hydro,  # no evaporation_m3s column
+            _ree_id_map(),
+            {0: "A", 1: "B"},
+        )
+
+        assert results == []
+        assert one_sided == []
+
+    def test_no_stage_hours_available_degrades_to_no_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No ``stages.json`` reconciliation denominator -- degrades
+        gracefully rather than raising or fabricating a divisor."""
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            lambda *_a, **_k: _evap_dec_oper_evap_fixture(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._cobre_stage_hours",
+            lambda *_a, **_k: {},
+        )
+
+        results, one_sided = _evaporation_result_comparisons(
+            tmp_path,
+            tmp_path,
+            _evap_aligned_fixture().cobre_hydro,
+            _ree_id_map(),
+            {0: "A", 1: "B"},
+        )
+
+        assert results == []
+        assert one_sided == []
+
+
+class TestBuildDecompDatasetEvaporation:
+    """ticket-020: fills ``results`` with per-(hydro, stage)
+    ``evaporation_m3s`` rows and ``dataset.metadata["unmapped"]["evaporation"]``."""
+
+    def test_no_deck_no_evaporation_rows_and_empty_unmapped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``_build_line_id_map`` returns ``None`` against a bare
+        ``tmp_path`` (no deck to read) -> no evaporation rollup, empty
+        ``unmapped["evaporation"]``, no exception."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        evap_rows = dataset.tidy.filter(
+            (pl.col("entity_type") == "hydro")
+            & (pl.col("variable") == "evaporation_m3s")
+        )
+        assert evap_rows.is_empty()
+        assert dataset.metadata["unmapped"]["evaporation"] == []
+        build_comparison_report(dataset)  # must not raise
+
+    def test_both_sides_present_tidy_carries_evaporation_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: ``tidy`` has ``entity_type=="hydro"``/
+        ``variable=="evaporation_m3s"`` rows with ``source`` in
+        {"newave", "cobre"}, and ``dataset.summary`` includes the
+        ``evaporation_m3s`` variable."""
+        _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._build_line_id_map",
+            lambda *_a, **_k: _ree_id_map(),
+        )
+        _patch_evap_sources(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        evap_rows = dataset.tidy.filter(
+            (pl.col("entity_type") == "hydro")
+            & (pl.col("variable") == "evaporation_m3s")
+        )
+        assert set(evap_rows["source"].unique().to_list()) == {"newave", "cobre"}
+        assert evap_rows.height == 4  # 2 plants * 2 sources
+        assert dataset.metadata["unmapped"]["evaporation"] == []
+
+        summary_vars = set(dataset.summary["variable"].to_list())
+        assert "evaporation_m3s" in summary_vars
+
+    def test_one_sided_plant_counted_in_dataset_metadata(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._build_line_id_map",
+            lambda *_a, **_k: _ree_id_map(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            lambda *_a, **_k: _evap_dec_oper_evap_fixture().filter(
+                pl.col("codigo_usina") == 10
+            ),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._cobre_stage_hours",
+            lambda *_a, **_k: {0: 168.0},
+        )
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata["unmapped"]["evaporation"] == [1]
+
+    def test_hydro_plant_detail_tab_carries_evaporation_content(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: ``build_comparison_report(dataset)`` renders the Hydro Plant
+        Details tab's ``evaporation_m3s`` panel content -- the exact token
+        ``charts._HYDRO_VARIABLES`` already wires into that tab, so no new
+        chart is required (ticket-020 requirement 4)."""
+        _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._build_line_id_map",
+            lambda *_a, **_k: _ree_id_map(),
+        )
+        _patch_evap_sources(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)
+
+        assert 'id="tab-hydro-detail"' in html
+        detail_tab = _extract_tab_content(html, "tab-hydro-detail")
+        # The per-plant JSON payload's evaporation_m3s series is non-empty
+        # for the one stage both fixture plants carry it at (compact JSON,
+        # no spaces -- see ``ui.html.json_for_script``).
+        assert '"evaporation_m3s_stages":[0]' in detail_tab
+
+
+@pytest.mark.skipif(
+    not _REDUCED_DECOMP_DECK.is_dir() or not _REDUCED_COBRE_OUTPUT.is_dir(),
+    reason="reduced deck + converted cobre output not present",
+)
+class TestBuildDecompDatasetEvaporationE2E:
+    """Tier 3 (dev-only smoke, ticket-020): the reduced deck's real
+    evaporation comparison renders end to end. Both directories are
+    gitignored, so this never runs in CI."""
+
+    def test_evaporation_rows_render_on_the_real_deck(self) -> None:
+        dataset = build_decomp_dataset(_REDUCED_DECOMP_DECK, _REDUCED_COBRE_OUTPUT)
+
+        evap_rows = dataset.tidy.filter(
+            (pl.col("entity_type") == "hydro")
+            & (pl.col("variable") == "evaporation_m3s")
+        )
+        assert not evap_rows.is_empty()
+        # The real deck's Cobre run also carries a p10/p50/p90 percentile
+        # band for evaporation_m3s (generic per-variable percentile
+        # unpivoting, not ticket-020-specific) -- assert the two E1-shaped
+        # sources are present rather than an exact source set.
+        assert {"newave", "cobre"} <= set(evap_rows["source"].unique().to_list())
+
+        html = build_comparison_report(dataset)
+        assert 'id="tab-hydro-detail"' in html
+
+
+# --- ticket-019: Constraints tab (gc_* metadata, DECOMP-side LHS) ---
+
+
+def _re_record(
+    constraint_id: int,
+    terms: tuple[ConstraintTerm, ...],
+    *,
+    stage_start: int = 0,
+    stage_end: int = 1,
+    family: str = "RE",
+) -> ConstraintRecord:
+    """A minimal `ConstraintRecord` fixture carrying only the fields
+    `_generic_constraint_lhs_decomp` reads (`family`, `constraint_id`,
+    `stage_start`/`stage_end`, `terms`); `bounds` is never read by this
+    ticket's LHS derivation."""
+    return ConstraintRecord(
+        family=family,
+        constraint_id=constraint_id,
+        stage_start=stage_start,
+        stage_end=stage_end,
+        terms=terms,
+        bounds={},
+        per_block=family in ("RE", "HQ"),
+    )
+
+
+def _usih_frame(rows: list[dict[str, object]]) -> pl.DataFrame:
+    """A ``dec_oper_usih``-shaped frame: one stage-aggregate
+    (``patamar=None``) row per (code, stage) -- the shape `_stage_rows`
+    keeps."""
+    base = {
+        "no": 1,
+        "cenario": 1,
+        "patamar": None,
+        "duracao": None,
+        "vazao_defluente_m3s": 0.0,
+        "vazao_turbinada_m3s": 0.0,
+        "vazao_desviada_m3s": 0.0,
+        "vazao_vertida_m3s": 0.0,
+        "volume_util_final_hm3": 0.0,
+        "geracao_MW": 0.0,
+    }
+    return pl.DataFrame([{**base, **row} for row in rows])
+
+
+def _no_dec_oper(*_args: object, **_kwargs: object) -> pl.DataFrame:
+    """A ``read_dec_oper_usih``/``read_dec_oper_usit`` stub for "this deck has
+    no such table": raises ``FileNotFoundError`` like the real reader would,
+    so `_dec_oper_hydro_stage_frame`/`_dec_oper_thermal_stage_frame`'s own
+    degrade-to-empty ``except`` path is exercised -- a bare ``pl.DataFrame()``
+    (no columns at all) is not a shape the real reader ever returns (it
+    raises on an empty parse) and trips `_scenario_mean`'s ``group_by``."""
+    raise FileNotFoundError("dec_oper_*.csv not found")
+
+
+def _gc(cid: int, name: str, expression: str = "") -> dict[str, object]:
+    """A minimal ``generic_constraints.json`` entry: only ``id``/``name``
+    are read by `_generic_constraint_lhs_decomp` itself."""
+    return {"id": cid, "name": name, "expression": expression}
+
+
+def _write_generic_constraints_case(
+    case_dir: Path,
+    constraints: list[dict[str, Any]],
+    bound_rows: list[dict[str, Any]],
+) -> Path:
+    """Write ``constraints/generic_constraints.json`` +
+    ``constraints/generic_constraint_bounds.parquet`` under *case_dir* and
+    return the Cobre output dir (``case_dir/output``) `case_dir_for`
+    resolves back to *case_dir* from -- mirrors `_write_lines_json`."""
+    constraints_dir = case_dir / "constraints"
+    constraints_dir.mkdir(parents=True, exist_ok=True)
+    (constraints_dir / "generic_constraints.json").write_text(
+        json.dumps({"constraints": constraints})
+    )
+    pd.DataFrame(
+        bound_rows,
+        columns=[
+            "constraint_id",
+            "stage_id",
+            "block_id",
+            "bound_lower",
+            "bound_upper",
+        ],
+    ).to_parquet(constraints_dir / "generic_constraint_bounds.parquet")
+    output_dir = case_dir / "output"
+    output_dir.mkdir(exist_ok=True)
+    return output_dir
+
+
+class TestDecompConstraintContext:
+    """`_decomp_constraint_context`: best-effort census + id map, mirroring
+    `_build_line_id_map`'s degrade-gracefully pattern."""
+
+    def test_returns_none_when_the_directory_has_no_deck(self, tmp_path: Path) -> None:
+        assert _decomp_constraint_context(tmp_path) is None
+
+
+class TestStageFrameToLookup:
+    """`_stage_frame_to_lookup`: one `dec_oper_*` column -> {(code, stage):
+    value}, 1-based `estagio` converted to 0-based `stage_id`."""
+
+    def test_builds_zero_based_stage_lookup(self) -> None:
+        frame = pl.DataFrame(
+            {"codigo_usina": [10, 10], "estagio": [1, 2], "geracao_MW": [100.0, 90.0]}
+        )
+        assert _stage_frame_to_lookup(frame, "geracao_MW") == {
+            (10, 0): 100.0,
+            (10, 1): 90.0,
+        }
+
+    def test_empty_frame_returns_empty_dict(self) -> None:
+        assert _stage_frame_to_lookup(pl.DataFrame(), "geracao_MW") == {}
+
+    def test_missing_column_returns_empty_dict(self) -> None:
+        frame = pl.DataFrame({"codigo_usina": [10], "estagio": [1]})
+        assert _stage_frame_to_lookup(frame, "geracao_MW") == {}
+
+    def test_null_values_are_skipped(self) -> None:
+        frame = pl.DataFrame(
+            {"codigo_usina": [10, 11], "estagio": [1, 1], "geracao_MW": [100.0, None]}
+        )
+        assert _stage_frame_to_lookup(frame, "geracao_MW") == {(10, 0): 100.0}
+
+
+class TestStorageLookup:
+    """`_storage_lookup`: absolute storage = useful volume + Vmin, Vmin
+    resolved via the id map onto the cobre-side `min_storage_hm3` registry."""
+
+    def test_adds_min_storage_floor_via_id_map(self) -> None:
+        hydro_frame = pl.DataFrame(
+            {"codigo_usina": [10], "estagio": [1], "volume_util_final_hm3": [120.0]}
+        )
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(10,))
+        assert _storage_lookup(hydro_frame, id_map, {0: 30.0}) == {(10, 0): 150.0}
+
+    def test_unmapped_code_is_excluded(self) -> None:
+        hydro_frame = pl.DataFrame(
+            {"codigo_usina": [99], "estagio": [1], "volume_util_final_hm3": [120.0]}
+        )
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(10,))
+        assert _storage_lookup(hydro_frame, id_map, {0: 30.0}) == {}
+
+    def test_missing_min_storage_entry_is_excluded(self) -> None:
+        hydro_frame = pl.DataFrame(
+            {"codigo_usina": [10], "estagio": [1], "volume_util_final_hm3": [120.0]}
+        )
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(10,))
+        assert _storage_lookup(hydro_frame, id_map, {}) == {}
+
+
+class TestTermLookupValue:
+    """`_term_lookup_value`: dispatches one register term to its lookup."""
+
+    def _lookups(self) -> _DecompConstraintLookups:
+        return _DecompConstraintLookups(
+            hydro_generation={(10, 0): 100.0},
+            thermal_generation={(5, 0): 30.0},
+            flow={"QDEF": {(10, 0): 80.0}},
+            storage={(10, 0): 500.0},
+        )
+
+    def test_generation_term(self) -> None:
+        term = ConstraintTerm(code=10, coefficient=1.0, variable="generation")
+        assert _term_lookup_value(term, self._lookups(), 0) == 100.0
+
+    def test_thermal_generation_term(self) -> None:
+        term = ConstraintTerm(code=5, coefficient=1.0, variable="thermal_generation")
+        assert _term_lookup_value(term, self._lookups(), 0) == 30.0
+
+    def test_varm_term(self) -> None:
+        term = ConstraintTerm(code=10, coefficient=1.0, variable="VARM")
+        assert _term_lookup_value(term, self._lookups(), 0) == 500.0
+
+    def test_flow_term(self) -> None:
+        term = ConstraintTerm(code=10, coefficient=1.0, variable="QDEF")
+        assert _term_lookup_value(term, self._lookups(), 0) == 80.0
+
+    def test_unresolvable_stage_returns_none(self) -> None:
+        term = ConstraintTerm(code=10, coefficient=1.0, variable="generation")
+        assert _term_lookup_value(term, self._lookups(), 5) is None
+
+    def test_unsupported_variable_returns_none(self) -> None:
+        term = ConstraintTerm(code=0, coefficient=1.0, variable="interchange")
+        assert _term_lookup_value(term, self._lookups(), 0) is None
+
+
+class TestUnsupportedTermVariables:
+    def test_contains_interchange_and_qbom(self) -> None:
+        assert _UNSUPPORTED_TERM_VARIABLES == frozenset({"interchange", "QBOM"})
+
+
+class TestConstraintNameRe:
+    """`_CONSTRAINT_NAME_RE`: recovers a cobre generic constraint's source
+    family + register id from the emitter-authored ``name`` field."""
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("RE_401", ("RE", "401")),
+            ("HQ_12", ("HQ", "12")),
+            ("HV_5", ("HV", "5")),
+            ("RHE_101", ("RHE", "101")),
+        ],
+    )
+    def test_matches_known_prefixes(self, name: str, expected: tuple[str, str]) -> None:
+        match = _CONSTRAINT_NAME_RE.match(name)
+        assert match is not None
+        assert match.groups() == expected
+
+    @pytest.mark.parametrize("name", ["VminOP_1", "AGRINT_3", "RE401", ""])
+    def test_rejects_unknown_names(self, name: str) -> None:
+        assert _CONSTRAINT_NAME_RE.match(name) is None
+
+
+class TestRheLhsLookup:
+    """`_rhe_lhs_lookup`: RHE achieved LHS = valor_MW (the achieved value)."""
+
+    def test_uses_valor_as_the_achieved_lhs(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "estagio": [4],
+                "no": [4],
+                "cenario": [1],
+                "codigo_restricao": [101],
+                "valor_MW": [34550.64],
+                "violacao_absoluta_MW": [0.0],
+            }
+        )
+        assert _rhe_lhs_lookup(frame) == {101: {3: 34550.64}}
+
+    def test_uses_valor_not_the_bound_during_violation(self) -> None:
+        # valor_MW is the achieved LHS; valor_MW + violacao_absoluta_MW would be
+        # the target/bound (Meta), which must NOT be used as the LHS.
+        frame = pl.DataFrame(
+            {
+                "estagio": [4],
+                "no": [4],
+                "cenario": [1],
+                "codigo_restricao": [115],
+                "valor_MW": [2951.58],
+                "violacao_absoluta_MW": [145.83],
+            }
+        )
+        lookup = _rhe_lhs_lookup(frame)
+        assert lookup[115][3] == pytest.approx(2951.58)
+
+    def test_empty_frame_returns_empty_dict(self) -> None:
+        assert _rhe_lhs_lookup(pl.DataFrame()) == {}
+
+
+class TestGenericConstraintLhsDecomp:
+    """`_generic_constraint_lhs_decomp`: the DECOMP-side LHS derivation --
+    this plan's least-certain crux (ticket-019)."""
+
+    def test_no_constraints_returns_empty_schema(self, tmp_path: Path) -> None:
+        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [])
+        assert result.schema == _GC_LHS_SCHEMA
+        assert result.is_empty()
+
+    def test_re_hydro_generation_terms_sum_by_coefficient(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        record = _re_record(
+            401,
+            (
+                ConstraintTerm(code=155, coefficient=1.0, variable="generation"),
+                ConstraintTerm(code=157, coefficient=1.0, variable="generation"),
+            ),
+        )
+        census = ConstraintCensus(
+            by_family={"RE": (record,), "HQ": (), "HV": (), "HE": ()}
+        )
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(155, 157))
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
+            lambda *_a, **_k: _DecompConstraintContext(census=census, id_map=id_map),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            lambda *_a, **_k: _usih_frame(
+                [
+                    {"codigo_usina": 155, "estagio": 1, "geracao_MW": 3000.0},
+                    {"codigo_usina": 157, "estagio": 1, "geracao_MW": 3077.78},
+                ]
+            ),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+
+        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(0, "RE_401")])
+
+        row = result.row(0, named=True)
+        assert row["constraint_id"] == 0
+        assert row["stage_id"] == 0
+        assert row["lhs_value"] == pytest.approx(6077.78)
+
+    def test_hv_varm_term_uses_absolute_storage_floor(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        record = _re_record(
+            9001,
+            (ConstraintTerm(code=10, coefficient=1.0, variable="VARM"),),
+            family="HV",
+            stage_start=0,
+            stage_end=0,
+        )
+        census = ConstraintCensus(
+            by_family={"RE": (), "HQ": (), "HV": (record,), "HE": ()}
+        )
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(10,))
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
+            lambda *_a, **_k: _DecompConstraintContext(census=census, id_map=id_map),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            lambda *_a, **_k: _usih_frame(
+                [{"codigo_usina": 10, "estagio": 1, "volume_util_final_hm3": 120.0}]
+            ),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_hydro_metadata",
+            lambda *_a, **_k: {0: {"min_storage_hm3": 30.0}},
+        )
+
+        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(3, "HV_9001")])
+
+        assert result.to_dicts() == [
+            {"constraint_id": 3, "stage_id": 0, "lhs_value": 150.0}
+        ]
+
+    def test_rhe_soft_constraint_lhs_is_the_achieved_valor(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: a soft (RHE) constraint's per-stage ``lhs_value`` is the
+        operation's achieved value (``valor_MW``) -- NOT valor + the shortfall
+        (which would be the target/bound ``Meta``). Verified on a constructed
+        fixture, independent of any deck/census (RHE reads `DecOperRheSoft`)."""
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
+            lambda *_a, **_k: None,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(
+                {
+                    "estagio": [4],
+                    "no": [4],
+                    "cenario": [1],
+                    "codigo_restricao": [115],
+                    "limite_MW": [3097.40],
+                    "valor_MW": [2951.58],
+                    "violacao_absoluta_MW": [145.83],
+                    "violacao_percentual": [1.412423],
+                }
+            ),
+        )
+
+        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(7, "RHE_115")])
+
+        rows = result.to_dicts()
+        assert len(rows) == 1
+        assert rows[0]["constraint_id"] == 7
+        assert rows[0]["stage_id"] == 3
+        assert rows[0]["lhs_value"] == pytest.approx(2951.58)
+
+    def test_interchange_term_skips_whole_constraint_cobre_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An RE record mixing a resolvable ``generation`` term with an
+        unresolvable ``interchange`` term must not fabricate a partial LHS
+        from the resolvable term alone -- the whole constraint renders
+        cobre-only."""
+        record = _re_record(
+            405,
+            (
+                ConstraintTerm(code=141, coefficient=1.0, variable="generation"),
+                ConstraintTerm(
+                    code=0,
+                    coefficient=1.0,
+                    variable="interchange",
+                    submarket_de="SE",
+                    submarket_para="S",
+                ),
+            ),
+        )
+        census = ConstraintCensus(
+            by_family={"RE": (record,), "HQ": (), "HV": (), "HE": ()}
+        )
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(141,))
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
+            lambda *_a, **_k: _DecompConstraintContext(census=census, id_map=id_map),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            lambda *_a, **_k: _usih_frame(
+                [{"codigo_usina": 141, "estagio": 1, "geracao_MW": 1000.0}]
+            ),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+
+        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(2, "RE_405")])
+
+        assert result.is_empty()
+
+    def test_unrecognized_name_skips_constraint(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
+            lambda *_a, **_k: None,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+
+        result = _generic_constraint_lhs_decomp(
+            tmp_path, tmp_path, [_gc(9, "VminOP_1")]
+        )
+
+        assert result.is_empty()
+
+    def test_no_deck_context_yields_no_re_hq_hv_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``_decomp_constraint_context`` returning ``None`` (no readable
+        deck) must degrade RE/HQ/HV to cobre-only, never raise."""
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
+            lambda *_a, **_k: None,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            lambda *_a, **_k: _usih_frame(
+                [{"codigo_usina": 155, "estagio": 1, "geracao_MW": 3000.0}]
+            ),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+
+        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(0, "RE_401")])
+
+        assert result.is_empty()
+
+
+class TestBuildDecompDatasetConstraints:
+    """ticket-019: fills ``gc_constraints``/``gc_bounds``/``gc_lhs_newave``/
+    ``gc_lhs_cobre`` -- the cobre-side pieces reused verbatim from
+    `constraints_compare`, the DECOMP-side LHS newly derived."""
+
+    def test_no_generic_constraints_case_renders_empty_no_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        case_dir = tmp_path / "case"
+        output_dir = _write_generic_constraints_case(case_dir, [], [])
+
+        dataset = build_decomp_dataset(case_dir, output_dir)
+
+        assert dataset.metadata["gc_constraints"] == []
+        assert dataset.metadata["gc_lhs_newave"].is_empty()
+        assert dataset.metadata["gc_lhs_cobre"].is_empty()
+        html = build_comparison_report(dataset)  # must not raise
+        constraints_tab = _extract_tab_content(html, "tab-constraints")
+        assert "Generic Constraints — LHS vs Bound" in constraints_tab
+
+    def test_populated_case_wires_gc_metadata(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        case_dir = tmp_path / "case"
+        constraints = [
+            {
+                "id": 0,
+                "name": "RHE_115",
+                "description": "RHE stored-energy constraint 115",
+                "expression": "@rho_acum_h0 * hydro_storage(0)",
+                "slack": {"enabled": True, "penalty": 1000.0},
+            }
+        ]
+        bound_rows = [
+            {
+                "constraint_id": 0,
+                "stage_id": 0,
+                "block_id": None,
+                "bound_lower": 3097.40,
+                "bound_upper": None,
+            }
+        ]
+        output_dir = _write_generic_constraints_case(case_dir, constraints, bound_rows)
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(
+                {
+                    "estagio": [1],
+                    "no": [1],
+                    "cenario": [1],
+                    "codigo_restricao": [115],
+                    "valor_MW": [2951.58],
+                    "violacao_absoluta_MW": [145.83],
+                }
+            ),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.constraints_compare.evaluate_lhs_cobre",
+            lambda *_a, **_k: pl.DataFrame(
+                {"constraint_id": [0], "stage_id": [0], "lhs_value": [3000.0]}
+            ),
+        )
+
+        dataset = build_decomp_dataset(case_dir, output_dir)
+
+        assert dataset.metadata["gc_constraints"] == constraints
+        assert dataset.metadata["gc_bounds"].height == 1
+        nw_row = dataset.metadata["gc_lhs_newave"].row(0, named=True)
+        assert nw_row["constraint_id"] == 0
+        assert nw_row["stage_id"] == 0
+        assert nw_row["lhs_value"] == pytest.approx(2951.58)
+        cb_row = dataset.metadata["gc_lhs_cobre"].row(0, named=True)
+        assert cb_row == {"constraint_id": 0, "stage_id": 0, "lhs_value": 3000.0}
+
+        html = build_comparison_report(dataset)
+        constraints_tab = _extract_tab_content(html, "tab-constraints")
+        assert "Generic Constraints — LHS vs Bound" in constraints_tab
+        assert "Plotly.newPlot" in constraints_tab
+
+
+@pytest.mark.skipif(
+    not _REDUCED_DECOMP_DECK.is_dir() or not _REDUCED_COBRE_OUTPUT.is_dir(),
+    reason="reduced deck + converted cobre output not present",
+)
+class TestBuildDecompDatasetConstraintsE2E:
+    """Tier 3 (dev-only smoke, ticket-019): the reduced deck's real
+    Constraints tab renders end to end. Both directories are gitignored, so
+    this never runs in CI."""
+
+    def test_constraints_tab_renders_on_the_real_deck(self) -> None:
+        dataset = build_decomp_dataset(_REDUCED_DECOMP_DECK, _REDUCED_COBRE_OUTPUT)
+
+        assert dataset.metadata["gc_constraints"]
+        assert not dataset.metadata["gc_lhs_newave"].is_empty()
+
+        html = build_comparison_report(dataset)
+        constraints_tab = _extract_tab_content(html, "tab-constraints")
+        assert "Generic Constraints — LHS vs Bound" in constraints_tab
+        assert "Plotly.newPlot" in constraints_tab
 
 
 class TestComparisonRecord:

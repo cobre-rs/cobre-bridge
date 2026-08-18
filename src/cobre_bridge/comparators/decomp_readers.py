@@ -25,8 +25,11 @@ from idecomp.decomp import (
     DecDesvFpha,
     DecEstatFpha,
     Decomptim,
+    DecOperEvap,
     DecOperGnl,
     DecOperInterc,
+    DecOperRee,
+    DecOperRheSoft,
     DecOperSist,
     DecOperUsih,
     DecOperUsit,
@@ -117,12 +120,63 @@ def read_dec_oper_interc(case_dir: Path) -> pl.DataFrame:
     return _read_dec_oper(case_dir, "dec_oper_interc.csv", DecOperInterc)
 
 
+def read_dec_oper_rhesoft(case_dir: Path) -> pl.DataFrame:
+    """Per-RHE-soft-constraint operation: achieved stored energy against its
+    limit, and the violation the soft treatment absorbed.
+
+    Native columns: ``estagio``, ``no``, ``cenario``, ``codigo_restricao``,
+    ``limite_MW``, ``valor_MW``, ``violacao_absoluta_MW``,
+    ``violacao_percentual``. ``codigo_restricao`` is the same ``HE``/``CM``
+    register id (``constraint_registers.ConstraintRecord.constraint_id``)
+    the conversion-time RHE emitter (``decomp.constraints.
+    emit_rhe_generics``) names its cobre constraint after (``"RHE_<id>"``).
+
+    ticket-019: this is the RHE (soft minimum-stored-energy) constraints'
+    own achieved LHS, straight from the source model -- the Constraints tab's
+    DECOMP-side LHS derivation (`decomp_results._rhe_lhs_lookup`) reads
+    ``valor_MW``/``violacao_absoluta_MW`` from here rather than re-deriving
+    the register's ρ_acum-weighted cascade sum a second time."""
+    return _read_dec_oper(case_dir, "dec_oper_rhesoft.csv", DecOperRheSoft)
+
+
 def read_dec_oper_gnl(case_dir: Path) -> pl.DataFrame:
     """Per-anticipated-thermal (GNL) operation: dispatch bounds, incremental
     cost, and the fuel cost (``custo_geracao``, native k$). Ships only under
     ``saidas/`` (no curated root copy); resolved by the saidas-first lookup
     shared with every other ``dec_oper_*`` table."""
     return _read_dec_oper(case_dir, "dec_oper_gnl.csv", DecOperGnl)
+
+
+def read_dec_oper_evap(case_dir: Path) -> pl.DataFrame:
+    """Per-hydro/stage/node/scenario reservoir evaporation.
+
+    Verified (idecomp 1.14.2, ``DecOperEvap.tabela``) native columns:
+    ``estagio``, ``no``, ``cenario``, ``codigo_usina``, ``nome_usina``,
+    ``codigo_submercado``, ``codigo_ree``, ``volume_util_inicial_hm3``,
+    ``volume_util_inicial_percentual``, ``volume_util_final_hm3``,
+    ``volume_util_final_percentual``, ``evaporacao_modelo_hm3`` (the fitted
+    monthly-coefficient estimate), ``evaporacao_calculada_hm3`` (the volume
+    the run's own water balance actually applied over the stage -- hm³, a
+    volume, not a flow), ``desvio_absoluto_hm3``, ``desvio_percentual``.
+    Unlike `read_dec_oper_usih`/`read_dec_oper_ree`, this table carries no
+    ``patamar`` column -- it is already one row per (stage, node, scenario,
+    plant), with no sub-stage block breakdown to fold. ticket-020: the
+    source for the evaporation comparison (`decomp_results.
+    _evaporation_result_comparisons`), which reconciles
+    ``evaporacao_calculada_hm3`` (hm³) against Cobre's ``evaporation_m3s``
+    (m³/s) via the stage's own hours."""
+    return _read_dec_oper(case_dir, "dec_oper_evap.csv", DecOperEvap)
+
+
+def read_dec_oper_ree(case_dir: Path) -> pl.DataFrame:
+    """Per-REE (reservoir-equivalent-energy) operation: natural inflow energy
+    (``ena_MWmes``) and stored energy (``earm_inicial``/``earm_final``, both
+    absolute ``_MWmes`` and ``_percentual``, plus ``earm_maximo_MWmes``), one
+    row per (stage, node, scenario, REE). ticket-018: the DECOMP-side source
+    for the REE energy rollup -- Cobre has no REE entity, so its counterpart
+    is a membership-weighted sum of plant output (see
+    `decomp_results._ree_result_comparisons`)."""
+    return _read_dec_oper(case_dir, "dec_oper_ree.csv", DecOperRee)
 
 
 def _resolve_revisioned_file(case_dir: Path, stem: str) -> Path | None:
@@ -227,6 +281,20 @@ def read_relato_expected_cost(case_dir: Path) -> pl.DataFrame:
     Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
     """
     return _read_relato_table(case_dir, "custo_operacao_valor_esperado")
+
+
+def read_relato_membership(case_dir: Path) -> pl.DataFrame:
+    """Read the hydro-plant -> REE -> submarket membership table
+    (``codigo_usina``, ``nome_usina``, ``codigo_ree``, ``nome_ree``,
+    ``codigo_submercado``, ``nome_submercado``, ``nome_submercado_newave``)
+    from the general report.
+
+    ticket-018: the sole source that attributes a hydro plant to its REE --
+    neither `DecompIdMap` nor any ``dec_oper_*`` table carries that
+    membership, so `decomp_results._ree_result_comparisons` rolls Cobre's
+    per-plant energy up to the REE level through this table instead.
+    """
+    return _read_relato_table(case_dir, "uhes_rees_submercados")
 
 
 # --- ticket-017: FPHA (fitted production function) readers ---

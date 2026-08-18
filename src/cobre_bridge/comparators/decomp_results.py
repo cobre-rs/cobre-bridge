@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,7 +44,10 @@ from cobre_bridge.comparators import cobre_readers
 from cobre_bridge.comparators.decomp_readers import (
     read_dec_desvfpha,
     read_dec_estatfpha,
+    read_dec_oper_evap,
     read_dec_oper_interc,
+    read_dec_oper_ree,
+    read_dec_oper_rhesoft,
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
@@ -51,12 +55,19 @@ from cobre_bridge.comparators.decomp_readers import (
     read_eco_fpha,
     read_relato_convergence,
     read_relato_costs,
+    read_relato_membership,
     reconcile_kdollars_to_reais,
 )
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.decomp.constraint_registers import (
+        ConstraintCensus,
+        ConstraintRecord,
+        ConstraintTerm,
+    )
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -70,6 +81,15 @@ _ZERO_FLOOR = 1e-9
 #: :data:`cobre_bridge.comparators.results._PRODUCTIVITY_TURB_EPS`: near-zero
 #: turbining makes generation/turbined an undefined 0/0 on both sides.
 _PRODUCTIVITY_TURBINED_EPS: float = 1.0e-6
+
+#: ticket-018: cobre's ``stored_energy_final_mwh`` is MWh; the source model's
+#: own REE ``earm_final_MWmes`` is MWmês (average MW sustained over a month).
+#: 730 h/month is the same implicit hours-per-month convention
+#: `report_builder`'s Energy Balance chart already applies to the SIN-total
+#: EARM overlay (``cobre_aggregate_chart(..., nw_factor=730.0, ...)``) --
+#: reused here rather than re-derived so the two EARM reconciliations never
+#: drift apart.
+_EARM_MWH_TO_MWMES: float = 730.0
 
 
 @dataclass(frozen=True)
@@ -1970,6 +1990,863 @@ def _fpha_metrics(
     return metrics if not metrics.is_empty() else None
 
 
+# --- ticket-018: REE energy rollup via membership ---
+#
+# DECOMP reports energy at REE (reservoir-equivalent-energy) granularity
+# (`read_dec_oper_ree`); Cobre has no REE entity and `DecompIdMap` carries no
+# REE map, so the Cobre counterpart is built by rolling each REE's member
+# plants' own energy up through the `relato.uhes_rees_submercados`
+# membership table (`read_relato_membership`) instead. Reuses
+# `build_decomp_dataset`'s own `line_id_map` (ticket-008) for the hydro
+# code -> Cobre id half of that membership, the same way `_fpha_metrics`
+# already does, rather than rebuilding a third `DecompIdMap`.
+
+
+def _ree_membership_map(
+    membership: pl.DataFrame, hydro_codes: dict[int, int]
+) -> tuple[dict[int, int], list[int]]:
+    """``{cobre_hydro_id: codigo_ree}`` via membership, restricted to the
+    operated hydro codes this module already resolves
+    (``{codigo_usina: cobre_id}``, from `DecompIdMap.hydro_id`).
+
+    A hydro code with no row in *membership* cannot be attributed to any REE
+    -- it is excluded from every REE sum and returned (sorted) as the second
+    element instead of being silently dropped (ticket-018 requirement 4).
+    """
+    code_to_ree: dict[int, int] = {}
+    if not membership.is_empty():
+        for row in membership.iter_rows(named=True):
+            code_to_ree[int(row["codigo_usina"])] = int(row["codigo_ree"])
+
+    ree_by_cobre_id: dict[int, int] = {}
+    unmapped: list[int] = []
+    for code, cobre_id in hydro_codes.items():
+        ree_code = code_to_ree.get(code)
+        if ree_code is None:
+            unmapped.append(code)
+            continue
+        ree_by_cobre_id[cobre_id] = ree_code
+    return ree_by_cobre_id, sorted(unmapped)
+
+
+_EMPTY_COBRE_REE_SUMS_SCHEMA: dict[str, type[pl.DataType]] = {
+    "entity_id": pl.Int64,
+    "stage_id": pl.Int64,
+    "ena_mw": pl.Float64,
+    "earm_mwh": pl.Float64,
+}
+
+#: Columns :func:`_cobre_ree_sums` reads off *cobre_hydro* besides
+#: ``entity_id``/``stage_id``. A frame missing either -- e.g. some other
+#: ticket's trimmed test fixture that only carries the E1 hydro-comparison
+#: columns -- degrades to an empty sum instead of a Polars
+#: ``ColumnNotFoundError``.
+_REE_COBRE_ENERGY_COLUMNS: tuple[str, ...] = (
+    "incremental_inflow_energy_mw",
+    "stored_energy_final_mwh",
+)
+
+
+def _cobre_ree_sums(
+    cobre_hydro: pl.DataFrame, ree_by_cobre_id: dict[int, int]
+) -> pl.DataFrame:
+    """Membership-weighted sum of Cobre hydro ENA/EARM per (codigo_ree, stage).
+
+    *cobre_hydro* is `_AlignedDecompFrames.cobre_hydro` (ticket-002's own
+    Cobre hydro means, reused rather than re-read); *ree_by_cobre_id* inverts
+    :func:`_ree_membership_map`'s own map, one entry per member plant. A
+    Cobre hydro id absent from it -- every plant this rollup could not
+    attribute to a membership row -- contributes to no REE sum. Returned
+    ``entity_id`` is the REE code (``codigo_ree``), matching the join key
+    :func:`_decomp_ree_frame` emits; ``earm_mwh`` is still raw MWh here --
+    the ÷730 MWmês reconciliation happens once, at the
+    :class:`~cobre_bridge.comparators.results.ResultComparison` emission site.
+    """
+    empty = pl.DataFrame(schema=_EMPTY_COBRE_REE_SUMS_SCHEMA)
+    if cobre_hydro.is_empty() or not ree_by_cobre_id:
+        return empty
+    if not set(_REE_COBRE_ENERGY_COLUMNS) <= set(cobre_hydro.columns):
+        return empty
+    mapped = cobre_hydro.with_columns(
+        pl.col("entity_id")
+        .map_elements(lambda i: ree_by_cobre_id.get(int(i)), return_dtype=pl.Int64)
+        .alias("codigo_ree")
+    ).filter(pl.col("codigo_ree").is_not_null())
+    if mapped.is_empty():
+        return empty
+    return (
+        mapped.group_by(["codigo_ree", "stage_id"])
+        .agg(
+            pl.col("incremental_inflow_energy_mw").sum().alias("ena_mw"),
+            pl.col("stored_energy_final_mwh").sum().alias("earm_mwh"),
+        )
+        .rename({"codigo_ree": "entity_id"})
+        .cast({"entity_id": pl.Int64, "stage_id": pl.Int64})
+        .sort(["entity_id", "stage_id"])
+    )
+
+
+def _decomp_ree_frame(decomp_dir: Path) -> tuple[pl.DataFrame, dict[int, str]]:
+    """DECOMP-side per-(codigo_ree, stage) ENA/EARM, scenario-averaged over
+    the deck's own nodes, plus the REE display-name lookup.
+
+    Mirrors every other ``_*_side`` helper's fold
+    (:func:`_stage_rows`/:func:`_scenario_mean`), keyed by ``codigo_ree``
+    (`read_dec_oper_ree` carries no ``patamar`` column, so :func:`_stage_rows`
+    is a no-op here -- called anyway for the same fold shape every other level
+    uses). Rebases ``estagio`` onto the 0-based ``stage_id`` the same way
+    :func:`_map_entities` does. Raises whatever `read_dec_oper_ree` raises on
+    a missing/empty parse -- the caller degrades that to "no REE section".
+    """
+    frame = _stage_rows(read_dec_oper_ree(decomp_dir))
+
+    names: dict[int, str] = {}
+    if "nome_ree" in frame.columns:
+        for row in (
+            frame.select("codigo_ree", "nome_ree").unique().iter_rows(named=True)
+        ):
+            names[int(row["codigo_ree"])] = str(row["nome_ree"])
+
+    aggregated = _scenario_mean(
+        frame, "estagio", ["ena_MWmes", "earm_final_MWmes"], entity_column="codigo_ree"
+    )
+    if aggregated.is_empty():
+        return aggregated, names
+    mapped = aggregated.with_columns(
+        pl.col("codigo_ree").cast(pl.Int64).alias("entity_id"),
+        (pl.col("estagio").cast(pl.Int64) - 1).alias("stage_id"),
+    ).drop("codigo_ree", "estagio")
+    return mapped, names
+
+
+def _ree_result_comparisons(
+    decomp_dir: Path,
+    cobre_hydro: pl.DataFrame,
+    id_map: DecompIdMap | None,
+) -> tuple[list[ResultComparison], list[int]]:
+    """REE-level ``ena_mwmes``/``earm_final_mwmes`` ``ResultComparison`` rows.
+
+    The source-model side is `_decomp_ree_frame` (`read_dec_oper_ree`,
+    scenario-averaged per REE/stage); the Cobre side is
+    :func:`_cobre_ree_sums`'s membership-weighted plant rollup, with EARM
+    converted MWh -> MWmês (:data:`_EARM_MWH_TO_MWMES`) at emission -- ENA is
+    a plain sum, no unit conversion. ``newave_code``/``cobre_id`` are both the
+    REE's own ``codigo_ree`` -- Cobre has no independent REE id to diverge
+    from it.
+
+    Returns ``([], [])`` when *id_map* is ``None`` (deck unreadable -- no
+    hydro code -> Cobre id mapping exists to build the membership map with).
+    A missing/empty membership table or `dec_oper_ree` table degrades to no
+    REE rows (a genuinely unavailable section, logged at INFO) rather than
+    raising -- matching every other optional field this module builds. A
+    hydro code absent from the membership table is excluded from every REE
+    sum and returned (sorted) as the second element, with a WARNING
+    diagnostic recording the codes (ticket-018 requirement 4, never silently
+    dropped).
+    """
+    if id_map is None:
+        return [], []
+
+    hydro_codes = {code: id_map.hydro_id(code) for code in id_map.hydro_codes}
+
+    try:
+        membership = read_relato_membership(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model REE membership table (relato): %s", exc)
+        return [], []
+
+    ree_by_cobre_id, unmapped = _ree_membership_map(membership, hydro_codes)
+    if unmapped:
+        emit(
+            Diagnostic(
+                code="ree-membership-plant-unmapped",
+                severity=Severity.WARNING,
+                category="Compare data",
+                title="Hydro plant absent from REE membership table",
+                summary=(
+                    f"{len(unmapped)} source-model hydro plant code(s) carry "
+                    "no row in the relato uhes_rees_submercados membership "
+                    "table; excluded from every REE energy sum rather than "
+                    "silently dropped."
+                ),
+                notes=[f"codigo_usina: {unmapped}"],
+            ),
+            logger=_LOG,
+        )
+
+    try:
+        source_ree, names = _decomp_ree_frame(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model REE table (dec_oper_ree): %s", exc)
+        return [], unmapped
+
+    cobre_sums = _cobre_ree_sums(cobre_hydro, ree_by_cobre_id)
+    if source_ree.is_empty() or cobre_sums.is_empty():
+        return [], unmapped
+
+    joined = source_ree.join(cobre_sums, on=["entity_id", "stage_id"], how="inner")
+    if joined.is_empty():
+        return [], unmapped
+
+    results: list[ResultComparison] = []
+    for row in joined.iter_rows(named=True):
+        ree_code = int(row["entity_id"])
+        stage = int(row["stage_id"])
+        name = names.get(ree_code, "")
+        cobre_earm_mwmes = float(row["earm_mwh"]) / _EARM_MWH_TO_MWMES
+        for variable, nw_raw, cobre_value in (
+            ("ena_mwmes", row["ena_MWmes"], float(row["ena_mw"])),
+            ("earm_final_mwmes", row["earm_final_MWmes"], cobre_earm_mwmes),
+        ):
+            if nw_raw is None:
+                continue
+            nw_value = float(nw_raw)
+            abs_diff, rel_diff = _result_diff(nw_value, cobre_value)
+            results.append(
+                ResultComparison(
+                    entity_type="ree",
+                    entity_name=name,
+                    newave_code=ree_code,
+                    cobre_id=ree_code,
+                    stage=stage,
+                    variable=variable,
+                    newave_value=nw_value,
+                    cobre_value=cobre_value,
+                    abs_diff=abs_diff,
+                    rel_diff=rel_diff,
+                )
+            )
+    return results, unmapped
+
+
+# --- ticket-020: evaporation comparison (hydro, "evaporation_m3s") ---
+#
+# The source model reports evaporation as a per-stage *volume* in hm³
+# (`read_dec_oper_evap`'s `evaporacao_calculada_hm3` -- the run's own water
+# balance, not the fitted `evaporacao_modelo_hm3` estimate); Cobre reports it
+# as a mean *flow* in m³/s (`evaporation_m3s`, already carried by
+# `_read_aligned_frames`'s `cobre_hydro`, see `cobre_readers.
+# read_cobre_hydro_means`). Reconciling the two units needs the stage's own
+# duration -- unlike the source model's *own* MEDIAS report (`results.py`'s
+# `_compare_hydros`, which divides by the rounded fixed monthly constant
+# 2.63), the source model's stages here are not always full calendar months
+# (sub-monthly patamares), so the divisor must come from the stage's actual
+# hours (`_cobre_stage_hours`, sourced from the Cobre case's own
+# ``stages.json`` via `cobre_readers._load_block_hours` -- reused rather than
+# re-parsed so the two block-hours readings can never drift apart).
+
+
+def _cobre_stage_hours(cobre_output_dir: Path) -> dict[int, float]:
+    """``{stage_id: total_hours}`` from the Cobre case's own ``stages.json``.
+
+    Reuses `cobre_readers._load_block_hours` -- the project's one
+    ``stages.json`` block-hours reader, already the source every
+    hours-weighted `cobre_readers` aggregation goes through -- rather than
+    re-parsing the file a second time; sums each stage's block hours into a
+    flat per-stage lookup. Empty when ``stages.json`` cannot be found or
+    parsed (`_load_block_hours` returns ``None``), which
+    :func:`_evaporation_result_comparisons` treats as "no hours denominator
+    available" and degrades to no evaporation rows, rather than fabricating
+    one.
+    """
+    block_hours = cobre_readers._load_block_hours(cobre_output_dir)  # noqa: SLF001
+    if block_hours is None or block_hours.is_empty():
+        return {}
+    totals = block_hours.group_by("stage_id").agg(pl.col("hours").sum().alias("hours"))
+    return {
+        int(row["stage_id"]): float(row["hours"])
+        for row in totals.iter_rows(named=True)
+    }
+
+
+#: hm³ -> m³/s conversion factor per hour of stage duration -- the inverse of
+#: `converters.network.C_M3S2HM3` (``hours * 3600 / 1e6``), generalized to the
+#: stage's own ``hours`` instead of the fixed ``MONTH_HOURS`` (730) that
+#: constant assumes.
+_HM3_TO_M3S_HOUR_FACTOR: float = 3600.0 / 1e6
+
+
+def _hm3_to_m3s(volume_hm3: float, stage_hours: float) -> float:
+    """Convert a stage's evaporated volume (hm³) into a mean flow (m³/s).
+
+    ``m3s = hm3 * 1e6 / (stage_hours * 3600)`` -- volume/time with the hm³ ->
+    m³ and hour -> second unit changes folded into
+    :data:`_HM3_TO_M3S_HOUR_FACTOR`, the same physical relationship
+    `converters.network.C_M3S2HM3` expresses in the opposite direction.
+    """
+    return volume_hm3 / (stage_hours * _HM3_TO_M3S_HOUR_FACTOR)
+
+
+def _evap_side(
+    decomp_dir: Path, hydro_codes: dict[int, int]
+) -> tuple[pl.DataFrame, list[int]]:
+    """The source model's per-(hydro, stage) evaporated volume (hm³),
+    scenario-averaged over the deck's own nodes.
+
+    Mirrors :func:`_hydro_side`'s exact fold (:func:`_stage_rows` is a no-op
+    here -- `read_dec_oper_evap` carries no ``patamar`` column, unlike
+    `dec_oper_usih` -- called anyway for the same fold shape every other
+    level uses). Raises whatever `read_dec_oper_evap` raises on a
+    missing/empty parse; the caller degrades that to "no evaporation
+    section".
+    """
+    frame = _stage_rows(read_dec_oper_evap(decomp_dir))
+    aggregated = _scenario_mean(
+        frame, "estagio", ["evaporacao_calculada_hm3"], entity_column="codigo_usina"
+    )
+    return _map_entities(aggregated, "codigo_usina", hydro_codes)
+
+
+def _evaporation_result_comparisons(
+    decomp_dir: Path,
+    cobre_output_dir: Path,
+    cobre_hydro: pl.DataFrame,
+    id_map: DecompIdMap | None,
+    names: dict[int, str],
+) -> tuple[list[ResultComparison], list[int]]:
+    """Per-(hydro, stage) ``evaporation_m3s`` ``ResultComparison`` rows.
+
+    The source-model side is :func:`_evap_side` (`read_dec_oper_evap`,
+    scenario-averaged, mapped onto Cobre ids via *id_map*); the Cobre side is
+    *cobre_hydro*'s own ``evaporation_m3s`` column (already carried by
+    `_read_aligned_frames`, not re-read here). A plant carrying an
+    evaporation series on only one side -- the source model's
+    ``dec_oper_evap`` but no Cobre ``evaporation_m3s`` for that plant, or the
+    reverse -- is excluded from the paired join and returned (sorted, by
+    Cobre id) as the second element instead of being silently dropped
+    (ticket-020 requirement 5), with a WARNING diagnostic recording the
+    count.
+
+    TRACKED COBRE-GAP WORKAROUND (C11): Cobre's own evaporation model
+    over-scales the volume it deposits on a sub-monthly stage -- it applies
+    (pre-fix) a full calendar month's worth of evaporation regardless of the
+    stage's actual duration (see `decomp.hydro.
+    _evaporation_coefficients_mm`'s docstring and the spec at
+    ``~/git/cobre/plans/evaporation-stage-duration-scaling-spec.md``). The
+    reconciliation below ONLY rescales the source model's own hm³ volume into
+    a directly comparable m³/s flow via :func:`_hm3_to_m3s`; Cobre's
+    ``evaporation_m3s`` value is compared UNCHANGED. Any residual divergence
+    this surfaces on a sub-monthly stage is that known Cobre gap (C11), not a
+    conversion error -- it must not be "corrected away" by rescaling Cobre's
+    side to match.
+
+    Returns ``([], [])`` when *id_map* is ``None`` (deck unreadable). A
+    missing/empty `dec_oper_evap` table, an absent ``evaporation_m3s`` column
+    on the Cobre side, or no resolvable stage-hours denominator
+    (:func:`_cobre_stage_hours`) each degrade to "no evaporation section"
+    (logged at INFO) rather than raising, matching every other optional
+    field this module builds.
+    """
+    if id_map is None:
+        return [], []
+
+    hydro_codes = {code: id_map.hydro_id(code) for code in id_map.hydro_codes}
+
+    try:
+        source_evap, _unmapped_hydro_codes = _evap_side(decomp_dir, hydro_codes)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model evaporation table (dec_oper_evap): %s", exc)
+        return [], []
+    if source_evap.is_empty():
+        return [], []
+
+    if cobre_hydro.is_empty() or "evaporation_m3s" not in cobre_hydro.columns:
+        _LOG.info("Cobre output has no evaporation_m3s column; skipping")
+        return [], []
+    cobre_evap = cobre_hydro.select(
+        "entity_id", "stage_id", "evaporation_m3s"
+    ).drop_nulls("evaporation_m3s")
+
+    stage_hours = _cobre_stage_hours(cobre_output_dir)
+    if not stage_hours:
+        _LOG.info(
+            "No stages.json block-hours available; skipping the evaporation "
+            "hm3->m3s reconciliation"
+        )
+        return [], []
+
+    decomp_ids = set(source_evap["entity_id"].unique().to_list())
+    cobre_ids = set(cobre_evap["entity_id"].unique().to_list())
+    one_sided = sorted(int(i) for i in decomp_ids.symmetric_difference(cobre_ids))
+    if one_sided:
+        emit(
+            Diagnostic(
+                code="evaporation-plant-one-sided",
+                severity=Severity.WARNING,
+                category="Compare data",
+                title="Hydro plant has evaporation data on only one side",
+                summary=(
+                    f"{len(one_sided)} hydro plant(s) carry an evaporation "
+                    "series on only one side (the source model's "
+                    "dec_oper_evap or Cobre's evaporation_m3s, not both); "
+                    "excluded from the paired evaporation comparison rather "
+                    "than silently dropped."
+                ),
+                notes=[f"cobre_id: {one_sided}"],
+            ),
+            logger=_LOG,
+        )
+
+    joined = source_evap.join(cobre_evap, on=["entity_id", "stage_id"], how="inner")
+    if joined.is_empty():
+        return [], one_sided
+
+    results: list[ResultComparison] = []
+    for row in joined.iter_rows(named=True):
+        entity_id = int(row["entity_id"])
+        stage = int(row["stage_id"])
+        hours = stage_hours.get(stage)
+        if hours is None or hours <= 0:
+            continue
+        nw_value = _hm3_to_m3s(float(row["evaporacao_calculada_hm3"]), hours)
+        cobre_value = float(row["evaporation_m3s"])
+        abs_diff, rel_diff = _result_diff(nw_value, cobre_value)
+        results.append(
+            ResultComparison(
+                entity_type="hydro",
+                entity_name=names.get(entity_id, ""),
+                newave_code=int(row["newave_code"]),
+                cobre_id=entity_id,
+                stage=stage,
+                variable="evaporation_m3s",
+                newave_value=nw_value,
+                cobre_value=cobre_value,
+                abs_diff=abs_diff,
+                rel_diff=rel_diff,
+            )
+        )
+    return results, one_sided
+
+
+# --- ticket-019: Constraints tab (gc_* metadata, DECOMP-side LHS) ---
+#
+# `constraints_compare` already supplies the source-agnostic pieces verbatim:
+# `_load_generic_constraints`/`_load_generic_constraint_bounds` (the
+# converted case's own constraint/bounds tables) and `evaluate_lhs_cobre`
+# (the Cobre-side LHS from simulation output). What is missing is the
+# DECOMP-side LHS -- `evaluate_lhs_newave` is MEDIAS-USIH/int*.out +
+# EntityAlignment/NewaveIdMap-coupled and cannot serve DECOMP (see the
+# module's own docstring) -- so `_generic_constraint_lhs_decomp` below is
+# its DECOMP sibling: it evaluates each constraint directly against
+# `dec_oper_usih`/`dec_oper_usit`/`dec_oper_rhesoft`, using the
+# special-constraint register (`decomp.constraint_registers.
+# read_constraints`) to recover the same coefficients the conversion-time
+# emitters (`decomp.constraints.emit_re_generics`/`emit_rhq_rhv_generics`/
+# `emit_rhe_generics`) used to author each constraint's expression.
+
+
+@dataclass(frozen=True)
+class _DecompConstraintContext:
+    """Deck-derived inputs `_generic_constraint_lhs_decomp` needs beyond the
+    `dec_oper_*` tables: the special-constraint census (for RE/HQ/HV term
+    coefficients) and the id map (to translate a plant code to its cobre
+    hydro id for the HV storage floor)."""
+
+    census: ConstraintCensus
+    id_map: DecompIdMap
+
+
+def _decomp_constraint_context(decomp_dir: Path) -> _DecompConstraintContext | None:
+    """Best-effort census + id map for the DECOMP-side generic-constraint LHS.
+
+    Mirrors `_build_line_id_map`'s degrade-gracefully pattern (deck
+    discovery -> ``Dadger.read`` -> a from-dadger builder): a missing or
+    invalid deck yields ``None`` (logged, not raised) instead of failing the
+    whole dataset build -- the Constraints tab's DECOMP-side overlay is one
+    optional section among many.
+    """
+    from idecomp.decomp import Dadger
+
+    from cobre_bridge.decomp.constraint_registers import read_constraints
+    from cobre_bridge.decomp.id_map import DecompIdMap
+    from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+    try:
+        files = discover_decomp_files(decomp_dir)
+        dadger = Dadger.read(str(files.dadger))
+        return _DecompConstraintContext(
+            census=read_constraints(dadger),
+            id_map=DecompIdMap.from_dadger(dadger),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info(
+            "No deck available for the DECOMP-side generic-constraint LHS "
+            "derivation: %s",
+            exc,
+        )
+        return None
+
+
+def _dec_oper_hydro_stage_frame(decomp_dir: Path) -> pl.DataFrame:
+    """One row per (source hydro code, stage): the stage-aggregate
+    ``dec_oper_usih`` columns this ticket's constraint terms need, averaged
+    over node/scenario.
+
+    Reuses `_stage_rows` (keep the duration-weighted ``patamar``-null
+    aggregate row) + `_scenario_mean` exactly like `_hydro_side`, but stops
+    short of `_map_entities`'s translation to cobre ids -- the
+    special-constraint register terms this feeds carry the source model's
+    own plant codes, not cobre ids. Degrades to an empty frame (never
+    raises) when the deck ships no ``dec_oper_usih.csv`` -- every caller
+    already treats an empty frame as "nothing to look up".
+    """
+    try:
+        frame = _stage_rows(read_dec_oper_usih(decomp_dir))
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No dec_oper_usih.csv for the Constraints tab LHS: %s", exc)
+        return pl.DataFrame()
+    columns = [
+        "geracao_MW",
+        "vazao_defluente_m3s",
+        "vazao_turbinada_m3s",
+        "vazao_desviada_m3s",
+        "vazao_vertida_m3s",
+        "volume_util_final_hm3",
+    ]
+    return _scenario_mean(frame, "estagio", columns, entity_column="codigo_usina")
+
+
+def _dec_oper_thermal_stage_frame(decomp_dir: Path) -> pl.DataFrame:
+    """One row per (source thermal code, stage): ``dec_oper_usit``'s
+    generation, averaged over node/scenario. Mirrors
+    `_dec_oper_hydro_stage_frame`, including the same degrade-to-empty."""
+    try:
+        frame = _stage_rows(read_dec_oper_usit(decomp_dir))
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No dec_oper_usit.csv for the Constraints tab LHS: %s", exc)
+        return pl.DataFrame()
+    return _scenario_mean(
+        frame, "estagio", ["geracao_MW"], entity_column="codigo_usina"
+    )
+
+
+def _dec_oper_rhesoft_frame(decomp_dir: Path) -> pl.DataFrame:
+    """Best-effort ``dec_oper_rhesoft.csv`` read.
+
+    Empty when the deck carries no RHE (soft minimum-stored-energy)
+    constraints -- the source model omits the file entirely in that case,
+    which `read_dec_oper_rhesoft`'s own empty-is-error contract (for a
+    genuinely broken/empty parse) does not distinguish on its own.
+    """
+    try:
+        return read_dec_oper_rhesoft(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No dec_oper_rhesoft.csv (no RHE constraints?): %s", exc)
+        return pl.DataFrame()
+
+
+def _stage_frame_to_lookup(
+    frame: pl.DataFrame, value_col: str, *, code_col: str = "codigo_usina"
+) -> dict[tuple[int, int], float]:
+    """One stage-aggregate ``dec_oper_*`` frame column -> ``{(code,
+    stage_0based): value}``.
+
+    *frame* is already collapsed to one row per (code, stage) by
+    `_scenario_mean`; this only reshapes it into a lookup and converts the
+    source model's 1-based ``estagio`` to the 0-based ``stage_id`` every
+    other ``gc_*`` frame uses (D-STAGE-OFFSET, offset=1).
+    """
+    if (
+        frame.is_empty()
+        or value_col not in frame.columns
+        or code_col not in frame.columns
+    ):
+        return {}
+    return {
+        (int(row[code_col]), int(row["estagio"]) - 1): float(row[value_col])
+        for row in frame.iter_rows(named=True)
+        if row[value_col] is not None
+    }
+
+
+def _storage_lookup(
+    hydro_frame: pl.DataFrame,
+    id_map: DecompIdMap,
+    min_storage_by_cobre_id: dict[int, float],
+) -> dict[tuple[int, int], float]:
+    """``{(source code, stage_0based): absolute storage hm3}`` = useful + Vmin.
+
+    The source model's own operation export (``volume_util_final_hm3``)
+    reports *useful* volume (above the plant's minimum operative storage);
+    cobre's ``hydro_storage(id)`` -- what an ``HV``/``VARM`` generic
+    constraint's expression is built from -- is absolute. This reuses the
+    ``min_storage_hm3`` the converter already wrote to the case's own
+    ``system/hydros.json`` (via `cobre_readers.read_cobre_hydro_metadata`) --
+    the same floor `_cobre_hydro` subtracts in the other direction for the
+    Hydro Operation tab's own storage row -- rather than rebuilding
+    ``EffectiveCadastro`` from the deck a second time. A single static value
+    per plant, not per-stage: the same simplification
+    `constraints_compare._load_hydro_min_storage` already accepts on the
+    source-model side.
+    """
+    useful = _stage_frame_to_lookup(hydro_frame, "volume_util_final_hm3")
+    out: dict[tuple[int, int], float] = {}
+    for (code, stage), value in useful.items():
+        try:
+            cobre_id = id_map.hydro_id(code)
+        except KeyError:
+            continue
+        vmin = min_storage_by_cobre_id.get(cobre_id)
+        if vmin is None:
+            continue
+        out[(code, stage)] = value + vmin
+    return out
+
+
+@dataclass(frozen=True)
+class _DecompConstraintLookups:
+    """Per-(source code, stage) means feeding
+    `_generic_constraint_lhs_decomp`'s register-term resolution."""
+
+    hydro_generation: dict[tuple[int, int], float] = field(default_factory=dict)
+    thermal_generation: dict[tuple[int, int], float] = field(default_factory=dict)
+    flow: dict[str, dict[tuple[int, int], float]] = field(default_factory=dict)
+    storage: dict[tuple[int, int], float] = field(default_factory=dict)
+
+
+#: Register term variables `_generic_constraint_lhs_decomp` cannot re-derive
+#: from ``dec_oper_*`` output without conversion-time context this
+#: comparator does not rebuild: ``interchange`` (RE ``FI``) needs the same
+#: bus/line direction resolution `decomp.constraints.resolve_fi_term` does
+#: at conversion time; ``QBOM`` (HQ pumping) names a pumping-station code
+#: (not a hydro code), and no ``dec_oper_*`` table reports a pumping
+#: station's own flow directly. A constraint carrying either is skipped
+#: whole (skip-not-partial), never rendered with a partial sum.
+_UNSUPPORTED_TERM_VARIABLES = frozenset({"interchange", "QBOM"})
+
+#: Matches a cobre generic constraint's ``name`` field as authored by the
+#: conversion-time emitters (``decomp.constraints.emit_re_generics`` ->
+#: ``"RE_<id>"``, ``emit_rhq_rhv_generics`` -> ``"HQ_<id>"``/``"HV_<id>"``,
+#: ``emit_rhe_generics`` -> ``"RHE_<id>"``), recovering the special-constraint
+#: register's own family + ``codigo_restricao`` without re-running the
+#: conversion-time id-assignment sequence.
+_CONSTRAINT_NAME_RE = re.compile(r"^(RE|HQ|HV|RHE)_(\d+)$")
+
+
+def _term_lookup_value(
+    term: ConstraintTerm, lookups: _DecompConstraintLookups, stage: int
+) -> float | None:
+    """One register term's per-stage value, or ``None`` when unavailable."""
+    if term.variable == "generation":
+        return lookups.hydro_generation.get((term.code, stage))
+    if term.variable == "thermal_generation":
+        return lookups.thermal_generation.get((term.code, stage))
+    if term.variable == "VARM":
+        return lookups.storage.get((term.code, stage))
+    flow_lookup = lookups.flow.get(term.variable)
+    return flow_lookup.get((term.code, stage)) if flow_lookup is not None else None
+
+
+def _rhe_lhs_lookup(dec_oper_rhesoft: pl.DataFrame) -> dict[int, dict[int, float]]:
+    """``{codigo_restricao: {stage_0based: valor_MW}}``.
+
+    RHE constraints report their achieved LHS directly in
+    ``DecOperRheSoft``: ``valor_MW`` is the achieved Σρ_acum·storage in the
+    operation -- the same raw physical quantity cobre's own (slack-free)
+    expression evaluation produces, so the two overlaid series compare on
+    the same basis. Read it directly rather than re-deriving the
+    ρ_acum-weighted cascade sum ``decomp.constraints.emit_rhe_generics``
+    computes at conversion time, which would duplicate a large, easily
+    drifting piece of machinery.
+
+    The file's ``violacao_absoluta_MW`` is the shortfall against the target
+    ``Meta`` (``valor_MW + violacao_absoluta_MW == Meta``, the constraint's
+    *bound*, not its LHS) -- adding it would collapse the reference trace
+    onto the bound line during every violation episode, exactly the moments
+    the LHS-vs-bound chart exists to surface. Verified against real
+    ``dec_oper_rhesoft.csv`` output.
+    """
+    out: dict[int, dict[int, float]] = {}
+    if dec_oper_rhesoft.is_empty():
+        return out
+    collapsed = _scenario_mean(
+        dec_oper_rhesoft,
+        "estagio",
+        ["valor_MW"],
+        entity_column="codigo_restricao",
+    )
+    for row in collapsed.iter_rows(named=True):
+        valor = row["valor_MW"]
+        if valor is None:
+            continue
+        cid = int(row["codigo_restricao"])
+        stage0 = int(row["estagio"]) - 1
+        out.setdefault(cid, {})[stage0] = float(valor)
+    return out
+
+
+_GC_LHS_SCHEMA = {
+    "constraint_id": pl.Int32,
+    "stage_id": pl.Int32,
+    "lhs_value": pl.Float64,
+}
+
+
+def _generic_constraint_lhs_decomp(
+    decomp_dir: Path,
+    cobre_output_dir: Path,
+    gc_constraints: list[dict],
+) -> pl.DataFrame:
+    """Evaluate each generic constraint's LHS from the source model's own
+    operation output (ticket-019).
+
+    The DECOMP sibling of ``constraints_compare.evaluate_lhs_newave``: that
+    function reads MEDIAS-USIH/int*.out through an ``EntityAlignment``/
+    ``NewaveIdMap`` this source has neither of, so this evaluates each
+    constraint's participating entities directly against
+    ``dec_oper_usih``/``dec_oper_usit``/``dec_oper_rhesoft``.
+
+    Per-family strategy:
+
+    - **RE** (hydro/thermal generation): ``generation``/
+      ``thermal_generation`` register terms resolve against
+      ``dec_oper_usih``/``dec_oper_usit``'s own stage-aggregate row.
+    - **HQ** (flow): ``QDEF``/``QTUR``/``QDES``/``QVER`` register terms
+      resolve against the matching ``dec_oper_usih`` flow column.
+    - **HV** (storage): ``VARM`` register terms resolve against
+      ``dec_oper_usih``'s *useful* stage-final volume, floor-adjusted to
+      cobre's absolute basis (see `_storage_lookup`).
+    - **RHE** (soft stored-energy): read directly from ``DecOperRheSoft``
+      (see `_rhe_lhs_lookup`) -- no register/census lookup needed.
+
+    Deferred (cobre-only render, logged, never fabricated): RE
+    ``interchange`` (FI) and HQ ``QBOM`` (pumping) terms -- see
+    :data:`_UNSUPPORTED_TERM_VARIABLES`. A constraint whose name does not
+    match a known family/id (:data:`_CONSTRAINT_NAME_RE`), or whose id has
+    no matching register record (deck unavailable, or the record was not
+    found), is likewise skipped whole.
+    """
+    if not gc_constraints:
+        return pl.DataFrame(schema=_GC_LHS_SCHEMA)
+
+    context = _decomp_constraint_context(decomp_dir)
+    census_by_key: dict[tuple[str, int], ConstraintRecord] = {}
+    storage_lookup: dict[tuple[int, int], float] = {}
+    hydro_frame = _dec_oper_hydro_stage_frame(decomp_dir)
+    if context is not None:
+        for records in context.census.by_family.values():
+            for record in records:
+                census_by_key[(record.family, record.constraint_id)] = record
+        min_storage = {
+            i: float(m.get("min_storage_hm3") or 0.0)
+            for i, m in cobre_readers.read_cobre_hydro_metadata(
+                cobre_output_dir
+            ).items()
+        }
+        storage_lookup = _storage_lookup(hydro_frame, context.id_map, min_storage)
+
+    thermal_frame = _dec_oper_thermal_stage_frame(decomp_dir)
+    lookups = _DecompConstraintLookups(
+        hydro_generation=_stage_frame_to_lookup(hydro_frame, "geracao_MW"),
+        thermal_generation=_stage_frame_to_lookup(thermal_frame, "geracao_MW"),
+        flow={
+            "QDEF": _stage_frame_to_lookup(hydro_frame, "vazao_defluente_m3s"),
+            "QTUR": _stage_frame_to_lookup(hydro_frame, "vazao_turbinada_m3s"),
+            "QDES": _stage_frame_to_lookup(hydro_frame, "vazao_desviada_m3s"),
+            "QVER": _stage_frame_to_lookup(hydro_frame, "vazao_vertida_m3s"),
+        },
+        storage=storage_lookup,
+    )
+    rhe_lhs = _rhe_lhs_lookup(_dec_oper_rhesoft_frame(decomp_dir))
+
+    rows: list[dict[str, object]] = []
+    n_skipped = 0
+    for c in gc_constraints:
+        name = str(c.get("name", ""))
+        cobre_cid = int(c["id"])
+        match = _CONSTRAINT_NAME_RE.match(name)
+        if match is None:
+            _LOG.info(
+                "Generic constraint %d (%r) has no recognized source-model "
+                "family/id in its name; rendering cobre-only.",
+                cobre_cid,
+                name,
+            )
+            n_skipped += 1
+            continue
+        prefix, raw_cid = match.group(1), int(match.group(2))
+
+        if prefix == "RHE":
+            stage_values = rhe_lhs.get(raw_cid)
+            if not stage_values:
+                _LOG.info(
+                    "RHE constraint %d (%s) has no dec_oper_rhesoft rows; "
+                    "rendering cobre-only.",
+                    cobre_cid,
+                    name,
+                )
+                n_skipped += 1
+                continue
+            rows.extend(
+                {"constraint_id": cobre_cid, "stage_id": stage, "lhs_value": value}
+                for stage, value in stage_values.items()
+            )
+            continue
+
+        record = census_by_key.get((prefix, raw_cid))
+        if record is None:
+            _LOG.info(
+                "Generic constraint %d (%s) has no matching source-model "
+                "register record (deck unavailable or record not found); "
+                "rendering cobre-only.",
+                cobre_cid,
+                name,
+            )
+            n_skipped += 1
+            continue
+        unsupported = sorted(
+            {
+                t.variable
+                for t in record.terms
+                if t.variable in _UNSUPPORTED_TERM_VARIABLES
+            }
+        )
+        if unsupported:
+            _LOG.info(
+                "Generic constraint %d (%s) carries a term type this "
+                "comparator cannot re-derive from dec_oper_* output (%s); "
+                "rendering cobre-only.",
+                cobre_cid,
+                name,
+                ", ".join(unsupported),
+            )
+            n_skipped += 1
+            continue
+
+        constraint_rows = 0
+        for stage in range(record.stage_start, record.stage_end + 1):
+            lhs = 0.0
+            complete = True
+            for term in record.terms:
+                value = _term_lookup_value(term, lookups, stage)
+                if value is None:
+                    complete = False
+                    break
+                lhs += term.coefficient * value
+            if complete:
+                rows.append(
+                    {"constraint_id": cobre_cid, "stage_id": stage, "lhs_value": lhs}
+                )
+                constraint_rows += 1
+        if constraint_rows == 0:
+            n_skipped += 1
+
+    if n_skipped:
+        _LOG.info(
+            "DECOMP-side generic-constraint LHS: %d of %d constraint(s) "
+            "rendered cobre-only (no source-model LHS derivable).",
+            n_skipped,
+            len(gc_constraints),
+        )
+    if not rows:
+        return pl.DataFrame(schema=_GC_LHS_SCHEMA)
+    return pl.DataFrame(rows).with_columns(
+        pl.col("constraint_id").cast(pl.Int32),
+        pl.col("stage_id").cast(pl.Int32),
+        pl.col("lhs_value").cast(pl.Float64),
+    )
+
+
 def build_decomp_dataset(
     decomp_dir: Path, cobre_output_dir: Path, *, tolerance: float = 1e-2
 ) -> ComparisonDataset:
@@ -2057,6 +2934,36 @@ def build_decomp_dataset(
     path renders). ``fpha_surface``/``fpha_spill`` stay at their empty
     dataclass default; the section is entirely omitted (never a fabricated
     partial render) whenever either side has no fitted planes at all.
+    As of ticket-018, ``results`` additionally carries ``entity_type="ree"``
+    rows (``ena_mwmes``/``earm_final_mwmes``): the source model's own
+    `read_dec_oper_ree` per-REE energy against a membership-weighted
+    (`read_relato_membership`) sum of Cobre's per-plant
+    ``incremental_inflow_energy_mw``/``stored_energy_final_mwh`` (see
+    :func:`_ree_result_comparisons`; EARM is reconciled MWh -> MWmês via
+    :data:`_EARM_MWH_TO_MWMES`). No dedicated ``PercentileData`` field
+    exists for this -- unlike every earlier ticket's tab metadata, the REE
+    section reads straight off the ``results`` rows the same way
+    ``dataset.metadata["productivity_per_stage"]`` does.
+    As of ticket-019, the Constraints tab's ``gc_constraints``/``gc_bounds``/
+    ``gc_lhs_cobre`` are filled verbatim from ``constraints_compare``
+    (source-agnostic: constraint/bounds tables and the Cobre-side simulation
+    LHS); ``gc_lhs_newave`` is the DECOMP-side LHS, derived per constraint
+    family from ``dec_oper_usih``/``dec_oper_usit``/``dec_oper_rhesoft`` and
+    the special-constraint register (see
+    :func:`_generic_constraint_lhs_decomp`'s docstring for the per-family
+    strategy and its deliberately-deferred subset). ``nw_max_stage`` (already
+    set by ticket-013) doubles as this section's stage clamp.
+    As of ticket-020, ``results`` additionally carries a per-(hydro, stage)
+    ``entity_type="hydro"``/``variable="evaporation_m3s"`` row: the source
+    model's own ``dec_oper_evap`` volume (hm³) reconciled into a mean flow
+    (m³/s) via the stage's actual hours and compared against Cobre's own
+    ``evaporation_m3s`` (see :func:`_evaporation_result_comparisons`'s
+    docstring, including the TRACKED COBRE-GAP WORKAROUND (C11) it
+    surfaces rather than corrects away). No dedicated ``PercentileData``
+    field exists for it — like ticket-018's REE rows, it flows straight
+    through ``results``/``dataset.metadata["unmapped"]["evaporation"]``, and
+    is rendered by the existing Hydro Plant Details tab's per-plant
+    ``evaporation_m3s`` panel (``charts._HYDRO_VARIABLES``), not a new chart.
     Every other field stays at its empty default, and
     ``bus``/``hydro``/``thermal``/``line`` themselves stay empty whenever the
     Cobre run has no percentile output (e.g. the deterministic 2-node tree) —
@@ -2070,9 +2977,10 @@ def build_decomp_dataset(
 
     Returns:
         The validated dataset. ``metadata["unmapped"]`` carries the per-level
-        (hydro/thermal/bus/line) reference codes/corridors the id map or the
-        corridor alignment could not resolve, so they survive into the
-        dataset instead of being silently dropped.
+        (hydro/thermal/bus/line/ree) reference codes/corridors the id map,
+        the corridor alignment, or the REE membership table could not
+        resolve, so they survive into the dataset instead of being silently
+        dropped.
     """
     from cobre_bridge.comparators.analyze import build_results_dataset
 
@@ -2149,6 +3057,52 @@ def build_decomp_dataset(
         decomp_dir, cobre_output_dir, line_id_map, aligned.hydro_names
     )
 
+    # --- ticket-018: REE energy rollup via membership. Reuses ``line_id_map``
+    # (ticket-008) exactly like ``_fpha_metrics`` above -- the same
+    # hydro-code -> Cobre-id mapping, no third ``DecompIdMap`` rebuild.
+    ree_results, unmapped_ree = _ree_result_comparisons(
+        decomp_dir, aligned.cobre_hydro, line_id_map
+    )
+    results.extend(ree_results)
+
+    # --- ticket-020: evaporation comparison (hydro, "evaporation_m3s").
+    # Reuses ``line_id_map`` exactly like ``_fpha_metrics``/
+    # ``_ree_result_comparisons`` above -- the same hydro-code -> Cobre-id
+    # mapping, no fifth ``DecompIdMap`` rebuild. See
+    # ``_evaporation_result_comparisons``'s docstring for the hm³ -> m³/s
+    # reconciliation and the TRACKED COBRE-GAP WORKAROUND (C11) it surfaces.
+    evaporation_results, unmapped_evaporation = _evaporation_result_comparisons(
+        decomp_dir,
+        cobre_output_dir,
+        aligned.cobre_hydro,
+        line_id_map,
+        aligned.hydro_names,
+    )
+    results.extend(evaporation_results)
+
+    # --- ticket-019: Constraints tab (gc_* metadata). The cobre-side pieces
+    # (constraint/bounds tables, simulation LHS) are source-agnostic and
+    # reused verbatim from `constraints_compare`; only the DECOMP-side LHS
+    # (`_generic_constraint_lhs_decomp`) is new -- see that function's
+    # docstring for the per-family derivation.
+    from cobre_bridge.comparators.constraints_compare import (
+        _load_generic_constraint_bounds,
+        _load_generic_constraints,
+        evaluate_lhs_cobre,
+    )
+
+    cobre_case_dir = case_dir_for(cobre_output_dir)
+    gc_constraints = _load_generic_constraints(cobre_case_dir)
+    gc_bounds_df = _load_generic_constraint_bounds(cobre_case_dir)
+    if gc_constraints:
+        gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
+        gc_lhs_nw = _generic_constraint_lhs_decomp(
+            decomp_dir, cobre_output_dir, gc_constraints
+        )
+    else:
+        gc_lhs_cb = pl.DataFrame()
+        gc_lhs_nw = pl.DataFrame()
+
     pct = PercentileData(
         nw_bus_names=aligned.bus_names,
         nw_hydro_names=aligned.hydro_names,
@@ -2216,6 +3170,13 @@ def build_decomp_dataset(
         # readers carry no fitted plane coefficients to reconstruct a dense
         # surface from, only per-hydro/stage fit-fidelity statistics.
         fpha_metrics=fpha_metrics,
+        # ticket-019: Constraints tab LHS-vs-bound metadata. ``nw_max_stage``
+        # is unchanged (already set above by ticket-013's `_decomp_max_stage`)
+        # and doubles as this section's stage clamp (D-STAGE-OFFSET).
+        gc_constraints=gc_constraints,
+        gc_bounds=gc_bounds_df,
+        gc_lhs_newave=gc_lhs_nw,
+        gc_lhs_cobre=gc_lhs_cb,
     )
     dataset = build_results_dataset(results, pct, tolerance)
     dataset.metadata["unmapped"] = {
@@ -2223,4 +3184,6 @@ def build_decomp_dataset(
         for level, codes in aligned.unmapped.items()
     }
     dataset.metadata["unmapped"]["line"] = unresolved_lines
+    dataset.metadata["unmapped"]["ree"] = unmapped_ree
+    dataset.metadata["unmapped"]["evaporation"] = unmapped_evaporation
     return dataset

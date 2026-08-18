@@ -699,6 +699,57 @@ def system_comparison_chart(
     return _plotly_div(traces, layout)
 
 
+def ree_energy_chart(
+    results: list[ResultComparison],
+    variable: str,
+    title: str,
+) -> str:
+    """Line chart comparing an REE energy variable by stage.
+
+    ticket-018: mirrors :func:`system_comparison_chart`'s aggregate-line
+    shape (the source model's own value vs Cobre's, summed across every
+    matched REE per stage), keyed on ``entity_type == "ree"`` instead of
+    ``"bus"``. REE carries no Cobre percentile band --
+    :class:`~cobre_bridge.comparators.results.PercentileData` has no ``ree``
+    field -- so this omits the optional p10-p90 overlay entirely rather than
+    fabricating one.
+    """
+    ree_data = [r for r in results if r.entity_type == "ree" and r.variable == variable]
+    if not ree_data:
+        return f"<p>No {variable} data available.</p>"
+
+    nw_by_stage, cb_by_stage, _matched_ids = analyze.per_stage_sum_from_results(
+        results, "ree", variable
+    )
+    stages = sorted(set(nw_by_stage) | set(cb_by_stage))
+    traces = [
+        {
+            "x": stages,
+            "y": [nw_by_stage.get(s, 0) for s in stages],
+            "name": "NEWAVE",
+            "type": "scatter",
+            "mode": "lines",
+            "line": {"color": COLOR_NEWAVE, "width": 2},
+        },
+        {
+            "x": stages,
+            "y": [cb_by_stage.get(s, 0) for s in stages],
+            "name": "Cobre Mean",
+            "type": "scatter",
+            "mode": "lines",
+            "line": {"color": COLOR_COBRE, "width": 2},
+        },
+    ]
+
+    layout = {
+        "title": title,
+        "xaxis": {"title": "Stage"},
+        "yaxis": {"title": variable},
+    }
+
+    return _plotly_div(traces, layout)
+
+
 # -------------------------------------------------------------------
 # Hydro tab charts
 # -------------------------------------------------------------------

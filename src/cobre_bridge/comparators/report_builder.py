@@ -37,6 +37,7 @@ from cobre_bridge.comparators.charts import (
     productivity_blocks_table,
     productivity_comparison_scatter,
     productivity_per_stage_chart,
+    ree_energy_chart,
     system_comparison_chart,
     system_per_bus_chart,
     thermal_cost_chart,
@@ -331,6 +332,27 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                             nw_variable="ENA",
                             nw_factor=1.0,
                             nw_offset=balance_nw_offset,
+                        )
+                    ),
+                ]
+            )
+        )
+    # --- ticket-018: REE energy rollup (additive; absent for `compare
+    # newave` datasets, which never carry `entity_type == "ree"` rows) ---
+    ree_results = [r for r in results if r.entity_type == "ree"]
+    if ree_results:
+        energy_balance_extra.append(section_title("REE Energy (ENA / EARM)"))
+        energy_balance_extra.append(
+            chart_grid(
+                [
+                    wrap_chart(
+                        ree_energy_chart(
+                            results, "ena_mwmes", "REE Natural Inflow Energy (ENA)"
+                        )
+                    ),
+                    wrap_chart(
+                        ree_energy_chart(
+                            results, "earm_final_mwmes", "REE Stored Energy (EARM)"
                         )
                     ),
                 ]
