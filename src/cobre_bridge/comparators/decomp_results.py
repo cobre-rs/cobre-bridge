@@ -354,7 +354,7 @@ def _decomp_convergence_frame(decomp_dir: Path) -> pl.DataFrame:
     ``zsup`` onto the ``iteration``/``lower_bound``/``upper_bound_mean``
     columns :func:`cobre_readers.read_cobre_convergence` emits -- the shape
     :func:`~cobre_bridge.comparators.charts.convergence_chart` reads on each
-    side separately (not the legacy :func:`_convergence` join shape). The
+    side separately (not a per-iteration join shape). The
     iteration axis stays 1-based as reported, no offset -- the chart plots
     it directly.
 

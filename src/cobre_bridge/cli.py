@@ -71,9 +71,8 @@ if TYPE_CHECKING:
 #: of truth) and the ``--validate`` gate uses it to decide whether the installed
 #: cobre-python is new enough to validate the output.
 #:
-#: PENDING BUMP: the bridge now targets three cobre input-contract changes that
-#: all ride cobre's unreleased ``feat/generic-constraint-authoring`` branch (the
-#: next tagged release, expected 0.14):
+#: 0.14.1 is the first release carrying cobre's 0.14 input contract, on which the
+#: bridge now depends via three breaking changes:
 #:   1. **F3** sense-free generic constraints — ``generic_constraints.json`` +
 #:      ``generic_constraint_bounds.parquet`` carry no ``sense`` key and use
 #:      ``bound_lower``/``bound_upper`` in place of a single ``bound`` column
@@ -83,12 +82,8 @@ if TYPE_CHECKING:
 #:      the old path); the JSON shape is unchanged.
 #:   3. the NCS availability column is now ``availability_factor`` only (cobre's
 #:      clean break dropped the legacy ``value`` alias).
-#: None of these has been tagged/released yet, so there is no released version
-#: number to pin to; the installed editable ``cobre-python`` still reports
-#: ``0.13.0``, which is why this constant is unchanged for now. Bump
-#: ``MIN_COBRE_VERSION`` (and the ``cobre-python`` pin in ``pyproject.toml``) to
-#: the real release version as soon as cobre tags one — do not guess a number in
-#: the meantime.
+#: Keep the ``cobre-python`` pin in ``pyproject.toml`` in lockstep with this
+#: constant on any future bump.
 MIN_COBRE_VERSION = "0.14.1"
 
 

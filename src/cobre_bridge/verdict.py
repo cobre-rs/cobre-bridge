@@ -168,7 +168,7 @@ def decomp_dataset_summary(
     """
     from cobre_bridge.comparators.verdict import build_compare_verdict
 
-    summary = dict(compare_summary(build_compare_verdict(dataset)))
+    summary = compare_summary(build_compare_verdict(dataset))
     summary["stages"] = int(dataset.tidy["stage"].n_unique())
     summary["variables"] = dataset.summary.to_dicts()
     summary["unmapped"] = {

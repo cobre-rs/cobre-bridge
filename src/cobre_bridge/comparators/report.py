@@ -176,7 +176,8 @@ def print_results_summary_from_dataset(
     reference_label:
         Display name for the reference model in the printed header/labels.
         Defaults to ``"NEWAVE"``, which reproduces the pre-ticket output
-        byte-for-byte; ``compare decomp`` passes ``"DECOMP"``.
+        byte-for-byte; ``compare newave`` (this function's only caller) uses
+        that default.
     """
     out = sys.stdout
 
@@ -224,9 +225,9 @@ def print_results_summary_from_dataset(
 
     total, by_entity_type = _footer_counts(dataset)
 
-    entity_parts = []
-    for etype, count in sorted(by_entity_type.items()):
-        entity_parts.append(f"{count} {etype}")
+    entity_parts = [
+        f"{count} {etype}" for etype, count in sorted(by_entity_type.items())
+    ]
     entity_str = ", ".join(entity_parts) if entity_parts else "none"
 
     out.write(
