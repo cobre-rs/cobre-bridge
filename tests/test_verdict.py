@@ -8,6 +8,7 @@ from cobre_bridge.comparators.verdict import CompareVerdict
 from cobre_bridge.diagnostics import Diagnostic, Severity
 from cobre_bridge.verdict import (
     SCHEMA_VERSION,
+    _coerce_unmapped_code,
     build_verdict,
     check_summary,
     compare_summary,
@@ -149,3 +150,18 @@ class TestCompareSummary:
         assert result["all_within_tol"] is False
         assert result["worst_variable"] == "storage"
         assert result["worst_smape"] == pytest.approx(0.04)
+
+
+class TestCoerceUnmappedCode:
+    """`decomp_dataset_summary`'s `unmapped` coercion — regression for the
+    network level's `[de, para]` corridor pairs (which crashed `int([...])`)."""
+
+    def test_scalar_code_coerced_to_int(self) -> None:
+        assert _coerce_unmapped_code(86) == 86
+        assert isinstance(_coerce_unmapped_code(224), int)
+
+    def test_corridor_pair_kept_as_list_of_ints(self) -> None:
+        # A `line`-level unmapped entry is a `[submarket_de, submarket_para]`
+        # pair, not a scalar code — it must survive as a list, not raise.
+        assert _coerce_unmapped_code([-1, 1]) == [-1, 1]
+        assert _coerce_unmapped_code((2, -1)) == [2, -1]

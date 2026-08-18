@@ -142,6 +142,20 @@ def compare_summary(verdict: CompareVerdict) -> dict[str, object]:
     }
 
 
+def _coerce_unmapped_code(code: object) -> int | list[int]:
+    """JSON-friendly coercion for one ``unmapped`` entry.
+
+    Most levels list scalar entity codes (coerced to ``int``); the network
+    (``line``) level lists ``[submarket_de, submarket_para]`` corridor **pairs**
+    — lists, not scalar codes — so those are coerced element-wise and kept as
+    lists of ``int`` rather than forced through ``int(...)`` (which raised
+    ``TypeError`` on the pair).
+    """
+    if isinstance(code, list | tuple):
+        return [int(c) for c in code]
+    return int(code)
+
+
 def decomp_dataset_summary(
     dataset: ComparisonDataset, tolerance: float
 ) -> dict[str, object]:
@@ -172,7 +186,7 @@ def decomp_dataset_summary(
     summary["stages"] = int(dataset.tidy["stage"].n_unique())
     summary["variables"] = dataset.summary.to_dicts()
     summary["unmapped"] = {
-        level: [int(code) for code in codes]
+        level: [_coerce_unmapped_code(code) for code in codes]
         for level, codes in dataset.metadata["unmapped"].items()
     }
     return summary
