@@ -22,6 +22,7 @@ from typing import Protocol
 import pandas as pd
 import polars as pl
 from idecomp.decomp import (
+    Decomptim,
     DecOperGnl,
     DecOperInterc,
     DecOperSist,
@@ -162,6 +163,29 @@ def read_relato_convergence(case_dir: Path) -> pl.DataFrame:
     """Read the convergence table (``iteracao``, ``zinf``, ``zsup``,
     ``gap_percentual``, …) from the general report."""
     return _read_relato_table(case_dir, "convergencia")
+
+
+def read_decomp_tim(case_dir: Path) -> pl.DataFrame:
+    """Read the wall-clock timing table (``Etapa``, ``Tempo``) from
+    ``decomp.tim``.
+
+    ``Etapa`` names the phase (e.g. ``Leitura de Dados``, ``Convergencia``,
+    ``Impressao``, ``Tempo Total``); columns are returned unrenamed, with no
+    phase-name mapping — that belongs to the caller.
+    """
+    path = _resolve_result_file(case_dir, "decomp.tim")
+    if path is None:
+        raise FileNotFoundError(
+            f"decomp.tim not found in {case_dir} or its saidas/ subfolder"
+        )
+    table = Decomptim.read(str(path)).tempos_etapas
+    if table is None or table.empty:
+        raise ValueError(
+            f"{path} parsed empty; the run's outputs look incomplete or the "
+            "file syntax is unsupported"
+        )
+    _LOG.debug("Read %s: %d rows", path.name, len(table))
+    return pl.from_pandas(table)
 
 
 def read_relato_balance(case_dir: Path) -> pl.DataFrame:

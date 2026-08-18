@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,11 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.charts import _BALANCE_VARS, _COST_MAP
+from cobre_bridge.comparators.charts import (
+    _BALANCE_VARS,
+    _COST_MAP,
+    performance_fwd_bwd_split_chart,
+)
 from cobre_bridge.comparators.dataset import (
     SUMMARY_SCHEMA,
     TIDY_SCHEMA,
@@ -31,6 +36,10 @@ from cobre_bridge.comparators.decomp_results import (
     _bus_side,
     _corridor_line_alignment,
     _cost_frames,
+    _decomp_convergence_frame,
+    _decomp_max_stage,
+    _decomp_tim_iterations,
+    _decomp_tim_stages,
     _energy_balance_frames,
     _interc_side,
     _line_bounds_and_meta,
@@ -2068,6 +2077,208 @@ class TestBuildDecompDatasetCostsE2E:
         assert "Plotly.newPlot" in html
 
 
+def _relato_convergence_frame() -> pl.DataFrame:
+    """Three iterations of the source model's own convergence table.
+
+    Carries ``gap_percentual``/``tempo`` alongside ``iteracao``/``zinf``/
+    ``zsup`` so a test can pin that ticket-012 selects only the three chart
+    columns and drops the rest (out of scope per the ticket)."""
+    return pl.DataFrame(
+        {
+            "iteracao": [1, 2, 3],
+            "zinf": [100.0, 150.0, 180.0],
+            "zsup": [500.0, 300.0, 190.0],
+            "gap_percentual": [400.0, 100.0, 5.0],
+            "tempo": [12.0, 15.0, 9.0],
+        }
+    )
+
+
+def _cobre_convergence_fixture() -> pl.DataFrame:
+    """Cobre's own canonical convergence schema, straight from
+    ``read_cobre_convergence``'s contract."""
+    return pl.DataFrame(
+        {
+            "iteration": [1, 2, 3],
+            "lower_bound": [95.0, 145.0, 178.0],
+            "upper_bound_mean": [520.0, 310.0, 192.0],
+        },
+        schema={
+            "iteration": pl.Int64,
+            "lower_bound": pl.Float64,
+            "upper_bound_mean": pl.Float64,
+        },
+    )
+
+
+class TestDecompConvergenceFrame:
+    """ticket-012: ``_decomp_convergence_frame`` -- renames the source
+    model's ``relato.convergencia`` onto the canonical ``iteration``/
+    ``lower_bound``/``upper_bound_mean`` schema ``read_cobre_convergence``
+    emits, so ``convergence_chart`` can read both sides without a
+    source-specific branch."""
+
+    _CANONICAL_SCHEMA = {
+        "iteration": pl.Int64,
+        "lower_bound": pl.Float64,
+        "upper_bound_mean": pl.Float64,
+    }
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, frame: pl.DataFrame) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            lambda *_args, **_kwargs: frame,
+        )
+
+    def test_renames_and_casts_onto_the_canonical_schema(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch, _relato_convergence_frame())
+
+        frame = _decomp_convergence_frame(tmp_path)
+
+        assert frame.columns == ["iteration", "lower_bound", "upper_bound_mean"]
+        assert frame.schema == self._CANONICAL_SCHEMA
+        assert frame["iteration"].to_list() == [1, 2, 3]
+        assert frame["lower_bound"].to_list() == pytest.approx([100.0, 150.0, 180.0])
+        assert frame["upper_bound_mean"].to_list() == pytest.approx(
+            [500.0, 300.0, 190.0]
+        )
+
+    def test_gap_and_timing_columns_are_not_carried_over(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Out of scope per the ticket: ``gap_percentual``/``tempo`` are not
+        consumed by ``convergence_chart``, so they must not leak through."""
+        self._patch(monkeypatch, _relato_convergence_frame())
+
+        frame = _decomp_convergence_frame(tmp_path)
+
+        assert "gap_percentual" not in frame.columns
+        assert "tempo" not in frame.columns
+
+    def test_missing_relato_degrades_to_an_empty_canonical_frame(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+        )
+
+        frame = _decomp_convergence_frame(tmp_path)
+
+        assert frame.is_empty()
+        assert frame.schema == self._CANONICAL_SCHEMA
+
+    def test_empty_relato_table_degrades_to_an_empty_canonical_frame(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise ValueError("relato.rv0 has no convergencia table")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+        )
+
+        frame = _decomp_convergence_frame(tmp_path)
+
+        assert frame.is_empty()
+        assert frame.schema == self._CANONICAL_SCHEMA
+
+
+class TestBuildDecompDatasetConvergence:
+    """ticket-012: the Overview tab's Convergence overlay
+    (``nw_convergence``/``cobre_convergence``) filled by
+    ``build_decomp_dataset``."""
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            lambda *_args, **_kwargs: _relato_convergence_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_convergence",
+            lambda *_args, **_kwargs: _cobre_convergence_fixture(),
+        )
+
+    def test_nw_convergence_matches_the_source_table(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        nw_conv = dataset.metadata["nw_convergence"]
+        assert nw_conv.columns == ["iteration", "lower_bound", "upper_bound_mean"]
+        assert nw_conv["iteration"].to_list() == [1, 2, 3]
+        assert nw_conv["lower_bound"].to_list() == pytest.approx([100.0, 150.0, 180.0])
+        assert nw_conv["upper_bound_mean"].to_list() == pytest.approx(
+            [500.0, 300.0, 190.0]
+        )
+
+    def test_cobre_convergence_matches_the_reader_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        cobre_conv = dataset.metadata["cobre_convergence"]
+        assert cobre_conv.columns == ["iteration", "lower_bound", "upper_bound_mean"]
+        assert cobre_conv["lower_bound"].to_list() == pytest.approx(
+            [95.0, 145.0, 178.0]
+        )
+        assert cobre_conv["upper_bound_mean"].to_list() == pytest.approx(
+            [520.0, 310.0, 192.0]
+        )
+
+    def test_report_renders_the_convergence_section_and_both_traces(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)
+
+        assert "Convergence" in html
+        assert "NEWAVE ZINF" in html
+        assert "Cobre Lower" in html
+        assert "Plotly.newPlot" in html
+
+    def test_absent_decomp_convergence_yields_an_empty_canonical_frame_no_raise(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A missing relato must not abort the dataset build; the chart
+        degrades to a Cobre-only overlay."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_convergence",
+            lambda *_args, **_kwargs: _cobre_convergence_fixture(),
+        )
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        nw_conv = dataset.metadata["nw_convergence"]
+        assert nw_conv.is_empty()
+        assert nw_conv.columns == ["iteration", "lower_bound", "upper_bound_mean"]
+
+        html = build_comparison_report(dataset)
+        assert "Convergence" in html
+        assert "Cobre Lower" in html
+
+
 class TestBuildDecompDatasetParityWithLegacyComparison:
     """No drift from the migration: on the same aligned fixture,
     ``build_decomp_dataset`` and the legacy ``compare_decomp_results`` must
@@ -2111,6 +2322,416 @@ class TestBuildDecompDatasetParityWithLegacyComparison:
         dataset_unmapped = dict(dataset.metadata["unmapped"])
         assert dataset_unmapped.pop("line") == []
         assert dataset_unmapped == legacy.unmapped
+
+
+# ---------------------------------------------------------------------------
+# ticket-013: Performance tab timing metadata (Caveat #2 -- no fabricated
+# DECOMP forward/backward split).
+# ---------------------------------------------------------------------------
+
+
+def _decomp_tim_frame() -> pl.DataFrame:
+    """``read_decomp_tim``'s shape: ``Etapa``/``Tempo`` (timedelta), matching
+    the real reduced deck's ``decomp.tim`` (``Leitura de Dados`` 8s,
+    ``Convergencia`` 2m10s, ``Impressao`` 3s, ``Tempo Total`` 2m21s)."""
+    return pl.DataFrame(
+        {
+            "Etapa": ["Leitura de Dados", "Convergencia", "Impressao", "Tempo Total"],
+            "Tempo": [
+                timedelta(seconds=8),
+                timedelta(minutes=2, seconds=10),
+                timedelta(seconds=3),
+                timedelta(minutes=2, seconds=21),
+            ],
+        }
+    )
+
+
+class TestDecompTimStages:
+    """``_decomp_tim_stages``: ``decomp.tim`` ``Etapa`` phase totals mapped
+    onto the two keys ``performance_metric_cards`` reads."""
+
+    def test_maps_the_two_etapa_rows_onto_the_shared_card_keys(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_decomp_tim",
+            lambda *_args, **_kwargs: _decomp_tim_frame(),
+        )
+
+        stages = _decomp_tim_stages(tmp_path)
+
+        assert stages == {"Tempo Total": 141.0, "Calculo da Politica": 130.0}
+
+    def test_missing_convergencia_phase_falls_back_to_zero(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A truncated ``decomp.tim`` missing the ``Convergencia`` row still
+        yields both keys -- ``Calculo da Politica`` defaults to ``0.0``
+        rather than being omitted (never KeyError downstream)."""
+        table = pl.DataFrame(
+            {
+                "Etapa": ["Leitura de Dados", "Tempo Total"],
+                "Tempo": [timedelta(seconds=8), timedelta(minutes=2, seconds=21)],
+            }
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_decomp_tim",
+            lambda *_args, **_kwargs: table,
+        )
+
+        stages = _decomp_tim_stages(tmp_path)
+
+        assert stages == {"Tempo Total": 141.0, "Calculo da Politica": 0.0}
+
+    def test_missing_decomp_tim_degrades_to_an_empty_dict(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("decomp.tim not found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_decomp_tim", _boom
+        )
+
+        assert _decomp_tim_stages(tmp_path) == {}
+
+    def test_empty_decomp_tim_value_error_degrades_to_an_empty_dict(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise ValueError("decomp.tim parsed empty")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_decomp_tim", _boom
+        )
+
+        assert _decomp_tim_stages(tmp_path) == {}
+
+
+class TestDecompTimIterations:
+    """``_decomp_tim_iterations``: ``relato.convergencia``'s per-iteration
+    ``tempo`` renamed onto the canonical ``iteration``/``total_seconds``
+    schema -- Caveat #2: never a forward/backward split."""
+
+    _CANONICAL_SCHEMA = {"iteration": pl.Int64, "total_seconds": pl.Float64}
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            lambda *_args, **_kwargs: _relato_convergence_frame(),
+        )
+
+    def test_renames_iteracao_and_tempo_onto_the_canonical_schema(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        frame = _decomp_tim_iterations(tmp_path)
+
+        assert frame.columns == ["iteration", "total_seconds"]
+        assert frame.schema == self._CANONICAL_SCHEMA
+        assert frame["iteration"].to_list() == [1, 2, 3]
+        assert frame["total_seconds"].to_list() == pytest.approx([12.0, 15.0, 9.0])
+
+    def test_no_forward_or_backward_columns_are_ever_added(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Caveat #2: DECOMP has no forward/backward pass structure to
+        split -- the frame must carry EXACTLY the two canonical columns."""
+        self._patch(monkeypatch)
+
+        frame = _decomp_tim_iterations(tmp_path)
+
+        assert "forward_seconds" not in frame.columns
+        assert "backward_seconds" not in frame.columns
+        assert set(frame.columns) == {"iteration", "total_seconds"}
+
+    def test_missing_relato_degrades_to_an_empty_canonical_frame(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+        )
+
+        frame = _decomp_tim_iterations(tmp_path)
+
+        assert frame.is_empty()
+        assert frame.schema == self._CANONICAL_SCHEMA
+
+    def test_empty_relato_value_error_degrades_to_an_empty_canonical_frame(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise ValueError("relato.rv0 has no convergencia table")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+        )
+
+        frame = _decomp_tim_iterations(tmp_path)
+
+        assert frame.is_empty()
+        assert frame.schema == self._CANONICAL_SCHEMA
+
+
+class TestDecompMaxStage:
+    """``_decomp_max_stage``: the max already-aligned (0-based) ``stage_id``
+    across every level, derived without an extra read."""
+
+    def test_uses_the_max_stage_id_across_every_level(self) -> None:
+        aligned = dataclasses.replace(
+            _aligned_fixture(),
+            source_hydro=pl.DataFrame(
+                {"entity_id": [0, 0], "stage_id": [0, 2], "geracao_MW": [1.0, 1.0]}
+            ),
+            source_thermal=pl.DataFrame(
+                {"entity_id": [0, 0], "stage_id": [3, 4], "geracao_MW": [1.0, 1.0]}
+            ),
+            source_bus=pl.DataFrame({"entity_id": [0], "stage_id": [1], "cmo": [1.0]}),
+        )
+
+        assert _decomp_max_stage(aligned) == 4
+
+    def test_returns_none_when_every_level_is_empty(self) -> None:
+        aligned = dataclasses.replace(
+            _aligned_fixture(),
+            source_hydro=pl.DataFrame(),
+            source_thermal=pl.DataFrame(),
+            source_bus=pl.DataFrame(),
+        )
+
+        assert _decomp_max_stage(aligned) is None
+
+
+class TestPerformanceFwdBwdSplitChartColumnGuard:
+    """charts.py fix (approved scope expansion): ``has_nw`` must require the
+    ``forward_seconds``/``backward_seconds`` columns, not just a non-empty
+    frame -- a DECOMP-shaped ``iteration``/``total_seconds``-only frame must
+    render Cobre-only instead of raising ``ColumnNotFoundError``."""
+
+    _COBRE_TIMING = pl.DataFrame(
+        {
+            "iteration": [1, 2],
+            "time_forward_ms": [1000.0, 900.0],
+            "time_backward_ms": [2000.0, 1800.0],
+            "time_total_ms": [3000.0, 2700.0],
+        }
+    )
+
+    def test_decomp_shaped_frame_renders_cobre_only_without_raising(self) -> None:
+        decomp_shaped = pl.DataFrame(
+            {"iteration": [1, 2], "total_seconds": [12.0, 15.0]}
+        )
+
+        html = performance_fwd_bwd_split_chart(decomp_shaped, self._COBRE_TIMING)
+
+        assert "NEWAVE (s)" not in html
+        assert "Cobre (s)" in html
+
+    def test_newave_shaped_frame_still_renders_its_own_panel(self) -> None:
+        """Parity guard: the source model's own ``newave.tim`` frame (all
+        four columns) is unaffected by the DECOMP-motivated guard change."""
+        newave_shaped = pl.DataFrame(
+            {
+                "iteration": [1, 2],
+                "backward_seconds": [20.0, 18.0],
+                "forward_seconds": [10.0, 9.0],
+                "total_seconds": [30.0, 27.0],
+            }
+        )
+
+        html = performance_fwd_bwd_split_chart(newave_shaped, self._COBRE_TIMING)
+
+        assert "NEWAVE (s)" in html
+        assert "Cobre (s)" in html
+
+    def test_columnless_empty_frame_still_renders_cobre_only(self) -> None:
+        """The pre-ticket-013 default (an entirely empty frame) must keep
+        working exactly as before -- the guard's ``is_empty()`` half."""
+        html = performance_fwd_bwd_split_chart(pl.DataFrame(), self._COBRE_TIMING)
+
+        assert "NEWAVE (s)" not in html
+        assert "Cobre (s)" in html
+
+
+class TestBuildDecompDatasetPerformance:
+    """ticket-013: the Performance tab's timing metadata
+    (``nw_tim_stages``/``nw_tim_iterations``/``nw_max_stage``/
+    ``cobre_training_seconds``/``cobre_iteration_timing``) filled by
+    ``build_decomp_dataset``."""
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_decomp_tim",
+            lambda *_args, **_kwargs: _decomp_tim_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            lambda *_args, **_kwargs: _relato_convergence_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_training_duration",
+            lambda *_args, **_kwargs: 26.0,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_iteration_timing",
+            lambda *_args, **_kwargs: pl.DataFrame(
+                {
+                    "iteration": [1, 2, 3],
+                    "time_forward_ms": [4000.0, 3500.0, 3000.0],
+                    "time_backward_ms": [6000.0, 5500.0, 5000.0],
+                    "time_total_ms": [10000.0, 9000.0, 8000.0],
+                }
+            ),
+        )
+
+    def test_nw_tim_stages_carries_the_two_mapped_keys(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata["nw_tim_stages"] == {
+            "Tempo Total": 141.0,
+            "Calculo da Politica": 130.0,
+        }
+
+    def test_nw_tim_iterations_has_exactly_iteration_and_total_seconds(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        nw_tim_iterations = dataset.metadata["nw_tim_iterations"]
+        assert nw_tim_iterations.columns == ["iteration", "total_seconds"]
+        assert nw_tim_iterations["total_seconds"].to_list() == pytest.approx(
+            [12.0, 15.0, 9.0]
+        )
+
+    def test_cobre_training_seconds_and_iteration_timing_are_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata["cobre_training_seconds"] == 26.0
+        cobre_iter_timing = dataset.metadata["cobre_iteration_timing"]
+        assert cobre_iter_timing["time_total_ms"].to_list() == pytest.approx(
+            [10000.0, 9000.0, 8000.0]
+        )
+
+    def test_nw_max_stage_is_derived_from_the_aligned_frames(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        # ``_aligned_fixture``'s every level is single-stage, stage_id 0.
+        assert dataset.metadata["nw_max_stage"] == 0
+
+    def test_report_renders_metric_cards_and_time_per_iteration_section(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)
+
+        assert "Time per Iteration" in html
+        assert "NEWAVE Total Wall-Clock" in html
+        assert "Plotly.newPlot" in html
+
+    def test_forward_backward_split_is_cobre_only_no_decomp_trace_no_crash(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The crash-guard proof: a NON-EMPTY DECOMP ``nw_tim_iterations``
+        (``iteration``/``total_seconds`` only, per Caveat #2) must not raise
+        ``ColumnNotFoundError`` inside ``build_comparison_report`` -- the
+        "Forward / Backward Split" section renders with a Cobre trace and no
+        DECOMP forward/backward trace."""
+        self._patch(monkeypatch)
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        assert not dataset.metadata["nw_tim_iterations"].is_empty()
+
+        html = build_comparison_report(dataset)  # must not raise
+
+        content = _extract_tab_content(html, "tab-performance")
+        assert "Forward / Backward Split" in content
+        assert "Cobre (s)" in content
+        assert "NEWAVE (s)" not in content
+
+    def test_missing_decomp_tim_and_relato_degrades_to_empty_zero_no_raise(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        def _boom_tim(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("decomp.tim not found")
+
+        def _boom_conv(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_decomp_tim", _boom_tim
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            _boom_conv,
+        )
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)  # must not raise
+
+        assert dataset.metadata["nw_tim_stages"] == {}
+        assert dataset.metadata["nw_tim_iterations"].is_empty()
+
+        html = build_comparison_report(dataset)  # must not raise either
+        assert "Plotly.newPlot" in html
+
+
+def _extract_tab_content(html: str, tab_id: str) -> str:
+    """Slice out one ``<div id="tab-...">...</div>`` tab's own content.
+
+    Mirrors ``test_chart_helpers._extract_tab_content``'s contract (locate
+    the tab by its id, stop at the next ``id="tab-`` marker) -- duplicated
+    locally rather than imported so this file has no cross-test-module
+    dependency.
+    """
+    import re
+
+    match = re.search(rf'id="{tab_id}".*?(?=id="tab-|\Z)', html, re.S)
+    return match.group(0) if match else ""
+
+
+@pytest.mark.skipif(
+    not _REDUCED_DECOMP_DECK.is_dir() or not _REDUCED_COBRE_OUTPUT.is_dir(),
+    reason="reduced deck + converted cobre output not present",
+)
+class TestBuildDecompDatasetPerformanceE2E:
+    """Tier 3 (dev-only smoke, ticket-013): the reduced deck's real
+    Performance tab renders end to end. Both directories are gitignored, so
+    this never runs in CI."""
+
+    def test_performance_tab_is_non_empty_on_the_reduced_deck(self) -> None:
+        dataset = build_decomp_dataset(_REDUCED_DECOMP_DECK, _REDUCED_COBRE_OUTPUT)
+
+        html = build_comparison_report(dataset)
+
+        assert dataset.metadata["nw_tim_stages"]
+        assert not dataset.metadata["nw_tim_iterations"].is_empty()
+        assert "Time per Iteration" in html
+        assert "Forward / Backward Split" in html
+        assert "Plotly.newPlot" in html
 
 
 class TestComparisonRecord:

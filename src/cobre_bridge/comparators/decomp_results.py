@@ -44,6 +44,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
+    read_decomp_tim,
     read_relato_convergence,
     read_relato_costs,
     reconcile_kdollars_to_reais,
@@ -411,6 +412,47 @@ def _convergence(decomp_dir: Path, cobre_output_dir: Path) -> pl.DataFrame:
     for frame in frames[1:]:
         combined = combined.join(frame, on="iteration", how="full", coalesce=True)
     return combined.sort("iteration")
+
+
+#: Canonical convergence-chart schema -- matches
+#: :func:`cobre_readers.read_cobre_convergence`'s own return schema exactly,
+#: so :func:`~cobre_bridge.comparators.charts.convergence_chart` can read
+#: either side without a source-specific branch.
+_CONVERGENCE_SCHEMA: dict[str, type[pl.DataType]] = {
+    "iteration": pl.Int64,
+    "lower_bound": pl.Float64,
+    "upper_bound_mean": pl.Float64,
+}
+
+
+def _decomp_convergence_frame(decomp_dir: Path) -> pl.DataFrame:
+    """DECOMP-side convergence bounds in the canonical chart schema.
+
+    ticket-012: renames ``relato.convergencia``'s ``iteracao``/``zinf``/
+    ``zsup`` onto the ``iteration``/``lower_bound``/``upper_bound_mean``
+    columns :func:`cobre_readers.read_cobre_convergence` emits -- the shape
+    :func:`~cobre_bridge.comparators.charts.convergence_chart` reads on each
+    side separately (not the legacy :func:`_convergence` join shape). The
+    iteration axis stays 1-based as reported, no offset -- the chart plots
+    it directly.
+
+    A missing/empty relato (``read_relato_convergence`` raising
+    ``FileNotFoundError``/``ValueError``) degrades to an empty frame with
+    this same canonical schema instead of aborting
+    :func:`build_decomp_dataset` -- the chart then renders Cobre-only.
+    """
+    try:
+        source = read_relato_convergence(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.warning("No source-model convergence table: %s", exc)
+        return pl.DataFrame(schema=_CONVERGENCE_SCHEMA)
+
+    columns = {c.lower(): c for c in source.columns}
+    return source.select(
+        pl.col(columns["iteracao"]).cast(pl.Int64).alias("iteration"),
+        pl.col(columns["zinf"]).cast(pl.Float64).alias("lower_bound"),
+        pl.col(columns["zsup"]).cast(pl.Float64).alias("upper_bound_mean"),
+    )
 
 
 def _hydro_side(
@@ -1213,6 +1255,129 @@ def _union_cost_rows(nw_sin: pl.DataFrame, cost_rows: pl.DataFrame) -> pl.DataFr
     return pl.concat([nw_sin, cost_rows], how="vertical", rechunk=True)
 
 
+# --- ticket-013: Performance tab timing metadata ---
+#
+# Fills the Performance tab's DECOMP-side wall-clock metadata (Caveat #2):
+# DECOMP is nested Benders over an explicit tree, not sampled SDDP -- it has
+# no forward/backward pass structure, so ``nw_tim_iterations`` never carries
+# ``forward_seconds``/``backward_seconds``. ``performance_fwd_bwd_split_chart``
+# renders cobre-only whenever those columns are absent (charts.py's own
+# ``has_nw`` guard checks for them, not just frame emptiness).
+
+#: ``decomp.tim``'s ``Etapa`` phase name -> the two keys
+#: ``charts.performance_metric_cards`` reads (``"Tempo Total"`` /
+#: ``"Calculo da Politica"``), so the shared card renderer needs no
+#: source-specific branch. Confirmed against the real reduced deck
+#: (``example/decomp-mar-26-rv2-reduced/saidas/decomp.tim``): DECOMP emits
+#: exactly four phases -- ``"Leitura de Dados"``, ``"Convergencia"``,
+#: ``"Impressao"``, ``"Tempo Total"``. ``"Convergencia"`` is DECOMP's nested
+#: Benders backward/forward loop -- the DECOMP analog of "Calculo da
+#: Politica" (policy training) on the source model's own ``newave.tim``.
+#: A deck whose ``decomp.tim`` doesn't carry one of these two ``Etapa`` rows
+#: -- an incomplete/truncated run -- gets ``0.0`` for that key, explicitly,
+#: from :func:`_decomp_tim_stages` itself (never KeyError, never omitted):
+#: the two keys are guaranteed present whenever ``decomp.tim`` was read at
+#: all, so the metric cards' own ``.get(key, 0.0)`` fallback is defense in
+#: depth, not the sole guarantee.
+_DECOMP_TIM_PHASE_MAP: dict[str, str] = {
+    "Tempo Total": "Tempo Total",
+    "Convergencia": "Calculo da Politica",
+}
+
+
+def _decomp_tim_stages(decomp_dir: Path) -> dict[str, float]:
+    """``nw_tim_stages``: DECOMP phase totals mapped onto the shared card keys.
+
+    ``read_decomp_tim``'s ``Tempo`` column is a ``datetime.timedelta`` (one
+    row per ``iter_rows``); :meth:`~datetime.timedelta.total_seconds` gives
+    the float seconds :func:`~cobre_bridge.comparators.charts.
+    performance_metric_cards` expects. A missing/empty ``decomp.tim``
+    (``read_decomp_tim`` raising ``FileNotFoundError``/``ValueError``)
+    degrades to ``{}`` instead of failing :func:`build_decomp_dataset` --
+    the metric cards then render with their ``0.0``/"—" fallback. When
+    ``decomp.tim`` *is* read but one of the two mapped ``Etapa`` rows is
+    absent from it, that key is still returned, explicitly set to ``0.0``
+    (see :data:`_DECOMP_TIM_PHASE_MAP`).
+    """
+    try:
+        table = read_decomp_tim(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model timing table (decomp.tim): %s", exc)
+        return {}
+
+    seconds_by_etapa: dict[str, float] = {}
+    for row in table.iter_rows(named=True):
+        tempo = row["Tempo"]
+        seconds_by_etapa[str(row["Etapa"]).strip()] = (
+            tempo.total_seconds() if tempo is not None else 0.0
+        )
+    return {
+        key: seconds_by_etapa.get(etapa, 0.0)
+        for etapa, key in _DECOMP_TIM_PHASE_MAP.items()
+    }
+
+
+#: Canonical ``nw_tim_iterations`` schema -- deliberately only ``iteration``/
+#: ``total_seconds`` (Caveat #2): unlike the source model's own
+#: ``newave.tim``, DECOMP has no forward/backward pass to split, so this
+#: frame must never carry ``forward_seconds``/``backward_seconds`` --
+#: fabricating either would misrepresent a source with no such structure.
+_DECOMP_TIM_ITERATIONS_SCHEMA: dict[str, type[pl.DataType]] = {
+    "iteration": pl.Int64,
+    "total_seconds": pl.Float64,
+}
+
+
+def _decomp_tim_iterations(decomp_dir: Path) -> pl.DataFrame:
+    """``nw_tim_iterations``: per-iteration wall-clock, DECOMP-shaped.
+
+    ``relato.convergencia``'s ``iteracao``/``tempo`` rename straight onto
+    ``iteration``/``total_seconds`` -- no forward/backward split is derived
+    or fabricated (Caveat #2). Degrades to the empty canonical frame when
+    ``read_relato_convergence`` raises ``FileNotFoundError``/``ValueError``,
+    matching :func:`_decomp_convergence_frame`'s own degrade-to-empty
+    contract for the same reader.
+    """
+    empty = pl.DataFrame(schema=_DECOMP_TIM_ITERATIONS_SCHEMA)
+    try:
+        source = read_relato_convergence(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model convergence table for timing: %s", exc)
+        return empty
+
+    columns = {c.lower(): c for c in source.columns}
+    if "iteracao" not in columns or "tempo" not in columns:
+        return empty
+    return source.select(
+        pl.col(columns["iteracao"]).cast(pl.Int64).alias("iteration"),
+        pl.col(columns["tempo"]).cast(pl.Float64).alias("total_seconds"),
+    )
+
+
+def _decomp_max_stage(aligned: _AlignedDecompFrames) -> int | None:
+    """Max DECOMP stage (0-based, Cobre convention) seen in this run.
+
+    Neither of :func:`_decomp_tim_stages`'/:func:`_decomp_tim_iterations`'s
+    two sources (``decomp.tim``, ``relato.convergencia``) carries a stage
+    axis, so ``nw_max_stage`` is derived from the already-aligned per-level
+    frames (:func:`_hydro_side`/:func:`_thermal_side`/:func:`_bus_side`, via
+    :func:`_map_entities`) instead of an extra read -- their ``stage_id`` is
+    already 0-based, matching every other Cobre-convention stage-axis field
+    on :class:`~cobre_bridge.comparators.results.PercentileData`. ``None``
+    when every level is empty, mirroring
+    :func:`~cobre_bridge.comparators.results.compare_results`'s own
+    ``nw_max_stage_1based is None`` case.
+    """
+    candidates: list[int] = []
+    for frame in (aligned.source_hydro, aligned.source_thermal, aligned.source_bus):
+        if frame.is_empty() or "stage_id" not in frame.columns:
+            continue
+        values = frame["stage_id"].drop_nulls()
+        if not values.is_empty():
+            candidates.append(int(values.max()))  # type: ignore[arg-type]
+    return max(candidates) if candidates else None
+
+
 def _map_entities(
     frame: pl.DataFrame, code_column: str, mapping: dict[int, int]
 ) -> tuple[pl.DataFrame, list[int]]:
@@ -1444,7 +1609,20 @@ def build_decomp_dataset(
     ``cobre_stage_costs`` (from :func:`cobre_readers.read_cobre_stage_costs`);
     ``nw_sin`` additionally carries the ``COPER``/``CUSTO_FUTURO``/``CTERM``
     per-stage cost rows, unioned onto the ticket-006 EARM/ENA rows via
-    :func:`_union_cost_rows` rather than overwriting them. Every other field
+    :func:`_union_cost_rows` rather than overwriting them. As of ticket-012,
+    ``nw_convergence``/``cobre_convergence`` carry the Overview tab's
+    Convergence overlay (see :func:`_decomp_convergence_frame` and
+    :func:`cobre_readers.read_cobre_convergence`) — a source-side canonical
+    frame distinct from the legacy :class:`DecompComparison`'s
+    ``convergence`` join. As of ticket-013, the Performance tab's timing
+    metadata is filled: ``nw_tim_stages``/``nw_tim_iterations`` (see
+    :func:`_decomp_tim_stages`/:func:`_decomp_tim_iterations`, sourced from
+    ``decomp.tim``/``relato.convergencia``), ``nw_max_stage`` (see
+    :func:`_decomp_max_stage`), and ``cobre_training_seconds``/
+    ``cobre_iteration_timing`` (verbatim from the matching
+    :mod:`cobre_readers` functions). Per Caveat #2, ``nw_tim_iterations``
+    never carries a ``forward_seconds``/``backward_seconds`` split — DECOMP
+    has no forward/backward pass structure to split. Every other field
     stays at its empty default, and ``bus``/``line`` themselves stay empty
     whenever the Cobre run has no percentile output (e.g. the deterministic
     2-node tree) — no percentile spread is ever fabricated.
@@ -1506,6 +1684,16 @@ def build_decomp_dataset(
     cobre_stage_costs = cobre_readers.read_cobre_stage_costs(cobre_output_dir)
     nw_sin = _union_cost_rows(aligned.nw_sin, nw_cost_rows)
 
+    # --- ticket-013: Performance tab timing metadata (Caveat #2: no
+    # fabricated DECOMP forward/backward split) ---
+    nw_tim_stages = _decomp_tim_stages(decomp_dir)
+    nw_tim_iterations = _decomp_tim_iterations(decomp_dir)
+    nw_max_stage = _decomp_max_stage(aligned)
+    cobre_training_seconds = cobre_readers.read_cobre_training_duration(
+        cobre_output_dir
+    )
+    cobre_iteration_timing = cobre_readers.read_cobre_iteration_timing(cobre_output_dir)
+
     pct = PercentileData(
         nw_bus_names=aligned.bus_names,
         nw_hydro_names=aligned.hydro_names,
@@ -1515,6 +1703,9 @@ def build_decomp_dataset(
         nw_sin=nw_sin,
         # D-STAGE-OFFSET: fixed at 1, not derived — see the docstring above.
         nw_offset=1,
+        # ticket-012: Overview tab's Convergence overlay.
+        nw_convergence=_decomp_convergence_frame(decomp_dir),
+        cobre_convergence=cobre_readers.read_cobre_convergence(cobre_output_dir),
         nw_costs=nw_costs,
         cobre_costs=cobre_costs,
         cobre_stage_costs=cobre_stage_costs,
@@ -1524,6 +1715,12 @@ def build_decomp_dataset(
         line=cobre_readers.read_cobre_line_percentiles(cobre_output_dir),
         line_bounds=line_bounds,
         line_meta=line_meta,
+        # ticket-013: Performance tab timing metadata.
+        nw_tim_stages=nw_tim_stages,
+        nw_tim_iterations=nw_tim_iterations,
+        nw_max_stage=nw_max_stage,
+        cobre_training_seconds=cobre_training_seconds,
+        cobre_iteration_timing=cobre_iteration_timing,
     )
     dataset = build_results_dataset(results, pct, tolerance)
     dataset.metadata["unmapped"] = {

@@ -1761,8 +1761,18 @@ def performance_fwd_bwd_split_chart(
     Two panels stacked vertically: top panel = the source model (backward +
     forward stacked bars in seconds), bottom panel = Cobre (same but
     converted from ms).
+
+    ``nw_tim_iterations`` renders its panel only when it actually carries the
+    ``forward_seconds``/``backward_seconds`` columns this chart stacks -- a
+    source with no forward/backward pass structure (e.g. DECOMP's nested
+    Benders over an explicit tree) fills only ``iteration``/``total_seconds``
+    and must never fabricate a split, so a non-empty-but-columnless frame
+    degrades to "no source panel" here rather than raising.
     """
-    has_nw = not nw_tim_iterations.is_empty()
+    has_nw = not nw_tim_iterations.is_empty() and {
+        "forward_seconds",
+        "backward_seconds",
+    }.issubset(nw_tim_iterations.columns)
     has_cb = (
         not cobre_convergence.is_empty()
         and "iteration" in cobre_convergence.columns

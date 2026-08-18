@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
 import polars as pl
 import pytest
-from idecomp.decomp import DecOperGnl, Relato
+from idecomp.decomp import Decomptim, DecOperGnl, Relato
 
 from cobre_bridge.comparators.decomp_readers import (
     _read_dec_oper,
@@ -19,6 +20,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
+    read_decomp_tim,
     read_relato_balance,
     read_relato_convergence,
     read_relato_costs,
@@ -34,11 +36,22 @@ _needs_reduced_deck = pytest.mark.skipif(
     not (_REDUCED_DECK / "saidas" / "relato.rv2").is_file(),
     reason="reduced deck outputs not present",
 )
+_needs_reduced_deck_tim = pytest.mark.skipif(
+    not (_REDUCED_DECK / "saidas" / "decomp.tim").is_file(),
+    reason="reduced deck decomp.tim not present",
+)
 
 
 class _StubFile:
     def __init__(self, table: pd.DataFrame | None) -> None:
         self.tabela = table
+
+
+class _StubTimFile:
+    """Stub for a `Decomptim.read(...)` result, carrying `tempos_etapas`."""
+
+    def __init__(self, table: pd.DataFrame | None) -> None:
+        self.tempos_etapas = table
 
 
 def _stub_reader(table: pd.DataFrame | None) -> type:
@@ -527,6 +540,73 @@ class TestReadDecOperGnl:
     def test_real_deck_is_non_empty(self) -> None:
         df = read_dec_oper_gnl(_REDUCED_DECK)
         assert df.height > 0
+
+
+class TestReadDecompTim:
+    """`read_decomp_tim`: wall-clock timing table from ``decomp.tim``."""
+
+    def test_finds_saidas_only_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "decomp.tim").touch()
+        stub_table = pd.DataFrame(
+            {
+                "Etapa": ["Leitura de Dados", "Convergencia", "Tempo Total"],
+                "Tempo": [
+                    timedelta(seconds=1),
+                    timedelta(minutes=5),
+                    timedelta(minutes=6, seconds=1),
+                ],
+            }
+        )
+        monkeypatch.setattr(
+            Decomptim,
+            "read",
+            staticmethod(lambda _path: _StubTimFile(stub_table)),
+        )
+        result = read_decomp_tim(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.columns == ["Etapa", "Tempo"]
+        assert result.height == 3
+
+    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="decomp.tim") as exc_info:
+            read_decomp_tim(tmp_path)
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas" in message
+
+    def test_none_table_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "decomp.tim").touch()
+        monkeypatch.setattr(
+            Decomptim,
+            "read",
+            staticmethod(lambda _path: _StubTimFile(None)),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_decomp_tim(tmp_path)
+
+    def test_empty_table_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "decomp.tim").touch()
+        monkeypatch.setattr(
+            Decomptim,
+            "read",
+            staticmethod(lambda _path: _StubTimFile(pd.DataFrame())),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_decomp_tim(tmp_path)
+
+    @_needs_reduced_deck_tim
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_decomp_tim(_REDUCED_DECK)
+        assert df.height > 0
+        assert "total" in " ".join(df["Etapa"].to_list()).lower()
 
 
 class TestReconcileKdollarsToReais:
