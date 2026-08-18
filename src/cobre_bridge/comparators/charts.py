@@ -1411,12 +1411,15 @@ def line_summary_chart(
 
     # Build per-line p10/p90 lookups from percentile data.
     pct_by_lid: dict[int, dict[int, dict]] = {}
-    if line_pct is not None and not line_pct.is_empty():
-        if {"net_flow_mw_p10", "net_flow_mw_p90"}.issubset(line_pct.columns):
-            for r in line_pct.iter_rows(named=True):
-                lid = int(r["entity_id"])
-                sid = int(r["stage_id"])
-                pct_by_lid.setdefault(lid, {})[sid] = r
+    if (
+        line_pct is not None
+        and not line_pct.is_empty()
+        and {"net_flow_mw_p10", "net_flow_mw_p90"}.issubset(line_pct.columns)
+    ):
+        for r in line_pct.iter_rows(named=True):
+            lid = int(r["entity_id"])
+            sid = int(r["stage_id"])
+            pct_by_lid.setdefault(lid, {})[sid] = r
 
     # Per-line stage-keyed capacity bounds.
     static_caps: dict[int, tuple[float, float]] = {}
