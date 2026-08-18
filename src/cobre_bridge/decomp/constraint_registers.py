@@ -705,10 +705,21 @@ def detect_libs_electrical(deck_dir: Path) -> Diagnostic | None:
 
     A deck using the LIBs electrical-constraint family declares it in
     ``indices.csv`` under a ``RESTRICAO-ELETRICA-ESPECIAL`` entry; that
-    richer format is not converted (E9, blocked), so converting only the
-    classic ``RE`` subset from ``dadger`` would silently omit it. This reads
+    richer format is unconverted only for its short-form ``RE``/``RE-*`` and
+    date-indexed ``-HORIZONTE-DATA``/``-FORMULA-DATA-PATAMAR`` variants (E9's
+    period-keyed long-form cards ARE converted — see
+    :mod:`cobre_bridge.decomp.libs_electrical`, ticket-013). This reads
     ``indices.csv`` (when present) and reports the entry's presence; it does
-    not parse or convert the LIBs file itself.
+    not parse or convert the LIBs file itself, and does not know whether the
+    long-form subset converted — the caller (:func:`~cobre_bridge.decomp.
+    pipeline.convert_decomp_case`) is the one that reads
+    :func:`~cobre_bridge.decomp.libs_electrical.read_libs_electrical` and
+    decides whether this diagnostic's return value is still worth emitting:
+    it suppresses it once the long-form subset converts (the census INFO
+    diagnostic, ``decomp-libs-electrical-converted``, is authoritative
+    then), and still emits it for a short-form-only entry. This function
+    itself is unchanged either way — always returning the same diagnostic
+    for the same *deck_dir*.
 
     Parameters
     ----------
@@ -744,3 +755,43 @@ def detect_libs_electrical(deck_dir: Path) -> Diagnostic | None:
             "needed to convert."
         ),
     )
+
+
+def resolve_libs_electrical_path(deck_dir: Path) -> Path | None:
+    """Resolve the deck's LIBs electrical-constraint file path (ticket-013).
+
+    Reads *deck_dir*'s ``indices.csv`` for the ``RESTRICAO-ELETRICA-ESPECIAL``
+    entry's own ``Caminho`` (the third ``;``-delimited field), matched by its
+    first field **exactly** — never the ``-ATIVACAO``/``-VIOLACAO`` sibling
+    entries :func:`detect_libs_electrical`'s substring scan also matches —
+    and resolved relative to *deck_dir*. Falls back to a
+    ``lib_restricao-eletrica-especial*.csv`` glob in *deck_dir* when
+    ``indices.csv`` is absent, carries no such entry, or the entry's own path
+    does not resolve to an existing file — mirroring
+    :func:`~cobre_bridge.decomp.pipeline.discover_decomp_files`'s own
+    ``find`` fallback idiom for the deck's other optional files.
+
+    Parameters
+    ----------
+    deck_dir:
+        The deck's source directory (holding ``indices.csv`` alongside
+        ``caso.dat``).
+
+    Returns
+    -------
+    The resolved file path, or ``None`` when neither resolves.
+    """
+    indices_path = deck_dir / "indices.csv"
+    if indices_path.is_file():
+        for line in indices_path.read_text(encoding="latin-1").splitlines():
+            fields = line.split(";")
+            if len(fields) < 3 or fields[0].strip().upper() != _LIBS_ELECTRICAL_TOKEN:
+                continue
+            filename = fields[2].strip()
+            if not filename:
+                continue
+            candidate = deck_dir / filename
+            if candidate.is_file():
+                return candidate
+    matches = sorted(deck_dir.glob("lib_restricao-eletrica-especial*.csv"))
+    return matches[0] if matches else None

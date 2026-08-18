@@ -221,7 +221,7 @@ def test_mid_horizon_nummaq_drop_overlay_only_at_reduced_stage() -> None:
     calendar = _calendar()
     effective = _dropping_machine_set_effective(hidr, len(calendar))
 
-    values, deltas = convert_hydro_group_availability(
+    values = convert_hydro_group_availability(
         _StubDadger(), hidr, _ID_MAP, calendar, effective
     )
     hydro_id = _ID_MAP.hydro_id(_HYDRO_CODE)
@@ -232,7 +232,6 @@ def test_mid_horizon_nummaq_drop_overlay_only_at_reduced_stage() -> None:
     entry = values[(hydro_id, 0, 2)]
     assert entry.max_generation_mw == pytest.approx(50.0)
     assert entry.max_turbined_m3s == pytest.approx(50.0 / 0.72)
-    assert deltas == []
 
 
 def test_constant_machine_set_availability_matches_mp_fd_product() -> None:
@@ -268,7 +267,7 @@ def test_constant_machine_set_availability_matches_mp_fd_product() -> None:
         ]
     )
 
-    values, deltas = convert_hydro_group_availability(
+    values = convert_hydro_group_availability(
         _StubDadger(mp=mp, fd=fd), hidr, _ID_MAP, calendar, effective
     )
     hydro_id = _ID_MAP.hydro_id(_HYDRO_CODE)
@@ -282,5 +281,3 @@ def test_constant_machine_set_availability_matches_mp_fd_product() -> None:
     stage2 = values[(hydro_id, 0, 2)]
     assert stage2.max_generation_mw == pytest.approx(80.0)
     assert stage2.max_turbined_m3s is None
-
-    assert deltas == []

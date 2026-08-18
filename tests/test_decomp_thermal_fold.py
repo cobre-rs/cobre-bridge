@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
 _DECK = Path("example/decomp-jul-26-rv3")
 _needs_deck = pytest.mark.skipif(
-    not (_DECK / "saidas" / "dec_oper_usit.csv").exists(),
+    not (_DECK / "dec_oper_usit.csv").exists(),
     reason="reference deck outputs not present",
 )
 
@@ -76,7 +76,7 @@ def _resolved_bounds_frame(
 
 def _reference_blocks() -> pl.DataFrame:
     """Per (plant, stage, block) effective bounds as the reference reports them."""
-    usit = read_dec_oper_usit(_DECK / "saidas")
+    usit = read_dec_oper_usit(_DECK)
     return (
         usit.filter(pl.col("patamar").is_not_null())
         .group_by(["codigo_usina", "estagio", "patamar"])

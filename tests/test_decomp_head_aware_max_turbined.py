@@ -246,8 +246,9 @@ def test_per_stage_overlay_is_head_corrected() -> None:
     flow below the envelope — the ``hydro_unit_group_bounds`` overlay's
     ``max_turbined_m3s`` at that stage is the head-corrected value, not the
     (stage-invariant) rated ``q_g``. The unchanged earlier stages, whose
-    head-corrected flow equals the envelope exactly, get no turbined
-    overlay at all."""
+    head-corrected flow equals the envelope exactly, get no overlay row at
+    all (availability, with no MP/FD derate here, sits at the rated envelope,
+    so neither column drops below it)."""
     hidr = _hidr_frame(
         {1: _plant_row(conjuntos=[(1, 100.0, 1000.0, 160.0)], tipo_turbina=1)}
     )
@@ -260,17 +261,14 @@ def test_per_stage_overlay_is_head_corrected() -> None:
     )
     dadger = _FakeDadger(uh=_uh_frame([1]))
 
-    values, _ = convert_hydro_group_availability(
-        dadger, hidr, id_map, calendar, effective
-    )
+    values = convert_hydro_group_availability(dadger, hidr, id_map, calendar, effective)
     hydro_id = id_map.hydro_id(1)
 
     expected_stage2 = 100.0 * (40.0 / 160.0) ** 0.5
     entry2 = values[(hydro_id, 0, 2)]
     assert entry2.max_turbined_m3s == pytest.approx(expected_stage2)
 
-    entry0 = values[(hydro_id, 0, 0)]
-    assert entry0.max_turbined_m3s is None
+    assert (hydro_id, 0, 0) not in values
 
 
 @pytest.mark.parametrize(

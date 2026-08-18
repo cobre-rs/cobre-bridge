@@ -11,6 +11,9 @@ import pytest
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.hydro import (
+    _build_split_unit_groups,
+    _evaporation_coefficients_mm,
+    _evaporation_flag_codes,
     convert_energy_productivity,
     convert_hydros,
     convert_initial_storage,
@@ -19,6 +22,85 @@ from cobre_bridge.decomp.hydro import (
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import convert_thermal_bounds, convert_thermals
+
+_EVAPORATION_COLUMNS = (
+    "evaporacao_JAN",
+    "evaporacao_FEV",
+    "evaporacao_MAR",
+    "evaporacao_ABR",
+    "evaporacao_MAI",
+    "evaporacao_JUN",
+    "evaporacao_JUL",
+    "evaporacao_AGO",
+    "evaporacao_SET",
+    "evaporacao_OUT",
+    "evaporacao_NOV",
+    "evaporacao_DEZ",
+)
+
+
+def _evaporation_hidr(rows: dict[int, list[float]]) -> pd.DataFrame:
+    """A ``hidr``-shaped frame carrying only the 12 monthly evaporation columns."""
+    df = pd.DataFrame(
+        {
+            code: dict(zip(_EVAPORATION_COLUMNS, vals, strict=True))
+            for code, vals in rows.items()
+        }
+    ).T
+    df.index.name = "codigo_usina"
+    return df
+
+
+class TestEvaporationEmission:
+    """Reservoir-evaporation conversion (C11 fixed in cobre 0.14): the per-plant
+    UH ``evaporacao`` flag switches it on; the 12 monthly mm rates come from
+    ``hidr.dat`` in calendar order (Jan..Dec)."""
+
+    def test_coefficients_are_hidr_months_jan_to_dec(self) -> None:
+        hidr = _evaporation_hidr({7: [0, 2, 29, 40, 51, 46, 32, 23, 24, 15, 4, 7]})
+        assert _evaporation_coefficients_mm(hidr, 7) == [
+            0.0,
+            2.0,
+            29.0,
+            40.0,
+            51.0,
+            46.0,
+            32.0,
+            23.0,
+            24.0,
+            15.0,
+            4.0,
+            7.0,
+        ]
+
+    def test_all_zero_months_is_none(self) -> None:
+        hidr = _evaporation_hidr({7: [0.0] * 12})
+        assert _evaporation_coefficients_mm(hidr, 7) is None
+
+    def test_absent_plant_is_none(self) -> None:
+        hidr = _evaporation_hidr({7: [1.0] * 12})
+        assert _evaporation_coefficients_mm(hidr, 99) is None
+
+    def test_missing_columns_is_none_not_keyerror(self) -> None:
+        # A hidr frame without the evaporation columns (e.g. a partial fixture)
+        # yields None rather than raising, so a stray UH flag never crashes.
+        hidr = pd.DataFrame({7: {"volume_maximo": 100.0}}).T
+        hidr.index.name = "codigo_usina"
+        assert _evaporation_coefficients_mm(hidr, 7) is None
+
+    def test_flag_codes_reads_uh_evaporacao(self) -> None:
+        uh = pd.DataFrame(
+            [
+                {"codigo_usina": 1, "evaporacao": 1},
+                {"codigo_usina": 2, "evaporacao": 0},
+                {"codigo_usina": 3, "evaporacao": 1},
+            ]
+        )
+        assert _evaporation_flag_codes(_StubDadger(uh=uh)) == {1, 3}
+
+    def test_flag_codes_absent_column_is_empty(self) -> None:
+        assert _evaporation_flag_codes(_StubDadger(uh=pd.DataFrame())) == set()
+
 
 _RV3_DECK = Path("example/decomp-jul-26-rv3")
 
@@ -132,14 +214,22 @@ class _StubDadger:
         self,
         uh: pd.DataFrame | None = None,
         ct: pd.DataFrame | None = None,
+        mp: pd.DataFrame | None = None,
+        fd: pd.DataFrame | None = None,
     ) -> None:
-        self._uh, self._ct = uh, ct
+        self._uh, self._ct, self._mp, self._fd = uh, ct, mp, fd
 
     def uh(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return self._uh
 
     def ct(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return self._ct
+
+    def mp(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return self._mp
+
+    def fd(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return self._fd
 
     def ac(  # noqa: ARG002
         self,
@@ -183,6 +273,50 @@ def _uh_frame() -> pd.DataFrame:
         },
     ]
     return pd.DataFrame(rows)
+
+
+#: ticket-006: a minimal per-frequency split-plant (Itaipu-shaped) fixture —
+#: two identical conjuntos (2 machines x 100 m3/s x 50 MW each), submercado
+#: 1 (SE) — so the bus-relocation math reuses the same 100.0 / 0.72 head-free
+#: engolimento ratio already pinned for ``UP_RES`` above, just per-conjunto.
+_ITAIPU_ID_MAP = DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"), hydro_codes=(66,))
+
+
+def _itaipu_hidr_frame() -> pd.DataFrame:
+    row = _plant_row("ITAIPU", 1, 0, 100.0, 100.0)
+    row["numero_conjuntos_maquinas"] = 2
+    row["maquinas_conjunto_2"] = 2
+    row["vazao_nominal_conjunto_2"] = 100.0
+    row["potencia_nominal_conjunto_2"] = 50.0
+    df = pd.DataFrame({66: row}).T
+    df.index.name = "codigo_usina"
+    return df
+
+
+def _itaipu_uh_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "codigo_usina": 66,
+                "volume_inicial": 100.0,
+                "vazao_defluente_minima": None,
+                "volume_morto_inicial": None,
+            }
+        ]
+    )
+
+
+def _itaipu_frequency_frame() -> pd.DataFrame:
+    """Shared shape for the ``MP``/``FD`` stub tables: one row per
+    ``frequencia`` (50, 60), matching the real registers'
+    ``codigo_usina``/``frequencia`` key that :func:`_split_plant_frequencies`
+    reads."""
+    return pd.DataFrame(
+        [
+            {"codigo_usina": 66, "frequencia": 50.0},
+            {"codigo_usina": 66, "frequencia": 60.0},
+        ]
+    )
 
 
 class TestConvertHydros:
@@ -281,6 +415,85 @@ class TestConvertHydros:
         assert all(
             m["stage_ranges"][0]["model"] == "constant_productivity" for m in models
         )
+
+
+class TestItaipuBusRelabel:
+    """ticket-006: the per-frequency split plant's 50 Hz unit group (group
+    id 0, the ascending-frequency convention pinned by
+    :func:`_split_plant_frequencies`) is unconditionally relocated to the
+    ``IV`` transshipment bus; the 60 Hz group (group id 1) stays on the
+    plant's own submercado bus. Pure/synthetic, deck-independent — no
+    ``example/`` read.
+    """
+
+    def test_50hz_group_on_iv_60hz_group_on_se(self) -> None:
+        hidr = _itaipu_hidr_frame()
+        dadger = _StubDadger(
+            uh=_itaipu_uh_frame(),
+            mp=_itaipu_frequency_frame(),
+            fd=_itaipu_frequency_frame(),
+        )
+        doc = convert_hydros(
+            dadger,
+            hidr,
+            _ITAIPU_ID_MAP,
+            date(2026, 7, 18),
+            _no_override_effective(hidr),
+        )
+        itaipu = doc["hydros"][0]
+        groups = {g["id"]: g for g in itaipu["unit_groups"]}
+        assert groups.keys() == {0, 1}
+        assert groups[0]["bus_id"] == _ITAIPU_ID_MAP.transhipment_bus_id  # 50 Hz -> IV
+        assert groups[1]["bus_id"] == _ITAIPU_ID_MAP.bus_id(1)  # 60 Hz -> SE
+        assert groups[0]["bus_id"] != groups[1]["bus_id"]
+
+    def test_envelope_unchanged_by_the_relabel(self) -> None:
+        """The relabel moves only the 50 Hz group's ``bus_id`` — the summed
+        plant envelope is exactly what it was before the split existed: two
+        identical conjuntos, each capped by its own installed power at
+        ``100.0 / 0.72`` m3/s (no head data in this fixture, same head-free
+        ratio ``UP_RES`` pins above), never the plant-wide power cap.
+        """
+        hidr = _itaipu_hidr_frame()
+        dadger = _StubDadger(
+            uh=_itaipu_uh_frame(),
+            mp=_itaipu_frequency_frame(),
+            fd=_itaipu_frequency_frame(),
+        )
+        doc = convert_hydros(
+            dadger,
+            hidr,
+            _ITAIPU_ID_MAP,
+            date(2026, 7, 18),
+            _no_override_effective(hidr),
+        )
+        itaipu = doc["hydros"][0]
+        gen = itaipu["generation"]
+        groups = itaipu["unit_groups"]
+
+        expected_generation = 2 * 100.0
+        expected_turbined = 2 * (100.0 / 0.72)
+        assert gen["max_generation_mw"] == pytest.approx(expected_generation)
+        assert gen["max_turbined_m3s"] == pytest.approx(expected_turbined)
+        assert sum(g["max_generation_mw"] for g in groups) == pytest.approx(
+            gen["max_generation_mw"]
+        )
+        assert sum(g["max_turbined_m3s"] for g in groups) == pytest.approx(
+            gen["max_turbined_m3s"]
+        )
+
+    def test_bus_count_mismatch_raises(self) -> None:
+        """A mis-wired split (fewer/more per-group buses than frequencies)
+        must fail loud, not silently colocate the groups."""
+        hidr = _itaipu_hidr_frame()
+        hreg = hidr.loc[66]
+        with pytest.raises(
+            ValueError,
+            match="plant 66: 2 split frequencies but 1 per-group buses were supplied",
+        ):
+            _build_split_unit_groups(
+                hreg, 66, "ITAIPU", [0], [50.0, 60.0], _no_override_effective(hidr)
+            )
 
 
 def test_deferred_note_excludes_head_productivity(caplog) -> None:
@@ -485,15 +698,19 @@ class TestRealDecks:
         itaipu = next(h for h in hydros if h["name"] == "ITAIPU")
         assert "bus_id" not in itaipu
         # Two per-frequency groups (ticket-027, code 66): unique ids {0, 1},
-        # both on bus SE (id_map.bus_id(1) == 0), each 7000 MW installed
-        # (rated, unchanged) — id-addressed, not array-order (cobre sorts by
-        # group id on load). max_turbined_m3s is head-corrected (ticket-017):
-        # 6620 m3/s rated derates to ~6530.33 m3/s at Itaipu's own nominal
-        # head (117 m) and operating head, both conjuntos symmetric.
+        # each 7000 MW installed (rated, unchanged) — id-addressed, not
+        # array-order (cobre sorts by group id on load). max_turbined_m3s is
+        # head-corrected (ticket-017): 6620 m3/s rated derates to ~6530.33
+        # m3/s at Itaipu's own nominal head (117 m) and operating head, both
+        # conjuntos symmetric. Group id 0 (50 Hz) is unconditionally
+        # relocated to the IV transshipment bus; group id 1 (60 Hz) stays on
+        # the plant's own SE bus (ticket-006).
         groups = itaipu["unit_groups"]
         assert {g["id"] for g in groups} == {0, 1}
+        groups_by_id = {g["id"]: g for g in groups}
+        assert groups_by_id[0]["bus_id"] == id_map.transhipment_bus_id  # 50 Hz -> IV
+        assert groups_by_id[1]["bus_id"] == id_map.bus_id(1)  # 60 Hz -> SE
         for group in groups:
-            assert group["bus_id"] == 0  # SE
             assert group["max_generation_mw"] == pytest.approx(7000.0)
             assert group["max_turbined_m3s"] == pytest.approx(6530.33, abs=0.01)
         assert itaipu["downstream_id"] is None

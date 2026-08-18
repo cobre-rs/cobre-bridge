@@ -21,6 +21,7 @@ this same id space.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -253,6 +254,69 @@ def convert_ncs_factors(
     return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": entries}
 
 
+def _sorted_pee_codes(
+    renovaveis: Renovaveis, calendar: Sequence[OperativeStage]
+) -> list[int]:
+    """Every declared renewable park's ``codigo_pee``, sorted — the ncs_id
+    assignment order :func:`_pee_series` (the NCS series writer) and
+    :func:`build_pee_ncs_id_map` (the public ``codigo_pee -> ncs_id`` map)
+    share, so neither enumeration can drift from the other.
+
+    A code is "declared" here iff it appears on at least one
+    ``PEE-GER-PER-PAT-CEN`` row (mirrors :func:`_pee_series`'s own
+    ``per_park`` keys, without building its per-(stage,block) generation).
+
+    Returns ``[]`` when the deck carries no ``PEE-CAD``/``PEE-GER`` card at
+    all (mirrors :func:`_pee_series`'s own no-op guard).
+
+    Raises
+    ------
+    ValueError
+        When a row's ``estagio`` falls outside *calendar*.
+    """
+    cad = renovaveis.pee_cad(df=True)
+    ger = renovaveis.pee_ger_per_pat_cen(df=True)
+    if cad is None or cad.empty or ger is None or ger.empty:
+        return []
+
+    n_stages = len(calendar)
+    codes: set[int] = set()
+    for _, row in ger.iterrows():
+        estagio = int(row["estagio"])
+        if not 1 <= estagio <= n_stages:
+            raise ValueError(
+                f"renewable generation at stage {estagio} outside the "
+                f"calendar (1..{n_stages})"
+            )
+        codes.add(int(row["codigo_pee"]))
+    return sorted(codes)
+
+
+def build_pee_ncs_id_map(
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+    renovaveis: Renovaveis | None,
+) -> dict[int, int]:
+    """Public ``codigo_pee -> ncs_id`` map for the emitter (ticket-011), sharing
+    :func:`_pee_series`'s ordering via :func:`_sorted_pee_codes`.
+
+    ``ncs_id`` continues the ``PQ`` series' id space (:func:`_pq_series`'s
+    count is the offset), then :func:`_sorted_pee_codes`'s sorted-by-code
+    order — the exact same two facts :func:`_pee_series` itself combines, so
+    a park's id here always matches the id its own :class:`_PqSeries` gets.
+
+    Returns ``{}`` when *renovaveis* is ``None`` or the deck declares no
+    renewable parks (mirrors :func:`_all_series`'s "no renovaveis -> PQ
+    only" convention).
+    """
+    if renovaveis is None:
+        return {}
+    first_ncs_id = len(_pq_series(dadger, id_map, calendar))
+    sorted_codes = _sorted_pee_codes(renovaveis, calendar)
+    return {code: first_ncs_id + offset for offset, code in enumerate(sorted_codes)}
+
+
 def _pee_series(
     renovaveis: Renovaveis,
     id_map: DecompIdMap,
@@ -272,6 +336,11 @@ def _pee_series(
     if cad is None or cad.empty or ger is None or ger.empty:
         return []
 
+    sorted_codes = _sorted_pee_codes(renovaveis, calendar)
+    ncs_id_by_code = {
+        code: first_ncs_id + offset for offset, code in enumerate(sorted_codes)
+    }
+
     names = {
         int(r["codigo_pee"]): str(r["nome_pee"]).strip() for _, r in cad.iterrows()
     }
@@ -281,36 +350,50 @@ def _pee_series(
 
     values: dict[tuple[int, int, int], dict[int, float]] = {}
     for _, row in ger.iterrows():
-        first = int(row["estagio_inicial"])
-        last = int(row["estagio_final"])
-        for estagio in range(first, last + 1):
-            stage_index = estagio - 1
-            if not 0 <= stage_index < len(calendar):
-                raise ValueError(
-                    f"renewable generation at stage {estagio} outside the "
-                    f"calendar (1..{len(calendar)})"
-                )
-            key = (int(row["codigo_pee"]), stage_index, int(row["patamar"]) - 1)
-            values.setdefault(key, {})[int(row["cenario"])] = float(row["geracao"])
+        # The PEE-GER-PER-PAT-CEN card is single-período: one `estagio` per row.
+        # (idecomp < 1.14.1 mis-modelled it as an estagio_inicial/estagio_final
+        # range, which left `geracao` unreadable — see
+        # plans/idecomp-renovaveis-pee-ger-layout-spec.md; requires idecomp >= 1.14.1.)
+        estagio = int(row["estagio"])
+        stage_index = estagio - 1
+        if not 0 <= stage_index < len(calendar):
+            raise ValueError(
+                f"renewable generation at stage {estagio} outside the "
+                f"calendar (1..{len(calendar)})"
+            )
+        key = (int(row["codigo_pee"]), stage_index, int(row["patamar"]) - 1)
+        values.setdefault(key, {})[int(row["cenario"])] = float(row["geracao"])
 
     per_park: dict[int, dict[int, list[float]]] = {}
     for (code, stage_index, block), by_scenario in values.items():
-        top = max(by_scenario.values())
-        bottom = min(by_scenario.values())
-        if top - bottom > 1e-9 * max(abs(top), 1.0):
-            raise ValueError(
-                f"renewable park {code} stage {stage_index + 1} block "
-                f"{block + 1}: generation varies across scenarios "
-                f"({bottom}..{top}); per-scenario renewables need the "
-                "external availability class — not converted yet"
+        scenario_values = list(by_scenario.values())
+        # DECOMP renewables are deterministic: every scenario carries the same
+        # generation for a (park, stage, block). A per-scenario spread is a deck
+        # typo (e.g. one scenario's value fat-fingered), not real stochasticity —
+        # so recover the majority (modal) value, robust to a single stray entry,
+        # and warn rather than crash or trust the outlier (the max).
+        representative = Counter(scenario_values).most_common(1)[0][0]
+        spread = max(scenario_values) - min(scenario_values)
+        if spread > 1e-9 * max(abs(representative), 1.0):
+            _LOG.warning(
+                "renewable park %d stage %d block %d: generation is not identical "
+                "across %d scenarios (%.6g..%.6g) — DECOMP renewables are "
+                "deterministic, so this is a deck typo; using the modal value %.6g",
+                code,
+                stage_index + 1,
+                block + 1,
+                len(scenario_values),
+                min(scenario_values),
+                max(scenario_values),
+                representative,
             )
         stage_blocks = per_park.setdefault(code, {}).setdefault(
             stage_index, [0.0] * len(calendar[stage_index].block_hours)
         )
-        stage_blocks[block] = top
+        stage_blocks[block] = representative
 
     series: list[_PqSeries] = []
-    for offset, code in enumerate(sorted(per_park)):
+    for code in sorted_codes:
         stages = per_park[code]
         if 0 not in stages:
             raise ValueError(
@@ -326,7 +409,7 @@ def _pee_series(
             raise ValueError(f"renewable park {code} has no subsystem record")
         series.append(
             _PqSeries(
-                ncs_id=first_ncs_id + offset,
+                ncs_id=ncs_id_by_code[code],
                 name=f"{names.get(code, f'PEE_{code}')}_{sub_code}",
                 bus_id=id_map.bus_id(sub_code),
                 per_stage_blocks=tuple(dense),

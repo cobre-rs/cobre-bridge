@@ -312,6 +312,121 @@ def convert_lines(
     )
 
 
+#: The converter-created SE<->IV line's fixed name (ticket-007) -- the
+#: transshipment link that carries Itaipu's 50 Hz surplus into SE, mirroring
+#: the ``"{de}-{para}"`` naming convention IA lines get above.
+_IV_SE_LINE_NAME = "IV-SE"
+
+#: idecomp's ``df=True`` accessor expands the ``RI`` register's per-patamar
+#: ``geracao_maxima_50_hz`` list the same way it expands ``carga_ande``
+#: (mirrors ``libs_electrical._CARGA_ANDE_COLUMN``): one
+#: ``geracao_maxima_50_hz_{k}`` column per patamar slot, a row's own slots
+#: beyond its declared patamar count reading back as ``NaN``.
+_GERACAO_MAXIMA_50HZ_COLUMN = re.compile(r"^geracao_maxima_50_hz_(\d+)$")
+
+#: The source model's own "no limit" numeric idiom for an exchange pair --
+#: the exact value :func:`convert_lines` already passes through as ordinary
+#: ``IA`` data (see its own docstring). Reused verbatim, never invented, as
+#: the converter-created SE<->IV line's capacity when the deck carries no
+#: ``RI`` register to size the 50 Hz half.
+_UNBOUNDED_LINE_CAPACITY_MW = 99999.0
+
+
+def _itaipu_50hz_capacity_mw(dadger: Dadger) -> float:
+    """The SE<->IV line's capacity: the largest declared ``RI``
+    ``geracao_maxima_50_hz`` value across every stage and patamar, or
+    :data:`_UNBOUNDED_LINE_CAPACITY_MW` when the deck carries no ``RI``
+    register at all.
+
+    An absent register means "no limit", not zero -- the line must never
+    bind the 50 Hz surplus (ticket-007 pitfall guard).
+    """
+    ri = dadger.ri(df=True)
+    if ri is None or ri.empty:
+        return _UNBOUNDED_LINE_CAPACITY_MW
+    columns = [c for c in ri.columns if _GERACAO_MAXIMA_50HZ_COLUMN.match(c)]
+    values = [
+        float(row[column])
+        for _, row in ri.iterrows()
+        for column in columns
+        if not pd.isna(row[column])
+    ]
+    return max(values) if values else _UNBOUNDED_LINE_CAPACITY_MW
+
+
+def append_iv_se_line(
+    lines_doc: dict,
+    line_bounds: pa.Table,
+    calendar: Sequence[OperativeStage],
+    start_date: date,
+    source_bus_id: int,
+    target_bus_id: int,
+    capacity_mw: float,
+) -> tuple[dict, pa.Table]:
+    """Append the converter-created ``IV-SE`` line to a :func:`convert_lines` result.
+
+    Unconditional on Itaipu detection alone: the caller decides whether
+    Itaipu (code 66) is operated and only calls this when it is
+    (ticket-007), so a deck that never operates Itaipu stays byte-identical
+    to today. But before synthesizing, this checks whether *lines_doc*
+    already carries a line connecting *source_bus_id* and *target_bus_id*
+    (as an unordered pair -- the deck's own ``IA`` line may run either
+    direction). When one exists, the ``IV`` bus is not islanded: the deck's
+    own line already wires it, and carries the source model's own capacity
+    rather than the unbounded sentinel, so this is a no-op (ticket-016) --
+    *lines_doc*/*line_bounds* are returned unchanged.
+
+    Otherwise (the genuinely-islanded case) it synthesizes exactly as
+    before: the new line's id is the next free id after every ``IA`` line
+    (``len(lines_doc["lines"])``), so the existing lines are never
+    renumbered and ``constraints.build_fi_line_map`` stays stable.
+
+    Mirrors :func:`convert_lines`'s own ``lines.json`` entry and stage-level
+    ``line_bounds`` base-row (``block_id = None``) shape -- one base row per
+    calendar stage, no per-block override rows (this link carries no
+    per-block data of its own). Both directions share *capacity_mw* since
+    the source model declares no separate reverse limit for this
+    converter-created link.
+    """
+    pair = frozenset({source_bus_id, target_bus_id})
+    existing_line = next(
+        (
+            line
+            for line in lines_doc["lines"]
+            if frozenset({line["source_bus_id"], line["target_bus_id"]}) == pair
+        ),
+        None,
+    )
+    if existing_line is not None:
+        # The deck's own IA register already wires this pair (with its real
+        # capacity), so the converter-created IV-SE line is a no-op here.
+        return lines_doc, line_bounds
+
+    line_id = len(lines_doc["lines"])
+    new_line = {
+        "id": line_id,
+        "name": _IV_SE_LINE_NAME,
+        "operational_start_date": start_date.isoformat(),
+        "source_bus_id": source_bus_id,
+        "target_bus_id": target_bus_id,
+        "capacity": {"direct_mw": capacity_mw, "reverse_mw": capacity_mw},
+    }
+    extended_lines_doc = {**lines_doc, "lines": [*lines_doc["lines"], new_line]}
+
+    n_stages = len(calendar)
+    new_bounds = pa.table(
+        {
+            "line_id": pa.array([line_id] * n_stages, type=pa.int32()),
+            "stage_id": pa.array([s.index for s in calendar], type=pa.int32()),
+            "block_id": pa.array([None] * n_stages, type=pa.int32()),
+            "direct_mw": pa.array([capacity_mw] * n_stages, type=pa.float64()),
+            "reverse_mw": pa.array([capacity_mw] * n_stages, type=pa.float64()),
+        },
+        schema=_LINE_BOUNDS_SCHEMA,
+    )
+    return extended_lines_doc, pa.concat_tables([line_bounds, new_bounds])
+
+
 def pumping_station_id_map(dadger: Dadger) -> dict[int, int]:
     """``{codigo_usina: 0-based pumping-station id}`` — the single authority
     for ``UE`` id assignment.

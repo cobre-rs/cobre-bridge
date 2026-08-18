@@ -57,7 +57,8 @@ import pytest
 from idecomp.decomp import Dadger  # type: ignore[attr-defined]
 from inewave.newave import Cortesh
 
-from cobre_bridge.decomp.fcf import import_boundary_fcf
+from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
+from cobre_bridge.decomp.fcf import _coupling_stage_hours, import_boundary_fcf
 from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, StageCutRecord, read_cortes
 from cobre_bridge.decomp.id_map import DecompIdMap
@@ -134,6 +135,7 @@ class _RoundTripCase:
     reloaded: dict[str, Any]
     bcuts: BoundaryCuts
     id_map: DecompIdMap
+    cost_unit_hours: float
 
 
 @dataclass(frozen=True)
@@ -218,26 +220,43 @@ def _theta_source(
     records: Sequence[StageCutRecord],
     resolved: Mapping[int, tuple[int, int, dict[int, int]]],
     state: _PhysicalState,
+    cost_unit_hours: float,
 ) -> float:
     """``max_k(rhs_k + pi_varm_k . storage + pi_qafl_k . inflow)`` over active
     source records, restricted to resolved plants and present lag slots —
     the independent oracle AC 4 cross-evaluates against ``_theta_cobre``.
+
+    Terms are scaled per family to match the mapper's cost-unit conversion
+    (``fcf.mapper``), since the authored (reloaded) cut ``_theta_cobre`` reads
+    is in cobre cost units: the intercept and storage by ``cost_unit_hours``
+    (the ``($·mês)/h -> $`` integration over the coupling stage's hours), and
+    the inflow-lag additionally by ``C_M3S2HM3`` (the Hm³<-m³/s factor for
+    cobre's m³/s lag state). ``cost_unit_hours`` is the same value the mapper
+    was given (MONTH_HOURS for the synthetic fixtures, the deck's coupling
+    stage hours for the real round trip).
     """
+    lag_factor = cost_unit_hours * C_M3S2HM3
     best = float("-inf")
     for record in records:
         if not record.is_active:
             continue
-        value = record.rhs
+        value = record.rhs * cost_unit_hours
         for plant_index, (
             _hydro_id,
             _storage_position,
             lag_positions,
         ) in resolved.items():
-            value += record.pi_varm[plant_index] * state.storage.get(plant_index, 0.0)
+            value += (
+                record.pi_varm[plant_index]
+                * state.storage.get(plant_index, 0.0)
+                * cost_unit_hours
+            )
             plant_lags = record.pi_qafl[plant_index]
             for depth in lag_positions:
-                value += plant_lags[depth - 1] * state.inflow.get(
-                    (plant_index, depth), 0.0
+                value += (
+                    plant_lags[depth - 1]
+                    * state.inflow.get((plant_index, depth), 0.0)
+                    * lag_factor
                 )
         if value > best:
             best = value
@@ -350,10 +369,14 @@ def test_synthetic_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     assert len(active_cuts) == 1
     cut = active_cuts[0]
     coefficients = cut["coefficients"]
-    assert cut["intercept"] == active_record.rhs
+    # Authored values are the source terms scaled to cobre cost units by
+    # MONTH_HOURS (fcf.mapper's ($·mês)/h -> $ conversion).
+    assert math.isclose(
+        cut["intercept"], active_record.rhs * MONTH_HOURS, rel_tol=1e-9, abs_tol=1e-6
+    )
 
     for plant_index, (_hydro_id, storage_position, lag_positions) in resolved.items():
-        source_storage = active_record.pi_varm[plant_index]
+        source_storage = active_record.pi_varm[plant_index] * MONTH_HOURS
         assert math.isclose(
             coefficients[storage_position], source_storage, rel_tol=1e-9, abs_tol=1e-6
         ), f"plant_index={plant_index} storage slot {storage_position}"
@@ -361,7 +384,7 @@ def test_synthetic_roundtrip_coefficient_identity(tmp_path: Path) -> None:
         for depth, lag_position in lag_positions.items():
             assert math.isclose(
                 coefficients[lag_position],
-                plant_lags[depth - 1],
+                plant_lags[depth - 1] * MONTH_HOURS * C_M3S2HM3,
                 rel_tol=1e-9,
                 abs_tol=1e-6,
             ), f"plant_index={plant_index} lag depth={depth} slot {lag_position}"
@@ -447,11 +470,40 @@ def test_synthetic_roundtrip_theta_sweep(tmp_path: Path) -> None:
                 x_cobre[lag_position] = state.inflow.get((plant_index, depth), 0.0)
 
         theta_cobre = _theta_cobre(cuts_list, x_cobre)
-        theta_source = _theta_source(records, resolved, state)
+        # Synthetic fixture used synthetic_roundtrip's default cost_unit_hours.
+        theta_source = _theta_source(
+            records, resolved, state, cost_unit_hours=MONTH_HOURS
+        )
         assert math.isclose(theta_cobre, theta_source, rel_tol=1e-9, abs_tol=1e-6), (
             f"state {index}: theta_cobre={theta_cobre!r} != "
             f"theta_source={theta_source!r}"
         )
+
+
+@requires_cobre_python
+@requires_writer_binding
+def test_synthetic_roundtrip_carries_delivery_date(tmp_path: Path) -> None:
+    """D5 — the CBVF write->load round trip carries `delivery_date`, no deck
+    and no cobre binary.
+
+    Authors a one-plant, one-cut synthetic checkpoint via
+    `synthetic_roundtrip` and asserts the reloaded terminal
+    `entity_manifest[0]` dict contains the `delivery_date` key (the CBVF
+    schema-break field `make_slot` now emits) and that
+    `metadata["producer"]["cost_scale_factor"] == 1.0` survives the round
+    trip (guards the legacy 10**6-scale marker from silently reappearing).
+    """
+    plant_codes = (10,)
+    id_map = make_id_map(plant_codes)
+    manifest = make_manifest([make_slot(_HYDRO_STORAGE, 0, 0)])
+    record = make_cut_record(pi_varm=(3.0,), rhs=100.0, cut_id=1, iteration=1)
+    cuts = make_boundary_cuts(plant_codes, (record,))
+
+    reloaded = synthetic_roundtrip(tmp_path / "boundary", cuts, manifest, id_map)
+
+    entry = reloaded["stage_cuts"][0]
+    assert "delivery_date" in entry["entity_manifest"][0]
+    assert reloaded["metadata"]["producer"]["cost_scale_factor"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +539,6 @@ def roundtrip_case(tmp_path_factory: pytest.TempPathFactory) -> _RoundTripCase:
         case_dir,
         _CORTESH,
         _CORTES,
-        cobre_bin=_COBRE_BIN,
         work_dir=root / "work",
         cost_scale_factor=1.0,
     )
@@ -515,8 +566,15 @@ def roundtrip_case(tmp_path_factory: pytest.TempPathFactory) -> _RoundTripCase:
             "pairing is broken"
         )
 
+    # The same coupling-stage hours import_boundary_fcf scaled the coefficients
+    # by — the oracle below must use it to reproduce the authored values.
+    cost_unit_hours = _coupling_stage_hours(case_dir)
     return _RoundTripCase(
-        case_dir=case_dir, reloaded=reloaded, bcuts=bcuts, id_map=id_map
+        case_dir=case_dir,
+        reloaded=reloaded,
+        bcuts=bcuts,
+        id_map=id_map,
+        cost_unit_hours=cost_unit_hours,
     )
 
 
@@ -578,11 +636,11 @@ def test_storage_coefficient_identity_and_unmapped_slots_zero(
         coefficients = cut["coefficients"]
         for plant_index, (_hydro_id, storage_position, _lags) in resolved.items():
             authored = coefficients[storage_position]
-            source = record.pi_varm[plant_index]
+            source = record.pi_varm[plant_index] * roundtrip_case.cost_unit_hours
             assert math.isclose(authored, source, rel_tol=1e-9, abs_tol=1e-6), (
                 f"cut_id={cut['cut_id']} plant_index={plant_index} storage "
                 f"slot {storage_position}: authored={authored!r} "
-                f"source pi_varm={source!r}"
+                f"source pi_varm*cost_unit_hours={source!r}"
             )
         for position, value in enumerate(coefficients):
             if position not in mapped_positions:
@@ -626,11 +684,13 @@ def test_lag_coefficient_identity(roundtrip_case: _RoundTripCase) -> None:
             for depth, lag_position in lag_positions.items():
                 checked += 1
                 authored = coefficients[lag_position]
-                source = plant_lags[depth - 1]
+                source = (
+                    plant_lags[depth - 1] * roundtrip_case.cost_unit_hours * C_M3S2HM3
+                )
                 assert math.isclose(authored, source, rel_tol=1e-9, abs_tol=1e-6), (
                     f"cut_id={cut['cut_id']} plant_index={plant_index} lag "
                     f"depth={depth} slot {lag_position}: authored="
-                    f"{authored!r} source pi_qafl={source!r}"
+                    f"{authored!r} source pi_qafl*cost_unit_hours*C_M3S2HM3={source!r}"
                 )
     assert checked > 0, "no HydroInflowLag slots were present to check"
 
@@ -683,7 +743,12 @@ def test_evaluation_sweep_theta_identity(roundtrip_case: _RoundTripCase) -> None
                 x_cobre[lag_position] = state.inflow.get((plant_index, depth), 0.0)
 
         theta_cobre = _theta_cobre(cuts_list, x_cobre)
-        theta_source = _theta_source(roundtrip_case.bcuts.records, resolved, state)
+        theta_source = _theta_source(
+            roundtrip_case.bcuts.records,
+            resolved,
+            state,
+            cost_unit_hours=roundtrip_case.cost_unit_hours,
+        )
         assert math.isclose(theta_cobre, theta_source, rel_tol=1e-9, abs_tol=1e-6), (
             f"state {index}: theta_cobre={theta_cobre!r} != "
             f"theta_source={theta_source!r}"

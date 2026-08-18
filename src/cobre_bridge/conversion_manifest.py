@@ -26,6 +26,7 @@ from cobre_bridge._git import git_sha
 from cobre_bridge.newave_files import NewaveFiles
 
 if TYPE_CHECKING:
+    from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.diagnostics import Diagnostic
 
 _HASH_CHUNK_BYTES = 8192
@@ -121,12 +122,15 @@ class ConversionManifest:
         return cls(**filtered)
 
 
-def hash_input_files(files: NewaveFiles) -> list[dict[str, object]]:
-    """Hash every present input file of *files* into a sorted manifest list.
+def hash_input_files(files: NewaveFiles | DecompFiles) -> list[dict[str, object]]:
+    """Hash every ``Path``-valued input file of *files* into a sorted list.
 
-    Introspects :func:`dataclasses.fields` of :class:`NewaveFiles`, skipping the
-    ``directory`` field and any optional field whose value is ``None``. For each
-    remaining ``(name, path)`` it produces an entry
+    Introspects :func:`dataclasses.fields` of *files* (the instance, so any
+    files dataclass works), skipping the ``directory`` field and any field
+    whose value is not a :class:`~pathlib.Path` (which also skips an absent
+    optional, stored as ``None``, and a non-path field such as
+    :class:`~cobre_bridge.decomp.pipeline.DecompFiles`'s ``revision``). For
+    each remaining ``(name, path)`` it produces an entry
     ``{"field", "path", "sha256", "size_bytes"}`` where ``sha256`` is the
     SHA-256 hex digest of the file's raw bytes and ``size_bytes`` is the file
     size.
@@ -136,11 +140,11 @@ def hash_input_files(files: NewaveFiles) -> list[dict[str, object]]:
     The returned list is sorted by ``"field"`` for deterministic ordering.
     """
     entries: list[dict[str, object]] = []
-    for spec in fields(NewaveFiles):
+    for spec in fields(files):
         if spec.name == "directory":
             continue
         value = getattr(files, spec.name)
-        if value is None:
+        if not isinstance(value, Path):
             continue
         path: Path = value
         sha256, size_bytes = _hash_file(path)

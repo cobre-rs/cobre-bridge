@@ -199,11 +199,16 @@ def test_numjus_override_relinks_downstream() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2: an operated-plant relink re-derives the incremental cascade.
+# AC2: the incremental inflow values are invariant to a NUMJUS relink.
 # ---------------------------------------------------------------------------
 
 
-def test_operated_relink_shifts_incrementals() -> None:
+def test_relink_does_not_shift_incremental_inflows() -> None:
+    """DECOMP's inflow file is already incremental per gauge column, so an
+    ``AC NUMJUS`` relink changes only the routing topology (a plant's
+    ``downstream_id`` — see AC1/AC3), never the incremental inflow *values*,
+    which are read straight from each plant's own gauge column.
+    """
     hidr = _abc_hidr()
     dadger = _FakeDadger({ACNUMJUS: _numjus_override(1, 3)})
     effective, _ = build_effective_cadastro(dadger, hidr, _calendar())
@@ -215,13 +220,10 @@ def test_operated_relink_shifts_incrementals() -> None:
     trunk = table.to_pandas()
     trunk = trunk[trunk["stage_id"] == 0].set_index("hydro_id")["value_m3s"]
 
-    # A (hydro_id 0): unchanged, no upstream feeds it.
-    assert trunk.loc[0] == pytest.approx(100.0)
-    # B (hydro_id 1): A no longer feeds it -> its own natural flow only.
-    assert trunk.loc[1] == pytest.approx(200.0)
-    # C (hydro_id 2): now receives BOTH B's (unchanged) and A's (relinked)
-    # natural flow -- not B's incremental alone.
-    assert trunk.loc[2] == pytest.approx(300.0 - 200.0 - 100.0)
+    # Each plant reads its own gauge column directly, regardless of the relink.
+    assert trunk.loc[0] == pytest.approx(100.0)  # A, gauge 11
+    assert trunk.loc[1] == pytest.approx(200.0)  # B, gauge 12
+    assert trunk.loc[2] == pytest.approx(300.0)  # C, gauge 13
 
 
 # ---------------------------------------------------------------------------

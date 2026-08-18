@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 _DECK = Path("example/decomp-jul-26-rv3")
 _needs_deck = pytest.mark.skipif(
-    not (_DECK / "saidas" / "dec_oper_usih.csv").exists(),
+    not (_DECK / "dec_oper_usih.csv").exists(),
     reason="reference deck outputs not present",
 )
 
@@ -74,7 +74,7 @@ def _registers() -> tuple[dict, dict]:
 
 
 def _reported() -> pl.DataFrame:
-    stage_rows = read_dec_oper_usih(_DECK / "saidas").filter(
+    stage_rows = read_dec_oper_usih(_DECK).filter(
         pl.col("patamar").is_null()
     )
     return (
@@ -462,12 +462,12 @@ class TestConverterEmitsAvailability:
 
     def test_overlay_reconstruction_matches_independent_registers(self) -> None:
         """Criterion 2: the effective per-stage ``max_generation_mw`` (the
-        overlay row if present, else the declared envelope) equals
-        ``min(hydraulic, installed×MP×FD)`` recomputed independently from
-        the registers — for every one of the 504 single-group (code != 66)
-        rows, not a sample. Also pins the binding-row set (criterion 4's own
-        obligation) by cross-checking it against the converter's own delta
-        list.
+        overlay row if present, else the declared envelope) equals the
+        ``installed×MP×FD`` availability recomputed independently from the
+        registers — for every one of the 504 single-group (code != 66) rows,
+        not a sample. The head-derived hydraulic ceiling no longer caps
+        generation (the head-corrected turbined-flow cap owns the physical
+        limit), so the emitted generation cap is the availability alone.
         """
         dadger, hidr, id_map, calendar, effective = _load_deck()
         numero_conjuntos, numero_maquinas, potencia, vazao = _independent_ac_overrides(
@@ -475,28 +475,24 @@ class TestConverterEmitsAvailability:
         )
         mp_by_code = _independent_single_group_rows(dadger.mp(df=True))
         fd_by_code = _independent_single_group_rows(dadger.fd(df=True))
-        rho_by_hydro_id = _rho_by_hydro_id(effective, id_map, calendar)
 
-        values, deltas = convert_hydro_group_availability(
+        values = convert_hydro_group_availability(
             dadger, hidr, id_map, calendar, effective
         )
-        actual_binding = {(d.code, d.stage_id) for d in deltas}
 
-        expected_binding: set[tuple[int, int]] = set()
         checked = 0
         for code in id_map.hydro_codes:
             if code == _SPLIT_PLANT:
                 continue
             hreg = hidr.loc[code]
             hydro_id = id_map.hydro_id(code)
-            q_max, p_max = _independent_ac_adjusted_rated(
+            _, p_max = _independent_ac_adjusted_rated(
                 code, hreg, numero_conjuntos, numero_maquinas, potencia, vazao
             )
             mp_row = mp_by_code.get(code)
             fd_row = fd_by_code.get(code)
 
             for stage in calendar:
-                hydraulic_mw = rho_by_hydro_id[(hydro_id, stage.index)] * q_max
                 mp_factor = (
                     1.0
                     if mp_row is None
@@ -506,45 +502,37 @@ class TestConverterEmitsAvailability:
                     1.0 if fd_row is None else float(fd_row[f"fator_{stage.index + 1}"])
                 )
                 availability_mw = p_max * mp_factor * fd_factor
-                expected_emitted = min(hydraulic_mw, availability_mw)
 
                 key = (hydro_id, 0, stage.index)
-                effective = values[key].max_generation_mw if key in values else p_max
-                assert effective == pytest.approx(expected_emitted, abs=1e-6), (
+                emitted = values[key].max_generation_mw if key in values else None
+                effective = p_max if emitted is None else emitted
+                assert effective == pytest.approx(availability_mw, abs=1e-6), (
                     f"plant {code} stage {stage.index}: converter emitted "
-                    f"{effective}, independent reconstruction {expected_emitted}"
+                    f"{effective}, independent reconstruction {availability_mw}"
                 )
-
-                if hydraulic_mw < availability_mw:
-                    expected_binding.add((code, stage.index))
                 checked += 1
 
         assert checked == 504, f"expected 504 single-group rows, got {checked}"
-        # Criterion 4: pinned — measured here (not assumed), 2026-08-03; shifted
-        # 110 -> 103 by ticket-013's per-stage, AC-COTVOL/JUSMED-effective ρ_eq
-        # (rv3 carries those overrides on 7 plants), re-measured 2026-08-08.
-        assert len(expected_binding) == 103
-        assert actual_binding == expected_binding
 
-    def test_non_binding_rows_match_oracle_binding_rows_stay_below(self) -> None:
-        """Criteria 3 and 4 against the ``dec_oper_usih`` oracle directly (as
+    def test_every_row_reproduces_the_oracle(self) -> None:
+        """Criterion 3 against the ``dec_oper_usih`` oracle directly (as
         opposed to the previous test's purely internal reconstruction): every
-        single-group row where the hydraulic ceiling does *not* bind
-        reproduces ``potencia_disponivel_MW`` to < 0.01 MW — now on all 504
-        rows, the AC join having closed the 24-row gap a bare
-        ``_compute_max_turbined_rated`` would have left. Every binding row
-        stays at or below it (the accepted, B8-sanctioned cost).
+        single-group row's effective ``max_generation_mw`` reproduces the
+        source model's own reported ``potencia_disponivel_MW`` to < 0.01 MW —
+        on all 504 rows. The generation cap is now exactly the availability
+        (installed×MP×FD), which is what the oracle reports, so there is no
+        longer a hydraulic-binding subset sitting below it.
         """
         dadger, hidr, id_map, calendar, effective = _load_deck()
         numero_conjuntos, numero_maquinas, potencia, vazao = _independent_ac_overrides(
             dadger
         )
-        mp_by_code = _independent_single_group_rows(dadger.mp(df=True))
-        fd_by_code = _independent_single_group_rows(dadger.fd(df=True))
-        rho_by_hydro_id = _rho_by_hydro_id(effective, id_map, calendar)
 
-        checked_nonbinding = 0
-        checked_binding = 0
+        values = convert_hydro_group_availability(
+            dadger, hidr, id_map, calendar, effective
+        )
+
+        checked = 0
         for row in _reported().iter_rows(named=True):
             code = int(row["codigo_usina"])
             stage_number = int(row["estagio"])
@@ -552,67 +540,19 @@ class TestConverterEmitsAvailability:
                 continue
             hreg = hidr.loc[code]
             hydro_id = id_map.hydro_id(code)
-            q_max, p_max = _independent_ac_adjusted_rated(
+            _, p_max = _independent_ac_adjusted_rated(
                 code, hreg, numero_conjuntos, numero_maquinas, potencia, vazao
             )
-            hydraulic_mw = rho_by_hydro_id[(hydro_id, stage_number - 1)] * q_max
-            mp_row = mp_by_code.get(code)
-            fd_row = fd_by_code.get(code)
-            mp_factor = (
-                1.0 if mp_row is None else float(mp_row[f"manutencao_{stage_number}"])
+            key = (hydro_id, 0, stage_number - 1)
+            emitted = values[key].max_generation_mw if key in values else None
+            effective = p_max if emitted is None else emitted
+            assert effective == pytest.approx(row["available"], abs=_TOL), (
+                f"plant {code} stage {stage_number}: emitted {effective}, "
+                f"oracle {row['available']}"
             )
-            fd_factor = (
-                1.0 if fd_row is None else float(fd_row[f"fator_{stage_number}"])
-            )
-            availability_mw = p_max * mp_factor * fd_factor
-            emitted = min(hydraulic_mw, availability_mw)
+            checked += 1
 
-            if hydraulic_mw >= availability_mw:
-                assert emitted == pytest.approx(row["available"], abs=_TOL), (
-                    f"plant {code} stage {stage_number}: emitted {emitted}, "
-                    f"oracle {row['available']}"
-                )
-                checked_nonbinding += 1
-            else:
-                assert emitted <= row["available"] + _TOL
-                checked_binding += 1
-
-        # Shifted 110 -> 103 alongside the binding count above (ticket-013).
-        assert checked_nonbinding == 504 - 103
-        assert checked_binding == 103
-
-    def test_pipeline_emits_the_availability_delta_diagnostic(
-        self, tmp_path: Path
-    ) -> None:
-        """Criterion 4's Diagnostic half: the pipeline reports the same
-        binding-row count via one INFO Diagnostic, ten worst offenders."""
-        from unittest.mock import patch
-
-        from cobre_bridge import emission_checks
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-        # Epic-07 (ticket-023): this deck's BELO MONTE (hydro 159) carries an
-        # RE-derived generation ceiling (11000 MW) above its own
-        # head-derated declared capacity (9777.776 MW) — a pre-existing,
-        # cross-source data mismatch cobre rule 43 now correctly catches for
-        # the first time (real-deck remediation is ticket-026's territory),
-        # unrelated to this test's own concern (the availability diagnostic).
-        with (
-            patch.object(emission_checks, "check_hydro_bounds_no_raising"),
-            dx.collect() as diagnostics,
-        ):
-            convert_decomp_case(_DECK, tmp_path / "out", force=True)
-
-        found = [
-            d for d in diagnostics if d.code == "hydro-availability-hydraulic-cap-binds"
-        ]
-        assert len(found) == 1
-        diagnostic = found[0]
-        assert diagnostic.severity is Severity.INFO
-        # Shifted 110 -> 103 alongside the binding count above (ticket-013).
-        assert "103" in diagnostic.summary
-        assert diagnostic.table is not None
-        assert len(diagnostic.table.rows) == 10
+        assert checked == 504
 
     def test_static_over_allow_defect_is_closed_for_code_42(self) -> None:
         """Criterion 5: code 42 (``MP = 0.333`` at stages 1-2, 0.109 for code
@@ -622,7 +562,7 @@ class TestConverterEmitsAvailability:
         ``max_generation_mw`` to the maintenance-derated value ≈ 115.7 MW.
         """
         dadger, hidr, id_map, calendar, effective = _load_deck()
-        values, _ = convert_hydro_group_availability(
+        values = convert_hydro_group_availability(
             dadger, hidr, id_map, calendar, effective
         )
         hydro_id = id_map.hydro_id(42)
@@ -645,7 +585,7 @@ class TestConverterEmitsAvailability:
             calendar[0].start_date,
             effective,
         )
-        values, _ = convert_hydro_group_availability(
+        values = convert_hydro_group_availability(
             dadger, hidr, id_map, calendar, effective
         )
         group_bounds = convert_hydro_unit_group_bounds(values, calendar)
@@ -762,6 +702,10 @@ class TestItaipuSplitGroups:
         ``max_turbined_m3s`` is head-corrected (ticket-017, per-conjunto
         cap: :func:`_itaipu_conjunto_head_corrected`), and the entity's
         ``max_turbined_m3s`` is their sum, per :func:`_build_split_unit_groups`.
+        Group id 0 (50 Hz) is unconditionally relocated to the ``IV``
+        transshipment bus; group id 1 (60 Hz) stays on the plant's own SE
+        bus (ticket-006) — the relocation moves no envelope quantity, only
+        the 50 Hz cell's ``bus_id``.
         """
         dadger, hidr, id_map, calendar, effective = _load_deck()
         doc = convert_hydros(
@@ -784,7 +728,9 @@ class TestItaipuSplitGroups:
         q_head_expected = _itaipu_conjunto_head_corrected(
             hidr, effective, calendar, rho_by_hydro_id, hydro_id
         )
-        expected_bus = id_map.bus_id(1)
+        # id 0 (50 Hz) -> IV transshipment bus; id 1 (60 Hz) -> the plant's
+        # own SE bus (ticket-006, unconditional whenever Itaipu is operated).
+        expected_bus_by_group = {0: id_map.transhipment_bus_id, 1: id_map.bus_id(1)}
         for group in sorted(groups, key=lambda g: g["id"]):
             _, p_expected = conjuntos[group["id"]]
             assert group["max_generation_mw"] == pytest.approx(p_expected, abs=1e-6)
@@ -794,8 +740,11 @@ class TestItaipuSplitGroups:
             )
             assert group["min_generation_mw"] == 0.0
             assert group["min_turbined_m3s"] == 0.0
-            assert group["bus_id"] == expected_bus
+            assert group["bus_id"] == expected_bus_by_group[group["id"]]
 
+        # Envelope unchanged by the relabel: the summed plant envelope is
+        # exactly what it was before the bus relocation (only the 50 Hz
+        # group's own bus_id moved).
         gen = itaipu["generation"]
         assert gen["max_generation_mw"] == pytest.approx(14000.0, abs=1e-6)
         assert gen["max_turbined_m3s"] == pytest.approx(sum(q_head_expected), abs=1e-6)
@@ -841,26 +790,22 @@ class TestItaipuSplitGroups:
             assert group_wise == pytest.approx(row["available"], abs=_TOL)
             assert group_wise == pytest.approx(expected_oracle[stage], abs=_TOL)
 
-    def test_overlay_reconstruction_and_binding_delta(self) -> None:
-        """Criteria 3 and 4 together (both reconstructed independently from
-        the registers, ρ_eq re-derived per stage via the same production
-        formula ``convert_energy_productivity`` and ``convert_hydro_group_
-        availability`` both call — never hardcoded):
+    def test_overlay_reconstruction_and_group_sum_matches_oracle(self) -> None:
+        """Criterion 3, reconstructed independently from the registers: each
+        emitted ``(group, stage)`` ``max_generation_mw`` equals the group's
+        ``7000 x MP_g x FD_g`` availability to < 0.01 MW, with
+        ``hydro_unit_group_id`` in {0, 1}, ``block_id`` null, every value
+        <= 7000 (rule 45 holds per group).
 
-        - Criterion 3: each emitted ``(group, stage)`` ``max_generation_mw``
-          equals ``min(ρ_eq x 6620, 7000 x MP_g x FD_g)`` to < 0.01 MW, with
-          ``hydro_unit_group_id`` in {0, 1}, ``block_id`` null, every value
-          <= 7000 (rule 45 holds per group).
-        - Criterion 4: the hydraulic-binding set is exactly
-          {(group1, stage1), (group0, stage2), (group1, stage2)} (0-based:
-          {(1, 0), (0, 1), (1, 1)}); the emitted group sum is below the
-          oracle at stages 1-2 (delta > 0, ~= 189 / 315 MW) and exact at
-          stage 3 (< 0.01 MW) — the measured B8 accepted cost, pinned here,
-          not asserted equal to the oracle.
+        The head-derived hydraulic ceiling no longer caps generation (the
+        head-corrected turbined-flow cap owns the physical limit), so the
+        emitted per-group sum now equals the oracle's ``potencia_disponivel_MW``
+        at every stage — no B8 accepted-cost delta — matching the register-side
+        group-wise sum pinned by
+        :meth:`test_availability_rule_is_exact_vs_oracle_group_wise`.
         """
         dadger, hidr, id_map, calendar, effective = _load_deck()
         hydro_id = id_map.hydro_id(_SPLIT_PLANT)
-        rho_by_hydro_id = _rho_by_hydro_id(effective, id_map, calendar)
 
         conjuntos = _itaipu_conjunto_rated(hidr)
         maintenance, availability = _registers()
@@ -875,7 +820,7 @@ class TestItaipuSplitGroups:
             .iterrows()
         )
 
-        values, _ = convert_hydro_group_availability(
+        values = convert_hydro_group_availability(
             dadger, hidr, id_map, calendar, effective
         )
         group_bounds = convert_hydro_unit_group_bounds(values, calendar)
@@ -884,50 +829,32 @@ class TestItaipuSplitGroups:
         assert set(itaipu_bounds["hydro_unit_group_id"]) == {0, 1}
         assert itaipu_bounds["block_id"].isna().all()
 
-        binding: set[tuple[int, int]] = set()
         emitted_sum = {0: 0.0, 1: 0.0, 2: 0.0}
         for group_id in (0, 1):
-            q_g, p_g = conjuntos[group_id]
+            _, p_g = conjuntos[group_id]
             assert p_g == pytest.approx(7000.0)
             _, mp_row = mp_rows[group_id]
             _, fd_row = fd_rows[group_id]
 
             for stage_index in range(3):
-                hydraulic_mw = rho_by_hydro_id[(hydro_id, stage_index)] * q_g
                 stage_number = stage_index + 1
                 availability_mw = (
                     p_g
                     * float(mp_row[f"manutencao_{stage_number}"])
                     * float(fd_row[f"fator_{stage_number}"])
                 )
-                expected_emitted = min(hydraulic_mw, availability_mw)
-
                 key = (hydro_id, group_id, stage_index)
-                assert key in values, (
-                    f"expected an overlay row at group {group_id} stage {stage_index}"
-                )
-                emitted = values[key].max_generation_mw
-                assert isinstance(emitted, float)  # a scalar per-stage generation cap
-                assert emitted == pytest.approx(expected_emitted, abs=1e-6)
-                assert emitted <= 7000.0 + 1e-6
-
-                emitted_sum[stage_index] += emitted
-                if hydraulic_mw < availability_mw:
-                    binding.add((group_id, stage_index))
-
-        # Criterion 4: pinned — measured, not assumed.
-        assert binding == {(1, 0), (0, 1), (1, 1)}
+                emitted = values[key].max_generation_mw if key in values else None
+                # No overlay row means availability sits at the group's rated
+                # envelope (p_g) — the effective cap is then that envelope.
+                effective = p_g if emitted is None else emitted
+                assert effective == pytest.approx(availability_mw, abs=_TOL)
+                assert effective <= 7000.0 + 1e-6
+                emitted_sum[stage_index] += effective
 
         oracle = {0: 13328.0, 1: 13937.0, 2: 12236.0}
-        delta = {s: oracle[s] - emitted_sum[s] for s in oracle}
-        assert delta[0] == pytest.approx(189.20, abs=0.01)
-        assert delta[1] == pytest.approx(315.40, abs=0.01)
-        assert delta[2] == pytest.approx(0.0, abs=0.01)
-        assert delta[0] > 0.0
-        assert delta[1] > 0.0
-        assert emitted_sum[0] == pytest.approx(13138.80, abs=0.01)
-        assert emitted_sum[1] == pytest.approx(13621.60, abs=0.01)
-        assert emitted_sum[2] == pytest.approx(12236.0, abs=0.01)
+        for stage_index, expected in oracle.items():
+            assert emitted_sum[stage_index] == pytest.approx(expected, abs=_TOL)
 
     def test_rule_45_mirror_raises_nothing_on_itaipus_own_emission(self) -> None:
         """The rule-45 mirror, run directly against Itaipu's own declared
@@ -941,7 +868,7 @@ class TestItaipuSplitGroups:
             calendar[0].start_date,
             effective,
         )
-        values, _ = convert_hydro_group_availability(
+        values = convert_hydro_group_availability(
             dadger, hidr, id_map, calendar, effective
         )
         group_bounds = convert_hydro_unit_group_bounds(values, calendar)

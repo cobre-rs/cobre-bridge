@@ -21,11 +21,16 @@ into the ``hydro_bounds`` parquet rows.
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.bounds import convert_storage_bounds
+from cobre_bridge.decomp.bounds import (
+    convert_irrigation_withdrawal,
+    convert_storage_bounds,
+    convert_volume_espera_bounds,
+)
 from cobre_bridge.decomp.cadastro import EffectiveCadastro, storage_envelope
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
@@ -100,3 +105,196 @@ def test_convert_storage_bounds_no_stage_varying_volumes_emits_no_contributions(
     no_override = EffectiveCadastro(base=_hidr_frame(), n_stages=3, stage_varying={})
     contributions = convert_storage_bounds(no_override, id_map, calendar)
     assert contributions == []
+
+
+# ---------------------------------------------------------------------------
+# VE (volume de espera) — flood-control hard max-storage ceiling
+# ---------------------------------------------------------------------------
+
+
+def _dadger_with_ve(rows: list[dict] | None):
+    """Fake ``dadger`` exposing ``.ve(df=True)`` -> a VE frame (or ``None``)."""
+    frame = None if rows is None else pd.DataFrame(rows)
+    return SimpleNamespace(ve=lambda df=True: frame)
+
+
+def test_ve_emits_percent_of_useful_upper_only(
+    effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # plant 1 envelope = (20, 250) per the fixtures (volume_maximo raised to 250
+    # at stage 2), useful = 230. VE 50% at stage 0 -> ceiling 20 + 0.5*230 = 135.
+    dadger = _dadger_with_ve(
+        [{"codigo_usina": 1, "volume_1": 50.0, "volume_2": 100.0, "volume_3": None}]
+    )
+    contribs = convert_volume_espera_bounds(dadger, id_map, calendar, effective)
+    # stage 0: 50% tightens (135 < 250) -> emitted; stage 1: 100% is a no-op
+    # (ceiling == env_max); stage 2: blank -> skipped.
+    assert len(contribs) == 1
+    c = contribs[0]
+    assert (c.family, c.axis, c.entity_id, c.stage_id, c.block_id) == (
+        "hydro",
+        "storage",
+        0,
+        0,
+        None,
+    )
+    assert c.lower is None
+    assert c.upper == 20.0 + 0.5 * 230.0
+    assert c.contributor == "VE"
+
+
+def test_ve_full_percent_is_noop(
+    effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    dadger = _dadger_with_ve(
+        [{"codigo_usina": 1, "volume_1": 100.0, "volume_2": 100.0, "volume_3": 100.0}]
+    )
+    assert convert_volume_espera_bounds(dadger, id_map, calendar, effective) == []
+
+
+def test_ve_absent_register_returns_empty(
+    effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    assert (
+        convert_volume_espera_bounds(_dadger_with_ve(None), id_map, calendar, effective)
+        == []
+    )
+
+
+def test_ve_unoperated_plant_skipped(
+    effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # plant 999 is not in id_map.hydro_codes -> contributes nothing.
+    dadger = _dadger_with_ve([{"codigo_usina": 999, "volume_1": 30.0}])
+    assert convert_volume_espera_bounds(dadger, id_map, calendar, effective) == []
+
+
+# ---------------------------------------------------------------------------
+# TI (irrigation) — consumptive water withdrawal
+# ---------------------------------------------------------------------------
+
+
+def _dadger_with_ti(rows: list[dict] | None):
+    """Fake ``dadger`` exposing ``.ti(df=True)`` -> a TI frame (or ``None``)."""
+    frame = None if rows is None else pd.DataFrame(rows)
+    return SimpleNamespace(ti=lambda df=True: frame)
+
+
+def test_ti_emits_per_stage_withdrawal(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # calendar has 3 stages; taxa_1..3 map to stages 0..2 (plant 1 -> hydro_id 0).
+    dadger = _dadger_with_ti(
+        [{"codigo_usina": 1, "taxa_1": 5.0, "taxa_2": 7.0, "taxa_3": 9.0}]
+    )
+    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    assert table is not None
+    got = {
+        (h, s): v
+        for h, s, v in zip(
+            table.column("hydro_id").to_pylist(),
+            table.column("stage_id").to_pylist(),
+            table.column("water_withdrawal_m3s").to_pylist(),
+            strict=True,
+        )
+    }
+    assert got == {(0, 0): 5.0, (0, 1): 7.0, (0, 2): 9.0}
+
+
+def test_ti_zero_and_blank_skipped(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # taxa 0.0 (no withdrawal) and NaN both contribute no row.
+    dadger = _dadger_with_ti(
+        [{"codigo_usina": 1, "taxa_1": 0.0, "taxa_2": None, "taxa_3": 4.0}]
+    )
+    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    assert table is not None
+    assert table.column("stage_id").to_pylist() == [2]
+    assert table.column("water_withdrawal_m3s").to_pylist() == [4.0]
+
+
+def test_ti_carry_forward_last_rate_for_extra_stages(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # Only two taxa columns for a 3-stage calendar -> stage 2 repeats taxa_2.
+    dadger = _dadger_with_ti([{"codigo_usina": 1, "taxa_1": 5.0, "taxa_2": 7.0}])
+    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    assert table is not None
+    assert table.column("water_withdrawal_m3s").to_pylist() == [5.0, 7.0, 7.0]
+
+
+def test_ti_absent_returns_none(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    assert (
+        convert_irrigation_withdrawal(_dadger_with_ti(None), id_map, calendar) is None
+    )
+
+
+def test_ti_unoperated_plant_returns_none(
+    id_map: DecompIdMap, calendar: list[OperativeStage]
+) -> None:
+    # plant 999 is not operated -> no rows -> None.
+    dadger = _dadger_with_ti([{"codigo_usina": 999, "taxa_1": 5.0}])
+    assert convert_irrigation_withdrawal(dadger, id_map, calendar) is None
+
+
+def test_merge_water_withdrawal_lands_on_null_block_row() -> None:
+    import pyarrow as pa
+
+    from cobre_bridge.decomp.pipeline import _merge_water_withdrawal
+
+    # Existing bounds: a null-block stage-0 row (min_outflow) + a per-block row.
+    hydro_bounds = pa.table(
+        {
+            "hydro_id": pa.array([1, 1, 1], pa.int32()),
+            "stage_id": pa.array([0, 0, 1], pa.int32()),
+            "block_id": pa.array([None, 0, None], pa.int32()),
+            "min_outflow_m3s": pa.array([80.0, None, 80.0], pa.float64()),
+        }
+    )
+    withdrawal = pa.table(
+        {
+            "hydro_id": pa.array([1, 1], pa.int32()),
+            "stage_id": pa.array([0, 1], pa.int32()),
+            "water_withdrawal_m3s": pa.array([5.0, 6.0], pa.float64()),
+        }
+    )
+    merged = _merge_water_withdrawal(hydro_bounds, withdrawal)
+    rows = {
+        (h, s, b): w
+        for h, s, b, w in zip(
+            merged.column("hydro_id").to_pylist(),
+            merged.column("stage_id").to_pylist(),
+            merged.column("block_id").to_pylist(),
+            merged.column("water_withdrawal_m3s").to_pylist(),
+            strict=True,
+        )
+    }
+    # Withdrawal lands on the null-block rows only; the per-block row is untouched.
+    assert rows[(1, 0, None)] == 5.0
+    assert rows[(1, 1, None)] == 6.0
+    assert rows[(1, 0, 0)] is None
+
+
+def test_merge_water_withdrawal_none_is_noop() -> None:
+    import pyarrow as pa
+
+    from cobre_bridge.decomp.pipeline import _merge_water_withdrawal
+
+    hydro_bounds = pa.table(
+        {
+            "hydro_id": pa.array([1], pa.int32()),
+            "stage_id": pa.array([0], pa.int32()),
+            "block_id": pa.array([None], pa.int32()),
+        }
+    )
+    assert _merge_water_withdrawal(hydro_bounds, None) is hydro_bounds
+
+
+# EZ (percentual máximo do volume útil para acoplamento) is deliberately NOT
+# converted as an operational max-storage cap: it is an FCF-coupling formulation
+# detail, not an operational ceiling. Verified against dec_oper_usih on the
+# mar-26 deck -- DECOMP holds SERRA MESA at VutilFim% = 64.14 % at the coupling,
+# well above its EZ = 55 %, so the register does not bind the operation.

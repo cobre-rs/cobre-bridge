@@ -183,6 +183,7 @@ def _resolve_cost_categories(
 def cost_breakdown_chart(
     nw_costs: dict[str, float],
     cobre_costs: dict[str, float],
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Stacked vertical bar comparing the source model vs Cobre per cost category in
     NPV.
@@ -202,7 +203,7 @@ def cost_breakdown_chart(
     # Sort so largest total cost is at the bottom of the stack (drawn first).
     categories = sorted(categories, key=lambda t: -(t[1] + t[2]))
 
-    x_labels = ["NEWAVE", "Cobre"]
+    x_labels = [reference_label, "Cobre"]
     traces: list[dict] = []
 
     for label, nw_v, cb_v, color in categories:
@@ -244,6 +245,7 @@ def cost_breakdown_chart(
 def cost_breakdown_table(
     nw_costs: dict[str, float],
     cobre_costs: dict[str, float],
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-category NPV diff table — the source model, Cobre, Δ, Δ% — sorted by |Δ|.
 
@@ -289,7 +291,7 @@ def cost_breakdown_table(
     head = (
         "<thead><tr>"
         '<th class="cb-cat">Category</th>'
-        '<th class="cb-num">NEWAVE</th>'
+        f'<th class="cb-num">{reference_label}</th>'
         '<th class="cb-num">Cobre</th>'
         '<th class="cb-num">Δ</th>'
         '<th class="cb-num">Δ%</th>'
@@ -422,6 +424,7 @@ def immediate_cost_chart(
     nw_sin: pl.DataFrame,
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-stage *immediate* cost: The source model ``COPER`` vs Cobre
     ``immediate_cost``.
@@ -437,8 +440,8 @@ def immediate_cost_chart(
         nw_offset,
         nw_variable="COPER",
         cb_column="immediate_cost",
-        title="Immediate Cost — NEWAVE COPER vs Cobre",
-        nw_label="NEWAVE COPER",
+        title=f"Immediate Cost — {reference_label} COPER vs Cobre",
+        nw_label=f"{reference_label} COPER",
         cb_label="Cobre immediate_cost",
     )
 
@@ -447,6 +450,7 @@ def future_cost_chart(
     nw_sin: pl.DataFrame,
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-stage *future* cost: The source model ``CUSTO_FUTURO`` vs Cobre
     ``future_cost``."""
@@ -456,8 +460,8 @@ def future_cost_chart(
         nw_offset,
         nw_variable="CUSTO_FUTURO",
         cb_column="future_cost",
-        title="Future Cost — NEWAVE CUSTO_FUTURO vs Cobre",
-        nw_label="NEWAVE CUSTO_FUTURO",
+        title=f"Future Cost — {reference_label} CUSTO_FUTURO vs Cobre",
+        nw_label=f"{reference_label} CUSTO_FUTURO",
         cb_label="Cobre future_cost",
     )
 
@@ -466,6 +470,7 @@ def thermal_cost_chart(
     nw_sin: pl.DataFrame,
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-stage thermal cost: The source model ``CTERM`` vs Cobre thermal (incl.
     anticip.).
@@ -483,8 +488,8 @@ def thermal_cost_chart(
         nw_offset,
         nw_variable="CTERM",
         cb_column="thermal_cost_total",
-        title="Thermal Cost — NEWAVE CTERM vs Cobre",
-        nw_label="NEWAVE CTERM",
+        title=f"Thermal Cost — {reference_label} CTERM vs Cobre",
+        nw_label=f"{reference_label} CTERM",
         cb_label="Cobre thermal (incl. anticipated)",
     )
 
@@ -493,6 +498,7 @@ def other_costs_chart(
     nw_sin: pl.DataFrame,
     cobre_stage_costs: pl.DataFrame,
     nw_offset: int = 0,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-stage non-thermal operation cost: ``COPER − CTERM`` per stage.
 
@@ -527,12 +533,13 @@ def other_costs_chart(
             {
                 "x": stages,
                 "y": _series(nw_other),
-                "name": "NEWAVE COPER − CTERM",
+                "name": f"{reference_label} COPER − CTERM",
                 "type": "scatter",
                 "mode": "lines+markers",
                 "line": {"color": COLOR_NEWAVE},
                 "hovertemplate": (
-                    "stage %{x}<br>NEWAVE COPER − CTERM: %{y:.2f} 10⁶ R$<extra></extra>"
+                    f"stage %{{x}}<br>{reference_label} COPER − CTERM: "
+                    "%{y:.2f} 10⁶ R$<extra></extra>"
                 ),
             }
         )
@@ -564,6 +571,7 @@ def other_costs_chart(
 def convergence_chart(
     nw_conv: pl.DataFrame,
     cobre_conv: pl.DataFrame,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Convergence overlay: The source model vs Cobre lower/upper bounds.
 
@@ -599,7 +607,7 @@ def convergence_chart(
             {
                 "x": nw_iters,
                 "y": [lb_nw[i] for i in nw_iters],
-                "name": "NEWAVE ZINF",
+                "name": f"{reference_label} ZINF",
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE},
@@ -609,7 +617,7 @@ def convergence_chart(
             {
                 "x": nw_iters,
                 "y": [ub_nw.get(i) for i in nw_iters],
-                "name": "NEWAVE ZSUP",
+                "name": f"{reference_label} ZSUP",
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "dash": "dash"},
@@ -640,7 +648,7 @@ def convergence_chart(
         )
 
     layout = {
-        "title": "Convergence: NEWAVE vs Cobre",
+        "title": f"Convergence: {reference_label} vs Cobre",
         "xaxis": {"title": "Iteration"},
         "yaxis": {"title": "Cost (R$)", "type": "log"},
     }
@@ -658,6 +666,7 @@ def system_comparison_chart(
     variable: str,
     title: str,
     pct_df: pl.DataFrame | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Line chart comparing a system variable by stage with p10-p90 band."""
     bus_data = [r for r in results if r.entity_type == "bus" and r.variable == variable]
@@ -674,7 +683,7 @@ def system_comparison_chart(
             {
                 "x": stages,
                 "y": [nw_by_stage.get(s, 0) for s in stages],
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -689,6 +698,58 @@ def system_comparison_chart(
             },
         ]
     )
+
+    layout = {
+        "title": title,
+        "xaxis": {"title": "Stage"},
+        "yaxis": {"title": variable},
+    }
+
+    return _plotly_div(traces, layout)
+
+
+def ree_energy_chart(
+    results: list[ResultComparison],
+    variable: str,
+    title: str,
+    reference_label: str = "NEWAVE",
+) -> str:
+    """Line chart comparing an REE energy variable by stage.
+
+    ticket-018: mirrors :func:`system_comparison_chart`'s aggregate-line
+    shape (the source model's own value vs Cobre's, summed across every
+    matched REE per stage), keyed on ``entity_type == "ree"`` instead of
+    ``"bus"``. REE carries no Cobre percentile band --
+    :class:`~cobre_bridge.comparators.results.PercentileData` has no ``ree``
+    field -- so this omits the optional p10-p90 overlay entirely rather than
+    fabricating one.
+    """
+    ree_data = [r for r in results if r.entity_type == "ree" and r.variable == variable]
+    if not ree_data:
+        return f"<p>No {variable} data available.</p>"
+
+    nw_by_stage, cb_by_stage, _matched_ids = analyze.per_stage_sum_from_results(
+        results, "ree", variable
+    )
+    stages = sorted(set(nw_by_stage) | set(cb_by_stage))
+    traces = [
+        {
+            "x": stages,
+            "y": [nw_by_stage.get(s, 0) for s in stages],
+            "name": reference_label,
+            "type": "scatter",
+            "mode": "lines",
+            "line": {"color": COLOR_NEWAVE, "width": 2},
+        },
+        {
+            "x": stages,
+            "y": [cb_by_stage.get(s, 0) for s in stages],
+            "name": "Cobre Mean",
+            "type": "scatter",
+            "mode": "lines",
+            "line": {"color": COLOR_COBRE, "width": 2},
+        },
+    ]
 
     layout = {
         "title": title,
@@ -782,6 +843,7 @@ def cobre_aggregate_chart(
     nw_factor: float = 1.0,
     nw_offset: int = 0,
     matched_ids: set[int] | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """System-aggregate chart for a Cobre per-hydro variable.
 
@@ -837,7 +899,7 @@ def cobre_aggregate_chart(
             {
                 "x": stages,
                 "y": [nw_by_stage.get(s, 0) for s in stages],
-                "name": "NEWAVE SIN",
+                "name": f"{reference_label} SIN",
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -873,6 +935,7 @@ def hydro_per_bus_chart(
     pct_df: pl.DataFrame | None,
     hydro_meta: dict[int, dict],
     bus_meta: dict[int, dict],
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-bus faceted hydro comparison for *variable*.
 
@@ -976,7 +1039,7 @@ def hydro_per_bus_chart(
             {
                 "x": stages,
                 "y": nw,
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -1010,6 +1073,7 @@ def hydro_aggregate_chart(
     variable: str,
     title: str,
     pct_df: pl.DataFrame | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Aggregate hydro comparison by stage with optional p10-p90 band."""
     hydro_data = [
@@ -1031,7 +1095,7 @@ def hydro_aggregate_chart(
             {
                 "x": stages,
                 "y": [nw_by_stage.get(s, 0) for s in stages],
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -1078,6 +1142,7 @@ def hydro_slack_aggregate_chart(
     pct_df: pl.DataFrame | None = None,
     matched_ids: set[int] | None = None,
     unit: str = "m³/s",
+    reference_label: str = "NEWAVE",
 ) -> str:
     """SIN-total slack chart from per-(entity_id, stage_id) frames.
 
@@ -1100,7 +1165,7 @@ def hydro_slack_aggregate_chart(
             {
                 "x": stages,
                 "y": [nw_by_stage.get(s, 0) for s in stages],
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -1134,6 +1199,7 @@ def hydro_slack_per_bus_chart(
     hydro_meta: dict[int, dict],
     bus_meta: dict[int, dict],
     matched_ids: set[int] | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-bus faceted slack chart from per-(entity_id, stage_id) frames.
 
@@ -1236,7 +1302,7 @@ def hydro_slack_per_bus_chart(
                 {
                     "x": stages,
                     "y": [nw_map.get(s, 0.0) for s in stages],
-                    "name": "NEWAVE",
+                    "name": reference_label,
                     "type": "scatter",
                     "mode": "lines",
                     "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -1273,6 +1339,7 @@ def hydro_slack_per_bus_chart(
 def thermal_generation_chart(
     results: list[ResultComparison],
     pct_df: pl.DataFrame | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Aggregate thermal generation comparison by stage."""
     thermal_data = [r for r in results if r.entity_type == "thermal"]
@@ -1289,7 +1356,7 @@ def thermal_generation_chart(
             {
                 "x": stages,
                 "y": [nw_by_stage.get(s, 0) for s in stages],
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -1324,6 +1391,7 @@ def line_summary_chart(
     line_pct: pl.DataFrame | None,
     line_bounds: pd.DataFrame | None,
     line_meta: list[dict],
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-line small-multiples comparing the source model vs Cobre net flow.
 
@@ -1480,7 +1548,7 @@ def line_summary_chart(
             {
                 "x": stages,
                 "y": nw,
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -1518,6 +1586,7 @@ def line_summary_chart(
 def system_spillage_energy_chart(
     results: list[ResultComparison],
     cobre_spill_energy: pl.DataFrame,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Three-panel chart of system spillage in MWmes.
 
@@ -1582,7 +1651,7 @@ def system_spillage_energy_chart(
             {
                 "x": all_stages,
                 "y": nw_y,
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -1621,6 +1690,7 @@ def system_spillage_energy_chart(
 def performance_metric_cards(
     nw_tim_stages: dict[str, float],
     cobre_training_seconds: float,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Headline timing KPIs: The source model total / training, Cobre total, speedup."""
     from cobre_bridge.comparators.html_report import metric_card, metrics_grid
@@ -1646,12 +1716,12 @@ def performance_metric_cards(
     cards = [
         metric_card(
             _fmt_dur(nw_total),
-            "NEWAVE Total Wall-Clock",
+            f"{reference_label} Total Wall-Clock",
             color=COMPARISON_COLORS.get("newave"),
         ),
         metric_card(
             _fmt_dur(nw_policy),
-            "NEWAVE Policy Training",
+            f"{reference_label} Policy Training",
             color=COMPARISON_COLORS.get("newave"),
         ),
         metric_card(
@@ -1661,7 +1731,7 @@ def performance_metric_cards(
         ),
         metric_card(
             _fmt_x(speedup),
-            "Speedup (NEWAVE policy ÷ Cobre training)",
+            f"Speedup ({reference_label} policy ÷ Cobre training)",
             color=COMPARISON_COLORS.get("match"),
         ),
     ]
@@ -1671,6 +1741,7 @@ def performance_metric_cards(
 def performance_iteration_chart(
     nw_tim_iterations: pl.DataFrame,
     cobre_convergence: pl.DataFrame,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Line chart of total seconds per training iteration.
 
@@ -1700,7 +1771,7 @@ def performance_iteration_chart(
             {
                 "x": it_col,
                 "y": tot,
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines+markers",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -1755,14 +1826,25 @@ def performance_iteration_chart(
 def performance_fwd_bwd_split_chart(
     nw_tim_iterations: pl.DataFrame,
     cobre_convergence: pl.DataFrame,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Stacked forward / backward split per iteration, the source model vs Cobre.
 
     Two panels stacked vertically: top panel = the source model (backward +
     forward stacked bars in seconds), bottom panel = Cobre (same but
     converted from ms).
+
+    ``nw_tim_iterations`` renders its panel only when it actually carries the
+    ``forward_seconds``/``backward_seconds`` columns this chart stacks -- a
+    source with no forward/backward pass structure (e.g. DECOMP's nested
+    Benders over an explicit tree) fills only ``iteration``/``total_seconds``
+    and must never fabricate a split, so a non-empty-but-columnless frame
+    degrades to "no source panel" here rather than raising.
     """
-    has_nw = not nw_tim_iterations.is_empty()
+    has_nw = not nw_tim_iterations.is_empty() and {
+        "forward_seconds",
+        "backward_seconds",
+    }.issubset(nw_tim_iterations.columns)
     has_cb = (
         not cobre_convergence.is_empty()
         and "iteration" in cobre_convergence.columns
@@ -1781,7 +1863,7 @@ def performance_fwd_bwd_split_chart(
         # real range. The raw value remains in the parsed DataFrame.
         bw_clipped = [v if v < 1e5 else 0.0 for v in bw]
         fw_clipped = [v if v < 1e5 else 0.0 for v in fw]
-        panels.append(("NEWAVE", it, bw_clipped, fw_clipped))
+        panels.append((reference_label, it, bw_clipped, fw_clipped))
         all_secs.extend([v for v in bw_clipped + fw_clipped if v > 0])
     if has_cb:
         df = cobre_convergence.sort("iteration")
@@ -1878,6 +1960,7 @@ def productivity_comparison_scatter(
     df: pl.DataFrame,
     kind: str,
     title: str | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Static conversion-fidelity scatter for one productivity *kind*.
 
@@ -1943,7 +2026,7 @@ def productivity_comparison_scatter(
 
     layout = {
         "title": title or f"Static productivity: {nw_label} vs {cb_label}",
-        "xaxis": {"title": f"NEWAVE pmo {nw_label}"},
+        "xaxis": {"title": f"{reference_label} pmo {nw_label}"},
         "yaxis": {"title": f"cobre-bridge {cb_label}"},
         "annotations": [
             {
@@ -2026,7 +2109,7 @@ def _prod_blocks_pct(nw: float | None, cb: float | None) -> float | None:
     return (cb - nw) / nw * 100.0
 
 
-def productivity_blocks_table(df: pl.DataFrame) -> str:
+def productivity_blocks_table(df: pl.DataFrame, reference_label: str = "NEWAVE") -> str:
     """Grouped building-blocks table — per metric: The source model | Cobre | Δ%.
 
     One row per aligned hydro. The columns are organised into metric groups (ρ_esp,
@@ -2082,7 +2165,7 @@ def productivity_blocks_table(df: pl.DataFrame) -> str:
             f'<th class="{_cls(idx, sub_index=0)}" colspan="3">'
             f"{escape_text(label)}</th>"
         )
-        for j, sub in enumerate(("NEWAVE", "Cobre", "Δ%")):
+        for j, sub in enumerate((reference_label, "Cobre", "Δ%")):
             sub_cells.append(f'<th class="{_cls(idx, sub_index=j)}">{sub}</th>')
     head = f"<thead><tr>{''.join(top_cells)}</tr><tr>{''.join(sub_cells)}</tr></thead>"
 
@@ -2111,7 +2194,7 @@ def productivity_blocks_table(df: pl.DataFrame) -> str:
     caption = (
         "<caption>Productivity Building Blocks "
         '<span class="cb-caption-note">— columns are grouped per metric: '
-        "NEWAVE vs Cobre vs Δ%</span></caption>"
+        f"{reference_label} vs Cobre vs Δ%</span></caption>"
     )
     return (
         '<table class="cost-breakdown-table prod-blocks-table">'
@@ -2127,7 +2210,7 @@ def productivity_blocks_table(df: pl.DataFrame) -> str:
 # -------------------------------------------------------------------
 
 
-def fpha_metrics_table(metrics: pl.DataFrame) -> str:
+def fpha_metrics_table(metrics: pl.DataFrame, reference_label: str = "NEWAVE") -> str:
     """Per-plant fitted-production-function fidelity table.
 
     Aggregates the per-(plant, stage) metrics into one row per plant: the mean and
@@ -2185,10 +2268,10 @@ def fpha_metrics_table(metrics: pl.DataFrame) -> str:
         "</tr></thead>"
     )
     caption = (
-        "<caption>Fitted production surface — Cobre vs NEWAVE "
+        f"<caption>Fitted production surface — Cobre vs {reference_label} "
         '<span class="cb-caption-note">— NMAE / bias as % of each plant\'s '
-        "max generation; GHmax ratio = Cobre / NEWAVE at the max V/Q corner"
-        "</span></caption>"
+        f"max generation; GHmax ratio = Cobre / {reference_label} at the max "
+        "V/Q corner</span></caption>"
     )
     return (
         '<table class="cost-breakdown-table fpha-metrics-table">'
@@ -2264,7 +2347,9 @@ def _fpha_widget_data(
     return out
 
 
-def fpha_detail_chart(surface: pl.DataFrame, spill: pl.DataFrame) -> str:
+def fpha_detail_chart(
+    surface: pl.DataFrame, spill: pl.DataFrame, reference_label: str = "NEWAVE"
+) -> str:
     """Interactive per-plant FPHA surface comparison (heatmaps + spillage slice).
 
     A plant ``<select>`` (every plant fitted on both sides) drives a stage
@@ -2330,9 +2415,9 @@ def fpha_detail_chart(surface: pl.DataFrame, spill: pl.DataFrame) -> str:
                 return row.map(function(val, j) {{ return val - d.znw[i][j]; }});
             }});
             var traces = [
-                {{z: d.znw, x: d.q, y: d.v, type: 'surface', name: 'NEWAVE',
+                {{z: d.znw, x: d.q, y: d.v, type: 'surface', name: '{reference_label}',
                     visible: true, colorscale: 'Viridis', colorbar: {{title: 'MW'}},
-                    hovertemplate: 'NEWAVE<br>Q=%{{x}}<br>V=%{{y}}' +
+                    hovertemplate: '{reference_label}<br>Q=%{{x}}<br>V=%{{y}}' +
                         '<br>GH=%{{z}} MW<extra></extra>'}},
                 {{z: d.zcb, x: d.q, y: d.v, type: 'surface', name: 'Cobre',
                     visible: true, showscale: false, opacity: 0.9,
@@ -2350,7 +2435,7 @@ def fpha_detail_chart(surface: pl.DataFrame, spill: pl.DataFrame) -> str:
                         'scene.zaxis.autorange': true}}]}};
             }}
             Plotly.react('fpha-surf', traces, {{
-                title: {{text: 'GH(V,Q): NEWAVE (color) + Cobre (orange)'}},
+                title: {{text: 'GH(V,Q): {reference_label} (color) + Cobre (orange)'}},
                 height: 600, margin: {{l: 0, r: 0, t: 80, b: 0}},
                 template: 'plotly_white',
                 scene: {{xaxis: {{title: 'Turbined (m³/s)'}},
@@ -2360,18 +2445,18 @@ def fpha_detail_chart(surface: pl.DataFrame, spill: pl.DataFrame) -> str:
                 updatemenus: [{{type: 'buttons', direction: 'right',
                     showactive: true, active: 2, x: 0, xanchor: 'left',
                     y: 1.06, yanchor: 'bottom', buttons: [
-                    fphaBtn('NEWAVE', [true, false, false], 'GH (MW)',
-                        'NEWAVE GH(V,Q)'),
+                    fphaBtn('{reference_label}', [true, false, false], 'GH (MW)',
+                        '{reference_label} GH(V,Q)'),
                     fphaBtn('Cobre', [false, true, false], 'GH (MW)',
                         'Cobre GH(V,Q)'),
                     fphaBtn('Both', [true, true, false], 'GH (MW)',
-                        'GH(V,Q): NEWAVE (color) + Cobre (orange)'),
+                        'GH(V,Q): {reference_label} (color) + Cobre (orange)'),
                     fphaBtn('Difference', [false, false, true], 'Δ MW',
-                        'Cobre − NEWAVE (MW)')]}}]
+                        'Cobre − {reference_label} (MW)')]}}]
             }}, {{responsive: true}});
         }} else {{
             Plotly.react('fpha-line', [
-                {{x: d.q, y: d.znw[0], name: 'NEWAVE', type: 'scatter',
+                {{x: d.q, y: d.znw[0], name: '{reference_label}', type: 'scatter',
                     mode: 'lines', line: {{color: fphaNw, width: 2}}}},
                 {{x: d.q, y: d.zcb[0], name: 'Cobre', type: 'scatter',
                     mode: 'lines', line: {{color: fphaCb, width: 2}}}}],
@@ -2381,7 +2466,7 @@ def fpha_detail_chart(surface: pl.DataFrame, spill: pl.DataFrame) -> str:
                 {{responsive: true}});
         }}
         Plotly.react('fpha-spill', [
-            {{x: d.ss, y: d.spnw, name: 'NEWAVE', type: 'scatter',
+            {{x: d.ss, y: d.spnw, name: '{reference_label}', type: 'scatter',
                 mode: 'lines', line: {{color: fphaNw, width: 2}}}},
             {{x: d.ss, y: d.spcb, name: 'Cobre', type: 'scatter',
                 mode: 'lines', line: {{color: fphaCb, width: 2}}}}],
@@ -2426,6 +2511,7 @@ def overview_metrics(
     summary: ResultsSummary,
     nw_costs: dict[str, float] | None = None,
     cobre_costs: dict[str, float] | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Headline KPI cards for the overview tab.
 
@@ -2468,7 +2554,7 @@ def overview_metrics(
     cards = [
         metric_card(
             _bn(nw_thermal),
-            "NEWAVE Thermal Cost (10⁹ R$, NPV)",
+            f"{reference_label} Thermal Cost (10⁹ R$, NPV)",
             color=COMPARISON_COLORS.get("newave"),
         ),
         metric_card(
@@ -2478,7 +2564,7 @@ def overview_metrics(
         ),
         metric_card(
             f"{diff / 1e9:+.3f}",
-            "Δ Thermal Cost (Cobre − NEWAVE, 10⁹ R$)",
+            f"Δ Thermal Cost (Cobre − {reference_label}, 10⁹ R$)",
             color=diff_color,
         ),
         metric_card(
@@ -2522,6 +2608,7 @@ def build_energy_balance_tab(
     nw_bus_names: dict[int, str],
     *,
     nw_net_load: pl.DataFrame | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Build per-bus energy balance charts with p10/p90 bands.
 
@@ -2705,7 +2792,7 @@ def build_energy_balance_tab(
                     {
                         "x": all_stages,
                         "y": nw_y,
-                        "name": "NEWAVE",
+                        "name": reference_label,
                         "type": "scatter",
                         "mode": "lines",
                         "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -2737,6 +2824,7 @@ def system_per_bus_chart(
     variable: str,
     title: str,
     pct_df: pl.DataFrame | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """2x2 faceted per-bus chart with p10-p90 bands.
 
@@ -2826,7 +2914,7 @@ def system_per_bus_chart(
             {
                 "x": stages,
                 "y": nw,
-                "name": "NEWAVE",
+                "name": reference_label,
                 "type": "scatter",
                 "mode": "lines",
                 "line": {"color": COLOR_NEWAVE, "width": 2},
@@ -2951,6 +3039,7 @@ def _plant_max_reldiff_table(
     results: list[ResultComparison],
     entity_type: str,
     variables: list[tuple[str, str]],
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-plant max relative-difference summary table.
 
@@ -3042,7 +3131,8 @@ def _plant_max_reldiff_table(
     return (
         '<table class="cost-breakdown-table">'
         f"<caption>{caption_label} per-plant max relative difference "
-        "(|Cobre − NEWAVE| / |NEWAVE|, over stages)</caption>"
+        f"(|Cobre − {reference_label}| / |{reference_label}|, over stages)"
+        "</caption>"
         f"<thead><tr>{header_cells}</tr></thead>"
         "<tbody>" + "".join(body_rows) + "</tbody>"
         "</table>"
@@ -3056,6 +3146,7 @@ def build_hydro_detail_tab(
     cobre_hydro_meta: dict[int, dict] | None = None,
     cobre_hydro_per_stage_bounds: pl.DataFrame | None = None,
     nw_hydro_slacks: pl.DataFrame | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Build interactive per-plant hydro detail with JS dropdown.
 
@@ -3233,12 +3324,15 @@ def build_hydro_detail_tab(
 
     _enrich_with_percentiles(js_plants, all_vars, pct_df)
 
-    summary_table = _plant_max_reldiff_table(results, "hydro", _HYDRO_VARIABLES)
+    summary_table = _plant_max_reldiff_table(
+        results, "hydro", _HYDRO_VARIABLES, reference_label
+    )
     detail_html = _build_interactive_detail_html(
         js_plants,
         all_vars,
         "hydro",
         "Hydro Plant",
+        reference_label,
     )
     if summary_table:
         summary_table = f'<div style="margin-bottom:32px">{summary_table}</div>'
@@ -3248,6 +3342,7 @@ def build_hydro_detail_tab(
 def build_thermal_detail_tab(
     results: list[ResultComparison],
     pct_df: pl.DataFrame | None = None,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Build interactive per-plant thermal detail with JS dropdown."""
     thermal_data = [r for r in results if r.entity_type == "thermal"]
@@ -3287,12 +3382,15 @@ def build_thermal_detail_tab(
 
     _enrich_with_percentiles(js_plants, thermal_vars, pct_df)
 
-    summary_table = _plant_max_reldiff_table(results, "thermal", thermal_vars)
+    summary_table = _plant_max_reldiff_table(
+        results, "thermal", thermal_vars, reference_label
+    )
     detail_html = _build_interactive_detail_html(
         js_plants,
         thermal_vars,
         "thermal",
         "Thermal Plant",
+        reference_label,
     )
     if summary_table:
         summary_table = f'<div style="margin-bottom:32px">{summary_table}</div>'
@@ -3304,6 +3402,7 @@ def _build_interactive_detail_html(
     variables: list[tuple[str, str]],
     prefix: str,
     label: str,
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Build the HTML/JS for interactive per-plant detail charts."""
     data_json = json_for_script(js_plants)
@@ -3372,7 +3471,7 @@ def _build_interactive_detail_html(
                 }});
             }}
             if (nw && nw.length > 0) {{
-                traces.push({{x: s, y: nw, name: 'NEWAVE', type: 'scatter',
+                traces.push({{x: s, y: nw, name: '{reference_label}', type: 'scatter',
                     mode: 'lines', line: {{color: '{COLOR_NEWAVE}', width: 2}}}});
             }}
             traces.push({{x: s, y: cb, name: 'Cobre Mean', type: 'scatter',
@@ -3456,6 +3555,7 @@ def constraints_comparison_chart(
     lhs_newave: pl.DataFrame,
     lhs_cobre: pl.DataFrame,
     bound_by_constraint: dict[int, dict[int, ResolvedBound]],
+    reference_label: str = "NEWAVE",
 ) -> str:
     """Per-constraint small-multiples comparing the source model vs Cobre LHS vs bound.
 
@@ -3568,7 +3668,7 @@ def constraints_comparison_chart(
                 {
                     "x": nw_x_present,
                     "y": nw_v_present,
-                    "name": "NEWAVE LHS",
+                    "name": f"{reference_label} LHS",
                     "type": "scatter",
                     "mode": "lines",
                     "line": {"color": COLOR_NEWAVE, "width": 2},

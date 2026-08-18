@@ -4,14 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.12.0"
+version = "0.14.1"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 dependencies = [
-    "idecomp>=1.13.0",
-    "inewave>=1.15.0",
+    "idecomp>=1.14.2",
+    # NOTE: floor is 1.15.1, not 1.15.0 — 1.15.1 is the first inewave release
+    # whose `Cortes.from_cortesh(..., por_estagio=True)` correctly decodes the
+    # hybrid production cortes (D2); 1.15.0 silently mis-decodes it.
+    "inewave>=1.15.1",
     "pyarrow>=24.0.0",
     "pandas>=3.0.3",
     "plotly>=6.8.0",
@@ -28,25 +31,18 @@ dev = [
     "ruff",
     "jsonschema",
 ]
-# NOTE: the bridge now targets three cobre input-contract changes that all ride
-# cobre's unreleased `feat/generic-constraint-authoring` branch (the next tagged
-# release, expected 0.14): (1) F3 sense-free generic constraints
-# (generic_constraints.json + generic_constraint_bounds.parquet: no `sense` key,
-# bound_lower/bound_upper in place of a single `bound` column); (2) the
-# scalar-parameters input moved from system/scalar_parameters.json to
-# constraints/generic_parameters.json (clean break, JSON shape unchanged); and
+# The bridge targets cobre 0.14.1, which tags three input-contract changes:
+# (1) F3 sense-free generic constraints (generic_constraints.json +
+# generic_constraint_bounds.parquet: no `sense` key, bound_lower/bound_upper in
+# place of a single `bound` column); (2) the scalar-parameters input moved from
+# system/scalar_parameters.json to constraints/generic_parameters.json; and
 # (3) the NCS availability column renamed `value` -> `availability_factor`.
-# None is a tagged release yet, so there is no released version to pin to;
-# bumping this constraint now would make `pip install -e ".[dev]"` unresolvable
-# against the only cobre-python build that exists (an editable 0.13.0 checkout of
-# that branch). Once cobre tags the release, hard-bump both extras below to it
-# (and MIN_COBRE_VERSION in src/cobre_bridge/cli.py in lockstep) — do not guess
-# a version number in the interim.
+# Kept in lockstep with MIN_COBRE_VERSION in src/cobre_bridge/cli.py.
 validation = [
-    "cobre-python>=0.13,<0.14",
+    "cobre-python>=0.14.1,<0.15",
 ]
 test-roundtrip = [
-    "cobre-python>=0.13,<0.14",
+    "cobre-python>=0.14.1,<0.15",
 ]
 
 [project.scripts]

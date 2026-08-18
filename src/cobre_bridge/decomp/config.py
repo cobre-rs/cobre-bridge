@@ -1,11 +1,20 @@
 """Run configuration and penalties for DECOMP-like decks.
 
-``config.json`` carries the fixed ``state_space.inflow_lag_depth`` (P3/D8),
-the deck's ``GP`` convergence criterion as a **relative** ``Gap`` stopping
-rule (``relative_tolerance``, matching DECOMP's ``Zsup/Zinf - 1 <= GP``
-convergence; cobre auto-injects a ``BoundStalling`` companion so an
-unattainable tolerance degrades to a diagnosed stall), the deck-faithful
-``NI`` iteration backstop, and the external scenario schemes.
+``config.json`` carries the deck's ``GP`` convergence criterion as a
+**relative** ``Gap`` stopping rule (``relative_tolerance``, matching DECOMP's
+``Zsup/Zinf - 1 <= GP`` convergence; cobre auto-injects a ``BoundStalling``
+companion so an unattainable tolerance degrades to a diagnosed stall), the
+deck-faithful ``NI`` iteration backstop, and the external scenario schemes.
+
+No ``state_space.inflow_lag_depth`` is emitted. Under a deferred boundary FCF
+the external white-noise inflow model contributes no inflow-lag state, so cobre
+resolves a zero depth and reserving lag slots would be dead state (and would
+raise cobre's lag-blind-stage advisory for nothing). The inflow-lag depth is a
+property of the *boundary policy*: the boundary-FCF importer
+(``fcf/__init__.py``) reserves exactly the depth the loaded cuts reference — and
+only when a boundary policy is actually imported. cobre is slated to infer that
+depth from the checkpoint itself, retiring even the importer's patch (see
+``~/git/cobre/plans/state-space-inflow-lag-depth-inference-spec.md``).
 
 ``penalties.json`` reuses the shared ρ-scaled hydro penalty construction
 with the deck's deficit cost and the converted productivities — the same
@@ -38,31 +47,44 @@ _CONFIG_SCHEMA_URL = (
     "/schemas/config.schema.json"
 )
 
-# D8: the boundary cut's deepest lag term sets the state-space depth cobre
-# must reserve, so the emitted config declares it explicitly rather than
-# leaving cobre to infer one. The source model's boundary cuts carry
-# ``pi_qafl`` lag coefficients out to depth 12, so a smaller value would
-# drop lag coefficients cobre would then reject at load.
-_INFLOW_LAG_DEPTH = 12
 
+def convert_config(dadger: Dadger) -> dict:
+    """Build ``config.json``: Gap + NI stopping rules, external scenario
+    sources, simulation on.
 
-def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
-    """Build ``config.json``: state space depth, Gap + NI stopping rules,
-    external scenario sources, simulation on.
+    The ``gap`` stopping rule (relative ``GP``) is emitted unconditionally —
+    the faithful analogue of DECOMP's own ``Zsup/Zinf − 1 ≤ GP`` convergence,
+    which is itself risk-adjusted. It is admissible under a CVaR risk measure
+    too: under enumerated forwards cobre computes the exact *risk-adjusted*
+    upper bound (``setup/mod.rs``, cobre commit landing the enumerated CVaR
+    UB), which brackets the risk-adjusted lower bound, provided the risk
+    measure is **uniform across all stages** — which
+    :func:`cobre_bridge.decomp.temporal.stage_records` guarantees by emitting
+    the CVaR measure on every stage (``reject_gap_under_nonuniform_risk``).
+    Requires that cobre build; an older cobre without the enumerated
+    risk-adjusted UB rejects a gap rule under CVaR and would need a
+    ``bound_stalling`` fallback instead.
 
-    Training uses ``selection = {"method": "enumerated"}``: the explicit
-    trunk-plus-fan node graph enumerates every root-to-leaf path, so the
-    forward-pass count is derived from the graph. Simulation uses ``sampled``
-    with ``n_terminal_scenarios`` as a TRACKED COBRE-GAP WORKAROUND (C9):
-    cobre 0.14 cannot yet execute enumerated (weighted-census) simulation over
-    a *branching* graph — only a single-realization tree — so an enumerated
-    simulation aborts. Sampling the fan width approximates the census until
-    cobre wires branching-census simulation (epic-06/epic-14).
+    Both training and simulation use ``selection = {"method": "enumerated"}``:
+    the explicit trunk-plus-fan node graph enumerates every root-to-leaf path,
+    so training runs the full forward/backward census and simulation runs the
+    exact per-node-probability weighted census (cobre 0.14+ wires the
+    branching-graph census simulation, retiring the earlier ``sampled`` fallback
+    tracked as C9). The simulation omits its own ``scenario_source`` and inherits
+    training's external one.
 
-    ``state_space.inflow_lag_depth`` is fixed at 12 (P3/D8): under
-    no-folding, the source model's boundary cuts carry lag coefficients out
-    to depth 12, so cobre's bookkeeping must reserve that many lag slots for
-    the terminal boundary cut to price.
+    ``scenario_source.seed`` is a fixed ``0``. A seed controls random sampling;
+    with every class ``external`` (a deterministic replay of the explicit tree)
+    and ``enumerated`` selection nothing samples, so the value is inert — but
+    cobre's schema requires the field whenever any class is external, so a
+    constant placeholder is emitted rather than a study-varying value that would
+    misleadingly imply a meaningful random draw.
+
+    No ``state_space`` block is emitted: the inflow-lag depth is a property of
+    the boundary policy, not the case inputs. With the boundary FCF deferred the
+    external inflow model needs no lag state, so cobre resolves a zero depth; the
+    boundary-FCF importer reserves the cut-derived depth when a boundary is
+    actually imported (see the module docstring).
     """
     ni = int(dadger.ni.iteracoes or 500)
     gp = float(dadger.gp.data[0])
@@ -73,38 +95,25 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
         gp,
         ni,
     )
-
-    dt = dadger.dt
-    seed = int(dt.ano) * 10000 + int(dt.mes) * 100 + int(dt.dia)
-
-    _LOG.warning(
-        "TRACKED COBRE-GAP WORKAROUND (C9): cobre 0.14 executes enumerated "
-        "selection only on a single-realization tree; a branching graph's "
-        "weighted-census SIMULATION is not wired, so simulation falls back to "
-        "sampled selection over the %d terminal-fan scenarios "
-        "(~/git/cobre/plans/conversion-found-improvements.md). Training stays "
-        "enumerated (it runs the full census). Remove when cobre wires "
-        "branching-census simulation (epic-06/epic-14).",
-        n_terminal_scenarios,
-    )
+    stopping_rules = [
+        {"type": "gap", "relative_tolerance": gp},
+        {"type": "iteration_limit", "limit": ni},
+    ]
 
     return {
         "$schema": _CONFIG_SCHEMA_URL,
-        "state_space": {"inflow_lag_depth": _INFLOW_LAG_DEPTH},
         "training": {
             "selection": {"method": "enumerated"},
-            "stopping_rules": [
-                {"type": "gap", "relative_tolerance": gp},
-                {"type": "iteration_limit", "limit": ni},
-            ],
+            "stopping_rules": stopping_rules,
             # Under the node-native explicit tree every stochastic class is
             # external: inflow (the tree), NCS (renewables), and load. cobre's
             # scheme-aware load membership admits an external load class
             # regardless of σ (a deterministic std = 0 load standardizes to
             # eta = 0), so load is external here rather than the former
-            # in-sample-with-null-std workaround.
+            # in-sample-with-null-std workaround. seed is a schema-required
+            # inert placeholder (0) — external + enumerated never samples.
             "scenario_source": {
-                "seed": seed,
+                "seed": 0,
                 "inflow": {"scheme": "external"},
                 "load": {"scheme": "external"},
                 "ncs": {"scheme": "external"},
@@ -112,12 +121,7 @@ def convert_config(dadger: Dadger, n_terminal_scenarios: int) -> dict:
         },
         "simulation": {
             "enabled": True,
-            # C9 workaround: sampled (not enumerated) until cobre wires
-            # branching-census simulation — see the module note above.
-            "selection": {
-                "method": "sampled",
-                "num_scenarios": n_terminal_scenarios,
-            },
+            "selection": {"method": "enumerated"},
         },
     }
 

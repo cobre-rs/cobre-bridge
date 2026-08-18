@@ -1287,10 +1287,9 @@ class TestCompareResultsReturnsDataset:
     """``compare_results`` returns a validated ``ComparisonDataset`` (ticket-022).
 
     Drives the REAL ``compare_results`` with every reader patched to empty so the
-    return-type contract is exercised end-to-end without any case files: The source
-    model saidas is absent (``_find_saidas_dir`` -> ``None``), every Cobre/the source
-    model reader returns an empty frame/dict, and the generic-constraint loaders are
-    empty.
+    return-type contract is exercised end-to-end without any case files: every
+    Cobre and source-model reader (MEDIAS / nwlistop / pmo included) returns an
+    empty frame/dict, and the generic-constraint loaders are empty.
     """
 
     @staticmethod
@@ -1302,8 +1301,17 @@ class TestCompareResultsReturnsDataset:
         empty_pl = pl.DataFrame
         empty_pd = lambda *a, **k: __import__("pandas").DataFrame()  # noqa: E731
 
-        # The source model saidas absent -> all saidas-guarded branches are skipped.
-        monkeypatch.setattr(nr + "_find_saidas_dir", lambda _d: None)
+        # The source-model MEDIAS / nwlistop readers return empty (no result
+        # files in the case dir); the MEDIAS block still runs (no saidas/ gate).
+        for name in (
+            "read_medias_hydro",
+            "read_medias_thermal",
+            "read_medias_system",
+            "read_medias_market",
+            "read_medias_sin",
+            "read_nwlistop_intercambio",
+        ):
+            monkeypatch.setattr(nr + name, lambda *a, **k: empty_pl())
 
         # Frame-returning Cobre readers.
         for name in (
@@ -1335,7 +1343,7 @@ class TestCompareResultsReturnsDataset:
         monkeypatch.setattr(cr + "read_cobre_cost_breakdown", lambda *a, **k: {})
         monkeypatch.setattr(cr + "read_cobre_training_duration", lambda *a, **k: 0.0)
 
-        # The source model readers (only the non-saidas ones are reached).
+        # The remaining source-model readers (pmo / net-load / tim).
         monkeypatch.setattr(nr + "read_pmo_convergence", lambda *a, **k: empty_pl())
         monkeypatch.setattr(
             nr + "read_pmo_productivity_detail", lambda *a, **k: empty_pl()

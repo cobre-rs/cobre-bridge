@@ -530,8 +530,10 @@ def _read_polynomial_overrides(
     Unlike the scalar, diversion, and compound-key shapes above, one
     *effective* override here is not a single row: ``AC COTVOL`` declares the
     plant's full 5-coefficient forebay-cota polynomial as up to five separate
-    rows, one per ``ordem`` (0..4), all sharing the same ``(codigo_usina,
-    mes, semana, ano)`` triple. Reads ``dadger.ac(codigo_usina=None,
+    rows, one per **1-based** ``ordem`` (1..5, the coefficients a0..a4 — the
+    reader normalises it to a 0-based tuple index), all sharing the same
+    ``(codigo_usina, mes, semana, ano)`` triple. Reads
+    ``dadger.ac(codigo_usina=None,
     modificacao=ac_class, df=True)`` and resolves **every row's own**
     ``(mes, semana, ano)`` triple to an effective stage via
     :func:`resolve_effective_stage`, then groups rows by ``(codigo_usina,
@@ -553,6 +555,9 @@ def _read_polynomial_overrides(
     KeyError
         If the accessor frame is missing an expected column (a malformed
         idecomp frame is a hard error, never a silent default).
+    ValueError
+        If a row's 1-based ``ordem`` is outside 1..5 — an out-of-range
+        coefficient index is a malformed register, never silently dropped.
     """
     out_of_horizon: list[OutOfHorizon] = []
     table = dadger.ac(codigo_usina=None, modificacao=ac_class, df=True)
@@ -562,7 +567,19 @@ def _read_polynomial_overrides(
     coeffs_by_group: dict[tuple[int, int], dict[int, float]] = {}
     for _, row in table.iterrows():
         code = int(row["codigo_usina"])
-        ordem = int(row["ordem"])
+        # ``AC COTVOL`` numbers its coefficients 1..5 (a0..a4) and idecomp
+        # surfaces that raw 1-based ``ordem`` verbatim. Normalise it to the
+        # 0-based index the coefficient tuple below is read at: leaving the
+        # 1-based value in place shifts every coefficient up one slot, which
+        # silently zeroes the a0 constant term and drops a4 — for a
+        # run-of-river plant whose override is a single constant forebay cota
+        # (a0), that turns a fixed level of, say, 90 m into ``90·volume``.
+        coeff_index = int(row["ordem"]) - 1
+        if not 0 <= coeff_index < 5:
+            raise ValueError(
+                f"{param}: coefficient order {int(row['ordem'])} for plant "
+                f"{code} is outside the expected 1..5 range"
+            )
         coeficiente = float(row["coeficiente"])
         mes = row["mes"]
         eff = resolve_effective_stage(mes, row["semana"], row["ano"], calendar)
@@ -571,7 +588,7 @@ def _read_polynomial_overrides(
                 _out_of_horizon_record(code, mes, row["ano"], param, calendar)
             )
             continue
-        coeffs_by_group.setdefault((code, eff), {})[ordem] = coeficiente
+        coeffs_by_group.setdefault((code, eff), {})[coeff_index] = coeficiente
 
     records: dict[int, list[tuple[int, tuple[float, ...]]]] = {}
     for (code, eff), coeffs_by_ordem in coeffs_by_group.items():

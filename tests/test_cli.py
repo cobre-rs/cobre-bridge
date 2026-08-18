@@ -132,6 +132,30 @@ def _make_fake_newave_dir(tmp_path: Path) -> Path:
     return newave_dir
 
 
+def _make_fake_decomp_dir(tmp_path: Path) -> Path:
+    """Create a minimal discoverable deck directory: ``caso.dat`` naming ``rv0``,
+    plus ``dadger``/``vazoes``/``hidr`` stubs. ``discover_decomp_files`` only
+    stats/globs these, never parses them."""
+    decomp_dir = tmp_path / "decomp_case"
+    decomp_dir.mkdir()
+    (decomp_dir / "caso.dat").write_text("rv0\n")
+    (decomp_dir / "dadger.rv0").write_text("stub")
+    (decomp_dir / "vazoes.rv0").write_text("stub")
+    (decomp_dir / "hidr.dat").write_text("stub")
+    return decomp_dir
+
+
+def _make_fake_decomp_dir_with_cuts(tmp_path: Path) -> Path:
+    """Like :func:`_make_fake_decomp_dir`, plus stub ``cortesh``/``cortes``
+    files so the real (unmocked) ``discover_decomp_files`` resolves both via
+    its glob fallback — the boundary-FCF gating path only globs/stats these,
+    never parses their contents."""
+    decomp_dir = _make_fake_decomp_dir(tmp_path)
+    (decomp_dir / "cortesh.rv0").write_text("stub")
+    (decomp_dir / "cortes.rv0").write_text("stub")
+    return decomp_dir
+
+
 # ---------------------------------------------------------------------------
 # ConversionReport
 # ---------------------------------------------------------------------------
@@ -532,14 +556,16 @@ class TestConvertNewaweCasePipeline:
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
 
-        with patch(
-            "cobre_bridge.pipeline.NewaveCase.from_directory",
-            side_effect=FileNotFoundError(
-                f"Required NEWAVE file not found in {src}: hidr.dat"
+        with (
+            patch(
+                "cobre_bridge.pipeline.NewaveCase.from_directory",
+                side_effect=FileNotFoundError(
+                    f"Required NEWAVE file not found in {src}: hidr.dat"
+                ),
             ),
+            pytest.raises(FileNotFoundError) as exc_info,
         ):
-            with pytest.raises(FileNotFoundError) as exc_info:
-                convert_newave_case(src, dst)
+            convert_newave_case(src, dst)
         assert "hidr.dat" in str(exc_info.value)
 
     def test_dry_run_does_not_call_write_table(self, tmp_path: Path) -> None:
@@ -1184,7 +1210,7 @@ class TestCliInProcess:
         """The manifest's ``min_cobre_version`` tracks the CLI constant, pinned.
 
         ticket-005: a manifest written after the bump must record the real
-        floor (``"0.13.0"``), not a stale value — the manifest is provenance,
+        floor (``"0.14.1"``), not a stale value — the manifest is provenance,
         and a wrong floor there is false provenance. Pinning the literal (not
         just equality with the constant) catches an accidental revert of the
         constant itself.
@@ -1193,7 +1219,7 @@ class TestCliInProcess:
         from cobre_bridge.conversion_manifest import ConversionManifest
         from cobre_bridge.pipeline import ConversionReport
 
-        assert MIN_COBRE_VERSION == "0.13.0"
+        assert MIN_COBRE_VERSION == "0.14.1"
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
@@ -1212,7 +1238,7 @@ class TestCliInProcess:
 
         assert code == 0
         manifest = ConversionManifest.from_json(dst / "conversion_manifest.json")
-        assert manifest.min_cobre_version == "0.13.0"
+        assert manifest.min_cobre_version == "0.14.1"
         assert manifest.min_cobre_version == MIN_COBRE_VERSION
 
     def test_manifest_not_in_json_verdict(
@@ -1696,7 +1722,7 @@ class TestCliInProcess:
 
         def _guard_import(name: str, *args: object, **kwargs: object) -> object:
             # No cobre validation import may be attempted under --dry-run.
-            if name == "cobre.io" or name.startswith("cobre.io"):
+            if name.startswith("cobre.io"):
                 raise AssertionError("validation must not import cobre under --dry-run")
             return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -1855,7 +1881,7 @@ class TestCliInProcess:
         from cobre_bridge.cli import MIN_COBRE_VERSION
         from cobre_bridge.pipeline import ConversionReport
 
-        assert MIN_COBRE_VERSION == "0.13.0"
+        assert MIN_COBRE_VERSION == "0.14.1"
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
@@ -1884,7 +1910,7 @@ class TestCliInProcess:
         # validation did not run (not that it ran and passed).
         assert "skipping cobre-python validation" in stderr
         assert "0.12.0" in stderr
-        assert "0.13.0" in stderr
+        assert "0.14.1" in stderr
         assert MIN_COBRE_VERSION in stderr
         doc = json.loads(stdout)
         assert doc["status"] == "ok"
@@ -2051,6 +2077,241 @@ class TestCliInProcess:
         assert "external-solver interoperability" in stderr
         assert "Validation warning:" in stderr
 
+    def test_convert_decomp_success_shows_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful ``convert decomp`` prints the ``✓ Converted ...`` summary."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "✓ Converted 3 hydros" in stdout
+
+    def test_convert_decomp_warning_diagnostic_renders_rollup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``WARNING`` diagnostic on the report renders the notes roll-up + title."""
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        warning = Diagnostic(
+            code="decomp-some-warning",
+            severity=Severity.WARNING,
+            category="Conversion",
+            title="A DECOMP warning",
+            summary="heads up",
+        )
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            diagnostics=[warning],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "Conversion notes:" in stderr
+        assert "A DECOMP warning" in stderr
+
+    def test_convert_decomp_json_success_emits_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``convert decomp --json`` emits the unified verdict envelope."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["command"] == "convert decomp"
+        assert doc["status"] == "ok"
+        assert set(doc["summary"]) >= {"hydros", "thermals", "buses", "lines", "stages"}
+
+    def test_convert_decomp_json_failure_emits_error_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A conversion failure under ``--json`` emits ``status == "error"``; exit 1."""
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            side_effect=ValueError("bad"),
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        doc = json.loads(stdout)
+        assert doc["status"] == "error"
+
+    def test_convert_decomp_diagnostics_json_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--diagnostics-json`` writes the report-shaped sidecar (summary + findings)."""
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            diagnostics=[
+                Diagnostic(
+                    code="decomp-some-warning",
+                    severity=Severity.WARNING,
+                    category="Conversion",
+                    title="A DECOMP warning",
+                    summary="heads up",
+                )
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--diagnostics-json",
+                    str(json_path),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert json_path.exists()
+        payload = json.loads(json_path.read_text())
+        assert set(payload) == {"summary", "diagnostics"}
+        assert payload["summary"]["hydros"] == 3
+        assert [d["code"] for d in payload["diagnostics"]] == ["decomp-some-warning"]
+
+    def test_convert_decomp_diagnostics_json_coexists_with_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sidecar and ``--json`` are independent: stdout verdict AND file written."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--diagnostics-json",
+                    str(json_path),
+                    "--json",
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        # stdout is exactly the unified verdict object …
+        doc = json.loads(stdout)
+        assert doc["command"] == "convert decomp"
+        # … and the sidecar was written all the same.
+        assert json_path.exists()
+        assert set(json.loads(json_path.read_text())) == {"summary", "diagnostics"}
+
+    def test_convert_decomp_no_diagnostics_json_writes_no_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Absent the flag, no sidecar file is created."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert not json_path.exists()
+
     def test_convert_decomp_validate_whitelists_interop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2063,9 +2324,9 @@ class TestCliInProcess:
         ``test_convert_newave_validate_unchanged_by_helper`` above).
         """
         from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.pipeline import ConversionReport
 
-        src = tmp_path / "decomp_src"
-        src.mkdir()
+        src = _make_fake_decomp_dir(tmp_path)
         dst = tmp_path / "dst"
 
         monkeypatch.setattr(
@@ -2088,7 +2349,13 @@ class TestCliInProcess:
             ),
         )
 
-        with patch("cobre_bridge.decomp.pipeline.convert_decomp_case"):
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
             code, _stdout, stderr = self._invoke_main(
                 ["convert", "decomp", str(src), str(dst), "--validate"],
                 monkeypatch,
@@ -2098,6 +2365,773 @@ class TestCliInProcess:
         validate.assert_called_once()
         assert "external-solver interoperability" not in stderr
         assert "Validation warning:" not in stderr
+
+    def test_convert_decomp_dry_run_writes_nothing_to_dst(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run`` into an empty dst writes nothing and exits 0."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        # No destination directory is created and nothing is written.
+        assert not dst.exists() or list(dst.iterdir()) == []
+        assert "Dry run — no files written" in stdout
+        assert "config.json" in stdout
+
+    def test_convert_decomp_dry_run_json_document_is_deterministic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --json`` emits a sorted, dst-relative would-write document."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        # Deliberately unsorted absolute paths under dst.
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[
+                str(dst / "system" / "hydros.json"),
+                str(dst / "config.json"),
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run", "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        # would_write moves UNDER summary; only the five envelope keys at the top.
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert "would_write" not in doc
+        assert doc["command"] == "convert decomp"
+        assert doc["status"] == "dry-run"
+        assert doc["summary"] == {
+            "hydros": 3,
+            "thermals": 2,
+            "buses": 1,
+            "lines": 0,
+            "stages": 4,
+            # dst-relative, forward-slash, sorted.
+            "would_write": ["config.json", "system/hydros.json"],
+        }
+
+    def test_convert_decomp_dry_run_json_failure_has_would_write_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A conversion failure under ``--dry-run --json`` still carries the
+        ``would_write`` key (parity with ``convert newave``): a consumer that
+        reads ``summary["would_write"]`` on any dry-run verdict must not
+        KeyError just because the conversion failed.
+        """
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            side_effect=ValueError("bad"),
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run", "--json"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        doc = json.loads(stdout)
+        assert list(doc.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert doc["command"] == "convert decomp"
+        assert doc["summary"]["would_write"] == []
+
+    def test_convert_decomp_dry_run_with_validate_emits_note_and_skips_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --validate`` skips validation and notes it on stderr."""
+        import builtins
+
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        real_import = builtins.__import__
+
+        def _guard_import(name: str, *args: object, **kwargs: object) -> object:
+            # No cobre validation import may be attempted under --dry-run.
+            if name.startswith("cobre.io"):
+                raise AssertionError("validation must not import cobre under --dry-run")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch.object(builtins, "__import__", _guard_import),
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run", "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "--validate is ignored under --dry-run" in stderr
+        # No validation output of any kind reached stderr.
+        assert "Validation" not in stderr
+
+    def test_convert_decomp_dry_run_writes_no_diagnostics_json_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run --diagnostics-json`` writes no sidecar: the dry-run branch
+        returns before the sidecar block runs."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--dry-run",
+                    "--diagnostics-json",
+                    str(json_path),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert not json_path.exists()
+
+    def test_convert_decomp_manifest_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful ``convert decomp`` leaves a valid provenance manifest."""
+        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3, thermal_count=2, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        manifest_path = dst / "conversion_manifest.json"
+        assert manifest_path.exists()
+        manifest = ConversionManifest.from_json(manifest_path)
+        assert manifest.command == "convert decomp"
+        assert manifest.entity_counts == {
+            "hydros": 3,
+            "thermals": 2,
+            "buses": 1,
+            "lines": 0,
+            "stages": 4,
+        }
+        # The stub deck's dadger/vazoes/hidr files were discovered and hashed.
+        assert manifest.input_files
+
+    def test_convert_decomp_manifest_records_min_cobre_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DECOMP manifest's ``min_cobre_version`` tracks the CLI constant."""
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=12
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        manifest = ConversionManifest.from_json(dst / "conversion_manifest.json")
+        assert manifest.min_cobre_version == MIN_COBRE_VERSION
+
+    def test_convert_decomp_dry_run_writes_no_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run`` writes no provenance manifest: the dry-run branch
+        returns before the manifest-write block runs."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert not (dst / "conversion_manifest.json").exists()
+
+    # ------------------------------------------------------------------
+    # Boundary FCF (default on; --no-fcf opts out; in-process, no --cobre-bin)
+    # ------------------------------------------------------------------
+
+    def test_convert_decomp_no_fcf_skips_import(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--no-fcf`` skips the importer even when the deck declares cut
+        files: no ``boundary/`` directory, and the deck is never re-discovered
+        for the FCF gate."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--no-fcf"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        mock_import.assert_not_called()
+        assert not (dst / "boundary").exists()
+
+    def test_convert_decomp_boundary_fcf_happy_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With cut files present (the default), the importer runs with
+        ``cost_scale_factor=1.0``, exits 0, surfaces the C8 run recipe on
+        stderr, and the ``--json`` verdict carries ``summary["boundary_fcf"]``."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch(
+                "cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"
+            ) as mock_capability,
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                return_value=dst / "boundary",
+            ) as mock_import,
+        ):
+            code, stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        mock_capability.assert_called_once()
+        mock_import.assert_called_once()
+        assert mock_import.call_args.kwargs["cost_scale_factor"] == 1.0
+        assert "cobre_bin" not in mock_import.call_args.kwargs
+        assert mock_import.call_args.args[0] == dst
+        # C8 recipe surfaced on stderr regardless of --json.
+        assert f"cobre run {dst}" in stderr
+        assert f"--output={dst}" in stderr
+        doc = json.loads(stdout)
+        assert doc["summary"]["boundary_fcf"] == {
+            "imported": True,
+            "path": "boundary",
+            "run_constraint": f"--output={dst}",
+        }
+
+    def test_convert_decomp_missing_cortes_skips_fcf(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deck that declares no cortes files converts with exit 0 and an
+        INFO note (not an error): the importer never runs and no ``boundary/``
+        directory is written."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)  # no cortesh/cortes files
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "no cortes/cortesh files" in stderr
+        mock_import.assert_not_called()
+        assert not (dst / "boundary").exists()
+
+    def test_convert_decomp_boundary_fcf_capability_guard_failure_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing capability probe exits 1 with the branch-wheel remediation."""
+        from cobre_bridge.decomp.fcf.capability import REMEDIATION
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch(
+                "cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability",
+                side_effect=RuntimeError(REMEDIATION),
+            ),
+            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst)],
+                monkeypatch,
+            )
+
+        assert code == 1
+        assert "feat/cobre-gnl-boundary-pricing" in stderr
+        mock_import.assert_not_called()
+
+    def test_convert_decomp_boundary_fcf_runs_before_validate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The boundary-FCF import runs BEFORE ``--validate``; a validation
+        failure still exits 2 once the import already succeeded."""
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        call_order: list[str] = []
+
+        def _fake_import(*args: object, **kwargs: object) -> Path:
+            call_order.append("import_boundary_fcf")
+            return dst / "boundary"
+
+        def _fake_validate(*args: object, **kwargs: object) -> dict[str, object]:
+            call_order.append("validate")
+            return {"valid": False, "warnings": [], "errors": ["boom"]}
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version",
+            lambda: MIN_COBRE_VERSION,
+        )
+        self._inject_cobre_io(monkeypatch, MagicMock(side_effect=_fake_validate))
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                side_effect=_fake_import,
+            ),
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 2
+        assert call_order == ["import_boundary_fcf", "validate"]
+
+    def test_convert_decomp_fcf_skipped_under_dry_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run`` skips the boundary FCF import and notes it on stderr,
+        even when the deck declares cut files."""
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1,
+            thermal_count=1,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            would_write_paths=[str(dst / "config.json")],
+        )
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--dry-run"],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "boundary FCF import is skipped under --dry-run" in stderr
+        mock_import.assert_not_called()
+        assert not dst.exists() or list(dst.iterdir()) == []
+
+    def test_convert_decomp_boundary_fcf_importer_diagnostics_reach_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ticket-010 (D): the importer runs inside a ``dx.collect()`` sink,
+        so a ``Diagnostic`` it emits — here the GNL anticipated-ring
+        deviation — reaches the ``--json`` verdict's ``diagnostics`` array.
+        This test fails against the pre-sink CLI (no ``dx.collect()``
+        wrapping ``import_boundary_fcf``), proving the deferred Epic-03 gap
+        is closed."""
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        def _fake_import(*args: object, **kwargs: object) -> Path:
+            dx.emit(
+                dx.Diagnostic(
+                    code="boundary-fcf-gnl-anticipated-deviation",
+                    severity=dx.Severity.INFO,
+                    category="Boundary FCF",
+                    title="GNL anticipated ring carries a per-patamar sum",
+                    summary="synthetic deviation diagnostic for the sink test",
+                )
+            )
+            return dst / "boundary"
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                side_effect=_fake_import,
+            ),
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--json",
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        doc = json.loads(stdout)
+        codes = {d["code"] for d in doc["diagnostics"]}
+        assert "boundary-fcf-gnl-anticipated-deviation" in codes
+        # ``status`` stays "ok": the importer's diagnostic is INFO-severity,
+        # so surfacing it never flips the verdict outcome.
+        assert doc["status"] == "ok"
+
+    def test_convert_decomp_boundary_fcf_importer_diagnostics_render_panel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ticket-010 (D): the same emitting mock, without ``--json`` — the
+        diagnostic's title renders on stderr (the Rich panel), and the
+        existing happy-path C8-recipe assertions still hold (no
+        double-render, no exit-code change)."""
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        def _fake_import(*args: object, **kwargs: object) -> Path:
+            dx.emit(
+                dx.Diagnostic(
+                    code="boundary-fcf-gnl-anticipated-deviation",
+                    severity=dx.Severity.INFO,
+                    category="Boundary FCF",
+                    title="GNL anticipated ring carries a per-patamar sum",
+                    summary="synthetic deviation diagnostic for the sink test",
+                )
+            )
+            return dst / "boundary"
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                side_effect=_fake_import,
+            ),
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert "GNL anticipated ring carries a per-patamar sum" in stderr
+        # The C8 run-recipe note still surfaces (happy-path behaviour intact).
+        assert f"cobre run {dst}" in stderr
+        assert f"--output={dst}" in stderr
+
+    def test_convert_decomp_boundary_fcf_importer_diagnostics_reach_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Epic-04 boundary-review finding #2: the same emitting mock as
+        ``..._reach_json``, but without ``--json`` and with
+        ``--diagnostics-json`` — the importer's ``Diagnostic`` (captured by
+        the ``dx.collect()`` sink) must reach the sidecar file too, not just
+        the ``--json`` stdout verdict. This test fails against the pre-fix
+        CLI, where the sidecar is written BEFORE the boundary-FCF block runs
+        and therefore only ever contains ``report.diagnostics``."""
+        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir_with_cuts(tmp_path)
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=1, thermal_count=1, bus_count=1, line_count=0, stage_count=4
+        )
+
+        def _fake_import(*args: object, **kwargs: object) -> Path:
+            dx.emit(
+                dx.Diagnostic(
+                    code="boundary-fcf-gnl-anticipated-deviation",
+                    severity=dx.Severity.INFO,
+                    category="Boundary FCF",
+                    title="GNL anticipated ring carries a per-patamar sum",
+                    summary="synthetic deviation diagnostic for the sink test",
+                )
+            )
+            return dst / "boundary"
+
+        with (
+            patch(
+                "cobre_bridge.decomp.pipeline.convert_decomp_case",
+                return_value=fake_report,
+            ),
+            patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
+            patch(
+                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                side_effect=_fake_import,
+            ),
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--diagnostics-json",
+                    str(json_path),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert json_path.exists()
+        payload = json.loads(json_path.read_text())
+        codes = {d["code"] for d in payload["diagnostics"]}
+        assert "boundary-fcf-gnl-anticipated-deviation" in codes
+
+    def test_convert_decomp_diagnostics_json_unchanged_without_fcf(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guard: a ``convert decomp --diagnostics-json --no-fcf`` sidecar is
+        exactly ``report.diagnostics`` — deferring the sidecar write past the
+        (here, skipped) boundary-FCF block must not regress the contract."""
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+        json_path = tmp_path / "diag.json"
+
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            diagnostics=[
+                Diagnostic(
+                    code="decomp-some-warning",
+                    severity=Severity.WARNING,
+                    category="Conversion",
+                    title="A DECOMP warning",
+                    summary="heads up",
+                )
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "decomp",
+                    str(src),
+                    str(dst),
+                    "--diagnostics-json",
+                    str(json_path),
+                    "--no-fcf",
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        payload = json.loads(json_path.read_text())
+        assert set(payload) == {"summary", "diagnostics"}
+        assert [d["code"] for d in payload["diagnostics"]] == ["decomp-some-warning"]
 
 
 class TestCompareDatasetWiring:
@@ -2719,13 +3753,15 @@ class TestConversionWarningCapture:
 
         pkg_logger = logging.getLogger("cobre_bridge")
         handlers_before = list(pkg_logger.handlers)
-        with patch.object(
-            pipeline,
-            "_convert_newave_case_impl",
-            side_effect=RuntimeError("boom"),
+        with (
+            patch.object(
+                pipeline,
+                "_convert_newave_case_impl",
+                side_effect=RuntimeError("boom"),
+            ),
+            pytest.raises(RuntimeError, match="boom"),
         ):
-            with pytest.raises(RuntimeError, match="boom"):
-                convert_newave_case(tmp_path, tmp_path)
+            convert_newave_case(tmp_path, tmp_path)
 
         # The capture handler must be removed in the finally block, leaving the
         # package logger's handler list exactly as it was.
@@ -2754,9 +3790,11 @@ class TestConversionWarningCapture:
             (d / "system" / "hydros.json").write_text("{}")
             raise RuntimeError("disk full mid-write")
 
-        with patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl):
-            with pytest.raises(RuntimeError, match="disk full"):
-                convert_newave_case(tmp_path, dst)
+        with (
+            patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl),
+            pytest.raises(RuntimeError, match="disk full"),
+        ):
+            convert_newave_case(tmp_path, dst)
 
         # No pipeline outputs survive — dst holds no half-written case.
         assert not (dst / "config.json").exists()

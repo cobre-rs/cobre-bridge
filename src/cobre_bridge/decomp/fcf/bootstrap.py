@@ -12,21 +12,24 @@ checkpointing on, and reads the emitted checkpoint's terminal
 writer (ticket-008) then author cuts against that manifest verbatim, so any
 future cobre layout change breaks loudly — a manifest mismatch on load — not
 silently.
+
+The run is driven **in-process** through :func:`cobre.run.run` (the same
+cobre-python wheel the writer and reader already require), not a subprocess
+``cobre`` binary: one dependency, no binary/wheel version skew, and no
+``--cobre-bin`` path to resolve. ``cobre.run.run``'s ``config_overrides``
+deep-merges an override into ``config.json`` **in memory** (it never mutates
+the case), so no scratch copy is needed, and its ``on_iteration`` callback
+stops the run cooperatively after the first iteration boundary — the terminal
+state-vector layout is structural, present from iteration one.
 """
 
 from __future__ import annotations
 
-import json
-import shutil
-import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-#: Number of trailing stderr lines kept in a subprocess failure message.
-_STDERR_TAIL_LINES = 40
 
 
 def ensure_writer_binding() -> None:
@@ -81,39 +84,31 @@ class TerminalManifest:
     state_dimension: int
 
 
-def _set_iteration_limit_one(config_path: Path) -> None:
-    """Overwrite ``config_path``'s stopping rule to a single iteration.
-
-    Reads and rewrites the *copy* at ``config_path`` in place — the caller
-    is responsible for ``config_path`` living under a scratch copy, never
-    the original input case.
-    """
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["training"]["stopping_rules"] = [{"type": "iteration_limit", "limit": 1}]
-    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-
-
-def _stderr_tail(stderr: str) -> str:
-    """The trailing ``_STDERR_TAIL_LINES`` lines of ``stderr``, for error messages."""
-    lines = stderr.splitlines()
-    return "\n".join(lines[-_STDERR_TAIL_LINES:])
-
-
 def bootstrap_terminal_manifest(
-    case_dir: Path, cobre_bin: Path, *, work_dir: Path
+    case_dir: Path, *, work_dir: Path, inflow_lag_depth: int = 0
 ) -> TerminalManifest:
-    """Run cobre for 1 iteration on a copy of ``case_dir`` and read its terminal
-    manifest.
+    """Run cobre for 1 iteration on ``case_dir`` and read its terminal manifest.
 
-    Copies ``case_dir`` into ``work_dir`` (never mutating the input case),
-    overrides the copy's ``config.json`` stopping rule to a single training
-    iteration, runs the local ``cobre_bin run`` binary with checkpointing on
-    (the default), then reads the emitted checkpoint back via
+    Trains ``case_dir`` in-process via :func:`cobre.run.run`, writing the
+    checkpoint under ``work_dir`` (``case_dir`` is never mutated: the
+    single-iteration cap is applied through ``config_overrides``'
+    in-memory deep-merge, and the ``on_iteration`` callback requests a
+    cooperative stop at the first iteration boundary). Simulation is skipped.
+
+    ``inflow_lag_depth`` (when ``>= 1``) is applied as another in-memory
+    ``config_overrides`` entry so the bootstrap manifest reserves the inflow-lag
+    state slots the boundary cuts will be mapped onto — the mapper bounds-checks
+    ``pi_qafl`` placement against the manifest's ``HydroInflowLag`` slot count.
+    It is an override, never written to ``case_dir/config.json``: cobre >= 0.14
+    infers the same depth from the loaded boundary policy at run time, so the
+    shipped case declares no ``state_space.inflow_lag_depth``. At bootstrap there
+    is no boundary yet, so the depth must be supplied here explicitly.
+    It then reads the emitted checkpoint back via
     :func:`cobre.results.load_policy` and returns the terminal stage's (the
     entry whose ``stage_id`` is max) ``entity_manifest`` and
     ``state_dimension``.
 
-    Depends only on ``cobre_bin run`` and ``cobre.results.load_policy`` —
+    Depends only on ``cobre.run.run`` and ``cobre.results.load_policy`` —
     neither needs the ``write_policy_checkpoint`` binding, so this function
     does not call :func:`ensure_writer_binding`. The mapper/writer stages
     that consume the returned :class:`TerminalManifest` do need it; a caller
@@ -123,36 +118,25 @@ def bootstrap_terminal_manifest(
     Raises
     ------
     RuntimeError
-        If ``cobre_bin run`` exits nonzero (message includes the stderr
-        tail), or if the loaded checkpoint has no stage cuts / an empty
-        terminal ``entity_manifest`` / a terminal ``state_dimension`` that
-        disagrees with the checkpoint metadata.
+        If the loaded checkpoint has no stage cuts or an empty terminal
+        ``entity_manifest``. A failure inside the run itself propagates as
+        ``cobre.run.run``'s own exception.
     """
-    scratch_case = work_dir / "case"
-    shutil.copytree(case_dir, scratch_case)
-    _set_iteration_limit_one(scratch_case / "config.json")
+    import cobre
 
     output_dir = work_dir / "output"
-    completed = subprocess.run(
-        [
-            str(cobre_bin),
-            "run",
-            str(scratch_case),
-            "--output",
-            str(output_dir),
-            "--quiet",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    config_overrides: dict[str, object] = {
+        "training.stopping_rules": [{"type": "iteration_limit", "limit": 1}]
+    }
+    if inflow_lag_depth >= 1:
+        config_overrides["state_space.inflow_lag_depth"] = inflow_lag_depth
+    cobre.run.run(
+        str(case_dir),
+        output_dir=str(output_dir),
+        skip_simulation=True,
+        config_overrides=config_overrides,
+        on_iteration=lambda _info: True,
     )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"cobre run failed (exit {completed.returncode}) on {scratch_case}:\n"
-            f"{_stderr_tail(completed.stderr)}"
-        )
-
-    import cobre
 
     policy = cobre.results.load_policy(output_dir, policy_subdir="policy")
     stage_cuts = policy["stage_cuts"]

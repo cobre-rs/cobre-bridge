@@ -86,7 +86,6 @@ are excluded from the operated set and reported.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -99,6 +98,7 @@ from cobre_bridge.converters.hydro import (
     _PRODUCTION_MODELS_SCHEMA_URL,
     _SCHEMA_URL,
     _apply_hydraulic_loss,
+    _fpha_efficiency,
     build_mirror_unit_group,
 )
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
@@ -138,23 +138,32 @@ def read_hidr(path: Path) -> pd.DataFrame:
 def _operated_uh(dadger: Dadger) -> pd.DataFrame:
     """The ``UH`` rows carrying an initial volume (the operated plants).
 
-    Rows without one (coupling-only registrations) are reported and
-    excluded — their terminal-value treatment is the boundary importer's
-    D3 territory, not the registry's.
+    Rows without one (coupling-only registrations) are excluded — their
+    terminal-value treatment is the boundary importer's D3 territory, not the
+    registry's. :func:`convert_hydros` reports the excluded set (by name) once.
     """
     uh = dadger.uh(df=True)
     if uh is None or uh.empty:
         raise ValueError("the deck has no UH records; cannot convert hydros")
-    operated = uh[uh["volume_inicial"].notna()]
+    return uh[uh["volume_inicial"].notna()]
+
+
+def _coupling_only_codes(dadger: Dadger) -> list[int]:
+    """Operated-set-excluded ``UH`` codes — registrations with no initial volume."""
+    uh = dadger.uh(df=True)
+    if uh is None or uh.empty:
+        return []
     excluded = uh[uh["volume_inicial"].isna()]
-    if not excluded.empty:
-        _LOG.warning(
-            "%d UH registration(s) without an initial volume excluded from "
-            "the operated set (coupling-only): codes %s",
-            len(excluded),
-            sorted(int(c) for c in excluded["codigo_usina"]),
-        )
-    return operated
+    return sorted(int(c) for c in excluded["codigo_usina"])
+
+
+def _hydro_display_name(hidr: pd.DataFrame, code: int) -> str:
+    """``'NAME (code)'`` for a plant, or just the code if the registry lacks it."""
+    try:
+        name = str(hidr.loc[code, "nome_usina"]).strip()
+    except KeyError:
+        return str(code)
+    return f"{name} ({code})"
 
 
 def _downstream_operated(
@@ -603,7 +612,7 @@ def _build_split_unit_groups(
     hreg: pd.Series,
     code: int,
     name: str,
-    bus_id: int,
+    group_bus_ids: Sequence[int],
     frequencies: list[float],
     effective: EffectiveCadastro,
 ) -> tuple[list[dict[str, object]], float, float]:
@@ -617,8 +626,16 @@ def _build_split_unit_groups(
     that conjunto's own head-corrected envelope
     (:func:`_conjunto_head_corrected_envelope`, ticket-017) — each group has
     only its own conjunto's installed power to draw on, so the power cap
-    inside that function is per-group, never plant-wide. All groups sit on
-    *bus_id*, the plant's own bus (no per-group bus on this deck).
+    inside that function is per-group, never plant-wide. Group ``i`` sits on
+    ``group_bus_ids[i]`` — a per-group bus, not necessarily the plant's own
+    bus: :func:`convert_hydros` relocates Itaipu's 50 Hz group to the ``IV``
+    transshipment bus while keeping its 60 Hz group on the plant's own bus.
+
+    Raises
+    ------
+    ValueError
+        Naming both counts, if *frequencies* and *group_bus_ids* disagree in
+        length — a mis-wired split must fail loud, not silently colocate.
 
     Returns the groups plus their summed ``(max_turbined_m3s,
     max_generation_mw)``: :func:`convert_hydros` declares the plant's own
@@ -627,6 +644,11 @@ def _build_split_unit_groups(
     two groups' own per-stage machine-set changes (if any) need not peak on
     the same stage.
     """
+    if len(frequencies) != len(group_bus_ids):
+        raise ValueError(
+            f"plant {code}: {len(frequencies)} split frequencies but "
+            f"{len(group_bus_ids)} per-group buses were supplied"
+        )
     groups: list[dict[str, object]] = []
     total_turbined = 0.0
     total_generation = 0.0
@@ -637,7 +659,7 @@ def _build_split_unit_groups(
         groups.append(
             build_mirror_unit_group(
                 name=name,
-                bus_id=bus_id,
+                bus_id=group_bus_ids[i],
                 min_generation_mw=0.0,
                 max_generation_mw=p,
                 min_turbined_m3s=0.0,
@@ -675,14 +697,87 @@ def _frequency_row(
     return rows.iloc[0]
 
 
+#: ``hidr.dat``'s 12 monthly reservoir-evaporation columns in calendar order
+#: (Jan..Dec) — cobre's ``evaporation.coefficients_mm`` is index 0 = January.
+_EVAPORATION_MONTH_COLUMNS = (
+    "evaporacao_JAN",
+    "evaporacao_FEV",
+    "evaporacao_MAR",
+    "evaporacao_ABR",
+    "evaporacao_MAI",
+    "evaporacao_JUN",
+    "evaporacao_JUL",
+    "evaporacao_AGO",
+    "evaporacao_SET",
+    "evaporacao_OUT",
+    "evaporacao_NOV",
+    "evaporacao_DEZ",
+)
+
+
+def _evaporation_flag_codes(dadger: Dadger) -> set[int]:
+    """Plant codes whose ``UH`` register sets the reservoir-evaporation flag.
+
+    DECOMP models a plant's evaporation only when its ``UH`` ``evaporacao``
+    flag is set; a plant absent from this set is emitted with no evaporation
+    regardless of the coefficients ``hidr.dat`` may carry.
+    """
+    uh = dadger.uh(df=True)
+    if uh is None or "evaporacao" not in uh.columns or "codigo_usina" not in uh.columns:
+        return set()
+    return set(uh.loc[uh["evaporacao"].fillna(0) != 0, "codigo_usina"].astype(int))
+
+
+def _evaporation_coefficients_mm(hidr: pd.DataFrame, code: int) -> list[float] | None:
+    """The plant's 12 monthly evaporation coefficients [mm/month], Jan..Dec,
+    from ``hidr.dat`` — or ``None`` when the plant is absent or every month is
+    zero (nothing to model).
+
+    cobre (>= 0.14) computes the evaporation-outflow model internally from
+    these monthly rates and the reservoir area geometry
+    (``hydro_geometry.parquet``, emitted by the FPHA path), scaling each stage
+    to its ``stage_hours / month_hours`` share of the calendar month — the C11
+    fix (pre-0.14 deposited a whole month's evaporation on every stage). The
+    bridge supplies only the monthly mm rates.
+    """
+    if code not in hidr.index or not all(
+        column in hidr.columns for column in _EVAPORATION_MONTH_COLUMNS
+    ):
+        return None
+    row = hidr.loc[code]
+    coefficients = [float(row[column]) for column in _EVAPORATION_MONTH_COLUMNS]
+    if not any(coefficients):
+        return None
+    return coefficients
+
+
 def convert_hydros(
     dadger: Dadger,
     hidr: pd.DataFrame,
     id_map: DecompIdMap,
     start_date: date,
     effective: EffectiveCadastro,
+    travel_time_hours: dict[int, float] | None = None,
+    fpha_codes: set[int] | None = None,
 ) -> dict:
     """Build ``hydros.json`` for the operated plants.
+
+    *fpha_codes* (from :func:`cobre_bridge.decomp.fpha.fpha_eligible_codes`)
+    selects the plants emitted with cobre's computed-FPHA generation model:
+    their ``generation.model`` is ``"fpha"`` and they carry the turbine
+    ``efficiency`` (η = ρ_esp / K), the ``specific_productivity_mw_per_m3s_per_m``
+    cobre derives ρ_eq from, and an inline constant ``tailrace`` (the
+    ``canal_fuga_medio`` fallback used when ``tailrace_curves.parquet`` carries
+    no family for the plant). Plants absent from it — or the whole set being
+    ``None`` — keep the constant-productivity model whose ρ_eq rides in
+    ``hydro_energy_productivity.parquet``.
+
+    *travel_time_hours* (``{plant code: hours}``, from
+    :func:`cobre_bridge.decomp.travel_time.convert_travel_time`) stamps the
+    ``VI`` water travel time onto each arc plant's entry; a plant absent from it
+    — or the whole map being ``None`` — emits no ``travel_time_hours`` key
+    (cobre defaults it to instantaneous). The key is emitted only when the plant
+    also has a downstream arc for the delay to act on.
 
     ``max_generation_mw`` is the installed (un-derated, ``TEIF``/``IP``-free)
     max-over-stages envelope of the AC-adjusted rated unit-power sum,
@@ -713,13 +808,26 @@ def convert_hydros(
     construction — cobre rule 41 holds even though the two groups' own
     per-stage machine-set changes (if any) need not peak on the same stage,
     nor their head-corrected flows peak on the same stage as their rated
-    power. The entity ``reservoir`` block is the plant's outer per-stage
-    storage envelope (:func:`storage_envelope`), so per-stage bound
-    overrides (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
+    power. Itaipu's 50 Hz group (group id 0) is placed on
+    ``id_map.transhipment_bus_id`` — the ``IV`` transshipment bus — rather
+    than the plant's own submercado bus; the 60 Hz group (group id 1) stays
+    on the plant's own bus. This relocation is unconditional whenever Itaipu
+    is operated (ticket-006). The entity ``reservoir`` block is the plant's
+    outer per-stage storage envelope (:func:`storage_envelope`), so
+    per-stage bound overrides
+    (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
     always sit inside it. Per-family ``AC`` coverage is reported by
     ``check decomp`` (:mod:`cobre_bridge.decomp.preflight`), not logged here.
     """
     operated = _operated_uh(dadger)
+    coupling_only = _coupling_only_codes(dadger)
+    if coupling_only:
+        _LOG.warning(
+            "%d UH registration(s) without an initial volume excluded from "
+            "the operated set (coupling-only): %s",
+            len(coupling_only),
+            ", ".join(_hydro_display_name(hidr, c) for c in coupling_only),
+        )
     operated_codes = set(id_map.hydro_codes)
     min_outflow_by_code: dict[int, float] = {}
     for _, row in operated.iterrows():
@@ -737,12 +845,14 @@ def convert_hydros(
 
     op_date = start_date.isoformat()
     hydros: list[dict] = []
+    evaporation_codes = _evaporation_flag_codes(dadger)
     n_runofriver_collapsed = 0
     for code in id_map.hydro_codes:
         if code not in hidr.index:
             raise ValueError(f"UH plant {code} is not in the hydro registry")
         hreg = hidr.loc[code]
         name = str(hreg["nome_usina"]).strip()
+        is_fpha = fpha_codes is not None and code in fpha_codes
         downstream = _downstream_operated(effective, code, operated_codes)
         min_storage_hm3, max_storage_hm3 = storage_envelope(effective, code)
         if str(hreg.get("tipo_regulacao", "")).strip() == "D" and float(
@@ -752,8 +862,16 @@ def convert_hydros(
         bus_id = id_map.bus_id(int(hreg["submercado"]))
         if code == _ITAIPU_CODE:
             frequencies = _split_plant_frequencies(hreg, code, effective, mp, fd)
+            # Unconditional 50 Hz -> IV relocation (ticket-006): Itaipu's 50 Hz
+            # unit group (group id 0, the lower of the two ascending
+            # frequencies) is moved to the transshipment bus so cobre's
+            # HydroGeneration{bus} selector can separate the two groups; the
+            # 60 Hz group (group id 1) stays on the plant's own SE bus
+            # (already computed above as `bus_id`).
+            se_bus = bus_id
+            iv_bus = id_map.transhipment_bus_id
             unit_groups, max_turbined, max_generation = _build_split_unit_groups(
-                hreg, code, name, bus_id, frequencies, effective
+                hreg, code, name, [iv_bus, se_bus], frequencies, effective
             )
         else:
             _, max_generation = _rated_envelope(hreg, code, effective)
@@ -784,7 +902,7 @@ def convert_hydros(
                 "max_outflow_m3s": None,
             },
             "generation": {
-                "model": "constant_productivity",
+                "model": "fpha" if is_fpha else "constant_productivity",
                 "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": max_turbined,
                 "min_generation_mw": 0.0,
@@ -792,6 +910,38 @@ def convert_hydros(
             },
             "unit_groups": unit_groups,
         }
+        if is_fpha:
+            rho_esp = effective.value(code, "produtibilidade_especifica", 0)
+            entry["specific_productivity_mw_per_m3s_per_m"] = rho_esp
+            entry["efficiency"] = {
+                "type": "constant",
+                "value": _fpha_efficiency(rho_esp, name),
+            }
+            # Inline constant tailrace = mean canal de fuga: cobre's FPHA
+            # fallback for a plant whose tailrace_curves.parquet family is
+            # absent (all this deck's FPHA plants do carry a family, so it is
+            # only a safety net).
+            cf = effective.value(code, "canal_fuga_medio", 0)
+            if cf > 0.0:
+                entry["tailrace"] = {"type": "polynomial", "coefficients": [cf]}
+            # Penstock hydraulic losses — a computed FPHA requires the field
+            # (cobre rejects an FPHA plant without it). tipo_perda 1 = a % of
+            # gross head (factor); 2 = constant metres; anything else / no loss
+            # emits an explicit lossless factor so the required field is present.
+            perdas = effective.value(code, "perdas", 0)
+            tipo_perda = int(effective.base.loc[code, "tipo_perda"])
+            if tipo_perda == 1 and perdas > 0.0:
+                entry["hydraulic_losses"] = {"type": "factor", "value": perdas / 100.0}
+            elif tipo_perda == 2 and perdas > 0.0:
+                entry["hydraulic_losses"] = {"type": "constant", "value_m": perdas}
+            else:
+                entry["hydraulic_losses"] = {"type": "factor", "value": 0.0}
+        if travel_time_hours and code in travel_time_hours and downstream is not None:
+            entry["travel_time_hours"] = travel_time_hours[code]
+        if code in evaporation_codes:
+            evaporation_mm = _evaporation_coefficients_mm(hidr, code)
+            if evaporation_mm is not None:
+                entry["evaporation"] = {"coefficients_mm": evaporation_mm}
         hydros.append(entry)
 
     affected_codes = set(effective.machine_conjunto_counts) | {
@@ -836,6 +986,40 @@ def convert_hydros(
     return {"$schema": _SCHEMA_URL, "hydros": hydros}
 
 
+def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> float:
+    """The ``UH`` ``volume_inicial`` percentage resolved to hm³ at stage 0.
+
+    ``pct`` is a percentage of the *initial stage's* effective useful volume,
+    not the plant's outer envelope, so the range is read from
+    :func:`~cobre_bridge.decomp.cadastro.effective_storage_range` at stage
+    ``0``. A run-of-river (``D``) plant's stage-0 range is already the
+    single-point collapse ``(vol_ref, vol_ref)`` (ticket-018), so its initial
+    value is ``vol_ref`` regardless of *pct*. Shared by
+    :func:`convert_initial_storage` (the initial condition) and
+    :func:`_operated_initial_volumes` (the generation-productivity anchor) so
+    both resolve a plant's initial volume identically.
+    """
+    v_min, v_max = effective_storage_range(effective, code, 0)
+    return min(max(v_min + (pct / 100.0) * (v_max - v_min), v_min), v_max)
+
+
+def _operated_initial_volumes(
+    dadger: Dadger, effective: EffectiveCadastro
+) -> dict[int, float]:
+    """``{code: initial reservoir volume hm³}`` for every operated ``UH`` plant.
+
+    The volume :func:`convert_energy_productivity` anchors each plant's
+    generation productivity on — the same value :func:`convert_initial_storage`
+    emits as the initial condition (both via :func:`_initial_volume_hm3`).
+    """
+    return {
+        int(row["codigo_usina"]): _initial_volume_hm3(
+            effective, int(row["codigo_usina"]), float(row["volume_inicial"])
+        )
+        for _, row in _operated_uh(dadger).iterrows()
+    }
+
+
 def convert_initial_storage(
     dadger: Dadger,
     hidr: pd.DataFrame,
@@ -844,22 +1028,15 @@ def convert_initial_storage(
 ) -> list[dict]:
     """Initial reservoir volumes from ``UH`` (% of useful → hm³).
 
-    ``volume_inicial`` is a percentage of the *initial stage's* effective
-    useful volume, not the plant's outer envelope, so the min/max here are
-    read from :func:`~cobre_bridge.decomp.cadastro.effective_storage_range`
-    at stage ``0``. A run-of-river (``D``) plant's stage-0 range is already
-    the single-point collapse ``(vol_ref, vol_ref)`` (ticket-018), so its
-    initial value is ``vol_ref`` regardless of the declared ``UH``
-    percentage.
+    The percentage is resolved by :func:`_initial_volume_hm3` against the
+    stage-0 effective useful volume (run-of-river plants collapse to their
+    reference volume — ticket-018).
     """
     operated = _operated_uh(dadger)
     storage: list[dict] = []
     for _, row in operated.iterrows():
         code = int(row["codigo_usina"])
-        v_min, v_max = effective_storage_range(effective, code, 0)
-        pct = float(row["volume_inicial"])
-        value = v_min + (pct / 100.0) * (v_max - v_min)
-        value = min(max(value, v_min), v_max)
+        value = _initial_volume_hm3(effective, code, float(row["volume_inicial"]))
         storage.append({"hydro_id": id_map.hydro_id(code), "value_hm3": value})
         dead = row.get("volume_morto_inicial")
         if not pd.isna(dead):
@@ -914,24 +1091,37 @@ def _mean_cota_from_coeffs(coeffs: Sequence[float], v_lo: float, v_hi: float) ->
 
 
 def _equivalent_productivity_mw_per_m3s(
-    effective: EffectiveCadastro, code: int, stage_index: int
+    effective: EffectiveCadastro,
+    code: int,
+    stage_index: int,
+    reference_volume_hm3: float | None = None,
 ) -> float:
     """``ρ_eq = ρ_esp · h_net`` for one plant at one stage.
 
-    The gross head is the volume-averaged upstream cota over the **full**
-    operating range (``volume_minimo``..``volume_maximo``) minus the mean
-    tailrace level, with the hydraulic-loss model applied — the same
-    full-range construction the other converter family uses for its
-    constant-productivity plants, for **every** regulation class (no
-    ``tipo_regulacao`` branch: validated against the source model's own
-    reported equivalent productivity to median 0.01% across every class —
-    see the module docstring). Every input is read at *stage_index* through
-    *effective*, so an ``AC PROESP``/``PERHID``/``JUSMED``/``COTVOL``/
-    ``VOLMIN``/``VOLMAX`` override shifts this stage's ρ_eq; ``tipo_perda``
-    carries no ``AC`` register of its own and stays a base read. Factored out
-    so :func:`convert_energy_productivity` (the penalties input, stage-0
-    only) and :func:`convert_hydro_group_availability` (the B8 hydraulic
-    cap, per-stage) always agree on the same plant's stage-*stage_index* ρ_eq.
+    The gross head is an upstream cota minus the mean tailrace level, with the
+    hydraulic-loss model applied. The cota anchor depends on
+    *reference_volume_hm3*:
+
+    * ``None`` (the engolimento anchor) — the volume-averaged cota over the
+      **full** operating range (``volume_minimo``..``volume_maximo``). This is
+      the value the head-aware ``max_turbined`` envelope and
+      :func:`convert_hydro_group_availability`'s B8 hydraulic cap consume,
+      validated against the source model's ``Qtur Maxima``; it stays on the
+      full-range mean so that path is unchanged.
+    * a volume (the **generation** anchor) — the cota at that single volume.
+      :func:`convert_energy_productivity` passes the plant's initial reservoir
+      volume because the source model anchors each plant's hydro production
+      function (FPHA) at the initial volume ± a fit window (manual §3.4.6.4,
+      ``FP`` fields 10-11), **not** the full-range mean. For a reservoir
+      starting far from mid-range the two heads differ materially — validated
+      against ``dec_oper_usih`` effective productivity, the initial-volume
+      anchor cuts the reservoir median error 4.3% -> 2.6% and the worst case
+      (BARRA BONITA, 87% full) 22.7% -> 5.9%.
+
+    Every other input is read at *stage_index* through *effective*, so an
+    ``AC PROESP``/``PERHID``/``JUSMED``/``COTVOL``/``VOLMIN``/``VOLMAX``
+    override shifts this stage's ρ_eq; ``tipo_perda`` carries no ``AC`` register
+    of its own and stays a base read.
     """
     v_min = effective.value(code, "volume_minimo", stage_index)
     v_max = effective.value(code, "volume_maximo", stage_index)
@@ -940,7 +1130,11 @@ def _equivalent_productivity_mw_per_m3s(
     perdas = effective.value(code, "perdas", stage_index)
     tipo_perda = int(effective.base.loc[code, "tipo_perda"])
     coeffs = effective.cota_polynomial(code, stage_index)
-    h_gross = _mean_cota_from_coeffs(coeffs, v_min, v_max) - cf
+    if reference_volume_hm3 is None:
+        cota = _mean_cota_from_coeffs(coeffs, v_min, v_max)
+    else:
+        cota = _eval_cota_from_coeffs(coeffs, reference_volume_hm3)
+    h_gross = cota - cf
     h_net = max(_apply_hydraulic_loss(h_gross, tipo_perda, perdas), 0.0)
     return rho_esp * h_net
 
@@ -948,23 +1142,41 @@ def _equivalent_productivity_mw_per_m3s(
 def convert_energy_productivity(
     effective: EffectiveCadastro,
     id_map: DecompIdMap,
+    initial_volumes: dict[int, float] | None = None,
+    exclude_codes: set[int] | None = None,
 ) -> pa.Table:
-    """Per-plant stage-0 equivalent productivity.
+    """Per-plant equivalent generation productivity, anchored at initial volume.
 
-    ``ρ_eq = ρ_esp · h_net`` at the initial stage — see
-    :func:`_equivalent_productivity_mw_per_m3s`. Emits exactly one value per
-    plant (``stage_id`` stays ``None``): cobre's DECOMP ``constant_
-    productivity`` production model and :func:`convert_penalties` both
-    consume one ρ_eq per plant, so a plant whose head/productivity inputs
-    carry a mid-horizon ``AC`` override still only contributes its stage-0
-    effective value here — the per-stage variation instead feeds
+    ``ρ_eq = ρ_esp · h_net`` with the head taken at the plant's **initial
+    reservoir volume** — the source model's FPHA fit anchor (see
+    :func:`_equivalent_productivity_mw_per_m3s`). *initial_volumes*
+    (``{code: hm³}``, from :func:`_operated_initial_volumes`) supplies that
+    anchor; a plant absent from it — or the whole map being ``None`` — falls
+    back to the full-range mean anchor (``reference_volume_hm3=None``), the
+    pre-FPHA-fix behaviour.
+
+    *exclude_codes* omits those plants from the emitted table — used for the
+    ``hydro_energy_productivity.parquet`` write to drop the FPHA plants, which
+    carry ``model: "fpha"`` and would be a double-supply (cobre rejects a plant
+    that has both a computed FPHA and a parquet ρ_eq). Left ``None`` (every
+    plant emitted) the full list still feeds :func:`convert_penalties`' system
+    ρ_avg/ρ_max, so the penalty scale is unchanged by the FPHA split. The
+    per-stage head variation instead feeds
     :func:`convert_hydro_group_availability`'s own hydraulic ceiling.
     """
+    vols = initial_volumes or {}
+    excluded = exclude_codes or set()
     hydro_ids: list[int] = []
     values: list[float] = []
     for code in id_map.hydro_codes:
+        if code in excluded:
+            continue
         hydro_ids.append(id_map.hydro_id(code))
-        values.append(_equivalent_productivity_mw_per_m3s(effective, code, 0))
+        values.append(
+            _equivalent_productivity_mw_per_m3s(
+                effective, code, 0, reference_volume_hm3=vols.get(code)
+            )
+        )
 
     return pa.table(
         {
@@ -1026,29 +1238,8 @@ def _stage_register_factor(
     return float(row[column])
 
 
-@dataclass(frozen=True)
-class AvailabilityDeltaRow:
-    """One single-group ``(hydro, stage)`` where the B8 hydraulic ceiling
-    (``ρ_eq · q_max``) binds below the ``installed × MP × FD`` availability —
-    the "accepted cost" B8 requires measuring and reporting, not assuming
-    empty.
-    """
-
-    code: int
-    name: str
-    stage_id: int
-    hydraulic_mw: float
-    availability_mw: float
-
-    @property
-    def pct_under(self) -> float:
-        """Percentage the hydraulic ceiling sits below the availability value."""
-        return (self.availability_mw - self.hydraulic_mw) / self.availability_mw * 100.0
-
-
 def _availability_bound_entry(
     q_g: float,
-    hydraulic_mw: float,
     availability_mw: float,
     q_envelope: float,
     p_envelope: float,
@@ -1056,8 +1247,16 @@ def _availability_bound_entry(
     """One ``(hydro/group, stage)``'s B8 overlay entry, or ``None`` if
     neither bound column falls below that group's own declared envelope.
 
-    ``max_generation_mw`` is ``min(hydraulic_mw, availability_mw)`` when
-    that falls below *p_envelope* (the existing B8 behaviour);
+    ``max_generation_mw`` is *availability_mw* (installed × MP × FD — the
+    source model's own reported available capacity, ``potencia_disponivel``)
+    when it falls below *p_envelope*. The turbined-flow ceiling is *not*
+    folded into this generation cap: ``max_turbined_m3s`` below already caps
+    the flow at the per-stage head-corrected engolimento, and generation is
+    ``productivity × turbined``, so the physical hydraulic limit binds through
+    the flow cap — a separate ``ρ_eq·q_max`` generation cap only ever
+    duplicated it (and understated any FPHA plant whose production curve beat
+    the linear ``ρ_eq`` estimate).
+
     ``max_turbined_m3s`` is *q_g* — the per-stage **head-corrected** turbined
     flow (the head-aware engolimento supplied by the caller, not the rated
     unit-flow sum) — when it falls below *q_envelope* (a mid-horizon machine-set
@@ -1066,8 +1265,9 @@ def _availability_bound_entry(
     per-conjunto-group emission loops in
     :func:`convert_hydro_group_availability`.
     """
-    emitted = min(hydraulic_mw, availability_mw)
-    max_generation_mw = emitted if _below_envelope(emitted, p_envelope) else None
+    max_generation_mw = (
+        availability_mw if _below_envelope(availability_mw, p_envelope) else None
+    )
     max_turbined_m3s = q_g if _below_envelope(q_g, q_envelope) else None
     if max_generation_mw is None and max_turbined_m3s is None:
         return None
@@ -1082,7 +1282,7 @@ def convert_hydro_group_availability(
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
     effective: EffectiveCadastro,
-) -> tuple[dict[tuple[int, int, int], GroupBoundEntry], list[AvailabilityDeltaRow]]:
+) -> dict[tuple[int, int, int], GroupBoundEntry]:
     """B8 per-group per-stage available capacity.
 
     For the single-group majority (every plant but Itaipu):
@@ -1090,21 +1290,21 @@ def convert_hydro_group_availability(
     ``installed(stage)`` is the per-stage AC-adjusted rated power
     (:func:`_compute_max_turbined_rated_ac_adjusted`, sourced from
     *effective*'s machine-set view), a missing ``MP``/``FD`` register
-    defaults its factor to ``1.0`` — capped by the per-stage hydraulic
-    ceiling ``ρ_eq(stage) · q(stage)`` (``ρ_eq(stage)`` the same per-stage
-    :func:`_equivalent_productivity_mw_per_m3s` :func:`convert_energy_
-    productivity` reads at stage 0; ``q(stage)`` the per-stage AC-adjusted
-    **rated** flow — the hydraulic ceiling and ``max_generation_mw`` overlay
-    are unaffected by ticket-017). The emitted ``max_generation_mw`` overlay
-    is sparse against the group's own rated envelope (:func:`_rated_envelope`);
-    the emitted ``max_turbined_m3s`` overlay is instead the per-stage
-    **head-corrected** flow (:func:`_head_corrected_max_turbined_ac_adjusted`,
-    ticket-017), sparse against the group's own head-corrected envelope
-    (:func:`_head_corrected_envelope`) — a mid-horizon machine-set shrink or
-    head drop lowers both ceilings independently
-    (:func:`_availability_bound_entry`). Defensively, any *other* plant
-    whose ``MP``/``FD`` register carries more than one row is also dropped
-    from this path (today only Itaipu, code 66, does).
+    defaults its factor to ``1.0``. This *is* the source model's own reported
+    available capacity (``potencia_disponivel``), so it is emitted directly as
+    the ``max_generation_mw`` overlay, sparse against the group's own rated
+    envelope (:func:`_rated_envelope`). The per-stage hydraulic engolimento
+    limit is *not* imposed as a second generation cap: the emitted
+    ``max_turbined_m3s`` overlay is the per-stage **head-corrected** flow
+    (:func:`_head_corrected_max_turbined_ac_adjusted`, ticket-017), sparse
+    against the group's own head-corrected envelope
+    (:func:`_head_corrected_envelope`), and generation is
+    ``productivity × turbined`` — so the physical hydraulic limit binds
+    through the flow cap, not through a redundant ``ρ_eq·q_max`` generation
+    ceiling (:func:`_availability_bound_entry`). A mid-horizon machine-set
+    shrink or head drop lowers both ceilings independently. Defensively, any
+    *other* plant whose ``MP``/``FD`` register carries more than one row is
+    also dropped from this path (today only Itaipu, code 66, does).
 
     For Itaipu specifically, the same B8 formula is computed **per
     conjunto-backed group** rather than per plant —
@@ -1112,28 +1312,17 @@ def convert_hydro_group_availability(
     FD_g(stage)``, ``g`` in ``{0, 1}`` (frequencies sorted ascending,
     matching :func:`_build_split_unit_groups`'s group ids), each register
     row frequency-matched via :func:`_frequency_row` (no defaulting to
-    ``1.0`` — the split plant declares both rows) — capped by that same
-    group's own per-stage hydraulic ceiling ``ρ_eq(stage) · q_g(stage)``
-    (``ρ_eq(stage)`` per-plant per-stage, ``q_g(stage)`` per-conjunto,
-    **rated**); its ``max_turbined_m3s`` overlay is the per-conjunto
-    head-corrected flow (:func:`_conjunto_head_corrected_ac_adjusted`),
-    sparse against that group's own head-corrected envelope
-    (:func:`_conjunto_head_corrected_envelope`). Itaipu's binding rows are
-    *not* folded into the returned ``deltas`` list
-    (which stays single-group-only, preserving the shared B8 Diagnostic's
-    pre-existing count) — its own accepted-cost delta is measured and pinned in
-    ``tests/test_decomp_availability_rule.py`` per the ticket's own
-    "reconstruct independently, never read the converter's own
-    intermediate" discipline.
+    ``1.0`` — the split plant declares both rows); its ``max_turbined_m3s``
+    overlay is the per-conjunto head-corrected flow
+    (:func:`_conjunto_head_corrected_ac_adjusted`), sparse against that
+    group's own head-corrected envelope
+    (:func:`_conjunto_head_corrected_envelope`).
 
     Returns the ``(hydro_id, hydro_unit_group_id, stage_id) ->
     GroupBoundEntry`` mapping ticket-025's ``convert_hydro_unit_group_bounds``
     consumes unchanged — populated *sparsely*, only where an emitted value
     falls below that group's own declared envelope, the same "only where it
-    differs" convention every sibling emitter uses — plus the list of
-    single-group ``(hydro, stage)`` rows where the hydraulic ceiling actually
-    bound below availability, B8's own attached measurement obligation. The
-    caller reports that list as a :class:`~cobre_bridge.diagnostics.Diagnostic`.
+    differs" convention every sibling emitter uses.
     """
     mp = dadger.mp(df=True)
     fd = dadger.fd(df=True)
@@ -1141,7 +1330,6 @@ def convert_hydro_group_availability(
     fd_by_code = _single_group_factor_rows(fd)
 
     values: dict[tuple[int, int, int], GroupBoundEntry] = {}
-    deltas: list[AvailabilityDeltaRow] = []
     for code in id_map.hydro_codes:
         hreg = hidr.loc[code]
         hydro_id = id_map.hydro_id(code)
@@ -1165,7 +1353,6 @@ def convert_hydro_group_availability(
                     q_g, p_g = _conjunto_rated_ac_adjusted(
                         hreg, code, conjunto_index, effective, stage.index
                     )
-                    hydraulic_mw = rho_eq * q_g
                     mp_factor = _stage_register_factor(
                         mp_row, "manutencao", code, stage.index
                     )
@@ -1188,12 +1375,11 @@ def convert_hydro_group_availability(
                         )
                     )
                     entry = _availability_bound_entry(
-                        q_head, hydraulic_mw, availability_mw, q_envelope, p_envelope
+                        q_head, availability_mw, q_envelope, p_envelope
                     )
                     if entry is not None:
                         values[(hydro_id, i, stage.index)] = entry
             continue
-        name = str(hreg["nome_usina"]).strip()
         _, p_envelope = _rated_envelope(hreg, code, effective)
         q_envelope = _head_corrected_envelope(hreg, code, effective)
         mp_row = mp_by_code.get(code)
@@ -1204,7 +1390,6 @@ def convert_hydro_group_availability(
             q_g, p_g = _compute_max_turbined_rated_ac_adjusted(
                 hreg, code, effective, stage.index
             )
-            hydraulic_mw = rho_eq * q_g
             mp_factor = (
                 1.0
                 if mp_row is None
@@ -1217,17 +1402,6 @@ def convert_hydro_group_availability(
             )
             availability_mw = p_g * mp_factor * fd_factor
 
-            if hydraulic_mw < availability_mw:
-                deltas.append(
-                    AvailabilityDeltaRow(
-                        code=code,
-                        name=name,
-                        stage_id=stage.index,
-                        hydraulic_mw=hydraulic_mw,
-                        availability_mw=availability_mw,
-                    )
-                )
-
             h_op = _operating_head(effective, code, stage.index, rho_eq)
             q_head = (
                 q_g
@@ -1237,30 +1411,153 @@ def convert_hydro_group_availability(
                 )
             )
             entry = _availability_bound_entry(
-                q_head, hydraulic_mw, availability_mw, q_envelope, p_envelope
+                q_head, availability_mw, q_envelope, p_envelope
             )
             if entry is not None:
                 values[(hydro_id, 0, stage.index)] = entry
 
-    return values, deltas
+    return values
 
 
-def convert_production_models(id_map: DecompIdMap) -> dict:
-    """Constant-productivity production models for every operated plant."""
-    return {
-        "$schema": _PRODUCTION_MODELS_SCHEMA_URL,
-        "production_models": [
+#: The two Itaipu frequency-half minimum-generation floors on the ``RI``
+#: register, keyed by the split-plant group id they bound (0 = 50 Hz, 1 =
+#: 60 Hz, matching :func:`_build_split_unit_groups`'s ascending-frequency
+#: ordering). Each value is the ``RI`` column prefix whose per-patamar slots
+#: (``…_1``.. ``…_5``) carry that half's floor.
+_ITAIPU_MIN_GENERATION_PREFIXES: tuple[tuple[int, str], ...] = (
+    (0, "geracao_minima_50_hz"),
+    (1, "geracao_minima_60_hz"),
+)
+
+
+def convert_itaipu_frequency_min_generation(
+    dadger: Dadger,
+    id_map: DecompIdMap,
+    calendar: Sequence[OperativeStage],
+) -> dict[tuple[int, int, int], list[float]]:
+    """Itaipu's per-frequency minimum-generation floors from the ``RI`` register.
+
+    DECOMP's ``RI`` (restrição de Itaipu) register carries a must-run floor on
+    each Itaipu frequency half: ``geracao_minima_50_hz`` on the 50 Hz group
+    (which serves the Paraguay/ANDE load plus its surplus into SE) and
+    ``geracao_minima_60_hz`` on the 60 Hz group (on the plant's own bus). Each
+    is a per-(estágio, patamar) list, forward-filled across the calendar the
+    same way :func:`~cobre_bridge.decomp.libs_electrical.read_carga_ande` fills
+    the co-located ``carga_ande`` load. In DECOMP the 50 Hz floor binds (the
+    50 Hz half sits exactly at it), so dropping it lets the converted case
+    under-run Itaipu's 50 Hz half and backfill the ANDE load from the rest of
+    the system through the ``IV`` bus's lines.
+
+    Returns ``{(hydro_id, hydro_unit_group_id, stage_index): [MW per block]}``
+    for the two Itaipu groups, ready to merge into the
+    ``hydro_unit_group_bounds`` overlay's ``min_generation_mw`` column
+    (:func:`~cobre_bridge.decomp.group_bounds.convert_hydro_unit_group_bounds`).
+    Returns ``{}`` when the deck operates no Itaipu or carries no ``RI``
+    register (a deck with no Itaipu import).
+
+    Raises
+    ------
+    ValueError
+        When a declared row's ``estagio`` falls outside the calendar, when a
+        frequency half's patamar-value count does not match the calendar's
+        block count for that stage, or when the register declares a frequency
+        half but no estágio-1 row for it (no forward-fill base) -- the same
+        fail-loud contract as ``read_carga_ande``.
+    """
+    if _ITAIPU_CODE not in id_map.hydro_codes:
+        return {}
+    ri = dadger.ri(df=True)
+    if ri is None or ri.empty:
+        return {}
+
+    hydro_id = id_map.hydro_id(_ITAIPU_CODE)
+    n_stages = len(calendar)
+    result: dict[tuple[int, int, int], list[float]] = {}
+    for group_id, prefix in _ITAIPU_MIN_GENERATION_PREFIXES:
+        patamar_columns = [
+            column
+            for _, column in sorted(
+                (int(column[len(prefix) + 1 :]), column)
+                for column in ri.columns
+                if column.startswith(f"{prefix}_")
+                and column[len(prefix) + 1 :].isdigit()
+            )
+        ]
+        if not patamar_columns:
+            continue
+
+        declared: dict[int, list[float]] = {}
+        for _, row in ri.iterrows():
+            stage_index = int(row["estagio"]) - 1
+            if not 0 <= stage_index < n_stages:
+                raise ValueError(
+                    f"RI {prefix} período {int(row['estagio'])} outside the "
+                    f"calendar (1..{n_stages})"
+                )
+            values = [row[column] for column in patamar_columns]
+            while values and pd.isna(values[-1]):
+                values.pop()
+            n_blocks = len(calendar[stage_index].block_hours)
+            if len(values) != n_blocks:
+                raise ValueError(
+                    f"RI {prefix} stage {stage_index}: {len(values)} patamares "
+                    f"declared vs {n_blocks} blocks in the calendar"
+                )
+            declared[stage_index] = [float(value) for value in values]
+
+        if 0 not in declared:
+            raise ValueError(
+                f"RI {prefix}: no row declares estágio 1; sparse-stage "
+                "inheritance has no base"
+            )
+
+        per_stage: list[list[float]] = []
+        for stage in calendar:
+            per_stage.append(
+                declared.get(stage.index, per_stage[-1] if per_stage else declared[0])
+            )
+        for stage, values in zip(calendar, per_stage, strict=True):
+            result[(hydro_id, group_id, stage.index)] = values
+
+    return result
+
+
+def convert_production_models(
+    id_map: DecompIdMap,
+    fpha_configs: dict[int, dict] | None = None,
+    reference_volumes: dict[int, dict] | None = None,
+) -> dict:
+    """Per-plant production-model selection.
+
+    A plant in *fpha_configs* (``{code: fpha_config}``, from the pipeline via
+    :func:`cobre_bridge.decomp.fpha.fitting_window`) is emitted as ``model:
+    "fpha"`` — cobre fits the production function from the plant geometry
+    (``hydro_geometry.parquet``) + tailrace families (``tailrace_curves.parquet``)
+    over the config's ``fitting_window`` — with its ``reference_volume`` (from
+    *reference_volumes*, the initial-volume anchor) setting the FPHA reference /
+    backwater level. Every other operated plant keeps ``constant_productivity``,
+    its ρ_eq riding in ``hydro_energy_productivity.parquet``. *fpha_configs* and
+    *reference_volumes* are pre-built by the pipeline so this module needs no
+    import from :mod:`cobre_bridge.decomp.fpha` (which imports it).
+    """
+    fpha_configs = fpha_configs or {}
+    reference_volumes = reference_volumes or {}
+    models: list[dict] = []
+    for code in id_map.hydro_codes:
+        stage_range: dict = {"start_stage_id": 0, "end_stage_id": None}
+        if code in fpha_configs:
+            stage_range["model"] = "fpha"
+            stage_range["fpha_config"] = fpha_configs[code]
+            reference_volume = reference_volumes.get(code)
+            if reference_volume is not None:
+                stage_range["reference_volume"] = reference_volume
+        else:
+            stage_range["model"] = "constant_productivity"
+        models.append(
             {
                 "hydro_id": id_map.hydro_id(code),
                 "selection_mode": "stage_ranges",
-                "stage_ranges": [
-                    {
-                        "start_stage_id": 0,
-                        "end_stage_id": None,
-                        "model": "constant_productivity",
-                    }
-                ],
+                "stage_ranges": [stage_range],
             }
-            for code in id_map.hydro_codes
-        ],
-    }
+        )
+    return {"$schema": _PRODUCTION_MODELS_SCHEMA_URL, "production_models": models}

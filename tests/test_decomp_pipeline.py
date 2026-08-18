@@ -8,7 +8,7 @@ import re
 from contextlib import ExitStack
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pyarrow as pa
@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from cobre_bridge.cli import app
+from cobre_bridge.decomp.anticipated import GnlEmission
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.cadastro import DiversionChannel, EffectiveCadastro
 from cobre_bridge.decomp.constraint_registers import (
@@ -28,7 +29,11 @@ from cobre_bridge.decomp.constraint_registers import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
-from cobre_bridge.decomp.pipeline import _diversion_channels
+from cobre_bridge.decomp.pipeline import (
+    ConversionReport,
+    _base_diversion_channels,
+    _diversion_channels,
+)
 from cobre_bridge.decomp.scenarios import (
     convert_external_inflows,
     convert_inflow_stats_identity,
@@ -36,8 +41,10 @@ from cobre_bridge.decomp.scenarios import (
     deterministic_external_scenarios,
     terminal_fan_probabilities,
 )
+from cobre_bridge.decomp.single_term_bounds import HydroCapacities
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
+from cobre_bridge.diagnostics import Diagnostic
 
 _RV3_DECK = Path("example/decomp-jul-26-rv3")
 
@@ -108,11 +115,12 @@ class TestScenarioEmitters:
         # 4 tree nodes × 2 hydros.
         assert len(table) == 8
         trunk = table[(table["stage_id"] == 0) & (table["hydro_id"] == 1)]
-        # Plant 2's incremental subtracts its operated upstream (plant 1).
-        assert trunk["value_m3s"].iloc[0] == pytest.approx(150.0 - 100.0)
+        # DECOMP's inflow file is already incremental per gauge column, so
+        # plant 2's value passes through directly (no upstream subtraction).
+        assert trunk["value_m3s"].iloc[0] == pytest.approx(150.0)
         fan = table[(table["stage_id"] == 2) & (table["scenario_id"] == 1)]
         assert fan[fan["hydro_id"] == 0]["value_m3s"].iloc[0] == pytest.approx(120.0)
-        assert fan[fan["hydro_id"] == 1]["value_m3s"].iloc[0] == pytest.approx(60.0)
+        assert fan[fan["hydro_id"] == 1]["value_m3s"].iloc[0] == pytest.approx(180.0)
 
     def test_identity_stats(self) -> None:
         stats = convert_inflow_stats_identity(_ID_MAP, _calendar()).to_pandas()
@@ -296,6 +304,54 @@ class TestPipeline:
             convert_decomp_case(tmp_path, tmp_path / "out")
 
 
+class TestPhaseLabels:
+    """ticket-004 (epic-02): ``DECOMP_CONVERSION_PHASE_LABELS`` + the
+    ``on_phase`` progress callback, mirroring the source model's own
+    ``CONVERSION_PHASE_LABELS``/``on_phase`` wiring."""
+
+    def test_decomp_conversion_phase_labels_is_the_expected_tuple(self) -> None:
+        from cobre_bridge.decomp.pipeline import DECOMP_CONVERSION_PHASE_LABELS
+
+        assert DECOMP_CONVERSION_PHASE_LABELS == (
+            "Discovering deck",
+            "Converting entities",
+            "Converting scenarios",
+            "Resolving bounds",
+            "Converting constraints",
+            "Writing outputs",
+        )
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_rv3_on_phase_callback_receives_every_label_once_in_order(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import (
+            DECOMP_CONVERSION_PHASE_LABELS,
+            convert_decomp_case,
+        )
+
+        labels: list[str] = []
+        dst = tmp_path / "case"
+        convert_decomp_case(_RV3_DECK, dst, on_phase=labels.append)
+
+        assert labels == list(DECOMP_CONVERSION_PHASE_LABELS)
+
+    @pytest.mark.skipif(
+        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
+    )
+    def test_rv3_no_on_phase_still_returns_a_report_without_raising(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import ConversionReport, convert_decomp_case
+
+        dst = tmp_path / "case"
+        report = convert_decomp_case(_RV3_DECK, dst)
+
+        assert isinstance(report, ConversionReport)
+
+
 class TestEmissionCheckWiring:
     """The post-emission self-checks (ticket-016, epic-04) run inside
     ``convert_decomp_case``, before the constraint writes."""
@@ -317,13 +373,30 @@ class TestEmissionCheckWiring:
         row down to the declared capacity, so ``convert_decomp_case`` no
         longer raises the rule-43 ``hydro-bounds-raises-declared-capacity``
         error on it, and a ``decomp-re-generation-clamped`` diagnostic
-        records the clamp instead."""
+        records the clamp instead.
+
+        ticket-003: ``convert_decomp_case`` now owns its own ``dx.collect()``
+        and returns a ``ConversionReport``, so this reads
+        ``report.diagnostics`` instead of wrapping the call in its own outer
+        sink (which would now be shadowed and see nothing). Also covers
+        AC-1/AC-2: every entity/stage count on the report is ``> 0``, and the
+        report carries the ``cadastro-overrides-applied`` INFO diagnostic
+        plus at least one WARNING-severity diagnostic (the bridged deferral
+        warning)."""
         from cobre_bridge import diagnostics as dx
         from cobre_bridge.decomp.pipeline import convert_decomp_case
 
         dst = tmp_path / "case"
-        with dx.collect() as collected:
-            convert_decomp_case(_RV3_DECK, dst)  # must not raise
+        report = convert_decomp_case(_RV3_DECK, dst)  # must not raise
+
+        assert report.hydro_count > 0
+        assert report.thermal_count > 0
+        assert report.bus_count > 0
+        assert report.line_count > 0
+        assert report.stage_count > 0
+
+        assert any(d.code == "cadastro-overrides-applied" for d in report.diagnostics)
+        assert any(d.severity is dx.Severity.WARNING for d in report.diagnostics)
 
         hydros = json.loads((dst / "system" / "hydros.json").read_text())["hydros"]
         belo_monte = next(h for h in hydros if h["id"] == 159)
@@ -340,11 +413,15 @@ class TestEmissionCheckWiring:
         assert all(v == pytest.approx(capacity) for v in belo_monte_ceilings)
 
         errors = [
-            d for d in collected if d.code == "hydro-bounds-raises-declared-capacity"
+            d
+            for d in report.diagnostics
+            if d.code == "hydro-bounds-raises-declared-capacity"
         ]
         assert errors == []
 
-        clamped = [d for d in collected if d.code == "decomp-re-generation-clamped"]
+        clamped = [
+            d for d in report.diagnostics if d.code == "decomp-re-generation-clamped"
+        ]
         assert clamped
         assert any("Hydro 159" in d.summary for d in clamped)
 
@@ -597,7 +674,17 @@ class TestCli:
         with patch("cobre_bridge.decomp.pipeline.convert_decomp_case") as mock_convert:
             result = runner.invoke(
                 app,
-                ["convert", "decomp", str(tmp_path), str(tmp_path / "out"), "--force"],
+                # --no-fcf: the empty tmp_path is not a discoverable deck, and
+                # this test only asserts the pipeline is invoked (convert is
+                # mocked), so skip the default boundary-FCF discovery/import.
+                [
+                    "convert",
+                    "decomp",
+                    str(tmp_path),
+                    str(tmp_path / "out"),
+                    "--force",
+                    "--no-fcf",
+                ],
             )
         assert result.exit_code == 0
         mock_convert.assert_called_once()
@@ -675,6 +762,13 @@ def _cadastro_plant_row(
         "a2_volume_cota": 0.0,
         "a3_volume_cota": 0.0,
         "a4_volume_cota": 0.0,
+        # cota→area coefficients: this reservoir is FPHA-eligible (non-degenerate
+        # cota + rho_esp > 0), so convert_hydro_geometry reads these.
+        "a0_cota_area": 1.0,
+        "a1_cota_area": 0.0,
+        "a2_cota_area": 0.0,
+        "a3_cota_area": 0.0,
+        "a4_cota_area": 0.0,
         "canal_fuga_medio": 20.0,
         "produtibilidade_especifica": 0.009,
         "tipo_perda": 0,
@@ -733,13 +827,31 @@ class _CadastroDadger:
     class _Tx:
         taxa = 12.0
 
+    class _Data:
+        """Register API `resolve_cvar` probes: no ``AR`` register (this mock
+        deck is risk-neutral), so CVaR resolution yields expectation."""
+
+        @staticmethod
+        def of_type(_register: type) -> list[object]:
+            return []
+
     def __init__(self, ac_volmax_frame: pd.DataFrame | None) -> None:
         self.tx = self._Tx()
+        self.data = self._Data()
         self._uh = _cadastro_uh_frame()
         self._ac_volmax_frame = ac_volmax_frame
 
     def uh(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
         return self._uh
+
+    def vi(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return None
+
+    def ve(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return None
+
+    def ti(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
+        return None
 
     def ac(
         self,
@@ -761,6 +873,11 @@ def _run_cadastro_pipeline(
     to_generic: tuple[ConstraintRecord, ...] = (),
     unreadable_electrical: tuple[object, ...] = (),
     libs_electrical: object | None = None,
+    diagnostics_out: list[Diagnostic] | None = None,
+    dry_run: bool = False,
+    report_out: list[ConversionReport] | None = None,
+    gnl_emission: GnlEmission | None = None,
+    convert_gnl_mock_out: list[MagicMock] | None = None,
 ) -> Path:
     """Run ``convert_decomp_case`` against the fully synthetic mock deck
     above, patching every converter this ticket does not wire to a canned
@@ -774,6 +891,32 @@ def _run_cadastro_pipeline(
     detection helpers the same way — both otherwise patched to their
     empty/absent default so this shared fixture keeps regressing the
     ticket-008/023 combine logic it was built for, undisturbed.
+
+    *diagnostics_out* (ticket-003): ``convert_decomp_case`` now owns its own
+    top-level ``dx.collect()``, so a caller-side ``with dx.collect():``
+    wrapped around this helper would be shadowed and see nothing. A caller
+    that needs the run's diagnostics passes a list here; it is extended in
+    place with ``report.diagnostics`` after the (patched) conversion returns.
+
+    *dry_run* (ticket-007) threads straight through to ``convert_decomp_case``.
+    *report_out*, mirroring *diagnostics_out*'s out-param shape, lets a caller
+    inspect the full returned ``ConversionReport`` (e.g. ``would_write_paths``)
+    without changing this helper's ``Path``-only return type.
+
+    *gnl_emission* (ticket-004, epic-03) drives the pipeline's GNL wiring
+    block (``pipeline.py``'s ``files.dadgnl is not None`` branch), which every
+    other caller skips by leaving *gnl_emission* at its ``None`` default. When
+    supplied: ``files.dadgnl`` points at a placeholder path so the branch is
+    entered; ``Dadger.Dadgnl.read``/``anticipated_conv.read_gnl_model`` are
+    patched to a sentinel non-``None`` model (their own decode logic is out of
+    scope — ``tests/test_decomp_anticipated.py`` owns it);
+    ``anticipated_conv.convert_gnl`` is patched to return *gnl_emission*
+    verbatim; and ``thermal_conv.convert_thermals`` is swapped from the empty
+    default to a single CT thermal (id ``0``) so ``first_thermal_id`` (``max(id)
+    + 1``) resolves to ``1`` instead of raising on an empty sequence.
+    *convert_gnl_mock_out*, mirroring *diagnostics_out*'s out-param shape, lets
+    a caller recover the ``convert_gnl`` mock (and thus its call args) after
+    the patched run — populated only alongside *gnl_emission*.
     """
     from cobre_bridge.decomp.pipeline import DecompFiles, convert_decomp_case
 
@@ -782,8 +925,9 @@ def _run_cadastro_pipeline(
         dadger=Path("unused/dadger.rv0"),
         vazoes=Path("unused/vazoes.rv0"),
         hidr=Path("unused/hidr.dat"),
-        dadgnl=None,
+        dadgnl=Path("unused/dadgnl.rv0") if gnl_emission is not None else None,
         renovaveis=None,
+        polinjus=None,
     )
     dadger = _CadastroDadger(ac_volmax_frame)
     hidr = _cadastro_hidr_frame()
@@ -859,6 +1003,8 @@ def _run_cadastro_pipeline(
         },
         "cobre_bridge.decomp.pipeline"
         ".scenarios_conv.convert_external_inflows": external_inflow_table,
+        "cobre_bridge.decomp.pipeline"
+        ".scenarios_conv.convert_recent_observation_windows": [],
         "cobre_bridge.decomp.pipeline.load_conv.convert_load_stats": load_stats_table,
         "cobre_bridge.decomp.pipeline.load_conv.convert_load_factors": {},
         "cobre_bridge.decomp.pipeline.ncs_conv.convert_ncs_stats": ncs_stats_table,
@@ -868,10 +1014,7 @@ def _run_cadastro_pipeline(
         ),
         "cobre_bridge.decomp.pipeline"
         ".bounds_conv.convert_hydro_bounds": baseline_hydro_bounds,
-        "cobre_bridge.decomp.pipeline.hydro_conv.convert_hydro_group_availability": (
-            {},
-            [],
-        ),
+        "cobre_bridge.decomp.pipeline.hydro_conv.convert_hydro_group_availability": {},
         "cobre_bridge.decomp.pipeline.contracts_conv.read_contracts": [],
         # epic-07 (ticket-023): the mock deck (_CadastroDadger) exposes no
         # RE/HQ/HV/UE accessors, so the special-constraint census and the
@@ -895,12 +1038,180 @@ def _run_cadastro_pipeline(
             libs_electrical
         ),
     }
+    if gnl_emission is not None:
+        # ticket-004: route the GNL wiring block (pipeline.py:779-810) through
+        # its own patches rather than the empty/absent default above —
+        # convert_gnl's own decode/placement logic stays out of scope
+        # (tests/test_decomp_anticipated.py owns it), only the routing of its
+        # *return value* into the written case files is under test here.
+        patches["cobre_bridge.decomp.pipeline.Dadgnl.read"] = object()
+        patches["cobre_bridge.decomp.pipeline.anticipated_conv.read_gnl_model"] = (
+            object()
+        )
+        patches["cobre_bridge.decomp.pipeline.anticipated_conv.convert_gnl"] = (
+            gnl_emission
+        )
+        patches["cobre_bridge.decomp.pipeline.thermal_conv.convert_thermals"] = {
+            "thermals": [{"id": 0}]
+        }
     with ExitStack() as stack:
+        entered: dict[str, MagicMock] = {}
         for target, value in patches.items():
-            stack.enter_context(patch(target, return_value=value))
+            entered[target] = stack.enter_context(patch(target, return_value=value))
+        if convert_gnl_mock_out is not None:
+            convert_gnl_mock_out.append(
+                entered["cobre_bridge.decomp.pipeline.anticipated_conv.convert_gnl"]
+            )
         dst = tmp_path / "case"
-        convert_decomp_case(Path("unused-src"), dst)
+        report = convert_decomp_case(Path("unused-src"), dst, dry_run=dry_run)
+    if diagnostics_out is not None:
+        diagnostics_out.extend(report.diagnostics)
+    if report_out is not None:
+        report_out.append(report)
     return dst
+
+
+# ticket-004 (epic-03): two hand-built ``GnlEmission`` fixtures driving
+# ``TestGnlWiring`` below via ``_run_cadastro_pipeline``'s ``gnl_emission``
+# param — no real ``dadgnl`` deck, no ``convert_gnl`` execution (it is
+# mocked). "Populated" carries a non-empty right boundary (a pinned,
+# post-horizon delivery); "empty-right-boundary" mirrors a GS-calendar-only
+# plant (e.g. PSERGIPE I) that declares free deliveries in-study but commits
+# none post-horizon.
+_POPULATED_GNL_EMISSION = GnlEmission(
+    thermals=[
+        {"id": 1, "name": "GNL A", "anticipated_config": {"lead_time_hours": 168.0}},
+        {"id": 2, "name": "GNL B", "anticipated_config": {"lead_time_hours": 336.0}},
+    ],
+    past_anticipated_commitments=[
+        {"thermal_id": 1, "stage_id": 0, "mw": 50.0},
+        {"thermal_id": 2, "stage_id": 0, "mw": 30.0},
+    ],
+    future_anticipated_deliveries=[
+        {"thermal_id": 1, "stage_id": 12, "min_mw": 50.0, "max_mw": 50.0},
+        {"thermal_id": 2, "stage_id": 12, "min_mw": 0.0, "max_mw": 100.0},
+    ],
+    post_study_stages={
+        "stages": [{"id": 12, "start_date": "2027-07-06"}],
+        "thermal_bounds": [{"thermal_id": 1, "stage_id": 12, "max_mw": 50.0}],
+    },
+)
+
+_EMPTY_RIGHT_BOUNDARY_GNL_EMISSION = GnlEmission(
+    thermals=[
+        {"id": 1, "name": "GNL A", "anticipated_config": {"lead_time_hours": 168.0}},
+    ],
+    past_anticipated_commitments=[{"thermal_id": 1, "stage_id": 0, "mw": 20.0}],
+    future_anticipated_deliveries=[],
+    post_study_stages={
+        "stages": [{"id": 12, "start_date": "2027-07-06"}],
+        "thermal_bounds": [],
+    },
+)
+
+
+class TestGnlWiring:
+    """ticket-004 (epic-03): regression-guard the pre-existing GNL wiring
+    block (``pipeline.py:779-810``). Epic 02 reworked ``convert_gnl`` to
+    synthesise a GS-driven post-study calendar and free (not just pinned)
+    forward deliveries, but the pipeline call site already carried the
+    unchanged ``GnlEmission`` shape to disk — no tier-1 test exercised it,
+    since the mock deck's ``DecompFiles`` always carried ``dadgnl=None``.
+    These tests drive the block via ``_run_cadastro_pipeline``'s
+    ``gnl_emission`` param without a real ``dadgnl`` deck or a real
+    ``convert_gnl`` call (mocked)."""
+
+    def test_convert_gnl_called_with_first_thermal_id_bus_id_of_and_stages(
+        self, tmp_path: Path
+    ) -> None:
+        """``first_thermal_id`` resolves to 1 past the single mocked CT
+        thermal (id 0); ``bus_id_of`` is the run's own ``id_map.bus_id``;
+        ``stages`` is the exact list written to ``stages.json``."""
+        convert_gnl_mock_out: list[MagicMock] = []
+        dst = _run_cadastro_pipeline(
+            tmp_path,
+            ac_volmax_frame=None,
+            gnl_emission=_POPULATED_GNL_EMISSION,
+            convert_gnl_mock_out=convert_gnl_mock_out,
+        )
+
+        [convert_gnl_mock] = convert_gnl_mock_out
+        convert_gnl_mock.assert_called_once()
+        call_kwargs = convert_gnl_mock.call_args.kwargs
+        assert call_kwargs["first_thermal_id"] == 1
+        assert call_kwargs["bus_id_of"] == _CADASTRO_ID_MAP.bus_id
+        written_stages = json.loads((dst / "stages.json").read_text())["stages"]
+        assert call_kwargs["stages"] == written_stages
+
+    def test_populated_emission_routes_thermals_and_both_boundaries(
+        self, tmp_path: Path
+    ) -> None:
+        """Every created GNL thermal id lands in ``thermals.json``, sorted
+        ascending; both boundaries land in ``initial_conditions.json``
+        verbatim."""
+        dst = _run_cadastro_pipeline(
+            tmp_path, ac_volmax_frame=None, gnl_emission=_POPULATED_GNL_EMISSION
+        )
+
+        thermal_ids = [
+            t["id"]
+            for t in json.loads((dst / "system" / "thermals.json").read_text())[
+                "thermals"
+            ]
+        ]
+        assert thermal_ids == sorted(thermal_ids)
+        assert {1, 2}.issubset(set(thermal_ids))
+
+        initial_conditions = json.loads((dst / "initial_conditions.json").read_text())
+        assert (
+            initial_conditions["past_anticipated_commitments"]
+            == _POPULATED_GNL_EMISSION.past_anticipated_commitments
+        )
+        assert (
+            initial_conditions["future_anticipated_deliveries"]
+            == _POPULATED_GNL_EMISSION.future_anticipated_deliveries
+        )
+
+    def test_empty_right_boundary_writes_post_study_stages_and_omits_key(
+        self, tmp_path: Path
+    ) -> None:
+        """A GS-calendar-only plant (empty ``future_anticipated_deliveries``,
+        empty ``post_study_stages["thermal_bounds"]``) still gets
+        ``post_study_stages.json`` (non-``None`` calendar), but
+        ``initial_conditions.json`` carries no
+        ``future_anticipated_deliveries`` key at all (the block only sets it
+        when truthy)."""
+        dst = _run_cadastro_pipeline(
+            tmp_path,
+            ac_volmax_frame=None,
+            gnl_emission=_EMPTY_RIGHT_BOUNDARY_GNL_EMISSION,
+        )
+
+        post_study = json.loads((dst / "post_study_stages.json").read_text())
+        assert post_study["thermal_bounds"] == []
+        expected_post_study = _EMPTY_RIGHT_BOUNDARY_GNL_EMISSION.post_study_stages
+        assert expected_post_study is not None
+        assert post_study["stages"] == expected_post_study["stages"]
+
+        initial_conditions = json.loads((dst / "initial_conditions.json").read_text())
+        assert "future_anticipated_deliveries" not in initial_conditions
+
+    def test_summary_log_names_future_anticipated_not_post_horizon(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The summary log's future-delivery count is worded "future
+        anticipated deliver(y/ies)" (it counts free + pinned deliveries),
+        never the old "post-horizon deliver(y/ies)"."""
+        with caplog.at_level(logging.INFO, logger="cobre_bridge.decomp.pipeline"):
+            _run_cadastro_pipeline(
+                tmp_path, ac_volmax_frame=None, gnl_emission=_POPULATED_GNL_EMISSION
+            )
+
+        future_matches = [
+            r for r in caplog.records if "future anticipated deliver" in r.message
+        ]
+        assert len(future_matches) == 1
+        assert not any("post-horizon deliver" in r.message for r in caplog.records)
 
 
 class TestCadastroPipelineWiring:
@@ -980,7 +1291,12 @@ class TestCadastroPipelineWiring:
         self, tmp_path: Path
     ) -> None:
         """The resolution-report summary is a single INFO diagnostic naming
-        ``volume_maximo`` among the applied overrides."""
+        ``volume_maximo`` among the applied overrides.
+
+        ticket-003: ``convert_decomp_case`` now owns its own top-level
+        ``dx.collect()``, so this reads the diagnostics via
+        ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
+        ``dx.collect()`` (which would be shadowed and see nothing)."""
         from cobre_bridge import diagnostics as dx
 
         ac_volmax_frame = pd.DataFrame(
@@ -994,8 +1310,10 @@ class TestCadastroPipelineWiring:
                 }
             ]
         )
-        with dx.collect() as collected:
-            _run_cadastro_pipeline(tmp_path, ac_volmax_frame=ac_volmax_frame)
+        collected: list[dx.Diagnostic] = []
+        _run_cadastro_pipeline(
+            tmp_path, ac_volmax_frame=ac_volmax_frame, diagnostics_out=collected
+        )
 
         cadastro_diagnostics = [
             d for d in collected if d.code == "cadastro-overrides-applied"
@@ -1212,7 +1530,12 @@ class TestGenericConstraintWiring:
         self, tmp_path: Path
     ) -> None:
         """AC4: the E1 FE/RHA/LIBs-electrical detection diagnostics are
-        captured by an outer ``dx.collect()``, not only logged."""
+        captured on the returned ``ConversionReport``, not only logged.
+
+        ticket-003: ``convert_decomp_case`` now owns its own top-level
+        ``dx.collect()``, so this reads the diagnostics via
+        ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
+        ``dx.collect()`` (which would be shadowed and see nothing)."""
         from cobre_bridge import diagnostics as dx
 
         fe_diagnostic = dx.Diagnostic(
@@ -1237,13 +1560,14 @@ class TestGenericConstraintWiring:
             summary="synthetic LIBs finding",
         )
 
-        with dx.collect() as collected:
-            _run_cadastro_pipeline(
-                tmp_path,
-                ac_volmax_frame=None,
-                unreadable_electrical=(fe_diagnostic, rha_diagnostic),
-                libs_electrical=libs_diagnostic,
-            )
+        collected: list[dx.Diagnostic] = []
+        _run_cadastro_pipeline(
+            tmp_path,
+            ac_volmax_frame=None,
+            unreadable_electrical=(fe_diagnostic, rha_diagnostic),
+            libs_electrical=libs_diagnostic,
+            diagnostics_out=collected,
+        )
 
         codes = {d.code for d in collected}
         assert {
@@ -1278,21 +1602,165 @@ class TestGenericConstraintWiring:
         assert set(doc) == {"$schema", "constraints"}
 
 
+class TestDryRun:
+    """ticket-007 (epic-03): ``dry_run`` threads through both DECOMP write
+    seams (the in-impl ``_write_json``/``_write_parquet`` closures and the
+    ``write_scalar_parameters`` seam) and the partial-write cleanup arm."""
+
+    def test_dry_run_writes_nothing_and_records_would_write_paths(
+        self, tmp_path: Path
+    ) -> None:
+        report_out: list[ConversionReport] = []
+        dst = _run_cadastro_pipeline(
+            tmp_path, ac_volmax_frame=None, dry_run=True, report_out=report_out
+        )
+
+        assert not dst.exists()
+        [report] = report_out
+        assert str(dst / "config.json") in report.would_write_paths
+        assert str(dst / "stages.json") in report.would_write_paths
+
+    def test_dry_run_defers_generic_parameters_but_records_its_path(
+        self, tmp_path: Path
+    ) -> None:
+        """A surviving RHE record (ticket-018) drives
+        ``write_scalar_parameters`` -- under ``dry_run=True`` it must defer
+        the write while still recording the path, proving the second write
+        seam (outside the ``_write_json``/``_write_parquet`` closures) is
+        dry-run-aware too."""
+        report_out: list[ConversionReport] = []
+        dst = _run_cadastro_pipeline(
+            tmp_path,
+            ac_volmax_frame=None,
+            to_generic=(_synthetic_rhe_record(),),
+            dry_run=True,
+            report_out=report_out,
+        )
+
+        assert not (dst / "constraints" / "generic_parameters.json").exists()
+        [report] = report_out
+        assert (
+            str(dst / "constraints" / "generic_parameters.json")
+            in report.would_write_paths
+        )
+
+    def test_real_run_failure_clears_partial_writes(self, tmp_path: Path) -> None:
+        """A mid-conversion failure on a real run removes the known outputs
+        already written before the raise, so a plain (no ``--force``) retry
+        is not refused as "destination not empty"."""
+        from cobre_bridge.decomp import pipeline as decomp_pipeline
+
+        dst = tmp_path / "case"
+
+        def _fake_impl(*args: object, **kwargs: object) -> ConversionReport:
+            dst.mkdir(parents=True, exist_ok=True)
+            (dst / "config.json").write_text("{}", encoding="utf-8")
+            raise ValueError("boom")
+
+        with (
+            patch.object(
+                decomp_pipeline, "_convert_decomp_case_impl", side_effect=_fake_impl
+            ),
+            pytest.raises(ValueError, match="boom"),
+        ):
+            decomp_pipeline.convert_decomp_case(tmp_path / "src", dst)
+
+        assert not (dst / "config.json").exists()
+
+    def test_dry_run_failure_preserves_pre_existing_dst_contents(
+        self, tmp_path: Path
+    ) -> None:
+        """A dry-run failure must never clear ``dst``: it wrote nothing, and
+        ``dst`` may be a pre-existing populated directory the user never
+        asked to clear. ``config.json`` is one of ``_clear_dst_contents``'s
+        own removal-list names, so its survival proves cleanup was skipped
+        entirely, not merely that this particular name was spared.
+
+        ``force=True`` here only clears the unrelated non-empty-``dst``
+        refusal guard (now checked up front by ``convert_decomp_case``
+        itself, ahead of the mocked impl) so this test can reach and isolate
+        the failure-clearing behavior under ``dry_run`` that it actually
+        targets; see ``test_real_run_against_populated_dst_refuses_without_clearing``
+        for the refusal-guard behavior on its own."""
+        from cobre_bridge.decomp import pipeline as decomp_pipeline
+
+        dst = tmp_path / "case"
+        dst.mkdir()
+        existing = dst / "config.json"
+        existing.write_text("keep me", encoding="utf-8")
+
+        def _fake_impl(*args: object, **kwargs: object) -> ConversionReport:
+            raise ValueError("boom")
+
+        with (
+            patch.object(
+                decomp_pipeline, "_convert_decomp_case_impl", side_effect=_fake_impl
+            ),
+            pytest.raises(ValueError, match="boom"),
+        ):
+            decomp_pipeline.convert_decomp_case(
+                tmp_path / "src", dst, dry_run=True, force=True
+            )
+
+        assert existing.read_text(encoding="utf-8") == "keep me"
+
+    def test_real_run_against_populated_dst_refuses_without_clearing(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for the epic-03 data-loss bug: the non-empty/``force``
+        refusal must fire before the clearing ``try``/``except`` so a plain
+        (no ``--force``) run against a pre-existing, populated ``dst`` raises
+        cleanly and never deletes the user's existing case. Exercises the
+        real guard (no mocking of ``_convert_decomp_case_impl``), since a
+        guard living inside the mocked-out implementation would not be
+        caught by a test that replaces it with a fake."""
+        from cobre_bridge.decomp.pipeline import convert_decomp_case
+
+        dst = tmp_path / "case"
+        dst.mkdir()
+        existing = dst / "config.json"
+        existing.write_bytes(b"keep me")
+
+        with pytest.raises(FileExistsError, match="force"):
+            convert_decomp_case(tmp_path / "src", dst)
+
+        assert existing.read_bytes() == b"keep me"
+
+
+_READ_TRAVEL_TIMES = "cobre_bridge.decomp.pipeline.travel_time_conv.read_travel_times"
+
+
 class TestDeferralWarning:
-    """ticket-024: the flat ``deferred at this milestone`` warning names only
-    what genuinely remains deferred at this milestone (GNL anticipation,
-    boundary FCF, windowed inflow inputs). E3-E6 now convert every readable
-    RE/RHQ/RHV/RHE family, so the old "flow/volume/electrical constraint
-    families" clause is dropped; the FE/RHA/LIBs surfaces ticket-023b already
-    reports through the structured ``dx`` sink must not be named here too.
+    """The flat ``deferred at this milestone`` warning now names ONLY water
+    travel time, and only when the deck actually carries a ``VI`` register.
+    Boundary FCF is imported by default, reservoir evaporation is converted
+    (cobre >= 0.14's C11 fix), and windowed inflow inputs do not apply to the
+    external explicit tree the DECOMP path emits — so none of those are
+    deferred, and a deck with no travel time emits no deferral warning at all.
     """
 
-    def test_drops_the_now_converted_family_clause(
+    def test_no_warning_when_nothing_is_deferred(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """AC1: no "flow/volume/electrical constraint families" (or
-        equivalent special-constraint) clause survives."""
+        """The mock deck carries no VI travel-time register, so nothing is
+        deferred and no ``deferred at this milestone`` warning is emitted."""
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
+            _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
+
+        assert not [
+            r for r in caplog.records if "deferred at this milestone" in r.message
+        ]
+
+    def test_names_only_water_travel_time_when_present(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """With a VI register present, the warning fires naming water travel
+        time alone — never boundary FCF, windowed inflow inputs, GNL
+        anticipation, or reservoir evaporation (all emitted, not deferred)."""
+        with (
+            caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"),
+            patch(_READ_TRAVEL_TIMES, return_value={1: 24.0}),
+        ):
             _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
 
         deferral = next(
@@ -1300,34 +1768,23 @@ class TestDeferralWarning:
             for r in caplog.records
             if "deferred at this milestone" in r.message
         )
-        assert "flow/volume/electrical constraint families" not in deferral
-        assert "generic-constraints emitter" not in deferral
+        assert "water travel time (VI present)" in deferral
+        for absent in ("boundary FCF", "windowed inflow", "GNL", "evaporation"):
+            assert absent not in deferral
 
-    def test_still_names_the_genuinely_deferred_items(
+    def test_fe_rha_libs_are_reported_through_the_dx_sink_not_the_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """AC2: GNL anticipation, boundary FCF, and windowed inflow inputs
-        stay named, and the ``dadgnl`` present/absent interpolation still
-        reflects the (mocked, absent-``dadgnl``) fixture deck."""
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"):
-            _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
+        """A deck with FE/RHA/LIBs surfaces reports them exactly once, through
+        ticket-023b's structured ``Diagnostic``s -- even when the deferral
+        warning fires (VI present here), it names only water travel time,
+        never these special-constraint surfaces (the warning text and the
+        ``dx`` sink are disjoint on these items).
 
-        deferral = next(
-            r.message
-            for r in caplog.records
-            if "deferred at this milestone" in r.message
-        )
-        assert "GNL anticipation (dadgnl absent)" in deferral
-        assert "boundary FCF" in deferral
-        assert "windowed inflow inputs" in deferral
-
-    def test_fe_rha_libs_are_reported_once_through_the_dx_sink_not_the_warning(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """AC3: a deck with FE/RHA/LIBs surfaces reports them exactly once,
-        through ticket-023b's structured ``Diagnostic``s -- the flat
-        deferral warning must not also name them (the warning text and the
-        ``dx`` sink are disjoint on these items)."""
+        ticket-003: ``convert_decomp_case`` owns its own top-level
+        ``dx.collect()``, so the diagnostics half reads
+        ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
+        ``dx.collect()`` (which would be shadowed and see nothing)."""
         from cobre_bridge import diagnostics as dx
 
         fe_diagnostic = dx.Diagnostic(
@@ -1352,15 +1809,17 @@ class TestDeferralWarning:
             summary="synthetic LIBs finding",
         )
 
+        collected: list[dx.Diagnostic] = []
         with (
-            dx.collect() as collected,
             caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.pipeline"),
+            patch(_READ_TRAVEL_TIMES, return_value={1: 24.0}),
         ):
             _run_cadastro_pipeline(
                 tmp_path,
                 ac_volmax_frame=None,
                 unreadable_electrical=(fe_diagnostic, rha_diagnostic),
                 libs_electrical=libs_diagnostic,
+                diagnostics_out=collected,
             )
 
         codes = {d.code for d in collected}
@@ -1461,3 +1920,221 @@ class TestDiversionChannels:
         )
         assert channels == {}
         assert unresolved == []
+
+
+class TestBaseDiversionChannels:
+    """``_base_diversion_channels`` models the BASE ``desvio`` diversions that
+    carry no QDES flow bound (e.g. MOXOTO -> P.AFONSO 4): without them cobre pins
+    the diversion column to ``[0, 0]`` and the downstream plant is stranded."""
+
+    @staticmethod
+    def _id_map() -> DecompIdMap:
+        # 173 (MOXOTO source) -> 0, 175 (P.AFONSO 4 receiver) -> 1.
+        return DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(173, 175))
+
+    @staticmethod
+    def _effective(diversions: dict, n_stages: int = 2) -> EffectiveCadastro:
+        return EffectiveCadastro(
+            base=pd.DataFrame(),
+            n_stages=n_stages,
+            stage_varying={},
+            diversions=diversions,
+        )
+
+    @staticmethod
+    def _caps() -> dict[int, HydroCapacities]:
+        return {
+            0: HydroCapacities(max_generation_mw=400.0, max_turbined_m3s=2120.5),
+            1: HydroCapacities(max_generation_mw=2462.4, max_turbined_m3s=2406.8),
+        }
+
+    def test_base_channel_capped_at_receiver_turbine(self) -> None:
+        channel = DiversionChannel(downstream=175, limit=None)
+        channels, contribs = _base_diversion_channels(
+            self._effective({173: (channel, channel)}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids=set(),
+            stage_ids=[0, 1],
+        )
+        assert channels == {0: {"downstream_id": 1, "max_flow_m3s": 2406.8}}
+        # one diversion contribution per stage, opened [0, receiver-turbine]
+        assert [
+            (c.entity_id, c.stage_id, c.axis, c.lower, c.upper) for c in contribs
+        ] == [
+            (0, 0, "diversion", 0.0, 2406.8),
+            (0, 1, "diversion", 0.0, 2406.8),
+        ]
+
+    def test_ac_limit_channel_uses_the_explicit_limit(self) -> None:
+        channel = DiversionChannel(downstream=175, limit=500.0)
+        channels, contribs = _base_diversion_channels(
+            self._effective({173: (channel, channel)}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids=set(),
+            stage_ids=[0, 1],
+        )
+        assert channels == {0: {"downstream_id": 1, "max_flow_m3s": 500.0}}
+        assert all(c.upper == 500.0 for c in contribs)
+
+    def test_already_bounded_source_is_skipped(self) -> None:
+        channel = DiversionChannel(downstream=175, limit=None)
+        channels, contribs = _base_diversion_channels(
+            self._effective({173: (channel, channel)}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids={0},
+            stage_ids=[0, 1],
+        )
+        assert channels == {}
+        assert contribs == []
+
+    def test_unmapped_downstream_is_skipped(self) -> None:
+        channel = DiversionChannel(downstream=999, limit=None)
+        channels, contribs = _base_diversion_channels(
+            self._effective({173: (channel, channel)}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids=set(),
+            stage_ids=[0, 1],
+        )
+        assert channels == {}
+        assert contribs == []
+
+    def test_no_diversion_returns_empty(self) -> None:
+        channels, contribs = _base_diversion_channels(
+            self._effective({}),
+            self._id_map(),
+            self._caps(),
+            already_bounded_ids=set(),
+            stage_ids=[0, 1],
+        )
+        assert channels == {}
+        assert contribs == []
+
+
+def _fc_line(tipo: str, caminho: str) -> str:
+    """One fixed-width ``FC`` register line: identifier at columns 0:4,
+    ``tipo`` mnemonic at 4:10, ``caminho`` from column 14 -- matching
+    ``idecomp.decomp.modelos.dadger.FC``'s own layout (confirmed against
+    ``example/decomp-mar-26-rv2/dadger.rv2``'s real ``FC  NEWV21
+    cortesh.dat`` line)."""
+    return f"FC  {tipo:<6}    {caminho}"
+
+
+class TestDiscoverDecompFilesBoundaryFcf:
+    """TICKET-007: ``discover_decomp_files`` resolves the deck's optional
+    boundary-FCF cut files (``cortesh``/``cortes``), gated on their presence
+    -- the discovery prerequisite for the boundary-FCF importer, which
+    ``convert decomp`` now runs by default (``--no-fcf`` opts out). Mirrors
+    ``TestDiscoverDecompFilesLibsElectrical``'s synthetic-deck-dir fixture
+    pattern (``tests/test_decomp_libs_electrical_pipeline.py``)."""
+
+    @staticmethod
+    def _minimal_deck(deck_dir: Path, *, dadger_text: str = "") -> None:
+        (deck_dir / "caso.dat").write_text("rv0", encoding="latin-1")
+        (deck_dir / "rv0").write_text(
+            "dadger.rv0\nvazoes.rv0\nhidr.dat\n", encoding="latin-1"
+        )
+        (deck_dir / "dadger.rv0").write_text(dadger_text, encoding="latin-1")
+        (deck_dir / "vazoes.rv0").write_text("", encoding="latin-1")
+        (deck_dir / "hidr.dat").write_text("", encoding="latin-1")
+
+    def test_cortesh_and_cortes_resolved_when_present(self, tmp_path: Path) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        self._minimal_deck(tmp_path)
+        (tmp_path / "cortesh.dat").write_text("", encoding="latin-1")
+        (tmp_path / "cortes-004.dat").write_text("", encoding="latin-1")
+
+        files = discover_decomp_files(tmp_path)
+
+        assert files.cortesh == tmp_path / "cortesh.dat"
+        assert files.cortes == tmp_path / "cortes-004.dat"
+
+    def test_cortesh_and_cortes_none_when_absent(self, tmp_path: Path) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        self._minimal_deck(tmp_path)
+
+        files = discover_decomp_files(tmp_path)
+
+        assert files.cortesh is None
+        assert files.cortes is None
+
+    def test_cortes_prefers_single_stage_export_over_consolidated_archive(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        self._minimal_deck(tmp_path)
+        (tmp_path / "cortesh.dat").write_text("", encoding="latin-1")
+        (tmp_path / "cortes.dat").write_text("", encoding="latin-1")
+        (tmp_path / "cortes-004.dat").write_text("", encoding="latin-1")
+
+        files = discover_decomp_files(tmp_path)
+
+        assert files.cortes == tmp_path / "cortes-004.dat"
+
+    def test_cortesh_resolved_via_fc_record_outside_deck_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """The ``FC`` record's own ``caminho`` may be a relative path
+        pointing outside the deck directory (e.g. a shared upstream run
+        directory); the glob idiom alone could never find it there."""
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        deck_dir = tmp_path / "deck"
+        deck_dir.mkdir()
+        shared_dir = tmp_path / "shared"
+        shared_dir.mkdir()
+        target = shared_dir / "cortesh.dat"
+        target.write_text("", encoding="latin-1")
+
+        self._minimal_deck(
+            deck_dir,
+            dadger_text=_fc_line("NEWV21", "../shared/cortesh.dat") + "\n",
+        )
+
+        files = discover_decomp_files(deck_dir)
+
+        assert files.cortesh == target
+
+    def test_fc_record_naming_missing_file_falls_back_to_glob(
+        self, tmp_path: Path
+    ) -> None:
+        """A malformed/stale ``FC`` record (naming a file that does not
+        exist) must never raise -- discovery falls through to the deck-local
+        glob idiom instead."""
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+
+        self._minimal_deck(
+            tmp_path,
+            dadger_text=_fc_line("NEWV21", "does-not-exist.dat") + "\n",
+        )
+        target = tmp_path / "cortesh.dat"
+        target.write_text("", encoding="latin-1")
+
+        files = discover_decomp_files(tmp_path)
+
+        assert files.cortesh == target
+
+    def test_decomp_files_still_constructs_without_the_new_fields(self) -> None:
+        """Every pre-existing ``DecompFiles(...)`` call site (this ticket
+        touches none of them) keeps constructing unchanged -- both new
+        fields default to ``None``."""
+        from cobre_bridge.decomp.pipeline import DecompFiles
+
+        files = DecompFiles(
+            revision="rv0",
+            dadger=Path("dadger.rv0"),
+            vazoes=Path("vazoes.rv0"),
+            hidr=Path("hidr.dat"),
+            dadgnl=None,
+            renovaveis=None,
+            polinjus=None,
+        )
+
+        assert files.cortesh is None
+        assert files.cortes is None

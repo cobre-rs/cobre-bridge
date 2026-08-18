@@ -12,6 +12,13 @@ The ``DP`` records carry the deterministic per-block demand per
 The emission invariant ``Σ_b factor_b·h_b = H`` (per bus, stage) holds by
 construction and is asserted anyway: a violation means the block data and
 the calendar disagree.
+
+The transhipment (``IV``) bus is absent from ``DP`` by construction, so it
+normally carries zero load; when Itaipu's ``RI`` register declares
+``carga_ande`` (ticket-007), the caller supplies it via the optional
+*extra_bus_loads* parameter on both public entry points below, merged in
+alongside the ``DP`` rows so the ``IV`` bus is treated no differently from
+any other loaded bus.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ import pyarrow as pa
 from cobre_bridge.converters.stochastic import _LOAD_FACTORS_SCHEMA_URL
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from idecomp.decomp import Dadger
 
@@ -38,11 +45,19 @@ def _per_stage_block_loads(
     dadger: Dadger,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    *,
+    extra_bus_loads: Mapping[tuple[int, int], list[float]] | None = None,
 ) -> dict[tuple[int, int], list[float]]:
     """Read ``DP`` into ``{(bus_id, stage_index): [MW per block]}``.
 
     Missing load values (the fictitious subsystem's blank fields) read as
     0.0. Block counts must match the calendar's per-stage block structure.
+
+    *extra_bus_loads* (ticket-007) supplies additional per-(bus, stage)
+    block-load rows for a bus ``DP`` never declares -- the ``IV``
+    transshipment bus's ``carga_ande`` -- merged in after the ``DP`` read so
+    every consumer of this map (both public entry points below) sees the
+    ``IV`` load uniformly.
     """
     dp = dadger.dp(df=True)
     if dp is None or dp.empty:
@@ -69,6 +84,8 @@ def _per_stage_block_loads(
             for k in range(1, n_blocks + 1)
         ]
         loads[(bus, stage_index)] = values
+    if extra_bus_loads:
+        loads.update(extra_bus_loads)
     return loads
 
 
@@ -84,13 +101,18 @@ def convert_load_stats(
     dadger: Dadger,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    *,
+    extra_bus_loads: Mapping[tuple[int, int], list[float]] | None = None,
 ) -> pa.Table:
     """Build ``load_seasonal_stats`` rows: one per (bus, stage), ``std = 0``.
 
     Every bus in the id map gets a row for every stage; buses absent from
-    ``DP`` (the transhipment bus) carry zero load.
+    ``DP`` (the transhipment bus) carry zero load unless *extra_bus_loads*
+    (ticket-007 -- see :func:`_per_stage_block_loads`) supplies one.
     """
-    loads = _per_stage_block_loads(dadger, id_map, calendar)
+    loads = _per_stage_block_loads(
+        dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+    )
 
     bus_ids: list[int] = []
     stage_ids: list[int] = []
@@ -117,13 +139,20 @@ def convert_load_factors(
     dadger: Dadger,
     id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
+    *,
+    extra_bus_loads: Mapping[tuple[int, int], list[float]] | None = None,
 ) -> dict:
     """Build the ``load_factors.json`` dict from the ``DP`` block loads.
 
     Entries exist only for (bus, stage) pairs with load; factors of a zero
-    mean are undefined and deliberately absent.
+    mean are undefined and deliberately absent. *extra_bus_loads*
+    (ticket-007 -- see :func:`_per_stage_block_loads`) feeds the same
+    ``Σ_b factor_b·h_b = H`` invariant check below as every ``DP``-sourced
+    row.
     """
-    loads = _per_stage_block_loads(dadger, id_map, calendar)
+    loads = _per_stage_block_loads(
+        dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+    )
 
     entries: list[dict] = []
     for (bus, stage_index), block_loads in sorted(loads.items()):

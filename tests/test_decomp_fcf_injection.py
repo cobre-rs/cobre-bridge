@@ -132,7 +132,6 @@ def imported_case(
         case_dir,
         _CORTESH,
         _CORTES,
-        cobre_bin=_COBRE_BIN,
         work_dir=root / "work",
         cost_scale_factor=1.0,
     )
@@ -213,7 +212,7 @@ def _mock_deck_and_cut_seams(
     monkeypatch.setitem(sys.modules, "cobre", SimpleNamespace(__version__="0.13.0"))
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.discover_decomp_files",
-        lambda _deck_dir: SimpleNamespace(dadger=Path("dadger.rv0")),
+        lambda _deck_dir: SimpleNamespace(dadger=Path("dadger.rv0"), dadgnl=None),
     )
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.Dadger",
@@ -230,6 +229,18 @@ def _mock_deck_and_cut_seams(
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.read_cortes",
         lambda *_args, **_kwargs: fake_cuts,
+    )
+    # The coupling-stage per-block-hours read (case_dir/stages.json) is a
+    # case-reading seam like the deck ones above; these binary-free
+    # orchestration cases carry only a minimal config.json, so stub it to a
+    # single 648 h block rather than author a full stages.json. `import_
+    # boundary_fcf` derives its scalar `cost_unit_hours` as the sum of these
+    # (ticket-001), so a one-element `[648.0]` preserves the prior 648 h; these
+    # storage/C8 cases place no live GNL ring, so the per-block length is never
+    # validated against `n_patamares`.
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf._final_stage_block_hours",
+        lambda _case_dir: [648.0],
     )
     monkeypatch.setattr("cobre_bridge.decomp.fcf.ensure_writer_binding", lambda: None)
 
@@ -344,7 +355,6 @@ def test_import_boundary_fcf_logs_c8_workaround(
             case_dir,
             tmp_path / "deck" / "cortesh.dat",
             tmp_path / "deck" / "cortes-010.dat",
-            cobre_bin=Path("unused-cobre-bin"),
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
@@ -405,7 +415,6 @@ def test_import_boundary_fcf_rejects_storageless_manifest(
             case_dir,
             tmp_path / "deck" / "cortesh.dat",
             tmp_path / "deck" / "cortes-010.dat",
-            cobre_bin=Path("unused-cobre-bin"),
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
@@ -485,9 +494,7 @@ def test_manifest_identity_guard_matches_fresh_bootstrap(
     boundary_free_case = root / "converted"
     convert_decomp_case(_DECK, boundary_free_case, force=True)
 
-    fresh = bootstrap_terminal_manifest(
-        boundary_free_case, _COBRE_BIN, work_dir=root / "work"
-    )
+    fresh = bootstrap_terminal_manifest(boundary_free_case, work_dir=root / "work")
 
     authored_policy = cobre.results.load_policy(
         imported_case.case_dir, policy_subdir="boundary"

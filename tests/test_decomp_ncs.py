@@ -193,3 +193,57 @@ class TestRealDecks:
                 for bf in entry["block_factors"]
             )
             assert weighted == pytest.approx(stage.total_hours, rel=1e-9)
+
+
+class _StubRenovaveis:
+    def __init__(
+        self, cad: pd.DataFrame, subm: pd.DataFrame, ger: pd.DataFrame
+    ) -> None:
+        self._cad, self._subm, self._ger = cad, subm, ger
+
+    def pee_cad(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
+        return self._cad
+
+    def pee_subm(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
+        return self._subm
+
+    def pee_ger_per_pat_cen(self, df: bool = False) -> pd.DataFrame:  # noqa: ARG002
+        return self._ger
+
+
+def test_pee_series_deterministic_typo_uses_modal_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DECOMP renewables are deterministic: a lone per-scenario outlier (deck
+    typo) is collapsed to the majority (modal) value and warned, not crashed
+    on, and never resolved to the outlier."""
+    import logging
+
+    from cobre_bridge.decomp.ncs import _pee_series
+
+    cad = pd.DataFrame([{"codigo_pee": 9, "nome_pee": "PARK9"}])
+    subm = pd.DataFrame([{"codigo_pee": 9, "codigo_submercado": 1}])
+    # stage 1, three patamares, three scenarios; patamar 1 carries a single-
+    # scenario typo (77.9 among 77.07s), patamares 2/3 are clean.
+    ger_rows = []
+    for pat, clean in ((1, 77.07), (2, 50.0), (3, 60.0)):
+        for cen in (1, 2, 3):
+            g = 77.9 if (pat == 1 and cen == 3) else clean
+            ger_rows.append(
+                {
+                    "codigo_pee": 9,
+                    "estagio": 1,
+                    "patamar": pat,
+                    "cenario": cen,
+                    "geracao": g,
+                }
+            )
+    renov = _StubRenovaveis(cad, subm, pd.DataFrame(ger_rows))
+
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.ncs"):
+        series = _pee_series(renov, _ID_MAP, _calendar(), 0)
+
+    assert len(series) == 1
+    # block 0 (patamar 1) resolves to the modal 77.07, NOT the 77.9 outlier.
+    assert series[0].per_stage_blocks[0] == (77.07, 50.0, 60.0)
+    assert any("modal value" in r.message for r in caplog.records)

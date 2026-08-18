@@ -90,6 +90,7 @@ def _make_mock_data(
     data.n_scenarios = n_scenarios
     data.n_stages = n_stages
     data.stage_labels = {i: f"Stage {i}" for i in range(n_stages)}
+    data.stage_dates = {i: f"2024-01-{i + 1:02d}" for i in range(n_stages)}
     data.non_fictitious_bus_ids = [0, 1]
     data.bus_names = {0: "Bus A", 1: "Bus B"}
     # Provide real empty polars objects to prevent MagicMock auto-chaining OOM
@@ -416,6 +417,7 @@ def _make_mock_data_full(
     data.n_scenarios = n_scenarios
     data.n_stages = n_stages
     data.stage_labels = {i: f"Stage {i}" for i in range(n_stages)}
+    data.stage_dates = {i: f"2024-01-{i + 1:02d}" for i in range(n_stages)}
     data.non_fictitious_bus_ids = (
         non_fictitious_bus_ids if non_fictitious_bus_ids is not None else [0, 1]
     )
@@ -564,6 +566,7 @@ def test_render_spot_price_contains_collapsible_section() -> None:
                 )
     data.buses_lf = pl.DataFrame(rows_list).lazy()
     data.stage_labels = {0: "Stage 0", 1: "Stage 1", 2: "Stage 2"}
+    data.stage_dates = {0: "2024-01-01", 1: "2024-01-02", 2: "2024-01-03"}
     html = _render_spot_price(data)
     assert "collapsible-section" in html
 
@@ -601,6 +604,7 @@ def test_render_spot_price_subplot_titles_match_bus_count() -> None:
         bh_df=bh_df,
     )
     data.stage_labels = {0: "S0", 1: "S1", 2: "S2"}
+    data.stage_dates = {0: "2024-01-01", 1: "2024-01-02", 2: "2024-01-03"}
 
     html = _render_spot_price(data)
     # Each bus name should appear in the HTML as a subplot title annotation
@@ -815,25 +819,31 @@ def test_chart_violation_timeline_has_scatter_trace_for_storage_violation() -> N
     assert any("Storage Violation" in name for name in trace_names)
 
 
-def test_chart_violation_timeline_x_values_use_stage_labels() -> None:
-    """_chart_violation_timeline x-axis values must use stage labels, not raw integers.
+def test_chart_violation_timeline_x_axis_uses_dates_with_label_ticks() -> None:
+    """_chart_violation_timeline plots on a proportional date x-axis.
 
-    Acceptance criterion from ticket-009: trace x-values are strings from
-    stage_labels mapping, not bare stage_id integers.
+    The trace x-values are each stage's ISO ``start_date`` (strings, never raw
+    stage_id integers), the axis is a ``type="date"`` axis so stages are spaced
+    by real calendar distance, and the human-readable stage labels are carried
+    as the axis tick text.
     """
     costs = _make_costs_df_with_storage_violation(
         n_scenarios=2, n_stages=3, storage_violation_cost=20.0
     )
     data = _make_mock_data_full(costs=costs, n_stages=3)
-    # stage_labels maps 0->"Stage 0", 1->"Stage 1", 2->"Stage 2"
+    # stage_dates maps 0->"2024-01-01", 1->"2024-01-02", 2->"2024-01-03";
+    # stage_labels maps 0->"Stage 0", 1->"Stage 1", 2->"Stage 2".
     fig = _chart_violation_timeline(data)
     assert fig is not None
     scatter_traces = [t for t in fig.data if isinstance(t, go.Scatter)]
     assert len(scatter_traces) >= 1
     x_vals = list(scatter_traces[0].x)
-    # Must contain at least one string label, not raw integers
-    assert any(isinstance(v, str) for v in x_vals)
-    assert "Stage 0" in x_vals or "Stage 1" in x_vals or "Stage 2" in x_vals
+    # x-values are ISO date strings, never raw stage_id integers.
+    assert all(isinstance(v, str) for v in x_vals)
+    assert any(v in ("2024-01-01", "2024-01-02", "2024-01-03") for v in x_vals)
+    # Proportional date axis, with the stage labels as tick text.
+    assert fig.layout.xaxis.type == "date"
+    assert set(fig.layout.xaxis.ticktext) <= {"Stage 0", "Stage 1", "Stage 2"}
 
 
 def test_chart_violation_timeline_returns_none_when_all_zero() -> None:
@@ -931,13 +941,21 @@ def test_build_composition_data_keys() -> None:
     """_build_composition_data must return a dict with required top-level keys.
 
     Acceptance criterion from ticket-011: keys are category, component, total,
-    stages, colors.
+    stages, colors — plus ``stage_labels`` (the tick text paired with the ISO
+    date positions in ``stages`` for the proportional date x-axis).
     """
     costs = _make_composition_costs_df()
     data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
     result = _build_composition_data(data)
     assert result is not None
-    assert set(result.keys()) == {"category", "component", "total", "stages", "colors"}
+    assert set(result.keys()) == {
+        "category",
+        "component",
+        "total",
+        "stages",
+        "stage_labels",
+        "colors",
+    }
 
 
 def test_build_composition_data_total_stats() -> None:

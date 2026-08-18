@@ -1,11 +1,8 @@
-"""Tests for the DECOMP config emitter's ``state_space`` section."""
+"""Tests for the DECOMP config emitter (``convert_config``)."""
 
 from __future__ import annotations
 
-from cobre_bridge.decomp.config import (
-    _INFLOW_LAG_DEPTH,
-    convert_config,
-)
+from cobre_bridge.decomp.config import convert_config
 
 
 class _Ni:
@@ -27,19 +24,25 @@ class _Dadger:
 
 
 class TestConvertConfigStateSpace:
-    def test_convert_config_emits_inflow_lag_depth_12(self) -> None:
-        result = convert_config(_Dadger(), n_terminal_scenarios=259)  # type: ignore[arg-type]
+    def test_convert_config_omits_state_space(self) -> None:
+        # The inflow-lag depth is a property of the boundary policy, not the
+        # case inputs. With the boundary FCF deferred cobre resolves a zero
+        # depth, so no ``state_space`` block is emitted (reserving lag slots
+        # would be dead state); the boundary-FCF importer patches the
+        # cut-derived depth in only when a boundary is actually imported.
+        result = convert_config(_Dadger())  # type: ignore[arg-type]
 
-        assert result["state_space"] == {"inflow_lag_depth": 12}
-        assert _INFLOW_LAG_DEPTH == 12
+        assert "state_space" not in result
 
-    def test_convert_config_training_enumerated_simulation_sampled(self) -> None:
-        result = convert_config(_Dadger(), n_terminal_scenarios=259)  # type: ignore[arg-type]
+    def test_convert_config_training_and_simulation_enumerated(self) -> None:
+        result = convert_config(_Dadger())  # type: ignore[arg-type]
 
         # Training enumerates the explicit trunk-plus-fan node graph; every
         # stochastic class is external — inflow (the tree), load, and NCS.
         # cobre's scheme-aware load membership admits a deterministic (std = 0)
-        # external load class (it standardizes to eta = 0).
+        # external load class (it standardizes to eta = 0). The seed is a
+        # schema-required inert placeholder fixed at 0 (external + enumerated
+        # never samples).
         expected_training = {
             "selection": {"method": "enumerated"},
             "stopping_rules": [
@@ -47,17 +50,18 @@ class TestConvertConfigStateSpace:
                 {"type": "iteration_limit", "limit": 250},
             ],
             "scenario_source": {
-                "seed": 20260718,
+                "seed": 0,
                 "inflow": {"scheme": "external"},
                 "load": {"scheme": "external"},
                 "ncs": {"scheme": "external"},
             },
         }
-        # Simulation is sampled (C10 workaround) until cobre wires
-        # branching-census simulation.
+        # Simulation is the exact weighted census over the branching graph
+        # (cobre 0.14+ wires it; the old C9 sampled fallback is retired). With
+        # no simulation.scenario_source, cobre inherits training's external one.
         expected_simulation = {
             "enabled": True,
-            "selection": {"method": "sampled", "num_scenarios": 259},
+            "selection": {"method": "enumerated"},
         }
 
         assert result["training"] == expected_training

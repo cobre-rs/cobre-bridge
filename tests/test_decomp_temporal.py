@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from cobre_bridge.decomp.config import convert_config
 from cobre_bridge.decomp.temporal import (
+    CVaRConfig,
     OperativeStage,
     build_node_graph,
     build_operative_calendar,
     convert_stages,
     operative_calendar_from_dadger,
+    resolve_cvar,
     stage_records,
 )
 
@@ -270,3 +275,93 @@ class TestFromDadger:
 
         with pytest.raises(ValueError, match="differ across"):
             operative_calendar_from_dadger(_Dadger())  # type: ignore[arg-type]
+
+
+class TestCVaRRiskMeasure:
+    """CVaR resolution + emission: the deck's ``AR`` register (or, for a blank
+    NEWAVE-inherited ``AR``, the FCF header ``cortesh.dat``) maps to cobre's
+    per-stage ``risk_measure`` and drives the stopping-rule switch."""
+
+    def _calendar(self) -> list[OperativeStage]:
+        return build_operative_calendar(date(2024, 8, 31), _RV0_HOURS)
+
+    @staticmethod
+    def _dadger_with_ar(ar: object | None) -> MagicMock:
+        d = MagicMock()
+        d.data.of_type.return_value = [] if ar is None else [ar]
+        return d
+
+    # ---- stage_records emission ----
+    def test_stage_records_applies_cvar_uniformly(self) -> None:
+        # Emitted on EVERY stage (uniform), regardless of the AR starting
+        # period: CVaR collapses to expectation on the deterministic trunk, and
+        # cobre's gap rule under CVaR+enumerated requires a uniform measure.
+        cvar = CVaRConfig(from_stage_index=5, alpha=0.15, lambda_=0.4)
+        records = stage_records(self._calendar(), cvar)
+        assert all(
+            r["risk_measure"] == {"cvar": {"alpha": 0.15, "lambda": 0.4}}
+            for r in records
+        )
+
+    def test_stage_records_none_is_all_expectation(self) -> None:
+        records = stage_records(self._calendar(), None)
+        assert all(r["risk_measure"] == "expectation" for r in records)
+
+    # ---- resolve_cvar ----
+    def test_no_ar_register_is_expectation(self) -> None:
+        assert resolve_cvar(self._dadger_with_ar(None), None) is None
+
+    def test_explicit_ar_percent_maps_to_fraction(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=40.0, alfa=15.0)
+        assert resolve_cvar(self._dadger_with_ar(ar), None) == CVaRConfig(
+            from_stage_index=0, alpha=0.15, lambda_=0.4
+        )
+
+    def test_explicit_ar_already_fraction_not_divided(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=0.4, alfa=0.15)
+        assert resolve_cvar(self._dadger_with_ar(ar), None) == CVaRConfig(
+            from_stage_index=0, alpha=0.15, lambda_=0.4
+        )
+
+    def test_ar_starting_period_offsets_stage_index(self) -> None:
+        ar = SimpleNamespace(estagio=4, lamb=40.0, alfa=15.0)
+        cvar = resolve_cvar(self._dadger_with_ar(ar), None)
+        assert cvar is not None and cvar.from_stage_index == 3
+
+    def test_blank_ar_falls_back_to_cortesh(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=None, alfa=None)
+        with patch(
+            "cobre_bridge.decomp.temporal._cortesh_cvar", return_value=(0.15, 0.4)
+        ):
+            cvar = resolve_cvar(self._dadger_with_ar(ar), Path("cortesh.dat"))
+        assert cvar == CVaRConfig(from_stage_index=0, alpha=0.15, lambda_=0.4)
+
+    def test_blank_ar_without_cortesh_is_expectation(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=None, alfa=None)
+        assert resolve_cvar(self._dadger_with_ar(ar), None) is None
+
+    def test_zero_lambda_is_expectation(self) -> None:
+        ar = SimpleNamespace(estagio=1, lamb=0.0, alfa=0.15)
+        assert resolve_cvar(self._dadger_with_ar(ar), None) is None
+
+
+class TestConvertConfigStoppingRules:
+    """``convert_config`` emits the deck's GP as a relative gap stopping rule
+    (with the NI iteration backstop) unconditionally — the faithful analogue of
+    DECOMP's ``Zsup/Zinf-1 <= GP`` convergence. It is admissible under CVaR too:
+    cobre computes the exact risk-adjusted upper bound under enumerated forwards,
+    and ``stage_records`` emits CVaR uniformly so the measure is stage-uniform."""
+
+    @staticmethod
+    def _dadger() -> MagicMock:
+        d = MagicMock()
+        d.ni.iteracoes = 500
+        d.gp.data = [0.001]
+        return d
+
+    def test_emits_gap_plus_iteration_rules(self) -> None:
+        cfg = convert_config(self._dadger())
+        rules = cfg["training"]["stopping_rules"]
+        assert [r["type"] for r in rules] == ["gap", "iteration_limit"]
+        assert rules[0]["relative_tolerance"] == 0.001
+        assert rules[1]["limit"] == 500

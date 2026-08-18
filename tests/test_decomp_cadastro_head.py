@@ -218,17 +218,18 @@ def test_jusmed_override_applies_all_stages() -> None:
 
 
 def test_cotvol_polynomial_forward_fills() -> None:
-    """AC2: ``ACCOTVOL`` ``ordem`` 0..4 rows dated ``AGO semana 1`` (the
-    3-stage calendar's index-2 stage) replace the plant's forebay-cota
-    polynomial from that stage forward; a missing ``ordem`` in the override
-    group defaults its coefficient to ``0.0``; the earlier stages still read
-    the base ``a{0..4}_volume_cota``.
+    """AC2: ``ACCOTVOL`` ``ordem`` 1..5 rows (the raw 1-based coefficient
+    index idecomp surfaces; the reader normalises it to a 0-based tuple slot)
+    dated ``AGO semana 1`` (the 3-stage calendar's index-2 stage) replace the
+    plant's forebay-cota polynomial from that stage forward; a missing
+    ``ordem`` in the override group defaults its coefficient to ``0.0``; the
+    earlier stages still read the base ``a{0..4}_volume_cota``.
     """
     hidr = _hidr_frame({1: _plant_row(cota=(100.0, 1.0, 0.0, 0.0, 0.0))})
     override_rows = [
         {
             "codigo_usina": 1,
-            "ordem": 0,
+            "ordem": 1,  # a0
             "coeficiente": 50.0,
             "mes": "AGO",
             "semana": 1.0,
@@ -236,13 +237,13 @@ def test_cotvol_polynomial_forward_fills() -> None:
         },
         {
             "codigo_usina": 1,
-            "ordem": 1,
+            "ordem": 2,  # a1
             "coeficiente": 2.0,
             "mes": "AGO",
             "semana": 1.0,
             "ano": 2026.0,
         },
-        # ordem 2..4 omitted -> default to 0.0.
+        # ordem 3..5 (a2..a4) omitted -> default to 0.0.
     ]
     dadger = _FakeDadger({ACCOTVOL: pd.DataFrame(override_rows)})
     effective, report = build_effective_cadastro(dadger, hidr, _calendar())
@@ -251,6 +252,52 @@ def test_cotvol_polynomial_forward_fills() -> None:
     assert effective.cota_polynomial(1, 1) == (100.0, 1.0, 0.0, 0.0, 0.0)
     assert effective.cota_polynomial(1, 2) == (50.0, 2.0, 0.0, 0.0, 0.0)
     assert report.applied["cota_volume"] == 1
+
+
+def test_cotvol_single_constant_override_lands_in_a0() -> None:
+    """Regression: a run-of-river plant whose ``ACCOTVOL`` override is a
+    single constant forebay level (only ``ordem`` 1 present, the rest 0)
+    must land that level in the a0 constant term, not a1. The real deck
+    encodes fixed-level plants (JIRAU/BELO MONTE) exactly this way; treating
+    the 1-based ``ordem`` as a 0-based slot turned a 90 m level into
+    ``90·volume`` and inflated the head ~1000x.
+    """
+    hidr = _hidr_frame({1: _plant_row(cota=(66.35, 0.0207, -8e-6, 0.0, 0.0))})
+    override_rows = [
+        {
+            "codigo_usina": 1,
+            "ordem": ordem,
+            "coeficiente": coeff,
+            "mes": "AGO",
+            "semana": 1.0,
+            "ano": 2026.0,
+        }
+        for ordem, coeff in ((1, 90.0), (2, 0.0), (3, 0.0), (4, 0.0), (5, 0.0))
+    ]
+    dadger = _FakeDadger({ACCOTVOL: pd.DataFrame(override_rows)})
+    effective, _ = build_effective_cadastro(dadger, hidr, _calendar())
+
+    # Constant polynomial: cota == 90.0 m at every volume, not 90·V.
+    assert effective.cota_polynomial(1, 2) == (90.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def test_cotvol_ordem_out_of_range_raises() -> None:
+    """A coefficient ``ordem`` outside the 1..5 range is a malformed register
+    and is rejected, never silently dropped or mis-slotted.
+    """
+    rows = [
+        {
+            "codigo_usina": 1,
+            "ordem": 0,  # 0 is out of the 1-based 1..5 range
+            "coeficiente": 90.0,
+            "mes": "AGO",
+            "semana": 1.0,
+            "ano": 2026.0,
+        }
+    ]
+    dadger = _FakeDadger({ACCOTVOL: pd.DataFrame(rows)})
+    with pytest.raises(ValueError, match="outside the expected 1..5 range"):
+        _read_polynomial_overrides(dadger, _calendar(), ACCOTVOL, "cota_volume")
 
 
 def test_cotvol_out_of_horizon_reported_not_dropped() -> None:
@@ -266,7 +313,7 @@ def test_cotvol_out_of_horizon_reported_not_dropped() -> None:
             "semana": None,
             "ano": 2026.0,
         }
-        for ordem in range(5)
+        for ordem in range(1, 6)
     ]
     dadger = _FakeDadger({ACCOTVOL: pd.DataFrame(rows)})
     records, out_of_horizon = _read_polynomial_overrides(
@@ -277,14 +324,20 @@ def test_cotvol_out_of_horizon_reported_not_dropped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC3: per-stage rho_eq shifts the B8 hydraulic ceiling.
+# AC3: per-stage rho_eq no longer caps generation (availability owns the
+# generation cap; the head-corrected turbined-flow cap owns the physical
+# hydraulic limit).
 # ---------------------------------------------------------------------------
 
 
-def test_per_stage_rho_eq_shifts_hydraulic_cap() -> None:
-    """AC3: a plant's ``PROESP`` doubles from stage 1 onward — the B8
-    hydraulic ceiling (``rho_eq(stage) x q_max``) reflects the doubled value
-    from stage 1 forward, while stage 0 still uses the base rho_eq.
+def test_per_stage_rho_eq_does_not_cap_generation() -> None:
+    """A plant's ``PROESP`` doubles from stage 1 onward, so its per-stage
+    ρ_eq doubles too — but that no longer lowers ``max_generation_mw``. The
+    generation cap is the installed × MP × FD availability (head-independent),
+    and the physical hydraulic limit binds through the head-corrected
+    turbined-flow cap instead. With no MP/FD derate here the availability
+    equals the rated envelope, so no lowered generation overlay is emitted at
+    any stage.
     """
     hidr = _hidr_frame(
         {
@@ -308,16 +361,14 @@ def test_per_stage_rho_eq_shifts_hydraulic_cap() -> None:
     )
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
 
-    values, _ = convert_hydro_group_availability(
+    values = convert_hydro_group_availability(
         _StubDadger(), hidr, id_map, _calendar(), effective
     )
     hydro_id = id_map.hydro_id(1)
 
-    # h_gross = 100 - 20 = 80; stage 0: rho_eq = 0.01 x 80 = 0.8 -> 80 MW.
-    assert values[(hydro_id, 0, 0)].max_generation_mw == pytest.approx(80.0)
-    # stage 1: PROESP doubles to 0.02 -> rho_eq = 1.6 -> 160 MW.
-    assert values[(hydro_id, 0, 1)].max_generation_mw == pytest.approx(160.0)
-    assert values[(hydro_id, 0, 2)].max_generation_mw == pytest.approx(160.0)
+    for stage_index in range(3):
+        entry = values.get((hydro_id, 0, stage_index))
+        assert entry is None or entry.max_generation_mw is None
 
 
 # ---------------------------------------------------------------------------
@@ -394,10 +445,12 @@ def test_rho_eq_uses_full_range_for_all_classes() -> None:
 
 def test_no_override_is_byte_identical() -> None:
     """AC5: with no head/productivity override at all, the emitted rho_eq
-    and every B8 hydraulic-cap overlay value equal the pre-ticket
-    base-registry formula bit-for-bit — reconstructed here independently via
-    the same shared row-level helpers (``_mean_cota_over_volume``,
-    ``_apply_hydraulic_loss``) the pre-ticket formula itself called.
+    equals the pre-ticket base-registry formula bit-for-bit — reconstructed
+    here independently via the same shared row-level helpers
+    (``_mean_cota_over_volume``, ``_apply_hydraulic_loss``) the pre-ticket
+    formula itself called. The head no longer feeds a generation cap, so the
+    B8 overlay emits no lowered ``max_generation_mw`` (availability, at the
+    rated envelope here, owns that column).
     """
     hidr = _hidr_frame(
         {
@@ -432,14 +485,61 @@ def test_no_override_is_byte_identical() -> None:
     table = convert_energy_productivity(effective, id_map).to_pandas()
     assert table["equivalent_productivity_mw_per_m3s"].iloc[0] == expected_rho_eq
 
-    values, _ = convert_hydro_group_availability(
+    values = convert_hydro_group_availability(
         _StubDadger(), hidr, id_map, _calendar(), effective
     )
     hydro_id = id_map.hydro_id(1)
-    q_max = 100.0  # 2 machines x 50 m3/s
-    p_max = 400.0  # 2 machines x 200 MW
-    expected_hydraulic_mw = expected_rho_eq * q_max
-    assert expected_hydraulic_mw < p_max  # the hydraulic ceiling binds here
+    # Availability (no MP/FD derate) equals the rated envelope, so no lowered
+    # generation overlay is emitted — the head-derived hydraulic value no
+    # longer caps generation.
     for stage_index in range(3):
-        entry = values[(hydro_id, 0, stage_index)]
-        assert entry.max_generation_mw == expected_hydraulic_mw
+        entry = values.get((hydro_id, 0, stage_index))
+        assert entry is None or entry.max_generation_mw is None
+
+
+# ---------------------------------------------------------------------------
+# FPHA anchor: generation productivity takes head at the initial volume.
+# ---------------------------------------------------------------------------
+
+
+def test_generation_productivity_anchors_at_initial_volume() -> None:
+    """The generation ρ_eq takes head at the plant's initial volume (the source
+    model's FPHA fit anchor, manual §3.4.6.4), not the full-range mean. For a
+    reservoir starting high on a rising cota curve, that is a higher head — and
+    a higher productivity — than the mid-range mean would give.
+    """
+    vmin, vmax = 100.0, 500.0
+    # Rising cota: 220 m at vmin, 300 m at vmax; mean over the range = 260 m.
+    coeffs = (200.0, 0.2, 0.0, 0.0, 0.0)
+    cf, rho_esp = 20.0, 0.01
+    hidr = _hidr_frame(
+        {1: _plant_row(vmin=vmin, vmax=vmax, cota=coeffs, cf=cf, rho_esp=rho_esp)}
+    )
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
+    effective = EffectiveCadastro(base=hidr, n_stages=1, stage_varying={})
+    hydro_id = id_map.hydro_id(1)
+
+    v_initial = 460.0  # 90% full
+    expected_init = rho_esp * ((coeffs[0] + coeffs[1] * v_initial) - cf)
+
+    def antideriv(v: float) -> float:
+        return coeffs[0] * v + coeffs[1] * v * v / 2.0
+
+    mean_cota = (antideriv(vmax) - antideriv(vmin)) / (vmax - vmin)
+    expected_mean = rho_esp * (mean_cota - cf)
+
+    anchored = (
+        convert_energy_productivity(effective, id_map, {1: v_initial})
+        .to_pandas()
+        .set_index("hydro_id")["equivalent_productivity_mw_per_m3s"][hydro_id]
+    )
+    # No map -> full-range mean fallback (the engolimento/legacy anchor).
+    fallback = (
+        convert_energy_productivity(effective, id_map)
+        .to_pandas()
+        .set_index("hydro_id")["equivalent_productivity_mw_per_m3s"][hydro_id]
+    )
+
+    assert anchored == pytest.approx(expected_init)
+    assert fallback == pytest.approx(expected_mean)
+    assert anchored > fallback  # rising cota + high fill => higher than the mean

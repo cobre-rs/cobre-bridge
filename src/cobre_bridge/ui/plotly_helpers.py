@@ -93,6 +93,35 @@ def stage_x_labels(stage_ids: Sequence[int], labels: dict[int, str]) -> list[str
     return [labels.get(int(s), str(s)) for s in stage_ids]
 
 
+def stage_x_dates(stage_ids: Sequence[int], stage_dates: dict[int, str]) -> list[str]:
+    """Map stage ids to ISO ``YYYY-MM-DD`` x-positions (fallback: the id as text).
+
+    Paired with :func:`stage_x_labels` (tick text) and :func:`apply_stage_date_axis`,
+    these positions place each stage on a Plotly ``type="date"`` axis at its true
+    calendar distance, so weekly stages sit closer than a following monthly one.
+    """
+    return [stage_dates.get(int(s), str(s)) for s in stage_ids]
+
+
+def apply_stage_date_axis(
+    fig: go.Figure, x_dates: Sequence[str], x_labels: Sequence[str]
+) -> go.Figure:
+    """Make *fig*'s x-axis a proportionally-spaced stage-date axis.
+
+    Sets ``type="date"`` and pins the ticks to the stage dates (*x_dates*, the
+    trace x-positions) rendered with the compact *x_labels* as tick text. Stages
+    thus plot at their real calendar spacing while the axis keeps the readable
+    date labels. Mutates *fig* in place and returns it.
+    """
+    fig.update_xaxes(
+        type="date",
+        tickmode="array",
+        tickvals=list(x_dates),
+        ticktext=list(x_labels),
+    )
+    return fig
+
+
 def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
     """Convert a Plotly Figure to an HTML fragment.
 

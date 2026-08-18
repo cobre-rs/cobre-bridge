@@ -27,7 +27,7 @@ from cobre_bridge.ui.html import (
     metrics_grid,
     section_title,
 )
-from cobre_bridge.ui.plotly_helpers import stage_x_labels
+from cobre_bridge.ui.plotly_helpers import stage_x_dates, stage_x_labels
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -355,6 +355,8 @@ def _build_lhs_section(data: DashboardData, lhs_df: pd.DataFrame) -> str:
         data.gc_constraints, lhs_df, data.gc_bounds, data.stage_labels
     )
     data_json = json_for_script(lhs_data)
+    # ISO date x-positions (proportional date axis); xlabels stay the tick text.
+    dates_json = json_for_script(stage_x_dates(lhs_data["stages"], data.stage_dates))
 
     options_html = "\n".join(
         f'<option value="{c["id"]}">{c["name"]}</option>' for c in data.gc_constraints
@@ -379,16 +381,20 @@ def _build_lhs_section(data: DashboardData, lhs_df: pd.DataFrame) -> str:
         + "const GC_LHS_DATA = "
         + data_json
         + ";\n"
+        + "const GC_LHS_DATES = "
+        + dates_json
+        + ";\n"
         + r"""
 function updateConstraintChart() {
   var cid = document.getElementById('gc-constraint-sel').value;
   var cdata = GC_LHS_DATA.constraints[cid];
   if (!cdata) return;
   var xlabels = GC_LHS_DATA.xlabels;
+  var xdates = GC_LHS_DATES;
 
   var traces = [
     {
-      x: xlabels.concat(xlabels.slice().reverse()),
+      x: xdates.concat(xdates.slice().reverse()),
       y: cdata.lhs_p90.concat(cdata.lhs_p10.slice().reverse()),
       fill: 'toself',
       fillcolor: 'rgba(74,144,184,0.15)',
@@ -398,13 +404,13 @@ function updateConstraintChart() {
       hoverinfo: 'skip'
     },
     {
-      x: xlabels,
+      x: xdates,
       y: cdata.lhs_p50,
       name: 'LHS Median (P50)',
       line: {color: '#4A90B8', width: 2}
     },
     {
-      x: xlabels,
+      x: xdates,
       y: cdata.bound,
       name: 'Bound (RHS)',
       line: {color: '#DC4C4C', width: 1.5, dash: 'dash'}
@@ -422,7 +428,7 @@ function updateConstraintChart() {
   });
   if (hasDistinctFloor) {
     traces.push({
-      x: xlabels,
+      x: xdates,
       y: cdata.bound_lower,
       name: 'Bound Floor',
       line: {color: '#B8860B', width: 1.5, dash: 'dot'}
@@ -434,8 +440,8 @@ function updateConstraintChart() {
       type: 'rect',
       xref: 'x',
       yref: 'paper',
-      x0: xlabels[v.start],
-      x1: xlabels[v.end],
+      x0: xdates[v.start],
+      x1: xdates[v.end],
       y0: 0,
       y1: 1,
       fillcolor: 'rgba(220,76,76,0.12)',
@@ -446,6 +452,7 @@ function updateConstraintChart() {
   var layout = {
     title: cdata.name + ' \u2014 LHS vs Bound',
     hovermode: 'x unified',
+    xaxis: {type: 'date', tickmode: 'array', tickvals: xdates, ticktext: xlabels},
     shapes: shapes,
     margin: {l: 60, r: 20, t: 60, b: 10},
     legend: {

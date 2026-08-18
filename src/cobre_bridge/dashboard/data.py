@@ -59,24 +59,71 @@ def entity_name(names: dict[tuple[str, int], str], entity: str, eid: int) -> str
 
 
 def load_stage_labels(case_dir: Path) -> dict[int, str]:
-    """Return stage_id -> "Mon YYYY" label from stages.json."""
+    """Return stage_id -> date label from stages.json, keyed on each stage's date.
+
+    Monthly horizons (the source model's typical monthly stages) get a compact
+    ``"Mon YYYY"`` label. When a horizon packs several stages into one calendar
+    month — e.g. the weekly stages of a DECOMP week/month deck — a month-only
+    label would collapse them onto a single x-axis point, so every stage instead
+    gets a day-resolution ``"DD Mon YYYY"`` label from its own ``start_date``.
+    A stage with a missing or unparseable ``start_date`` falls back to its id.
+    """
     path = case_dir / "stages.json"
     if not path.exists():
         return {}
     with open(path) as f:
         data = json.load(f)
-    labels: dict[int, str] = {}
+
+    parsed: list[tuple[int, pd.Timestamp | None]] = []
     for stage in data.get("stages", []):
         sid = stage["id"]
         start = stage.get("start_date", "")
+        stamp: pd.Timestamp | None = None
         if start:
             try:
-                labels[sid] = pd.to_datetime(start).strftime("%b %Y")
+                stamp = pd.to_datetime(start)
             except (ValueError, TypeError):
-                labels[sid] = str(sid)
-        else:
-            labels[sid] = str(sid)
-    return labels
+                stamp = None
+        parsed.append((sid, stamp))
+
+    # If two stages share a calendar month, a month-only label would map them to
+    # the same x-axis point; drop to day resolution for the whole axis so each
+    # stage stays a distinct, date-accurate point.
+    year_months = [(s.year, s.month) for _, s in parsed if s is not None]
+    sub_monthly = len(year_months) != len(set(year_months))
+    fmt = "%d %b %Y" if sub_monthly else "%b %Y"
+
+    return {
+        sid: (stamp.strftime(fmt) if stamp is not None else str(sid))
+        for sid, stamp in parsed
+    }
+
+
+def load_stage_dates(case_dir: Path) -> dict[int, str]:
+    """Return stage_id -> ISO ``YYYY-MM-DD`` start date from stages.json.
+
+    These are the x-axis *positions* (paired with :func:`load_stage_labels`'s
+    display text as tick labels): feeding them to a Plotly ``type="date"`` axis
+    spaces the stages by their true calendar distance, so weekly stages sit
+    closer together than a following monthly stage. A stage with a missing or
+    unparseable ``start_date`` is omitted (its chart point falls back to the
+    stage-id label via the axis helper).
+    """
+    path = case_dir / "stages.json"
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        data = json.load(f)
+    dates: dict[int, str] = {}
+    for stage in data.get("stages", []):
+        start = stage.get("start_date", "")
+        if not start:
+            continue
+        try:
+            dates[stage["id"]] = pd.to_datetime(start).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            continue
+    return dates
 
 
 def resolve_hydro_bus_id(hydro: dict, *, hydros_path: Path) -> int | None:
@@ -504,6 +551,7 @@ class EntityMetadata:
 
     names: dict[tuple[str, int], str]
     stage_labels: dict[int, str]
+    stage_dates: dict[int, str]
     hydro_bus_map: dict[int, int]
     thermal_meta: dict[int, dict]
     ncs_bus_map: dict[int, int]
@@ -526,6 +574,7 @@ def load_entity_metadata(case_dir: Path) -> EntityMetadata:
     return EntityMetadata(
         names=names,
         stage_labels=load_stage_labels(case_dir),
+        stage_dates=load_stage_dates(case_dir),
         hydro_bus_map=hydro_bus_map,
         thermal_meta=load_thermal_metadata(case_dir),
         ncs_bus_map=load_ncs_bus_map(case_dir),
@@ -703,6 +752,44 @@ class SolverPerformance:
     lp_bounds: pd.DataFrame
 
 
+#: cobre 0.14 gave every diagnostic-output axis a single canonical spelling
+#: (``stage`` -> ``stage_id``, ``opening`` -> ``opening_index``,
+#: ``upper_bound_mean`` -> ``upper_bound``) and switched the not-applicable
+#: stage/opening marker from a ``-1`` sentinel to ``NULL``. The dashboard's chart
+#: layer was written against the pre-0.14 spellings; every raw diagnostic frame
+#: is normalized back to them at this single load choke point (mirroring
+#: :func:`cobre_bridge.comparators.cobre_readers.read_cobre_convergence`), so no
+#: chart needs to change and a pre-0.14 output directory — which already uses the
+#: legacy names — passes through untouched.
+_OUTPUT_COLUMN_ALIASES: dict[str, str] = {
+    "stage_id": "stage",
+    "opening_index": "opening",
+    "upper_bound": "upper_bound_mean",
+}
+
+
+def _normalize_output_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename cobre 0.14 canonical diagnostic columns to the dashboard's names.
+
+    A 0.14 column is renamed only when its legacy target is absent, so a
+    pre-0.14 frame (legacy names already present) is returned unchanged, and a
+    frame that shares a source name for a different concept it keeps canonical
+    elsewhere (e.g. ``bounds.parquet``'s ``stage_id``) is deliberately NOT run
+    through here. The ``-1`` -> ``NULL`` marker change needs no handling: a null
+    stage/opening reaches pandas as ``NaN``, and the chart layer's
+    ``stage >= 0`` filters drop those rows exactly as they dropped the old
+    ``-1`` rows, while its ``opening.notna()`` checks rely on the null directly.
+    """
+    if df.empty:
+        return df
+    rename = {
+        src: dst
+        for src, dst in _OUTPUT_COLUMN_ALIASES.items()
+        if src in df.columns and dst not in df.columns
+    }
+    return df.rename(columns=rename) if rename else df
+
+
 def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerformance:
     """Load solver/performance artifacts. ``conv`` (convergence) is needed to
     correct the timing wall-times. All frames fall back to empty when absent."""
@@ -718,7 +805,7 @@ def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerform
     solver_train_path = (
         case_dir / "output" / "training" / "solver" / "iterations.parquet"
     )
-    solver_train = (
+    solver_train = _normalize_output_columns(
         pq.read_table(solver_train_path).to_pandas()
         if solver_train_path.exists()
         else pd.DataFrame()
@@ -726,7 +813,7 @@ def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerform
     sim_solver_path = (
         case_dir / "output" / "simulation" / "solver" / "iterations.parquet"
     )
-    solver_sim = (
+    solver_sim = _normalize_output_columns(
         pq.read_table(sim_solver_path).to_pandas()
         if sim_solver_path.exists()
         else pd.DataFrame()
@@ -738,11 +825,11 @@ def load_solver_performance(case_dir: Path, conv: pd.DataFrame) -> SolverPerform
     else:
         scaling_report = {}
     cs_path = case_dir / "output" / "training" / "cut_selection" / "iterations.parquet"
-    cut_selection = (
+    cut_selection = _normalize_output_columns(
         pq.read_table(cs_path).to_pandas() if cs_path.exists() else pd.DataFrame()
     )
     retry_path = case_dir / "output" / "training" / "solver" / "retry_histogram.parquet"
-    retry_histogram = (
+    retry_histogram = _normalize_output_columns(
         pq.read_table(retry_path).to_pandas() if retry_path.exists() else pd.DataFrame()
     )
     bounds_path = case_dir / "output" / "training" / "dictionaries" / "bounds.parquet"
@@ -920,6 +1007,7 @@ class DashboardData:
     # Entity name/metadata dictionaries
     names: dict[tuple[str, int], str]
     stage_labels: dict[int, str]
+    stage_dates: dict[int, str]
     hydro_bus_map: dict[int, int]
     thermal_meta: dict[int, dict]
     ncs_bus_map: dict[int, int]
@@ -1019,9 +1107,11 @@ class DashboardData:
         logger.info("Loading dashboard data from %s", case_dir)
 
         # Training convergence is required and feeds the timing wall-time fix.
-        conv = pq.read_table(
-            case_dir / "output" / "training" / "convergence.parquet"
-        ).to_pandas()
+        conv = _normalize_output_columns(
+            pq.read_table(
+                case_dir / "output" / "training" / "convergence.parquet"
+            ).to_pandas()
+        )
 
         temporal = load_temporal_context(case_dir)
         entities = load_entity_metadata(case_dir)
@@ -1070,6 +1160,7 @@ class DashboardData:
             line_bounds=scenario.line_bounds,
             names=entities.names,
             stage_labels=entities.stage_labels,
+            stage_dates=entities.stage_dates,
             hydro_bus_map=entities.hydro_bus_map,
             thermal_meta=entities.thermal_meta,
             ncs_bus_map=entities.ncs_bus_map,

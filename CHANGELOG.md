@@ -5,7 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.1] - 2026-08-18
+
+Grows `compare decomp` to feature parity with `compare newave` — the rich
+multi-tab HTML report now ships from the CLI, correctly labelled "DECOMP" — and
+syncs the bridge to the **cobre 0.14.1** input contract.
+
+### Added
+
+- **`compare decomp --format html` now renders the full multi-tab comparison
+  report.** Previously the CLI emitted a thin single-page report; it now builds
+  the same shared report `compare newave` produces, from the same canonical
+  `ComparisonDataset` seam: Overview/cost breakdown, System (per-bus + SIN),
+  Energy Balance, Network (corridor→line), Convergence, a DECOMP-vs-cobre
+  Performance benchmark, Hydro/Thermal Operation + Plant Details, Productivity
+  (realized), and FPHA — plus a DECOMP-specific **REE energy** rollup, a
+  **Generic Constraints (LHS vs bound)** section, and an **evaporation**
+  comparison. Every reference series/label/title reads "DECOMP" (a new additive
+  `reference_label` indirection; `compare newave` output is byte-identical at its
+  default). Modeling caveats are surfaced honestly, not papered over: DECOMP
+  costs are undiscounted-nominal vs cobre's discounted NPV; FPHA is metrics-only
+  (no fitted-surface overlay); the Productivity static/pmo half and the
+  constraints' interchange/pumping terms render cobre-only where the source model
+  has no counterpart; the cobre sub-monthly-stage evaporation over-scaling gap
+  (C11) is shown rather than corrected.
+
+### Changed
+
+- **`MIN_COBRE_VERSION` is now `0.14.1`** (was `0.13.0`), and the `cobre-python`
+  `validation` / `test-roundtrip` pins move to `>=0.14.1,<0.15`. cobre 0.14
+  carries breaking input-contract changes (sense-free generic constraints,
+  `constraints/generic_parameters.json`, the NCS `value` → `availability_factor`
+  rename); converted cases require cobre **>= 0.14.1**.
+- **`compare decomp --json` now emits a within-tolerance `status`.** A new
+  `--tolerance` option (env `COBRE_BRIDGE_RESULTS_TOLERANCE`, default `1e-2`,
+  same precedence chain as `compare newave`'s `--tolerance`) drives it: `status`
+  is now `ok`/`mismatch`/`no-comparable-rows` (was `ok`/`no-comparable-rows`) —
+  `mismatch` when any compared variable's per-row sMAPE exceeds the tolerance,
+  `ok` when every variable is within it, `no-comparable-rows` unchanged for an
+  empty comparison. The `summary` object gains `within_tol`/`total`/
+  `all_within_tol` (mirroring `compare newave`'s `summary`), appended after the
+  existing `stages`/`variables`/`unmapped` keys. Backward-compatible: only new
+  keys were added, `schema_version` is unchanged, and the command still always
+  exits 0 regardless of status.
 
 ## [0.12.0] - 2026-07-22
 
