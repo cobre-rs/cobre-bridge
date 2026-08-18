@@ -13,11 +13,18 @@ Three conventions, each chosen so neither side is silently privileged:
   own duration-weighted stage value; the comparison reads that row instead of
   re-deriving one from the per-block rows, so a block-weighting convention
   cannot drift between the two products.
-- **Scenario averaging is unweighted on both sides.** Cobre's simulation
+- **Scenario averaging is unweighted on both sides** for the physical
+  operation variables (hydro/thermal/bus/interchange). Cobre's simulation
   statistics are plain scenario means until weighted statistics land with the
   explicit-tree work; weighting only the source side would bias every
   terminal-stage row. When per-node probabilities become consumable the two
-  sides move together.
+  sides move together. **The one exception is the Overview operating cost**
+  (:func:`_cost_frames`): the *expected* cost on a scenario-fan stage must use
+  the real tree ``probabilidade`` the ``relato``/``relato2`` cost tables carry
+  per row (the fan openings are not equiprobable), so cost uses
+  :func:`_probability_weighted_stage_cost`. cobre's per-stage cost is already
+  an expectation over its (equiprobable) simulation scenarios, so the two
+  sides stay comparable.
 - **Storage is compared as useful volume.** The source model reports useful
   volume; Cobre's ``storage_final_hm3`` is absolute, so the registry's
   ``min_storage_hm3`` is subtracted before comparing.
@@ -53,6 +60,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_dec_oper_usit,
     read_decomp_tim,
     read_eco_fpha,
+    read_relato2_costs,
     read_relato_convergence,
     read_relato_costs,
     read_relato_membership,
@@ -1076,44 +1084,94 @@ _NW_SIN_COST_TOKENS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _probability_weighted_stage_cost(
+    frame: pl.DataFrame, columns: list[str]
+) -> pl.DataFrame:
+    """Per-stage **expected** cost, weighting scenarios by the DECOMP tree
+    ``probabilidade``.
+
+    One row per ``estagio``; each cost column is
+    ``sum(probabilidade * col) / sum(probabilidade)`` across that stage's
+    scenarios. A deterministic stage (single row, ``probabilidade`` = 1.0)
+    reduces to the value itself, so ``relato``'s weekly stages are unchanged
+    and only a genuine scenario fan (``relato2``'s monthly stage) is averaged.
+    Unlike :func:`_scenario_mean`'s unweighted kernel, this uses the real tree
+    probabilities -- required for a correct *expected* cost on the fan stage,
+    where the openings are not equiprobable. Falls back to an unweighted mean
+    for any stage whose ``probabilidade`` is absent or sums to ~0 (a malformed
+    report), never dividing by zero.
+    """
+    present = [c for c in columns if c in frame.columns]
+    if frame.is_empty() or "estagio" not in frame.columns:
+        return frame
+    if "probabilidade" not in frame.columns:
+        return (
+            frame.group_by("estagio")
+            .agg([pl.col(c).mean().alias(c) for c in present])
+            .sort("estagio")
+        )
+    weight = pl.col("probabilidade")
+    weight_sum = weight.sum()
+    aggs = [
+        pl.when(weight_sum.abs() > 1e-12)
+        .then((pl.col(c) * weight).sum() / weight_sum)
+        .otherwise(pl.col(c).mean())
+        .alias(c)
+        for c in present
+    ]
+    return frame.group_by("estagio").agg(aggs).sort("estagio")
+
+
 def _cost_frames(decomp_dir: Path) -> tuple[dict[str, float], pl.DataFrame]:
     """DECOMP-side Overview cost metadata: the NPV dict + ``nw_sin`` rows.
 
-    Reads ``relatorio_operacao_custos`` (native k$, one row per (estagio,
-    cenario)) and aggregates it in two passes, both built on the same
-    per-stage mean:
+    Reads ``relatorio_operacao_custos`` from **both** reports and unions them
+    so every stage is covered: ``relato`` (:func:`read_relato_costs`) carries
+    the deterministic study-period weeks, and ``relato2``
+    (:func:`read_relato2_costs`, optional) carries the per-realization rows of
+    the scenario-fan (monthly) stage(s) ``relato`` omits. Where ``relato2``
+    covers a stage it is authoritative (that stage is dropped from ``relato``
+    before the union, so a fan stage is never counted twice). Aggregated in
+    two passes, both built on the same per-stage expected cost:
 
-    - **Per-stage mean across scenarios** -- :func:`_scenario_mean` with no
-      entity column (a single SIN-wide row per stage), reusing the exact
-      kernel every other ``_*_side``/``_energy_balance_frames`` helper in
-      this module uses. This keeps the source and cobre sides on the same
-      unweighted footing the module docstring already commits to ("Scenario
-      averaging is unweighted on both sides") even though
-      ``relatorio_operacao_custos`` carries an explicit ``probabilidade``
-      column per row -- special-casing a probability-weighted mean here
-      would make this one source diverge from every other level's
-      convention. No stage discount is applied either: unlike cobre's own
-      ``discount_factor`` column (:func:`cobre_readers.read_cobre_cost_
-      breakdown`), ``relatorio_operacao_custos`` exposes no per-row discount
-      factor at this granularity, so there is nothing to apply -- the
+    - **Per-stage expected cost** -- :func:`_probability_weighted_stage_cost`,
+      weighting each stage's scenarios by the real tree ``probabilidade``.
+      This is a deliberate departure from the module's unweighted-scenario
+      convention **for cost only**: an *expected* operating cost on the fan
+      stage must use the true opening probabilities (which are not
+      equiprobable), and both reports carry ``probabilidade`` per row. A
+      deterministic week (single row, prob 1.0) is unaffected. No stage
+      discount is applied: unlike cobre's ``discount_factor`` column
+      (:func:`cobre_readers.read_cobre_cost_breakdown`),
+      ``relatorio_operacao_custos`` exposes no per-row discount factor, so the
       per-stage values are DECOMP's own raw nominal $ costs at that node.
-    - **``nw_costs``** (R$): the per-stage means summed across every stage,
-      then :func:`reconcile_kdollars_to_reais` (x1e3). Categories below
+    - **``nw_costs``** (R$): the per-stage expected costs summed across every
+      stage, then :func:`reconcile_kdollars_to_reais` (x1e3). Categories below
       0.01 R$ are excluded, mirroring ``newave_readers.read_pmo_cost_
       breakdown`` and :func:`cobre_readers.read_cobre_cost_breakdown`'s own
       floor.
-    - **``nw_sin`` rows** (10^6 R$): the same per-stage means, unpivoted to
-      ``COPER``/``CUSTO_FUTURO``/``CTERM`` rows with the 1-based ``stage``
-      column kept as-is (the consuming charts subtract ``nw_offset``).
+    - **``nw_sin`` rows** (10^6 R$): the same per-stage expected costs,
+      unpivoted to ``COPER``/``CUSTO_FUTURO``/``CTERM`` rows with the 1-based
+      ``stage`` column kept as-is (the consuming charts subtract ``nw_offset``).
 
     Raises whatever :func:`read_relato_costs` raises on a missing/empty
-    parse -- no new swallowing (ticket-009's "no silent-empty" reader
-    contract).
+    ``relato`` parse (the mandatory report); a missing ``relato2`` is not an
+    error -- :func:`read_relato2_costs` returns empty and only the fan stage(s)
+    are absent.
     """
     raw = read_relato_costs(decomp_dir)
-    per_stage = _scenario_mean(
-        raw, "estagio", list(_RELATO_COST_COLUMNS), entity_column=None
-    )
+    monthly = read_relato2_costs(decomp_dir)
+    if monthly.is_empty():
+        combined = raw
+    else:
+        # relato2 is authoritative for any stage it covers -- drop those stages
+        # from relato first so a fan stage is never double-counted on union.
+        fan_stages = monthly["estagio"].unique().to_list()
+        combined = pl.concat(
+            [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
+            how="diagonal_relaxed",
+        )
+    per_stage = _probability_weighted_stage_cost(combined, list(_RELATO_COST_COLUMNS))
     present = [c for c in _RELATO_COST_COLUMNS if c in per_stage.columns]
 
     totals: dict[str, float] = (

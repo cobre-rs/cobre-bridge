@@ -24,6 +24,7 @@ from cobre_bridge.comparators.decomp_readers import (
     _read_dec_oper,
     _read_relato_table,
     _resolve_relato,
+    _resolve_relato2,
     _resolve_result_file,
     _resolve_revisioned_file,
     read_dec_desvfpha,
@@ -38,6 +39,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_dec_oper_usit,
     read_decomp_tim,
     read_eco_fpha,
+    read_relato2_costs,
     read_relato_balance,
     read_relato_convergence,
     read_relato_costs,
@@ -722,6 +724,71 @@ class TestReadRelatoCosts:
     def test_real_deck_is_non_empty(self) -> None:
         df = read_relato_costs(_REDUCED_DECK)
         assert df.height > 0
+
+
+class TestResolveRelato2:
+    """`_resolve_relato2`: root-only resolution for relato2.rvN, distinct from
+    relato.rvN (the relato resolver must not pick up relato2 or vice versa)."""
+
+    def test_root_resolves(self, tmp_path: Path) -> None:
+        target = tmp_path / "relato2.rv2"
+        target.touch()
+        assert _resolve_relato2(tmp_path) == target
+
+    def test_does_not_match_relato(self, tmp_path: Path) -> None:
+        (tmp_path / "relato.rv2").touch()
+        assert _resolve_relato2(tmp_path) is None
+
+    def test_absent_returns_none(self, tmp_path: Path) -> None:
+        assert _resolve_relato2(tmp_path) is None
+
+
+class TestReadRelato2Costs:
+    """`read_relato2_costs`: the fan-stage per-(stage, scenario) cost table
+    from relato2.rvN, or an empty frame when relato2 is absent (optional)."""
+
+    def test_absent_relato2_returns_empty(self, tmp_path: Path) -> None:
+        result = read_relato2_costs(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.is_empty()
+
+    def test_reads_fan_stage_costs_with_probabilities(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato2.rv2").touch()
+        stub_table = pd.DataFrame(
+            {
+                "estagio": [4, 4],
+                "cenario": [1, 2],
+                "probabilidade": [0.504438, 0.495562],
+                "custo_futuro": [0.0, 0.0],
+                "custo_presente": [1300.0, 300.0],
+                "geracao_termica": [1300.0, 300.0],
+                "penalidade_intercambio": [0.0, 0.0],
+            }
+        )
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(
+                lambda _path: _StubRelatoFile(relatorio_operacao_custos=stub_table)
+            ),
+        )
+        result = read_relato2_costs(tmp_path)
+        assert result.height == 2
+        assert set(result["estagio"].to_list()) == {4}
+        assert "probabilidade" in result.columns
+
+    def test_empty_table_returns_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato2.rv2").touch()
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(lambda _path: _StubRelatoFile(relatorio_operacao_custos=None)),
+        )
+        assert read_relato2_costs(tmp_path).is_empty()
 
 
 class TestReadRelatoExpectedCost:

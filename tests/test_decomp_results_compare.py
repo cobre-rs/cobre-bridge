@@ -1772,6 +1772,30 @@ def _relato_costs_frame() -> pl.DataFrame:
     )
 
 
+def _relato2_costs_frame() -> pl.DataFrame:
+    """A scenario-fan (monthly) stage 3 with two **unequal-probability**
+    openings, so its expected cost is genuinely probability-weighted rather
+    than a 50/50 mean. stage 3 geracao_termica expectation:
+    0.6*1000 + 0.4*500 = 800 k$ (weighted) vs 750 k$ (unweighted) -- the tests
+    pin the weighted value."""
+    return pl.DataFrame(
+        {
+            "estagio": [3, 3],
+            "cenario": [1, 2],
+            "probabilidade": [0.6, 0.4],
+            "custo_presente": [900.0, 400.0],
+            "custo_futuro": [0.0, 0.0],
+            "geracao_termica": [1000.0, 500.0],
+            "violacao_desvio": [0.0, 0.0],
+            "penalidade_vertimento_reservatorio": [0.0, 0.0],
+            "penalidade_vertimento_fio": [0.0, 0.0],
+            "violacao_turbinamento_reservatorio": [0.0, 0.0],
+            "violacao_turbinamento_fio": [0.0, 0.0],
+            "penalidade_intercambio": [0.0, 0.0],
+        }
+    )
+
+
 class TestCostFrames:
     """ticket-010: ``_cost_frames`` -- the DECOMP-side NPV dict (R$) + the
     per-stage ``nw_sin`` cost rows (10^6 R$), reconciled from native k$."""
@@ -1780,6 +1804,11 @@ class TestCostFrames:
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_relato_costs",
             lambda *_args, **_kwargs: _relato_costs_frame(),
+        )
+        # No scenario-fan stage by default -- relato2 is optional.
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_args, **_kwargs: pl.DataFrame(),
         )
 
     def test_kdollars_to_reais_reconciliation_on_both_unit_paths(
@@ -1803,6 +1832,50 @@ class TestCostFrames:
             )
         }
         assert cterm == pytest.approx({1: 0.12, 2: 0.1})
+
+    def test_relato2_scenario_fan_stage_is_unioned_in_and_probability_weighted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """relato2's monthly scenario-fan stage is unioned onto relato's weekly
+        stages, and its expected cost uses the real (unequal) tree
+        probabilities -- not a 50/50 mean."""
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_args, **_kwargs: _relato_costs_frame(),  # weekly stages 1, 2
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_args, **_kwargs: _relato2_costs_frame(),  # fan stage 3
+        )
+
+        nw_costs, nw_sin = _cost_frames(tmp_path)
+
+        cterm = {
+            row["stage"]: row["value"]
+            for row in nw_sin.filter(pl.col("variable") == "CTERM").iter_rows(
+                named=True
+            )
+        }
+        # The fan stage (3) is now present -- it was absent when only relato
+        # (weeks 1-2) was read ...
+        assert set(cterm) == {1, 2, 3}
+        # ... and probability-weighted: 0.6*1000 + 0.4*500 = 800 k$ -> 0.8
+        # (10^6 R$), NOT the unweighted 750 -> 0.75.
+        assert cterm[3] == pytest.approx(0.8)
+        # NPV thermal now includes the fan stage: (120 + 100 + 800) k$ x1e3.
+        assert nw_costs["GERACAO TERMICA"] == pytest.approx(1_020_000.0)
+
+    def test_absent_relato2_leaves_only_relato_stages(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A deck with no relato2 (empty frame) contributes no extra stage --
+        the cost frames cover exactly relato's weeks."""
+        self._patch(monkeypatch)  # read_relato2_costs stubbed to empty
+
+        _nw_costs, nw_sin = _cost_frames(tmp_path)
+
+        stages = set(nw_sin.filter(pl.col("variable") == "CTERM")["stage"].to_list())
+        assert stages == {1, 2}
 
     def test_all_cost_map_categories_are_populated_with_known_magnitudes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

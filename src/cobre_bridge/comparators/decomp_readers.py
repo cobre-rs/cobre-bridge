@@ -202,6 +202,19 @@ def _resolve_relato(case_dir: Path) -> Path | None:
     return _resolve_revisioned_file(case_dir, "relato")
 
 
+def _resolve_relato2(case_dir: Path) -> Path | None:
+    """Locate the revision-suffixed second report (``relato2.rvN``) in
+    *case_dir* (the deck root).
+
+    ``relato2`` holds the per-realization operation report for the
+    scenario-fan stage(s) the aggregate ``relato`` omits; it is optional -- a
+    deck without a fan stage has none. The ``^relato\\.rv\\d+$`` pattern
+    `_resolve_relato` uses does not match ``relato2.rvN`` (the char after
+    ``relato`` is a digit, not ``.``), so the two never collide.
+    """
+    return _resolve_revisioned_file(case_dir, "relato2")
+
+
 def _read_relato_table(case_dir: Path, attr: str) -> pl.DataFrame:
     """Read one named pandas table off the general report (``relato.rvN``).
 
@@ -253,6 +266,35 @@ def read_relato_costs(case_dir: Path) -> pl.DataFrame:
     Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
     """
     return _read_relato_table(case_dir, "relatorio_operacao_custos")
+
+
+def read_relato2_costs(case_dir: Path) -> pl.DataFrame:
+    """Read the fan-stage per-(stage, scenario) operating cost table from the
+    second report (``relato2.rvN``).
+
+    ``relato2`` carries the detailed per-realization operation report for the
+    scenario-fan (e.g. monthly) stage(s) that ``relato``'s aggregate
+    ``relatorio_operacao_custos`` omits -- the *same* cost columns
+    (``custo_presente``/``custo_futuro``/``geracao_termica``/penalties) with
+    one row per (``estagio``, ``cenario``) and the real tree ``probabilidade``
+    per row. Parsed with idecomp's ``Relato`` reader, which reads ``relato2``
+    with the same block format as ``relato``.
+
+    **Optional** -- returns an empty frame (not an error) when ``relato2`` is
+    absent, so a caller can fall back to ``relato`` alone: a deck with no
+    scenario fan has no second report. This is the one deliberately
+    silent-empty reader (a missing optional file is not a degraded input),
+    unlike the mandatory ``relato``/``dec_oper_*`` readers.
+
+    Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
+    """
+    path = _resolve_relato2(case_dir)
+    if path is None:
+        return pl.DataFrame()
+    table = Relato.read(str(path)).relatorio_operacao_custos
+    if table is None or table.empty:
+        return pl.DataFrame()
+    return pl.from_pandas(table)
 
 
 def read_relato_expected_cost(case_dir: Path) -> pl.DataFrame:
