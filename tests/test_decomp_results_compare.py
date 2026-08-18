@@ -25,7 +25,6 @@ from cobre_bridge.comparators.dataset import (
     TIDY_SCHEMA,
     ComparisonDataset,
 )
-from cobre_bridge.comparators.decomp_html_report import build_decomp_comparison_report
 from cobre_bridge.comparators.decomp_results import (
     _BUS_VARIABLES,
     _CANONICAL_VARIABLE,
@@ -5527,41 +5526,6 @@ class TestDecompDatasetSummary:
         assert summary["unmapped"] == {"hydro": [], "thermal": [], "bus": []}
 
 
-class TestBuildDecompComparisonReport:
-    """``build_decomp_comparison_report`` renders the same frames as the console."""
-
-    def test_populated_comparison_renders_all_three_frames(self) -> None:
-        comparison = _fake_comparison()
-
-        report = build_decomp_comparison_report(comparison)
-
-        assert "<!DOCTYPE html>" in report
-        assert "Operation comparison" in report
-        assert "generation" in report
-        assert "Final bounds" in report
-
-    def test_unmapped_codes_appear_in_the_report(self) -> None:
-        """``unmapped={"thermal": [86, 224]}`` in the fixture must surface."""
-        report = build_decomp_comparison_report(_fake_comparison())
-
-        assert "86" in report
-        assert "224" in report
-
-    def test_empty_comparison_short_circuits_without_raising(self) -> None:
-        empty_rows = _fake_comparison().rows.clear()
-        comparison = DecompComparison(
-            rows=empty_rows,
-            summary=_summarize(empty_rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
-
-        report = build_decomp_comparison_report(comparison)
-
-        assert "no comparable rows" in report
-        assert "<!DOCTYPE html>" in report
-
-
 class TestDecompCompareSummaryTolerance:
     """The within-tolerance verdict keys ``decomp_compare_summary`` appends."""
 
@@ -5835,9 +5799,13 @@ class TestCompareDecompCommand:
         assert (other / "summary.json").exists()
         assert "Artifacts written to" not in result.stdout
 
-    def test_format_html_writes_a_self_contained_report(
+    def test_format_html_writes_the_shared_multi_tab_report_labelled_decomp(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """ticket-022: the HTML block now renders the SAME shared multi-tab
+        report as ``compare newave`` (``build_comparison_report``), not the
+        legacy single-page renderer, with the reference series labelled
+        "DECOMP" (never "NEWAVE")."""
         out_dir = tmp_path / "artifacts"
         result = self._invoke(
             [
@@ -5855,7 +5823,12 @@ class TestCompareDecompCommand:
         assert result.exit_code == 0
         report_path = out_dir / "report.html"
         assert report_path.exists()
-        assert "Operation comparison" in report_path.read_text(encoding="utf-8")
+        report = report_path.read_text(encoding="utf-8")
+        assert "tab-system" in report
+        assert "tab-overview" in report
+        assert "Storage by Bus" in report
+        assert "DECOMP" in report
+        assert "NEWAVE" not in report
 
     def test_format_html_advisory_routes_to_stderr_under_json(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

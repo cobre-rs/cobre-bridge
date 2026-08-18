@@ -91,7 +91,7 @@ if TYPE_CHECKING:
 #: ``MIN_COBRE_VERSION`` (and the ``cobre-python`` pin in ``pyproject.toml``) to
 #: the real release version as soon as cobre tags one — do not guess a number in
 #: the meantime.
-MIN_COBRE_VERSION = "0.13.0"
+MIN_COBRE_VERSION = "0.14.1"
 
 
 def _installed_cobre_python_version() -> str | None:
@@ -1841,11 +1841,11 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
     # under --json (it is a --format artifact); only its stdout advisory is
     # routed to stderr so stdout stays pure JSON.
     if "html" in formats:
-        from cobre_bridge.comparators.decomp_html_report import (
-            build_decomp_comparison_report,
+        from cobre_bridge.comparators.report_builder import (
+            build_comparison_report,
         )
 
-        html = build_decomp_comparison_report(comparison)
+        html = build_comparison_report(dataset, reference_label="DECOMP")
         report_path = out_dir / "report.html"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(html, encoding="utf-8")
