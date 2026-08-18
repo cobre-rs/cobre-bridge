@@ -1190,7 +1190,8 @@ def _union_cost_rows(nw_sin: pl.DataFrame, cost_rows: pl.DataFrame) -> pl.DataFr
 #: ``charts.performance_metric_cards`` reads (``"Tempo Total"`` /
 #: ``"Calculo da Politica"``), so the shared card renderer needs no
 #: source-specific branch. Confirmed against the real reduced deck
-#: (``example/decomp-mar-26-rv2-reduced/saidas/decomp.tim``): DECOMP emits
+#: (``example/decomp-mar-26-rv2-reduced/decomp.tim``, read from the case
+#: root): DECOMP emits
 #: exactly four phases -- ``"Leitura de Dados"``, ``"Convergencia"``,
 #: ``"Impressao"``, ``"Tempo Total"``. ``"Convergencia"`` is DECOMP's nested
 #: Benders backward/forward loop -- the DECOMP analog of "Calculo da

@@ -51,19 +51,19 @@ _REDUCED_DECK = Path("example/decomp-mar-26-rv2-reduced")
 
 _needs_deck = pytest.mark.skipif(not _DECK.is_dir(), reason="rv3 outputs not present")
 _needs_reduced_deck = pytest.mark.skipif(
-    not (_REDUCED_DECK / "saidas" / "relato.rv2").is_file(),
+    not (_REDUCED_DECK / "relato.rv2").is_file(),
     reason="reduced deck outputs not present",
 )
 _needs_reduced_deck_tim = pytest.mark.skipif(
-    not (_REDUCED_DECK / "saidas" / "decomp.tim").is_file(),
+    not (_REDUCED_DECK / "decomp.tim").is_file(),
     reason="reduced deck decomp.tim not present",
 )
 _needs_reduced_deck_rhesoft = pytest.mark.skipif(
-    not (_REDUCED_DECK / "saidas" / "dec_oper_rhesoft.csv").is_file(),
+    not (_REDUCED_DECK / "dec_oper_rhesoft.csv").is_file(),
     reason="reduced deck dec_oper_rhesoft.csv not present",
 )
 _needs_reduced_deck_evap = pytest.mark.skipif(
-    not (_REDUCED_DECK / "saidas" / "dec_oper_evap.csv").is_file(),
+    not (_REDUCED_DECK / "dec_oper_evap.csv").is_file(),
     reason="reduced deck dec_oper_evap.csv not present",
 )
 
@@ -99,83 +99,81 @@ class _StubRelatoFile:
 
 
 class TestResolveResultFile:
-    """`_resolve_result_file`: saidas-first, case-insensitive discovery."""
+    """`_resolve_result_file`: root-only, case-insensitive discovery."""
 
-    def test_saidas_only(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        """A file present only under `saidas/` is a miss -- the clean break
+        retiring the saidas-first union (ticket-025)."""
         saidas = tmp_path / "saidas"
         saidas.mkdir()
-        target = saidas / "dec_oper_ree.csv"
-        target.touch()
-        assert _resolve_result_file(tmp_path, "dec_oper_ree.csv") == target
+        (saidas / "dec_oper_ree.csv").touch()
+        assert _resolve_result_file(tmp_path, "dec_oper_ree.csv") is None
 
-    def test_root_only_no_saidas_directory(self, tmp_path: Path) -> None:
+    def test_root_resolves(self, tmp_path: Path) -> None:
         target = tmp_path / "dec_oper_sist.csv"
         target.touch()
         assert _resolve_result_file(tmp_path, "dec_oper_sist.csv") == target
 
-    def test_prefers_saidas_when_both_present(self, tmp_path: Path) -> None:
+    def test_root_resolves_even_when_saidas_present(self, tmp_path: Path) -> None:
+        """`saidas/` is never consulted, even when a copy sits there too."""
         saidas = tmp_path / "saidas"
         saidas.mkdir()
-        saidas_copy = saidas / "dec_oper_sist.csv"
-        saidas_copy.touch()
-        (tmp_path / "dec_oper_sist.csv").touch()
-        assert _resolve_result_file(tmp_path, "dec_oper_sist.csv") == saidas_copy
+        (saidas / "dec_oper_sist.csv").touch()
+        root_copy = tmp_path / "dec_oper_sist.csv"
+        root_copy.touch()
+        assert _resolve_result_file(tmp_path, "dec_oper_sist.csv") == root_copy
 
-    def test_case_insensitive_in_saidas(self, tmp_path: Path) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        target = saidas / "DEC_OPER_SIST.CSV"
+    def test_case_insensitive_in_root(self, tmp_path: Path) -> None:
+        target = tmp_path / "DEC_OPER_SIST.CSV"
         target.touch()
         assert _resolve_result_file(tmp_path, "dec_oper_sist.csv") == target
 
-    def test_absent_from_both_returns_none(self, tmp_path: Path) -> None:
+    def test_absent_from_root_returns_none(self, tmp_path: Path) -> None:
         assert _resolve_result_file(tmp_path, "dec_oper_ree.csv") is None
 
 
 class TestResolveRelato:
-    """`_resolve_relato`: same saidas-first precedence for relato.rvN."""
+    """`_resolve_relato`: same root-only resolution for relato.rvN."""
 
-    def test_saidas_only(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
         saidas = tmp_path / "saidas"
         saidas.mkdir()
-        target = saidas / "relato.rv2"
-        target.touch()
-        assert _resolve_relato(tmp_path) == target
+        (saidas / "relato.rv2").touch()
+        assert _resolve_relato(tmp_path) is None
 
-    def test_root_only_no_saidas_directory(self, tmp_path: Path) -> None:
+    def test_root_resolves(self, tmp_path: Path) -> None:
         target = tmp_path / "relato.rv2"
         target.touch()
         assert _resolve_relato(tmp_path) == target
 
-    def test_absent_from_both_returns_none(self, tmp_path: Path) -> None:
+    def test_absent_from_root_returns_none(self, tmp_path: Path) -> None:
         assert _resolve_relato(tmp_path) is None
 
 
 class TestResolveRevisionedFile:
-    """`_resolve_revisioned_file`: the shared saidas-first ``<stem>.rvN``
+    """`_resolve_revisioned_file`: the shared root-only ``<stem>.rvN``
     resolver behind `_resolve_relato` and the ticket-017 FPHA readers."""
 
-    def test_saidas_only(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
         saidas = tmp_path / "saidas"
         saidas.mkdir()
-        target = saidas / "dec_estatfpha.rv2"
-        target.touch()
-        assert _resolve_revisioned_file(tmp_path, "dec_estatfpha") == target
+        (saidas / "dec_estatfpha.rv2").touch()
+        assert _resolve_revisioned_file(tmp_path, "dec_estatfpha") is None
 
-    def test_root_only_no_saidas_directory(self, tmp_path: Path) -> None:
+    def test_root_resolves(self, tmp_path: Path) -> None:
         target = tmp_path / "dec_desvfpha.rv3"
         target.touch()
         assert _resolve_revisioned_file(tmp_path, "dec_desvfpha") == target
 
-    def test_prefers_saidas_when_both_present(self, tmp_path: Path) -> None:
+    def test_root_resolves_even_when_saidas_present(self, tmp_path: Path) -> None:
         saidas = tmp_path / "saidas"
         saidas.mkdir()
-        saidas_copy = saidas / "eco_fpha.rv2"
-        saidas_copy.touch()
-        (tmp_path / "eco_fpha.rv2").touch()
-        assert _resolve_revisioned_file(tmp_path, "eco_fpha") == saidas_copy
+        (saidas / "eco_fpha.rv2").touch()
+        root_copy = tmp_path / "eco_fpha.rv2"
+        root_copy.touch()
+        assert _resolve_revisioned_file(tmp_path, "eco_fpha") == root_copy
 
-    def test_absent_from_both_returns_none(self, tmp_path: Path) -> None:
+    def test_absent_from_root_returns_none(self, tmp_path: Path) -> None:
         assert _resolve_revisioned_file(tmp_path, "eco_fpha") is None
 
     def test_does_not_match_a_different_stem(self, tmp_path: Path) -> None:
@@ -194,12 +192,10 @@ class _StubDecEstatFphaFile:
 class TestReadDecDesvfpha:
     """`read_dec_desvfpha`: per-hydro FPHA deviation table."""
 
-    def test_finds_saidas_only_file(
+    def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "dec_desvfpha.rv2").touch()
+        (tmp_path / "dec_desvfpha.rv2").touch()
         stub_table = pd.DataFrame(
             {
                 "codigo_usina": [1],
@@ -223,12 +219,22 @@ class TestReadDecDesvfpha:
         assert result.height == 1
         assert "geracao_hidraulica_fpha" in result.columns
 
-    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_desvfpha.rv2").touch()
         with pytest.raises(FileNotFoundError, match="dec_desvfpha") as exc_info:
             read_dec_desvfpha(tmp_path)
         message = str(exc_info.value)
         assert str(tmp_path) in message
-        assert "saidas" in message
+        assert "saidas/" not in message
+
+    def test_missing_file_raises_naming_case_dir(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="dec_desvfpha") as exc_info:
+            read_dec_desvfpha(tmp_path)
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas/" not in message
 
     def test_empty_parse_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -260,12 +266,10 @@ class TestReadDecDesvfpha:
 class TestReadEcoFpha:
     """`read_eco_fpha`: per-hydro/stage FPHA fitting-grid echo."""
 
-    def test_finds_saidas_only_file(
+    def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "eco_fpha.rv2").touch()
+        (tmp_path / "eco_fpha.rv2").touch()
         stub_table = pd.DataFrame(
             {
                 "codigo_usina": [1],
@@ -288,12 +292,22 @@ class TestReadEcoFpha:
         assert result.height == 1
         assert "numero_pontos_volume_armazenado" in result.columns
 
-    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "eco_fpha.rv2").touch()
         with pytest.raises(FileNotFoundError, match="eco_fpha") as exc_info:
             read_eco_fpha(tmp_path)
         message = str(exc_info.value)
         assert str(tmp_path) in message
-        assert "saidas" in message
+        assert "saidas/" not in message
+
+    def test_missing_file_raises_naming_case_dir(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="eco_fpha") as exc_info:
+            read_eco_fpha(tmp_path)
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas/" not in message
 
     def test_empty_parse_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -320,12 +334,10 @@ class TestReadEcoFpha:
 class TestReadDecEstatfpha:
     """`read_dec_estatfpha`: deck-wide FPHA deviation summary."""
 
-    def test_finds_saidas_only_file(
+    def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "dec_estatfpha.rv2").touch()
+        (tmp_path / "dec_estatfpha.rv2").touch()
         stub_table = pd.DataFrame({"variavel": ["DESVIO MEDIO (MW)"], "valor": [3.83]})
         monkeypatch.setattr(
             DecEstatFpha,
@@ -337,12 +349,22 @@ class TestReadDecEstatfpha:
         assert result.height == 1
         assert result["variavel"][0] == "DESVIO MEDIO (MW)"
 
-    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_estatfpha.rv2").touch()
         with pytest.raises(FileNotFoundError, match="dec_estatfpha") as exc_info:
             read_dec_estatfpha(tmp_path)
         message = str(exc_info.value)
         assert str(tmp_path) in message
-        assert "saidas" in message
+        assert "saidas/" not in message
+
+    def test_missing_file_raises_naming_case_dir(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="dec_estatfpha") as exc_info:
+            read_dec_estatfpha(tmp_path)
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas/" not in message
 
     def test_none_table_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -369,17 +391,28 @@ class TestReadDecOperCore:
         with pytest.raises(FileNotFoundError, match="dec_oper_sist.csv"):
             _read_dec_oper(tmp_path, "dec_oper_sist.csv", _stub_reader(None))
 
-    def test_missing_file_names_both_locations(self, tmp_path: Path) -> None:
+    def test_missing_file_names_case_dir_only(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError) as exc_info:
             _read_dec_oper(tmp_path, "dec_oper_ree.csv", _stub_reader(None))
         message = str(exc_info.value)
         assert str(tmp_path) in message
-        assert "saidas" in message
+        assert "saidas/" not in message
 
-    def test_found_in_saidas_only(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        """A file present only under `saidas/` is a miss: `_resolve_result_file`
+        returns `None` and `_read_dec_oper` raises `FileNotFoundError` naming
+        only `case_dir` (ticket-025 clean break)."""
         saidas = tmp_path / "saidas"
         saidas.mkdir()
         (saidas / "dec_oper_sist.csv").touch()
+        with pytest.raises(FileNotFoundError) as exc_info:
+            _read_dec_oper(tmp_path, "dec_oper_sist.csv", _stub_reader(None))
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas/" not in message
+
+    def test_found_in_root_only(self, tmp_path: Path) -> None:
+        (tmp_path / "dec_oper_sist.csv").touch()
         table = pd.DataFrame({"estagio": [1, 2], "cmo": [10.0, 12.0]})
         result = _read_dec_oper(tmp_path, "dec_oper_sist.csv", _stub_reader(table))
         assert isinstance(result, pl.DataFrame)
@@ -476,14 +509,13 @@ class TestRealDeckReaders:
 
 
 class TestReadRelatoConvergenceDiscovery:
-    """Tier-1: `read_relato_convergence` resolves a `saidas/`-only report."""
+    """Tier-1: `read_relato_convergence` resolves a root-only report; a
+    `saidas/`-only report is a miss (ticket-025)."""
 
-    def test_finds_saidas_only_relato(
+    def test_finds_root_relato(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "relato.rv2").touch()
+        (tmp_path / "relato.rv2").touch()
         stub_table = pd.DataFrame(
             {
                 "iteracao": [1],
@@ -500,6 +532,14 @@ class TestReadRelatoConvergenceDiscovery:
         result = read_relato_convergence(tmp_path)
         assert isinstance(result, pl.DataFrame)
         assert result.height == 1
+
+    def test_saidas_only_relato_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "relato.rv2").touch()
+        with pytest.raises(FileNotFoundError, match="relato") as exc_info:
+            read_relato_convergence(tmp_path)
+        assert "saidas/" not in str(exc_info.value)
 
 
 class TestReadRelatoTable:
@@ -535,12 +575,10 @@ class TestReadRelatoTable:
         with pytest.raises(ValueError, match="balanco_energetico"):
             _read_relato_table(tmp_path, "balanco_energetico")
 
-    def test_finds_saidas_only_relato(
+    def test_finds_root_relato(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "relato.rv2").touch()
+        (tmp_path / "relato.rv2").touch()
         stub_table = pd.DataFrame({"nome_submercado": ["SUDESTE"]})
         monkeypatch.setattr(
             Relato,
@@ -550,6 +588,14 @@ class TestReadRelatoTable:
         result = _read_relato_table(tmp_path, "balanco_energetico")
         assert isinstance(result, pl.DataFrame)
         assert result.height == 1
+
+    def test_saidas_only_relato_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "relato.rv2").touch()
+        with pytest.raises(FileNotFoundError, match="relato") as exc_info:
+            _read_relato_table(tmp_path, "balanco_energetico")
+        assert "saidas/" not in str(exc_info.value)
 
 
 class TestReadRelatoBalance:
@@ -793,14 +839,12 @@ class TestReadRelatoMembership:
 
 
 class TestReadDecOperGnl:
-    """`read_dec_oper_gnl`: anticipated-thermal operation, saidas-only file."""
+    """`read_dec_oper_gnl`: anticipated-thermal operation, root-only file."""
 
-    def test_finds_saidas_only_file(
+    def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "dec_oper_gnl.csv").touch()
+        (tmp_path / "dec_oper_gnl.csv").touch()
         stub_table = pd.DataFrame(
             {
                 "estagio": [1],
@@ -820,6 +864,14 @@ class TestReadDecOperGnl:
         assert result.height == 1
         assert "custo_geracao" in result.columns
         assert "geracao_MW" in result.columns
+
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_gnl.csv").touch()
+        with pytest.raises(FileNotFoundError, match="dec_oper_gnl.csv") as exc_info:
+            read_dec_oper_gnl(tmp_path)
+        assert "saidas/" not in str(exc_info.value)
 
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="dec_oper_gnl.csv"):
@@ -846,12 +898,10 @@ class TestReadDecOperGnl:
 class TestReadDecOperRee:
     """`read_dec_oper_ree`: per-REE energy operation (ENA / EARM)."""
 
-    def test_finds_saidas_only_file(
+    def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "dec_oper_ree.csv").touch()
+        (tmp_path / "dec_oper_ree.csv").touch()
         stub_table = pd.DataFrame(
             {
                 "estagio": [1],
@@ -879,6 +929,14 @@ class TestReadDecOperRee:
         assert result.height == 1
         for column in ("codigo_ree", "nome_ree", "ena_MWmes", "earm_final_MWmes"):
             assert column in result.columns
+
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_ree.csv").touch()
+        with pytest.raises(FileNotFoundError, match="dec_oper_ree.csv") as exc_info:
+            read_dec_oper_ree(tmp_path)
+        assert "saidas/" not in str(exc_info.value)
 
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="dec_oper_ree.csv"):
@@ -908,12 +966,10 @@ class TestReadDecOperEvap:
     (ticket-020). Verified columns against idecomp 1.14.2's
     ``DecOperEvap.tabela``."""
 
-    def test_finds_saidas_only_file(
+    def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "dec_oper_evap.csv").touch()
+        (tmp_path / "dec_oper_evap.csv").touch()
         stub_table = pd.DataFrame(
             {
                 "estagio": [1],
@@ -960,6 +1016,14 @@ class TestReadDecOperEvap:
         ):
             assert column in result.columns
 
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_evap.csv").touch()
+        with pytest.raises(FileNotFoundError, match="dec_oper_evap.csv") as exc_info:
+            read_dec_oper_evap(tmp_path)
+        assert "saidas/" not in str(exc_info.value)
+
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="dec_oper_evap.csv"):
             read_dec_oper_evap(tmp_path)
@@ -988,12 +1052,10 @@ class TestReadDecOperRheSoft:
     """`read_dec_oper_rhesoft`: RHE soft-constraint achieved LHS vs limit
     (ticket-019)."""
 
-    def test_finds_saidas_only_file(
+    def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "dec_oper_rhesoft.csv").touch()
+        (tmp_path / "dec_oper_rhesoft.csv").touch()
         stub_table = pd.DataFrame(
             {
                 "estagio": [4],
@@ -1026,12 +1088,20 @@ class TestReadDecOperRheSoft:
         ):
             assert column in result.columns
 
-    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_rhesoft.csv").touch()
+        with pytest.raises(FileNotFoundError, match="dec_oper_rhesoft.csv") as exc_info:
+            read_dec_oper_rhesoft(tmp_path)
+        assert "saidas/" not in str(exc_info.value)
+
+    def test_missing_file_raises_naming_case_dir(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="dec_oper_rhesoft.csv") as exc_info:
             read_dec_oper_rhesoft(tmp_path)
         message = str(exc_info.value)
         assert str(tmp_path) in message
-        assert "saidas" in message
+        assert "saidas/" not in message
 
     def test_empty_parse_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1061,12 +1131,10 @@ class TestReadDecOperRheSoft:
 class TestReadDecompTim:
     """`read_decomp_tim`: wall-clock timing table from ``decomp.tim``."""
 
-    def test_finds_saidas_only_file(
+    def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        saidas = tmp_path / "saidas"
-        saidas.mkdir()
-        (saidas / "decomp.tim").touch()
+        (tmp_path / "decomp.tim").touch()
         stub_table = pd.DataFrame(
             {
                 "Etapa": ["Leitura de Dados", "Convergencia", "Tempo Total"],
@@ -1087,12 +1155,20 @@ class TestReadDecompTim:
         assert result.columns == ["Etapa", "Tempo"]
         assert result.height == 3
 
-    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+    def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "decomp.tim").touch()
+        with pytest.raises(FileNotFoundError, match="decomp.tim") as exc_info:
+            read_decomp_tim(tmp_path)
+        assert "saidas/" not in str(exc_info.value)
+
+    def test_missing_file_raises_naming_case_dir(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="decomp.tim") as exc_info:
             read_decomp_tim(tmp_path)
         message = str(exc_info.value)
         assert str(tmp_path) in message
-        assert "saidas" in message
+        assert "saidas/" not in message
 
     def test_none_table_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
