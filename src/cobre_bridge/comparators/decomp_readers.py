@@ -21,7 +21,14 @@ from typing import Protocol
 
 import pandas as pd
 import polars as pl
-from idecomp.decomp import DecOperInterc, DecOperSist, DecOperUsih, DecOperUsit, Relato
+from idecomp.decomp import (
+    DecOperGnl,
+    DecOperInterc,
+    DecOperSist,
+    DecOperUsih,
+    DecOperUsit,
+    Relato,
+)
 
 from cobre_bridge.comparators.newave_readers import _find_case_insensitive
 
@@ -108,6 +115,14 @@ def read_dec_oper_interc(case_dir: Path) -> pl.DataFrame:
     return _read_dec_oper(case_dir, "dec_oper_interc.csv", DecOperInterc)
 
 
+def read_dec_oper_gnl(case_dir: Path) -> pl.DataFrame:
+    """Per-anticipated-thermal (GNL) operation: dispatch bounds, incremental
+    cost, and the fuel cost (``custo_geracao``, native k$). Ships only under
+    ``saidas/`` (no curated root copy); resolved by the saidas-first lookup
+    shared with every other ``dec_oper_*`` table."""
+    return _read_dec_oper(case_dir, "dec_oper_gnl.csv", DecOperGnl)
+
+
 def _resolve_relato(case_dir: Path) -> Path | None:
     """Locate the revision-suffixed general report (``relato.rvN``),
     preferring ``saidas/`` over the deck root (same precedence as
@@ -153,3 +168,42 @@ def read_relato_balance(case_dir: Path) -> pl.DataFrame:
     """Read the per-submarket energy balance table (demand, generation by
     source, purchase/sale, ENA, and EARM in/out) from the general report."""
     return _read_relato_table(case_dir, "balanco_energetico")
+
+
+def read_relato_costs(case_dir: Path) -> pl.DataFrame:
+    """Read the per-(stage, scenario) operating cost table (present/future
+    cost, thermal generation, deviation/spillage/turbining penalties, and
+    the per-submarket marginal cost) from the general report.
+
+    Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
+    """
+    return _read_relato_table(case_dir, "relatorio_operacao_custos")
+
+
+def read_relato_expected_cost(case_dir: Path) -> pl.DataFrame:
+    """Read the per-parcela expected operating cost table (one ``estagio_N``
+    column per stage) from the general report.
+
+    Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
+    """
+    return _read_relato_table(case_dir, "custo_operacao_valor_esperado")
+
+
+def reconcile_kdollars_to_reais(value: float) -> float:
+    """Convert a native k$ cost value to R$ (×10³).
+
+    Every cost the source model reports — `read_relato_costs`,
+    `read_relato_expected_cost`, `read_dec_oper_gnl`'s ``custo_geracao`` — is
+    in k$ (thousands of BRL), while cobre reports costs in R$. Silently
+    mixing the two is the same unit trap documented in
+    `project_decomp_fcf_unit_conversion_bug`: cobre's boundary FCF coefficients
+    were consumed verbatim in k$ against a R$-denominated model, undervaluing
+    water by three orders of magnitude. This helper is the single conversion
+    site — readers stay in native k$, and callers convert once, explicitly.
+
+    Downstream, two different R$ conventions apply: the Overview cost dict
+    (ticket-010) uses plain R$ (this factor, ×10³), while `nw_sin` uses
+    10⁶ R$ (an additional ÷10⁶ on top of this factor) — also ticket-010's
+    responsibility.
+    """
+    return value * 1e3

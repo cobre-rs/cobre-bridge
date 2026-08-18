@@ -11,7 +11,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.charts import _BALANCE_VARS
+from cobre_bridge.comparators.charts import _BALANCE_VARS, _COST_MAP
 from cobre_bridge.comparators.dataset import (
     SUMMARY_SCHEMA,
     TIDY_SCHEMA,
@@ -21,13 +21,16 @@ from cobre_bridge.comparators.decomp_html_report import build_decomp_comparison_
 from cobre_bridge.comparators.decomp_results import (
     _BUS_VARIABLES,
     _CANONICAL_VARIABLE,
+    _DEVIATION_VIOLATION_LABEL,
     _HYDRO_VARIABLES,
+    _NW_COST_LABELS,
     _THERMAL_VARIABLES,
     DecompComparison,
     _AlignedDecompFrames,
     _build_line_id_map,
     _bus_side,
     _corridor_line_alignment,
+    _cost_frames,
     _energy_balance_frames,
     _interc_side,
     _line_bounds_and_meta,
@@ -40,6 +43,7 @@ from cobre_bridge.comparators.decomp_results import (
     _stage_rows,
     _summarize,
     _tidy,
+    _union_cost_rows,
     build_decomp_dataset,
     compare_decomp_results,
 )
@@ -378,6 +382,18 @@ def _patch_aligned_frames(
         "cobre_bridge.comparators.decomp_results.cobre_readers."
         "read_cobre_bus_aggregates",
         lambda *_args, **_kwargs: pl.DataFrame(),
+    )
+    # ticket-010: ``build_decomp_dataset`` also calls ``_cost_frames`` directly
+    # (outside ``_read_aligned_frames``), which reads ``read_relato_costs`` --
+    # unlike every other reader here, it RAISES on a missing/empty parse
+    # (ticket-009's "no silent-empty" reader contract), which a bare
+    # ``tmp_path`` always trips. Stub it here too, so every fixture that does
+    # not care about ticket-010's cost metadata keeps working against a bare
+    # ``tmp_path``; tests that DO care override this again afterwards
+    # (monkeypatch's last ``setattr`` wins).
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results._cost_frames",
+        lambda *_args, **_kwargs: ({}, pl.DataFrame()),
     )
 
 
@@ -1739,6 +1755,316 @@ class TestBuildDecompDatasetNetworkE2E:
         html = build_comparison_report(dataset)
 
         assert "Line Net Flow" in html
+        assert "Plotly.newPlot" in html
+
+
+def _relato_costs_frame() -> pl.DataFrame:
+    """Two stages, two scenarios each -- known k$ values that pin the exact
+    NPV dict and per-stage ``nw_sin`` magnitudes ticket-010 must produce.
+
+    Per-stage means (across ``cenario``): stage 1 -> geracao_termica=120,
+    custo_presente=600, custo_futuro=2200; stage 2 -> geracao_termica=100,
+    custo_presente=400, custo_futuro=1200. NPV (summed across stage, x1e3):
+    GERACAO TERMICA=220_000, INTERCAMBIO=8_000, VERTIMENTO=12_000,
+    VIOL. TURB. MINIMO=2_000, VIOL. TURB. MAXIMO=4_000,
+    VIOLACAO DESVIO=16_000.
+    """
+    return pl.DataFrame(
+        {
+            "estagio": [1, 1, 2, 2],
+            "cenario": [1, 2, 1, 2],
+            "probabilidade": [0.5, 0.5, 0.5, 0.5],
+            "custo_presente": [500.0, 700.0, 300.0, 500.0],
+            "custo_futuro": [2000.0, 2400.0, 1000.0, 1400.0],
+            "geracao_termica": [100.0, 140.0, 80.0, 120.0],
+            "violacao_desvio": [10.0, 10.0, 6.0, 6.0],
+            "penalidade_vertimento_reservatorio": [5.0, 5.0, 3.0, 3.0],
+            "penalidade_vertimento_fio": [3.0, 3.0, 1.0, 1.0],
+            "violacao_turbinamento_reservatorio": [1.0, 1.0, 1.0, 1.0],
+            "violacao_turbinamento_fio": [2.0, 2.0, 2.0, 2.0],
+            "penalidade_intercambio": [4.0, 4.0, 4.0, 4.0],
+        }
+    )
+
+
+class TestCostFrames:
+    """ticket-010: ``_cost_frames`` -- the DECOMP-side NPV dict (R$) + the
+    per-stage ``nw_sin`` cost rows (10^6 R$), reconciled from native k$."""
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_args, **_kwargs: _relato_costs_frame(),
+        )
+
+    def test_kdollars_to_reais_reconciliation_on_both_unit_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The epic's TOP RISK guard, pinned in one place: a known k$ input
+        must land at the correct magnitude on BOTH the ``nw_costs`` dict (R$,
+        x1e3) and the ``nw_sin`` CTERM per-stage rows (10^6 R$, /1e3).
+        ``geracao_termica`` aggregates to 220.0 k$ NPV (120 + 100 stage
+        means), so the dict must read 220_000.0 R$; each stage's CTERM row
+        must read that stage's mean k$ /1e3."""
+        self._patch(monkeypatch)
+
+        nw_costs, nw_sin = _cost_frames(tmp_path)
+
+        assert nw_costs["GERACAO TERMICA"] == pytest.approx(220_000.0)
+        cterm = {
+            row["stage"]: row["value"]
+            for row in nw_sin.filter(pl.col("variable") == "CTERM").iter_rows(
+                named=True
+            )
+        }
+        assert cterm == pytest.approx({1: 0.12, 2: 0.1})
+
+    def test_all_cost_map_categories_are_populated_with_known_magnitudes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        nw_costs, _nw_sin = _cost_frames(tmp_path)
+
+        assert nw_costs["INTERCAMBIO"] == pytest.approx(8_000.0)
+        assert nw_costs["VERTIMENTO"] == pytest.approx(12_000.0)
+        assert nw_costs["VIOL. TURB. MINIMO"] == pytest.approx(2_000.0)
+        assert nw_costs["VIOL. TURB. MAXIMO"] == pytest.approx(4_000.0)
+
+    def test_violacao_desvio_surfaces_as_a_descriptive_residual_key(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``violacao_desvio`` has no ``charts._COST_MAP`` slot -- it must
+        still surface (not be silently dropped) under its own key."""
+        self._patch(monkeypatch)
+
+        nw_costs, _nw_sin = _cost_frames(tmp_path)
+
+        assert nw_costs[_DEVIATION_VIOLATION_LABEL] == pytest.approx(16_000.0)
+
+    def test_coper_and_custo_futuro_rows_match_the_stage_means(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        _nw_costs, nw_sin = _cost_frames(tmp_path)
+
+        coper = {
+            row["stage"]: row["value"]
+            for row in nw_sin.filter(pl.col("variable") == "COPER").iter_rows(
+                named=True
+            )
+        }
+        custo_futuro = {
+            row["stage"]: row["value"]
+            for row in nw_sin.filter(pl.col("variable") == "CUSTO_FUTURO").iter_rows(
+                named=True
+            )
+        }
+        assert coper == pytest.approx({1: 0.6, 2: 0.4})
+        assert custo_futuro == pytest.approx({1: 2.2, 2: 1.2})
+
+    def test_every_nw_costs_key_maps_to_a_known_cost_map_category(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No dead rows: every emitted key is either a ``charts._COST_MAP``
+        the source model label or the one intentional residual
+        (``violacao_desvio``)."""
+        self._patch(monkeypatch)
+
+        nw_costs, _nw_sin = _cost_frames(tmp_path)
+
+        known_labels = {label for label, *_ in _NW_COST_LABELS}
+        mapped_cost_map_keys = {k for _, nw_keys, _, _ in _COST_MAP for k in nw_keys}
+        assert nw_costs  # the fixture must exercise real categories
+        for key in nw_costs:
+            assert key in known_labels
+            assert key == _DEVIATION_VIOLATION_LABEL or key in mapped_cost_map_keys
+
+    def test_every_nw_sin_variable_is_a_chart_consumed_token(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        _nw_costs, nw_sin = _cost_frames(tmp_path)
+
+        assert set(nw_sin["variable"].unique().to_list()) <= {
+            "COPER",
+            "CUSTO_FUTURO",
+            "CTERM",
+        }
+
+    def test_stage_column_stays_one_based(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        _nw_costs, nw_sin = _cost_frames(tmp_path)
+
+        assert set(nw_sin["stage"].unique().to_list()) == {1, 2}
+
+    def test_propagates_the_readers_raise_on_missing_relato(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No new swallowing: a missing/empty relato surfaces exactly the
+        error ``read_relato_costs`` raises."""
+
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs", _boom
+        )
+
+        with pytest.raises(FileNotFoundError):
+            _cost_frames(tmp_path)
+
+
+class TestUnionCostRows:
+    """ticket-010: ``_union_cost_rows`` -- additive union onto ``nw_sin``,
+    defensive against the dataclass-default columnless ``pl.DataFrame()``."""
+
+    def _typed(self, variable: str, value: float) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "newave_code": [0],
+                "stage": [1],
+                "variable": [variable],
+                "value": [value],
+            }
+        )
+
+    def test_unions_cost_rows_onto_existing_rows(self) -> None:
+        earm = self._typed("EARMF", 7000.0)
+        cost = self._typed("CTERM", 0.12)
+
+        combined = _union_cost_rows(earm, cost)
+
+        assert set(combined["variable"].to_list()) == {"EARMF", "CTERM"}
+
+    def test_columnless_nw_sin_default_returns_cost_rows_unchanged(self) -> None:
+        cost = self._typed("CTERM", 0.12)
+
+        combined = _union_cost_rows(pl.DataFrame(), cost)
+
+        assert combined is cost
+
+    def test_columnless_cost_rows_returns_nw_sin_unchanged(self) -> None:
+        earm = self._typed("EARMF", 7000.0)
+
+        combined = _union_cost_rows(earm, pl.DataFrame())
+
+        assert combined is earm
+
+
+def _cobre_cost_breakdown_fixture() -> dict[str, float]:
+    return {"thermal_cost": 200_000.0, "deficit_cost": 1_000.0}
+
+
+def _cobre_stage_costs_fixture() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "stage_id": [0, 1],
+            "immediate_cost": [600_000.0, 400_000.0],
+            "future_cost": [2_200_000.0, 1_200_000.0],
+            "thermal_cost": [110_000.0, 95_000.0],
+            "anticipated_thermal_cost": [10_000.0, 5_000.0],
+            "thermal_cost_total": [120_000.0, 100_000.0],
+        }
+    )
+
+
+class TestBuildDecompDatasetCosts:
+    """ticket-010: Overview cost metadata (nw_costs/cobre_costs/nw_sin cost
+    rows/cobre_stage_costs) filled by ``build_decomp_dataset``."""
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_aligned_frames(monkeypatch, _balance_fixture())
+        # ``_patch_aligned_frames`` stubs ``_cost_frames`` itself to an
+        # empty default (see its own docstring) -- re-point it back to the
+        # real function (the module-level name this test file imported,
+        # unaffected by that stub) so patching ``read_relato_costs`` below
+        # actually takes effect through it.
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._cost_frames", _cost_frames
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_args, **_kwargs: _relato_costs_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_cost_breakdown",
+            lambda *_args, **_kwargs: _cobre_cost_breakdown_fixture(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_stage_costs",
+            lambda *_args, **_kwargs: _cobre_stage_costs_fixture(),
+        )
+
+    def test_nw_sin_retains_earm_ena_rows_alongside_the_new_cost_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Additive union, not overwrite: the ticket-006 EARM/ENA rows must
+        survive the ticket-010 cost-row union."""
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        variables = set(dataset.metadata["nw_sin"]["variable"].unique().to_list())
+        assert {"EARMF", "ENA"} <= variables
+        assert {"COPER", "CUSTO_FUTURO", "CTERM"} <= variables
+
+    def test_nw_costs_cobre_costs_stage_costs_and_offset_are_populated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata["nw_costs"]["GERACAO TERMICA"] == pytest.approx(
+            220_000.0
+        )
+        assert dataset.metadata["cobre_costs"]["thermal_cost"] == pytest.approx(
+            200_000.0
+        )
+        stage_costs = dataset.metadata["cobre_stage_costs"]
+        assert isinstance(stage_costs, pl.DataFrame)
+        assert not stage_costs.is_empty()
+        assert dataset.metadata["nw_offset"] == 1
+
+    def test_overview_cost_sections_render_non_empty(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)
+
+        assert "Cost Breakdown" in html
+        assert "Per-Stage Cost" in html
+        assert "No cost data available." not in html
+        assert "NEWAVE Thermal Cost" in html
+        assert "Cobre Thermal Cost" in html
+        assert "Plotly.newPlot" in html
+
+
+@pytest.mark.skipif(
+    not _REDUCED_DECOMP_DECK.is_dir() or not _REDUCED_COBRE_OUTPUT.is_dir(),
+    reason="reduced deck + converted cobre output not present",
+)
+class TestBuildDecompDatasetCostsE2E:
+    """Tier 3 (dev-only smoke, ticket-010): the reduced deck's real Overview
+    cost sections render end to end. Both directories are gitignored, so
+    this never runs in CI."""
+
+    def test_overview_cost_sections_are_non_empty_on_the_reduced_deck(self) -> None:
+        dataset = build_decomp_dataset(_REDUCED_DECOMP_DECK, _REDUCED_COBRE_OUTPUT)
+
+        html = build_comparison_report(dataset)
+
+        assert "No cost data available." not in html
         assert "Plotly.newPlot" in html
 
 

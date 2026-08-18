@@ -7,19 +7,23 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 import pytest
-from idecomp.decomp import Relato
+from idecomp.decomp import DecOperGnl, Relato
 
 from cobre_bridge.comparators.decomp_readers import (
     _read_dec_oper,
     _read_relato_table,
     _resolve_relato,
     _resolve_result_file,
+    read_dec_oper_gnl,
     read_dec_oper_interc,
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
     read_relato_balance,
     read_relato_convergence,
+    read_relato_costs,
+    read_relato_expected_cost,
+    reconcile_kdollars_to_reais,
 )
 
 _DECK = Path("example/decomp-jul-26-rv3")
@@ -355,3 +359,188 @@ class TestReadRelatoBalance:
     def test_real_deck_is_non_empty(self) -> None:
         df = read_relato_balance(_REDUCED_DECK)
         assert df.height > 0
+
+
+class TestReadRelatoCosts:
+    """`read_relato_costs`: per-(stage, scenario) operating cost table."""
+
+    def test_returns_expected_columns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        stub_table = pd.DataFrame(
+            {
+                "estagio": [1],
+                "cenario": [1],
+                "probabilidade": [1.0],
+                "custo_futuro": [1234.5],
+                "custo_presente": [678.9],
+                "geracao_termica": [50.0],
+                "violacao_desvio": [0.0],
+                "penalidade_vertimento_reservatorio": [0.0],
+                "penalidade_vertimento_fio": [0.0],
+                "violacao_turbinamento_reservatorio": [0.0],
+                "violacao_turbinamento_fio": [0.0],
+                "penalidade_intercambio": [0.0],
+                "cmo_SE": [100.0],
+            }
+        )
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(
+                lambda _path: _StubRelatoFile(relatorio_operacao_custos=stub_table)
+            ),
+        )
+        result = read_relato_costs(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        for column in (
+            "custo_presente",
+            "custo_futuro",
+            "geracao_termica",
+            "penalidade_intercambio",
+            "penalidade_vertimento_reservatorio",
+        ):
+            assert column in result.columns
+
+    def test_none_table_raises_naming_attr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(lambda _path: _StubRelatoFile(relatorio_operacao_custos=None)),
+        )
+        with pytest.raises(ValueError, match="relatorio_operacao_custos"):
+            read_relato_costs(tmp_path)
+
+    def test_missing_relato_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="relato"):
+            read_relato_costs(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_relato_costs(_REDUCED_DECK)
+        assert df.height > 0
+
+
+class TestReadRelatoExpectedCost:
+    """`read_relato_expected_cost`: per-parcela expected cost, wide by stage."""
+
+    def test_returns_estagio_columns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        stub_table = pd.DataFrame(
+            {
+                "parcela": ["GERACAO TERMICA"],
+                "estagio_1": [10.0],
+                "estagio_2": [20.0],
+                "estagio_3": [30.0],
+            }
+        )
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(
+                lambda _path: _StubRelatoFile(custo_operacao_valor_esperado=stub_table)
+            ),
+        )
+        result = read_relato_expected_cost(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        for column in ("parcela", "estagio_1", "estagio_2", "estagio_3"):
+            assert column in result.columns
+
+    def test_none_table_raises_naming_attr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "relato.rv2").touch()
+        monkeypatch.setattr(
+            Relato,
+            "read",
+            staticmethod(
+                lambda _path: _StubRelatoFile(custo_operacao_valor_esperado=None)
+            ),
+        )
+        with pytest.raises(ValueError, match="custo_operacao_valor_esperado"):
+            read_relato_expected_cost(tmp_path)
+
+    def test_missing_relato_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="relato"):
+            read_relato_expected_cost(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_relato_expected_cost(_REDUCED_DECK)
+        assert df.height > 0
+
+
+class TestReadDecOperGnl:
+    """`read_dec_oper_gnl`: anticipated-thermal operation, saidas-only file."""
+
+    def test_finds_saidas_only_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_oper_gnl.csv").touch()
+        stub_table = pd.DataFrame(
+            {
+                "estagio": [1],
+                "codigo_usina": [1],
+                "custo_incremental": [5.0],
+                "geracao_MW": [100.0],
+                "custo_geracao": [42.0],
+            }
+        )
+        monkeypatch.setattr(
+            DecOperGnl,
+            "read",
+            staticmethod(lambda _path: _StubFile(stub_table)),
+        )
+        result = read_dec_oper_gnl(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        assert "custo_geracao" in result.columns
+        assert "geracao_MW" in result.columns
+
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="dec_oper_gnl.csv"):
+            read_dec_oper_gnl(tmp_path)
+
+    def test_empty_parse_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "dec_oper_gnl.csv").touch()
+        monkeypatch.setattr(
+            DecOperGnl,
+            "read",
+            staticmethod(lambda _path: _StubFile(None)),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_dec_oper_gnl(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_dec_oper_gnl(_REDUCED_DECK)
+        assert df.height > 0
+
+
+class TestReconcileKdollarsToReais:
+    """`reconcile_kdollars_to_reais`: the single k$ -> R$ conversion site."""
+
+    @pytest.mark.parametrize(
+        ("kdollars", "reais"),
+        [(1.0, 1000.0), (2.5, 2500.0), (0.0, 0.0)],
+    )
+    def test_applies_thousand_factor(self, kdollars: float, reais: float) -> None:
+        assert reconcile_kdollars_to_reais(kdollars) == reais
+
+    def test_docstring_names_kdollar_provenance(self) -> None:
+        docstring = reconcile_kdollars_to_reais.__doc__
+        assert docstring is not None
+        assert "project_decomp_fcf_unit_conversion_bug" in docstring
+        assert "k$" in docstring

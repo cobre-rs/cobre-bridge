@@ -45,6 +45,8 @@ from cobre_bridge.comparators.decomp_readers import (
     read_dec_oper_usih,
     read_dec_oper_usit,
     read_relato_convergence,
+    read_relato_costs,
+    reconcile_kdollars_to_reais,
 )
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
 
@@ -1046,6 +1048,171 @@ def _energy_balance_frames(
     return nw_market, nw_net_load, nw_sin
 
 
+# --- ticket-010: Overview cost metadata (nw_costs / nw_sin cost rows) ---
+#
+# Fills the Overview tab's cost sections: the NPV breakdown dict consumed by
+# ``charts.overview_metrics``/``cost_breakdown_chart``/``_table`` (keyed by
+# ``charts._COST_MAP``'s the source model label strings) and the per-stage
+# ``nw_sin`` rows consumed by ``charts._extract_stage_cost_series``
+# (``COPER``/``CUSTO_FUTURO``/``CTERM``). This is the single place the
+# native k$ -> R$ reconciliation happens for both target unit conventions
+# (see epic-04's "TOP RISK" table): the dict is R$ (``reconcile_kdollars_to_
+# reais``, x1e3); ``nw_sin`` is 10^6 R$ (an additional /1e6 on top of that
+# factor).
+
+#: ``relatorio_operacao_custos`` numeric cost columns this ticket aggregates
+#: -- every cost column the table carries except the per-submarket
+#: ``cmo_<sbm>`` marginal-*price* columns (not a cost) and the
+#: estagio/cenario/probabilidade bookkeeping columns.
+_RELATO_COST_COLUMNS: tuple[str, ...] = (
+    "custo_presente",
+    "custo_futuro",
+    "geracao_termica",
+    "violacao_desvio",
+    "penalidade_vertimento_reservatorio",
+    "penalidade_vertimento_fio",
+    "violacao_turbinamento_reservatorio",
+    "violacao_turbinamento_fio",
+    "penalidade_intercambio",
+)
+
+#: ``violacao_desvio`` has no ``charts._COST_MAP`` analogue -- surfaced under
+#: its own label (matching the Portuguese-abbreviation style every other
+#: ``_COST_MAP`` key uses) rather than being silently dropped;
+#: ``charts._resolve_cost_categories`` appends it as an unmapped residual
+#: category.
+_DEVIATION_VIOLATION_LABEL = "VIOLACAO DESVIO"
+
+#: ``(display_label, source_columns...)`` for the ``nw_costs`` NPV dict --
+#: mirrors ``charts._COST_MAP``'s the source model label strings. VERTIMENTO
+#: sums two source columns (reservoir + run-of-river spillage penalty); every
+#: other category is a single column.
+_NW_COST_LABELS: tuple[tuple[str, ...], ...] = (
+    ("GERACAO TERMICA", "geracao_termica"),
+    ("INTERCAMBIO", "penalidade_intercambio"),
+    (
+        "VERTIMENTO",
+        "penalidade_vertimento_reservatorio",
+        "penalidade_vertimento_fio",
+    ),
+    ("VIOL. TURB. MINIMO", "violacao_turbinamento_reservatorio"),
+    ("VIOL. TURB. MAXIMO", "violacao_turbinamento_fio"),
+    (_DEVIATION_VIOLATION_LABEL, "violacao_desvio"),
+)
+
+#: ``nw_sin`` variable token -> source column, for the per-stage cost rows
+#: ``charts._extract_stage_cost_series`` reads. Matches MEDIAS-SIN's the
+#: source model tokens on the newave side of ``compare newave``.
+_NW_SIN_COST_TOKENS: tuple[tuple[str, str], ...] = (
+    ("COPER", "custo_presente"),
+    ("CUSTO_FUTURO", "custo_futuro"),
+    ("CTERM", "geracao_termica"),
+)
+
+
+def _cost_frames(decomp_dir: Path) -> tuple[dict[str, float], pl.DataFrame]:
+    """DECOMP-side Overview cost metadata: the NPV dict + ``nw_sin`` rows.
+
+    Reads ``relatorio_operacao_custos`` (native k$, one row per (estagio,
+    cenario)) and aggregates it in two passes, both built on the same
+    per-stage mean:
+
+    - **Per-stage mean across scenarios** -- :func:`_scenario_mean` with no
+      entity column (a single SIN-wide row per stage), reusing the exact
+      kernel every other ``_*_side``/``_energy_balance_frames`` helper in
+      this module uses. This keeps the source and cobre sides on the same
+      unweighted footing the module docstring already commits to ("Scenario
+      averaging is unweighted on both sides") even though
+      ``relatorio_operacao_custos`` carries an explicit ``probabilidade``
+      column per row -- special-casing a probability-weighted mean here
+      would make this one source diverge from every other level's
+      convention. No stage discount is applied either: unlike cobre's own
+      ``discount_factor`` column (:func:`cobre_readers.read_cobre_cost_
+      breakdown`), ``relatorio_operacao_custos`` exposes no per-row discount
+      factor at this granularity, so there is nothing to apply -- the
+      per-stage values are DECOMP's own raw nominal $ costs at that node.
+    - **``nw_costs``** (R$): the per-stage means summed across every stage,
+      then :func:`reconcile_kdollars_to_reais` (x1e3). Categories below
+      0.01 R$ are excluded, mirroring ``newave_readers.read_pmo_cost_
+      breakdown`` and :func:`cobre_readers.read_cobre_cost_breakdown`'s own
+      floor.
+    - **``nw_sin`` rows** (10^6 R$): the same per-stage means, unpivoted to
+      ``COPER``/``CUSTO_FUTURO``/``CTERM`` rows with the 1-based ``stage``
+      column kept as-is (the consuming charts subtract ``nw_offset``).
+
+    Raises whatever :func:`read_relato_costs` raises on a missing/empty
+    parse -- no new swallowing (ticket-009's "no silent-empty" reader
+    contract).
+    """
+    raw = read_relato_costs(decomp_dir)
+    per_stage = _scenario_mean(
+        raw, "estagio", list(_RELATO_COST_COLUMNS), entity_column=None
+    )
+    present = [c for c in _RELATO_COST_COLUMNS if c in per_stage.columns]
+
+    totals: dict[str, float] = (
+        per_stage.select([pl.col(c).sum().alias(c) for c in present]).row(0, named=True)
+        if present
+        else {}
+    )
+
+    nw_costs: dict[str, float] = {}
+    for label, *columns in _NW_COST_LABELS:
+        value = reconcile_kdollars_to_reais(sum(totals.get(c, 0.0) for c in columns))
+        if abs(value) > 0.01:
+            nw_costs[label] = value
+
+    sin_tokens = [(var, col) for var, col in _NW_SIN_COST_TOKENS if col in present]
+    if not sin_tokens or per_stage.is_empty():
+        nw_sin_rows = _empty_market_frame()
+    else:
+        # A scalar factor derived from the single conversion site rather
+        # than a re-derived literal: k$ -> R$ (x1e3) then R$ -> 10^6 R$
+        # (/1e6), collapsing to x1e-3 -- but expressed via
+        # reconcile_kdollars_to_reais so the x1e3 itself is never repeated.
+        k_to_r6 = reconcile_kdollars_to_reais(1.0) / 1e6
+        nw_sin_rows = (
+            per_stage.select(
+                "estagio",
+                *[pl.col(col).alias(var) for var, col in sin_tokens],
+            )
+            .unpivot(
+                on=[var for var, _ in sin_tokens],
+                index=["estagio"],
+                variable_name="variable",
+                value_name="value",
+            )
+            .with_columns(
+                pl.lit(0).cast(pl.Int64).alias("newave_code"),
+                pl.col("estagio").cast(pl.Int64).alias("stage"),
+                (pl.col("value") * k_to_r6).cast(pl.Float64).alias("value"),
+            )
+            .select("newave_code", "stage", "variable", "value")
+            .sort("stage", "variable")
+        )
+
+    return nw_costs, nw_sin_rows
+
+
+def _union_cost_rows(nw_sin: pl.DataFrame, cost_rows: pl.DataFrame) -> pl.DataFrame:
+    """Union :func:`_cost_frames`'s cost rows onto the existing ``nw_sin``.
+
+    ``nw_sin`` (from :func:`_energy_balance_frames`, ticket-006) already
+    carries the EARM/ENA rows -- this must add the cost rows alongside them,
+    never overwrite. A columnless frame on either side (the
+    ``_AlignedDecompFrames``/``PercentileData`` dataclass default
+    ``pl.DataFrame()``, which every fixture that predates ticket-006/010
+    still carries) cannot be vertically concatenated against a typed frame,
+    so it is treated as "nothing to union" instead of raising a
+    schema-mismatch error.
+    """
+    if not nw_sin.columns:
+        return cost_rows
+    if not cost_rows.columns:
+        return nw_sin
+    return pl.concat([nw_sin, cost_rows], how="vertical", rechunk=True)
+
+
 def _map_entities(
     frame: pl.DataFrame, code_column: str, mapping: dict[int, int]
 ) -> tuple[pl.DataFrame, list[int]]:
@@ -1270,7 +1437,14 @@ def build_decomp_dataset(
     MEDIAS stage, so the fixed offset is always 1 rather than derived from
     the data. As of ticket-008, ``line``/``line_bounds``/``line_meta`` carry
     the Network tab's cobre percentile band, per-stage capacity bounds, and
-    line metadata (see :func:`_line_bounds_and_meta`). Every other field
+    line metadata (see :func:`_line_bounds_and_meta`). As of ticket-010, the
+    Overview tab's cost sections are filled: ``nw_costs``/``cobre_costs``
+    (the NPV breakdown dicts, from :func:`_cost_frames` and
+    :func:`cobre_readers.read_cobre_cost_breakdown`) and
+    ``cobre_stage_costs`` (from :func:`cobre_readers.read_cobre_stage_costs`);
+    ``nw_sin`` additionally carries the ``COPER``/``CUSTO_FUTURO``/``CTERM``
+    per-stage cost rows, unioned onto the ticket-006 EARM/ENA rows via
+    :func:`_union_cost_rows` rather than overwriting them. Every other field
     stays at its empty default, and ``bus``/``line`` themselves stay empty
     whenever the Cobre run has no percentile output (e.g. the deterministic
     2-node tree) — no percentile spread is ever fabricated.
@@ -1325,15 +1499,25 @@ def build_decomp_dataset(
     )
     results.extend(line_results)
 
+    # --- ticket-010: Overview cost metadata (nw_costs / cobre_costs /
+    # nw_sin cost rows / cobre_stage_costs) ---
+    nw_costs, nw_cost_rows = _cost_frames(decomp_dir)
+    cobre_costs = cobre_readers.read_cobre_cost_breakdown(cobre_output_dir)
+    cobre_stage_costs = cobre_readers.read_cobre_stage_costs(cobre_output_dir)
+    nw_sin = _union_cost_rows(aligned.nw_sin, nw_cost_rows)
+
     pct = PercentileData(
         nw_bus_names=aligned.bus_names,
         nw_hydro_names=aligned.hydro_names,
         bus=cobre_readers.read_cobre_bus_percentiles(cobre_output_dir),
         nw_market=aligned.nw_market,
         nw_net_load=aligned.nw_net_load,
-        nw_sin=aligned.nw_sin,
+        nw_sin=nw_sin,
         # D-STAGE-OFFSET: fixed at 1, not derived — see the docstring above.
         nw_offset=1,
+        nw_costs=nw_costs,
+        cobre_costs=cobre_costs,
+        cobre_stage_costs=cobre_stage_costs,
         bus_aggregates=cobre_readers.read_cobre_bus_aggregates(cobre_output_dir),
         cobre_bus_meta=cobre_readers.read_cobre_bus_metadata(cobre_output_dir),
         cobre_hydro_means=cobre_readers.read_cobre_hydro_means(cobre_output_dir),
