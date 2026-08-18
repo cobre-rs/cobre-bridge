@@ -22,20 +22,21 @@ from typing import Protocol
 import pandas as pd
 import polars as pl
 from idecomp.decomp import (
+    DecDesvFpha,
+    DecEstatFpha,
     Decomptim,
     DecOperGnl,
     DecOperInterc,
     DecOperSist,
     DecOperUsih,
     DecOperUsit,
+    EcoFpha,
     Relato,
 )
 
 from cobre_bridge.comparators.newave_readers import _find_case_insensitive
 
 _LOG = logging.getLogger(__name__)
-
-_RELATO_PATTERN = re.compile(r"^relato\.rv\d+$", re.IGNORECASE)
 
 
 class _TableFile(Protocol):
@@ -124,20 +125,35 @@ def read_dec_oper_gnl(case_dir: Path) -> pl.DataFrame:
     return _read_dec_oper(case_dir, "dec_oper_gnl.csv", DecOperGnl)
 
 
-def _resolve_relato(case_dir: Path) -> Path | None:
-    """Locate the revision-suffixed general report (``relato.rvN``),
-    preferring ``saidas/`` over the deck root (same precedence as
-    `_resolve_result_file`)."""
+def _resolve_revisioned_file(case_dir: Path, stem: str) -> Path | None:
+    """Locate a revision-suffixed result file (``<stem>.rvN``), preferring
+    ``saidas/`` over the deck root (same precedence as
+    `_resolve_result_file`).
+
+    Shared by every reader whose filename carries the deck's own revision
+    number as a suffix instead of a fixed extension -- the general report
+    (``relato.rvN``) and the FPHA deviation/grid-echo files
+    (``dec_estatfpha.rvN``, ``dec_desvfpha.rvN``, ``eco_fpha.rvN``), unlike
+    the fixed-name ``dec_oper_*.csv``/``decomp.tim`` tables
+    `_resolve_result_file` resolves.
+    """
+    pattern = re.compile(rf"^{re.escape(stem)}\.rv\d+$", re.IGNORECASE)
     for base in (case_dir / "saidas", case_dir):
         if not base.is_dir():
             continue
         try:
             for entry in sorted(base.iterdir()):
-                if entry.is_file() and _RELATO_PATTERN.match(entry.name):
+                if entry.is_file() and pattern.match(entry.name):
                     return entry
         except OSError:
             pass
     return None
+
+
+def _resolve_relato(case_dir: Path) -> Path | None:
+    """Locate the revision-suffixed general report (``relato.rvN``),
+    preferring ``saidas/`` over the deck root."""
+    return _resolve_revisioned_file(case_dir, "relato")
 
 
 def _read_relato_table(case_dir: Path, attr: str) -> pl.DataFrame:
@@ -211,6 +227,98 @@ def read_relato_expected_cost(case_dir: Path) -> pl.DataFrame:
     Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
     """
     return _read_relato_table(case_dir, "custo_operacao_valor_esperado")
+
+
+# --- ticket-017: FPHA (fitted production function) readers ---
+#
+# Three files, all resolved via `_resolve_revisioned_file` (saidas-first,
+# `<stem>.rvN`): `dec_desvfpha` (per-hydro/stage/scenario/block deviation
+# between the "true" nonlinear generation and the piecewise-linear fit the
+# LP actually consumed), `eco_fpha` (per-hydro/stage fitting-grid bounds and
+# node counts), and `dec_estatfpha` (a single deck-wide deviation summary,
+# no per-hydro/stage key). None of the three carries the fitted PLANE
+# coefficients themselves (those live in a fourth, undeclared file,
+# `avl_cortesfpha.rvN` / idecomp's `AvlCortesFpha`) -- see
+# `decomp_results._fpha_metrics`'s docstring for how this ticket works
+# around that gap.
+
+
+def _read_revisioned_table(
+    case_dir: Path,
+    stem: str,
+    reader_cls: _TableReader,
+) -> pl.DataFrame:
+    """Read one revision-suffixed (``<stem>.rvN``) ``.tabela``-shaped table,
+    rejecting missing or empty parses.
+
+    Mirrors :func:`_read_dec_oper`'s shape exactly, but resolves via
+    `_resolve_revisioned_file` instead of an exact filename -- shared by the
+    FPHA readers whose filenames carry the deck's own revision suffix the
+    way ``dec_oper_*.csv`` does not.
+    """
+    path = _resolve_revisioned_file(case_dir, stem)
+    if path is None:
+        raise FileNotFoundError(
+            f"{stem}.rvN not found in {case_dir} or its saidas/ subfolder"
+        )
+    table = reader_cls.read(str(path)).tabela
+    if table is None or table.empty:
+        raise ValueError(
+            f"{path} parsed empty; the run's outputs look incomplete or the "
+            "file syntax is unsupported"
+        )
+    _LOG.debug("Read %s: %d rows", path.name, len(table))
+    return pl.from_pandas(table)
+
+
+def read_dec_desvfpha(case_dir: Path) -> pl.DataFrame:
+    """Read the per-hydro FPHA deviation table (``dec_desvfpha.rvN``).
+
+    One row per (hydro, stage, node, block): the realized ``(volume_total_hm3,
+    vazao_turbinada_m3s, vazao_vertida_m3s)`` operating point, the "true"
+    nonlinear generation (``geracao_hidraulica_fph``), the piecewise-linear
+    fit the LP actually consumed at that point (``geracao_hidraulica_fpha``),
+    and their signed deviation (``desvio_absoluto_MW``/``desvio_percentual``
+    -- "absoluto" means "in MW", not ``abs()``-ed; ``fpha - fph``).
+    """
+    return _read_revisioned_table(case_dir, "dec_desvfpha", DecDesvFpha)
+
+
+def read_eco_fpha(case_dir: Path) -> pl.DataFrame:
+    """Read the per-hydro/stage FPHA fitting-grid echo (``eco_fpha.rvN``).
+
+    One row per (hydro, stage): the volume/turbined-flow fitting-grid bounds
+    and node counts (``numero_pontos_volume_armazenado``/
+    ``numero_pontos_vazao_turbinada``, ``volume_armazenado_minimo/maximo``,
+    ``vazao_turbinada_minima/maxima``) and the plant's generation bounds --
+    the grid the source model's own fit was built on, not the fitted
+    coefficients themselves.
+    """
+    return _read_revisioned_table(case_dir, "eco_fpha", EcoFpha)
+
+
+def read_dec_estatfpha(case_dir: Path) -> pl.DataFrame:
+    """Read the deck-wide FPHA deviation summary (``dec_estatfpha.rvN``).
+
+    A ``variavel``/``valor`` key-value table (e.g. mean deviation in MW, %
+    of total generation, split reservoir vs. run-of-river) -- unlike every
+    other reader in this module, it carries no per-hydro or per-stage key,
+    so it cannot join into a per-(hydro, stage) frame; it is surfaced as
+    deck-wide context only (see `decomp_results._log_decomp_fpha_deck_summary`).
+    """
+    path = _resolve_revisioned_file(case_dir, "dec_estatfpha")
+    if path is None:
+        raise FileNotFoundError(
+            f"dec_estatfpha.rvN not found in {case_dir} or its saidas/ subfolder"
+        )
+    table = DecEstatFpha.read(str(path)).estatisticas_desvios
+    if table is None or table.empty:
+        raise ValueError(
+            f"{path} parsed empty; the run's outputs look incomplete or the "
+            "file syntax is unsupported"
+        )
+    _LOG.debug("Read %s: %d rows", path.name, len(table))
+    return pl.from_pandas(table)
 
 
 def reconcile_kdollars_to_reais(value: float) -> float:

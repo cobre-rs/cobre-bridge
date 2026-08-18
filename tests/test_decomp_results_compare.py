@@ -15,6 +15,7 @@ import pytest
 from cobre_bridge.comparators.charts import (
     _BALANCE_VARS,
     _COST_MAP,
+    hydro_slack_aggregate_chart,
     performance_fwd_bwd_split_chart,
 )
 from cobre_bridge.comparators.dataset import (
@@ -29,6 +30,7 @@ from cobre_bridge.comparators.decomp_results import (
     _DEVIATION_VIOLATION_LABEL,
     _HYDRO_VARIABLES,
     _NW_COST_LABELS,
+    _PRODUCTIVITY_TURBINED_EPS,
     _THERMAL_VARIABLES,
     DecompComparison,
     _AlignedDecompFrames,
@@ -41,11 +43,14 @@ from cobre_bridge.comparators.decomp_results import (
     _decomp_tim_iterations,
     _decomp_tim_stages,
     _energy_balance_frames,
+    _fpha_metrics,
+    _hydro_productivity_results,
     _interc_side,
     _line_bounds_and_meta,
     _line_entity_names,
     _line_result_comparisons,
     _map_entities,
+    _merge_hydro_bus_ids,
     _read_cobre_lines_index,
     _result_comparisons,
     _scenario_mean,
@@ -57,6 +62,7 @@ from cobre_bridge.comparators.decomp_results import (
     compare_decomp_results,
 )
 from cobre_bridge.comparators.report_builder import build_comparison_report
+from cobre_bridge.comparators.results import ResultComparison
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.verdict import decomp_compare_summary, decomp_dataset_summary
 
@@ -404,13 +410,27 @@ def _patch_aligned_frames(
         "cobre_bridge.comparators.decomp_results._cost_frames",
         lambda *_args, **_kwargs: ({}, pl.DataFrame()),
     )
+    # ticket-014: ``build_decomp_dataset`` also calls
+    # ``read_cobre_hydro_bus_labels`` directly (outside ``_read_aligned_frames``).
+    # Like ``read_cobre_bus_aggregates`` above (ticket-006), it reads the
+    # ``simulation/hydro_bus_generation/`` partition and RAISES
+    # ``CobrePartitionMissingError`` on a bare ``tmp_path`` instead of
+    # degrading to empty. Stub it here too, so every fixture that does not
+    # care about ticket-014's hydro metadata keeps working against a bare
+    # ``tmp_path``; tests that DO care override this again afterwards
+    # (monkeypatch's last ``setattr`` wins).
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "read_cobre_hydro_bus_labels",
+        lambda *_args, **_kwargs: {},
+    )
 
 
 class TestBuildDecompDataset:
     """``build_decomp_dataset`` assembles the canonical dataset for the
     current 8 DECOMP variables via the shared ``_read_aligned_frames`` seam."""
 
-    def test_dataset_validates_with_the_eight_canonical_variables(
+    def test_dataset_validates_with_the_canonical_variables(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
@@ -426,6 +446,9 @@ class TestBuildDecompDataset:
             "storage_final_hm3",
             "deficit_mw",
             "spot_price",
+            # ticket-016: derived realized hydro productivity (both fixture
+            # plants turbine well above the zero-guard on both sides).
+            "productivity_mw_per_m3s",
         }
 
     def test_tidy_sources_are_newave_and_cobre_only(
@@ -2732,6 +2755,1021 @@ class TestBuildDecompDatasetPerformanceE2E:
         assert "Time per Iteration" in html
         assert "Forward / Backward Split" in html
         assert "Plotly.newPlot" in html
+
+
+def _hydro_percentiles_fixture() -> pl.DataFrame:
+    """Cobre p10/p50/p90 for the two ``_aligned_fixture`` hydro entities."""
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1],
+            "stage_id": [0, 0],
+            "generation_mw_p10": [100.0, 55.0],
+            "generation_mw_p50": [110.0, 60.0],
+            "generation_mw_p90": [120.0, 65.0],
+            "storage_final_hm3_p10": [470.0, 290.0],
+            "storage_final_hm3_p50": [480.0, 300.0],
+            "storage_final_hm3_p90": [490.0, 310.0],
+        }
+    )
+
+
+def _hydro_metadata_fixture() -> dict[int, dict]:
+    return {
+        0: {"name": "A", "min_storage_hm3": 20.0},
+        1: {"name": "B", "min_storage_hm3": 10.0},
+    }
+
+
+def _hydro_bus_labels_fixture() -> dict[int, frozenset[int]]:
+    return {0: frozenset({0}), 1: frozenset({0})}
+
+
+def _hydro_per_stage_bounds_fixture() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "entity_id": [0, 1],
+            "stage_id": [0, 0],
+            "min_storage_hm3": [20.0, 10.0],
+            "max_storage_hm3": [1000.0, 600.0],
+        }
+    )
+
+
+def _patch_hydro_detail_readers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    percentiles: pl.DataFrame | None = None,
+    metadata: dict[int, dict] | None = None,
+    bus_labels: dict[int, frozenset[int]] | None = None,
+    per_stage_bounds: pl.DataFrame | None = None,
+) -> None:
+    """Stub ticket-014's four cobre readers, each defaulting to empty --
+    matching how a Cobre run with no hydro percentile/metadata output
+    (e.g. the deterministic 2-node tree) degrades in production."""
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "read_cobre_hydro_percentiles",
+        lambda *_a, **_k: pl.DataFrame() if percentiles is None else percentiles,
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "read_cobre_hydro_metadata",
+        lambda *_a, **_k: {} if metadata is None else metadata,
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "read_cobre_hydro_bus_labels",
+        lambda *_a, **_k: {} if bus_labels is None else bus_labels,
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "read_cobre_hydro_per_stage_bounds",
+        lambda *_a, **_k: (
+            pl.DataFrame() if per_stage_bounds is None else per_stage_bounds
+        ),
+    )
+
+
+class TestMergeHydroBusIds:
+    """ticket-014's ``bus_ids`` merge helper -- the per-bus hydro charts
+    KeyError without it (see ``analyze._bus_name_lookups``)."""
+
+    def test_injects_bus_ids_from_labels(self) -> None:
+        meta = {0: {"name": "A"}, 1: {"name": "B"}}
+        labels = {0: frozenset({7})}
+
+        merged = _merge_hydro_bus_ids(meta, labels)
+
+        assert merged[0]["bus_ids"] == frozenset({7})
+        assert merged[1]["bus_ids"] == []
+
+    def test_does_not_mutate_the_inputs(self) -> None:
+        meta = {0: {"name": "A"}}
+        labels = {0: frozenset({7})}
+
+        merged = _merge_hydro_bus_ids(meta, labels)
+        merged[0]["name"] = "changed"
+        merged[0]["bus_ids"] = frozenset({99})
+
+        assert meta[0] == {"name": "A"}
+        assert labels[0] == frozenset({7})
+
+    def test_every_plant_gets_a_bus_ids_key_even_with_no_labels(self) -> None:
+        meta = {5: {"name": "C"}}
+
+        merged = _merge_hydro_bus_ids(meta, {})
+
+        assert merged[5]["bus_ids"] == []
+
+
+class TestBuildDecompDatasetHydroDetail:
+    """ticket-014: the Hydro Operation + Hydro Plant Details tabs' four
+    remaining ``PercentileData`` fields (``hydro``, ``cobre_hydro_meta``,
+    ``cobre_hydro_per_stage_bounds``, ``nw_hydro_slacks``)."""
+
+    def test_hydro_percentiles_populate_metadata_when_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_hydro_detail_readers(
+            monkeypatch, percentiles=_hydro_percentiles_fixture()
+        )
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        hydro_pct = dataset.metadata["hydro"]
+        assert isinstance(hydro_pct, pl.DataFrame)
+        assert not hydro_pct.is_empty()
+        assert "generation_mw_p50" in hydro_pct.columns
+        assert "storage_final_hm3_p50" in hydro_pct.columns
+
+    def test_hydro_percentiles_stay_empty_when_cobre_output_lacks_them(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No percentile mock (deterministic-tree low-N, master-plan caveat
+        1): ``read_cobre_hydro_percentiles`` degrades to its own empty-frame
+        default and the dataset must not fabricate a spread."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_hydro_detail_readers(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        hydro_pct = dataset.metadata["hydro"]
+        assert isinstance(hydro_pct, pl.DataFrame)
+        assert hydro_pct.is_empty()
+
+    def test_cobre_hydro_meta_entries_carry_bus_ids(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_hydro_detail_readers(
+            monkeypatch,
+            metadata=_hydro_metadata_fixture(),
+            bus_labels=_hydro_bus_labels_fixture(),
+        )
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        cobre_hydro_meta = dataset.metadata["cobre_hydro_meta"]
+        assert set(cobre_hydro_meta) == {0, 1}
+        for entry in cobre_hydro_meta.values():
+            assert "bus_ids" in entry
+        assert cobre_hydro_meta[0]["bus_ids"] == frozenset({0})
+        assert cobre_hydro_meta[1]["bus_ids"] == frozenset({0})
+        # Plant physics from ``read_cobre_hydro_metadata`` survive the merge.
+        assert cobre_hydro_meta[0]["name"] == "A"
+
+    def test_cobre_hydro_meta_bus_ids_empty_when_plant_has_no_label(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_hydro_detail_readers(
+            monkeypatch, metadata=_hydro_metadata_fixture(), bus_labels={}
+        )
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        cobre_hydro_meta = dataset.metadata["cobre_hydro_meta"]
+        assert cobre_hydro_meta[0]["bus_ids"] == []
+        assert cobre_hydro_meta[1]["bus_ids"] == []
+
+    def test_hydro_per_stage_bounds_populate_metadata_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_hydro_detail_readers(
+            monkeypatch, per_stage_bounds=_hydro_per_stage_bounds_fixture()
+        )
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        bounds = dataset.metadata["cobre_hydro_per_stage_bounds"]
+        assert bounds["max_storage_hm3"].to_list() == [1000.0, 600.0]
+
+    def test_nw_hydro_slacks_is_empty_decomp_has_no_slack_table(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_hydro_detail_readers(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        nw_hydro_slacks = dataset.metadata["nw_hydro_slacks"]
+        assert nw_hydro_slacks is None or nw_hydro_slacks.is_empty()
+
+    def test_hydro_operation_and_detail_tabs_render_with_metadata_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_hydro_detail_readers(
+            monkeypatch,
+            percentiles=_hydro_percentiles_fixture(),
+            metadata=_hydro_metadata_fixture(),
+            bus_labels=_hydro_bus_labels_fixture(),
+            per_stage_bounds=_hydro_per_stage_bounds_fixture(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_bus_metadata",
+            lambda *_a, **_k: {0: {"name": "SUDESTE"}},
+        )
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)
+
+        assert "Storage by Bus (hm³)" in html
+        assert 'id="tab-hydro-detail"' in html
+        hydro_tab = _extract_tab_content(html, "tab-hydro")
+        assert "No hydro storage_final_hm3 data mapped to buses." not in hydro_tab
+        assert "Plotly.newPlot" in html
+
+    def test_both_hydro_tabs_render_without_exception_when_percentiles_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No cobre hydro percentiles/metadata/bus-labels at all -- both tabs
+        must degrade gracefully (fallback panels), never raise."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_hydro_detail_readers(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)  # must not raise
+
+        assert "Storage by Bus (hm³)" in html
+        assert 'id="tab-hydro-detail"' in html
+
+    def test_sin_slack_charts_render_cobre_only_no_newave_trace(self) -> None:
+        """``nw_hydro_slacks`` empty (or ``None``) -> the SIN-total slack
+        chart renders the Cobre Mean trace with no ``NEWAVE`` trace -- the
+        documented ``has_newave=False`` degrade path -- exercised directly
+        on the shared, unmodified chart function."""
+        cobre_hydro = pl.DataFrame(
+            {
+                "entity_id": [0],
+                "stage_id": [0],
+                "water_withdrawal_violation_neg_m3s": [1.5],
+            }
+        )
+
+        html = hydro_slack_aggregate_chart(
+            cobre_hydro,
+            None,
+            "water_withdrawal_violation_neg_m3s",
+            "Withdrawal Slack Pos (m³/s)",
+        )
+
+        assert '"name":"Cobre Mean"' in html
+        assert '"name":"NEWAVE"' not in html
+
+
+def _thermal_percentiles_fixture() -> pl.DataFrame:
+    """Cobre p10/p50/p90 for the one ``_aligned_fixture`` thermal entity."""
+    return pl.DataFrame(
+        {
+            "entity_id": [0],
+            "stage_id": [0],
+            "generation_mw_p10": [24.0],
+            "generation_mw_p50": [28.0],
+            "generation_mw_p90": [32.0],
+        }
+    )
+
+
+def _patch_thermal_percentiles(
+    monkeypatch: pytest.MonkeyPatch, percentiles: pl.DataFrame | None = None
+) -> None:
+    """Stub ticket-015's cobre thermal-percentile reader -- defaults to
+    empty, matching how a Cobre run with no thermal percentile output
+    (e.g. the deterministic 2-node tree) degrades in production."""
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "read_cobre_thermal_percentiles",
+        lambda *_a, **_k: pl.DataFrame() if percentiles is None else percentiles,
+    )
+
+
+class TestBuildDecompDatasetThermalDetail:
+    """ticket-015: fills ``PercentileData.thermal`` -- the disjoint thermal
+    counterpart to ticket-014's hydro percentile band -- for the shared
+    Thermal Operation and Thermal Plant Details tabs."""
+
+    def test_thermal_percentiles_populate_metadata_when_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_thermal_percentiles(monkeypatch, _thermal_percentiles_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        thermal_pct = dataset.metadata["thermal"]
+        assert isinstance(thermal_pct, pl.DataFrame)
+        assert not thermal_pct.is_empty()
+        assert "generation_mw_p10" in thermal_pct.columns
+        assert "generation_mw_p50" in thermal_pct.columns
+        assert "generation_mw_p90" in thermal_pct.columns
+
+    def test_thermal_percentiles_stay_empty_when_cobre_output_lacks_them(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No percentile mock (deterministic-tree low-N, master-plan caveat
+        1): ``read_cobre_thermal_percentiles`` degrades to its own
+        empty-frame default and the dataset must not fabricate a spread."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_thermal_percentiles(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        thermal_pct = dataset.metadata["thermal"]
+        assert isinstance(thermal_pct, pl.DataFrame)
+        assert thermal_pct.is_empty()
+
+    def test_thermal_tidy_rows_carry_generation_mw_and_known_sources(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """E1 already emits the thermal ``ResultComparison`` rows -- this
+        ticket must not re-emit or re-map them (Pitfalls to Avoid)."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        thermal_rows = dataset.tidy.filter(pl.col("entity_type") == "thermal")
+        assert not thermal_rows.is_empty()
+        assert set(thermal_rows["variable"].to_list()) == {"generation_mw"}
+        assert set(thermal_rows["source"].to_list()) == {"newave", "cobre"}
+
+    def test_thermal_operation_and_detail_tabs_render_with_metadata_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_thermal_percentiles(monkeypatch, _thermal_percentiles_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)
+
+        assert "Thermal Generation Comparison" in html
+        assert 'id="tab-thermal-detail"' in html
+        assert 'id="thermal-select"' in html
+        assert "Plotly.newPlot" in html
+
+    def test_both_thermal_tabs_render_without_exception_when_percentiles_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No cobre thermal percentiles at all -- both tabs must degrade
+        gracefully (Cobre-only band suppressed), never raise."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_thermal_percentiles(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)  # must not raise
+
+        assert "Thermal Generation Comparison" in html
+        assert 'id="tab-thermal-detail"' in html
+
+
+# ---------------------------------------------------------------------------
+# ticket-016: Productivity tab realized per-stage metadata.
+# ---------------------------------------------------------------------------
+
+
+class TestHydroProductivityResults:
+    """``_hydro_productivity_results`` derives per-(plant, stage) realized
+    productivity = generation / turbined from the E1 hydro
+    ``ResultComparison`` rows, mirroring
+    ``cobre_bridge.comparators.results``'s own ``_compare_hydros``
+    productivity derivation (same ratio, same zero-guard)."""
+
+    @staticmethod
+    def _hydro_pair(
+        *,
+        nw_gen: float,
+        nw_turb: float,
+        cb_gen: float,
+        cb_turb: float,
+        code: int = 10,
+        cobre_id: int = 0,
+        stage: int = 0,
+        name: str = "ALPHA",
+    ) -> list[ResultComparison]:
+        """One plant/stage's generation_mw + turbined_m3s rows -- the shape
+        ``_result_comparisons`` already emits for hydro entities."""
+        return [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name=name,
+                newave_code=code,
+                cobre_id=cobre_id,
+                stage=stage,
+                variable="generation_mw",
+                newave_value=nw_gen,
+                cobre_value=cb_gen,
+                abs_diff=abs(nw_gen - cb_gen),
+                rel_diff=None,
+            ),
+            ResultComparison(
+                entity_type="hydro",
+                entity_name=name,
+                newave_code=code,
+                cobre_id=cobre_id,
+                stage=stage,
+                variable="turbined_m3s",
+                newave_value=nw_turb,
+                cobre_value=cb_turb,
+                abs_diff=abs(nw_turb - cb_turb),
+                rel_diff=None,
+            ),
+        ]
+
+    def test_ratio_math(self) -> None:
+        """AC1: geracao_MW=100, vazao_turbinada_m3s=50 -> newave_value 2.0."""
+        rows = self._hydro_pair(nw_gen=100.0, nw_turb=50.0, cb_gen=90.0, cb_turb=45.0)
+
+        productivity = _hydro_productivity_results(rows)
+
+        assert len(productivity) == 1
+        row = productivity[0]
+        assert row.entity_type == "hydro"
+        assert row.variable == "productivity_mw_per_m3s"
+        assert row.newave_value == pytest.approx(2.0)
+        assert row.cobre_value == pytest.approx(2.0)
+
+    def test_zero_guard_drops_the_row_when_source_turbined_is_zero(self) -> None:
+        """AC2: vazao_turbinada_m3s=0 -> no non-null newave_value -- the row
+        is DROPPED entirely (never null-kept)."""
+        rows = self._hydro_pair(nw_gen=100.0, nw_turb=0.0, cb_gen=90.0, cb_turb=45.0)
+
+        assert _hydro_productivity_results(rows) == []
+
+    def test_zero_guard_drops_the_row_when_cobre_turbined_is_zero(self) -> None:
+        """Either side's turbined flow at zero drops the row -- not just the
+        source model's."""
+        rows = self._hydro_pair(nw_gen=100.0, nw_turb=50.0, cb_gen=90.0, cb_turb=0.0)
+
+        assert _hydro_productivity_results(rows) == []
+
+    def test_zero_guard_uses_the_eps_floor_not_only_exact_zero(self) -> None:
+        """Below the eps floor (not just exactly zero) is also dropped -- an
+        undefined 0/0, not a genuinely tiny but real ratio."""
+        rows = self._hydro_pair(
+            nw_gen=100.0,
+            nw_turb=_PRODUCTIVITY_TURBINED_EPS / 2,
+            cb_gen=90.0,
+            cb_turb=45.0,
+        )
+
+        assert _hydro_productivity_results(rows) == []
+
+    def test_row_dropped_when_the_matching_variable_is_absent(self) -> None:
+        """Only a generation_mw row, no turbined_m3s row for that key --
+        never an exception, just no productivity row (missing turbined flow
+        per the ticket's Error Handling)."""
+        rows = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ALPHA",
+                newave_code=10,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=90.0,
+                abs_diff=10.0,
+                rel_diff=0.1,
+            )
+        ]
+
+        assert _hydro_productivity_results(rows) == []
+
+    def test_non_hydro_rows_are_ignored(self) -> None:
+        rows = [
+            ResultComparison(
+                entity_type="thermal",
+                entity_name="GAS_A",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=90.0,
+                abs_diff=10.0,
+                rel_diff=0.1,
+            )
+        ]
+
+        assert _hydro_productivity_results(rows) == []
+
+    def test_two_plants_sorted_by_code_then_stage(self) -> None:
+        rows = self._hydro_pair(
+            nw_gen=100.0,
+            nw_turb=50.0,
+            cb_gen=90.0,
+            cb_turb=45.0,
+            code=20,
+            cobre_id=1,
+            stage=1,
+            name="BETA",
+        ) + self._hydro_pair(
+            nw_gen=60.0,
+            nw_turb=30.0,
+            cb_gen=55.0,
+            cb_turb=25.0,
+            code=10,
+            cobre_id=0,
+            stage=0,
+            name="ALPHA",
+        )
+
+        productivity = _hydro_productivity_results(rows)
+
+        assert [(r.newave_code, r.stage) for r in productivity] == [(10, 0), (20, 1)]
+
+
+def _productivity_aligned_fixture() -> _AlignedDecompFrames:
+    """Two hydro plants, one stage: plant A (code 10) exercises the ratio
+    math (AC1: 100/50 -> 2.0 on the source side); plant B (code 20)'s source
+    turbined is 0 (AC2: zero-guard drops it, never null-keeps it)."""
+    source_hydro = pl.DataFrame(
+        {
+            "entity_id": [0, 1],
+            "newave_code": [10, 20],
+            "stage_id": [0, 0],
+            "geracao_MW": [100.0, 60.0],
+            "vazao_turbinada_m3s": [50.0, 0.0],
+            "vazao_vertida_m3s": [0.0, 0.0],
+            "vazao_defluente_m3s": [50.0, 0.0],
+            "volume_util_final_hm3": [500.0, 300.0],
+        }
+    )
+    cobre_hydro = pl.DataFrame(
+        {
+            "entity_id": [0, 1],
+            "stage_id": [0, 0],
+            "generation_mw": [105.0, 60.0],
+            "turbined_m3s": [50.0, 40.0],
+            "spillage_m3s": [0.0, 0.0],
+            "outflow_m3s": [50.0, 40.0],
+            "useful_storage_hm3": [480.0, 300.0],
+        }
+    )
+    return dataclasses.replace(
+        _aligned_fixture(),
+        source_hydro=source_hydro,
+        cobre_hydro=cobre_hydro,
+        hydro_names={0: "ALPHA", 1: "BETA"},
+    )
+
+
+class TestBuildDecompDatasetProductivity:
+    """ticket-016: fills the Productivity tab's realized per-stage half
+    (``dataset.metadata["productivity_per_stage"]``) and leaves the static
+    pmo-derived half (``productivity_detail``) empty -- DECOMP ships no
+    pmo.dat ([ASSUMPTION] option a, no fabricated static comparison)."""
+
+    def test_productivity_per_stage_has_the_six_columns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _productivity_aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        per_stage = dataset.metadata["productivity_per_stage"]
+        assert isinstance(per_stage, pl.DataFrame)
+        assert set(per_stage.columns) == {
+            "plant_name",
+            "newave_code",
+            "cobre_id",
+            "stage",
+            "newave_value",
+            "cobre_value",
+        }
+
+    def test_ratio_math_matches_dec_oper_usih_generation_over_turbined(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC1: geracao_MW=100, vazao_turbinada_m3s=50 -> newave_value 2.0,
+        end to end from ``build_decomp_dataset``."""
+        _patch_aligned_frames(monkeypatch, _productivity_aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        per_stage = dataset.metadata["productivity_per_stage"]
+        alpha = per_stage.filter(pl.col("newave_code") == 10)
+        assert alpha["newave_value"].to_list() == [pytest.approx(2.0)]
+        assert alpha["cobre_value"].to_list() == [pytest.approx(2.1)]
+
+    def test_zero_turbined_plant_emits_no_non_null_newave_value(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC2: plant B's source turbined is 0 -> the zero-guard holds (the
+        row is DROPPED entirely, so no non-null -- or null -- value for it
+        survives into the frame)."""
+        _patch_aligned_frames(monkeypatch, _productivity_aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        per_stage = dataset.metadata["productivity_per_stage"]
+        assert per_stage.filter(pl.col("newave_code") == 20).is_empty()
+        assert per_stage["newave_value"].null_count() == 0
+
+    def test_productivity_detail_stays_empty_no_pmo_fabrication(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_aligned_frames(monkeypatch, _productivity_aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata["productivity_detail"].is_empty()
+
+    def test_report_renders_both_the_realized_title_and_the_static_no_data_note(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC4 + AC5 together, on the SAME DECOMP dataset: with
+        ``productivity_detail`` empty AND ``productivity_per_stage``
+        non-empty, the decoupled report_builder gate (ticket-016) renders
+        BOTH the realized-productivity section and the static section's "No
+        productivity data available" note."""
+        _patch_aligned_frames(monkeypatch, _productivity_aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+        html = build_comparison_report(dataset)
+
+        productivity_tab = _extract_tab_content(html, "tab-productivity")
+        assert "Realized productivity across stages" in productivity_tab
+        assert "No productivity data available." in productivity_tab
+        # The static-only Building Blocks table has no DECOMP data to render.
+        assert "Productivity Building Blocks" not in productivity_tab
+
+
+class TestReportBuilderProductivityGateDecoupling:
+    """ticket-016 decoupled report_builder's single ``if prod_df.is_empty():
+    ... else: ...`` Productivity-tab gate into two independent gates (one per
+    frame) so DECOMP's realized-only shape can render. This guards the
+    NEWAVE-shaped case -- both frames populated, which is what NEWAVE always
+    has -- still renders every section in the exact original order/content,
+    i.e. ``compare newave`` is unaffected by the decoupling."""
+
+    @staticmethod
+    def _both_frames_dataset() -> ComparisonDataset:
+        from cobre_bridge.comparators.analyze import (
+            _PRODUCTIVITY_DETAIL_SCHEMA,
+            build_results_dataset,
+        )
+        from cobre_bridge.comparators.results import PercentileData
+
+        results = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ALPHA",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="productivity_mw_per_m3s",
+                newave_value=0.78,
+                cobre_value=0.80,
+                abs_diff=0.02,
+                rel_diff=0.026,
+            )
+        ]
+        prod_detail = pl.DataFrame(
+            {
+                "plant_name": ["ALPHA"],
+                "newave_code": [1],
+                "cobre_id": [0],
+                "nw_altura_min": [0.69],
+                "nw_altura_65": [0.81],
+                "nw_altura_max": [0.85],
+                "nw_equivalent": [0.7865],
+                "nw_accumulated_earm": [5.35],
+                "nw_specific_productivity": [0.009],
+                "nw_tailwater_m": [672.0],
+                "nw_losses_m": [0.8],
+                "nw_vmin_hm3": [100.0],
+                "nw_vmax_hm3": [500.0],
+                "cb_point": [0.811],
+                "cb_equivalent": [0.7860],
+                "cb_accumulated": [5.349],
+                "cb_specific_productivity": [0.009],
+                "cb_tailwater_m": [672.0],
+                "cb_losses_m": [0.8],
+                "cb_vmin_hm3": [100.0],
+                "cb_vmax_hm3": [500.0],
+            },
+            schema=_PRODUCTIVITY_DETAIL_SCHEMA,
+        )
+        pct = PercentileData(productivity_detail=prod_detail)
+        return build_results_dataset(results, pct, 0.05)
+
+    def test_both_populated_renders_all_three_sections_in_the_original_order(
+        self,
+    ) -> None:
+        dataset = self._both_frames_dataset()
+
+        html = build_comparison_report(dataset)
+        productivity_tab = _extract_tab_content(html, "tab-productivity")
+
+        static_idx = productivity_tab.index(
+            "Static productivity — pmo vs cobre-bridge conversion"
+        )
+        realized_idx = productivity_tab.index("Realized productivity across stages")
+        blocks_idx = productivity_tab.index("Productivity Building Blocks")
+        assert static_idx < realized_idx < blocks_idx
+        assert "No productivity data available." not in productivity_tab
+
+    def test_only_detail_populated_renders_static_only_no_realized_section(
+        self,
+    ) -> None:
+        """The mirror case: ``prod_df`` non-empty, ``per_stage_df`` empty --
+        the realized section must NOT render. Proves the two gates are
+        independent, not still coupled to one another."""
+        from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.results import PercentileData
+
+        detail_only = self._both_frames_dataset()
+        pct = PercentileData(
+            productivity_detail=detail_only.metadata["productivity_detail"]
+        )
+        dataset = build_results_dataset([], pct, 0.05)
+
+        html = build_comparison_report(dataset)
+        productivity_tab = _extract_tab_content(html, "tab-productivity")
+
+        assert "Productivity Building Blocks" in productivity_tab
+        assert "Realized productivity across stages" not in productivity_tab
+
+
+# ---------------------------------------------------------------------------
+# ticket-017: Productivity tab's "Fitted production functions (FPHA)"
+# section. See `_fpha_metrics`'s [ASSUMPTION] docstring in decomp_results.py:
+# fallback (b) (fit-fidelity statistics only, no dense surface) is the
+# documented degradation from the epic's chosen-target full-surface
+# reconstruction (a), which this ticket's three declared readers cannot
+# support (no fitted plane coefficients on the DECOMP side).
+# ---------------------------------------------------------------------------
+
+
+def _fpha_id_map() -> DecompIdMap:
+    """One hydro plant (code 10 -> cobre id 0), matching `_aligned_fixture`'s
+    own hydro code/id/name so the SAME `_patch_aligned_frames` fixture can
+    back both the E1 result rows and the ticket-017 FPHA metrics in the same
+    ``build_decomp_dataset`` test."""
+    return DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(10, 20))
+
+
+def _fpha_cobre_planes_fixture() -> pl.DataFrame:
+    """One fitted Cobre plane for (hydro_id=0, stage_id=0): ``GH = q``
+    (``kappa=1``, every other coefficient zero except ``gamma_q``) --
+    deliberately trivial so the envelope's value at any point is just its
+    own ``q_m3s``, matching `cobre_readers.read_cobre_fpha_planes`'s own
+    ``hydro_id``/``stage_id``/``gamma_0``/``gamma_v``/``gamma_q``/
+    ``gamma_s``/``kappa`` schema."""
+    return pl.DataFrame(
+        {
+            "hydro_id": [0],
+            "stage_id": [0],
+            "gamma_0": [0.0],
+            "gamma_v": [0.0],
+            "gamma_q": [1.0],
+            "gamma_s": [0.0],
+            "kappa": [1.0],
+        }
+    )
+
+
+def _fpha_deviations_fixture() -> pl.DataFrame:
+    """One realized source-model operating point for hydro code 10, stage 1
+    (``estagio``, 1-based): ``vazao_turbinada_m3s=80`` (so Cobre's envelope
+    evaluates to 80 MW under the trivial plane above) against the source
+    model's own LP-consumed ``geracao_hidraulica_fpha=76`` -- a deliberate,
+    exact 4 MW gap so nmae/bias/max_abs_dev/gh_max_ratio are hand-checkable.
+    Matches `read_dec_desvfpha`'s real column set (a subset sufficient for
+    `_fpha_metrics`)."""
+    return pl.DataFrame(
+        {
+            "codigo_usina": [10],
+            "estagio": [1],
+            "volume_total_hm3": [500.0],
+            "vazao_turbinada_m3s": [80.0],
+            "vazao_vertida_m3s": [0.0],
+            "geracao_hidraulica_fpha": [76.0],
+        }
+    )
+
+
+def _patch_fpha_planes_and_deviations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wire `build_decomp_dataset`'s three ticket-017 sources -- outside
+    `_read_aligned_frames` -- to the fixtures above: Cobre's planes reader,
+    the deck id map (`_build_line_id_map`, reused verbatim by
+    `_fpha_metrics` rather than rebuilt), and the source model's own
+    deviation table. ``read_eco_fpha``/``read_dec_estatfpha`` are left
+    unmocked -- they raise `FileNotFoundError` against a bare `tmp_path`,
+    exercising `_fpha_metrics`'s own graceful degrade for those two optional
+    sources (``n_v`` stays null; the deck-wide summary is only logged).
+    """
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.cobre_readers.read_cobre_fpha_planes",
+        lambda *_a, **_k: _fpha_cobre_planes_fixture(),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results._build_line_id_map",
+        lambda *_a, **_k: _fpha_id_map(),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.decomp_results.read_dec_desvfpha",
+        lambda *_a, **_k: _fpha_deviations_fixture(),
+    )
+
+
+class TestFphaMetrics:
+    """`_fpha_metrics`: fallback (b)'s per-(hydro, stage) fit-fidelity table
+    -- Cobre's own fitted envelope evaluated at the source model's realized
+    operating points, compared to the source model's own realized
+    ``geracao_hidraulica_fpha``."""
+
+    def test_both_sides_present_computes_real_cross_solver_metrics(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_fpha_planes",
+            lambda *_a, **_k: _fpha_cobre_planes_fixture(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_desvfpha",
+            lambda *_a, **_k: _fpha_deviations_fixture(),
+        )
+
+        metrics = _fpha_metrics(tmp_path, tmp_path, _fpha_id_map(), {0: "A", 1: "B"})
+
+        assert metrics is not None
+        assert metrics.height == 1
+        row = metrics.row(0, named=True)
+        assert row["cobre_id"] == 0
+        assert row["plant_name"] == "A"
+        assert row["stage"] == 0
+        # No declared FPHA reader counts the source model's own planes.
+        assert row["n_planes_newave"] is None
+        assert row["n_planes_cobre"] == 1
+        # `read_eco_fpha` is unmocked -> raises against a bare tmp_path ->
+        # degrades to null, never fabricated.
+        assert row["n_v"] is None
+        assert row["nmae"] == pytest.approx(4.0 / 76.0)
+        assert row["bias"] == pytest.approx(4.0 / 76.0)
+        assert row["max_abs_dev"] == pytest.approx(4.0)
+        assert row["gh_max_ratio"] == pytest.approx(80.0 / 76.0)
+
+    def test_cobre_has_no_planes_returns_none(self, tmp_path: Path) -> None:
+        """`read_cobre_fpha_planes` naturally returns `None` against a bare
+        Cobre output dir (no ``hydro_models/fpha_hyperplanes.parquet``)."""
+        assert _fpha_metrics(tmp_path, tmp_path, _fpha_id_map(), {}) is None
+
+    def test_no_id_map_returns_none_even_with_cobre_planes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_fpha_planes",
+            lambda *_a, **_k: _fpha_cobre_planes_fixture(),
+        )
+        assert _fpha_metrics(tmp_path, tmp_path, None, {}) is None
+
+    def test_missing_source_deviation_table_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_fpha_planes",
+            lambda *_a, **_k: _fpha_cobre_planes_fixture(),
+        )
+        # `read_dec_desvfpha` left unmocked -> raises FileNotFoundError.
+        assert _fpha_metrics(tmp_path, tmp_path, _fpha_id_map(), {}) is None
+
+    def test_unresolvable_hydro_code_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A deviation table whose plant code the id map cannot resolve at
+        all (no hydro codes declared) never reaches the Cobre planes it
+        would otherwise match."""
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_fpha_planes",
+            lambda *_a, **_k: _fpha_cobre_planes_fixture(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_desvfpha",
+            lambda *_a, **_k: _fpha_deviations_fixture(),
+        )
+        no_hydros = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+        assert _fpha_metrics(tmp_path, tmp_path, no_hydros, {}) is None
+
+
+class TestBuildDecompDatasetFpha:
+    """ticket-017: fills ``dataset.metadata["fpha_metrics"]``;
+    ``fpha_surface``/``fpha_spill`` always stay `None` (fallback (b))."""
+
+    def test_cobre_has_no_planes_fpha_metrics_absent_no_section(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: ``read_cobre_fpha_planes`` returns ``None`` (the default on a
+        bare Cobre output dir) -> no FPHA metadata, the report omits the
+        section entirely, no exception."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata.get("fpha_metrics") is None
+        html = build_comparison_report(dataset)  # must not raise
+        assert "Fitted production functions (FPHA)" not in html
+
+    def test_both_sides_fitted_planes_fpha_metrics_populated_section_renders(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: mocked frames on both sides -> a non-empty ``fpha_metrics``
+        with the required columns, and the report renders the FPHA section
+        title."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_fpha_planes_and_deviations(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        fpha_metrics = dataset.metadata["fpha_metrics"]
+        assert isinstance(fpha_metrics, pl.DataFrame)
+        assert not fpha_metrics.is_empty()
+        for column in ("cobre_id", "plant_name", "nmae", "bias"):
+            assert column in fpha_metrics.columns
+
+        html = build_comparison_report(dataset)  # must not raise
+        assert "Fitted production functions (FPHA)" in html
+
+    def test_fpha_surface_and_spill_always_stay_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Fallback (b): never a dense surface, even once ``fpha_metrics``
+        is populated -- the section renders the metrics table but the
+        surface/spill widget falls back to its own "No production-function
+        (FPHA) data available" placeholder."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        _patch_fpha_planes_and_deviations(monkeypatch)
+
+        dataset = build_decomp_dataset(tmp_path, tmp_path)
+
+        assert dataset.metadata.get("fpha_surface") is None
+        assert dataset.metadata.get("fpha_spill") is None
+        html = build_comparison_report(dataset)  # must not raise
+        assert "No production-function (FPHA) data available." in html
+
+    def test_report_renders_without_exception_present_and_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """AC: ``build_comparison_report`` raises no exception whether the
+        FPHA section is present or omitted."""
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        dataset_absent = build_decomp_dataset(tmp_path, tmp_path)
+        build_comparison_report(dataset_absent)  # must not raise
+
+        _patch_fpha_planes_and_deviations(monkeypatch)
+        dataset_present = build_decomp_dataset(tmp_path, tmp_path)
+        build_comparison_report(dataset_present)  # must not raise
+
+
+@pytest.mark.skipif(
+    not _REDUCED_DECOMP_DECK.is_dir() or not _REDUCED_COBRE_OUTPUT.is_dir(),
+    reason="reduced deck + converted cobre output not present",
+)
+class TestBuildDecompDatasetFphaE2E:
+    """Tier 3 (dev-only smoke, ticket-017): the reduced deck's real FPHA
+    section renders end to end, and the full report renders without
+    exception across every E1-E6 tab. Both directories are gitignored, so
+    this never runs in CI."""
+
+    def test_report_renders_every_tab_without_exception(self) -> None:
+        dataset = build_decomp_dataset(_REDUCED_DECOMP_DECK, _REDUCED_COBRE_OUTPUT)
+
+        html = build_comparison_report(dataset)  # must not raise
+
+        for tab_id in (
+            "tab-overview",
+            "tab-system",
+            "tab-balance",
+            "tab-network",
+            "tab-constraints",
+            "tab-hydro",
+            "tab-hydro-detail",
+            "tab-thermal",
+            "tab-thermal-detail",
+            "tab-productivity",
+            "tab-performance",
+        ):
+            assert f'id="{tab_id}"' in html
+
+    def test_fpha_section_renders_on_the_real_deck(self) -> None:
+        dataset = build_decomp_dataset(_REDUCED_DECOMP_DECK, _REDUCED_COBRE_OUTPUT)
+
+        fpha_metrics = dataset.metadata.get("fpha_metrics")
+        assert fpha_metrics is not None
+        assert not fpha_metrics.is_empty()
+        for column in ("cobre_id", "plant_name", "nmae", "bias"):
+            assert column in fpha_metrics.columns
+
+        html = build_comparison_report(dataset)
+        assert "Fitted production functions (FPHA)" in html
 
 
 class TestComparisonRecord:

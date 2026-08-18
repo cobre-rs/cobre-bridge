@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,11 +41,14 @@ import polars as pl
 from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators import cobre_readers
 from cobre_bridge.comparators.decomp_readers import (
+    read_dec_desvfpha,
+    read_dec_estatfpha,
     read_dec_oper_interc,
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
     read_decomp_tim,
+    read_eco_fpha,
     read_relato_convergence,
     read_relato_costs,
     reconcile_kdollars_to_reais,
@@ -60,6 +64,12 @@ _LOG = logging.getLogger(__name__)
 #: Rows whose two values are both below this magnitude are treated as an exact
 #: match rather than a division by ~0 (physical units: MW, m³/s, hm³).
 _ZERO_FLOOR = 1e-9
+
+#: Minimum turbined flow (m³/s) for the derived gen/turbined productivity
+#: (ticket-016) to be meaningful -- mirrors
+#: :data:`cobre_bridge.comparators.results._PRODUCTIVITY_TURB_EPS`: near-zero
+#: turbining makes generation/turbined an undefined 0/0 on both sides.
+_PRODUCTIVITY_TURBINED_EPS: float = 1.0e-6
 
 
 @dataclass(frozen=True)
@@ -326,6 +336,82 @@ def _result_comparisons(
                 )
             )
     return results
+
+
+def _hydro_productivity_results(
+    hydro_results: Sequence[ResultComparison],
+) -> list[ResultComparison]:
+    """Derive per-(plant, stage) realized productivity = generation / turbined.
+
+    ticket-016: consumes the ``generation_mw``/``turbined_m3s`` hydro
+    ``ResultComparison`` rows :func:`_result_comparisons` already produced
+    (E1: the source values come from ``dec_oper_usih``'s stage-aggregate
+    rows, the Cobre values from the cobre hydro means, joined on the
+    id-map-resolved ``(entity_id, stage_id)`` pair) -- so this reuses that
+    exact alignment/restriction instead of a separate lookup or filter.
+    Mirrors :mod:`cobre_bridge.comparators.results`'s own ``_compare_hydros``
+    productivity derivation. TRACKED zero-guard semantics: a plant/stage
+    where either side's turbined flow is at/near zero -- or one side's row is
+    simply absent -- is DROPPED, never null-kept, matching the NEWAVE-side
+    behaviour for the exact same widget (gen/turbined is an undefined 0/0
+    there).
+
+    Returns a list meant to be appended onto the caller's main ``results``
+    list, not held separately: there is no dedicated ``PercentileData``
+    field for the per-stage productivity frame --
+    :func:`cobre_bridge.comparators.analyze.build_results_dataset` derives
+    ``dataset.metadata["productivity_per_stage"]`` by filtering the *same*
+    ``results`` list it was handed for ``entity_type == "hydro"`` /
+    ``variable == "productivity_mw_per_m3s"`` rows.
+    """
+    generation: dict[tuple[int, int], tuple[float, float, int, str]] = {}
+    turbined: dict[tuple[int, int], tuple[float, float]] = {}
+    for r in hydro_results:
+        if r.entity_type != "hydro":
+            continue
+        key = (r.newave_code, r.stage)
+        if r.variable == "generation_mw":
+            generation[key] = (
+                r.newave_value,
+                r.cobre_value,
+                r.cobre_id,
+                r.entity_name,
+            )
+        elif r.variable == "turbined_m3s":
+            turbined[key] = (r.newave_value, r.cobre_value)
+
+    productivity: list[ResultComparison] = []
+    for key, (nw_gen, cb_gen, cobre_id, name) in sorted(generation.items()):
+        turb = turbined.get(key)
+        if turb is None:
+            continue
+        nw_turb, cb_turb = turb
+        # Zero-guard: drop (never null-keep) a plant/stage where either side
+        # turbines at/near zero -- gen/turbined is an undefined 0/0 there.
+        if (
+            nw_turb <= _PRODUCTIVITY_TURBINED_EPS
+            or cb_turb <= _PRODUCTIVITY_TURBINED_EPS
+        ):
+            continue
+        nw_code, stage = key
+        nw_value = nw_gen / nw_turb
+        cobre_value = cb_gen / cb_turb
+        abs_diff, rel_diff = _result_diff(nw_value, cobre_value)
+        productivity.append(
+            ResultComparison(
+                entity_type="hydro",
+                entity_name=name,
+                newave_code=nw_code,
+                cobre_id=cobre_id,
+                stage=stage,
+                variable="productivity_mw_per_m3s",
+                newave_value=nw_value,
+                cobre_value=cobre_value,
+                abs_diff=abs_diff,
+                rel_diff=rel_diff,
+            )
+        )
+    return productivity
 
 
 def _summarize(rows: pl.DataFrame) -> pl.DataFrame:
@@ -1573,6 +1659,317 @@ def compare_decomp_results(
     )
 
 
+# --- ticket-014: Hydro Operation + Plant Details tab metadata ---
+#
+# Fills the four remaining hydro ``PercentileData`` fields the shared Hydro
+# Operation tab (``hydro_per_bus_chart``/``hydro_aggregate_chart``/
+# ``hydro_slack_per_bus_chart``/``hydro_slack_aggregate_chart``) and the
+# Hydro Plant Details tab (``build_hydro_detail_tab``) both read.
+
+
+def _merge_hydro_bus_ids(
+    meta: dict[int, dict], labels: dict[int, frozenset[int]]
+) -> dict[int, dict]:
+    """Copy each hydro's metadata dict and inject its cobre bus ids.
+
+    ``cobre_readers.read_cobre_hydro_metadata`` carries plant physics only
+    -- no bus information (decision B1, see that reader's docstring); the
+    plant -> bus *label* is re-sourced from
+    ``cobre_readers.read_cobre_hydro_bus_labels``'s
+    ``hydro_bus_generation``-partition-derived map, exactly the way
+    ``results.compare_results`` merges the two for the source model's own
+    Hydro Operation/Details tabs.
+
+    ``hydro_per_bus_chart``/``hydro_slack_per_bus_chart`` (via
+    ``analyze._bus_name_lookups``) key off ``meta[hydro_id]["bus_ids"]``
+    and KeyError without it -- every
+    returned entry carries the key, an empty list when the plant has no
+    label in the partition, rather than leaving it absent. Returns a new
+    dict of new per-plant dicts; neither *meta* nor *labels* is mutated.
+    """
+    return {
+        hydro_id: {**entry, "bus_ids": labels.get(hydro_id, [])}
+        for hydro_id, entry in meta.items()
+    }
+
+
+# --- ticket-017: Productivity tab's "Fitted production functions (FPHA)"
+# section (`fpha_metrics`/`fpha_surface`/`fpha_spill`) ---
+#
+# [ASSUMPTION] (epic-06 Pending Decision, Confidence Low): the newave-side
+# comparison (`analyze.build_fpha_comparison`) reconstructs BOTH solvers'
+# fitted production surfaces on a shared ``(V, Q)`` grid and renders a full
+# 3D overlay -- option (a) in the ticket. That needs the source side's
+# fitted PLANE coefficients (``gamma_0``/``gamma_v``/``gamma_q``/``gamma_s``
+# + a multiplier), evaluated at that shared grid. None of this ticket's
+# three declared readers carries them: `read_dec_estatfpha`'s table is a
+# single DECK-WIDE variavel/valor summary (no per-hydro/stage key at all);
+# `read_dec_desvfpha`'s table carries the REALIZED ``(V, Q, S)`` operating
+# points from the forward pass, not a fitted plane; `read_eco_fpha`'s table
+# gives only the fitting-grid *bounds*/node counts, no coefficients. The
+# plane coefficients themselves live in a fourth file (``avl_cortesfpha.rvN``
+# / idecomp's ``AvlCortesFpha``) that is explicitly NOT one of this ticket's
+# three declared readers. Option (a) is therefore genuinely infeasible on
+# the declared reader scope, so this ships the documented fallback (b):
+# `fpha_metrics` only -- `fpha_surface`/`fpha_spill` always stay `None`, and
+# the report's existing FPHA-section gate (a plain
+# ``if not fpha_metrics.is_empty()`` in `report_builder`, unmodified by this
+# ticket) already renders `fpha_detail_chart`'s "No production-function
+# (FPHA) data available" placeholder for an empty surface/spill pair, so no
+# exception follows from leaving them empty.
+#
+# Within (b), rather than reporting the source model's own fph-vs-fpha
+# self-consistency in isolation (a number with no Cobre linkage at all),
+# `_fpha_metrics` evaluates Cobre's OWN fitted envelope
+# (`cobre_readers.read_cobre_fpha_planes`) AT the source model's realized
+# operating points (`read_dec_desvfpha`'s ``volume_total_hm3``/
+# ``vazao_turbinada_m3s``/``vazao_vertida_m3s``) and compares it to the
+# source model's own realized ``geracao_hidraulica_fpha`` (the value its LP
+# actually consumed at that point) -- a genuine, non-fabricated cross-solver
+# comparison, just sampled at the source model's own trajectory instead of a
+# shared dense grid (so it never claims the full-surface fidelity (a) would
+# have shown). ``n_planes_newave`` stays null throughout -- no declared
+# reader counts the source model's planes; ``n_planes_cobre``/``n_v`` are
+# real counts from `read_cobre_fpha_planes`/`read_eco_fpha`.
+
+
+def _log_decomp_fpha_deck_summary(decomp_dir: Path) -> None:
+    """Log the source model's deck-wide FPHA deviation summary.
+
+    `read_dec_estatfpha`'s table carries no per-hydro or per-stage key (a
+    single deck-wide variavel/valor summary), so it cannot join into the
+    per-(hydro, stage) `fpha_metrics` frame `_fpha_metrics` builds -- it is
+    surfaced as log context only. Never raises: a missing/empty parse is
+    logged and dropped, exactly like every other optional FPHA source here.
+    """
+    try:
+        summary = read_dec_estatfpha(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model FPHA deck-wide summary (dec_estatfpha): %s", exc)
+        return
+    _LOG.info(
+        "Source-model deck-wide FPHA deviation summary: %s",
+        dict(
+            zip(
+                summary["variavel"].to_list(),
+                summary["valor"].to_list(),
+                strict=True,
+            )
+        ),
+    )
+
+
+def _cobre_fpha_plane_counts(cb_planes: pl.DataFrame) -> pl.DataFrame:
+    """One row per (cobre_id, stage) with Cobre's own fitted plane count."""
+    return (
+        cb_planes.rename({"hydro_id": "cobre_id", "stage_id": "stage"})
+        .cast({"cobre_id": pl.Int64, "stage": pl.Int64})
+        .group_by(["cobre_id", "stage"])
+        .agg(pl.len().cast(pl.Int64).alias("n_planes_cobre"))
+    )
+
+
+def _decomp_fpha_grid_nv(
+    decomp_dir: Path, code_to_cobre: dict[int, int]
+) -> pl.DataFrame:
+    """One row per (cobre_id, stage) with the source model's own volume
+    fitting-grid node count (``numero_pontos_volume_armazenado``), from
+    `read_eco_fpha`.
+
+    Degrades to an empty frame -- never raises -- when the deck ships no
+    ``eco_fpha`` table (confirmed absent on the reduced deck this ticket was
+    developed against): ``n_v`` then stays null on every metrics row, honest
+    about the value being genuinely unavailable rather than fabricating one.
+    """
+    empty = pl.DataFrame(
+        schema={"cobre_id": pl.Int64, "stage": pl.Int64, "n_v": pl.Int64}
+    )
+    try:
+        grid = read_eco_fpha(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model FPHA grid table (eco_fpha): %s", exc)
+        return empty
+
+    mapped = grid.with_columns(
+        pl.col("codigo_usina")
+        .map_elements(lambda c: code_to_cobre.get(int(c)), return_dtype=pl.Int64)
+        .alias("cobre_id"),
+        (pl.col("estagio").cast(pl.Int64) - 1).alias("stage"),
+    ).filter(pl.col("cobre_id").is_not_null())
+    if mapped.is_empty():
+        return empty
+    return mapped.select(
+        "cobre_id",
+        "stage",
+        pl.col("numero_pontos_volume_armazenado").cast(pl.Int64).alias("n_v"),
+    )
+
+
+def _evaluate_cobre_fpha_at_points(
+    cb_planes: pl.DataFrame, points: pl.DataFrame
+) -> pl.DataFrame:
+    """Evaluate Cobre's min-over-planes FPHA envelope at the source model's
+    own realized (hydro, stage, v, q, s) operating points.
+
+    ``points`` carries one row per realized sample, with columns
+    ``_point_id`` (a stable row identity), ``cobre_id``, ``stage``,
+    ``v_hm3``, ``q_m3s``, ``s_m3s``. ``cb_planes`` is
+    `cobre_readers.read_cobre_fpha_planes`'s own ``hydro_id``/``stage_id``/
+    ``gamma_0``/``gamma_v``/``gamma_q``/``gamma_s``/``kappa`` frame (multiple
+    plane rows per (hydro_id, stage_id)). Mirrors
+    `cobre_bridge.comparators.analyze._evaluate_fpha_envelope`'s own
+    ``kappa * (gamma_0 + gamma_v * v + gamma_q * q + gamma_s * s)``
+    min-over-planes definition (``gamma_v`` already multiplies *absolute*
+    volume for Cobre's own coefficients, so no volume offset applies here --
+    the source model's own ``volume_total_hm3`` is likewise absolute, not
+    useful, volume), expressed as a join + group-by rather than a numpy
+    broadcast since this evaluates a scattered point cloud, not a dense grid.
+
+    Returns one row per ``_point_id`` with the envelope value in
+    ``cobre_gh_mw``; a point whose (hydro, stage) has no Cobre planes drops
+    out of the join rather than null-keeping.
+    """
+    keyed_planes = cb_planes.rename({"hydro_id": "cobre_id", "stage_id": "stage"}).cast(
+        {"cobre_id": pl.Int64, "stage": pl.Int64}
+    )
+    joined = points.join(keyed_planes, on=["cobre_id", "stage"], how="inner")
+    if joined.is_empty():
+        return pl.DataFrame(schema={"_point_id": pl.Int64, "cobre_gh_mw": pl.Float64})
+    return (
+        joined.with_columns(
+            (
+                pl.col("kappa")
+                * (
+                    pl.col("gamma_0")
+                    + pl.col("gamma_v") * pl.col("v_hm3")
+                    + pl.col("gamma_q") * pl.col("q_m3s")
+                    + pl.col("gamma_s") * pl.col("s_m3s")
+                )
+            ).alias("plane_value")
+        )
+        .group_by("_point_id")
+        .agg(pl.col("plane_value").min().alias("cobre_gh_mw"))
+    )
+
+
+def _fpha_metrics(
+    decomp_dir: Path,
+    cobre_output_dir: Path,
+    id_map: DecompIdMap | None,
+    hydro_names: dict[int, str],
+) -> pl.DataFrame | None:
+    """Per-(hydro, stage) FPHA fit-fidelity metrics -- fallback (b), see the
+    [ASSUMPTION] comment above this section.
+
+    ``None`` whenever either side has no fitted planes to compare at all:
+    Cobre fitted none (`cobre_readers.read_cobre_fpha_planes` returns
+    ``None``), the deck has no id map to resolve hydro codes onto Cobre ids
+    (`id_map` is ``None``), the source model's own deviation table is
+    absent/empty, or no realized point resolves onto a Cobre hydro with
+    fitted planes. `build_decomp_dataset` passes ``None`` straight through
+    to `~cobre_bridge.comparators.results.PercentileData.fpha_metrics`; the
+    report's FPHA section gate (`report_builder`, unmodified by this ticket)
+    treats that identically to an empty frame via its own ``_meta_frame``
+    helper, so the section is omitted, never a crash.
+    """
+    cb_planes = cobre_readers.read_cobre_fpha_planes(cobre_output_dir)
+    if cb_planes is None or id_map is None:
+        return None
+
+    try:
+        deviations = read_dec_desvfpha(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No source-model FPHA deviation table: %s", exc)
+        return None
+
+    code_to_cobre = {code: id_map.hydro_id(code) for code in id_map.hydro_codes}
+    points = deviations.with_columns(
+        pl.col("codigo_usina")
+        .map_elements(lambda c: code_to_cobre.get(int(c)), return_dtype=pl.Int64)
+        .alias("cobre_id"),
+        (pl.col("estagio").cast(pl.Int64) - 1).alias("stage"),
+    ).filter(pl.col("cobre_id").is_not_null())
+    if points.is_empty():
+        return None
+    points = (
+        points.select(
+            "cobre_id",
+            "stage",
+            pl.col("volume_total_hm3").cast(pl.Float64).alias("v_hm3"),
+            pl.col("vazao_turbinada_m3s").cast(pl.Float64).alias("q_m3s"),
+            pl.col("vazao_vertida_m3s").cast(pl.Float64).alias("s_m3s"),
+            pl.col("geracao_hidraulica_fpha").cast(pl.Float64).alias("decomp_gh_mw"),
+        )
+        .with_row_index("_point_id")
+        .with_columns(pl.col("_point_id").cast(pl.Int64))
+    )
+
+    envelope = _evaluate_cobre_fpha_at_points(cb_planes, points)
+    if envelope.is_empty():
+        return None
+
+    _log_decomp_fpha_deck_summary(decomp_dir)
+
+    joined = points.join(envelope, on="_point_id", how="inner").with_columns(
+        (pl.col("cobre_gh_mw") - pl.col("decomp_gh_mw")).alias("diff")
+    )
+
+    metrics = (
+        joined.group_by(["cobre_id", "stage"])
+        .agg(
+            pl.col("decomp_gh_mw").max().abs().alias("_denom"),
+            pl.col("diff").abs().mean().alias("_mean_abs_diff"),
+            pl.col("diff").mean().alias("_mean_diff"),
+            pl.col("diff").abs().max().alias("max_abs_dev"),
+            pl.col("cobre_gh_mw").max().alias("_cobre_max"),
+            pl.col("decomp_gh_mw").max().alias("_decomp_max"),
+        )
+        .with_columns((pl.col("_denom") > 1e-9).alias("_scaled"))
+        .with_columns(
+            pl.when(pl.col("_scaled"))
+            .then(pl.col("_mean_abs_diff") / pl.col("_denom"))
+            .otherwise(None)
+            .alias("nmae"),
+            pl.when(pl.col("_scaled"))
+            .then(pl.col("_mean_diff") / pl.col("_denom"))
+            .otherwise(None)
+            .alias("bias"),
+            pl.when(pl.col("_scaled"))
+            .then(pl.col("_cobre_max") / pl.col("_decomp_max"))
+            .otherwise(None)
+            .alias("gh_max_ratio"),
+        )
+        .join(_cobre_fpha_plane_counts(cb_planes), on=["cobre_id", "stage"], how="left")
+        .join(
+            _decomp_fpha_grid_nv(decomp_dir, code_to_cobre),
+            on=["cobre_id", "stage"],
+            how="left",
+        )
+        .with_columns(
+            pl.col("cobre_id")
+            .map_elements(
+                lambda c: hydro_names.get(int(c), f"hydro_{c}"), return_dtype=pl.Utf8
+            )
+            .alias("plant_name"),
+            pl.lit(None).cast(pl.Int64).alias("n_planes_newave"),
+        )
+        .select(
+            "cobre_id",
+            "plant_name",
+            "stage",
+            "n_planes_newave",
+            "n_planes_cobre",
+            "n_v",
+            "nmae",
+            "bias",
+            "max_abs_dev",
+            "gh_max_ratio",
+        )
+        .sort(["cobre_id", "stage"])
+    )
+    return metrics if not metrics.is_empty() else None
+
+
 def build_decomp_dataset(
     decomp_dir: Path, cobre_output_dir: Path, *, tolerance: float = 1e-2
 ) -> ComparisonDataset:
@@ -1622,10 +2019,48 @@ def build_decomp_dataset(
     ``cobre_iteration_timing`` (verbatim from the matching
     :mod:`cobre_readers` functions). Per Caveat #2, ``nw_tim_iterations``
     never carries a ``forward_seconds``/``backward_seconds`` split — DECOMP
-    has no forward/backward pass structure to split. Every other field
-    stays at its empty default, and ``bus``/``line`` themselves stay empty
-    whenever the Cobre run has no percentile output (e.g. the deterministic
-    2-node tree) — no percentile spread is ever fabricated.
+    has no forward/backward pass structure to split. As of ticket-014, the
+    Hydro Operation and Hydro Plant Details tabs are filled: ``hydro`` (the
+    cobre percentile band, from
+    :func:`cobre_readers.read_cobre_hydro_percentiles`),
+    ``cobre_hydro_meta`` (:func:`cobre_readers.read_cobre_hydro_metadata`
+    merged with the plant->bus label via :func:`_merge_hydro_bus_ids`, so
+    every entry carries a ``"bus_ids"`` key), and
+    ``cobre_hydro_per_stage_bounds`` (verbatim from
+    :func:`cobre_readers.read_cobre_hydro_per_stage_bounds`).
+    ``nw_hydro_slacks`` stays at its empty dataclass default — DECOMP has no
+    withdrawal/evaporation-slack analog — so the slack charts render the
+    cobre Mean + p10/p90 band only (``report_builder``'s documented
+    ``has_newave=False`` path). As of ticket-015, ``thermal`` carries the
+    Thermal Operation/Plant Details tabs' cobre percentile band (from
+    :func:`cobre_readers.read_cobre_thermal_percentiles`) — the disjoint
+    thermal counterpart to ticket-014's ``hydro`` field; the thermal
+    ``ResultComparison`` rows themselves are unchanged (E1). As of ticket-016,
+    the Productivity tab's realized per-stage half is filled: a
+    ``productivity_mw_per_m3s`` hydro ``ResultComparison`` row is derived per
+    (plant, stage) from the ``generation_mw``/``turbined_m3s`` rows E1 already
+    produced (see :func:`_hydro_productivity_results`) and appended onto
+    ``results``, so
+    :func:`~cobre_bridge.comparators.analyze.build_results_dataset` fills
+    ``dataset.metadata["productivity_per_stage"]`` the same way it does for
+    the source model. ``productivity_detail`` (the pmo-derived static
+    point/equivalent/accumulated scatter + building-blocks table) stays at its
+    empty dataclass default — DECOMP ships no ``pmo.dat``, so that half has no
+    DECOMP counterpart and the report's static section renders its "No
+    productivity data available" path instead of a fabricated comparison.
+    As of ticket-017, ``fpha_metrics`` carries the Productivity tab's
+    "Fitted production functions (FPHA)" section fidelity table (see
+    :func:`_fpha_metrics` and its preceding [ASSUMPTION] comment for why this
+    is fallback (b) -- fit-fidelity statistics only, evaluated at the source
+    model's own realized operating points against Cobre's fitted envelope --
+    rather than the full grid-reconstructed surface overlay the source model
+    path renders). ``fpha_surface``/``fpha_spill`` stay at their empty
+    dataclass default; the section is entirely omitted (never a fabricated
+    partial render) whenever either side has no fitted planes at all.
+    Every other field stays at its empty default, and
+    ``bus``/``hydro``/``thermal``/``line`` themselves stay empty whenever the
+    Cobre run has no percentile output (e.g. the deterministic 2-node tree) —
+    no percentile spread is ever fabricated.
 
     Args:
         decomp_dir: The deck directory (results resolved via the ticket-001
@@ -1644,14 +2079,17 @@ def build_decomp_dataset(
     aligned = _read_aligned_frames(decomp_dir, cobre_output_dir)
 
     results: list[ResultComparison] = []
-    results.extend(
-        _result_comparisons(
-            aligned.source_hydro,
-            aligned.cobre_hydro,
-            _HYDRO_VARIABLES,
-            names=aligned.hydro_names,
-        )
+    # ticket-016: captured separately so the derived realized productivity
+    # (generation / turbined, per plant/stage) can be appended right after
+    # -- see _hydro_productivity_results.
+    hydro_results = _result_comparisons(
+        aligned.source_hydro,
+        aligned.cobre_hydro,
+        _HYDRO_VARIABLES,
+        names=aligned.hydro_names,
     )
+    results.extend(hydro_results)
+    results.extend(_hydro_productivity_results(hydro_results))
     results.extend(
         _result_comparisons(
             aligned.source_thermal,
@@ -1694,6 +2132,23 @@ def build_decomp_dataset(
     )
     cobre_iteration_timing = cobre_readers.read_cobre_iteration_timing(cobre_output_dir)
 
+    # --- ticket-014: Hydro Operation + Plant Details tab metadata ---
+    cobre_hydro_meta = _merge_hydro_bus_ids(
+        cobre_readers.read_cobre_hydro_metadata(cobre_output_dir),
+        cobre_readers.read_cobre_hydro_bus_labels(cobre_output_dir),
+    )
+
+    # --- ticket-017: Productivity tab's "Fitted production functions
+    # (FPHA)" section. Reuses ``line_id_map`` (ticket-008) rather than
+    # rebuilding it a third time -- it already carries every hydro code ->
+    # Cobre id mapping this needs, and every fixture built before this
+    # ticket that leaves it ``None`` (no deck to read) keeps working
+    # unchanged, since `_fpha_metrics` treats ``id_map is None`` as "no FPHA
+    # section" rather than raising.
+    fpha_metrics = _fpha_metrics(
+        decomp_dir, cobre_output_dir, line_id_map, aligned.hydro_names
+    )
+
     pct = PercentileData(
         nw_bus_names=aligned.bus_names,
         nw_hydro_names=aligned.hydro_names,
@@ -1721,6 +2176,46 @@ def build_decomp_dataset(
         nw_max_stage=nw_max_stage,
         cobre_training_seconds=cobre_training_seconds,
         cobre_iteration_timing=cobre_iteration_timing,
+        # ticket-014: Hydro Operation + Plant Details tab metadata. Never
+        # fabricate a percentile spread when the Cobre run has no hydro
+        # percentile output (e.g. the deterministic 2-node tree) --
+        # ``read_cobre_hydro_percentiles`` already degrades to an empty
+        # frame in that case, passed through verbatim.
+        hydro=cobre_readers.read_cobre_hydro_percentiles(cobre_output_dir),
+        cobre_hydro_meta=cobre_hydro_meta,
+        cobre_hydro_per_stage_bounds=cobre_readers.read_cobre_hydro_per_stage_bounds(
+            cobre_output_dir
+        ),
+        # DECOMP has no direct withdrawal/evaporation-slack analog --
+        # stays at the dataclass empty-frame default (never set to a
+        # DECOMP-derived source) so the slack charts render the cobre
+        # Mean + p10/p90 band only (report_builder's has_newave=False path).
+        nw_hydro_slacks=pl.DataFrame(),
+        # ticket-015: Thermal Operation + Plant Details tab metadata.
+        # Mirrors ticket-014's hydro band exactly -- never fabricate a
+        # percentile spread when the Cobre run has no thermal percentile
+        # output (e.g. the deterministic 2-node tree);
+        # ``read_cobre_thermal_percentiles`` already degrades to an empty
+        # frame in that case, passed through verbatim. The thermal
+        # ``ResultComparison`` rows themselves are untouched -- E1 already
+        # emits them above via ``_result_comparisons``.
+        thermal=cobre_readers.read_cobre_thermal_percentiles(cobre_output_dir),
+        # ticket-016: DECOMP ships no pmo.dat, so the static
+        # point/equivalent/accumulated productivity scatter and the
+        # building-blocks table have no DECOMP counterpart -- stays at the
+        # dataclass empty-frame default (never fabricated) so the Productivity
+        # tab's static section renders its "No productivity data available"
+        # path. The *realized* per-stage productivity is still filled -- via
+        # the ``productivity_mw_per_m3s`` hydro rows appended to ``results``
+        # above (see _hydro_productivity_results), not through this field.
+        productivity_detail=pl.DataFrame(),
+        # ticket-017: Productivity tab's Fitted production functions (FPHA)
+        # section -- fallback (b), see the [ASSUMPTION] comment above
+        # `_fpha_metrics`. ``fpha_surface``/``fpha_spill`` stay at their
+        # dataclass ``None`` default (never fabricated): the declared FPHA
+        # readers carry no fitted plane coefficients to reconstruct a dense
+        # surface from, only per-hydro/stage fit-fidelity statistics.
+        fpha_metrics=fpha_metrics,
     )
     dataset = build_results_dataset(results, pct, tolerance)
     dataset.metadata["unmapped"] = {

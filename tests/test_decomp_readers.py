@@ -8,19 +8,30 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 import pytest
-from idecomp.decomp import Decomptim, DecOperGnl, Relato
+from idecomp.decomp import (
+    DecDesvFpha,
+    DecEstatFpha,
+    Decomptim,
+    DecOperGnl,
+    EcoFpha,
+    Relato,
+)
 
 from cobre_bridge.comparators.decomp_readers import (
     _read_dec_oper,
     _read_relato_table,
     _resolve_relato,
     _resolve_result_file,
+    _resolve_revisioned_file,
+    read_dec_desvfpha,
+    read_dec_estatfpha,
     read_dec_oper_gnl,
     read_dec_oper_interc,
     read_dec_oper_sist,
     read_dec_oper_usih,
     read_dec_oper_usit,
     read_decomp_tim,
+    read_eco_fpha,
     read_relato_balance,
     read_relato_convergence,
     read_relato_costs,
@@ -123,6 +134,219 @@ class TestResolveRelato:
 
     def test_absent_from_both_returns_none(self, tmp_path: Path) -> None:
         assert _resolve_relato(tmp_path) is None
+
+
+class TestResolveRevisionedFile:
+    """`_resolve_revisioned_file`: the shared saidas-first ``<stem>.rvN``
+    resolver behind `_resolve_relato` and the ticket-017 FPHA readers."""
+
+    def test_saidas_only(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        target = saidas / "dec_estatfpha.rv2"
+        target.touch()
+        assert _resolve_revisioned_file(tmp_path, "dec_estatfpha") == target
+
+    def test_root_only_no_saidas_directory(self, tmp_path: Path) -> None:
+        target = tmp_path / "dec_desvfpha.rv3"
+        target.touch()
+        assert _resolve_revisioned_file(tmp_path, "dec_desvfpha") == target
+
+    def test_prefers_saidas_when_both_present(self, tmp_path: Path) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        saidas_copy = saidas / "eco_fpha.rv2"
+        saidas_copy.touch()
+        (tmp_path / "eco_fpha.rv2").touch()
+        assert _resolve_revisioned_file(tmp_path, "eco_fpha") == saidas_copy
+
+    def test_absent_from_both_returns_none(self, tmp_path: Path) -> None:
+        assert _resolve_revisioned_file(tmp_path, "eco_fpha") is None
+
+    def test_does_not_match_a_different_stem(self, tmp_path: Path) -> None:
+        (tmp_path / "dec_estatfpha.rv2").touch()
+        assert _resolve_revisioned_file(tmp_path, "dec_desvfpha") is None
+
+
+class _StubDecEstatFphaFile:
+    """Stub for a `DecEstatFpha.read(...)` result, carrying
+    `estatisticas_desvios`."""
+
+    def __init__(self, table: pd.DataFrame | None) -> None:
+        self.estatisticas_desvios = table
+
+
+class TestReadDecDesvfpha:
+    """`read_dec_desvfpha`: per-hydro FPHA deviation table."""
+
+    def test_finds_saidas_only_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_desvfpha.rv2").touch()
+        stub_table = pd.DataFrame(
+            {
+                "codigo_usina": [1],
+                "estagio": [1],
+                "volume_total_hm3": [500.0],
+                "vazao_turbinada_m3s": [80.0],
+                "vazao_vertida_m3s": [0.0],
+                "geracao_hidraulica_fph": [37.68],
+                "geracao_hidraulica_fpha": [37.61],
+                "desvio_absoluto_MW": [-0.07],
+                "desvio_percentual": [-0.19],
+            }
+        )
+        monkeypatch.setattr(
+            DecDesvFpha,
+            "read",
+            staticmethod(lambda _path: _StubFile(stub_table)),
+        )
+        result = read_dec_desvfpha(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        assert "geracao_hidraulica_fpha" in result.columns
+
+    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="dec_desvfpha") as exc_info:
+            read_dec_desvfpha(tmp_path)
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas" in message
+
+    def test_empty_parse_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "dec_desvfpha.rv2").touch()
+        monkeypatch.setattr(
+            DecDesvFpha,
+            "read",
+            staticmethod(lambda _path: _StubFile(pd.DataFrame())),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_dec_desvfpha(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_dec_desvfpha(_REDUCED_DECK)
+        assert df.height > 0
+        for column in (
+            "codigo_usina",
+            "estagio",
+            "volume_total_hm3",
+            "vazao_turbinada_m3s",
+            "vazao_vertida_m3s",
+            "geracao_hidraulica_fpha",
+        ):
+            assert column in df.columns
+
+
+class TestReadEcoFpha:
+    """`read_eco_fpha`: per-hydro/stage FPHA fitting-grid echo."""
+
+    def test_finds_saidas_only_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "eco_fpha.rv2").touch()
+        stub_table = pd.DataFrame(
+            {
+                "codigo_usina": [1],
+                "estagio": [1],
+                "numero_pontos_volume_armazenado": [5],
+                "volume_armazenado_minimo": [387.3],
+                "volume_armazenado_maximo": [656.1],
+                "numero_pontos_vazao_turbinada": [5],
+                "vazao_turbinada_minima": [0.0],
+                "vazao_turbinada_maxima": [210.7],
+            }
+        )
+        monkeypatch.setattr(
+            EcoFpha,
+            "read",
+            staticmethod(lambda _path: _StubFile(stub_table)),
+        )
+        result = read_eco_fpha(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        assert "numero_pontos_volume_armazenado" in result.columns
+
+    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="eco_fpha") as exc_info:
+            read_eco_fpha(tmp_path)
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas" in message
+
+    def test_empty_parse_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "eco_fpha.rv2").touch()
+        monkeypatch.setattr(
+            EcoFpha,
+            "read",
+            staticmethod(lambda _path: _StubFile(None)),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_eco_fpha(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_has_no_eco_fpha(self) -> None:
+        """The reduced deck this ticket was developed against ships no
+        ``eco_fpha`` table at all -- `read_eco_fpha` must degrade this to
+        `FileNotFoundError`, never a crash, so callers can treat it exactly
+        like any other absent optional FPHA source."""
+        with pytest.raises(FileNotFoundError, match="eco_fpha"):
+            read_eco_fpha(_REDUCED_DECK)
+
+
+class TestReadDecEstatfpha:
+    """`read_dec_estatfpha`: deck-wide FPHA deviation summary."""
+
+    def test_finds_saidas_only_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saidas = tmp_path / "saidas"
+        saidas.mkdir()
+        (saidas / "dec_estatfpha.rv2").touch()
+        stub_table = pd.DataFrame({"variavel": ["DESVIO MEDIO (MW)"], "valor": [3.83]})
+        monkeypatch.setattr(
+            DecEstatFpha,
+            "read",
+            staticmethod(lambda _path: _StubDecEstatFphaFile(stub_table)),
+        )
+        result = read_dec_estatfpha(tmp_path)
+        assert isinstance(result, pl.DataFrame)
+        assert result.height == 1
+        assert result["variavel"][0] == "DESVIO MEDIO (MW)"
+
+    def test_missing_file_raises_naming_both_locations(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="dec_estatfpha") as exc_info:
+            read_dec_estatfpha(tmp_path)
+        message = str(exc_info.value)
+        assert str(tmp_path) in message
+        assert "saidas" in message
+
+    def test_none_table_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "dec_estatfpha.rv2").touch()
+        monkeypatch.setattr(
+            DecEstatFpha,
+            "read",
+            staticmethod(lambda _path: _StubDecEstatFphaFile(None)),
+        )
+        with pytest.raises(ValueError, match="parsed empty"):
+            read_dec_estatfpha(tmp_path)
+
+    @_needs_reduced_deck
+    def test_real_deck_is_non_empty(self) -> None:
+        df = read_dec_estatfpha(_REDUCED_DECK)
+        assert df.height > 0
+        assert "variavel" in df.columns
+        assert "valor" in df.columns
 
 
 class TestReadDecOperCore:

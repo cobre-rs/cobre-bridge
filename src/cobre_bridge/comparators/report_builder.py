@@ -586,11 +586,17 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         "Static productivity — pmo vs cobre-bridge conversion "
         "(point / equivalent / accumulated)"
     )
+    # ticket-016: the static (pmo-derived) and realized (per-stage) halves are
+    # disjoint data sources -- a source with no pmo.dat (e.g. DECOMP) can
+    # carry a non-empty ``per_stage_df`` while ``prod_df`` stays empty, and
+    # vice versa -- so each half is gated on its OWN frame, independently.
+    # Order is preserved exactly for the case both are non-empty (e.g.
+    # NEWAVE, which always has both): static title -> scatter/no-data-note ->
+    # realized title/description/chart -> building-blocks table.
+    prod_parts.append(section_title(static_title))
     if prod_df.is_empty():
-        prod_parts.append(section_title(static_title))
         prod_parts.append("<p>No productivity data available.</p>")
     else:
-        prod_parts.append(section_title(static_title))
         prod_parts.append(
             chart_grid(
                 [
@@ -618,6 +624,8 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
                 ]
             )
         )
+
+    if not per_stage_df.is_empty():
         prod_parts.append(section_title("Realized productivity across stages"))
         prod_parts.append(
             '<p style="color:#64748B;margin:-8px 0 12px">Productivity is constant'
@@ -628,6 +636,8 @@ def build_comparison_report(dataset: ComparisonDataset) -> str:
         # Reuses the shared per-plant dropdown widget (same as the hydro/thermal
         # detail tabs), so every reservoir is selectable — not a fixed subset.
         prod_parts.append(productivity_per_stage_chart(per_stage_df))
+
+    if not prod_df.is_empty():
         prod_parts.append(section_title("Productivity Building Blocks"))
         prod_parts.append(
             chart_grid(
