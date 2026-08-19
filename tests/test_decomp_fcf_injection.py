@@ -311,9 +311,11 @@ def test_import_boundary_fcf_logs_c8_workaround(
     "monkeypatched-shape unit path" — isolating the orchestration under
     test: that `import_boundary_fcf` returns `case_dir / "boundary"`,
     patches `config.json`'s `policy.boundary.source_stage` to the reader's
-    boundary stage, emits a `WARNING` naming the C8 workaround and
-    `--output` right after patching `policy.boundary`, and that the source
-    carries the matching code comment at the patch site.
+    boundary stage, emits a `WARNING` with the actionable run-with-`--output`
+    guidance right after patching `policy.boundary`, and that the source
+    carries the matching `TRACKED COBRE-GAP WORKAROUND (C8)` code comment at
+    the patch site. The internal C8 marker lives in that comment, not in the
+    end-user-facing log message.
     """
     case_dir = tmp_path / "case"
     case_dir.mkdir()
@@ -367,11 +369,16 @@ def test_import_boundary_fcf_logs_c8_workaround(
     )
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("TRACKED COBRE-GAP WORKAROUND (C8)" in r.message for r in warnings), (
-        f"no C8 WARNING found in captured records: {caplog.text}"
-    )
-    assert any("--output" in r.message for r in warnings), (
-        f"C8 warning is missing --output guidance: {caplog.text}"
+    # The workaround is surfaced as an actionable WARNING (the run-with-
+    # `--output` constraint) — not silently absorbed. The internal "(C8)"
+    # tracking marker lives in the code comment (asserted below), never in the
+    # end-user-facing message, so this checks the actionable content only.
+    assert any(
+        "--output" in r.message and "cobre run" in r.message for r in warnings
+    ), f"no actionable run-with-output WARNING found: {caplog.text}"
+    # The message must not leak the internal tracking code to end users.
+    assert not any("TRACKED COBRE-GAP" in r.message for r in warnings), (
+        f"C8 tracking marker leaked into a user-facing log message: {caplog.text}"
     )
 
     source_path = inspect.getsourcefile(import_boundary_fcf)

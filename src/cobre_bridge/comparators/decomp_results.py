@@ -2167,6 +2167,7 @@ def _ree_result_comparisons(
     id_map: DecompIdMap | None,
     *,
     probabilities: pl.DataFrame | None = None,
+    stage_hours: dict[int, float] | None = None,
 ) -> tuple[list[ResultComparison], list[int]]:
     """REE-level ``ena_mwmes``/``earm_final_mwmes`` ``ResultComparison`` rows.
 
@@ -2175,8 +2176,10 @@ def _ree_result_comparisons(
     unchanged, see :func:`_hydro_side` for its scenario-weighting contract);
     the Cobre side is
     :func:`_cobre_ree_sums`'s membership-weighted plant rollup, with EARM
-    converted MWh -> MWmês (:data:`_EARM_MWH_TO_MWMES`) at emission -- ENA is
-    a plain sum, no unit conversion. ``newave_code``/``cobre_id`` are both the
+    converted MWh -> MWmês (:data:`_EARM_MWH_TO_MWMES`) and ENA converted from
+    a stage-mean MW (average power) to MWmês energy via the stage's own
+    duration (*stage_hours* ÷ 730 months), both at emission -- so each is on
+    DECOMP's MW-month footing. ``newave_code``/``cobre_id`` are both the
     REE's own ``codigo_ree`` -- Cobre has no independent REE id to diverge
     from it.
 
@@ -2240,8 +2243,24 @@ def _ree_result_comparisons(
         stage = int(row["stage_id"])
         name = names.get(ree_code, "")
         cobre_earm_mwmes = float(row["earm_mwh"]) / _EARM_MWH_TO_MWMES
+        # cobre's ``ena_mw`` is a stage-mean MW (average inflow power); DECOMP's
+        # ``ena_MWmes`` is the natural energy *over the stage* (MW-month), which
+        # scales with stage duration. Convert the rate to MWmês by the stage's
+        # own duration in months (``stage_hours / 730``), mirroring EARM's ÷730
+        # — otherwise a weekly stage's average power is compared to a week's
+        # energy, a ~stage_hours/730 mismatch that inflates the weekly ENA
+        # several-fold. Falls back to one month when hours are unavailable
+        # (e.g. a fixture without stage metadata). The residual per-REE offset
+        # that remains is the productivity/FPHA-coefficient difference between
+        # DECOMP's REE aggregate and cobre's per-plant model, not a unit error.
+        stage_months = (
+            stage_hours.get(stage, _EARM_MWH_TO_MWMES) / _EARM_MWH_TO_MWMES
+            if stage_hours is not None
+            else 1.0
+        )
+        cobre_ena_mwmes = float(row["ena_mw"]) * stage_months
         for variable, nw_raw, cobre_value in (
-            ("ena_mwmes", row["ena_MWmes"], float(row["ena_mw"])),
+            ("ena_mwmes", row["ena_MWmes"], cobre_ena_mwmes),
             ("earm_final_mwmes", row["earm_final_MWmes"], cobre_earm_mwmes),
         ):
             if nw_raw is None:
@@ -3171,7 +3190,11 @@ def build_decomp_dataset(
     # (ticket-008) exactly like ``_fpha_metrics`` above -- the same
     # hydro-code -> Cobre-id mapping, no third ``DecompIdMap`` rebuild.
     ree_results, unmapped_ree = _ree_result_comparisons(
-        decomp_dir, aligned.cobre_hydro, line_id_map, probabilities=probabilities
+        decomp_dir,
+        aligned.cobre_hydro,
+        line_id_map,
+        probabilities=probabilities,
+        stage_hours=_cobre_stage_hours(cobre_output_dir) or None,
     )
     results.extend(ree_results)
 

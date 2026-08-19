@@ -518,6 +518,13 @@ def _convert_newave_case_impl(
         hydro_bounds_table, head_turbined_table
     )
 
+    # Clamp any per-stage MAX bound above the plant's declared envelope back to
+    # the declared value (WARNING, not silent), so the rule-43 self-check below
+    # passes on the result.
+    hydro_bounds_table = emission_checks.clamp_hydro_bounds_to_declared(
+        hydros_dict, hydro_bounds_table
+    )
+
     # ------------------------------------------------------------------
     # 3b. Post-emission self-checks (cobre 0.13 rules 43, 41, 36, and the
     # block_id-range rule) — a courtesy mirror of cheap cobre invariants over

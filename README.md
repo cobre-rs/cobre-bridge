@@ -5,17 +5,12 @@ Convert power system data formats to [Cobre](https://github.com/cobre-rs/cobre) 
 ## Installation
 
 ```bash
-# Recommended: isolated, on-PATH CLI
-uv tool install cobre-bridge
-
-# Alternative
-pipx install cobre-bridge
-
-# With cobre-python, so `convert --validate` can validate the output
-uv tool install "cobre-bridge[validation]"
+uv tool install cobre-bridge   # recommended: isolated, on-PATH CLI
+pipx install cobre-bridge       # alternative
 ```
 
-Requires Python >= 3.12.
+Requires Python >= 3.12. `cobre-python` is bundled as a core dependency, so
+`convert --validate` and `compare` work out of the box.
 
 ## Usage
 
@@ -39,16 +34,10 @@ constraints, and evaporation sections).
 
 See [docs/cli.md](docs/cli.md) for the full per-command reference.
 
-> **Cobre version.** `convert newave` targets **cobre 0.14.1**. Every converted
-> case requires **cobre >= 0.14.1** — this release adopts cobre 0.14's
-> input-contract changes (sense-free generic constraints,
-> `constraints/generic_parameters.json`, and the NCS `availability_factor`
-> column), alongside the `training.parallelism.backward_scheduler` block
-> (opening-block scheduler) and the `operational_start_date` all system entities
-> carry. NEWAVE `NE` (future, will-be-built) plants are converted via cobre's
-> dead-volume **filling** schema. With `cobre-python >= 0.14.1` installed,
-> `convert --validate` validates the output; an older cobre-python that predates
-> the schema is skipped gracefully.
+> **Cobre version.** This release targets **cobre 0.14.2**: converted cases use
+> cobre 0.14's input contract, and the emitted policy relies on 0.14.2's solver
+> fixes, so `convert --validate` requires `cobre-python >= 0.14.2` (an older one
+> is skipped gracefully rather than failing).
 
 ## Configuration
 

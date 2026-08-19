@@ -43,28 +43,28 @@ def ensure_writer_binding() -> None:
     Raises
     ------
     RuntimeError
-        Naming the missing binding and the remediation: reinstall the
-        wheel from ``~/git/cobre`` (e.g. ``maturin develop --release -m
-        ~/git/cobre/crates/cobre-python/Cargo.toml``). Raised both when
-        ``cobre`` is not installed at all (caught as ``ModuleNotFoundError``)
-        and when it is installed but predates ``write_policy_checkpoint``.
+        With a self-contained, end-user-facing remediation (reinstall/upgrade
+        the required ``cobre-python`` dependency via ``pip``, or re-run with
+        ``--no-fcf``). Raised both when ``cobre`` is not installed at all
+        (caught as ``ModuleNotFoundError``) and when it is installed but
+        predates ``write_policy_checkpoint``.
     """
     try:
         import cobre
     except ModuleNotFoundError:
         raise RuntimeError(
-            "cobre is not installed; install/reinstall it from "
-            "~/git/cobre, e.g. `VIRTUAL_ENV=<bridge>/.venv "
-            "<bridge>/.venv/bin/maturin develop --release -m "
-            "~/git/cobre/crates/cobre-python/Cargo.toml`"
+            "cobre is not installed. cobre-python is a required dependency of "
+            "cobre-bridge — install it (for example: pip install cobre-python), "
+            "or reinstall cobre-bridge. To convert without the boundary "
+            "cost-to-go function, re-run with --no-fcf."
         ) from None
     if not hasattr(cobre, "write_policy_checkpoint"):
         raise RuntimeError(
-            "the installed cobre wheel does not expose "
-            "write_policy_checkpoint; rebuild/reinstall it from "
-            "~/git/cobre, e.g. `VIRTUAL_ENV=<bridge>/.venv "
-            "<bridge>/.venv/bin/maturin develop --release -m "
-            "~/git/cobre/crates/cobre-python/Cargo.toml`"
+            "The installed cobre package is too old for the boundary cost-to-go "
+            "import (it does not provide the policy checkpoint writer). Upgrade "
+            "it (for example: pip install --upgrade cobre-python), or reinstall "
+            "cobre-bridge. To convert without the boundary cost-to-go function, "
+            "re-run with --no-fcf."
         )
 
 

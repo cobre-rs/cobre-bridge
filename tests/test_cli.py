@@ -624,22 +624,22 @@ class TestEmissionCheckWiring:
         assert not_applicable[0].severity is Severity.INFO
         assert _convert_status(report.diagnostics, success="ok") == "ok"  # type: ignore[union-attr]
 
-    def test_rule_43_violation_flips_convert_status_to_error(
+    def test_over_declared_bound_is_clamped_and_warned_not_errored(
         self, tmp_path: Path
     ) -> None:
-        """A hydro_bounds row raising the plant's declared max_turbined_m3s is
-        caught, and feeding the resulting diagnostics through
-        ``_convert_status`` (the same function cli.py uses to derive the
-        convert verdict) yields "error", never just an inspected diagnostic."""
+        """A hydro_bounds row above the plant's declared max_turbined_m3s is
+        clamped back to the declaration and reported as a WARNING, so the
+        convert verdict stays "ok" instead of erroring on cobre rule 43."""
         import contextlib
 
         from cobre_bridge.cli import _convert_status
+        from cobre_bridge.diagnostics import Severity
         from cobre_bridge.pipeline import convert_newave_case
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
 
-        violating_hydros = {
+        hydros = {
             "$schema": "http://example",
             "hydros": [
                 {
@@ -659,7 +659,7 @@ class TestEmissionCheckWiring:
                 }
             ],
         }
-        violating_storage_bounds = pa.table(
+        over_declared_bounds = pa.table(
             {
                 "hydro_id": pa.array([0], type=pa.int32()),
                 "stage_id": pa.array([2], type=pa.int32()),
@@ -674,29 +674,32 @@ class TestEmissionCheckWiring:
             stack.enter_context(
                 patch(
                     "cobre_bridge.pipeline.hydro_conv.convert_hydros",
-                    return_value=violating_hydros,
+                    return_value=hydros,
                 )
             )
             stack.enter_context(
                 patch(
                     "cobre_bridge.pipeline.hydro_conv.convert_storage_bounds",
-                    return_value=violating_storage_bounds,
+                    return_value=over_declared_bounds,
                 )
             )
             report = convert_newave_case(src, dst)
 
-        errors = [
+        # The clamp resolves it: a warning, not a rule-43 error.
+        assert not any(
+            d.code == "hydro-bounds-raises-declared-capacity"
+            for d in report.diagnostics
+        )
+        clamps = [
             d
             for d in report.diagnostics
-            if d.code == "hydro-bounds-raises-declared-capacity"
+            if d.code == "hydro-bounds-clamped-to-declared-capacity"
         ]
-        assert len(errors) == 1
-        assert "Test Plant" not in errors[0].summary  # rule 43 names IDs, like cobre
+        assert len(clamps) == 1
+        assert clamps[0].severity is Severity.WARNING
 
-        # Load-bearing: the verdict comes from _convert_status, not a bare
-        # inspection of the diagnostic list.
-        assert _convert_status(report.diagnostics, success="ok") == "error"
-        assert _convert_status([], success="ok") == "ok"
+        # Load-bearing: a warning does not flip the verdict.
+        assert _convert_status(report.diagnostics, success="ok") == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -1210,7 +1213,7 @@ class TestCliInProcess:
         """The manifest's ``min_cobre_version`` tracks the CLI constant, pinned.
 
         ticket-005: a manifest written after the bump must record the real
-        floor (``"0.14.1"``), not a stale value — the manifest is provenance,
+        floor (``"0.14.2"``), not a stale value — the manifest is provenance,
         and a wrong floor there is false provenance. Pinning the literal (not
         just equality with the constant) catches an accidental revert of the
         constant itself.
@@ -1219,7 +1222,7 @@ class TestCliInProcess:
         from cobre_bridge.conversion_manifest import ConversionManifest
         from cobre_bridge.pipeline import ConversionReport
 
-        assert MIN_COBRE_VERSION == "0.14.1"
+        assert MIN_COBRE_VERSION == "0.14.2"
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
@@ -1238,7 +1241,7 @@ class TestCliInProcess:
 
         assert code == 0
         manifest = ConversionManifest.from_json(dst / "conversion_manifest.json")
-        assert manifest.min_cobre_version == "0.14.1"
+        assert manifest.min_cobre_version == "0.14.2"
         assert manifest.min_cobre_version == MIN_COBRE_VERSION
 
     def test_manifest_not_in_json_verdict(
@@ -1881,7 +1884,7 @@ class TestCliInProcess:
         from cobre_bridge.cli import MIN_COBRE_VERSION
         from cobre_bridge.pipeline import ConversionReport
 
-        assert MIN_COBRE_VERSION == "0.14.1"
+        assert MIN_COBRE_VERSION == "0.14.2"
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
@@ -1910,7 +1913,7 @@ class TestCliInProcess:
         # validation did not run (not that it ran and passed).
         assert "skipping cobre-python validation" in stderr
         assert "0.12.0" in stderr
-        assert "0.14.1" in stderr
+        assert "0.14.2" in stderr
         assert MIN_COBRE_VERSION in stderr
         doc = json.loads(stdout)
         assert doc["status"] == "ok"
@@ -2785,7 +2788,7 @@ class TestCliInProcess:
     def test_convert_decomp_boundary_fcf_capability_guard_failure_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failing capability probe exits 1 with the branch-wheel remediation."""
+        """A failing capability probe exits 1 with the install remediation."""
         from cobre_bridge.decomp.fcf.capability import REMEDIATION
         from cobre_bridge.pipeline import ConversionReport
 
@@ -2813,7 +2816,7 @@ class TestCliInProcess:
             )
 
         assert code == 1
-        assert "feat/cobre-gnl-boundary-pricing" in stderr
+        assert "cobre-python" in stderr
         mock_import.assert_not_called()
 
     def test_convert_decomp_boundary_fcf_runs_before_validate(

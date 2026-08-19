@@ -363,7 +363,7 @@ def make_chart_card(
         ValueError: When *fig* is ``None``.
     """
     if fig is None:
-        raise ValueError("make_chart_card: fig must not be None")
+        raise ValueError("Cannot build a chart card: the figure is missing.")
 
     defaults: dict = dict(
         title=dict(text=title, font=dict(size=13), x=0.02, xanchor="left"),

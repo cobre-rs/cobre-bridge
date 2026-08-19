@@ -4268,9 +4268,11 @@ class TestReeResultComparisons:
     MWh -> MWmes reconciliation, and the never-silently-dropped
     unmapped-plant diagnostic (ticket-018 requirement 4)."""
 
-    def test_ena_is_a_plain_sum_earm_is_divided_by_730(
+    def test_without_stage_hours_ena_is_unscaled_earm_is_divided_by_730(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        # With no stage_hours lookup, ENA falls back to the raw stage-mean MW
+        # (factor 1.0) -- the backward-compatible default.
         _patch_ree_sources(monkeypatch)
 
         results, unmapped = _ree_result_comparisons(
@@ -4288,15 +4290,31 @@ class TestReeResultComparisons:
         assert ena.cobre_id == 100
         assert ena.stage == 0
         assert ena.newave_value == pytest.approx(145.0)
-        assert ena.cobre_value == pytest.approx(150.0)  # plain sum, no scaling
+        assert ena.cobre_value == pytest.approx(150.0)  # unscaled fallback
         assert ena.abs_diff == pytest.approx(5.0)
 
         earm = by_variable["earm_final_mwmes"]
-        assert earm.newave_value == pytest.approx(1010.0)
-        # 730000.0 MWh / _EARM_MWH_TO_MWMES(730) == 1000.0 MWmes.
         assert earm.cobre_value == pytest.approx(730000.0 / _EARM_MWH_TO_MWMES)
-        assert earm.cobre_value == pytest.approx(1000.0)
-        assert earm.abs_diff == pytest.approx(10.0)
+
+    def test_stage_hours_convert_ena_rate_to_mwmes_energy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # cobre's ena_mw is an average-MW rate; with stage_hours it is converted
+        # to MW-month energy via stage_hours/730 (mirroring EARM's ÷730), so it
+        # is comparable to DECOMP's ena_MWmes. Half a month (365h) halves it.
+        _patch_ree_sources(monkeypatch)
+
+        results, _ = _ree_result_comparisons(
+            tmp_path,
+            _ree_cobre_hydro_fixture(),
+            _ree_id_map(),
+            stage_hours={0: _EARM_MWH_TO_MWMES / 2},  # 365 h == 0.5 month
+        )
+
+        ena = {r.variable: r for r in results}["ena_mwmes"]
+        # 150.0 MW (rate) × (365 / 730) == 75.0 MWmês.
+        assert ena.cobre_value == pytest.approx(75.0)
+        assert ena.newave_value == pytest.approx(145.0)
 
     def test_none_id_map_returns_no_rows_and_no_unmapped(self, tmp_path: Path) -> None:
         results, unmapped = _ree_result_comparisons(
