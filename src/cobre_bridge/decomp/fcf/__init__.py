@@ -826,17 +826,21 @@ def import_boundary_fcf(
             coupling_month,
         )
 
+    # TRACKED COBRE-GAP WORKAROUND (C8): cobre resolves policy.boundary.path
+    # against the run's --output directory rather than the case directory the
+    # checkpoint was authored into, so this case must be run with
+    # --output=<case_dir>. Removal condition tracked in
+    # ~/git/cobre/plans/conversion-found-improvements.md. The message below is
+    # end-user-facing (no repo-internal references).
     _LOG.warning(
-        "TRACKED COBRE-GAP WORKAROUND (C8): cobre resolves "
-        "policy.boundary.path against the run's --output directory, not "
-        "case_dir (~/git/cobre/plans/conversion-found-improvements.md); "
-        "until cobre is fixed, run this case with `cobre run %s --output "
-        "%s` so output_dir == case_dir and %s resolves — a default `cobre "
-        "run <case>` (no --output, or --output pointed elsewhere) will "
-        "NOT find the boundary checkpoint and aborts before any iteration",
+        "This case must be run with `cobre run %s --output %s`: the boundary "
+        "cost-to-go checkpoint at %s is resolved relative to the run's output "
+        "directory, so a plain `cobre run %s` (with output elsewhere) will not "
+        "find it and will stop before the first iteration.",
         case_dir,
         case_dir,
         boundary_dir,
+        case_dir,
     )
 
     return boundary_dir

@@ -2785,7 +2785,7 @@ class TestCliInProcess:
     def test_convert_decomp_boundary_fcf_capability_guard_failure_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failing capability probe exits 1 with the branch-wheel remediation."""
+        """A failing capability probe exits 1 with the install remediation."""
         from cobre_bridge.decomp.fcf.capability import REMEDIATION
         from cobre_bridge.pipeline import ConversionReport
 
@@ -2813,7 +2813,7 @@ class TestCliInProcess:
             )
 
         assert code == 1
-        assert "feat/cobre-gnl-boundary-pricing" in stderr
+        assert "cobre-python" in stderr
         mock_import.assert_not_called()
 
     def test_convert_decomp_boundary_fcf_runs_before_validate(

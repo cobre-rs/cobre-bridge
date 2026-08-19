@@ -28,11 +28,11 @@ class TestSenseToInterval:
         assert sense_to_interval("==", 7.0) == (7.0, 7.0)
 
     def test_unknown_sense_raises_value_error(self) -> None:
-        with pytest.raises(ValueError, match="unknown sense"):
+        with pytest.raises(ValueError, match="Unknown constraint sense"):
             sense_to_interval("!=", 1.0)
 
     def test_empty_sense_raises_value_error(self) -> None:
-        with pytest.raises(ValueError, match="unknown sense"):
+        with pytest.raises(ValueError, match="Unknown constraint sense"):
             sense_to_interval("", 1.0)
 
 

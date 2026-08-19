@@ -220,7 +220,8 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             _LOG.warning(
                 "adterm.dat thermal code=%d committed dispatch [%s] MW falls "
                 "outside the plant's generation bounds [%.4f, %.4f]; clamping to "
-                "[%s] to keep cobre's anticipated fishing equality feasible.",
+                "[%s] so the plant's committed (anticipated) dispatch stays "
+                "within its generation bounds.",
                 newave_code,
                 ", ".join(f"{v:.4f}" for v in dispatch.values_mw),
                 lo,

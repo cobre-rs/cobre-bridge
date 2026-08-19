@@ -339,10 +339,11 @@ def _ac_coverage(
                 "decomp-ac-altefe-uningestable",
                 "AC ALTEFE cannot be ingested",
                 "The deck declares an AC ALTEFE effective-head override; "
-                "idecomp exposes no value accessor for it, so the conversion "
-                "cannot read it at all (distinct from a deferred override, "
-                "which idecomp does expose a value for).",
-                "Tracked as an idecomp accessor gap; no action needed to convert.",
+                "the source-model reader cannot expose a value for it, so the "
+                "conversion cannot read it at all (distinct from a deferred "
+                "override, which does expose a value).",
+                "This override cannot be read from the deck and is not applied; "
+                "no action needed to convert.",
             )
         )
 

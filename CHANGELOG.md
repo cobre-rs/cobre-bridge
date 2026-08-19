@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] - 2026-08-18
+
+Makes a fresh `pip install cobre-bridge` work out of the box. `cobre-python` is
+now a required runtime dependency, so `convert decomp` — which imports the
+deck's boundary cost-to-go function by default — no longer fails on a plain
+install, and the guidance printed when a dependency is missing is self-contained
+for end users.
+
+### Changed
+
+- **`cobre-python` is now a required runtime dependency** (`>=0.14.1,<0.15`),
+  moved from the optional `validation` / `test-roundtrip` extras into the core
+  `dependencies`. A plain `pip install cobre-bridge` now installs a cobre that
+  can validate converted output and import the boundary cost-to-go function. The
+  two extras, which only ever carried `cobre-python`, are **removed** (a plain
+  install now supersedes them); CI installs the dependency via `.[dev]` on every
+  supported Python.
+- **End-user-facing messages are self-contained.** The boundary cost-to-go
+  capability and writer diagnostics no longer point users at developer build
+  recipes or repo-internal documents (worktrees, `maturin` commands); they now
+  give an actionable `pip install` / `--no-fcf` remediation.
+
+### Fixed
+
+- **`convert decomp` no longer aborts on a fresh install.** With the boundary
+  cost-to-go function imported by default and `cobre-python` merely optional, a
+  plain install failed on any deck that declares its cut files; making the
+  dependency required fixes it.
+
+### Added
+
+- Packaging-guard tests: `cobre-python` must be a core dependency (not an extra)
+  and its pin must floor at `MIN_COBRE_VERSION`; and a guard that the
+  boundary-FCF remediation never leaks a repo-internal reference.
+
 ## [0.14.1] - 2026-08-18
 
 Grows `compare decomp` to feature parity with `compare newave` — the rich

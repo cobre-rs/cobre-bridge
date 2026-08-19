@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.14.1"
+version = "0.14.2"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -21,6 +21,18 @@ dependencies = [
     "polars>=1.42.0",
     "rich>=15.0.0",
     "typer>=0.26.8",
+    # cobre-python is a REQUIRED runtime dependency, not an optional extra:
+    # `convert decomp` imports the deck's boundary FCF by default (via
+    # `cobre.write_policy_checkpoint`), and `convert --validate` / `compare`
+    # load cobre output — all need `import cobre` to succeed out of the box.
+    # The bridge targets the cobre 0.14.1 input contract, which tags three
+    # changes: (1) F3 sense-free generic constraints (generic_constraints.json +
+    # generic_constraint_bounds.parquet: no `sense` key, bound_lower/bound_upper
+    # in place of a single `bound` column); (2) the scalar-parameters input moved
+    # from system/scalar_parameters.json to constraints/generic_parameters.json;
+    # and (3) the NCS availability column renamed `value` -> `availability_factor`.
+    # Keep this pin in lockstep with MIN_COBRE_VERSION in src/cobre_bridge/cli.py.
+    "cobre-python>=0.14.1,<0.15",
 ]
 
 [project.optional-dependencies]
@@ -30,19 +42,6 @@ dev = [
     "pytest-cov",
     "ruff",
     "jsonschema",
-]
-# The bridge targets cobre 0.14.1, which tags three input-contract changes:
-# (1) F3 sense-free generic constraints (generic_constraints.json +
-# generic_constraint_bounds.parquet: no `sense` key, bound_lower/bound_upper in
-# place of a single `bound` column); (2) the scalar-parameters input moved from
-# system/scalar_parameters.json to constraints/generic_parameters.json; and
-# (3) the NCS availability column renamed `value` -> `availability_factor`.
-# Kept in lockstep with MIN_COBRE_VERSION in src/cobre_bridge/cli.py.
-validation = [
-    "cobre-python>=0.14.1,<0.15",
-]
-test-roundtrip = [
-    "cobre-python>=0.14.1,<0.15",
 ]
 
 [project.scripts]
