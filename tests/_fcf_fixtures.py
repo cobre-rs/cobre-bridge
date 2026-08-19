@@ -42,7 +42,7 @@ from cobre_bridge.decomp.fcf.writer import (
 from cobre_bridge.decomp.id_map import DecompIdMap
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 #: Fixed timestamp handed to `build_metadata`'s `created_at` — this module
@@ -156,6 +156,7 @@ def make_mapped_cut(
     iteration: int = 1,
     forward_pass_index: int = 0,
     is_active: bool = True,
+    inflow_lag_coefficients: Mapping[int, tuple[float, ...]] | None = None,
 ) -> MappedCut:
     """One hand-authored `MappedCut`."""
     return MappedCut(
@@ -165,6 +166,7 @@ def make_mapped_cut(
         iteration=iteration,
         forward_pass_index=forward_pass_index,
         is_active=is_active,
+        inflow_lag_coefficients=dict(inflow_lag_coefficients or {}),
     )
 
 

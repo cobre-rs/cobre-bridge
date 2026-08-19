@@ -131,3 +131,26 @@ def test_build_payload_rejects_wrong_coefficient_length() -> None:
 
     with pytest.raises(ValueError, match="state_dimension"):
         build_stage_cuts_payload(mapping, manifest, stage_id=10)
+
+
+def test_build_stage_cuts_payload_carries_keyed_inflow_lag_coefficients() -> None:
+    manifest = make_manifest([make_slot(0, 0, 0)])  # one storage slot
+    cut = make_mapped_cut(
+        coefficients=(0.5,),
+        inflow_lag_coefficients={0: (2.0, 3.0, 0.0)},
+    )
+    payload = build_stage_cuts_payload(
+        MappingResult(cuts=(cut,), dropped=()), manifest, stage_id=10
+    )
+    # The keyed lag coefficients ride alongside the storage-aligned vector, as
+    # lists cobre's write_policy_checkpoint consumes to place its reserved slots.
+    assert payload["cuts"][0]["inflow_lag_coefficients"] == {0: [2.0, 3.0, 0.0]}
+
+
+def test_build_stage_cuts_payload_empty_lag_coefficients_by_default() -> None:
+    manifest = make_manifest([make_slot(0, 0, 0)])
+    cut = make_mapped_cut(coefficients=(0.5,))
+    payload = build_stage_cuts_payload(
+        MappingResult(cuts=(cut,), dropped=()), manifest, stage_id=10
+    )
+    assert payload["cuts"][0]["inflow_lag_coefficients"] == {}
