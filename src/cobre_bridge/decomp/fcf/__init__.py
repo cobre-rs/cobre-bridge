@@ -37,6 +37,7 @@ from cobre_bridge.decomp.fcf.bootstrap import (
 )
 from cobre_bridge.decomp.fcf.cortes import (
     read_cortes,
+    required_inflow_lag_depth,
     summarize_cut_families,
 )
 from cobre_bridge.decomp.fcf.mapper import (
@@ -767,6 +768,12 @@ def import_boundary_fcf(
     # the individual plants that share it (see map_boundary_cuts) rather than
     # being dropped.
     complexo_components = _read_complexo_map(deck_files.dadger)
+    # The DECOMP case has no PAR(p) model, so the bootstrap manifest carries no
+    # HydroInflowLag slots; the deepest lag the boundary cuts reference is
+    # declared to the writer, which reserves the canonical slots (cobre-side
+    # design B — see the module's cortes.required_inflow_lag_depth). The mapper
+    # then emits the lag terms keyed by hydro rather than into the (absent) slots.
+    inflow_lag_depth = required_inflow_lag_depth(summarize_cut_families(cuts))
     mapping = map_boundary_cuts(
         cuts,
         manifest,
@@ -776,6 +783,7 @@ def import_boundary_fcf(
         coupling_block_hours=coupling_block_hours,
         inflow_lag_means=inflow_lag_means,
         complexo_components=complexo_components,
+        inflow_lag_depth=inflow_lag_depth,
     )
     _LOG.info(
         "scaling boundary FCF coefficients to cobre cost units over the "
@@ -804,7 +812,12 @@ def import_boundary_fcf(
     )
 
     boundary_dir = case_dir / "boundary"
-    write_boundary_checkpoint(boundary_dir, stage_cuts_payload, metadata)
+    write_boundary_checkpoint(
+        boundary_dir,
+        stage_cuts_payload,
+        metadata,
+        inflow_lag_depth=inflow_lag_depth,
+    )
 
     _patch_policy_boundary(case_dir / "config.json", source_stage=boundary_stage)
 

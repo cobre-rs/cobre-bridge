@@ -746,3 +746,59 @@ def test_map_gnl_requires_block_hours_when_placing() -> None:
         map_boundary_cuts(
             cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=plan
         )
+
+
+def test_map_no_lag_slots_emits_keyed_inflow_lag_coefficients() -> None:
+    # A DECOMP manifest carries no HydroInflowLag slots; with inflow_lag_depth=N
+    # the mapper emits the lag terms keyed by hydro (for cobre's writer to
+    # reserve + place) rather than into the storage-only coefficient vector, and
+    # still folds the seasonal mean into the intercept.
+    id_map = make_id_map((10,))
+    manifest = make_manifest([make_slot(_HYDRO_STORAGE, 0, 0)])  # storage only
+    lags = (1.0, 2.0) + (0.0,) * 10
+    cuts = make_boundary_cuts(
+        (10,), (make_cut_record(pi_varm=(0.0,), pi_qafl=(lags,), rhs=5.0),)
+    )
+    means = {0: (100.0, 50.0) + (0.0,) * 10}
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        inflow_lag_means=means,
+        inflow_lag_depth=3,
+    )
+
+    mapped = result.cuts[0]
+    # Storage-aligned vector stays storage-only; the lag terms are keyed instead.
+    assert len(mapped.coefficients) == manifest.state_dimension
+    assert mapped.inflow_lag_coefficients[0] == pytest.approx(
+        (1.0 * _LAG_FACTOR, 2.0 * _LAG_FACTOR, 0.0)
+    )
+    # Intercept folded by Σ placed_coef·μ over the emitted depths.
+    expected_fold = 1.0 * _LAG_FACTOR * 100.0 + 2.0 * _LAG_FACTOR * 50.0
+    assert mapped.intercept == pytest.approx(5.0 * MONTH_HOURS - expected_fold)
+
+
+def test_map_no_lag_slots_zero_depth_emits_nothing() -> None:
+    # No lag slots + the default inflow_lag_depth=0: no keyed coeffs and no fold
+    # — byte-for-byte the pre-fix behaviour.
+    id_map = make_id_map((10,))
+    manifest = make_manifest([make_slot(_HYDRO_STORAGE, 0, 0)])
+    lags = (1.0, 2.0) + (0.0,) * 10
+    cuts = make_boundary_cuts(
+        (10,), (make_cut_record(pi_varm=(0.0,), pi_qafl=(lags,), rhs=5.0),)
+    )
+
+    result = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        inflow_lag_means={0: (100.0, 50.0) + (0.0,) * 10},
+    )
+
+    mapped = result.cuts[0]
+    assert mapped.inflow_lag_coefficients == {}
+    assert mapped.intercept == pytest.approx(5.0 * MONTH_HOURS)

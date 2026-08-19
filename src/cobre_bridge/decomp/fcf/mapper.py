@@ -24,7 +24,7 @@ explicit coefficient ``0.0``.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cobre_bridge.converters.network import C_M3S2HM3
@@ -145,6 +145,17 @@ class MappedCut:
     iteration: int
     forward_pass_index: int
     is_active: bool
+    #: Inflow-lag gradient terms keyed by cobre hydro id (``{hydro_id:
+    #: (coef_depth1, …, coef_depthN)}``), separate from the storage-aligned
+    #: ``coefficients``. Populated only when the boundary needs lag slots the
+    #: target manifest does not yet carry (``map_boundary_cuts``'s
+    #: ``inflow_lag_depth``); cobre's ``write_policy_checkpoint`` reserves the
+    #: canonical ``HydroInflowLag`` slots and places these values. Empty (the
+    #: default) when the manifest already carries the lag slots (placed into
+    #: ``coefficients``) or the boundary prices no inflow-lag state.
+    inflow_lag_coefficients: Mapping[int, tuple[float, ...]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -601,6 +612,7 @@ def map_boundary_cuts(
     coupling_block_hours: Sequence[float] | None = None,
     inflow_lag_means: Mapping[int, Sequence[float]] | None = None,
     complexo_components: Mapping[int, Sequence[int]] | None = None,
+    inflow_lag_depth: int = 0,
 ) -> MappingResult:
     """Map every cut in `cuts.records` onto `manifest`'s state-vector layout.
 
@@ -741,6 +753,7 @@ def map_boundary_cuts(
         # the intercept. Summed per record over exactly the lag coefficients
         # actually placed, so a dropped plant/lag contributes nothing to the
         # fold either — the fold can never reference a term cobre won't apply.
+        inflow_lag_coefficients: dict[int, tuple[float, ...]] = {}
         rhs_fold = 0.0
         for plant_index, targets in resolved_storage.items():
             # `targets` is one slot for an ordinary plant, or several for a
@@ -751,22 +764,43 @@ def map_boundary_cuts(
             plant_lags = record.pi_qafl[plant_index]
             for hydro_id, storage_position in targets:
                 coefficients[storage_position] = storage_coefficient
-                if lag_bound == 0:
-                    continue
                 plant_means = (
                     inflow_lag_means.get(hydro_id)
                     if inflow_lag_means is not None
                     else None
                 )
-                for depth_index, subindex in enumerate(lag_subindices):
-                    lag_position = slot_positions.get(
-                        (_HYDRO_INFLOW_LAG, hydro_id, subindex)
+                if lag_bound > 0:
+                    # The manifest already carries this hydro's HydroInflowLag
+                    # slots — place each depth's coefficient into the aligned
+                    # vector (join 1:1 by `lag_slot_of`).
+                    for depth_index, subindex in enumerate(lag_subindices):
+                        lag_position = slot_positions.get(
+                            (_HYDRO_INFLOW_LAG, hydro_id, subindex)
+                        )
+                        if lag_position is not None:
+                            lag_coefficient = (
+                                plant_lags[depth_index] * inflow_lag_factor
+                            )
+                            coefficients[lag_position] = lag_coefficient
+                            if plant_means is not None:
+                                rhs_fold += lag_coefficient * plant_means[depth_index]
+                elif inflow_lag_depth > 0:
+                    # The manifest carries no lag slots (a DECOMP case has no
+                    # PAR(p) model for cobre to size them from), so emit the lag
+                    # coefficients keyed by hydro (depth 1..N); cobre's
+                    # write_policy_checkpoint reserves the canonical
+                    # HydroInflowLag slots and places them. Same per-depth
+                    # scaling and mean-fold as the aligned path above.
+                    lag_coeffs = tuple(
+                        plant_lags[depth_index] * inflow_lag_factor
+                        for depth_index in range(inflow_lag_depth)
                     )
-                    if lag_position is not None:
-                        lag_coefficient = plant_lags[depth_index] * inflow_lag_factor
-                        coefficients[lag_position] = lag_coefficient
-                        if plant_means is not None:
-                            rhs_fold += lag_coefficient * plant_means[depth_index]
+                    inflow_lag_coefficients[hydro_id] = lag_coeffs
+                    if plant_means is not None:
+                        for depth_index in range(inflow_lag_depth):
+                            rhs_fold += (
+                                lag_coeffs[depth_index] * plant_means[depth_index]
+                            )
 
         for gnl_position, gnl_cols in resolved_gnl.items():
             # Hours-weighted collapse (ticket-001): `pi_gnl` prices an energy
@@ -797,6 +831,7 @@ def map_boundary_cuts(
                 iteration=record.iteration,
                 forward_pass_index=record.forward_pass_index,
                 is_active=record.is_active,
+                inflow_lag_coefficients=inflow_lag_coefficients,
             )
         )
 
