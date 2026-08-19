@@ -175,6 +175,37 @@ def summarize_cut_families(cuts: BoundaryCuts) -> CutFamilySummary:
     )
 
 
+def required_inflow_lag_depth(summary: CutFamilySummary) -> int:
+    """The deepest inflow-lag depth any boundary cut references, ``1``-based.
+
+    The boundary cuts price inflow-lag state only out to the deepest lag with a
+    nonzero ``pi_qafl`` coefficient (``summary.lag_nonzero_by_depth[d-1] > 0``
+    for calendar-month depth ``d`` in ``1..12``). That depth is exactly the
+    number of ``HydroInflowLag`` slots cobre must reserve so the terminal
+    boundary cut can price its conditioning history — the bridge-side equivalent
+    of cobre's ``boundary_cut_lag_depth`` (which reads the same quantity off the
+    written manifest at load).
+
+    Declared to ``cobre.write_policy_checkpoint`` so the writer reserves that many
+    canonical ``HydroInflowLag`` slots in the checkpoint: a DECOMP case has no
+    PAR(p) model for cobre to infer the depth from, so the depth must be carried
+    in the boundary checkpoint itself (see
+    ``~/git/cobre/plans/cobre-bootstrap-inflow-lag-depth-programmatic-spec.md``).
+    It is never written to ``config.json`` (cobre 0.14 retired that user field).
+
+    Returns ``0`` when no cut carries a nonzero lag coefficient — the boundary
+    prices no inflow-lag state, so no slots need reserving.
+    """
+    return max(
+        (
+            depth
+            for depth, count in enumerate(summary.lag_nonzero_by_depth, start=1)
+            if count > 0
+        ),
+        default=0,
+    )
+
+
 def read_cortesh(path: Path) -> CortesHeader:
     """Read ``cortesh.dat`` into a :class:`CortesHeader`.
 
