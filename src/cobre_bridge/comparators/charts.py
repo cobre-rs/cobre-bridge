@@ -3612,13 +3612,17 @@ def constraints_comparison_chart(
                 float(r["lhs_value"])
             )
 
-    # Keep only constraints that have at least one data point on either
-    # side or at least one bound entry. A constraint with no LHS data
-    # anywhere has nothing to show.
+    # A source-model↔Cobre comparison needs the reference (source-model) LHS:
+    # facet only the constraints the reference side actually evaluated an LHS
+    # for. Constraints with a bound (or a Cobre-only LHS) but NO reference LHS
+    # — the cobre-only FI/QBOM terms, 52 of 76 on the mar-26 deck — have nothing
+    # to compare against, and faceting them wallpapered the tab with dozens of
+    # reference-less panels (a 38-row grid). Dropping them keeps the grid a
+    # readable size and every panel a genuine comparison.
     renderable: list[dict] = []
     for c in constraints:
         cid = int(c["id"])
-        if cid in nw_by_cid or cid in cb_by_cid or bound_by_constraint.get(cid):
+        if cid in nw_by_cid:
             renderable.append(c)
     if not renderable:
         return "<p>No constraint data available to compare.</p>"

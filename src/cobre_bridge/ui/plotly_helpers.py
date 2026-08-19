@@ -67,7 +67,17 @@ def facet_grid(
     if n == 0:
         return []
     nrows = (n + ncols - 1) // ncols
-    row_h = max((1.0 - row_gap * (nrows - 1)) / nrows, min_row_h)
+    # Cap the effective row gap so nrows rows + gaps always fit within [0, 1].
+    # A fixed row_gap times many rows otherwise sums past 1.0, marching the
+    # y-domains negative (invisible/garbled bottom facets) for tall grids. For
+    # grids where the requested gap already fits, eff_row_gap == row_gap — a
+    # no-op, so existing small-multiples layouts (and their goldens) are
+    # unchanged; the cap only engages once a grid would overflow.
+    eff_row_gap = row_gap
+    if nrows > 1:
+        max_total_gap = max(1.0 - nrows * min_row_h, 0.0)
+        eff_row_gap = min(row_gap, max_total_gap / (nrows - 1))
+    row_h = max((1.0 - eff_row_gap * (nrows - 1)) / nrows, min_row_h)
     col_w = (1.0 - col_gap * (ncols - 1)) / ncols
     panels: list[FacetPanel] = []
     for idx in range(n):
@@ -75,7 +85,7 @@ def facet_grid(
         col_i = idx % ncols
         x0 = col_i * (col_w + col_gap)
         x1 = x0 + col_w
-        y1 = 1.0 - row_i * (row_h + row_gap)
+        y1 = 1.0 - row_i * (row_h + eff_row_gap)
         y0 = y1 - row_h
         panels.append(
             FacetPanel(
