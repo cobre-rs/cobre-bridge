@@ -38,7 +38,6 @@ from cobre_bridge.comparators.decomp_results import (
     _PRODUCTIVITY_TURBINED_EPS,
     _THERMAL_VARIABLES,
     _UNSUPPORTED_TERM_VARIABLES,
-    DecompComparison,
     _AlignedDecompFrames,
     _build_line_id_map,
     _bus_side,
@@ -73,15 +72,13 @@ from cobre_bridge.comparators.decomp_results import (
     _result_comparisons,
     _rhe_lhs_lookup,
     _scenario_mean,
+    _scenario_probabilities,
     _stage_frame_to_lookup,
     _stage_rows,
     _storage_lookup,
-    _summarize,
     _term_lookup_value,
-    _tidy,
     _union_cost_rows,
     build_decomp_dataset,
-    compare_decomp_results,
 )
 from cobre_bridge.comparators.report_builder import build_comparison_report
 from cobre_bridge.comparators.results import ResultComparison
@@ -91,7 +88,7 @@ from cobre_bridge.decomp.constraint_registers import (
     ConstraintTerm,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.verdict import decomp_compare_summary, decomp_dataset_summary
+from cobre_bridge.verdict import decomp_dataset_summary
 
 
 def _source_frame() -> pl.DataFrame:
@@ -132,6 +129,111 @@ class TestScenarioMean:
         )
         out = _scenario_mean(
             frame, "estagio", ["geracao_MW"], entity_column="codigo_usina"
+        )
+        assert out["geracao_MW"].to_list() == [30.0]
+
+    def test_probability_weighted_fan_stage_differs_from_unweighted(self) -> None:
+        """A fan stage (3) with unequal (0.6/0.4) opening probabilities must
+        be weighted, not plainly averaged; a single-scenario stage (1) must
+        be unaffected -- a weighted mean over one row is that row's value."""
+        frame = pl.DataFrame(
+            {
+                "estagio": [1, 3, 3],
+                "cenario": [1, 1, 2],
+                "codigo_usina": [10, 10, 10],
+                "geracao_MW": [50.0, 100.0, 20.0],
+            }
+        )
+        probabilities = pl.DataFrame(
+            {
+                "estagio": [1, 3, 3],
+                "cenario": [1, 1, 2],
+                "probabilidade": [1.0, 0.6, 0.4],
+            }
+        )
+
+        weighted = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=probabilities,
+        )
+        unweighted = _scenario_mean(
+            frame, "estagio", ["geracao_MW"], entity_column="codigo_usina"
+        )
+
+        weighted_by_stage = dict(
+            zip(weighted["estagio"].to_list(), weighted["geracao_MW"].to_list())
+        )
+        unweighted_by_stage = dict(
+            zip(unweighted["estagio"].to_list(), unweighted["geracao_MW"].to_list())
+        )
+        # Fan stage: weighted mean = 0.6*100 + 0.4*20 = 68.0, NOT the
+        # unweighted mean(100, 20) = 60.0.
+        assert weighted_by_stage[3] == pytest.approx(0.6 * 100.0 + 0.4 * 20.0)
+        assert weighted_by_stage[3] != pytest.approx(unweighted_by_stage[3])
+        # Deterministic single-scenario stage: unaffected by weighting.
+        assert weighted_by_stage[1] == pytest.approx(unweighted_by_stage[1])
+        assert weighted_by_stage[1] == pytest.approx(50.0)
+
+    def test_none_probabilities_keeps_the_unweighted_default(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3, 3],
+                "cenario": [1, 2, 3],
+                "codigo_usina": [10, 10, 10],
+                "geracao_MW": [10.0, 20.0, 60.0],
+            }
+        )
+        out = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=None,
+        )
+        assert out["geracao_MW"].to_list() == [30.0]
+
+    def test_empty_probabilities_frame_keeps_the_unweighted_default(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3, 3],
+                "cenario": [1, 2, 3],
+                "codigo_usina": [10, 10, 10],
+                "geracao_MW": [10.0, 20.0, 60.0],
+            }
+        )
+        out = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=pl.DataFrame(),
+        )
+        assert out["geracao_MW"].to_list() == [30.0]
+
+    def test_frame_without_cenario_column_keeps_the_unweighted_default(self) -> None:
+        """A frame with no ``cenario`` column of its own (e.g. a table
+        `_stage_rows` already collapsed past the scenario axis) must ignore
+        *probabilities* entirely rather than fail trying to join on a column
+        that does not exist."""
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3, 3],
+                "codigo_usina": [10, 10, 10],
+                "geracao_MW": [10.0, 20.0, 60.0],
+            }
+        )
+        probabilities = pl.DataFrame(
+            {"estagio": [3], "cenario": [1], "probabilidade": [0.9]}
+        )
+        out = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=probabilities,
         )
         assert out["geracao_MW"].to_list() == [30.0]
 
@@ -187,76 +289,9 @@ class TestMapEntities:
         assert mapped["newave_code"].to_list() == [10, 10]
 
 
-class TestTidyAndSummary:
-    def _pair(self) -> tuple[pl.DataFrame, pl.DataFrame]:
-        source = pl.DataFrame(
-            {
-                "entity_id": [0, 1],
-                "stage_id": [0, 0],
-                "geracao_MW": [100.0, 50.0],
-            }
-        )
-        cobre = pl.DataFrame(
-            {
-                "entity_id": [0, 1],
-                "stage_id": [0, 0],
-                "generation_mw": [90.0, 50.0],
-            }
-        )
-        return source, cobre
-
-    def test_tidy_rows_carry_both_sides_and_the_difference(self) -> None:
-        source, cobre = self._pair()
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={0: "A", 1: "B"})
-        generation = rows.filter(pl.col("variable") == "generation").sort("entity_id")
-        assert generation["source"].to_list() == [100.0, 50.0]
-        assert generation["cobre"].to_list() == [90.0, 50.0]
-        assert generation["delta"].to_list() == [-10.0, 0.0]
-        assert generation["delta_pct"].to_list() == [pytest.approx(-10.0), 0.0]
-        assert generation["entity_name"].to_list() == ["A", "B"]
-
-    def test_variables_missing_on_either_side_are_skipped(self) -> None:
-        source, cobre = self._pair()
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={})
-        # Only generation is present in both frames.
-        assert set(rows["variable"]) == {"generation"}
-
-    def test_summary_totals_and_worst_entity(self) -> None:
-        source, cobre = self._pair()
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={0: "A", 1: "B"})
-        summary = _summarize(rows)
-        assert len(summary) == 1
-        row = summary.to_dicts()[0]
-        assert row["n"] == 2
-        assert row["source_total"] == 150.0
-        assert row["cobre_total"] == 140.0
-        assert row["delta_total"] == -10.0
-        assert row["delta_total_pct"] == pytest.approx(-100.0 / 15.0)
-        assert row["worst_entity"] == "A"
-
-    def test_zero_versus_zero_reads_as_agreement(self) -> None:
-        source = pl.DataFrame({"entity_id": [0], "stage_id": [0], "geracao_MW": [0.0]})
-        cobre = pl.DataFrame(
-            {"entity_id": [0], "stage_id": [0], "generation_mw": [0.0]}
-        )
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={})
-        assert rows["smape_pct"].to_list() == [0.0]
-        assert rows["delta_pct"].to_list() == [None]
-
-    def test_empty_join_yields_an_empty_but_typed_frame(self) -> None:
-        source = pl.DataFrame({"entity_id": [0], "stage_id": [0], "geracao_MW": [1.0]})
-        cobre = pl.DataFrame(
-            {"entity_id": [9], "stage_id": [9], "generation_mw": [1.0]}
-        )
-        rows = _tidy(source, cobre, _HYDRO_VARIABLES, names={})
-        assert rows.is_empty()
-        assert "smape_pct" in rows.columns
-        assert _summarize(rows).is_empty()
-
-
 class TestResultComparisons:
-    """``_result_comparisons`` is the ``ResultComparison`` counterpart of
-    ``_tidy``, feeding ``build_decomp_dataset`` instead of ``DecompComparison``."""
+    """``_result_comparisons`` joins one level's two frames into the
+    ``ResultComparison`` rows that feed ``build_decomp_dataset``."""
 
     def _pair(self) -> tuple[pl.DataFrame, pl.DataFrame]:
         source = pl.DataFrame(
@@ -403,13 +438,6 @@ def _patch_aligned_frames(
     monkeypatch.setattr(
         "cobre_bridge.comparators.decomp_results._read_aligned_frames",
         lambda *_args, **_kwargs: aligned,
-    )
-    # ``compare_decomp_results`` also reads the convergence report directly
-    # (outside ``_read_aligned_frames``); stub it so the parity fixture never
-    # has to touch a real deck/output directory.
-    monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results._convergence",
-        lambda *_args, **_kwargs: pl.DataFrame(schema={"iteration": pl.Int64}),
     )
     # ticket-006: ``build_decomp_dataset`` also calls
     # ``read_cobre_bus_aggregates`` directly (outside ``_read_aligned_frames``).
@@ -1850,6 +1878,30 @@ def _relato_costs_frame() -> pl.DataFrame:
     )
 
 
+def _relato2_costs_frame() -> pl.DataFrame:
+    """A scenario-fan (monthly) stage 3 with two **unequal-probability**
+    openings, so its expected cost is genuinely probability-weighted rather
+    than a 50/50 mean. stage 3 geracao_termica expectation:
+    0.6*1000 + 0.4*500 = 800 k$ (weighted) vs 750 k$ (unweighted) -- the tests
+    pin the weighted value."""
+    return pl.DataFrame(
+        {
+            "estagio": [3, 3],
+            "cenario": [1, 2],
+            "probabilidade": [0.6, 0.4],
+            "custo_presente": [900.0, 400.0],
+            "custo_futuro": [0.0, 0.0],
+            "geracao_termica": [1000.0, 500.0],
+            "violacao_desvio": [0.0, 0.0],
+            "penalidade_vertimento_reservatorio": [0.0, 0.0],
+            "penalidade_vertimento_fio": [0.0, 0.0],
+            "violacao_turbinamento_reservatorio": [0.0, 0.0],
+            "violacao_turbinamento_fio": [0.0, 0.0],
+            "penalidade_intercambio": [0.0, 0.0],
+        }
+    )
+
+
 class TestCostFrames:
     """ticket-010: ``_cost_frames`` -- the DECOMP-side NPV dict (R$) + the
     per-stage ``nw_sin`` cost rows (10^6 R$), reconciled from native k$."""
@@ -1858,6 +1910,11 @@ class TestCostFrames:
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_relato_costs",
             lambda *_args, **_kwargs: _relato_costs_frame(),
+        )
+        # No scenario-fan stage by default -- relato2 is optional.
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_args, **_kwargs: pl.DataFrame(),
         )
 
     def test_kdollars_to_reais_reconciliation_on_both_unit_paths(
@@ -1881,6 +1938,50 @@ class TestCostFrames:
             )
         }
         assert cterm == pytest.approx({1: 0.12, 2: 0.1})
+
+    def test_relato2_scenario_fan_stage_is_unioned_in_and_probability_weighted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """relato2's monthly scenario-fan stage is unioned onto relato's weekly
+        stages, and its expected cost uses the real (unequal) tree
+        probabilities -- not a 50/50 mean."""
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_args, **_kwargs: _relato_costs_frame(),  # weekly stages 1, 2
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_args, **_kwargs: _relato2_costs_frame(),  # fan stage 3
+        )
+
+        nw_costs, nw_sin = _cost_frames(tmp_path)
+
+        cterm = {
+            row["stage"]: row["value"]
+            for row in nw_sin.filter(pl.col("variable") == "CTERM").iter_rows(
+                named=True
+            )
+        }
+        # The fan stage (3) is now present -- it was absent when only relato
+        # (weeks 1-2) was read ...
+        assert set(cterm) == {1, 2, 3}
+        # ... and probability-weighted: 0.6*1000 + 0.4*500 = 800 k$ -> 0.8
+        # (10^6 R$), NOT the unweighted 750 -> 0.75.
+        assert cterm[3] == pytest.approx(0.8)
+        # NPV thermal now includes the fan stage: (120 + 100 + 800) k$ x1e3.
+        assert nw_costs["GERACAO TERMICA"] == pytest.approx(1_020_000.0)
+
+    def test_absent_relato2_leaves_only_relato_stages(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A deck with no relato2 (empty frame) contributes no extra stage --
+        the cost frames cover exactly relato's weeks."""
+        self._patch(monkeypatch)  # read_relato2_costs stubbed to empty
+
+        _nw_costs, nw_sin = _cost_frames(tmp_path)
+
+        stages = set(nw_sin.filter(pl.col("variable") == "CTERM")["stage"].to_list())
+        assert stages == {1, 2}
 
     def test_all_cost_map_categories_are_populated_with_known_magnitudes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1981,6 +2082,206 @@ class TestCostFrames:
 
         with pytest.raises(FileNotFoundError):
             _cost_frames(tmp_path)
+
+
+def _relato_costs_with_overlapping_fan_stage() -> pl.DataFrame:
+    """`_relato_costs_frame`'s weekly stages 1-2, plus a deliberately WRONG
+    row for the fan stage (3) that `_relato2_costs_frame` also covers --
+    pins that relato2 is authoritative for any stage it covers, exactly like
+    `_cost_frames`'s own union."""
+    overlapping = pl.DataFrame(
+        {
+            "estagio": [3, 3],
+            "cenario": [1, 2],
+            "probabilidade": [0.9, 0.1],  # wrong -- must be superseded
+            "custo_presente": [1.0, 1.0],
+            "custo_futuro": [1.0, 1.0],
+            "geracao_termica": [1.0, 1.0],
+            "violacao_desvio": [1.0, 1.0],
+            "penalidade_vertimento_reservatorio": [1.0, 1.0],
+            "penalidade_vertimento_fio": [1.0, 1.0],
+            "violacao_turbinamento_reservatorio": [1.0, 1.0],
+            "violacao_turbinamento_fio": [1.0, 1.0],
+            "penalidade_intercambio": [1.0, 1.0],
+        }
+    )
+    return pl.concat([_relato_costs_frame(), overlapping], how="vertical")
+
+
+class TestScenarioProbabilities:
+    """`_scenario_probabilities` -- the ``(estagio, cenario, probabilidade)``
+    lookup `_scenario_mean` consumes, built by unioning `read_relato_costs`
+    (deterministic weeks) with `read_relato2_costs` (the real, unequal fan-
+    stage opening probabilities), relato2 authoritative for any stage it
+    covers."""
+
+    def test_unions_relato_and_relato2(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_a, **_k: _relato_costs_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: _relato2_costs_frame(),
+        )
+
+        result = _scenario_probabilities(tmp_path)
+
+        rows = {
+            (int(r["estagio"]), int(r["cenario"])): r["probabilidade"]
+            for r in result.iter_rows(named=True)
+        }
+        assert rows == {
+            (1, 1): pytest.approx(0.5),
+            (1, 2): pytest.approx(0.5),
+            (2, 1): pytest.approx(0.5),
+            (2, 2): pytest.approx(0.5),
+            (3, 1): pytest.approx(0.6),
+            (3, 2): pytest.approx(0.4),
+        }
+
+    def test_relato2_is_authoritative_for_stages_it_covers(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_a, **_k: _relato_costs_with_overlapping_fan_stage(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: _relato2_costs_frame(),
+        )
+
+        result = _scenario_probabilities(tmp_path)
+
+        stage_3 = {
+            int(r["cenario"]): r["probabilidade"]
+            for r in result.filter(pl.col("estagio") == 3).iter_rows(named=True)
+        }
+        # relato2's 0.6/0.4 wins -- NOT relato's (wrong) 0.9/0.1.
+        assert stage_3 == {1: pytest.approx(0.6), 2: pytest.approx(0.4)}
+
+    def test_empty_when_neither_report_is_available(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs", _boom
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+
+        result = _scenario_probabilities(tmp_path)
+
+        assert result.is_empty()
+
+    def test_never_raises_when_relato_is_missing_but_relato2_is_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A deck with only a fan-stage report and no aggregate relato (an
+        edge case, but `_scenario_probabilities` must not propagate
+        `read_relato_costs`'s raise when relato2 alone already has data)."""
+
+        def _boom(*_args: object, **_kwargs: object) -> pl.DataFrame:
+            raise FileNotFoundError("no relato.rvN found")
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs", _boom
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: _relato2_costs_frame(),
+        )
+
+        result = _scenario_probabilities(tmp_path)
+
+        assert set(result["estagio"].unique().to_list()) == {3}
+
+
+def _bus_fan_stage_frame() -> pl.DataFrame:
+    """One bus: a deterministic single-scenario stage (1) and a 2-scenario
+    fan stage (3) -- already ``_stage_rows``-shaped (patamar-null aggregate
+    rows only), matching what `read_dec_oper_sist` returns after that fold."""
+    return pl.DataFrame(
+        {
+            "estagio": [1, 3, 3],
+            "no": [1, 1, 2],
+            "cenario": [1, 1, 2],
+            "patamar": [None, None, None],
+            "codigo_submercado": [1, 1, 1],
+            "deficit_MW": [0.0, 0.0, 0.0],
+            "cmo": [40.0, 100.0, 20.0],
+        }
+    )
+
+
+class TestScenarioWeightingIntegration:
+    """Integration-style: proves the real pipeline --
+    `_scenario_probabilities` built from (mocked) relato/relato2 reports,
+    threaded through a real ``_*_side`` fold (`_bus_side`, one of this
+    module's physical-variable call sites) -- probability-weights the fan
+    stage, and degrades to the pre-existing unweighted mean when no
+    probability source is available at all."""
+
+    def _bus_codes(self) -> dict[int, int]:
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
+        return {code: id_map.bus_id(code) for code in id_map.bus_codes}
+
+    def test_fan_stage_is_probability_weighted_when_a_source_is_available(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            lambda *_a, **_k: _bus_fan_stage_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            lambda *_a, **_k: _relato_costs_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            lambda *_a, **_k: _relato2_costs_frame(),
+        )
+
+        probabilities = _scenario_probabilities(tmp_path)
+        mapped, _unmapped = _bus_side(
+            tmp_path, self._bus_codes(), probabilities=probabilities
+        )
+
+        cmo_by_stage = dict(zip(mapped["stage_id"].to_list(), mapped["cmo"].to_list()))
+        # Fan stage (0-based stage_id 2): relato2's 0.6/0.4 weighted mean =
+        # 0.6*100 + 0.4*20 = 68.0, NOT the unweighted mean(100, 20) = 60.0.
+        assert cmo_by_stage[2] == pytest.approx(68.0)
+        # Deterministic stage (0-based stage_id 0): unaffected.
+        assert cmo_by_stage[0] == pytest.approx(40.0)
+
+    def test_fan_stage_stays_unweighted_when_no_probability_source_exists(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A bare deck (no relato/relato2 at all) -- `_scenario_probabilities`
+        degrades to empty, and `_bus_side` must reproduce the exact
+        pre-existing unweighted-mean value on the fan stage."""
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            lambda *_a, **_k: _bus_fan_stage_frame(),
+        )
+
+        probabilities = _scenario_probabilities(tmp_path)
+        assert probabilities.is_empty()
+
+        mapped, _unmapped = _bus_side(
+            tmp_path, self._bus_codes(), probabilities=probabilities
+        )
+
+        cmo_by_stage = dict(zip(mapped["stage_id"].to_list(), mapped["cmo"].to_list()))
+        assert cmo_by_stage[2] == pytest.approx(60.0)  # plain mean(100, 20)
+        assert cmo_by_stage[0] == pytest.approx(40.0)
 
 
 class TestUnionCostRows:
@@ -2194,9 +2495,12 @@ class TestDecompConvergenceFrame:
         assert frame.columns == ["iteration", "lower_bound", "upper_bound_mean"]
         assert frame.schema == self._CANONICAL_SCHEMA
         assert frame["iteration"].to_list() == [1, 2, 3]
-        assert frame["lower_bound"].to_list() == pytest.approx([100.0, 150.0, 180.0])
+        # zinf/zsup (native k$) reconciled to R$ (x1e3) to match cobre's bounds.
+        assert frame["lower_bound"].to_list() == pytest.approx(
+            [100_000.0, 150_000.0, 180_000.0]
+        )
         assert frame["upper_bound_mean"].to_list() == pytest.approx(
-            [500.0, 300.0, 190.0]
+            [500_000.0, 300_000.0, 190_000.0]
         )
 
     def test_gap_and_timing_columns_are_not_carried_over(
@@ -2269,9 +2573,12 @@ class TestBuildDecompDatasetConvergence:
         nw_conv = dataset.metadata["nw_convergence"]
         assert nw_conv.columns == ["iteration", "lower_bound", "upper_bound_mean"]
         assert nw_conv["iteration"].to_list() == [1, 2, 3]
-        assert nw_conv["lower_bound"].to_list() == pytest.approx([100.0, 150.0, 180.0])
+        # native k$ zinf/zsup reconciled to R$ (x1e3).
+        assert nw_conv["lower_bound"].to_list() == pytest.approx(
+            [100_000.0, 150_000.0, 180_000.0]
+        )
         assert nw_conv["upper_bound_mean"].to_list() == pytest.approx(
-            [500.0, 300.0, 190.0]
+            [500_000.0, 300_000.0, 190_000.0]
         )
 
     def test_cobre_convergence_matches_the_reader_verbatim(
@@ -2331,54 +2638,6 @@ class TestBuildDecompDatasetConvergence:
         html = build_comparison_report(dataset)
         assert "Convergence" in html
         assert "Cobre Lower" in html
-
-
-class TestBuildDecompDatasetParityWithLegacyComparison:
-    """No drift from the migration: on the same aligned fixture,
-    ``build_decomp_dataset`` and the legacy ``compare_decomp_results`` must
-    report the same per-(entity, stage) newave/cobre values."""
-
-    def test_every_legacy_row_has_a_matching_dataset_pair(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        _patch_aligned_frames(monkeypatch, _aligned_fixture())
-
-        legacy = compare_decomp_results(tmp_path, tmp_path)
-        dataset = build_decomp_dataset(tmp_path, tmp_path)
-
-        assert legacy.rows.height > 0  # the fixture must exercise real rows
-        for row in legacy.rows.iter_rows(named=True):
-            canonical = _CANONICAL_VARIABLE[(row["level"], row["variable"])]
-            match = dataset.tidy.filter(
-                (pl.col("entity_type") == row["level"])
-                & (pl.col("variable") == canonical)
-                & (pl.col("entity_id") == row["entity_id"])
-                & (pl.col("stage") == row["stage_id"])
-            )
-            newave_value = match.filter(pl.col("source") == "newave")["value"].to_list()
-            cobre_value = match.filter(pl.col("source") == "cobre")["value"].to_list()
-            assert newave_value == pytest.approx([row["source"]])
-            assert cobre_value == pytest.approx([row["cobre"]])
-
-    def test_unmapped_dict_is_identical_between_entry_points(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """``build_decomp_dataset`` and the legacy comparison must agree on
-        every level ``_read_aligned_frames`` reports. ``"line"``/``"ree"``/
-        ``"evaporation"`` are ticket-008/ticket-018/ticket-020 additions
-        sourced outside ``_read_aligned_frames`` (the legacy comparison never
-        gained line, REE, or evaporation rows), so they are compared
-        separately rather than folded into the shared-levels equality."""
-        _patch_aligned_frames(monkeypatch, _aligned_fixture())
-
-        legacy = compare_decomp_results(tmp_path, tmp_path)
-        dataset = build_decomp_dataset(tmp_path, tmp_path)
-
-        dataset_unmapped = dict(dataset.metadata["unmapped"])
-        assert dataset_unmapped.pop("line") == []
-        assert dataset_unmapped.pop("ree") == []
-        assert dataset_unmapped.pop("evaporation") == []
-        assert dataset_unmapped == legacy.unmapped
 
 
 # ---------------------------------------------------------------------------
@@ -4009,9 +4268,11 @@ class TestReeResultComparisons:
     MWh -> MWmes reconciliation, and the never-silently-dropped
     unmapped-plant diagnostic (ticket-018 requirement 4)."""
 
-    def test_ena_is_a_plain_sum_earm_is_divided_by_730(
+    def test_without_stage_hours_ena_is_unscaled_earm_is_divided_by_730(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        # With no stage_hours lookup, ENA falls back to the raw stage-mean MW
+        # (factor 1.0) -- the backward-compatible default.
         _patch_ree_sources(monkeypatch)
 
         results, unmapped = _ree_result_comparisons(
@@ -4029,15 +4290,31 @@ class TestReeResultComparisons:
         assert ena.cobre_id == 100
         assert ena.stage == 0
         assert ena.newave_value == pytest.approx(145.0)
-        assert ena.cobre_value == pytest.approx(150.0)  # plain sum, no scaling
+        assert ena.cobre_value == pytest.approx(150.0)  # unscaled fallback
         assert ena.abs_diff == pytest.approx(5.0)
 
         earm = by_variable["earm_final_mwmes"]
-        assert earm.newave_value == pytest.approx(1010.0)
-        # 730000.0 MWh / _EARM_MWH_TO_MWMES(730) == 1000.0 MWmes.
         assert earm.cobre_value == pytest.approx(730000.0 / _EARM_MWH_TO_MWMES)
-        assert earm.cobre_value == pytest.approx(1000.0)
-        assert earm.abs_diff == pytest.approx(10.0)
+
+    def test_stage_hours_convert_ena_rate_to_mwmes_energy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # cobre's ena_mw is an average-MW rate; with stage_hours it is converted
+        # to MW-month energy via stage_hours/730 (mirroring EARM's ÷730), so it
+        # is comparable to DECOMP's ena_MWmes. Half a month (365h) halves it.
+        _patch_ree_sources(monkeypatch)
+
+        results, _ = _ree_result_comparisons(
+            tmp_path,
+            _ree_cobre_hydro_fixture(),
+            _ree_id_map(),
+            stage_hours={0: _EARM_MWH_TO_MWMES / 2},  # 365 h == 0.5 month
+        )
+
+        ena = {r.variable: r for r in results}["ena_mwmes"]
+        # 150.0 MW (rate) × (365 / 730) == 75.0 MWmês.
+        assert ena.cobre_value == pytest.approx(75.0)
+        assert ena.newave_value == pytest.approx(145.0)
 
     def test_none_id_map_returns_no_rows_and_no_unmapped(self, tmp_path: Path) -> None:
         results, unmapped = _ree_result_comparisons(
@@ -5333,67 +5610,9 @@ class TestBuildDecompDatasetConstraintsE2E:
         assert "Plotly.newPlot" in constraints_tab
 
 
-class TestComparisonRecord:
-    def test_stage_count_counts_distinct_stages(self) -> None:
-        rows = pl.DataFrame(
-            {
-                "level": ["hydro"] * 3,
-                "variable": ["generation"] * 3,
-                "unit": ["MW"] * 3,
-                "entity_id": [0, 0, 1],
-                "entity_name": ["A", "A", "B"],
-                "stage_id": [0, 1, 1],
-                "source": [1.0, 2.0, 3.0],
-                "cobre": [1.0, 2.0, 3.0],
-                "delta": [0.0, 0.0, 0.0],
-                "delta_pct": [0.0, 0.0, 0.0],
-                "smape_pct": [0.0, 0.0, 0.0],
-            }
-        )
-        comparison = DecompComparison(
-            rows=rows,
-            summary=_summarize(rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
-        assert comparison.stage_count == 2
-
-
-def _fake_comparison() -> DecompComparison:
-    rows = pl.DataFrame(
-        {
-            "level": ["hydro", "thermal"],
-            "variable": ["generation", "generation"],
-            "unit": ["MW", "MW"],
-            "entity_id": [0, 0],
-            "entity_name": ["A", "T"],
-            "stage_id": [0, 0],
-            "source": [100.0, 20.0],
-            "cobre": [90.0, 20.0],
-            "delta": [-10.0, 0.0],
-            "delta_pct": [-10.0, 0.0],
-            "smape_pct": [10.5, 0.0],
-        }
-    )
-    return DecompComparison(
-        rows=rows,
-        summary=_summarize(rows),
-        convergence=pl.DataFrame(
-            {
-                "iteration": [1, 2],
-                "source_lower": [1.0, 2.0],
-                "source_upper": [3.0, 3.0],
-                "cobre_lower": [10.0, None],
-                "cobre_upper": [30.0, None],
-            }
-        ),
-        unmapped={"hydro": [], "thermal": [86, 224], "bus": []},
-    )
-
-
 def _fake_dataset(*, all_within_tol: bool = False) -> ComparisonDataset:
-    """The canonical-dataset counterpart of ``_fake_comparison``: two stages,
-    two variables. ``generation_mw`` always matches; ``turbined_m3s`` diverges
+    """A canonical two-stage, two-variable dataset for the ``compare decomp``
+    CLI tests. ``generation_mw`` always matches; ``turbined_m3s`` diverges
     unless *all_within_tol* asks for a fully-passing dataset instead."""
     tidy = pl.DataFrame(
         {
@@ -5445,9 +5664,8 @@ def _empty_fake_dataset() -> ComparisonDataset:
 
 
 class TestDecompDatasetSummary:
-    """``decomp_dataset_summary`` -- the superset ``--json`` payload builder
-    that supersedes ``decomp_compare_summary`` at the ``compare decomp``
-    call site (the legacy summary itself is untouched, per D-STRANGLER)."""
+    """``decomp_dataset_summary`` -- the ``compare decomp --json`` payload
+    builder, sourced entirely from the canonical ``ComparisonDataset``."""
 
     def test_returns_the_superset_shape_in_the_documented_key_order(self) -> None:
         dataset = _fake_dataset()
@@ -5526,126 +5744,51 @@ class TestDecompDatasetSummary:
         assert summary["unmapped"] == {"hydro": [], "thermal": [], "bus": []}
 
 
-class TestDecompCompareSummaryTolerance:
-    """The within-tolerance verdict keys ``decomp_compare_summary`` appends."""
-
-    def test_mixed_fixture_has_one_variable_exceeding_tolerance(self) -> None:
-        """Hydro's ``smape_pct == 10.5`` exceeds 1e-2; thermal's ``0.0`` is within."""
-        comparison = _fake_comparison()
-
-        summary = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        assert list(summary.keys()) == [
-            "stages",
-            "variables",
-            "unmapped",
-            "within_tol",
-            "total",
-            "all_within_tol",
-        ]
-        assert summary["total"] == 2
-        assert summary["within_tol"] == 1
-        assert summary["all_within_tol"] is False
-
-    def test_all_rows_within_tolerance_report_all_within_tol_true(self) -> None:
-        rows = pl.DataFrame(
-            {
-                "level": ["hydro", "thermal"],
-                "variable": ["generation", "generation"],
-                "unit": ["MW", "MW"],
-                "entity_id": [0, 0],
-                "entity_name": ["A", "T"],
-                "stage_id": [0, 0],
-                "source": [100.0, 20.0],
-                "cobre": [100.0, 20.0],
-                "delta": [0.0, 0.0],
-                "delta_pct": [0.0, 0.0],
-                "smape_pct": [0.0, 0.0],
-            }
-        )
-        comparison = DecompComparison(
-            rows=rows,
-            summary=_summarize(rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
-
-        summary = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        assert summary["total"] == 2
-        assert summary["within_tol"] == 2
-        assert summary["all_within_tol"] is True
-
-    def test_empty_comparison_reports_zero_totals(self) -> None:
-        empty_rows = _fake_comparison().rows.clear()
-        comparison = DecompComparison(
-            rows=empty_rows,
-            summary=_summarize(empty_rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
-
-        summary = decomp_compare_summary(comparison, tolerance=1e-2)
-
-        assert summary["within_tol"] == 0
-        assert summary["total"] == 0
-        assert summary["all_within_tol"] is False
-
-
 class TestCompareDecompCommand:
-    """The ``compare decomp`` subcommand, with the comparison itself stubbed."""
+    """The ``compare decomp`` subcommand, with the dataset build stubbed."""
 
     @staticmethod
     def _invoke(
         argv: list[str],
         monkeypatch: pytest.MonkeyPatch,
-        comparison: DecompComparison | None = None,
         dataset: ComparisonDataset | None = None,
     ) -> Any:
         from typer.testing import CliRunner
 
         from cobre_bridge.cli import app
 
-        resolved_comparison = (
-            comparison if comparison is not None else _fake_comparison()
-        )
         resolved_dataset = dataset if dataset is not None else _fake_dataset()
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.compare_decomp_results",
-            lambda *_args, **_kwargs: resolved_comparison,
-        )
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
             lambda *_args, **_kwargs: resolved_dataset,
         )
         return CliRunner().invoke(app, argv)
 
-    def test_renders_tables_and_exits_zero(
+    def test_renders_headline_and_exits_zero(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """ticket-023: the legacy per-variable table and bounds table renderer
+        is retired; the shared ``build_compare_verdict`` headline is the sole
+        terminal summary."""
         result = self._invoke(
             ["compare", "decomp", str(tmp_path), str(tmp_path)], monkeypatch
         )
         assert result.exit_code == 0
-        assert "Operation comparison" in result.stdout
-        assert "Final bounds" in result.stdout
+        assert "Operation comparison" not in result.stdout
+        assert "Final bounds" not in result.stdout
 
     def test_headline_leads_stdout_on_a_diverging_run(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """The shared ``build_compare_verdict`` headline, from ``_fake_dataset``'s
-        mismatch (1/2 within tol, worst ``turbined_m3s`` at 12% sMAPE), leads
-        stdout ahead of the legacy per-variable table."""
+        mismatch (1/2 within tol, worst ``turbined_m3s`` at 12% sMAPE), is the
+        first line of stdout."""
         result = self._invoke(
             ["compare", "decomp", str(tmp_path), str(tmp_path)], monkeypatch
         )
         assert result.exit_code == 0
         lines = result.stdout.splitlines()
         assert lines[0] == "⚠ 1/2 variables within tol — worst: turbined_m3s sMAPE 12%"
-        assert "Operation comparison" in result.stdout
-        assert result.stdout.index("Operation comparison") > result.stdout.index(
-            lines[0]
-        )
 
     def test_headline_leads_stdout_when_all_within_tol(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -5658,7 +5801,6 @@ class TestCompareDecompCommand:
         assert result.exit_code == 0
         lines = result.stdout.splitlines()
         assert lines[0] == "✓ 2/2 variables within tol"
-        assert "Operation comparison" in result.stdout
 
     def test_json_carries_the_summary_and_unmapped_codes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -5722,17 +5864,9 @@ class TestCompareDecompCommand:
     def test_json_reports_no_comparable_rows_when_comparison_is_empty(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        empty_rows = _fake_comparison().rows.clear()
-        empty_comparison = DecompComparison(
-            rows=empty_rows,
-            summary=_summarize(empty_rows),
-            convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-            unmapped={"hydro": [], "thermal": [], "bus": []},
-        )
         result = self._invoke(
             ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"],
             monkeypatch,
-            comparison=empty_comparison,
             dataset=_empty_fake_dataset(),
         )
         assert result.exit_code == 0
@@ -5747,7 +5881,7 @@ class TestCompareDecompCommand:
     def test_unreadable_output_exits_two(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        def _boom(*_args: object, **_kwargs: object) -> DecompComparison:
+        def _boom(*_args: object, **_kwargs: object) -> ComparisonDataset:
             raise FileNotFoundError("dec_oper_sist.csv not found")
 
         from typer.testing import CliRunner
@@ -5755,7 +5889,7 @@ class TestCompareDecompCommand:
         from cobre_bridge.cli import app
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.compare_decomp_results", _boom
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset", _boom
         )
         result = CliRunner().invoke(
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]
@@ -5866,7 +6000,7 @@ class TestCompareDecompCommand:
 
         sim_dir = tmp_path / "cobre" / "simulation" / "hydro_bus_generation"
 
-        def _boom(*_args: object, **_kwargs: object) -> DecompComparison:
+        def _boom(*_args: object, **_kwargs: object) -> ComparisonDataset:
             raise CobrePartitionMissingError(
                 f"Cobre output partition not found: {sim_dir}. The "
                 "hydro_bus_generation partition is produced by cobre "
@@ -5880,7 +6014,7 @@ class TestCompareDecompCommand:
         from cobre_bridge.cli import app
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.compare_decomp_results", _boom
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset", _boom
         )
         result = CliRunner().invoke(
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]

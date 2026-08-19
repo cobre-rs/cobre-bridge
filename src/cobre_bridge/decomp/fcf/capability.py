@@ -1,17 +1,15 @@
 """Capability probe gating boundary-FCF import on a real CBVF round trip.
 
-The branch wheel (``feat/cobre-gnl-boundary-pricing``, worktree
-``~/git/cobre-gnlbp``) self-reports version ``0.13.0`` yet writes the
-CBVF/``delivery_date`` checkpoint format that the released ``0.13.0`` wheel
-does not understand (spec Sec. 2, D1). A version-string check would
-therefore pass a wrong (released) wheel and then fail deep inside a
-``cobre run`` with an opaque error. This module gates the ``--boundary-fcf``
-path on a real write -> load round trip instead: it authors a minimal
+``convert decomp`` imports the deck's boundary FCF by default, which needs a
+``cobre-python`` that can write and reload the CBVF/``delivery_date``
+checkpoint format (introduced in cobre 0.14.x; ``cobre-python`` is a required
+bridge dependency). This module gates the ``--boundary-fcf`` path on a real
+write -> load round trip rather than a version-string check: a round trip also
+catches a broken, partial, or ABI-mismatched wheel that reports a satisfying
+version yet cannot actually read back what it wrote. It authors a minimal
 synthetic checkpoint via ``cobre.write_policy_checkpoint``, reloads it via
 ``cobre.results.load_policy``, and asserts the reloaded terminal
-``entity_manifest`` slot carries the CBVF-format ``delivery_date`` key — the
-schema break that distinguishes the branch wheel from the released
-``0.13.0`` wheel. Never a version comparison.
+``entity_manifest`` slot carries the CBVF-format ``delivery_date`` key.
 
 Mirrors ``fcf/bootstrap.py``'s ``ensure_writer_binding`` convention of a
 lazy, function-body-only ``import cobre`` so this module stays importable
@@ -58,11 +56,12 @@ _PROBE_CREATED_AT = "1970-01-01T00:00:00Z"
 #: Remediation text raised on any probe failure. Kept as a module-level
 #: constant so tests assert against it directly.
 REMEDIATION = (
-    "boundary-FCF capability probe failed: the installed cobre wheel does "
-    "not write and load the CBVF delivery_date checkpoint format that "
-    "--boundary-fcf requires; rebuild cobre from "
-    "feat/cobre-gnl-boundary-pricing (worktree ~/git/cobre-gnlbp) — see "
-    "docs/decomp-boundary-fcf-build.md"
+    "The boundary cost-to-go function could not be imported: the installed "
+    "cobre package cannot write and read back the policy checkpoint format it "
+    "requires. cobre-python is a required dependency of cobre-bridge — reinstall "
+    "or upgrade it (for example: pip install --upgrade cobre-python), or "
+    "reinstall cobre-bridge, then try again. To convert without the boundary "
+    "cost-to-go function, re-run with --no-fcf."
 )
 
 #: Every exception type the CBVF round trip can fail with: `ModuleNotFoundError`
@@ -94,8 +93,9 @@ def ensure_boundary_fcf_capability() -> None:
     Raises
     ------
     RuntimeError
-        Naming ``feat/cobre-gnl-boundary-pricing``, ``~/git/cobre-gnlbp``,
-        and ``docs/decomp-boundary-fcf-build.md`` — on any failure: cobre
+        Carrying :data:`REMEDIATION` — a self-contained, end-user-facing
+        message (the cobre-python install/upgrade fix plus the ``--no-fcf``
+        escape hatch, with no repo-internal paths) — on any failure: cobre
         absent, no writer binding, the write/load call itself raising, or a
         reloaded slot lacking ``delivery_date``.
     """

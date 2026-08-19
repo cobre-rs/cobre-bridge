@@ -296,7 +296,7 @@ def test_make_chart_card_html() -> None:
 
 def test_make_chart_card_none_raises() -> None:
     """Passing None as fig raises ValueError."""
-    with pytest.raises(ValueError, match="fig must not be None"):
+    with pytest.raises(ValueError, match="the figure is missing"):
         make_chart_card(None, "Title", "chart-id")
 
 

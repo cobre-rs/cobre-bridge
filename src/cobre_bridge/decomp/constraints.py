@@ -173,12 +173,12 @@ _HYDRO_TOKEN_FN: dict[str, str] = {
 }
 
 #: Variables ``_variable_token`` refuses to resolve itself, mapped to the
-#: mechanism (and owning ticket) that resolves them instead.
+#: mechanism that resolves them instead.
 _DEFERRED_VARIABLES: dict[str, str] = {
-    "interchange": "resolve_fi_term (ticket-014, FI line resolution)",
-    "VDEF": "the hours-weighted flow-domain path (ticket-016)",
-    "VDES": "the hours-weighted flow-domain path (ticket-016)",
-    "VBOM": "the hours-weighted flow-domain path (ticket-016)",
+    "interchange": "the interchange (FI line) resolution path",
+    "VDEF": "the hours-weighted flow-domain path",
+    "VDES": "the hours-weighted flow-domain path",
+    "VBOM": "the hours-weighted flow-domain path",
 }
 
 
@@ -220,9 +220,10 @@ def _variable_token(
     owner = _DEFERRED_VARIABLES.get(variable)
     if owner is not None:
         raise ValueError(
-            f"_variable_token: {variable!r} is resolved by {owner}, not this dispatcher"
+            f"Cannot build a constraint term: {variable!r} is resolved by "
+            f"{owner}, not this dispatcher."
         )
-    raise ValueError(f"_variable_token: unknown variable {variable!r}")
+    raise ValueError(f"Cannot build a constraint term: unknown variable {variable!r}.")
 
 
 def _line_int_field(line: Mapping[str, object], field: str) -> int:
@@ -317,8 +318,8 @@ def resolve_fi_term(
     """
     if term.submarket_de is None or term.submarket_para is None:
         raise ValueError(
-            "resolve_fi_term: an interchange term must carry "
-            f"submarket_de/submarket_para, got {term!r}"
+            "Cannot resolve an interchange term: it must carry both "
+            f"submarket_de and submarket_para, got {term!r}."
         )
     try:
         de = id_map.bus_id_by_name(term.submarket_de)
@@ -745,8 +746,9 @@ def _emit_rhv_volume_tipo_deferred(record: ConstraintRecord, tipo: str) -> None:
                 "coefficient."
             ),
             remediation=(
-                "Volume-tipo RHV lowering needs the E5 per-stage "
-                "scalar-parameter plumbing; no action needed to convert."
+                "This volume-based RHV limit needs per-stage coefficients that "
+                "are not yet supported, so the constraint is skipped; no action "
+                "needed to convert."
             ),
         )
     )

@@ -213,19 +213,20 @@ CliRunner invocation can't leak logging state into a later `caplog` test.
 ### Boundary-FCF test tiers
 
 The boundary-FCF import tests (`tests/test_decomp_fcf_*.py`) sit in three
-tiers, so the suite collects and runs meaningfully in every CI job even
-without the optional `cobre-python` wheel or a real, gitignored deck under
-`example/`:
+tiers, so the suite still collects and runs meaningfully even in an
+environment without cobre (e.g. a partial dev checkout) or without a real,
+gitignored deck under `example/`:
 
-- **Tier 1** — pure Python, no optional dependency. Installs with `.[dev]`
-  alone and runs on every CI job (the full 3.12/3.13/3.14 matrix). No module
-  at this tier may `import cobre` at module scope.
-- **Tier 2** — needs the `cobre-python` wheel but not the real solver binary
-  or a deck. Guarded by `tests.conftest.requires_cobre_python`
-  (`pytest.mark.skipif` on `importlib.util.find_spec("cobre") is None`); any
-  `import cobre` lives inside the guarded test/helper body, never at module
-  scope. CI installs the wheel via the `test-roundtrip` extra on the primary
-  (3.13) job only, so these tests run there and skip on 3.12/3.14.
+- **Tier 1** — pure Python, imports no cobre. Runs on every CI job (the full
+  3.12/3.13/3.14 matrix). No module at this tier may `import cobre` at module
+  scope, so the package stays importable even if cobre is somehow absent.
+- **Tier 2** — needs `cobre-python` (a required runtime dependency) but not the
+  real solver binary or a deck. Guarded defensively by
+  `tests.conftest.requires_cobre_python` (`pytest.mark.skipif` on
+  `importlib.util.find_spec("cobre") is None`); any `import cobre` lives inside
+  the guarded test/helper body, never at module scope. Since `cobre-python` is
+  now a core dependency installed via `.[dev]`, these run on every CI job
+  (3.12/3.13/3.14) — the skipif only guards a deliberately cobre-free env.
 - **Tier 3** — needs the real solver binary and a real deck under `example/`.
   `@pytest.mark.skipif(...)` on path existence (plus, where relevant, a
   writer-binding check), dev-only smoke — never runs in CI, which has

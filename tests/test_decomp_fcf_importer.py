@@ -534,7 +534,7 @@ def test_emit_import_diagnostics_gnl_deviation_gated_off_without_plan() -> None:
 # cobre binary) + the deviation diagnostic's dropped-coverage count reading
 # the new uncovered-lane drops from `mapping.gnl_dropped`; plus one tier-3
 # `@skipif` e2e boundary-load smoke against the real `decomp-mar-26-rv2`
-# deck + the `feat/cobre-gnl-boundary-pricing` branch binary.
+# deck + a CBVF-capable `cobre` binary (cobre >= 0.14.1).
 # ---------------------------------------------------------------------------
 
 

@@ -1510,7 +1510,7 @@ def build_data_context(
             if term.token == _SE_TOKEN:
                 return evaluate_se(term, model, stage_index, block_index, resolve)
             raise ValueError(
-                f"build_data_context: cannot resolve bucket-B token {term.token!r}"
+                f"Cannot resolve electrical-constraint data term {term.token!r}."
             )
 
         return resolve
@@ -2190,8 +2190,8 @@ def _emit_disp_usih_substitution(
             ),
             remediation=(
                 "This reformulates the reserve constraint into a generation "
-                "cap at a fixed reference-head available-power value "
-                "(OQ-2, this module's header); check the source model's "
+                "cap at a fixed reference-head available-power value; "
+                "check the source model's "
                 f"maintenance/availability data for plant {plant_code} if "
                 "this value seems stale."
             ),

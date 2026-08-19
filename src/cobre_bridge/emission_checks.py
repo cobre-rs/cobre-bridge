@@ -66,6 +66,15 @@ _ENVELOPE_TOLERANCE = 1e-9
 #: Both guarded columns for rule 43 / rule 41, checked independently.
 _ENVELOPE_COLUMNS: tuple[str, ...] = ("max_turbined_m3s", "max_generation_mw")
 
+#: Per-stage ``hydro_bounds`` MAX columns clamped into the plant's declared
+#: envelope, each as ``(bounds column, hydros block, declared-min key,
+#: declared-max key)``. See :func:`clamp_hydro_bounds_to_declared`.
+_CLAMP_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
+    ("max_turbined_m3s", "generation", "min_turbined_m3s", "max_turbined_m3s"),
+    ("max_generation_mw", "generation", "min_generation_mw", "max_generation_mw"),
+    ("max_outflow_m3s", "outflow", "min_outflow_m3s", "max_outflow_m3s"),
+)
+
 
 def _tolerance(declared: float) -> float:
     """``ENVELOPE_TOLERANCE * max(|declared|, 1.0)`` — cobre's envelope tolerance."""
@@ -231,6 +240,161 @@ def check_hydro_bounds_no_raising(
         ),
         logger=_LOG,
     )
+
+
+def _hydro_declared_bounds(
+    hydros: Mapping[str, object],
+) -> dict[int, dict[str, tuple[float | None, float | None]]]:
+    """``{hydro_id: {bounds_column: (declared_min, declared_max)}}`` for every
+    column in :data:`_CLAMP_COLUMNS`.
+
+    A bound is ``None`` when the plant declares no value for it (e.g. a
+    run-of-river plant with ``outflow.max_outflow_m3s = null`` has no ceiling to
+    clamp against). Columns with neither a min nor a max are omitted, so callers
+    treat a missing entry as "no declared envelope for this variable".
+    """
+    declared: dict[int, dict[str, tuple[float | None, float | None]]] = {}
+    raw_hydros = hydros.get("hydros")
+    if not isinstance(raw_hydros, list):
+        return declared
+    for hydro in raw_hydros:
+        if not isinstance(hydro, Mapping):
+            continue
+        hydro_id = hydro.get("id")
+        if not isinstance(hydro_id, int):
+            continue
+        entry: dict[str, tuple[float | None, float | None]] = {}
+        for column, block_name, min_key, max_key in _CLAMP_COLUMNS:
+            block = hydro.get(block_name)
+            if not isinstance(block, Mapping):
+                continue
+            raw_min = block.get(min_key)
+            raw_max = block.get(max_key)
+            declared_min = float(raw_min) if isinstance(raw_min, int | float) else None
+            declared_max = float(raw_max) if isinstance(raw_max, int | float) else None
+            if declared_min is not None or declared_max is not None:
+                entry[column] = (declared_min, declared_max)
+        if entry:
+            declared[hydro_id] = entry
+    return declared
+
+
+def clamp_hydro_bounds_to_declared(
+    hydros: Mapping[str, object],
+    hydro_bounds: pa.Table | None,
+) -> pa.Table | None:
+    """Clamp every per-stage ``hydro_bounds`` MAX column into the owning plant's
+    declared ``[min, max]`` envelope from ``hydros.json``, returning the clamped
+    table.
+
+    A per-stage override (TURBMAXT, VAZMAXT, an RE ceiling) can raise a MAX
+    column above the plant's declaration, which cobre rejects on load (rule 43
+    and its outflow analogue). Rather than raise the declaration to fit the
+    override — which would let a bound *loosen* the declared capacity — this
+    ceils each value at the declared max and floors it at the declared min, so
+    the row stays a valid tightening; the declared value is the authority. A
+    WARNING reports what was clamped. Returns *hydro_bounds* unchanged (same
+    object) when it is ``None``, carries no clampable column, or nothing fell
+    outside its envelope.
+    """
+    if hydro_bounds is None:
+        return None
+    present = [
+        column for column, *_ in _CLAMP_COLUMNS if column in hydro_bounds.column_names
+    ]
+    if not present:
+        return hydro_bounds
+    declared = _hydro_declared_bounds(hydros)
+    if not declared:
+        return hydro_bounds
+
+    hydro_ids = hydro_bounds["hydro_id"].to_pylist()
+    stage_ids = hydro_bounds["stage_id"].to_pylist()
+    column_values = {column: hydro_bounds[column].to_pylist() for column in present}
+
+    # (hydro_id, column) -> [(stage, original, clamped, declared_bound), ...]
+    clamped: dict[tuple[int, str], list[tuple[int, float, float, float]]] = {}
+    for i, hydro_id in enumerate(hydro_ids):
+        entry = declared.get(hydro_id)
+        if entry is None:
+            continue
+        for column in present:
+            envelope = entry.get(column)
+            if envelope is None:
+                continue
+            declared_min, declared_max = envelope
+            value = column_values[column][i]
+            if value is None:
+                continue
+            new_value = value
+            bound: float | None = None
+            if declared_max is not None and value > declared_max + _tolerance(
+                declared_max
+            ):
+                new_value = declared_max
+                bound = declared_max
+            elif declared_min is not None and value < declared_min - _tolerance(
+                declared_min
+            ):
+                new_value = declared_min
+                bound = declared_min
+            if bound is not None:
+                column_values[column][i] = new_value
+                clamped.setdefault((hydro_id, column), []).append(
+                    (stage_ids[i], value, new_value, bound)
+                )
+
+    if not clamped:
+        return hydro_bounds
+
+    clamped_columns = {column for _, column in clamped}
+    table = hydro_bounds
+    for column in clamped_columns:
+        index = table.column_names.index(column)
+        table = table.set_column(
+            index, column, pa.array(column_values[column], type=pa.float64())
+        )
+
+    rows: list[list[object]] = []
+    for (hydro_id, column), occurrences in sorted(clamped.items()):
+        worst = max(occurrences, key=lambda occ: abs(occ[1] - occ[2]))
+        rows.append(
+            [
+                hydro_id,
+                column,
+                format_stage_ranges(stage for stage, *_ in occurrences),
+                round(worst[3], 6),
+                round(worst[1], 6),
+            ]
+        )
+
+    emit(
+        Diagnostic(
+            code="hydro-bounds-clamped-to-declared-capacity",
+            severity=Severity.WARNING,
+            category=_CATEGORY,
+            title=f"hydro_bounds clamped to declared capacity ({len(rows)} finding(s))",
+            summary=(
+                f"{len(rows)} (hydro, column) combination(s) had a per-stage "
+                "bound outside the plant's declared envelope in system/hydros.json "
+                "(e.g. a TURBMAXT/VAZMAXT/RE override above the reference-head "
+                "declaration); each was clamped to the declared bound so the row "
+                "stays a valid tightening (cobre rule 43 and its outflow analogue)"
+            ),
+            table=DiagnosticTable(
+                columns=["Hydro ID", "Column", "Stages", "Declared", "Clamped from"],
+                rows=rows,
+                justify=["right", "left", "left", "right", "right"],
+            ),
+            remediation=(
+                "No action required — the bound was clamped to the plant's own "
+                "declared value. If the higher value is intended, raise the "
+                "plant's declared capacity in the source deck instead."
+            ),
+        ),
+        logger=_LOG,
+    )
+    return table
 
 
 def check_unit_group_envelope(hydros: Mapping[str, object]) -> None:

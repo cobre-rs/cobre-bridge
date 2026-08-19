@@ -44,7 +44,6 @@ from cobre_bridge.ui.theme import COPPER_ACCENT
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
-    from cobre_bridge.comparators.decomp_results import DecompComparison
     from cobre_bridge.comparators.verdict import CompareVerdict
     from cobre_bridge.pipeline import ConversionReport
     from cobre_bridge.preflight import PreflightResult
@@ -243,128 +242,6 @@ def render_compare_verdict(
             f" — worst: {verdict.worst_variable} sMAPE {verdict.worst_smape * 100:.0f}%"
         )
     target.print(line, style=style, soft_wrap=True)
-
-
-def _iteration_count(comparison: DecompComparison, column: str) -> int | None:
-    """How many iterations one side reported, or ``None`` when it has no data."""
-    if column not in comparison.convergence.columns:
-        return None
-    count = int(comparison.convergence[column].drop_nulls().len())
-    return count or None
-
-
-def render_decomp_comparison(
-    comparison: DecompComparison, *, console: Console | None = None
-) -> None:
-    """Render the source-model-vs-Cobre summary table and bound comparison.
-
-    Results (both tables) go to stdout; the unmapped-entity note is a
-    diagnostic and goes to stderr, so a piped run keeps only the numbers.
-    """
-    target = console or get_console()
-
-    if comparison.rows.is_empty():
-        print_status(
-            "no comparable rows — check that both runs cover the same stages",
-            console=get_console(stderr=True),
-            style=_SEVERITY_STYLE[Severity.WARNING],
-        )
-        return
-
-    rows = [
-        [
-            row["level"],
-            row["variable"],
-            row["unit"],
-            row["n"],
-            row["source_total"],
-            row["cobre_total"],
-            row["delta_total"],
-            None
-            if row["delta_total_pct"] is None
-            else f"{row['delta_total_pct']:+.1f}",
-            f"{row['smape_pct']:.1f}",
-            row["worst_entity"],
-        ]
-        for row in comparison.summary.iter_rows(named=True)
-    ]
-    target.print(
-        make_table(
-            [
-                "level",
-                "variable",
-                "unit",
-                "n",
-                "source",
-                "cobre",
-                "Δ",
-                "Δ%",
-                "sMAPE%",
-                "worst entity",
-            ],
-            rows,
-            title=f"Operation comparison ({comparison.stage_count} stages)",
-            justify=[
-                "left",
-                "left",
-                "left",
-                "right",
-                "right",
-                "right",
-                "right",
-                "right",
-                "right",
-                "left",
-            ],
-            caption="stage sums of scenario means; Δ = cobre − source",
-        )
-    )
-
-    if not comparison.convergence.is_empty():
-        # Each side stops at its own iteration count, so read the last value
-        # each column actually has rather than the last row of the union.
-        def _final(column: str) -> object:
-            if column not in comparison.convergence.columns:
-                return None
-            values = comparison.convergence[column].drop_nulls()
-            return None if values.is_empty() else values[-1]
-
-        target.print(
-            make_table(
-                ["side", "lower bound", "upper bound", "iterations"],
-                [
-                    [
-                        "source",
-                        _final("source_lower"),
-                        _final("source_upper"),
-                        _iteration_count(comparison, "source_lower"),
-                    ],
-                    [
-                        "cobre",
-                        _final("cobre_lower"),
-                        _final("cobre_upper"),
-                        _iteration_count(comparison, "cobre_lower"),
-                    ],
-                ],
-                title="Final bounds",
-                justify=["left", "right", "right", "right"],
-                caption="bounds are reported in each product's own units",
-            )
-        )
-
-    missing = {level: codes for level, codes in comparison.unmapped.items() if codes}
-    if missing:
-        detail = "; ".join(
-            f"{level}: {', '.join(str(code) for code in codes[:8])}"
-            + (" …" if len(codes) > 8 else "")
-            for level, codes in missing.items()
-        )
-        print_status(
-            f"{_SEVERITY_GLYPH[Severity.WARNING]} entities in the run outputs with "
-            f"no converted counterpart — {detail}",
-            console=get_console(stderr=True),
-            style=_SEVERITY_STYLE[Severity.WARNING],
-        )
 
 
 def render_checklist(

@@ -1,4 +1,15 @@
-"""Unit tests for the ``compare decomp`` artifact export."""
+"""Unit tests for the ``compare decomp`` artifact export.
+
+Since ticket-023 (D-STRANGLER completion), ``compare decomp`` writes its
+machine-readable artifacts through the same shared
+:func:`cobre_bridge.comparators.export.write_artifacts` entry point as
+``compare newave`` — there is no DECOMP-specific writer any more. This module
+exercises that shared path against a DECOMP-shaped
+:class:`~cobre_bridge.comparators.dataset.ComparisonDataset` (built the way
+``build_decomp_dataset`` builds one), focusing on the one thing worth
+DECOMP-specific coverage for: that the ``unmapped`` entity provenance
+(``dataset.metadata["unmapped"]``) survives into the written artifact set.
+"""
 
 from __future__ import annotations
 
@@ -8,57 +19,67 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.decomp_export import (
-    DecompComparisonManifest,
-    write_decomp_artifacts,
+from cobre_bridge.comparators.dataset import (
+    SUMMARY_SCHEMA,
+    TIDY_SCHEMA,
+    ComparisonDataset,
 )
-from cobre_bridge.comparators.decomp_results import DecompComparison, _summarize
+from cobre_bridge.comparators.export import write_artifacts
 
 
-def _fake_comparison() -> DecompComparison:
-    """A hydro-generation row, a thermal-generation row, and two iterations."""
-    rows = pl.DataFrame(
+def _make_decomp_dataset() -> ComparisonDataset:
+    """A small validated dataset shaped like ``build_decomp_dataset``'s output.
+
+    One hydro-generation row and one thermal-generation row, plus a
+    DECOMP-flavoured ``unmapped`` metadata entry (entities present in the
+    deck's own outputs that the id map could not resolve into Cobre ids).
+    """
+    tidy = pl.DataFrame(
         {
-            "level": ["hydro", "thermal"],
-            "variable": ["generation", "generation"],
-            "unit": ["MW", "MW"],
+            "entity_type": ["hydro", "thermal"],
             "entity_id": [0, 0],
             "entity_name": ["A", "T"],
-            "stage_id": [0, 0],
-            "source": [100.0, 20.0],
-            "cobre": [90.0, 20.0],
-            "delta": [-10.0, 0.0],
-            "delta_pct": [-10.0, 0.0],
-            "smape_pct": [10.5, 0.0],
-        }
+            "bus": [-1, -1],
+            "stage": [0, 0],
+            "block": [-1, -1],
+            "variable": ["generation_mw", "generation_mw"],
+            "source": ["newave", "cobre"],
+            "value": [100.0, 90.0],
+        },
+        schema=TIDY_SCHEMA,
     )
-    return DecompComparison(
-        rows=rows,
-        summary=_summarize(rows),
-        convergence=pl.DataFrame(
-            {
-                "iteration": [1, 2],
-                "source_lower": [1.0, 2.0],
-                "source_upper": [3.0, 3.0],
-                "cobre_lower": [10.0, None],
-                "cobre_upper": [30.0, None],
-            }
-        ),
-        unmapped={"hydro": [], "thermal": [86, 224], "bus": []},
+    summary = pl.DataFrame(
+        {
+            "variable": ["generation_mw"],
+            "count": [1],
+            "mean_abs_diff": [10.0],
+            "max_abs_diff": [10.0],
+            "mean_smape": [0.105],
+            "max_smape": [0.105],
+            "within_tol_rate": [0.0],
+            "correlation": [None],
+        },
+        schema=SUMMARY_SCHEMA,
     )
+    metadata: dict[str, object] = {
+        "unmapped": {"hydro": [], "thermal": [86, 224], "bus": []},
+    }
+    dataset = ComparisonDataset(tidy=tidy, summary=summary, metadata=metadata)
+    dataset.validate()
+    return dataset
 
 
-def test_write_decomp_artifacts_emits_expected_files(tmp_path: Path) -> None:
-    comparison = _fake_comparison()
-    src = tmp_path / "decomp"
-    cobre = tmp_path / "output"
+def test_write_artifacts_emits_expected_files(tmp_path: Path) -> None:
+    dataset = _make_decomp_dataset()
+    decomp_dir = tmp_path / "decomp"
+    cobre_output_dir = tmp_path / "output"
     out = tmp_path / "artifacts"
 
-    write_decomp_artifacts(
-        comparison,
+    write_artifacts(
+        dataset,
         command="compare decomp",
-        decomp_dir=src,
-        cobre_output_dir=cobre,
+        newave_dir=decomp_dir,
+        cobre_output_dir=cobre_output_dir,
         tolerance=1e-2,
         out_dir=out,
         formats=["parquet", "json", "csv"],
@@ -66,28 +87,45 @@ def test_write_decomp_artifacts_emits_expected_files(tmp_path: Path) -> None:
 
     assert (out / "comparison.parquet").exists()
     assert (out / "summary.parquet").exists()
-    assert (out / "convergence.parquet").exists()
+    assert (out / "metadata.json").exists()
     assert (out / "summary.json").exists()
-    assert (out / "convergence.json").exists()
+    assert (out / "top_divergences.json").exists()
     assert (out / "comparison.csv").exists()
     assert (out / "summary.csv").exists()
-    assert (out / "convergence.csv").exists()
     assert (out / "comparison.json").exists()
 
 
-def test_manifest_records_command_tolerance_unmapped_and_artifacts(
-    tmp_path: Path,
-) -> None:
-    comparison = _fake_comparison()
-    src = tmp_path / "decomp"
-    cobre = tmp_path / "output"
+def test_unmapped_provenance_survives_in_metadata_json(tmp_path: Path) -> None:
+    """The DECOMP-specific concern: ``dataset.metadata["unmapped"]`` (the
+    per-level unresolved entity codes) is not DECOMP-shaped export state — it
+    rides the dataset's own generic ``metadata.json`` serialization, exactly
+    like every other metadata key."""
+    dataset = _make_decomp_dataset()
     out = tmp_path / "artifacts"
 
-    write_decomp_artifacts(
-        comparison,
+    write_artifacts(
+        dataset,
         command="compare decomp",
-        decomp_dir=src,
-        cobre_output_dir=cobre,
+        newave_dir=tmp_path / "decomp",
+        cobre_output_dir=tmp_path / "output",
+        tolerance=1e-2,
+        out_dir=out,
+        formats=["parquet"],
+    )
+
+    metadata = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["unmapped"] == {"hydro": [], "thermal": [86, 224], "bus": []}
+
+
+def test_manifest_records_command_tolerance_and_artifacts(tmp_path: Path) -> None:
+    dataset = _make_decomp_dataset()
+    out = tmp_path / "artifacts"
+
+    manifest = write_artifacts(
+        dataset,
+        command="compare decomp",
+        newave_dir=tmp_path / "decomp",
+        cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,
         out_dir=out,
         formats=["parquet", "json", "csv"],
@@ -96,19 +134,19 @@ def test_manifest_records_command_tolerance_unmapped_and_artifacts(
     payload = json.loads((out / "comparison.json").read_text(encoding="utf-8"))
     assert payload["command"] == "compare decomp"
     assert payload["tolerance"] == 1e-2
-    assert payload["unmapped"] == {"hydro": [], "thermal": [86, 224], "bus": []}
     assert payload["artifacts"] == sorted(payload["artifacts"])
     assert "comparison.json" in payload["artifacts"]
+    assert manifest.command == "compare decomp"
 
 
 def test_unknown_format_raises_valueerror(tmp_path: Path) -> None:
-    comparison = _fake_comparison()
+    dataset = _make_decomp_dataset()
 
     with pytest.raises(ValueError, match="xml"):
-        write_decomp_artifacts(
-            comparison,
+        write_artifacts(
+            dataset,
             command="compare decomp",
-            decomp_dir=tmp_path / "decomp",
+            newave_dir=tmp_path / "decomp",
             cobre_output_dir=tmp_path / "output",
             tolerance=1e-2,
             out_dir=tmp_path / "artifacts",
@@ -116,20 +154,18 @@ def test_unknown_format_raises_valueerror(tmp_path: Path) -> None:
         )
 
 
-def test_empty_comparison_still_writes_typed_artifacts(tmp_path: Path) -> None:
-    empty_rows = _fake_comparison().rows.clear()
-    empty_comparison = DecompComparison(
-        rows=empty_rows,
-        summary=_summarize(empty_rows),
-        convergence=pl.DataFrame(schema={"iteration": pl.Int64}),
-        unmapped={"hydro": [], "thermal": [], "bus": []},
+def test_empty_dataset_still_writes_typed_artifacts(tmp_path: Path) -> None:
+    empty_dataset = ComparisonDataset(
+        tidy=pl.DataFrame(schema=TIDY_SCHEMA),
+        summary=pl.DataFrame(schema=SUMMARY_SCHEMA),
+        metadata={"unmapped": {"hydro": [], "thermal": [], "bus": []}},
     )
     out = tmp_path / "artifacts"
 
-    manifest = write_decomp_artifacts(
-        empty_comparison,
+    manifest = write_artifacts(
+        empty_dataset,
         command="compare decomp",
-        decomp_dir=tmp_path / "decomp",
+        newave_dir=tmp_path / "decomp",
         cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,
         out_dir=out,
@@ -138,27 +174,7 @@ def test_empty_comparison_still_writes_typed_artifacts(tmp_path: Path) -> None:
 
     assert (out / "comparison.parquet").exists()
     assert (out / "summary.parquet").exists()
-    assert (out / "convergence.parquet").exists()
     assert (out / "comparison.json").exists()
-    assert manifest.unmapped == {"hydro": [], "thermal": [], "bus": []}
-
-
-def test_write_decomp_artifacts_returns_manifest_instance(tmp_path: Path) -> None:
-    comparison = _fake_comparison()
-    out = tmp_path / "artifacts"
-
-    manifest = write_decomp_artifacts(
-        comparison,
-        command="compare decomp",
-        decomp_dir=tmp_path / "decomp",
-        cobre_output_dir=tmp_path / "output",
-        tolerance=1e-2,
-        out_dir=out,
-        formats=["json"],
-    )
-
-    assert isinstance(manifest, DecompComparisonManifest)
-    assert manifest.decomp_dir == str(tmp_path / "decomp")
-    assert manifest.cobre_output_dir == str(tmp_path / "output")
-    assert manifest.bridge_version
-    assert manifest.timestamp
+    metadata = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["unmapped"] == {"hydro": [], "thermal": [], "bus": []}
+    assert manifest.artifacts == sorted(manifest.artifacts)

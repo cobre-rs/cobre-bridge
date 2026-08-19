@@ -925,7 +925,27 @@ def cobre_aggregate_chart(
     return _plotly_div(traces, layout)
 
 
-_HYDRO_BUS_ORDER: list[str] = ["SUDESTE", "SUL", "NORDESTE", "NORTE"]
+#: The four real Brazilian submarket buses, for a clean 2x2 facet grid. Shared
+#: by ``compare newave`` and ``compare decomp``, whose decks name the same
+#: submarkets differently: NEWAVE uses the full names (``SUDESTE``/``SUL``/
+#: ``NORDESTE``/``NORTE``), DECOMP the short codes (``SE``/``NE``/``S``/``N``).
+#: Both naming conventions are listed — a report only ever carries one — so
+#: filtering ``[b for b in _REAL_SUBMARKET_ORDER if b in buses]`` keeps NEWAVE's
+#: historical order for a NEWAVE report and yields SE, NE, S, N for a DECOMP one.
+#: Any bus NOT listed here — the fictitious transhipment nodes (``FC``/``IV``,
+#: NEWAVE ``NOFICT*``) and any unnamed phantom — is excluded, never faceted.
+_REAL_SUBMARKET_ORDER: list[str] = [
+    # NEWAVE full names, in NEWAVE's historical facet order (unchanged).
+    "SUDESTE",
+    "SUL",
+    "NORDESTE",
+    "NORTE",
+    # DECOMP short codes, ordered SE, NE, S, N (Sudeste, Nordeste, Sul, Norte).
+    "SE",
+    "NE",
+    "S",
+    "N",
+]
 
 
 def hydro_per_bus_chart(
@@ -973,9 +993,8 @@ def hydro_per_bus_chart(
     if not per_bus_nw:
         return f"<p>No hydro {variable} data mapped to buses.</p>"
 
-    # Preferred bus order with any extras appended.
-    ordered = [b for b in _HYDRO_BUS_ORDER if b in per_bus_nw]
-    ordered += [b for b in sorted(per_bus_nw) if b not in ordered]
+    # Real submarkets only, fixed order for a clean 2x2 (fictitious buses excluded).
+    ordered = [b for b in _REAL_SUBMARKET_ORDER if b in per_bus_nw]
 
     # Build aggregate-percentile lookups per bus (sum of plant p10/p90).
     per_bus_pct = analyze.per_bus_band_from_pct(pct_df, variable, per_bus_ids)
@@ -1235,10 +1254,7 @@ def hydro_slack_per_bus_chart(
     if not per_bus_cb and not per_bus_nw:
         return f"<p>No {variable} data mapped to buses.</p>"
 
-    ordered = [b for b in _HYDRO_BUS_ORDER if b in per_bus_cb or b in per_bus_nw]
-    ordered += [
-        b for b in sorted(set(per_bus_cb) | set(per_bus_nw)) if b not in ordered
-    ]
+    ordered = [b for b in _REAL_SUBMARKET_ORDER if b in per_bus_cb or b in per_bus_nw]
 
     per_bus_pct = analyze.per_bus_band_from_pct(pct_df, variable, per_bus_ids)
 
@@ -1411,12 +1427,15 @@ def line_summary_chart(
 
     # Build per-line p10/p90 lookups from percentile data.
     pct_by_lid: dict[int, dict[int, dict]] = {}
-    if line_pct is not None and not line_pct.is_empty():
-        if {"net_flow_mw_p10", "net_flow_mw_p90"}.issubset(line_pct.columns):
-            for r in line_pct.iter_rows(named=True):
-                lid = int(r["entity_id"])
-                sid = int(r["stage_id"])
-                pct_by_lid.setdefault(lid, {})[sid] = r
+    if (
+        line_pct is not None
+        and not line_pct.is_empty()
+        and {"net_flow_mw_p10", "net_flow_mw_p90"}.issubset(line_pct.columns)
+    ):
+        for r in line_pct.iter_rows(named=True):
+            lid = int(r["entity_id"])
+            sid = int(r["stage_id"])
+            pct_by_lid.setdefault(lid, {})[sid] = r
 
     # Per-line stage-keyed capacity bounds.
     static_caps: dict[int, tuple[float, float]] = {}
@@ -2055,7 +2074,9 @@ def productivity_comparison_scatter(
     return _plotly_div(traces, layout)
 
 
-def productivity_per_stage_chart(per_stage: pl.DataFrame) -> str:
+def productivity_per_stage_chart(
+    per_stage: pl.DataFrame, reference_label: str = "NEWAVE"
+) -> str:
     """Per-plant realized productivity (generation / turbined) across stages.
 
     Productivity is **constant within a stage but varies across stages** in both models,
@@ -2097,7 +2118,7 @@ def productivity_per_stage_chart(per_stage: pl.DataFrame) -> str:
 
     variables = [(var_key, "Realized productivity — Gen / Turbined (MW per m³/s)")]
     return _build_interactive_detail_html(
-        js_plants, variables, "prodstage", "Reservoir"
+        js_plants, variables, "prodstage", "Reservoir", reference_label
     )
 
 
@@ -2642,21 +2663,14 @@ def build_energy_balance_tab(
         if cid is not None:
             matched[nw_code] = (cid, nw_name)
 
-    # Preferred bus order.
-    bus_order = ["SUDESTE", "SUL", "NORDESTE", "NORTE"]
-    # Exclude fictitious buses.
-    _skip = {"NOFICT1", "NOFICT2", "NOFICT3"}
+    # Real submarkets only, fixed order for a clean 2x2 (fictitious/transhipment
+    # buses — NEWAVE NOFICT*, DECOMP FC/IV — are excluded, never faceted).
     ordered_buses = []
-    for bname in bus_order:
+    for bname in _REAL_SUBMARKET_ORDER:
         for nw_code, (cid, name) in matched.items():
             if name == bname:
                 ordered_buses.append((nw_code, cid, name))
                 break
-    for nw_code, (cid, name) in sorted(matched.items()):
-        if name in _skip:
-            continue
-        if not any(b[2] == name for b in ordered_buses):
-            ordered_buses.append((nw_code, cid, name))
 
     if not ordered_buses:
         return "<p>No matching buses found.</p>"
@@ -2816,9 +2830,6 @@ def build_energy_balance_tab(
     return "\n".join(parts)
 
 
-_BUS_ORDER = ["SUDESTE", "SUL", "NORDESTE", "NORTE"]
-
-
 def system_per_bus_chart(
     results: list[ResultComparison],
     variable: str,
@@ -2828,7 +2839,8 @@ def system_per_bus_chart(
 ) -> str:
     """2x2 faceted per-bus chart with p10-p90 bands.
 
-    Buses are ordered: SUDESTE, SUL, NORDESTE, NORTE.
+    Restricted to the real submarket buses (:data:`_REAL_SUBMARKET_ORDER`) so
+    the grid is a clean 2x2 — fictitious/transhipment nodes are never faceted.
     """
     bus_data = [r for r in results if r.entity_type == "bus" and r.variable == variable]
     if not bus_data:
@@ -2838,9 +2850,8 @@ def system_per_bus_chart(
     p10_col = f"{variable}_p10"
     p90_col = f"{variable}_p90"
 
-    # Order buses: preferred order first, then any remaining.
-    ordered = [b for b in _BUS_ORDER if b in buses]
-    ordered += [b for b in sorted(buses) if b not in ordered]
+    # Real submarkets only, fixed order for a clean 2x2 (fictitious buses excluded).
+    ordered = [b for b in _REAL_SUBMARKET_ORDER if b in buses]
     if not ordered:
         return f"<p>No {variable} data available.</p>"
 
@@ -3601,13 +3612,17 @@ def constraints_comparison_chart(
                 float(r["lhs_value"])
             )
 
-    # Keep only constraints that have at least one data point on either
-    # side or at least one bound entry. A constraint with no LHS data
-    # anywhere has nothing to show.
+    # A source-model↔Cobre comparison needs the reference (source-model) LHS:
+    # facet only the constraints the reference side actually evaluated an LHS
+    # for. Constraints with a bound (or a Cobre-only LHS) but NO reference LHS
+    # — the cobre-only FI/QBOM terms, 52 of 76 on the mar-26 deck — have nothing
+    # to compare against, and faceting them wallpapered the tab with dozens of
+    # reference-less panels (a 38-row grid). Dropping them keeps the grid a
+    # readable size and every panel a genuine comparison.
     renderable: list[dict] = []
     for c in constraints:
         cid = int(c["id"])
-        if cid in nw_by_cid or cid in cb_by_cid or bound_by_constraint.get(cid):
+        if cid in nw_by_cid:
             renderable.append(c)
     if not renderable:
         return "<p>No constraint data available to compare.</p>"

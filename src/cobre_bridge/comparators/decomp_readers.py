@@ -54,20 +54,26 @@ class _TableReader(Protocol):
 
 
 def _resolve_result_file(case_dir: Path, filename: str) -> Path | None:
-    """Resolve *filename* case-insensitively, preferring ``saidas/`` over
-    the deck root.
+    """Resolve *filename* case-insensitively in *case_dir* (the deck root).
 
-    DECOMP ships its full result export under the deck's ``saidas/``
-    subfolder; the deck root carries only a curated subset. A file present
-    in both locations is taken from ``saidas/``. A missing ``saidas/``
-    directory is a silent miss, not an error.
+    Every DECOMP result file is read from the case root; a missing
+    *case_dir*, or *filename* absent from it, is a silent miss, not an
+    error -- callers translate a `None` return into `FileNotFoundError`
+    themselves.
     """
-    for base in (case_dir / "saidas", case_dir):
-        if base.is_dir():
-            hit = _find_case_insensitive(base, filename)
-            if hit is not None:
-                return hit
-    return None
+    return _find_case_insensitive(case_dir, filename)
+
+
+def _finalize_table(path: Path, table: pd.DataFrame | None) -> pl.DataFrame:
+    """Reject an empty/None parse (see the module docstring), debug-log the
+    row count, and convert to Polars."""
+    if table is None or table.empty:
+        raise ValueError(
+            f"{path} parsed empty; the run's outputs look incomplete or the "
+            "file syntax is unsupported"
+        )
+    _LOG.debug("Read %s: %d rows", path.name, len(table))
+    return pl.from_pandas(table)
 
 
 def _read_dec_oper(
@@ -78,17 +84,8 @@ def _read_dec_oper(
     """Read one ``dec_oper_*`` table, rejecting missing or empty parses."""
     path = _resolve_result_file(case_dir, filename)
     if path is None:
-        raise FileNotFoundError(
-            f"{filename} not found in {case_dir} or its saidas/ subfolder"
-        )
-    table = reader_cls.read(str(path)).tabela
-    if table is None or table.empty:
-        raise ValueError(
-            f"{path} parsed empty; the run's outputs look incomplete or the "
-            "file syntax is unsupported"
-        )
-    _LOG.debug("Read %s: %d rows", path.name, len(table))
-    return pl.from_pandas(table)
+        raise FileNotFoundError(f"{filename} not found in {case_dir}")
+    return _finalize_table(path, reader_cls.read(str(path)).tabela)
 
 
 def read_dec_oper_sist(case_dir: Path) -> pl.DataFrame:
@@ -141,9 +138,8 @@ def read_dec_oper_rhesoft(case_dir: Path) -> pl.DataFrame:
 
 def read_dec_oper_gnl(case_dir: Path) -> pl.DataFrame:
     """Per-anticipated-thermal (GNL) operation: dispatch bounds, incremental
-    cost, and the fuel cost (``custo_geracao``, native k$). Ships only under
-    ``saidas/`` (no curated root copy); resolved by the saidas-first lookup
-    shared with every other ``dec_oper_*`` table."""
+    cost, and the fuel cost (``custo_geracao``, native k$). Resolved via the
+    same root-only lookup shared with every other ``dec_oper_*`` table."""
     return _read_dec_oper(case_dir, "dec_oper_gnl.csv", DecOperGnl)
 
 
@@ -180,9 +176,8 @@ def read_dec_oper_ree(case_dir: Path) -> pl.DataFrame:
 
 
 def _resolve_revisioned_file(case_dir: Path, stem: str) -> Path | None:
-    """Locate a revision-suffixed result file (``<stem>.rvN``), preferring
-    ``saidas/`` over the deck root (same precedence as
-    `_resolve_result_file`).
+    """Locate a revision-suffixed result file (``<stem>.rvN``) in *case_dir*
+    (the deck root).
 
     Shared by every reader whose filename carries the deck's own revision
     number as a suffix instead of a fixed extension -- the general report
@@ -192,37 +187,45 @@ def _resolve_revisioned_file(case_dir: Path, stem: str) -> Path | None:
     `_resolve_result_file` resolves.
     """
     pattern = re.compile(rf"^{re.escape(stem)}\.rv\d+$", re.IGNORECASE)
-    for base in (case_dir / "saidas", case_dir):
-        if not base.is_dir():
-            continue
-        try:
-            for entry in sorted(base.iterdir()):
-                if entry.is_file() and pattern.match(entry.name):
-                    return entry
-        except OSError:
-            pass
+    try:
+        for entry in sorted(case_dir.iterdir()):
+            if entry.is_file() and pattern.match(entry.name):
+                return entry
+    except OSError:
+        pass
     return None
 
 
 def _resolve_relato(case_dir: Path) -> Path | None:
-    """Locate the revision-suffixed general report (``relato.rvN``),
-    preferring ``saidas/`` over the deck root."""
+    """Locate the revision-suffixed general report (``relato.rvN``) in
+    *case_dir* (the deck root)."""
     return _resolve_revisioned_file(case_dir, "relato")
+
+
+def _resolve_relato2(case_dir: Path) -> Path | None:
+    """Locate the revision-suffixed second report (``relato2.rvN``) in
+    *case_dir* (the deck root).
+
+    ``relato2`` holds the per-realization operation report for the
+    scenario-fan stage(s) the aggregate ``relato`` omits; it is optional -- a
+    deck without a fan stage has none. The ``^relato\\.rv\\d+$`` pattern
+    `_resolve_relato` uses does not match ``relato2.rvN`` (the char after
+    ``relato`` is a digit, not ``.``), so the two never collide.
+    """
+    return _resolve_revisioned_file(case_dir, "relato2")
 
 
 def _read_relato_table(case_dir: Path, attr: str) -> pl.DataFrame:
     """Read one named pandas table off the general report (``relato.rvN``).
 
-    Resolves the relato file via `_resolve_relato` (saidas-first), reads it
+    Resolves the relato file via `_resolve_relato` (root-only), reads it
     via ``Relato.read``, and pulls the table at ``getattr(relato, attr)``.
     Shared by every ``relato``-backed reader (convergence, energy balance,
     and — in later tickets — costs and membership).
     """
     path = _resolve_relato(case_dir)
     if path is None:
-        raise FileNotFoundError(
-            f"no relato.rvN found in {case_dir} or its saidas/ subfolder"
-        )
+        raise FileNotFoundError(f"no relato.rvN found in {case_dir}")
     table = getattr(Relato.read(str(path)), attr)
     if table is None or table.empty:
         raise ValueError(f"{path} has no {attr} table")
@@ -245,17 +248,8 @@ def read_decomp_tim(case_dir: Path) -> pl.DataFrame:
     """
     path = _resolve_result_file(case_dir, "decomp.tim")
     if path is None:
-        raise FileNotFoundError(
-            f"decomp.tim not found in {case_dir} or its saidas/ subfolder"
-        )
-    table = Decomptim.read(str(path)).tempos_etapas
-    if table is None or table.empty:
-        raise ValueError(
-            f"{path} parsed empty; the run's outputs look incomplete or the "
-            "file syntax is unsupported"
-        )
-    _LOG.debug("Read %s: %d rows", path.name, len(table))
-    return pl.from_pandas(table)
+        raise FileNotFoundError(f"decomp.tim not found in {case_dir}")
+    return _finalize_table(path, Decomptim.read(str(path)).tempos_etapas)
 
 
 def read_relato_balance(case_dir: Path) -> pl.DataFrame:
@@ -272,6 +266,35 @@ def read_relato_costs(case_dir: Path) -> pl.DataFrame:
     Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
     """
     return _read_relato_table(case_dir, "relatorio_operacao_custos")
+
+
+def read_relato2_costs(case_dir: Path) -> pl.DataFrame:
+    """Read the fan-stage per-(stage, scenario) operating cost table from the
+    second report (``relato2.rvN``).
+
+    ``relato2`` carries the detailed per-realization operation report for the
+    scenario-fan (e.g. monthly) stage(s) that ``relato``'s aggregate
+    ``relatorio_operacao_custos`` omits -- the *same* cost columns
+    (``custo_presente``/``custo_futuro``/``geracao_termica``/penalties) with
+    one row per (``estagio``, ``cenario``) and the real tree ``probabilidade``
+    per row. Parsed with idecomp's ``Relato`` reader, which reads ``relato2``
+    with the same block format as ``relato``.
+
+    **Optional** -- returns an empty frame (not an error) when ``relato2`` is
+    absent, so a caller can fall back to ``relato`` alone: a deck with no
+    scenario fan has no second report. This is the one deliberately
+    silent-empty reader (a missing optional file is not a degraded input),
+    unlike the mandatory ``relato``/``dec_oper_*`` readers.
+
+    Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
+    """
+    path = _resolve_relato2(case_dir)
+    if path is None:
+        return pl.DataFrame()
+    table = Relato.read(str(path)).relatorio_operacao_custos
+    if table is None or table.empty:
+        return pl.DataFrame()
+    return pl.from_pandas(table)
 
 
 def read_relato_expected_cost(case_dir: Path) -> pl.DataFrame:
@@ -299,7 +322,7 @@ def read_relato_membership(case_dir: Path) -> pl.DataFrame:
 
 # --- ticket-017: FPHA (fitted production function) readers ---
 #
-# Three files, all resolved via `_resolve_revisioned_file` (saidas-first,
+# Three files, all resolved via `_resolve_revisioned_file` (root-only,
 # `<stem>.rvN`): `dec_desvfpha` (per-hydro/stage/scenario/block deviation
 # between the "true" nonlinear generation and the piecewise-linear fit the
 # LP actually consumed), `eco_fpha` (per-hydro/stage fitting-grid bounds and
@@ -326,17 +349,8 @@ def _read_revisioned_table(
     """
     path = _resolve_revisioned_file(case_dir, stem)
     if path is None:
-        raise FileNotFoundError(
-            f"{stem}.rvN not found in {case_dir} or its saidas/ subfolder"
-        )
-    table = reader_cls.read(str(path)).tabela
-    if table is None or table.empty:
-        raise ValueError(
-            f"{path} parsed empty; the run's outputs look incomplete or the "
-            "file syntax is unsupported"
-        )
-    _LOG.debug("Read %s: %d rows", path.name, len(table))
-    return pl.from_pandas(table)
+        raise FileNotFoundError(f"{stem}.rvN not found in {case_dir}")
+    return _finalize_table(path, reader_cls.read(str(path)).tabela)
 
 
 def read_dec_desvfpha(case_dir: Path) -> pl.DataFrame:
@@ -376,17 +390,8 @@ def read_dec_estatfpha(case_dir: Path) -> pl.DataFrame:
     """
     path = _resolve_revisioned_file(case_dir, "dec_estatfpha")
     if path is None:
-        raise FileNotFoundError(
-            f"dec_estatfpha.rvN not found in {case_dir} or its saidas/ subfolder"
-        )
-    table = DecEstatFpha.read(str(path)).estatisticas_desvios
-    if table is None or table.empty:
-        raise ValueError(
-            f"{path} parsed empty; the run's outputs look incomplete or the "
-            "file syntax is unsupported"
-        )
-    _LOG.debug("Read %s: %d rows", path.name, len(table))
-    return pl.from_pandas(table)
+        raise FileNotFoundError(f"dec_estatfpha.rvN not found in {case_dir}")
+    return _finalize_table(path, DecEstatFpha.read(str(path)).estatisticas_desvios)
 
 
 def reconcile_kdollars_to_reais(value: float) -> float:

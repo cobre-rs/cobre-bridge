@@ -105,8 +105,8 @@ def _emit_ener_comerc_deferred(term: ParsedTerm) -> None:
             title="ener_comerc term deferred",
             summary=(
                 f"Electrical restriction decision term ener_comerc"
-                f"{list(term.args)} has no cobre VariableRef counterpart "
-                "yet; the constraint is skipped."
+                f"{list(term.args)} has no equivalent variable in the target "
+                "model yet; the constraint is skipped."
             ),
             remediation=(
                 "ener_comerc does not appear on the target deck; no action "

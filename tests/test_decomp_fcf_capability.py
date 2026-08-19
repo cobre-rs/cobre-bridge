@@ -17,18 +17,41 @@ from cobre_bridge.decomp.fcf.capability import (
 )
 from tests.conftest import requires_cobre_python, requires_writer_binding
 
-#: Every fact the remediation message must name (D1's mandated remediation
-#: pointers), shared by every "raises" test below.
+#: Every fact the remediation message must name: the dependency at fault, the
+#: install/upgrade fix, and the ``--no-fcf`` escape hatch. Shared by every
+#: "raises" test below.
 _REMEDIATION_MARKERS = (
-    "feat/cobre-gnl-boundary-pricing",
-    "~/git/cobre-gnlbp",
-    "docs/decomp-boundary-fcf-build.md",
+    "cobre-python",
+    "pip install",
+    "--no-fcf",
+)
+
+#: Repo-internal references that must NEVER leak into an end-user-facing
+#: message: a pip-installed user has no repo checkout, so doc paths, developer
+#: worktrees, and internal spec/ticket codes are noise (and, as this message's
+#: history proved, actively misleading). This is the regression guard.
+_REPO_INTERNAL_LEAKS = (
+    "docs/",
+    "plans/",
+    "~/git",
+    "feat/",
+    "ticket-",
+    "epic-",
 )
 
 
-def test_remediation_names_branch_worktree_and_docs() -> None:
+def test_remediation_names_install_fix_and_escape_hatch() -> None:
     for marker in _REMEDIATION_MARKERS:
         assert marker in REMEDIATION
+
+
+def test_remediation_has_no_repo_internal_references() -> None:
+    """The remediation reaches pip-installed end users, who have no repo — it
+    must stay self-contained (no doc paths, worktrees, or ticket/spec codes)."""
+    for leak in _REPO_INTERNAL_LEAKS:
+        assert leak not in REMEDIATION, (
+            f"remediation leaks repo-internal reference {leak!r}: {REMEDIATION!r}"
+        )
 
 
 def test_ensure_boundary_fcf_capability_raises_when_wheel_lacks_writer(
@@ -73,8 +96,8 @@ def test_ensure_boundary_fcf_capability_raises_when_delivery_date_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AC 3 -- a wheel that writes and reloads fine but whose reloaded
-    terminal manifest slot lacks `delivery_date` (the released 0.13.0
-    shape) still raises -- proving the probe checks the CBVF format, not
+    terminal manifest slot lacks `delivery_date` (a cobre that predates the
+    CBVF format) still raises -- proving the probe checks the CBVF format, not
     merely the `write_policy_checkpoint` attribute.
     """
     fake_policy = {
@@ -123,14 +146,16 @@ def test_capability_module_imports_with_cobre_absent(
 
 @requires_cobre_python
 @requires_writer_binding
-def test_ensure_boundary_fcf_capability_passes_against_branch_wheel(
+def test_ensure_boundary_fcf_capability_passes_against_installed_wheel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC 2 -- against the installed branch wheel, the guard passes
+    """AC 2 -- against the installed (CBVF-capable) wheel, the guard passes
     silently and writes only under a temporary directory: forcing
     `tempfile.gettempdir()` to resolve under `tmp_path` and asserting
     nothing is left behind afterward (the probe's own `TemporaryDirectory`
-    cleans itself up on exit).
+    cleans itself up on exit). With `cobre-python` a core dependency this
+    runs on every CI job, proving the pinned/released wheel supports the
+    boundary-FCF checkpoint format end to end.
     """
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 

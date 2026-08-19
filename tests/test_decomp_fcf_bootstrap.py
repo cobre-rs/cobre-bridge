@@ -49,9 +49,15 @@ def test_ensure_writer_binding_raises_when_absent(
 ) -> None:
     stub_cobre = SimpleNamespace()
     monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
-    with pytest.raises(RuntimeError, match="write_policy_checkpoint") as exc_info:
+    with pytest.raises(RuntimeError, match="cobre") as exc_info:
         ensure_writer_binding()
-    assert "~/git/cobre" in str(exc_info.value)
+    message = str(exc_info.value)
+    # End-user-facing: actionable pip guidance + the --no-fcf escape hatch,
+    # and no repo-internal leaks (worktree paths, maturin build commands).
+    assert "pip install" in message
+    assert "--no-fcf" in message
+    assert "~/git" not in message
+    assert "maturin" not in message
 
 
 def test_ensure_writer_binding_passes_when_present(

@@ -43,28 +43,28 @@ def ensure_writer_binding() -> None:
     Raises
     ------
     RuntimeError
-        Naming the missing binding and the remediation: reinstall the
-        wheel from ``~/git/cobre`` (e.g. ``maturin develop --release -m
-        ~/git/cobre/crates/cobre-python/Cargo.toml``). Raised both when
-        ``cobre`` is not installed at all (caught as ``ModuleNotFoundError``)
-        and when it is installed but predates ``write_policy_checkpoint``.
+        With a self-contained, end-user-facing remediation (reinstall/upgrade
+        the required ``cobre-python`` dependency via ``pip``, or re-run with
+        ``--no-fcf``). Raised both when ``cobre`` is not installed at all
+        (caught as ``ModuleNotFoundError``) and when it is installed but
+        predates ``write_policy_checkpoint``.
     """
     try:
         import cobre
     except ModuleNotFoundError:
         raise RuntimeError(
-            "cobre is not installed; install/reinstall it from "
-            "~/git/cobre, e.g. `VIRTUAL_ENV=<bridge>/.venv "
-            "<bridge>/.venv/bin/maturin develop --release -m "
-            "~/git/cobre/crates/cobre-python/Cargo.toml`"
+            "cobre is not installed. cobre-python is a required dependency of "
+            "cobre-bridge — install it (for example: pip install cobre-python), "
+            "or reinstall cobre-bridge. To convert without the boundary "
+            "cost-to-go function, re-run with --no-fcf."
         ) from None
     if not hasattr(cobre, "write_policy_checkpoint"):
         raise RuntimeError(
-            "the installed cobre wheel does not expose "
-            "write_policy_checkpoint; rebuild/reinstall it from "
-            "~/git/cobre, e.g. `VIRTUAL_ENV=<bridge>/.venv "
-            "<bridge>/.venv/bin/maturin develop --release -m "
-            "~/git/cobre/crates/cobre-python/Cargo.toml`"
+            "The installed cobre package is too old for the boundary cost-to-go "
+            "import (it does not provide the policy checkpoint writer). Upgrade "
+            "it (for example: pip install --upgrade cobre-python), or reinstall "
+            "cobre-bridge. To convert without the boundary cost-to-go function, "
+            "re-run with --no-fcf."
         )
 
 
@@ -84,9 +84,7 @@ class TerminalManifest:
     state_dimension: int
 
 
-def bootstrap_terminal_manifest(
-    case_dir: Path, *, work_dir: Path, inflow_lag_depth: int = 0
-) -> TerminalManifest:
+def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalManifest:
     """Run cobre for 1 iteration on ``case_dir`` and read its terminal manifest.
 
     Trains ``case_dir`` in-process via :func:`cobre.run.run`, writing the
@@ -95,14 +93,14 @@ def bootstrap_terminal_manifest(
     in-memory deep-merge, and the ``on_iteration`` callback requests a
     cooperative stop at the first iteration boundary). Simulation is skipped.
 
-    ``inflow_lag_depth`` (when ``>= 1``) is applied as another in-memory
-    ``config_overrides`` entry so the bootstrap manifest reserves the inflow-lag
-    state slots the boundary cuts will be mapped onto — the mapper bounds-checks
-    ``pi_qafl`` placement against the manifest's ``HydroInflowLag`` slot count.
-    It is an override, never written to ``case_dir/config.json``: cobre >= 0.14
-    infers the same depth from the loaded boundary policy at run time, so the
-    shipped case declares no ``state_space.inflow_lag_depth``. At bootstrap there
-    is no boundary yet, so the depth must be supplied here explicitly.
+    The bootstrap reserves no inflow-lag depth explicitly: cobre sizes the
+    ``HydroInflowLag`` state block from the case's own PAR(p) model order
+    (``resolve_state_layout``), the same autoregressive structure the DECOMP
+    boundary cuts' ``pi_qafl`` terms derive from, so the terminal manifest
+    already carries the slots the mapper places those terms onto. (The former
+    ``state_space.inflow_lag_depth`` config override was redundant with that
+    PAR-order sizing and is rejected outright by cobre >= 0.14, which removed
+    the ``state_space`` config field.)
     It then reads the emitted checkpoint back via
     :func:`cobre.results.load_policy` and returns the terminal stage's (the
     entry whose ``stage_id`` is max) ``entity_manifest`` and
@@ -128,8 +126,6 @@ def bootstrap_terminal_manifest(
     config_overrides: dict[str, object] = {
         "training.stopping_rules": [{"type": "iteration_limit", "limit": 1}]
     }
-    if inflow_lag_depth >= 1:
-        config_overrides["state_space.inflow_lag_depth"] = inflow_lag_depth
     cobre.run.run(
         str(case_dir),
         output_dir=str(output_dir),

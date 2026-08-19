@@ -13,11 +13,27 @@ Three conventions, each chosen so neither side is silently privileged:
   own duration-weighted stage value; the comparison reads that row instead of
   re-deriving one from the per-block rows, so a block-weighting convention
   cannot drift between the two products.
-- **Scenario averaging is unweighted on both sides.** Cobre's simulation
-  statistics are plain scenario means until weighted statistics land with the
-  explicit-tree work; weighting only the source side would bias every
-  terminal-stage row. When per-node probabilities become consumable the two
-  sides move together.
+- **Scenario averaging is probability-weighted on the source side** for
+  every operation variable this module compares -- hydro/thermal/bus/
+  interchange, the REE energy rollup, evaporation, and the Constraints tab's
+  DECOMP-side LHS, not only the Overview operating cost. The monthly
+  scenario-fan stage's openings are not equiprobable, so the source model's
+  expected value at each (stage, entity) must use the real tree
+  ``probabilidade`` the ``relato``/``relato2`` cost tables carry per row --
+  :func:`_scenario_probabilities` builds that per-(stage, scenario) lookup
+  once, in :func:`build_decomp_dataset`, and every :func:`_scenario_mean`
+  call site threads it through via the ``probabilities`` parameter. A
+  deterministic (single-scenario) stage's weighted mean over its one row is
+  identically that row's value, so only a genuine scenario fan's aggregate
+  changes; a deck with no ``relato``/``relato2`` probability source at all
+  degrades to :func:`_scenario_mean`'s original unweighted mean rather than
+  raising. cobre's per-stage statistics are already an expectation over its
+  own (equiprobable) simulation scenarios, so the two sides stay comparable.
+  **The Overview operating cost** (:func:`_cost_frames`) predates this and
+  keeps its own, independent path: it reads the same real ``probabilidade``
+  directly off its already-unioned ``relato``/``relato2`` cost frame via
+  :func:`_probability_weighted_stage_cost`, rather than joining in
+  :func:`_scenario_probabilities`'s lookup.
 - **Storage is compared as useful volume.** The source model reports useful
   volume; Cobre's ``storage_final_hm3`` is absolute, so the registry's
   ``min_storage_hm3`` is subtracted before comparing.
@@ -53,6 +69,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_dec_oper_usit,
     read_decomp_tim,
     read_eco_fpha,
+    read_relato2_costs,
     read_relato_convergence,
     read_relato_costs,
     read_relato_membership,
@@ -71,10 +88,6 @@ if TYPE_CHECKING:
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)
-
-#: Rows whose two values are both below this magnitude are treated as an exact
-#: match rather than a division by ~0 (physical units: MW, m³/s, hm³).
-_ZERO_FLOOR = 1e-9
 
 #: Minimum turbined flow (m³/s) for the derived gen/turbined productivity
 #: (ticket-016) to be meaningful -- mirrors
@@ -140,28 +153,6 @@ _CANONICAL_VARIABLE: dict[tuple[str, str], str] = {
 }
 
 
-@dataclass(frozen=True)
-class DecompComparison:
-    """Aligned comparison of one source-model run against one Cobre run.
-
-    ``rows`` is tidy — one row per (level, variable, entity, stage) with both
-    values and their difference. ``summary`` rolls that up per variable, and
-    ``convergence`` puts the two bound sequences side by side.
-    """
-
-    rows: pl.DataFrame
-    summary: pl.DataFrame
-    convergence: pl.DataFrame
-    unmapped: dict[str, list[int]]
-
-    @property
-    def stage_count(self) -> int:
-        """Number of distinct stages that carry at least one compared row."""
-        if self.rows.is_empty():
-            return 0
-        return int(self.rows["stage_id"].n_unique())
-
-
 def _stage_rows(frame: pl.DataFrame) -> pl.DataFrame:
     """Keep the source model's own stage-aggregate rows (``patamar`` null).
 
@@ -187,6 +178,7 @@ def _scenario_mean(
     columns: list[str],
     *,
     entity_column: str | list[str] | None,
+    probabilities: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Average the stage rows over the source model's nodes.
 
@@ -195,6 +187,25 @@ def _scenario_mean(
     a single column name for a single-code entity, or a list of column names
     for a composite key -- e.g. an interchange corridor's
     ``(codigo_submercado_de, codigo_submercado_para)`` pair (ticket-007).
+
+    ``probabilities`` -- a :func:`_scenario_probabilities`-shaped
+    ``(estagio, cenario, probabilidade)`` lookup -- turns the fold into a
+    probability-weighted expectation over *frame*'s own ``cenario`` openings
+    instead of a plain mean: the monthly scenario-fan stage's openings are
+    not equiprobable, so the source model's own tree probabilities give the
+    correct expected value there. ``None``, an empty frame, or a *frame*
+    that carries no ``cenario`` column of its own each keep the existing
+    unweighted ``.mean()`` behaviour verbatim -- every pre-existing caller is
+    unaffected by this parameter's default. Otherwise *frame* is left-joined
+    onto *probabilities* by ``[key, "cenario"]`` (both sides cast to
+    ``Int64`` first, so a dtype mismatch never breaks the join); a scenario
+    absent from *probabilities* defaults to weight ``1.0`` (``fill_null``)
+    rather than being dropped, and each present column becomes the
+    per-group weighted mean ``sum(col * probabilidade) / sum(probabilidade)``
+    -- falling back to the plain mean for any group whose weight sum is ~0,
+    never dividing by zero. A deterministic (single-scenario) stage's
+    weighted mean over its one row is identically that row's own value, so
+    only a genuine scenario fan's aggregate changes.
     """
     present = [c for c in columns if c in frame.columns]
     if entity_column is None:
@@ -204,30 +215,107 @@ def _scenario_mean(
     else:
         entity_columns = list(entity_column)
     group = [key, *entity_columns]
-    return (
-        frame.group_by(group)
-        .agg([pl.col(c).mean().alias(c) for c in present])
-        .sort(group)
+
+    if (
+        probabilities is None
+        or probabilities.is_empty()
+        or "cenario" not in frame.columns
+    ):
+        return (
+            frame.group_by(group)
+            .agg([pl.col(c).mean().alias(c) for c in present])
+            .sort(group)
+        )
+
+    joined = (
+        frame.with_columns(pl.col(key).cast(pl.Int64), pl.col("cenario").cast(pl.Int64))
+        .join(
+            probabilities.rename({"estagio": key}),
+            on=[key, "cenario"],
+            how="left",
+        )
+        .with_columns(pl.col("probabilidade").fill_null(1.0))
     )
-
-
-def _difference_columns() -> list[pl.Expr]:
-    """Δ and its relative form, with a floor so ~0 vs ~0 reads as agreement."""
-    delta = pl.col("cobre") - pl.col("source")
-    magnitude = pl.col("source").abs() + pl.col("cobre").abs()
-    return [
-        delta.alias("delta"),
-        pl.when(pl.col("source").abs() > _ZERO_FLOOR)
-        .then(delta / pl.col("source").abs() * 100.0)
-        .otherwise(None)
-        .alias("delta_pct"),
-        # Same definition as comparators.results.smape, expressed per row so a
-        # near-zero reference cannot dominate the roll-up.
-        pl.when(magnitude > _ZERO_FLOOR)
-        .then(delta.abs() / (magnitude / 2.0) * 100.0)
-        .otherwise(0.0)
-        .alias("smape_pct"),
+    weight = pl.col("probabilidade")
+    weight_sum = weight.sum()
+    aggs = [
+        pl.when(weight_sum.abs() > 1e-12)
+        .then((pl.col(c) * weight).sum() / weight_sum)
+        .otherwise(pl.col(c).mean())
+        .alias(c)
+        for c in present
     ]
+    return joined.group_by(group).agg(aggs).sort(group)
+
+
+#: Canonical schema :func:`_scenario_probabilities` returns -- the
+#: ``_scenario_mean``-consumable ``(estagio, cenario, probabilidade)``
+#: lookup, independent of which ``dec_oper_*`` table a given caller folds.
+_SCENARIO_PROBABILITY_SCHEMA: dict[str, type[pl.DataType]] = {
+    "estagio": pl.Int64,
+    "cenario": pl.Int64,
+    "probabilidade": pl.Float64,
+}
+
+
+def _scenario_probabilities(decomp_dir: Path) -> pl.DataFrame:
+    """Real per-(stage, scenario) tree probabilities, from ``relato``/``relato2``.
+
+    Every physical ``dec_oper_*`` table (``dec_oper_usih``/``_usit``/
+    ``_sist``/``_interc``/``_ree``/``_evap``/``_rhesoft``) carries a
+    ``cenario`` index but no ``probabilidade`` column of its own -- the real
+    tree probabilities live only in the ``relatorio_operacao_custos`` table
+    the ``relato``/``relato2`` general reports carry, and the ``cenario``
+    indices align between the two (verified: ``dec_oper_usit``'s stage-4
+    per-scenario thermal cost equals ``relato2``'s per-scenario values for
+    the same stage/scenario). This builds the ``(estagio, cenario,
+    probabilidade)`` lookup :func:`_scenario_mean` consumes, unioning the two
+    reports exactly the way :func:`_cost_frames` does: ``relato``
+    (:func:`read_relato_costs`) supplies the deterministic weekly stages;
+    ``relato2`` (:func:`read_relato2_costs`, optional) supplies the real,
+    non-equiprobable opening probabilities of the scenario-fan (monthly)
+    stage(s) ``relato`` omits, and is authoritative for any stage it covers
+    -- that stage is dropped from the ``relato`` side before the union, so it
+    is never double-counted.
+
+    Built once by :func:`build_decomp_dataset` and threaded through every
+    :func:`_scenario_mean` call site, rather than re-read per site -- parsing
+    ``relato2`` is not free.
+
+    Returns an empty (schema-valid) frame -- :func:`_scenario_mean` then
+    falls back to its unweighted mean -- when :func:`read_relato_costs`
+    raises ``FileNotFoundError``/``ValueError`` (no source-model cost report
+    at all) AND ``relato2`` is also empty. Never raises on its own.
+    """
+    try:
+        raw = read_relato_costs(decomp_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        _LOG.info("No relato cost table for scenario probabilities: %s", exc)
+        raw = pl.DataFrame()
+
+    monthly = read_relato2_costs(decomp_dir)
+
+    if raw.is_empty() and monthly.is_empty():
+        return pl.DataFrame(schema=_SCENARIO_PROBABILITY_SCHEMA)
+    if raw.is_empty():
+        combined = monthly
+    elif monthly.is_empty():
+        combined = raw
+    else:
+        # relato2 is authoritative for any stage it covers -- drop those
+        # stages from relato first, exactly like _cost_frames's own union.
+        fan_stages = monthly["estagio"].unique().to_list()
+        combined = pl.concat(
+            [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
+            how="diagonal_relaxed",
+        )
+
+    return (
+        combined.select("estagio", "cenario", "probabilidade")
+        .unique()
+        .cast(_SCENARIO_PROBABILITY_SCHEMA)
+        .sort(["estagio", "cenario"])
+    )
 
 
 def _result_diff(nw_value: float, cobre_value: float) -> tuple[float, float | None]:
@@ -243,62 +331,6 @@ def _result_diff(nw_value: float, cobre_value: float) -> tuple[float, float | No
     return abs_diff, rel_diff
 
 
-def _tidy(
-    source: pl.DataFrame,
-    cobre: pl.DataFrame,
-    variables: tuple[_Variable, ...],
-    *,
-    names: dict[int, str],
-) -> pl.DataFrame:
-    """Join one level's two frames into tidy per-variable rows."""
-    joined = source.join(cobre, on=["entity_id", "stage_id"], how="inner")
-    if joined.is_empty():
-        return _empty_rows()
-
-    parts: list[pl.DataFrame] = []
-    for var in variables:
-        if var.source_column not in joined.columns:
-            continue
-        if var.cobre_column not in joined.columns:
-            _LOG.info("Cobre output has no %s column; skipping", var.cobre_column)
-            continue
-        part = joined.select(
-            pl.lit(var.level).alias("level"),
-            pl.lit(var.name).alias("variable"),
-            pl.lit(var.unit).alias("unit"),
-            pl.col("entity_id"),
-            pl.col("entity_id")
-            .map_elements(lambda i: names.get(int(i), ""), return_dtype=pl.Utf8)
-            .alias("entity_name"),
-            pl.col("stage_id"),
-            pl.col(var.source_column).cast(pl.Float64).alias("source"),
-            pl.col(var.cobre_column).cast(pl.Float64).alias("cobre"),
-        ).with_columns(_difference_columns())
-        parts.append(part)
-
-    if not parts:
-        return _empty_rows()
-    return pl.concat(parts)
-
-
-def _empty_rows() -> pl.DataFrame:
-    return pl.DataFrame(
-        schema={
-            "level": pl.Utf8,
-            "variable": pl.Utf8,
-            "unit": pl.Utf8,
-            "entity_id": pl.Int64,
-            "entity_name": pl.Utf8,
-            "stage_id": pl.Int64,
-            "source": pl.Float64,
-            "cobre": pl.Float64,
-            "delta": pl.Float64,
-            "delta_pct": pl.Float64,
-            "smape_pct": pl.Float64,
-        }
-    )
-
-
 def _result_comparisons(
     source: pl.DataFrame,
     cobre: pl.DataFrame,
@@ -308,12 +340,11 @@ def _result_comparisons(
 ) -> list[ResultComparison]:
     """Join one level's two frames into ``ResultComparison`` rows.
 
-    Mirrors :func:`_tidy`'s join, but emits the canonical
+    Emits the canonical
     :class:`~cobre_bridge.comparators.results.ResultComparison` shape
     :func:`build_decomp_dataset` hands to
     :func:`cobre_bridge.comparators.analyze.build_results_dataset`, keyed by
-    :data:`_CANONICAL_VARIABLE` rather than the decomp-local
-    ``_Variable.name`` :func:`_tidy` uses for its own standalone rows.
+    :data:`_CANONICAL_VARIABLE`.
     """
     joined = source.join(cobre, on=["entity_id", "stage_id"], how="inner")
     if joined.is_empty():
@@ -434,92 +465,6 @@ def _hydro_productivity_results(
     return productivity
 
 
-def _summarize(rows: pl.DataFrame) -> pl.DataFrame:
-    """Roll tidy rows up to one line per (level, variable)."""
-    if rows.is_empty():
-        return pl.DataFrame(
-            schema={
-                "level": pl.Utf8,
-                "variable": pl.Utf8,
-                "unit": pl.Utf8,
-                "n": pl.UInt32,
-                "source_total": pl.Float64,
-                "cobre_total": pl.Float64,
-                "delta_total": pl.Float64,
-                "delta_total_pct": pl.Float64,
-                "smape_pct": pl.Float64,
-                "worst_entity": pl.Utf8,
-                "worst_delta": pl.Float64,
-            }
-        )
-
-    worst = (
-        rows.sort(pl.col("delta").abs(), descending=True, nulls_last=True)
-        .group_by("level", "variable")
-        .agg(
-            pl.col("entity_name").first().alias("worst_entity"),
-            pl.col("delta").first().alias("worst_delta"),
-        )
-    )
-    return (
-        rows.group_by("level", "variable")
-        .agg(
-            pl.col("unit").first(),
-            pl.len().alias("n").cast(pl.UInt32),
-            pl.col("source").sum().alias("source_total"),
-            pl.col("cobre").sum().alias("cobre_total"),
-            pl.col("smape_pct").mean().alias("smape_pct"),
-        )
-        .with_columns(
-            (pl.col("cobre_total") - pl.col("source_total")).alias("delta_total")
-        )
-        .with_columns(
-            pl.when(pl.col("source_total").abs() > _ZERO_FLOOR)
-            .then(pl.col("delta_total") / pl.col("source_total").abs() * 100.0)
-            .otherwise(None)
-            .alias("delta_total_pct")
-        )
-        .join(worst, on=["level", "variable"], how="left")
-        .sort("level", "variable")
-    )
-
-
-def _convergence(decomp_dir: Path, cobre_output_dir: Path) -> pl.DataFrame:
-    """Put both bound sequences side by side, one row per iteration index."""
-    try:
-        source = read_relato_convergence(decomp_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        _LOG.warning("No source-model convergence table: %s", exc)
-        source = pl.DataFrame()
-
-    cobre = cobre_readers.read_cobre_convergence(cobre_output_dir)
-
-    frames: list[pl.DataFrame] = []
-    if not source.is_empty():
-        columns = {c.lower(): c for c in source.columns}
-        selected = [
-            pl.col(columns["iteracao"]).cast(pl.Int64).alias("iteration"),
-            pl.col(columns["zinf"]).cast(pl.Float64).alias("source_lower"),
-            pl.col(columns["zsup"]).cast(pl.Float64).alias("source_upper"),
-        ]
-        frames.append(source.select(selected))
-    if not cobre.is_empty():
-        frames.append(
-            cobre.select(
-                pl.col("iteration").cast(pl.Int64),
-                pl.col("lower_bound").alias("cobre_lower"),
-                pl.col("upper_bound_mean").alias("cobre_upper"),
-            )
-        )
-
-    if not frames:
-        return pl.DataFrame(schema={"iteration": pl.Int64})
-    combined = frames[0]
-    for frame in frames[1:]:
-        combined = combined.join(frame, on="iteration", how="full", coalesce=True)
-    return combined.sort("iteration")
-
-
 #: Canonical convergence-chart schema -- matches
 #: :func:`cobre_readers.read_cobre_convergence`'s own return schema exactly,
 #: so :func:`~cobre_bridge.comparators.charts.convergence_chart` can read
@@ -538,9 +483,11 @@ def _decomp_convergence_frame(decomp_dir: Path) -> pl.DataFrame:
     ``zsup`` onto the ``iteration``/``lower_bound``/``upper_bound_mean``
     columns :func:`cobre_readers.read_cobre_convergence` emits -- the shape
     :func:`~cobre_bridge.comparators.charts.convergence_chart` reads on each
-    side separately (not the legacy :func:`_convergence` join shape). The
+    side separately (not a per-iteration join shape). The
     iteration axis stays 1-based as reported, no offset -- the chart plots
-    it directly.
+    it directly. ``zinf``/``zsup`` are native k$ and are reconciled to R$
+    (:func:`reconcile_kdollars_to_reais`, x1e3) so the bounds are
+    unit-comparable to cobre's R$-denominated convergence.
 
     A missing/empty relato (``read_relato_convergence`` raising
     ``FileNotFoundError``/``ValueError``) degrades to an empty frame with
@@ -554,38 +501,75 @@ def _decomp_convergence_frame(decomp_dir: Path) -> pl.DataFrame:
         return pl.DataFrame(schema=_CONVERGENCE_SCHEMA)
 
     columns = {c.lower(): c for c in source.columns}
+    # zinf/zsup are native k$ (like every DECOMP cost); cobre's bounds are R$.
+    # Convert once via the shared factor (x1e3) so the two convergence lines are
+    # unit-comparable -- without it the DECOMP bounds sit ~1000x below cobre's.
+    k_to_r = reconcile_kdollars_to_reais(1.0)
     return source.select(
         pl.col(columns["iteracao"]).cast(pl.Int64).alias("iteration"),
-        pl.col(columns["zinf"]).cast(pl.Float64).alias("lower_bound"),
-        pl.col(columns["zsup"]).cast(pl.Float64).alias("upper_bound_mean"),
+        (pl.col(columns["zinf"]).cast(pl.Float64) * k_to_r).alias("lower_bound"),
+        (pl.col(columns["zsup"]).cast(pl.Float64) * k_to_r).alias("upper_bound_mean"),
     )
 
 
 def _hydro_side(
-    decomp_dir: Path, id_map_hydro: dict[int, int]
+    decomp_dir: Path,
+    id_map_hydro: dict[int, int],
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, list[int]]:
+    """Per-(hydro, stage) ``dec_oper_usih`` means. *probabilities* -- a
+    :func:`_scenario_probabilities` lookup -- weights the scenario fold by
+    the real tree probabilities instead of :func:`_scenario_mean`'s plain
+    mean; ``None`` (the default) keeps the unweighted fold."""
     frame = _stage_rows(read_dec_oper_usih(decomp_dir))
     columns = [v.source_column for v in _HYDRO_VARIABLES]
-    aggregated = _scenario_mean(frame, "estagio", columns, entity_column="codigo_usina")
+    aggregated = _scenario_mean(
+        frame,
+        "estagio",
+        columns,
+        entity_column="codigo_usina",
+        probabilities=probabilities,
+    )
     return _map_entities(aggregated, "codigo_usina", id_map_hydro)
 
 
 def _thermal_side(
-    decomp_dir: Path, id_map_thermal: dict[int, int]
+    decomp_dir: Path,
+    id_map_thermal: dict[int, int],
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, list[int]]:
+    """Per-(thermal, stage) ``dec_oper_usit`` means. See :func:`_hydro_side`
+    for *probabilities*'s scenario-weighting contract."""
     frame = _stage_rows(read_dec_oper_usit(decomp_dir))
     columns = [v.source_column for v in _THERMAL_VARIABLES]
-    aggregated = _scenario_mean(frame, "estagio", columns, entity_column="codigo_usina")
+    aggregated = _scenario_mean(
+        frame,
+        "estagio",
+        columns,
+        entity_column="codigo_usina",
+        probabilities=probabilities,
+    )
     return _map_entities(aggregated, "codigo_usina", id_map_thermal)
 
 
 def _bus_side(
-    decomp_dir: Path, id_map_bus: dict[int, int]
+    decomp_dir: Path,
+    id_map_bus: dict[int, int],
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, list[int]]:
+    """Per-(bus, stage) ``dec_oper_sist`` means. See :func:`_hydro_side` for
+    *probabilities*'s scenario-weighting contract."""
     frame = _stage_rows(read_dec_oper_sist(decomp_dir))
     columns = [v.source_column for v in _BUS_VARIABLES]
     aggregated = _scenario_mean(
-        frame, "estagio", columns, entity_column="codigo_submercado"
+        frame,
+        "estagio",
+        columns,
+        entity_column="codigo_submercado",
+        probabilities=probabilities,
     )
     return _map_entities(aggregated, "codigo_submercado", id_map_bus)
 
@@ -744,13 +728,19 @@ def _corridor_line_alignment(
 
 
 def _interc_side(
-    decomp_dir: Path, cobre_output_dir: Path, id_map: DecompIdMap
+    decomp_dir: Path,
+    cobre_output_dir: Path,
+    id_map: DecompIdMap,
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, list[tuple[int, int]]]:
     """Per-(cobre ``line_id``, 0-based stage) DECOMP interchange net-flow.
 
     Folds ``dec_oper_interc`` the way every other ``_*_side`` helper folds
     its table -- :func:`_stage_rows`'s patamar-null aggregate, then
-    :func:`_scenario_mean` averaged over the source model's nodes, here keyed
+    :func:`_scenario_mean` averaged over the source model's nodes (real
+    tree-probability-weighted when *probabilities* is given -- see
+    :func:`_hydro_side`), here keyed
     by the corridor's composite ``(codigo_submercado_de,
     codigo_submercado_para)`` pair rather than a single entity code -- aligns
     each corridor onto its cobre line leg(s) via
@@ -799,6 +789,7 @@ def _interc_side(
         "estagio",
         ["intercambio_origem_MW", "perdas_MW"],
         entity_column=["codigo_submercado_de", "codigo_submercado_para"],
+        probabilities=probabilities,
     )
     if aggregated.is_empty():
         return empty, []
@@ -926,6 +917,8 @@ def _line_result_comparisons(
     cobre_output_dir: Path,
     id_map: DecompIdMap | None,
     line_meta: list[dict],
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> tuple[list[ResultComparison], list[list[int]]]:
     """Join ticket-007's aligned DECOMP line flow onto Cobre's per-line means.
 
@@ -936,6 +929,8 @@ def _line_result_comparisons(
     level's rows -- carries no single canonical source-model code; it stays
     at the constant ``0`` placeholder, mirroring the SIN row's own
     convention (:func:`_energy_balance_frames`) rather than fabricating one.
+    *probabilities* is forwarded to :func:`_interc_side` unchanged (see
+    :func:`_hydro_side` for its scenario-weighting contract).
 
     Returns ``([], [])`` when the deck could not be read (*id_map* is
     ``None``) or the source-model interchange table is unavailable, and
@@ -946,7 +941,9 @@ def _line_result_comparisons(
     if id_map is None:
         return [], []
     try:
-        source_lines, unresolved = _interc_side(decomp_dir, cobre_output_dir, id_map)
+        source_lines, unresolved = _interc_side(
+            decomp_dir, cobre_output_dir, id_map, probabilities=probabilities
+        )
     except (FileNotFoundError, ValueError) as exc:
         _LOG.info("No source-model interchange table for line alignment: %s", exc)
         return [], []
@@ -1031,7 +1028,9 @@ def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pd.DataFrame, list[di
 #: needs: the two generation families it sums into GHTOT/GTERM, the demand
 #: and non-controllable-generation basis for NET_LOAD, and the two system
 #: energy series (EARM/ENA). Read once via :func:`_scenario_mean` so scenario
-#: averaging matches the rest of the module (unweighted mean across nodes).
+#: averaging matches the rest of the module (real tree-probability-weighted
+#: when a ``relato``/``relato2`` probability source is available, else the
+#: plain unweighted mean across nodes).
 _NW_MARKET_COLUMNS: tuple[str, ...] = (
     "demanda_MW",
     "geracao_hidroeletrica_MW",
@@ -1057,7 +1056,10 @@ def _empty_market_frame() -> pl.DataFrame:
 
 
 def _energy_balance_frames(
-    decomp_dir: Path, bus_codes: dict[int, int]
+    decomp_dir: Path,
+    bus_codes: dict[int, int],
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """Build the Energy Balance tab's DECOMP-side reference frames.
 
@@ -1065,6 +1067,8 @@ def _energy_balance_frames(
     ``newave_code``/``stage``/``variable``/``value`` frames
     :func:`~cobre_bridge.comparators.charts.build_energy_balance_tab` and
     :func:`~cobre_bridge.comparators.charts.cobre_aggregate_chart` read.
+    *probabilities* is forwarded to the single :func:`_scenario_mean` fold
+    below (see :func:`_hydro_side` for its scenario-weighting contract).
 
     Only the tokens the tab actually consumes are emitted — no dead rows:
     ``GHTOT``/``GTERM``/``DEFT`` in ``nw_market`` (mirroring
@@ -1097,7 +1101,11 @@ def _energy_balance_frames(
         return empty, empty, empty
 
     aggregated = _scenario_mean(
-        frame, "estagio", list(_NW_MARKET_COLUMNS), entity_column="codigo_submercado"
+        frame,
+        "estagio",
+        list(_NW_MARKET_COLUMNS),
+        entity_column="codigo_submercado",
+        probabilities=probabilities,
     )
     present = set(aggregated.columns)
 
@@ -1258,44 +1266,97 @@ _NW_SIN_COST_TOKENS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _probability_weighted_stage_cost(
+    frame: pl.DataFrame, columns: list[str]
+) -> pl.DataFrame:
+    """Per-stage **expected** cost, weighting scenarios by the DECOMP tree
+    ``probabilidade``.
+
+    One row per ``estagio``; each cost column is
+    ``sum(probabilidade * col) / sum(probabilidade)`` across that stage's
+    scenarios. A deterministic stage (single row, ``probabilidade`` = 1.0)
+    reduces to the value itself, so ``relato``'s weekly stages are unchanged
+    and only a genuine scenario fan (``relato2``'s monthly stage) is averaged.
+    This is the same probability-weighted expectation
+    :func:`_scenario_mean`'s own ``probabilities`` parameter now applies to
+    every physical variable, but reads ``probabilidade`` directly off *this*
+    already-unioned ``relato``/``relato2`` cost frame instead of joining in a
+    separate :func:`_scenario_probabilities` lookup -- the cost path predates
+    that lookup and every one of its cost columns is already in *frame*.
+    Falls back to an unweighted mean for any stage whose ``probabilidade`` is
+    absent or sums to ~0 (a malformed report), never dividing by zero.
+    """
+    present = [c for c in columns if c in frame.columns]
+    if frame.is_empty() or "estagio" not in frame.columns:
+        return frame
+    if "probabilidade" not in frame.columns:
+        return (
+            frame.group_by("estagio")
+            .agg([pl.col(c).mean().alias(c) for c in present])
+            .sort("estagio")
+        )
+    weight = pl.col("probabilidade")
+    weight_sum = weight.sum()
+    aggs = [
+        pl.when(weight_sum.abs() > 1e-12)
+        .then((pl.col(c) * weight).sum() / weight_sum)
+        .otherwise(pl.col(c).mean())
+        .alias(c)
+        for c in present
+    ]
+    return frame.group_by("estagio").agg(aggs).sort("estagio")
+
+
 def _cost_frames(decomp_dir: Path) -> tuple[dict[str, float], pl.DataFrame]:
     """DECOMP-side Overview cost metadata: the NPV dict + ``nw_sin`` rows.
 
-    Reads ``relatorio_operacao_custos`` (native k$, one row per (estagio,
-    cenario)) and aggregates it in two passes, both built on the same
-    per-stage mean:
+    Reads ``relatorio_operacao_custos`` from **both** reports and unions them
+    so every stage is covered: ``relato`` (:func:`read_relato_costs`) carries
+    the deterministic study-period weeks, and ``relato2``
+    (:func:`read_relato2_costs`, optional) carries the per-realization rows of
+    the scenario-fan (monthly) stage(s) ``relato`` omits. Where ``relato2``
+    covers a stage it is authoritative (that stage is dropped from ``relato``
+    before the union, so a fan stage is never counted twice). Aggregated in
+    two passes, both built on the same per-stage expected cost:
 
-    - **Per-stage mean across scenarios** -- :func:`_scenario_mean` with no
-      entity column (a single SIN-wide row per stage), reusing the exact
-      kernel every other ``_*_side``/``_energy_balance_frames`` helper in
-      this module uses. This keeps the source and cobre sides on the same
-      unweighted footing the module docstring already commits to ("Scenario
-      averaging is unweighted on both sides") even though
-      ``relatorio_operacao_custos`` carries an explicit ``probabilidade``
-      column per row -- special-casing a probability-weighted mean here
-      would make this one source diverge from every other level's
-      convention. No stage discount is applied either: unlike cobre's own
-      ``discount_factor`` column (:func:`cobre_readers.read_cobre_cost_
-      breakdown`), ``relatorio_operacao_custos`` exposes no per-row discount
-      factor at this granularity, so there is nothing to apply -- the
+    - **Per-stage expected cost** -- :func:`_probability_weighted_stage_cost`,
+      weighting each stage's scenarios by the real tree ``probabilidade``.
+      This is a deliberate departure from the module's unweighted-scenario
+      convention **for cost only**: an *expected* operating cost on the fan
+      stage must use the true opening probabilities (which are not
+      equiprobable), and both reports carry ``probabilidade`` per row. A
+      deterministic week (single row, prob 1.0) is unaffected. No stage
+      discount is applied: unlike cobre's ``discount_factor`` column
+      (:func:`cobre_readers.read_cobre_cost_breakdown`),
+      ``relatorio_operacao_custos`` exposes no per-row discount factor, so the
       per-stage values are DECOMP's own raw nominal $ costs at that node.
-    - **``nw_costs``** (R$): the per-stage means summed across every stage,
-      then :func:`reconcile_kdollars_to_reais` (x1e3). Categories below
+    - **``nw_costs``** (R$): the per-stage expected costs summed across every
+      stage, then :func:`reconcile_kdollars_to_reais` (x1e3). Categories below
       0.01 R$ are excluded, mirroring ``newave_readers.read_pmo_cost_
       breakdown`` and :func:`cobre_readers.read_cobre_cost_breakdown`'s own
       floor.
-    - **``nw_sin`` rows** (10^6 R$): the same per-stage means, unpivoted to
-      ``COPER``/``CUSTO_FUTURO``/``CTERM`` rows with the 1-based ``stage``
-      column kept as-is (the consuming charts subtract ``nw_offset``).
+    - **``nw_sin`` rows** (10^6 R$): the same per-stage expected costs,
+      unpivoted to ``COPER``/``CUSTO_FUTURO``/``CTERM`` rows with the 1-based
+      ``stage`` column kept as-is (the consuming charts subtract ``nw_offset``).
 
     Raises whatever :func:`read_relato_costs` raises on a missing/empty
-    parse -- no new swallowing (ticket-009's "no silent-empty" reader
-    contract).
+    ``relato`` parse (the mandatory report); a missing ``relato2`` is not an
+    error -- :func:`read_relato2_costs` returns empty and only the fan stage(s)
+    are absent.
     """
     raw = read_relato_costs(decomp_dir)
-    per_stage = _scenario_mean(
-        raw, "estagio", list(_RELATO_COST_COLUMNS), entity_column=None
-    )
+    monthly = read_relato2_costs(decomp_dir)
+    if monthly.is_empty():
+        combined = raw
+    else:
+        # relato2 is authoritative for any stage it covers -- drop those stages
+        # from relato first so a fan stage is never double-counted on union.
+        fan_stages = monthly["estagio"].unique().to_list()
+        combined = pl.concat(
+            [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
+            how="diagonal_relaxed",
+        )
+    per_stage = _probability_weighted_stage_cost(combined, list(_RELATO_COST_COLUMNS))
     present = [c for c in _RELATO_COST_COLUMNS if c in per_stage.columns]
 
     totals: dict[str, float] = (
@@ -1374,7 +1435,8 @@ def _union_cost_rows(nw_sin: pl.DataFrame, cost_rows: pl.DataFrame) -> pl.DataFr
 #: ``charts.performance_metric_cards`` reads (``"Tempo Total"`` /
 #: ``"Calculo da Politica"``), so the shared card renderer needs no
 #: source-specific branch. Confirmed against the real reduced deck
-#: (``example/decomp-mar-26-rv2-reduced/saidas/decomp.tim``): DECOMP emits
+#: (``example/decomp-mar-26-rv2-reduced/decomp.tim``, read from the case
+#: root): DECOMP emits
 #: exactly four phases -- ``"Leitura de Dados"``, ``"Convergencia"``,
 #: ``"Impressao"``, ``"Tempo Total"``. ``"Convergencia"`` is DECOMP's nested
 #: Benders backward/forward loop -- the DECOMP analog of "Calculo da
@@ -1546,11 +1608,10 @@ def _cobre_hydro(cobre_output_dir: Path) -> tuple[pl.DataFrame, dict[int, str]]:
 class _AlignedDecompFrames:
     """One run's DECOMP-side + Cobre-side frames, aligned to Cobre ids/stages.
 
-    The shared read/align result :func:`compare_decomp_results` and
-    :func:`build_decomp_dataset` both build on, via
+    The shared read/align result :func:`build_decomp_dataset` builds on, via
     :func:`_read_aligned_frames` — deck discovery, id-map construction,
     per-level scenario averaging, and the matching Cobre means run exactly
-    once per entry point.
+    once.
     """
 
     source_hydro: pl.DataFrame
@@ -1574,7 +1635,10 @@ class _AlignedDecompFrames:
 
 
 def _read_aligned_frames(
-    decomp_dir: Path, cobre_output_dir: Path
+    decomp_dir: Path,
+    cobre_output_dir: Path,
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> _AlignedDecompFrames:
     """Read and align both sides of one DECOMP-vs-Cobre comparison run.
 
@@ -1583,6 +1647,11 @@ def _read_aligned_frames(
     in that directory); ``cobre_output_dir`` is Cobre's output directory, whose
     case directory supplies the entity registries. Entities the id map cannot
     resolve are reported via ``unmapped`` rather than dropped in silence.
+    *probabilities* -- a :func:`_scenario_probabilities` lookup, built once
+    by :func:`build_decomp_dataset` -- is forwarded unchanged to every
+    per-level fold (:func:`_hydro_side`/:func:`_thermal_side`/
+    :func:`_bus_side`/:func:`_energy_balance_frames`); ``None`` keeps their
+    unweighted default.
     """
     from idecomp.decomp import Dadger
 
@@ -1597,10 +1666,18 @@ def _read_aligned_frames(
     thermal_codes = {code: id_map.thermal_id(code) for code in id_map.thermal_codes}
     bus_codes = {code: id_map.bus_id(code) for code in id_map.bus_codes}
 
-    source_hydro, unmapped_hydro = _hydro_side(decomp_dir, hydro_codes)
-    source_thermal, unmapped_thermal = _thermal_side(decomp_dir, thermal_codes)
-    source_bus, unmapped_bus = _bus_side(decomp_dir, bus_codes)
-    nw_market, nw_net_load, nw_sin = _energy_balance_frames(decomp_dir, bus_codes)
+    source_hydro, unmapped_hydro = _hydro_side(
+        decomp_dir, hydro_codes, probabilities=probabilities
+    )
+    source_thermal, unmapped_thermal = _thermal_side(
+        decomp_dir, thermal_codes, probabilities=probabilities
+    )
+    source_bus, unmapped_bus = _bus_side(
+        decomp_dir, bus_codes, probabilities=probabilities
+    )
+    nw_market, nw_net_load, nw_sin = _energy_balance_frames(
+        decomp_dir, bus_codes, probabilities=probabilities
+    )
 
     cobre_hydro, hydro_names = _cobre_hydro(cobre_output_dir)
     cobre_thermal = cobre_readers.read_cobre_thermal_means(cobre_output_dir)
@@ -1633,49 +1710,6 @@ def _read_aligned_frames(
         nw_market=nw_market,
         nw_net_load=nw_net_load,
         nw_sin=nw_sin,
-    )
-
-
-def compare_decomp_results(
-    decomp_dir: Path, cobre_output_dir: Path
-) -> DecompComparison:
-    """Compare a source-model run against the Cobre run of its converted case.
-
-    ``decomp_dir`` is the deck directory (it must contain the ``dec_oper_*.csv``
-    result tables and the deck files needed to rebuild the id map, all directly
-    in that directory); ``cobre_output_dir`` is Cobre's output directory, whose
-    case directory supplies the entity registries.
-    """
-    aligned = _read_aligned_frames(decomp_dir, cobre_output_dir)
-
-    rows = pl.concat(
-        [
-            _tidy(
-                aligned.source_hydro,
-                aligned.cobre_hydro,
-                _HYDRO_VARIABLES,
-                names=aligned.hydro_names,
-            ),
-            _tidy(
-                aligned.source_thermal,
-                aligned.cobre_thermal,
-                _THERMAL_VARIABLES,
-                names=aligned.thermal_names,
-            ),
-            _tidy(
-                aligned.source_bus,
-                aligned.cobre_bus,
-                _BUS_VARIABLES,
-                names=aligned.bus_names,
-            ),
-        ]
-    )
-
-    return DecompComparison(
-        rows=rows,
-        summary=_summarize(rows),
-        convergence=_convergence(decomp_dir, cobre_output_dir),
-        unmapped=aligned.unmapped,
     )
 
 
@@ -2086,7 +2120,9 @@ def _cobre_ree_sums(
     )
 
 
-def _decomp_ree_frame(decomp_dir: Path) -> tuple[pl.DataFrame, dict[int, str]]:
+def _decomp_ree_frame(
+    decomp_dir: Path, *, probabilities: pl.DataFrame | None = None
+) -> tuple[pl.DataFrame, dict[int, str]]:
     """DECOMP-side per-(codigo_ree, stage) ENA/EARM, scenario-averaged over
     the deck's own nodes, plus the REE display-name lookup.
 
@@ -2094,7 +2130,9 @@ def _decomp_ree_frame(decomp_dir: Path) -> tuple[pl.DataFrame, dict[int, str]]:
     (:func:`_stage_rows`/:func:`_scenario_mean`), keyed by ``codigo_ree``
     (`read_dec_oper_ree` carries no ``patamar`` column, so :func:`_stage_rows`
     is a no-op here -- called anyway for the same fold shape every other level
-    uses). Rebases ``estagio`` onto the 0-based ``stage_id`` the same way
+    uses). *probabilities* is forwarded to :func:`_scenario_mean` unchanged
+    (see :func:`_hydro_side` for its scenario-weighting contract). Rebases
+    ``estagio`` onto the 0-based ``stage_id`` the same way
     :func:`_map_entities` does. Raises whatever `read_dec_oper_ree` raises on
     a missing/empty parse -- the caller degrades that to "no REE section".
     """
@@ -2108,7 +2146,11 @@ def _decomp_ree_frame(decomp_dir: Path) -> tuple[pl.DataFrame, dict[int, str]]:
             names[int(row["codigo_ree"])] = str(row["nome_ree"])
 
     aggregated = _scenario_mean(
-        frame, "estagio", ["ena_MWmes", "earm_final_MWmes"], entity_column="codigo_ree"
+        frame,
+        "estagio",
+        ["ena_MWmes", "earm_final_MWmes"],
+        entity_column="codigo_ree",
+        probabilities=probabilities,
     )
     if aggregated.is_empty():
         return aggregated, names
@@ -2123,14 +2165,21 @@ def _ree_result_comparisons(
     decomp_dir: Path,
     cobre_hydro: pl.DataFrame,
     id_map: DecompIdMap | None,
+    *,
+    probabilities: pl.DataFrame | None = None,
+    stage_hours: dict[int, float] | None = None,
 ) -> tuple[list[ResultComparison], list[int]]:
     """REE-level ``ena_mwmes``/``earm_final_mwmes`` ``ResultComparison`` rows.
 
     The source-model side is `_decomp_ree_frame` (`read_dec_oper_ree`,
-    scenario-averaged per REE/stage); the Cobre side is
+    scenario-averaged per REE/stage -- *probabilities* is forwarded to it
+    unchanged, see :func:`_hydro_side` for its scenario-weighting contract);
+    the Cobre side is
     :func:`_cobre_ree_sums`'s membership-weighted plant rollup, with EARM
-    converted MWh -> MWmês (:data:`_EARM_MWH_TO_MWMES`) at emission -- ENA is
-    a plain sum, no unit conversion. ``newave_code``/``cobre_id`` are both the
+    converted MWh -> MWmês (:data:`_EARM_MWH_TO_MWMES`) and ENA converted from
+    a stage-mean MW (average power) to MWmês energy via the stage's own
+    duration (*stage_hours* ÷ 730 months), both at emission -- so each is on
+    DECOMP's MW-month footing. ``newave_code``/``cobre_id`` are both the
     REE's own ``codigo_ree`` -- Cobre has no independent REE id to diverge
     from it.
 
@@ -2175,7 +2224,7 @@ def _ree_result_comparisons(
         )
 
     try:
-        source_ree, names = _decomp_ree_frame(decomp_dir)
+        source_ree, names = _decomp_ree_frame(decomp_dir, probabilities=probabilities)
     except (FileNotFoundError, ValueError) as exc:
         _LOG.info("No source-model REE table (dec_oper_ree): %s", exc)
         return [], unmapped
@@ -2194,8 +2243,24 @@ def _ree_result_comparisons(
         stage = int(row["stage_id"])
         name = names.get(ree_code, "")
         cobre_earm_mwmes = float(row["earm_mwh"]) / _EARM_MWH_TO_MWMES
+        # cobre's ``ena_mw`` is a stage-mean MW (average inflow power); DECOMP's
+        # ``ena_MWmes`` is the natural energy *over the stage* (MW-month), which
+        # scales with stage duration. Convert the rate to MWmês by the stage's
+        # own duration in months (``stage_hours / 730``), mirroring EARM's ÷730
+        # — otherwise a weekly stage's average power is compared to a week's
+        # energy, a ~stage_hours/730 mismatch that inflates the weekly ENA
+        # several-fold. Falls back to one month when hours are unavailable
+        # (e.g. a fixture without stage metadata). The residual per-REE offset
+        # that remains is the productivity/FPHA-coefficient difference between
+        # DECOMP's REE aggregate and cobre's per-plant model, not a unit error.
+        stage_months = (
+            stage_hours.get(stage, _EARM_MWH_TO_MWMES) / _EARM_MWH_TO_MWMES
+            if stage_hours is not None
+            else 1.0
+        )
+        cobre_ena_mwmes = float(row["ena_mw"]) * stage_months
         for variable, nw_raw, cobre_value in (
-            ("ena_mwmes", row["ena_MWmes"], float(row["ena_mw"])),
+            ("ena_mwmes", row["ena_MWmes"], cobre_ena_mwmes),
             ("earm_final_mwmes", row["earm_final_MWmes"], cobre_earm_mwmes),
         ):
             if nw_raw is None:
@@ -2278,7 +2343,10 @@ def _hm3_to_m3s(volume_hm3: float, stage_hours: float) -> float:
 
 
 def _evap_side(
-    decomp_dir: Path, hydro_codes: dict[int, int]
+    decomp_dir: Path,
+    hydro_codes: dict[int, int],
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, list[int]]:
     """The source model's per-(hydro, stage) evaporated volume (hm³),
     scenario-averaged over the deck's own nodes.
@@ -2286,13 +2354,18 @@ def _evap_side(
     Mirrors :func:`_hydro_side`'s exact fold (:func:`_stage_rows` is a no-op
     here -- `read_dec_oper_evap` carries no ``patamar`` column, unlike
     `dec_oper_usih` -- called anyway for the same fold shape every other
-    level uses). Raises whatever `read_dec_oper_evap` raises on a
-    missing/empty parse; the caller degrades that to "no evaporation
-    section".
+    level uses); *probabilities* is forwarded to :func:`_scenario_mean`
+    unchanged (see :func:`_hydro_side` for its scenario-weighting contract).
+    Raises whatever `read_dec_oper_evap` raises on a missing/empty parse;
+    the caller degrades that to "no evaporation section".
     """
     frame = _stage_rows(read_dec_oper_evap(decomp_dir))
     aggregated = _scenario_mean(
-        frame, "estagio", ["evaporacao_calculada_hm3"], entity_column="codigo_usina"
+        frame,
+        "estagio",
+        ["evaporacao_calculada_hm3"],
+        entity_column="codigo_usina",
+        probabilities=probabilities,
     )
     return _map_entities(aggregated, "codigo_usina", hydro_codes)
 
@@ -2303,11 +2376,15 @@ def _evaporation_result_comparisons(
     cobre_hydro: pl.DataFrame,
     id_map: DecompIdMap | None,
     names: dict[int, str],
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> tuple[list[ResultComparison], list[int]]:
     """Per-(hydro, stage) ``evaporation_m3s`` ``ResultComparison`` rows.
 
     The source-model side is :func:`_evap_side` (`read_dec_oper_evap`,
-    scenario-averaged, mapped onto Cobre ids via *id_map*); the Cobre side is
+    scenario-averaged -- *probabilities* is forwarded to it unchanged, see
+    :func:`_hydro_side` for its scenario-weighting contract -- mapped onto
+    Cobre ids via *id_map*); the Cobre side is
     *cobre_hydro*'s own ``evaporation_m3s`` column (already carried by
     `_read_aligned_frames`, not re-read here). A plant carrying an
     evaporation series on only one side -- the source model's
@@ -2343,7 +2420,9 @@ def _evaporation_result_comparisons(
     hydro_codes = {code: id_map.hydro_id(code) for code in id_map.hydro_codes}
 
     try:
-        source_evap, _unmapped_hydro_codes = _evap_side(decomp_dir, hydro_codes)
+        source_evap, _unmapped_hydro_codes = _evap_side(
+            decomp_dir, hydro_codes, probabilities=probabilities
+        )
     except (FileNotFoundError, ValueError) as exc:
         _LOG.info("No source-model evaporation table (dec_oper_evap): %s", exc)
         return [], []
@@ -2477,7 +2556,9 @@ def _decomp_constraint_context(decomp_dir: Path) -> _DecompConstraintContext | N
         return None
 
 
-def _dec_oper_hydro_stage_frame(decomp_dir: Path) -> pl.DataFrame:
+def _dec_oper_hydro_stage_frame(
+    decomp_dir: Path, *, probabilities: pl.DataFrame | None = None
+) -> pl.DataFrame:
     """One row per (source hydro code, stage): the stage-aggregate
     ``dec_oper_usih`` columns this ticket's constraint terms need, averaged
     over node/scenario.
@@ -2486,7 +2567,9 @@ def _dec_oper_hydro_stage_frame(decomp_dir: Path) -> pl.DataFrame:
     aggregate row) + `_scenario_mean` exactly like `_hydro_side`, but stops
     short of `_map_entities`'s translation to cobre ids -- the
     special-constraint register terms this feeds carry the source model's
-    own plant codes, not cobre ids. Degrades to an empty frame (never
+    own plant codes, not cobre ids. *probabilities* is forwarded to
+    `_scenario_mean` unchanged (see `_hydro_side` for its
+    scenario-weighting contract). Degrades to an empty frame (never
     raises) when the deck ships no ``dec_oper_usih.csv`` -- every caller
     already treats an empty frame as "nothing to look up".
     """
@@ -2503,20 +2586,33 @@ def _dec_oper_hydro_stage_frame(decomp_dir: Path) -> pl.DataFrame:
         "vazao_vertida_m3s",
         "volume_util_final_hm3",
     ]
-    return _scenario_mean(frame, "estagio", columns, entity_column="codigo_usina")
+    return _scenario_mean(
+        frame,
+        "estagio",
+        columns,
+        entity_column="codigo_usina",
+        probabilities=probabilities,
+    )
 
 
-def _dec_oper_thermal_stage_frame(decomp_dir: Path) -> pl.DataFrame:
+def _dec_oper_thermal_stage_frame(
+    decomp_dir: Path, *, probabilities: pl.DataFrame | None = None
+) -> pl.DataFrame:
     """One row per (source thermal code, stage): ``dec_oper_usit``'s
     generation, averaged over node/scenario. Mirrors
-    `_dec_oper_hydro_stage_frame`, including the same degrade-to-empty."""
+    `_dec_oper_hydro_stage_frame`, including the same degrade-to-empty and
+    the same *probabilities* scenario-weighting contract."""
     try:
         frame = _stage_rows(read_dec_oper_usit(decomp_dir))
     except (FileNotFoundError, ValueError) as exc:
         _LOG.info("No dec_oper_usit.csv for the Constraints tab LHS: %s", exc)
         return pl.DataFrame()
     return _scenario_mean(
-        frame, "estagio", ["geracao_MW"], entity_column="codigo_usina"
+        frame,
+        "estagio",
+        ["geracao_MW"],
+        entity_column="codigo_usina",
+        probabilities=probabilities,
     )
 
 
@@ -2637,7 +2733,9 @@ def _term_lookup_value(
     return flow_lookup.get((term.code, stage)) if flow_lookup is not None else None
 
 
-def _rhe_lhs_lookup(dec_oper_rhesoft: pl.DataFrame) -> dict[int, dict[int, float]]:
+def _rhe_lhs_lookup(
+    dec_oper_rhesoft: pl.DataFrame, *, probabilities: pl.DataFrame | None = None
+) -> dict[int, dict[int, float]]:
     """``{codigo_restricao: {stage_0based: valor_MW}}``.
 
     RHE constraints report their achieved LHS directly in
@@ -2654,7 +2752,9 @@ def _rhe_lhs_lookup(dec_oper_rhesoft: pl.DataFrame) -> dict[int, dict[int, float
     *bound*, not its LHS) -- adding it would collapse the reference trace
     onto the bound line during every violation episode, exactly the moments
     the LHS-vs-bound chart exists to surface. Verified against real
-    ``dec_oper_rhesoft.csv`` output.
+    ``dec_oper_rhesoft.csv`` output. *probabilities* is forwarded to
+    `_scenario_mean` unchanged (see `_hydro_side` for its
+    scenario-weighting contract).
     """
     out: dict[int, dict[int, float]] = {}
     if dec_oper_rhesoft.is_empty():
@@ -2664,6 +2764,7 @@ def _rhe_lhs_lookup(dec_oper_rhesoft: pl.DataFrame) -> dict[int, dict[int, float
         "estagio",
         ["valor_MW"],
         entity_column="codigo_restricao",
+        probabilities=probabilities,
     )
     for row in collapsed.iter_rows(named=True):
         valor = row["valor_MW"]
@@ -2686,9 +2787,17 @@ def _generic_constraint_lhs_decomp(
     decomp_dir: Path,
     cobre_output_dir: Path,
     gc_constraints: list[dict],
+    *,
+    probabilities: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Evaluate each generic constraint's LHS from the source model's own
     operation output (ticket-019).
+
+    *probabilities* is forwarded unchanged to every underlying
+    :func:`_scenario_mean` fold this derivation relies on
+    (:func:`_dec_oper_hydro_stage_frame`/:func:`_dec_oper_thermal_stage_frame`/
+    :func:`_rhe_lhs_lookup`) -- see :func:`_hydro_side` for its
+    scenario-weighting contract.
 
     The DECOMP sibling of ``constraints_compare.evaluate_lhs_newave``: that
     function reads MEDIAS-USIH/int*.out through an ``EntityAlignment``/
@@ -2722,7 +2831,7 @@ def _generic_constraint_lhs_decomp(
     context = _decomp_constraint_context(decomp_dir)
     census_by_key: dict[tuple[str, int], ConstraintRecord] = {}
     storage_lookup: dict[tuple[int, int], float] = {}
-    hydro_frame = _dec_oper_hydro_stage_frame(decomp_dir)
+    hydro_frame = _dec_oper_hydro_stage_frame(decomp_dir, probabilities=probabilities)
     if context is not None:
         for records in context.census.by_family.values():
             for record in records:
@@ -2735,7 +2844,9 @@ def _generic_constraint_lhs_decomp(
         }
         storage_lookup = _storage_lookup(hydro_frame, context.id_map, min_storage)
 
-    thermal_frame = _dec_oper_thermal_stage_frame(decomp_dir)
+    thermal_frame = _dec_oper_thermal_stage_frame(
+        decomp_dir, probabilities=probabilities
+    )
     lookups = _DecompConstraintLookups(
         hydro_generation=_stage_frame_to_lookup(hydro_frame, "geracao_MW"),
         thermal_generation=_stage_frame_to_lookup(thermal_frame, "geracao_MW"),
@@ -2747,7 +2858,9 @@ def _generic_constraint_lhs_decomp(
         },
         storage=storage_lookup,
     )
-    rhe_lhs = _rhe_lhs_lookup(_dec_oper_rhesoft_frame(decomp_dir))
+    rhe_lhs = _rhe_lhs_lookup(
+        _dec_oper_rhesoft_frame(decomp_dir), probabilities=probabilities
+    )
 
     rows: list[dict[str, object]] = []
     n_skipped = 0
@@ -2852,14 +2965,11 @@ def build_decomp_dataset(
 ) -> ComparisonDataset:
     """Build the canonical results dataset for the current 8 DECOMP variables.
 
-    Shares the read/align step with :func:`compare_decomp_results` (via
-    :func:`_read_aligned_frames`), but emits the canonical
-    :class:`~cobre_bridge.comparators.results.ResultComparison` shape and
-    assembles it through the shared, source-agnostic
+    Reads and aligns both sides via :func:`_read_aligned_frames`, then emits
+    the canonical :class:`~cobre_bridge.comparators.results.ResultComparison`
+    shape and assembles it through the shared, source-agnostic
     :func:`~cobre_bridge.comparators.analyze.build_results_dataset` stat
-    kernel — instead of the standalone tidy/summary frames
-    :class:`DecompComparison` renders. This is the reuse engine every later
-    epic extends by filling more
+    kernel. This is the reuse engine every later epic extends by filling more
     :class:`~cobre_bridge.comparators.results.PercentileData` fields.
 
     Per D-PERCENTILEDATA, the returned dataset's ``PercentileData`` carries
@@ -2886,9 +2996,8 @@ def build_decomp_dataset(
     :func:`_union_cost_rows` rather than overwriting them. As of ticket-012,
     ``nw_convergence``/``cobre_convergence`` carry the Overview tab's
     Convergence overlay (see :func:`_decomp_convergence_frame` and
-    :func:`cobre_readers.read_cobre_convergence`) — a source-side canonical
-    frame distinct from the legacy :class:`DecompComparison`'s
-    ``convergence`` join. As of ticket-013, the Performance tab's timing
+    :func:`cobre_readers.read_cobre_convergence`). As of ticket-013, the
+    Performance tab's timing
     metadata is filled: ``nw_tim_stages``/``nw_tim_iterations`` (see
     :func:`_decomp_tim_stages`/:func:`_decomp_tim_iterations`, sourced from
     ``decomp.tim``/``relato.convergencia``), ``nw_max_stage`` (see
@@ -2968,6 +3077,16 @@ def build_decomp_dataset(
     ``bus``/``hydro``/``thermal``/``line`` themselves stay empty whenever the
     Cobre run has no percentile output (e.g. the deterministic 2-node tree) —
     no percentile spread is ever fabricated.
+    Scenario weighting: :func:`_scenario_probabilities` is built exactly
+    once, here, from ``decomp_dir``'s ``relato``/``relato2`` reports, and
+    threaded as the ``probabilities`` keyword into every physical-variable
+    fold this function drives (``_read_aligned_frames``,
+    ``_line_result_comparisons``, ``_ree_result_comparisons``,
+    ``_evaporation_result_comparisons``, ``_generic_constraint_lhs_decomp``)
+    so a genuine scenario-fan stage is probability-weighted, not plainly
+    averaged, everywhere — see the module docstring's "Scenario averaging"
+    bullet. A deck with no probability source at all degrades every one of
+    those folds to their original unweighted mean.
 
     Args:
         decomp_dir: The deck directory (results resolved via the ticket-001
@@ -2984,7 +3103,13 @@ def build_decomp_dataset(
     """
     from cobre_bridge.comparators.analyze import build_results_dataset
 
-    aligned = _read_aligned_frames(decomp_dir, cobre_output_dir)
+    # Built once, threaded to every physical-variable _scenario_mean call
+    # site below (never rebuilt per site -- relato2 parsing is not free).
+    probabilities = _scenario_probabilities(decomp_dir)
+
+    aligned = _read_aligned_frames(
+        decomp_dir, cobre_output_dir, probabilities=probabilities
+    )
 
     results: list[ResultComparison] = []
     # ticket-016: captured separately so the derived realized productivity
@@ -3019,7 +3144,11 @@ def build_decomp_dataset(
     line_bounds, line_meta = _line_bounds_and_meta(cobre_output_dir)
     line_id_map = _build_line_id_map(decomp_dir)
     line_results, unresolved_lines = _line_result_comparisons(
-        decomp_dir, cobre_output_dir, line_id_map, line_meta
+        decomp_dir,
+        cobre_output_dir,
+        line_id_map,
+        line_meta,
+        probabilities=probabilities,
     )
     results.extend(line_results)
 
@@ -3061,7 +3190,11 @@ def build_decomp_dataset(
     # (ticket-008) exactly like ``_fpha_metrics`` above -- the same
     # hydro-code -> Cobre-id mapping, no third ``DecompIdMap`` rebuild.
     ree_results, unmapped_ree = _ree_result_comparisons(
-        decomp_dir, aligned.cobre_hydro, line_id_map
+        decomp_dir,
+        aligned.cobre_hydro,
+        line_id_map,
+        probabilities=probabilities,
+        stage_hours=_cobre_stage_hours(cobre_output_dir) or None,
     )
     results.extend(ree_results)
 
@@ -3077,6 +3210,7 @@ def build_decomp_dataset(
         aligned.cobre_hydro,
         line_id_map,
         aligned.hydro_names,
+        probabilities=probabilities,
     )
     results.extend(evaporation_results)
 
@@ -3097,7 +3231,7 @@ def build_decomp_dataset(
     if gc_constraints:
         gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
         gc_lhs_nw = _generic_constraint_lhs_decomp(
-            decomp_dir, cobre_output_dir, gc_constraints
+            decomp_dir, cobre_output_dir, gc_constraints, probabilities=probabilities
         )
     else:
         gc_lhs_cb = pl.DataFrame()

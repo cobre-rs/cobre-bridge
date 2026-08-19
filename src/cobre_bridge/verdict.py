@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from cobre_bridge.comparators.dataset import ComparisonDataset
-    from cobre_bridge.comparators.decomp_results import DecompComparison
     from cobre_bridge.comparators.verdict import CompareVerdict
     from cobre_bridge.diagnostics import Diagnostic
 
@@ -143,51 +142,18 @@ def compare_summary(verdict: CompareVerdict) -> dict[str, object]:
     }
 
 
-def decomp_compare_summary(
-    comparison: DecompComparison, tolerance: float
-) -> dict[str, object]:
-    """The ``compare decomp`` command's ``summary`` block — per-variable rows.
+def _coerce_unmapped_code(code: object) -> int | list[int]:
+    """JSON-friendly coercion for one ``unmapped`` entry.
 
-    Returns ``{"stages", "variables", "unmapped", "within_tol", "total",
-    "all_within_tol"}`` in that order. ``stages`` is
-    :attr:`DecompComparison.stage_count`; ``variables`` is
-    ``comparison.summary.to_dicts()`` verbatim — polars' ``to_dicts()`` already
-    yields JSON-native ``int``/``float``/``str``/``None`` cells, so the rows are
-    passed through unchanged; ``unmapped`` mirrors
-    :attr:`DecompComparison.unmapped` with every entity id coerced to ``int``.
-
-    The trailing three keys mirror :func:`compare_summary`'s headline fields so
-    the two compare commands' summaries are symmetric. They thread NO new
-    comparison science: a (level, variable) group is within tolerance iff
-    *every* one of its rows in :attr:`DecompComparison.rows` already satisfies
-    ``smape_pct / 100.0 <= tolerance`` — the per-row sMAPE percentage
-    ``DecompComparison.rows`` already carries, folded with a plain Python loop
-    (no polars import needed) rather than recomputed. ``within_tol`` counts the
-    groups that pass; ``total`` is the group count; ``all_within_tol`` is
-    ``True`` iff ``total > 0`` and every group passes. For an empty comparison
-    this yields ``within_tol=0``, ``total=0``, ``all_within_tol=False``.
+    Most levels list scalar entity codes (coerced to ``int``); the network
+    (``line``) level lists ``[submarket_de, submarket_para]`` corridor **pairs**
+    — lists, not scalar codes — so those are coerced element-wise and kept as
+    lists of ``int`` rather than forced through ``int(...)`` (which raised
+    ``TypeError`` on the pair).
     """
-    within_by_group: dict[tuple[str, str], bool] = {}
-    for row in comparison.rows.iter_rows(named=True):
-        key = (row["level"], row["variable"])
-        passes = (row["smape_pct"] / 100.0) <= tolerance
-        within_by_group[key] = within_by_group.get(key, True) and passes
-
-    total = len(within_by_group)
-    within_tol = sum(1 for passes in within_by_group.values() if passes)
-    all_within_tol = total > 0 and within_tol == total
-
-    return {
-        "stages": int(comparison.stage_count),
-        "variables": comparison.summary.to_dicts(),
-        "unmapped": {
-            level: [int(code) for code in codes]
-            for level, codes in comparison.unmapped.items()
-        },
-        "within_tol": within_tol,
-        "total": total,
-        "all_within_tol": all_within_tol,
-    }
+    if isinstance(code, list | tuple):
+        return [int(c) for c in code]
+    return int(code)
 
 
 def decomp_dataset_summary(
@@ -195,11 +161,9 @@ def decomp_dataset_summary(
 ) -> dict[str, object]:
     """The ``compare decomp`` command's dataset-sourced ``summary`` block.
 
-    Supersedes :func:`decomp_compare_summary` at the ``compare decomp --json``
-    call site only (D-STRANGLER: the old summary stays for now, still
-    exercised by its own tests; E8 retires it). Returns the shared headline
-    fields from :func:`compare_summary` (``within_tol``, ``total``,
-    ``worst_variable``, ``worst_smape``, ``all_within_tol`` — sourced via
+    Returns the shared headline fields from :func:`compare_summary`
+    (``within_tol``, ``total``, ``worst_variable``, ``worst_smape``,
+    ``all_within_tol`` — sourced via
     :func:`~cobre_bridge.comparators.verdict.build_compare_verdict`, so the
     headline is computed once from ``dataset.summary`` and matches
     ``compare newave``'s) PLUS the three DECOMP-specific keys read straight
@@ -209,8 +173,8 @@ def decomp_dataset_summary(
     (``dataset.metadata["unmapped"]``, with every entity id coerced to
     ``int``).
 
-    *tolerance* is accepted only for call-site symmetry with
-    :func:`decomp_compare_summary` — it is not consumed here because
+    *tolerance* is accepted for call-site symmetry with the other compare
+    commands' summary builders — it is not consumed here because
     ``dataset.summary``'s ``within_tol_rate`` (which
     :func:`~cobre_bridge.comparators.verdict.build_compare_verdict` reads) was
     already computed against a tolerance when the caller built *dataset*
@@ -218,11 +182,11 @@ def decomp_dataset_summary(
     """
     from cobre_bridge.comparators.verdict import build_compare_verdict
 
-    summary = dict(compare_summary(build_compare_verdict(dataset)))
+    summary = compare_summary(build_compare_verdict(dataset))
     summary["stages"] = int(dataset.tidy["stage"].n_unique())
     summary["variables"] = dataset.summary.to_dicts()
     summary["unmapped"] = {
-        level: [int(code) for code in codes]
+        level: [_coerce_unmapped_code(code) for code in codes]
         for level, codes in dataset.metadata["unmapped"].items()
     }
     return summary

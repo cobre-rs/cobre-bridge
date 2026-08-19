@@ -45,7 +45,7 @@ def sense_to_interval(sense: str, value: float) -> tuple[float | None, float | N
         return None, value
     if sense == "==":
         return value, value
-    raise ValueError(f"sense_to_interval: unknown sense {sense!r}")
+    raise ValueError(f"Unknown constraint sense {sense!r}.")
 
 
 def shape_from_bounds(lower: float | None, upper: float | None) -> str:
@@ -64,8 +64,8 @@ def shape_from_bounds(lower: float | None, upper: float | None) -> str:
     """
     if lower is None and upper is None:
         raise ValueError(
-            "shape_from_bounds: a bound row must have at least one endpoint "
-            "(bound_lower and bound_upper are both None)"
+            "A constraint bound row must have at least one endpoint "
+            "(bound_lower and bound_upper are both None)."
         )
     if lower is None:
         return "<="
