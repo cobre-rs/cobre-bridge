@@ -38,6 +38,13 @@ fixes several `compare`/dashboard rendering bugs.
 
 ### Fixed
 
+- **`convert newave` clamps per-stage hydro bounds into the plant's declared
+  envelope (cobre rule 43).** A per-stage override (TURBMAXT, VAZMAXT, or an RE
+  ceiling) could raise a `hydro_bounds` MAX column above the plant's own declared
+  value in `system/hydros.json`, which cobre rejects on load. A post-emission
+  pass now ceils each such value at the declared max and floors it at the
+  declared min, so every row stays a valid tightening of the envelope, and emits
+  a **warning** naming what was clamped rather than adjusting silently.
 - **`convert decomp` no longer aborts on a fresh install.** With the boundary
   cost-to-go function imported by default and `cobre-python` merely optional, a
   plain install failed on any deck that declares its cut files; making the
