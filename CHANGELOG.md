@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.3] - 2026-08-19
+
+Pairs the bridge with the **cobre 0.14.3** release and restores the boundary
+cost-to-go function's inflow-lag coupling for DECOMP-style decks. `convert decomp`
+now declares the boundary's inflow-lag depth so cobre reserves the matching state
+slots when it loads the checkpoint; without it those slots were absent and every
+inflow-lag term was silently dropped. The pin and `MIN_COBRE_VERSION` floor at
+`0.14.3` (the 0.14 input contract is unchanged).
+
+### Fixed
+
+- **`convert decomp` keeps the boundary cost-to-go function's inflow-lag
+  coupling.** A terminal cut carries a storage gradient plus per-lag inflow
+  gradients, but the deck has no autoregressive inflow model for the solver to
+  size the inflow-lag state from, so the written checkpoint reserved no lag slots
+  and every inflow-lag term was dropped on load — the reconciled boundary
+  collapsed to storage-only (a few hundred state slots where thousands were
+  expected). The checkpoint now declares its inflow-lag depth, so cobre reserves
+  the canonical inflow-lag slots and places the per-lag gradients; the loaded
+  boundary prices the inflow-lag coupling again.
+
+### Changed
+
+- **`MIN_COBRE_VERSION` raised to `0.14.3`** (pin `cobre-python>=0.14.3,<0.15`).
+  The 0.14 input contract is unchanged (a case converted here still loads on
+  0.14.1), but 0.14.3 is the first release whose checkpoint writer reserves the
+  canonical inflow-lag state slots the emitted boundary now depends on; on an
+  older cobre those slots are absent and the inflow-lag coupling is silently
+  dropped (recorded in the conversion manifest and enforced by the `--validate`
+  gate).
+
 ## [0.14.2] - 2026-08-18
 
 Pairs the bridge with the **cobre 0.14.2** solver bug-fix release and makes a

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.14.2"
+version = "0.14.3"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -24,7 +24,7 @@ dependencies = [
     # boundary FCF by default and `convert --validate` / `compare` load cobre
     # output, so `import cobre` must work out of the box. Keep the floor in
     # lockstep with MIN_COBRE_VERSION in cli.py (which documents the contract).
-    "cobre-python>=0.14.2,<0.15",
+    "cobre-python>=0.14.3,<0.15",
 ]
 
 [project.optional-dependencies]
