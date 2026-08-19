@@ -82,9 +82,14 @@ if TYPE_CHECKING:
 #:      the old path); the JSON shape is unchanged.
 #:   3. the NCS availability column is now ``availability_factor`` only (cobre's
 #:      clean break dropped the legacy ``value`` alias).
-#: Keep the ``cobre-python`` pin in ``pyproject.toml`` in lockstep with this
+#:
+#: 0.14.2 keeps that same 0.14 input contract (a case converted here still loads
+#: on 0.14.1) but is a solver bug-fix release the emitted policy now depends on
+#: for correct results — the CVaR gap rule and the loaded terminal boundary FCF
+#: converge/price correctly only against 0.14.2's fixes — so the bridge requires
+#: it. Keep the ``cobre-python`` pin in ``pyproject.toml`` in lockstep with this
 #: constant on any future bump.
-MIN_COBRE_VERSION = "0.14.1"
+MIN_COBRE_VERSION = "0.14.2"
 
 
 def _installed_cobre_python_version() -> str | None:

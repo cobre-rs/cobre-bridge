@@ -7,21 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.14.2] - 2026-08-18
 
-Makes a fresh `pip install cobre-bridge` work out of the box. `cobre-python` is
-now a required runtime dependency, so `convert decomp` — which imports the
-deck's boundary cost-to-go function by default — no longer fails on a plain
-install, and the guidance printed when a dependency is missing is self-contained
-for end users.
+Pairs the bridge with the **cobre 0.14.2** solver bug-fix release and makes a
+fresh `pip install cobre-bridge` work out of the box. The emitted policy (the
+CVaR gap rule and the loaded terminal boundary cost-to-go function) now converges
+and prices correctly against cobre 0.14.2's fixes, so the pin and
+`MIN_COBRE_VERSION` floor at `0.14.2` (the 0.14 input contract is unchanged).
+`cobre-python` is now a required runtime dependency, so `convert decomp` — which
+imports the deck's boundary cost-to-go function by default — no longer fails on a
+plain install. This release also completes `compare decomp` result parity and
+fixes several `compare`/dashboard rendering bugs.
 
 ### Changed
 
-- **`cobre-python` is now a required runtime dependency** (`>=0.14.1,<0.15`),
+- **`cobre-python` is now a required runtime dependency** (`>=0.14.2,<0.15`),
   moved from the optional `validation` / `test-roundtrip` extras into the core
   `dependencies`. A plain `pip install cobre-bridge` now installs a cobre that
   can validate converted output and import the boundary cost-to-go function. The
   two extras, which only ever carried `cobre-python`, are **removed** (a plain
   install now supersedes them); CI installs the dependency via `.[dev]` on every
   supported Python.
+- **`MIN_COBRE_VERSION` raised to `0.14.2`.** The 0.14 input contract is
+  unchanged (a case converted here still loads on 0.14.1), but the emitted CVaR
+  gap rule and loaded terminal boundary cost-to-go function rely on cobre
+  0.14.2's solver fixes to converge and price correctly, so the bridge requires
+  it (recorded in the conversion manifest and enforced by the `--validate` gate).
 - **End-user-facing messages are self-contained.** The boundary cost-to-go
   capability and writer diagnostics no longer point users at developer build
   recipes or repo-internal documents (worktrees, `maturin` commands); they now
@@ -33,9 +42,42 @@ for end users.
   cost-to-go function imported by default and `cobre-python` merely optional, a
   plain install failed on any deck that declares its cut files; making the
   dependency required fixes it.
+- **`compare decomp --json` no longer crashes on network corridors.** The
+  unmapped-entity summary coerced every code with `int()`, but the `line` level
+  lists `[from, to]` submarket corridor _pairs_; those now serialize as lists,
+  so the JSON verdict is emitted correctly.
+- **`compare decomp` REE energy (ENA) is now a fair comparison.** cobre's
+  `incremental_inflow_energy_mw` is a stage-mean MW rate; DECOMP's `ena_MWmes`
+  is energy over the stage. The comparator converts the cobre rate to MWmês
+  (×stage-hours/730, mirroring the existing EARM handling), collapsing a
+  several-fold weekly-stage discrepancy to the residual model-coefficient offset.
+- **Dashboard per-submarket facets** are restricted to the four real submarkets
+  (a clean 2×2), no longer faceting fictitious/interconnection nodes — for both
+  the NEWAVE and DECOMP conventions.
+- **Dashboard Constraints tab** facets only constraints that carry a reference
+  LHS, and `facet_grid` no longer marches y-domains negative on tall grids
+  (the row-gap is capped so rows + gaps fit `[0, 1]`).
+- **`compare decomp` convergence bounds** are reconciled from DECOMP's k$ to
+  cobre's R$ (×1e3) so the Convergence section compares like for like.
+- **`convert decomp`** no longer emits a `state_space.inflow_lag_depth` override
+  that cobre 0.14 rejects on lag-coupled decks (cobre now sizes the inflow-lag
+  state from the PAR(p) order and boundary); this unblocks
+  `convert decomp --boundary-fcf` on those decks.
 
 ### Added
 
+- **`compare decomp` probability-weights all physical DECOMP variables** across
+  the terminal scenario fan, so the reference series aggregate the stochastic
+  stage the same way the cost figures already did.
+- **The monthly scenario-fan stage is represented in the Overview cost**
+  (`relato2`, probability-weighted), completing the cost breakdown across the
+  weekly trunk and the monthly fan.
+- **Root-only result discovery** — `compare decomp` reads DECOMP results
+  (`dec_oper_*`, `relato*`, cut files) directly from the deck root; the legacy
+  `saidas/` subfolder convention is retired.
+- **`compare decomp` export / `--json` unified onto the canonical
+  `ComparisonDataset`** seam (same source of truth as the HTML report), with docs
+  and tests brought along.
 - Packaging-guard tests: `cobre-python` must be a core dependency (not an extra)
   and its pin must floor at `MIN_COBRE_VERSION`; and a guard that the
   boundary-FCF remediation never leaks a repo-internal reference.
