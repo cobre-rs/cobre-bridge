@@ -148,25 +148,6 @@ def build_metadata(
     }
 
 
-def _write_accepts_inflow_lag_depth() -> bool:
-    """``True`` when the installed ``cobre.write_policy_checkpoint`` accepts an
-    explicit ``inflow_lag_depth`` argument.
-
-    The writer-side canonical lag-slot reservation this fix relies on landed in
-    a specific cobre release; feature-detecting it keeps the bridge a no-op on an
-    older cobre (which would otherwise write the boundary with no lag slots and
-    silently drop the inflow-lag coupling)."""
-    import inspect
-
-    import cobre
-
-    try:
-        params = inspect.signature(cobre.write_policy_checkpoint).parameters
-    except (TypeError, ValueError):  # pragma: no cover - unusual binding shape
-        return False
-    return "inflow_lag_depth" in params
-
-
 def write_boundary_checkpoint(
     boundary_dir: Path,
     stage_cuts_payload: Mapping[str, Any],
@@ -177,17 +158,17 @@ def write_boundary_checkpoint(
     """Write `stage_cuts_payload` + `metadata` to `boundary_dir` via cobre.
 
     Calls :func:`ensure_writer_binding` first (the environment gate), then
-    `cobre.write_policy_checkpoint(boundary_dir, [stage_cuts_payload],
-    metadata)` with `stage_bases`/`stage_states` left at their defaults — a
-    raw-authored checkpoint carries neither, so `boundary_dir/basis/` is
-    written empty and no `states/` directory is created.
+    `cobre.write_policy_checkpoint(boundary_dir, [stage_cuts_payload], metadata,
+    inflow_lag_depth=inflow_lag_depth)` with `stage_bases`/`stage_states` left at
+    their defaults — a raw-authored checkpoint carries neither, so
+    `boundary_dir/basis/` is written empty and no `states/` directory is created.
 
-    ``inflow_lag_depth`` (when ``>= 1``) is forwarded so cobre reserves that many
-    canonical ``HydroInflowLag`` slots and places the cuts'
-    ``inflow_lag_coefficients`` — the boundary then self-describes its lag depth.
-    It is forwarded only when the installed cobre exposes the argument
-    (:func:`_write_accepts_inflow_lag_depth`); on an older cobre the depth and the
-    keyed coefficients are ignored (the boundary carries no lag slots, as today).
+    ``inflow_lag_depth`` (when ``>= 1``) has cobre reserve that many canonical
+    ``HydroInflowLag`` slots and place the cuts' ``inflow_lag_coefficients`` — the
+    boundary then self-describes its lag depth. ``0`` (the default, and the
+    storage-only case) reserves no slots, leaving the checkpoint byte-identical to
+    a no-lag boundary. The reservation is a cobre-side feature the pin and
+    :data:`~cobre_bridge.cli.MIN_COBRE_VERSION` floor guarantee is present.
 
     Raises
     ------
@@ -198,12 +179,9 @@ def write_boundary_checkpoint(
     ensure_writer_binding()
     import cobre
 
-    if inflow_lag_depth >= 1 and _write_accepts_inflow_lag_depth():
-        cobre.write_policy_checkpoint(
-            boundary_dir,
-            [stage_cuts_payload],
-            metadata,
-            inflow_lag_depth=inflow_lag_depth,
-        )
-    else:
-        cobre.write_policy_checkpoint(boundary_dir, [stage_cuts_payload], metadata)
+    cobre.write_policy_checkpoint(
+        boundary_dir,
+        [stage_cuts_payload],
+        metadata,
+        inflow_lag_depth=inflow_lag_depth,
+    )
