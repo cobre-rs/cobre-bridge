@@ -34,10 +34,10 @@ constraints, and evaporation sections).
 
 See [docs/cli.md](docs/cli.md) for the full per-command reference.
 
-> **Cobre version.** This release targets **cobre 0.14.2**: converted cases use
-> cobre 0.14's input contract, and the emitted policy relies on 0.14.2's solver
-> fixes, so `convert --validate` requires `cobre-python >= 0.14.2` (an older one
-> is skipped gracefully rather than failing).
+> **Cobre version.** This release targets **cobre 0.14.3**: converted cases use
+> cobre 0.14's input contract, and the emitted policy relies on 0.14.3's boundary
+> inflow-lag slot reservation, so `convert --validate` requires
+> `cobre-python >= 0.14.3` (an older one is skipped gracefully rather than failing).
 
 ## Configuration
 

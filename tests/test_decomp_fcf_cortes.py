@@ -29,6 +29,7 @@ from cobre_bridge.decomp.fcf.cortes import (
     _read_trailer,
     read_cortes,
     read_cortesh,
+    required_inflow_lag_depth,
     summarize_cut_families,
 )
 
@@ -652,3 +653,36 @@ def test_summarize_families_counts_plant_once_across_records() -> None:
     assert summary.gnl_nonzero_slots == 1
     assert summary.rhs_min == 10.0
     assert summary.rhs_max == 20.0
+
+
+def _summary_with_lag_depths(lag_nonzero_by_depth: tuple[int, ...]) -> CutFamilySummary:
+    """A ``CutFamilySummary`` whose only varying field is the lag-depth census."""
+    return CutFamilySummary(
+        n_active_cuts=1,
+        storage_nonzero_plants=0,
+        lag_nonzero_by_depth=lag_nonzero_by_depth,
+        gnl_nonzero_slots=0,
+        rhs_min=0.0,
+        rhs_max=0.0,
+    )
+
+
+def test_required_inflow_lag_depth_returns_deepest_nonzero_depth() -> None:
+    # Nonzero at calendar-month depths 1 and 3 (0-based indices 0 and 2): the
+    # deepest referenced depth is 3, so 3 lag slots must be reserved.
+    summary = _summary_with_lag_depths((2, 0, 1) + (0,) * 9)
+
+    assert required_inflow_lag_depth(summary) == 3
+
+
+def test_required_inflow_lag_depth_full_annual_depth() -> None:
+    summary = _summary_with_lag_depths((1,) * 12)
+
+    assert required_inflow_lag_depth(summary) == 12
+
+
+def test_required_inflow_lag_depth_zero_when_no_lag_terms() -> None:
+    # No cut carries a lag coefficient: no slots to reserve.
+    summary = _summary_with_lag_depths((0,) * 12)
+
+    assert required_inflow_lag_depth(summary) == 0

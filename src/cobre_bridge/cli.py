@@ -83,13 +83,15 @@ if TYPE_CHECKING:
 #:   3. the NCS availability column is now ``availability_factor`` only (cobre's
 #:      clean break dropped the legacy ``value`` alias).
 #:
-#: 0.14.2 keeps that same 0.14 input contract (a case converted here still loads
-#: on 0.14.1) but is a solver bug-fix release the emitted policy now depends on
-#: for correct results — the CVaR gap rule and the loaded terminal boundary FCF
-#: converge/price correctly only against 0.14.2's fixes — so the bridge requires
-#: it. Keep the ``cobre-python`` pin in ``pyproject.toml`` in lockstep with this
-#: constant on any future bump.
-MIN_COBRE_VERSION = "0.14.2"
+#: 0.14.3 keeps that same 0.14 input contract (a case converted here still loads
+#: on 0.14.1) but the emitted terminal boundary policy now depends on it: 0.14.3
+#: is the first release whose ``write_policy_checkpoint`` reserves the canonical
+#: inflow-lag state slots, so a boundary carrying inflow-lag gradient terms is
+#: written with those slots present. On an older cobre those slots are absent and
+#: the lag coupling is silently dropped (0.14.3 also carries 0.14.2's solver
+#: bug-fixes the CVaR gap rule and loaded FCF rely on). Keep the ``cobre-python``
+#: pin in ``pyproject.toml`` in lockstep with this constant on any future bump.
+MIN_COBRE_VERSION = "0.14.3"
 
 
 def _installed_cobre_python_version() -> str | None:

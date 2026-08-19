@@ -72,6 +72,15 @@ def build_stage_cuts_payload(
                 "intercept": mapped.intercept,
                 "coefficients": list(mapped.coefficients),
                 "is_active": mapped.is_active,
+                # Inflow-lag gradient terms keyed by hydro (depth 1..N), placed by
+                # cobre's write_policy_checkpoint into the canonical HydroInflowLag
+                # slots it reserves. Empty (the common case: the manifest already
+                # carried the lag slots, or the boundary prices no lag) — an empty
+                # map leaves the written checkpoint byte-identical.
+                "inflow_lag_coefficients": {
+                    hydro_id: list(coeffs)
+                    for hydro_id, coeffs in mapped.inflow_lag_coefficients.items()
+                },
             }
         )
         if mapped.is_active:
@@ -143,14 +152,23 @@ def write_boundary_checkpoint(
     boundary_dir: Path,
     stage_cuts_payload: Mapping[str, Any],
     metadata: Mapping[str, Any],
+    *,
+    inflow_lag_depth: int = 0,
 ) -> None:
     """Write `stage_cuts_payload` + `metadata` to `boundary_dir` via cobre.
 
     Calls :func:`ensure_writer_binding` first (the environment gate), then
-    `cobre.write_policy_checkpoint(boundary_dir, [stage_cuts_payload],
-    metadata)` with `stage_bases`/`stage_states` left at their defaults — a
-    raw-authored checkpoint carries neither, so `boundary_dir/basis/` is
-    written empty and no `states/` directory is created.
+    `cobre.write_policy_checkpoint(boundary_dir, [stage_cuts_payload], metadata,
+    inflow_lag_depth=inflow_lag_depth)` with `stage_bases`/`stage_states` left at
+    their defaults — a raw-authored checkpoint carries neither, so
+    `boundary_dir/basis/` is written empty and no `states/` directory is created.
+
+    ``inflow_lag_depth`` (when ``>= 1``) has cobre reserve that many canonical
+    ``HydroInflowLag`` slots and place the cuts' ``inflow_lag_coefficients`` — the
+    boundary then self-describes its lag depth. ``0`` (the default, and the
+    storage-only case) reserves no slots, leaving the checkpoint byte-identical to
+    a no-lag boundary. The reservation is a cobre-side feature the pin and
+    :data:`~cobre_bridge.cli.MIN_COBRE_VERSION` floor guarantee is present.
 
     Raises
     ------
@@ -161,4 +179,9 @@ def write_boundary_checkpoint(
     ensure_writer_binding()
     import cobre
 
-    cobre.write_policy_checkpoint(boundary_dir, [stage_cuts_payload], metadata)
+    cobre.write_policy_checkpoint(
+        boundary_dir,
+        [stage_cuts_payload],
+        metadata,
+        inflow_lag_depth=inflow_lag_depth,
+    )
