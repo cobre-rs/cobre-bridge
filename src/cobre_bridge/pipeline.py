@@ -304,7 +304,6 @@ def convert_newave_case(
     finally:
         pkg_logger.removeHandler(collector)
     report.diagnostics = _finalize_diagnostics(collected, collector.messages)
-    # Backward-compatible flat WARNING strings derived from the diagnostics.
     report.warnings = [
         d.summary for d in report.diagnostics if d.severity is dx.Severity.WARNING
     ]
@@ -445,9 +444,6 @@ def _convert_newave_case_impl(
         case, id_map
     )
 
-    # Generic constraints (VminOP, electric, AGRINT) share one ID space; the
-    # allocator hands each converter the next free start ID so the pipeline no
-    # longer threads `start_id = vminop_count + electric_count` by hand.
     constraint_ids = _ConstraintIdAllocator()
 
     step("Converting constraints")
@@ -662,7 +658,6 @@ def _convert_newave_case_impl(
             hydro_penalty_path = constraints_dir / "penalty_overrides_hydro.parquet"
             _write_parquet(hydro_penalty_table, hydro_penalty_path)
 
-    # Merge VminOP and electric constraints into a single output.
     all_constraints: list[dict] = []
     bounds_tables: list[pa.Table] = []
 

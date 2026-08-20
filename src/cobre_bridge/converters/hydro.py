@@ -568,9 +568,7 @@ def _read_penalid(case: NewaveCase) -> dict[int, dict[str, float]]:
             continue
 
         cost = float(valor)
-        if ree_code not in result:
-            result[ree_code] = {}
-        result[ree_code][cobre_field] = cost
+        result.setdefault(ree_code, {})[cobre_field] = cost
 
     return result
 
@@ -1075,7 +1073,6 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # value unchanged.
     turbined_envelope = _per_stage_turbined_envelope(case, id_map)
 
-    # Collect study plant codes for temporal override extraction.
     existing = case.active_hydros
 
     # Per-stage (year, month) closure over the study horizon, built once and
