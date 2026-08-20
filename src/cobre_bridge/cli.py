@@ -314,6 +314,7 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
     """
     _resolve_compare_settings(args)
 
+    from cobre_bridge import diagnostics as dx
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.results import compare_results
@@ -332,30 +333,34 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
     # this compare needs) and CobreReadError (a RuntimeError; a malformed
     # output file) are disjoint hierarchies — both must stay in the ``except``,
     # or the dropped one crashes with a bare traceback instead of exit 2.
-    try:
-        with spinner(
-            "Comparing results…",
-            verbose=args.verbose > 0,
-            quiet=args.quiet,
-            no_color=args.no_color,
-        ):
-            dataset = compare_results(
-                case=case,
-                id_map=id_map,
-                alignment=alignment,
-                cobre_output_dir=cobre_output_dir,
-                tolerance=tolerance,
+    with dx.collect() as compare_diagnostics:
+        try:
+            with spinner(
+                "Comparing results…",
+                verbose=args.verbose > 0,
+                quiet=args.quiet,
+                no_color=args.no_color,
+            ):
+                dataset = compare_results(
+                    case=case,
+                    id_map=id_map,
+                    alignment=alignment,
+                    cobre_output_dir=cobre_output_dir,
+                    tolerance=tolerance,
+                )
+        except (CobreReadError, CobrePartitionMissingError) as exc:
+            print_status(
+                f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
             )
-    except (CobreReadError, CobrePartitionMissingError) as exc:
-        print_status(
-            f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
-        )
-        raise typer.Exit(code=2)
+            raise typer.Exit(code=2)
 
     # Print text summary (sourced from the dataset). Under --json the Rich tables
     # are suppressed in favour of a single machine-readable verdict on stdout.
     if not args.json_output:
         print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
+        render_diagnostics(
+            compare_diagnostics, console=get_console(stderr=True), quiet=args.quiet
+        )
 
     formats, out_dir = _export_compare_artifacts(
         dataset,
@@ -393,7 +398,12 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
         verdict = build_compare_verdict(dataset)
         status = "ok" if verdict.all_within_tol else "mismatch"
         _emit_convert_json(
-            build_verdict("compare newave", status, compare_summary(verdict))
+            build_verdict(
+                "compare newave",
+                status,
+                compare_summary(verdict),
+                compare_diagnostics,
+            )
         )
 
 
@@ -1698,6 +1708,7 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
     the one failure (exit 2) — reporting a zero-vs-zero match on data we could
     not read would be worse than stopping.
     """
+    from cobre_bridge import diagnostics as dx
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.decomp_results import build_decomp_dataset
     from cobre_bridge.comparators.verdict import build_compare_verdict
@@ -1708,29 +1719,33 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
     # raw, possibly-``None`` CLI value — mirrors ``_run_newave_comparison``.
     _resolve_compare_settings(args)
 
-    try:
-        with spinner(
-            "Comparing results…",
-            verbose=args.verbose > 0,
-            quiet=args.quiet,
-            no_color=args.no_color,
-        ):
-            dataset = build_decomp_dataset(
-                args.decomp_dir, args.cobre_output_dir, tolerance=args.tolerance
+    with dx.collect() as compare_diagnostics:
+        try:
+            with spinner(
+                "Comparing results…",
+                verbose=args.verbose > 0,
+                quiet=args.quiet,
+                no_color=args.no_color,
+            ):
+                dataset = build_decomp_dataset(
+                    args.decomp_dir, args.cobre_output_dir, tolerance=args.tolerance
+                )
+        except (
+            CobreReadError,
+            CobrePartitionMissingError,
+            FileNotFoundError,
+            ValueError,
+        ) as exc:
+            print_status(
+                f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
             )
-    except (
-        CobreReadError,
-        CobrePartitionMissingError,
-        FileNotFoundError,
-        ValueError,
-    ) as exc:
-        print_status(
-            f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
-        )
-        raise typer.Exit(code=2) from exc
+            raise typer.Exit(code=2) from exc
 
     if not args.json_output:
         render_compare_verdict(build_compare_verdict(dataset))
+        render_diagnostics(
+            compare_diagnostics, console=get_console(stderr=True), quiet=args.quiet
+        )
 
     formats, out_dir = _export_compare_artifacts(
         dataset,
@@ -1770,7 +1785,9 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
             status = "no-comparable-rows"
         else:
             status = "ok" if summary["all_within_tol"] else "mismatch"
-        _emit_convert_json(build_verdict("compare decomp", status, summary))
+        _emit_convert_json(
+            build_verdict("compare decomp", status, summary, compare_diagnostics)
+        )
 
 
 @compare_app.command("decomp")

@@ -7,8 +7,10 @@ alignment, computation, comparison, and report generation.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -26,6 +28,10 @@ from cobre_bridge.comparators.results import (
     build_results_summary,
 )
 from tests.conftest import make_case
+
+if TYPE_CHECKING:
+    from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.diagnostics import Diagnostic
 
 # -------------------------------------------------------------------
 # Bounds comparison unit tests
@@ -605,6 +611,169 @@ class TestCompareVerdictExitCodes:
 
 
 # -------------------------------------------------------------------
+# Compare diagnostics wiring (dx.collect() sink -> render + verdict)
+# -------------------------------------------------------------------
+
+
+def _fake_results_dataset() -> ComparisonDataset:
+    """One-row dataset built through the shared dataset-assembly kernel."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+
+    results = [
+        ResultComparison(
+            entity_type="hydro",
+            entity_name="ITAIPU",
+            newave_code=10,
+            cobre_id=0,
+            stage=0,
+            variable="generation_mw",
+            newave_value=100.0,
+            cobre_value=110.0,
+            abs_diff=10.0,
+            rel_diff=0.1,
+        ),
+    ]
+    return build_results_dataset(results, PercentileData(), 1e-2)
+
+
+def _fake_decomp_dataset() -> ComparisonDataset:
+    """Adds the ``metadata["unmapped"]`` key ``decomp_dataset_summary`` reads."""
+    dataset = _fake_results_dataset()
+    dataset.metadata["unmapped"] = {"hydro": [], "thermal": [], "bus": []}
+    return dataset
+
+
+def _dropped_plant_diagnostic() -> Diagnostic:
+    from cobre_bridge.diagnostics import Diagnostic, Severity
+
+    return Diagnostic(
+        code="test-dropped-plant",
+        severity=Severity.WARNING,
+        category="Test",
+        title="Dropped test plant",
+        summary="one plant was dropped for diagnostics-wiring coverage",
+    )
+
+
+class TestCompareDiagnosticsWiring:
+    """A ``Severity.WARNING`` emit() during dataset building must reach both
+    the ``--json`` envelope's ``diagnostics`` array and the non-``--json``
+    stderr render, on both compare tracks."""
+
+    @staticmethod
+    def _invoke(argv: list[str]) -> Any:
+        from typer.testing import CliRunner
+
+        from cobre_bridge.cli import app
+
+        return CliRunner().invoke(app, argv)
+
+    def test_compare_newave_json_diagnostics_array_is_non_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge import diagnostics as dx
+
+        TestCompareVerdictExitCodes._patch_compare_context(monkeypatch)
+        diagnostic = _dropped_plant_diagnostic()
+
+        def _compare_results_with_diagnostic(**_kwargs: object) -> ComparisonDataset:
+            dx.emit(diagnostic)
+            return _fake_results_dataset()
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            _compare_results_with_diagnostic,
+        )
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        result = self._invoke(
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["diagnostics"]
+        assert payload["diagnostics"][0]["code"] == diagnostic.code
+
+    def test_compare_decomp_json_diagnostics_array_is_non_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge import diagnostics as dx
+
+        diagnostic = _dropped_plant_diagnostic()
+
+        def _build_decomp_dataset_with_diagnostic(
+            *_args: object, **_kwargs: object
+        ) -> ComparisonDataset:
+            dx.emit(diagnostic)
+            return _fake_decomp_dataset()
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            _build_decomp_dataset_with_diagnostic,
+        )
+
+        result = self._invoke(
+            ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["diagnostics"]
+        assert payload["diagnostics"][0]["code"] == diagnostic.code
+
+    def test_compare_newave_non_json_renders_diagnostic_title_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge import diagnostics as dx
+
+        TestCompareVerdictExitCodes._patch_compare_context(monkeypatch)
+        diagnostic = _dropped_plant_diagnostic()
+
+        def _compare_results_with_diagnostic(**_kwargs: object) -> ComparisonDataset:
+            dx.emit(diagnostic)
+            return _fake_results_dataset()
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            _compare_results_with_diagnostic,
+        )
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        result = self._invoke(
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)]
+        )
+
+        assert result.exit_code == 0
+        assert diagnostic.title in result.stderr
+
+    def test_compare_decomp_non_json_renders_diagnostic_title_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge import diagnostics as dx
+
+        diagnostic = _dropped_plant_diagnostic()
+
+        def _build_decomp_dataset_with_diagnostic(
+            *_args: object, **_kwargs: object
+        ) -> ComparisonDataset:
+            dx.emit(diagnostic)
+            return _fake_decomp_dataset()
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            _build_decomp_dataset_with_diagnostic,
+        )
+
+        result = self._invoke(["compare", "decomp", str(tmp_path), str(tmp_path)])
+
+        assert result.exit_code == 0
+        assert diagnostic.title in result.stderr
+
+
+# -------------------------------------------------------------------
 # HTML report tests
 # -------------------------------------------------------------------
 
@@ -1159,7 +1328,6 @@ class TestComparisonReportIntegration:
     def _make_results() -> list[ResultComparison]:
         """Build a representative set of comparison results across entity types."""
         return [
-            # Hydro entries — two stages
             ResultComparison(
                 entity_type="hydro",
                 entity_name="PLANT_A",
@@ -1184,7 +1352,6 @@ class TestComparisonReportIntegration:
                 abs_diff=10.0,
                 rel_diff=0.002,
             ),
-            # Thermal entry
             ResultComparison(
                 entity_type="thermal",
                 entity_name="GAS_A",
@@ -1197,7 +1364,6 @@ class TestComparisonReportIntegration:
                 abs_diff=2.0,
                 rel_diff=0.007,
             ),
-            # Bus entry
             ResultComparison(
                 entity_type="bus",
                 entity_name="SE",
@@ -1210,7 +1376,6 @@ class TestComparisonReportIntegration:
                 abs_diff=2.0,
                 rel_diff=0.013,
             ),
-            # Convergence entry
             ResultComparison(
                 entity_type="convergence",
                 entity_name="iteration_1",
