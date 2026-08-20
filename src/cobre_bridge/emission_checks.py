@@ -11,8 +11,8 @@ bridge-side context (entity, stage, column, declared vs. offending value) in
 milliseconds, instead of at ``cobre validate``/``cobre run`` load time.
 
 This is a **courtesy mirror**, not a substitute: cobre remains the authority.
-Each rule is scoped to match cobre's own implementation exactly (see
-``~/git/cobre/crates/cobre-io/src/validation/semantic/``):
+Each rule is scoped to match cobre's own implementation exactly (cobre's
+semantic validation layer):
 
 - Rule 43 — :func:`check_hydro_bounds_no_raising`
   (``block_bounds.rs::check_bound_raises_declared_capacity``).
@@ -57,8 +57,7 @@ _LOG = logging.getLogger(__name__)
 
 _CATEGORY = "Emission self-checks"
 
-#: Mirrors cobre-io's
-#: ``crates/cobre-io/src/validation/semantic/mod.rs::ENVELOPE_TOLERANCE``. A
+#: Mirrors cobre-io's semantic-validation ``ENVELOPE_TOLERANCE``. A
 #: relative tolerance, not an absolute one — an absolute epsilon would false-fire
 #: on a plant declared at, say, 1e6 m^3/s and float-noise-pass a plant near zero.
 _ENVELOPE_TOLERANCE = 1e-9
@@ -97,8 +96,7 @@ class BoundFamily:
     when set, both row-level checks fold into the **key** alongside
     *entity_column*/``stage_id``/``block_id`` instead of treating it as a
     value column — mirroring cobre rule 36's own widened key ``(hydro_id,
-    hydro_unit_group_id, stage_id, block_id, column)``
-    (``crates/cobre-io/src/validation/semantic/block_bounds.rs:338``).
+    hydro_unit_group_id, stage_id, block_id, column)``.
     ``None`` (the default) reproduces the three pre-existing families'
     unchanged, single-entity-key behaviour.
     """
@@ -643,8 +641,8 @@ def check_bound_row_uniqueness(families: Sequence[BoundFamily]) -> None:
     than being treated as a value column — two groups of the same plant
     setting the same column at the same ``(stage, block)`` are distinct
     keys, not a collision, mirroring cobre rule 36's own widened key
-    ``(hydro_id, hydro_unit_group_id, stage_id, block_id, column)``
-    (``block_bounds.rs:338``). A family with ``group_column=None`` (the
+    ``(hydro_id, hydro_unit_group_id, stage_id, block_id, column)``.
+    A family with ``group_column=None`` (the
     three pre-existing families) is unaffected: the finding's rendered
     ``Group ID`` column reflects whether any *actual finding* came from a
     group-scoped family, not merely whether one was present in *families* —

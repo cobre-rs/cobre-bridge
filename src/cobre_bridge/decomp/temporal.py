@@ -1,9 +1,8 @@
 """Operative-calendar temporal conversion for DECOMP-like decks.
 
 Builds the stage calendar (dates, blocks, seasons) from the deck's start
-date (``DT``) and per-stage block durations (``DP``), per
-``plans/decomp-converter-core.md`` §1.1 and the operative-calendar rules of
-``plans/decomp-round-2-revision.md`` §2.2:
+date (``DT``) and per-stage block durations (``DP``). The operative-calendar
+rules:
 
 - the study starts on a Saturday; weekly stages are exactly 168 h and break
   on Saturdays; the single final stage aggregates the second operative

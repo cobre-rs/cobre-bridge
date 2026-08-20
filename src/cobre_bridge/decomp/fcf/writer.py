@@ -1,9 +1,9 @@
 """Assemble and write the source model's boundary-cut checkpoint.
 
-The mapper (``fcf/mapper.py``, ticket-005) produces a :class:`MappingResult`
+The mapper (``fcf/mapper.py``) produces a :class:`MappingResult`
 of :class:`~cobre_bridge.decomp.fcf.mapper.MappedCut`, each already aligned
-to the terminal manifest's state-vector layout (``fcf/bootstrap.py``,
-ticket-004). This module assembles that pair into the plain-dict payload and
+to the terminal manifest's state-vector layout (``fcf/bootstrap.py``).
+This module assembles that pair into the plain-dict payload and
 metadata shapes ``cobre.write_policy_checkpoint`` expects, then calls it to
 produce ``boundary/{metadata.json, cuts/<pool>.bin, basis/}`` — a raw,
 one-pool checkpoint (cobre 0.14 keys the cut file by pool id, not the old
@@ -12,7 +12,7 @@ loads.
 
 ``cost_scale_factor`` is the single most dangerous field in ``metadata``: if
 absent (``None``), cobre treats the checkpoint as legacy and silently scales
-every value by 10⁶ (design §2.1). :func:`build_metadata` therefore refuses to
+every value by 10⁶. :func:`build_metadata` therefore refuses to
 build a metadata dict without it.
 """
 
@@ -118,7 +118,7 @@ def build_metadata(
     field — it is per-pool, on each `stage_cuts` payload
     (:func:`build_stage_cuts_payload`). `created_at` is accepted as a parameter
     rather than derived internally (this module never calls `datetime.now()`) —
-    the caller (ticket-009's orchestration) supplies an ISO 8601 timestamp.
+    the caller supplies an ISO 8601 timestamp.
 
     Raises
     ------

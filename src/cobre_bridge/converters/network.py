@@ -46,8 +46,7 @@ _NCS_FACTORS_SCHEMA_URL = (
 # "Penalidades
 # (Ex.: Penalid.dat)" and the internal-default tables on pages 87–88.
 #
-# Time-aspect summary (re-derived from cobre/crates/cobre-sddp/src/lp_builder/
-# matrix.rs in current HEAD):
+# Time-aspect summary (re-derived from cobre's SDDP LP builder, matrix.rs):
 #
 # Every cobre penalty coefficient in penalties.json is multiplied by some
 # hours quantity before entering the LP objective. The variable it sits on
@@ -77,7 +76,7 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   Affected: hydro.water_withdrawal_violation_(pos|neg)_cost,
 #   hydro.evaporation_violation_(pos|neg)_cost,
 # hydro.inflow_nonnegativity_cost. Cobre's docstring on evaporation_violation_cost says
-# "$/mm" but the actual LP column (matrix.rs:346-347) reads f_evap_plus/minus as flow
+# "$/mm" but the actual LP column (matrix.rs) reads f_evap_plus/minus as flow
 # rates in m³/s — same unit as withdrawal. The "_m3s" suffix in the simulation output
 # `evaporation_violation_pos_m3s` confirms this. → Conversion: **× ρ_max_acum**
 # (`MAX_PRODTACUM_SIN`) for DESVIO and evaporation (per source-model manual p.87); **×
@@ -1033,7 +1032,7 @@ def convert_line_bounds(
     per-block-factor JSON document, now deleted — and folds each per-block
     multiplicative factor into an absolute-MW override row, ``direct_mw =
     base_direct_mw × direct_factor`` (and the reverse equivalent), per cobre
-    decision 10 (epic 02 §7.2). A block row is emitted only where it differs
+    decision 10. A block row is emitted only where it differs
     from the base (i.e. the factor is not 1.0 for both directions); a
     line-stage whose blocks are all uniform gets no block rows, since the base
     row alone is equivalent.
@@ -1134,7 +1133,7 @@ def convert_line_bounds(
     }
 
     # ------------------------------------------------------------------
-    # Per-block factors (cobre decision 10, epic 02 §7.2): fold
+    # Per-block factors (cobre decision 10): fold
     # ``patamar.dat::intercambio_patamares`` into per-block direct/reverse
     # multipliers, keyed the same way as the base lookup above so block rows
     # can be derived as base × factor. This is the factor lookup that used to

@@ -94,7 +94,7 @@ class DecompFiles:
     dadgnl: Path | None
     renovaveis: Path | None
     polinjus: Path | None
-    #: The deck's LIBs-era electrical-constraint file (ticket-013), resolved
+    #: The deck's LIBs-era electrical-constraint file, resolved
     #: via :func:`constraint_registers.resolve_libs_electrical_path`; ``None``
     #: when the deck carries none. Defaults to ``None`` so every pre-existing
     #: ``DecompFiles(...)`` call site keeps constructing without it.
@@ -102,14 +102,14 @@ class DecompFiles:
     #: The deck's boundary-FCF header file (``cortesh.dat``), resolved via
     #: :func:`_resolve_fc_record_path` (the deck's ``FC NEWV21`` record) or,
     #: failing that, the ``cortesh*`` glob idiom; ``None`` when the deck
-    #: carries no boundary FCF (ticket-007). Defaults to ``None`` for the
+    #: carries no boundary FCF. Defaults to ``None`` for the
     #: same back-compat reason as ``libs_restricao_eletrica`` above.
     cortesh: Path | None = None
     #: The deck's boundary-FCF cut-record file: a single-stage partition
     #: export (``cortes-<estagio>.dat``, preferred) or the consolidated
     #: archive (``cortes.dat``), resolved via :func:`_resolve_fc_record_path`
     #: (the deck's ``FC NEWCUT`` record) or the glob idiom; ``None`` when
-    #: absent (ticket-007).
+    #: absent.
     cortes: Path | None = None
 
 
@@ -205,7 +205,7 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     renovaveis = find("renovaveis", required=False)
     polinjus = find("polinjus", required=False)
     assert dadger is not None and vazoes is not None and hidr is not None
-    # cortesh/cortes (ticket-007): prefer the deck's own FC record over the
+    # cortesh/cortes: prefer the deck's own FC record over the
     # glob idiom (its caminho may point outside `src`, e.g. `../../cortesh.dat`,
     # which the glob fallback below could never find); the `cortes-` prefix is
     # checked before the broader `cortes` prefix so a single-stage partition
@@ -293,7 +293,7 @@ def _topology_relink_diagnostic(
     effective: cadastro_conv.EffectiveCadastro,
     id_map: DecompIdMap,
 ) -> dx.Diagnostic | None:
-    """The ``cadastro-topology-relinked`` INFO diagnostic (ticket-014, OQ-4),
+    """The ``cadastro-topology-relinked`` INFO diagnostic,
     or ``None`` when no operated plant's effective downstream link/inflow
     gauge differs from the base registry (the byte-identical no-override
     case).
@@ -304,8 +304,8 @@ def _topology_relink_diagnostic(
     ``AC NUMJUS`` rows all take this form (34/43 -> 45, 127/181 -> 129,
     117 -> 108).
 
-    As a defensive backstop — the "precise relink check" the ticket calls
-    for — also walks the incremental-inflow cascade
+    As a defensive backstop — a precise relink check — also walks the
+    incremental-inflow cascade
     (:func:`~cobre_bridge.decomp.scenarios._incremental_context`) under
     both *effective* and a base-only cadastro (same registry, no override
     maps) and compares the resolved ``parents`` maps: an ``AC NUMJUS`` on a
@@ -537,7 +537,7 @@ def _base_diversion_channels(
 def _libs_electrical_census_diagnostic(
     result: libs_electrical_emit.LibsElectricalResult,
 ) -> dx.Diagnostic:
-    """The ``decomp-libs-electrical-converted`` INFO diagnostic (ticket-013):
+    """The ``decomp-libs-electrical-converted`` INFO diagnostic:
     the authoritative per-restriction census for the deck's LIBs-era
     long-form electrical file -- how many restrictions converted to a cobre
     generic constraint, and how many were dropped, broken down by
@@ -698,14 +698,14 @@ def _convert_decomp_case_impl(
         renovaveis = Renovaveis.read(str(files.renovaveis))
 
     id_map = DecompIdMap.from_dadger(dadger)
-    # ticket-007: Itaipu's split-plant topology (ticket-006) needs a
+    # Itaipu's split-plant topology needs a
     # synthesized SE<->IV line and, only when the deck carries the data,
     # the ANDE load on the IV bus -- both driven by this single
     # Itaipu(66)-operated check, computed once and reused by both wiring
     # sites below.
     itaipu_operated = hydro_conv._ITAIPU_CODE in id_map.hydro_codes
     calendar = temporal_conv.operative_calendar_from_dadger(dadger)
-    # epic-02/epic-03 (cadastro overrides): the per-stage-effective view of
+    # Cadastro overrides: the per-stage-effective view of
     # the registry, folding in any temporal AC VOLMIN/VOLMAX/VAZMIN override —
     # read once and threaded to every consumer below (initial storage, the
     # entity reservoir envelope, the per-stage storage and minimum-outflow
@@ -734,7 +734,7 @@ def _convert_decomp_case_impl(
             ),
             logger=_LOG,
         )
-    # ticket-014 (E5, OQ-4): the topology/gauge relink is its own diagnostic
+    # The topology/gauge relink is its own diagnostic
     # (not folded into the summary above) so an automated consumer can key
     # on "cadastro-topology-relinked" specifically — the resolved
     # downstream/gauge links, not just an override count.
@@ -855,8 +855,8 @@ def _convert_decomp_case_impl(
     # is DEFERRED alongside GNL and the boundary FCF: detected for the deferral
     # warning below, but not emitted. Restore by wiring convert_travel_time back
     # into hydros.json + initial_conditions.past_defluences once the cobre bug
-    # is fixed. Removal condition tracked in
-    # ~/git/cobre/plans/conversion-found-improvements.md (C-travel-time).
+    # is fixed. Removal condition tracked in the cobre repository's
+    # conversion-found-improvements registry (C-travel-time).
     has_travel_time = bool(travel_time_conv.read_travel_times(dadger))
     # Built here but written below (after GNL): an anticipated GNL fleet extends
     # it with the left/right temporal-boundary arrays, and those need the thermal
@@ -881,8 +881,8 @@ def _convert_decomp_case_impl(
         dadger, id_map, calendar, start_date
     )
     if itaipu_operated:
-        # When Itaipu is operated (ticket-006 relocates its 50 Hz group to the
-        # IV bus), the IV bus needs a connection to SE. append_iv_se_line
+        # When Itaipu is operated (the split-plant topology relocates its 50 Hz
+        # group to the IV bus), the IV bus needs a connection to SE. append_iv_se_line
         # synthesizes an SE<->IV line only when the deck's own IA register does
         # NOT already wire IV<->SE; when it does (as on most Itaipu decks), the
         # helper reuses that line -- its real operational capacity -- and adding
@@ -980,7 +980,7 @@ def _convert_decomp_case_impl(
         scenarios / "external_inflow_scenarios.parquet",
         scenarios_conv.convert_external_inflows(vazoes, effective, id_map, calendar),
     )
-    # ticket-007: the IV bus's carga_ande load is gated on the dadger RI
+    # The IV bus's carga_ande load is gated on the dadger RI
     # register being present -- independent of (and additional to) the
     # unconditional Itaipu-operated line above. An Itaipu deck with no RI
     # register (read_carga_ande returns {}) converts gracefully: the line
@@ -1045,8 +1045,7 @@ def _convert_decomp_case_impl(
     )
 
     constraints = dst / "constraints"
-    # epic-07 (special-constraints pipeline wiring, ticket-023): every
-    # per-entity bound — the legacy RQ/UH minimum-outflow, the per-stage
+    # Every per-entity bound — the legacy RQ/UH minimum-outflow, the per-stage
     # storage envelope, the CT thermal generation bounds, and the RE/RHQ/RHV
     # single-term special-constraint bounds — is collected as
     # bounds_accumulator.BoundContribution objects and resolved through
@@ -1054,15 +1053,15 @@ def _convert_decomp_case_impl(
     # constraint colliding with a legacy bound on the same (entity, stage,
     # block) cell correctly intersects instead of producing the
     # two-rows-same-column parquet cobre rejects. read_constraints/
-    # pumping_station_id_map are read once here and reused by ticket-023b
-    # (generic constraints).
+    # pumping_station_id_map are read once here and reused by the generic
+    # constraints emitted below.
     step("Resolving bounds")
     census = constraint_registers.read_constraints(dadger)
     pumping_ids = network_conv.pumping_station_id_map(dadger)
     thermal_generation_contribs, thermal_cost_table = (
         thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
     )
-    # ticket-023c/boundary-review-fix-1: the RE `FU` single-hydro-generation
+    # The RE `FU` single-hydro-generation
     # and the RHQ `QTUR`/turbined bound producers each clamp their emitted
     # upper to the plant's own declared max_generation_mw/max_turbined_m3s,
     # so a looser source-declared ceiling on either axis (a real
@@ -1181,7 +1180,7 @@ def _convert_decomp_case_impl(
     pumping_bounds_table = bound_tables.pumping.sort_by(
         [("pumping_station_id", "ascending"), *_bound_sort_keys]
     )
-    # ticket-026/027: B8 per-group per-stage availability (installed × MP ×
+    # Per-group per-stage availability (installed × MP ×
     # FD, capped by the ρ_eq·q_max hydraulic ceiling) for every plant,
     # single-group and Itaipu's own two per-frequency groups (code 66) alike.
     # Sparse by construction — a value only lands here where it lowers that
@@ -1192,7 +1191,7 @@ def _convert_decomp_case_impl(
     availability_values = hydro_conv.convert_hydro_group_availability(
         dadger, hidr, id_map, calendar, effective
     )
-    # ticket-007 companion: Itaipu's RI per-frequency must-run floors
+    # Itaipu's RI per-frequency must-run floors
     # (geracao_minima_50/60_hz) overlay the same per-group table as the
     # availability max caps. The 50 Hz floor binds in DECOMP (its 50 Hz half
     # sits exactly at it), so without it the converted case under-runs Itaipu's
@@ -1213,7 +1212,7 @@ def _convert_decomp_case_impl(
         availability_values, calendar
     )
 
-    # epic-01 (contracts): the CI/CE energy-contract model, read once and
+    # The CI/CE energy-contract model, read once and
     # shared by both emitters. Real decks carry no usable contract data
     # (rv0's single placeholder is skipped by D6, rv3 has none), so the
     # visible effect on a real conversion is: no contract files written, no
@@ -1291,9 +1290,8 @@ def _convert_decomp_case_impl(
     if contract_bounds_table.num_rows:
         _write_parquet(constraints / "contract_bounds.parquet", contract_bounds_table)
 
-    # epic-07 (special-constraints pipeline wiring, ticket-023b): emit every
-    # RE/RHQ/RHV/RHE special constraint that did NOT lower to an entity bound
-    # (`census.to_generic`, read once by ticket-023 above) as a Cobre generic
+    # Emit every RE/RHQ/RHV/RHE special constraint that did NOT lower to an
+    # entity bound (`census.to_generic`, read once above) as a Cobre generic
     # constraint, over one shared 0-based constraint-id allocator so ids
     # never collide across emitters regardless of which family produced
     # them. The three emitters run in this fixed order (E7); `big_m`,
@@ -1308,7 +1306,7 @@ def _convert_decomp_case_impl(
         for _, row in operated_uh.iterrows()
     }
 
-    # ticket-013: read the deck's LIBs-era electrical-constraint file (the
+    # Read the deck's LIBs-era electrical-constraint file (the
     # indices.csv RESTRICAO-ELETRICA-ESPECIAL entry, resolved by
     # discover_decomp_files) exactly once here -- both the narrowed
     # detect_libs_electrical decision and the 4th generic-constraint emitter
@@ -1354,7 +1352,7 @@ def _convert_decomp_case_impl(
         generic_bound_tables.append(rhe_generics.result.bounds)
         next_generic_id += len(rhe_generics.result.constraints)
 
-    # ticket-013 (E9 wiring): the 4th generic-constraint emitter link -- every
+    # The 4th generic-constraint emitter link -- every
     # LIBs-era long-form electrical restriction that resolved
     # (`libs_electrical_model`, read once above), spliced after RHE so the
     # unconditional write block below picks it up automatically, identical in
@@ -1407,7 +1405,7 @@ def _convert_decomp_case_impl(
             pa.concat_tables(generic_bound_tables),
         )
 
-    # E5 (ticket-017/018): every `@rho_acum_h{id}` sigil a surviving RHE
+    # Every `@rho_acum_h{id}` sigil a surviving RHE
     # expression references must resolve, or cobre fails to load the case --
     # write generic_parameters.json whenever any RHE constraint survives,
     # never only when another generic family also happens to be present.
@@ -1425,10 +1423,10 @@ def _convert_decomp_case_impl(
 
     # E1: the FE/RHA/LIBs-electrical detection diagnostics each surface
     # once, through the structured sink, alongside the flat deferral warning
-    # below (ticket-024 dedups the matching clause out of that warning).
+    # below (the matching clause is deduped out of that warning).
     for detection in constraint_registers.detect_unreadable_electrical(files.dadger):
         dx.emit(detection, logger=_LOG)
-    # ticket-013: the flat presence warning is narrowed to the subset
+    # The flat presence warning is narrowed to the subset
     # `libs_electrical_model` (read once above) did NOT convert -- a
     # short-form-only (RE/RE-*, date-indexed) file, or no long-form card at
     # all despite the indices.csv entry (OQ-4). Once the long-form subset

@@ -193,7 +193,7 @@ def read_cobre_hydro_bus_generation(cobre_output_dir: Path) -> pl.LazyFrame:
     hours — weight ``generation_mw`` by hours only where a genuine power
     figure (not an energy total) is required.
 
-    Absence vs. present-but-empty (plan decision B2)
+    Absence vs. present-but-empty
     -------------------------------------------------
     Unlike every other reader in this module, this one does **not** treat a
     missing partition as "nothing to report": the compare layer switches to
@@ -794,7 +794,7 @@ def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
     instead the target lives in ``constraints/hydro_bounds.parquet`` as
     ``water_withdrawal_m3s`` (one value per hydro-stage). Comparison against the source
     model ``VRETIRUH`` therefore matches the *input* target — discrepancies beyond the
-    post-study horizon are expected (see ``hydro.py:1083`` converter note).
+    post-study horizon are expected (see ``converters.hydro.convert_water_withdrawal``).
 
     Returns columns: ``entity_id``, ``stage_id``, ``withdrawal_m3s``.
     Empty frame if the parquet is missing or lacks the column.
@@ -1374,7 +1374,7 @@ def read_cobre_bus_aggregates(
 
     # Hydro generation: the partition already carries bus_id, so it is
     # aggregated directly rather than through the map/join loop below —
-    # see AC1/AC5 in ticket-010: absence must raise, not silently drop out
+    # absence must raise, not silently drop out
     # of ``frames`` the way a ``None``-returning entity aggregation would.
     frames.append(_agg_hydro_bus_generation())
     all_vars.append("hydro_gen_mw")
@@ -1719,7 +1719,7 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     This reader's job is plant *physics* (productivity, storage, outflow/
     generation bounds) — it does **not** carry a plant-level bus id. Hydros
     no longer carry a plant-level ``bus_id`` in ``system/hydros.json`` under
-    cobre 0.13 (decision B1); the compare layer's plant->bus label is
+    cobre 0.13; the compare layer's plant->bus label is
     re-sourced from the ``simulation/hydro_bus_generation/`` partition via
     :func:`read_cobre_hydro_bus_labels` instead. Removing the key here
     (rather than leaving it ``None``) makes a stale caller expecting it
@@ -1781,15 +1781,15 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
 def read_cobre_hydro_bus_labels(cobre_output_dir: Path) -> dict[int, frozenset[int]]:
     """Derive the plant -> bus *label* map from the 0.13 hydro_bus_generation partition.
 
-    ``read_cobre_hydro_metadata`` no longer carries a plant-level ``bus_id``
-    (decision B1) — this is the correct re-source for the compare layer's
+    ``read_cobre_hydro_metadata`` no longer carries a plant-level ``bus_id`` —
+    this is the correct re-source for the compare layer's
     plant->bus label: it reads :func:`read_cobre_hydro_bus_generation` and
     collapses it to the distinct ``(hydro_id, bus_id)`` pairs.
 
     Returns ``{hydro_id: frozenset(bus_id, ...)}``. A plant with a single bus
     (every real deck today) maps to a one-element ``frozenset``; a plant
     genuinely present at more than one bus in the partition (only possible
-    once epic 08 lands multi-bus hydro support) keeps every one of its buses
+    once multi-bus hydro support lands) keeps every one of its buses
     here — callers decide how to handle that ambiguity (see
     ``cobre_bridge.comparators.analyze._bus_name_lookups``), this reader does
     not silently pick one.

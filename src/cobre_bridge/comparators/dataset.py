@@ -7,7 +7,7 @@ and a typed metadata side-table for non-tidy artifacts carried verbatim during
 the strangler migration.
 
 This is a leaf module: it must not import from any other comparator (notably
-``results.py`` or ``bounds.py``) so that later epics can wire it in without
+``results.py`` or ``bounds.py``) so that callers can wire it in without
 creating import cycles.
 """
 
@@ -35,8 +35,8 @@ class SchemaError(ValueError):
 #: Allowed values for the tidy ``source`` column.
 VALID_SOURCES: frozenset[str] = frozenset({"newave", "cobre", "p10", "p50", "p90"})
 
-#: Ordered schema of the canonical tidy/long value frame. Every later epic
-#: consumes this exact column contract.
+#: Ordered schema of the canonical tidy/long value frame. Every consumer
+#: relies on this exact column contract.
 TIDY_SCHEMA: dict[str, type[pl.DataType]] = {
     "entity_type": pl.Utf8,
     "entity_id": pl.Int64,
@@ -62,12 +62,12 @@ _FRAME_SENTINEL: str = "__frame__"
 #: provenance — they are render inputs only — so :func:`_metadata_to_json` (and
 #: thus :meth:`ComparisonDataset.to_dir`) skips every key listed here, keeping
 #: ``metadata.json`` small. This set shrinks to empty once the charts source
-#: their inputs from ``dataset.tidy`` in a future epic; at that point it (and
+#: their inputs from ``dataset.tidy``; at that point it (and
 #: the in-memory carry-over) can be deleted outright.
 RENDER_ONLY_METADATA_KEYS: frozenset[str] = frozenset(
     {
         "results",
-        # NOTE: no "pct" key — the superseded ticket-012 design that stored the
+        # NOTE: no "pct" key — a superseded design that stored the
         # whole ``PercentileData`` under a single "pct" key was replaced by the
         # individual per-field keys below (each ``PercentileData`` frame/attr is
         # drained into its own named metadata key).

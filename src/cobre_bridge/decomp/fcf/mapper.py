@@ -1,17 +1,17 @@
 """Manifest-to-manifest mapper for the source model's boundary cuts.
 
-The bootstrap stage (``fcf/bootstrap.py``, ticket-004) reads back cobre's
+The bootstrap stage (``fcf/bootstrap.py``) reads back cobre's
 terminal ``entity_manifest`` — the target case's per-slot state-vector
 layout. This module maps each of the source model's boundary cuts
-(``fcf/cortes.py``'s :class:`~cobre_bridge.decomp.fcf.cortes.BoundaryCuts`,
-ticket-002) onto that layout: storage terms join by plant code, inflow-lag
+(``fcf/cortes.py``'s :class:`~cobre_bridge.decomp.fcf.cortes.BoundaryCuts`)
+onto that layout: storage terms join by plant code, inflow-lag
 terms join 1:1 by calendar-month lag slot, and — when the caller supplies a
 :class:`GnlRingPlan` — GNL-anticipated-ring terms join each target's
 *covered* dated ring slot(s) via a chain-rule patamar sum over ``pi_gnl``
-(ticket-009; narrowed to covered post-horizon lanes only by ticket-013). A
+(narrowed to covered post-horizon lanes only). A
 source plant with no match in the target manifest is dropped (D3), never
 folded into a neighbour, and recorded in :class:`MappingResult.dropped` for
-the diagnostics layer (epic 4) to render; a GNL source/target term with no
+the diagnostics layer to render; a GNL source/target term with no
 live counterpart — including a dated ring slot whose delivery falls before
 :attr:`GnlRingPlan.post_horizon_start` (a non-covered, K=0-lead lane cobre
 will not accept a coefficient on) — is dropped the same way into
@@ -135,7 +135,7 @@ class MappedCut:
     hours-weighted collapse (see the module header). ``cut_id``, ``iteration``,
     ``forward_pass_index``, and ``is_active`` are the source
     ``StageCutRecord``'s provenance fields, carried verbatim so the
-    checkpoint writer (ticket-008) has every field it needs without
+    checkpoint writer has every field it needs without
     re-reading the source.
     """
 
@@ -163,7 +163,7 @@ class DroppedTerm:
     """A source-only plant's storage term, dropped rather than folded (D3).
 
     ``beta`` is that plant's ``pi_varm`` coefficient in the source's first
-    cut record — a representative value for the diagnostics layer (epic 4)
+    cut record — a representative value for the diagnostics layer
     to report; drop status itself is a per-plant, cut-invariant property
     (target availability does not vary cut to cut), so exactly one
     :class:`DroppedTerm` is recorded per unresolvable plant, not one per cut.
@@ -193,14 +193,14 @@ class GnlThermalTarget:
 class GnlRingPlan:
     """The resolved submercado -> GNL-thermal membership for one deck.
 
-    Built by the importer (ticket-010) from the deck's own GNL declarations;
+    Built by the importer from the deck's own GNL declarations;
     this module never derives it — see the module docstring's deck-free
-    contract. ``post_horizon_start`` (ticket-013) is the earliest post-study
+    contract. ``post_horizon_start`` is the earliest post-study
     stage start, as a ``YYYYMMDD`` int, computed by the importer from
     ``post_study_stages.json`` — this module stays deck-free and never reads
     that file itself, only the threaded-in int. A dated ring slot is
     *covered* (receives the `pi_gnl` coefficient) when
-    ``post_horizon_start is None`` (no filter — the pre-ticket-013 default,
+    ``post_horizon_start is None`` (no filter — the default,
     so every existing construction keeps placing on all dated slots) or its
     ``delivery_date >= post_horizon_start``; otherwise it is *non-covered*
     and dropped (see :func:`_resolve_gnl_targets`).
@@ -218,9 +218,9 @@ class GnlDroppedTerm:
     :class:`GnlThermalTarget` claims that submercado at all) and the
     resolved thermal id for a target-side drop — out-of-range
     lag/submercado, a thermal with no dated ring slot at all, or
-    (ticket-013) a dated slot whose ``delivery_date`` falls before the
+    a dated slot whose ``delivery_date`` falls before the
     post-study horizon (a non-covered lane). ``coefficient`` is a
-    representative value for the diagnostics layer (ticket-010) to report:
+    representative value for the diagnostics layer to report:
     the summed source coefficient for a source-submercado drop; for most
     target-side drops it is ``0.0`` (no source coefficient is attributable
     to a target that never resolves at all) — EXCEPT the non-covered
@@ -243,7 +243,7 @@ class MappingResult:
     """The mapped cuts plus every D3-dropped source-only term.
 
     ``dropped`` carries storage/lag source-only plants; ``gnl_dropped``
-    (defaulted, so pre-ticket-009 constructions keep working) carries GNL
+    (defaulted, so existing constructions keep working) carries GNL
     source-submercado and target terms with no live dated ring slot.
     """
 
@@ -317,7 +317,7 @@ def _lag_subindex_bound(slot_positions: Mapping[tuple[int, int, int], int]) -> i
     """One past the max `HydroInflowLag` subindex present, or 0 if absent.
 
     ``0`` signals the family is entirely absent from the manifest — a
-    legitimate case shape (a storage-only converted case, pre-ticket-006),
+    legitimate case shape (a storage-only converted case),
     not a read bug — and disables the `lag_slot_of` bounds check entirely.
     """
     lag_subindices = [
@@ -427,7 +427,7 @@ def _first_active_gnl_sum(cuts: BoundaryCuts, cols: tuple[int, ...]) -> float:
     """The chain-rule `Σ_p pi_gnl[cols]` from `cuts`' first active record.
 
     A representative value for a non-covered dated slot's `GnlDroppedTerm`
-    (ticket-013) — the sum that WOULD have been placed had the slot been
+    — the sum that WOULD have been placed had the slot been
     covered — mirroring `_resolve_storage_targets`'s representative-`beta`
     convention. `0.0` when `cuts` carries no active record at all (never
     raised on; the diagnostics layer reports a representative figure, not a
@@ -453,8 +453,8 @@ def _resolve_gnl_targets(
 
     A target's dated ring slot(s) split into *covered* (`delivery_date >=
     gnl_plan.post_horizon_start`, or `post_horizon_start is None` — no
-    filter) and *non-covered* (`delivery_date < post_horizon_start`,
-    ticket-013): only covered slots land in `resolved`; each non-covered slot
+    filter) and *non-covered* (`delivery_date < post_horizon_start`):
+    only covered slots land in `resolved`; each non-covered slot
     is dropped into the returned `GnlDroppedTerm`s (reason names the
     post-study horizon), staying at coefficient `0.0` exactly like the
     existing GNL drops — never folded onto a neighbour. A target with dated
@@ -637,7 +637,7 @@ def map_boundary_cuts(
     `Σ_p pi_gnl[col(s,p,nl_lag)] · coupling_block_hours[p]` (`math.fsum`,
     order-independent); a target with no dated ring slot, a dated slot whose
     delivery falls before the post-study horizon (a non-covered, K=0-lead lane
-    cobre rejects a coefficient on — ticket-013), or a source submercado with
+    cobre rejects a coefficient on), or a source submercado with
     no matching target, is dropped and recorded in `MappingResult.gnl_dropped`,
     never folded onto a neighbour. `HydroTransitBucket` slots, the sentinel
     (undated) `AnticipatedThermalState` slot, and every ring slot with no
@@ -652,7 +652,7 @@ def map_boundary_cuts(
     ``× C_M3S2HM3`` for cobre's m³/s inflow-lag state, and GNL by the
     per-block `coupling_block_hours` collapse above (see the module header).
     Produces one `MappedCut` per source record, active or not —
-    active-frontier selection is ticket-008's writer concern, not the
+    active-frontier selection is the checkpoint writer's concern, not the
     mapper's.
 
     `coupling_block_hours` is the coupling stage's per-block hours in patamar
@@ -803,7 +803,7 @@ def map_boundary_cuts(
                             )
 
         for gnl_position, gnl_cols in resolved_gnl.items():
-            # Hours-weighted collapse (ticket-001): `pi_gnl` prices an energy
+            # Hours-weighted collapse: `pi_gnl` prices an energy
             # state, so each patamar column is weighted by that patamar's own
             # coupling-block hours, not by the coupling stage's total hours.
             # `coupling_block_hours` is guaranteed non-None here — validated

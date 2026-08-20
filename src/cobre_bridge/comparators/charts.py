@@ -716,7 +716,7 @@ def ree_energy_chart(
 ) -> str:
     """Line chart comparing an REE energy variable by stage.
 
-    ticket-018: mirrors :func:`system_comparison_chart`'s aggregate-line
+    Mirrors :func:`system_comparison_chart`'s aggregate-line
     shape (the source model's own value vs Cobre's, summed across every
     matched REE per stage), keyed on ``entity_type == "ree"`` instead of
     ``"bus"``. REE carries no Cobre percentile band --

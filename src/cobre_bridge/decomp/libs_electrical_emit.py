@@ -18,7 +18,7 @@ This mirrors the codebase's existing read/emit split
 source model's own token vocabulary — ``ger_usih``, ``ener_interc``, …),
 and this module is where that vocabulary turns into cobre's.
 
-:func:`emit_libs_electrical_generics` (ticket-012) is the other half of that
+:func:`emit_libs_electrical_generics` is the other half of that
 last mile: for each restriction, it drives ``active_cells``/``assemble_bound``
 over every active ``(stage, block)`` cell, renders the cell-invariant
 expression once via :func:`build_electrical_expression`, and synthesizes a
@@ -26,8 +26,8 @@ per-restriction :class:`~cobre_bridge.decomp.constraint_registers.
 ConstraintRecord` that feeds the **existing** E1–E7
 :class:`~cobre_bridge.decomp.constraints._GenericBuilder` — never a new
 emitter. The pipeline wiring that builds *id_map*/*ncs_id_by_pee_code*/
-*conjh_bus_by_code_group*/*line_map* from a real deck remains a later
-ticket's job (ticket-013) — this module only ever consumes those maps, never
+*conjh_bus_by_code_group*/*line_map* from a real deck lives in the pipeline
+caller — this module only ever consumes those maps, never
 builds them (except :mod:`cobre_bridge.decomp.ncs`'s own
 ``build_pee_ncs_id_map``, which lives next to the ``ncs_id`` assignment it
 mirrors).
@@ -315,9 +315,9 @@ class LibsElectricalResult:
     ``"unrecognized-token"`` (the restriction's formula references a
     well-formed but undeclared identifier —
     :class:`~cobre_bridge.decomp.libs_electrical.UnrecognizedElectricalToken`,
-    TICKET-015; already WARNED). All four keys are always present, empty
+    already WARNED). All four keys are always present, empty
     when nothing was dropped for that reason — this is the census data
-    ticket-013 renders.
+    the census diagnostic renders.
     """
 
     generic: GenericConstraintResult | None
@@ -396,16 +396,16 @@ def emit_libs_electrical_generics(
     Iterates ``sorted(model.restrictions)`` (deterministic order). For each
     restriction:
 
-    - ``active_cells`` (ticket-009) resolves the exact set of active
+    - ``active_cells`` resolves the exact set of active
       ``(stage, block)`` cells. An empty set means ``active_cells`` already
       emitted the one INFO diagnostic; this records ``deferred["inactive"]``
       and never emits a second one.
-    - ``assemble_bound`` (ticket-008/010) folds every active cell's bucket-
+    - ``assemble_bound`` folds every active cell's bucket-
       B/-C terms into its numeric bound, leaving only the bucket-A decision
       terms structural. A single unresolvable cell (``assemble_bound``
       returning ``None``, already WARNED) drops the **whole** restriction —
       ``deferred["unresolved-bucket-bc"]`` — skip-not-partial.
-    - :func:`build_electrical_expression` (ticket-011) renders one cell's
+    - :func:`build_electrical_expression` renders one cell's
       surviving terms into the cobre expression string exactly once, since
       the structural expression is cell-invariant by construction; every
       other active cell's terms are asserted equal to it — a mismatch is a
@@ -417,7 +417,7 @@ def emit_libs_electrical_generics(
       decomp.libs_electrical.UnrecognizedElectricalToken`, raised from
       inside ``active_cells``'s, ``assemble_bound``'s, or
       ``build_electrical_expression``'s own ``parse_linear_expression``
-      call — TICKET-015/017) drops **only this restriction** —
+      call) drops **only this restriction** —
       ``deferred["unrecognized-token"]`` — WARNed here and skipped, never
       aborting the rest of the deck. A malformed-DSL ``ValueError`` (not
       this subclass) — including ``active_cells``' dangling-``HABILITA``
@@ -437,7 +437,7 @@ def emit_libs_electrical_generics(
 
     Reads no deck: every input — *id_map*, *context_factory*, *a_h*,
     *calendar*, the three id maps, *big_m*, *start_id* — arrives from the
-    caller (ticket-013).
+    caller.
     """
     builder = _GenericBuilder(start_id)
     converted: list[int] = []

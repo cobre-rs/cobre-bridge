@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 #: ``constraint_registers._BOUNDS_AXIS`` QDEF/QTUR/QDES/QVER entries. Keep the
 #: two mappings consistent for a *hydro* flow axis; a future hydro flow
 #: ``tipo`` gaining a bound axis updates both. ``QBOM`` is the one asymmetry:
-#: it joined ``_BOUNDS_AXIS`` in M2 (ticket-020) but is a *pumping*-entity
+#: it lives in ``_BOUNDS_AXIS`` but is a *pumping*-entity
 #: axis, not a hydro one, so it is dispatched to
 #: :func:`_qbom_pumping_contributions` instead of living in this mapping.
 _HQ_AXIS_BY_VARIABLE: dict[str, str] = {

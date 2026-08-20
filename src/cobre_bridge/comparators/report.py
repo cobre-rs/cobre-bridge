@@ -175,9 +175,8 @@ def print_results_summary_from_dataset(
         Path to the Cobre output directory.
     reference_label:
         Display name for the reference model in the printed header/labels.
-        Defaults to ``"NEWAVE"``, which reproduces the pre-ticket output
-        byte-for-byte; ``compare newave`` (this function's only caller) uses
-        that default.
+        Defaults to ``"NEWAVE"``; ``compare newave`` (this function's only
+        caller) uses that default.
     """
     out = sys.stdout
 

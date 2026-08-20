@@ -41,10 +41,10 @@ if TYPE_CHECKING:
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _INVARIANT_RTOL = 1e-9
-# TRACKED COBRE-GAP WORKAROUND (C1, plans/conversion-found-improvements.md
-# in the cobre repo): the schema requires factors > 0, but a
-# zero-generation block (solar at the light patamar) is real data. Remove
-# the clamp when factor >= 0 is accepted.
+# TRACKED COBRE-GAP WORKAROUND (C1, the cobre repository's
+# conversion-found-improvements registry): the schema requires factors > 0,
+# but a zero-generation block (solar at the light patamar) is real data.
+# Remove the clamp when factor >= 0 is accepted.
 _MIN_FACTOR = 1e-9
 
 _LOG = logging.getLogger(__name__)
@@ -298,7 +298,7 @@ def build_pee_ncs_id_map(
     calendar: Sequence[OperativeStage],
     renovaveis: Renovaveis | None,
 ) -> dict[int, int]:
-    """Public ``codigo_pee -> ncs_id`` map for the emitter (ticket-011), sharing
+    """Public ``codigo_pee -> ncs_id`` map for the emitter, sharing
     :func:`_pee_series`'s ordering via :func:`_sorted_pee_codes`.
 
     ``ncs_id`` continues the ``PQ`` series' id space (:func:`_pq_series`'s
@@ -352,8 +352,8 @@ def _pee_series(
     for _, row in ger.iterrows():
         # The PEE-GER-PER-PAT-CEN card is single-período: one `estagio` per row.
         # (idecomp < 1.14.1 mis-modelled it as an estagio_inicial/estagio_final
-        # range, which left `geracao` unreadable — see
-        # plans/idecomp-renovaveis-pee-ger-layout-spec.md; requires idecomp >= 1.14.1.)
+        # range, which left `geracao` unreadable — see the idecomp renovaveis
+        # PEE-GER record layout; requires idecomp >= 1.14.1.)
         estagio = int(row["estagio"])
         stage_index = estagio - 1
         if not 0 <= stage_index < len(calendar):

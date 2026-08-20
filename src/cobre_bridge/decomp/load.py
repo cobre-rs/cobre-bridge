@@ -15,7 +15,7 @@ the calendar disagree.
 
 The transhipment (``IV``) bus is absent from ``DP`` by construction, so it
 normally carries zero load; when Itaipu's ``RI`` register declares
-``carga_ande`` (ticket-007), the caller supplies it via the optional
+``carga_ande``, the caller supplies it via the optional
 *extra_bus_loads* parameter on both public entry points below, merged in
 alongside the ``DP`` rows so the ``IV`` bus is treated no differently from
 any other loaded bus.
@@ -53,7 +53,7 @@ def _per_stage_block_loads(
     Missing load values (the fictitious subsystem's blank fields) read as
     0.0. Block counts must match the calendar's per-stage block structure.
 
-    *extra_bus_loads* (ticket-007) supplies additional per-(bus, stage)
+    *extra_bus_loads* supplies additional per-(bus, stage)
     block-load rows for a bus ``DP`` never declares -- the ``IV``
     transshipment bus's ``carga_ande`` -- merged in after the ``DP`` read so
     every consumer of this map (both public entry points below) sees the
@@ -108,7 +108,7 @@ def convert_load_stats(
 
     Every bus in the id map gets a row for every stage; buses absent from
     ``DP`` (the transhipment bus) carry zero load unless *extra_bus_loads*
-    (ticket-007 -- see :func:`_per_stage_block_loads`) supplies one.
+    (see :func:`_per_stage_block_loads`) supplies one.
     """
     loads = _per_stage_block_loads(
         dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
@@ -146,7 +146,7 @@ def convert_load_factors(
 
     Entries exist only for (bus, stage) pairs with load; factors of a zero
     mean are undefined and deliberately absent. *extra_bus_loads*
-    (ticket-007 -- see :func:`_per_stage_block_loads`) feeds the same
+    (see :func:`_per_stage_block_loads`) feeds the same
     ``Σ_b factor_b·h_b = H`` invariant check below as every ``DP``-sourced
     row.
     """

@@ -23,13 +23,13 @@ machine set drops below that envelope gets a sparse per-stage overlay row
 instead (:func:`convert_hydro_group_availability`), never a change to the
 declared envelope itself.
 
-**Head-aware ``max_turbined_m3s`` (ticket-017, E5 headline, validated
-2026-08-08).** The emitted ``max_turbined_m3s`` is the head-corrected
+**Head-aware ``max_turbined_m3s``.** The emitted ``max_turbined_m3s`` is the
+head-corrected
 engolimento, not the plain rated sum: :func:`_head_corrected_envelope`/
 :func:`_conjunto_head_corrected_envelope` mirror the source-model side's
 ``converters.hydro._compute_max_turbined_head_corrected`` — derating the
 rated flow by the turbine affinity law ``(h_op / h_nom) ** k_turb`` and
-capping it at ``Σ n·p_nom / ρ_eq`` — using ticket-013's per-stage
+capping it at ``Σ n·p_nom / ρ_eq`` — using the per-stage
 ``h_op = ρ_eq / ρ_esp``. Two DECOMP-specific corrections vs the shared
 helper, both validated against ``relato.rv3``'s ``Qtur Maxima``: **no**
 TEIF/IP availability derating (availability lives on the MP×FD/B8 path,
@@ -53,8 +53,8 @@ The one plant whose maintenance and availability registers are declared
 two ``MP``/``FD`` ``frequencia`` rows) gets two conjunto-backed unit groups
 instead of the usual single mirror group — see
 :func:`_build_split_unit_groups`. Scope is the ratified loop-closing
-milestone: faithful registry, cascade, capability, initial storage, and (as
-of tickets 013/017, E5) head/productivity, including head-aware
+milestone: faithful registry, cascade, capability, initial storage, and
+head/productivity, including head-aware
 engolimento — with everything whose faithful treatment is still gated on
 later features left unconverted: travel time (``VI`` — a separate dadger
 register, not an ``AC`` class) and the evaporation/tailrace-polynomial
@@ -64,15 +64,15 @@ given deck actually declares) is reported by ``check decomp``
 (:mod:`cobre_bridge.decomp.preflight`); ``VI``, not being an ``AC``
 register, is documented only here.
 
-**Effective (post-``AC``) cascade topology and inflow gauge (ticket-014,
-E5, OQ-4 resolved).** The cascade walk (:func:`_downstream_operated`,
+**Effective (post-``AC``) cascade topology and inflow gauge.** The cascade
+walk (:func:`_downstream_operated`,
 shared by this module's own ``downstream_id`` entity field and
 ``scenarios.py``'s incremental-inflow attribution) and the inflow-gauge
 attribution both read :class:`~cobre_bridge.decomp.cadastro.
 EffectiveCadastro`'s ``downstream_plant``/``inflow_gauge`` accessors — the
 post-``AC NUMJUS``/``NUMPOS`` link/gauge — rather than the base ``hidr``
 columns directly. Absent an override the effective value equals base, so
-this is byte-identical to the pre-ticket behaviour for every plant with no
+this is byte-identical to the base-column behaviour for every plant with no
 ``NUMJUS``/``NUMPOS`` row. ``AC JUSENA`` (a downstream-**energy** coupling,
 not a water-routing link) and ``AC NPOSNW`` (the other source family's own
 inflow gauge) are deliberately **not** ingested — no DECOMP consumer; their
@@ -175,8 +175,7 @@ def _downstream_operated(
 ) -> int | None:
     """Walk the *effective* (post-``AC NUMJUS``) cascade to the next
     *operated* plant downstream, at *stage_index* (default the initial
-    stage — the single stage-representative topology every caller uses,
-    ticket-014).
+    stage — the single stage-representative topology every caller uses).
 
     Non-operated intermediates are skipped through (their routing is
     instantaneous absence — the water continues down the declared chain);
@@ -236,7 +235,7 @@ def _conjunto_rated_ac_adjusted(
     own is the ``hidr`` base, forward-filled flat); ``None`` means the pair
     carries no override at all, and every field falls back to the
     ``hidr.dat`` row directly — the same ``.get(..., base)`` fallback the
-    pre-ticket date-blind reader used.
+    date-blind reader used.
     """
     machine_set = effective.machine_set(code, conjunto_index, stage_index)
     if machine_set is None:
@@ -301,7 +300,7 @@ def _rated_envelope(
     ac_adjusted`'s two components ever reaches over the horizon, taken
     independently (the two maxima need not land on the same stage). A
     constant machine set collapses this to the stage-0 value, matching the
-    pre-ticket date-blind value exactly. Not used for the split plant
+    date-blind value exactly. Not used for the split plant
     (Itaipu): its entity envelope is instead the *sum* of the two groups'
     own :func:`_conjunto_rated_envelope`, computed in
     :func:`convert_hydros`, so cobre rule 41 holds by construction rather
@@ -624,7 +623,7 @@ def _build_split_unit_groups(
     max-over-stages AC-adjusted rated envelope
     (:func:`_conjunto_rated_envelope`); its ``max_turbined_m3s`` is instead
     that conjunto's own head-corrected envelope
-    (:func:`_conjunto_head_corrected_envelope`, ticket-017) — each group has
+    (:func:`_conjunto_head_corrected_envelope`) — each group has
     only its own conjunto's installed power to draw on, so the power cap
     inside that function is per-group, never plant-wide. Group ``i`` sits on
     ``group_bus_ids[i]`` — a per-group bus, not necessarily the plant's own
@@ -787,7 +786,7 @@ def convert_hydros(
     in-service machine configuration differs from ``hidr.dat``'s nameplate
     conjunto sum, and/or changes mid-horizon. ``max_turbined_m3s`` is
     instead the max-over-stages envelope of the **head-corrected** engolimento
-    (:func:`_head_corrected_envelope`, ticket-017 — see the module docstring
+    (:func:`_head_corrected_envelope` — see the module docstring
     for the validated formula and accuracy). A stage whose effective
     capacity (installed power or head-corrected flow) drops below its own
     envelope gets a sparse per-stage overlay instead
@@ -812,7 +811,7 @@ def convert_hydros(
     ``id_map.transhipment_bus_id`` — the ``IV`` transshipment bus — rather
     than the plant's own submercado bus; the 60 Hz group (group id 1) stays
     on the plant's own bus. This relocation is unconditional whenever Itaipu
-    is operated (ticket-006). The entity ``reservoir`` block is the plant's
+    is operated. The entity ``reservoir`` block is the plant's
     outer per-stage storage envelope (:func:`storage_envelope`), so
     per-stage bound overrides
     (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
@@ -862,7 +861,7 @@ def convert_hydros(
         bus_id = id_map.bus_id(int(hreg["submercado"]))
         if code == _ITAIPU_CODE:
             frequencies = _split_plant_frequencies(hreg, code, effective, mp, fd)
-            # Unconditional 50 Hz -> IV relocation (ticket-006): Itaipu's 50 Hz
+            # Unconditional 50 Hz -> IV relocation: Itaipu's 50 Hz
             # unit group (group id 0, the lower of the two ascending
             # frequencies) is moved to the transshipment bus so cobre's
             # HydroGeneration{bus} selector can separate the two groups; the
@@ -993,7 +992,7 @@ def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> 
     not the plant's outer envelope, so the range is read from
     :func:`~cobre_bridge.decomp.cadastro.effective_storage_range` at stage
     ``0``. A run-of-river (``D``) plant's stage-0 range is already the
-    single-point collapse ``(vol_ref, vol_ref)`` (ticket-018), so its initial
+    single-point collapse ``(vol_ref, vol_ref)``, so its initial
     value is ``vol_ref`` regardless of *pct*. Shared by
     :func:`convert_initial_storage` (the initial condition) and
     :func:`_operated_initial_volumes` (the generation-productivity anchor) so
@@ -1030,7 +1029,7 @@ def convert_initial_storage(
 
     The percentage is resolved by :func:`_initial_volume_hm3` against the
     stage-0 effective useful volume (run-of-river plants collapse to their
-    reference volume — ticket-018).
+    reference volume).
     """
     operated = _operated_uh(dadger)
     storage: list[dict] = []
@@ -1296,7 +1295,7 @@ def convert_hydro_group_availability(
     envelope (:func:`_rated_envelope`). The per-stage hydraulic engolimento
     limit is *not* imposed as a second generation cap: the emitted
     ``max_turbined_m3s`` overlay is the per-stage **head-corrected** flow
-    (:func:`_head_corrected_max_turbined_ac_adjusted`, ticket-017), sparse
+    (:func:`_head_corrected_max_turbined_ac_adjusted`), sparse
     against the group's own head-corrected envelope
     (:func:`_head_corrected_envelope`), and generation is
     ``productivity × turbined`` — so the physical hydraulic limit binds
@@ -1319,7 +1318,7 @@ def convert_hydro_group_availability(
     (:func:`_conjunto_head_corrected_envelope`).
 
     Returns the ``(hydro_id, hydro_unit_group_id, stage_id) ->
-    GroupBoundEntry`` mapping ticket-025's ``convert_hydro_unit_group_bounds``
+    GroupBoundEntry`` mapping ``convert_hydro_unit_group_bounds``
     consumes unchanged — populated *sparsely*, only where an emitted value
     falls below that group's own declared envelope, the same "only where it
     differs" convention every sibling emitter uses.

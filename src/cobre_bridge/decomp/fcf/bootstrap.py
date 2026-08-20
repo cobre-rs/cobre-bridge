@@ -8,8 +8,8 @@ silently the moment cobre's own layout changes), this module runs cobre
 itself for exactly one training iteration on the converted case, with
 checkpointing on, and reads the emitted checkpoint's terminal
 ``entity_manifest`` + ``state_dimension`` back via
-:func:`cobre.results.load_policy`. The mapper (epic 2's ticket-005) and the
-writer (ticket-008) then author cuts against that manifest verbatim, so any
+:func:`cobre.results.load_policy`. The mapper and the
+writer then author cuts against that manifest verbatim, so any
 future cobre layout change breaks loudly — a manifest mismatch on load — not
 silently.
 
@@ -35,9 +35,9 @@ if TYPE_CHECKING:
 def ensure_writer_binding() -> None:
     """Raise if the installed ``cobre`` wheel lacks ``write_policy_checkpoint``.
 
-    The importer's writer (ticket-008) needs
+    The importer's writer needs
     ``cobre.write_policy_checkpoint`` to author a boundary-cut checkpoint;
-    this is the epic's environment gate, callable standalone before any
+    this is the environment gate, callable standalone before any
     bootstrap/mapper/writer work runs.
 
     Raises

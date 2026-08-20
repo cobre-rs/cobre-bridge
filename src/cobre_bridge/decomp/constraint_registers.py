@@ -31,8 +31,7 @@ terms, a non-unit coefficient, or the ``HE`` energy sum) becomes a **generic
 constraint**.
 
 This module only reads, joins, and classifies. The lowering itself lives in the
-bounds emitters and the generic-constraints emitter (E4). See
-``plans/decomp-special-constraints-feature.md``.
+bounds emitters and the generic-constraints emitter.
 """
 
 from __future__ import annotations
@@ -65,10 +64,9 @@ _MAX_BLOCK_SLOTS = 5
 #: family-agnostic *membership* set: the only consumer is `lowers_to_bound`'s
 #: `variable in _BOUNDS_AXIS` test, so the values are never read (do not
 #: convert this to a family-keyed structure — nothing consumes it). Pumping
-#: (QBOM) lowers to `pumping_bounds` min/max_m3s (M2, ticket-020); diversion
-#: (QDES) and spillage (QVER) lower to the two-sided hydro `diversion`/
-#: `spillage` axes (M3/M5, ticket-021/ticket-022) now that cobre's
-#: generic-constraint-authoring epic-01 has landed both.
+#: (QBOM) lowers to `pumping_bounds` min/max_m3s; diversion (QDES) and
+#: spillage (QVER) lower to the two-sided hydro `diversion`/`spillage` axes
+#: now that cobre's generic-constraint-authoring has landed both.
 _BOUNDS_AXIS: dict[str, str] = {
     "generation": "generation",  # RE FU (hydro)   -> min/max_generation_mw
     "thermal_generation": "generation",  # RE FT (thermal) -> min/max_generation_mw
@@ -706,9 +704,9 @@ def detect_libs_electrical(deck_dir: Path) -> Diagnostic | None:
     A deck using the LIBs electrical-constraint family declares it in
     ``indices.csv`` under a ``RESTRICAO-ELETRICA-ESPECIAL`` entry; that
     richer format is unconverted only for its short-form ``RE``/``RE-*`` and
-    date-indexed ``-HORIZONTE-DATA``/``-FORMULA-DATA-PATAMAR`` variants (E9's
+    date-indexed ``-HORIZONTE-DATA``/``-FORMULA-DATA-PATAMAR`` variants (the
     period-keyed long-form cards ARE converted — see
-    :mod:`cobre_bridge.decomp.libs_electrical`, ticket-013). This reads
+    :mod:`cobre_bridge.decomp.libs_electrical`). This reads
     ``indices.csv`` (when present) and reports the entry's presence; it does
     not parse or convert the LIBs file itself, and does not know whether the
     long-form subset converted — the caller (:func:`~cobre_bridge.decomp.
@@ -758,7 +756,7 @@ def detect_libs_electrical(deck_dir: Path) -> Diagnostic | None:
 
 
 def resolve_libs_electrical_path(deck_dir: Path) -> Path | None:
-    """Resolve the deck's LIBs electrical-constraint file path (ticket-013).
+    """Resolve the deck's LIBs electrical-constraint file path.
 
     Reads *deck_dir*'s ``indices.csv`` for the ``RESTRICAO-ELETRICA-ESPECIAL``
     entry's own ``Caminho`` (the third ``;``-delimited field), matched by its

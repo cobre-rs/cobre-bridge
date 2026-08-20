@@ -249,7 +249,7 @@ def _read_converter_line_bounds(
 
     Only reads rows with ``block_id`` IS NULL (the stage-level base rows),
     mirroring ``_read_cobre_bounds`` above. ``line_bounds.parquet`` now also
-    carries per-block override rows (cobre decision 10, epic 02 §7.2); this
+    carries per-block override rows; this
     dict is keyed by ``(line_id, stage_id)`` with no block dimension, so
     without the filter a later block row would silently overwrite the base
     capacity for any stage with a differing block. Block-level fidelity is

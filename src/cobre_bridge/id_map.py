@@ -1,8 +1,8 @@
 """NewaveIdMap: deterministic 1-based-to-0-based entity ID remapping.
 
 Accepts sorted lists of the source model entity IDs and provides 0-based lookups that
-are consistent across all entity files.  Tickets 010 and 011 import this class to share
-the same mapping produced during entity conversion.
+are consistent across all entity files.  Both conversion tracks import this class
+to share the same mapping produced during entity conversion.
 """
 
 from __future__ import annotations

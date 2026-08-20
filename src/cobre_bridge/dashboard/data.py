@@ -142,8 +142,8 @@ def resolve_hydro_bus_id(hydro: dict, *, hydros_path: Path) -> int | None:
       **not** duplicated across every bus it touches either (that would
       double-count it wherever a caller sums per bus) -- the same dilemma the
       compare layer resolved the same way in
-      ``comparators.analyze._bus_name_lookups``. Implementation note (the
-      deliberate degraded-rendering choice for this ticket): a ``WARNING``
+      ``comparators.analyze._bus_name_lookups``. Implementation note (a
+      deliberate degraded-rendering choice): a ``WARNING``
       :class:`~cobre_bridge.diagnostics.Diagnostic` is emitted and ``None``
       is returned. Callers must omit the plant from any single-bus-keyed
       view: ``load_hydro_bus_map``'s id->bus map has no room for more than
@@ -372,13 +372,13 @@ def _compute_lp_load(
 
 
 def _aggregate_timing_by_iteration(timing_raw: pd.DataFrame) -> pd.DataFrame:
-    """Collapse the post-epic-04b multi-row-per-iteration timing shape.
+    """Collapse the multi-row-per-iteration timing shape.
 
-    Post-epic-04b cobre (``training/timing/iterations.parquet``) emits one
+    Newer cobre (``training/timing/iterations.parquet``) emits one
     rank-aggregated row plus N per-worker rows per iteration — per-worker
     rows only carry fwd/bwd wall + setup, rank rows carry everything else.
     ``SUM(col) GROUP BY iteration`` reconstructs the single-row totals that
-    the pre-epic-04b chart code expects. Legacy frames (no ``rank``/
+    the single-row chart code expects. Legacy frames (no ``rank``/
     ``worker_id`` columns) pass through unchanged.
 
     The sum semantics are correct for the rank-only columns (one contributing
@@ -1033,7 +1033,7 @@ class DashboardData:
     # Performance / solver data (optional — empty DataFrame when absent).
     # ``timing`` is aggregated to one row per iteration for backward
     # compatibility with v0.4.4-era chart code. ``timing_raw`` retains the
-    # multi-row-per-iteration view from post-epic-04b cobre outputs where
+    # multi-row-per-iteration view from newer cobre outputs where
     # each iteration has one rank-aggregated row (``worker_id`` NULL) and
     # N per-worker rows (``worker_id`` populated) — see
     # ``build_worker_timing_records`` in cobre-sddp training_output.rs.
@@ -1077,12 +1077,12 @@ class DashboardData:
     gc_bounds: pd.DataFrame
     gc_violations: pd.DataFrame
 
-    # Input constraint bounds (optional — ticket-002)
+    # Input constraint bounds (optional)
     hydro_bounds: pd.DataFrame
     thermal_bounds: pd.DataFrame
     ncs_stats: pd.DataFrame
     # Per-block line_bounds override rows (block_id non-null); a case whose
-    # lines are uniform across blocks legitimately has none (ticket-013).
+    # lines are uniform across blocks legitimately has none.
     line_block_bounds: pd.DataFrame
     retry_histogram: pd.DataFrame
 

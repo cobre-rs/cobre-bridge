@@ -67,7 +67,7 @@ REMEDIATION = (
 #: Every exception type the CBVF round trip can fail with: `ModuleNotFoundError`
 #: (cobre absent), `AttributeError` (missing `write_policy_checkpoint`/`results`
 #: binding), `ValueError`/`OSError`/`RuntimeError` (every `cobre.errors.CobreError`
-#: leaf subclasses one of those three builtins, per `cobre-python/src/errors.rs`),
+#: leaf subclasses one of those three builtins),
 #: and `TypeError`/`KeyError` from this probe's own access into a malformed
 #: reloaded policy dict. Never a bare `except:`.
 _PROBE_FAILURE_TYPES: tuple[type[Exception], ...] = (

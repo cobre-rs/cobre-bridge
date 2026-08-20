@@ -23,10 +23,9 @@ every thermal as non-anticipated.
 Cobre side
 ----------
 For each anticipated thermal the LP needs a single MW value per delivery stage
-(``InitialConditions.past_anticipated_commitments`` — see plans/anticipated-thermals
-epic-02 ticket-008/009).  The MW is held *uniformly across blocks* of the delivery stage
-by the fishing row, so the right aggregation from the source model's per-block values is
-the
+(``InitialConditions.past_anticipated_commitments``).  The MW is held
+*uniformly across blocks* of the delivery stage by the fishing row, so the
+right aggregation from the source model's per-block values is the
 block-duration-weighted mean:
 
     MW_eq = Σ_b f_b · MW_b

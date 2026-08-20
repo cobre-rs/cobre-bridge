@@ -50,9 +50,9 @@ rewrite (``Σ_h(disp_usih(h) − ger_usih(h)) >= R`` -> ``Σ_h ger_usih(h) <=
 Σ_h A_h − R``) so only bucket-A terms ever survive structurally.
 
 :func:`active_cells` ties the activation-rule engine to the restriction's
-horizonte and ticket-008's per-(stage,block) data-context factory, producing
+horizonte and the per-(stage,block) data-context factory, producing
 the exact set of ``(stage_index, block_index)`` cells a restriction is
-active in — the set the emitter (a later ticket) uses to decide which cells
+active in — the set the emitter uses to decide which cells
 get a bound row at all, as distinct from what that bound's value is.
 """
 
@@ -145,7 +145,7 @@ class ViolationTreatment:
     ``enabled`` is ``True`` whenever the restriction carries an explicit
     treatment row (``penalty`` is that row's ``custo_violacao``, or ``None``
     when the row leaves it blank). Resolving the classic BIG-M default for a
-    restriction with **no** treatment row at all is a later ticket's job —
+    restriction with **no** treatment row at all is not this reader's job —
     this reader leaves :attr:`ElectricalRestriction.violation` as ``None``
     in that case.
     """
@@ -541,7 +541,7 @@ def read_carga_ande(
 
     Returns ``{}`` when the deck carries no ``RI`` register at all (a deck
     with no Itaipu import); callers then place no ``IV`` load and resolve any
-    ``carga_ande`` reference to a fail-loud diagnostic (ticket-008).
+    ``carga_ande`` reference to a fail-loud diagnostic.
 
     Raises
     ------
@@ -628,7 +628,7 @@ class ParsedTerm:
     - the reserved :data:`_ALIAS_TOKEN` (``"alias"``) for an unresolved
       ``ALIAS-ELETRICO`` reference — ``args`` is empty and the alias's own
       name is in ``alias_name``; its numeric value is resolved
-      per-(stage,block) later (ticket-008), never here;
+      per-(stage,block) later, never here;
     - a built-in bare token (``demanda_sin`` / ``val_demanda_sin`` /
       ``carga_ande``), ``args`` empty;
     - the reserved :data:`_SE_TOKEN` (``"se"``) for a ``se(cond, X, Y)``
@@ -848,7 +848,7 @@ class _ExpressionParser:
 
     def _parse_se(self, scale: float) -> list[ParsedTerm]:
         """``se(cond, X, Y)`` — one structural term; ``cond`` is never evaluated
-        here (ticket-008), so its raw text (and both branches') is captured by a
+        here, so its raw text (and both branches') is captured by a
         depth-aware scan for the top-level commas rather than by tokenizing it."""
         self._consume("(", "after 'se'")
         args_start = self._pos
@@ -1141,7 +1141,7 @@ class ActivationRule:
 #: This is the source model's per-(stage,block) demand/alias resolver's
 #: interface, defined here so this engine stays pure and testable; the real
 #: resolver driving it with the source model's demand/alias data over every
-#: (stage, block) cell is a later ticket's job (ticket-008). Tests use a
+#: (stage, block) cell is :func:`build_data_context`. Tests use a
 #: trivial dict-backed double implementing this same interface.
 type DataContext = Callable[[ParsedTerm], float]
 
@@ -1262,7 +1262,7 @@ def parse_activation_rule(text: str, model: LibsElectricalModel) -> ActivationRu
     This is the closed six-operator + ``&`` grammar verified against every
     rule in the source model's decks (spec §4a) — it has no ``|``
     (disjunction) and no ``se`` literal at the rule-text level, so neither is
-    supported here; a deck that needs either is a new ticket, not a silent
+    supported here; a deck that needs either is out of scope, not a silent
     extension.
 
     Raises
@@ -1296,10 +1296,10 @@ def _evaluate_side(terms: Sequence[ParsedTerm], context: DataContext) -> float:
 
     A bare numeric constant (``term.token == _CONST_TOKEN``) is read
     straight from ``term.coefficient`` rather than through *context*: a
-    conforming context already returns ``1.0`` for it (ticket-004's
-    documented convention), so this changes nothing for one, but it closes
+    conforming context already returns ``1.0`` for it (the DataContext
+    convention), so this changes nothing for one, but it closes
     the handshake so a non-conforming context can never silently double- or
-    zero-apply a constant (epic-01-boundary carry-forward 4.2).
+    zero-apply a constant.
     """
     return sum(
         term.coefficient
@@ -1431,9 +1431,9 @@ def build_data_context(
     calendar: Sequence[OperativeStage],
 ) -> Callable[[int, int], DataContext]:
     """Build the per-(stage,block) :data:`DataContext` factory that drives
-    :func:`assemble_bound` (this ticket) and ticket-009's activation gate.
+    :func:`assemble_bound` and the activation gate.
 
-    :data:`DataContext` (ticket-004's ``Callable[[ParsedTerm], float]``) is
+    :data:`DataContext` (a ``Callable[[ParsedTerm], float]``) is
     defined for exactly *one* ``(stage_index, block_index)`` cell — see its
     own docstring — and *build_data_context*'s own signature carries no such
     cell, so it returns a **factory**: call the returned closure with a cell
@@ -1451,12 +1451,12 @@ def build_data_context(
       for that (bus, stage);
     - ``demanda_sin``/``val_demanda_sin`` — the block load summed over every
       declared submarket;
-    - ``carga_ande`` — the ticket-005 series;
+    - ``carga_ande`` — the series from :func:`read_carga_ande`;
     - an ``alias`` token — the model alias's value
       (:func:`_resolve_alias_value`: stage-inherited, ``NA``-patamar applies
       to all blocks);
-    - the numeric-constant token — ``1.0``, never the constant's own value
-      (epic-01-boundary carry-forward 4.2): the value already lives in
+    - the numeric-constant token — ``1.0``, never the constant's own value:
+      the value already lives in
       ``term.coefficient``, which :func:`_evaluate_side` applies directly;
     - a ``se(cond, X, Y)`` conditional — :func:`evaluate_se`.
 
@@ -1528,15 +1528,15 @@ def evaluate_se(
     """Evaluate one structural ``se(cond, X, Y)`` term to a float for one
     (stage, block) cell.
 
-    ``cond`` is parsed and evaluated by reusing ticket-004's activation-rule
+    ``cond`` is parsed and evaluated by reusing the activation-rule
     engine (:func:`parse_activation_rule` + :func:`evaluate_rule`) — the
     same comparison grammar an activation rule's own condition uses —
     selecting :attr:`ParsedTerm.branch_true` when it evaluates ``True``,
     else :attr:`ParsedTerm.branch_false`.
 
     The selected branch is then parsed (:func:`parse_linear_expression`) and
-    classified (:func:`classify_terms`). Per epic-01-boundary carry-forward
-    4.1, a selected branch is only safe to fold to a single float when it is
+    classified (:func:`classify_terms`). A selected branch is only safe to
+    fold to a single float when it is
     entirely bucket B (input data): folding a branch that carries a
     bucket-A (cobre decision) or bucket-C (``disp_usih``) term would fold
     that term into a plain number and silently drop it from the LP. ``se``
@@ -1544,8 +1544,8 @@ def evaluate_se(
     ``REGRA-ATIVACAO``, not inline ``se()``), so this guard is defensive
     hardening, not a gap in coverage — keeping a decision-bearing branch's
     bucket-A/-C terms structural (folding only its bucket-B terms, the way
-    :func:`assemble_bound` does for a whole restriction) is a future
-    ticket's job; this fails loud instead.
+    :func:`assemble_bound` does for a whole restriction) is out of scope
+    here; this fails loud instead.
 
     Raises
     ------
@@ -1683,8 +1683,8 @@ def _fold_inequacao_bound(
     were already on the LHS).
 
     Sums each side's bucket-B contribution (:func:`_evaluate_side`) and
-    combines them with bucket-A normalized onto the LHS (epic-01-boundary
-    carry-forward 4.3): ``bound = Σ_{B∩RHS} − Σ_{B∩LHS}``. :func:`~cobre_bridge.
+    combines them with bucket-A normalized onto the LHS:
+    ``bound = Σ_{B∩RHS} − Σ_{B∩LHS}``. :func:`~cobre_bridge.
     generic_constraint_format.sense_to_interval` then maps *restriction*'s
     operator onto the F3 ``(lower, upper)`` shape (``>=`` lower-only, ``<=``
     upper-only, ``==`` both endpoints equal to *bound*).
@@ -1753,7 +1753,7 @@ def assemble_bound(
     *stage_index*/*block_index* are used here to select *restriction*'s own
     per-cell limit/patamar, not to re-scope *ctx*. *a_h* is required exactly
     when *restriction* carries a bucket-C term; a restriction with none never
-    touches it, so existing ticket-008 callers pass nothing.
+    touches it, so a caller with no bucket-C term passes nothing.
 
     Returns ``None`` — after emitting one ``Severity.WARNING``
     :class:`Diagnostic` naming the unresolvable term and the cell — when a
@@ -1894,12 +1894,12 @@ def active_cells(
     stage is checked independently via :func:`evaluate_rule`, so a
     demand-band rule that holds only in the heavy-load block activates only
     that block, never the light blocks of the same stage. This
-    per-(stage,block) granularity is the faithful default this ticket
-    adopts; confirming that no restriction in the source model instead needs
-    coarser stage-only (all-or-no-block) granularity is a later census's job
-    (ticket-013), not this function's.
+    per-(stage,block) granularity is the faithful default here; confirming
+    that no restriction in the source model instead needs coarser stage-only
+    (all-or-no-block) granularity is a separate census's concern, not this
+    function's.
 
-    *context_factory* is ticket-008's :func:`build_data_context` return
+    *context_factory* is :func:`build_data_context`'s return
     value — a per-cell **factory**, not a single :data:`DataContext` — since
     a :data:`DataContext` is scoped to exactly one ``(stage_index,
     block_index)`` cell (see its own docstring) and this function evaluates
@@ -1916,19 +1916,18 @@ def active_cells(
     returned set is empty and this function itself emits one
     ``Severity.INFO`` :class:`~cobre_bridge.diagnostics.Diagnostic` naming
     *restriction* (mirroring ``constraint_registers``'s dropped-restriction
-    skip logging, as a diagnostic here rather than a bare log record). The
-    eventual caller (a later ticket's emitter) has not landed yet, so this
-    is the self-contained, directly-testable place to raise it (via
-    :func:`~cobre_bridge.diagnostics.collect`) — that caller will simply add
-    no bound rows for an empty set and does not need to emit this diagnostic
-    itself.
+    skip logging, as a diagnostic here rather than a bare log record).
+    Raising it here keeps *active_cells* self-contained and directly
+    testable (via :func:`~cobre_bridge.diagnostics.collect`) — the caller
+    simply adds no bound rows for an empty set and does not need to emit
+    this diagnostic itself.
 
     The activation rule's ``==``/``!=`` comparisons
     (:func:`evaluate_rule`/``_COMPARISON_FUNCS``) are exact float equality,
     with no tolerance — an intentional, faithful choice already made at the
-    rule engine (ticket-004) and left unchanged here; a census confirming no
-    real rule gates on ``==``/``!=`` over a computed demand sum is a later
-    ticket's concern, not a reason to relax the comparison here.
+    rule engine and left unchanged here; a census confirming no real rule
+    gates on ``==``/``!=`` over a computed demand sum is a separate concern,
+    not a reason to relax the comparison here.
 
     Raises
     ------
@@ -2219,14 +2218,14 @@ def _fold_reserve_disp_usih(
     Every ``disp_usih(h)`` term (coefficient ``c``) on the LHS must be
     paired with a ``ger_usih(h)`` term also on the LHS carrying the exact
     opposite coefficient (``-c``) — the documented reserve SIGN structure
-    (this module's header / TICKET-010's CRITICAL pitfall). Substituting
+    (this module's header). Substituting
     ``disp_usih(h) -> A_h`` (:func:`resolve_disp_usih`) and multiplying the
     whole relation by ``-1`` — realized on the returned
     :class:`AssembledBound` by negating every surviving ``ger_usih`` term
     (this is the A1 fix: a caller reading ``restriction.lhs`` verbatim would
     keep its original negative coefficient, silently inverting the bound) —
     flips the operator's sense; any bucket-B terms on either side fold into
-    the same bound the ticket-008 way.
+    the same bound.
 
     Raises
     ------
@@ -2236,8 +2235,8 @@ def _fold_reserve_disp_usih(
         the LHS that is not ``ger_usih``, more than one ``ger_usih`` term
         for the same plant, a ``disp_usih(h)`` with no paired ``ger_usih(h)``
         of the exact opposite coefficient, or a ``ger_usih(h)`` with no
-        paired ``disp_usih(h)`` — the CRITICAL pitfall this ticket calls
-        out: fail loud rather than silently mis-rewrite a shape the pattern
+        paired ``disp_usih(h)`` — the CRITICAL pitfall: fail loud rather
+        than silently mis-rewrite a shape the pattern
         does not cover.
     _UnresolvableDispUsih
         Propagated from :func:`resolve_disp_usih` when a paired plant's

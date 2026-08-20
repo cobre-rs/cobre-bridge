@@ -59,7 +59,7 @@ class PercentileData:
     nw_offset: int = 0
     nw_max_stage: int | None = None
 
-    # --- Epic 1: line interchange --- Cobre per-(line_id, stage_id) p10/p50/p90 of
+    # --- line interchange --- Cobre per-(line_id, stage_id) p10/p50/p90 of
     # net_flow_mw across scenarios; bound table from constraints/line_bounds.parquet;
     # metadata list straight from system/lines.json["lines"]. The source model side:
     # mean interchange per (line_id, stage_0based) read from int*.out NWLISTOP files and
@@ -69,7 +69,7 @@ class PercentileData:
     line_meta: list[dict] = field(default_factory=list)
     nw_line_means: pl.DataFrame = field(default_factory=pl.DataFrame)
 
-    # --- Epic 2: per-hydro derived flow variables ---
+    # --- per-hydro derived flow variables ---
     # Cobre per-(hydro_id, stage_id) total_inflow_m3s (incremental +
     # upstream turbined+spilled) and total_outflow_m3s (turbined + spilled).
     # Outflow comes directly from the parquet ``outflow_m3s`` column when
@@ -93,7 +93,7 @@ class PercentileData:
     # :func:`_compute_nw_hydro_slacks`.
     nw_hydro_slacks: pl.DataFrame = field(default_factory=pl.DataFrame)
 
-    # --- Epic 3: system spillage in MWmes ---
+    # --- system spillage in MWmes ---
     # Per-stage stage-mean MW of system spillage ``spillage_m3s × ρ_eq``,
     # split into total / reservoir / run-of-river via the
     # ``max_storage_hm3 > 0`` discriminator.
@@ -1069,7 +1069,7 @@ def compare_results(
     # Read entity names from both sides.
     nw_hydro_names, nw_thermal_names, nw_bus_names = read_reference_names(case)
     cobre_hydro_meta = read_cobre_hydro_metadata(cobre_output_dir)
-    # ``read_cobre_hydro_metadata`` carries plant physics only (decision B1);
+    # ``read_cobre_hydro_metadata`` carries plant physics only;
     # merge in the plant->bus *label* from the 0.13 hydro_bus_generation
     # partition so ``dataset.metadata["cobre_hydro_meta"]`` -- the single
     # channel report_builder.py already threads into the per-bus hydro chart

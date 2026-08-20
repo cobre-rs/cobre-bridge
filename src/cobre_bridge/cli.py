@@ -477,10 +477,10 @@ def _run_dashboard(args: SimpleNamespace) -> None:
             )
 
 
-#: Preflight verdict → process exit code. The contract is fixed by the epic
-#: overview: ``OK`` is clean (0), ``WARNINGS`` is advisory (1), and
-#: ``WILL_NOT_CONVERT`` is the most severe (2). Kept as data so the mapping is
-#: directly unit-testable and impossible to drift from in the handler.
+#: Preflight verdict → process exit code: ``OK`` is clean (0), ``WARNINGS`` is
+#: advisory (1), and ``WILL_NOT_CONVERT`` is the most severe (2). Kept as data
+#: so the mapping is directly unit-testable and impossible to drift from in the
+#: handler.
 _VERDICT_EXIT_CODE: dict[PreflightVerdict, int] = {
     PreflightVerdict.OK: 0,
     PreflightVerdict.WARNINGS: 1,
@@ -1324,8 +1324,8 @@ def _convert_newave(
 #: boundary FCF is imported: a plain conversion has no boundary, so cobre
 #: resolves a zero depth and this warning never fires. Matched via
 #: :func:`_partition_validation_warnings` against cobre's stable substring
-#: (never the volatile message prefix); see
-#: ``cobre-io/src/validation/semantic/stages.rs``.
+#: (never the volatile message prefix), emitted by cobre's stage semantic
+#: validation.
 _DECOMP_VALIDATION_WHITELIST: tuple[str, ...] = ("external-solver interoperability",)
 
 
@@ -1480,8 +1480,8 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
     # other conversion-step failure — rather than the ``--validate`` exit-2
     # idiom, since this is a conversion step, not a validation gate.
     #
-    # The importer call runs inside a ``dx.collect()`` sink (deferred Epic-03
-    # review finding) so its ``Diagnostic``s — the cut-family summary, the
+    # The importer call runs inside a ``dx.collect()`` sink so its
+    # ``Diagnostic``s — the cut-family summary, the
     # D3-dropped source-only plants, and the GNL anticipated-ring deviation —
     # reach the Rich panels and the ``--json`` verdict instead of degrading to
     # invisible log records. ``boundary_diagnostics``/``fcf_diags`` default to
@@ -1560,10 +1560,10 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
         else:
             boundary_diagnostics = list(fcf_diags)
             # C8 surfacing (D7, TRACKED COBRE-GAP WORKAROUND — see
-            # ``fcf/__init__.py::_patch_policy_boundary`` and ~/git/cobre/
-            # plans/conversion-found-improvements.md): until cobre resolves
-            # ``policy.boundary.path`` relative to case_dir rather than the
-            # run's --output directory, this case must be run with
+            # ``fcf/__init__.py::_patch_policy_boundary`` and the cobre
+            # repository's conversion-found-improvements registry): until cobre
+            # resolves ``policy.boundary.path`` relative to case_dir rather than
+            # the run's --output directory, this case must be run with
             # ``--output <case_dir>``.
             run_constraint = f"--output={args.dst}"
             print_status(

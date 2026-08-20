@@ -135,8 +135,8 @@ def convert_lines_placeholder() -> dict:
     The exchange network waits on the ``IA`` accessor fix upstream; until
     it lands the buses are deliberately unconnected — each subsystem
     self-balances against its own deficit cost. (The file being mandatory
-    for a lineless study is tracked cobre-gap C4,
-    ``plans/conversion-found-improvements.md`` in the cobre repo.)
+    for a lineless study is tracked cobre-gap C4 in the cobre repository's
+    conversion-found-improvements registry.)
     """
     logging.getLogger(__name__).warning(
         "exchange network deferred (IA accessor fix upstream): emitting an "
@@ -312,7 +312,7 @@ def convert_lines(
     )
 
 
-#: The converter-created SE<->IV line's fixed name (ticket-007) -- the
+#: The converter-created SE<->IV line's fixed name -- the
 #: transshipment link that carries Itaipu's 50 Hz surplus into SE, mirroring
 #: the ``"{de}-{para}"`` naming convention IA lines get above.
 _IV_SE_LINE_NAME = "IV-SE"
@@ -339,7 +339,7 @@ def _itaipu_50hz_capacity_mw(dadger: Dadger) -> float:
     register at all.
 
     An absent register means "no limit", not zero -- the line must never
-    bind the 50 Hz surplus (ticket-007 pitfall guard).
+    bind the 50 Hz surplus.
     """
     ri = dadger.ri(df=True)
     if ri is None or ri.empty:
@@ -366,14 +366,14 @@ def append_iv_se_line(
     """Append the converter-created ``IV-SE`` line to a :func:`convert_lines` result.
 
     Unconditional on Itaipu detection alone: the caller decides whether
-    Itaipu (code 66) is operated and only calls this when it is
-    (ticket-007), so a deck that never operates Itaipu stays byte-identical
-    to today. But before synthesizing, this checks whether *lines_doc*
+    Itaipu (code 66) is operated and only calls this when it is, so a deck
+    that never operates Itaipu stays byte-identical to today. But before
+    synthesizing, this checks whether *lines_doc*
     already carries a line connecting *source_bus_id* and *target_bus_id*
     (as an unordered pair -- the deck's own ``IA`` line may run either
     direction). When one exists, the ``IV`` bus is not islanded: the deck's
     own line already wires it, and carries the source model's own capacity
-    rather than the unbounded sentinel, so this is a no-op (ticket-016) --
+    rather than the unbounded sentinel, so this is a no-op --
     *lines_doc*/*line_bounds* are returned unchanged.
 
     Otherwise (the genuinely-islanded case) it synthesizes exactly as
@@ -436,8 +436,7 @@ def pumping_station_id_map(dadger: Dadger) -> dict[int, int]:
     ``single_term_bounds.single_term_bound_contributions``'s ``QBOM`` path
     resolves its pumping-station entity id through this same map (its
     ``pumping_station_ids`` argument), since the QBOM term's ``code`` is a
-    pumping-station ``codigo_usina``, not a hydro one (epic-07,
-    ticket-023).
+    pumping-station ``codigo_usina``, not a hydro one.
     """
     ue = dadger.ue(df=True)
     if ue is None or ue.empty:

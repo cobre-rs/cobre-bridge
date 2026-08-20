@@ -3,8 +3,8 @@
 Provides timing breakdowns, solver diagnostics, LP dimensions, and scaling
 charts used by the main performance tab module.
 
-Timing column hierarchy (verified against cobre crates/cobre-sddp/src/
-{forward,backward,training_output}.rs):
+Timing column hierarchy (verified against cobre's SDDP forward, backward, and
+training_output timing modules):
 
 - **Top-level phases** (mutually exclusive, sum ≈ iteration total):
   ``forward_wall_ms``, ``backward_wall_ms``, ``cut_selection_ms``,
@@ -1681,7 +1681,7 @@ def chart_convergence_vs_wall_time(conv: pd.DataFrame, timing: pd.DataFrame) -> 
 
 
 # ---------------------------------------------------------------------------
-# Post-epic-04a backward-pass charts: per-opening & per-worker observability
+# Backward-pass charts: per-opening & per-worker observability
 # ---------------------------------------------------------------------------
 
 
@@ -1941,7 +1941,7 @@ def _box_stats_by_stage(bwd: pd.DataFrame, value_col: str) -> pd.DataFrame:
 def chart_backward_per_opening_solve_time(solver_train: pd.DataFrame) -> str:
     """Box plot of per-opening backward solve time (ms), grouped by stage.
 
-    Post-epic-04a the backward pass emits one solver-stats row per
+    The backward pass emits one solver-stats row per
     ``(iteration, stage, opening, rank, worker_id)``. Aggregating by stage
     exposes how much variability exists across openings and iterations at
     each stage — a fat tail signals LPs that swing wildly in difficulty.
@@ -2041,7 +2041,7 @@ def chart_backward_per_opening_simplex(solver_train: pd.DataFrame) -> str:
 def chart_backward_load_balance_per_worker(solver_train: pd.DataFrame) -> str:
     """Per-(rank, worker) backward solve time summed across iterations.
 
-    Post-epic-04b backward rows carry the real ``(rank, worker_id)`` from
+    Backward rows carry the real ``(rank, worker_id)`` from
     the MPI allgatherv. Summing solve time across iterations per worker
     reveals static load imbalance — a worker that consistently picks up
     more LPs than its peers stands out as a tall bar in this chart.
@@ -2109,7 +2109,7 @@ def chart_backward_load_balance_per_worker(solver_train: pd.DataFrame) -> str:
 def chart_worker_wall_time_distribution(timing_raw: pd.DataFrame) -> str:
     """Per-(rank, worker) forward + backward wall time across iterations.
 
-    Consumes the raw post-epic-04b timing rows that carry a non-null
+    Consumes the raw timing rows that carry a non-null
     ``worker_id``. Each bar is one worker; the two series are the summed
     forward/backward wall time observed by that worker. Large discrepancies
     across workers at the same rank surface thread-pool imbalance.

@@ -265,7 +265,7 @@ def _apply_permanent_overrides(
         for rec in modif.modificacoes_usina(code):
             type_name = type(rec).__name__
 
-            # Skip temporal override types — handled separately in ticket-005.
+            # Skip temporal override types — handled separately.
             if type_name in _TEMPORAL_OVERRIDE_TYPES:
                 continue
 
@@ -992,7 +992,7 @@ def _unit_ramp_summary(
     (``<s>`` = the stage at which the conjunto is fully online) joined by
     ``"; "``. Returns ``"—"`` when the plant has no parsable unit rows.
 
-    The epic-04 field-independence guards (``data_entrada_operacao.notna()`` +
+    The field-independence guards (``data_entrada_operacao.notna()`` +
     a ``pd.isna(conjunto)`` skip) keep a malformed exph row — a set conjunto
     with a ``NaT`` date, or the inverse — from crashing the cast.
     """
@@ -1092,7 +1092,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     seasonal_volref = _read_volref_saz(case)
 
     # NE plants carrying an exph dead-volume filling row are admitted as real
-    # downstream nodes (epic-2 admission predicate, single source of truth). The
+    # downstream nodes (admission predicate, single source of truth). The
     # set is computed once here and threaded into the cascade walker so upstream
     # plants resolve to the filling plant; it also drives each filling plant's
     # FILLING contract below. Empty (byte-identical to the no-arg call) when the
@@ -1113,7 +1113,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # convert_turbined_bounds_head_corrected emits into hydro_bounds.parquet.
     # cobre rule 43 forbids any hydro_bounds row from raising max_turbined_m3s
     # above the plant's own declared value, so the reference-head value below
-    # must be raised to cover every emitted per-stage row (ticket-015b). Empty
+    # must be raised to cover every emitted per-stage row. Empty
     # for a hydro with no per-stage head variation, which keeps its declared
     # value unchanged.
     turbined_envelope = _per_stage_turbined_envelope(case, id_map)
@@ -1121,8 +1121,8 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # Collect study plant codes for temporal override extraction.
     existing = case.active_hydros
 
-    # Per-stage (year, month) closure over the study horizon, built once (epic-1
-    # guidance) and passed into ``filling_min_rate_m3s`` for each filling plant.
+    # Per-stage (year, month) closure over the study horizon, built once and
+    # passed into ``filling_min_rate_m3s`` for each filling plant.
     # The exph DataFrame is only consulted when ``filling_codes`` is non-empty,
     # which guarantees ``case.exph`` is not None there.
     horizon = case.horizon
@@ -1189,7 +1189,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         elif tipo_reg == "S":
             vol_max = vol_min
 
-        # FILLING phase (design §3/§4.1): an admitted NE plant fills its dead
+        # FILLING phase: an admitted NE plant fills its dead
         # volume from its seeded storage up to ``min_storage_hm3`` over the
         # half-open window ``[start_sid, entry_sid)``, then enters operation at
         # ``entry_sid``. EX plants never enter this branch (filling_codes is the
@@ -1241,11 +1241,11 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 # JURUENA's single-stage window is anchor-insensitive: the soft
                 # target is pinned to ``min_storage_hm3`` regardless of the rate,
                 # so the exact per-stage ζ anchor (ζ_t vs ζ_{t+1}) does not matter.
-                # TODO(epic-04+): verify the multi-stage anchor against
-                # ``cobre/crates/cobre-core/src/lp/builder/layout.rs`` before
-                # shipping a non-trivial (multi-stage) filling rate.
+                # TODO(multi-stage-anchor): verify the multi-stage anchor against
+                # cobre's LP layout builder before shipping a non-trivial
+                # (multi-stage) filling rate.
                 #
-                # Rate clamp (design §8): a plant whose filling completes past the
+                # Rate clamp: a plant whose filling completes past the
                 # study horizon (``entry_sid > horizon.total_stages``) is a VALID
                 # case — it fills but never operates within the study, yet is still
                 # emitted with its true ``entry_stage_id``. The rate is summed only
@@ -1270,7 +1270,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 }
             # entry_sid == start_sid (duracao 0): keep filling None but still set
             # entry_stage_id — cobre rejects start_stage_id >= entry_stage_id, so
-            # no degenerate filling block is emitted (design §8).
+            # no degenerate filling block is emitted.
 
         # Generation parameters. Productivity lives in
         # ``hydro_production_models.json`` on cobre HEAD; callers that need
@@ -1290,7 +1290,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         #
         # The declaration itself is the ENVELOPE over that reference-head value
         # and every per-stage head-corrected cap this hydro emits into
-        # hydro_bounds (ticket-015b): a plant with per-stage head variation
+        # hydro_bounds: a plant with per-stage head variation
         # (MODIF.DAT CFUGA/CMONT or seasonal VOLREF_SAZ) can turbine more at a
         # higher-head stage than at the reference head, and cobre rule 43
         # forbids a hydro_bounds row from exceeding the plant's own declared
@@ -2752,8 +2752,8 @@ def convert_storage_bounds(
     # Read confhd for the list of active plant codes.
     confhd_codes = case.active_hydro_codes
 
-    # Determine whether the case has any NE-with-filling plant (epic-02
-    # admission predicate). The max_generation_mw column is gated on this:
+    # Determine whether the case has any NE-with-filling plant (admission
+    # predicate). The max_generation_mw column is gated on this:
     # EX-only cases keep the byte-identical 8-column schema.
     exph_df = case.exph.expansoes if case.exph is not None else None
     filling_codes = filling_hydro_codes(case.confhd.usinas, exph_df)
@@ -2875,12 +2875,13 @@ def convert_storage_bounds(
             min_turbined_vals.append(turbmint_by_stage.get(stage_id))
             min_outflow_vals.append(vazmint_by_stage.get(stage_id))
             min_generation_vals.append(ghmin_by_stage.get(stage_id))
-            # ticket-010 adds the column but no values; ticket-011 populates
-            # per-stage ramp caps. None mirrors min_generation null handling.
+            # Column present but unpopulated here; the filling-plant unit-ramp
+            # branch below populates per-stage ramp caps. None mirrors
+            # min_generation null handling.
             max_generation_vals.append(None)
             is_ramp_vals.append(False)
 
-    # Filling-plant unit-ramp branch (ticket-011, design §4.2/§5): a
+    # Filling-plant unit-ramp branch: a
     # ``NE``-with-filling plant operates from ``entry_sid`` but its turbine /
     # generation capacity at each stage is whatever generating units are online.
     # We export EXPLICIT 0/reduced caps over the FULL pre-operating window
@@ -2902,7 +2903,7 @@ def convert_storage_bounds(
     # de-dup pass below resolves any ``(hydro_id, stage_id)`` collision in favour
     # of the ramp row (ramp wins: the explicit 0-cap during PreFilling/Filling
     # overrides a colliding MODIF/GHMIN minimum). cobre defers duplicate-pair
-    # handling (bounds.rs ~84), so the bridge resolves it here. JURUENA itself
+    # handling, so the bridge resolves it here. JURUENA itself
     # carries no MODIF/GHMIN, so for it the de-dup is a no-op.
     if filling_codes and case.exph is not None:
         exph_df = case.exph.expansoes
@@ -2951,7 +2952,7 @@ def convert_storage_bounds(
 
             # All-units-online stage: the exported pre-operating window is
             # [0, full_online_sid). Clamp the upper bound to total_stages so the
-            # loop never indexes past the horizon (epic-03 IndexError lesson). A
+            # loop never indexes past the horizon. A
             # plant whose entry is at/after the horizon end still emits explicit
             # 0-cap rows for every in-study stage [0, total_stages) — it never
             # operates in-study, so every stage is pre-operating.

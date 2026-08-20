@@ -24,7 +24,7 @@ the jul-26 deck's own outputs (2026-07-24):
   *skipped* the ``RQ``/``UH`` contribution for any plant with a ``CQ``
   ``QDEF`` window — encoding the wrong "the window replaces the default"
   reading of the reference manual instead of the correct "both apply,
-  tighter wins" one; that skip was correctly retired in epic-07/ticket-023,
+  tighter wins" one; that skip was correctly retired
   once the accumulator's ``intersect`` could express the co-apply
   composition directly instead of this module approximating it via a skip.
 
@@ -216,7 +216,7 @@ def convert_storage_bounds(
 
     For each hydro *code*, the outer envelope is ``storage_envelope(effective,
     code)`` — the widest floor/ceiling the plant's per-stage volumes ever
-    reach, and the default the entity ``reservoir`` block (ticket-007)
+    reach, and the default the entity ``reservoir`` block
     declares. A stage whose effective range (:func:`~cobre_bridge.decomp.
     cadastro.effective_storage_range`) differs from that envelope (past float
     noise) contributes a stage-level (``block_id = None``) override; a stage
@@ -224,7 +224,7 @@ def convert_storage_bounds(
     with no temporal ``VOLMIN``/``VOLMAX`` override never differs from its own
     envelope, so it contributes nothing at all — and neither does a
     run-of-river (``D``) plant, whose per-stage range is already the same
-    single-point collapse as its envelope (ticket-018). Storage is a
+    single-point collapse as its envelope. Storage is a
     stage-level axis (``block_eligible=False``), so no ``block_id`` is ever
     emitted here.
     """

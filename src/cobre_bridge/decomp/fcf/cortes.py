@@ -8,7 +8,7 @@ multi-stage archive, ``cortes-<estagio>.dat`` for a single-stage partition
 export; the canonical name is set by the deck's ``FC`` record) carrying the
 cut coefficients. ``inewave.newave.Cortesh`` parses the header into
 :class:`CortesHeader`, the manifest both :func:`read_cortes` and the mapper
-(epic 2) key off. :func:`read_cortes` reads the boundary-stage records into
+key off. :func:`read_cortes` reads the boundary-stage records into
 :class:`StageCutRecord`/:class:`BoundaryCuts` via ``inewave`` 1.15.0's
 ``Cortes.from_cortesh``, which returns a ``.cortes`` frame of named columns
 (``rhs``, ``pi_gnl_sbm{s}_pat{p}_lag{l}``, ``pi_varm_uhe{code}``,
@@ -65,10 +65,10 @@ class CortesHeader:
 class StageCutRecord:
     """One boundary cut's provenance and coefficients, in header slot order.
 
-    Populated by the record reader (ticket-002); defined here so the
+    Populated by the record reader; defined here so the
     header reader and its consumers share one type. ``cut_id``,
     ``iteration``, ``forward_pass_index``, and ``is_active`` are the
-    per-cut provenance columns the checkpoint writer (epic 2's ticket-008)
+    per-cut provenance columns the checkpoint writer
     needs — carried verbatim from the ``from_cortesh`` frame's
     ``indice_corte``, ``iteracao_construcao``, ``indice_forward``, and
     ``iteracao_desativacao == 0`` respectively. The reader carries every
@@ -90,7 +90,7 @@ class StageCutRecord:
 class BoundaryCuts:
     """The boundary-stage cut family: header plus its cut records.
 
-    Assembled by the record reader (ticket-002); defined here so the
+    Assembled by the record reader; defined here so the
     header reader and its consumers share one type.
     """
 
@@ -107,7 +107,7 @@ class CutFamilySummary:
     storage or inflow-lag coefficient, which GNL slots are live, and the
     RHS coefficient scale. Plain data — no logging, no
     :class:`~cobre_bridge.diagnostics.Diagnostic` — so it stays reusable
-    both as an epic-1 self-check and as diagnostic input for epic 4.
+    both as a self-check and as diagnostic input.
     """
 
     n_active_cuts: int
@@ -189,8 +189,8 @@ def required_inflow_lag_depth(summary: CutFamilySummary) -> int:
     Declared to ``cobre.write_policy_checkpoint`` so the writer reserves that many
     canonical ``HydroInflowLag`` slots in the checkpoint: a DECOMP case has no
     PAR(p) model for cobre to infer the depth from, so the depth must be carried
-    in the boundary checkpoint itself (see
-    ``~/git/cobre/plans/cobre-bootstrap-inflow-lag-depth-programmatic-spec.md``).
+    in the boundary checkpoint itself (cobre's programmatic inflow-lag-depth
+    bootstrap via ``write_policy_checkpoint(inflow_lag_depth=N)``).
     It is never written to ``config.json`` (cobre 0.14 retired that user field).
 
     Returns ``0`` when no cut carries a nonzero lag coefficient — the boundary

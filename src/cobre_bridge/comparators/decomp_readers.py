@@ -128,7 +128,7 @@ def read_dec_oper_rhesoft(case_dir: Path) -> pl.DataFrame:
     the conversion-time RHE emitter (``decomp.constraints.
     emit_rhe_generics``) names its cobre constraint after (``"RHE_<id>"``).
 
-    ticket-019: this is the RHE (soft minimum-stored-energy) constraints'
+    This is the RHE (soft minimum-stored-energy) constraints'
     own achieved LHS, straight from the source model -- the Constraints tab's
     DECOMP-side LHS derivation (`decomp_results._rhe_lhs_lookup`) reads
     ``valor_MW``/``violacao_absoluta_MW`` from here rather than re-deriving
@@ -156,7 +156,7 @@ def read_dec_oper_evap(case_dir: Path) -> pl.DataFrame:
     volume, not a flow), ``desvio_absoluto_hm3``, ``desvio_percentual``.
     Unlike `read_dec_oper_usih`/`read_dec_oper_ree`, this table carries no
     ``patamar`` column -- it is already one row per (stage, node, scenario,
-    plant), with no sub-stage block breakdown to fold. ticket-020: the
+    plant), with no sub-stage block breakdown to fold. The
     source for the evaporation comparison (`decomp_results.
     _evaporation_result_comparisons`), which reconciles
     ``evaporacao_calculada_hm3`` (hm³) against Cobre's ``evaporation_m3s``
@@ -168,7 +168,7 @@ def read_dec_oper_ree(case_dir: Path) -> pl.DataFrame:
     """Per-REE (reservoir-equivalent-energy) operation: natural inflow energy
     (``ena_MWmes``) and stored energy (``earm_inicial``/``earm_final``, both
     absolute ``_MWmes`` and ``_percentual``, plus ``earm_maximo_MWmes``), one
-    row per (stage, node, scenario, REE). ticket-018: the DECOMP-side source
+    row per (stage, node, scenario, REE). The DECOMP-side source
     for the REE energy rollup -- Cobre has no REE entity, so its counterpart
     is a membership-weighted sum of plant output (see
     `decomp_results._ree_result_comparisons`)."""
@@ -221,7 +221,7 @@ def _read_relato_table(case_dir: Path, attr: str) -> pl.DataFrame:
     Resolves the relato file via `_resolve_relato` (root-only), reads it
     via ``Relato.read``, and pulls the table at ``getattr(relato, attr)``.
     Shared by every ``relato``-backed reader (convergence, energy balance,
-    and — in later tickets — costs and membership).
+    and later costs and membership).
     """
     path = _resolve_relato(case_dir)
     if path is None:
@@ -312,7 +312,7 @@ def read_relato_membership(case_dir: Path) -> pl.DataFrame:
     ``codigo_submercado``, ``nome_submercado``, ``nome_submercado_newave``)
     from the general report.
 
-    ticket-018: the sole source that attributes a hydro plant to its REE --
+    The sole source that attributes a hydro plant to its REE --
     neither `DecompIdMap` nor any ``dec_oper_*`` table carries that
     membership, so `decomp_results._ree_result_comparisons` rolls Cobre's
     per-plant energy up to the REE level through this table instead.
@@ -320,7 +320,7 @@ def read_relato_membership(case_dir: Path) -> pl.DataFrame:
     return _read_relato_table(case_dir, "uhes_rees_submercados")
 
 
-# --- ticket-017: FPHA (fitted production function) readers ---
+# --- FPHA (fitted production function) readers ---
 #
 # Three files, all resolved via `_resolve_revisioned_file` (root-only,
 # `<stem>.rvN`): `dec_desvfpha` (per-hydro/stage/scenario/block deviation
@@ -330,7 +330,7 @@ def read_relato_membership(case_dir: Path) -> pl.DataFrame:
 # no per-hydro/stage key). None of the three carries the fitted PLANE
 # coefficients themselves (those live in a fourth, undeclared file,
 # `avl_cortesfpha.rvN` / idecomp's `AvlCortesFpha`) -- see
-# `decomp_results._fpha_metrics`'s docstring for how this ticket works
+# `decomp_results._fpha_metrics`'s docstring for how it works
 # around that gap.
 
 
@@ -407,8 +407,7 @@ def reconcile_kdollars_to_reais(value: float) -> float:
     site — readers stay in native k$, and callers convert once, explicitly.
 
     Downstream, two different R$ conventions apply: the Overview cost dict
-    (ticket-010) uses plain R$ (this factor, ×10³), while `nw_sin` uses
-    10⁶ R$ (an additional ÷10⁶ on top of this factor) — also ticket-010's
-    responsibility.
+    uses plain R$ (this factor, ×10³), while `nw_sin` uses
+    10⁶ R$ (an additional ÷10⁶ on top of this factor).
     """
     return value * 1e3

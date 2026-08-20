@@ -383,10 +383,10 @@ def _cobre_safe_lead_hours(ideal_lead_hours: float, horizon_hours: float) -> flo
     """Cap the mirror lead strictly below the study horizon (a cobre workaround).
 
     TRACKED COBRE-GAP WORKAROUND (C13): cobre's LP builder panics with a
-    divide-by-zero (``crates/cobre-sddp/src/lp/builder/entries.rs``, ``stage_idx
-    % k_max``) when an anticipated ``LeadTime`` plant's lead reaches the full
-    study horizon. cobre derives the in-study ring depth ``k_max`` from the lead
-    alone: with a lead ``>=`` the horizon, every in-study delivery-stage decider
+    divide-by-zero (``stage_idx % k_max``) when an anticipated ``LeadTime``
+    plant's lead reaches the full study horizon. cobre derives the in-study
+    ring depth ``k_max`` from the lead alone: with a lead ``>=`` the horizon,
+    every in-study delivery-stage decider
     is pre-study, so ``k_max`` collapses to ``0`` — yet the commitment-maturity
     ("fishing") rows still fire and index ``stage_idx % k_max``.
 
@@ -403,7 +403,8 @@ def _cobre_safe_lead_hours(ideal_lead_hours: float, horizon_hours: float) -> flo
 
     Remove this cap (return ``ideal_lead_hours`` unchanged) once cobre handles
     ``k_max == 0`` by collapsing the in-study fishing rows. Tracked with its
-    removal condition in ``~/git/cobre/plans/conversion-found-improvements.md``.
+    removal condition in the cobre repository's conversion-found-improvements
+    registry.
     """
     if ideal_lead_hours < horizon_hours:
         return ideal_lead_hours

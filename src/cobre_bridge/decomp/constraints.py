@@ -37,7 +37,7 @@ so ``emit_rhq_rhv_generics`` detects one and skips the constraint with a
 plumbing).
 
 ``HE`` (RHE stored-energy) constraints are emitted by
-``emit_rhe_generics`` (E5, ticket-018): unlike the three families above, it
+``emit_rhe_generics``: unlike the three families above, it
 owns its own model-agnostic productivity reconstruction (the shared
 ``productivity.stored_energy_productivity`` primitive, driven over the
 operated-cascade walk this module imports from ``decomp/hydro.py``) rather
@@ -153,7 +153,7 @@ def _hydro_generation_token(hydro_id: int, bus_id: int | None = None) -> str:
     ``bus_id`` selects the v0.14 frequency-split generation selector
     (``hydro_generation(id, bus=bus_id)``); omitted, it is the plant's whole
     generation (``hydro_generation(id)``). Frequency-split resolution itself
-    is deferred to the multi-term RE emitter (ticket-015).
+    is deferred to the multi-term RE emitter.
     """
     if bus_id is not None:
         return f"hydro_generation({hydro_id}, bus={bus_id})"
@@ -197,10 +197,10 @@ def _variable_token(
     Raises
     ------
     ValueError
-        For ``interchange`` (resolved by ticket-014's ``resolve_fi_term``,
-        which needs the line map), the volume tipos ``VDEF``/``VDES``/
-        ``VBOM`` (resolved by ticket-016's hours-weighted flow-domain path),
-        or any other unrecognised variable — fail-loud, never a silent skip
+        For ``interchange`` (resolved by ``resolve_fi_term``, which needs
+        the line map), the volume tipos ``VDEF``/``VDES``/``VBOM``
+        (resolved by the hours-weighted flow-domain path), or any other
+        unrecognised variable — fail-loud, never a silent skip
         that would build a malformed expression.
     KeyError
         Propagated from ``id_map.hydro_id``/``id_map.thermal_id`` for an
@@ -574,7 +574,7 @@ def _resolve_re_terms(
       (which would raise ``KeyError``). Otherwise resolved via
       ``_variable_token``.
     - ``interchange`` — resolved via ``resolve_fi_term``; a ``None`` result
-      (ticket-014's resolver already warned) drops the whole record.
+      (the resolver already warned) drops the whole record.
 
     Any single unresolved term drops the **whole** constraint
     (skip-not-partial) — never a partial expression. Returns the ordered

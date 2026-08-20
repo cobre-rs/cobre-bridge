@@ -414,8 +414,7 @@ def build_bus_balance(
     Net import for a bus = sum of ``net_flow_mw`` for all lines where the
     bus is the **target** minus sum where the bus is the **source**.
     Positive = net importer, negative = net exporter.  All buses in
-    ``line_meta`` are included (no fictitious bus filtering per epic-01
-    design decision).
+    ``line_meta`` are included (no fictitious bus filtering).
 
     Args:
         exchanges_lf: Line flow LazyFrame with ``net_flow_mw`` column.

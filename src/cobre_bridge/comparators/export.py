@@ -1,7 +1,7 @@
 """Machine-readable artifact export for the ANALYZE layer.
 
-This module wires the canonical :class:`ComparisonDataset` (epic-01) and the
-:class:`ComparisonManifest` (epic-01) into a single export entry point,
+This module wires the canonical :class:`ComparisonDataset` and the
+:class:`ComparisonManifest` into a single export entry point,
 :func:`write_artifacts`, that emits the artifacts a divergence-investigation
 workflow consumes: the tidy ``comparison.parquet`` frame, the per-variable
 ``summary.parquet`` / ``summary.json`` / ``summary.csv`` projections, the

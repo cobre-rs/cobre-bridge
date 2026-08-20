@@ -5,7 +5,7 @@ thermal cost, deficit cost), a horizontal stacked cost breakdown bar chart,
 and a companion summary table with component/mean/std/p10/p90/percentage
 columns.
 
-Ticket-015 extends this module with four temporal evolution sections:
+This module also provides four temporal evolution sections:
   D. Cost Composition by Stage — stacked area, undiscounted.
   E. Cost Category Trends — line chart with p10-p90 bands per group.
   F. Spot Price by Bus — faceted mean+p50+band, block-hours weighted.
@@ -453,7 +453,7 @@ def _render_cost_composition(data: DashboardData) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Section D — interactive group-by composition section (ticket-011)
+# Section D — interactive group-by composition section
 # ---------------------------------------------------------------------------
 
 # 28-color sequential palette for individual cost components.
@@ -1134,7 +1134,7 @@ def render(data: DashboardData) -> str:
     """Return the full HTML string for the v2 Costs tab content area.
 
     Renders five sections in order:
-    - NPV Cost Analysis (metrics + bar chart + table) — from ticket-014.
+    - NPV Cost Analysis (metrics + bar chart + table).
     - Cost Composition by Stage (stacked area, undiscounted) — Section D.
     - Cost Category Trends (line + bands per group) — Section E.
     - Spot Price by Bus (faceted subplots, block-hours weighted) — Section F.

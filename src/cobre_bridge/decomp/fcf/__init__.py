@@ -1,8 +1,8 @@
 """Boundary FCF importer: reads the source model's cut files and authors a
 cobre policy checkpoint.
 
-:func:`import_boundary_fcf` is the epic's single entry point: it composes the
-cut reader (``fcf/cortes.py``, epic 1), the terminal-manifest bootstrap
+:func:`import_boundary_fcf` is the single entry point: it composes the
+cut reader (``fcf/cortes.py``), the terminal-manifest bootstrap
 (``fcf/bootstrap.py``), the manifest-to-manifest mapper (``fcf/mapper.py``),
 and the checkpoint writer (``fcf/writer.py``) in order, then patches the
 converted case's ``config.json`` so cobre loads the authored ``boundary/``
@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 
-#: (ticket-013 Requirement C.3 / Finding 3) a GNL deviation group whose
+#: a GNL deviation group whose
 #: carried |Σ| is below this FRACTION of the panel's own max |Σ| is treated
 #: as numerically vanished relative to the group that actually carries
 #: weight — its relative spread `(max_p c_p - min_p c_p) / |Σ_p c_p|` would
@@ -169,7 +169,7 @@ def _post_horizon_start(case_dir: Path) -> int | None:
     post-horizon). Returns ``None`` when the file is absent or its
     ``stages`` list is empty — a case shape as legitimate as "no post-study
     horizon at all"; the mapper's ``GnlRingPlan.post_horizon_start=None``
-    disables the covered-lane filter entirely for that case (ticket-013).
+    disables the covered-lane filter entirely for that case.
 
     A malformed ``start_date`` string is NOT swallowed here: the
     ``ValueError`` from ``int(...)`` propagates verbatim rather than
@@ -198,7 +198,7 @@ def _final_stage_block_hours(case_dir: Path) -> list[float]:
     coupling month's post-exclusion hours — e.g. 648 h for a 27-day April) —
     so :func:`~cobre_bridge.decomp.fcf.mapper.map_boundary_cuts`'s GNL branch
     can weight each ``pi_gnl`` patamar column by its own coupling block's
-    hours (ticket-001), rather than the stage's total.
+    hours, rather than the stage's total.
     :func:`_coupling_stage_hours` sums this same vector for the
     intercept/storage/inflow-lag terms.
 
@@ -382,7 +382,7 @@ def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan
     reader's own gate, never re-derived here. Otherwise threads
     :func:`_post_horizon_start` into the resolved plan so
     ``fcf/mapper.py::_resolve_gnl_targets`` restricts placement to covered
-    post-horizon lanes (ticket-013) without itself reading any deck file.
+    post-horizon lanes without itself reading any deck file.
     """
     if deck_files.dadgnl is None:
         return None
@@ -413,8 +413,8 @@ def _gnl_deviation_rows(
     whichever active record maximises the relative spread
     ``(max_p c_p - min_p c_p) / |sum_p c_p|`` (guarded to ``0.0`` when
     ``|sum_p c_p| <= 1e-9``) — a worst-case snapshot, not an aggregate across
-    records; ``absolute_spread`` (``max_p c_p - min_p c_p``, ticket-013
-    Requirement C.3) is that same selected record's un-normalised spread, so
+    records; ``absolute_spread`` (``max_p c_p - min_p c_p``) is that same
+    selected record's un-normalised spread, so
     a caller can report it alongside the relative figure without the
     near-zero-Σ inflation the ratio alone is prone to. Skips a group whose
     ``(submercado, lag)`` falls outside ``cuts``' own ``pi_gnl`` shape (the
@@ -485,11 +485,11 @@ def _emit_import_diagnostics(
     pre-fan-out patamar spread the mapper's chain-rule sum collapses (see
     :func:`_gnl_deviation_rows`), headlined as a relative/absolute spread
     pair (the relative figure excludes a near-zero-Σ group per
-    ``_GNL_DEVIATION_REL_FLOOR``, ticket-013 Requirement C.3) plus a
+    ``_GNL_DEVIATION_REL_FLOOR``) plus a
     dropped-coverage count read verbatim from ``mapping.gnl_dropped``
-    (source-submercado drops plus, since ticket-013, non-covered
+    (source-submercado drops plus non-covered
     dated-slot drops); ``gnl_plan=None`` (the default) gates it off
-    entirely, so pre-ticket-010 2-arg callers are unchanged.
+    entirely, so 2-arg callers are unchanged.
 
     Pure side effect via :func:`cobre_bridge.diagnostics.emit`: reads
     ``cuts``/``mapping``/``gnl_plan`` but does not alter any of them, so it
@@ -506,7 +506,7 @@ def _emit_import_diagnostics(
             severity=dx.Severity.INFO,
             category="Boundary FCF",
             title=f"Boundary FCF authors {summary.n_active_cuts} cut(s)",
-            # (Finding 1, ticket-013 Requirement C.1) `lag_nonzero_by_depth` is
+            # `lag_nonzero_by_depth` is
             # the one fact not already in this string; every other figure a
             # `notes` bullet used to restate (n_active_cuts, storage_nonzero_
             # plants, rhs_min/max) is already here, so `notes` is dropped
@@ -556,7 +556,7 @@ def _emit_import_diagnostics(
         rows = _gnl_deviation_rows(cuts, gnl_plan)
         # "Dropped" is every GNL term that reached no *covered* target: a
         # source submercado with no live thermal at all (`thermal_id is
-        # None`), or (ticket-013) a target's dated slot dropped for falling
+        # None`), or a target's dated slot dropped for falling
         # before the post-study horizon (reason names it) — read straight
         # from `mapping.gnl_dropped`, never recomputing the covered/
         # uncovered split independently here.
@@ -633,13 +633,12 @@ def _patch_policy_boundary(config_path: Path, *, source_stage: int) -> None:
     with config_path.open(encoding="utf-8") as handle:
         config = json.load(handle)
     policy = config.setdefault("policy", {})
-    # TRACKED COBRE-GAP WORKAROUND (C8, ~/git/cobre/plans/
-    # conversion-found-improvements.md): cobre resolves this path against the
-    # run's --output directory, not case_dir (run/policy.rs:209), while every
-    # other case input resolves against case_dir. A default `cobre run
-    # <case>` will not find `case_dir/boundary` — callers must run with
-    # `--output <case_dir>` until cobre resolves policy.boundary.path
-    # relative to case_dir.
+    # TRACKED COBRE-GAP WORKAROUND (C8, cobre's conversion-found-improvements
+    # registry): cobre resolves this path against the run's --output directory,
+    # not case_dir, while every other case input resolves against case_dir. A
+    # default `cobre run <case>` will not find `case_dir/boundary` — callers
+    # must run with `--output <case_dir>` until cobre resolves
+    # policy.boundary.path relative to case_dir.
     policy["boundary"] = {"path": "boundary", "source_stage": source_stage}
     with config_path.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2, ensure_ascii=False)
@@ -680,9 +679,9 @@ def import_boundary_fcf(
        each cut's RHS reduced by ``Σ lag_coef · mu`` so the loaded cut prices
        the raw lag state as the *deviation* from the seasonal mean —
        ``fcf/mapper.py``'s ``inflow_lag_means``), and ``AnticipatedThermalState``
-       GNL-ring terms via the plan's per-block hours-weighted patamar sum
-       (ticket-001); ``HydroTransitBucket`` slots are left at coefficient 0
-       regardless (epic 5's job, not this one's).
+       GNL-ring terms via the plan's per-block hours-weighted patamar sum;
+       ``HydroTransitBucket`` slots are left at coefficient 0
+       regardless.
     5. Surfaces the mapping's documented approximations as ``Diagnostic``s
        (:func:`_emit_import_diagnostics`): the always-on cut-family triage,
        the D3-dropped source-only plants (gated on non-empty), and — when the
@@ -701,7 +700,7 @@ def import_boundary_fcf(
        ``case_dir`` rather than the run's ``--output`` directory, the case
        must be run with ``--output <case_dir>`` (see
        ``_patch_policy_boundary``'s code comment and
-       ``~/git/cobre/plans/conversion-found-improvements.md``).
+       cobre's conversion-found-improvements registry).
 
     Returns the ``case_dir/boundary`` path, or ``None`` on the no-cut-files
     no-op.
@@ -760,7 +759,7 @@ def import_boundary_fcf(
     inflow_lag_means = inflow_context[2] if inflow_context is not None else None
     # Read stages.json's per-block hours once; cost_unit_hours (the
     # intercept/storage/inflow-lag scale) is this same vector's sum, never a
-    # second stages.json read (ticket-001).
+    # second stages.json read.
     coupling_block_hours = _final_stage_block_hours(case_dir)
     cost_unit_hours = math.fsum(coupling_block_hours)
     # CX register (complexo -> DECOMP components): the header prices a NEWAVE
@@ -842,8 +841,8 @@ def import_boundary_fcf(
     # TRACKED COBRE-GAP WORKAROUND (C8): cobre resolves policy.boundary.path
     # against the run's --output directory rather than the case directory the
     # checkpoint was authored into, so this case must be run with
-    # --output=<case_dir>. Removal condition tracked in
-    # ~/git/cobre/plans/conversion-found-improvements.md. The message below is
+    # --output=<case_dir>. Removal condition tracked in cobre's
+    # conversion-found-improvements registry. The message below is
     # end-user-facing (no repo-internal references).
     _LOG.warning(
         "This case must be run with `cobre run %s --output %s`: the boundary "

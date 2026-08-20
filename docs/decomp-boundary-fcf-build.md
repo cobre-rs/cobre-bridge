@@ -8,18 +8,16 @@ pass (`cobre.run.run`), and writes the cuts into a Cobre policy checkpoint via
 `delivery_date` entity-manifest field). Every cobre call is in-process against
 the `cobre-python` wheel — the import needs no external `cobre` binary.
 
-See `plans/decomp-boundary-fcf-feature.md` for the design and
-`plans/decomp-boundary-fcf/` for the tickets.
-
 ## Requirements
 
-- **`cobre-python >= 0.14.1`** — and nothing else. The CBVF `delivery_date`
-  checkpoint format ships in the released cobre `0.14.1` wheel on PyPI, and
-  `cobre-python` is a **required runtime dependency** of `cobre-bridge` (in
-  `pyproject.toml`'s core `dependencies`, pinned `>=0.14.1,<0.15`). A normal
-  `pip install cobre-bridge` therefore installs everything the import needs —
-  no wheel to build, no binary to supply. Keep the pin in lockstep with
-  `MIN_COBRE_VERSION` in `src/cobre_bridge/cli.py`.
+- **`cobre-python`** — and nothing else. The CBVF `delivery_date` checkpoint
+  format ships in the released cobre wheels on PyPI, and `cobre-python` is a
+  **required runtime dependency** of `cobre-bridge` (in `pyproject.toml`'s
+  core `dependencies`). A normal `pip install cobre-bridge` therefore installs
+  everything the import needs — no wheel to build, no binary to supply. The
+  version floor is stated once, in `pyproject.toml`, in lockstep with
+  `MIN_COBRE_VERSION` in `src/cobre_bridge/cli.py`; `tests/test_packaging.py`
+  guards that lockstep, so this doc deliberately repeats no number.
 
 An external `cobre` binary is needed only later, to _solve_ the converted case
 (`cobre run`), which is a separate step downstream of the bridge — see
@@ -34,8 +32,8 @@ The bridge does not trust the wheel's self-reported version. The authoritative
 check is the runtime **capability probe** in
 `src/cobre_bridge/decomp/fcf/capability.py` (`ensure_boundary_fcf_capability()`):
 it performs a real CBVF write→load round trip against the installed wheel and
-raises a `RuntimeError` naming this doc if the wheel cannot write or reload the
-`delivery_date` checkpoint format. A round trip (rather than a version string)
+raises a `RuntimeError` with a self-contained remediation message if the wheel
+cannot write or reload the `delivery_date` checkpoint format. A round trip (rather than a version string)
 also catches a broken, partial, or ABI-mismatched wheel. Any bridge command that
 gates on it — e.g. `convert decomp` on a deck that declares cut files — exercises
 the probe. If it fails, reinstall or upgrade `cobre-python` (`pip install
@@ -57,5 +55,5 @@ case directory it was authored into, so a plain `cobre run <case_dir>` (default
 output elsewhere) fails to locate the boundary checkpoint. The bridge's
 `--boundary-fcf` wiring surfaces this constraint in its own output after a
 successful import; it is worked around at the call site, not solved by the
-bridge. Its removal condition is tracked in
-`~/git/cobre/plans/conversion-found-improvements.md`.
+bridge. Its removal condition is tracked in the cobre repository's
+conversion-found-improvements registry.

@@ -1,6 +1,6 @@
 """Adapters mapping the comparison-engine output into the tidy dataset.
 
-These are the ANALYZE-layer adapters (epic-02). They turn the existing
+These are the ANALYZE-layer adapters. They turn the existing
 ``list[ResultComparison]`` + ``PercentileData`` value frames produced by
 ``results.py`` AND the ``list[BoundComparison]`` produced by ``bounds.py`` into
 the canonical tidy/long frame defined by
@@ -9,7 +9,7 @@ the canonical tidy/long frame defined by
 It runs BEHIND the existing report flow (strangler-fig): it calls no readers and
 recomputes no diffs — it consumes the passed-in objects verbatim and never
 mutates them. ``bus`` enrichment, constraint/convergence/productivity rows are
-out of scope here and are added when their tabs migrate in later epics; this
+out of scope here and are added when their tabs migrate; this
 adapter emits the sentinel ``bus = -1`` / ``block = -1`` for every row.
 """
 
@@ -317,7 +317,7 @@ def build_results_dataset(
         "cobre_costs": pct.cobre_costs,
         "nw_bus_names": pct.nw_bus_names,
         "nw_hydro_names": pct.nw_hydro_names,
-        # --- ticket-013: Overview/System/Energy-Balance/Network tab inputs ---
+        # --- Overview/System/Energy-Balance/Network tab inputs ---
         # The four migrated tabs read these named keys (via report_builder's
         # typed metadata accessors) instead of the monolithic ``pct`` object.
         # Stored as the live objects: frames as pl/pd DataFrames, the dict/list/
@@ -337,7 +337,7 @@ def build_results_dataset(
         "line": pct.line,
         "line_bounds": pct.line_bounds,
         "line_meta": pct.line_meta,
-        # --- ticket-014: Hydro Operation / Hydro Details tab inputs ---
+        # --- Hydro Operation / Hydro Details tab inputs ---
         # The two hydro tabs read these named keys (via report_builder's typed
         # metadata accessors). ``cobre_hydro_meta`` is a dict[int, dict];
         # ``nw_hydro_slacks`` and ``cobre_hydro_per_stage_bounds`` are frames.
@@ -345,7 +345,7 @@ def build_results_dataset(
         "cobre_hydro_meta": pct.cobre_hydro_meta,
         "nw_hydro_slacks": pct.nw_hydro_slacks,
         "cobre_hydro_per_stage_bounds": pct.cobre_hydro_per_stage_bounds,
-        # --- ticket-021: Thermal Operation / Thermal Details / Productivity ---
+        # --- Thermal Operation / Thermal Details / Productivity ---
         # The thermal tabs read ``thermal``; the Productivity tab reads
         # ``productivity_detail``. Both are live ``pl.DataFrame`` objects.
         "thermal": pct.thermal,
@@ -361,7 +361,7 @@ def build_results_dataset(
         "fpha_metrics": pct.fpha_metrics,
         "fpha_surface": pct.fpha_surface,
         "fpha_spill": pct.fpha_spill,
-        # --- ticket-022: Constraints / Performance tab inputs ---
+        # --- Constraints / Performance tab inputs ---
         # The final two tabs read these named keys (via report_builder's typed
         # metadata accessors). ``gc_constraints`` is a ``list[dict]``;
         # ``nw_max_stage`` is ``int | None``; ``cobre_training_seconds`` is a
@@ -854,13 +854,13 @@ def _bus_name_lookups(
     label the ``simulation/hydro_bus_generation`` partition carries per plant
     (see ``cobre_readers.read_cobre_hydro_bus_labels``). ``hydro_meta`` itself
     (``cobre_readers.read_cobre_hydro_metadata``) carries no bus information --
-    it is plant physics only (decision B1) -- ``"bus_ids"`` is merged onto it
+    it is plant physics only -- ``"bus_ids"`` is merged onto it
     by the results-comparison orchestrator before it reaches here.
 
     A plant with no recorded bus (``"bus_ids"`` absent or empty) is skipped,
     matching the legacy ``bus_id is None`` skip. A plant recorded at *more
-    than one* bus (only possible once a case has genuine multi-bus hydros --
-    epic 08) is **not** collapsed onto an arbitrary one of them and **not**
+    than one* bus (only possible once a case has genuine multi-bus hydros) is
+    **not** collapsed onto an arbitrary one of them and **not**
     added to every one of them either: either choice would misreport the
     per-bus roll-up (silently dropping one bus's share, or double-counting
     the plant's whole value at each bus it touches). It is instead excluded
@@ -955,7 +955,7 @@ def per_bus_sums_from_results(
     """Roll hydro ``ResultComparison`` rows up to per-(bus, stage) sums.
 
     Pure numeric core of the per-bus accumulation in
-    ``charts.hydro_per_bus_chart`` (``charts.py:904-939``). Rows are filtered to
+    ``charts.hydro_per_bus_chart``. Rows are filtered to
     ``entity_type == "hydro"`` and ``variable``; each plant is mapped to its
     owning bus via ``hydro_meta[cobre_id]["bus_ids"]`` (see
     :func:`_bus_name_lookups` -- plants with no resolvable single bus,
@@ -1023,7 +1023,7 @@ def per_bus_sums_from_frame(
     """Roll a per-(entity_id, stage_id) frame up to per-(bus, stage) sums.
 
     Pure numeric core of the ``_per_bus_from_frame`` closure in
-    ``charts.hydro_slack_per_bus_chart`` (``charts.py:1207-1233``). Used for the
+    ``charts.hydro_slack_per_bus_chart``. Used for the
     slack variables that are sourced from per-entity frames rather than
     ``ResultComparison`` rows. Rows are optionally filtered to ``matched_ids``,
     each entity is mapped to its owning bus (same resolution / fictitious-skip
@@ -1089,8 +1089,8 @@ def per_bus_band_from_pct(
     """Sum ``{variable}_p10``/``{variable}_p90`` per stage for each bus's plants.
 
     Pure numeric core of the per-bus percentile-band roll-up in
-    ``charts.hydro_per_bus_chart`` (``charts.py:948-966``) and the parallel block
-    in ``charts.hydro_slack_per_bus_chart`` (``charts.py:1253-1264``). For each
+    ``charts.hydro_per_bus_chart`` and the parallel block
+    in ``charts.hydro_slack_per_bus_chart``. For each
     ``bus_name -> ids`` it sums the percentile columns across ``ids`` per
     ``stage_id`` and returns the per-stage ``(p10, p90)`` tuples. Buses with an
     empty id set contribute no entry (mirroring the slack-chart ``if not ids``
@@ -1140,7 +1140,7 @@ def plant_percentile_arrays(
     """Extract one plant's per-stage ``{var}_p10``/``{var}_p90`` arrays.
 
     Pure numeric core of the inner extraction in
-    ``charts._enrich_with_percentiles`` (``charts.py:2786-2799``). For the single
+    ``charts._enrich_with_percentiles``. For the single
     plant ``plant_cobre_id`` it filters ``pct_df`` to that entity **once**, then
     for each ``(var_key, _, stages)`` triple whose ``{var}_p10``/``{var}_p90``
     columns are present, reads the rounded per-stage values aligned to that
@@ -1199,7 +1199,7 @@ def cobre_sum_and_newave_sin(
     """Roll a Cobre per-hydro variable and a source-model-SIN long frame to per-stage
     totals.
 
-    Pure numeric core of ``charts.cobre_aggregate_chart`` (``charts.py:813-846``). The
+    Pure numeric core of ``charts.cobre_aggregate_chart``. The
     Cobre side sums ``variable`` across (optionally ``matched_ids``-filtered) plants per
     ``stage_id`` — delegated to :func:`per_stage_sum_from_frame` so the
     grouping/sort/filter semantics stay identical. The source model side folds the long
@@ -1255,7 +1255,7 @@ def bus_groups_and_pct(
 ) -> tuple[dict[str, list[ResultComparison]], dict[int, dict[int, dict[str, object]]]]:
     """Group ``bus`` rows by name and build the per-entity percentile lookup.
 
-    Pure numeric core of ``charts.system_per_bus_chart`` (``charts.py:2500-2523``).
+    Pure numeric core of ``charts.system_per_bus_chart``.
     Rows are filtered to ``entity_type == "bus"`` and ``variable`` and bucketed by
     upper-cased ``entity_name`` (insertion order preserved). The percentile lookup
     maps ``entity_id -> {stage_id -> row}`` over ``pct_df`` when both the
@@ -1304,8 +1304,8 @@ def spillage_lookups(
 ) -> tuple[dict[str, dict[int, float]], dict[str, dict[int, float]]]:
     """Build the source model and Cobre per-variable, per-stage spillage lookups.
 
-    Pure numeric core of ``charts.system_spillage_energy_chart``
-    (``charts.py:1565-1581``). The source model lookup is keyed by each
+    Pure numeric core of ``charts.system_spillage_energy_chart``. The source
+    model lookup is keyed by each
     ``system_spillage`` row's ``variable`` (e.g. ``VERTOT``/``VERTcont``/ ``VERTfio``)
     then ``stage`` to ``newave_value``. The Cobre lookup maps the ``cobre_spill_energy``
     frame's ``total_mw``/``reservoir_mw``/``rorov_mw`` columns per ``stage_id`` under

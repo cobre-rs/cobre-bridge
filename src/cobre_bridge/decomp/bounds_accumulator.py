@@ -179,8 +179,8 @@ def intersect(
     """Intersect a homogeneous group of contributions into one bound pair.
 
     ``contribs`` must all share one full key (family, entity, stage, block,
-    axis) — this is a pure per-group reduction, not a grouping primitive (see
-    ticket-008 for grouping). Returns ``(max of the effective lowers, min of
+    axis) — this is a pure per-group reduction, not a grouping primitive.
+    Returns ``(max of the effective lowers, min of
     the effective uppers)``, each ``None`` when no contribution bounds that
     side.
 
@@ -363,8 +363,8 @@ def resolve(
 #: contribution on some axis simply carries ``null`` there, distinct from a
 #: genuine ``0.0`` bound. ``HYDRO_BOUNDS_SCHEMA`` widens ``decomp/bounds.py``'s
 #: ``_HYDRO_BOUNDS_SCHEMA`` to every hydro axis in :data:`AXES`, including the
-#: two-sided diversion and spillage axes cobre's generic-constraint-authoring
-#: epic-01 landed.
+#: two-sided diversion and spillage axes that cobre's
+#: generic-constraint-authoring support added.
 HYDRO_BOUNDS_SCHEMA = pa.schema(
     [
         pa.field("hydro_id", pa.int32(), nullable=False),

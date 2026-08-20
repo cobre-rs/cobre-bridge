@@ -55,7 +55,7 @@ def _incremental_context(
     id_map: DecompIdMap,
 ) -> tuple[dict[int, str], dict[int, list[int]]]:
     """Per-plant station column and direct operated-upstream stations, off
-    the *effective* (post-``AC NUMJUS``/``NUMPOS``) topology (ticket-014).
+    the *effective* (post-``AC NUMJUS``/``NUMPOS``) topology.
 
     Stage-agnostic by design (one cascade for the whole horizon): both the
     station column and the downstream link are read at stage 0
@@ -244,7 +244,7 @@ def convert_external_inflows(
 ) -> pa.Table:
     """``external_inflow_scenarios.parquet``: the tree of per-plant incremental
     inflows, read off each plant's *effective* (post-``AC NUMPOS``) gauge
-    column (ticket-014)."""
+    column."""
     values = _tree_values(vazoes, effective, id_map, calendar)
 
     stage_ids: list[int] = []

@@ -62,7 +62,7 @@ if TYPE_CHECKING:
 
 
 # -------------------------------------------------------------------
-# Typed metadata accessors for the migrated tab blocks (ticket-013)
+# Typed metadata accessors for the migrated tab blocks
 #
 # Each isinstance-guards its named key and returns a safe default when the key
 # is absent or ill-typed, reproducing the legacy ``pct.<field> if pctiles else
@@ -193,8 +193,7 @@ def build_comparison_report(
         artifact (see ``RENDER_ONLY_METADATA_KEYS``).
     reference_label:
         Display name for the reference series (trace names, chart titles,
-        prose). Defaults to ``"NEWAVE"``, which reproduces the pre-ticket
-        output byte-for-byte; ``compare decomp`` passes ``"DECOMP"``.
+        prose). Defaults to ``"NEWAVE"``; ``compare decomp`` passes ``"DECOMP"``.
 
     Returns
     -------
@@ -372,7 +371,7 @@ def build_comparison_report(
                 ]
             )
         )
-    # --- ticket-018: REE energy rollup (additive; absent for `compare
+    # --- REE energy rollup (additive; absent for `compare
     # newave` datasets, which never carry `entity_type == "ree"` rows) ---
     ree_results = [r for r in results if r.entity_type == "ree"]
     if ree_results:
@@ -678,7 +677,7 @@ def build_comparison_report(
         "Static productivity — pmo vs cobre-bridge conversion "
         "(point / equivalent / accumulated)"
     )
-    # ticket-016: the static (pmo-derived) and realized (per-stage) halves are
+    # the static (pmo-derived) and realized (per-stage) halves are
     # disjoint data sources -- a source with no pmo.dat (e.g. DECOMP) can
     # carry a non-empty ``per_stage_df`` while ``prod_df`` stays empty, and
     # vice versa -- so each half is gated on its OWN frame, independently.

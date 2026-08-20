@@ -164,15 +164,14 @@ class _ScalarAcSpec:
 
 #: The scalar single-value ``AC`` mnemonics ingested by
 #: :func:`_read_scalar_overrides`. Module scope (rather than function-local)
-#: so every consumer of the scalar-override machinery shares one registry —
-#: epic-03 extends this same tuple with the diversion-channel volume
-#: thresholds (`VMDESV`/`VSVERT`); the diversion channel itself (`DESVIO`)
-#: is not scalar and gets its own reader, :func:`_read_diversion_overrides`.
-#: ticket-013 (E5) extends it further with the three scalar head/
-#: productivity mnemonics (`PROESP`/`PERHID`/`JUSMED`) — the fourth,
-#: `COTVOL`, is a multi-row polynomial and gets its own reader instead,
-#: :func:`_read_polynomial_overrides`. ticket-014 (E5) adds the topology/
-#: gauge pair (`NUMJUS`/`NUMPOS`) via the shared :func:`_read_keyed_overrides`
+#: so every consumer of the scalar-override machinery shares one registry.
+#: The diversion-channel volume thresholds (`VMDESV`/`VSVERT`) are scalar and
+#: belong here; the diversion channel itself (`DESVIO`) is not scalar and gets
+#: its own reader, :func:`_read_diversion_overrides`. The three scalar head/
+#: productivity mnemonics (`PROESP`/`PERHID`/`JUSMED`) belong here too — the
+#: fourth, `COTVOL`, is a multi-row polynomial and gets its own reader instead,
+#: :func:`_read_polynomial_overrides`. The topology/gauge pair
+#: (`NUMJUS`/`NUMPOS`) goes through the shared :func:`_read_keyed_overrides`
 #: (with :func:`_plant_code_key`): single-value and plant-keyed like this
 #: tuple's own entries, but `int`-valued (a plant/gauge code), so it does
 #: not fit this `float`-typed tuple either.
@@ -221,7 +220,7 @@ UNINGESTABLE_AC_CLASSES: frozenset[type] = frozenset({ACALTEFE})
 class OutOfHorizon:
     """An ``AC`` override whose effective date falls after the calendar horizon.
 
-    Reported rather than dropped: ticket-004's assembly surfaces these so a
+    Reported rather than dropped: the cadastro assembly surfaces these so a
     deck that overrides a plant's cadastro beyond the study horizon is never
     silently ignored.
     """
@@ -468,9 +467,8 @@ def _read_machine_set_overrides(
     A fifth machine-configuration mnemonic, ``ALTEFE`` (effective head), is
     deliberately **not** ingested here: the installed idecomp accessor
     exposes no value property on it, only the identifying/timing columns, so
-    its ``df=True`` frame carries nothing to consume — and effective head is
-    out of this ticket's scope regardless (E5 head/productivity work). Do
-    not import or read it without a value accessor to back it.
+    its ``df=True`` frame carries nothing to consume. Do not import or read
+    it without a value accessor to back it.
 
     Raises
     ------
@@ -749,7 +747,7 @@ class EffectiveCadastro:
 
     def downstream_plant_varies(self, code: int) -> bool:
         """Whether *code*'s effective downstream link varies across stages
-        (a temporal ``AC NUMJUS``) — the ticket-014 tracked-gap trigger:
+        (a temporal ``AC NUMJUS``) — the tracked-gap trigger:
         :func:`~cobre_bridge.decomp.hydro._downstream_operated` reads one
         stage-representative link for the whole horizon (stage 0 by
         default), so a caller checks this to warn rather than silently
@@ -836,7 +834,7 @@ def storage_envelope(effective: EffectiveCadastro, code: int) -> tuple[float, fl
     the single-point collapse ``(vol_ref, vol_ref)`` at every stage, so its
     envelope collapses to that same point; every ``M``/``S`` plant is
     unchanged. This is the envelope the entity ``reservoir`` block
-    (ticket-007) declares as its default storage bounds;
+    declares as its default storage bounds;
     :func:`cobre_bridge.decomp.bounds.convert_storage_bounds` emits a
     per-stage override wherever a stage's effective bounds differ from it.
     """
@@ -914,7 +912,7 @@ def build_effective_cadastro(
     stage rather than one scalar.
 
     Also builds ``downstream_links``/``inflow_gauges`` from
-    :func:`_read_keyed_overrides` (ticket-014, OQ-4): sparse by plant
+    :func:`_read_keyed_overrides`: sparse by plant
     code, seeded from the base ``codigo_usina_jusante``/``posto`` columns
     and densified the same way as every other per-stage series. Consumed by
     :meth:`EffectiveCadastro.downstream_plant`/``inflow_gauge`` — the

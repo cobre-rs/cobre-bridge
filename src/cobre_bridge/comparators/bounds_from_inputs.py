@@ -108,12 +108,12 @@ def compute_line_bounds(
 
     ``convert_line_bounds`` now also emits per-block override rows
     (``block_id`` set) alongside the stage-level base row (``block_id is
-    None``) — cobre decision 10 (epic 02 §7.2). Only the base rows are used
+    None``). Only the base rows are used
     here: this dict is keyed by ``(line_id, stage_id)`` with no block
     dimension, so folding block rows in would let a later row silently
     overwrite the base capacity for any stage with a differing block, rather
     than raising or comparing per block. Block-level fidelity is not yet this
-    check's job — a future ticket may extend the comparison to be block-aware.
+    check's job.
     """
     from cobre_bridge.converters.network import convert_line_bounds
 
