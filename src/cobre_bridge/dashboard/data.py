@@ -505,6 +505,36 @@ def load_temporal_context(case_dir: Path) -> TemporalContext:
     if pg_rate is not None:
         discount_rate = float(pg_rate)
 
+    # A non-empty node list is a scenario tree with per-branch probabilities;
+    # every mean/quantile downstream still averages leaf paths uniformly (full
+    # probability-weighting is a separate follow-up), so the reader needs a
+    # signal that the aggregates are not weighted expectations.
+    nodes = stages_data.get("policy_graph", {}).get("nodes")
+    if nodes:
+        emit(
+            Diagnostic(
+                code="dashboard-unweighted-tree-averages",
+                severity=Severity.WARNING,
+                category="Dashboard data",
+                title="Scenario tree averages are not probability-weighted",
+                summary=(
+                    "This case is built from a scenario tree whose branches "
+                    "occur with different probabilities, but every mean and "
+                    "percentile band in this dashboard treats each scenario "
+                    "path with equal weight. The reported statistics are "
+                    "unweighted averages across scenario paths, not the "
+                    "probability-weighted expectations the underlying "
+                    "optimization targets."
+                ),
+                remediation=(
+                    "Read the displayed means and percentile bands as "
+                    "unweighted scenario-path averages, not probability-"
+                    "weighted expectations."
+                ),
+            ),
+            logger=logger,
+        )
+
     stage_hours: dict[int, float] = {}
     for s in stages_data["stages"]:
         stage_hours[s["id"]] = sum(b["hours"] for b in s["blocks"])
@@ -967,8 +997,7 @@ def load_generic_constraints(case_dir: Path) -> GenericConstraintData:
 class DashboardData:
     """All data sources required to render the Cobre dashboard.
 
-    Populated via ``DashboardData.load(case_dir)``.  Fields match the local
-    variables previously declared inside ``build_dashboard()``.
+    Populated via ``DashboardData.load(case_dir)``.
     """
 
     case_dir: Path

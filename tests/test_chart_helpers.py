@@ -667,8 +667,9 @@ _GOLDEN_DIR = Path(__file__).parent / "golden"
 
 
 def _strip_chart_id(html: str) -> str:
-    """Normalise the random ``chart-<hex>`` div id (uuid per render)."""
-    return re.sub(r"chart-[0-9a-f]+", "chart-XXXX", html)
+    """Normalise the random ``chart-<hex>`` div id and the plotly.js CDN version."""
+    html = re.sub(r"chart-[0-9a-f]+", "chart-XXXX", html)
+    return re.sub(r"plotly-[0-9.]+\.min\.js", "plotly-XXXX.min.js", html)
 
 
 def _rc(
@@ -1255,7 +1256,8 @@ def test_system_spillage_energy_chart_html_matches_golden(
 #
 # The golden ``tests/golden/build_comparison_report_full.html`` was captured
 # from the LEGACY ``build_comparison_report(results, pctiles)`` call on the
-# fixtures below; only the random ``chart-<hex>`` div id is normalised.
+# fixtures below; the random ``chart-<hex>`` div id and the plotly.js CDN
+# version are normalised by ``_strip_chart_id`` before comparison.
 # ---------------------------------------------------------------------------
 
 

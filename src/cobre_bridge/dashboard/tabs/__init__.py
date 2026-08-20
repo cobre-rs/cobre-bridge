@@ -1,8 +1,4 @@
-"""Tab registry for the dashboard.
-
-Defines the ``TabModule`` Protocol, the ``TAB_MODULES`` registry, and the
-``get_renderable_tabs`` orchestration function.
-"""
+"""Tab registry for the dashboard."""
 
 from __future__ import annotations
 
@@ -25,6 +21,7 @@ class TabModule(Protocol):
     TAB_ID: str
     TAB_LABEL: str
     TAB_ORDER: int
+    REQUIRED_JS: list[str]
 
     def can_render(self, data: DashboardData) -> bool:
         """Return True when this tab has sufficient data to be shown."""
@@ -90,12 +87,6 @@ def _render_error_placeholder(tab_label: str, exc: Exception) -> str:
 def get_renderable_tabs(data: DashboardData) -> list[tuple[str, str, str]]:
     """Return ordered, renderable tabs for *data*.
 
-    Steps:
-    1. Sort ``TAB_MODULES`` by ``TAB_ORDER`` (ascending).
-    2. Filter to modules where ``can_render(data)`` is True.
-    3. Call ``render(data)`` on each; on any exception, log and substitute an
-       in-tab error placeholder rather than dropping the tab.
-
     Returns:
         List of ``(tab_id, tab_label, rendered_html)`` tuples.
     """
@@ -116,3 +107,27 @@ def get_renderable_tabs(data: DashboardData) -> list[tuple[str, str, str]]:
             html = _render_error_placeholder(module.TAB_LABEL, exc)
         result.append((module.TAB_ID, module.TAB_LABEL, html))
     return result
+
+
+def collect_required_js(data: DashboardData) -> str:
+    """Union the ``REQUIRED_JS`` blocks of every renderable tab for *data*.
+
+    Each tab declares the shared JS function definitions it needs instead of
+    relying on another tab having emitted them — a tab's shared JS dependency
+    stays satisfied regardless of which other tabs render for this case shape
+    (see ``build_html``'s ``required_js`` parameter). Modules that declare
+    nothing are tolerated via ``getattr(..., [])``.
+
+    Returns:
+        The deduped blocks (first-seen order, deduped by string value) joined
+        with ``"\\n"``.
+    """
+    ordered = sorted(TAB_MODULES, key=lambda m: m.TAB_ORDER)
+    blocks: list[str] = []
+    for module in ordered:
+        if not module.can_render(data):
+            continue
+        for block in getattr(module, "REQUIRED_JS", []):
+            if block not in blocks:
+                blocks.append(block)
+    return "\n".join(blocks)

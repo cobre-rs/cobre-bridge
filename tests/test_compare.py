@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pyarrow as pa
 import pytest
+from plotly.offline import get_plotlyjs_version
 
 from cobre_bridge.comparators.bounds import (
     BoundComparison,
@@ -261,11 +262,6 @@ class _MakeTableSpy:
         return make_table(*args, **kwargs)  # type: ignore[arg-type]
 
 
-def _spy_make_table() -> _MakeTableSpy:
-    """Return a fresh :class:`_MakeTableSpy` for a single printer invocation."""
-    return _MakeTableSpy()
-
-
 class TestToleranceRowColouring:
     """Compare summary table rows are coloured green/red by tolerance."""
 
@@ -305,7 +301,7 @@ class TestToleranceRowColouring:
         ]
         dataset = build_results_dataset(results, PercentileData(), 1e-2)
 
-        spy = _spy_make_table()
+        spy = _MakeTableSpy()
         with patch("cobre_bridge.comparators.report.make_table", side_effect=spy):
             print_results_summary_from_dataset(dataset, Path("/nw"), Path("/cobre"))
 
@@ -330,7 +326,7 @@ class TestToleranceRowColouring:
 
         dataset = build_bounds_dataset(_make_bounds_for_colour())
 
-        spy = _spy_make_table()
+        spy = _MakeTableSpy()
         with patch("cobre_bridge.comparators.report.make_table", side_effect=spy):
             print_bounds_summary_from_dataset(
                 dataset, Path("/nw"), Path("/cobre"), 1e-3
@@ -790,7 +786,7 @@ class TestHtmlReport:
         )
         assert "<!DOCTYPE html>" in html
         assert "Test Report" in html
-        assert "plotly-2.35.2.min.js" in html
+        assert f"plotly-{get_plotlyjs_version()}.min.js" in html
         assert "<p>Hello</p>" in html
 
     def test_build_comparison_report_no_crash(self) -> None:

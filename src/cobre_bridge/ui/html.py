@@ -5,6 +5,10 @@ from __future__ import annotations
 import html as _html
 import json
 
+from plotly.offline import get_plotlyjs_version
+
+_PLOTLYJS_VERSION = get_plotlyjs_version()
+
 
 def escape_text(value: object) -> str:
     """Escape *value* for use as HTML **text** content (e.g. inside ``<td>``).
@@ -87,12 +91,11 @@ def collapsible_section(
         "</svg>"
     )
 
+    section_class = "collapsible-section"
     if default_collapsed:
-        section_class = "collapsible-section"
         title_class = "section-title collapsed-title"
         content_class = "collapsible-content collapsed"
     else:
-        section_class = "collapsible-section"
         title_class = "section-title"
         content_class = "collapsible-content"
 
@@ -119,7 +122,6 @@ def _sparkline_svg(
     min_v = min(values)
     max_v = max(values)
     value_range = max_v - min_v
-    # Avoid division by zero for flat series
     scale = height / value_range if value_range > 0 else 0.0
     pts_list: list[str] = []
     for i, v in enumerate(values):
@@ -238,6 +240,7 @@ def build_html(
     tab_contents: dict[str, str],
     css: str,
     js: str,
+    required_js: str = "",
 ) -> str:
     """Assemble a complete HTML document with tabbed navigation.
 
@@ -248,6 +251,11 @@ def build_html(
             render as ``"<p>No data</p>"``.
         css: CSS string injected into ``<style>`` in ``<head>``.
         js: JavaScript string injected into ``<script>`` at end of ``<body>``.
+        required_js: Shared JS function definitions needed by tab-body
+            scripts. Emitted in its own ``<script>`` in ``<head>``,
+            immediately after the plotly ``<script>``, so the definitions
+            exist before any tab's inline ``DOMContentLoaded`` handler runs.
+            Empty (the default) emits nothing.
 
     Returns:
         A complete ``<!DOCTYPE html>`` document string.
@@ -272,13 +280,17 @@ def build_html(
             f'<section id="{tab_id}" class="tab-content{active_cls}">\n{content}\n</section>'
         )
 
+    # Empty when required_js is "" so the comparison-report path (no shared JS
+    # needed) renders byte-identical <head> markup to before this parameter existed.
+    shared_js_block = f"\n    <script>\n{required_js}\n</script>" if required_js else ""
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{title}</title>
-    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-{_PLOTLYJS_VERSION}.min.js"></script>{shared_js_block}
     <style>
 {css}
     </style>

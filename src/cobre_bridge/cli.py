@@ -416,19 +416,25 @@ def _run_dashboard(args: SimpleNamespace) -> None:
         render_error(f"no simulation output found in {case_dir}")
         raise typer.Exit(code=1)
 
+    from cobre_bridge import diagnostics as dx
+
     output_path: Path = args.output or (case_dir / "dashboard.html")
     if not args.json_output:
         print_status(f"Building dashboard from {case_dir} ...")
-    with spinner(
-        "Building dashboard…",
-        verbose=args.verbose > 0,
-        quiet=args.quiet,
-        no_color=args.no_color,
-    ):
-        build_dashboard(case_dir, output_path)
+    with dx.collect() as dash_diags:
+        with spinner(
+            "Building dashboard…",
+            verbose=args.verbose > 0,
+            quiet=args.quiet,
+            no_color=args.no_color,
+        ):
+            build_dashboard(case_dir, output_path)
     size_kb = output_path.stat().st_size / 1024
     if not args.json_output:
         print_status(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
+        render_diagnostics(
+            dash_diags, console=get_console(stderr=True), quiet=args.quiet
+        )
 
     if args.json_output:
         # --json: one machine-readable verdict to stdout. Emitted BEFORE the
@@ -441,6 +447,7 @@ def _run_dashboard(args: SimpleNamespace) -> None:
                 "dashboard",
                 "ok",
                 dashboard_summary(str(output_path), size_kb),
+                dash_diags,
             )
         )
 

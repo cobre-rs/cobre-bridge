@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 TAB_ID = "tab-plants"
 TAB_LABEL = "Plant Explorer"
 TAB_ORDER = 50
+REQUIRED_JS: list[str] = [SUB_TAB_JS, PLANT_EXPLORER_JS]
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -325,21 +326,12 @@ def _build_hydro_json(
                 ]
 
         # Derived outflow = turbined + spillage (sum of p50 arrays for display)
-        turb_p50 = entry.get("turb_p50", [])
-        spill_p50 = entry.get("spill_p50", [])
-        entry["outflow_p50"] = [
-            round(float(t + sp), 4) for t, sp in zip(turb_p50, spill_p50)
-        ]
-        turb_p10 = entry.get("turb_p10", [])
-        spill_p10 = entry.get("spill_p10", [])
-        entry["outflow_p10"] = [
-            round(float(t + sp), 4) for t, sp in zip(turb_p10, spill_p10)
-        ]
-        turb_p90 = entry.get("turb_p90", [])
-        spill_p90 = entry.get("spill_p90", [])
-        entry["outflow_p90"] = [
-            round(float(t + sp), 4) for t, sp in zip(turb_p90, spill_p90)
-        ]
+        for sfx in ("p50", "p10", "p90"):
+            turb = entry.get(f"turb_{sfx}", [])
+            spill = entry.get(f"spill_{sfx}", [])
+            entry[f"outflow_{sfx}"] = [
+                round(float(t + sp), 4) for t, sp in zip(turb, spill)
+            ]
 
         # hydro_bounds: storage and turbined/spillage/outflow min/max
         if hid in hb_index:
@@ -1234,7 +1226,8 @@ def render(data: DashboardData) -> str:
     """Return the full HTML string for the Plant Explorer tab content area.
 
     Wraps the hydro and thermal sub-tabs in a sub-tab bar with switching.
-    Emits PLANT_EXPLORER_JS and SUB_TAB_JS once each before both panels.
+    SUB_TAB_JS and PLANT_EXPLORER_JS are declared via REQUIRED_JS and emitted
+    once in the document shell, not inline here.
     """
     hydro_content = build_hydro_explorer(
         hydros_lf=data.hydros_lf,
@@ -1261,8 +1254,6 @@ def render(data: DashboardData) -> str:
         "</div>"
     )
 
-    shared_js = "<script>\n" + SUB_TAB_JS + PLANT_EXPLORER_JS + "\n</script>"
-
     hydro_panel = (
         '<div id="plants-hydro" class="sub-tab-panel" style="display:block;">'
         + hydro_content
@@ -1282,4 +1273,4 @@ def render(data: DashboardData) -> str:
         + "</div>"
     )
 
-    return section_title("Plant Explorer") + shared_js + group
+    return section_title("Plant Explorer") + group

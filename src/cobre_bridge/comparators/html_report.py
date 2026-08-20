@@ -41,7 +41,7 @@ def build_comparison_html(
     title: str,
     tab_contents: dict[str, str],
 ) -> str:
-    """Build a complete self-contained HTML comparison report."""
+    """Build a complete HTML comparison report that loads plotly.js from a CDN."""
     return build_html(
         title=title,
         tab_defs=COMPARISON_TABS,

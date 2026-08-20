@@ -31,6 +31,7 @@ from cobre_bridge.ui.html import (
     plant_explorer_table,
     wrap_chart,
 )
+from cobre_bridge.ui.js import PLANT_EXPLORER_JS
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
@@ -51,17 +52,13 @@ if TYPE_CHECKING:
 TAB_ID = "tab-stochastic"
 TAB_LABEL = "Stochastic Model"
 TAB_ORDER = 10
+REQUIRED_JS: list[str] = [PLANT_EXPLORER_JS]
 
 _HIST_COLOR: str = COLORS["hydro"]  # #4A90B8 — historical traces
 _SYNTH_COLOR: str = COLORS["thermal"]  # #F5A623 — synthetic traces
 
 _NO_HIST = "<p>No historical inflow data.</p>"
 _NO_DATA = "<p>No data.</p>"
-
-
-# ---------------------------------------------------------------------------
-# Helper: convert hex color to rgba string
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -1141,21 +1138,6 @@ def _render_section_d(data: DashboardData) -> str:
         bus_name = data.bus_names.get(prev_bus, str(prev_bus))
         bus_boundaries.append({"pos": n, "label": bus_name, "start": bus_start})
 
-    month_names = [
-        "Jan",
-        "Feb",
-        "Mar",
-        "Apr",
-        "May",
-        "Jun",
-        "Jul",
-        "Aug",
-        "Sep",
-        "Oct",
-        "Nov",
-        "Dec",
-    ]
-
     def _reorder_matrix(
         mat: np.ndarray,
         idx: list[int],
@@ -1178,7 +1160,7 @@ def _render_section_d(data: DashboardData) -> str:
             continue
         try:
             mat = np.array(profile["correlation_groups"][0]["matrix"], dtype=np.float64)
-            synthetic_by_season[month_names[month_idx]] = _reorder_matrix(mat, reorder)
+            synthetic_by_season[_MONTH_NAMES[month_idx]] = _reorder_matrix(mat, reorder)
         except (KeyError, IndexError, TypeError):
             continue
 
@@ -1217,13 +1199,13 @@ def _render_section_d(data: DashboardData) -> str:
             # Round to 4 decimals to match the synthetic matrices (see
             # ``_reorder_matrix``) — keeps the heatmap's .3f hover exact while
             # avoiding full float64 reprs in the embedded payload.
-            historical_by_season[month_names[month_idx]] = np.round(
+            historical_by_season[_MONTH_NAMES[month_idx]] = np.round(
                 np.nan_to_num(corr_arr, nan=0.0), 4
             ).tolist()
 
     # Determine available seasons
     available = [
-        m for m in month_names if m in synthetic_by_season and m in historical_by_season
+        m for m in _MONTH_NAMES if m in synthetic_by_season and m in historical_by_season
     ]
     if not available:
         available = list(synthetic_by_season.keys())

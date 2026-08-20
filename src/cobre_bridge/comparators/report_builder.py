@@ -1,7 +1,7 @@
 """Assemble the full HTML comparison report from results data.
 
-Combines chart implementations and the HTML template into a complete
-self-contained report.
+Combines chart implementations and the HTML template into a single HTML file
+that loads plotly.js from a CDN.
 """
 
 from __future__ import annotations
@@ -637,14 +637,11 @@ def build_comparison_report(
         results,
         hydro_pct,
         cobre_hydro_means,
-        cobre_hydro_meta=cast(
-            "dict[int, dict[object, object]]",
-            _meta_dict(dataset.metadata, "cobre_hydro_meta"),
-        ),
+        cobre_hydro_meta=hydro_meta,
         cobre_hydro_per_stage_bounds=_meta_frame(
             dataset.metadata, "cobre_hydro_per_stage_bounds"
         ),
-        nw_hydro_slacks=_meta_frame(dataset.metadata, "nw_hydro_slacks"),
+        nw_hydro_slacks=nw_hydro_slacks,
         reference_label=reference_label,
     )
 

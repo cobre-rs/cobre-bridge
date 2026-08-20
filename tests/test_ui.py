@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import plotly.graph_objects as go
 import pytest
+from plotly.offline import get_plotlyjs_version
 
 from cobre_bridge.ui.css import PLANT_EXPLORER_CSS, comparison_css, dashboard_css
 from cobre_bridge.ui.html import (
@@ -283,7 +284,7 @@ def test_build_html_structure(
         js=TAB_SWITCH_JS,
     )
     assert "<!DOCTYPE html>" in result
-    assert "plotly-2.35.2.min.js" in result
+    assert f"plotly-{get_plotlyjs_version()}.min.js" in result
     assert "<header>" in result
     assert "<nav>" in result
     assert "<main>" in result
