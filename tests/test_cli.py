@@ -18,11 +18,14 @@ import subprocess
 import sys
 import webbrowser
 from pathlib import Path
-from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
+
+if TYPE_CHECKING:
+    from cobre_bridge.cli_args import CompareArgs
 
 # Fake data for converter functions.
 _FAKE_LOAD_FACTORS: dict = {"load_factors": []}
@@ -3407,13 +3410,14 @@ class TestCompareDatasetWiring:
         cobre_dir = tmp_path / "cobre"
         cobre_dir.mkdir()
 
-        code, _, stderr = self._invoke_main(
+        code, stdout, stderr = self._invoke_main(
             ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)],
             monkeypatch,
         )
 
         assert code == 1
-        assert "Error: caso.dat not found" in stderr
+        assert stdout == ""
+        assert "caso.dat not found" in stderr
 
     def test_compare_results_html_tabs_intact(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3731,15 +3735,17 @@ class TestCompareJson:
         cobre_dir = tmp_path / "cobre"
         cobre_dir.mkdir()
 
-        code, stdout, stderr = self._invoke_main(
+        code, stdout, _ = self._invoke_main(
             ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
             monkeypatch,
         )
 
         assert code == 2
-        assert stdout == ""
-        assert "ERROR:" in stderr
-        assert "bad parquet" in stderr
+        doc = json.loads(stdout)
+        assert doc["command"] == "compare newave"
+        assert doc["status"] == "error"
+        assert len(doc["diagnostics"]) == 1
+        assert "bad parquet" in doc["diagnostics"][0]["summary"]
 
     def test_compare_results_partition_missing_exit_2_no_stdout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3769,16 +3775,18 @@ class TestCompareJson:
             _raise,
         )
 
-        code, stdout, stderr = self._invoke_main(
+        code, stdout, _ = self._invoke_main(
             ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"],
             monkeypatch,
         )
 
         assert code == 2
-        assert stdout == ""
-        assert "ERROR:" in stderr
-        assert str(cobre_dir / "simulation" / "hydro_bus_generation") in stderr
-        assert "0.13.0" in stderr
+        doc = json.loads(stdout)
+        assert doc["command"] == "compare newave"
+        assert doc["status"] == "error"
+        summary = doc["diagnostics"][0]["summary"]
+        assert str(cobre_dir / "simulation" / "hydro_bus_generation") in summary
+        assert "0.13.0" in summary
 
 
 class TestParseFormats:
@@ -4404,28 +4412,57 @@ def test_convert_newave_case_threads_on_phase(tmp_path: Path) -> None:
 
 
 class TestResolveCompareSettings:
-    """ticket-014: unit tests for the ``_resolve_compare_settings`` helper.
+    """ticket-014/ticket-006: unit tests for the ``_resolve_compare_settings`` helper.
 
-    Drives the helper directly with a crafted ``SimpleNamespace`` and a patched
+    Drives the helper directly with a crafted ``CompareArgs`` and a patched
     ``load_config`` returning a hand-built ``BridgeConfig``, so the precedence
     logic (flag/env > config > built-in default) is exercised without any I/O.
+    ``_resolve_compare_settings`` is pure: it returns a new resolved
+    ``CompareArgs`` instead of mutating its (frozen) input.
     """
 
     @staticmethod
+    def _make_args(
+        *,
+        tolerance: float | None,
+        fmt: list[str] | None,
+        out_dir: Path | None,
+    ) -> CompareArgs:
+        from cobre_bridge.cli_args import CompareArgs
+
+        return CompareArgs(
+            source_dir=Path("source"),
+            cobre_output_dir=Path("cobre_output"),
+            tolerance=tolerance,
+            format=fmt,
+            out_dir=out_dir,
+            json_output=False,
+            verbose=0,
+            log_file=None,
+            no_color=False,
+            quiet=False,
+        )
+
+    @classmethod
     def _resolve(
+        cls,
         config: object,
         *,
         tolerance: float | None,
         fmt: list[str] | None,
         out_dir: Path | None,
-    ) -> SimpleNamespace:
-        """Run ``_resolve_compare_settings`` with ``load_config`` patched."""
+    ) -> tuple[CompareArgs, CompareArgs]:
+        """Run ``_resolve_compare_settings`` with ``load_config`` patched.
+
+        Returns ``(args, resolved)``: the original (untouched) input and the
+        new instance the pure resolver returns.
+        """
         import cobre_bridge.cli as cli
 
-        args = SimpleNamespace(tolerance=tolerance, format=fmt, out_dir=out_dir)
+        args = cls._make_args(tolerance=tolerance, fmt=fmt, out_dir=out_dir)
         with patch.object(cli, "load_config", return_value=config):
-            cli._resolve_compare_settings(args)
-        return args
+            resolved = cli._resolve_compare_settings(args)
+        return args, resolved
 
     def test_flag_or_env_value_wins_over_config(self) -> None:
         """A non-None ``args`` value (flag or env) is kept, ignoring config."""
@@ -4436,13 +4473,18 @@ class TestResolveCompareSettings:
             formats=("csv",),
             out_dir=Path("from_config"),
         )
-        args = self._resolve(
+        args, resolved = self._resolve(
             config,
             tolerance=9e-4,
             fmt=["json"],
             out_dir=Path("from_flag"),
         )
 
+        assert resolved.tolerance == 9e-4
+        assert resolved.format == ["json"]
+        assert resolved.out_dir == Path("from_flag")
+
+        # Input carried flag values already, so it reads the same before/after.
         assert args.tolerance == 9e-4
         assert args.format == ["json"]
         assert args.out_dir == Path("from_flag")
@@ -4456,11 +4498,16 @@ class TestResolveCompareSettings:
             formats=("json", "csv"),
             out_dir=Path("art"),
         )
-        args = self._resolve(config, tolerance=None, fmt=None, out_dir=None)
+        args, resolved = self._resolve(config, tolerance=None, fmt=None, out_dir=None)
 
-        assert args.tolerance == 5e-4
-        assert args.format == ["json", "csv"]
-        assert args.out_dir == Path("art")
+        assert resolved.tolerance == 5e-4
+        assert resolved.format == ["json", "csv"]
+        assert resolved.out_dir == Path("art")
+
+        # The frozen input is never mutated by resolution.
+        assert args.tolerance is None
+        assert args.format is None
+        assert args.out_dir is None
 
     def test_builtin_default_when_config_empty(self) -> None:
         """An empty config falls through to the built-in tolerance default."""
@@ -4469,12 +4516,14 @@ class TestResolveCompareSettings:
             BridgeConfig,
         )
 
-        args = self._resolve(BridgeConfig(), tolerance=None, fmt=None, out_dir=None)
-        assert args.tolerance == RESULTS_TOLERANCE_DEFAULT
+        _args, resolved = self._resolve(
+            BridgeConfig(), tolerance=None, fmt=None, out_dir=None
+        )
+        assert resolved.tolerance == RESULTS_TOLERANCE_DEFAULT
         # Format/out-dir stay None so the downstream defaults (``_parse_formats``
         # / derived out-dir) still apply.
-        assert args.format is None
-        assert args.out_dir is None
+        assert resolved.format is None
+        assert resolved.out_dir is None
 
     def test_config_warning_emitted_to_stderr(
         self, capsys: pytest.CaptureFixture[str]
@@ -4921,22 +4970,25 @@ class TestDashboardJson:
         # stdout parses as exactly one JSON object.
         assert json.loads(stdout)["command"] == "dashboard"
 
-    def test_dashboard_json_no_simulation_exits_1_no_stdout(
+    def test_dashboard_json_no_simulation_exits_1_emits_error_envelope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A case dir WITHOUT output/simulation fires the exit-1 guard FIRST, so no
-        # build and no verdict happen; stdout stays empty.
+        # build happens; the guard now routes through ``_fail``, so stdout carries
+        # one error envelope instead of staying empty (CLI-02).
         case_dir = tmp_path / "case"
         case_dir.mkdir()
         self._stub_build_dashboard(monkeypatch)
 
-        exit_code, stdout, stderr = self._invoke_main(
+        exit_code, stdout, _stderr = self._invoke_main(
             ["dashboard", str(case_dir), "--json"], monkeypatch
         )
 
         assert exit_code == 1
-        assert stdout == ""
-        assert "no simulation output found" in stderr
+        document = json.loads(stdout)
+        assert document["command"] == "dashboard"
+        assert document["status"] == "error"
+        assert "no simulation output found" in document["diagnostics"][0]["summary"]
 
     def test_dashboard_json_open_advisory_stays_on_stderr(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

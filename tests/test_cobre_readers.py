@@ -10,7 +10,6 @@ CLI maps :class:`CobreReadError` to exit code 2 (distinct from exit 1 =
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -22,6 +21,7 @@ import pytest
 import typer
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.cli_args import CompareArgs
 from cobre_bridge.comparators.cobre_readers import (
     CobreReadError,
     _load_entity_bus_map,
@@ -297,13 +297,15 @@ class TestCliExitCodeTwoOnCobreReadError:
     ) -> None:
         from cobre_bridge import cli
 
-        args = argparse.Namespace(
-            newave_dir=tmp_path / "newave",
+        args = CompareArgs(
+            source_dir=tmp_path / "newave",
             cobre_output_dir=tmp_path / "output",
             tolerance=1e-2,
             format=None,
             out_dir=None,
-            verbose=False,
+            json_output=False,
+            verbose=0,
+            log_file=None,
             no_color=False,
             quiet=False,
         )
@@ -331,8 +333,7 @@ class TestCliExitCodeTwoOnCobreReadError:
 
         assert excinfo.value.exit_code == 2
         err = capsys.readouterr().err
-        assert "ERROR:" in err
-        assert "hydro simulation data" in err
+        assert "Failed to aggregate hydro simulation data: /x/hydros" in err
 
 
 # ---------------------------------------------------------------------------

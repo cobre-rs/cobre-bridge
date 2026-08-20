@@ -248,6 +248,7 @@ def render_checklist(
     result: PreflightResult,
     *,
     console: Console | None = None,
+    diagnostics_console: Console | None = None,
     quiet: bool = False,
 ) -> None:
     """Render a :class:`~cobre_bridge.preflight.PreflightResult` as a ✓/✗ checklist.
@@ -262,8 +263,12 @@ def render_checklist(
     ``✖ <label>`` (red); a non-empty ``detail`` is appended as ``— <detail>`` (dim).
     With *quiet* set, passing ``✓`` lines are suppressed but the headline and failed
     ``✖`` lines are still shown. The diagnostics are then delegated to
-    :func:`render_diagnostics` so warnings/errors render through the same panels (and,
-    when *console* is ``None``, on its default stderr console).
+    :func:`render_diagnostics`, on *diagnostics_console* when given, so warnings/errors
+    render through the same panels on a separate stream/colour setting than the
+    headline; when *diagnostics_console* is ``None`` it falls back to *console* (and
+    when both are ``None``, to :func:`render_diagnostics`'s own default stderr
+    console) — the two-argument split lets a caller keep the stdout(results)/
+    stderr(diagnostics) contract while making both streams ``--no-color``-aware.
     """
     target = console or get_console()
 
@@ -280,7 +285,9 @@ def render_checklist(
             line.append(f" — {check.detail}", style="dim")
         target.print(line, soft_wrap=True)
 
-    render_diagnostics(result.diagnostics, console=console, quiet=quiet)
+    render_diagnostics(
+        result.diagnostics, console=diagnostics_console or console, quiet=quiet
+    )
 
 
 def render_diagnostics(

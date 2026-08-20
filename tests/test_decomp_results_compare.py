@@ -6023,6 +6023,6 @@ class TestCompareDecompCommand:
         # path, not an unhandled exception caught by CliRunner's default
         # catch_exceptions=True (which would report exit_code == 1).
         assert result.exit_code == 2
-        assert "ERROR:" in result.stderr
-        assert str(sim_dir) in result.stderr
+        assert "Cobre output partition not found" in result.stderr
+        assert "hydro_bus_generation" in result.stderr
         assert "0.13.0" in result.stderr

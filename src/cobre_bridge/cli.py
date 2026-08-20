@@ -2,25 +2,31 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import sys
 import tempfile
 import webbrowser
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, NoReturn
 
 import typer
 
 from cobre_bridge import __version__
+from cobre_bridge.cli_args import CheckArgs, CompareArgs, ConvertArgs, DashboardArgs
 from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.config_resolution import (
     RESULTS_TOLERANCE_DEFAULT,
     load_config,
 )
 from cobre_bridge.diagnostics import Severity
-from cobre_bridge.errors import diagnostic_from_exception
+from cobre_bridge.errors import (
+    BridgeError,
+    CobreOutputError,
+    SourceFileError,
+    diagnostic_from_exception,
+)
 from cobre_bridge.preflight import PreflightVerdict
 from cobre_bridge.ui.console import (
     conversion_progress,
@@ -44,11 +50,12 @@ from cobre_bridge.verdict import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from rich.console import Console
 
     from cobre_bridge.case import NewaveCase
+    from cobre_bridge.cli_args import CommonArgs
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
     from cobre_bridge.decomp.pipeline import DecompFiles
@@ -173,6 +180,9 @@ def _parse_formats(raw: list[str] | None) -> set[str]:
 def _load_compare_context(
     newave_dir: Path,
     cobre_output_dir: Path,
+    *,
+    command: str,
+    args: CompareArgs,
 ) -> tuple[NewaveCase, NewaveIdMap, EntityAlignment, list[dict[str, object]]]:
     """Load the source model case, id-map, entity alignment, and lines.json.
 
@@ -180,8 +190,9 @@ def _load_compare_context(
     case once (so the id-map reuses its cached readers), loads lines.json, and
     builds the entity alignment.
 
-    Exits the process with code 1 (clean stderr message) if the source model case
-    directory is missing (FileNotFoundError from NewaveCase.from_directory).
+    Exits the process with code 1 via :func:`_fail` (a rendered diagnostic, or
+    under ``--json`` a verdict envelope) if the source model case directory is
+    missing (``FileNotFoundError`` from ``NewaveCase.from_directory``).
     """
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import build_entity_alignment
@@ -189,8 +200,7 @@ def _load_compare_context(
     try:
         case = NewaveCase.from_directory(newave_dir)
     except FileNotFoundError as exc:
-        render_error(str(exc))
-        raise typer.Exit(code=1)
+        _fail(command, args, exc, 1)
 
     id_map = case.id_map
     lines_json = _load_lines_json(cobre_output_dir)
@@ -202,6 +212,7 @@ def _export_compare_artifacts(
     dataset: ComparisonDataset,
     *,
     command: str,
+    args: CompareArgs,
     raw_formats: list[str] | None,
     newave_dir: Path,
     cobre_output_dir: Path,
@@ -217,8 +228,8 @@ def _export_compare_artifacts(
     resolved out_dir so the handler can run its own HTML branch and
     exit-code logic.
 
-    An invalid ``--format`` token exits 2 (clean stderr). A write failure must
-    NOT change the comparison exit code, so an ``OSError`` is warned and
+    An invalid ``--format`` token exits 2 via :func:`_fail`. A write failure
+    must NOT change the comparison exit code, so an ``OSError`` is warned and
     swallowed.
 
     *quiet_status* (set by ``--json``) gates ONLY the ``Artifacts written to …``
@@ -230,8 +241,7 @@ def _export_compare_artifacts(
     try:
         formats = _parse_formats(raw_formats)
     except ValueError as exc:
-        render_error(str(exc))
-        raise typer.Exit(code=2)
+        _fail(command, args, exc, 2)
 
     out_dir: Path = out_dir_arg or (cobre_output_dir / "comparison_artifacts")
     export_formats = formats & {"csv", "parquet", "json"}
@@ -251,21 +261,22 @@ def _export_compare_artifacts(
     except OSError as exc:
         print_status(
             f"Warning: failed to write artifacts: {exc}",
-            console=get_console(stderr=True),
+            console=args.err_console(),
             style="#F5A623",
         )
 
     return formats, out_dir
 
 
-def _resolve_compare_settings(args: SimpleNamespace) -> None:
-    """Fill tolerance/format/out_dir from config when flag+env left them ``None``.
+def _resolve_compare_settings(args: CompareArgs) -> CompareArgs:
+    """Return *args* with tolerance/format/out_dir filled in from config.
 
     Implements the bottom two rungs of the precedence chain
     **CLI flag > env var > config file > built-in default**: Typer has already
     resolved flag-or-env into ``args`` (a non-``None`` value means the flag or
     env var supplied it), so this fills in the config-file value, then the
-    built-in default, for whatever is still ``None``. Mutates *args* in place.
+    built-in default, for whatever is still ``None``. ``args`` is frozen, so
+    the resolved settings come back as a new instance; the input is untouched.
 
     Loads the config once via :func:`load_config` (discovery from cwd) and emits
     one stderr WARNING note per load warning (e.g. a malformed config file). It
@@ -281,38 +292,44 @@ def _resolve_compare_settings(args: SimpleNamespace) -> None:
         resolved_tolerance = cfg.results_tolerance
     else:
         resolved_tolerance = RESULTS_TOLERANCE_DEFAULT
-    args.tolerance = resolved_tolerance
 
     # Format: only consult config when neither flag nor env supplied it. Leave
     # ``None`` (rather than pre-expanding) so ``_parse_formats`` stays the single
     # validator/expander downstream.
-    if args.format is None and cfg.formats is not None:
-        args.format = list(cfg.formats)
+    resolved_format = args.format
+    if resolved_format is None and cfg.formats is not None:
+        resolved_format = list(cfg.formats)
 
     # Out-dir: only consult config when neither flag nor env supplied it. The
     # config value may itself be ``None``, which keeps the derived
     # ``<cobre_output_dir>/comparison_artifacts`` default downstream.
-    if args.out_dir is None:
-        args.out_dir = cfg.out_dir
+    resolved_out_dir = args.out_dir if args.out_dir is not None else cfg.out_dir
 
     # Surface any config-load warnings on stderr only (never stdout), matching
     # the side-file advisory pattern used by ``_export_compare_artifacts``.
     for warning in cfg.warnings:
         print_status(
             warning,
-            console=get_console(stderr=True),
+            console=args.err_console(),
             style="#F5A623",
         )
 
+    return dataclasses.replace(
+        args,
+        tolerance=resolved_tolerance,
+        format=resolved_format,
+        out_dir=resolved_out_dir,
+    )
 
-def _run_newave_comparison(args: SimpleNamespace) -> None:
+
+def _run_newave_comparison(args: CompareArgs) -> None:
     """Execute the compare newave subcommand.
 
     Intentionally always exits 0: ``compare newave`` is informational (a
     descriptive NEWAVE-vs-Cobre divergence report), so it never signals a
     failure on divergence.
     """
-    _resolve_compare_settings(args)
+    args = _resolve_compare_settings(args)
 
     from cobre_bridge import diagnostics as dx
     from cobre_bridge.comparators.cobre_readers import CobreReadError
@@ -321,12 +338,12 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
     from cobre_bridge.comparators.verdict import build_compare_verdict
     from cobre_bridge.errors import CobrePartitionMissingError
 
-    newave_dir: Path = args.newave_dir
+    newave_dir: Path = args.source_dir
     cobre_output_dir: Path = args.cobre_output_dir
     tolerance: float = args.tolerance
 
     case, id_map, alignment, _lines_json = _load_compare_context(
-        newave_dir, cobre_output_dir
+        newave_dir, cobre_output_dir, command="compare newave", args=args
     )
 
     # CobrePartitionMissingError (a BridgeError; output predates a partition
@@ -349,22 +366,20 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
                     tolerance=tolerance,
                 )
         except (CobreReadError, CobrePartitionMissingError) as exc:
-            print_status(
-                f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
-            )
-            raise typer.Exit(code=2)
+            _fail("compare newave", args, exc, 2)
 
     # Print text summary (sourced from the dataset). Under --json the Rich tables
     # are suppressed in favour of a single machine-readable verdict on stdout.
     if not args.json_output:
         print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
         render_diagnostics(
-            compare_diagnostics, console=get_console(stderr=True), quiet=args.quiet
+            compare_diagnostics, console=args.err_console(), quiet=args.quiet
         )
 
     formats, out_dir = _export_compare_artifacts(
         dataset,
         command="compare newave",
+        args=args,
         raw_formats=args.format,
         newave_dir=newave_dir,
         cobre_output_dir=cobre_output_dir,
@@ -387,7 +402,7 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
         report_path.write_text(html, encoding="utf-8")
         print_status(
             f"HTML report written to {report_path}",
-            console=get_console(stderr=True) if args.json_output else None,
+            console=args.err_console() if args.json_output else None,
         )
 
     if args.json_output:
@@ -407,20 +422,26 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
         )
 
 
-def _run_dashboard(args: SimpleNamespace) -> None:
+def _run_dashboard(args: DashboardArgs) -> None:
     """Execute the dashboard subcommand."""
     from cobre_bridge.dashboard import build_dashboard
 
     case_dir: Path = args.case_dir.resolve()
     if not (case_dir / "output" / "simulation").exists():
-        render_error(f"no simulation output found in {case_dir}")
-        raise typer.Exit(code=1)
+        _fail(
+            "dashboard",
+            args,
+            CobreOutputError(f"no simulation output found in {case_dir}"),
+            1,
+        )
 
     from cobre_bridge import diagnostics as dx
 
     output_path: Path = args.output or (case_dir / "dashboard.html")
-    if not args.json_output:
-        print_status(f"Building dashboard from {case_dir} ...")
+    if not args.json_output and not args.quiet:
+        print_status(
+            f"Building dashboard from {case_dir} ...", console=args.out_console()
+        )
     with dx.collect() as dash_diags:
         with spinner(
             "Building dashboard…",
@@ -431,7 +452,11 @@ def _run_dashboard(args: SimpleNamespace) -> None:
             build_dashboard(case_dir, output_path)
     size_kb = output_path.stat().st_size / 1024
     if not args.json_output:
-        print_status(f"Dashboard written to {output_path} ({size_kb:.0f} KB)")
+        if not args.quiet:
+            print_status(
+                f"Dashboard written to {output_path} ({size_kb:.0f} KB)",
+                console=args.out_console(),
+            )
         render_diagnostics(
             dash_diags, console=get_console(stderr=True), quiet=args.quiet
         )
@@ -454,7 +479,7 @@ def _run_dashboard(args: SimpleNamespace) -> None:
     # The --open advisory stays off the stdout --json payload; it already goes to
     # stderr (err_console below), so the two compose cleanly.
     if args.open_browser:
-        err_console = get_console(stderr=True, no_color=args.no_color)
+        err_console = args.err_console()
         try:
             opened = webbrowser.open(output_path.resolve().as_uri())
         except (webbrowser.Error, OSError):
@@ -478,7 +503,7 @@ _VERDICT_EXIT_CODE: dict[PreflightVerdict, int] = {
 }
 
 
-def _run_decomp_check(args: SimpleNamespace) -> None:
+def _run_decomp_check(args: CheckArgs) -> None:
     """Execute the check decomp subcommand.
 
     Same contract as ``check newave`` — the preflight captures every failure
@@ -503,14 +528,19 @@ def _run_decomp_check(args: SimpleNamespace) -> None:
             )
         )
     else:
-        render_checklist(result, quiet=args.quiet)
+        render_checklist(
+            result,
+            console=args.out_console(),
+            diagnostics_console=args.err_console(),
+            quiet=args.quiet,
+        )
 
     exit_code = _VERDICT_EXIT_CODE[result.verdict]
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
 
 
-def _run_check(args: SimpleNamespace) -> None:
+def _run_check(args: CheckArgs) -> None:
     """Execute the check newave subcommand.
 
     Runs :func:`run_preflight` (which already captures every discovery/parse
@@ -542,10 +572,14 @@ def _run_check(args: SimpleNamespace) -> None:
             )
         )
     else:
-        # Default consoles: the ✓/✗ checklist goes to stdout while render_checklist
-        # delegates its diagnostics block to render_diagnostics (stderr default),
-        # preserving the stdout(results)/stderr(diagnostics) split.
-        render_checklist(result, quiet=args.quiet)
+        # The ✓/✗ checklist goes to stdout while diagnostics go to stderr, both
+        # via the --no-color-aware consoles the typed args build.
+        render_checklist(
+            result,
+            console=args.out_console(),
+            diagnostics_console=args.err_console(),
+            quiet=args.quiet,
+        )
 
     exit_code = _VERDICT_EXIT_CODE[result.verdict]
     if exit_code != 0:
@@ -721,7 +755,7 @@ def _run_cobre_validation(
     return validation_failed
 
 
-def _run_newave_conversion(args: SimpleNamespace) -> None:
+def _run_newave_conversion(args: ConvertArgs) -> None:
     """Execute the convert newave subcommand."""
     from cobre_bridge.newave_files import NewaveFiles
     from cobre_bridge.pipeline import (
@@ -734,21 +768,30 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     src: Path = args.src
     dst: Path = args.dst
 
-    out_console = get_console(no_color=args.no_color)
-    err_console = get_console(stderr=True, no_color=args.no_color)
+    out_console = args.out_console()
+    err_console = args.err_console()
 
     if not src.exists() or not src.is_dir():
-        render_error(f"source directory '{src}' does not exist", console=err_console)
-        raise typer.Exit(code=1)
+        _fail(
+            "convert newave",
+            args,
+            SourceFileError(f"source directory '{src}' does not exist"),
+            1,
+            summary=_convert_verdict_summary(None),
+        )
 
     if dst.exists() and any(dst.iterdir()):
         if not args.force:
-            render_error(
-                f"destination directory '{dst}' is not empty."
-                " Use --force to overwrite.",
-                console=err_console,
+            _fail(
+                "convert newave",
+                args,
+                BridgeError(
+                    f"destination directory '{dst}' is not empty."
+                    " Use --force to overwrite."
+                ),
+                1,
+                summary=_convert_verdict_summary(None),
             )
-            raise typer.Exit(code=1)
         # --force: remove previous pipeline outputs before converting. A dry run
         # never mutates the destination, so the clear is skipped even with --force.
         if not args.dry_run:
@@ -948,6 +991,23 @@ def _emit_convert_json(document: dict[str, object]) -> None:
     """
     json.dump(document, sys.stdout, indent=2, ensure_ascii=False, sort_keys=False)
     sys.stdout.write("\n")
+
+
+def _fail(
+    command: str,
+    args: CommonArgs,
+    exc: Exception,
+    code: int,
+    *,
+    summary: Mapping[str, object] | None = None,
+) -> NoReturn:
+    """Render + (under --json) emit one failure verdict, then Exit(code)."""
+    diag = diagnostic_from_exception(exc, context=command)
+    if args.json_output:
+        _emit_convert_json(build_verdict(command, "error", summary or {}, [diag]))
+    else:
+        render_diagnostics([diag], console=args.err_console(), quiet=args.quiet)
+    raise typer.Exit(code=code)
 
 
 def _write_diagnostics_json(
@@ -1293,7 +1353,7 @@ def _convert_newave(
     """Convert a NEWAVE case directory to a Cobre case directory."""
     _configure_logging(verbose, log_file)
     _run_newave_conversion(
-        SimpleNamespace(
+        ConvertArgs(
             src=src,
             dst=dst,
             validate=validate,
@@ -1318,7 +1378,7 @@ def _convert_newave(
 _DECOMP_VALIDATION_WHITELIST: tuple[str, ...] = ("external-solver interoperability",)
 
 
-def _run_decomp_conversion(args: SimpleNamespace) -> None:
+def _run_decomp_conversion(args: ConvertArgs) -> None:
     """Execute the convert decomp subcommand.
 
     Structurally mirrors ``_run_newave_conversion``: a TTY phase bar over the
@@ -1355,8 +1415,8 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
         discover_decomp_files,
     )
 
-    out_console = get_console(no_color=args.no_color)
-    err_console = get_console(stderr=True, no_color=args.no_color)
+    out_console = args.out_console()
+    err_console = args.err_console()
 
     try:
         with conversion_progress(
@@ -1691,7 +1751,7 @@ def _convert_decomp(
     """
     _configure_logging(verbose, log_file)
     _run_decomp_conversion(
-        SimpleNamespace(
+        ConvertArgs(
             src=src,
             dst=dst,
             force=force,
@@ -1708,7 +1768,7 @@ def _convert_decomp(
     )
 
 
-def _run_decomp_comparison(args: SimpleNamespace) -> None:
+def _run_decomp_comparison(args: CompareArgs) -> None:
     """Execute the compare decomp subcommand.
 
     Informational like ``compare newave``: it always exits 0 and describes the
@@ -1725,7 +1785,7 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
     # Resolved before the read (unlike the pre-dataset ordering) so
     # ``build_decomp_dataset`` below gets a concrete tolerance rather than the
     # raw, possibly-``None`` CLI value — mirrors ``_run_newave_comparison``.
-    _resolve_compare_settings(args)
+    args = _resolve_compare_settings(args)
 
     with dx.collect() as compare_diagnostics:
         try:
@@ -1736,7 +1796,7 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
                 no_color=args.no_color,
             ):
                 dataset = build_decomp_dataset(
-                    args.decomp_dir, args.cobre_output_dir, tolerance=args.tolerance
+                    args.source_dir, args.cobre_output_dir, tolerance=args.tolerance
                 )
         except (
             CobreReadError,
@@ -1744,22 +1804,20 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
             FileNotFoundError,
             ValueError,
         ) as exc:
-            print_status(
-                f"ERROR: {exc}", console=get_console(stderr=True), style="bold #DC4C4C"
-            )
-            raise typer.Exit(code=2) from exc
+            _fail("compare decomp", args, exc, 2)
 
     if not args.json_output:
         render_compare_verdict(build_compare_verdict(dataset))
         render_diagnostics(
-            compare_diagnostics, console=get_console(stderr=True), quiet=args.quiet
+            compare_diagnostics, console=args.err_console(), quiet=args.quiet
         )
 
     formats, out_dir = _export_compare_artifacts(
         dataset,
         command="compare decomp",
+        args=args,
         raw_formats=args.format,
-        newave_dir=args.decomp_dir,
+        newave_dir=args.source_dir,
         cobre_output_dir=args.cobre_output_dir,
         tolerance=args.tolerance,
         out_dir_arg=args.out_dir,
@@ -1780,7 +1838,7 @@ def _run_decomp_comparison(args: SimpleNamespace) -> None:
         report_path.write_text(html, encoding="utf-8")
         print_status(
             f"HTML report written to {report_path}",
-            console=get_console(stderr=True) if args.json_output else None,
+            console=args.err_console() if args.json_output else None,
         )
 
     if args.json_output:
@@ -1853,8 +1911,8 @@ def _compare_decomp(
     """
     _configure_logging(verbose, log_file)
     _run_decomp_comparison(
-        SimpleNamespace(
-            decomp_dir=decomp_dir,
+        CompareArgs(
+            source_dir=decomp_dir,
             cobre_output_dir=cobre_output_dir,
             format=fmt,
             out_dir=out_dir,
@@ -1913,8 +1971,8 @@ def _compare_newave(
     """
     _configure_logging(verbose, log_file)
     _run_newave_comparison(
-        SimpleNamespace(
-            newave_dir=newave_dir,
+        CompareArgs(
+            source_dir=newave_dir,
             cobre_output_dir=cobre_output_dir,
             tolerance=tolerance,
             format=fmt,
@@ -1949,7 +2007,7 @@ def _check_newave(
     """Validate a NEWAVE case directory without converting or writing any files."""
     _configure_logging(verbose, log_file)
     _run_check(
-        SimpleNamespace(
+        CheckArgs(
             src=src,
             json_output=json_output,
             verbose=verbose,
@@ -1985,7 +2043,7 @@ def _check_decomp(
     """
     _configure_logging(verbose, log_file)
     _run_decomp_check(
-        SimpleNamespace(
+        CheckArgs(
             src=src,
             json_output=json_output,
             verbose=verbose,
@@ -2035,7 +2093,7 @@ def _dashboard(
     """Generate an interactive HTML dashboard from Cobre simulation results."""
     _configure_logging(verbose, log_file)
     _run_dashboard(
-        SimpleNamespace(
+        DashboardArgs(
             case_dir=case_dir,
             output=output,
             open_browser=open_browser,
