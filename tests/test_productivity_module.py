@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 import pytest
 
 from cobre_bridge.productivity import (
     compute_productivity,
     equivalent_productivity,
+    equivalent_productivity_from_coeffs,
+    evaluate_cota,
     integrated_productivity,
+    mean_cota,
     stored_energy_productivity,
 )
 
@@ -35,9 +40,6 @@ def _hreg(**overrides: object) -> pd.Series:
 
 
 def test_hydro_aliases_point_to_public_functions() -> None:
-    # The whole point of the extraction: hydro.py's private names are now just
-    # aliases of the public domain functions, so every existing test that uses
-    # the private names also validates these.
     from cobre_bridge.converters.hydro import (
         _compute_integrated_productivity,
         _compute_productivity,
@@ -72,3 +74,74 @@ def test_equivalent_vs_integrated_agree_on_linear_polynomial() -> None:
     # equivalent_productivity and integrated_productivity use the same integral.
     hreg = _hreg(tipo_perda=0)
     assert equivalent_productivity(hreg) == pytest.approx(integrated_productivity(hreg))
+
+
+def test_equivalent_productivity_from_coeffs_all_zero_guard_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.productivity"):
+        result = equivalent_productivity_from_coeffs(
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            volume_min_hm3=0.0,
+            volume_max_hm3=100.0,
+            rho_esp=0.01,
+            canal_fuga_m=10.0,
+            tipo_perda=0,
+            perdas=0.0,
+            plant_name="Z",
+        )
+
+    assert result == 0.0
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings
+    assert any(getattr(record, "plant", None) == "Z" for record in warnings)
+
+
+def test_equivalent_productivity_from_coeffs_negative_head_clamped_to_zero() -> None:
+    # coeffs=[10,0,0,0,0] -> constant cota=10; canal_fuga=50 puts the tailrace
+    # above the forebay, so the unclamped net head would be -40.
+    result = equivalent_productivity_from_coeffs(
+        [10.0, 0.0, 0.0, 0.0, 0.0],
+        volume_min_hm3=0.0,
+        volume_max_hm3=100.0,
+        rho_esp=0.01,
+        canal_fuga_m=50.0,
+        tipo_perda=0,
+        perdas=0.0,
+        plant_name="NEG",
+    )
+    assert result == 0.0
+    assert result >= 0.0
+
+
+def test_mean_cota_degenerate_range_equals_evaluate_cota() -> None:
+    coeffs = [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert mean_cota(coeffs, 5.0, 5.0) == evaluate_cota(coeffs, 5.0)
+
+
+def test_mean_cota_linear_coeffs_equals_evaluate_cota_at_midpoint() -> None:
+    coeffs = [10.0, 0.5, 0.0, 0.0, 0.0]
+    v_lo, v_hi = 20.0, 80.0
+    midpoint = (v_lo + v_hi) / 2.0
+    assert mean_cota(coeffs, v_lo, v_hi) == pytest.approx(
+        evaluate_cota(coeffs, midpoint)
+    )
+
+
+def test_equivalent_productivity_agrees_with_coeffs_core_on_positive_head() -> None:
+    # Row adapter and coeffs core must agree exactly for a positive-head plant
+    # (the clamp/guard the core adds are no-ops here).
+    hreg = _hreg()
+    coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+    core_value = equivalent_productivity_from_coeffs(
+        coeffs,
+        volume_min_hm3=float(hreg["volume_minimo"]),
+        volume_max_hm3=float(hreg["volume_maximo"]),
+        rho_esp=float(hreg["produtibilidade_especifica"]),
+        canal_fuga_m=float(hreg["canal_fuga_medio"]),
+        tipo_perda=int(hreg["tipo_perda"]),
+        perdas=float(hreg["perdas"]),
+        plant_name=str(hreg["nome_usina"]),
+    )
+    assert core_value > 0.0
+    assert equivalent_productivity(hreg) == pytest.approx(core_value)

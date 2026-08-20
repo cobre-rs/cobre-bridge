@@ -12,6 +12,7 @@ only: synthetic ``_FakeDadger``/``_StubDadger`` doubles and a synthetic
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -19,7 +20,6 @@ import pandas as pd
 import pytest
 from idecomp.decomp.modelos.dadger import ACCOTVOL, ACJUSMED, ACPERHID, ACPROESP
 
-from cobre_bridge.converters.hydro import _apply_hydraulic_loss, _mean_cota_over_volume
 from cobre_bridge.decomp.cadastro import (
     EffectiveCadastro,
     OutOfHorizon,
@@ -32,6 +32,7 @@ from cobre_bridge.decomp.hydro import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
+from cobre_bridge.productivity import apply_hydraulic_loss, mean_cota
 
 if TYPE_CHECKING:
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -446,11 +447,11 @@ def test_rho_eq_uses_full_range_for_all_classes() -> None:
 def test_no_override_is_byte_identical() -> None:
     """AC5: with no head/productivity override at all, the emitted rho_eq
     equals the pre-ticket base-registry formula bit-for-bit — reconstructed
-    here independently via the same shared row-level helpers
-    (``_mean_cota_over_volume``, ``_apply_hydraulic_loss``) the pre-ticket
-    formula itself called. The head no longer feeds a generation cap, so the
-    B8 overlay emits no lowered ``max_generation_mw`` (availability, at the
-    rated envelope here, owns that column).
+    here independently via the same shared coeffs-keyed primitives
+    (``mean_cota``, ``apply_hydraulic_loss``) the production code now calls.
+    The head no longer feeds a generation cap, so the B8 overlay emits no
+    lowered ``max_generation_mw`` (availability, at the rated envelope here,
+    owns that column).
     """
     hidr = _hidr_frame(
         {
@@ -478,8 +479,9 @@ def test_no_override_is_byte_identical() -> None:
     cf = float(hreg.get("canal_fuga_medio", 0.0) or 0.0)
     tipo_perda = int(hreg.get("tipo_perda", 0) or 0)
     perdas = float(hreg.get("perdas", 0.0) or 0.0)
-    h_gross = _mean_cota_over_volume(hreg, v_min, v_max) - cf
-    h_net = max(_apply_hydraulic_loss(h_gross, tipo_perda, perdas), 0.0)
+    coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
+    h_gross = mean_cota(coeffs, v_min, v_max) - cf
+    h_net = max(apply_hydraulic_loss(h_gross, tipo_perda, perdas), 0.0)
     expected_rho_eq = rho_esp * h_net
 
     table = convert_energy_productivity(effective, id_map).to_pandas()
@@ -489,12 +491,37 @@ def test_no_override_is_byte_identical() -> None:
         _StubDadger(), hidr, id_map, _calendar(), effective
     )
     hydro_id = id_map.hydro_id(1)
-    # Availability (no MP/FD derate) equals the rated envelope, so no lowered
-    # generation overlay is emitted — the head-derived hydraulic value no
-    # longer caps generation.
     for stage_index in range(3):
         entry = values.get((hydro_id, 0, stage_index))
         assert entry is None or entry.max_generation_mw is None
+
+
+# ---------------------------------------------------------------------------
+# AC6: all-zero cota coefficients (the shared-core guard gained by routing
+# through productivity.equivalent_productivity_from_coeffs).
+# ---------------------------------------------------------------------------
+
+
+def test_all_zero_coeffs_plant_returns_zero_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A plant with no forebay curve at all (all-zero ``a0..a4_volume_cota``)
+    yields ``ρ_eq == 0.0`` and logs a WARNING, rather than the pre-shared-core
+    behaviour of silently evaluating a degenerate polynomial and clamping a
+    meaningless head to zero.
+    """
+    hidr = _hidr_frame({1: _plant_row(cota=(0.0, 0.0, 0.0, 0.0, 0.0))})
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
+    effective = EffectiveCadastro(base=hidr, n_stages=1, stage_varying={})
+
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.productivity"):
+        table = convert_energy_productivity(effective, id_map).to_pandas()
+
+    assert table["equivalent_productivity_mw_per_m3s"].iloc[0] == 0.0
+    assert any(
+        record.levelno == logging.WARNING and "zero" in record.getMessage().lower()
+        for record in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------

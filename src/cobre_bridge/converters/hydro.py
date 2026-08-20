@@ -30,9 +30,12 @@ from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
 from cobre_bridge.plants import fictitious_codes, filling_hydro_codes
 from cobre_bridge.productivity import (
+    apply_hydraulic_loss,
     compute_productivity,
     equivalent_productivity,
+    evaluate_cota,
     integrated_productivity,
+    mean_cota,
     stored_energy_productivity,
 )
 
@@ -651,51 +654,6 @@ def _compute_max_turbined_rated(hreg: pd.Series) -> tuple[float, float]:
     return max_turbined, max_generation
 
 
-def _evaluate_cota_polynomial(hreg: pd.Series, volume_hm3: float) -> float:
-    """Evaluate the upstream cota polynomial ``cota(V) = Σ a_i · V^i`` at *V*."""
-    a = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
-    v = volume_hm3
-    return a[0] + a[1] * v + a[2] * v * v + a[3] * v**3 + a[4] * v**4
-
-
-def _mean_cota_over_volume(hreg: pd.Series, v_lo: float, v_hi: float) -> float:
-    """Return the volume-averaged upstream cota over ``[v_lo, v_hi]``.
-
-    Computed analytically from the integral of the quartic polynomial — the same shape
-    the source model uses to derive ``prodt_eq`` for reservoir plants.
-    """
-    if v_hi <= v_lo:
-        return _evaluate_cota_polynomial(hreg, v_lo)
-    a = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
-
-    def antideriv(v: float) -> float:
-        return (
-            a[0] * v
-            + a[1] * v * v / 2.0
-            + a[2] * v**3 / 3.0
-            + a[3] * v**4 / 4.0
-            + a[4] * v**5 / 5.0
-        )
-
-    return (antideriv(v_hi) - antideriv(v_lo)) / (v_hi - v_lo)
-
-
-def _apply_hydraulic_loss(h_gross: float, tipo_perda: int, perdas: float) -> float:
-    """Return net head after hidr.dat hydraulic-loss model.
-
-    ``tipo_perda == 1`` -> percentage loss applied to gross head.
-    ``tipo_perda == 2`` -> constant head loss in metres.
-    ``tipo_perda == 0`` (or any unknown) -> no loss.
-    """
-    if math.isnan(perdas) or perdas <= 0.0:
-        return h_gross
-    if tipo_perda == 1:
-        return h_gross * (1.0 - perdas / 100.0)
-    if tipo_perda == 2:
-        return h_gross - perdas
-    return h_gross
-
-
 def _compute_max_turbined_head_corrected(
     hreg: pd.Series, name: str, *, h_op_override: float | None = None
 ) -> tuple[float, float]:
@@ -806,6 +764,7 @@ def _compute_max_turbined_head_corrected(
     cf = float(cf_raw)
     rho_esp = float(rho_esp_raw)
     kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+    coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
 
     if h_op_override is not None:
         # Per-stage caller supplies the operating head directly (= ρ_eq / ρ_esp for
@@ -819,8 +778,8 @@ def _compute_max_turbined_head_corrected(
         # V_65], not the snapshot at V = V_65.  Verified against M. DE MORAES (the
         # diagnostic case): with this interpretation the formula reproduces the observed
         # the source model cap of 1084.95 m³/s exactly.
-        h_int_gross = _mean_cota_over_volume(hreg, vol_min, v65) - cf
-        h_op = _apply_hydraulic_loss(h_int_gross, tipo_perda, perdas)
+        h_int_gross = mean_cota(coeffs, vol_min, v65) - cf
+        h_op = apply_hydraulic_loss(h_int_gross, tipo_perda, perdas)
         # For M plants ``prodt^M`` integrates over the same range, so h_int
         # equals h_op — the same value is reused intentionally.
         h_int = h_op
@@ -834,10 +793,10 @@ def _compute_max_turbined_head_corrected(
         # ``(GHIDUH/QTURUH)/ρ_esp`` (ITAIPU 113.37 m vs nominal 117 m).
         vol_ref_raw = hreg.get("volume_referencia")
         if vol_ref_raw is None or is_na(vol_ref_raw) or float(vol_ref_raw) <= 0.0:
-            h_op_gross = _mean_cota_over_volume(hreg, vol_min, vol_max) - cf
+            h_op_gross = mean_cota(coeffs, vol_min, vol_max) - cf
         else:
-            h_op_gross = _evaluate_cota_polynomial(hreg, float(vol_ref_raw)) - cf
-        h_op = _apply_hydraulic_loss(h_op_gross, tipo_perda, perdas)
+            h_op_gross = evaluate_cota(coeffs, float(vol_ref_raw)) - cf
+        h_op = apply_hydraulic_loss(h_op_gross, tipo_perda, perdas)
         h_int = h_op
 
     # Defensive: a negative or zero h_op means cota_jus is above the

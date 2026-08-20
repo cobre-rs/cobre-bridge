@@ -30,7 +30,7 @@ import pyarrow as pa
 from cobre_bridge.converters.hydro import _fpha_efficiency
 from cobre_bridge.converters.tailrace import build_tailrace_table
 from cobre_bridge.decomp.cadastro import effective_storage_range
-from cobre_bridge.decomp.hydro import _eval_cota_from_coeffs
+from cobre_bridge.productivity import evaluate_cota
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -180,8 +180,8 @@ def convert_hydro_geometry(
             grid = [vmin + step * i for i in range(_GEOMETRY_N_POINTS)]
 
         for v in grid:
-            h = max(_eval_cota_from_coeffs(vc_coeffs, v), 0.0)
-            a = max(_eval_cota_from_coeffs(ca_coeffs, h), 0.0)
+            h = max(evaluate_cota(vc_coeffs, v), 0.0)
+            a = max(evaluate_cota(ca_coeffs, h), 0.0)
             hydro_ids.append(hydro_id)
             volumes.append(v)
             heights.append(h)

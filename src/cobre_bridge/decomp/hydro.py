@@ -97,12 +97,12 @@ from cobre_bridge.converters.hydro import (
     _KTURB_BY_TIPO_TURBINA,
     _PRODUCTION_MODELS_SCHEMA_URL,
     _SCHEMA_URL,
-    _apply_hydraulic_loss,
     _fpha_efficiency,
     build_mirror_unit_group,
 )
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
 from cobre_bridge.decomp.group_bounds import GroupBoundEntry
+from cobre_bridge.productivity import equivalent_productivity_from_coeffs
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -1049,46 +1049,6 @@ def convert_initial_storage(
     return storage
 
 
-def _eval_cota_from_coeffs(coeffs: Sequence[float], volume_hm3: float) -> float:
-    """Evaluate the upstream cota polynomial ``cota(V) = Σ a_i · V^i`` at *V*
-    from an explicit 5-coefficient list, ordered ``ordem 0..4``.
-
-    The coefficient-list counterpart of ``converters.hydro.
-    _evaluate_cota_polynomial``, which reads the same five coefficients off a
-    base ``hidr`` row directly — this variant exists so the per-stage
-    *effective* polynomial (:meth:`~cobre_bridge.decomp.cadastro.
-    EffectiveCadastro.cota_polynomial`, base or ``AC COTVOL``-overridden) can
-    be evaluated without mutating a per-stage copy of the base row.
-    """
-    v = volume_hm3
-    a = coeffs
-    return a[0] + a[1] * v + a[2] * v * v + a[3] * v**3 + a[4] * v**4
-
-
-def _mean_cota_from_coeffs(coeffs: Sequence[float], v_lo: float, v_hi: float) -> float:
-    """Volume-averaged upstream cota over ``[v_lo, v_hi]`` from an explicit
-    5-coefficient list.
-
-    The same analytic quartic integral as ``converters.hydro.
-    _mean_cota_over_volume``, taking *coeffs* directly rather than a ``hidr``
-    row — see :func:`_eval_cota_from_coeffs` for why.
-    """
-    if v_hi <= v_lo:
-        return _eval_cota_from_coeffs(coeffs, v_lo)
-    a = coeffs
-
-    def antideriv(v: float) -> float:
-        return (
-            a[0] * v
-            + a[1] * v * v / 2.0
-            + a[2] * v**3 / 3.0
-            + a[3] * v**4 / 4.0
-            + a[4] * v**5 / 5.0
-        )
-
-    return (antideriv(v_hi) - antideriv(v_lo)) / (v_hi - v_lo)
-
-
 def _equivalent_productivity_mw_per_m3s(
     effective: EffectiveCadastro,
     code: int,
@@ -1129,13 +1089,17 @@ def _equivalent_productivity_mw_per_m3s(
     perdas = effective.value(code, "perdas", stage_index)
     tipo_perda = int(effective.base.loc[code, "tipo_perda"])
     coeffs = effective.cota_polynomial(code, stage_index)
-    if reference_volume_hm3 is None:
-        cota = _mean_cota_from_coeffs(coeffs, v_min, v_max)
-    else:
-        cota = _eval_cota_from_coeffs(coeffs, reference_volume_hm3)
-    h_gross = cota - cf
-    h_net = max(_apply_hydraulic_loss(h_gross, tipo_perda, perdas), 0.0)
-    return rho_esp * h_net
+    return equivalent_productivity_from_coeffs(
+        coeffs,
+        volume_min_hm3=v_min,
+        volume_max_hm3=v_max,
+        rho_esp=rho_esp,
+        canal_fuga_m=cf,
+        tipo_perda=tipo_perda,
+        perdas=perdas,
+        reference_volume_hm3=reference_volume_hm3,
+        plant_name=str(effective.base.loc[code, "nome_usina"]).strip(),
+    )
 
 
 def convert_energy_productivity(
