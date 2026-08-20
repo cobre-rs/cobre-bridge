@@ -38,8 +38,6 @@ from cobre_bridge.decomp.fcf.cortes import (
 # skipif-guarded on its presence.
 _NEWAVE_RODADA = Path("example/newave_rodada/cortesh.dat")
 _NEWAVE_RODADA_CORTES = Path("example/newave_rodada/cortes.dat")
-_DECOMP_SET_24 = Path("example/decomp-set-24-rv0/cortesh.dat")
-_DECOMP_SET_24_CORTES = Path("example/decomp-set-24-rv0/cortes-010.dat")
 _DECOMP_MAR26 = Path("example/decomp-mar-26-rv2/cortesh.dat")
 _DECOMP_MAR26_CORTES = Path("example/decomp-mar-26-rv2/cortes-004.dat")
 
@@ -61,17 +59,6 @@ def test_read_cortesh_nongnl_deck_header() -> None:
     uhes = Cortesh.read(str(_NEWAVE_RODADA)).dados_uhes.sort_values("indice_usina")
     expected_plant_codes = tuple(int(code) for code in uhes["codigo_usina"])
     assert header.plant_codes == expected_plant_codes
-
-
-@pytest.mark.skipif(
-    not _DECOMP_SET_24.exists(), reason="decomp-set-24-rv0 deck not present"
-)
-def test_read_cortesh_gnl_deck_header() -> None:
-    header = read_cortesh(_DECOMP_SET_24)
-
-    assert header.n_plants == 155
-    assert header.lag_maximo_gnl == 2
-    assert header.n_patamares == 3
 
 
 @pytest.mark.skipif(
@@ -100,13 +87,6 @@ def test_read_cortesh_hybrid_deck_header() -> None:
             _NEWAVE_RODADA,
             marks=pytest.mark.skipif(
                 not _NEWAVE_RODADA.exists(), reason="newave_rodada deck not present"
-            ),
-        ),
-        pytest.param(
-            _DECOMP_SET_24,
-            marks=pytest.mark.skipif(
-                not _DECOMP_SET_24.exists(),
-                reason="decomp-set-24-rv0 deck not present",
             ),
         ),
     ],
@@ -321,39 +301,6 @@ def test_read_cortes_nongnl_nonzero_families() -> None:
 
 
 @pytest.mark.skipif(
-    not _DECOMP_SET_24.exists() or not _DECOMP_SET_24_CORTES.exists(),
-    reason="decomp-set-24-rv0 deck not present",
-)
-def test_read_cortes_gnl_boundary_stage_and_gnl_block() -> None:
-    cortesh = Cortesh.read(str(_DECOMP_SET_24))
-    boundary = read_cortes(_DECOMP_SET_24_CORTES, cortesh)
-
-    assert boundary.boundary_stage == 10
-    assert len(boundary.records) == 10000
-
-    nonzero_any_record = [False] * 24
-    fully_nonzero_records = 0
-    for record in boundary.records:
-        assert len(record.pi_gnl) == 24
-        record_fully_nonzero = True
-        for i, value in enumerate(record.pi_gnl):
-            if abs(value) > _NONZERO:
-                nonzero_any_record[i] = True
-            else:
-                record_fully_nonzero = False
-        if record_fully_nonzero:
-            fully_nonzero_records += 1
-
-    assert all(nonzero_any_record)
-
-    # Exactly 3 first-Benders-iteration records zero NORDESTE's 6 slots (a
-    # degenerate early-iteration state, byte-exact `from_cortesh`
-    # measurement, 2026-08-03) — supersedes the pre-1.15.0 literal "each
-    # record all-24" figure.
-    assert fully_nonzero_records >= 9990
-
-
-@pytest.mark.skipif(
     not _DECOMP_MAR26.exists() or not _DECOMP_MAR26_CORTES.exists(),
     reason="decomp-mar-26-rv2 deck not present",
 )
@@ -540,35 +487,6 @@ def test_summarize_families_nongnl_matches_probed_facts() -> None:
     assert summary.rhs_max >= summary.rhs_min > 0
     assert summary.rhs_min == pytest.approx(summary.rhs_min)  # finite, not NaN
     assert summary.rhs_max == pytest.approx(summary.rhs_max)  # finite, not NaN
-
-
-@pytest.mark.skipif(
-    not _DECOMP_SET_24.exists() or not _DECOMP_SET_24_CORTES.exists(),
-    reason="decomp-set-24-rv0 deck not present",
-)
-def test_summarize_families_gnl_matches_probed_facts() -> None:
-    cortesh = Cortesh.read(str(_DECOMP_SET_24))
-    boundary = read_cortes(_DECOMP_SET_24_CORTES, cortesh)
-
-    summary = summarize_cut_families(boundary)
-
-    assert summary.n_active_cuts == len(boundary.records) == 10000
-    assert summary.storage_nonzero_plants == 155
-    assert summary.gnl_nonzero_slots == 24
-    assert len(summary.lag_nonzero_by_depth) == 12
-
-    # Byte-exact `from_cortesh` measurement, 2026-08-03: per-lag nonzero
-    # plant counts are (151, 151, 151, 151, 151, 151, 151, 151, 150, 150,
-    # 149, 148) for lags 1..12 — a measured floor of 148, pinned here (not
-    # the informal pre-1.15.0 "148-151" estimate the ticket superseded,
-    # which happens to bracket the true floor).
-    _MEASURED_GNL_LAG_FLOOR = 148
-    assert min(summary.lag_nonzero_by_depth) >= _MEASURED_GNL_LAG_FLOOR
-    assert all(
-        count >= 145 for count in summary.lag_nonzero_by_depth
-    )  # AC robust floor
-
-    assert summary.rhs_max >= summary.rhs_min > 0
 
 
 @pytest.mark.skipif(

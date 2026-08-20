@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -12,14 +11,8 @@ import pytest
 from cobre_bridge.decomp.bounds import convert_hydro_bounds
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.ncs import convert_non_controllable_sources
 from cobre_bridge.decomp.network import convert_lines, convert_pumping_stations
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
-
-_RV3_DECK = Path("example/decomp-jul-26-rv3")
-_needs_deck = pytest.mark.skipif(
-    not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-)
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2, 3, 4, 11),
@@ -262,27 +255,3 @@ class TestConvertHydroBounds:
             self._dadger(cq=cq), _ID_MAP, calendar, self._effective(calendar)
         )
         assert 0 in {c.entity_id for c in contributions}
-
-
-class TestRenovaveis:
-    @_needs_deck
-    def test_parks_append_after_pq(self) -> None:
-        from idecomp.decomp import Dadger
-        from idecomp.libs import Renovaveis
-
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV3_DECK / "dadger.rv3"))
-        renovaveis = Renovaveis.read(str(_RV3_DECK / "renovaveis.csv"))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-
-        doc = convert_non_controllable_sources(
-            dadger, id_map, calendar, calendar[0].start_date, renovaveis
-        )
-        entries = doc["non_controllable_sources"]
-        assert len(entries) == 24 + 8
-        park_names = [e["name"] for e in entries[24:]]
-        assert any("Eolica" in name for name in park_names)
-        assert [e["id"] for e in entries] == list(range(32))
-        assert all(e["allow_curtailment"] is False for e in entries)

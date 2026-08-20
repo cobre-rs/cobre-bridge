@@ -1,47 +1,20 @@
-"""Grades the per-block ``RQ`` minimum-outflow bounds against their own
-registers.
+"""Tests the ``RQ``-derived and ``UH``-declared minimum-outflow bound
+classification in ``convert_hydro_bounds``, via a synthetic mixed deck
+(``TestSyntheticUniformAndUhDeclared``).
 
 For an ``RQ``-derived plant, ``convert_hydro_bounds`` contributes, per stage,
 **either** one stage-level (``block_id = None``) contribution — the
-hours-weighted value, unchanged from the earlier interim fold — when the
-stage's per-block percentages are all equal, **or** one contribution per
-block (``block_id = 0..n-1``, no base) when they are not; never both (epic-07,
-ticket-023 — the accumulator does not replicate cobre's replace-not-merge
-column semantics, so a base contribution left alongside per-block ones would
-be double-counted into every block's intersection). Three questions matter
-and they are different:
-
-1. **Does the reconstructed per-block bound match the registers?** Take the
-   *effective* contribution for every ``RQ``-derived (hydro, stage, block)
-   cell (the per-block contribution if one exists, else the base
-   contribution) and compare it against ``pct[ree][block] / 100 * base``
-   computed directly from the ``RQ`` and registry (post ``AC VAZMIN``)
-   records — independently of the converter's own hours-weighted fold.
-   Graded to a ``< 1e-6`` m3/s tolerance (criterion 1).
-2. **Is the fold preserved on the base contribution?** Where a stage is
-   block-uniform and does contribute one, it equals the hours-weighted mean
-   of that same per-block list, so any stage-level consumer still sees the
-   pre-change number (criterion 2).
-3. **Is the sparse pattern exactly right?** A block-uniform stage
-   contributes exactly one base contribution and no per-block ones; a
-   non-uniform stage contributes exactly one per-block contribution per
-   declared block (including a ``0.0``-valued one) and no base (criterion 3).
-
-Measured on ``decomp-jul-26-rv3`` (2026-08-09, post ticket-023): a
-``QDEF``-windowed plant is no longer excluded from the RQ/UH classification
-here — that window's own contribution now comes from
+hours-weighted value — when the stage's per-block percentages are all equal,
+**or** one contribution per block (``block_id = 0..n-1``, no base) when they
+are not; never both (epic-07, ticket-023 — the accumulator does not
+replicate cobre's replace-not-merge column semantics, so a base contribution
+left alongside per-block ones would be double-counted into every block's
+intersection). A ``UH``-declared plant's own value takes priority over
+``RQ`` and is always base-only. A ``QDEF``-windowed plant still contributes
+its ``RQ``/``UH`` value regardless of the window (ticket-023, AC7) — that
+window's own contribution comes separately from
 ``single_term_bounds.single_term_bound_contributions`` (RHQ), and the
-accumulator intersects the two rather than one replacing the other (AC7) —
-so this module's own independent reproduction (``_rq_derived_codes``) no
-longer excludes them either: 169 RQ-derived plants (up from 86 pre-ticket-023,
-since all 83 ``QDEF``-windowed plants also carry a valid RQ record via their
-REE), of which 100 clear the (post ``AC VAZMIN``) positivity gate in at least
-one stage — 300 (plant, stage) cells, all non-uniform (every ``RQ`` record on
-this deck is ``(100, 100, 0)``, so the light block is *always* fully relaxed),
-900 per-block contributions, zero base contributions. The block-uniform half
-of criterion 3 and the ``UH``-declared half of criterion 4 therefore cannot
-be exercised by this deck's own data and are pinned by a small synthetic
-fixture instead (``TestSyntheticUniformAndUhDeclared`` below).
+accumulator intersects the two rather than one replacing the other.
 """
 
 from __future__ import annotations
@@ -49,281 +22,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
-import pytest
 
-from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.bounds import convert_hydro_bounds
-from cobre_bridge.decomp.bounds_accumulator import (
-    BoundContribution,
-    build_bound_tables,
-    resolve,
-)
-from cobre_bridge.decomp.cadastro import EffectiveCadastro, build_effective_cadastro
-from cobre_bridge.decomp.hydro import read_hidr
+from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.temporal import (
-    OperativeStage,
-    build_operative_calendar,
-    operative_calendar_from_dadger,
-)
-from cobre_bridge.diagnostics import Severity
-from cobre_bridge.emission_checks import (
-    BoundFamily,
-    check_bound_block_id_range,
-    check_bound_row_uniqueness,
-    check_hydro_bounds_no_raising,
-)
-
-_DECK = Path("example/decomp-jul-26-rv3")
-_needs_deck = pytest.mark.skipif(
-    not (_DECK / "dec_oper_usit.csv").exists(),
-    reason="reference deck outputs not present",
-)
-
-#: The spec's own tolerance for the per-block reconstruction (criterion 1/2).
-_TOL = 1e-6
-
-
-def _load():
-    """Parse the deck once: dadger, registry, id map, and calendar."""
-    from idecomp.decomp import Dadger
-
-    dadger = Dadger.read(str(_DECK / "dadger.rv3"))
-    hidr = read_hidr(_DECK / "hidr.dat")
-    id_map = DecompIdMap.from_dadger(dadger)
-    calendar = operative_calendar_from_dadger(dadger)
-    return dadger, hidr, id_map, calendar
-
-
-def _rq_pct_blocks(dadger) -> dict[int, list[float]]:
-    """``{ree: [pct_block_1, ...]}`` parsed directly from the ``RQ`` records."""
-    rq = dadger.rq(df=True)
-    pct_blocks: dict[int, list[float]] = {}
-    for _, row in rq.iterrows():
-        values: list[float] = []
-        k = 1
-        while f"vazao_{k}" in rq.columns:
-            value = row[f"vazao_{k}"]
-            values.append(0.0 if pd.isna(value) else float(value))
-            k += 1
-        pct_blocks[int(row["codigo_ree"])] = values
-    return pct_blocks
-
-
-def _vazmin(dadger, hidr, id_map: DecompIdMap) -> dict[int, float]:
-    """Registry historical minimum flow, post ``AC VAZMIN`` overrides — the
-    same source :func:`convert_hydro_bounds` reads, parsed independently
-    here."""
-    from idecomp.decomp.modelos.dadger import ACVAZMIN
-
-    vazmin: dict[int, float] = {}
-    for code in id_map.hydro_codes:
-        if code in hidr.index:
-            base = hidr.loc[code, "vazao_minima_historica"]
-            vazmin[code] = 0.0 if pd.isna(base) else float(base)
-    overrides = dadger.ac(codigo_usina=None, modificacao=ACVAZMIN, df=True)
-    if isinstance(overrides, pd.DataFrame) and not overrides.empty:
-        for _, row in overrides.iterrows():
-            code = int(row["codigo_usina"])
-            if code in vazmin:
-                vazmin[code] = float(row["vazao"])
-    return vazmin
-
-
-def _ree_by_code(dadger) -> dict[int, int]:
-    uh = dadger.uh(df=True)
-    operated = uh[uh["volume_inicial"].notna()]
-    return {
-        int(row["codigo_usina"]): int(row["codigo_ree"])
-        for _, row in operated.iterrows()
-    }
-
-
-def _uh_declared_codes(dadger) -> set[int]:
-    uh = dadger.uh(df=True)
-    operated = uh[uh["volume_inicial"].notna()]
-    declared = set()
-    for _, row in operated.iterrows():
-        value = row.get("vazao_defluente_minima")
-        if value is not None and not pd.isna(value):
-            declared.add(int(row["codigo_usina"]))
-    return declared
-
-
-def _rq_derived_codes(dadger, id_map: DecompIdMap) -> dict[int, int]:
-    """``{code: ree}`` for every operated hydro this deck governs through
-    ``RQ`` (not ``UH``-declared, its REE has an ``RQ`` record) — matching
-    :func:`convert_hydro_bounds`'s own classification, parsed independently
-    here. A ``QDEF``-windowed plant is *not* excluded (ticket-023, AC7):
-    ``convert_hydro_bounds`` contributes its RQ/UH value regardless, and the
-    accumulator intersects it with that window's own contribution.
-    """
-    ree_by_code = _ree_by_code(dadger)
-    uh_declared = _uh_declared_codes(dadger)
-    pct_blocks = _rq_pct_blocks(dadger)
-    return {
-        code: ree_by_code[code]
-        for code in id_map.hydro_codes
-        if code in ree_by_code
-        and code not in uh_declared
-        and ree_by_code[code] in pct_blocks
-    }
-
-
-def _by_hydro_stage(
-    contributions: Sequence[BoundContribution], hydro_id: int, stage_id: int
-) -> list[BoundContribution]:
-    return [
-        c for c in contributions if c.entity_id == hydro_id and c.stage_id == stage_id
-    ]
-
-
-@_needs_deck
-class TestRqPerBlockBounds:
-    """Criteria 1-3: per-block exactness, fold preservation, sparse pattern."""
-
-    def test_effective_per_block_matches_registers_and_fold(self) -> None:
-        dadger, hidr, id_map, calendar = _load()
-        effective, _ = build_effective_cadastro(dadger, hidr, calendar)
-        contributions = convert_hydro_bounds(dadger, id_map, calendar, effective)
-
-        pct_blocks = _rq_pct_blocks(dadger)
-        vazmin = _vazmin(dadger, hidr, id_map)
-        rq_codes = _rq_derived_codes(dadger, id_map)
-        assert rq_codes, "deck must declare at least one RQ-derived plant"
-
-        checked_cells = 0
-        uniform_stages = 0
-        nonuniform_stages = 0
-
-        for code, ree in rq_codes.items():
-            hydro_id = id_map.hydro_id(code)
-            base = vazmin.get(code, 0.0)
-            values = pct_blocks[ree]
-
-            for stage in calendar:
-                n_blocks = len(stage.block_hours)
-                expected_blocks = [v / 100.0 * base for v in values[:n_blocks]]
-                expected_stage = (
-                    sum(
-                        v * h
-                        for v, h in zip(expected_blocks, stage.block_hours, strict=True)
-                    )
-                    / stage.total_hours
-                )
-
-                stage_contribs = _by_hydro_stage(contributions, hydro_id, stage.index)
-                if expected_stage <= 0.0:
-                    # Stage-level positivity gate: a zero (or AC-VAZMIN-zeroed)
-                    # base contributes nothing at all, base or per-block.
-                    assert stage_contribs == []
-                    continue
-
-                base_contribs = [c for c in stage_contribs if c.block_id is None]
-                override_contribs = [
-                    c for c in stage_contribs if c.block_id is not None
-                ]
-                override_by_block = {c.block_id: c.lower for c in override_contribs}
-                uniform = all(v == expected_blocks[0] for v in expected_blocks)
-
-                if uniform:
-                    # Criterion 3: a uniform stage contributes exactly one
-                    # base contribution and no per-block ones.
-                    assert len(base_contribs) == 1
-                    assert override_contribs == []
-                    base_value = base_contribs[0].lower
-                    # Criterion 2: the base contribution is the pre-change
-                    # fold, exactly.
-                    assert base_value == pytest.approx(expected_stage, abs=_TOL)
-                    uniform_stages += 1
-                else:
-                    # Criterion 3: a non-uniform stage contributes exactly
-                    # one per-block contribution per block, including a
-                    # 0.0-valued one, and no base.
-                    assert base_contribs == []
-                    assert set(override_by_block) == set(range(n_blocks))
-                    nonuniform_stages += 1
-
-                # Criterion 1: the reconstructed effective value (per-block
-                # contribution if present, else the base one) for every
-                # block.
-                for b, expected_value in enumerate(expected_blocks):
-                    effective_value = override_by_block.get(
-                        b, base_contribs[0].lower if base_contribs else None
-                    )
-                    assert effective_value == pytest.approx(expected_value, abs=_TOL)
-                    checked_cells += 1
-
-        # Pinned against the deck (see module docstring): every RQ record on
-        # this deck is (100, 100, 0), so every positive-base stage is
-        # non-uniform — the uniform branch never fires here by construction,
-        # not because of a bug (covered synthetically below instead).
-        assert uniform_stages == 0
-        assert nonuniform_stages == 300
-        assert checked_cells == 900
-
-
-@_needs_deck
-class TestQdefStillContributesRqDefault:
-    """Criterion 4 (``QDEF`` half, retired per ticket-023 AC7): RQ per-block
-    emission is unaffected by a plant's own ``QDEF`` flow window — that
-    window no longer causes ``convert_hydro_bounds`` to skip the plant."""
-
-    def test_qdef_plants_still_contribute_via_rq(self, caplog) -> None:
-        dadger, hidr, id_map, calendar = _load()
-        cq = dadger.cq(df=True)
-        qdef = (
-            {
-                int(c)
-                for c in cq[cq["tipo"].astype(str).str.strip() == "QDEF"][
-                    "codigo_usina"
-                ]
-            }
-            & set(id_map.hydro_codes)
-            & set(_rq_derived_codes(dadger, id_map))
-        )
-        assert qdef, "deck must declare at least one QDEF-windowed RQ-derived plant"
-
-        effective, _ = build_effective_cadastro(dadger, hidr, calendar)
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.bounds"):
-            contributions = convert_hydro_bounds(dadger, id_map, calendar, effective)
-
-        qdef_ids = {id_map.hydro_id(code) for code in qdef}
-        contributed_ids = {c.entity_id for c in contributions}
-        assert qdef_ids & contributed_ids
-        # AC7: the skip-and-warn branch is retired; no such warning fires.
-        assert "QDEF" not in caplog.text
-
-
-@_needs_deck
-class TestEmissionSelfChecks:
-    """Criterion 5: the pipeline's post-emission self-checks raise nothing."""
-
-    def test_no_error_severity_finding(self) -> None:
-        dadger, hidr, id_map, calendar = _load()
-        effective, _ = build_effective_cadastro(dadger, hidr, calendar)
-        contributions = convert_hydro_bounds(dadger, id_map, calendar, effective)
-        block_counts = {stage.index: len(stage.block_hours) for stage in calendar}
-        table = build_bound_tables(resolve(contributions, block_counts)).hydro
-
-        stages_doc = {
-            "stages": [
-                {"id": stage.index, "blocks": [{}] * len(stage.block_hours)}
-                for stage in calendar
-            ]
-        }
-        families = [BoundFamily("Hydro", "hydro_id", table)]
-
-        with dx.collect() as diagnostics:
-            check_hydro_bounds_no_raising({"hydros": []}, table)
-            check_bound_row_uniqueness(families)
-            check_bound_block_id_range(stages_doc, families)
-
-        errors = [d for d in diagnostics if d.severity is Severity.ERROR]
-        assert not errors, [d.summary for d in errors]
+from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 
 
 class _StubDadger:

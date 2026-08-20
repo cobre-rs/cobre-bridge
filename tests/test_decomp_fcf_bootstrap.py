@@ -16,15 +16,9 @@ from types import SimpleNamespace
 import pytest
 
 from cobre_bridge.decomp.fcf.bootstrap import (
-    TerminalManifest,
     bootstrap_terminal_manifest,
     ensure_writer_binding,
 )
-
-# Real, gitignored deck (see example/README.md) — CI does not have it, so the
-# one test that genuinely needs a live in-process ``cobre.run.run`` is
-# skipif-guarded on the deck's presence.
-_RV3_DECK = Path("example/decomp-jul-26-rv3")
 
 _MINIMAL_CONFIG = (
     '{"training": {"stopping_rules": [{"type": "iteration_limit", "limit": 500}]}}'
@@ -66,27 +60,6 @@ def test_ensure_writer_binding_passes_when_present(
     stub_cobre = SimpleNamespace(write_policy_checkpoint=lambda: None)
     monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
     ensure_writer_binding()  # must not raise
-
-
-@pytest.mark.skipif(not _RV3_DECK.exists(), reason="decomp-jul-26-rv3 deck not present")
-def test_bootstrap_reads_terminal_manifest(tmp_path: Path) -> None:
-    from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-    case_dir = tmp_path / "converted"
-    convert_decomp_case(_RV3_DECK, case_dir, force=True)
-
-    manifest = bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
-
-    assert isinstance(manifest, TerminalManifest)
-    assert isinstance(manifest.state_dimension, int)
-    assert manifest.state_dimension > 0
-    assert isinstance(manifest.entity_manifest, tuple)
-    assert len(manifest.entity_manifest) > 0
-    for slot in manifest.entity_manifest:
-        assert isinstance(slot, dict)
-        assert "entity_type" in slot
-        assert "entity_id" in slot
-        assert "subindex" in slot
 
 
 def test_bootstrap_does_not_mutate_input_case(

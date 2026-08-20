@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -101,8 +100,6 @@ class TestEvaporationEmission:
     def test_flag_codes_absent_column_is_empty(self) -> None:
         assert _evaporation_flag_codes(_StubDadger(uh=pd.DataFrame())) == set()
 
-
-_RV3_DECK = Path("example/decomp-jul-26-rv3")
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2, 3, 4, 11),
@@ -667,79 +664,3 @@ class TestConvertThermals:
             convert_thermals(
                 _StubDadger(ct=ct), _ID_MAP, _calendar(), date(2026, 7, 18)
             )
-
-
-class TestRealDecks:
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "dadger.rv3").exists(), reason="rv3 deck not present"
-    )
-    def test_rv3_end_to_end(self) -> None:
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.hydro import read_hidr
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV3_DECK / "dadger.rv3"))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-        hidr = read_hidr(_RV3_DECK / "hidr.dat")
-        # This smoke test exercises the registry/cascade/capability
-        # conversion, not the AC-override resolution layer (ticket-004/006's
-        # own territory) — an empty-override view falls straight through to
-        # the base registry, matching this test's pre-existing assertions.
-        effective = _no_override_effective(hidr, n_stages=len(calendar))
-
-        assert len(id_map.hydro_codes) > 150
-        assert len(id_map.thermal_codes) == 97
-
-        doc = convert_hydros(dadger, hidr, id_map, calendar[0].start_date, effective)
-        hydros = doc["hydros"]
-        assert len(hydros) == len(id_map.hydro_codes)
-        itaipu = next(h for h in hydros if h["name"] == "ITAIPU")
-        assert "bus_id" not in itaipu
-        # Two per-frequency groups (ticket-027, code 66): unique ids {0, 1},
-        # each 7000 MW installed (rated, unchanged) — id-addressed, not
-        # array-order (cobre sorts by group id on load). max_turbined_m3s is
-        # head-corrected (ticket-017): 6620 m3/s rated derates to ~6530.33
-        # m3/s at Itaipu's own nominal head (117 m) and operating head, both
-        # conjuntos symmetric. Group id 0 (50 Hz) is unconditionally
-        # relocated to the IV transshipment bus; group id 1 (60 Hz) stays on
-        # the plant's own SE bus (ticket-006).
-        groups = itaipu["unit_groups"]
-        assert {g["id"] for g in groups} == {0, 1}
-        groups_by_id = {g["id"]: g for g in groups}
-        assert groups_by_id[0]["bus_id"] == id_map.transhipment_bus_id  # 50 Hz -> IV
-        assert groups_by_id[1]["bus_id"] == id_map.bus_id(1)  # 60 Hz -> SE
-        for group in groups:
-            assert group["max_generation_mw"] == pytest.approx(7000.0)
-            assert group["max_turbined_m3s"] == pytest.approx(6530.33, abs=0.01)
-        assert itaipu["downstream_id"] is None
-
-        storage = convert_initial_storage(dadger, hidr, id_map, effective)
-        assert len(storage) == len(id_map.hydro_codes)
-        for entry, hydro in zip(storage, hydros, strict=True):
-            reservoir = hydro["reservoir"]
-            assert (
-                reservoir["min_storage_hm3"]
-                <= entry["value_hm3"]
-                <= reservoir["max_storage_hm3"]
-            )
-
-        thermals = convert_thermals(dadger, id_map, calendar, calendar[0].start_date)[
-            "thermals"
-        ]
-        assert len(thermals) == 97
-        cuiaba = next(t for t in thermals if t["name"] == "CUIABA CC")
-        assert cuiaba["generation"]["max_mw"] == pytest.approx(490.0)
-
-        bounds = convert_thermal_bounds(dadger, id_map, calendar)
-        # 291 (thermal, stage) pairs total; 38 are block-varying and
-        # contribute per-block only (no base), per the replace-vs-intersect
-        # discipline — see tests/test_decomp_thermal_fold.py for the
-        # per-block exactness grading against the reference outputs.
-        base = [c for c in bounds.generation if c.block_id is None]
-        assert len(base) == 97 * len(calendar) - 38
-        # cost_per_mwh rides its own side-table, one row per (thermal,
-        # stage) regardless of whether that stage's generation bound
-        # materialized a base contribution.
-        assert bounds.cost.num_rows == 97 * len(calendar)

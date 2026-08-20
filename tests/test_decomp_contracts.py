@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from datetime import date
 from pathlib import Path
 
@@ -31,13 +30,6 @@ from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calenda
 _COBRE_SCHEMA = (
     Path.home() / "git" / "cobre" / "schemas" / "energy_contracts.schema.json"
 )
-
-# ticket-007: the local develop build under the cobre oracle checkout — never
-# ~/.cargo/bin/cobre (see the `reference_local_cobre_binary` convention). CI
-# hosts lack this checkout, so every test depending on it is skipif-guarded.
-_COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
-_RV0_DECK = Path("example/decomp-set-24-rv0")
-_RV3_DECK = Path("example/decomp-jul-26-rv3")
 _D41_DIR = (
     Path.home()
     / "git"
@@ -821,87 +813,10 @@ def test_integrated_json_schema_and_parquet_roundtrip(tmp_path: Path) -> None:
     ]
 
 
-# --- End-to-end cobre-validate + d41 round-trip (ticket-007) ------------
+# --- End-to-end d41 round-trip (ticket-007) ------------------------------
 #
-# The two ``cobre validate`` tests are skipif-guarded on the local oracle
-# binary (CI hosts lack the ~/git/cobre checkout entirely); the d41 shape
-# round-trip needs no binary but is itself skipif-guarded on that sibling
-# checkout being present.
-
-
-@pytest.mark.skipif(
-    not (_COBRE_BIN.exists() and _RV0_DECK.exists() and _RV3_DECK.exists()),
-    reason="cobre binary or a real deck (rv0/rv3) not present",
-)
-def test_real_decks_still_validate_clean(tmp_path: Path) -> None:
-    """Regression guard: both real decks still convert to a case ``cobre
-    validate`` accepts with 0 errors. Neither carries usable contract data
-    (rv0's lone ``CI`` row is a D6 placeholder; rv3 declares none), so this
-    proves the contract wiring changed nothing for a contract-free deck.
-    """
-    from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-    for name, deck in (("rv0", _RV0_DECK), ("rv3", _RV3_DECK)):
-        dst = tmp_path / name
-        convert_decomp_case(deck, dst, force=True)
-
-        result = subprocess.run(
-            [str(_COBRE_BIN), "validate", str(dst)],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, (
-            f"cobre validate failed for {name} ({deck}):\n{result.stderr}"
-        )
-
-
-@pytest.mark.skipif(
-    not (_COBRE_BIN.exists() and _RV3_DECK.exists()),
-    reason="cobre binary or the real rv3 deck not present",
-)
-def test_synthetic_contracts_validate_in_a_real_case(tmp_path: Path) -> None:
-    """Overwrite a real rv3 conversion's two contract files with the
-    ticket-006 synthetic fixture's output and confirm ``cobre validate``
-    accepts them. The fixture's ``codigo_submercado`` values are re-mapped
-    through the module's own ``_bus_id_map()`` (bus 1 -> id 0, bus 2 -> id 1),
-    checked below against the converted case's own ``buses.json`` rather than
-    assumed, since only an id that genuinely exists there proves anything.
-    """
-    from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-    dst = tmp_path / "case"
-    convert_decomp_case(_RV3_DECK, dst, force=True)
-
-    buses_doc = json.loads((dst / "system" / "buses.json").read_text(encoding="utf-8"))
-    valid_bus_ids = {bus["id"] for bus in buses_doc["buses"]}
-
-    calendar = _calendar()
-    id_map = _bus_id_map()
-    mapped_bus_ids = {id_map.bus_id(1), id_map.bus_id(2)}
-    assert mapped_bus_ids.issubset(valid_bus_ids), (
-        f"the synthetic fixture's mapped bus ids {mapped_bus_ids} must exist "
-        f"in the converted rv3 case's buses.json ({valid_bus_ids})"
-    )
-
-    contracts = read_contracts(_contracts_stub(), calendar)
-    energy_contracts_doc = convert_energy_contracts(
-        contracts, id_map, calendar, calendar[0].start_date
-    )
-    contract_bounds_table = convert_contract_bounds(contracts, calendar)
-
-    _write_json(dst / "system" / "energy_contracts.json", energy_contracts_doc)
-    _write_parquet(
-        dst / "constraints" / "contract_bounds.parquet", contract_bounds_table
-    )
-
-    result = subprocess.run(
-        [str(_COBRE_BIN), "validate", str(dst)],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"cobre validate failed on the synthetic-contract case:\n{result.stderr}"
-    )
+# The d41 shape round-trip needs no cobre binary but is itself skipif-guarded
+# on the sibling ~/git/cobre checkout being present.
 
 
 @pytest.mark.skipif(

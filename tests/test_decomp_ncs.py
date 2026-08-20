@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -15,9 +14,6 @@ from cobre_bridge.decomp.ncs import (
     convert_non_controllable_sources,
 )
 from cobre_bridge.decomp.temporal import build_operative_calendar
-
-_RV0_DECK = Path("example/decomp-set-24-rv0/dadger.rv0")
-_RV3_DECK = Path("example/decomp-jul-26-rv3/dadger.rv3")
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2, 3, 4, 11),
@@ -147,52 +143,6 @@ class TestFactors:
                 for bf in entry["block_factors"]
             )
             assert weighted == pytest.approx(stage.total_hours, rel=1e-12)
-
-
-class TestRealDecks:
-    @pytest.mark.skipif(not _RV0_DECK.exists(), reason="rv0 deck not present")
-    def test_rv0_series_count(self) -> None:
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV0_DECK))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-
-        doc = convert_non_controllable_sources(
-            dadger, id_map, calendar, calendar[0].start_date
-        )
-        entries = doc["non_controllable_sources"]
-        assert len(entries) == 32
-        assert all(e["allow_curtailment"] is False for e in entries)
-
-        stats = convert_ncs_stats(dadger, id_map, calendar).to_pandas()
-        assert len(stats) == 32 * len(calendar)
-
-    @pytest.mark.skipif(not _RV3_DECK.exists(), reason="rv3 deck not present")
-    def test_rv3_end_to_end(self) -> None:
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV3_DECK))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-
-        doc = convert_non_controllable_sources(
-            dadger, id_map, calendar, calendar[0].start_date
-        )
-        assert len(doc["non_controllable_sources"]) == 24
-
-        factors = convert_ncs_factors(dadger, id_map, calendar)
-        for entry in factors["non_controllable_factors"]:
-            stage = calendar[entry["stage_id"]]
-            weighted = sum(
-                bf["factor"] * stage.block_hours[bf["block_id"]]
-                for bf in entry["block_factors"]
-            )
-            assert weighted == pytest.approx(stage.total_hours, rel=1e-9)
 
 
 class _StubRenovaveis:

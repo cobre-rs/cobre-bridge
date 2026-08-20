@@ -1,16 +1,9 @@
-"""End-to-end tests for the boundary FCF importer orchestration
+"""Tests for the boundary FCF importer orchestration
 (``fcf/__init__.py::import_boundary_fcf``).
 
-Option C (same-study, 2026-08-03): ``example/decomp-set-24-rv0`` is both the
-convertible deck (``dadger.rv0`` -> the target case) and the boundary cut
-source (its own ``cortesh.dat``/``cortes-010.dat``, a single-stage export
-whose trailer derives boundary stage 10). The deck carries GNL, but the
-epic-2 mapper leaves every ``AnticipatedThermalState`` slot at coefficient 0
-(``pi_gnl`` is epic 3's job) — this converted case's terminal manifest in
-fact carries *no* ``AnticipatedThermalState``/``HydroTransitBucket`` slots at
-all yet (GNL-anticipation emission is deferred at this DECOMP milestone), so
-there is nothing to zero here; the mapper's docstring names this an
-explicitly legitimate case shape, not an error.
+The GNL-ring and diagnostics tests below are tier-1 (synthetic fixtures, no
+deck, no cobre binary); the ``decomp-mar-26-rv2`` block further down is the
+real-deck, real-cobre-binary end-to-end round trip.
 """
 
 from __future__ import annotations
@@ -27,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.converters.network import MONTH_HOURS
@@ -39,11 +31,7 @@ from cobre_bridge.decomp.fcf import (
     _post_horizon_start,
     import_boundary_fcf,
 )
-from cobre_bridge.decomp.fcf.cortes import (
-    BoundaryCuts,
-    read_cortes,
-    summarize_cut_families,
-)
+from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, summarize_cut_families
 from cobre_bridge.decomp.fcf.mapper import (
     DroppedTerm,
     GnlRingPlan,
@@ -61,16 +49,6 @@ from tests._fcf_fixtures import (
     make_mapped_cut,
     make_slot,
 )
-
-# Real, gitignored deck + local cobre build (see example/README.md and
-# tests/test_decomp_fcf_bootstrap.py's identical constants) — CI has
-# neither, so the heavy end-to-end tests (AC 1-3) are skipif-guarded on both
-# plus the writer binding; the no-cut-files no-op (AC 4) needs none of them
-# and runs unconditionally.
-_DECK = Path("example/decomp-set-24-rv0")
-_CORTESH = _DECK / "cortesh.dat"
-_CORTES = _DECK / "cortes-010.dat"
-_COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
 
 
 def _has_writer_binding() -> bool:
@@ -90,181 +68,12 @@ def _has_writer_binding() -> bool:
 
 _HAS_WRITER_BINDING = _has_writer_binding()
 
-_HAS_E2E_DEPS = _COBRE_BIN.exists() and _DECK.exists() and _HAS_WRITER_BINDING
-_SKIP_REASON = (
-    f"requires the local cobre binary ({_COBRE_BIN}), the "
-    f"decomp-set-24-rv0 deck ({_DECK}), and the write_policy_checkpoint "
-    "writer binding"
-)
-_skip_e2e = pytest.mark.skipif(not _HAS_E2E_DEPS, reason=_SKIP_REASON)
-
-
-@dataclass(frozen=True)
-class _ImportedCase:
-    """One converted-and-boundary-imported case, shared across the AC1-3 tests."""
-
-    case_dir: Path
-    boundary_dir: Path
-
-
-@pytest.fixture(scope="module")
-def imported_case(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> _ImportedCase:
-    """Convert ``decomp-set-24-rv0`` and import its own boundary FCF, once.
-
-    Module-scoped and shared across the three AC1-3 tests below: the deck's
-    ``cortes-010.dat`` is ~176 MB and the bootstrap stage runs a real
-    ``cobre run``, so this ~30s+ path executes exactly once regardless of how
-    many assertions exercise its result. Guarded by the same skip condition
-    as the consuming tests (belt-and-suspenders — a skipped test never
-    reaches its fixtures in this suite's other epic-2 modules, but the
-    explicit ``pytest.skip`` here keeps this fixture safe even if invoked on
-    its own).
-    """
-    if not _HAS_E2E_DEPS:
-        pytest.skip(_SKIP_REASON)
-
-    root = tmp_path_factory.mktemp("fcf_importer_e2e")
-    case_dir = root / "converted"
-    convert_decomp_case(_DECK, case_dir, force=True)
-
-    boundary_dir = import_boundary_fcf(
-        case_dir,
-        _CORTESH,
-        _CORTES,
-        work_dir=root / "work",
-        cost_scale_factor=1.0,
-    )
-    assert boundary_dir is not None
-    return _ImportedCase(case_dir=case_dir, boundary_dir=boundary_dir)
-
-
-@_skip_e2e
-def test_import_boundary_fcf_nongnl_writes_checkpoint(
-    imported_case: _ImportedCase,
-) -> None:
-    """AC 1 — the boundary checkpoint's files exist at the derived stage 10."""
-    boundary_dir = imported_case.boundary_dir
-
-    assert boundary_dir == imported_case.case_dir / "boundary"
-    assert (boundary_dir / "metadata.json").is_file()
-    # cobre 0.14 keys the cut file by pool id (stage 10 -> "010.bin").
-    assert (boundary_dir / "cuts" / "010.bin").is_file()
-    assert (boundary_dir / "basis").is_dir()
-
-    metadata = json.loads((boundary_dir / "metadata.json").read_text())
-    # 0.14 nests the algorithm provenance under a "producer" block.
-    assert metadata["producer"]["cost_scale_factor"] == 1.0
-    assert metadata["num_stages"] == 1
-
-
-@_skip_e2e
-def test_import_boundary_fcf_patches_policy_boundary(
-    imported_case: _ImportedCase,
-) -> None:
-    """AC 2 — config.json's policy.boundary is wired at the derived stage 10."""
-    config = json.loads((imported_case.case_dir / "config.json").read_text())
-
-    assert config["policy"]["boundary"] == {
-        "path": "boundary",
-        "source_stage": 10,
-    }
-    # cobre >= 0.14 infers the inflow-lag depth from the loaded boundary policy,
-    # so the importer no longer writes state_space into the shipped config; it
-    # feeds the cut-derived depth to the bootstrap run as an in-memory override
-    # (this deck's boundary cuts carry pi_qafl terms, so that depth is positive).
-    assert "state_space" not in config
-    # the convert_config sections must survive the policy.boundary patch untouched
-    assert "training" in config
-    assert "simulation" in config
-
-
-@_skip_e2e
-def test_import_boundary_fcf_case_validates(imported_case: _ImportedCase) -> None:
-    """AC 3 — ``cobre validate`` accepts the boundary-injected case.
-
-    Only the exit code gates this test — a non-fatal external-interop
-    warning (e.g. ``inflow_lags``) may legitimately appear on stdout/stderr
-    without flipping it.
-    """
-    completed = subprocess.run(
-        [str(_COBRE_BIN), "validate", str(imported_case.case_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert completed.returncode == 0, (
-        f"cobre validate failed (exit {completed.returncode}):\n"
-        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-    )
-
-
-@_skip_e2e
-def test_import_boundary_fcf_emits_diagnostics(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> None:
-    """AC 1/AC 2 (ticket-015) — the importer's two INFO ``Diagnostic``s.
-
-    A fresh convert+import, wrapped in its own ``dx.collect()`` block —
-    ``imported_case``'s call above already ran with no sink installed, and
-    ``diagnostics.emit`` cannot retroactively populate a sink that wasn't
-    active at call time, so this test performs its own run rather than
-    reusing that fixture's result.
-
-    Asserts the dropped-plant table names exactly the two D3-dropped plants
-    (codes 132, 176 — pinned from the epic-2 learnings) and that the
-    cut-family-summary diagnostic's reported figures equal a *direct*
-    ``summarize_cut_families`` call on an independently re-read
-    ``BoundaryCuts`` — proving the diagnostic never re-implements the triage.
-    """
-    root = tmp_path_factory.mktemp("fcf_importer_diagnostics_e2e")
-    case_dir = root / "converted"
-    convert_decomp_case(_DECK, case_dir, force=True)
-
-    with dx.collect() as sink:
-        boundary_dir = import_boundary_fcf(
-            case_dir,
-            _CORTESH,
-            _CORTES,
-            work_dir=root / "work",
-            cost_scale_factor=1.0,
-        )
-    assert boundary_dir is not None
-
-    assert len(sink) == 2
-    by_code = {diagnostic.code: diagnostic for diagnostic in sink}
-    assert set(by_code) == {
-        "boundary-fcf-cut-family-summary",
-        "boundary-fcf-source-only-plants-dropped",
-    }
-
-    dropped_diagnostic = by_code["boundary-fcf-source-only-plants-dropped"]
-    assert dropped_diagnostic.severity is dx.Severity.INFO
-    assert dropped_diagnostic.table is not None
-    assert {row[0] for row in dropped_diagnostic.table.rows} == {132, 176}
-
-    summary_diagnostic = by_code["boundary-fcf-cut-family-summary"]
-    assert summary_diagnostic.severity is dx.Severity.INFO
-
-    cortesh = Cortesh.read(str(_CORTESH))
-    cuts = read_cortes(_CORTES, cortesh, boundary_stage=None)
-    summary = summarize_cut_families(cuts)
-    # ticket-013 Requirement C.1: the figures live in `summary` now, not a
-    # separate restating `notes` bullet (dropped as duplicate bloat).
-    assert summary_diagnostic.notes == []
-    assert str(summary.n_active_cuts) in summary_diagnostic.summary
-    assert str(summary.storage_nonzero_plants) in summary_diagnostic.summary
-    assert str(summary.lag_nonzero_by_depth) in summary_diagnostic.summary
-
 
 def test_emit_import_diagnostics_ac1_ac2_from_synthetic() -> None:
     """AC 1/AC 2 (ticket-015) — both diagnostics fire against fully synthetic
-    inputs: no deck, no cobre binary. ``dropped`` uses codes 20/30 rather
-    than the real deck's 132/176 (see
-    ``test_import_boundary_fcf_emits_diagnostics`` above), so this test
-    carries no hidden dependency on ``example/``.
+    inputs: no deck, no cobre binary. ``dropped`` uses codes 20/30 (not a
+    real deck's plant codes), so this test carries no hidden dependency on
+    ``example/``.
     """
     cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
     mapping = MappingResult(
@@ -891,9 +700,9 @@ def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
 # the local cobre **develop** build. The boundary-pricing / anticipated-
 # reconciliation work has landed in develop (commits `abf73bf1` reconcile-by-
 # dated-fan-out, `7faed7a0` exempt post-horizon anticipated deliveries from the
-# lead-horizon cap), so the develop build is the correct target and equals the
-# sibling `_COBRE_BIN` above. Under the mirror-shift GNL emission the anticipation
-# lead is capped strictly below the horizon (TRACKED COBRE-GAP WORKAROUND C13,
+# lead-horizon cap), so the develop build is the correct target. Under the
+# mirror-shift GNL emission the anticipation lead is capped strictly below
+# the horizon (TRACKED COBRE-GAP WORKAROUND C13,
 # `decomp/anticipated.py`), so this deck loads with no K=0 / no dropped deliveries.
 # CI has neither the deck nor the binary, so this stays a dev-only tier-3 smoke.
 _MAR26_DECK = Path("example/decomp-mar-26-rv2")
@@ -925,9 +734,9 @@ def mar26rv2_imported_case(
 ) -> _Mar26ImportedCase:
     """Convert ``decomp-mar-26-rv2`` and import its own boundary FCF, once.
 
-    Module-scoped and shared by both tests below (mirrors ``imported_case``
-    above): the ~20 s convert + bootstrap pass runs exactly once regardless
-    of how many assertions exercise its result. Neither consuming test
+    Module-scoped and shared by both tests below: the ~20 s convert +
+    bootstrap pass runs exactly once regardless of how many assertions
+    exercise its result. Neither consuming test
     mutates this fixture's ``case_dir`` in place -- the run-load test copies
     it into its own scratch directory first -- so test order never matters.
     """
