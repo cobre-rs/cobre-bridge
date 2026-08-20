@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,7 @@ from cobre_bridge.decomp.constraint_registers import (
     detect_unreadable_electrical,
     read_constraints,
 )
+from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.decomp.preflight import (
     _ALL_AC_CLASSES,
     _ac_coverage,
@@ -34,7 +36,7 @@ from cobre_bridge.decomp.preflight import (
     run_decomp_preflight,
 )
 from cobre_bridge.diagnostics import Severity
-from cobre_bridge.preflight import PreflightVerdict
+from cobre_bridge.preflight import PreflightVerdict, optional_input_advisory
 from tests.test_decomp_cadastro import _FakeDadger
 from tests.test_decomp_constraint_registers import (
     _cm,
@@ -58,8 +60,70 @@ class TestDiscoveryFailure:
         assert list(tmp_path.iterdir()) == []
 
 
+class TestOptionalInputAdvisory:
+    """DECOMP adopts the shared
+    :func:`cobre_bridge.preflight.optional_input_advisory` helper for all six
+    optional ``DecompFiles`` fields, in place of the old two-field hard-coded
+    loop.
+    """
+
+    @staticmethod
+    def _files(tmp_path: Path, **overrides: Path | None) -> DecompFiles:
+        return DecompFiles(
+            revision="rv0",
+            dadger=tmp_path / "dadger.rv0",
+            vazoes=tmp_path / "vazoes.rv0",
+            hidr=tmp_path / "hidr.dat",
+            dadgnl=overrides.get("dadgnl"),
+            renovaveis=overrides.get("renovaveis"),
+            polinjus=overrides.get("polinjus"),
+            libs_restricao_eletrica=overrides.get("libs_restricao_eletrica"),
+            cortesh=overrides.get("cortesh"),
+            cortes=overrides.get("cortes"),
+        )
+
+    def test_reports_all_six_decomp_optionals(self, tmp_path: Path) -> None:
+        files = self._files(tmp_path)
+
+        checks, diagnostics = optional_input_advisory(files)
+
+        assert len(checks) == 6
+        assert all(check.passed for check in checks)
+        assert len(diagnostics) == 6
+        assert all(d.code == "optional-file-absent" for d in diagnostics)
+        assert all(d.severity is Severity.INFO for d in diagnostics)
+
+        reported = {
+            note.removeprefix("field: ")
+            for d in diagnostics
+            for note in d.notes
+            if note.startswith("field: ")
+        }
+        assert reported == {
+            "dadgnl",
+            "renovaveis",
+            "polinjus",
+            "libs_restricao_eletrica",
+            "cortesh",
+            "cortes",
+        }
+
+    def test_skips_present_decomp_optional(self, tmp_path: Path) -> None:
+        files = self._files(tmp_path, dadgnl=tmp_path / "dadgnl.rv0")
+
+        _checks, diagnostics = optional_input_advisory(files)
+
+        assert len(diagnostics) == 5
+        assert not any("field: dadgnl" in d.notes for d in diagnostics)
+
+    def test_run_decomp_preflight_uses_the_shared_advisory_helper(self) -> None:
+        source = inspect.getsource(run_decomp_preflight)
+        assert "optional_input_advisory" in source
+        assert '("dadgnl", "renovaveis")' not in source
+
+
 class TestAcCoverageRegistry:
-    """ticket-015: the resolver's ``APPLIED_AC_CLASSES``/
+    """The resolver's ``APPLIED_AC_CLASSES``/
     ``UNINGESTABLE_AC_CLASSES`` registries and the reflected idecomp ``AC``
     universe (``_ALL_AC_CLASSES``) stay consistent with each other, and the
     derived deferred bucket is populated by enumerate-and-diff rather than a
@@ -98,7 +162,7 @@ class TestAcCoverageRegistry:
 
 
 class TestAcCoverage:
-    """ticket-015: ``_ac_coverage``'s three-bucket classification and its
+    """``_ac_coverage``'s three-bucket classification and its
     always-passing summary ``CheckItem`` plus per-bucket diagnostics.
     """
 
@@ -166,7 +230,7 @@ class TestAcCoverage:
 
 
 class TestSpecialConstraintCoverage:
-    """ticket-025: ``_special_constraint_coverage``'s converted (RE/HQ/HV/HE,
+    """``_special_constraint_coverage``'s converted (RE/HQ/HV/HE,
     bounds-lowered vs generic-emitted) vs deferred (FE/RHA/LIBs-electrical)
     classification, and its always-passing summary ``CheckItem``.
     """
@@ -174,7 +238,7 @@ class TestSpecialConstraintCoverage:
     @staticmethod
     def _synthetic_dadger() -> _ConstraintFakeDadger:
         """One record per family: RE (FU), HV (VARM), and HQ (QDES, a
-        diversion bound since epic-06/ticket-021) lower to bounds; HE
+        diversion bound) lower to bounds; HE
         (always generic) is the only one that emits as a generic
         constraint — mirrors the register fixtures in
         ``test_decomp_constraint_registers.py``."""
@@ -244,7 +308,7 @@ class TestSpecialConstraintCoverage:
         converted = next(
             d for d in diagnostics if d.code == "decomp-special-constraints-converted"
         )
-        # Probe (spec §10) — asserted against the census's own counts, never
+        # Probe — asserted against the census's own counts, never
         # a hard-coded oracle.
         assert str(len(census.to_bounds)) in converted.summary
         assert str(len(census.to_generic)) in converted.summary

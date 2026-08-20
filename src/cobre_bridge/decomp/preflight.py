@@ -28,7 +28,12 @@ from cobre_bridge.decomp import constraint_registers
 from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
 from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
 from cobre_bridge.errors import diagnostic_from_exception
-from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
+from cobre_bridge.preflight import (
+    CheckItem,
+    PreflightResult,
+    PreflightVerdict,
+    optional_input_advisory,
+)
 
 if TYPE_CHECKING:
     from cobre_bridge.decomp.cadastro import CadastroResolutionReport
@@ -496,15 +501,9 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
     ]
     diagnostics: list[Diagnostic] = []
 
-    for name in ("dadgnl", "renovaveis"):
-        if getattr(files, name) is None:
-            checks.append(
-                CheckItem(
-                    label=f"Optional: {name}",
-                    passed=True,
-                    detail="absent (nothing to convert from it)",
-                )
-            )
+    optional_checks, optional_diags = optional_input_advisory(files)
+    checks.extend(optional_checks)
+    diagnostics.extend(optional_diags)
 
     try:
         dadger = Dadger.read(str(files.dadger))

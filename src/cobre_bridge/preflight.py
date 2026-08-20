@@ -22,13 +22,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING, TypeVar
 
 from cobre_bridge.diagnostics import Diagnostic, Severity
 from cobre_bridge.errors import diagnostic_from_exception
 from cobre_bridge.newave_files import NewaveFiles
 
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
+
 _DISCOVERY_LABEL = "File discovery (caso.dat → arquivos.dat)"
 _PREFLIGHT_CONTEXT = "Preflight"
+_OPTIONAL_ABSENT_DETAIL = "absent (optional; conversion proceeds)"
+
+_FilesT = TypeVar("_FilesT", bound="DataclassInstance")
 
 
 class PreflightVerdict(Enum):
@@ -69,7 +76,7 @@ class PreflightResult:
         The overall :class:`PreflightVerdict`.
     diagnostics:
         The :class:`Diagnostic` list — ``ERROR`` for a blocking discovery
-        failure, ``WARNING`` for each absent optional file.
+        failure, ``INFO`` for each absent optional input.
     checks:
         The ``✓/✗`` :class:`CheckItem` list the renderer consumes.
     """
@@ -79,8 +86,8 @@ class PreflightResult:
     checks: list[CheckItem] = field(default_factory=list)
 
 
-def _optional_file_fields() -> list[str]:
-    """Return the optional (``Path | None``) field names of :class:`NewaveFiles`.
+def _optional_file_fields(files: DataclassInstance) -> list[str]:
+    """Optional (``Path | None``) field names of the passed files dataclass.
 
     Derived from the dataclass annotations (the ``| None`` ones) rather than a
     duplicated literal list, so the advisory stays in sync if the discovery
@@ -88,43 +95,45 @@ def _optional_file_fields() -> list[str]:
     discovered input file.
     """
     return [
-        f.name
-        for f in fields(NewaveFiles)
-        if f.name != "directory" and "None" in str(f.type)
+        f.name for f in fields(files) if f.name != "directory" and "None" in str(f.type)
     ]
 
 
-def _optional_advisory(
-    files: NewaveFiles,
+# ruff's PEP 695 rewrite of this signature is unsafe/incomplete (--unsafe-fixes
+# renames the type parameter but leaves the body's `_FilesT` annotation as-is).
+def optional_input_advisory(  # noqa: UP047
+    files: _FilesT,
 ) -> tuple[list[CheckItem], list[Diagnostic]]:
-    """Build the absent-optional checks and ``WARNING`` diagnostics for *files*.
+    """Passing check + INFO advisory per absent optional input of *files*.
 
-    For each optional input that resolved to ``None`` (absent), emit a *passing*
-    :class:`CheckItem` (it does not block conversion) and a ``WARNING``
-    :class:`Diagnostic` noting defaults will be used. Present optionals produce
-    nothing.
+    Reflects over the ``Path | None`` fields of *files*'s dataclass (any
+    files dataclass — the NEWAVE and DECOMP engines share this helper). Each
+    that resolved to ``None`` yields a passing :class:`CheckItem` plus a
+    ``Severity.INFO`` :class:`Diagnostic` (``code="optional-file-absent"``):
+    an absent optional never blocks conversion and, being INFO not WARNING,
+    never drives the ``WARNINGS`` verdict. Present optionals produce nothing.
     """
     checks: list[CheckItem] = []
     diagnostics: list[Diagnostic] = []
-    for name in _optional_file_fields():
+    for name in _optional_file_fields(files):
         if getattr(files, name) is not None:
             continue
         checks.append(
             CheckItem(
                 label=f"Optional: {name}",
                 passed=True,
-                detail="absent (will use defaults)",
+                detail=_OPTIONAL_ABSENT_DETAIL,
             )
         )
         diagnostics.append(
             Diagnostic(
                 code="optional-file-absent",
-                severity=Severity.WARNING,
+                severity=Severity.INFO,
                 category="Preflight",
                 title="Optional input absent",
                 summary=(
                     f"Optional input '{name}' was not found; "
-                    "the converter will fall back to its defaults."
+                    "the conversion proceeds without it."
                 ),
                 notes=[f"field: {name}"],
                 remediation=(
@@ -176,7 +185,7 @@ def run_preflight(src: Path) -> PreflightResult:
     the failure is captured as a failed :class:`CheckItem` plus an ``ERROR``
     :class:`Diagnostic` and the result is returned immediately with verdict
     ``WILL_NOT_CONVERT`` — nothing propagates. On successful discovery it adds the
-    required-files-present check, a per-absent-optional advisory (``WARNING``),
+    required-files-present check, a per-absent-optional advisory (``INFO``),
     and structural sanity checks, then computes the verdict.
 
     This function writes no file and raises nothing for a missing input.
@@ -198,7 +207,7 @@ def run_preflight(src: Path) -> PreflightResult:
     ]
     diagnostics: list[Diagnostic] = []
 
-    optional_checks, optional_diags = _optional_advisory(files)
+    optional_checks, optional_diags = optional_input_advisory(files)
     checks.extend(optional_checks)
     diagnostics.extend(optional_diags)
 
