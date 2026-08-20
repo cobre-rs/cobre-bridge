@@ -1678,7 +1678,6 @@ def convert_agrint_constraints(
     for group_id in sorted(groups.keys()):
         terms_raw = groups[group_id]
 
-        # Build expression: each (A, B, coeff) -> directional flow term.
         # The source model's ``Interc(A→B)`` is the *non-negative directional* flow from
         # A to B (zero whenever physical flow goes B→A).  Cobre's ``line_direct(id)`` /
         # ``line_reverse(id)`` are the matching non-negative LP variables:

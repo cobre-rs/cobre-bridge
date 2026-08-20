@@ -740,10 +740,10 @@ def convert_thermal_bounds(
     # exceptions: build each attribute's window union, then revert to its
     # default wherever no window covers the stage.
     #
-    # A plant is in service (POTEF) / under a minimum (GTMIN) for any stage
-    # whose date falls inside at least one window. Open-ended data_fim extends
-    # to the last stage date. Chained schedules (a finite window followed by an
-    # open-ended one) are applied in sequence, not ended at the first window.
+    # A stage is covered if its date falls inside at least one window; open-ended
+    # data_fim extends to the last stage date, and chained schedules (a finite
+    # window followed by an open-ended one) apply in sequence, not ended at the
+    # first window.
     potef_windows: dict[int, list[tuple[date, date]]] = {}
     gtmin_windows: dict[int, list[tuple[date, date]]] = {}
 

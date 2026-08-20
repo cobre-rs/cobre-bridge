@@ -1138,11 +1138,9 @@ class ActivationRule:
 #: :func:`evaluate_rule`'s ``coefficient * context(term)`` product would
 #: otherwise double-apply the constant.
 #:
-#: This is the source model's per-(stage,block) demand/alias resolver's
-#: interface, defined here so this engine stays pure and testable; the real
-#: resolver driving it with the source model's demand/alias data over every
-#: (stage, block) cell is :func:`build_data_context`. Tests use a
-#: trivial dict-backed double implementing this same interface.
+#: This is the source model's per-(stage, block) demand/alias resolver
+#: interface, kept abstract so the engine stays a pure function; the real
+#: resolver is :func:`build_data_context`.
 type DataContext = Callable[[ParsedTerm], float]
 
 

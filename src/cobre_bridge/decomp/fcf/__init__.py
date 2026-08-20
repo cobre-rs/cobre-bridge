@@ -69,17 +69,15 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 
-#: a GNL deviation group whose
-#: carried |Σ| is below this FRACTION of the panel's own max |Σ| is treated
-#: as numerically vanished relative to the group that actually carries
-#: weight — its relative spread `(max_p c_p - min_p c_p) / |Σ_p c_p|` would
-#: otherwise inflate into noise (observed: a Σ≈-4e-05 group reported spread
-#: 0.25 while the weight-carrying Σ=-4412 group's spread was only ~0.09; an
-#: earlier fixed-magnitude floor of `1e-6` was ~40x too small to exclude
-#: that 4e-05 group, since `4e-05 >= 1e-6` — an absolute floor cannot track
-#: how "small" a Σ is without knowing the panel's own scale). Excluded from
-#: the `boundary-fcf-gnl-anticipated-deviation` diagnostic's relative
-#: `max_spread` HEADLINE only; its per-row table values are unaffected.
+#: a GNL deviation group whose carried |Σ| is below this FRACTION of the
+#: panel's own max |Σ| is treated as numerically vanished relative to the
+#: group that actually carries weight — its relative spread
+#: `(max_p c_p - min_p c_p) / |Σ_p c_p|` would otherwise inflate into noise.
+#: Relative, not a fixed-magnitude floor: an absolute floor cannot track how
+#: "small" a Σ is without knowing the panel's own scale (a `1e-6` floor left a
+#: Σ≈-4e-05 group in, since `4e-05 >= 1e-6`). Excluded from the
+#: `boundary-fcf-gnl-anticipated-deviation` diagnostic's relative `max_spread`
+#: HEADLINE only; its per-row table values are unaffected.
 _GNL_DEVIATION_REL_FLOOR = 1e-3
 
 
@@ -565,13 +563,10 @@ def _emit_import_diagnostics(
             for term in mapping.gnl_dropped
             if term.thermal_id is None or "post-study horizon" in term.reason
         ]
-        # See `_GNL_DEVIATION_REL_FLOOR`'s docstring: a group carrying less
-        # than that fraction of the panel's own max |Σ| is excluded from the
-        # relative headline only (its row still renders below); the absolute
-        # spread has no such denominator and is reported unfiltered. Guard
-        # the degenerate case where every group's |Σ| is itself ~0 (no
-        # group carries any real weight at all) — no group qualifies for a
-        # meaningful relative headline, which then reports "n/a" rather than
+        # See `_GNL_DEVIATION_REL_FLOOR`'s docstring for the relative-headline
+        # filter. Guard the degenerate case where every group's |Σ| is itself
+        # ~0 (no group carries any real weight at all): no group qualifies for
+        # a meaningful relative headline, which then reports "n/a" rather than
         # a misleading 0.
         max_abs_sum = max((abs(row[2]) for row in rows), default=0.0)
         if max_abs_sum <= 1e-12:

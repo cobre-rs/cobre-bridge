@@ -284,15 +284,11 @@ def convert_stages(case: NewaveCase, id_map: NewaveIdMap) -> dict:  # noqa: ARG0
                 }
             )
 
-        # Determine risk_measure for this stage.  Modes (mirrors the
-        # top-of-function log message):
-        #   * deterministic mode wins — single inflow path means CVaR
-        #     has no tail to penalise, so expectation is correct;
-        #   * dger.cvar=0 → expectation;
-        #   * dger.cvar=1 → the same constant CVaR(alpha,lambda) on every
-        #     stage (already-built ``_cvar_constant`` is reused);
-        #   * dger.cvar=2 → per-stage alpha/lambda from cvar.dat with the
-        #     constant ``valores_constantes`` as the fallback.
+        # risk_measure per stage.  ``dger.cvar``: 0 → expectation; 1 → one constant
+        # CVaR(alpha,lambda) on every stage (reuse ``_cvar_constant``); 2 → per-stage
+        # alpha/lambda from cvar.dat, falling back to ``valores_constantes``.
+        # Deterministic mode overrides all: a single inflow path has no tail for
+        # CVaR to penalise, so expectation is correct.
         risk_measure: str | dict
         if deterministic or dger_cvar == 0:
             risk_measure = "expectation"
@@ -604,14 +600,11 @@ def convert_config(case: NewaveCase) -> dict:
             "check_frequency": 1,
         }
 
-    # -- Backward-pass scheduler (cobre 0.14) --
-    # Opt into the by_node scheduler so each backward work unit is a
-    # (trial point, opening block) pair rather than a whole trial point, and
-    # pin the block size to half of the source model's backward opening count,
-    # rounded up.  Cobre's default scheduler is per-trial-point; the explicit
-    # block size coincides with cobre's own per-node opening-block default
-    # (ceil(|Omega_s|/2)) but records the value taken from the source deck.
-    # (0.14 renamed the method "opening_block" → "by_node"; block_size unchanged.)
+    # -- Backward-pass scheduler --
+    # Opt into ``by_node`` so each backward work unit is a (trial point, opening
+    # block) pair rather than a whole trial point, with block size
+    # ceil(num_openings / 2).  This coincides with cobre's own per-node default but
+    # pins the value taken from the source deck rather than relying on it.
     parallelism: dict = {
         "backward_scheduler": {
             "method": "by_node",

@@ -34,9 +34,8 @@ _BAND_LINE = "rgba(255,255,255,0)"
 #
 # Tuple layout: (display_label, [newave_keys], [cobre_columns], hex_color).
 #
-# Ordering reflects logical grouping (generation, regularisation, hydro
-# operational violations, generic violations) and drives the legend order in
-# the stacked bar.
+# Ordering reflects logical grouping and drives the legend order in the
+# stacked bar.
 _COST_MAP: list[tuple[str, list[str], list[str], str]] = [
     # Operational / generation costs. Cobre's anticipated_thermal_cost (GNL
     # forward-committed fuel, booked on the decision column) is folded in here so the
@@ -2972,16 +2971,15 @@ _HYDRO_VARIABLES = [
     ("water_value_per_hm3", "Water Value (R$/hm³)"),
 ]
 
-# Cobre-only per-plant variables (the source model has no per-plant equivalent).
-# Appended to the dropdown after the comparison variables.
+# Cobre-only per-plant variables (no per-plant equivalent in the source model).
 #
-# Withdrawal-slack ``pos`` / ``neg`` labels follow the source model's convention, which
-# is the *inverse* of Cobre's column-name convention — Cobre's
-# ``water_withdrawal_violation_pos_m3s`` is the physical equivalent of The source
-# model's ``VIOL_NEG_VRETIRUH`` and vice versa.  The ``_NW_HYDRO_SLACK_VARS`` mapping in
-# ``results.py`` is correspondingly swapped so each panel pairs the right Cobre column
-# with the right the source model series under its the source-model-style label.
-# Evaporation slacks share the source model's convention so no swap is needed there.
+# Withdrawal-slack ``pos``/``neg`` labels follow the source model's convention,
+# the *inverse* of Cobre's column-name convention: Cobre's
+# ``water_withdrawal_violation_pos_m3s`` is the physical equivalent of the source
+# model's ``VIOL_NEG_VRETIRUH`` and vice versa. ``_NW_HYDRO_SLACK_VARS`` in
+# ``results.py`` is swapped to match, so each panel pairs the right Cobre column
+# with the right source-model series under a source-model-style label.
+# Evaporation slacks share the source model's convention, so no swap is needed.
 _HYDRO_COBRE_ONLY_VARIABLES = [
     ("stored_energy_initial_mwh", "Stored Energy Initial (MWh)"),
     ("stored_energy_final_mwh", "Stored Energy Final (MWh)"),

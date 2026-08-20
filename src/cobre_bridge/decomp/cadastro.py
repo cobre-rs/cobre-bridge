@@ -163,18 +163,15 @@ class _ScalarAcSpec:
 
 
 #: The scalar single-value ``AC`` mnemonics ingested by
-#: :func:`_read_scalar_overrides`. Module scope (rather than function-local)
-#: so every consumer of the scalar-override machinery shares one registry.
-#: The diversion-channel volume thresholds (`VMDESV`/`VSVERT`) are scalar and
-#: belong here; the diversion channel itself (`DESVIO`) is not scalar and gets
-#: its own reader, :func:`_read_diversion_overrides`. The three scalar head/
-#: productivity mnemonics (`PROESP`/`PERHID`/`JUSMED`) belong here too — the
-#: fourth, `COTVOL`, is a multi-row polynomial and gets its own reader instead,
-#: :func:`_read_polynomial_overrides`. The topology/gauge pair
-#: (`NUMJUS`/`NUMPOS`) goes through the shared :func:`_read_keyed_overrides`
-#: (with :func:`_plant_code_key`): single-value and plant-keyed like this
-#: tuple's own entries, but `int`-valued (a plant/gauge code), so it does
-#: not fit this `float`-typed tuple either.
+#: :func:`_read_scalar_overrides`. Module scope so every consumer of the
+#: scalar-override machinery shares one registry. Membership is by shape:
+#: the diversion volume thresholds (`VMDESV`/`VSVERT`) and the head/
+#: productivity mnemonics (`PROESP`/`PERHID`/`JUSMED`) are scalar and belong
+#: here; the diversion channel (`DESVIO`) and the `COTVOL` polynomial are
+#: multi-row and get their own readers (:func:`_read_diversion_overrides`,
+#: :func:`_read_polynomial_overrides`); the `int`-valued topology/gauge pair
+#: (`NUMJUS`/`NUMPOS`) goes through :func:`_read_keyed_overrides` and does
+#: not fit this `float`-typed tuple.
 _SCALAR_AC_SPECS: tuple[_ScalarAcSpec, ...] = (
     _ScalarAcSpec(ACVOLMIN, "volume", "volume_minimo"),
     _ScalarAcSpec(ACVOLMAX, "volume", "volume_maximo"),

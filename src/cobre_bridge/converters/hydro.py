@@ -826,14 +826,12 @@ def _compute_max_turbined_head_corrected(
         h_int = h_op
     else:
         # Run-of-river ('S') and daily-regulated ('D') plants operate at a ~constant
-        # volume = the reference volume (``volume_referencia``). The source model's
-        # operating head is the forebay cota AT vol_ref minus tailrace and losses, used
-        # for BOTH the turbine affinity ratio and prodt.  The previous code used the
-        # machine-weighted *nominal* head as ``h_op``, which made the affinity ratio
-        # ``h_op / h_nominal`` ≈ 1 (a silent no-op, leaving ``max_turbined =
-        # Σ(n·q)·availability`` uncorrected). Verified vs the source model's
-        # ``(GHIDUH/QTURUH)/ρ_esp`` operating head to ~0.01 m across ~57 run-of-river
-        # plants incl. ITAIPU (113.37 m vs nominal 117 m → cap 11692.65 not 11878.58).
+        # reference volume (``volume_referencia``): operating head = forebay cota at
+        # vol_ref minus tailrace and losses, used for BOTH the turbine affinity ratio
+        # and prodt.  NOT the machine-weighted *nominal* head — that makes the affinity
+        # ratio ``h_op / h_nominal`` ≈ 1, a silent no-op leaving ``max_turbined =
+        # Σ(n·q)·availability`` uncorrected.  Matches the source model's operating head
+        # ``(GHIDUH/QTURUH)/ρ_esp`` (ITAIPU 113.37 m vs nominal 117 m).
         vol_ref_raw = hreg.get("volume_referencia")
         if vol_ref_raw is None or is_na(vol_ref_raw) or float(vol_ref_raw) <= 0.0:
             h_op_gross = _mean_cota_over_volume(hreg, vol_min, vol_max) - cf
@@ -1172,13 +1170,12 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         # The source model treats Daily-regulation ('D') and run-of-river / fio-d'água
         # ('S') plants as fio-d'água — they can't accumulate water across stages, so the
         # useful volume is NOT a usable reservoir buffer. Collapse the active range to a
-        # single point so Cobre's LP mirrors that (otherwise Cobre stores the inflow
-        # excess in the phantom buffer and shifts it across stages, where the source
-        # model simply spills it).
-        #   * 'D' → frozen at ``volume_referencia`` (legacy, validated).
-        #   * 'S' → pinned at ``volume_minimo``; verified against ITAIPU (the
-        # only 'S' plant), which the source model keeps at VARMPUH 0% = Vmin every
-        # stage, spilling the turbine-excess inflow.
+        # single point so Cobre's LP mirrors that; otherwise Cobre stores the inflow
+        # excess in a phantom buffer and shifts it across stages, where the source
+        # model simply spills it.
+        #   * 'D' → frozen at ``volume_referencia``.
+        #   * 'S' → pinned at ``volume_minimo`` (the source model holds ITAIPU at
+        #     VARMPUH 0% = Vmin every stage, spilling the turbine-excess inflow).
         tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
         if tipo_reg == "D":
             vol_ref_raw = hreg.get("volume_referencia")
@@ -1278,15 +1275,11 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         is_fpha = newave_code in fpha_codes
         # Turbined and generation caps are independent of the production
         # function:
-        #   * turbined cap = head-corrected engolimento at the operating head —
-        #     the operational dispatch cap. Verified on QUEBRA QUEIX, whose cap
-        #     binds: 113.006 == its realized 113.01 m³/s, while rated
-        #     Σ n·q_nom = 117.0 overshoots by 3.5%.
-        #   * generation cap = rated installed power Σ n·p_nom — the FPHA GHmax
-        #     (verified TUCURUI 7445.0, QUEBRA QUEIX 120.0; the availability-
-        #     derated power undershoots it). This loose ceiling never binds
-        #     before the head-corrected turbined cap, so a plant reaches its
-        #     turbined limit, not nameplate power.
+        #   * turbined cap = head-corrected engolimento at the operating head
+        #     (m³/s) — the operational dispatch cap; rated Σ n·q_nom overshoots it.
+        #   * generation cap = rated installed power Σ n·p_nom = the FPHA GHmax.
+        #     This loose ceiling never binds before the head-corrected turbined
+        #     cap, so a plant reaches its turbined limit, not nameplate power.
         #
         # The declaration itself is the ENVELOPE over that reference-head value
         # and every per-stage head-corrected cap this hydro emits into
@@ -2146,14 +2139,13 @@ def convert_hydro_energy_productivity(
     needs_per_stage = bool(plants_with_drop_overrides) or bool(seasonal_volref)
     total_stages = _total_study_stages(case) if needs_per_stage else 0
 
-    # FICT-cascade: when a real plant's energy-cascade traverses fictitious plants, fold
-    # those FICTs' ρ_eq into the upstream real plant's own ρ_eq so that cobre's
-    # per-plant cascade sum (computed at solve time from
-    # ``hydro_energy_productivity.parquet`` plus the rewired ``downstream_id``)
-    # reproduces the source model's ``produtibilidade_acumulada_calculo_earm``.  In The
-    # source model's bundled cases FICT plants have ρ_esp = 0 so this is a no-op
-    # numerically; the fix is purely structural.  The helper is robust to non-zero FICT
-    # productivities (uncommon but possible).
+    # FICT-cascade: when a real plant's energy-cascade traverses fictitious plants,
+    # fold those FICTs' ρ_eq into the upstream real plant's own ρ_eq so cobre's
+    # per-plant cascade sum (from ``hydro_energy_productivity.parquet`` plus the
+    # rewired ``downstream_id``) reproduces the source model's
+    # ``produtibilidade_acumulada_calculo_earm``.  FICT plants have ρ_esp = 0 in the
+    # bundled cases, so this is numerically a no-op there — a structural fix, robust
+    # to non-zero FICT productivities.
     from cobre_bridge.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro)
@@ -2881,30 +2873,22 @@ def convert_storage_bounds(
             max_generation_vals.append(None)
             is_ramp_vals.append(False)
 
-    # Filling-plant unit-ramp branch: a
-    # ``NE``-with-filling plant operates from ``entry_sid`` but its turbine /
-    # generation capacity at each stage is whatever generating units are online.
-    # We export EXPLICIT 0/reduced caps over the FULL pre-operating window
-    # ``[0, full_online_sid)`` (clamped to the in-study horizon) so the parquet
-    # carries the true 0→full capacity profile from study start through the ramp,
-    # for plottability and bounds comparison. ``online_machines`` clamps every
-    # unit's online stage up to ``entry_sid``, so stages ``[0, entry_sid)`` (the
-    # PreFilling/Filling window) get explicit ``(0, 0)`` caps; the ramp window
-    # ``[entry_sid, full_online_sid)`` gets reduced caps; from ``full_online_sid``
-    # the base ``hydros.json`` caps apply and no further rows are needed. These
-    # pre-entry rows match cobre's internal PreFilling/Filling forcing (capacity
-    # is already 0 there): cobre's ``hydro_bounds`` reader is a sparse override
-    # table with NO stage-window validation, so a ``max=0`` row during
-    # PreFilling/Filling is inert to / consistent-with its internal forcing — the
-    # simulation result is UNCHANGED, only the exported data gains the explicit
-    # 0-cap stages. A filling plant
-    # may in principle also carry MODIF/GHMIN rows at a stage INSIDE its ramp
-    # window; this branch appends SEPARATE rows tagged ``is_ramp=True``, and the
-    # de-dup pass below resolves any ``(hydro_id, stage_id)`` collision in favour
-    # of the ramp row (ramp wins: the explicit 0-cap during PreFilling/Filling
-    # overrides a colliding MODIF/GHMIN minimum). cobre defers duplicate-pair
-    # handling, so the bridge resolves it here. JURUENA itself
-    # carries no MODIF/GHMIN, so for it the de-dup is a no-op.
+    # Filling-plant unit-ramp branch: a ``NE``-with-filling plant operates from
+    # ``entry_sid`` but its turbine/generation capacity at each stage is whatever
+    # generating units are online.  Export EXPLICIT 0/reduced caps over the FULL
+    # pre-operating window ``[0, full_online_sid)`` (clamped to the in-study horizon)
+    # so the parquet carries the true 0→full capacity profile.  ``online_machines``
+    # clamps every unit's online stage up to ``entry_sid``, so ``[0, entry_sid)``
+    # (PreFilling/Filling) gets ``(0, 0)`` caps and ``[entry_sid, full_online_sid)``
+    # gets reduced caps; from ``full_online_sid`` the base ``hydros.json`` caps apply.
+    # These rows are inert to cobre's own PreFilling/Filling forcing: its
+    # ``hydro_bounds`` reader is a sparse override table with NO stage-window
+    # validation, so a ``max=0`` row there leaves the simulation result UNCHANGED —
+    # only the exported data gains the explicit 0-cap stages.  A ramp-window stage may
+    # also carry a MODIF/GHMIN row; those append SEPARATE rows tagged ``is_ramp=True``,
+    # and the de-dup pass below resolves any ``(hydro_id, stage_id)`` collision in
+    # favour of the ramp row (the explicit 0-cap wins over a colliding MODIF/GHMIN
+    # minimum), since cobre defers duplicate-pair handling.
     if filling_codes and case.exph is not None:
         exph_df = case.exph.expansoes
         for code in sorted(filling_codes):
@@ -2929,15 +2913,12 @@ def convert_storage_bounds(
                 start_month,
             )
 
-            # A generating-unit row is defined by its ``data_entrada_operacao``
-            # (the online date); ``conjunto_maquina_entrada`` names the machine
-            # group. Filter on ``data_entrada_operacao`` — the defining field —
-            # because inewave parses the two columns independently, so a unit row
-            # can carry a conjunto with a BLANK date (``NaT``), which would make
-            # ``ud.year``/``ud.month`` NaN and crash ``range(...)`` downstream. A
-            # row missing the online date cannot define an online stage, and one
-            # missing the conjunto cannot be counted into a machine group, so
-            # either way it is skipped, not crashed.
+            # inewave parses ``data_entrada_operacao`` (the unit's online date) and
+            # ``conjunto_maquina_entrada`` (its machine group) independently, so a
+            # unit row can carry a conjunto with a BLANK date (``NaT``) — which would
+            # make ``ud.year``/``ud.month`` NaN and crash ``range(...)`` downstream.
+            # Filter on the online date (the defining field) and skip a row missing
+            # the conjunto: either alone cannot define an online stage.
             unit_rows: list[tuple[int, int]] = []
             unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
             for _, ur in unit_df.iterrows():

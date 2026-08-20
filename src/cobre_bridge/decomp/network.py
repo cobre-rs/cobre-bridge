@@ -281,11 +281,8 @@ def convert_lines(
             # Per-block rows carry the IA record's own de_para/para_de
             # values directly, as absolute MW — no factor round-trip, so
             # no division and no reconstruction error. A block whose limit
-            # is 0.0 is now an ordinary bound (direct_mw = 0.0 / reverse_mw
-            # = 0.0): the previous factor encoding had no representation
-            # for a zero limit and raised on it; under absolute MW that
-            # case no longer exists, so the raise is gone and nothing
-            # replaces it.
+            # is 0.0 is an ordinary bound (direct_mw = 0.0 / reverse_mw = 0.0),
+            # not a sentinel to skip.
             blocks = list(zip(limits["de_para"], limits["para_de"], strict=True))
             uniform = all(d == direct_base and r == reverse_base for d, r in blocks)
             if not uniform:

@@ -205,14 +205,13 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     renovaveis = find("renovaveis", required=False)
     polinjus = find("polinjus", required=False)
     assert dadger is not None and vazoes is not None and hidr is not None
-    # cortesh/cortes: prefer the deck's own FC record over the
-    # glob idiom (its caminho may point outside `src`, e.g. `../../cortesh.dat`,
-    # which the glob fallback below could never find); the `cortes-` prefix is
-    # checked before the broader `cortes` prefix so a single-stage partition
-    # export (`cortes-<estagio>.dat`) always wins over the consolidated
-    # `cortes.dat` archive when both are present, matching `fcf/cortes.py`'s
-    # own trailer-based shape detection. `exclude="cortesh"` keeps the broader
-    # `cortes` glob from mistaking the header file for the record file.
+    # Prefer the deck's own FC record over the glob: its caminho may point
+    # outside `src` (e.g. `../../cortesh.dat`), which the glob can never find.
+    # The `cortes-` prefix is tried before the broader `cortes` so a
+    # single-stage partition export wins over the consolidated `cortes.dat`
+    # archive when both are present (matching `fcf/cortes.py`'s trailer-based
+    # shape detection); `exclude="cortesh"` keeps the `cortes` glob from
+    # mistaking the header file for the record file.
     cortesh = _resolve_fc_record_path(dadger, src, tipo=_FC_TIPO_CORTESH) or find(
         "cortesh", required=False
     )
@@ -1011,14 +1010,13 @@ def _convert_decomp_case_impl(
         ncs_conv.convert_ncs_factors(dadger, id_map, calendar, renovaveis),
     )
     # Under the node-native explicit tree every stochastic class is sourced
-    # externally: inflow (the tree), NCS (renewables), and load. cobre landed
-    # scheme-aware load membership (`std > 0 OR load_scheme == External`), so a
+    # externally: inflow (the tree), NCS (renewables), and load. A
     # deterministic (std = 0) external load class still occupies its noise slot
-    # and standardizes to eta = 0 (value == mean) — no longer the in-sample-with-
-    # null-std workaround. Each deterministic per-(entity, stage) mean fans out
-    # unchanged across the same per-stage scenario columns as the inflow library
-    # (1 on the trunk, the terminal fan width at the last stage) for joint
-    # scenario_id coherence across the external classes.
+    # and standardizes to eta = 0 (value == mean) under cobre's scheme-aware
+    # load membership (`std > 0 OR load_scheme == External`). Each deterministic
+    # per-(entity, stage) mean fans out unchanged across the same per-stage
+    # scenario columns as the inflow library (1 on the trunk, the terminal fan
+    # width at the last stage) for joint scenario_id coherence.
     scenario_counts = [1] * (len(calendar) - 1) + [len(fan_probabilities)]
     _write_parquet(
         scenarios / "external_ncs_scenarios.parquet",
@@ -1052,24 +1050,19 @@ def _convert_decomp_case_impl(
     # exactly ONE resolve() + build_bound_tables() pass, so a new special
     # constraint colliding with a legacy bound on the same (entity, stage,
     # block) cell correctly intersects instead of producing the
-    # two-rows-same-column parquet cobre rejects. read_constraints/
-    # pumping_station_id_map are read once here and reused by the generic
-    # constraints emitted below.
+    # two-rows-same-column parquet cobre rejects.
     step("Resolving bounds")
     census = constraint_registers.read_constraints(dadger)
     pumping_ids = network_conv.pumping_station_id_map(dadger)
     thermal_generation_contribs, thermal_cost_table = (
         thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
     )
-    # The RE `FU` single-hydro-generation
-    # and the RHQ `QTUR`/turbined bound producers each clamp their emitted
-    # upper to the plant's own declared max_generation_mw/max_turbined_m3s,
-    # so a looser source-declared ceiling on either axis (a real
-    # cross-source mismatch — see BELO MONTE's RE ceiling on both real
-    # decks) never trips cobre rule 43
+    # The RE `FU` single-hydro-generation and the RHQ `QTUR`/turbined bound
+    # producers each clamp their emitted upper to the plant's own declared
+    # max_generation_mw/max_turbined_m3s, so a looser source-declared ceiling
+    # on either axis (a real cross-source mismatch — see BELO MONTE's RE
+    # ceiling on both real decks) never trips cobre rule 43
     # (emission_checks.check_hydro_bounds_no_raising, self-checked below).
-    # Read the same way that check reads hydros_dict: hydro id -> its
-    # generation.max_generation_mw/max_turbined_m3s.
     hydro_capacities: dict[int, single_term_bounds.HydroCapacities] = {
         hydro["id"]: single_term_bounds.HydroCapacities(
             max_generation_mw=hydro["generation"]["max_generation_mw"],
@@ -1224,23 +1217,19 @@ def _convert_decomp_case_impl(
     )
     contract_bounds_table = contracts_conv.convert_contract_bounds(contracts, calendar)
 
-    # Post-emission self-checks (cobre 0.13 rules 43, 41, 45, 38, 36, and the
-    # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
-    # the in-memory artifacts, run before the constraint tables are written.
-    # hydro_bounds now carries max_turbined_m3s/max_generation_mw whenever a
+    # Post-emission self-checks: mirror cheap cobre load invariants (rules 43,
+    # 41, 45, 38, 36, and the block_id-range rule) over the in-memory artifacts
+    # before the constraint tables are written. rule 43 is reachable because
+    # hydro_bounds carries max_turbined_m3s/max_generation_mw whenever a
     # single-term special constraint (e.g. an RE FU generation ceiling) lowers
-    # to one, so the rule-43 check below is genuinely reachable — it raises
-    # when such a bound exceeds the entity's own declared capacity, and only
-    # reports "not applicable" when no capacity column is populated at all.
-    # See cobre_bridge.emission_checks for the rule scope.
+    # to one; it raises when such a bound exceeds the entity's own declared
+    # capacity. See cobre_bridge.emission_checks for the rule scope.
     #
-    # An ERROR-severity finding mirrors a cobre load invariant the converted
-    # case would fail, so it fails the conversion outright (the raise below)
-    # rather than surfacing only as a diagnostic on the returned report. The
-    # local dx.collect() exists so this function can inspect severity; every
-    # collected finding is then re-emitted via dx.emit() so the wrapper's
-    # outer sink (and thus the returned ConversionReport) still records it,
-    # and a standalone call with no sink still logs it.
+    # An ERROR-severity finding fails the conversion outright (the raise below)
+    # rather than only surfacing as a diagnostic. The local dx.collect() lets
+    # this function inspect severity; every finding is re-emitted via dx.emit()
+    # so the wrapper's outer sink (and the returned ConversionReport) still
+    # records it, and a standalone call with no sink still logs it.
     step("Writing outputs")
     bound_families = [
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds),
@@ -1306,13 +1295,12 @@ def _convert_decomp_case_impl(
         for _, row in operated_uh.iterrows()
     }
 
-    # Read the deck's LIBs-era electrical-constraint file (the
-    # indices.csv RESTRICAO-ELETRICA-ESPECIAL entry, resolved by
-    # discover_decomp_files) exactly once here -- both the narrowed
-    # detect_libs_electrical decision and the 4th generic-constraint emitter
-    # link below thread this same `libs_electrical_model`, so neither can
-    # disagree about whether the deck's long-form subset converted.
-    # `read_libs_electrical` itself returns `None` for a short-form-only
+    # Read the deck's LIBs-era electrical-constraint file (the indices.csv
+    # RESTRICAO-ELETRICA-ESPECIAL entry, resolved by discover_decomp_files)
+    # once: both the narrowed detect_libs_electrical decision and the
+    # generic-constraint emitter below thread this same `libs_electrical_model`,
+    # so neither can disagree about whether the deck's long-form subset
+    # converted. `read_libs_electrical` returns `None` for a short-form-only
     # (RE/RE-* or date-indexed) file -- that fallback stays on
     # detect_libs_electrical's flat warning (OQ-4).
     libs_electrical_model: libs_electrical_conv.LibsElectricalModel | None = None

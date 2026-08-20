@@ -63,10 +63,7 @@ _MAX_BLOCK_SLOTS = 5
 #: one of these lowers to a plant bound (`constraints/bounds.rs`). This is a
 #: family-agnostic *membership* set: the only consumer is `lowers_to_bound`'s
 #: `variable in _BOUNDS_AXIS` test, so the values are never read (do not
-#: convert this to a family-keyed structure — nothing consumes it). Pumping
-#: (QBOM) lowers to `pumping_bounds` min/max_m3s; diversion (QDES) and
-#: spillage (QVER) lower to the two-sided hydro `diversion`/`spillage` axes
-#: now that cobre's generic-constraint-authoring has landed both.
+#: convert this to a family-keyed structure — nothing consumes it).
 _BOUNDS_AXIS: dict[str, str] = {
     "generation": "generation",  # RE FU (hydro)   -> min/max_generation_mw
     "thermal_generation": "generation",  # RE FT (thermal) -> min/max_generation_mw

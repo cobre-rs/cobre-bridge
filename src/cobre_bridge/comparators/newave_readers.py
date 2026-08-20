@@ -268,13 +268,13 @@ def read_medias_system(case_dir: Path) -> pl.DataFrame:
 # (treating "-" as a missing DZINF) so that subsequent layout drift in
 # pmo.dat (longer decimal widths, extra padding) does not break us.
 _PMO_CONV_ROW = re.compile(
-    r"^\s*(\d+)"  # iteration                                     -> group 1
+    r"^\s*(\d+)"  # iteration -> group 1
     r"\s+(?:\d+\.\d+)"  # LIM.INF (not captured)
-    r"\s+(\d+\.\d+)"  # ZINF (cuts-based lower bound)           -> group 2
+    r"\s+(\d+\.\d+)"  # ZINF -> group 2
     r"\s+(?:\d+\.\d+)"  # LIM.SUP (not captured)
-    r"\s+(\d+\.\d+)"  # ZSUP  (mean forward cost = upper bound) -> group 3
+    r"\s+(\d+\.\d+)"  # ZSUP -> group 3
     r"\s+(?:-|\d+\.\d+)"  # DZINF
-    r"\s+(?:\d+\.\d+)"  # ZSUP_ITER (per-iter sample; not captured)
+    r"\s+(?:\d+\.\d+)"  # ZSUP_ITER (not captured)
     r"(?:\s+\S+)?\s*$",  # optional tempo column
     re.MULTILINE,
 )

@@ -59,38 +59,15 @@ if TYPE_CHECKING:
 
 
 #: Minimum cobre / cobre-python version that can load the bridge's converted
-#: output. Since cobre 0.12.0 the converted ``config.json`` carries a
-#: ``training.parallelism.backward_scheduler`` block (an opening-block scheduler,
-#: new in 0.12.0); under the config's strict unknown-key rejection an older cobre
-#: rejects it outright. (Since 0.10.0 every ``system/*.json`` entity also carries
-#: a required ``operational_start_date``.) Since cobre 0.13.0 every hydro also
-#: carries a mandatory ``unit_groups`` array and no longer accepts the removed
-#: top-level ``bus_id`` (cobre decisions 13/14), and the windowed
-#: ``inflow_history`` the bridge now emits also targets 0.13. So *all* converted
-#: cases require cobre >= this version. The manifest records it (single source
-#: of truth) and the ``--validate`` gate uses it to decide whether the installed
-#: cobre-python is new enough to validate the output.
+#: output. The manifest records it (single source of truth) and the
+#: ``--validate`` gate uses it to decide whether the installed cobre-python is
+#: new enough to validate the output. Keep the ``cobre-python`` pin in
+#: ``pyproject.toml`` in lockstep with this constant on any future bump.
 #:
-#: 0.14.1 is the first release carrying cobre's 0.14 input contract, on which the
-#: bridge now depends via three breaking changes:
-#:   1. **F3** sense-free generic constraints — ``generic_constraints.json`` +
-#:      ``generic_constraint_bounds.parquet`` carry no ``sense`` key and use
-#:      ``bound_lower``/``bound_upper`` in place of a single ``bound`` column
-#:      (see ``cobre_bridge.generic_constraint_format``).
-#:   2. the scalar-parameters input moved from ``system/scalar_parameters.json``
-#:      to ``constraints/generic_parameters.json`` (a clean break — cobre rejects
-#:      the old path); the JSON shape is unchanged.
-#:   3. the NCS availability column is now ``availability_factor`` only (cobre's
-#:      clean break dropped the legacy ``value`` alias).
-#:
-#: 0.14.3 keeps that same 0.14 input contract (a case converted here still loads
-#: on 0.14.1) but the emitted terminal boundary policy now depends on it: 0.14.3
-#: is the first release whose ``write_policy_checkpoint`` reserves the canonical
-#: inflow-lag state slots, so a boundary carrying inflow-lag gradient terms is
-#: written with those slots present. On an older cobre those slots are absent and
-#: the lag coupling is silently dropped (0.14.3 also carries 0.14.2's solver
-#: bug-fixes the CVaR gap rule and loaded FCF rely on). Keep the ``cobre-python``
-#: pin in ``pyproject.toml`` in lockstep with this constant on any future bump.
+#: The floor is 0.14.3 because the emitted terminal boundary policy depends on
+#: it: 0.14.3's ``write_policy_checkpoint`` reserves the canonical inflow-lag
+#: state slots. On an older cobre those slots are absent and a boundary carrying
+#: inflow-lag gradient terms has its lag coupling silently dropped.
 MIN_COBRE_VERSION = "0.14.3"
 
 
@@ -351,14 +328,10 @@ def _run_newave_comparison(args: SimpleNamespace) -> None:
         newave_dir, cobre_output_dir
     )
 
-    # Run comparison. A CobreReadError means an *existing* Cobre output file
-    # was unreadable/malformed; a CobrePartitionMissingError means the output
-    # predates the cobre version that introduced a partition this compare
-    # relies on (e.g. simulation/hydro_bus_generation/, cobre >= 0.13.0).
-    # CobrePartitionMissingError extends BridgeError, a hierarchy disjoint
-    # from CobreReadError (RuntimeError) — both must be caught here, or the
-    # latter crashes with an unhandled traceback instead of failing loudly
-    # (exit 2) like the former.
+    # CobrePartitionMissingError (a BridgeError; output predates a partition
+    # this compare needs) and CobreReadError (a RuntimeError; a malformed
+    # output file) are disjoint hierarchies — both must stay in the ``except``,
+    # or the dropped one crashes with a bare traceback instead of exit 2.
     try:
         with spinner(
             "Comparing results…",
@@ -854,14 +827,9 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
         console=err_console,
     )
 
-    # When --validate and --json are combined, the human validation messages stay
-    # on err_console (stderr) exactly as without --json, and the machine-readable
-    # outcome is folded UNDER ``summary`` as a ``validation`` sub-object (mutated
-    # in place by the shared helper below). The verdict is emitted (below) only
-    # AFTER this block so ``validation`` is populated; validation failure flips
-    # the exit code, never the status. ``convert newave`` passes an empty
-    # whitelist, so ``_run_cobre_validation`` is the identity case here and its
-    # rendering/``--json`` shape stay byte-identical to before the extraction.
+    # ``--validate`` failure flips the exit code, never the status (verdict
+    # exit-code contract). The verdict is emitted only AFTER this block so the
+    # ``validation`` sub-object it folds under ``summary`` is populated first.
     validation_failed = False
     if args.validate:
         validation_failed = _run_cobre_validation(
@@ -1316,16 +1284,12 @@ def _convert_newave(
     )
 
 
-#: Warning substring that marks the P3 lag-blind stage shape
-#: (``state_variables.inflow_lags = false`` on every stage — see
-#: ``decomp/temporal.py::stage_records`` — alongside the positive inflow-lag
-#: depth cobre infers from the imported boundary policy) as deliberate
-#: external-solver interoperability, not a misconfiguration. Only arises once a
-#: boundary FCF is imported: a plain conversion has no boundary, so cobre
-#: resolves a zero depth and this warning never fires. Matched via
-#: :func:`_partition_validation_warnings` against cobre's stable substring
-#: (never the volatile message prefix), emitted by cobre's stage semantic
-#: validation.
+#: Warning substring that marks the lag-blind stage shape
+#: (``state_variables.inflow_lags = false`` on every stage, alongside the
+#: positive inflow-lag depth cobre infers from the imported boundary policy) as
+#: deliberate external-solver interoperability, not a misconfiguration. Only
+#: fires once a boundary FCF is imported. Matched against cobre's stable
+#: substring, never the volatile message prefix, which would drift.
 _DECOMP_VALIDATION_WHITELIST: tuple[str, ...] = ("external-solver interoperability",)
 
 
@@ -1470,23 +1434,15 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
         console=err_console,
     )
 
-    # Boundary-FCF import (opt-in, D3): runs after the manifest write and
-    # BEFORE ``--validate`` so validation sees the patched ``config.json``
-    # (``policy.boundary``; cobre infers the inflow-lag depth from the boundary,
-    # so no ``state_space`` is written). Never runs
-    # under ``--dry-run`` (handled above, before this point is reached).
-    # Cut-files-absent, the capability probe, and the importer itself all
-    # funnel through this one broad ``except`` — mapped to exit 1 like every
-    # other conversion-step failure — rather than the ``--validate`` exit-2
-    # idiom, since this is a conversion step, not a validation gate.
-    #
-    # The importer call runs inside a ``dx.collect()`` sink so its
-    # ``Diagnostic``s — the cut-family summary, the
-    # D3-dropped source-only plants, and the GNL anticipated-ring deviation —
-    # reach the Rich panels and the ``--json`` verdict instead of degrading to
-    # invisible log records. ``boundary_diagnostics``/``fcf_diags`` default to
-    # ``[]`` so a disabled or pre-sink-reached failure still yields a valid
-    # (empty) merge below.
+    # Runs after the manifest write and BEFORE ``--validate`` so validation
+    # sees the patched ``config.json`` (``policy.boundary``); cobre infers the
+    # inflow-lag depth from the boundary, so no ``state_space`` is written.
+    # Cut-files-absent, the capability probe, and the importer all funnel
+    # through this one broad ``except`` mapped to exit 1 (a conversion-step
+    # failure), not the ``--validate`` exit-2 idiom — this is a conversion step,
+    # not a validation gate. The call runs inside a ``dx.collect()`` sink so its
+    # ``Diagnostic``s reach the Rich panels and the ``--json`` verdict instead
+    # of degrading to invisible log records.
     boundary_diagnostics: list[Diagnostic] = []
     # The boundary FCF is imported by default; ``--no-fcf`` skips the whole
     # step (and its deck re-discovery). With it on, the deck's own FC records

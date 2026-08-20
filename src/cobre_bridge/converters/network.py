@@ -136,10 +136,7 @@ HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
 #
 # These are the source model's v30 values verbatim: tiny (~1e-4 R$/MWh) regularization
 # costs whose only role is to break LP ties in a fixed merit order (exchange < spillage
-# < … < excess), well below any operational or deterrent cost. An earlier revision
-# multiplied them by a uniform uplift factor to widen the HiGHS coefficient range; that
-# factor was reverted to 1.0 (a no-op) and is now dropped — the bare the source model
-# values condition fine at cobre's case scale.
+# < … < excess), well below any operational or deterrent cost.
 _PINT = 0.000273  # intercâmbio  → line.exchange_cost
 
 # The source model halves the intercâmbio penalty on lines that touch a fictitious
@@ -170,17 +167,13 @@ _PCDESV = 0.000300  # volume desviado → hydro.diversion_cost
 # constraints (water-cycle physics, water-supply requirements) at the top of the merit
 # order so the LP violates them only as a last resort. We apply that 10× faithfully (it
 # doubles as the PENALID fallback below, and `_ELETRI_HIGH_MULT` reuses the same
-# magnitude). Earlier revisions trialled softer factors (1.1×, 2×) to tame HiGHS's
-# coefficient range, but the bare 10× conditions acceptably at cobre's case scale and
-# stays the source-model-faithful.
+# magnitude).
 _EVAPORATION_MULT = 10.0
 
 # NOTE: when PENALID supplies TURBMN, VAZMIN, TURBMX with the same R$/MWh value
 # (typical the source model convention), the resulting
-# turbined/outflow-below/outflow-above slack costs share an LP coefficient (ρ_avg
-# cancels nothing). An earlier revision multiplied each by a ~1 % "tie-break" factor to
-# break that degeneracy; the factors were all reverted to 1.00 (no-op) and have been
-# dropped. Reintroduce distinct spacing here if HiGHS degeneracy resurfaces.
+# turbined/outflow-below/outflow-above slack costs share an LP coefficient. Reintroduce
+# distinct spacing here if HiGHS degeneracy resurfaces.
 
 # --- Cobre Family-D fields not yet wired into the LP -----------------------
 # Storage-floor and filling-target violation costs are declared on cobre's schema
@@ -668,9 +661,7 @@ def _hydro_penalty_costs(
     # so cobre_coef = P_R$_MWh × ρ × HM3_TO_MWH_PER_RHO. The 730h/month assumption
     # cancels out — this is dimensional energy-equivalence, not a per-hour rate.
     # ρ here is ρ_max_acum (MAX_PRODTACUM_SIN), per the agreed criterion and
-    # matching the evaporation / water-withdrawal slacks (manual p.87). (Earlier
-    # versions used × C_M3S2HM3 here which was wrong by the factor
-    # MONTH_HOURS = 730.)
+    # matching the evaporation / water-withdrawal slacks (manual p.87).
     #
     # ⚠️ This volumetric (730-cancelling) form is correct ONLY because cobre
     # prices these Family-D slots with NO time multiplier (`objective = penalty`).
@@ -1132,16 +1123,10 @@ def convert_line_bounds(
         k: v for k, (_, v) in last_year_per_key.items()
     }
 
-    # ------------------------------------------------------------------
     # Per-block factors (cobre decision 10): fold
     # ``patamar.dat::intercambio_patamares`` into per-block direct/reverse
-    # multipliers, keyed the same way as the base lookup above so block rows
-    # can be derived as base × factor. This is the factor lookup that used to
-    # live in a now-deleted standalone converter; the pairing and the
-    # per-calendar-month post-study seasonalization are unchanged from that
-    # deleted code, only the destination (rows on this table, not a separate
-    # JSON document) is new.
-    # ------------------------------------------------------------------
+    # multipliers, keyed like the base lookup above so block rows derive as
+    # base × factor.
     patamar = case.patamar
     factors_df: pd.DataFrame | None = patamar.intercambio_patamares
 

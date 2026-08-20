@@ -468,13 +468,6 @@ def compute_non_fictitious_bus_ids(load_stats: pd.DataFrame) -> list[int]:
 
 # ---------------------------------------------------------------------------
 # Section loaders
-#
-# ``DashboardData.load`` is composed from these cohesive, independently
-# callable section loaders instead of one monolithic block. Each owns a single
-# slice of the case and returns a small sub-struct, which keeps the loading
-# grouped by concern and lets a future partial/lazy dashboard pull only the
-# sections it needs. The aggregate ``DashboardData`` still exposes the flat
-# fields every tab already consumes, so tab code is unaffected.
 # ---------------------------------------------------------------------------
 
 
@@ -703,14 +696,12 @@ def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
     line_bounds = (
         pq.read_table(lb_path).to_pandas() if lb_path.exists() else pd.DataFrame()
     )
-    # Cobre 0.13 deleted the standalone per-block exchange-factor JSON
-    # document and folded it into absolute-MW override rows inside
-    # line_bounds.parquet (see converters/network.py::convert_line_bounds):
-    # block_id is non-null only on those rows, never on the stage-level base
-    # row. Do not reconstruct a factor by dividing back through the base —
-    # that reintroduces the division cobre's decision removed and can divide
-    # by a zero base. A line-stage whose blocks are uniform legitimately has
-    # no override row, so an empty frame here is a correct steady state.
+    # ``block_id`` is non-null only on the absolute-MW per-block override rows
+    # (the exchange factor lives there now), never on the stage-level base row.
+    # Do not reconstruct a factor by dividing back through the base — that
+    # reintroduces the removed division and can divide by a zero base. A
+    # uniform-block line-stage legitimately has no override row, so an empty
+    # frame here is a correct steady state, not an error.
     line_block_bounds = (
         line_bounds[line_bounds["block_id"].notna()].reset_index(drop=True)
         if "block_id" in line_bounds.columns
@@ -752,15 +743,10 @@ class SolverPerformance:
     lp_bounds: pd.DataFrame
 
 
-#: cobre 0.14 gave every diagnostic-output axis a single canonical spelling
-#: (``stage`` -> ``stage_id``, ``opening`` -> ``opening_index``,
-#: ``upper_bound_mean`` -> ``upper_bound``) and switched the not-applicable
-#: stage/opening marker from a ``-1`` sentinel to ``NULL``. The dashboard's chart
-#: layer was written against the pre-0.14 spellings; every raw diagnostic frame
-#: is normalized back to them at this single load choke point (mirroring
-#: :func:`cobre_bridge.comparators.cobre_readers.read_cobre_convergence`), so no
-#: chart needs to change and a pre-0.14 output directory — which already uses the
-#: legacy names — passes through untouched.
+#: Renames cobre 0.14's canonical diagnostic-output axes back to the pre-0.14
+#: spellings the dashboard's chart layer was written against, applied at this
+#: single load choke point (mirroring
+#: :func:`cobre_bridge.comparators.cobre_readers.read_cobre_convergence`).
 _OUTPUT_COLUMN_ALIASES: dict[str, str] = {
     "stage_id": "stage",
     "opening_index": "opening",
