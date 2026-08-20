@@ -425,6 +425,36 @@ class TestEmissionCheckWiring:
         assert clamped
         assert any("Hydro 159" in d.summary for d in clamped)
 
+    def test_run_and_gate_raises_on_duplicate_bound_row(self) -> None:
+        """tier-1 (no ``example/`` deck): drives the same
+        ``emission_checks.run_and_gate`` call ``_convert_decomp_case_impl``
+        now makes (ticket-002), over a synthetic in-memory bounds table
+        carrying one duplicate ``(hydro_id, stage_id, block_id, column)`` row
+        (cobre rule 36, ``check_bound_row_uniqueness``) — the gate must raise
+        ``EmissionCheckError``, and that exception must still satisfy
+        ``isinstance(exc, ValueError)`` for any existing
+        ``pytest.raises(ValueError)`` call site."""
+        from cobre_bridge import emission_checks
+
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], type=pa.int32()),
+                "stage_id": pa.array([1, 1], type=pa.int32()),
+                "block_id": pa.array([None, None], type=pa.int32()),
+                "min_outflow_m3s": pa.array([5.0, 5.0], type=pa.float64()),
+            }
+        )
+        bound_families = [
+            emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds)
+        ]
+
+        def _run_emission_checks() -> None:
+            emission_checks.check_bound_row_uniqueness(bound_families)
+
+        with pytest.raises(emission_checks.EmissionCheckError) as excinfo:
+            emission_checks.run_and_gate(_run_emission_checks)
+        assert isinstance(excinfo.value, ValueError)
+
     def test_decomp_shaped_violation_flips_convert_status_through_the_same_function(
         self,
     ) -> None:
@@ -1039,7 +1069,7 @@ def _run_cadastro_pipeline(
         ),
     }
     if gnl_emission is not None:
-        # ticket-004: route the GNL wiring block (pipeline.py:779-810) through
+        # ticket-004: route the GNL wiring block through
         # its own patches rather than the empty/absent default above —
         # convert_gnl's own decode/placement logic stays out of scope
         # (tests/test_decomp_anticipated.py owns it), only the routing of its
@@ -1112,7 +1142,7 @@ _EMPTY_RIGHT_BOUNDARY_GNL_EMISSION = GnlEmission(
 
 class TestGnlWiring:
     """ticket-004 (epic-03): regression-guard the pre-existing GNL wiring
-    block (``pipeline.py:779-810``). Epic 02 reworked ``convert_gnl`` to
+    block. Epic 02 reworked ``convert_gnl`` to
     synthesise a GS-driven post-study calendar and free (not just pinned)
     forward deliveries, but the pipeline call site already carried the
     unchanged ``GnlEmission`` shape to disk — no tier-1 test exercised it,

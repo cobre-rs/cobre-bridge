@@ -8,11 +8,13 @@ never imports either pipeline, matching emission_checks.py's own contract.
 from __future__ import annotations
 
 import pyarrow as pa
+import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.emission_checks import (
     BoundFamily,
+    EmissionCheckError,
     check_block_id_not_on_anticipated_thermal,
     check_bound_block_id_range,
     check_bound_row_uniqueness,
@@ -20,6 +22,7 @@ from cobre_bridge.emission_checks import (
     check_hydro_bounds_no_raising,
     check_unit_group_envelope,
     clamp_hydro_bounds_to_declared,
+    run_and_gate,
 )
 
 
@@ -844,3 +847,111 @@ class TestBlockIdNotOnAnticipatedThermal:
             check_block_id_not_on_anticipated_thermal(thermals, None)
 
         assert collected == []
+
+
+# ---------------------------------------------------------------------------
+# run_and_gate
+# ---------------------------------------------------------------------------
+
+
+class TestRunAndGate:
+    def test_error_diagnostic_raises_emission_check_error_naming_the_code(
+        self,
+    ) -> None:
+        def run_checks() -> None:
+            dx.emit(
+                dx.Diagnostic(
+                    code="synthetic-error",
+                    severity=Severity.ERROR,
+                    category="Emission self-checks",
+                    title="Synthetic error",
+                    summary="a synthetic ERROR finding for run_and_gate",
+                )
+            )
+
+        with pytest.raises(EmissionCheckError) as exc_info:
+            run_and_gate(run_checks)
+
+        assert "synthetic-error" in str(exc_info.value)
+
+    def test_warning_and_info_only_returns_none(self) -> None:
+        def run_checks() -> None:
+            dx.emit(
+                dx.Diagnostic(
+                    code="synthetic-warning",
+                    severity=Severity.WARNING,
+                    category="Emission self-checks",
+                    title="Synthetic warning",
+                    summary="a synthetic WARNING finding for run_and_gate",
+                )
+            )
+            dx.emit(
+                dx.Diagnostic(
+                    code="synthetic-info",
+                    severity=Severity.INFO,
+                    category="Emission self-checks",
+                    title="Synthetic info",
+                    summary="a synthetic INFO finding for run_and_gate",
+                )
+            )
+
+        assert run_and_gate(run_checks) is None
+
+
+# ---------------------------------------------------------------------------
+# run_and_gate over the NEWAVE pipeline's four-check closure
+# ---------------------------------------------------------------------------
+
+
+class TestNewaveEmissionGate:
+    """Mirrors pipeline.py's ``_run_checks`` closure order: rule 43, rule 41,
+    rule 36, then the block_id-range rule."""
+
+    def _run_checks(
+        self,
+        hydros: dict,
+        stages: dict,
+        bound_families: list[BoundFamily],
+        hydro_bounds: pa.Table | None,
+    ) -> None:
+        check_hydro_bounds_no_raising(hydros, hydro_bounds)
+        check_unit_group_envelope(hydros)
+        check_bound_row_uniqueness(bound_families)
+        check_bound_block_id_range(stages, bound_families)
+
+    def test_duplicate_bound_row_raises_emission_check_error(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+        stages = _stages(2)
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], type=pa.int32()),
+                "stage_id": pa.array([0, 0], type=pa.int32()),
+                "max_turbined_m3s": pa.array([10.0, 20.0], type=pa.float64()),
+            }
+        )
+        bound_families = [BoundFamily("Hydro", "hydro_id", hydro_bounds)]
+
+        with pytest.raises(EmissionCheckError) as exc_info:
+            run_and_gate(
+                lambda: self._run_checks(hydros, stages, bound_families, hydro_bounds)
+            )
+
+        assert "bound-row-duplicate" in str(exc_info.value)
+
+    def test_clean_bound_set_returns_none(self) -> None:
+        hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
+        stages = _stages(2)
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0], type=pa.int32()),
+                "stage_id": pa.array([0], type=pa.int32()),
+                "max_turbined_m3s": pa.array([10.0], type=pa.float64()),
+            }
+        )
+        bound_families = [BoundFamily("Hydro", "hydro_id", hydro_bounds)]
+
+        result = run_and_gate(
+            lambda: self._run_checks(hydros, stages, bound_families, hydro_bounds)
+        )
+
+        assert result is None

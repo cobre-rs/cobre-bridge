@@ -514,7 +514,6 @@ class TestConvertNewaweCasePipeline:
         }
 
         fake_id_map = MagicMock()
-        # Build patches with production_models returning data.
         # Use ExitStack for correct LIFO teardown to avoid mock leakage.
         import contextlib
 
@@ -1086,6 +1085,46 @@ class TestCliInProcess:
         # The Rich diagnostic block must not also render.
         assert "✖" not in stderr
 
+    def test_convert_json_error_status_without_exception_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ERROR diagnostic reaching a non-raising report exits 1 under --json."""
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+            diagnostics=[
+                Diagnostic(
+                    code="newave-some-error",
+                    severity=Severity.ERROR,
+                    category="Conversion",
+                    title="An error",
+                    summary="boom",
+                )
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, stdout, _stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--json"],
+                monkeypatch,
+            )
+
+        assert code == 1
+        doc = json.loads(stdout)
+        assert doc["status"] == "error"
+
     def test_convert_json_coexists_with_diagnostics_json_sidecar(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1359,6 +1398,58 @@ class TestCliInProcess:
         }
         # No validation text leaked onto stdout; the human messages stay on stderr.
         assert "Validation" not in stdout
+        assert "Validation failed." in stderr
+
+    def test_convert_validate_failure_precedence_over_ok_status_exits_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``--validate`` failure exits 2 even though ``status`` stays "ok".
+
+        Exercises the ``_gate_convert_exit`` precedence rule (validation-failure
+        over error-status) on the branch where there is no error status to
+        compete with — the report carries no ERROR diagnostic.
+        """
+        import types
+
+        from cobre_bridge.cli import MIN_COBRE_VERSION
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=10,
+            thermal_count=5,
+            bus_count=4,
+            line_count=3,
+            stage_count=60,
+        )
+
+        monkeypatch.setattr(
+            "cobre_bridge.cli._installed_cobre_python_version",
+            lambda: MIN_COBRE_VERSION,
+        )
+        cobre_pkg = types.ModuleType("cobre")
+        cobre_io = types.ModuleType("cobre.io")
+        cobre_io.validate = lambda _dst: {  # type: ignore[attr-defined]
+            "valid": False,
+            "warnings": [],
+            "errors": ["e1"],
+        }
+        cobre_pkg.io = cobre_io  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "cobre", cobre_pkg)
+        monkeypatch.setitem(sys.modules, "cobre.io", cobre_io)
+
+        with patch(
+            "cobre_bridge.pipeline.convert_newave_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, stderr = self._invoke_main(
+                ["convert", "newave", str(src), str(dst), "--validate"],
+                monkeypatch,
+            )
+
+        assert code == 2
         assert "Validation failed." in stderr
 
     def test_convert_json_validate_raising_still_emits_one_verdict(
@@ -2198,6 +2289,44 @@ class TestCliInProcess:
         assert code == 1
         doc = json.loads(stdout)
         assert doc["status"] == "error"
+
+    def test_convert_decomp_error_status_without_exception_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ERROR diagnostic reaching a non-raising report exits 1 without --json."""
+        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.pipeline import ConversionReport
+
+        src = _make_fake_decomp_dir(tmp_path)
+        dst = tmp_path / "dst"
+
+        fake_report = ConversionReport(
+            hydro_count=3,
+            thermal_count=2,
+            bus_count=1,
+            line_count=0,
+            stage_count=4,
+            diagnostics=[
+                Diagnostic(
+                    code="decomp-some-error",
+                    severity=Severity.ERROR,
+                    category="Conversion",
+                    title="An error",
+                    summary="boom",
+                )
+            ],
+        )
+
+        with patch(
+            "cobre_bridge.decomp.pipeline.convert_decomp_case",
+            return_value=fake_report,
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                ["convert", "decomp", str(src), str(dst), "--no-fcf"],
+                monkeypatch,
+            )
+
+        assert code == 1
 
     def test_convert_decomp_diagnostics_json_written(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

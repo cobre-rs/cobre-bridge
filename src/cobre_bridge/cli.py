@@ -847,8 +847,7 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
             build_verdict("convert newave", status, summary, report.diagnostics)
         )
 
-    if validation_failed:
-        raise typer.Exit(code=2)
+    _gate_convert_exit(status, validation_failed=validation_failed)
 
 
 def _convert_verdict_summary(report: ConversionReport | None) -> dict[str, object]:
@@ -882,6 +881,14 @@ def _convert_status(diagnostics: Sequence[Diagnostic], *, success: str) -> str:
     if any(d.severity is Severity.ERROR for d in diagnostics):
         return "error"
     return success
+
+
+def _gate_convert_exit(status: str, *, validation_failed: bool) -> None:
+    """Convert exit-code gate: validation failure (2) over error status (1)."""
+    if validation_failed:
+        raise typer.Exit(code=2)
+    if status == "error":
+        raise typer.Exit(code=1)
 
 
 def _render_dry_run_summary(
@@ -1570,22 +1577,24 @@ def _run_decomp_conversion(args: SimpleNamespace) -> None:
             whitelist_substrings=_DECOMP_VALIDATION_WHITELIST,
         )
 
+    # ``status`` is derived from ``combined_diagnostics`` (importer diagnostics
+    # are INFO-only, so this stays "ok" whenever the converter's own
+    # diagnostics allow it) and feeds both the --json verdict below and the
+    # exit-code gate, so it is computed unconditionally.
+    status = _convert_status(combined_diagnostics, success="ok")
+
     # Emit the --json verdict now (after validation has populated ``summary``).
-    # ``status`` is recomputed from ``combined_diagnostics`` (importer
-    # diagnostics are INFO-only, so this stays "ok" whenever the converter's
-    # own diagnostics allow it).
     if args.json_output:
         _emit_convert_json(
             build_verdict(
                 "convert decomp",
-                _convert_status(combined_diagnostics, success="ok"),
+                status,
                 summary,
                 combined_diagnostics,
             )
         )
 
-    if validation_failed:
-        raise typer.Exit(code=2)
+    _gate_convert_exit(status, validation_failed=validation_failed)
 
 
 @convert_app.command("decomp")

@@ -362,24 +362,15 @@ def _convert_newave_case_impl(
     report = ConversionReport()
     step = on_phase if on_phase is not None else (lambda _label: None)
 
-    # ------------------------------------------------------------------
-    # 1. Discover and validate all source files via caso.dat -> Arquivos.
-    # ------------------------------------------------------------------
     step("Discovering files")
     logger.debug("Discovering NEWAVE files from %s", src)
     # Build the parsed-case object once; every converter reads its parsed inputs from
     # ``case`` (each source-model file parsed once and cached).
     case = NewaveCase.from_directory(src)
 
-    # ------------------------------------------------------------------
-    # 2. Build the entity ID map (from the case's cached readers).
-    # ------------------------------------------------------------------
     logger.debug("Building NewaveIdMap from %s", src)
     id_map = case.id_map
 
-    # ------------------------------------------------------------------
-    # 3. Call all converters.
-    # ------------------------------------------------------------------
     step("Converting entities")
     logger.debug("Converting hydros")
     hydros_dict = hydro_conv.convert_hydros(case, id_map)
@@ -525,34 +516,29 @@ def _convert_newave_case_impl(
         hydros_dict, hydro_bounds_table
     )
 
-    # ------------------------------------------------------------------
-    # 3b. Post-emission self-checks (cobre 0.13 rules 43, 41, 36, and the
-    # block_id-range rule) — a courtesy mirror of cheap cobre invariants over
-    # the in-memory artifacts, run before anything is written so a bad
-    # emission fails in milliseconds with bridge-side context instead of at
-    # cobre load time. See cobre_bridge.emission_checks for the rule scope.
-    # ------------------------------------------------------------------
+    # Post-emission self-checks: mirror cheap cobre load invariants
+    # (rules 43, 41, 36, and the block_id-range rule) over the in-memory
+    # artifacts before anything is written. See cobre_bridge.emission_checks
+    # for the rule scope.
     bound_families = [
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds_table),
         emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
         emission_checks.BoundFamily("Line", "line_id", line_bounds_table),
     ]
-    emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds_table)
-    emission_checks.check_unit_group_envelope(hydros_dict)
-    emission_checks.check_bound_row_uniqueness(bound_families)
-    emission_checks.check_bound_block_id_range(stages_dict, bound_families)
 
-    # ------------------------------------------------------------------
-    # 4. Create the output directory structure.
-    # ------------------------------------------------------------------
+    def _run_checks() -> None:
+        emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds_table)
+        emission_checks.check_unit_group_envelope(hydros_dict)
+        emission_checks.check_bound_row_uniqueness(bound_families)
+        emission_checks.check_bound_block_id_range(stages_dict, bound_families)
+
+    emission_checks.run_and_gate(_run_checks)
+
     if not dry_run:
         (dst / "system").mkdir(parents=True, exist_ok=True)
         (dst / "scenarios").mkdir(parents=True, exist_ok=True)
         (dst / "constraints").mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # 5. Write JSON files.
-    # ------------------------------------------------------------------
     # Every output path is routed through ``_write_json`` / ``_write_parquet`` so
     # the would-write listing and the dry-run gate live in exactly one place each,
     # rather than guarding ~30 individual write sites.
@@ -610,9 +596,6 @@ def _convert_newave_case_impl(
     )
     _write_json(dst / "constraints" / "generic_parameters.json", scalar_parameters_dict)
 
-    # ------------------------------------------------------------------
-    # 6. Write Parquet files.
-    # ------------------------------------------------------------------
     step("Writing Parquet")
     geometry_path = dst / "system" / "hydro_geometry.parquet"
     _write_parquet(geometry_table, geometry_path)
@@ -716,9 +699,6 @@ def _convert_newave_case_impl(
             gc_bounds_path = constraints_dir / "generic_constraint_bounds.parquet"
             _write_parquet(merged_bounds, gc_bounds_path)
 
-    # ------------------------------------------------------------------
-    # 7. Populate the report.
-    # ------------------------------------------------------------------
     report.hydro_count = len(hydros_dict.get("hydros", []))
     report.thermal_count = len(thermals_dict.get("thermals", []))
     report.bus_count = len(buses_dict.get("buses", []))

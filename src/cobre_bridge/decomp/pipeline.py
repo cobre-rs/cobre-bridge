@@ -76,12 +76,6 @@ DECOMP_CONVERSION_PHASE_LABELS: tuple[str, ...] = (
     "Writing outputs",
 )
 
-#: Same logger name ``emission_checks`` itself logs to when no diagnostics
-#: sink is active — used to re-emit each collected finding below so a
-#: standalone call (no outer ``dx.collect()``) still logs under the check
-#: module's own name, exactly as it did before this wiring existed.
-_EMISSION_CHECKS_LOGGER = logging.getLogger("cobre_bridge.emission_checks")
-
 
 @dataclass(frozen=True)
 class DecompFiles:
@@ -269,23 +263,6 @@ def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.T
         {field.name: pa.array(merged[field.name], type=field.type) for field in schema},
         schema=schema,
     )
-
-
-def _describe_emission_check_errors(errors: list[dx.Diagnostic]) -> str:
-    """Render *errors* (every entry ``ERROR`` severity) as a multi-line,
-    human-readable block naming the failing rule and the offending entities —
-    the message :func:`convert_decomp_case` raises when any is found. Each
-    diagnostic's own detail table (hydro/thermal/line id, stage, column) is
-    included, not just its one-line summary, so the exception is actionable
-    on its own without re-running with a diagnostics sink attached.
-    """
-    lines: list[str] = []
-    for diagnostic in errors:
-        lines.append(f"- {diagnostic.code}: {diagnostic.summary}")
-        if diagnostic.table is not None:
-            for row in diagnostic.table.rows:
-                lines.append("    " + ", ".join(str(value) for value in row))
-    return "\n".join(lines)
 
 
 def _topology_relink_diagnostic(
@@ -1224,12 +1201,6 @@ def _convert_decomp_case_impl(
     # single-term special constraint (e.g. an RE FU generation ceiling) lowers
     # to one; it raises when such a bound exceeds the entity's own declared
     # capacity. See cobre_bridge.emission_checks for the rule scope.
-    #
-    # An ERROR-severity finding fails the conversion outright (the raise below)
-    # rather than only surfacing as a diagnostic. The local dx.collect() lets
-    # this function inspect severity; every finding is re-emitted via dx.emit()
-    # so the wrapper's outer sink (and the returned ConversionReport) still
-    # records it, and a standalone call with no sink still logs it.
     step("Writing outputs")
     bound_families = [
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds),
@@ -1246,7 +1217,8 @@ def _convert_decomp_case_impl(
             "Pumping", "pumping_station_id", pumping_bounds_table
         ),
     ]
-    with dx.collect() as check_diagnostics:
+
+    def _run_emission_checks() -> None:
         emission_checks.check_hydro_bounds_no_raising(hydros_dict, hydro_bounds)
         emission_checks.check_unit_group_envelope(hydros_dict)
         emission_checks.check_group_bound_envelope(hydros_dict, group_bounds)
@@ -1255,16 +1227,8 @@ def _convert_decomp_case_impl(
         emission_checks.check_block_id_not_on_anticipated_thermal(
             thermals_dict, thermal_bounds_table
         )
-    for diagnostic in check_diagnostics:
-        dx.emit(diagnostic, logger=_EMISSION_CHECKS_LOGGER)
-    check_errors = [d for d in check_diagnostics if d.severity is dx.Severity.ERROR]
-    if check_errors:
-        raise ValueError(
-            f"DECOMP conversion failed {len(check_errors)} post-emission "
-            "self-check error(s) (cobre 0.13 rules 43/41/45/38/36/"
-            "block_id-range):\n"
-            f"{_describe_emission_check_errors(check_errors)}"
-        )
+
+    emission_checks.run_and_gate(_run_emission_checks)
 
     _write_parquet(constraints / "thermal_bounds.parquet", thermal_bounds_table)
     _write_parquet(constraints / "line_bounds.parquet", line_bounds)

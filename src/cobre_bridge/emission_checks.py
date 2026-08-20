@@ -39,7 +39,7 @@ unit-testable against hand-built artifacts.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -49,6 +49,7 @@ from cobre_bridge.diagnostics import (
     Diagnostic,
     DiagnosticTable,
     Severity,
+    collect,
     emit,
     format_stage_ranges,
 )
@@ -73,6 +74,10 @@ _CLAMP_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("max_generation_mw", "generation", "min_generation_mw", "max_generation_mw"),
     ("max_outflow_m3s", "outflow", "min_outflow_m3s", "max_outflow_m3s"),
 )
+
+
+class EmissionCheckError(ValueError):
+    """A post-emission self-check reported at least one ERROR-severity diagnostic."""
 
 
 def _tolerance(declared: float) -> float:
@@ -966,3 +971,40 @@ def check_block_id_not_on_anticipated_thermal(
         ),
         logger=_LOG,
     )
+
+
+def _describe_emission_check_errors(errors: Sequence[Diagnostic]) -> str:
+    """Render *errors* (every entry ``ERROR`` severity) as a multi-line,
+    human-readable block naming the failing rule and the offending entities —
+    the message :func:`run_and_gate` raises when any is found. Each
+    diagnostic's own detail table (hydro/thermal/line id, stage, column) is
+    included, not just its one-line summary, so the exception is actionable
+    on its own without re-running with a diagnostics sink attached.
+    """
+    lines: list[str] = []
+    for diagnostic in errors:
+        lines.append(f"- {diagnostic.code}: {diagnostic.summary}")
+        if diagnostic.table is not None:
+            for row in diagnostic.table.rows:
+                lines.append("    " + ", ".join(str(value) for value in row))
+    return "\n".join(lines)
+
+
+def run_and_gate(run_checks: Callable[[], None]) -> None:
+    """Run *run_checks* inside a diagnostics sink, re-emit every captured
+    diagnostic on this module's logger, and raise :class:`EmissionCheckError`
+    when any of them is ``ERROR`` severity.
+
+    *run_checks* is a zero-argument callable invoking whichever check
+    functions the caller's pipeline needs, so this gate stays track-agnostic.
+    """
+    with collect() as check_diagnostics:
+        run_checks()
+    for diagnostic in check_diagnostics:
+        emit(diagnostic, logger=_LOG)
+    check_errors = [d for d in check_diagnostics if d.severity is Severity.ERROR]
+    if check_errors:
+        raise EmissionCheckError(
+            f"{len(check_errors)} post-emission self-check error(s):\n"
+            f"{_describe_emission_check_errors(check_errors)}"
+        )
