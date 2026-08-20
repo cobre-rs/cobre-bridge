@@ -50,3 +50,45 @@ def test_cobre_python_core_pin_floors_at_min_cobre_version() -> None:
         f"cobre-python core pin {pin!r} must floor at MIN_COBRE_VERSION "
         f"{MIN_COBRE_VERSION!r}"
     )
+
+
+_UV_LOCK = Path(__file__).resolve().parent.parent / "uv.lock"
+
+
+def _lock_cobre_python_requirement() -> dict[str, str] | None:
+    """The `cobre-bridge` package's `cobre-python` requires-dist entry from
+    uv.lock, or None if absent."""
+    data = tomllib.loads(_UV_LOCK.read_text(encoding="utf-8"))
+    for package in data["package"]:
+        if package.get("name") == "cobre-bridge":
+            for req in package.get("metadata", {}).get("requires-dist", []):
+                if req.get("name") == "cobre-python":
+                    return req
+    return None
+
+
+def test_uv_lock_cobre_python_is_a_core_dependency() -> None:
+    """uv.lock must record cobre-python as a core requirement — not gated
+    behind an `extra` — so `uv sync` installs it by default, matching
+    pyproject. Guards against the lock drifting back to a `validation` extra."""
+    req = _lock_cobre_python_requirement()
+    assert req is not None, "cobre-python missing from uv.lock requires-dist"
+    marker = req.get("marker", "")
+    assert "extra" not in marker, (
+        "cobre-python must be a core dependency in uv.lock, not gated behind "
+        f"an extra; found marker {marker!r}"
+    )
+
+
+def test_uv_lock_cobre_python_floors_at_min_cobre_version() -> None:
+    """The uv.lock cobre-python floor must match MIN_COBRE_VERSION so a
+    regenerated lock never drifts below the pinned cobre contract."""
+    from cobre_bridge.cli import MIN_COBRE_VERSION
+
+    req = _lock_cobre_python_requirement()
+    assert req is not None
+    specifier = req.get("specifier", "").replace(" ", "")
+    assert f">={MIN_COBRE_VERSION}" in specifier, (
+        f"uv.lock cobre-python specifier {specifier!r} must floor at "
+        f"MIN_COBRE_VERSION {MIN_COBRE_VERSION!r}"
+    )
