@@ -19,6 +19,7 @@ import typing
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner, Result
 
 from cobre_bridge.cli import _run_dashboard, app
@@ -56,6 +57,30 @@ def _stub_build_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
         output_path.write_text("x", encoding="utf-8")
 
     monkeypatch.setattr("cobre_bridge.dashboard.build_dashboard", _fake_build)
+
+
+def _spy_print_status(monkeypatch: pytest.MonkeyPatch) -> list[Console]:
+    """Patch ``print_status`` to record the consoles it renders through, then
+    delegate to the real implementation so the status lines still print.
+
+    ``CliRunner`` never presents a TTY, so an ANSI-absence assertion on the
+    captured output cannot distinguish ``--no-color`` actually threading from
+    Rich's own non-TTY auto-detection; the returned list lets a test assert
+    directly on the ``Console.no_color`` the CLI built for each status line.
+    """
+    import cobre_bridge.cli as cli_module
+
+    captured: list[Console] = []
+    original = cli_module.print_status
+
+    def _spy(*args: object, **kwargs: object) -> None:
+        console = kwargs["console"]
+        assert isinstance(console, Console)
+        captured.append(console)
+        original(*args, **kwargs)
+
+    monkeypatch.setattr("cobre_bridge.cli.print_status", _spy)
+    return captured
 
 
 class TestDashboardHandlerSignature:
@@ -126,8 +151,18 @@ class TestDashboardNoColor:
         monkeypatch: pytest.MonkeyPatch,
         dumb_terminal: None,
     ) -> None:
+        """``--no-color`` threads through the status-line renderer.
+
+        Under ``CliRunner`` the captured stream is never a TTY, so Rich
+        withholds ANSI regardless of ``--no-color`` — an ANSI-absence
+        assertion alone is tautological. Spy on the consoles ``print_status``
+        actually renders through and assert they were built with
+        ``no_color=True``, so the test genuinely fails if the flag stops
+        threading.
+        """
         case_dir = _make_case_dir(tmp_path)
         _stub_build_dashboard(monkeypatch)
+        captured = _spy_print_status(monkeypatch)
 
         result = _invoke(["dashboard", str(case_dir), "--no-color"])
 
@@ -136,3 +171,7 @@ class TestDashboardNoColor:
         assert "Dashboard written to" in result.stdout
         assert "\x1b[" not in result.stdout
         assert "\x1b[" not in result.stderr
+        # Hermetic guard: both status-line consoles were actually built with
+        # no_color=True, not merely non-TTY-quiet (see _spy_print_status).
+        assert len(captured) == 2
+        assert all(console.no_color is True for console in captured)

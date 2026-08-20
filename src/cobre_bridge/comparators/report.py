@@ -24,6 +24,8 @@ from cobre_bridge.ui.console import (
 )
 
 if TYPE_CHECKING:
+    from rich.console import Console
+
     from cobre_bridge.comparators.dataset import ComparisonDataset
 
 
@@ -157,6 +159,8 @@ def print_results_summary_from_dataset(
     newave_dir: Path,
     cobre_output_dir: Path,
     reference_label: str = "NEWAVE",
+    *,
+    console: Console | None = None,
 ) -> None:
     """Print the results comparison summary (Rich table) from the canonical dataset.
 
@@ -177,15 +181,24 @@ def print_results_summary_from_dataset(
         Display name for the reference model in the printed header/labels.
         Defaults to ``"NEWAVE"``; ``compare newave`` (this function's only
         caller) uses that default.
+    console:
+        The stdout console to render through. Defaults to :func:`get_console`
+        so direct callers (tests) keep working unchanged; the CLI passes its
+        ``--no-color``-aware console so this summary honours the flag.
     """
-    out = sys.stdout
+    target = console or get_console()
 
-    render_compare_verdict(build_compare_verdict(dataset))
+    render_compare_verdict(build_compare_verdict(dataset), console=target)
 
-    out.write(f"\nCobre vs {reference_label} Results Comparison\n")
-    out.write("=" * 88 + "\n")
-    out.write(f"{reference_label} case:  {newave_dir}\n")
-    out.write(f"Cobre output: {cobre_output_dir}\n")
+    target.print()
+    target.print(
+        f"Cobre vs {reference_label} Results Comparison",
+        soft_wrap=True,
+        markup=False,
+    )
+    target.print("=" * 88, soft_wrap=True)
+    target.print(f"{reference_label} case:  {newave_dir}", soft_wrap=True, markup=False)
+    target.print(f"Cobre output: {cobre_output_dir}", soft_wrap=True, markup=False)
 
     # Per-variable table. WithinTol = share within the (relative) tolerance; sMAPE =
     # mean symmetric error (robust to near-zero source-model references).
@@ -213,7 +226,7 @@ def print_results_summary_from_dataset(
             compare_row_style(within_tol=float(stats["within_tol_rate"]) == 1.0)
         )
 
-    get_console().print(
+    target.print(
         make_table(
             ["Variable", "Count", "Mean|D|", "Max|D|", "WithinTol", "sMAPE", "r"],
             rows,
@@ -229,10 +242,14 @@ def print_results_summary_from_dataset(
     ]
     entity_str = ", ".join(entity_parts) if entity_parts else "none"
 
-    out.write(
-        f"\nSummary: {total} comparisons across "
-        f"{len(by_entity_type)} entity types ({entity_str})\n\n"
+    target.print()
+    target.print(
+        f"Summary: {total} comparisons across "
+        f"{len(by_entity_type)} entity types ({entity_str})",
+        soft_wrap=True,
+        markup=False,
     )
+    target.print()
 
 
 def print_bounds_summary_from_dataset(

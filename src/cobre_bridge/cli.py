@@ -34,7 +34,6 @@ from cobre_bridge.ui.console import (
     make_table,
     print_status,
     render_checklist,
-    render_compare_verdict,
     render_conversion_summary,
     render_diagnostics,
     render_error,
@@ -335,7 +334,7 @@ def _run_newave_comparison(args: CompareArgs) -> None:
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.results import compare_results
-    from cobre_bridge.comparators.verdict import build_compare_verdict
+    from cobre_bridge.comparators.verdict import build_compare_verdict, compare_status
     from cobre_bridge.errors import CobrePartitionMissingError
 
     newave_dir: Path = args.source_dir
@@ -369,9 +368,13 @@ def _run_newave_comparison(args: CompareArgs) -> None:
             _fail("compare newave", args, exc, 2)
 
     # Print text summary (sourced from the dataset). Under --json the Rich tables
-    # are suppressed in favour of a single machine-readable verdict on stdout.
+    # are suppressed in favour of a single machine-readable verdict on stdout;
+    # under --quiet the summary is suppressed too, but diagnostics still render.
     if not args.json_output:
-        print_results_summary_from_dataset(dataset, newave_dir, cobre_output_dir)
+        if not args.quiet:
+            print_results_summary_from_dataset(
+                dataset, newave_dir, cobre_output_dir, console=args.out_console()
+            )
         render_diagnostics(
             compare_diagnostics, console=args.err_console(), quiet=args.quiet
         )
@@ -406,12 +409,11 @@ def _run_newave_comparison(args: CompareArgs) -> None:
         )
 
     if args.json_output:
-        # ``status`` REFLECTS divergence (so it is self-consistent with
-        # ``summary``), but the results exit
-        # code is DECOUPLED from it — this command always exits 0. An empty
-        # dataset → ``all_within_tol`` False → ``status`` "mismatch".
+        # ``status`` is DECOUPLED from the exit code (this command always
+        # exits 0) and uses the shared ``compare_status`` vocabulary, so an
+        # empty dataset reports "no-comparable-rows", not "mismatch".
         verdict = build_compare_verdict(dataset)
-        status = "ok" if verdict.all_within_tol else "mismatch"
+        status = compare_status(dataset)
         _emit_convert_json(
             build_verdict(
                 "compare newave",
@@ -1201,8 +1203,7 @@ def _configure_logging(verbose: int, log_file: Path | None) -> None:
 # Typer application
 # ---------------------------------------------------------------------------
 
-# Shared flags reused across the leaf commands (kept *after* the subcommand,
-# matching the previous argparse UX).
+# Shared flags reused across the leaf commands.
 _VerboseOpt = Annotated[
     int,
     typer.Option(
@@ -1779,7 +1780,8 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
     from cobre_bridge import diagnostics as dx
     from cobre_bridge.comparators.cobre_readers import CobreReadError
     from cobre_bridge.comparators.decomp_results import build_decomp_dataset
-    from cobre_bridge.comparators.verdict import build_compare_verdict
+    from cobre_bridge.comparators.report import print_results_summary_from_dataset
+    from cobre_bridge.comparators.verdict import compare_status
     from cobre_bridge.errors import CobrePartitionMissingError
 
     # Resolved before the read (unlike the pre-dataset ordering) so
@@ -1807,7 +1809,14 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
             _fail("compare decomp", args, exc, 2)
 
     if not args.json_output:
-        render_compare_verdict(build_compare_verdict(dataset))
+        if not args.quiet:
+            print_results_summary_from_dataset(
+                dataset,
+                args.source_dir,
+                args.cobre_output_dir,
+                reference_label="DECOMP",
+                console=args.out_console(),
+            )
         render_diagnostics(
             compare_diagnostics, console=args.err_console(), quiet=args.quiet
         )
@@ -1842,15 +1851,11 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
         )
 
     if args.json_output:
-        # ``status`` REFLECTS divergence (the shared headline verdict), but the
-        # exit code is DECOUPLED from it — this command always exits 0,
-        # mirroring ``compare newave``. An empty dataset has no rows to judge,
-        # so it keeps the E1 data-availability status instead.
+        # ``status`` is DECOUPLED from the exit code (this command always
+        # exits 0, mirroring ``compare newave``) and uses the shared
+        # ``compare_status`` vocabulary.
         summary = decomp_dataset_summary(dataset, args.tolerance)
-        if dataset.tidy.is_empty():
-            status = "no-comparable-rows"
-        else:
-            status = "ok" if summary["all_within_tol"] else "mismatch"
+        status = compare_status(dataset)
         _emit_convert_json(
             build_verdict("compare decomp", status, summary, compare_diagnostics)
         )

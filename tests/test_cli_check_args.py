@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner, Result
 
 from cobre_bridge.cli import _run_check, _run_decomp_check, app
@@ -26,6 +27,33 @@ from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
 
 def _invoke(argv: list[str]) -> Result:
     return CliRunner().invoke(app, argv)
+
+
+def _spy_render_checklist(monkeypatch: pytest.MonkeyPatch) -> dict[str, Console]:
+    """Patch ``render_checklist`` to record the consoles it renders through,
+    then delegate to the real implementation so rendering still happens.
+
+    ``CliRunner`` never presents a TTY, so an ANSI-absence assertion on the
+    captured output cannot distinguish ``--no-color`` actually threading from
+    Rich's own non-TTY auto-detection; the returned dict lets a test assert
+    directly on the ``Console.no_color`` the CLI built.
+    """
+    import cobre_bridge.cli as cli_module
+
+    captured: dict[str, Console] = {}
+    original = cli_module.render_checklist
+
+    def _spy(*args: object, **kwargs: object) -> None:
+        console = kwargs["console"]
+        diagnostics_console = kwargs["diagnostics_console"]
+        assert isinstance(console, Console)
+        assert isinstance(diagnostics_console, Console)
+        captured["console"] = console
+        captured["diagnostics_console"] = diagnostics_console
+        original(*args, **kwargs)
+
+    monkeypatch.setattr("cobre_bridge.cli.render_checklist", _spy)
+    return captured
 
 
 def _warnings_result() -> PreflightResult:
@@ -99,8 +127,10 @@ class TestCheckNewaveJsonShape:
 
 class TestCheckNewaveNoColor:
     def test_no_color_produces_ansi_free_output_on_both_streams(
-        self, tmp_path: Path, dumb_terminal: None
+        self, tmp_path: Path, dumb_terminal: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        captured = _spy_render_checklist(monkeypatch)
+
         with patch(
             "cobre_bridge.preflight.run_preflight", return_value=_warnings_result()
         ):
@@ -115,6 +145,10 @@ class TestCheckNewaveNoColor:
         # diagnostics delegated to stderr), just without ANSI escapes.
         assert "Ready with warnings" in result.stdout
         assert "Optional input absent" in result.stderr
+        # Hermetic guard: the streams were actually built with no_color=True,
+        # not merely non-TTY-quiet (see _spy_render_checklist).
+        assert captured["console"].no_color is True
+        assert captured["diagnostics_console"].no_color is True
 
 
 class TestCheckDecompJsonShape:
@@ -153,8 +187,10 @@ class TestCheckDecompNoColor:
     """Mirrors TestCheckNewaveNoColor for ``_run_decomp_check``."""
 
     def test_no_color_produces_ansi_free_output_on_both_streams(
-        self, tmp_path: Path, dumb_terminal: None
+        self, tmp_path: Path, dumb_terminal: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        captured = _spy_render_checklist(monkeypatch)
+
         with patch(
             "cobre_bridge.decomp.preflight.run_decomp_preflight",
             return_value=_warnings_result(),
@@ -170,3 +206,7 @@ class TestCheckDecompNoColor:
         # diagnostics delegated to stderr), just without ANSI escapes.
         assert "Ready with warnings" in result.stdout
         assert "Optional input absent" in result.stderr
+        # Hermetic guard: the streams were actually built with no_color=True,
+        # not merely non-TTY-quiet (see _spy_render_checklist).
+        assert captured["console"].no_color is True
+        assert captured["diagnostics_console"].no_color is True

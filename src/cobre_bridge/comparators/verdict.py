@@ -80,3 +80,19 @@ def build_compare_verdict(dataset: ComparisonDataset) -> CompareVerdict:
         worst_smape=worst_smape,
         all_within_tol=total > 0 and within_tol == total,
     )
+
+
+def compare_status(dataset: ComparisonDataset) -> str:
+    """The converged compare ``--json`` status: one vocabulary for both tracks.
+
+    Returns ``"no-comparable-rows"`` for an empty dataset (``dataset.summary``
+    has no rows — zero paired comparisons), else ``"ok"`` when
+    :func:`build_compare_verdict` reports every variable within tolerance,
+    else ``"mismatch"``. Checked on ``summary``, not ``tidy`` — ``tidy`` also
+    carries single-source percentile rows (p10/p50/p90), so a zero-paired-
+    comparisons run can leave ``tidy`` non-empty while ``summary`` (the frame
+    :func:`build_compare_verdict` counts for ``total``) is empty.
+    """
+    if dataset.summary.is_empty():
+        return "no-comparable-rows"
+    return "ok" if build_compare_verdict(dataset).all_within_tol else "mismatch"
