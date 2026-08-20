@@ -99,7 +99,7 @@ src/cobre_bridge/
   pipeline.py               # Conversion orchestrator (calls all converters)
   newave_files.py           # NEWAVE file discovery via caso.dat -> arquivos.dat
   id_map.py                 # NEWAVE 1-based -> Cobre 0-based ID mapping
-  dashboard.py              # Interactive HTML dashboard (large, line-length exempt)
+  dashboard/                # Interactive Plotly dashboard package (data.py + tabs/)
   converters/               # One module per entity/data category
     hydro.py                #   Hydro plants, geometry, production models
     thermal.py              #   Thermal plants, maintenance bounds
@@ -241,13 +241,60 @@ tier 3 and must carry a `skipif` guard on that path's existence.
 
 - **Linter/formatter**: ruff (target Python 3.12, line-length 88)
 - **Lint rules**: E (errors), F (pyflakes), I (isort), UP (pyupgrade)
-- `dashboard.py` is exempt from E501 (line length) due to embedded HTML/JS
+- `dashboard/tabs/*.py` and `ui/{css,js,html}.py` are exempt from E501 due to
+  embedded HTML/JS
 - Follow the Python rules in `~/.claude/rules/python.md` (type hints, pathlib,
   no bare except, no mutable defaults, etc.)
 - User-facing terminal output goes through `cobre_bridge.ui.console`; converters
   emit structured `cobre_bridge.diagnostics.Diagnostic` objects rather than
   formatting warning strings. Keep "the source model" in prose/comments; NEWAVE
   file names and codes are fine in user-facing CLI labels.
+
+---
+
+## Quality Gates & Conventions
+
+Path-scoped rules in `.claude/rules/` auto-load when editing matching files —
+they are the authoritative statements; CLAUDE.md only points at them:
+
+- `comments.md` (**/*.py) — comment/docstring discipline: default-off, the
+  Deletion Test, units/convention contracts (D2), rationale above suppression
+  (D3), no drift-prone refs (N3), no plan-token leakage (N4).
+- `doc-integrity.md` (*.md) — prose docs: never freeze a count/version without
+  a guard; every cited repo path must resolve; no promotional voice.
+- `testing.md` (tests/) — the 3-tier convention, deck-guard discipline, mock
+  discipline, golden-file policy.
+- `bridge.md` (src/) — twin-track NEWAVE/DECOMP symmetry, the TRACKED
+  COBRE-GAP workaround protocol, source-model prose, user-facing message
+  hygiene, presentation/I-O boundaries, exit-code + `--json` contracts.
+
+Enforcement lives in `scripts/ci/` (see `scripts/README.md`): hard gates
+`check_no_plan_leaks.py`, `check_comment_refs.py`, `check_doc_paths.py` run in
+CI and from the pre-commit hook (`ln -sf ../../scripts/pre-commit
+.git/hooks/pre-commit`); `check_comment_bloat.py` and `quality_report.py` are
+advisory. ruff's `PGH` rules ban blanket `# noqa`/`# type: ignore` (a code is
+always named, with a rationale per comments.md D3).
+
+Hard rules (non-negotiable, fixed before committing):
+
+- **No plan-structure references in shipped artifacts** — `epic`/`ticket`/
+  `sprint` vocabulary and plan ids never appear in `src/`, `README.md`,
+  `CHANGELOG.md`, or `docs/`. Plans live in `plans/` (gitignored). Commit
+  messages may reference plan structure.
+- **No rot-prone references in shipped prose** — no `file.py:NNN`, no
+  `MEMORY.md`, no `.claude/` paths (rules excepted), no machine-local
+  (`~/git/...`) or gitignored (`plans/`) paths. Reference symbols, named
+  tests, or stable external anchors.
+- **Twin-track symmetry** — behaviour added to one conversion track lands on
+  both in the same change, or the asymmetry is recorded in the audit registry.
+  Never import underscore-private names across the `converters/` ↔ `decomp/`
+  boundary.
+- **Never silently work around a cobre limitation** — log + `TRACKED
+  COBRE-GAP (Cn)` comment + registry entry with removal condition (in the
+  cobre repo). Those comments are protected: never deleted in cleanup passes.
+- **Comment discipline is default-off** — a comment ships only if it survives
+  the Deletion Test (`.claude/rules/comments.md` §1); never delete or weaken a
+  load-bearing unit/direction contract.
 
 ---
 

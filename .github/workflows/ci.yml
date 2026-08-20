@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   lint:
-    name: ruff check
+    name: ruff + quality gates
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -21,7 +21,12 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install ruff
-      - run: ruff check src/
+      - run: ruff check src/ scripts/ci/
+      - run: ruff format --check src/ scripts/ci/
+      # Drift/rot gates — conventions in .claude/rules/, docs in scripts/README.md
+      - run: python3 scripts/ci/check_no_plan_leaks.py
+      - run: python3 scripts/ci/check_comment_refs.py
+      - run: python3 scripts/ci/check_doc_paths.py
 
   test:
     name: pytest (Python ${{ matrix.python-version }})

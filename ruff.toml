@@ -2,10 +2,11 @@ target-version = "py312"
 line-length = 88
 
 [lint]
-select = ["E", "F", "I", "UP"]
+# PGH bans blanket suppressions: every `# noqa` and `# type: ignore` must name
+# its code (pair each with a rationale — .claude/rules/comments.md D3).
+select = ["E", "F", "I", "UP", "PGH"]
 
 [lint.per-file-ignores]
-"**/dashboard.py" = ["E501"]
 "**/dashboard/tabs/*.py" = ["E501"]
 "**/ui/css.py" = ["E501"]
 "**/ui/js.py" = ["E501"]

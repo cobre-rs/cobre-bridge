@@ -30,8 +30,10 @@ htmlcov/
 example/
 
 # Local .claude config is ignored, except the project's NEWAVE<->Cobre
-# comparison skill, which is tracked and shared with the team.
+# comparison skill and the path-scoped quality rules, which are tracked
+# and shared with the team.
 .claude/*
+!.claude/rules/
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/compare-newave-cobre/
