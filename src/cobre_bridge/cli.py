@@ -719,6 +719,7 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
     from cobre_bridge.newave_files import NewaveFiles
     from cobre_bridge.pipeline import (
         CONVERSION_PHASE_LABELS,
+        NEWAVE_CLEARED_ARTIFACTS,
         _clear_dst_contents,
         convert_newave_case,
     )
@@ -744,7 +745,7 @@ def _run_newave_conversion(args: SimpleNamespace) -> None:
         # --force: remove previous pipeline outputs before converting. A dry run
         # never mutates the destination, so the clear is skipped even with --force.
         if not args.dry_run:
-            _clear_dst_contents(dst)
+            _clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
 
     # A dry run creates no destination directory; the pipeline writes nothing.
     if not args.dry_run:

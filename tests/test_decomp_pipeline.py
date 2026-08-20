@@ -1734,6 +1734,60 @@ class TestDryRun:
 
         assert existing.read_text(encoding="utf-8") == "keep me"
 
+    def test_force_preclears_stale_decomp_artifacts(self, tmp_path: Path) -> None:
+        """A successful ``--force`` re-run over a populated ``dst`` pre-clears
+        the previous case's full artifact set first, so a conditional
+        artifact the new run does not reproduce (``post_study_stages.json``,
+        ``boundary/``) cannot survive on top of the fresh case (CONV-02)."""
+        from cobre_bridge.decomp import pipeline as decomp_pipeline
+
+        dst = tmp_path / "case"
+        dst.mkdir()
+        post_study = dst / "post_study_stages.json"
+        post_study.write_text("{}", encoding="utf-8")
+        boundary = dst / "boundary"
+        boundary.mkdir()
+        (boundary / "metadata.json").write_text("{}", encoding="utf-8")
+
+        def _fake_impl(*args: object, **kwargs: object) -> ConversionReport:
+            return ConversionReport()
+
+        with patch.object(
+            decomp_pipeline, "_convert_decomp_case_impl", side_effect=_fake_impl
+        ):
+            decomp_pipeline.convert_decomp_case(tmp_path / "src", dst, force=True)
+
+        assert not post_study.exists()
+        assert not boundary.exists()
+
+    def test_force_dry_run_preserves_stale_decomp_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        """``--force --dry-run`` over the same populated ``dst`` must not
+        pre-clear: a dry run never mutates ``dst``."""
+        from cobre_bridge.decomp import pipeline as decomp_pipeline
+
+        dst = tmp_path / "case"
+        dst.mkdir()
+        post_study = dst / "post_study_stages.json"
+        post_study.write_text("{}", encoding="utf-8")
+        boundary = dst / "boundary"
+        boundary.mkdir()
+        (boundary / "metadata.json").write_text("{}", encoding="utf-8")
+
+        def _fake_impl(*args: object, **kwargs: object) -> ConversionReport:
+            return ConversionReport()
+
+        with patch.object(
+            decomp_pipeline, "_convert_decomp_case_impl", side_effect=_fake_impl
+        ):
+            decomp_pipeline.convert_decomp_case(
+                tmp_path / "src", dst, force=True, dry_run=True
+            )
+
+        assert post_study.exists()
+        assert boundary.exists()
+
     def test_real_run_against_populated_dst_refuses_without_clearing(
         self, tmp_path: Path
     ) -> None:
@@ -1755,6 +1809,56 @@ class TestDryRun:
             convert_decomp_case(tmp_path / "src", dst)
 
         assert existing.read_bytes() == b"keep me"
+
+    def test_clear_dst_contents_removes_decomp_only_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        """The DECOMP set clears the shared artifacts plus its own root-level
+        ``post_study_stages.json`` and ``boundary/`` tree (CONV-10)."""
+        from cobre_bridge.decomp.pipeline import DECOMP_CLEARED_ARTIFACTS
+        from cobre_bridge.pipeline import _clear_dst_contents
+
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        post_study = dst / "post_study_stages.json"
+        post_study.write_text("{}", encoding="utf-8")
+        boundary = dst / "boundary"
+        boundary.mkdir()
+        (boundary / "metadata.json").write_text("{}", encoding="utf-8")
+        config = dst / "config.json"
+        config.write_text("{}", encoding="utf-8")
+        notes = dst / "notes.txt"
+        notes.write_text("keep me", encoding="utf-8")
+
+        _clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
+
+        assert not post_study.exists()
+        assert not boundary.exists()
+        assert not config.exists()
+        assert notes.exists()
+
+    def test_newave_cleared_set_leaves_decomp_only_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression pinning CONV-10: the NEWAVE set does not name
+        DECOMP-only artifacts, so they survive a NEWAVE-set clear."""
+        from cobre_bridge.pipeline import NEWAVE_CLEARED_ARTIFACTS, _clear_dst_contents
+
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        post_study = dst / "post_study_stages.json"
+        post_study.write_text("{}", encoding="utf-8")
+        boundary = dst / "boundary"
+        boundary.mkdir()
+        (boundary / "metadata.json").write_text("{}", encoding="utf-8")
+        config = dst / "config.json"
+        config.write_text("{}", encoding="utf-8")
+
+        _clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
+
+        assert post_study.exists()
+        assert boundary.exists()
+        assert not config.exists()
 
 
 _READ_TRAVEL_TIMES = "cobre_bridge.decomp.pipeline.travel_time_conv.read_travel_times"

@@ -1596,14 +1596,14 @@ class TestCliInProcess:
 
     def test_clear_dst_removes_manifest(self, tmp_path: Path) -> None:
         """``_clear_dst_contents`` removes a stale top-level manifest on --force."""
-        from cobre_bridge.pipeline import _clear_dst_contents
+        from cobre_bridge.pipeline import NEWAVE_CLEARED_ARTIFACTS, _clear_dst_contents
 
         dst = tmp_path / "dst"
         dst.mkdir()
         manifest_path = dst / "conversion_manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
 
-        _clear_dst_contents(dst)
+        _clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
 
         assert not manifest_path.exists()
 
@@ -3933,6 +3933,39 @@ class TestConversionWarningCapture:
         assert not (dst / "system").exists()
         # dst itself may remain but must be empty, so a no-force re-run proceeds.
         assert not any(dst.iterdir())
+
+    def test_dry_run_failure_preserves_pre_existing_dst_contents(
+        self, tmp_path: Path
+    ) -> None:
+        """A dry-run failure must never clear ``dst``: it wrote nothing, and
+        ``dst`` may be a pre-existing populated directory the user never
+        asked to clear."""
+        from cobre_bridge import pipeline
+        from cobre_bridge.pipeline import convert_newave_case
+
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        (dst / "config.json").write_text("{}")
+        (dst / "system").mkdir()
+        (dst / "system" / "hydros.json").write_text("{}")
+
+        def fake_impl(
+            src: Path,
+            d: Path,
+            on_phase: object = None,
+            *,
+            dry_run: bool = False,
+        ) -> object:
+            raise RuntimeError("boom")
+
+        with (
+            patch.object(pipeline, "_convert_newave_case_impl", side_effect=fake_impl),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            convert_newave_case(tmp_path, dst, dry_run=True)
+
+        assert (dst / "config.json").exists()
+        assert (dst / "system").exists()
 
 
 def test_constraint_id_allocator_advances_contiguously() -> None:

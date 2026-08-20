@@ -56,6 +56,7 @@ from cobre_bridge.decomp.scalar_parameters import (
     write_scalar_parameters,
 )
 from cobre_bridge.pipeline import (
+    ClearedArtifacts,
     ConversionReport,
     _clear_dst_contents,
     _finalize_diagnostics,
@@ -63,6 +64,20 @@ from cobre_bridge.pipeline import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+DECOMP_CLEARED_ARTIFACTS = ClearedArtifacts(
+    subdirs=("system", "scenarios", "constraints", "boundary"),
+    files=(
+        "config.json",
+        "stages.json",
+        "penalties.json",
+        "initial_conditions.json",
+        "conversion_manifest.json",
+        # DECOMP-only, conditional, root-level artifacts a re-run may not
+        # reproduce; the NEWAVE set never lists these (CONV-10).
+        "post_study_stages.json",
+    ),
+)
 
 #: Coarse conversion phases reported to an optional ``on_phase`` callback (drives the
 #: CLI progress bar). The order matches the boundaries in
@@ -604,8 +619,17 @@ def convert_decomp_case(
     # reach ``_clear_dst_contents`` and delete a pre-existing, unrelated case
     # (mirrors the source model's own NEWAVE-twin ordering, which performs
     # this check ahead of its own write/clear try block).
-    if dst.exists() and any(dst.iterdir()) and not force:
-        raise FileExistsError(f"{dst} already contains files; pass force to overwrite")
+    if dst.exists() and any(dst.iterdir()):
+        if not force:
+            raise FileExistsError(
+                f"{dst} already contains files; pass force to overwrite"
+            )
+        # --force over a populated dst: pre-clear the previous case's full
+        # artifact set before rewriting, so a conditional artifact this run
+        # does not reproduce (post_study_stages.json, boundary/) cannot
+        # survive. Skipped under a dry run, which never mutates dst.
+        if not dry_run:
+            _clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
 
     collector = _WarningCollector()
     pkg_logger = logging.getLogger("cobre_bridge")
@@ -629,7 +653,7 @@ def convert_decomp_case(
         # Skipped under a dry run: nothing was written, and dst may be a
         # pre-existing populated directory the user never asked to clear.
         if not dry_run:
-            _clear_dst_contents(dst)
+            _clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
         raise
     finally:
         pkg_logger.removeHandler(collector)

@@ -178,10 +178,8 @@ def _compute_per_stage_sin_productivities(
         return None
 
 
-# The id-map builder moved to ``cobre_bridge.id_map.build_id_map`` (its natural
-# home, next to NewaveIdMap) so the comparators can use a public entry point
-# instead of reaching into this module's internals. Kept as an alias for
-# backward compatibility with existing importers.
+# Backward-compatible alias for importers still referencing this private name;
+# the builder itself lives in ``cobre_bridge.id_map.build_id_map``.
 _build_id_map = build_id_map
 
 
@@ -297,8 +295,11 @@ def convert_newave_case(
         # files behind. Remove the known pipeline outputs so a half-written
         # case is never mistaken for a complete one and a plain (no --force)
         # re-run is not refused as "destination not empty". Re-raise so the
-        # CLI still reports the original failure.
-        _clear_dst_contents(dst)
+        # CLI still reports the original failure. Skipped under a dry run:
+        # nothing was written, and dst may be a pre-existing populated
+        # directory the user never asked to clear.
+        if not dry_run:
+            _clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
         raise
     finally:
         pkg_logger.removeHandler(collector)
@@ -709,25 +710,40 @@ def _convert_newave_case_impl(
     return report
 
 
-def _clear_dst_contents(dst: Path) -> None:
-    """Remove the known output subdirectories and top-level JSON files from dst.
+@dataclass(frozen=True)
+class ClearedArtifacts:
+    """A conversion track's on-disk output set, for --force pre-clear and
+    failure rollback: subdirectories removed as a tree, files unlinked."""
 
-    Only the specific files/subdirectories produced by the pipeline are
-    removed.  This avoids accidentally deleting unrelated files in the
-    destination directory.
-    """
-    for subdir in ("system", "scenarios", "constraints"):
-        target = dst / subdir
-        if target.exists():
-            shutil.rmtree(target)
+    subdirs: tuple[str, ...]
+    files: tuple[str, ...]
 
-    for filename in (
+
+NEWAVE_CLEARED_ARTIFACTS = ClearedArtifacts(
+    subdirs=("system", "scenarios", "constraints"),
+    files=(
         "config.json",
         "stages.json",
         "penalties.json",
         "initial_conditions.json",
         "conversion_manifest.json",
-    ):
+    ),
+)
+
+
+def _clear_dst_contents(dst: Path, artifacts: ClearedArtifacts) -> None:
+    """Remove *artifacts*' known output subdirectories and top-level files from dst.
+
+    Only the specific files/subdirectories named by *artifacts* are removed.
+    This avoids accidentally deleting unrelated files in the destination
+    directory.
+    """
+    for subdir in artifacts.subdirs:
+        target = dst / subdir
+        if target.exists():
+            shutil.rmtree(target)
+
+    for filename in artifacts.files:
         path = dst / filename
         if path.exists():
             path.unlink()
