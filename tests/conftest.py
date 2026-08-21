@@ -32,7 +32,7 @@ from cobre_bridge.newave_files import NewaveFiles
 # extras on the primary (3.13) job only; use ``find_spec`` (import-free) so
 # this module stays importable in a cobre-free environment. ``condition`` is
 # passed by keyword (rather than positionally) so ``.kwargs["condition"]`` is
-# introspectable, per the ticket's resolved Requirement#3-vs-AC3/4 conflict.
+# introspectable.
 # Import via ``from tests.conftest import requires_cobre_python``.
 requires_cobre_python = pytest.mark.skipif(
     condition=importlib.util.find_spec("cobre") is None,
@@ -74,6 +74,28 @@ requires_writer_binding = pytest.mark.skipif(
         "writer binding"
     ),
 )
+
+
+@pytest.fixture
+def decomp_mini_deck() -> Path:
+    """Path to the committed DECOMP mini-deck under ``tests/decks/decomp_mini/``.
+
+    A tier-2 end-to-end test converts this deck with the real
+    ``convert_decomp_case`` and validates the result with the real
+    ``cobre.io.validate`` — see ``tests/test_convert_decomp_e2e.py``.
+    """
+    return Path(__file__).parent / "decks" / "decomp_mini"
+
+
+@pytest.fixture
+def newave_mini_deck() -> Path:
+    """Path to the committed NEWAVE mini-deck under ``tests/decks/newave_mini/``.
+
+    A tier-2 end-to-end test converts this deck with the real
+    ``convert_newave_case`` and validates the result with the real
+    ``cobre.io.validate`` — see ``tests/test_convert_newave_e2e.py``.
+    """
+    return Path(__file__).parent / "decks" / "newave_mini"
 
 
 @pytest.fixture
