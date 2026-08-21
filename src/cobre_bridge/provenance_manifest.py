@@ -87,7 +87,7 @@ def hash_input_files(files: NewaveFiles | DecompFiles) -> list[dict[str, object]
         value = getattr(files, spec.name)
         if not isinstance(value, Path):
             continue
-        path: Path = value
+        path = value
         sha256, size_bytes = _hash_file(path)
         entries.append(
             {

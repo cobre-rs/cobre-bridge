@@ -426,8 +426,8 @@ def _convert_newave_case_impl(
     logger.debug("Converting thermal bounds from expt.dat and manutt.dat")
     thermal_bounds_table = thermal_conv.convert_thermal_bounds(case, id_map)
 
-    # Merge hydro_bounds now (hoisted from the write phase below) so the
-    # post-emission self-checks see the exact table that will be written.
+    # Merge hydro_bounds before the write phase so the post-emission
+    # self-checks see the exact table that will be written.
     hydro_bounds_table = _merge_hydro_bounds(withdrawal_table, storage_bounds_table)
     hydro_bounds_table = _fold_head_turbined_bounds(
         hydro_bounds_table, head_turbined_table

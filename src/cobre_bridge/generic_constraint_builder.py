@@ -2,10 +2,8 @@
 
 The NEWAVE track (``converters/constraints.py``) and the DECOMP track
 (``decomp/constraints.py``) each assemble cobre F3 generic constraints
-(``generic_constraint_format.py``'s sense-free interval shape), but until now
-one had a builder with no shared id source and the other had an id source with
-no builder, and both duplicated the ``GenericConstraintResult`` shape. This
-module is the single model-agnostic home for that stateful assembly —
+(``generic_constraint_format.py``'s sense-free interval shape). This module is
+the single model-agnostic home both tracks use for that stateful assembly —
 :class:`ConstraintIdAllocator`, :class:`GenericConstraintBuilder`,
 :class:`GenericConstraintResult`, :data:`GENERIC_BOUNDS_SCHEMA`, and the F3
 slot/sentinel helpers (:data:`UNBOUNDED`, :func:`is_bounded`,

@@ -66,7 +66,7 @@ class CompareArgs(CommonArgs):
 
 @dataclass(frozen=True)
 class CheckArgs(CommonArgs):
-    """Options for ``check newave``."""
+    """Options for ``check newave`` / ``check decomp``."""
 
     src: Path
 

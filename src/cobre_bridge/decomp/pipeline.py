@@ -184,9 +184,9 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     index = src / revision
     if index.is_file():
         names = [
-            line.strip()
+            stripped
             for line in index.read_text(encoding="latin-1").splitlines()
-            if line.strip() and not line.strip().startswith("&")
+            if (stripped := line.strip()) and not stripped.startswith("&")
         ]
 
     def find(prefix: str, required: bool, *, exclude: str | None = None) -> Path | None:
