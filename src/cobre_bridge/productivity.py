@@ -35,6 +35,41 @@ import pandas as pd
 
 _LOG = logging.getLogger(__name__)
 
+# --- FPHA turbine efficiency ------------------------------------------------
+#
+# cobre's FPHA production function is ``phi = K · eta · q · h_net`` (MW), with ``K = g /
+# 1000`` and ``eta`` the dimensionless turbine efficiency in (0, 1]. The source model
+# instead carries the *specific* productivity ``rho_esp`` (MW/((m³/s)·m)), which already
+# folds in ``K · eta``. So the efficiency cobre needs is ``eta = rho_esp / K`` — the
+# value that makes cobre's ``phi`` reproduce the source model's ``rho_esp · q · h_liq``.
+_GRAVITY_MW_FACTOR = 9.81e-3
+
+
+def fpha_efficiency(rho_esp: float, name: str) -> float:
+    """Dimensionless turbine efficiency ``eta = rho_esp / K`` for cobre's FPHA.
+
+    Clamped to ``1.0`` if the source ``rho_esp`` implies ``eta > 1`` (unphysical
+    in the input data), with a warning.
+    """
+    eta = rho_esp / _GRAVITY_MW_FACTOR
+    if eta > 1.0:
+        _LOG.warning(
+            "FPHA turbine efficiency for plant %s implied by rho_esp is %.4f "
+            "(> 1.0); clamping to 1.0.",
+            name,
+            eta,
+        )
+        return 1.0
+    return eta
+
+
+# Turbine type code -> kturb exponent used in the head-correction formula. The source
+# model codes: 1 = Francis, 2 = Kaplan, 3 = Pelton.  Francis and Pelton share the kturb
+# = 0.5 exponent (square-root flow/head response); Kaplan uses 0.2 (gentler response
+# thanks to adjustable blades).  Code 0 (= not specified in hidr.dat) falls back to
+# Francis.
+KTURB_BY_TIPO_TURBINA: dict[int, float] = {0: 0.5, 1: 0.5, 2: 0.2, 3: 0.5}
+
 
 def evaluate_cota(coeffs: Sequence[float], x: float) -> float:
     """Evaluate the degree-4 cota polynomial ``a0 + a1·x + a2·x² + a3·x³ + a4·x⁴``.

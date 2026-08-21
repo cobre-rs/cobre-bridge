@@ -552,16 +552,26 @@ class TestCompareVerdictExitCodes:
 
     @staticmethod
     def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
+        from tests.conftest import make_nw_files
+
+        # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
+        # MagicMock attribute) — ``hash_input_files`` reflects over it via
+        # ``dataclasses.fields``, which raises on a non-dataclass. The paths
+        # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
             "cobre_bridge.case.NewaveCase.from_directory",
-            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+            classmethod(
+                lambda cls, _dir: MagicMock(
+                    id_map=MagicMock(), files=make_nw_files(Path("nw"))
+                )
+            ),
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.cli._load_lines_json",
+            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
             lambda _dir: [],
         )
 
@@ -657,6 +667,18 @@ class TestCompareDiagnosticsWiring:
     stderr render, on both compare tracks."""
 
     @staticmethod
+    def _patch_decomp_case(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch ``DecompCase.from_directory`` so the manifest-hashing path
+        (``hash_input_files(decomp_case.files)``) reflects over a real
+        ``DecompFiles`` dataclass instead of failing on the fake deck dir."""
+        from tests.conftest import make_decomp_case
+
+        monkeypatch.setattr(
+            "cobre_bridge.decomp.case.DecompCase.from_directory",
+            classmethod(lambda cls, _dir: make_decomp_case(Path("decomp"))),
+        )
+
+    @staticmethod
     def _invoke(argv: list[str]) -> Any:
         from typer.testing import CliRunner
 
@@ -697,6 +719,7 @@ class TestCompareDiagnosticsWiring:
     ) -> None:
         from cobre_bridge import diagnostics as dx
 
+        self._patch_decomp_case(monkeypatch)
         diagnostic = _dropped_plant_diagnostic()
 
         def _build_decomp_dataset_with_diagnostic(
@@ -750,6 +773,7 @@ class TestCompareDiagnosticsWiring:
     ) -> None:
         from cobre_bridge import diagnostics as dx
 
+        self._patch_decomp_case(monkeypatch)
         diagnostic = _dropped_plant_diagnostic()
 
         def _build_decomp_dataset_with_diagnostic(

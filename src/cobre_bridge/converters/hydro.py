@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.filling import (
@@ -30,10 +31,12 @@ from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
 from cobre_bridge.plants import fictitious_codes, filling_hydro_codes
 from cobre_bridge.productivity import (
+    KTURB_BY_TIPO_TURBINA,
     apply_hydraulic_loss,
     compute_productivity,
     equivalent_productivity,
     evaluate_cota,
+    fpha_efficiency,
     integrated_productivity,
     mean_cota,
     stored_energy_productivity,
@@ -50,15 +53,6 @@ _equivalent_productivity = equivalent_productivity
 _compute_integrated_productivity = integrated_productivity
 _stored_energy_productivity = stored_energy_productivity
 
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/hydros.schema.json"
-)
-_PRODUCTION_MODELS_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/production_models.schema.json"
-)
-
 # --- FPHA (hydro production function) emission ---------------------------------
 #
 # When the source model evaluates generation via FPHA (``dger.dat`` line 96,
@@ -67,12 +61,6 @@ _PRODUCTION_MODELS_SCHEMA_URL = (
 # the plant geometry + tailrace families instead of the bridge pre-baking a single
 # constant productivity.
 
-# cobre's FPHA production function is ``phi = K · eta · q · h_net`` (MW), with ``K = g /
-# 1000`` and ``eta`` the dimensionless turbine efficiency in (0, 1]. The source model
-# instead carries the *specific* productivity ``rho_esp`` (MW/((m³/s)·m)), which already
-# folds in ``K · eta``. So the efficiency cobre needs is ``eta = rho_esp / K`` — the
-# value that makes cobre's ``phi`` reproduce the source model's ``rho_esp · q · h_liq``.
-_GRAVITY_MW_FACTOR = 9.81e-3
 # The source model's tratamento-fpha distance method carries only a tolerance; cobre
 # also requires a sample count for the mean-squared-distance estimate. The source model
 # does not specify one, so we supply a reasonable default.
@@ -117,24 +105,6 @@ def fpha_eligible_codes(case: NewaveCase) -> set[int]:
         if code in cadastro.index and _is_fpha_eligible(cadastro.loc[code]):
             eligible.add(code)
     return eligible
-
-
-def _fpha_efficiency(rho_esp: float, name: str) -> float:
-    """Dimensionless turbine efficiency ``eta = rho_esp / K`` for cobre's FPHA.
-
-    Clamped to ``1.0`` if the source ``rho_esp`` implies ``eta > 1`` (unphysical
-    in the input data), with a warning.
-    """
-    eta = rho_esp / _GRAVITY_MW_FACTOR
-    if eta > 1.0:
-        _LOG.warning(
-            "FPHA turbine efficiency for plant %s implied by rho_esp is %.4f "
-            "(> 1.0); clamping to 1.0.",
-            name,
-            eta,
-        )
-        return 1.0
-    return eta
 
 
 def _parse_fpha_plane_reduction(case: NewaveCase) -> dict | None:
@@ -573,14 +543,6 @@ def _read_penalid(case: NewaveCase) -> dict[int, dict[str, float]]:
     return result
 
 
-# Turbine type code -> kturb exponent used in the head-correction formula. The source
-# model codes: 1 = Francis, 2 = Kaplan, 3 = Pelton.  Francis and Pelton share the kturb
-# = 0.5 exponent (square-root flow/head response); Kaplan uses 0.2 (gentler response
-# thanks to adjustable blades).  Code 0 (= not specified in hidr.dat) falls back to
-# Francis.
-_KTURB_BY_TIPO_TURBINA: dict[int, float] = {0: 0.5, 1: 0.5, 2: 0.2, 3: 0.5}
-
-
 def _clamp_outage_pct(value: float, label: str, plant_name: str) -> float:
     """Clamp TEIF/IP percentages into ``[0, 100]`` and warn on overshoot."""
     if math.isnan(value) or value < 0.0:
@@ -761,7 +723,7 @@ def _compute_max_turbined_head_corrected(
 
     cf = float(cf_raw)
     rho_esp = float(rho_esp_raw)
-    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+    kturb = KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
     coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
 
     if h_op_override is not None:
@@ -1370,7 +1332,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         if is_fpha and rho_esp is not None:
             efficiency = {
                 "type": "constant",
-                "value": _fpha_efficiency(rho_esp, name),
+                "value": fpha_efficiency(rho_esp, name),
             }
 
         # Tailrace as a zero-order polynomial = canal_fuga_medio (constant). Cobre
@@ -1437,7 +1399,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # Surface the admitted dead-volume filling plants as a single INFO
     # Diagnostic with one table row per plant (the thermal-bounds diagnostic
     # shape). Emitted only when at least one filling plant was seen, so EX-only
-    # cases add nothing. The de-dup in ``_finalize_diagnostics`` keys on
+    # cases add nothing. The de-dup in ``finalize_diagnostics`` keys on
     # ``(code, summary)``, so the per-plant detail must ride on the table, not on
     # N separate diagnostics.
     if filling_diag_rows:
@@ -1474,7 +1436,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         )
 
     return {
-        "$schema": _SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("system/hydros.json"),
         "hydros": hydros,
     }
 
@@ -1748,7 +1710,9 @@ def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 
     production_models.sort(key=lambda m: m["hydro_id"])
 
-    result: dict = {"$schema": _PRODUCTION_MODELS_SCHEMA_URL}
+    result: dict = {
+        "$schema": cobre_schemas.schema_url_for("system/hydro_production_models.json")
+    }
     # File-level FPHA plane reduction (tratamento-fpha), applied to every FPHA
     # plant. Only meaningful when there is at least one FPHA plant.
     if fpha_codes:

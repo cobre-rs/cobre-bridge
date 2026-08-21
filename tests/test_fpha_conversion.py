@@ -16,7 +16,6 @@ import pytest
 
 from cobre_bridge.converters.hydro import (
     _fpha_computed_config,
-    _fpha_efficiency,
     _is_fpha_eligible,
     _parse_fpha_plane_reduction,
     convert_hydro_energy_productivity,
@@ -25,6 +24,7 @@ from cobre_bridge.converters.hydro import (
     fpha_eligible_codes,
 )
 from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.productivity import fpha_efficiency
 from tests.conftest import make_case, make_nw_files
 from tests.test_entity_conversion import (
     _make_confhd_df,
@@ -82,13 +82,13 @@ class TestIsFphaEligible:
 
 class TestFphaEfficiency:
     def test_realistic_rho_esp_maps_to_fraction(self) -> None:
-        eta = _fpha_efficiency(_REALISTIC_RHO_ESP, "USINA")
+        eta = fpha_efficiency(_REALISTIC_RHO_ESP, "USINA")
         assert eta == pytest.approx(_REALISTIC_RHO_ESP / _K)
         assert 0.0 < eta <= 1.0
 
     def test_unphysical_rho_esp_clamped_to_one(self) -> None:
         # rho_esp >> K would imply eta > 1; cobre requires (0, 1].
-        assert _fpha_efficiency(0.9, "USINA") == 1.0
+        assert fpha_efficiency(0.9, "USINA") == 1.0
 
 
 class TestFphaComputedConfig:

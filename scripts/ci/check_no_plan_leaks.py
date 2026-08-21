@@ -38,6 +38,8 @@ PATTERN = re.compile(
     r"|\b(?:CONV|CMP|CLI|TST|GHA)-[0-9]+\b"
     # All-caps hyphenated plan-token form (TICKET-012, EPIC-08, SPRINT-3, ...).
     r"|\b(?:TICKET|EPIC|SPRINT)-[0-9]+\b"
+    # Finding-id and no-hyphen acceptance-criteria tag forms (FINDING-5, AC5).
+    r"|\bFINDING-[0-9]+\b|\bAC[0-9]+\b"
 )
 
 HARD_DOCS = ["README.md", "CHANGELOG.md"]

@@ -22,10 +22,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.network import (
-    _BUSES_SCHEMA_URL,
-    _LINES_SCHEMA_URL,
-)
+from cobre_bridge import cobre_schemas
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -39,10 +36,6 @@ if TYPE_CHECKING:
 _COST_COLUMN = re.compile(r"^custo_(\d+)$")
 _LIMIT_COLUMN = re.compile(r"^limite_superior_(\d+)$")
 _FULL_DEPTH_PERCENT = 100.0
-_PUMPING_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/pumping_stations.schema.json"
-)
 
 
 def _bus_deficit_costs(dadger: Dadger) -> dict[int, float]:
@@ -125,7 +118,10 @@ def convert_buses(
         }
     )
 
-    return {"$schema": _BUSES_SCHEMA_URL, "buses": buses}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/buses.json"),
+        "buses": buses,
+    }
 
 
 def convert_lines_placeholder() -> dict:
@@ -141,7 +137,10 @@ def convert_lines_placeholder() -> dict:
         "exchange network deferred (IA accessor fix upstream): emitting an "
         "empty lines.json — subsystems are unconnected and self-balance"
     )
-    return {"$schema": _LINES_SCHEMA_URL, "lines": []}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/lines.json"),
+        "lines": [],
+    }
 
 
 def _ia_dense(
@@ -302,7 +301,7 @@ def convert_lines(
         schema=_LINE_BOUNDS_SCHEMA,
     )
     return (
-        {"$schema": _LINES_SCHEMA_URL, "lines": lines},
+        {"$schema": cobre_schemas.schema_url_for("system/lines.json"), "lines": lines},
         bounds,
     )
 
@@ -455,7 +454,10 @@ def convert_pumping_stations(
     dadger = case.dadger
     ue = dadger.ue(df=True)
     if ue is None or ue.empty:
-        return {"$schema": _PUMPING_SCHEMA_URL, "pumping_stations": []}
+        return {
+            "$schema": cobre_schemas.schema_url_for("system/pumping_stations.json"),
+            "pumping_stations": [],
+        }
 
     station_ids = pumping_station_id_map(dadger)
     op_date = case.start_date.isoformat()
@@ -480,4 +482,7 @@ def convert_pumping_stations(
                 },
             }
         )
-    return {"$schema": _PUMPING_SCHEMA_URL, "pumping_stations": stations}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/pumping_stations.json"),
+        "pumping_stations": stations,
+    }

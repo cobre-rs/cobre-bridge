@@ -17,9 +17,10 @@ shared ``_export_compare_artifacts`` helper used by both ``compare`` subcommands
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import TYPE_CHECKING
 
-from cobre_bridge.cobre_io import case_dir_for
+from cobre_bridge.comparators.cobre_readers import read_cobre_training_metadata
 from cobre_bridge.comparators.manifest import ComparisonManifest
 
 if TYPE_CHECKING:
@@ -47,11 +48,13 @@ def write_artifacts(
     dataset: ComparisonDataset,
     *,
     command: str,
-    newave_dir: Path,
+    source_dir: Path,
     cobre_output_dir: Path,
     tolerance: float,
     out_dir: Path,
     formats: Sequence[str],
+    input_files: list[dict[str, object]] | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> ComparisonManifest:
     """Emit comparison artifacts for ``dataset`` and return the written manifest.
 
@@ -78,13 +81,20 @@ def write_artifacts(
     Args:
         dataset: The validated canonical dataset to export.
         command: The originating command label (e.g. ``"compare results"``).
-        newave_dir: The source model case directory (recorded in the manifest).
+        source_dir: The source-model case directory (recorded in the manifest).
         cobre_output_dir: The Cobre output directory (recorded in the manifest
             and probed for the Cobre version).
         tolerance: The comparison tolerance (recorded in the manifest).
         out_dir: Destination directory; created with ``parents=True``.
         formats: The artifact formats to emit; each must be in
             ``{"parquet", "json", "csv"}``.
+        input_files: The hashed source-deck input files (mirrors the
+            conversion manifest's ``input_files``); omitted (``None``) records
+            an empty list.
+        diagnostics: The compare run's diagnostics, each as a
+            :meth:`~cobre_bridge.diagnostics.Diagnostic.to_dict` dict; omitted
+            (``None``) records an empty ``diagnostics`` list and an empty
+            ``diagnostics_summary``.
 
     Returns:
         The :class:`ComparisonManifest` written to ``out_dir / "comparison.json"``.
@@ -137,12 +147,18 @@ def write_artifacts(
     written.append(_MANIFEST_FILE)
 
     top_divergences = _coerce_top_divergences(dataset.metadata.get("top_divergences"))
+    diagnostics_summary = dict(
+        Counter(str(entry.get("severity")) for entry in diagnostics or [])
+    )
     manifest = ComparisonManifest.create(
         command,
-        newave_dir,
+        source_dir,
         cobre_output_dir,
         tolerance,
         cobre_version=_read_cobre_version(cobre_output_dir),
+        input_files=input_files,
+        diagnostics_summary=diagnostics_summary,
+        diagnostics=diagnostics,
     )
     manifest.artifacts = sorted(written)
     manifest.top_divergences = top_divergences
@@ -173,11 +189,10 @@ def _coerce_top_divergences(value: object) -> list[dict[str, object]]:
 def _read_cobre_version(cobre_output_dir: Path) -> str | None:
     """Return the Cobre version recorded in the training metadata, or ``None``.
 
-    Reads ``output/training/metadata.json`` relative to the Cobre case directory
-    (via :func:`case_dir_for`), mirroring the candidate-directory search used by
-    ``cli.py:_load_lines_json``, and returns its ``"version"`` field. A missing
-    file, unparseable JSON, or an absent ``"version"`` key yields ``None``; no
-    error is raised.
+    Delegates to :func:`cobre_readers.read_cobre_training_metadata` for the
+    unified candidate-directory search; keeps its own
+    ``(cobre_output_dir) -> str | None`` signature and ``str``-type guard so
+    existing callers/tests stay green.
 
     Args:
         cobre_output_dir: The Cobre output directory handed to the comparator.
@@ -185,26 +200,5 @@ def _read_cobre_version(cobre_output_dir: Path) -> str | None:
     Returns:
         The ``"version"`` string when present and readable, else ``None``.
     """
-    case_dir = case_dir_for(cobre_output_dir)
-    metadata_path = case_dir / "output" / "training" / "metadata.json"
-    if not metadata_path.exists():
-        for candidate in (cobre_output_dir, cobre_output_dir.parent):
-            p = candidate / "training" / "metadata.json"
-            if p.exists():
-                metadata_path = p
-                break
-
-    if not metadata_path.exists():
-        return None
-
-    try:
-        data = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-    if not isinstance(data, dict):
-        return None
-    version = data.get("version")
-    if isinstance(version, str):
-        return version
-    return None
+    version = read_cobre_training_metadata(cobre_output_dir).get("version")
+    return version if isinstance(version, str) else None

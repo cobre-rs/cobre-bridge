@@ -6,10 +6,23 @@ frames with the source's native column names (1-based ``estagio``,
 node/scenario indices as written). Alignment onto Cobre entity ids and
 stage indices happens in the comparison layer, not here.
 
-Every reader treats an empty parse as an error: silent-empty DataFrames
-are idecomp's characteristic failure mode on unexpected syntax, and a
-comparison built on an empty frame would report a false zero-vs-zero
-match.
+Reader-failure contract: an absent OPTIONAL input yields a typed-empty
+frame plus a WARNING log; a present-but-unreadable file, or an absent
+REQUIRED input, raises a typed error (``CobreReadError``, ``ValueError``,
+or ``FileNotFoundError``) — never a silent empty, since an empty frame
+from real-but-broken data fabricates a false zero-vs-zero match
+(``.claude/rules/comments.md`` §4; reads route through this layer per
+``.claude/rules/bridge.md`` §5). This module and ``cobre_readers`` raise on
+present-but-corrupt data; ``newave_readers`` is the genuine outlier — it
+best-effort degrades present-but-broken optional inputs to empty/None plus a
+WARNING (see its module docstring). DECOMP's operation tables are required,
+the source model's and Cobre's optional partitions are not. Every ``dec_oper_*``/
+``relato``-backed table here is a REQUIRED input: an absent file raises
+``FileNotFoundError`` and a present file that parses empty raises
+``ValueError`` — silent-empty DataFrames are idecomp's characteristic
+failure mode on unexpected syntax. ``read_relato2_costs`` is the one
+deliberate exception, an OPTIONAL per-realization report that degrades
+to an empty frame when absent.
 """
 
 from __future__ import annotations
@@ -37,7 +50,7 @@ from idecomp.decomp import (
     Relato,
 )
 
-from cobre_bridge.comparators.newave_readers import _find_case_insensitive
+from cobre_bridge.paths import find_case_insensitive
 
 _LOG = logging.getLogger(__name__)
 
@@ -61,7 +74,7 @@ def _resolve_result_file(case_dir: Path, filename: str) -> Path | None:
     error -- callers translate a `None` return into `FileNotFoundError`
     themselves.
     """
-    return _find_case_insensitive(case_dir, filename)
+    return find_case_insensitive(case_dir, filename)
 
 
 def _finalize_table(path: Path, table: pd.DataFrame | None) -> pl.DataFrame:
@@ -263,7 +276,8 @@ def read_relato_costs(case_dir: Path) -> pl.DataFrame:
     cost, thermal generation, deviation/spillage/turbining penalties, and
     the per-submarket marginal cost) from the general report.
 
-    Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
+    Costs are **native k$**, unconverted -- converted once in the analysis
+    layer, see `decomp_results.reconcile_kdollars_to_reais`.
     """
     return _read_relato_table(case_dir, "relatorio_operacao_custos")
 
@@ -286,7 +300,8 @@ def read_relato2_costs(case_dir: Path) -> pl.DataFrame:
     silent-empty reader (a missing optional file is not a degraded input),
     unlike the mandatory ``relato``/``dec_oper_*`` readers.
 
-    Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
+    Costs are **native k$**, unconverted -- converted once in the analysis
+    layer, see `decomp_results.reconcile_kdollars_to_reais`.
     """
     path = _resolve_relato2(case_dir)
     if path is None:
@@ -301,7 +316,8 @@ def read_relato_expected_cost(case_dir: Path) -> pl.DataFrame:
     """Read the per-parcela expected operating cost table (one ``estagio_N``
     column per stage) from the general report.
 
-    Costs are **native k$**, unconverted; see `reconcile_kdollars_to_reais`.
+    Costs are **native k$**, unconverted -- converted once in the analysis
+    layer, see `decomp_results.reconcile_kdollars_to_reais`.
     """
     return _read_relato_table(case_dir, "custo_operacao_valor_esperado")
 
@@ -392,22 +408,3 @@ def read_dec_estatfpha(case_dir: Path) -> pl.DataFrame:
     if path is None:
         raise FileNotFoundError(f"dec_estatfpha.rvN not found in {case_dir}")
     return _finalize_table(path, DecEstatFpha.read(str(path)).estatisticas_desvios)
-
-
-def reconcile_kdollars_to_reais(value: float) -> float:
-    """Convert a native k$ cost value to R$ (×10³).
-
-    Every cost the source model reports — `read_relato_costs`,
-    `read_relato_expected_cost`, `read_dec_oper_gnl`'s ``custo_geracao`` — is
-    in k$ (thousands of BRL), while cobre reports costs in R$. Silently
-    mixing the two is the same unit trap documented in
-    `project_decomp_fcf_unit_conversion_bug`: cobre's boundary FCF coefficients
-    were consumed verbatim in k$ against a R$-denominated model, undervaluing
-    water by three orders of magnitude. This helper is the single conversion
-    site — readers stay in native k$, and callers convert once, explicitly.
-
-    Downstream, two different R$ conventions apply: the Overview cost dict
-    uses plain R$ (this factor, ×10³), while `nw_sin` uses
-    10⁶ R$ (an additional ÷10⁶ on top of this factor).
-    """
-    return value * 1e3

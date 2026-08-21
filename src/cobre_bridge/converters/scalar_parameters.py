@@ -26,10 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/generic_parameters.schema.json"
-)
+from cobre_bridge import cobre_schemas
 
 
 def rho_acum_name(hydro_id: int) -> str:
@@ -113,6 +110,6 @@ def build_scalar_parameters(
         next_id += 1
 
     return {
-        "$schema": _SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("constraints/generic_parameters.json"),
         "scalar_parameters": entries,
     }

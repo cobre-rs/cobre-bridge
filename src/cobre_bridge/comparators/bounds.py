@@ -16,13 +16,13 @@ from pathlib import Path
 import polars as pl
 
 from cobre_bridge.case import NewaveCase
-from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.comparators.alignment import (
     EntityAlignment,
     HydroEntity,
     LineEntity,
     ThermalEntity,
 )
+from cobre_bridge.comparators.cobre_readers import read_cobre_line_bounds
 from cobre_bridge.horizon import is_effectively_infinite
 from cobre_bridge.id_map import NewaveIdMap
 
@@ -244,24 +244,20 @@ def _read_converter_line_bounds(
     Returns ``{(line_id, stage_id, bound_name): value}`` where
     ``bound_name`` is ``direct_flow_max`` or ``reverse_flow_max``.
 
-    The converter output lives one level above the Cobre output directory
-    (``cobre_output_dir.parent``).
-
-    Only reads rows with ``block_id`` IS NULL (the stage-level base rows),
-    mirroring ``_read_cobre_bounds`` above. ``line_bounds.parquet`` now also
-    carries per-block override rows; this
-    dict is keyed by ``(line_id, stage_id)`` with no block dimension, so
-    without the filter a later block row would silently overwrite the base
-    capacity for any stage with a differing block. Block-level fidelity is
-    not yet this comparison's job.
+    Reads the raw frame via :func:`cobre_readers.read_cobre_line_bounds`
+    (absent -> typed-empty + WARNING; corrupt -> ``CobreReadError``), then
+    keeps only rows with ``block_id`` IS NULL (the stage-level base rows),
+    mirroring ``_read_cobre_bounds`` above. ``line_bounds.parquet`` also
+    carries per-block override rows; this dict is keyed by
+    ``(line_id, stage_id)`` with no block dimension, so without the filter a
+    later block row would silently overwrite the base capacity for any
+    stage with a differing block. Block-level fidelity is not yet this
+    comparison's job.
     """
-    case_dir = case_dir_for(cobre_output_dir)
-    path = case_dir / "constraints" / "line_bounds.parquet"
-    if not path.exists():
-        _LOG.warning("line_bounds.parquet not found at %s", path)
+    df = read_cobre_line_bounds(cobre_output_dir)
+    if df.is_empty():
         return {}
 
-    df = pl.read_parquet(path)
     df = df.filter(pl.col("block_id").is_null())
     result: dict[tuple[int, int, str], float] = {}
     for row in df.iter_rows(named=True):
@@ -381,7 +377,6 @@ def compare_bounds(
     cobre_bounds = _read_cobre_bounds(cobre_output_dir)
     _LOG.info("Cobre: %d bound entries", len(cobre_bounds))
 
-    # Build reverse lookups: cobre_id -> entity.
     hydro_lookup: dict[int, HydroEntity] = {h.cobre_id: h for h in alignment.hydros}
     thermal_lookup: dict[int, ThermalEntity] = {
         t.cobre_id: t for t in alignment.thermals

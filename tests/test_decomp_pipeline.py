@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.cli import app
 from cobre_bridge.decomp.anticipated import GnlEmission
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
@@ -947,6 +948,18 @@ class TestCadastroPipelineWiring:
         assert values[0] == pytest.approx(60.0)
         assert values[1] == pytest.approx(30.0)
 
+    def test_initial_conditions_json_stamps_schema_as_first_key(
+        self, tmp_path: Path
+    ) -> None:
+        """``$schema`` is now stamped on DECOMP ``initial_conditions.json`` too
+        (the twin-track asymmetry epic-07 deferred), first key to match the
+        source model's own key order, pinned to the registry."""
+        dst = _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
+
+        doc = json.loads((dst / "initial_conditions.json").read_text())
+        assert next(iter(doc)) == "$schema"
+        assert doc["$schema"] == cobre_schemas.schema_url_for("initial_conditions.json")
+
     def test_temporal_override_adds_storage_rows_and_raises_the_entity_envelope(
         self, tmp_path: Path
     ) -> None:
@@ -1284,11 +1297,9 @@ class TestGenericConstraintWiring:
     ) -> None:
         """AC5: ``generic_constraint_bounds.parquet`` compresses with zstd
         (cobre C3: snappy unsupported), and ``generic_constraints.json``'s
-        envelope key + ``$schema`` match the source model's own generic-
-        constraints writer (``converters/constraints.py``), confirmed by
-        loading both."""
-        from cobre_bridge.converters import constraints as source_constraints_conv
-
+        envelope key + ``$schema`` match the registry entry the source
+        model's own generic-constraints writer (``converters/constraints.py``)
+        also reads, confirmed by loading both."""
         dst = _run_cadastro_pipeline(
             tmp_path, ac_volmax_frame=None, to_generic=_all_synthetic_generics()
         )
@@ -1301,7 +1312,9 @@ class TestGenericConstraintWiring:
                 assert row_group.column(column_index).compression == "ZSTD"
 
         doc = json.loads((dst / "constraints" / "generic_constraints.json").read_text())
-        assert doc["$schema"] == source_constraints_conv._SCHEMA_URL
+        assert doc["$schema"] == cobre_schemas.schema_url_for(
+            "constraints/generic_constraints.json"
+        )
         assert set(doc) == {"$schema", "constraints"}
 
 
@@ -1375,7 +1388,7 @@ class TestDryRun:
     ) -> None:
         """A dry-run failure must never clear ``dst``: it wrote nothing, and
         ``dst`` may be a pre-existing populated directory the user never
-        asked to clear. ``config.json`` is one of ``_clear_dst_contents``'s
+        asked to clear. ``config.json`` is one of ``clear_dst_contents``'s
         own removal-list names, so its survival proves cleanup was skipped
         entirely, not merely that this particular name was spared.
 
@@ -1489,7 +1502,7 @@ class TestDryRun:
         """The DECOMP set clears the shared artifacts plus its own root-level
         ``post_study_stages.json`` and ``boundary/`` tree (CONV-10)."""
         from cobre_bridge.decomp.pipeline import DECOMP_CLEARED_ARTIFACTS
-        from cobre_bridge.pipeline import _clear_dst_contents
+        from cobre_bridge.pipeline import clear_dst_contents
 
         dst = tmp_path / "dst"
         dst.mkdir()
@@ -1503,7 +1516,7 @@ class TestDryRun:
         notes = dst / "notes.txt"
         notes.write_text("keep me", encoding="utf-8")
 
-        _clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
+        clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
 
         assert not post_study.exists()
         assert not boundary.exists()
@@ -1515,7 +1528,7 @@ class TestDryRun:
     ) -> None:
         """Regression pinning CONV-10: the NEWAVE set does not name
         DECOMP-only artifacts, so they survive a NEWAVE-set clear."""
-        from cobre_bridge.pipeline import NEWAVE_CLEARED_ARTIFACTS, _clear_dst_contents
+        from cobre_bridge.pipeline import NEWAVE_CLEARED_ARTIFACTS, clear_dst_contents
 
         dst = tmp_path / "dst"
         dst.mkdir()
@@ -1527,7 +1540,7 @@ class TestDryRun:
         config = dst / "config.json"
         config.write_text("{}", encoding="utf-8")
 
-        _clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
+        clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
 
         assert post_study.exists()
         assert boundary.exists()

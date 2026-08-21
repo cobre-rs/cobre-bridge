@@ -1,14 +1,10 @@
 """Public registry mapping each Cobre case output file to its ``$schema`` URL.
 
-Today every emitted ``$schema`` value is defined by a scattered set of
-``_*_SCHEMA_URL`` constants (and a few inline literals) spread across
-``converters/`` and ``decomp/``, with the DECOMP track reaching into
-NEWAVE-side privates to stay in sync. This module is the public home those
-per-track definitions are promoted into: :data:`SCHEMA_URLS` and
-:func:`schema_url_for` give every schema URL one canonical entry, keyed by
-the case-relative output path, so both tracks can eventually share a single
-source of truth. Until that promotion happens, ``tests/test_cobre_schemas.py``
-pins this registry against every live constant so the two cannot drift apart.
+Every ``$schema`` value emitted by either conversion track reads
+:func:`schema_url_for`, keyed by the case-relative output path, so both
+tracks share one canonical source instead of duplicating per-module
+constants. ``tests/test_cobre_schemas.py`` pins the registry's shape and its
+16-entry coverage.
 """
 
 from __future__ import annotations

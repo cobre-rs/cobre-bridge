@@ -12,11 +12,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.contracts import (
     _CONTRACT_BOUNDS_SCHEMA,
-    _SCHEMA_URL,
     Contract,
     ContractStage,
     _signed_price,
@@ -416,7 +416,10 @@ def test_convert_energy_contracts_empty_is_total() -> None:
 
     result = convert_energy_contracts(case, id_map, contracts=[])
 
-    assert result == {"$schema": _SCHEMA_URL, "contracts": []}
+    assert result == {
+        "$schema": cobre_schemas.schema_url_for("system/energy_contracts.json"),
+        "contracts": [],
+    }
 
 
 def test_contract_bounds_uniform_emits_base_rows_only() -> None:

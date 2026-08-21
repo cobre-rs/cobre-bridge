@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.network import _NCS_FACTORS_SCHEMA_URL, _NCS_SCHEMA_URL
+from cobre_bridge import cobre_schemas
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -157,7 +157,10 @@ def convert_non_controllable_sources(
         }
         for s in _all_series(case.dadger, id_map, calendar, case.renovaveis)
     ]
-    return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": entries}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/non_controllable_sources.json"),
+        "non_controllable_sources": entries,
+    }
 
 
 def convert_ncs_stats(
@@ -247,7 +250,12 @@ def convert_ncs_factors(
             clamped,
             _MIN_FACTOR,
         )
-    return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": entries}
+    return {
+        "$schema": cobre_schemas.schema_url_for(
+            "scenarios/non_controllable_factors.json"
+        ),
+        "non_controllable_factors": entries,
+    }
 
 
 def _sorted_pee_codes(

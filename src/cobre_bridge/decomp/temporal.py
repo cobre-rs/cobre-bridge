@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
-from cobre_bridge.converters.temporal import _block_names, monthly_season_definitions
+from cobre_bridge import cobre_schemas
+from cobre_bridge.converters.temporal import block_names, monthly_season_definitions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -37,10 +38,6 @@ if TYPE_CHECKING:
 _SATURDAY = 5
 _WEEK_HOURS = 168.0
 _HOURS_PER_DAY = 24.0
-_STAGES_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/stages.schema.json"
-)
 
 
 @dataclass(frozen=True)
@@ -310,7 +307,7 @@ def stage_records(
     """
     records: list[dict] = []
     for stage in calendar:
-        names = _block_names(len(stage.block_hours))
+        names = block_names(len(stage.block_hours))
         if cvar is not None:
             risk_measure: object = {
                 "cvar": {"alpha": cvar.alpha, "lambda": cvar.lambda_}
@@ -405,7 +402,7 @@ def convert_stages(
     stages = stage_records(case.calendar, cvar)
     nodes, transitions = build_node_graph(len(stages), fan_probabilities)
     return {
-        "$schema": _STAGES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("stages.json"),
         "season_definitions": monthly_season_definitions(),
         "policy_graph": {
             "type": "finite_horizon",

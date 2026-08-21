@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas, emission_checks
 from cobre_bridge import diagnostics as dx
-from cobre_bridge import emission_checks
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.converters import constraints as constraints_conv
@@ -73,25 +73,6 @@ class ConversionReport:
             f"{self.line_count} lines, "
             f"{self.stage_count} stages"
         )
-
-
-class _WarningCollector(logging.Handler):
-    """Capture ``WARNING``+ records emitted under ``cobre_bridge`` during a run.
-
-    Converters log every degraded-input substitution (vazpast → empty, c_adic →
-    no load, EXPT/RE skipped, REE.DAT cutoff fallback, …) at ``WARNING`` level.
-    Attaching this to the package logger for the duration of a conversion lets
-    :func:`convert_newave_case` report those degradations through
-    :attr:`ConversionReport.warnings` instead of letting them pass silently.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(level=logging.WARNING)
-        self.messages: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if record.levelno >= logging.WARNING:
-            self.messages.append(record.getMessage())
 
 
 def _compute_prod_media_sin_safe(case: NewaveCase) -> float | None:
@@ -260,7 +241,7 @@ def convert_newave_case(
         If *src* does not exist, is not a directory, or a required the source model file
         is missing.
     """
-    collector = _WarningCollector()
+    collector = dx.WarningCollector()
     pkg_logger = logging.getLogger("cobre_bridge")
     pkg_logger.addHandler(collector)
     try:
@@ -280,47 +261,15 @@ def convert_newave_case(
         # nothing was written, and dst may be a pre-existing populated
         # directory the user never asked to clear.
         if not dry_run:
-            _clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
+            clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
         raise
     finally:
         pkg_logger.removeHandler(collector)
-    report.diagnostics = _finalize_diagnostics(collected, collector.messages)
+    report.diagnostics = dx.finalize_diagnostics(collected, collector.messages)
     report.warnings = [
         d.summary for d in report.diagnostics if d.severity is dx.Severity.WARNING
     ]
     return report
-
-
-def _finalize_diagnostics(
-    collected: list[dx.Diagnostic], legacy_messages: list[str]
-) -> list[dx.Diagnostic]:
-    """Combine structured diagnostics with bridged legacy ``logger.warning`` strings.
-
-    Structured diagnostics are de-duplicated by ``(code, summary)`` (a converter run
-    more than once should surface a finding only once). Each remaining captured
-    warning string — emitted by a site not yet migrated to :func:`diagnostics.emit` —
-    is wrapped in a generic WARNING diagnostic so it still renders through the same
-    pipeline, with first-occurrence order preserved.
-    """
-    result: list[dx.Diagnostic] = []
-    seen: set[tuple[str, str]] = set()
-    for diag in collected:
-        key = (diag.code, diag.summary)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(diag)
-    for message in dict.fromkeys(legacy_messages):
-        result.append(
-            dx.Diagnostic(
-                code="legacy-warning",
-                severity=dx.Severity.WARNING,
-                category="Other warnings",
-                title="Conversion warning",
-                summary=message,
-            )
-        )
-    return result
 
 
 def _convert_newave_case_impl(
@@ -625,9 +574,8 @@ def _convert_newave_case_impl(
 
     if all_constraints:
         merged_dict = {
-            "$schema": (
-                "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-                "/schemas/generic_constraints.schema.json"
+            "$schema": cobre_schemas.schema_url_for(
+                "constraints/generic_constraints.json"
             ),
             "constraints": all_constraints,
         }
@@ -670,7 +618,7 @@ NEWAVE_CLEARED_ARTIFACTS = ClearedArtifacts(
 )
 
 
-def _clear_dst_contents(dst: Path, artifacts: ClearedArtifacts) -> None:
+def clear_dst_contents(dst: Path, artifacts: ClearedArtifacts) -> None:
     """Remove *artifacts*' known output subdirectories and top-level files from dst.
 
     Only the specific files/subdirectories named by *artifacts* are removed.

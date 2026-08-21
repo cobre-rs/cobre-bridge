@@ -4,7 +4,9 @@ Defines :class:`ConversionManifest`, a provenance record emitted alongside a
 converted Cobre case directory so that a downstream agent can know exactly which
 bridge version, git state, source-model case directory, and input files produced
 a given conversion, plus the entity counts and the diagnostics raised during the
-run. It mirrors :mod:`cobre_bridge.comparators.manifest`.
+run. It mirrors :mod:`cobre_bridge.comparators.manifest`; both subclass
+:class:`cobre_bridge.provenance_manifest.ProvenanceManifest` for their shared
+``to_json``/``from_json`` behaviour.
 
 The shared :func:`cobre_bridge._git.git_sha` runs the git subprocess only
 inside :meth:`ConversionManifest.create`, never at import time.
@@ -12,28 +14,18 @@ inside :meth:`ConversionManifest.create`, never at import time.
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-from collections import Counter
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import ClassVar
 
 import cobre_bridge
 from cobre_bridge._git import git_sha
-from cobre_bridge.newave_files import NewaveFiles
-
-if TYPE_CHECKING:
-    from cobre_bridge.decomp.pipeline import DecompFiles
-    from cobre_bridge.diagnostics import Diagnostic
-
-_HASH_CHUNK_BYTES = 8192
+from cobre_bridge.provenance_manifest import ProvenanceManifest
 
 
 @dataclass
-class ConversionManifest:
+class ConversionManifest(ProvenanceManifest):
     """Provenance record for a conversion run.
 
     Carries the originating command, the source-model and output paths, the
@@ -58,6 +50,8 @@ class ConversionManifest:
     # field round-trips through ``from_json`` unchanged. Appended last so existing
     # positional construction stays unchanged.
     min_cobre_version: str | None = None
+
+    _NOT_FOUND_LABEL: ClassVar[str] = "Conversion manifest"
 
     @classmethod
     def create(
@@ -96,96 +90,3 @@ class ConversionManifest:
             diagnostics=diagnostics,
             min_cobre_version=min_cobre_version,
         )
-
-    def to_json(self, path: Path) -> None:
-        """Write the manifest to ``path`` as indented JSON.
-
-        Parent directories are created if missing.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
-
-    @classmethod
-    def from_json(cls, path: Path) -> ConversionManifest:
-        """Reconstruct a manifest from a JSON file written by :meth:`to_json`.
-
-        Unknown keys (e.g. from a manifest written by a newer bridge) are
-        dropped, and absent optional keys fall back to their dataclass defaults,
-        so reading a manifest across bridge versions does not raise. Raises
-        :class:`FileNotFoundError` (naming ``path``) when the file is absent.
-        """
-        if not path.exists():
-            raise FileNotFoundError(f"Conversion manifest not found: {path}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        known = {f.name for f in fields(cls)}
-        filtered = {k: v for k, v in data.items() if k in known}
-        return cls(**filtered)
-
-
-def hash_input_files(files: NewaveFiles | DecompFiles) -> list[dict[str, object]]:
-    """Hash every ``Path``-valued input file of *files* into a sorted list.
-
-    Introspects :func:`dataclasses.fields` of *files* (the instance, so any
-    files dataclass works), skipping the ``directory`` field and any field
-    whose value is not a :class:`~pathlib.Path` (which also skips an absent
-    optional, stored as ``None``, and a non-path field such as
-    :class:`~cobre_bridge.decomp.pipeline.DecompFiles`'s ``revision``). For
-    each remaining ``(name, path)`` it produces an entry
-    ``{"field", "path", "sha256", "size_bytes"}`` where ``sha256`` is the
-    SHA-256 hex digest of the file's raw bytes and ``size_bytes`` is the file
-    size.
-
-    A file that cannot be read (:class:`OSError`) is recorded with
-    ``sha256=None`` and ``size_bytes=None`` rather than aborting the manifest.
-    The returned list is sorted by ``"field"`` for deterministic ordering.
-    """
-    entries: list[dict[str, object]] = []
-    for spec in fields(files):
-        if spec.name == "directory":
-            continue
-        value = getattr(files, spec.name)
-        if not isinstance(value, Path):
-            continue
-        path: Path = value
-        sha256, size_bytes = _hash_file(path)
-        entries.append(
-            {
-                "field": spec.name,
-                "path": str(path),
-                "sha256": sha256,
-                "size_bytes": size_bytes,
-            }
-        )
-    entries.sort(key=lambda entry: entry["field"])
-    return entries
-
-
-def _hash_file(path: Path) -> tuple[str | None, int | None]:
-    """Return the SHA-256 hex digest and byte size of *path*.
-
-    Reads the file in ``_HASH_CHUNK_BYTES``-byte binary chunks. The size is read
-    from the open descriptor (``os.fstat``) so it is consistent with the bytes
-    just hashed even if the file is replaced afterwards. On :class:`OSError`
-    (unreadable / missing file) returns ``(None, None)`` so the caller records
-    the failure instead of raising.
-    """
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(_HASH_CHUNK_BYTES), b""):
-                digest.update(chunk)
-            size_bytes = os.fstat(handle.fileno()).st_size
-    except OSError:
-        return None, None
-    return digest.hexdigest(), size_bytes
-
-
-def summarize_diagnostics(diagnostics: list[Diagnostic]) -> dict[str, int]:
-    """Count *diagnostics* by severity value, omitting absent severities.
-
-    Returns a plain ``dict[str, int]`` keyed by ``severity.value`` (``"info"`` /
-    ``"warning"`` / ``"error"``); a severity with no diagnostics is absent from
-    the result rather than mapped to zero.
-    """
-    counts = Counter(diagnostic.severity.value for diagnostic in diagnostics)
-    return dict(counts)

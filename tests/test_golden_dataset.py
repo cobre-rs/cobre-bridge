@@ -240,7 +240,7 @@ def test_golden_results_summary_json_on_disk(tmp_path: Path) -> None:
     export.write_artifacts(
         dataset,
         command="compare newave",
-        newave_dir=Path("/fake/nw"),
+        source_dir=Path("/fake/nw"),
         cobre_output_dir=Path("/fake/cobre"),
         tolerance=1e-2,
         out_dir=tmp_path,
@@ -257,7 +257,7 @@ def test_golden_bounds_summary_json_on_disk(tmp_path: Path) -> None:
     export.write_artifacts(
         dataset,
         command="compare bounds",
-        newave_dir=Path("/fake/nw"),
+        source_dir=Path("/fake/nw"),
         cobre_output_dir=Path("/fake/cobre"),
         tolerance=1e-2,
         out_dir=tmp_path,

@@ -78,7 +78,7 @@ def test_write_artifacts_emits_expected_files(tmp_path: Path) -> None:
     write_artifacts(
         dataset,
         command="compare decomp",
-        newave_dir=decomp_dir,
+        source_dir=decomp_dir,
         cobre_output_dir=cobre_output_dir,
         tolerance=1e-2,
         out_dir=out,
@@ -106,7 +106,7 @@ def test_unmapped_provenance_survives_in_metadata_json(tmp_path: Path) -> None:
     write_artifacts(
         dataset,
         command="compare decomp",
-        newave_dir=tmp_path / "decomp",
+        source_dir=tmp_path / "decomp",
         cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,
         out_dir=out,
@@ -124,7 +124,7 @@ def test_manifest_records_command_tolerance_and_artifacts(tmp_path: Path) -> Non
     manifest = write_artifacts(
         dataset,
         command="compare decomp",
-        newave_dir=tmp_path / "decomp",
+        source_dir=tmp_path / "decomp",
         cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,
         out_dir=out,
@@ -139,6 +139,39 @@ def test_manifest_records_command_tolerance_and_artifacts(tmp_path: Path) -> Non
     assert manifest.command == "compare decomp"
 
 
+def test_manifest_records_source_dir_input_files_and_diagnostics(
+    tmp_path: Path,
+) -> None:
+    """The mislabel fix (CMP-14): ``comparison.json`` records the decomp deck
+    under ``source_dir`` (never ``newave_dir``), plus the hashed input files and
+    diagnostics threaded through from the caller."""
+    dataset = _make_decomp_dataset()
+    decomp_dir = tmp_path / "decomp"
+    out = tmp_path / "artifacts"
+    input_files = [
+        {"field": "dadger", "path": "dadger.rv0", "sha256": "cafe", "size_bytes": 8}
+    ]
+    diagnostics = [{"code": "y", "severity": "info", "category": "Test"}]
+
+    write_artifacts(
+        dataset,
+        command="compare decomp",
+        source_dir=decomp_dir,
+        cobre_output_dir=tmp_path / "output",
+        tolerance=1e-2,
+        out_dir=out,
+        formats=["json"],
+        input_files=input_files,
+        diagnostics=diagnostics,
+    )
+
+    payload = json.loads((out / "comparison.json").read_text(encoding="utf-8"))
+    assert payload["source_dir"] == str(decomp_dir)
+    assert "newave_dir" not in payload
+    assert payload["input_files"] == input_files
+    assert payload["diagnostics"] == diagnostics
+
+
 def test_unknown_format_raises_valueerror(tmp_path: Path) -> None:
     dataset = _make_decomp_dataset()
 
@@ -146,7 +179,7 @@ def test_unknown_format_raises_valueerror(tmp_path: Path) -> None:
         write_artifacts(
             dataset,
             command="compare decomp",
-            newave_dir=tmp_path / "decomp",
+            source_dir=tmp_path / "decomp",
             cobre_output_dir=tmp_path / "output",
             tolerance=1e-2,
             out_dir=tmp_path / "artifacts",
@@ -165,7 +198,7 @@ def test_empty_dataset_still_writes_typed_artifacts(tmp_path: Path) -> None:
     manifest = write_artifacts(
         empty_dataset,
         command="compare decomp",
-        newave_dir=tmp_path / "decomp",
+        source_dir=tmp_path / "decomp",
         cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,
         out_dir=out,

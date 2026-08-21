@@ -230,13 +230,23 @@ def test_print_results_summary_decomp_label_keeps_newave_dir_param_name() -> Non
 def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch the shared NEWAVE case/alignment loaders for the CLI.
 
-    ``_load_lines_json`` is left unpatched: its consumer
+    ``read_cobre_lines`` is left unpatched: its consumer
     (``build_entity_alignment``) is mocked above, and the empty ``tmp_path``
-    cobre dir yields ``[]`` from the real loader anyway.
+    cobre dir yields ``[]`` from the real reader anyway.
     """
+    from tests.conftest import make_nw_files
+
+    # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
+    # MagicMock attribute) — ``hash_input_files`` reflects over it via
+    # ``dataclasses.fields``, which raises on a non-dataclass. The paths
+    # need not exist: a missing file degrades to a ``None`` hash/size.
     monkeypatch.setattr(
         "cobre_bridge.case.NewaveCase.from_directory",
-        classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+        classmethod(
+            lambda cls, _dir: MagicMock(
+                id_map=MagicMock(), files=make_nw_files(Path("nw"))
+            )
+        ),
     )
     monkeypatch.setattr(
         "cobre_bridge.comparators.alignment.build_entity_alignment",

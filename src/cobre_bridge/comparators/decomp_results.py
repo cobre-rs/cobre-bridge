@@ -44,7 +44,6 @@ silence.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Sequence
@@ -73,7 +72,6 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_convergence,
     read_relato_costs,
     read_relato_membership,
-    reconcile_kdollars_to_reais,
 )
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
@@ -462,6 +460,25 @@ def _hydro_productivity_results(
     return productivity
 
 
+def reconcile_kdollars_to_reais(value: float) -> float:
+    """Convert a native k$ cost value to R$ (×10³).
+
+    Every cost the source model reports — `read_relato_costs`,
+    `read_relato_expected_cost`, `read_dec_oper_gnl`'s ``custo_geracao`` — is
+    in k$ (thousands of BRL), while cobre reports costs in R$. Silently
+    mixing the two is the same unit trap documented in
+    `project_decomp_fcf_unit_conversion_bug`: cobre's boundary FCF coefficients
+    were consumed verbatim in k$ against a R$-denominated model, undervaluing
+    water by three orders of magnitude. This helper is the single conversion
+    site — readers stay in native k$, and callers convert once, explicitly.
+
+    Downstream, two different R$ conventions apply: the Overview cost dict
+    uses plain R$ (this factor, ×10³), while `nw_sin` uses
+    10⁶ R$ (an additional ÷10⁶ on top of this factor).
+    """
+    return value * 1e3
+
+
 #: Canonical convergence-chart schema -- matches
 #: :func:`cobre_readers.read_cobre_convergence`'s own return schema exactly,
 #: so :func:`~cobre_bridge.comparators.charts.convergence_chart` can read
@@ -600,7 +617,8 @@ def _read_cobre_lines_index(cobre_output_dir: Path) -> dict[tuple[int, int], int
     -- yields an empty index rather than raising: :func:`_corridor_line_alignment`
     then resolves nothing, and :func:`_interc_side` reports every corridor as
     unresolved instead of failing the comparison (the Network tab degrades to
-    empty).
+    empty). Built from :func:`cobre_readers.read_cobre_lines`'s raw ``"lines"``
+    list -- this function owns only the bus-pair index transform.
 
     [ASSUMPTION] (star topology): more than one
     line declared between the *same ordered* bus pair makes that leg
@@ -608,15 +626,9 @@ def _read_cobre_lines_index(cobre_output_dir: Path) -> dict[tuple[int, int], int
     resolve through it is reported unresolved rather than guessing which
     line applies.
     """
-    lines_path = case_dir_for(cobre_output_dir) / "system" / "lines.json"
-    if not lines_path.exists():
-        return {}
-    with lines_path.open() as f:
-        data = json.load(f)
-
     index: dict[tuple[int, int], int] = {}
     ambiguous: set[tuple[int, int]] = set()
-    for line in data.get("lines", []):
+    for line in cobre_readers.read_cobre_lines(cobre_output_dir):
         key = (int(line["source_bus_id"]), int(line["target_bus_id"]))
         if key in index:
             ambiguous.add(key)
@@ -946,39 +958,37 @@ def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pd.DataFrame, list[di
 
     Both are pure Cobre-case artifacts, not DECOMP-derived, so this reads
     them exactly the way ``results.compare_results`` does for the source
-    model's own Network tab:
+    model's own Network tab, via the shared ``cobre_readers`` readers:
 
-    - ``line_bounds``: ``constraints/line_bounds.parquet`` verbatim, via
-      pandas (``charts.line_summary_chart`` indexes it with ``.iterrows()``
-      / ``row["..."]``, so it must stay pandas, never polars -- handing it a
-      polars frame makes the bounds overlay silently disappear). This is
-      already per-stage: ``decomp/network.py::convert_lines`` writes one base
-      row (``block_id`` null) per ``(line, stage)`` carrying the resolved
-      max-of-blocks ``IA`` capacity for that stage, so a case whose capacity
-      genuinely never changes across stages naturally produces identical
-      per-stage rows here -- no separate static-capacity broadcast needs
-      implementing on top.
-    - ``line_meta``: ``system/lines.json``'s ``"lines"`` list verbatim --
-      each entry's own nested ``capacity.direct_mw``/``capacity.reverse_mw``
-      is exactly the shape ``line_summary_chart`` reads.
+    - ``line_bounds``: :func:`cobre_readers.read_cobre_line_bounds`,
+      converted to pandas (``charts.line_summary_chart`` indexes it with
+      ``.iterrows()`` / ``row["..."]``, so it must stay pandas, never polars
+      -- handing it a polars frame makes the bounds overlay silently
+      disappear). This is already per-stage: ``decomp/network.py::
+      convert_lines`` writes one base row (``block_id`` null) per
+      ``(line, stage)`` carrying the resolved max-of-blocks ``IA`` capacity
+      for that stage, so a case whose capacity genuinely never changes
+      across stages naturally produces identical per-stage rows here -- no
+      separate static-capacity broadcast needs implementing on top.
+    - ``line_meta``: :func:`cobre_readers.read_cobre_lines`'s ``"lines"``
+      list verbatim -- each entry's own nested ``capacity.direct_mw``/
+      ``capacity.reverse_mw`` is exactly the shape ``line_summary_chart``
+      reads.
 
-    A missing file degrades to an empty frame / empty list rather than
-    raising -- the Network tab is optional.
+    The Network tab is optional: a missing ``line_bounds.parquet`` degrades
+    to an empty frame via the reader's own typed-empty contract; a missing
+    or unparseable ``lines.json`` degrades to an empty ``line_meta`` (with a
+    warning) rather than raising, unchanged from before this module routed
+    through the shared readers.
     """
-    case_dir = case_dir_for(cobre_output_dir)
+    line_bounds = cobre_readers.read_cobre_line_bounds(cobre_output_dir).to_pandas()
 
-    bounds_path = case_dir / "constraints" / "line_bounds.parquet"
-    line_bounds = (
-        pd.read_parquet(bounds_path) if bounds_path.exists() else pd.DataFrame()
-    )
+    try:
+        line_meta = cobre_readers.read_cobre_lines(cobre_output_dir)
+    except cobre_readers.CobreReadError as exc:
+        _LOG.warning("Failed to read lines.json for network tab: %s", exc)
+        line_meta = []
 
-    lines_path = case_dir / "system" / "lines.json"
-    line_meta: list[dict] = []
-    if lines_path.exists():
-        try:
-            line_meta = json.loads(lines_path.read_text()).get("lines", [])
-        except (OSError, json.JSONDecodeError) as exc:
-            _LOG.warning("Failed to read %s: %s", lines_path, exc)
     return line_bounds, line_meta
 
 

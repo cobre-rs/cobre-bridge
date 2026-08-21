@@ -15,7 +15,6 @@ import typer
 
 from cobre_bridge import __version__
 from cobre_bridge.cli_args import CheckArgs, CompareArgs, ConvertArgs, DashboardArgs
-from cobre_bridge.cobre_io import case_dir_for
 from cobre_bridge.config_resolution import (
     RESULTS_TOLERANCE_DEFAULT,
     load_config,
@@ -117,29 +116,6 @@ def _cobre_python_supports_output(installed: str) -> bool:
     return _release(installed) >= _release(MIN_COBRE_VERSION)
 
 
-def _load_lines_json(cobre_output_dir: Path) -> list[dict]:
-    """Load lines.json from the Cobre case directory.
-
-    Searches for ``system/lines.json`` near the output directory.
-    Returns an empty list if not found.
-    """
-    cobre_case_dir = case_dir_for(cobre_output_dir)
-    lines_path = cobre_case_dir / "system" / "lines.json"
-    if not lines_path.exists():
-        for candidate in [cobre_output_dir, cobre_output_dir.parent]:
-            p = candidate / "system" / "lines.json"
-            if p.exists():
-                lines_path = p
-                break
-
-    if not lines_path.exists():
-        return []
-
-    with lines_path.open() as f:
-        lines_data = json.load(f)
-    return lines_data.get("lines", [])
-
-
 #: The ``--format`` tokens the compare subcommands accept on the CLI.
 _VALID_CLI_FORMATS: frozenset[str] = frozenset(
     {"console", "html", "csv", "parquet", "json", "all"}
@@ -195,6 +171,7 @@ def _load_compare_context(
     """
     from cobre_bridge.case import NewaveCase
     from cobre_bridge.comparators.alignment import build_entity_alignment
+    from cobre_bridge.comparators.cobre_readers import read_cobre_lines
 
     try:
         case = NewaveCase.from_directory(newave_dir)
@@ -202,7 +179,7 @@ def _load_compare_context(
         _fail(command, args, exc, 1)
 
     id_map = case.id_map
-    lines_json = _load_lines_json(cobre_output_dir)
+    lines_json = read_cobre_lines(cobre_output_dir)
     alignment = build_entity_alignment(id_map, case, lines_json)
     return case, id_map, alignment, lines_json
 
@@ -213,15 +190,17 @@ def _export_compare_artifacts(
     command: str,
     args: CompareArgs,
     raw_formats: list[str] | None,
-    newave_dir: Path,
+    source_dir: Path,
     cobre_output_dir: Path,
     tolerance: float,
     out_dir_arg: Path | None,
+    input_files: list[dict[str, object]] | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
     quiet_status: bool = False,
 ) -> tuple[set[str], Path]:
     """Resolve ``--format`` and write the machine-readable comparison artifacts.
 
-    Shared by `compare newave` and `compare decomp` (``newave_dir`` names the
+    Shared by `compare newave` and `compare decomp` (``source_dir`` names the
     source-case directory generically — the manifest field itself is
     reused across both callers). Returns the requested formats and the
     resolved out_dir so the handler can run its own HTML branch and
@@ -249,11 +228,13 @@ def _export_compare_artifacts(
         write_artifacts(
             dataset,
             command=command,
-            newave_dir=newave_dir,
+            source_dir=source_dir,
             cobre_output_dir=cobre_output_dir,
             tolerance=tolerance,
             out_dir=out_dir,
             formats=sorted(export_formats),
+            input_files=input_files,
+            diagnostics=diagnostics,
         )
         if not quiet_status:
             print_status(f"Artifacts written to {out_dir}")
@@ -336,6 +317,7 @@ def _run_newave_comparison(args: CompareArgs) -> None:
     from cobre_bridge.comparators.results import compare_results
     from cobre_bridge.comparators.verdict import build_compare_verdict, compare_status
     from cobre_bridge.errors import CobrePartitionMissingError
+    from cobre_bridge.provenance_manifest import hash_input_files
 
     newave_dir: Path = args.source_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -384,10 +366,12 @@ def _run_newave_comparison(args: CompareArgs) -> None:
         command="compare newave",
         args=args,
         raw_formats=args.format,
-        newave_dir=newave_dir,
+        source_dir=newave_dir,
         cobre_output_dir=cobre_output_dir,
         tolerance=tolerance,
         out_dir_arg=args.out_dir,
+        input_files=hash_input_files(case.files),
+        diagnostics=[d.to_dict() for d in compare_diagnostics],
         quiet_status=args.json_output,
     )
 
@@ -763,7 +747,7 @@ def _run_newave_conversion(args: ConvertArgs) -> None:
     from cobre_bridge.pipeline import (
         CONVERSION_PHASE_LABELS,
         NEWAVE_CLEARED_ARTIFACTS,
-        _clear_dst_contents,
+        clear_dst_contents,
         convert_newave_case,
     )
 
@@ -797,7 +781,7 @@ def _run_newave_conversion(args: ConvertArgs) -> None:
         # --force: remove previous pipeline outputs before converting. A dry run
         # never mutates the destination, so the clear is skipped even with --force.
         if not args.dry_run:
-            _clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
+            clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
 
     # A dry run creates no destination directory; the pipeline writes nothing.
     if not args.dry_run:
@@ -1076,8 +1060,8 @@ def _write_conversion_manifest(
     swallowed — the conversion itself already succeeded, so neither changes the
     exit code.
     """
-    from cobre_bridge.conversion_manifest import (
-        ConversionManifest,
+    from cobre_bridge.conversion_manifest import ConversionManifest
+    from cobre_bridge.provenance_manifest import (
         hash_input_files,
         summarize_diagnostics,
     )
@@ -1785,7 +1769,9 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
     from cobre_bridge.comparators.decomp_results import build_decomp_dataset
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.verdict import compare_status
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.errors import CobrePartitionMissingError, FieldParseError
+    from cobre_bridge.provenance_manifest import hash_input_files
 
     # Resolved before the read (unlike the pre-dataset ordering) so
     # ``build_decomp_dataset`` below gets a concrete tolerance rather than the
@@ -1825,15 +1811,19 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
             compare_diagnostics, console=args.err_console(), quiet=args.quiet
         )
 
+    decomp_case = DecompCase.from_directory(args.source_dir)
+
     formats, out_dir = _export_compare_artifacts(
         dataset,
         command="compare decomp",
         args=args,
         raw_formats=args.format,
-        newave_dir=args.source_dir,
+        source_dir=args.source_dir,
         cobre_output_dir=args.cobre_output_dir,
         tolerance=args.tolerance,
         out_dir_arg=args.out_dir,
+        input_files=hash_input_files(decomp_case.files),
+        diagnostics=[d.to_dict() for d in compare_diagnostics],
         quiet_status=args.json_output,
     )
 

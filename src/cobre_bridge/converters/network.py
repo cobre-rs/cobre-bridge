@@ -10,33 +10,13 @@ from collections.abc import Mapping, Sequence
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.horizon import POST_STUDY_YEAR, historical_start_date
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
 
 _LOG = logging.getLogger(__name__)
-
-_BUSES_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/buses.schema.json"
-)
-_LINES_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/lines.schema.json"
-)
-_PENALTIES_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/penalties.schema.json"
-)
-_NCS_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/non_controllable_sources.schema.json"
-)
-_NCS_FACTORS_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/non_controllable_factors.schema.json"
-)
 
 # --------------------------------------------------------------------------
 # Penalty conversion constants
@@ -137,7 +117,7 @@ HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
 # These are the source model's v30 values verbatim: tiny (~1e-4 R$/MWh) regularization
 # costs whose only role is to break LP ties in a fixed merit order (exchange < spillage
 # < … < excess), well below any operational or deterrent cost.
-_PINT = 0.000273  # intercâmbio  → line.exchange_cost
+PINT = 0.000273  # intercâmbio  → line.exchange_cost
 
 # The source model halves the intercâmbio penalty on lines that touch a fictitious
 # submercado (e.g. NOFICT1). Rationale: a fictitious node is a routing-only hop with no
@@ -145,10 +125,10 @@ _PINT = 0.000273  # intercâmbio  → line.exchange_cost
 # accumulate twice the penalty of an equivalent direct real → real link. The 0.5
 # discount restores cost-parity between the two topologies.  Emitted as the per-line
 # `exchange_cost` override defined in lines.schema.json; absence falls back to the
-# global `_PINT` value.
+# global `PINT` value.
 _PINT_FICTITIOUS_DISCOUNT = 0.5
-_PCORTEOL = 0.000344  # corte geração eólica → ncs.curtailment_cost
-_PEXC = 0.000355  # excesso de energia → bus.excess_cost
+PCORTEOL = 0.000344  # corte geração eólica → ncs.curtailment_cost
+PEXC = 0.000355  # excesso de energia → bus.excess_cost
 
 # Flow-domain (R$/MWh equivalent, multiplied by ρ_avg before emission). Cobre's
 # `hydro.spillage_cost` covers ALL spillage (reservoir + run-of-river). In the
@@ -270,7 +250,6 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             "sistema.dat contains no deficit cost data (custo_deficit is None)"
         )
 
-    # Build per-subsystem deficit segments.
     # Columns: codigo_submercado, nome_submercado, ficticio,
     # patamar_deficit, custo, corte
     buses_by_code: dict[int, dict] = {}
@@ -344,7 +323,7 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     buses.sort(key=lambda b: b["id"])
 
     return {
-        "$schema": _BUSES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("system/buses.json"),
         "buses": buses,
     }
 
@@ -472,7 +451,7 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 
     if limites_df is None or limites_df.empty:
         return {
-            "$schema": _LINES_SCHEMA_URL,
+            "$schema": cobre_schemas.schema_url_for("system/lines.json"),
             "lines": [],
         }
 
@@ -554,11 +533,11 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             },
         }
         if src in fictitious_codes or tgt in fictitious_codes:
-            line_entry["exchange_cost"] = _PINT * _PINT_FICTITIOUS_DISCOUNT
+            line_entry["exchange_cost"] = PINT * _PINT_FICTITIOUS_DISCOUNT
         lines.append(line_entry)
 
     return {
-        "$schema": _LINES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("system/lines.json"),
         "lines": lines,
     }
 
@@ -614,7 +593,7 @@ def _own_productivities(
     return out
 
 
-def _hydro_penalty_costs(
+def hydro_penalty_costs(
     *,
     rho_avg: float,
     rho_max_acum: float,
@@ -808,12 +787,7 @@ def convert_penalties(
     primary_deficit_cost = 0.0
     max_deficit_cost = 0.0
     if deficit_df is not None and not deficit_df.empty:
-        first_sub = deficit_df.sort_values(
-            [
-                "codigo_submercado",
-                "patamar_deficit",
-            ]
-        )
+        first_sub = deficit_df.sort_values(["codigo_submercado", "patamar_deficit"])
         primary_deficit_cost = float(first_sub.iloc[0]["custo"])
         max_deficit_cost = float(deficit_df["custo"].max())
 
@@ -847,8 +821,8 @@ def convert_penalties(
     # The ρ-scaled hydro penalty block is computed by a pure helper so the
     # global (base) penalties.json and the per-stage override parquet built by
     # ``convert_hydro_penalty_overrides`` apply byte-identical formulas — see
-    # ``_hydro_penalty_costs``.
-    hydro_costs = _hydro_penalty_costs(
+    # ``hydro_penalty_costs``.
+    hydro_costs = hydro_penalty_costs(
         rho_avg=rho_avg,
         rho_max_acum=rho_max_acum,
         penalid_costs=penalid_costs,
@@ -860,12 +834,12 @@ def convert_penalties(
     # through directly (no productivity multiplier, hence not stage-varying and not part
     # of the hydro override).
     # --------------------------------------------------------------------
-    excess_cost = _PEXC
-    exchange_cost = _PINT
-    curtailment_cost = _PCORTEOL
+    excess_cost = PEXC
+    exchange_cost = PINT
+    curtailment_cost = PCORTEOL
 
     return {
-        "$schema": _PENALTIES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("penalties.json"),
         "bus": {
             "deficit_segments": [
                 {
@@ -959,7 +933,7 @@ def convert_hydro_penalty_overrides(
     # columns that differ from the global base (sparse-override contract).
     stage_overrides: list[tuple[int, dict[str, float]]] = []
     for s in range(n_stages):
-        stage_costs = _hydro_penalty_costs(
+        stage_costs = hydro_penalty_costs(
             rho_avg=per_stage_rho_avg[s],
             rho_max_acum=per_stage_rho_max_acum[s],
             penalid_costs=penalid_costs,
@@ -1220,14 +1194,7 @@ def convert_line_bounds(
 
     for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
         src, tgt = pair
-        freeze_caps = date_lookup.get(
-            (
-                src,
-                tgt,
-                ls_y,
-                ls_m,
-            )
-        ) or last_year_lookup.get(
+        freeze_caps = date_lookup.get((src, tgt, ls_y, ls_m)) or last_year_lookup.get(
             (src, tgt, ls_m), {"direct_mw": 0.0, "reverse_mw": 0.0}
         )
         y, m = start_year, start_month
@@ -1383,7 +1350,12 @@ def convert_non_controllable_sources(
     df_ncs: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
 
     if df_ncs is None or df_ncs.empty:
-        return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": []}
+        return {
+            "$schema": cobre_schemas.schema_url_for(
+                "system/non_controllable_sources.json"
+            ),
+            "non_controllable_sources": [],
+        }
 
     horizon = case.horizon
     start_month = horizon.start_month
@@ -1452,7 +1424,10 @@ def convert_non_controllable_sources(
         )
         ncs_id += 1
 
-    return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": ncs_list}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/non_controllable_sources.json"),
+        "non_controllable_sources": ncs_list,
+    }
 
 
 def convert_ncs_factors(
@@ -1482,7 +1457,9 @@ def convert_ncs_factors(
 
     if df is None or df.empty:
         return {
-            "$schema": _NCS_FACTORS_SCHEMA_URL,
+            "$schema": cobre_schemas.schema_url_for(
+                "scenarios/non_controllable_factors.json"
+            ),
             "non_controllable_factors": [],
         }
 
@@ -1504,7 +1481,9 @@ def convert_ncs_factors(
 
     if df.empty:
         return {
-            "$schema": _NCS_FACTORS_SCHEMA_URL,
+            "$schema": cobre_schemas.schema_url_for(
+                "scenarios/non_controllable_factors.json"
+            ),
             "non_controllable_factors": [],
         }
 
@@ -1586,7 +1565,9 @@ def convert_ncs_factors(
                 y += 1
 
     return {
-        "$schema": _NCS_FACTORS_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for(
+            "scenarios/non_controllable_factors.json"
+        ),
         "non_controllable_factors": results,
     }
 

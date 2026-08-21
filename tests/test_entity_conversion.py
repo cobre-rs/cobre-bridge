@@ -4715,8 +4715,8 @@ class TestConvertLines:
 
     def test_fictitious_lines_get_half_exchange_cost(self, tmp_path) -> None:
         from cobre_bridge.converters.network import (
-            _PINT,
             _PINT_FICTITIOUS_DISCOUNT,
+            PINT,
             convert_lines,
         )
 
@@ -4728,7 +4728,7 @@ class TestConvertLines:
         result = convert_lines(self._make_case(tmp_path), id_map)
 
         fict_bus_id = id_map.bus_id(99)
-        expected = _PINT * _PINT_FICTITIOUS_DISCOUNT
+        expected = PINT * _PINT_FICTITIOUS_DISCOUNT
         for ln in result["lines"]:
             touches_fict = (
                 ln["source_bus_id"] == fict_bus_id or ln["target_bus_id"] == fict_bus_id
@@ -5327,12 +5327,12 @@ class TestHydroPenaltyCosts:
     """The pure ρ-scaling helper shared by the base and per-stage paths."""
 
     def test_flow_penalties_scale_linearly_with_rho_avg(self) -> None:
-        from cobre_bridge.converters.network import _PEVERT, _hydro_penalty_costs
+        from cobre_bridge.converters.network import _PEVERT, hydro_penalty_costs
 
-        single = _hydro_penalty_costs(
+        single = hydro_penalty_costs(
             rho_avg=1.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
         )
-        double = _hydro_penalty_costs(
+        double = hydro_penalty_costs(
             rho_avg=2.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
         )
         # spillage_cost = _PEVERT * rho_avg → doubles with rho_avg.
@@ -5344,12 +5344,12 @@ class TestHydroPenaltyCosts:
         )
 
     def test_water_withdrawal_scales_with_rho_max_acum(self) -> None:
-        from cobre_bridge.converters.network import _hydro_penalty_costs
+        from cobre_bridge.converters.network import hydro_penalty_costs
 
-        low = _hydro_penalty_costs(
+        low = hydro_penalty_costs(
             rho_avg=1.0, rho_max_acum=1.0, penalid_costs={}, max_deficit_cost=100.0
         )
-        high = _hydro_penalty_costs(
+        high = hydro_penalty_costs(
             rho_avg=1.0, rho_max_acum=3.0, penalid_costs={}, max_deficit_cost=100.0
         )
         assert high["water_withdrawal_violation_cost"] == pytest.approx(
@@ -5362,11 +5362,11 @@ class TestHydroPenaltyCosts:
         from cobre_bridge.converters.network import (
             _STORAGE_VIOLATION_DEFICIT_MULT,
             HM3_TO_MWH_PER_RHO,
-            _hydro_penalty_costs,
+            hydro_penalty_costs,
         )
 
         max_deficit_cost, rho_max_acum = 100.0, 2.0
-        costs = _hydro_penalty_costs(
+        costs = hydro_penalty_costs(
             rho_avg=1.0,
             rho_max_acum=rho_max_acum,
             penalid_costs={},
@@ -5389,11 +5389,11 @@ class TestHydroPenaltyCosts:
         from cobre_bridge.converters.network import (
             _FILLING_TARGET_DEFICIT_FRACTION,
             HM3_TO_MWH_PER_RHO,
-            _hydro_penalty_costs,
+            hydro_penalty_costs,
         )
 
         max_deficit_cost, rho_max_acum = 100.0, 2.0
-        costs = _hydro_penalty_costs(
+        costs = hydro_penalty_costs(
             rho_avg=1.0,
             rho_max_acum=rho_max_acum,
             penalid_costs={},
@@ -5410,10 +5410,10 @@ class TestHydroPenaltyCosts:
     def test_storage_floor_is_the_largest_hydro_penalty(self) -> None:
         from cobre_bridge.converters.network import (
             HM3_TO_MWH_PER_RHO,
-            _hydro_penalty_costs,
+            hydro_penalty_costs,
         )
 
-        costs = _hydro_penalty_costs(
+        costs = hydro_penalty_costs(
             rho_avg=1.0, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=100.0
         )
         storage = costs["storage_violation_below_cost"]
@@ -5434,13 +5434,13 @@ class TestHydroPenaltyCosts:
     def test_storage_penalid_volmin_uses_rho_max_acum(self) -> None:
         from cobre_bridge.converters.network import (
             HM3_TO_MWH_PER_RHO,
-            _hydro_penalty_costs,
+            hydro_penalty_costs,
         )
 
         volmin_rate = 5.0
         penalid = {"VOLMIN": volmin_rate}
         # rho_avg deliberately != rho_max_acum so the two are distinguishable.
-        costs = _hydro_penalty_costs(
+        costs = hydro_penalty_costs(
             rho_avg=1.0,
             rho_max_acum=2.0,
             penalid_costs=penalid,
@@ -5450,7 +5450,7 @@ class TestHydroPenaltyCosts:
             volmin_rate * 2.0 * HM3_TO_MWH_PER_RHO
         )
         # Changing rho_avg alone must NOT move the storage floor (rho_max_acum-only).
-        moved_rho_avg = _hydro_penalty_costs(
+        moved_rho_avg = hydro_penalty_costs(
             rho_avg=9.0,
             rho_max_acum=2.0,
             penalid_costs=penalid,
@@ -5460,7 +5460,7 @@ class TestHydroPenaltyCosts:
             costs["storage_violation_below_cost"]
         )
         # Doubling rho_max_acum doubles the storage floor.
-        doubled = _hydro_penalty_costs(
+        doubled = hydro_penalty_costs(
             rho_avg=1.0,
             rho_max_acum=4.0,
             penalid_costs=penalid,
@@ -5478,15 +5478,15 @@ class TestConvertHydroPenaltyOverrides:
     def test_sin_uniform_sparse_per_stage(self, _mock_penalid, tmp_path) -> None:
         from cobre_bridge.converters.network import (
             _PEVERT,
-            _hydro_penalty_costs,
             convert_hydro_penalty_overrides,
+            hydro_penalty_costs,
         )
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         # Build the base via the same helper the override diffs against, with
         # the mocked max_deficit_cost (max custo = 500*2 = 1000). Stage 1 then
         # uses exactly the base (ρ_avg=0.6, ρ_max_acum=2.0) → no override.
-        base = _hydro_penalty_costs(
+        base = hydro_penalty_costs(
             rho_avg=0.6, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=1000.0
         )
         table = convert_hydro_penalty_overrides(
@@ -5520,13 +5520,13 @@ class TestConvertHydroPenaltyOverrides:
     @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
     def test_returns_none_when_no_stage_differs(self, _mock_penalid, tmp_path) -> None:
         from cobre_bridge.converters.network import (
-            _hydro_penalty_costs,
             convert_hydro_penalty_overrides,
+            hydro_penalty_costs,
         )
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         # max_deficit_cost from the mocked deficit df (max custo = 500*2 = 1000).
-        base = _hydro_penalty_costs(
+        base = hydro_penalty_costs(
             rho_avg=0.6, rho_max_acum=2.0, penalid_costs={}, max_deficit_cost=1000.0
         )
         # Every stage uses exactly the base ρ → fully sparse → None.

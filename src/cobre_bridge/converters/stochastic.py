@@ -18,17 +18,12 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Cadic, Dger, Vazoes
 
-from cobre_bridge import plants
+from cobre_bridge import cobre_schemas, plants
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 
 logger = logging.getLogger(__name__)
-
-_LOAD_FACTORS_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/load_factors.schema.json"
-)
 
 
 def _build_upstream_postos(
@@ -478,7 +473,10 @@ def convert_load_factors(
         logger.warning(
             "patamar.dat has no carga_patamares data; load_factors.json will be empty."
         )
-        return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": []}
+        return {
+            "$schema": cobre_schemas.schema_url_for("scenarios/load_factors.json"),
+            "load_factors": [],
+        }
 
     # ``carga_patamares`` numbers its ``patamar`` field as a GLOBAL running index
     # across submarkets (submarket 1 -> patamares 1..P, submarket 2 -> P+1..2P,
@@ -562,7 +560,10 @@ def convert_load_factors(
                 m = 1
                 y += 1
 
-    return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": load_factors}
+    return {
+        "$schema": cobre_schemas.schema_url_for("scenarios/load_factors.json"),
+        "load_factors": load_factors,
+    }
 
 
 def _derive_study_stage_months(dger: Dger) -> list[int]:

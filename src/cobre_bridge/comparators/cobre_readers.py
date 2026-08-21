@@ -3,6 +3,20 @@
 Reads Cobre simulation parquets using Polars lazy scanning and streaming aggregation to
 compute scenario means matching the source model MEDIAS aggregation level.  Also reads
 convergence data and hydro metadata.
+
+Reader-failure contract: an absent OPTIONAL input yields a typed-empty
+frame plus a WARNING log; a present-but-unreadable file, or an absent
+REQUIRED input, raises a typed error (``CobreReadError``, ``ValueError``,
+or ``FileNotFoundError``) — never a silent empty, since an empty frame
+from real-but-broken data fabricates a false zero-vs-zero match
+(``.claude/rules/comments.md`` §4; reads route through this module per
+``.claude/rules/bridge.md`` §5). This module and ``decomp_readers`` both
+raise on present-but-corrupt data and differ only in which inputs they
+treat as required — the source model's ``newave_readers`` instead
+degrades every present-but-unparseable input to a typed-empty frame, a
+genuine behaviour difference (see that module's docstring). Every
+partition and system JSON this module reads is an optional input; only
+a present-but-corrupt parquet or JSON raises.
 """
 
 from __future__ import annotations
@@ -670,6 +684,39 @@ def read_cobre_training_duration(cobre_output_dir: Path) -> float:
     return float(data.get("duration_seconds", 0.0) or 0.0)
 
 
+def read_cobre_training_metadata(cobre_output_dir: Path) -> dict:
+    """Read ``output/training/metadata.json`` under one unified path rule.
+
+    Tries ``case_dir_for(cobre_output_dir) / "output" / "training"``,
+    falling back to ``cobre_output_dir`` then ``cobre_output_dir.parent``
+    (each with a ``training/metadata.json`` suffix) -- the single candidate
+    search every caller now shares, replacing the two divergent searches
+    ``export._read_cobre_version`` and ``dashboard.load_output_metadata``
+    used to run separately, and which could resolve different files.
+    Returns ``{}`` on an absent file, unparseable JSON, or a non-dict
+    payload.
+    """
+    case_dir = case_dir_for(cobre_output_dir)
+    metadata_path = case_dir / "output" / "training" / "metadata.json"
+    if not metadata_path.exists():
+        for candidate in (cobre_output_dir, cobre_output_dir.parent):
+            p = candidate / "training" / "metadata.json"
+            if p.exists():
+                metadata_path = p
+                break
+
+    if not metadata_path.exists():
+        return {}
+
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _LOG.warning("Failed to parse %s", metadata_path)
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
 def read_cobre_line_means(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre line simulation means per (line_id, stage_id).
 
@@ -875,6 +922,43 @@ def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
     ]
     select_exprs.extend(pl.col(c).cast(pl.Float64) for c in available)
     return df.select(select_exprs).sort("entity_id", "stage_id")
+
+
+#: The columns the converter's ``constraints/line_bounds.parquet`` carries
+#: (``decomp/network.py::convert_lines``'s and ``converters/network.py::
+#: convert_line_bounds``'s shared ``_LINE_BOUNDS_SCHEMA``): one stage-level
+#: base row per (line, stage) with ``block_id`` null, plus per-block
+#: absolute-MW override rows.
+_LINE_BOUNDS_SCHEMA: dict[str, pl.DataType] = {
+    "line_id": pl.Int32,
+    "stage_id": pl.Int32,
+    "block_id": pl.Int32,
+    "direct_mw": pl.Float64,
+    "reverse_mw": pl.Float64,
+}
+
+
+def read_cobre_line_bounds(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read the raw ``constraints/line_bounds.parquet`` frame.
+
+    Returns every row verbatim (including per-block override rows), with
+    the converter's own columns: ``line_id``, ``stage_id``, ``block_id``
+    (nullable -- ``None`` on the stage-level base row), ``direct_mw``,
+    ``reverse_mw``. Absent parquet -> typed-empty frame + WARNING;
+    present-but-corrupt -> :class:`CobreReadError`. Callers own their own
+    ``block_id``-null filtering and any dict/lookup construction (kept in
+    the ANALYZE layer, e.g. ``comparators.bounds._read_converter_line_bounds``).
+    """
+    empty = pl.DataFrame(schema=_LINE_BOUNDS_SCHEMA)
+    case_dir = case_dir_for(cobre_output_dir)
+    path = case_dir / "constraints" / "line_bounds.parquet"
+    if not path.exists():
+        _LOG.warning("line_bounds.parquet not found at %s", path)
+        return empty
+    try:
+        return pl.read_parquet(path)
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(f"Failed to read line_bounds.parquet: {path}") from exc
 
 
 def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
@@ -1239,7 +1323,6 @@ def read_cobre_bus_aggregates(
         if value_col not in available:
             return None
 
-        # Map entity to bus.
         mapping = pl.DataFrame(
             {id_col: list(bus_map.keys()), "bus_id": list(bus_map.values())}
         )
@@ -1878,6 +1961,31 @@ def _find_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
         if p.exists():
             return p
     return None
+
+
+def read_cobre_lines(cobre_output_dir: Path) -> list[dict]:
+    """Read ``system/lines.json`` and return its ``"lines"`` list.
+
+    Resolves the file via :func:`_find_system_json`'s candidate search
+    (``case_dir_for(cobre_output_dir)`` -> ``cobre_output_dir`` -> its
+    parent), so every caller -- the compare context, the dashboard, the
+    DECOMP corridor-alignment index -- resolves the same file. Returns
+    ``[]`` when the file, or its ``"lines"`` key, is absent -- the
+    graceful-degrade half of this module's reader-failure contract. A
+    present-but-unparseable ``lines.json`` raises :class:`CobreReadError`
+    rather than silently degrading to an empty list, mirroring
+    :func:`_load_entity_bus_map`.
+    """
+    path = _find_system_json(cobre_output_dir, "lines.json")
+    if path is None:
+        _LOG.warning("lines.json not found near %s", cobre_output_dir)
+        return []
+    try:
+        with path.open() as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CobreReadError(f"Failed to parse lines.json: {path}") from exc
+    return data.get("lines", [])
 
 
 def read_cobre_thermal_metadata(cobre_output_dir: Path) -> dict[int, dict]:

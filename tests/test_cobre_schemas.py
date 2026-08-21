@@ -1,65 +1,31 @@
-"""Drift guard: `cobre_schemas.SCHEMA_URLS` pinned against every live constant."""
+"""Registry-integrity guard for `cobre_schemas.SCHEMA_URLS`/`schema_url_for`.
+
+Every per-track schema-URL constant and inline `$schema` literal has been
+repointed at this registry, so there is no live constant left to import here
+— the tests below pin the registry's own shape plus a sample of real emit
+sites (not a duplicated literal) to prove the emitted value still traces back
+to `SCHEMA_URLS`.
+"""
 
 from __future__ import annotations
 
+import contextlib
+import datetime
+import json
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pyarrow as pa
 import pytest
 
 from cobre_bridge import cobre_schemas
-from cobre_bridge.converters import constraints as converters_constraints
-from cobre_bridge.converters import hydro as converters_hydro
-from cobre_bridge.converters import initial_conditions as converters_initial_conditions
-from cobre_bridge.converters import network as converters_network
-from cobre_bridge.converters import scalar_parameters as converters_scalar_parameters
-from cobre_bridge.converters import stochastic as converters_stochastic
-from cobre_bridge.converters import thermal as converters_thermal
-from cobre_bridge.decomp import config as decomp_config
-from cobre_bridge.decomp import contracts as decomp_contracts
-from cobre_bridge.decomp import network as decomp_network
-from cobre_bridge.decomp import temporal as decomp_temporal
+from cobre_bridge.id_map import NewaveIdMap
+from tests.conftest import make_case
+from tests.test_cli import _all_converter_patches, _make_fake_newave_dir
 
-_NEWAVE_STAGES_INLINE_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/stages.schema.json"
+_CANONICAL_PREFIX = (
+    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/"
 )
-_NEWAVE_CONFIG_INLINE_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/config.schema.json"
-)
-_NEWAVE_GENERIC_CONSTRAINTS_INLINE_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/generic_constraints.schema.json"
-)
-
-
-def _expected_schema_urls() -> dict[str, str]:
-    return {
-        "config.json": decomp_config._CONFIG_SCHEMA_URL,
-        "stages.json": decomp_temporal._STAGES_SCHEMA_URL,
-        "penalties.json": converters_network._PENALTIES_SCHEMA_URL,
-        "initial_conditions.json": converters_initial_conditions._SCHEMA_URL,
-        "system/buses.json": converters_network._BUSES_SCHEMA_URL,
-        "system/lines.json": converters_network._LINES_SCHEMA_URL,
-        "system/thermals.json": converters_thermal._SCHEMA_URL,
-        "system/hydros.json": converters_hydro._SCHEMA_URL,
-        "system/hydro_production_models.json": (
-            converters_hydro._PRODUCTION_MODELS_SCHEMA_URL
-        ),
-        "system/non_controllable_sources.json": converters_network._NCS_SCHEMA_URL,
-        "system/pumping_stations.json": decomp_network._PUMPING_SCHEMA_URL,
-        "system/energy_contracts.json": decomp_contracts._SCHEMA_URL,
-        "scenarios/load_factors.json": converters_stochastic._LOAD_FACTORS_SCHEMA_URL,
-        "scenarios/non_controllable_factors.json": (
-            converters_network._NCS_FACTORS_SCHEMA_URL
-        ),
-        "constraints/generic_constraints.json": converters_constraints._SCHEMA_URL,
-        "constraints/generic_parameters.json": (
-            converters_scalar_parameters._SCHEMA_URL
-        ),
-    }
-
-
-def test_schema_urls_matches_live_constants() -> None:
-    assert cobre_schemas.SCHEMA_URLS == _expected_schema_urls()
 
 
 def test_schema_urls_has_sixteen_entries() -> None:
@@ -67,9 +33,8 @@ def test_schema_urls_has_sixteen_entries() -> None:
 
 
 def test_schema_url_for_hit() -> None:
-    assert (
-        cobre_schemas.schema_url_for("system/buses.json")
-        == converters_network._BUSES_SCHEMA_URL
+    assert cobre_schemas.schema_url_for("system/buses.json") == (
+        f"{_CANONICAL_PREFIX}buses.schema.json"
     )
 
 
@@ -78,26 +43,128 @@ def test_schema_url_for_unregistered_raises_key_error() -> None:
         cobre_schemas.schema_url_for("does/not/exist.json")
 
 
-def test_config_json_pins_decomp_constant_and_newave_inline_value() -> None:
-    assert cobre_schemas.SCHEMA_URLS["config.json"] == decomp_config._CONFIG_SCHEMA_URL
-    assert cobre_schemas.SCHEMA_URLS["config.json"] == _NEWAVE_CONFIG_INLINE_URL
-
-
-def test_stages_json_pins_decomp_constant_and_newave_inline_value() -> None:
-    assert (
-        cobre_schemas.SCHEMA_URLS["stages.json"] == decomp_temporal._STAGES_SCHEMA_URL
-    )
-    assert cobre_schemas.SCHEMA_URLS["stages.json"] == _NEWAVE_STAGES_INLINE_URL
-
-
-def test_generic_constraints_json_pins_named_constant_and_newave_inline_value() -> None:
-    relpath = "constraints/generic_constraints.json"
-    assert cobre_schemas.SCHEMA_URLS[relpath] == converters_constraints._SCHEMA_URL
-    assert cobre_schemas.SCHEMA_URLS[relpath] == _NEWAVE_GENERIC_CONSTRAINTS_INLINE_URL
-
-
 def test_all_urls_have_canonical_shape() -> None:
-    prefix = "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/"
     for relpath, url in cobre_schemas.SCHEMA_URLS.items():
-        assert url.startswith(prefix), relpath
+        assert url.startswith(_CANONICAL_PREFIX), relpath
         assert url.endswith(".schema.json"), relpath
+
+
+# ---------------------------------------------------------------------------
+# NEWAVE emit-output pins: the registry is proven the single source by
+# calling the real emit site, not by re-declaring the literal it should
+# return.
+# ---------------------------------------------------------------------------
+
+
+def _dger_mock() -> MagicMock:
+    """A ``dger.dat`` mock sufficient for ``convert_stages``/``convert_config``.
+
+    Deterministic-mode detection short-circuits on ``num_forwards != 1``
+    before touching ``case.shist``/``case.cvar``, so neither reader needs a
+    fixture here.
+    """
+    dger = MagicMock()
+    dger.mes_inicio_estudo = 1
+    dger.ano_inicio_estudo = 2020
+    dger.num_anos_estudo = 1
+    dger.num_anos_pre_estudo = 0
+    dger.num_anos_pos_estudo = 0
+    dger.num_forwards = 20
+    dger.num_max_iteracoes = 200
+    dger.num_series_sinteticas = 500
+    dger.taxa_de_desconto = 12.0
+    dger.num_aberturas = 10
+    dger.cvar = 0
+    dger.tipo_execucao = 1
+    dger.tipo_simulacao_final = 1
+    dger.considera_reamostragem_cenarios = 0
+    dger.ano_inicial_historico = 1931
+    dger.consideracao_media_anual_afluencias = None
+    dger.selecao_de_cortes_forward = 1
+    dger.selecao_de_cortes_backward = 1
+    dger.ordem_maxima_parp = 6
+    dger.impressao_estados_geracao_cortes = None
+    return dger
+
+
+def _patamar_mock() -> MagicMock:
+    """A single-block ``patamar.dat`` mock sufficient for ``convert_stages``."""
+    rows = [
+        {"data": datetime.datetime(2020, month, 1), "patamar": 1, "valor": 1.0}
+        for month in range(1, 13)
+    ]
+    patamar = MagicMock()
+    patamar.duracao_mensal_patamares = pd.DataFrame(rows)
+    patamar.numero_patamares = 1
+    return patamar
+
+
+def test_stages_json_emit_matches_registry(tmp_path) -> None:
+    from cobre_bridge.converters.temporal import convert_stages
+
+    case = make_case(tmp_path, dger=_dger_mock(), patamar=_patamar_mock())
+    id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
+
+    result = convert_stages(case, id_map)
+
+    assert result["$schema"] == cobre_schemas.SCHEMA_URLS["stages.json"]
+
+
+def test_config_json_emit_matches_registry(tmp_path) -> None:
+    from cobre_bridge.converters.temporal import convert_config
+
+    case = make_case(tmp_path, dger=_dger_mock())
+
+    result = convert_config(case)
+
+    assert result["$schema"] == cobre_schemas.SCHEMA_URLS["config.json"]
+
+
+def test_generic_constraints_json_emit_matches_registry(tmp_path) -> None:
+    """``constraints/generic_constraints.json`` is stamped by ``pipeline.py``'s
+    own merge site (not a single converter), so this exercises the real
+    pipeline run with every converter mocked except ``convert_vminop_constraints``
+    — the minimum needed to reach the merge and get a non-empty file."""
+    from cobre_bridge.converters.constraints import VminopResult
+    from cobre_bridge.generic_constraint_builder import GENERIC_BOUNDS_SCHEMA
+    from cobre_bridge.pipeline import convert_newave_case
+
+    src = _make_fake_newave_dir(tmp_path)
+    dst = tmp_path / "cobre_case"
+
+    fake_bounds = pa.table(
+        {
+            "constraint_id": pa.array([], type=pa.int32()),
+            "stage_id": pa.array([], type=pa.int32()),
+            "block_id": pa.array([], type=pa.int32()),
+            "bound_lower": pa.array([], type=pa.float64()),
+            "bound_upper": pa.array([], type=pa.float64()),
+        },
+        schema=GENERIC_BOUNDS_SCHEMA,
+    )
+    fake_vminop = VminopResult(
+        constraints_dict={"$schema": "http://example", "constraints": [{"id": 0}]},
+        bounds=fake_bounds,
+        referenced_hydro_ids=[],
+        rho_acum_overrides={},
+    )
+
+    fake_id_map = MagicMock()
+    with contextlib.ExitStack() as stack:
+        for p in _all_converter_patches(fake_id_map):
+            stack.enter_context(p)
+        # Override the vminop patch (entered last -> exits first) so the
+        # pipeline's merge actually runs and writes the file.
+        stack.enter_context(
+            patch(
+                "cobre_bridge.pipeline.constraints_conv.convert_vminop_constraints",
+                return_value=fake_vminop,
+            )
+        )
+        convert_newave_case(src, dst)
+
+    doc = json.loads((dst / "constraints" / "generic_constraints.json").read_text())
+    assert (
+        doc["$schema"]
+        == cobre_schemas.SCHEMA_URLS["constraints/generic_constraints.json"]
+    )

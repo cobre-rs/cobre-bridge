@@ -177,6 +177,57 @@ def emit(diagnostic: Diagnostic, *, logger: logging.Logger | None = None) -> Non
     )
 
 
+class WarningCollector(logging.Handler):
+    """Capture ``WARNING``+ records emitted under ``cobre_bridge`` during a run.
+
+    Converters log every degraded-input substitution (vazpast → empty, c_adic →
+    no load, EXPT/RE skipped, REE.DAT cutoff fallback, …) at ``WARNING`` level.
+    Attaching this to the package logger for the duration of a conversion lets
+    the pipeline report those degradations through :func:`finalize_diagnostics`
+    instead of letting them pass silently.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.WARNING:
+            self.messages.append(record.getMessage())
+
+
+def finalize_diagnostics(
+    collected: list[Diagnostic], legacy_messages: list[str]
+) -> list[Diagnostic]:
+    """Combine structured diagnostics with bridged legacy ``logger.warning`` strings.
+
+    Structured diagnostics are de-duplicated by ``(code, summary)`` (a converter run
+    more than once should surface a finding only once). Each remaining captured
+    warning string — emitted by a site not yet migrated to :func:`emit` — is
+    wrapped in a generic WARNING diagnostic so it still renders through the same
+    pipeline, with first-occurrence order preserved.
+    """
+    result: list[Diagnostic] = []
+    seen: set[tuple[str, str]] = set()
+    for diag in collected:
+        key = (diag.code, diag.summary)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(diag)
+    for message in dict.fromkeys(legacy_messages):
+        result.append(
+            Diagnostic(
+                code="legacy-warning",
+                severity=Severity.WARNING,
+                category="Other warnings",
+                title="Conversion warning",
+                summary=message,
+            )
+        )
+    return result
+
+
 def format_stage_ranges(stages: Iterable[int]) -> str:
     """Collapse stage ids into a compact range string (``[4,5,6,7,19] -> "4-7, 19"``).
 

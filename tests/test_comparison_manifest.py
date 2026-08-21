@@ -32,7 +32,7 @@ def test_create_sets_bridge_version_and_timestamp() -> None:
     manifest = ComparisonManifest.create("compare newave", Path("nw"), Path("cb"), 1e-2)
 
     assert manifest.command == "compare newave"
-    assert manifest.newave_dir == "nw"
+    assert manifest.source_dir == "nw"
     assert manifest.cobre_output_dir == "cb"
     assert manifest.tolerance == 1e-2
     assert manifest.bridge_version == cobre_bridge.__version__
@@ -40,10 +40,35 @@ def test_create_sets_bridge_version_and_timestamp() -> None:
     assert manifest.newave_version is None
     assert manifest.artifacts == []
     assert manifest.top_divergences == []
+    assert manifest.input_files == []
+    assert manifest.diagnostics_summary == {}
+    assert manifest.diagnostics == []
 
     parsed = datetime.fromisoformat(manifest.timestamp)
     assert parsed.tzinfo is not None
     assert parsed.utcoffset() is not None
+
+
+def test_create_threads_through_input_files_and_diagnostics() -> None:
+    """``create``'s new keyword-only fields default empty and thread through."""
+    input_files = [
+        {"field": "dadger", "path": "dadger.rv0", "sha256": "abc", "size_bytes": 4}
+    ]
+    diagnostics = [{"code": "x", "severity": "warning"}]
+
+    manifest = ComparisonManifest.create(
+        "compare decomp",
+        Path("decomp"),
+        Path("cb"),
+        1e-2,
+        input_files=input_files,
+        diagnostics_summary={"warning": 1},
+        diagnostics=diagnostics,
+    )
+
+    assert manifest.input_files == input_files
+    assert manifest.diagnostics_summary == {"warning": 1}
+    assert manifest.diagnostics == diagnostics
 
 
 def test_create_passes_through_optional_versions() -> None:
@@ -137,7 +162,7 @@ def _base_manifest_data() -> dict[str, object]:
     """Return a minimal valid manifest JSON payload as a dict."""
     return {
         "command": "compare newave",
-        "newave_dir": "nw",
+        "source_dir": "nw",
         "cobre_output_dir": "cb",
         "tolerance": 1e-2,
         "bridge_version": "0.1.0",
@@ -179,3 +204,6 @@ def test_from_json_missing_optional_fields_uses_defaults(tmp_path: Path) -> None
     assert manifest.top_divergences == []
     assert manifest.cobre_version is None
     assert manifest.newave_version is None
+    assert manifest.input_files == []
+    assert manifest.diagnostics_summary == {}
+    assert manifest.diagnostics == []

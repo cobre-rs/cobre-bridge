@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.thermal import _hours_weighted
 
@@ -35,11 +36,6 @@ _LOG = logging.getLogger(__name__)
 
 _LOWER_LIMIT_COLUMN = re.compile(r"^limite_inferior_\d+$")
 _UPPER_LIMIT_COLUMN = re.compile(r"^limite_superior_\d+$")
-
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/energy_contracts.schema.json"
-)
 
 
 @dataclass(frozen=True)
@@ -280,7 +276,10 @@ def convert_energy_contracts(
                 },
             }
         )
-    return {"$schema": _SCHEMA_URL, "contracts": out}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/energy_contracts.json"),
+        "contracts": out,
+    }
 
 
 _CONTRACT_BOUNDS_SCHEMA = pa.schema(

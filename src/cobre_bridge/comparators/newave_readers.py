@@ -6,6 +6,20 @@ directory and pmo.dat convergence/productivity data.
 MEDIAS files are parsed directly with Polars since inewave v1.13 does
 not provide dedicated reader classes for them.  pmo.dat is read via
 ``inewave.newave.Pmo``.
+
+Reader-failure contract: every file this module reads (MEDIAS CSVs,
+pmo.dat, sistema.dat, newave.tim, the FPHA reports) is an OPTIONAL
+input, and this module contains no ``raise`` statement — an absent
+input AND a present-but-unparseable input both degrade to a typed-empty
+frame (or ``None``, for the pmo/FPHA readers) plus a ``_LOG.warning``.
+This is a genuine behaviour difference from ``cobre_readers``/
+``decomp_readers``, which raise (``CobreReadError``/``ValueError``/
+``FileNotFoundError``) on a present-but-corrupt file or an absent
+required one: an empty frame from real-but-broken data can fabricate a
+false zero-vs-zero match (``.claude/rules/comments.md`` §4), but every
+caller of this module already treats an empty/None result as "nothing
+to compare here" rather than "no divergence found", so the softer
+contract is safe for this module's inputs specifically.
 """
 
 from __future__ import annotations
@@ -17,24 +31,14 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
+from cobre_bridge.paths import find_case_insensitive
+
 _LOG = logging.getLogger(__name__)
-
-
-def _find_case_insensitive(directory: Path, filename: str) -> Path | None:
-    """Find a file in *directory* ignoring case, or return None."""
-    lower = filename.lower()
-    try:
-        for entry in directory.iterdir():
-            if entry.is_file() and entry.name.lower() == lower:
-                return entry
-    except OSError:
-        pass
-    return None
 
 
 def _find_pmo(newave_dir: Path) -> Path | None:
     """Locate ``pmo.dat`` directly in the source model case directory."""
-    return _find_case_insensitive(newave_dir, "pmo.dat")
+    return find_case_insensitive(newave_dir, "pmo.dat")
 
 
 # -------------------------------------------------------------------
@@ -72,7 +76,7 @@ def _read_medias_csv(
         }
     )
 
-    path = _find_case_insensitive(case_dir, filename)
+    path = find_case_insensitive(case_dir, filename)
     if path is None:
         _LOG.warning("%s not found in %s", filename, case_dir)
         return empty
@@ -94,7 +98,6 @@ def _read_medias_csv(
         _LOG.warning("Failed to parse %s", path)
         return empty
 
-    # Normalize column names: strip whitespace.
     df = df.rename({c: c.strip() for c in df.columns})
 
     # Identify entity column, variable column, patamar column, and stage
@@ -165,13 +168,11 @@ def _read_medias_csv(
     if serie_col is not None:
         df = df.filter(pl.col(serie_col).cast(pl.Int64, strict=False) == 1)
 
-    # Filter by variable if needed.
     if variable_filter is not None and variable_col is not None:
         df = df.filter(
             pl.col(variable_col).str.strip_chars().str.to_uppercase() == variable_filter
         )
 
-    # Unpivot stage columns to long format.
     id_cols = [entity_col]
     if variable_col is not None:
         id_cols.append(variable_col)
@@ -713,7 +714,7 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
         }
     )
 
-    sistema_path = _find_case_insensitive(newave_dir, "sistema.dat")
+    sistema_path = find_case_insensitive(newave_dir, "sistema.dat")
     if sistema_path is None:
         _LOG.warning("sistema.dat not found in %s", newave_dir)
         return empty
@@ -736,7 +737,7 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     load_df = load_df[load_df["data"].dt.year < 9000]
 
     # Add C_ADIC must-take energy (Itaipu, ANDE, MMGD, etc.) to load.
-    cadical_path = _find_case_insensitive(newave_dir, "c_adic.dat")
+    cadical_path = find_case_insensitive(newave_dir, "c_adic.dat")
     if cadical_path is not None:
         try:
             from cobre_bridge.converters.stochastic import parse_cadical
@@ -871,7 +872,7 @@ def read_newave_tim_iterations(newave_dir: Path) -> pl.DataFrame:
             "total_seconds": pl.Float64,
         }
     )
-    tim_path = _find_case_insensitive(newave_dir, "newave.tim")
+    tim_path = find_case_insensitive(newave_dir, "newave.tim")
     if tim_path is None:
         _LOG.warning("newave.tim not found in %s", newave_dir)
         return empty
@@ -918,7 +919,7 @@ def read_newave_tim_stages(newave_dir: Path) -> dict[str, float]:
     model emits (e.g. ``"Tempo Total"``, ``"Calculo da Politica"``, ``"Simulacao
     Final"``). Empty dict on parse failure.
     """
-    tim_path = _find_case_insensitive(newave_dir, "newave.tim")
+    tim_path = find_case_insensitive(newave_dir, "newave.tim")
     if tim_path is None:
         return {}
     try:
@@ -948,7 +949,7 @@ def _find_fpha_report(newave_dir: Path, filename: str) -> Path | None:
     """
     for candidate_dir in (newave_dir / "fpha", newave_dir):
         if candidate_dir.is_dir():
-            hit = _find_case_insensitive(candidate_dir, filename)
+            hit = find_case_insensitive(candidate_dir, filename)
             if hit is not None:
                 return hit
     return None

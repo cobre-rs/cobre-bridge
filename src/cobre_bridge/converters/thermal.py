@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.diagnostics import (
@@ -39,11 +40,6 @@ _THERMAL_BOUNDS_SCHEMA = pa.schema(
         pa.field("max_generation_mw", pa.float64()),
         pa.field("cost_per_mwh", pa.float64()),
     ]
-)
-
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/thermals.schema.json"
 )
 
 
@@ -158,7 +154,7 @@ def convert_thermals(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     thermals.sort(key=lambda t: t["id"])
 
     return {
-        "$schema": _SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("system/thermals.json"),
         "thermals": thermals,
     }
 

@@ -8,14 +8,21 @@ import pandas as pd
 import pytest
 
 from cobre_bridge.productivity import (
+    KTURB_BY_TIPO_TURBINA,
     compute_productivity,
     equivalent_productivity,
     equivalent_productivity_from_coeffs,
     evaluate_cota,
+    fpha_efficiency,
     integrated_productivity,
     mean_cota,
     stored_energy_productivity,
 )
+
+# cobre's phi = K * eta * q * h_net with K = g/1000 (mirrors the module's
+# private _GRAVITY_MW_FACTOR — pinned here rather than imported, per the D2
+# unit contract in fpha_efficiency's docstring).
+_K = 9.81e-3
 
 
 def _hreg(**overrides: object) -> pd.Series:
@@ -145,3 +152,34 @@ def test_equivalent_productivity_agrees_with_coeffs_core_on_positive_head() -> N
     )
     assert core_value > 0.0
     assert equivalent_productivity(hreg) == pytest.approx(core_value)
+
+
+class TestFphaEfficiency:
+    def test_realistic_rho_esp_round_trips_to_rho_esp_over_k(self) -> None:
+        rho_esp = 0.00892
+        eta = fpha_efficiency(rho_esp, "USINA")
+        assert eta == pytest.approx(rho_esp / _K)
+        assert 0.0 < eta <= 1.0
+
+    def test_unphysical_rho_esp_clamped_to_one(self) -> None:
+        # rho_esp >> K would imply eta > 1; cobre requires (0, 1].
+        assert fpha_efficiency(0.9, "USINA") == 1.0
+
+    def test_clamp_warns_naming_the_plant(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge.productivity"):
+            fpha_efficiency(0.9, "CLAMPED PLANT")
+        assert any("CLAMPED PLANT" in record.getMessage() for record in caplog.records)
+
+
+class TestKturbByTipoTurbina:
+    def test_maps_known_turbine_types(self) -> None:
+        # 1 = Francis, 2 = Kaplan, 3 = Pelton; 0 = unspecified -> Francis.
+        assert KTURB_BY_TIPO_TURBINA[0] == 0.5
+        assert KTURB_BY_TIPO_TURBINA[1] == 0.5
+        assert KTURB_BY_TIPO_TURBINA[2] == 0.2
+        assert KTURB_BY_TIPO_TURBINA[3] == 0.5
+
+    def test_francis_and_pelton_share_the_square_root_exponent(self) -> None:
+        assert KTURB_BY_TIPO_TURBINA[1] == KTURB_BY_TIPO_TURBINA[3]

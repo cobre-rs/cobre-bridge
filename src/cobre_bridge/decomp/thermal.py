@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.thermal import _SCHEMA_URL
+from cobre_bridge import cobre_schemas
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.temporal import hours_weighted as _hours_weighted
 
@@ -139,7 +139,10 @@ def convert_thermals(
                 },
             }
         )
-    return {"$schema": _SCHEMA_URL, "thermals": thermals}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/thermals.json"),
+        "thermals": thermals,
+    }
 
 
 #: The ``cost_per_mwh`` side-table schema — cost rides alongside the

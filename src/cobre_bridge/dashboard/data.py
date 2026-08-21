@@ -18,6 +18,11 @@ import polars as pl
 import pyarrow.parquet as pq
 
 from cobre_bridge.cobre_io import resolve_hydro_productivities
+from cobre_bridge.comparators.cobre_readers import (
+    read_cobre_line_bounds,
+    read_cobre_lines,
+    read_cobre_training_metadata,
+)
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.errors import CobreOutputError
 
@@ -132,7 +137,7 @@ def resolve_hydro_bus_id(hydro: dict, *, hydros_path: Path) -> int | None:
     Single implementation of the pre-0.13 top-level ``hydros.json``
     ``bus_id`` -> 0.13 ``unit_groups[].bus_id`` relocation, shared by
     ``load_hydro_bus_map`` and ``load_hydro_metadata`` so the two never
-    disagree on a plant's bus (AC5).
+    disagree on a plant's bus.
 
     - Every plant either pipeline emits today carries exactly one distinct
       ``bus_id`` across its groups (cobre rule 41's mirror invariant) -- that
@@ -553,9 +558,7 @@ def load_temporal_context(case_dir: Path) -> TemporalContext:
         }
     )
 
-    lines_path = case_dir / "system" / "lines.json"
-    with lines_path.open() as f:
-        line_meta: list[dict] = json.load(f)["lines"]
+    line_meta: list[dict] = read_cobre_lines(case_dir / "output")
 
     return TemporalContext(
         config=config,
@@ -586,7 +589,7 @@ def load_entity_metadata(case_dir: Path) -> EntityMetadata:
     """Load entity name maps and hydro/thermal metadata dictionaries.
 
     ``hydro_bus_map`` is resolved once via :func:`load_hydro_bus_map` and
-    reused by :func:`load_hydro_metadata` (FINDING-5: both loaders resolve
+    reused by :func:`load_hydro_metadata` (both loaders resolve
     every plant's bus over the same ``system/hydros.json``; without sharing
     the map, an ambiguous plant's ``hydro-unit-groups-multi-bus`` warning
     fires twice per dashboard build instead of once).
@@ -722,10 +725,7 @@ def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
         pq.read_table(ih_path).to_pandas() if ih_path.exists() else pd.DataFrame()
     )
 
-    lb_path = case_dir / "constraints" / "line_bounds.parquet"
-    line_bounds = (
-        pq.read_table(lb_path).to_pandas() if lb_path.exists() else pd.DataFrame()
-    )
+    line_bounds = read_cobre_line_bounds(case_dir / "output").to_pandas()
     # ``block_id`` is non-null only on the absolute-MW per-block override rows
     # (the exchange factor lives there now), never on the stage-level base row.
     # Do not reconstruct a factor by dividing back through the base — that
@@ -943,7 +943,7 @@ def load_output_metadata(case_dir: Path) -> OutputMetadata:
             return {}
 
     return OutputMetadata(
-        training=_load_metadata("training"),
+        training=read_cobre_training_metadata(case_dir / "output"),
         simulation=_load_metadata("simulation"),
         policy=_load_metadata("policy"),
     )

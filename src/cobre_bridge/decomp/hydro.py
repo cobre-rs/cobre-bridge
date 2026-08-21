@@ -93,16 +93,15 @@ import pyarrow as pa
 from idecomp.decomp.modelos.dadger import ACALTEFE
 from inewave.newave import Hidr
 
-from cobre_bridge.converters.hydro import (
-    _KTURB_BY_TIPO_TURBINA,
-    _PRODUCTION_MODELS_SCHEMA_URL,
-    _SCHEMA_URL,
-    _fpha_efficiency,
-    build_mirror_unit_group,
-)
+from cobre_bridge import cobre_schemas
+from cobre_bridge.converters.hydro import build_mirror_unit_group
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
 from cobre_bridge.decomp.group_bounds import GroupBoundEntry
-from cobre_bridge.productivity import equivalent_productivity_from_coeffs
+from cobre_bridge.productivity import (
+    KTURB_BY_TIPO_TURBINA,
+    equivalent_productivity_from_coeffs,
+    fpha_efficiency,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -415,7 +414,7 @@ def _conjunto_head_corrected_ac_adjusted(
     base ``hidr`` ``queda_nominal_conjunto_{conjunto_index}``
     (:func:`_conjunto_h_nom`) — **not** the ``AC ALTEFE`` override, which has
     no idecomp value accessor — and ``k_turb`` is looked up from
-    ``_KTURB_BY_TIPO_TURBINA`` by the plant's ``tipo_turbina`` (0.5 for
+    ``KTURB_BY_TIPO_TURBINA`` by the plant's ``tipo_turbina`` (0.5 for
     Francis/Pelton, 0.2 for Kaplan). No TEIF/IP availability derating is
     applied (validated worse: 8.2% vs 1.3% median error vs ``Qtur Maxima`` —
     availability lives on the MP×FD/B8 path instead) and no
@@ -434,7 +433,7 @@ def _conjunto_head_corrected_ac_adjusted(
     )
     h_nom = _conjunto_h_nom(hreg, conjunto_index)
     tipo_turbina = int(hreg.get("tipo_turbina", 0) or 0)
-    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+    kturb = KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
     affinity = _conjunto_affinity_flow(n_q, h_nom, h_op, kturb)
     return min(affinity, n_p / rho_eq)
 
@@ -459,7 +458,7 @@ def _head_corrected_max_turbined_ac_adjusted(
     doing so would cap the power per conjunto, which only the split plant's
     own groups do. Instead it re-derives each conjunto's affinity flow the
     same way (``h_nom`` from :func:`_conjunto_h_nom`, ``k_turb`` from
-    ``_KTURB_BY_TIPO_TURBINA``, no TEIF/IP, no ``tipo_regulacao`` branch —
+    ``KTURB_BY_TIPO_TURBINA``, no TEIF/IP, no ``tipo_regulacao`` branch —
     see :func:`_conjunto_head_corrected_ac_adjusted`'s docstring for the
     validated rationale) and sums both the affinity flow and the installed
     power across conjuntos before taking the single min. *h_op* and *rho_eq*
@@ -470,7 +469,7 @@ def _head_corrected_max_turbined_ac_adjusted(
     if n_sets is None:
         n_sets = int(hreg["numero_conjuntos_maquinas"])
     tipo_turbina = int(hreg.get("tipo_turbina", 0) or 0)
-    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+    kturb = KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
     sum_affinity = 0.0
     sum_p = 0.0
     for i in range(1, n_sets + 1):
@@ -915,7 +914,7 @@ def convert_hydros(
             entry["specific_productivity_mw_per_m3s_per_m"] = rho_esp
             entry["efficiency"] = {
                 "type": "constant",
-                "value": _fpha_efficiency(rho_esp, name),
+                "value": fpha_efficiency(rho_esp, name),
             }
             # Inline constant tailrace = mean canal de fuga: cobre's FPHA
             # fallback for a plant whose tailrace_curves.parquet family is
@@ -983,7 +982,10 @@ def convert_hydros(
             n_altefe,
         )
 
-    return {"$schema": _SCHEMA_URL, "hydros": hydros}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/hydros.json"),
+        "hydros": hydros,
+    }
 
 
 def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> float:
@@ -1525,4 +1527,7 @@ def convert_production_models(
                 "stage_ranges": [stage_range],
             }
         )
-    return {"$schema": _PRODUCTION_MODELS_SCHEMA_URL, "production_models": models}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/hydro_production_models.json"),
+        "production_models": models,
+    }

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.stochastic import _LOAD_FACTORS_SCHEMA_URL
+from cobre_bridge import cobre_schemas
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -182,4 +182,7 @@ def convert_load_factors(
             }
         )
 
-    return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": entries}
+    return {
+        "$schema": cobre_schemas.schema_url_for("scenarios/load_factors.json"),
+        "load_factors": entries,
+    }

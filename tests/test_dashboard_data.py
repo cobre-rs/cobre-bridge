@@ -94,6 +94,28 @@ def _tree_policy_graph() -> dict[str, Any]:
     }
 
 
+class TestLoadTemporalContextAbsentLinesJson:
+    """ticket-029: ``lines.json`` degrades to an empty line set, not a crash.
+
+    Before ticket-029 routed this read through
+    ``cobre_readers.read_cobre_lines``, an absent ``system/lines.json``
+    crashed ``load_temporal_context`` with an unguarded ``json.load`` on a
+    missing path -- the one sanctioned behaviour change the reader-failure
+    contract makes (an input that previously had no valid output)."""
+
+    def test_absent_lines_json_yields_empty_line_meta(self, tmp_path: Path) -> None:
+        case_dir = tmp_path / "case"
+        _write_json(case_dir / "config.json", {"discount_rate": 0.1})
+        _write_json(
+            case_dir / "stages.json",
+            {"stages": [{"id": 0, "blocks": [{"id": 0, "hours": 730.0}]}]},
+        )
+
+        context = load_temporal_context(case_dir)
+
+        assert context.line_meta == []
+
+
 class TestTreeAveragesDiagnosticEmission:
     """AC #1/#2: emit on a non-empty ``nodes`` list; silent otherwise."""
 

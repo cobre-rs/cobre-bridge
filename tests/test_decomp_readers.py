@@ -41,8 +41,8 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_costs,
     read_relato_expected_cost,
     read_relato_membership,
-    reconcile_kdollars_to_reais,
 )
+from cobre_bridge.comparators.decomp_results import reconcile_kdollars_to_reais
 
 _REDUCED_DECK = Path("example/decomp-mar-26-rv2-reduced")
 

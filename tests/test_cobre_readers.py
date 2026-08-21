@@ -33,10 +33,13 @@ from cobre_bridge.comparators.cobre_readers import (
     read_cobre_hydro_metadata,
     read_cobre_hydro_per_stage_bounds,
     read_cobre_hydro_withdrawal,
+    read_cobre_line_bounds,
     read_cobre_line_means,
+    read_cobre_lines,
     read_cobre_lp_max_generation,
     read_cobre_thermal_means,
     read_cobre_thermal_metadata,
+    read_cobre_training_metadata,
 )
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.errors import CobrePartitionMissingError
@@ -314,7 +317,10 @@ class TestCliExitCodeTwoOnCobreReadError:
             raise CobreReadError("Failed to aggregate hydro simulation data: /x/hydros")
 
         with (
-            patch("cobre_bridge.cli._load_lines_json", return_value=[]),
+            patch(
+                "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
+                return_value=[],
+            ),
             patch(
                 "cobre_bridge.case.NewaveCase.from_directory",
                 return_value=MagicMock(),
@@ -1515,3 +1521,125 @@ class TestBusSumMatchesPlantTotalCrossCheck:
         assert bus6 == pytest.approx((1500.0 + 5000.0) / 300.0)
         assert bus7_rows.height == 1
         assert bus7_rows["hydro_gen_mw_p50"][0] is None
+
+
+# ---------------------------------------------------------------------------
+# ticket-029: read_cobre_lines / read_cobre_line_bounds /
+# read_cobre_training_metadata -- the three previously-missing readers that
+# every ad-hoc lines.json / line_bounds.parquet / training/metadata.json
+# site now routes through.
+# ---------------------------------------------------------------------------
+
+
+class TestReadCobreLines:
+    def test_present_returns_lines_list(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        system_dir = tmp_path / "system"
+        system_dir.mkdir(parents=True)
+        lines = [{"id": 0, "source_bus_id": 0, "target_bus_id": 1}]
+        (system_dir / "lines.json").write_text(json.dumps({"lines": lines}))
+
+        assert read_cobre_lines(out) == lines
+
+    def test_absent_returns_empty_list(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        out.mkdir()
+
+        assert read_cobre_lines(out) == []
+
+    def test_corrupt_json_raises_cobrereaderror(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        system_dir = tmp_path / "system"
+        system_dir.mkdir(parents=True)
+        (system_dir / "lines.json").write_text("not valid json{")
+
+        with pytest.raises(CobreReadError, match="lines.json"):
+            read_cobre_lines(out)
+
+
+class TestReadCobreLineBounds:
+    def test_present_returns_raw_frame(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        constraints_dir = tmp_path / "constraints"
+        constraints_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "line_id": pa.array([0], type=pa.int32()),
+                    "stage_id": pa.array([0], type=pa.int32()),
+                    "block_id": pa.array([None], type=pa.int32()),
+                    "direct_mw": pa.array([1200.0], type=pa.float64()),
+                    "reverse_mw": pa.array([800.0], type=pa.float64()),
+                }
+            ),
+            constraints_dir / "line_bounds.parquet",
+        )
+
+        df = read_cobre_line_bounds(out)
+
+        assert not df.is_empty()
+        assert df["direct_mw"][0] == 1200.0
+        assert df["reverse_mw"][0] == 800.0
+
+    def test_absent_returns_empty_frame(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        out.mkdir()
+
+        df = read_cobre_line_bounds(out)
+
+        assert df.is_empty()
+        assert {"line_id", "stage_id", "block_id", "direct_mw", "reverse_mw"}.issubset(
+            set(df.columns)
+        )
+
+    def test_corrupt_parquet_raises_cobrereaderror(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        _write_corrupt_parquet(tmp_path / "constraints" / "line_bounds.parquet")
+
+        with pytest.raises(CobreReadError, match="line_bounds.parquet"):
+            read_cobre_line_bounds(out)
+
+
+class TestReadCobreTrainingMetadata:
+    def test_present_returns_dict(self, tmp_path: Path) -> None:
+        out = tmp_path / "case" / "output"
+        training_dir = out / "training"
+        training_dir.mkdir(parents=True)
+        (training_dir / "metadata.json").write_text(
+            json.dumps({"version": "0.14.3", "duration_seconds": 12.0})
+        )
+
+        assert read_cobre_training_metadata(out) == {
+            "version": "0.14.3",
+            "duration_seconds": 12.0,
+        }
+
+    def test_absent_returns_empty_dict(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        out.mkdir()
+
+        assert read_cobre_training_metadata(out) == {}
+
+    def test_unified_path_rule_resolves_the_case_dir_parent_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """A case layout with no doubled ``output/`` segment (the shape
+        ``export._read_cobre_version`` used to resolve via its own fallback
+        but ``dashboard.load_output_metadata`` could not, CMP-11) still
+        resolves through the one unified candidate search."""
+        case_dir = tmp_path / "case"
+        training_dir = case_dir / "training"
+        training_dir.mkdir(parents=True)
+        (training_dir / "metadata.json").write_text(json.dumps({"version": "0.14.3"}))
+
+        assert read_cobre_training_metadata(case_dir / "output") == {
+            "version": "0.14.3"
+        }
+
+    def test_corrupt_json_degrades_to_empty_dict(self, tmp_path: Path) -> None:
+        out = tmp_path / "case" / "output"
+        training_dir = out / "training"
+        training_dir.mkdir(parents=True)
+        (training_dir / "metadata.json").write_text("not valid json{")
+
+        assert read_cobre_training_metadata(out) == {}

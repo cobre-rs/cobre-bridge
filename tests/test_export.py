@@ -74,7 +74,7 @@ def test_write_artifacts_emits_expected_files(tmp_path: Path) -> None:
     write_artifacts(
         dataset,
         command="compare newave",
-        newave_dir=nw,
+        source_dir=nw,
         cobre_output_dir=cb,
         tolerance=1e-2,
         out_dir=out,
@@ -95,7 +95,7 @@ def test_manifest_lists_emitted_artifacts(tmp_path: Path) -> None:
     manifest = write_artifacts(
         dataset,
         command="compare newave",
-        newave_dir=tmp_path / "newave",
+        source_dir=tmp_path / "newave",
         cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,
         out_dir=out,
@@ -112,6 +112,38 @@ def test_manifest_lists_emitted_artifacts(tmp_path: Path) -> None:
     assert manifest.top_divergences == dataset.metadata["top_divergences"]
 
 
+def test_manifest_carries_source_dir_input_files_and_diagnostics(
+    tmp_path: Path,
+) -> None:
+    """``comparison.json`` records ``source_dir`` (not ``newave_dir``) plus the
+    hashed input files and diagnostics threaded through from the caller."""
+    dataset = _make_dataset()
+    nw = tmp_path / "newave"
+    out = tmp_path / "artifacts"
+    input_files = [
+        {"field": "dger", "path": "dger.dat", "sha256": "deadbeef", "size_bytes": 4}
+    ]
+    diagnostics = [{"code": "x", "severity": "warning", "category": "Test"}]
+
+    write_artifacts(
+        dataset,
+        command="compare newave",
+        source_dir=nw,
+        cobre_output_dir=tmp_path / "output",
+        tolerance=1e-2,
+        out_dir=out,
+        formats=["json"],
+        input_files=input_files,
+        diagnostics=diagnostics,
+    )
+
+    payload = json.loads((out / "comparison.json").read_text(encoding="utf-8"))
+    assert payload["source_dir"] == str(nw)
+    assert "newave_dir" not in payload
+    assert payload["input_files"] == input_files
+    assert payload["diagnostics"] == diagnostics
+
+
 def test_unknown_format_raises_valueerror(tmp_path: Path) -> None:
     dataset = _make_dataset()
 
@@ -119,7 +151,7 @@ def test_unknown_format_raises_valueerror(tmp_path: Path) -> None:
         write_artifacts(
             dataset,
             command="compare newave",
-            newave_dir=tmp_path / "newave",
+            source_dir=tmp_path / "newave",
             cobre_output_dir=tmp_path / "output",
             tolerance=1e-2,
             out_dir=tmp_path / "artifacts",
@@ -162,7 +194,7 @@ def test_write_artifacts_csv_format(tmp_path: Path) -> None:
     manifest = write_artifacts(
         dataset,
         command="compare bounds",
-        newave_dir=tmp_path / "newave",
+        source_dir=tmp_path / "newave",
         cobre_output_dir=tmp_path / "output",
         tolerance=1.0,
         out_dir=out,
@@ -183,7 +215,7 @@ def test_write_artifacts_roundtrip_reload(tmp_path: Path) -> None:
     write_artifacts(
         dataset,
         command="compare newave",
-        newave_dir=tmp_path / "newave",
+        source_dir=tmp_path / "newave",
         cobre_output_dir=tmp_path / "output",
         tolerance=1e-2,
         out_dir=out,

@@ -20,12 +20,9 @@ from pathlib import Path
 import pyarrow as pa
 from idecomp.decomp import Vazoes
 
+from cobre_bridge import cobre_schemas, emission_checks
 from cobre_bridge import diagnostics as dx
-from cobre_bridge import emission_checks
 from cobre_bridge.case_writer import CaseWriter
-from cobre_bridge.converters.constraints import (
-    _SCHEMA_URL as _GENERIC_CONSTRAINTS_SCHEMA_URL,
-)
 from cobre_bridge.decomp import anticipated as anticipated_conv
 from cobre_bridge.decomp import bounds as bounds_conv
 from cobre_bridge.decomp import (
@@ -60,9 +57,7 @@ from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
 from cobre_bridge.pipeline import (
     ClearedArtifacts,
     ConversionReport,
-    _clear_dst_contents,
-    _finalize_diagnostics,
-    _WarningCollector,
+    clear_dst_contents,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -593,7 +588,7 @@ def convert_decomp_case(
 
     Mirrors the NEWAVE twin ``convert_newave_case``'s return contract: wraps
     the conversion in a top-level :func:`cobre_bridge.diagnostics.collect`
-    sink and a package-logger ``_WarningCollector`` so every structured
+    sink and a package-logger ``dx.WarningCollector`` so every structured
     ``dx.emit`` finding *and* every residual ``logger.warning`` string is
     captured, then returns them as one de-duplicated
     :class:`~cobre_bridge.pipeline.ConversionReport`.
@@ -626,7 +621,7 @@ def convert_decomp_case(
     """
     # This refusal must run before the clearing try/except below: it is a
     # "do not touch dst" guard, not a mid-write failure, so it must never
-    # reach ``_clear_dst_contents`` and delete a pre-existing, unrelated case
+    # reach ``clear_dst_contents`` and delete a pre-existing, unrelated case
     # (mirrors the source model's own NEWAVE-twin ordering, which performs
     # this check ahead of its own write/clear try block).
     if dst.exists() and any(dst.iterdir()):
@@ -639,9 +634,9 @@ def convert_decomp_case(
         # does not reproduce (post_study_stages.json, boundary/) cannot
         # survive. Skipped under a dry run, which never mutates dst.
         if not dry_run:
-            _clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
+            clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
 
-    collector = _WarningCollector()
+    collector = dx.WarningCollector()
     pkg_logger = logging.getLogger("cobre_bridge")
     pkg_logger.addHandler(collector)
     try:
@@ -663,11 +658,11 @@ def convert_decomp_case(
         # Skipped under a dry run: nothing was written, and dst may be a
         # pre-existing populated directory the user never asked to clear.
         if not dry_run:
-            _clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
+            clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
         raise
     finally:
         pkg_logger.removeHandler(collector)
-    report.diagnostics = _finalize_diagnostics(collected, collector.messages)
+    report.diagnostics = dx.finalize_diagnostics(collected, collector.messages)
     # Backward-compatible flat WARNING strings derived from the diagnostics.
     report.warnings = [
         d.summary for d in report.diagnostics if d.severity is dx.Severity.WARNING
@@ -843,6 +838,7 @@ def _convert_decomp_case_impl(
     # it with the left/right temporal-boundary arrays, and those need the thermal
     # ids assigned when thermals.json is built.
     initial_conditions_doc: dict = {
+        "$schema": cobre_schemas.schema_url_for("initial_conditions.json"),
         "storage": hydro_conv.convert_initial_storage(
             case, id_map, effective=effective
         ),
@@ -1364,7 +1360,9 @@ def _convert_decomp_case_impl(
         writer.write_json(
             "constraints/generic_constraints.json",
             {
-                "$schema": _GENERIC_CONSTRAINTS_SCHEMA_URL,
+                "$schema": cobre_schemas.schema_url_for(
+                    "constraints/generic_constraints.json"
+                ),
                 "constraints": generic_constraints,
             },
         )

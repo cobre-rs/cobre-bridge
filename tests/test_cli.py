@@ -1598,15 +1598,15 @@ class TestCliInProcess:
         assert len(manifest.diagnostics) == 1
 
     def test_clear_dst_removes_manifest(self, tmp_path: Path) -> None:
-        """``_clear_dst_contents`` removes a stale top-level manifest on --force."""
-        from cobre_bridge.pipeline import NEWAVE_CLEARED_ARTIFACTS, _clear_dst_contents
+        """``clear_dst_contents`` removes a stale top-level manifest on --force."""
+        from cobre_bridge.pipeline import NEWAVE_CLEARED_ARTIFACTS, clear_dst_contents
 
         dst = tmp_path / "dst"
         dst.mkdir()
         manifest_path = dst / "conversion_manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
 
-        _clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
+        clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
 
         assert not manifest_path.exists()
 
@@ -3331,17 +3331,26 @@ class TestCompareDatasetWiring:
     def _patch_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
         from cobre_bridge.comparators.results import PercentileData
+        from tests.conftest import make_nw_files
 
+        # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
+        # MagicMock attribute) — ``hash_input_files`` reflects over it via
+        # ``dataclasses.fields``, which raises on a non-dataclass. The paths
+        # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
             "cobre_bridge.case.NewaveCase.from_directory",
-            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+            classmethod(
+                lambda cls, _dir: MagicMock(
+                    id_map=MagicMock(), files=make_nw_files(Path("nw"))
+                )
+            ),
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.cli._load_lines_json",
+            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
             lambda _dir: [],
         )
         # ``compare_results`` now returns the canonical ``ComparisonDataset``;
@@ -3650,16 +3659,26 @@ class TestCompareJson:
 
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Patch the shared context loaders (case, alignment, lines.json)."""
+        from tests.conftest import make_nw_files
+
+        # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
+        # MagicMock attribute) — ``hash_input_files`` reflects over it via
+        # ``dataclasses.fields``, which raises on a non-dataclass. The paths
+        # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
             "cobre_bridge.case.NewaveCase.from_directory",
-            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+            classmethod(
+                lambda cls, _dir: MagicMock(
+                    id_map=MagicMock(), files=make_nw_files(Path("nw"))
+                )
+            ),
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.cli._load_lines_json",
+            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
             lambda _dir: [],
         )
 
@@ -4591,16 +4610,26 @@ class TestCompareConfigEnvPrecedence:
 
     def _stub_readers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stub the heavy the-source-model / Cobre readers shared by both commands."""
+        from tests.conftest import make_nw_files
+
+        # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
+        # MagicMock attribute) — ``hash_input_files`` reflects over it via
+        # ``dataclasses.fields``, which raises on a non-dataclass. The paths
+        # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
             "cobre_bridge.case.NewaveCase.from_directory",
-            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+            classmethod(
+                lambda cls, _dir: MagicMock(
+                    id_map=MagicMock(), files=make_nw_files(Path("nw"))
+                )
+            ),
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.cli._load_lines_json",
+            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
             lambda _dir: [],
         )
 

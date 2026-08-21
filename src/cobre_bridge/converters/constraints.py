@@ -24,6 +24,7 @@ from typing import Any, NamedTuple
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
@@ -42,11 +43,6 @@ from cobre_bridge.plants import active_hydros
 from cobre_bridge.productivity import compute_productivity, stored_energy_productivity
 
 _LOG = logging.getLogger(__name__)
-
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/generic_constraints.schema.json"
-)
 
 
 def _vminop_energy_factor(start_year: int, start_month: int, stage: int) -> float:
@@ -711,7 +707,7 @@ def convert_vminop_constraints(
         return None
 
     constraints_dict = {
-        "$schema": _SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("constraints/generic_constraints.json"),
         "constraints": result.constraints,
     }
 

@@ -8,8 +8,10 @@ from cobre_bridge.diagnostics import (
     Diagnostic,
     DiagnosticTable,
     Severity,
+    WarningCollector,
     collect,
     emit,
+    finalize_diagnostics,
     format_stage_ranges,
 )
 
@@ -113,3 +115,68 @@ class TestToDict:
             summary="s",
         )
         assert diag.to_dict()["table"] is None
+
+
+class TestWarningCollector:
+    def test_captures_warning_and_above(self) -> None:
+        logger = logging.getLogger("cobre_bridge.diagnostics.fake")
+        collector = WarningCollector()
+        logger.addHandler(collector)
+        try:
+            logger.warning("degraded input A")
+            logger.error("degraded input B")
+        finally:
+            logger.removeHandler(collector)
+        assert collector.messages == ["degraded input A", "degraded input B"]
+
+    def test_ignores_info_and_below(self) -> None:
+        logger = logging.getLogger("cobre_bridge.diagnostics.fake2")
+        logger.setLevel(logging.DEBUG)
+        collector = WarningCollector()
+        logger.addHandler(collector)
+        try:
+            logger.info("not a degradation")
+            logger.debug("also not a degradation")
+        finally:
+            logger.removeHandler(collector)
+        assert collector.messages == []
+
+
+class TestFinalizeDiagnostics:
+    def _diag(self, code: str = "x", summary: str = "something happened") -> Diagnostic:
+        return Diagnostic(
+            code=code,
+            severity=Severity.WARNING,
+            category="Cat",
+            title="Title",
+            summary=summary,
+        )
+
+    def test_dedups_structured_diagnostics_by_code_and_summary(self) -> None:
+        result = finalize_diagnostics([self._diag(), self._diag()], [])
+        assert len(result) == 1
+
+    def test_keeps_diagnostics_that_differ_in_code_or_summary(self) -> None:
+        result = finalize_diagnostics(
+            [self._diag(code="a"), self._diag(code="b"), self._diag(summary="other")],
+            [],
+        )
+        assert len(result) == 3
+
+    def test_wraps_legacy_strings_as_warning_diagnostics(self) -> None:
+        result = finalize_diagnostics([], ["legacy warning one"])
+        assert len(result) == 1
+        assert result[0].code == "legacy-warning"
+        assert result[0].severity is Severity.WARNING
+        assert result[0].summary == "legacy warning one"
+
+    def test_dedups_legacy_strings_and_preserves_first_occurrence_order(self) -> None:
+        result = finalize_diagnostics(
+            [], ["first", "second", "first", "third", "second"]
+        )
+        assert [d.summary for d in result] == ["first", "second", "third"]
+
+    def test_structured_diagnostics_precede_legacy_strings(self) -> None:
+        result = finalize_diagnostics([self._diag()], ["legacy"])
+        assert result[0].code == "x"
+        assert result[1].code == "legacy-warning"

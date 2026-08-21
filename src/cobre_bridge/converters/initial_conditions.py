@@ -7,6 +7,7 @@ from datetime import date
 
 import pandas as pd
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.converters.hydro import read_cadastro
@@ -15,11 +16,6 @@ from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.plants import filling_hydro_codes
 
 _LOG = logging.getLogger(__name__)
-
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/initial_conditions.schema.json"
-)
 
 
 def _filling_row(exph_df: pd.DataFrame, code: int) -> pd.Series:
@@ -244,7 +240,7 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     past_anticipated_commitments.sort(key=lambda c: (c["thermal_id"], c["start_date"]))
 
     result: dict = {
-        "$schema": _SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("initial_conditions.json"),
         "storage": storage,
         "filling_storage": filling_storage,
     }

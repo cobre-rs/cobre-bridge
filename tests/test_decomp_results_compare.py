@@ -6036,7 +6036,16 @@ class TestCompareDecompCommand:
         from typer.testing import CliRunner
 
         from cobre_bridge.cli import app
+        from tests.conftest import make_decomp_case
 
+        # ``DecompCase.from_directory`` is re-invoked (for manifest hashing)
+        # after ``build_decomp_dataset`` is mocked away; give it a real
+        # ``DecompFiles`` dataclass instead of trying to discover a deck under
+        # the fake ``tmp_path``.
+        monkeypatch.setattr(
+            "cobre_bridge.decomp.case.DecompCase.from_directory",
+            classmethod(lambda cls, _dir: make_decomp_case(Path("decomp"))),
+        )
         resolved_dataset = dataset if dataset is not None else _fake_dataset()
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.build_decomp_dataset",

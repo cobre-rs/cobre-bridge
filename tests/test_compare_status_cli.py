@@ -92,15 +92,27 @@ def _empty_decomp_dataset() -> ComparisonDataset:
 
 
 def _patch_newave_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.conftest import make_nw_files
+
+    # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
+    # MagicMock attribute) — ``hash_input_files`` reflects over it via
+    # ``dataclasses.fields``, which raises on a non-dataclass. The paths
+    # need not exist: a missing file degrades to a ``None`` hash/size.
     monkeypatch.setattr(
         "cobre_bridge.case.NewaveCase.from_directory",
-        classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+        classmethod(
+            lambda cls, _dir: MagicMock(
+                id_map=MagicMock(), files=make_nw_files(Path("nw"))
+            )
+        ),
     )
     monkeypatch.setattr(
         "cobre_bridge.comparators.alignment.build_entity_alignment",
         lambda *a, **k: MagicMock(),
     )
-    monkeypatch.setattr("cobre_bridge.cli._load_lines_json", lambda _dir: [])
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.cobre_readers.read_cobre_lines", lambda _dir: []
+    )
 
 
 def _invoke_newave(
@@ -121,6 +133,15 @@ def _invoke_newave(
 def _invoke_decomp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dataset: ComparisonDataset
 ) -> Any:
+    from tests.conftest import make_decomp_case
+
+    # ``DecompCase.from_directory`` is re-invoked (for manifest hashing) after
+    # ``build_decomp_dataset`` is mocked away; give it a real ``DecompFiles``
+    # dataclass instead of trying to discover a deck under the fake ``tmp_path``.
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.case.DecompCase.from_directory",
+        classmethod(lambda cls, _dir: make_decomp_case(Path("decomp"))),
+    )
     monkeypatch.setattr(
         "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
         lambda *_args, **_kwargs: dataset,
