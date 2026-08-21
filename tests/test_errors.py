@@ -49,6 +49,14 @@ class TestDiagnosticFromException:
         assert diag.summary == "boom"
         assert diag.remediation is None
 
+    def test_diagnostic_from_plain_bridge_error_uses_the_base_fallback(self) -> None:
+        diag = diagnostic_from_exception(BridgeError("boom"), context="Conversion")
+        assert diag.code == "conversion-error"
+        assert diag.category == "Conversion failure"
+        assert diag.severity is Severity.ERROR
+        assert diag.remediation is None
+        assert diag.summary == "boom"
+
     def test_diagnostic_notes_list_location_attrs(self) -> None:
         exc = FieldParseError(
             "bad value",

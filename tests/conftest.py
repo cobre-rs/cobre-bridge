@@ -6,8 +6,9 @@ with paths under a tmp dir (no filesystem access). ``make_case`` wraps it in a
 slots, so a converter under test reads the supplied mock objects instead of
 parsing files. ``hydro_with_group`` builds a 0.13-shaped ``hydros.json`` hydro
 dict (no top-level ``bus_id``, one mirror ``unit_groups`` entry) for tests that
-hand-build a hydro fixture rather than calling a converter. Import them with
-``from tests.conftest import make_case``.
+hand-build a hydro fixture rather than calling a converter. ``_FakeDadger``
+is a decomp-side test double returning preset DataFrames for register
+accessors. Import them with ``from tests.conftest import make_case``.
 """
 
 from __future__ import annotations
@@ -258,3 +259,23 @@ def hydro_with_group(
     }
     hydro.update(extra)
     return hydro
+
+
+class _FakeDadger:
+    """Return a preset DataFrame (or ``None``) for each register accessor.
+
+    Shared across the decomp constraint-register and results-compare test
+    modules; import with ``from tests.conftest import _FakeDadger``.
+    """
+
+    def __init__(self, **frames: pd.DataFrame) -> None:
+        self._frames = frames
+
+    def __getattr__(self, name: str):  # noqa: ANN204 - test double
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def accessor(df: bool = True) -> pd.DataFrame | None:
+            return self._frames.get(name)
+
+        return accessor

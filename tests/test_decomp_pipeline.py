@@ -190,6 +190,38 @@ class TestPipeline:
         with pytest.raises(FileNotFoundError, match="caso.dat"):
             convert_decomp_case(tmp_path, tmp_path / "out")
 
+    def test_discover_decomp_files_no_caso_raises_source_file_error(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.errors import SourceFileError
+
+        with pytest.raises(SourceFileError) as excinfo:
+            discover_decomp_files(tmp_path)
+
+        exc = excinfo.value
+        assert isinstance(exc, FileNotFoundError)
+        assert exc.path == str(tmp_path)
+        assert exc.field == "caso.dat"
+        assert "caso.dat" in str(exc)
+
+    def test_discover_decomp_files_no_dadger_raises_source_file_error(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.errors import SourceFileError
+
+        (tmp_path / "caso.dat").write_text("rv0\n", encoding="latin-1")
+
+        with pytest.raises(SourceFileError) as excinfo:
+            discover_decomp_files(tmp_path)
+
+        exc = excinfo.value
+        assert isinstance(exc, FileNotFoundError)
+        assert exc.path == str(tmp_path)
+        assert exc.field == "dadger"
+        assert "no dadger* file found" in str(exc)
+
 
 class TestPhaseLabels:
     """ticket-004 (epic-02): ``DECOMP_CONVERSION_PHASE_LABELS`` + the

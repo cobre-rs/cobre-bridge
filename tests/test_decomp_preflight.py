@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 from idecomp.decomp.modelos.dadger import (
@@ -36,6 +38,7 @@ from cobre_bridge.decomp.preflight import (
     run_decomp_preflight,
 )
 from cobre_bridge.diagnostics import Severity
+from cobre_bridge.errors import FieldParseError
 from cobre_bridge.preflight import PreflightVerdict, optional_input_advisory
 from tests.test_decomp_cadastro import _FakeDadger
 from tests.test_decomp_constraint_registers import (
@@ -58,6 +61,74 @@ class TestDiscoveryFailure:
     def test_nothing_is_written(self, tmp_path: Path) -> None:
         run_decomp_preflight(tmp_path)
         assert list(tmp_path.iterdir()) == []
+
+
+def _decomp_files(tmp_path: Path) -> DecompFiles:
+    return DecompFiles(
+        revision="rv0",
+        dadger=tmp_path / "dadger.rv0",
+        vazoes=tmp_path / "vazoes.rv0",
+        hidr=tmp_path / "hidr.dat",
+        dadgnl=None,
+        renovaveis=None,
+        polinjus=None,
+        libs_restricao_eletrica=None,
+        cortesh=None,
+        cortes=None,
+    )
+
+
+class TestIdMapReconcile:
+    """The id-map ``except`` widens from ``ValueError`` alone to
+    ``(FieldParseError, ValueError)`` -- the typed ``from_dadger`` parse
+    boundary and the id map's own ``__post_init__`` invariant checks both
+    still degrade to a diagnosed ``WILL_NOT_CONVERT`` instead of crashing.
+    """
+
+    def _run_with_id_map_error(self, tmp_path: Path, error: Exception):
+        files = _decomp_files(tmp_path)
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "cobre_bridge.decomp.pipeline.discover_decomp_files",
+                    return_value=files,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "cobre_bridge.decomp.pipeline.Dadger.read",
+                    return_value=object(),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "cobre_bridge.decomp.id_map.DecompIdMap.from_dadger",
+                    side_effect=error,
+                )
+            )
+            return run_decomp_preflight(tmp_path)
+
+    def test_field_parse_error_reconciles_to_will_not_convert(
+        self, tmp_path: Path
+    ) -> None:
+        error = FieldParseError(
+            "the deck has no SB records; cannot build the id map",
+            field="SB register",
+        )
+        result = self._run_with_id_map_error(tmp_path, error)
+
+        assert result.verdict is PreflightVerdict.WILL_NOT_CONVERT
+        id_map_check = next(c for c in result.checks if c.label == "Entity id map")
+        assert id_map_check.passed is False
+        assert any(d.code == "source-field-parse" for d in result.diagnostics)
+
+    def test_post_init_value_error_is_still_caught(self, tmp_path: Path) -> None:
+        error = ValueError("bus codes must be strictly ascending; got (2, 1)")
+        result = self._run_with_id_map_error(tmp_path, error)
+
+        assert result.verdict is PreflightVerdict.WILL_NOT_CONVERT
+        id_map_check = next(c for c in result.checks if c.label == "Entity id map")
+        assert id_map_check.passed is False
 
 
 class TestOptionalInputAdvisory:

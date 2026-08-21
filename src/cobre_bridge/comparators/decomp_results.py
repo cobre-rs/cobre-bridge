@@ -77,6 +77,7 @@ from cobre_bridge.comparators.decomp_readers import (
 )
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.errors import FieldParseError
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
@@ -890,7 +891,7 @@ def _build_line_id_map(decomp_dir: Path) -> DecompIdMap | None:
         files = discover_decomp_files(decomp_dir)
         dadger = Dadger.read(str(files.dadger))
         return DecompIdMap.from_dadger(dadger)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, FieldParseError) as exc:
         _LOG.info("No deck available for line alignment: %s", exc)
         return None
 
@@ -2474,7 +2475,7 @@ def _decomp_constraint_context(decomp_dir: Path) -> _DecompConstraintContext | N
             census=read_constraints(dadger),
             id_map=DecompIdMap.from_dadger(dadger),
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, FieldParseError) as exc:
         _LOG.info(
             "No deck available for the DECOMP-side generic-constraint LHS "
             "derivation: %s",

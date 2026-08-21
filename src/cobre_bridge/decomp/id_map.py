@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cobre_bridge.errors import FieldParseError
+
 if TYPE_CHECKING:
     from idecomp.decomp import Dadger
 
@@ -57,7 +59,10 @@ class DecompIdMap:
         """Build the map from a deck's ``SB`` + ``UH`` + ``CT`` records."""
         sb = dadger.sb(df=True)
         if sb is None or sb.empty:
-            raise ValueError("the deck has no SB records; cannot build the id map")
+            raise FieldParseError(
+                "the deck has no SB records; cannot build the id map",
+                field="SB register",
+            )
         rows = sorted(
             (int(r["codigo_submercado"]), str(r["nome_submercado"]).strip())
             for _, r in sb.iterrows()

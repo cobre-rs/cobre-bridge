@@ -55,6 +55,7 @@ from cobre_bridge.decomp.scalar_parameters import (
     build_decomp_scalar_parameters,
     write_scalar_parameters,
 )
+from cobre_bridge.errors import SourceFileError
 from cobre_bridge.pipeline import (
     ClearedArtifacts,
     ConversionReport,
@@ -176,7 +177,11 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     """Resolve the deck files via ``caso.dat`` → the revision index file."""
     caso = src / "caso.dat"
     if not caso.is_file():
-        raise FileNotFoundError(f"{caso} not found; not a deck directory")
+        raise SourceFileError(
+            f"{caso} not found; not a deck directory",
+            path=str(src),
+            field="caso.dat",
+        )
     revision = caso.read_text(encoding="latin-1").split()[0]
 
     names: list[str] = []
@@ -204,7 +209,11 @@ def discover_decomp_files(src: Path) -> DecompFiles:
         if matches:
             return matches[0]
         if required:
-            raise FileNotFoundError(f"no {prefix}* file found in {src}")
+            raise SourceFileError(
+                f"no {prefix}* file found in {src}",
+                path=str(src),
+                field=prefix,
+            )
         return None
 
     dadger = find("dadger", required=True)

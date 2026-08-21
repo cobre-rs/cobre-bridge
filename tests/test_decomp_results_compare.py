@@ -88,7 +88,10 @@ from cobre_bridge.decomp.constraint_registers import (
     ConstraintTerm,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
+from cobre_bridge.decomp.pipeline import DecompFiles
+from cobre_bridge.errors import FieldParseError
 from cobre_bridge.verdict import decomp_dataset_summary
+from tests.conftest import _FakeDadger as _ConstraintFakeDadger
 
 
 def _source_frame() -> pl.DataFrame:
@@ -648,6 +651,37 @@ def _decomp_id_map_three_subsystems() -> DecompIdMap:
     return DecompIdMap(bus_codes=(1, 2, 3), bus_names=("SE", "S", "NE"))
 
 
+def _decomp_files_stub(tmp_path: Path) -> DecompFiles:
+    return DecompFiles(
+        revision="rv0",
+        dadger=tmp_path / "dadger.rv0",
+        vazoes=tmp_path / "vazoes.rv0",
+        hidr=tmp_path / "hidr.dat",
+        dadgnl=None,
+        renovaveis=None,
+        polinjus=None,
+        libs_restricao_eletrica=None,
+        cortesh=None,
+        cortes=None,
+    )
+
+
+def _patch_discoverable_deck_with_no_sb(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Make deck discovery and ``Dadger.read`` succeed but hand back a deck
+    with no ``SB`` register, so ``DecompIdMap.from_dadger`` reaches its real
+    ``FieldParseError`` parse-boundary raise (rather than the discovery
+    failure the bare-``tmp_path`` tests exercise)."""
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.pipeline.discover_decomp_files",
+        lambda _src: _decomp_files_stub(tmp_path),
+    )
+    monkeypatch.setattr(
+        "idecomp.decomp.Dadger.read", lambda _path: _ConstraintFakeDadger()
+    )
+
+
 def _line_entry(
     line_id: int,
     source_bus_id: int,
@@ -1027,6 +1061,17 @@ class TestBuildLineIdMap:
         """A bare directory (no ``caso.dat``) must degrade to ``None``, not
         raise -- every other level's own ``build_decomp_dataset`` fixture
         exercises exactly this directory shape."""
+        assert _build_line_id_map(tmp_path) is None
+
+    def test_returns_none_when_the_deck_has_no_sb_records(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A discoverable, readable deck whose ``SB`` register is absent
+        raises the typed parse-boundary ``FieldParseError`` from
+        ``DecompIdMap.from_dadger`` -- the Network tab's id map must still
+        degrade to ``None`` instead of propagating it."""
+        _patch_discoverable_deck_with_no_sb(monkeypatch, tmp_path)
+
         assert _build_line_id_map(tmp_path) is None
 
 
@@ -5104,6 +5149,16 @@ class TestDecompConstraintContext:
     def test_returns_none_when_the_directory_has_no_deck(self, tmp_path: Path) -> None:
         assert _decomp_constraint_context(tmp_path) is None
 
+    def test_returns_none_when_the_deck_has_no_sb_records(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Mirrors :class:`TestBuildLineIdMap`'s reconcile case: a
+        discoverable, readable deck with no ``SB`` register still degrades
+        the Constraints tab's DECOMP-side overlay to ``None``."""
+        _patch_discoverable_deck_with_no_sb(monkeypatch, tmp_path)
+
+        assert _decomp_constraint_context(tmp_path) is None
+
 
 class TestStageFrameToLookup:
     """`_stage_frame_to_lookup`: one `dec_oper_*` column -> {(code, stage):
@@ -5883,6 +5938,32 @@ class TestCompareDecompCommand:
     ) -> None:
         def _boom(*_args: object, **_kwargs: object) -> ComparisonDataset:
             raise FileNotFoundError("dec_oper_sist.csv not found")
+
+        from typer.testing import CliRunner
+
+        from cobre_bridge.cli import app
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset", _boom
+        )
+        result = CliRunner().invoke(
+            app, ["compare", "decomp", str(tmp_path), str(tmp_path)]
+        )
+        assert result.exit_code == 2
+
+    def test_field_parse_error_from_dataset_build_exits_two(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The mandatory id-map step inside ``build_decomp_dataset`` can now
+        raise the typed ``FieldParseError`` (a malformed deck with no ``SB``
+        register) -- the handler must still route it to the clean exit-2
+        diagnostic instead of an uncaught traceback."""
+
+        def _boom(*_args: object, **_kwargs: object) -> ComparisonDataset:
+            raise FieldParseError(
+                "the deck has no SB records; cannot build the id map",
+                field="SB register",
+            )
 
         from typer.testing import CliRunner
 

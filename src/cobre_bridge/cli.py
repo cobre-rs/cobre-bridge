@@ -1782,7 +1782,7 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
     from cobre_bridge.comparators.decomp_results import build_decomp_dataset
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.verdict import compare_status
-    from cobre_bridge.errors import CobrePartitionMissingError
+    from cobre_bridge.errors import CobrePartitionMissingError, FieldParseError
 
     # Resolved before the read (unlike the pre-dataset ordering) so
     # ``build_decomp_dataset`` below gets a concrete tolerance rather than the
@@ -1803,6 +1803,7 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
         except (
             CobreReadError,
             CobrePartitionMissingError,
+            FieldParseError,
             FileNotFoundError,
             ValueError,
         ) as exc:

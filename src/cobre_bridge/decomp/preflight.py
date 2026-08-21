@@ -27,7 +27,7 @@ from idecomp.decomp.modelos import dadger as _dadger_models
 from cobre_bridge.decomp import constraint_registers
 from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
 from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
-from cobre_bridge.errors import diagnostic_from_exception
+from cobre_bridge.errors import FieldParseError, diagnostic_from_exception
 from cobre_bridge.preflight import (
     CheckItem,
     PreflightResult,
@@ -520,8 +520,9 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
 
     try:
         id_map = DecompIdMap.from_dadger(dadger)
-    except ValueError as exc:
+    except (FieldParseError, ValueError) as exc:
         checks.append(CheckItem(label="Entity id map", passed=False, detail=str(exc)))
+        diagnostics.append(diagnostic_from_exception(exc, context=_CONTEXT))
         return PreflightResult(
             verdict=PreflightVerdict.WILL_NOT_CONVERT,
             diagnostics=diagnostics,

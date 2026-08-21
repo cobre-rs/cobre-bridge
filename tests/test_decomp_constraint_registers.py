@@ -24,6 +24,7 @@ from cobre_bridge.decomp.constraints import emit_re_generics, emit_rhq_rhv_gener
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.diagnostics import Severity
+from tests.conftest import _FakeDadger
 
 
 def _stage(index: int, n_blocks: int) -> OperativeStage:
@@ -34,22 +35,6 @@ def _stage(index: int, n_blocks: int) -> OperativeStage:
         season_id=6,
         block_hours=tuple(168.0 / n_blocks for _ in range(n_blocks)),
     )
-
-
-class _FakeDadger:
-    """Return a preset DataFrame (or ``None``) for each register accessor."""
-
-    def __init__(self, **frames: pd.DataFrame) -> None:
-        self._frames = frames
-
-    def __getattr__(self, name: str):  # noqa: ANN204 - test double
-        if name.startswith("_"):
-            raise AttributeError(name)
-
-        def accessor(df: bool = True) -> pd.DataFrame | None:
-            return self._frames.get(name)
-
-        return accessor
 
 
 def _decl(*rows: tuple[int, int, int]) -> pd.DataFrame:
