@@ -28,6 +28,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.decomp.fcf import _patch_policy_boundary, import_boundary_fcf
 from cobre_bridge.decomp.fcf.mapper import MappingResult
 from tests._fcf_fixtures import (
@@ -131,7 +132,7 @@ def test_patch_policy_boundary_preserves_other_sections(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    _patch_policy_boundary(config_path, source_stage=10)
+    _patch_policy_boundary(CaseWriter(tmp_path), source_stage=10)
 
     patched_text = config_path.read_text(encoding="utf-8")
     patched = json.loads(patched_text)

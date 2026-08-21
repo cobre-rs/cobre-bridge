@@ -12,18 +12,17 @@ boundaries), no longer deferred.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 from idecomp.decomp import Vazoes
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge import emission_checks
+from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.converters.constraints import (
     _SCHEMA_URL as _GENERIC_CONSTRAINTS_SCHEMA_URL,
 )
@@ -752,32 +751,10 @@ def _convert_decomp_case_impl(
     if not dry_run:
         dst.mkdir(parents=True, exist_ok=True)
 
-    # Every output path is routed through ``_write_json`` / ``_write_parquet`` so
-    # the would-write listing and the dry-run gate live in exactly one place each,
-    # rather than guarding ~24 individual write sites. Local closures (not module-
-    # level helpers) so each carries this call's own *dry_run* and *would_write*
-    # without threading them through every call site.
-    would_write: list[Path] = []
-
-    def _write_json(path: Path, data: dict) -> None:
-        would_write.append(path)
-        if dry_run:
-            _LOG.debug("would write %s", path)
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-
-    def _write_parquet(path: Path, table: pa.Table) -> None:
-        would_write.append(path)
-        if dry_run:
-            _LOG.debug("would write %s", path)
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # TRACKED COBRE-GAP WORKAROUND (C3): the solver's parquet reader is
-        # built without snappy; zstd until the compression contract is settled.
-        pq.write_table(table, path, compression="zstd")
+    # Every output path is routed through one ``CaseWriter`` so the
+    # would-write listing, the byte format, and the dry-run gate live in
+    # exactly one place, rather than guarding ~24 individual write sites.
+    writer = CaseWriter(dst, dry_run=dry_run)
 
     step("Converting entities")
     # DECOMP risk aversion (CVaR): resolve the AR register / FCF-header CVaR
@@ -803,14 +780,14 @@ def _convert_decomp_case_impl(
             ),
             logger=_LOG,
         )
-    _write_json(dst / "config.json", config_conv.convert_config(case))
+    writer.write_json("config.json", config_conv.convert_config(case))
     stages_dict = temporal_conv.convert_stages(
         case,
         annual_discount_rate=tx,
         fan_probabilities=fan_probabilities,
         cvar=cvar,
     )
-    _write_json(dst / "stages.json", stages_dict)
+    writer.write_json("stages.json", stages_dict)
 
     # FPHA-anchor fidelity: the source model fits each plant's hydro production
     # function around its initial reservoir volume. FPHA-eligible reservoirs get
@@ -842,8 +819,8 @@ def _convert_decomp_case_impl(
     )
     deficit_costs = network_conv._bus_deficit_costs(dadger)
     deficit_cost = max(deficit_costs.values()) if deficit_costs else 0.0
-    _write_json(
-        dst / "penalties.json",
+    writer.write_json(
+        "penalties.json",
         config_conv.convert_penalties(
             deficit_cost,
             productivity["equivalent_productivity_mw_per_m3s"].to_pylist(),
@@ -871,9 +848,8 @@ def _convert_decomp_case_impl(
         "filling_storage": [],
     }
 
-    system = dst / "system"
     buses_doc = network_conv.convert_buses(case, id_map)
-    _write_json(system / "buses.json", buses_doc)
+    writer.write_json("system/buses.json", buses_doc)
     hydros_dict = hydro_conv.convert_hydros(
         case, id_map, effective=effective, fpha_codes=fpha_codes
     )
@@ -899,9 +875,9 @@ def _convert_decomp_case_impl(
             target_bus_id=id_map.bus_id(itaipu_submercado),
             capacity_mw=network_conv._itaipu_50hz_capacity_mw(dadger),
         )
-    _write_json(system / "lines.json", lines_doc)
-    _write_json(
-        system / "pumping_stations.json",
+    writer.write_json("system/lines.json", lines_doc)
+    writer.write_json(
+        "system/pumping_stations.json",
         network_conv.convert_pumping_stations(case, id_map),
     )
     thermals_dict = thermal_conv.convert_thermals(case, id_map)
@@ -933,14 +909,14 @@ def _convert_decomp_case_impl(
                 gnl.future_anticipated_deliveries
             )
         if gnl.post_study_stages is not None:
-            _write_json(dst / "post_study_stages.json", gnl.post_study_stages)
+            writer.write_json("post_study_stages.json", gnl.post_study_stages)
         _LOG.info(
             "emitted %d GNL anticipated thermal(s) from dadgnl; %d future "
             "anticipated deliver(y/ies)",
             len(gnl.thermals),
             len(gnl.future_anticipated_deliveries),
         )
-    _write_json(system / "thermals.json", thermals_dict)
+    writer.write_json("system/thermals.json", thermals_dict)
     # The PAR inflow-lag seed (initial_conditions.recent_observations) is NOT
     # written here. The boundary cuts price the inflow-lag *deviation from the
     # seasonal mean* (MLT), not the absolute inflow, so a raw observation seed is
@@ -950,31 +926,32 @@ def _convert_decomp_case_impl(
     # needs), patched onto this file after conversion -- so they can never ship
     # apart. A plain conversion (no boundary FCF) keeps the lag state at 0: its
     # inflow model is order 0 (no autoregression), so the lags are inert anyway.
-    _write_json(dst / "initial_conditions.json", initial_conditions_doc)
-    _write_json(
-        system / "hydro_production_models.json",
+    writer.write_json("initial_conditions.json", initial_conditions_doc)
+    writer.write_json(
+        "system/hydro_production_models.json",
         hydro_conv.convert_production_models(id_map, fpha_configs, reference_volumes),
     )
-    _write_parquet(system / "hydro_energy_productivity.parquet", productivity_parquet)
+    writer.write_parquet(
+        "system/hydro_energy_productivity.parquet", productivity_parquet
+    )
     # FPHA geometry + tailrace inputs cobre fits the production function from.
-    _write_parquet(
-        system / "hydro_geometry.parquet",
+    writer.write_parquet(
+        "system/hydro_geometry.parquet",
         fpha_conv.convert_hydro_geometry(effective, id_map),
     )
     tailrace_table = fpha_conv.convert_tailrace_curves(case, id_map)
     if tailrace_table is not None:
-        _write_parquet(system / "tailrace_curves.parquet", tailrace_table)
+        writer.write_parquet("system/tailrace_curves.parquet", tailrace_table)
     ncs_registry = ncs_conv.convert_non_controllable_sources(case, id_map)
-    _write_json(system / "non_controllable_sources.json", ncs_registry)
+    writer.write_json("system/non_controllable_sources.json", ncs_registry)
 
     step("Converting scenarios")
-    scenarios = dst / "scenarios"
-    _write_parquet(
-        scenarios / "inflow_seasonal_stats.parquet",
+    writer.write_parquet(
+        "scenarios/inflow_seasonal_stats.parquet",
         scenarios_conv.convert_inflow_stats_identity(case, id_map),
     )
-    _write_parquet(
-        scenarios / "external_inflow_scenarios.parquet",
+    writer.write_parquet(
+        "scenarios/external_inflow_scenarios.parquet",
         scenarios_conv.convert_external_inflows(
             case, id_map, vazoes=vazoes, effective=effective
         ),
@@ -996,15 +973,15 @@ def _convert_decomp_case_impl(
     load_stats = load_conv.convert_load_stats(
         case, id_map, extra_bus_loads=extra_bus_loads
     )
-    _write_parquet(scenarios / "load_seasonal_stats.parquet", load_stats)
-    _write_json(
-        scenarios / "load_factors.json",
+    writer.write_parquet("scenarios/load_seasonal_stats.parquet", load_stats)
+    writer.write_json(
+        "scenarios/load_factors.json",
         load_conv.convert_load_factors(case, id_map, extra_bus_loads=extra_bus_loads),
     )
     ncs_stats = ncs_conv.convert_ncs_stats(case, id_map)
-    _write_parquet(scenarios / "non_controllable_stats.parquet", ncs_stats)
-    _write_json(
-        scenarios / "non_controllable_factors.json",
+    writer.write_parquet("scenarios/non_controllable_stats.parquet", ncs_stats)
+    writer.write_json(
+        "scenarios/non_controllable_factors.json",
         ncs_conv.convert_ncs_factors(case, id_map),
     )
     # Under the node-native explicit tree every stochastic class is sourced
@@ -1016,8 +993,8 @@ def _convert_decomp_case_impl(
     # scenario columns as the inflow library (1 on the trunk, the terminal fan
     # width at the last stage) for joint scenario_id coherence.
     scenario_counts = [1] * (len(calendar) - 1) + [len(fan_probabilities)]
-    _write_parquet(
-        scenarios / "external_ncs_scenarios.parquet",
+    writer.write_parquet(
+        "scenarios/external_ncs_scenarios.parquet",
         scenarios_conv.deterministic_external_scenarios(
             ncs_stats,
             entity_column="ncs_id",
@@ -1029,8 +1006,8 @@ def _convert_decomp_case_impl(
             scenario_counts=scenario_counts,
         ),
     )
-    _write_parquet(
-        scenarios / "external_load_scenarios.parquet",
+    writer.write_parquet(
+        "scenarios/external_load_scenarios.parquet",
         scenarios_conv.deterministic_external_scenarios(
             load_stats,
             entity_column="bus_id",
@@ -1040,7 +1017,6 @@ def _convert_decomp_case_impl(
         ),
     )
 
-    constraints = dst / "constraints"
     # Every per-entity bound — the legacy RQ/UH minimum-outflow, the per-stage
     # storage envelope, the CT thermal generation bounds, and the RE/RHQ/RHV
     # single-term special-constraint bounds — is collected as
@@ -1169,7 +1145,7 @@ def _convert_decomp_case_impl(
             ),
             logger=_LOG,
         )
-    _write_json(system / "hydros.json", hydros_dict)
+    writer.write_json("system/hydros.json", hydros_dict)
     thermal_bounds_table = _rejoin_thermal_cost(
         bound_tables.thermal, thermal_cost_table
     ).sort_by([("thermal_id", "ascending"), *_bound_sort_keys])
@@ -1258,18 +1234,22 @@ def _convert_decomp_case_impl(
 
     emission_checks.run_and_gate(_run_emission_checks)
 
-    _write_parquet(constraints / "thermal_bounds.parquet", thermal_bounds_table)
-    _write_parquet(constraints / "line_bounds.parquet", line_bounds)
+    writer.write_parquet("constraints/thermal_bounds.parquet", thermal_bounds_table)
+    writer.write_parquet("constraints/line_bounds.parquet", line_bounds)
     if hydro_bounds.num_rows:
-        _write_parquet(constraints / "hydro_bounds.parquet", hydro_bounds)
+        writer.write_parquet("constraints/hydro_bounds.parquet", hydro_bounds)
     if pumping_bounds_table.num_rows:
-        _write_parquet(constraints / "pumping_bounds.parquet", pumping_bounds_table)
+        writer.write_parquet("constraints/pumping_bounds.parquet", pumping_bounds_table)
     if group_bounds.num_rows:
-        _write_parquet(constraints / "hydro_unit_group_bounds.parquet", group_bounds)
+        writer.write_parquet(
+            "constraints/hydro_unit_group_bounds.parquet", group_bounds
+        )
     if contracts:
-        _write_json(system / "energy_contracts.json", energy_contracts_doc)
+        writer.write_json("system/energy_contracts.json", energy_contracts_doc)
     if contract_bounds_table.num_rows:
-        _write_parquet(constraints / "contract_bounds.parquet", contract_bounds_table)
+        writer.write_parquet(
+            "constraints/contract_bounds.parquet", contract_bounds_table
+        )
 
     # Emit every RE/RHQ/RHV/RHE special constraint that did NOT lower to an
     # entity bound (`census.to_generic`, read once above) as a Cobre generic
@@ -1384,15 +1364,15 @@ def _convert_decomp_case_impl(
             next_generic_id += len(libs_electrical_result.generic.constraints)
 
     if generic_constraints:
-        _write_json(
-            constraints / "generic_constraints.json",
+        writer.write_json(
+            "constraints/generic_constraints.json",
             {
                 "$schema": _GENERIC_CONSTRAINTS_SCHEMA_URL,
                 "constraints": generic_constraints,
             },
         )
-        _write_parquet(
-            constraints / "generic_constraint_bounds.parquet",
+        writer.write_parquet(
+            "constraints/generic_constraint_bounds.parquet",
             pa.concat_tables(generic_bound_tables),
         )
 
@@ -1401,15 +1381,12 @@ def _convert_decomp_case_impl(
     # write generic_parameters.json whenever any RHE constraint survives,
     # never only when another generic family also happens to be present.
     if rhe_generics.rho_acum_overrides:
-        would_write.append(
-            write_scalar_parameters(
-                dst,
-                build_decomp_scalar_parameters(
-                    [id_map.hydro_id(code) for code in id_map.hydro_codes],
-                    rhe_generics.rho_acum_overrides,
-                ),
-                dry_run=dry_run,
-            )
+        write_scalar_parameters(
+            writer,
+            build_decomp_scalar_parameters(
+                [id_map.hydro_id(code) for code in id_map.hydro_codes],
+                rhe_generics.rho_acum_overrides,
+            ),
         )
 
     # E1: the FE/RHA/LIBs-electrical detection diagnostics each surface
@@ -1455,5 +1432,5 @@ def _convert_decomp_case_impl(
         bus_count=len(buses_doc["buses"]),
         line_count=len(lines_doc["lines"]),
         stage_count=len(calendar),
-        would_write_paths=[str(p) for p in would_write],
+        would_write_paths=[str(p) for p in writer.would_write],
     )

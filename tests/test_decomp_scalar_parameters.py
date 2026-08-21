@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.converters.scalar_parameters import (
     build_scalar_parameters,
 )
@@ -44,10 +45,11 @@ def test_build_decomp_scalar_parameters_per_stage_override_switches_kind() -> No
 
 def test_write_scalar_parameters_round_trip(tmp_path: Path) -> None:
     params = build_decomp_scalar_parameters([0], {0: [2.5]})
+    writer = CaseWriter(tmp_path)
 
-    written = write_scalar_parameters(tmp_path, params)
+    write_scalar_parameters(writer, params)
 
-    assert written == tmp_path / "constraints" / "generic_parameters.json"
+    written = tmp_path / "constraints" / "generic_parameters.json"
     assert written.exists()
     assert json.loads(written.read_text()) == params
 
@@ -60,9 +62,12 @@ def test_build_decomp_scalar_parameters_empty_ids_empty_list(
     tmp_path: Path,
 ) -> None:
     params = build_decomp_scalar_parameters([])
+    writer = CaseWriter(tmp_path)
 
     assert params["scalar_parameters"] == []
 
-    written = write_scalar_parameters(tmp_path, params)
+    write_scalar_parameters(writer, params)
+
+    written = tmp_path / "constraints" / "generic_parameters.json"
     assert written.exists()
     assert json.loads(written.read_text()) == params

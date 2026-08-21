@@ -29,6 +29,7 @@ from idecomp.decomp import Dadgnl, Mlt, Vazoes
 from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.decomp.anticipated import read_gnl_model
 from cobre_bridge.decomp.cadastro import build_effective_cadastro
 from cobre_bridge.decomp.fcf.bootstrap import (
@@ -333,7 +334,7 @@ def _boundary_inflow_context(
 
 
 def _seed_recent_observations(
-    case_dir: Path,
+    writer: CaseWriter,
     case: DecompCase,
     effective: EffectiveCadastro,
     calendar: Sequence[OperativeStage],
@@ -353,13 +354,11 @@ def _seed_recent_observations(
     windows = convert_recent_observation_windows(
         Vazoes.read(str(case.files.vazoes)), effective, case.id_map, calendar
     )
-    ic_path = case_dir / "initial_conditions.json"
+    ic_path = writer.dst / "initial_conditions.json"
     with ic_path.open(encoding="utf-8") as handle:
         doc = json.load(handle)
     doc["recent_observations"] = windows
-    with ic_path.open("w", encoding="utf-8") as handle:
-        json.dump(doc, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+    writer.write_json("initial_conditions.json", doc)
     return len(windows)
 
 
@@ -608,16 +607,16 @@ def _emit_import_diagnostics(
         )
 
 
-def _patch_policy_boundary(config_path: Path, *, source_stage: int) -> None:
-    """Set ``["policy"]["boundary"]`` in ``config_path``, preserving the rest.
+def _patch_policy_boundary(writer: CaseWriter, *, source_stage: int) -> None:
+    """Set ``["policy"]["boundary"]`` in ``config.json``, preserving the rest.
 
     Reads the whole ``config.json`` (``state_space``/``training``/
     ``simulation`` included), creates ``["policy"]`` if the case predates any
-    policy section, and rewrites only ``["policy"]["boundary"]`` — mirrors
-    ``decomp/pipeline.py``'s ``_write_json`` formatting (``indent=2``,
-    ``ensure_ascii=False``, trailing newline) so the patched file matches the
-    rest of the case's JSON output byte-for-byte in style.
+    policy section, and rewrites only ``["policy"]["boundary"]`` — writing via
+    *writer* so the patched file matches the rest of the case's JSON output
+    byte-for-byte in style.
     """
+    config_path = writer.dst / "config.json"
     with config_path.open(encoding="utf-8") as handle:
         config = json.load(handle)
     policy = config.setdefault("policy", {})
@@ -628,9 +627,7 @@ def _patch_policy_boundary(config_path: Path, *, source_stage: int) -> None:
     # must run with `--output <case_dir>` until cobre resolves
     # policy.boundary.path relative to case_dir.
     policy["boundary"] = {"path": "boundary", "source_stage": source_stage}
-    with config_path.open("w", encoding="utf-8") as handle:
-        json.dump(config, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+    writer.write_json("config.json", config)
 
 
 def import_boundary_fcf(
@@ -708,6 +705,10 @@ def import_boundary_fcf(
     if case.files.cortesh is None or case.files.cortes is None:
         _LOG.info("boundary FCF skipped — no cut files")
         return None
+
+    # A real, non-dry-run writer: the importer runs a real ``cobre`` pass and
+    # never runs under ``--dry-run``.
+    writer = CaseWriter(case_dir)
 
     cortesh = Cortesh.read(str(case.files.cortesh))
     cuts = read_cortes(case.files.cortes, cortesh, boundary_stage=None)
@@ -799,14 +800,14 @@ def import_boundary_fcf(
         inflow_lag_depth=inflow_lag_depth,
     )
 
-    _patch_policy_boundary(case_dir / "config.json", source_stage=boundary_stage)
+    _patch_policy_boundary(writer, source_stage=boundary_stage)
 
     # Seed the pre-study inflow-lag state and record the mean fold — both gated
     # on the same mlt.dat presence as the fold above, so the raw seed never
     # ships without the RHS mean that offsets it (`_boundary_inflow_context`).
     if inflow_context is not None:
         effective, calendar, _ = inflow_context
-        n_windows = _seed_recent_observations(case_dir, case, effective, calendar)
+        n_windows = _seed_recent_observations(writer, case, effective, calendar)
         _LOG.info(
             "boundary FCF inflow-lag coupling: folded the seasonal-mean (MLT) "
             "deviation into %d cut RHS(es) and seeded %d recent-observation "

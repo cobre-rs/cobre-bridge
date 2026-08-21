@@ -581,7 +581,7 @@ class TestConvertNewaweCasePipeline:
 
         fake_id_map = MagicMock()
         with (
-            patch("cobre_bridge.pipeline.pq.write_table") as write_table,
+            patch("cobre_bridge.case_writer.pq.write_table") as write_table,
             contextlib.ExitStack() as stack,
         ):
             for p in _all_converter_patches(fake_id_map):

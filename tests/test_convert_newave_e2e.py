@@ -27,3 +27,7 @@ def test_newave_mini_deck_converts_and_validates(
     result = cobre.io.validate(str(dst))
     assert result["valid"] is True
     assert result["errors"] == []
+
+    # Pins the CaseWriter Option-A byte format (a single trailing newline),
+    # the one on-disk change from routing NEWAVE writes through the writer.
+    assert (dst / "config.json").read_text().endswith("\n")

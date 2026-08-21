@@ -27,10 +27,10 @@ entry.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
+from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.converters.scalar_parameters import (
     build_scalar_parameters,
     rho_acum_name,  # re-exported for the RHE emitter's @-sigil expression
@@ -70,21 +70,11 @@ def build_decomp_scalar_parameters(
     return build_scalar_parameters(hydro_ids, rho_acum_per_stage_overrides)
 
 
-def write_scalar_parameters(dst: Path, params: dict, *, dry_run: bool = False) -> Path:
-    """Write *params* to ``dst/constraints/generic_parameters.json`` and return it.
+def write_scalar_parameters(writer: CaseWriter, params: Mapping[str, object]) -> None:
+    """Write *params* to ``constraints/generic_parameters.json`` via *writer*.
 
-    Creates the ``constraints/`` directory if absent. Mirrors
-    ``decomp/pipeline.py``'s ``_write_json`` formatting (``indent=2``,
-    ``ensure_ascii=False``). Any ``OSError`` from the filesystem propagates —
-    the caller owns diagnostics for write failures.
-
-    When *dry_run* is ``True``, the directory is not created and nothing is
-    written; the path is still returned so the caller can record it in the
-    conversion's would-write listing.
+    Delegates the byte format and the ``dry_run``/would-write bookkeeping to
+    the shared :class:`~cobre_bridge.case_writer.CaseWriter` — this module owns
+    only the relpath the DECOMP case writes it under.
     """
-    path = dst / _SCALAR_PARAMETERS_RELPATH
-    if dry_run:
-        return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(params, indent=2, ensure_ascii=False))
-    return path
+    writer.write_json(_SCALAR_PARAMETERS_RELPATH.as_posix(), params)

@@ -5,7 +5,6 @@ Reads a source-model case directory and writes a complete Cobre case directory.
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 from collections.abc import Callable
@@ -13,11 +12,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge import emission_checks
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
 from cobre_bridge.converters import inflow_windows
@@ -531,47 +530,25 @@ def _convert_newave_case_impl(
 
     emission_checks.run_and_gate(_run_checks)
 
-    if not dry_run:
-        (dst / "system").mkdir(parents=True, exist_ok=True)
-        (dst / "scenarios").mkdir(parents=True, exist_ok=True)
-        (dst / "constraints").mkdir(parents=True, exist_ok=True)
-
-    # Every output path is routed through ``_write_json`` / ``_write_parquet`` so
-    # the would-write listing and the dry-run gate live in exactly one place each,
-    # rather than guarding ~30 individual write sites.
-    would_write: list[Path] = []
-
-    def _write_json(path: Path, data: dict) -> None:
-        would_write.append(path)
-        if dry_run:
-            logger.debug("Would write %s", path)
-            return
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        logger.debug("Wrote %s", path)
-
-    def _write_parquet(table: pa.Table, path: Path) -> None:
-        would_write.append(path)
-        if dry_run:
-            logger.debug("Would write %s", path)
-            return
-        pq.write_table(table, path, compression="zstd")
-        logger.debug("Wrote %s", path)
+    # Every output path is routed through one ``CaseWriter`` so the
+    # would-write listing, the byte format, and the dry-run gate live in
+    # exactly one place, rather than guarding ~30 individual write sites.
+    writer = CaseWriter(dst, dry_run=dry_run)
 
     step("Writing JSON")
-    _write_json(dst / "config.json", config_dict)
-    _write_json(dst / "stages.json", stages_dict)
-    _write_json(dst / "penalties.json", penalties_dict)
-    _write_json(dst / "initial_conditions.json", ic_dict)
-    _write_json(dst / "system" / "hydros.json", hydros_dict)
-    _write_json(dst / "system" / "thermals.json", thermals_dict)
-    _write_json(dst / "system" / "buses.json", buses_dict)
-    _write_json(dst / "system" / "lines.json", lines_dict)
-    _write_json(dst / "system" / "non_controllable_sources.json", ncs_dict)
-    _write_json(dst / "scenarios" / "load_factors.json", load_factors_dict)
-    _write_json(dst / "scenarios" / "non_controllable_factors.json", ncs_factors_dict)
+    writer.write_json("config.json", config_dict)
+    writer.write_json("stages.json", stages_dict)
+    writer.write_json("penalties.json", penalties_dict)
+    writer.write_json("initial_conditions.json", ic_dict)
+    writer.write_json("system/hydros.json", hydros_dict)
+    writer.write_json("system/thermals.json", thermals_dict)
+    writer.write_json("system/buses.json", buses_dict)
+    writer.write_json("system/lines.json", lines_dict)
+    writer.write_json("system/non_controllable_sources.json", ncs_dict)
+    writer.write_json("scenarios/load_factors.json", load_factors_dict)
+    writer.write_json("scenarios/non_controllable_factors.json", ncs_factors_dict)
 
-    _write_json(dst / "system" / "hydro_production_models.json", production_models_dict)
+    writer.write_json("system/hydro_production_models.json", production_models_dict)
 
     # Declare per-hydro @rho_eq_h{id} / @rho_acum_h{id} computed parameters for
     # every hydro in the case. cobre rejects any @name token that has not been
@@ -591,51 +568,44 @@ def _convert_newave_case_impl(
         all_hydro_ids,
         rho_acum_per_stage_overrides=rho_acum_overrides or None,
     )
-    _write_json(dst / "constraints" / "generic_parameters.json", scalar_parameters_dict)
+    writer.write_json("constraints/generic_parameters.json", scalar_parameters_dict)
 
     step("Writing Parquet")
-    geometry_path = dst / "system" / "hydro_geometry.parquet"
-    _write_parquet(geometry_table, geometry_path)
+    writer.write_parquet("system/hydro_geometry.parquet", geometry_table)
 
     if hydro_energy_productivity_table.num_rows > 0:
-        hep_path = dst / "system" / "hydro_energy_productivity.parquet"
-        _write_parquet(hydro_energy_productivity_table, hep_path)
+        writer.write_parquet(
+            "system/hydro_energy_productivity.parquet",
+            hydro_energy_productivity_table,
+        )
 
     # Optional tailrace curves (polinjus) — only written when the case ships them.
     if tailrace_table is not None and tailrace_table.num_rows > 0:
-        tailrace_path = dst / "system" / "tailrace_curves.parquet"
-        _write_parquet(tailrace_table, tailrace_path)
+        writer.write_parquet("system/tailrace_curves.parquet", tailrace_table)
 
-    inflow_path = dst / "scenarios" / "inflow_seasonal_stats.parquet"
-    _write_parquet(inflow_table, inflow_path)
+    writer.write_parquet("scenarios/inflow_seasonal_stats.parquet", inflow_table)
 
-    load_path = dst / "scenarios" / "load_seasonal_stats.parquet"
-    _write_parquet(load_table, load_path)
+    writer.write_parquet("scenarios/load_seasonal_stats.parquet", load_table)
 
-    history_path = dst / "scenarios" / "inflow_history.parquet"
-    _write_parquet(inflow_history_table, history_path)
+    writer.write_parquet("scenarios/inflow_history.parquet", inflow_history_table)
 
-    constraints_dir = dst / "constraints"
-    line_bounds_path = constraints_dir / "line_bounds.parquet"
-    _write_parquet(line_bounds_table, line_bounds_path)
+    writer.write_parquet("constraints/line_bounds.parquet", line_bounds_table)
 
-    ncs_stats_path = dst / "scenarios" / "non_controllable_stats.parquet"
-    _write_parquet(ncs_stats_table, ncs_stats_path)
+    writer.write_parquet("scenarios/non_controllable_stats.parquet", ncs_stats_table)
 
     if hydro_bounds_table is not None:
-        hydro_bounds_path = constraints_dir / "hydro_bounds.parquet"
-        _write_parquet(hydro_bounds_table, hydro_bounds_path)
+        writer.write_parquet("constraints/hydro_bounds.parquet", hydro_bounds_table)
 
     if thermal_bounds_table is not None:
-        thermal_bounds_path = constraints_dir / "thermal_bounds.parquet"
-        _write_parquet(thermal_bounds_table, thermal_bounds_path)
+        writer.write_parquet("constraints/thermal_bounds.parquet", thermal_bounds_table)
 
     # Per-bus excess-cost override: forbid energy excess at fictitious
     # submarkets (pure transshipment nodes) by pricing it prohibitively.
     bus_penalty_table = network_conv.convert_bus_penalty_overrides(case, id_map)
     if bus_penalty_table is not None:
-        bus_penalty_path = constraints_dir / "penalty_overrides_bus.parquet"
-        _write_parquet(bus_penalty_table, bus_penalty_path)
+        writer.write_parquet(
+            "constraints/penalty_overrides_bus.parquet", bus_penalty_table
+        )
 
     # Per-stage hydro penalty override: The source model's PROD_MEDIA_SIN /
     # MAX_PRODTACUM_SIN shift with seasonal (VOLREF_SAZ) and temporal (CFUGA/CMONT)
@@ -655,8 +625,9 @@ def _convert_newave_case_impl(
             per_stage_rho_max_acum,
         )
         if hydro_penalty_table is not None:
-            hydro_penalty_path = constraints_dir / "penalty_overrides_hydro.parquet"
-            _write_parquet(hydro_penalty_table, hydro_penalty_path)
+            writer.write_parquet(
+                "constraints/penalty_overrides_hydro.parquet", hydro_penalty_table
+            )
 
     all_constraints: list[dict] = []
     bounds_tables: list[pa.Table] = []
@@ -688,19 +659,20 @@ def _convert_newave_case_impl(
             ),
             "constraints": all_constraints,
         }
-        _write_json(constraints_dir / "generic_constraints.json", merged_dict)
+        writer.write_json("constraints/generic_constraints.json", merged_dict)
 
         if bounds_tables:
             merged_bounds = pa.concat_tables(bounds_tables)
-            gc_bounds_path = constraints_dir / "generic_constraint_bounds.parquet"
-            _write_parquet(merged_bounds, gc_bounds_path)
+            writer.write_parquet(
+                "constraints/generic_constraint_bounds.parquet", merged_bounds
+            )
 
     report.hydro_count = len(hydros_dict.get("hydros", []))
     report.thermal_count = len(thermals_dict.get("thermals", []))
     report.bus_count = len(buses_dict.get("buses", []))
     report.line_count = len(lines_dict.get("lines", []))
     report.stage_count = len(stages_dict.get("stages", []))
-    report.would_write_paths = [str(p) for p in would_write]
+    report.would_write_paths = [str(p) for p in writer.would_write]
 
     return report
 
