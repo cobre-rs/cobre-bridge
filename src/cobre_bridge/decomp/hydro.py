@@ -106,14 +106,13 @@ from cobre_bridge.productivity import equivalent_productivity_from_coeffs
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
     from pathlib import Path
 
     from idecomp.decomp import Dadger
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.temporal import OperativeStage
 
 _LOG = logging.getLogger(__name__)
 
@@ -751,10 +750,9 @@ def _evaporation_coefficients_mm(hidr: pd.DataFrame, code: int) -> list[float] |
 
 
 def convert_hydros(
-    dadger: Dadger,
-    hidr: pd.DataFrame,
+    case: DecompCase,
     id_map: DecompIdMap,
-    start_date: date,
+    *,
     effective: EffectiveCadastro,
     travel_time_hours: dict[int, float] | None = None,
     fpha_codes: set[int] | None = None,
@@ -818,6 +816,9 @@ def convert_hydros(
     always sit inside it. Per-family ``AC`` coverage is reported by
     ``check decomp`` (:mod:`cobre_bridge.decomp.preflight`), not logged here.
     """
+    dadger = case.dadger
+    hidr = case.hidr
+    start_date = case.start_date
     operated = _operated_uh(dadger)
     coupling_only = _coupling_only_codes(dadger)
     if coupling_only:
@@ -1003,7 +1004,7 @@ def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> 
 
 
 def _operated_initial_volumes(
-    dadger: Dadger, effective: EffectiveCadastro
+    case: DecompCase, *, effective: EffectiveCadastro
 ) -> dict[int, float]:
     """``{code: initial reservoir volume hm³}`` for every operated ``UH`` plant.
 
@@ -1015,14 +1016,14 @@ def _operated_initial_volumes(
         int(row["codigo_usina"]): _initial_volume_hm3(
             effective, int(row["codigo_usina"]), float(row["volume_inicial"])
         )
-        for _, row in _operated_uh(dadger).iterrows()
+        for _, row in _operated_uh(case.dadger).iterrows()
     }
 
 
 def convert_initial_storage(
-    dadger: Dadger,
-    hidr: pd.DataFrame,
+    case: DecompCase,
     id_map: DecompIdMap,
+    *,
     effective: EffectiveCadastro,
 ) -> list[dict]:
     """Initial reservoir volumes from ``UH`` (% of useful → hm³).
@@ -1031,7 +1032,7 @@ def convert_initial_storage(
     stage-0 effective useful volume (run-of-river plants collapse to their
     reference volume).
     """
-    operated = _operated_uh(dadger)
+    operated = _operated_uh(case.dadger)
     storage: list[dict] = []
     for _, row in operated.iterrows():
         code = int(row["codigo_usina"])
@@ -1240,10 +1241,9 @@ def _availability_bound_entry(
 
 
 def convert_hydro_group_availability(
-    dadger: Dadger,
-    hidr: pd.DataFrame,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
+    *,
     effective: EffectiveCadastro,
 ) -> dict[tuple[int, int, int], GroupBoundEntry]:
     """B8 per-group per-stage available capacity.
@@ -1287,8 +1287,10 @@ def convert_hydro_group_availability(
     falls below that group's own declared envelope, the same "only where it
     differs" convention every sibling emitter uses.
     """
-    mp = dadger.mp(df=True)
-    fd = dadger.fd(df=True)
+    hidr = case.hidr
+    calendar = case.calendar
+    mp = case.dadger.mp(df=True)
+    fd = case.dadger.fd(df=True)
     mp_by_code = _single_group_factor_rows(mp)
     fd_by_code = _single_group_factor_rows(fd)
 
@@ -1394,9 +1396,8 @@ _ITAIPU_MIN_GENERATION_PREFIXES: tuple[tuple[int, str], ...] = (
 
 
 def convert_itaipu_frequency_min_generation(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
 ) -> dict[tuple[int, int, int], list[float]]:
     """Itaipu's per-frequency minimum-generation floors from the ``RI`` register.
 
@@ -1429,7 +1430,8 @@ def convert_itaipu_frequency_min_generation(
     """
     if _ITAIPU_CODE not in id_map.hydro_codes:
         return {}
-    ri = dadger.ri(df=True)
+    calendar = case.calendar
+    ri = case.dadger.ri(df=True)
     if ri is None or ri.empty:
         return {}
 

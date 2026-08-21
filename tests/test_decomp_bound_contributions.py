@@ -26,6 +26,7 @@ style). Covers:
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -37,6 +38,7 @@ from cobre_bridge.decomp.bounds_accumulator import (
     resolve,
 )
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
     ConstraintRecord,
@@ -48,6 +50,7 @@ from cobre_bridge.decomp.network import convert_pumping_stations, pumping_statio
 from cobre_bridge.decomp.single_term_bounds import single_term_bound_contributions
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.decomp.thermal import ThermalBounds, convert_thermal_bounds
+from tests.conftest import make_decomp_case
 
 
 class _StubDadger:
@@ -82,6 +85,10 @@ def _hidr_frame(code: int, **columns: float) -> pd.DataFrame:
 
 def _effective(hidr: pd.DataFrame, n_stages: int = 1) -> EffectiveCadastro:
     return EffectiveCadastro(base=hidr, n_stages=n_stages, stage_varying={})
+
+
+def _case(dadger: _StubDadger, calendar: list[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), dadger=dadger, calendar=calendar)
 
 
 def _rq_dadger(pct_blocks: list[float], *, code: int = 1, ree: int = 1) -> _StubDadger:
@@ -132,7 +139,7 @@ class TestContributionNativeReturnTypes:
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         contributions = convert_hydro_bounds(
-            _rq_dadger([50.0]), id_map, calendar, effective
+            _case(_rq_dadger([50.0]), calendar), id_map, effective=effective
         )
 
         assert isinstance(contributions, list)
@@ -147,7 +154,9 @@ class TestContributionNativeReturnTypes:
             stage_varying={(1, "volume_maximo"): (250.0,)},
         )
 
-        contributions = convert_storage_bounds(effective, id_map, calendar)
+        contributions = convert_storage_bounds(
+            _case(_StubDadger(), calendar), id_map, effective=effective
+        )
 
         assert isinstance(contributions, list)
         assert all(isinstance(c, BoundContribution) for c in contributions)
@@ -160,7 +169,7 @@ class TestContributionNativeReturnTypes:
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), thermal_codes=(1,))
 
         bounds = convert_thermal_bounds(
-            _ct_dadger([100.0, 100.0], [0.0, 0.0]), id_map, calendar
+            _case(_ct_dadger([100.0, 100.0], [0.0, 0.0]), calendar), id_map
         )
 
         assert isinstance(bounds, ThermalBounds)
@@ -185,7 +194,7 @@ class TestReplaceVsIntersectDiscipline:
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         contributions = convert_hydro_bounds(
-            _rq_dadger([50.0, 50.0]), id_map, calendar, effective
+            _case(_rq_dadger([50.0, 50.0]), calendar), id_map, effective=effective
         )
 
         assert len(contributions) == 1
@@ -201,7 +210,7 @@ class TestReplaceVsIntersectDiscipline:
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         contributions = convert_hydro_bounds(
-            _rq_dadger([100.0, 0.0]), id_map, calendar, effective
+            _case(_rq_dadger([100.0, 0.0]), calendar), id_map, effective=effective
         )
 
         assert len(contributions) == 2
@@ -214,7 +223,7 @@ class TestReplaceVsIntersectDiscipline:
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), thermal_codes=(1,))
 
         bounds = convert_thermal_bounds(
-            _ct_dadger([100.0, 100.0], [0.0, 0.0], cvu=10.0), id_map, calendar
+            _case(_ct_dadger([100.0, 100.0], [0.0, 0.0], cvu=10.0), calendar), id_map
         )
 
         assert len(bounds.generation) == 1
@@ -233,7 +242,7 @@ class TestReplaceVsIntersectDiscipline:
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), thermal_codes=(1,))
 
         bounds = convert_thermal_bounds(
-            _ct_dadger([100.0, 50.0], [0.0, 0.0], cvu=10.0), id_map, calendar
+            _case(_ct_dadger([100.0, 50.0], [0.0, 0.0], cvu=10.0), calendar), id_map
         )
 
         assert len(bounds.generation) == 2
@@ -256,7 +265,7 @@ class TestCollisionIntersection:
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         rq_contribs = convert_hydro_bounds(
-            _rq_dadger([50.0]), id_map, calendar, effective
+            _case(_rq_dadger([50.0]), calendar), id_map, effective=effective
         )
         assert rq_contribs == [
             BoundContribution(
@@ -284,7 +293,12 @@ class TestCollisionIntersection:
             by_family={"HQ": (qdef_record,)}, to_bounds=(qdef_record,)
         )
         rhq_contribs = single_term_bound_contributions(
-            census, id_map, {}, calendar, effective, {}
+            _case(_StubDadger(), calendar),
+            id_map,
+            census=census,
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities={},
         )
         assert len(rhq_contribs) == 1
 
@@ -337,7 +351,7 @@ class TestPumpingStationIdMapSingleAuthority:
         # Position in codigo_usina-sorted order: 10 -> 0, 30 -> 1.
         assert station_ids == {10: 0, 30: 1}
 
-        doc = convert_pumping_stations(dadger, id_map, date(2026, 7, 18))
+        doc = convert_pumping_stations(_case(dadger, [_stage(0, (10.0,))]), id_map)
         stations_by_name = {s["name"]: s for s in doc["pumping_stations"]}
         for name, code in (("UE30", 30), ("UE10", 10)):
             assert stations_by_name[name]["id"] == station_ids[code]
@@ -373,11 +387,15 @@ class TestByteIdenticalRegression:
         )
 
         hydro_contribs = [
-            *convert_hydro_bounds(_rq_dadger([50.0]), id_map, calendar, effective),
-            *convert_storage_bounds(effective, id_map, calendar),
+            *convert_hydro_bounds(
+                _case(_rq_dadger([50.0]), calendar), id_map, effective=effective
+            ),
+            *convert_storage_bounds(
+                _case(_StubDadger(), calendar), id_map, effective=effective
+            ),
         ]
         thermal_bounds = convert_thermal_bounds(
-            _ct_dadger([100.0, 100.0], [0.0, 0.0], cvu=10.0), id_map, calendar
+            _case(_ct_dadger([100.0, 100.0], [0.0, 0.0], cvu=10.0), calendar), id_map
         )
 
         block_counts = {stage.index: len(stage.block_hours) for stage in calendar}

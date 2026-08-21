@@ -54,13 +54,9 @@ from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from idecomp.decomp import Dadger
-
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.temporal import OperativeStage
 
 #: Mirrors the ``_SPARSITY_TOLERANCE`` idiom in ``decomp/hydro.py`` — a
 #: relative tolerance scaled by the reference magnitude, used only to decide
@@ -75,9 +71,9 @@ def _floats_differ(value: float, reference: float) -> bool:
 
 
 def convert_hydro_bounds(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
+    *,
     effective: EffectiveCadastro,
 ) -> list[BoundContribution]:
     """Minimum-outflow contributions from the ``RQ``/``UH`` defaults.
@@ -93,6 +89,8 @@ def convert_hydro_bounds(
     (``single_term_bounds``) via max-of-lowers/min-of-uppers rather than
     either one replacing the other.
     """
+    calendar = case.calendar
+    dadger = case.dadger
     rq = dadger.rq(df=True)
     if rq is None or rq.empty:
         return []
@@ -208,9 +206,10 @@ def convert_hydro_bounds(
 
 
 def convert_storage_bounds(
-    effective: EffectiveCadastro,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
+    *,
+    effective: EffectiveCadastro,
 ) -> list[BoundContribution]:
     """Sparse per-stage storage contributions wherever a stage tightens the envelope.
 
@@ -228,6 +227,7 @@ def convert_storage_bounds(
     stage-level axis (``block_eligible=False``), so no ``block_id`` is ever
     emitted here.
     """
+    calendar = case.calendar
     contributions: list[BoundContribution] = []
     for code in id_map.hydro_codes:
         env_min, env_max = storage_envelope(effective, code)
@@ -253,9 +253,9 @@ def convert_storage_bounds(
 
 
 def convert_volume_espera_bounds(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
+    *,
     effective: EffectiveCadastro,
 ) -> list[BoundContribution]:
     """Per-stage max-storage contributions from the ``VE`` (volume de espera).
@@ -279,7 +279,8 @@ def convert_volume_espera_bounds(
     contributes nothing, and neither does a plant absent from the register or
     without a useful-volume reservoir.
     """
-    ve = dadger.ve(df=True)
+    calendar = case.calendar
+    ve = case.dadger.ve(df=True)
     if ve is None or ve.empty:
         return []
 
@@ -342,9 +343,8 @@ _WATER_WITHDRAWAL_SCHEMA = pa.schema(
 
 
 def convert_irrigation_withdrawal(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
 ) -> pa.Table | None:
     """Per-(hydro, stage) consumptive irrigation withdrawal from the ``TI`` register.
 
@@ -369,7 +369,8 @@ def convert_irrigation_withdrawal(
     ``None`` when the deck carries no ``TI`` register or no operated plant
     withdraws (so the pipeline leaves ``hydro_bounds`` unchanged).
     """
-    ti = dadger.ti(df=True)
+    calendar = case.calendar
+    ti = case.dadger.ti(df=True)
     if ti is None or ti.empty:
         return None
 

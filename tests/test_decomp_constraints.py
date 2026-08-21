@@ -17,12 +17,14 @@ RHV multi-``VARM`` additive-floor/volume-tipo-deferral behaviour.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
     ConstraintRecord,
@@ -44,6 +46,7 @@ from cobre_bridge.decomp.constraints import (
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.diagnostics import Severity
+from tests.conftest import make_decomp_case
 
 
 def _stage(index: int, n_blocks: int) -> OperativeStage:
@@ -54,6 +57,10 @@ def _stage(index: int, n_blocks: int) -> OperativeStage:
         season_id=6,
         block_hours=tuple(168.0 / n_blocks for _ in range(n_blocks)),
     )
+
+
+def _case(calendar: list[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), calendar=calendar)
 
 
 @pytest.fixture
@@ -585,7 +592,12 @@ def test_emit_re_generics_mixed_hydro_interchange_round_trip(
     calendar = [_stage(0, 1)]
 
     result = emit_re_generics(
-        census, id_map, line_map, big_m=45000.0, calendar=calendar, start_id=0
+        _case(calendar),
+        id_map,
+        census=census,
+        line_map=line_map,
+        big_m=45000.0,
+        start_id=0,
     )
 
     assert result is not None
@@ -618,7 +630,12 @@ def test_emit_re_generics_gnl_thermal_skips_and_warns(id_map: DecompIdMap) -> No
 
     with dx.collect() as collected:
         result = emit_re_generics(
-            census, id_map, {}, big_m=45000.0, calendar=calendar, start_id=0
+            _case(calendar),
+            id_map,
+            census=census,
+            line_map={},
+            big_m=45000.0,
+            start_id=0,
         )
 
     assert result is None
@@ -648,7 +665,12 @@ def test_emit_re_generics_frequency_split_skips_and_warns(
 
     with dx.collect() as collected:
         result = emit_re_generics(
-            census, id_map, {}, big_m=45000.0, calendar=calendar, start_id=0
+            _case(calendar),
+            id_map,
+            census=census,
+            line_map={},
+            big_m=45000.0,
+            start_id=0,
         )
 
     assert result is None
@@ -680,7 +702,12 @@ def test_emit_re_generics_fi_no_line_skips(id_map: DecompIdMap) -> None:
 
     with dx.collect() as collected:
         result = emit_re_generics(
-            census, id_map, {}, big_m=45000.0, calendar=calendar, start_id=0
+            _case(calendar),
+            id_map,
+            census=census,
+            line_map={},
+            big_m=45000.0,
+            start_id=0,
         )
 
     assert result is None
@@ -738,7 +765,12 @@ def test_emit_re_generics_all_records_skipped_returns_none(
 
     with dx.collect() as collected:
         result = emit_re_generics(
-            census, id_map, {}, big_m=45000.0, calendar=calendar, start_id=0
+            _case(calendar),
+            id_map,
+            census=census,
+            line_map={},
+            big_m=45000.0,
+            start_id=0,
         )
 
     assert result is None
@@ -791,12 +823,12 @@ def test_emit_rhq_rhv_generics_rhq_multi_term_round_trip(
     calendar = [_stage(0, 1)]
 
     result = emit_rhq_rhv_generics(
-        census,
+        _case(calendar),
         id_map,
+        census=census,
         pumping_station_ids={},
         effective=unused_effective,
         big_m=45000.0,
-        calendar=calendar,
         start_id=0,
     )
 
@@ -829,12 +861,12 @@ def test_emit_rhq_rhv_generics_rhq_single_qbom_via_pumping_map(
     calendar = [_stage(0, 1)]
 
     result = emit_rhq_rhv_generics(
-        census,
+        _case(calendar),
         id_map,
+        census=census,
         pumping_station_ids={2: 1},
         effective=unused_effective,
         big_m=45000.0,
-        calendar=calendar,
         start_id=0,
     )
 
@@ -861,12 +893,12 @@ def test_emit_rhq_rhv_generics_rhq_qbom_no_station_skips_and_warns(
 
     with dx.collect() as collected:
         result = emit_rhq_rhv_generics(
-            census,
+            _case(calendar),
             id_map,
+            census=census,
             pumping_station_ids={},
             effective=unused_effective,
             big_m=45000.0,
-            calendar=calendar,
             start_id=0,
         )
 
@@ -897,12 +929,12 @@ def test_emit_rhq_rhv_generics_rhv_multi_varm_additive_floor() -> None:
     calendar = [_stage(0, 1)]
 
     result = emit_rhq_rhv_generics(
-        census,
+        _case(calendar),
         id_map,
+        census=census,
         pumping_station_ids={},
         effective=effective,
         big_m=45000.0,
-        calendar=calendar,
         start_id=0,
     )
 
@@ -942,12 +974,12 @@ def test_emit_rhq_rhv_generics_rhv_varm_uncadastred_skips_and_warns() -> None:
 
     with dx.collect() as collected:
         result = emit_rhq_rhv_generics(
-            census,
+            _case(calendar),
             id_map,
+            census=census,
             pumping_station_ids={},
             effective=effective,
             big_m=45000.0,
-            calendar=calendar,
             start_id=0,
         )
 
@@ -975,12 +1007,12 @@ def test_emit_rhq_rhv_generics_rhv_volume_tipo_deferred_skips_and_warns(
 
     with dx.collect() as collected:
         result = emit_rhq_rhv_generics(
-            census,
+            _case(calendar),
             id_map,
+            census=census,
             pumping_station_ids={},
             effective=unused_effective,
             big_m=45000.0,
-            calendar=calendar,
             start_id=0,
         )
 

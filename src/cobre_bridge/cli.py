@@ -1410,6 +1410,7 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
     warning; a failed validation exits 2, giving ``convert decomp`` the same
     0/1/2 exit-code set as ``convert newave``.
     """
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.pipeline import (
         DECOMP_CONVERSION_PHASE_LABELS,
         convert_decomp_case,
@@ -1531,14 +1532,17 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
     # of degrading to invisible log records.
     boundary_diagnostics: list[Diagnostic] = []
     # The boundary FCF is imported by default; ``--no-fcf`` skips the whole
-    # step (and its deck re-discovery). With it on, the deck's own FC records
+    # step (and its deck discovery). With it on, the deck's own FC records
     # (or the cortes* glob) locate the cut files; a deck that declares none
     # simply converts without a boundary FCF (an INFO note, not an error).
-    deck_files = discover_decomp_files(args.src) if not args.no_fcf else None
+    # The single `DecompCase` built here is handed to the importer below, so
+    # the deck is discovered (and, on first attribute access, parsed) once
+    # for the FCF step rather than the importer re-discovering it itself.
+    case = DecompCase.from_directory(args.src) if not args.no_fcf else None
     fcf_cut_files_present = (
-        deck_files is not None
-        and deck_files.cortesh is not None
-        and deck_files.cortes is not None
+        case is not None
+        and case.files.cortesh is not None
+        and case.files.cortes is not None
     )
     if not args.no_fcf and not fcf_cut_files_present:
         print_status(
@@ -1548,7 +1552,7 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
             style="#F5A623",
         )
     if fcf_cut_files_present:
-        assert deck_files is not None  # narrowed by fcf_cut_files_present
+        assert case is not None  # narrowed by fcf_cut_files_present
         from cobre_bridge import diagnostics as dx
 
         fcf_diags: list[Diagnostic] = []
@@ -1563,8 +1567,7 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
             with dx.collect() as fcf_diags, tempfile.TemporaryDirectory() as work_dir:
                 import_boundary_fcf(
                     args.dst,
-                    deck_files.cortesh,
-                    deck_files.cortes,
+                    case,
                     work_dir=Path(work_dir),
                     # Never None: a None cost_scale_factor triggers cobre's
                     # legacy 1e6 scaling — the source cuts are authored in

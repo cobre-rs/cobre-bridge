@@ -18,11 +18,13 @@ at all); a full ``convert_decomp_case`` run is out of this ticket's scope
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.libs_electrical import read_carga_ande
 from cobre_bridge.decomp.load import convert_load_factors, convert_load_stats
@@ -34,6 +36,7 @@ from cobre_bridge.decomp.network import (
     convert_lines,
 )
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
+from tests.conftest import make_decomp_case
 
 _ITAIPU_CODE = 66
 
@@ -46,6 +49,18 @@ _ID_MAP_NO_ITAIPU = DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"))
 def _calendar() -> list[OperativeStage]:
     hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
+
+
+def _case(
+    dadger: object = None, calendar: list[OperativeStage] | None = None
+) -> DecompCase:
+    """A ``DecompCase`` pre-filled with *dadger* (unused by
+    ``append_iv_se_line``, which never reads it) and *calendar* (defaults to
+    ``_calendar()``, matching the raw ``calendar``/``start`` every test here
+    used to pass directly)."""
+    return make_decomp_case(
+        Path("unused"), dadger=dadger, calendar=calendar or _calendar()
+    )
 
 
 class _StubDadger:
@@ -154,18 +169,17 @@ class TestAppendIvSeLine:
 
     def test_appends_after_existing_lines_without_mutating_them(self) -> None:
         calendar = _calendar()
-        start = calendar[0].start_date
         dadger = _StubDadger(ia=_ia_frame())
-        lines_doc, line_bounds = convert_lines(dadger, _ID_MAP_ITAIPU, calendar, start)
+        case = _case(dadger, calendar)
+        lines_doc, line_bounds = convert_lines(case, _ID_MAP_ITAIPU)
         assert len(lines_doc["lines"]) == 1
         original_line = dict(lines_doc["lines"][0])
         original_row_count = line_bounds.num_rows
 
         extended_doc, extended_bounds = append_iv_se_line(
-            lines_doc,
-            line_bounds,
-            calendar,
-            start,
+            case,
+            lines_doc=lines_doc,
+            line_bounds=line_bounds,
             source_bus_id=_ID_MAP_ITAIPU.transhipment_bus_id,
             target_bus_id=_ID_MAP_ITAIPU.bus_id(1),
             capacity_mw=3700.0,
@@ -194,14 +208,12 @@ class TestAppendIvSeLine:
 
     def test_next_free_id_with_no_existing_lines(self) -> None:
         calendar = _calendar()
-        start = calendar[0].start_date
         empty_doc = {"$schema": "irrelevant", "lines": []}
 
         extended_doc, extended_bounds = append_iv_se_line(
-            empty_doc,
-            _LINE_BOUNDS_SCHEMA.empty_table(),
-            calendar,
-            start,
+            _case(calendar=calendar),
+            lines_doc=empty_doc,
+            line_bounds=_LINE_BOUNDS_SCHEMA.empty_table(),
             source_bus_id=2,
             target_bus_id=0,
             capacity_mw=99999.0,
@@ -230,10 +242,9 @@ class TestAppendIvSeLine:
 
         with dx.collect() as collected:
             result_doc, result_bounds = append_iv_se_line(
-                lines_doc,
-                line_bounds,
-                calendar,
-                start,
+                _case(calendar=calendar),
+                lines_doc=lines_doc,
+                line_bounds=line_bounds,
                 # Reversed orientation vs. the existing line -- the deck's
                 # IA register may declare either direction.
                 source_bus_id=5,
@@ -251,16 +262,14 @@ class TestAppendIvSeLine:
         synthesized as before (pre-ticket behavior) and no diagnostic is
         emitted."""
         calendar = _calendar()
-        start = calendar[0].start_date
         lines_doc = {"$schema": "irrelevant", "lines": []}
         line_bounds = _LINE_BOUNDS_SCHEMA.empty_table()
 
         with dx.collect() as collected:
             extended_doc, extended_bounds = append_iv_se_line(
-                lines_doc,
-                line_bounds,
-                calendar,
-                start,
+                _case(calendar=calendar),
+                lines_doc=lines_doc,
+                line_bounds=line_bounds,
                 source_bus_id=5,
                 target_bus_id=0,
                 capacity_mw=99999.0,
@@ -295,16 +304,16 @@ class TestItaipuWithRi:
         return calendar, start, dadger
 
     def test_line_append_and_base_bound_row(self) -> None:
-        calendar, start, dadger = self._build()
-        lines_doc, line_bounds = convert_lines(dadger, _ID_MAP_ITAIPU, calendar, start)
+        calendar, _start, dadger = self._build()
+        case = _case(dadger, calendar)
+        lines_doc, line_bounds = convert_lines(case, _ID_MAP_ITAIPU)
         capacity = _itaipu_50hz_capacity_mw(dadger)
         assert capacity == 3700.0
 
         lines_doc, line_bounds = append_iv_se_line(
-            lines_doc,
-            line_bounds,
-            calendar,
-            start,
+            case,
+            lines_doc=lines_doc,
+            line_bounds=line_bounds,
             source_bus_id=_ID_MAP_ITAIPU.transhipment_bus_id,
             target_bus_id=_ID_MAP_ITAIPU.bus_id(1),
             capacity_mw=capacity,
@@ -331,7 +340,7 @@ class TestItaipuWithRi:
         }
 
         stats = convert_load_stats(
-            dadger, _ID_MAP_ITAIPU, calendar, extra_bus_loads=extra_bus_loads
+            _case(dadger, calendar), _ID_MAP_ITAIPU, extra_bus_loads=extra_bus_loads
         ).to_pandas()
         iv_rows = stats[stats["bus_id"] == iv_bus]
         assert (iv_rows["mean_mw"] > 0).all()
@@ -357,7 +366,7 @@ class TestItaipuWithRi:
         }
 
         doc = convert_load_factors(
-            dadger, _ID_MAP_ITAIPU, calendar, extra_bus_loads=extra_bus_loads
+            _case(dadger, calendar), _ID_MAP_ITAIPU, extra_bus_loads=extra_bus_loads
         )
         iv_entries = [e for e in doc["load_factors"] if e["bus_id"] == iv_bus]
         assert len(iv_entries) == len(calendar)
@@ -383,16 +392,16 @@ class TestItaipuNoRi:
         return calendar, start, dadger
 
     def test_line_present_with_unbounded_capacity(self) -> None:
-        calendar, start, dadger = self._build()
-        lines_doc, line_bounds = convert_lines(dadger, _ID_MAP_ITAIPU, calendar, start)
+        calendar, _start, dadger = self._build()
+        case = _case(dadger, calendar)
+        lines_doc, line_bounds = convert_lines(case, _ID_MAP_ITAIPU)
         capacity = _itaipu_50hz_capacity_mw(dadger)
         assert capacity == _UNBOUNDED_LINE_CAPACITY_MW
 
         lines_doc, _line_bounds = append_iv_se_line(
-            lines_doc,
-            line_bounds,
-            calendar,
-            start,
+            case,
+            lines_doc=lines_doc,
+            line_bounds=line_bounds,
             source_bus_id=_ID_MAP_ITAIPU.transhipment_bus_id,
             target_bus_id=_ID_MAP_ITAIPU.bus_id(1),
             capacity_mw=capacity,
@@ -409,13 +418,13 @@ class TestItaipuNoRi:
         assert carga_ande == {}  # no RI -> pipeline.py builds no extra_bus_loads
 
         stats = convert_load_stats(
-            dadger, _ID_MAP_ITAIPU, calendar, extra_bus_loads=None
+            _case(dadger, calendar), _ID_MAP_ITAIPU, extra_bus_loads=None
         ).to_pandas()
         iv_bus = _ID_MAP_ITAIPU.transhipment_bus_id
         assert set(stats[stats["bus_id"] == iv_bus]["mean_mw"]) == {0.0}
 
         doc = convert_load_factors(
-            dadger, _ID_MAP_ITAIPU, calendar, extra_bus_loads=None
+            _case(dadger, calendar), _ID_MAP_ITAIPU, extra_bus_loads=None
         )
         assert all(e["bus_id"] != iv_bus for e in doc["load_factors"])
 
@@ -431,7 +440,7 @@ class TestNoItaipu:
         calendar = _calendar()
         dadger = _StubDadger(ia=_ia_frame())
         lines_doc, _line_bounds = convert_lines(
-            dadger, _ID_MAP_NO_ITAIPU, calendar, calendar[0].start_date
+            _case(dadger, calendar), _ID_MAP_NO_ITAIPU
         )
         assert len(lines_doc["lines"]) == 1
         assert all(line["name"] != "IV-SE" for line in lines_doc["lines"])
@@ -440,12 +449,12 @@ class TestNoItaipu:
         calendar = _calendar()
         dadger = _StubDadger(dp=_dp_frame())
         stats = convert_load_stats(
-            dadger, _ID_MAP_NO_ITAIPU, calendar, extra_bus_loads=None
+            _case(dadger, calendar), _ID_MAP_NO_ITAIPU, extra_bus_loads=None
         ).to_pandas()
         iv_bus = _ID_MAP_NO_ITAIPU.transhipment_bus_id
         assert set(stats[stats["bus_id"] == iv_bus]["mean_mw"]) == {0.0}
 
         doc = convert_load_factors(
-            dadger, _ID_MAP_NO_ITAIPU, calendar, extra_bus_loads=None
+            _case(dadger, calendar), _ID_MAP_NO_ITAIPU, extra_bus_loads=None
         )
         assert all(e["bus_id"] != iv_bus for e in doc["load_factors"])

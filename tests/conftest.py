@@ -4,7 +4,9 @@
 with paths under a tmp dir (no filesystem access). ``make_case`` wraps it in a
 :class:`~cobre_bridge.case.NewaveCase` and pre-fills the requested cached reader
 slots, so a converter under test reads the supplied mock objects instead of
-parsing files. ``hydro_with_group`` builds a 0.13-shaped ``hydros.json`` hydro
+parsing files. ``make_decomp_files``/``make_decomp_case`` are the DECOMP-track
+twins, wrapping a :class:`~cobre_bridge.decomp.case.DecompCase`.
+``hydro_with_group`` builds a 0.13-shaped ``hydros.json`` hydro
 dict (no top-level ``bus_id``, one mirror ``unit_groups`` entry) for tests that
 hand-build a hydro fixture rather than calling a converter. ``_FakeDadger``
 is a decomp-side test double returning preset DataFrames for register
@@ -25,6 +27,8 @@ import pytest
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro import build_mirror_unit_group
+from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.newave_files import NewaveFiles
 
 # Shared skip marker for tier-2 tests that need the optional cobre-python
@@ -137,8 +141,6 @@ def _restore_cobre_bridge_logger() -> Iterator[None]:
         pkg.setLevel(prior_level)
 
 
-# Required NewaveFiles attributes get a default path under tmp_path; optional
-# ones default to None. Callers override any of them via keyword.
 _REQUIRED = (
     "dger",
     "confhd",
@@ -215,6 +217,53 @@ def make_case(files_or_tmp: NewaveFiles | Path, **parsed: Any) -> NewaveCase:
         default_hidr = MagicMock()
         default_hidr.cadastro = pd.DataFrame()
         case.__dict__["hidr"] = default_hidr
+    return case
+
+
+_DECOMP_REQUIRED = ("dadger", "vazoes", "hidr")
+_DECOMP_OPTIONAL = (
+    "dadgnl",
+    "renovaveis",
+    "polinjus",
+    "libs_restricao_eletrica",
+    "cortesh",
+    "cortes",
+)
+
+
+def make_decomp_files(tmp_path: Path, **overrides: Any) -> DecompFiles:
+    """Build a ``DecompFiles`` pointing into *tmp_path*; no I/O.
+
+    Required paths default to ``tmp_path / "<name>"``, optional paths to
+    ``None``, and ``revision`` to ``"rv0"``. Pass any attribute as a keyword
+    to override (e.g. ``make_decomp_files(tmp_path, dadgnl=tmp_path /
+    "dadgnl.rv0")``).
+    """
+    fields: dict[str, Any] = {"revision": "rv0"}
+    for name in _DECOMP_REQUIRED:
+        fields[name] = tmp_path / name
+    for name in _DECOMP_OPTIONAL:
+        fields[name] = None
+    fields.update(overrides)
+    return DecompFiles(**fields)
+
+
+def make_decomp_case(files_or_tmp: DecompFiles | Path, **parsed: Any) -> DecompCase:
+    """Build a ``DecompCase`` with the given parsed readers pre-cached.
+
+    *files_or_tmp* is either a ``DecompFiles`` or a tmp dir (then
+    ``make_decomp_files`` builds one). Each ``parsed`` keyword sets the
+    matching cached-property slot directly, so accessing e.g. ``case.dadger``
+    returns the supplied object without parsing.
+    """
+    files = (
+        files_or_tmp
+        if isinstance(files_or_tmp, DecompFiles)
+        else make_decomp_files(files_or_tmp)
+    )
+    case = DecompCase(files=files)
+    for name, value in parsed.items():
+        case.__dict__[name] = value
     return case
 
 

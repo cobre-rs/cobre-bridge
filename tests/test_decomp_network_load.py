@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -10,7 +11,8 @@ import pytest
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.load import convert_load_factors, convert_load_stats
 from cobre_bridge.decomp.network import convert_buses, convert_lines
-from cobre_bridge.decomp.temporal import build_operative_calendar
+from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
+from tests.conftest import make_decomp_case
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2, 3, 4, 11),
@@ -21,6 +23,21 @@ _ID_MAP = DecompIdMap(
 def _calendar_rv3():
     hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
+
+
+def _single_stage_calendar(start_date: date) -> list[OperativeStage]:
+    """A minimal one-stage calendar carrying only *start_date* — for tests
+    that assert on ``operational_start_date`` without needing a real
+    DECOMP-shaped (weekly + aggregated-month) calendar."""
+    return [
+        OperativeStage(
+            index=0,
+            start_date=start_date,
+            end_date=start_date,
+            season_id=start_date.month - 1,
+            block_hours=(1.0,),
+        )
+    ]
 
 
 class _StubDadger:
@@ -115,7 +132,12 @@ class TestDecompIdMap:
 class TestConvertBuses:
     def test_buses_with_and_without_deficit(self) -> None:
         dadger = _StubDadger(cd=_cd_frame())
-        doc = convert_buses(dadger, _ID_MAP, date(2024, 8, 31))
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=dadger,
+            calendar=_single_stage_calendar(date(2024, 8, 31)),
+        )
+        doc = convert_buses(case, _ID_MAP)
         buses = doc["buses"]
         assert [b["id"] for b in buses] == [0, 1, 2, 3, 4, 5]
         assert buses[0]["deficit_segments"] == [{"depth_mw": None, "cost": 7810.62}]
@@ -126,27 +148,43 @@ class TestConvertBuses:
 
     def test_rejects_non_full_depth(self) -> None:
         dadger = _StubDadger(cd=_cd_frame(limit=95.0))
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=dadger,
+            calendar=_single_stage_calendar(date(2024, 8, 31)),
+        )
         with pytest.raises(ValueError, match="depth"):
-            convert_buses(dadger, _ID_MAP, date(2024, 8, 31))
+            convert_buses(case, _ID_MAP)
 
     def test_rejects_block_varying_cost(self) -> None:
         cd = _cd_frame()
         cd.loc[0, "custo_2"] = 9000.0
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=_StubDadger(cd=cd),
+            calendar=_single_stage_calendar(date(2024, 8, 31)),
+        )
         with pytest.raises(ValueError, match="uniform"):
-            convert_buses(_StubDadger(cd=cd), _ID_MAP, date(2024, 8, 31))
+            convert_buses(case, _ID_MAP)
 
     def test_rejects_multi_segment_curves(self) -> None:
         cd = pd.concat([_cd_frame(), _cd_frame(cost=9000.0)], ignore_index=True)
         cd.loc[cd.index[-4:], "codigo_curva"] = 2
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=_StubDadger(cd=cd),
+            calendar=_single_stage_calendar(date(2024, 8, 31)),
+        )
         with pytest.raises(ValueError, match="multi-segment"):
-            convert_buses(_StubDadger(cd=cd), _ID_MAP, date(2024, 8, 31))
+            convert_buses(case, _ID_MAP)
 
 
 class TestConvertLoad:
     def test_stats_cover_every_bus_and_stage(self) -> None:
-        table = convert_load_stats(
-            _StubDadger(dp=_dp_frame()), _ID_MAP, _calendar_rv3()
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=_calendar_rv3()
         )
+        table = convert_load_stats(case, _ID_MAP)
         df = table.to_pandas()
         assert len(df) == 6 * 3
         assert set(df["std_mw"]) == {0.0}
@@ -158,7 +196,10 @@ class TestConvertLoad:
 
     def test_factors_invariant_and_zero_mean_omission(self) -> None:
         calendar = _calendar_rv3()
-        doc = convert_load_factors(_StubDadger(dp=_dp_frame()), _ID_MAP, calendar)
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=calendar
+        )
+        doc = convert_load_factors(case, _ID_MAP)
         entries = doc["load_factors"]
         assert {e["bus_id"] for e in entries} == {0, 1}
         for entry in entries:
@@ -172,13 +213,19 @@ class TestConvertLoad:
     def test_rejects_block_count_mismatch(self) -> None:
         dp = _dp_frame()
         dp.loc[0, "numero_patamares"] = 2
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=dp), calendar=_calendar_rv3()
+        )
         with pytest.raises(ValueError, match="blocks"):
-            convert_load_stats(_StubDadger(dp=dp), _ID_MAP, _calendar_rv3())
+            convert_load_stats(case, _ID_MAP)
 
     def test_rejects_stage_outside_calendar(self) -> None:
         dp = _dp_frame(calendar_stages=4)
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=dp), calendar=_calendar_rv3()
+        )
         with pytest.raises(ValueError, match="outside the calendar"):
-            convert_load_stats(_StubDadger(dp=dp), _ID_MAP, _calendar_rv3())
+            convert_load_stats(case, _ID_MAP)
 
 
 def _ia_zero_block_frame() -> pd.DataFrame:
@@ -214,12 +261,12 @@ class TestConvertLinesZeroCapability:
 
     def test_zero_block_limit_converts_without_raising(self) -> None:
         calendar = _calendar_rv3()
-        lines_doc, bounds = convert_lines(
-            _StubDadger(ia=_ia_zero_block_frame()),
-            _ID_MAP,
-            calendar,
-            date(2026, 7, 18),
-        )  # must not raise
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=_StubDadger(ia=_ia_zero_block_frame()),
+            calendar=calendar,
+        )
+        lines_doc, bounds = convert_lines(case, _ID_MAP)  # must not raise
         line_id = lines_doc["lines"][0]["id"]
         df = bounds.to_pandas()
 

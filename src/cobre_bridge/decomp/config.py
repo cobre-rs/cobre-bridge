@@ -38,7 +38,7 @@ from cobre_bridge.converters.network import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from idecomp.decomp import Dadger
+    from cobre_bridge.decomp.case import DecompCase
 
 _LOG = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ _CONFIG_SCHEMA_URL = (
 )
 
 
-def convert_config(dadger: Dadger) -> dict:
+def convert_config(case: DecompCase) -> dict:
     """Build ``config.json``: Gap + NI stopping rules, external scenario
     sources, simulation on.
 
@@ -86,6 +86,7 @@ def convert_config(dadger: Dadger) -> dict:
     boundary-FCF importer reserves the cut-derived depth when a boundary is
     actually imported (see the module docstring).
     """
+    dadger = case.dadger
     ni = int(dadger.ni.iteracoes or 500)
     gp = float(dadger.gp.data[0])
     _LOG.info(

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -28,6 +29,7 @@ from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import _topology_relink_diagnostic
 from cobre_bridge.decomp.scenarios import _incremental_context, convert_external_inflows
 from cobre_bridge.decomp.temporal import build_operative_calendar
+from tests.conftest import make_decomp_case
 
 if TYPE_CHECKING:
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -216,7 +218,10 @@ def test_relink_does_not_shift_incremental_inflows() -> None:
     vazoes = _StubVazoes(
         {"11": (100.0, 110.0), "12": (200.0, 210.0), "13": (300.0, 310.0)}
     )
-    table = convert_external_inflows(vazoes, effective, _ABC_ID_MAP, _calendar())
+    case = make_decomp_case(Path("unused"), calendar=_calendar())
+    table = convert_external_inflows(
+        case, _ABC_ID_MAP, vazoes=vazoes, effective=effective
+    )
     trunk = table.to_pandas()
     trunk = trunk[trunk["stage_id"] == 0].set_index("hydro_id")["value_m3s"]
 
@@ -248,17 +253,17 @@ def test_no_topology_override_is_identical() -> None:
     )
 
     vazoes = _StubVazoes({"11": (100.0, 110.0), "12": (200.0, 210.0)})
-    via_effective = convert_external_inflows(vazoes, effective, id_map, calendar)
-    via_base = convert_external_inflows(vazoes, base_effective, id_map, calendar)
+    case = make_decomp_case(Path("unused"), dadger=dadger, hidr=hidr, calendar=calendar)
+    via_effective = convert_external_inflows(
+        case, id_map, vazoes=vazoes, effective=effective
+    )
+    via_base = convert_external_inflows(
+        case, id_map, vazoes=vazoes, effective=base_effective
+    )
     assert via_effective.equals(via_base)
 
-    start_date = calendar[0].start_date
-    hydros_effective = convert_hydros(dadger, hidr, id_map, start_date, effective)[
-        "hydros"
-    ]
-    hydros_base = convert_hydros(dadger, hidr, id_map, start_date, base_effective)[
-        "hydros"
-    ]
+    hydros_effective = convert_hydros(case, id_map, effective=effective)["hydros"]
+    hydros_base = convert_hydros(case, id_map, effective=base_effective)["hydros"]
     assert [h["downstream_id"] for h in hydros_effective] == [
         h["downstream_id"] for h in hydros_base
     ]
@@ -291,7 +296,10 @@ def test_numpos_override_changes_station() -> None:
     # Column "11" (the base gauge) carries a value that must NOT be read;
     # column "99" (the overridden gauge) carries the value that must be.
     vazoes = _StubVazoes({"11": (500.0, 500.0), "99": (77.0, 88.0)})
-    table = convert_external_inflows(vazoes, effective, id_map, calendar).to_pandas()
+    case = make_decomp_case(Path("unused"), calendar=calendar)
+    table = convert_external_inflows(
+        case, id_map, vazoes=vazoes, effective=effective
+    ).to_pandas()
     trunk = table[table["stage_id"] == 0]["value_m3s"].iloc[0]
     assert trunk == pytest.approx(77.0)
 

@@ -10,6 +10,7 @@ own style and ``test_decomp_rq_bounds.py``'s synthetic-calendar fixture.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
@@ -28,6 +29,7 @@ from cobre_bridge.emission_checks import (
     check_bound_block_id_range,
     check_bound_row_uniqueness,
 )
+from tests.conftest import make_decomp_case
 
 
 def _calendar():
@@ -63,7 +65,8 @@ class TestSingleGroupBaseRows:
             (0, 0, 2): GroupBoundEntry(max_generation_mw=120.0),
         }
 
-        table = convert_hydro_unit_group_bounds(values, calendar)
+        case = make_decomp_case(Path("unused"), calendar=calendar)
+        table = convert_hydro_unit_group_bounds(case, values=values)
 
         assert table.schema == _HYDRO_UNIT_GROUP_BOUNDS_SCHEMA
         assert table.num_rows == 3
@@ -82,12 +85,14 @@ class TestSingleGroupBaseRows:
         calendar = _calendar()
         values = {(0, 0, 0): GroupBoundEntry()}
 
-        table = convert_hydro_unit_group_bounds(values, calendar)
+        case = make_decomp_case(Path("unused"), calendar=calendar)
+        table = convert_hydro_unit_group_bounds(case, values=values)
 
         assert table.num_rows == 0
 
     def test_empty_mapping_returns_empty_schema_correct_table(self) -> None:
-        table = convert_hydro_unit_group_bounds({}, _calendar())
+        case = make_decomp_case(Path("unused"), calendar=_calendar())
+        table = convert_hydro_unit_group_bounds(case, values={})
 
         assert table.schema == _HYDRO_UNIT_GROUP_BOUNDS_SCHEMA
         assert table.num_rows == 0
@@ -106,7 +111,8 @@ class TestBasePlusSparsePerBlock:
             (0, 0, 0): GroupBoundEntry(max_generation_mw=[100.0, 100.0, 0.0]),
         }
 
-        table = convert_hydro_unit_group_bounds(values, calendar)
+        case = make_decomp_case(Path("unused"), calendar=calendar)
+        table = convert_hydro_unit_group_bounds(case, values=values)
 
         assert table.num_rows == 4  # 1 base row + 3 per-block override rows
         assert table["block_id"].to_pylist() == [None, 0, 1, 2]
@@ -133,7 +139,8 @@ class TestBasePlusSparsePerBlock:
             (0, 0, 0): GroupBoundEntry(max_generation_mw=[50.0, 50.0, 50.0]),
         }
 
-        table = convert_hydro_unit_group_bounds(values, calendar)
+        case = make_decomp_case(Path("unused"), calendar=calendar)
+        table = convert_hydro_unit_group_bounds(case, values=values)
 
         assert table.num_rows == 1
         assert table["block_id"].to_pylist() == [None]
@@ -146,8 +153,9 @@ class TestBasePlusSparsePerBlock:
             (0, 0, 0): GroupBoundEntry(max_generation_mw=[100.0, 100.0]),
         }
 
+        case = make_decomp_case(Path("unused"), calendar=calendar)
         with pytest.raises(ValueError, match=r"zip\(\)"):
-            convert_hydro_unit_group_bounds(values, calendar)
+            convert_hydro_unit_group_bounds(case, values=values)
 
 
 # ---------------------------------------------------------------------------

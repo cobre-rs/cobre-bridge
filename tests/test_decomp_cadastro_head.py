@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -33,6 +34,7 @@ from cobre_bridge.decomp.hydro import (
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.productivity import apply_hydraulic_loss, mean_cota
+from tests.conftest import make_decomp_case
 
 if TYPE_CHECKING:
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -362,9 +364,10 @@ def test_per_stage_rho_eq_does_not_cap_generation() -> None:
     )
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
 
-    values = convert_hydro_group_availability(
-        _StubDadger(), hidr, id_map, _calendar(), effective
+    case = make_decomp_case(
+        Path("unused"), dadger=_StubDadger(), hidr=hidr, calendar=_calendar()
     )
+    values = convert_hydro_group_availability(case, id_map, effective=effective)
     hydro_id = id_map.hydro_id(1)
 
     for stage_index in range(3):
@@ -487,9 +490,10 @@ def test_no_override_is_byte_identical() -> None:
     table = convert_energy_productivity(effective, id_map).to_pandas()
     assert table["equivalent_productivity_mw_per_m3s"].iloc[0] == expected_rho_eq
 
-    values = convert_hydro_group_availability(
-        _StubDadger(), hidr, id_map, _calendar(), effective
+    case = make_decomp_case(
+        Path("unused"), dadger=_StubDadger(), hidr=hidr, calendar=_calendar()
     )
+    values = convert_hydro_group_availability(case, id_map, effective=effective)
     hydro_id = id_map.hydro_id(1)
     for stage_index in range(3):
         entry = values.get((hydro_id, 0, stage_index))

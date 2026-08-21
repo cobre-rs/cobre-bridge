@@ -38,6 +38,7 @@ from cobre_bridge.decomp.libs_electrical_emit import (
 )
 from cobre_bridge.decomp.ncs import _pee_series, build_pee_ncs_id_map
 from cobre_bridge.decomp.temporal import OperativeStage
+from tests.conftest import make_decomp_case
 
 # ---------------------------------------------------------------------------
 # _cobre_token — one bucket-A token kind at a time (spec §2)
@@ -350,7 +351,10 @@ def test_build_pee_ncs_id_map_sorted_offset_matches_pee_series() -> None:
     )
     renovaveis = _StubRenovaveis(cad, subm, ger)
 
-    ncs_map = build_pee_ncs_id_map(dadger, id_map, calendar, renovaveis)
+    case = make_decomp_case(
+        Path("unused"), dadger=dadger, calendar=calendar, renovaveis=renovaveis
+    )
+    ncs_map = build_pee_ncs_id_map(case, id_map)
     assert ncs_map == {3: 2, 7: 3}
 
     series = _pee_series(renovaveis, id_map, calendar, first_ncs_id=2)
@@ -363,7 +367,10 @@ def test_build_pee_ncs_id_map_none_renovaveis_returns_empty() -> None:
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
     calendar = _emit_calendar(1, n_blocks=1)
     dadger = _StubDadger(None)
-    assert build_pee_ncs_id_map(dadger, id_map, calendar, None) == {}
+    case = make_decomp_case(
+        Path("unused"), dadger=dadger, calendar=calendar, renovaveis=None
+    )
+    assert build_pee_ncs_id_map(case, id_map) == {}
 
 
 def test_build_pee_ncs_id_map_no_declared_parks_returns_empty() -> None:
@@ -371,7 +378,10 @@ def test_build_pee_ncs_id_map_no_declared_parks_returns_empty() -> None:
     calendar = _emit_calendar(1, n_blocks=1)
     dadger = _StubDadger(None)
     renovaveis = _StubRenovaveis(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
-    assert build_pee_ncs_id_map(dadger, id_map, calendar, renovaveis) == {}
+    case = make_decomp_case(
+        Path("unused"), dadger=dadger, calendar=calendar, renovaveis=renovaveis
+    )
+    assert build_pee_ncs_id_map(case, id_map) == {}
 
 
 # ---------------------------------------------------------------------------

@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from cobre_bridge.decomp.bounds import convert_hydro_bounds
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.network import convert_lines, convert_pumping_stations
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
+from tests.conftest import make_decomp_case
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2, 3, 4, 11),
@@ -35,6 +38,10 @@ class _StubDadger:
             frame = self._frames[name]
             return lambda df=False, **kwargs: frame  # noqa: ARG005
         raise AttributeError(name)
+
+
+def _case(dadger: _StubDadger, calendar: Sequence[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), dadger=dadger, calendar=calendar)
 
 
 def _ia_frame() -> pd.DataFrame:
@@ -64,7 +71,7 @@ class TestConvertLines:
     def test_lines_and_base_bounds(self) -> None:
         calendar = _calendar()
         lines_doc, bounds = convert_lines(
-            _StubDadger(ia=_ia_frame()), _ID_MAP, calendar, date(2026, 7, 18)
+            _case(_StubDadger(ia=_ia_frame()), calendar), _ID_MAP
         )
         lines = lines_doc["lines"]
         assert len(lines) == 2
@@ -84,7 +91,7 @@ class TestConvertLines:
     def test_block_bounds_are_absolute_mw_no_factor(self) -> None:
         calendar = _calendar()
         lines_doc, bounds = convert_lines(
-            _StubDadger(ia=_ia_frame()), _ID_MAP, calendar, date(2026, 7, 18)
+            _case(_StubDadger(ia=_ia_frame()), calendar), _ID_MAP
         )
         lines = lines_doc["lines"]
         se_iv_id = next(line["id"] for line in lines if line["name"] == "SE-IV")
@@ -115,7 +122,7 @@ class TestConvertLines:
         ia = _ia_frame()
         ia.loc[ia["nome_submercado_de"] == "SE", "estagio"] = 2
         with pytest.raises(ValueError, match="stage 1"):
-            convert_lines(_StubDadger(ia=ia), _ID_MAP, _calendar(), date(2026, 7, 18))
+            convert_lines(_case(_StubDadger(ia=ia), _calendar()), _ID_MAP)
 
 
 class TestConvertPumping:
@@ -134,7 +141,7 @@ class TestConvertPumping:
                 }
             ]
         )
-        doc = convert_pumping_stations(_StubDadger(ue=ue), _ID_MAP, date(2026, 7, 18))
+        doc = convert_pumping_stations(_case(_StubDadger(ue=ue), _calendar()), _ID_MAP)
         station = doc["pumping_stations"][0]
         assert station["source_hydro_id"] == 1
         assert station["destination_hydro_id"] == 2
@@ -203,7 +210,9 @@ class TestConvertHydroBounds:
     def test_rq_percentages_and_uh_priority(self) -> None:
         calendar = _calendar()
         contributions = convert_hydro_bounds(
-            self._dadger(), _ID_MAP, calendar, self._effective(calendar)
+            _case(self._dadger(), calendar),
+            _ID_MAP,
+            effective=self._effective(calendar),
         )
         # The RQ percentages (100, 100, 0) are non-uniform on every stage, so
         # plant 1 contributes per-block only (block_id = 0..2), no base
@@ -227,7 +236,7 @@ class TestConvertHydroBounds:
             stage_varying={(1, "vazao_minima_historica"): (0.0,) * len(calendar)},
         )
         contributions = convert_hydro_bounds(
-            self._dadger(), _ID_MAP, calendar, effective
+            _case(self._dadger(), calendar), _ID_MAP, effective=effective
         )
         # Plant 1's historical minimum overridden to zero: no contributions.
         assert 0 not in {c.entity_id for c in contributions}
@@ -252,6 +261,8 @@ class TestConvertHydroBounds:
         )
         calendar = _calendar()
         contributions = convert_hydro_bounds(
-            self._dadger(cq=cq), _ID_MAP, calendar, self._effective(calendar)
+            _case(self._dadger(cq=cq), calendar),
+            _ID_MAP,
+            effective=self._effective(calendar),
         )
         assert 0 in {c.entity_id for c in contributions}

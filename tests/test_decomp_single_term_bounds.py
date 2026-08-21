@@ -14,12 +14,14 @@ warning-skip), and the fail-loud dispatcher on an unhandled family.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
     ConstraintRecord,
@@ -34,6 +36,7 @@ from cobre_bridge.decomp.single_term_bounds import (
 )
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.diagnostics import Severity
+from tests.conftest import make_decomp_case
 
 
 def _stage(index: int, n_blocks: int) -> OperativeStage:
@@ -44,6 +47,10 @@ def _stage(index: int, n_blocks: int) -> OperativeStage:
         season_id=6,
         block_hours=tuple(168.0 / n_blocks for _ in range(n_blocks)),
     )
+
+
+def _case(calendar: list[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), calendar=calendar)
 
 
 def _census(*records: ConstraintRecord) -> ConstraintCensus:
@@ -116,12 +123,12 @@ def test_re_single_block_generation_bound(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record),
+        _case(calendar),
         id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_generation_mw=1_000.0),
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_generation_mw=1_000.0),
     )
 
     assert len(contributions) == 1
@@ -147,12 +154,12 @@ def test_re_negative_coefficient_flips_sides(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record),
+        _case(calendar),
         id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_generation_mw=1_000.0),
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_generation_mw=1_000.0),
     )
 
     assert len(contributions) == 1
@@ -171,12 +178,12 @@ def test_re_two_block_emits_per_block_contributions(
     calendar = [_stage(0, 2)]
 
     contributions = single_term_bound_contributions(
-        _census(record),
+        _case(calendar),
         id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_generation_mw=1_000.0),
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_generation_mw=1_000.0),
     )
 
     by_block = {c.block_id: c for c in contributions}
@@ -222,7 +229,12 @@ def test_ft_thermal_single_block_generation_bound(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective, {}
+        _case(calendar),
+        id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -247,7 +259,12 @@ def test_ft_thermal_two_block_emits_per_block_contributions(
     calendar = [_stage(0, 2)]
 
     contributions = single_term_bound_contributions(
-        _census(record), id_map, {}, calendar, effective, {}
+        _case(calendar),
+        id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     by_block = {c.block_id: c for c in contributions}
@@ -274,12 +291,12 @@ def test_re_hydro_regression_still_family_hydro(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record),
+        _case(calendar),
         id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_generation_mw=1_000.0),
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_generation_mw=1_000.0),
     )
 
     assert len(contributions) == 1
@@ -298,12 +315,12 @@ def test_absent_both_sides_emits_no_contribution(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record),
+        _case(calendar),
         id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_generation_mw=1_000.0),
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_generation_mw=1_000.0),
     )
 
     assert contributions == []
@@ -328,7 +345,12 @@ def test_unhandled_family_raises(
 
     with pytest.raises(ValueError, match="RHA"):
         single_term_bound_contributions(
-            _census(record), id_map, {}, calendar, effective, {}
+            _case(calendar),
+            id_map,
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities={},
         )
 
 
@@ -353,7 +375,12 @@ def test_re_unexpected_bounded_variable_raises(
 
     with pytest.raises(ValueError, match="QDEF"):
         single_term_bound_contributions(
-            _census(record), id_map, {}, calendar, effective, {}
+            _case(calendar),
+            id_map,
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities={},
         )
 
 
@@ -373,12 +400,12 @@ def test_re_ceiling_above_capacity_clamps_upper(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record),
+        _case(calendar),
         id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_generation_mw=9_777.776),
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_generation_mw=9_777.776),
     )
 
     assert len(contributions) == 1
@@ -401,12 +428,12 @@ def test_re_ceiling_at_capacity_is_not_clamped_and_emits_no_diagnostic(
 
     with dx.collect() as collected:
         contributions = single_term_bound_contributions(
-            _census(record),
+            _case(calendar),
             id_map,
-            {},
-            calendar,
-            effective,
-            _capacities(max_generation_mw=212.0),
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities=_capacities(max_generation_mw=212.0),
         )
 
     assert len(contributions) == 1
@@ -429,12 +456,12 @@ def test_re_clamp_emits_diagnostic_naming_plant_ceiling_and_capacity(
 
     with dx.collect() as collected:
         single_term_bound_contributions(
-            _census(record),
+            _case(calendar),
             id_map,
-            {},
-            calendar,
-            effective,
-            _capacities(max_generation_mw=9_777.776),
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities=_capacities(max_generation_mw=9_777.776),
         )
 
     clamped = [d for d in collected if d.code == "decomp-re-generation-clamped"]
@@ -460,7 +487,12 @@ def test_re_missing_capacity_entry_raises(
 
     with pytest.raises(KeyError):
         single_term_bound_contributions(
-            _census(record), id_map, {}, calendar, effective, {}
+            _case(calendar),
+            id_map,
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities={},
         )
 
 
@@ -499,7 +531,12 @@ def test_hq_qdef_lowers_to_outflow(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hq_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -525,12 +562,12 @@ def test_hq_qtur_lowers_to_turbined(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record),
+        _case(calendar),
         hq_id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_turbined_m3s=150.0),
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_turbined_m3s=150.0),
     )
 
     assert len(contributions) == 1
@@ -556,12 +593,12 @@ def test_hq_qtur_ceiling_above_capacity_clamps_upper(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record),
+        _case(calendar),
         hq_id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_turbined_m3s=972.0),
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_turbined_m3s=972.0),
     )
 
     assert len(contributions) == 1
@@ -584,12 +621,12 @@ def test_hq_qtur_ceiling_at_capacity_is_not_clamped_and_emits_no_diagnostic(
 
     with dx.collect() as collected:
         contributions = single_term_bound_contributions(
-            _census(record),
+            _case(calendar),
             hq_id_map,
-            {},
-            calendar,
-            effective,
-            _capacities(max_turbined_m3s=150.0),
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities=_capacities(max_turbined_m3s=150.0),
         )
 
     assert len(contributions) == 1
@@ -612,12 +649,12 @@ def test_hq_qtur_clamp_emits_diagnostic_naming_plant_ceiling_and_capacity(
 
     with dx.collect() as collected:
         single_term_bound_contributions(
-            _census(record),
+            _case(calendar),
             hq_id_map,
-            {},
-            calendar,
-            effective,
-            _capacities(max_turbined_m3s=972.0),
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities=_capacities(max_turbined_m3s=972.0),
         )
 
     clamped = [d for d in collected if d.code == "decomp-qtur-turbined-clamped"]
@@ -643,7 +680,12 @@ def test_hq_qtur_missing_capacity_entry_raises(
 
     with pytest.raises(KeyError):
         single_term_bound_contributions(
-            _census(record), hq_id_map, {}, calendar, effective, {}
+            _case(calendar),
+            hq_id_map,
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities={},
         )
 
 
@@ -660,7 +702,12 @@ def test_hq_qdef_does_not_read_hydro_capacities(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hq_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -678,7 +725,12 @@ def test_hq_per_block_outflow_contributions(
     calendar = [_stage(0, 2)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hq_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     by_block = {c.block_id: c for c in contributions}
@@ -707,12 +759,12 @@ def test_hq_qdef_and_qtur_coexist_on_one_plant(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(qdef, qtur),
+        _case(calendar),
         hq_id_map,
-        {},
-        calendar,
-        effective,
-        _capacities(max_turbined_m3s=150.0),
+        census=_census(qdef, qtur),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities=_capacities(max_turbined_m3s=150.0),
     )
 
     by_axis = {c.axis: c for c in contributions}
@@ -740,7 +792,12 @@ def test_hq_qdes_lowers_to_diversion(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hq_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -769,7 +826,12 @@ def test_hq_qdes_negative_coefficient_flips_sides(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hq_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -791,7 +853,12 @@ def test_hq_qver_lowers_to_spillage(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hq_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -819,7 +886,12 @@ def test_hq_qver_negative_coefficient_flips_sides(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hq_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hq_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -852,7 +924,12 @@ def test_hq_qdef_qdes_qver_all_coexist_on_one_plant(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(qdef, qdes, qver), hq_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hq_id_map,
+        census=_census(qdef, qdes, qver),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     by_axis = {c.axis: c for c in contributions}
@@ -979,7 +1056,12 @@ def test_hq_qbom_lowers_to_pumping_flow_bound(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), qbom_id_map, {30: 0}, calendar, effective, {}
+        _case(calendar),
+        qbom_id_map,
+        census=_census(record),
+        pumping_station_ids={30: 0},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -1008,7 +1090,12 @@ def test_hq_qbom_no_station_warns_and_skips(
 
     with dx.collect() as collected:
         contributions = single_term_bound_contributions(
-            _census(record), qbom_id_map, {}, calendar, effective, {}
+            _case(calendar),
+            qbom_id_map,
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities={},
         )
 
     assert contributions == []
@@ -1060,7 +1147,12 @@ def test_hv_varm_additive_floor_plus_lv(hv_id_map: DecompIdMap) -> None:
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hv_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -1092,7 +1184,12 @@ def test_hv_varm_uses_per_stage_effective_floor(hv_id_map: DecompIdMap) -> None:
     calendar = [_stage(0, 1), _stage(1, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hv_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     by_stage = {c.stage_id: c for c in contributions}
@@ -1116,7 +1213,12 @@ def test_hv_varm_negative_coefficient_flips_then_adds_floor(
     calendar = [_stage(0, 1)]
 
     contributions = single_term_bound_contributions(
-        _census(record), hv_id_map, {}, calendar, effective, {}
+        _case(calendar),
+        hv_id_map,
+        census=_census(record),
+        pumping_station_ids={},
+        effective=effective,
+        hydro_capacities={},
     )
 
     assert len(contributions) == 1
@@ -1136,7 +1238,12 @@ def test_hv_varm_uncadastred_plant_warns_and_skips(hv_id_map: DecompIdMap) -> No
 
     with dx.collect() as collected:
         contributions = single_term_bound_contributions(
-            _census(record), hv_id_map, {}, calendar, effective, {}
+            _case(calendar),
+            hv_id_map,
+            census=_census(record),
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities={},
         )
 
     assert contributions == []

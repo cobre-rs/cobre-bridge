@@ -7,6 +7,7 @@ import json
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pandas as pd
 import polars as pl
@@ -39,19 +40,16 @@ from cobre_bridge.comparators.decomp_results import (
     _THERMAL_VARIABLES,
     _UNSUPPORTED_TERM_VARIABLES,
     _AlignedDecompFrames,
-    _build_line_id_map,
     _bus_side,
     _cobre_ree_sums,
     _cobre_stage_hours,
     _corridor_line_alignment,
     _cost_frames,
-    _decomp_constraint_context,
     _decomp_convergence_frame,
     _decomp_max_stage,
     _decomp_ree_frame,
     _decomp_tim_iterations,
     _decomp_tim_stages,
-    _DecompConstraintContext,
     _DecompConstraintLookups,
     _energy_balance_frames,
     _evap_side,
@@ -89,9 +87,10 @@ from cobre_bridge.decomp.constraint_registers import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import DecompFiles
-from cobre_bridge.errors import FieldParseError
+from cobre_bridge.errors import FieldParseError, SourceFileError
 from cobre_bridge.verdict import decomp_dataset_summary
 from tests.conftest import _FakeDadger as _ConstraintFakeDadger
+from tests.conftest import make_decomp_case
 
 
 def _source_frame() -> pl.DataFrame:
@@ -435,6 +434,30 @@ def _aligned_fixture() -> _AlignedDecompFrames:
     )
 
 
+def _patch_shared_case(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    id_map: DecompIdMap,
+    dadger: object | None = None,
+) -> None:
+    """Patch the shared ``DecompCase.from_directory`` build (ticket-020) so
+    ``build_decomp_dataset``'s ``case.id_map``/``case.dadger`` resolve to
+    *id_map*/*dadger* without touching the filesystem -- the case is now
+    built unconditionally, before ``_read_aligned_frames`` runs, so every
+    fixture exercising ``build_decomp_dataset`` against a bare ``tmp_path``
+    needs this (mirrors ``_patch_aligned_frames``'s own "patch at the seam"
+    convention; monkeypatch's last ``setattr`` wins, so a test needing a
+    specific id map calls this again after ``_patch_aligned_frames``).
+    """
+    fake_dadger = _ConstraintFakeDadger() if dadger is None else dadger
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.case.DecompCase.from_directory",
+        lambda directory: make_decomp_case(
+            directory, dadger=fake_dadger, id_map=id_map
+        ),
+    )
+
+
 def _patch_aligned_frames(
     monkeypatch: pytest.MonkeyPatch, aligned: _AlignedDecompFrames
 ) -> None:
@@ -442,6 +465,13 @@ def _patch_aligned_frames(
         "cobre_bridge.comparators.decomp_results._read_aligned_frames",
         lambda *_args, **_kwargs: aligned,
     )
+    # ticket-020: the shared ``DecompCase`` build now runs unconditionally at
+    # the top of ``build_decomp_dataset`` (before ``_read_aligned_frames``,
+    # which this stub bypasses) -- degenerate but valid, so a bare
+    # ``tmp_path`` keeps working; tests needing a specific id map call
+    # ``_patch_shared_case`` again afterwards (monkeypatch's last ``setattr``
+    # wins).
+    _patch_shared_case(monkeypatch, id_map=DecompIdMap(bus_codes=(), bus_names=()))
     # ticket-006: ``build_decomp_dataset`` also calls
     # ``read_cobre_bus_aggregates`` directly (outside ``_read_aligned_frames``).
     # Unlike the other cobre readers it does NOT degrade to empty on a missing
@@ -1054,25 +1084,240 @@ class TestLineEntityNames:
         assert names == {0: "line_0"}
 
 
-class TestBuildLineIdMap:
-    """ticket-008: best-effort id map for the corridor -> line alignment."""
+class TestBuildDecompDatasetSharedCaseBuild:
+    """ticket-020: the deck is now parsed exactly once, via the shared
+    ``DecompCase`` built at the top of ``build_decomp_dataset`` (CMP-06) --
+    retargeted replacement for the old per-helper ``_build_line_id_map(...)
+    is None``/``_decomp_constraint_context(...) is None`` graceful-degrade
+    unit tests. A bad/deckless deck now raises at that shared build (the
+    same typed error ``_read_aligned_frames`` already raised first, before
+    this ticket) rather than silently degrading each of the three sites
+    independently."""
 
-    def test_returns_none_when_the_directory_has_no_deck(self, tmp_path: Path) -> None:
-        """A bare directory (no ``caso.dat``) must degrade to ``None``, not
-        raise -- every other level's own ``build_decomp_dataset`` fixture
-        exercises exactly this directory shape."""
-        assert _build_line_id_map(tmp_path) is None
+    def test_deckless_directory_raises_the_typed_discovery_error(
+        self, tmp_path: Path
+    ) -> None:
+        """A bare directory (no ``caso.dat``) raises ``SourceFileError`` at
+        the shared case build, not a per-section ``None`` degrade."""
+        with pytest.raises(SourceFileError):
+            build_decomp_dataset(tmp_path, tmp_path)
 
-    def test_returns_none_when_the_deck_has_no_sb_records(
+    def test_discoverable_deck_with_no_sb_records_raises_field_parse_error(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A discoverable, readable deck whose ``SB`` register is absent
         raises the typed parse-boundary ``FieldParseError`` from
-        ``DecompIdMap.from_dadger`` -- the Network tab's id map must still
-        degrade to ``None`` instead of propagating it."""
+        ``DecompIdMap.from_dadger`` (via the shared case's ``id_map``) at the
+        same first-touch position ``_read_aligned_frames`` reaches it."""
         _patch_discoverable_deck_with_no_sb(monkeypatch, tmp_path)
 
-        assert _build_line_id_map(tmp_path) is None
+        with pytest.raises(FieldParseError):
+            build_decomp_dataset(tmp_path, tmp_path)
+
+
+def _minimal_sist_frame() -> pl.DataFrame:
+    """One stage, one bus -- the minimal ``dec_oper_sist``-shaped row both
+    ``_bus_side`` and ``_energy_balance_frames`` read (ticket-020's
+    single-parse spy exercises the real, unmocked ``_read_aligned_frames``,
+    so its own readers need a real-enough frame instead of the
+    ``_read_aligned_frames``-level stub every other fixture in this module
+    uses)."""
+    return pl.DataFrame(
+        {
+            "estagio": [1],
+            "no": [1],
+            "cenario": [1],
+            "patamar": [None],
+            "codigo_submercado": [1],
+            "deficit_MW": [0.0],
+            "cmo": [40.0],
+        }
+    )
+
+
+class TestBuildDecompDatasetSingleParse:
+    """ticket-020 (CMP-06): `build_decomp_dataset` parses the deck exactly
+    once via the shared `DecompCase`, no matter how many of the three
+    historical parse sites (read/align, the Network/Productivity/REE/
+    evaporation id map, and the Constraints-tab census) a given run
+    exercises. Unlike every other fixture in this module, these tests do
+    NOT patch ``_read_aligned_frames`` away -- that seam is itself one of
+    the three sites under test, so it must run for real."""
+
+    def test_dadger_read_invoked_exactly_once_for_the_whole_build(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A spy on the public ``idecomp.decomp.Dadger.read`` entry point --
+        the seam every one of the three historical parse sites called
+        through -- sees exactly one invocation for a whole
+        ``build_decomp_dataset`` run that exercises all three, down from
+        three separate ``discover_decomp_files -> Dadger.read ->
+        DecompIdMap.from_dadger`` parses before this ticket."""
+        decomp_dir = tmp_path / "deck"
+        case_dir = tmp_path / "case"
+        constraints = [
+            {
+                "id": 0,
+                "name": "VminOP_1",
+                "description": "unrecognized family/id -- exercises the "
+                "census build without needing a matching register record",
+                "expression": "",
+                "slack": {"enabled": True, "penalty": 1000.0},
+            }
+        ]
+        output_dir = _write_generic_constraints_case(case_dir, constraints, [])
+
+        spy = MagicMock(
+            return_value=_ConstraintFakeDadger(
+                sb=pd.DataFrame({"codigo_submercado": [1], "nome_submercado": ["SE"]})
+            )
+        )
+        monkeypatch.setattr("idecomp.decomp.Dadger.read", spy)
+        monkeypatch.setattr(
+            "cobre_bridge.decomp.pipeline.discover_decomp_files",
+            lambda _src: _decomp_files_stub(decomp_dir),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            lambda *_a, **_k: _usih_frame([{"codigo_usina": 999, "estagio": 1}]),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            lambda *_a, **_k: _usih_frame([{"codigo_usina": 998, "estagio": 1}]),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            lambda *_a, **_k: _minimal_sist_frame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results._cost_frames",
+            lambda *_a, **_k: ({}, pl.DataFrame()),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_bus_aggregates",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "read_cobre_hydro_bus_labels",
+            lambda *_a, **_k: {},
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.constraints_compare.evaluate_lhs_cobre",
+            lambda *_a, **_k: pl.DataFrame(),
+        )
+
+        dataset = build_decomp_dataset(decomp_dir, output_dir)
+
+        assert spy.call_count == 1
+        # Sanity: the Constraints-tab census build (the third historical
+        # parse site) actually ran as part of this build.
+        assert dataset.metadata["gc_constraints"] == constraints
+
+    def test_dataset_equal_across_base_ree_and_constraints_sections(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """ComparisonDataset-equality regression: one ``build_decomp_dataset``
+        run exercising the hydro/thermal/bus base variables, the REE rollup,
+        and the Constraints-tab DECOMP-side LHS together -- all three reuse
+        the SAME shared case's ``id_map``/``dadger`` -- reproduces exactly
+        the values each section's own dedicated test (``TestBuildDecompDataset``,
+        ``TestBuildDecompDatasetRee``, ``TestBuildDecompDatasetConstraints``)
+        independently verifies in isolation. A behaviour-preserving
+        consolidation of the three parse sites cannot change any of these."""
+        _patch_aligned_frames(monkeypatch, _ree_aligned_fixture())
+        _patch_shared_case(monkeypatch, id_map=_ree_id_map())
+        _patch_ree_sources(monkeypatch)
+        case_dir = tmp_path / "case"
+        constraints = [
+            {
+                "id": 0,
+                "name": "RHE_115",
+                "description": "RHE stored-energy constraint 115",
+                "expression": "@rho_acum_h0 * hydro_storage(0)",
+                "slack": {"enabled": True, "penalty": 1000.0},
+            }
+        ]
+        bound_rows = [
+            {
+                "constraint_id": 0,
+                "stage_id": 0,
+                "block_id": None,
+                "bound_lower": 3097.40,
+                "bound_upper": None,
+            }
+        ]
+        output_dir = _write_generic_constraints_case(case_dir, constraints, bound_rows)
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(
+                {
+                    "estagio": [1],
+                    "no": [1],
+                    "cenario": [1],
+                    "codigo_restricao": [115],
+                    "valor_MW": [2951.58],
+                    "violacao_absoluta_MW": [145.83],
+                }
+            ),
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.constraints_compare.evaluate_lhs_cobre",
+            lambda *_a, **_k: pl.DataFrame(
+                {"constraint_id": [0], "stage_id": [0], "lhs_value": [3000.0]}
+            ),
+        )
+
+        dataset = build_decomp_dataset(case_dir, output_dir)
+        dataset.validate()
+
+        # Base hydro/thermal/bus/productivity variables (TestBuildDecompDataset).
+        assert set(dataset.summary["variable"].to_list()) >= {
+            "generation_mw",
+            "turbined_m3s",
+            "spillage_m3s",
+            "outflow_m3s",
+            "storage_final_hm3",
+            "deficit_mw",
+            "spot_price",
+            "productivity_mw_per_m3s",
+        }
+        # metadata["unmapped"] per level (TestBuildDecompDataset / ticket-018).
+        assert dataset.metadata["unmapped"] == {
+            "hydro": [],
+            "thermal": [86, 224],
+            "bus": [],
+            "line": [],
+            "ree": [],
+            "evaporation": [],
+        }
+
+        # REE rollup (TestBuildDecompDatasetRee).
+        ree_rows = dataset.tidy.filter(pl.col("entity_type") == "ree")
+        assert set(ree_rows["variable"].unique().to_list()) == {
+            "ena_mwmes",
+            "earm_final_mwmes",
+        }
+        assert set(ree_rows["source"].unique().to_list()) == {"newave", "cobre"}
+
+        # Constraints tab DECOMP-side LHS, derived via the shared case's
+        # dadger/id_map (TestBuildDecompDatasetConstraints).
+        assert dataset.metadata["gc_constraints"] == constraints
+        nw_row = dataset.metadata["gc_lhs_newave"].row(0, named=True)
+        assert nw_row["constraint_id"] == 0
+        assert nw_row["stage_id"] == 0
+        assert nw_row["lhs_value"] == pytest.approx(2951.58)
+        cb_row = dataset.metadata["gc_lhs_cobre"].row(0, named=True)
+        assert cb_row == {"constraint_id": 0, "stage_id": 0, "lhs_value": 3000.0}
 
 
 class TestLineResultComparisons:
@@ -1218,10 +1463,7 @@ def _patch_network(
     """Stub the ticket-008 line seam: the deck's id map, its interchange
     table, and Cobre's own per-line simulation output -- mirroring
     ``_patch_aligned_frames``'s "patch at the seam" convention."""
-    monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results._build_line_id_map",
-        lambda *_args, **_kwargs: id_map,
-    )
+    _patch_shared_case(monkeypatch, id_map=id_map)
     monkeypatch.setattr(
         "cobre_bridge.comparators.decomp_results.read_dec_oper_interc",
         lambda *_args, **_kwargs: interc_frame,
@@ -3894,7 +4136,7 @@ def _fpha_deviations_fixture() -> pl.DataFrame:
 def _patch_fpha_planes_and_deviations(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wire `build_decomp_dataset`'s three ticket-017 sources -- outside
     `_read_aligned_frames` -- to the fixtures above: Cobre's planes reader,
-    the deck id map (`_build_line_id_map`, reused verbatim by
+    the deck id map (the shared case's ``id_map``, reused verbatim by
     `_fpha_metrics` rather than rebuilt), and the source model's own
     deviation table. ``read_eco_fpha``/``read_dec_estatfpha`` are left
     unmocked -- they raise `FileNotFoundError` against a bare `tmp_path`,
@@ -3905,10 +4147,7 @@ def _patch_fpha_planes_and_deviations(monkeypatch: pytest.MonkeyPatch) -> None:
         "cobre_bridge.comparators.decomp_results.cobre_readers.read_cobre_fpha_planes",
         lambda *_a, **_k: _fpha_cobre_planes_fixture(),
     )
-    monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results._build_line_id_map",
-        lambda *_a, **_k: _fpha_id_map(),
-    )
+    _patch_shared_case(monkeypatch, id_map=_fpha_id_map())
     monkeypatch.setattr(
         "cobre_bridge.comparators.decomp_results.read_dec_desvfpha",
         lambda *_a, **_k: _fpha_deviations_fixture(),
@@ -4435,8 +4674,9 @@ class TestBuildDecompDatasetRee:
     def test_no_deck_no_ree_rows_and_empty_unmapped(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """``_build_line_id_map`` returns ``None`` against a bare
-        ``tmp_path`` (no deck to read) -> no REE rollup, empty
+        """The shared case's ``id_map`` is a degenerate, empty (but valid)
+        ``DecompIdMap`` against a bare ``tmp_path`` (via
+        ``_patch_aligned_frames``'s default) -> no REE rollup, empty
         ``unmapped["ree"]``, no exception, and no REE section in the report."""
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
 
@@ -4454,10 +4694,7 @@ class TestBuildDecompDatasetRee:
         """AC: ``tidy`` has ``entity_type=="ree"`` rows for ``ena_mwmes`` and
         ``earm_final_mwmes``, with ``source`` in {"newave", "cobre"}."""
         _patch_aligned_frames(monkeypatch, _ree_aligned_fixture())
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._build_line_id_map",
-            lambda *_a, **_k: _ree_id_map(),
-        )
+        _patch_shared_case(monkeypatch, id_map=_ree_id_map())
         _patch_ree_sources(monkeypatch)
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
@@ -4476,10 +4713,7 @@ class TestBuildDecompDatasetRee:
         """AC: ``build_comparison_report(dataset)`` renders a non-empty REE
         energy section for a DECOMP dataset."""
         _patch_aligned_frames(monkeypatch, _ree_aligned_fixture())
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._build_line_id_map",
-            lambda *_a, **_k: _ree_id_map(),
-        )
+        _patch_shared_case(monkeypatch, id_map=_ree_id_map())
         _patch_ree_sources(monkeypatch)
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
@@ -4935,8 +5169,9 @@ class TestBuildDecompDatasetEvaporation:
     def test_no_deck_no_evaporation_rows_and_empty_unmapped(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """``_build_line_id_map`` returns ``None`` against a bare
-        ``tmp_path`` (no deck to read) -> no evaporation rollup, empty
+        """The shared case's ``id_map`` is a degenerate, empty (but valid)
+        ``DecompIdMap`` against a bare ``tmp_path`` (via
+        ``_patch_aligned_frames``'s default) -> no evaporation rollup, empty
         ``unmapped["evaporation"]``, no exception."""
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
 
@@ -4958,10 +5193,7 @@ class TestBuildDecompDatasetEvaporation:
         {"newave", "cobre"}, and ``dataset.summary`` includes the
         ``evaporation_m3s`` variable."""
         _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._build_line_id_map",
-            lambda *_a, **_k: _ree_id_map(),
-        )
+        _patch_shared_case(monkeypatch, id_map=_ree_id_map())
         _patch_evap_sources(monkeypatch)
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
@@ -4981,10 +5213,7 @@ class TestBuildDecompDatasetEvaporation:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._build_line_id_map",
-            lambda *_a, **_k: _ree_id_map(),
-        )
+        _patch_shared_case(monkeypatch, id_map=_ree_id_map())
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
             lambda *_a, **_k: _evap_dec_oper_evap_fixture().filter(
@@ -5008,10 +5237,7 @@ class TestBuildDecompDatasetEvaporation:
         ``charts._HYDRO_VARIABLES`` already wires into that tab, so no new
         chart is required (ticket-020 requirement 4)."""
         _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._build_line_id_map",
-            lambda *_a, **_k: _ree_id_map(),
-        )
+        _patch_shared_case(monkeypatch, id_map=_ree_id_map())
         _patch_evap_sources(monkeypatch)
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
@@ -5140,24 +5366,6 @@ def _write_generic_constraints_case(
     output_dir = case_dir / "output"
     output_dir.mkdir(exist_ok=True)
     return output_dir
-
-
-class TestDecompConstraintContext:
-    """`_decomp_constraint_context`: best-effort census + id map, mirroring
-    `_build_line_id_map`'s degrade-gracefully pattern."""
-
-    def test_returns_none_when_the_directory_has_no_deck(self, tmp_path: Path) -> None:
-        assert _decomp_constraint_context(tmp_path) is None
-
-    def test_returns_none_when_the_deck_has_no_sb_records(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """Mirrors :class:`TestBuildLineIdMap`'s reconcile case: a
-        discoverable, readable deck with no ``SB`` register still degrades
-        the Constraints tab's DECOMP-side overlay to ``None``."""
-        _patch_discoverable_deck_with_no_sb(monkeypatch, tmp_path)
-
-        assert _decomp_constraint_context(tmp_path) is None
 
 
 class TestStageFrameToLookup:
@@ -5315,10 +5523,17 @@ class TestRheLhsLookup:
 
 class TestGenericConstraintLhsDecomp:
     """`_generic_constraint_lhs_decomp`: the DECOMP-side LHS derivation --
-    this plan's least-certain crux (ticket-019)."""
+    this plan's least-certain crux (ticket-019). ticket-020: the census/id
+    map now come from the shared `DecompCase` (`case.dadger`/`case.id_map`)
+    instead of a per-call `_decomp_constraint_context` re-parse -- these
+    tests build that `case` via `make_decomp_case` and patch the public
+    `read_constraints` seam rather than the now-removed private helper."""
 
     def test_no_constraints_returns_empty_schema(self, tmp_path: Path) -> None:
-        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [])
+        case = make_decomp_case(tmp_path)
+
+        result = _generic_constraint_lhs_decomp(case, tmp_path, [])
+
         assert result.schema == _GC_LHS_SCHEMA
         assert result.is_empty()
 
@@ -5336,9 +5551,10 @@ class TestGenericConstraintLhsDecomp:
             by_family={"RE": (record,), "HQ": (), "HV": (), "HE": ()}
         )
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(155, 157))
+        case = make_decomp_case(tmp_path, dadger=_ConstraintFakeDadger(), id_map=id_map)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
-            lambda *_a, **_k: _DecompConstraintContext(census=census, id_map=id_map),
+            "cobre_bridge.decomp.constraint_registers.read_constraints",
+            lambda *_a, **_k: census,
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
@@ -5358,7 +5574,7 @@ class TestGenericConstraintLhsDecomp:
             lambda *_a, **_k: pl.DataFrame(),
         )
 
-        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(0, "RE_401")])
+        result = _generic_constraint_lhs_decomp(case, tmp_path, [_gc(0, "RE_401")])
 
         row = result.row(0, named=True)
         assert row["constraint_id"] == 0
@@ -5379,9 +5595,10 @@ class TestGenericConstraintLhsDecomp:
             by_family={"RE": (), "HQ": (), "HV": (record,), "HE": ()}
         )
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(10,))
+        case = make_decomp_case(tmp_path, dadger=_ConstraintFakeDadger(), id_map=id_map)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
-            lambda *_a, **_k: _DecompConstraintContext(census=census, id_map=id_map),
+            "cobre_bridge.decomp.constraint_registers.read_constraints",
+            lambda *_a, **_k: census,
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
@@ -5403,7 +5620,7 @@ class TestGenericConstraintLhsDecomp:
             lambda *_a, **_k: {0: {"min_storage_hm3": 30.0}},
         )
 
-        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(3, "HV_9001")])
+        result = _generic_constraint_lhs_decomp(case, tmp_path, [_gc(3, "HV_9001")])
 
         assert result.to_dicts() == [
             {"constraint_id": 3, "stage_id": 0, "lhs_value": 150.0}
@@ -5415,10 +5632,14 @@ class TestGenericConstraintLhsDecomp:
         """AC: a soft (RHE) constraint's per-stage ``lhs_value`` is the
         operation's achieved value (``valor_MW``) -- NOT valor + the shortfall
         (which would be the target/bound ``Meta``). Verified on a constructed
-        fixture, independent of any deck/census (RHE reads `DecOperRheSoft`)."""
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
-            lambda *_a, **_k: None,
+        fixture, independent of any census (RHE reads `DecOperRheSoft`
+        directly); the shared case's ``dadger`` is a bare, register-less
+        fake -- ``read_constraints`` degrades it to an empty census, which
+        the RHE branch never consults."""
+        case = make_decomp_case(
+            tmp_path,
+            dadger=_ConstraintFakeDadger(),
+            id_map=DecompIdMap(bus_codes=(), bus_names=()),
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
@@ -5444,7 +5665,7 @@ class TestGenericConstraintLhsDecomp:
             ),
         )
 
-        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(7, "RHE_115")])
+        result = _generic_constraint_lhs_decomp(case, tmp_path, [_gc(7, "RHE_115")])
 
         rows = result.to_dicts()
         assert len(rows) == 1
@@ -5476,9 +5697,10 @@ class TestGenericConstraintLhsDecomp:
             by_family={"RE": (record,), "HQ": (), "HV": (), "HE": ()}
         )
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(141,))
+        case = make_decomp_case(tmp_path, dadger=_ConstraintFakeDadger(), id_map=id_map)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
-            lambda *_a, **_k: _DecompConstraintContext(census=census, id_map=id_map),
+            "cobre_bridge.decomp.constraint_registers.read_constraints",
+            lambda *_a, **_k: census,
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
@@ -5495,16 +5717,17 @@ class TestGenericConstraintLhsDecomp:
             lambda *_a, **_k: pl.DataFrame(),
         )
 
-        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(2, "RE_405")])
+        result = _generic_constraint_lhs_decomp(case, tmp_path, [_gc(2, "RE_405")])
 
         assert result.is_empty()
 
     def test_unrecognized_name_skips_constraint(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
-            lambda *_a, **_k: None,
+        case = make_decomp_case(
+            tmp_path,
+            dadger=_ConstraintFakeDadger(),
+            id_map=DecompIdMap(bus_codes=(), bus_names=()),
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
@@ -5519,20 +5742,22 @@ class TestGenericConstraintLhsDecomp:
             lambda *_a, **_k: pl.DataFrame(),
         )
 
-        result = _generic_constraint_lhs_decomp(
-            tmp_path, tmp_path, [_gc(9, "VminOP_1")]
-        )
+        result = _generic_constraint_lhs_decomp(case, tmp_path, [_gc(9, "VminOP_1")])
 
         assert result.is_empty()
 
-    def test_no_deck_context_yields_no_re_hq_hv_rows(
+    def test_empty_census_yields_no_re_hq_hv_rows(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """``_decomp_constraint_context`` returning ``None`` (no readable
-        deck) must degrade RE/HQ/HV to cobre-only, never raise."""
-        monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._decomp_constraint_context",
-            lambda *_a, **_k: None,
+        """A shared case whose census carries no matching RE/HQ/HV record
+        (a bare, register-less fake ``dadger`` -> ``read_constraints``
+        degrades to an empty census) must degrade RE/HQ/HV to cobre-only,
+        never raise, even when the matching ``dec_oper_usih`` generation
+        value is otherwise available."""
+        case = make_decomp_case(
+            tmp_path,
+            dadger=_ConstraintFakeDadger(),
+            id_map=DecompIdMap(bus_codes=(), bus_names=()),
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
@@ -5549,7 +5774,7 @@ class TestGenericConstraintLhsDecomp:
             lambda *_a, **_k: pl.DataFrame(),
         )
 
-        result = _generic_constraint_lhs_decomp(tmp_path, tmp_path, [_gc(0, "RE_401")])
+        result = _generic_constraint_lhs_decomp(case, tmp_path, [_gc(0, "RE_401")])
 
         assert result.is_empty()
 

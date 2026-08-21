@@ -12,12 +12,14 @@ energy-factor scaling, and the negative-CM sign path.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintRecord,
     ConstraintTerm,
@@ -28,6 +30,7 @@ from cobre_bridge.decomp.constraints import emit_rhe_generics
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.diagnostics import Severity
+from tests.conftest import make_decomp_case
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -43,6 +46,10 @@ def _stage(index: int, total_hours: float) -> OperativeStage:
         season_id=0,
         block_hours=(total_hours,),
     )
+
+
+def _case(calendar: list[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), calendar=calendar)
 
 
 def _census(*records: ConstraintRecord):
@@ -143,11 +150,11 @@ def test_emit_rhe_generics_absolute_round_trip() -> None:
     calendar = [_stage(0, 730.0)]
 
     result = emit_rhe_generics(
-        census,
+        _case(calendar),
         id_map,
-        effective,
+        census=census,
+        effective=effective,
         hydro_to_ree={5: 1},
-        calendar=calendar,
         start_id=0,
     )
 
@@ -193,11 +200,11 @@ def test_emit_rhe_generics_percentage_rhs() -> None:
     calendar = [_stage(0, 730.0)]
 
     result = emit_rhe_generics(
-        census,
+        _case(calendar),
         id_map,
-        effective,
+        census=census,
+        effective=effective,
         hydro_to_ree={5: 1},
-        calendar=calendar,
         start_id=0,
     )
 
@@ -251,11 +258,11 @@ def test_emit_rhe_generics_two_reservoir_cascade_override() -> None:
     calendar = [_stage(0, 730.0)]
 
     result = emit_rhe_generics(
-        census,
+        _case(calendar),
         id_map,
-        effective,
+        census=census,
+        effective=effective,
         hydro_to_ree={5: 1, 6: 1},
-        calendar=calendar,
         start_id=0,
     )
 
@@ -300,11 +307,11 @@ def test_emit_rhe_generics_run_of_river_excluded() -> None:
     calendar = [_stage(0, 730.0)]
 
     result = emit_rhe_generics(
-        census,
+        _case(calendar),
         id_map,
-        effective,
+        census=census,
+        effective=effective,
         hydro_to_ree={5: 1, 7: 1},
-        calendar=calendar,
         start_id=0,
     )
 
@@ -340,11 +347,11 @@ def test_emit_rhe_generics_no_storage_plants_skips_and_warns() -> None:
 
     with dx.collect() as collected:
         result = emit_rhe_generics(
-            census,
+            _case(calendar),
             id_map,
-            effective,
+            census=census,
+            effective=effective,
             hydro_to_ree={7: 1},
-            calendar=calendar,
             start_id=0,
         )
 
@@ -373,11 +380,11 @@ def test_emit_rhe_generics_unmapped_ree_skips_and_warns() -> None:
 
     with dx.collect() as collected:
         result = emit_rhe_generics(
-            census,
+            _case(calendar),
             id_map,
-            effective,
+            census=census,
+            effective=effective,
             hydro_to_ree={},
-            calendar=calendar,
             start_id=0,
         )
 
@@ -411,19 +418,19 @@ def test_emit_rhe_generics_energy_factor_scales_with_stage_hours() -> None:
     census = _census(record)
 
     weekly_result = emit_rhe_generics(
-        _census(record),
+        _case([_stage(0, 168.0)]),
         id_map,
-        effective,
+        census=_census(record),
+        effective=effective,
         hydro_to_ree={5: 1},
-        calendar=[_stage(0, 168.0)],
         start_id=0,
     )
     monthly_result = emit_rhe_generics(
-        census,
+        _case([_stage(0, 730.0)]),
         id_map,
-        effective,
+        census=census,
+        effective=effective,
         hydro_to_ree={5: 1},
-        calendar=[_stage(0, 730.0)],
         start_id=0,
     )
 
@@ -467,11 +474,11 @@ def test_emit_rhe_generics_negative_cm_sign_subtracts() -> None:
     calendar = [_stage(0, 730.0)]
 
     result = emit_rhe_generics(
-        census,
+        _case(calendar),
         id_map,
-        effective,
+        census=census,
+        effective=effective,
         hydro_to_ree={5: 1, 6: 2},
-        calendar=calendar,
         start_id=0,
     )
 
@@ -508,11 +515,11 @@ def test_emit_rhe_generics_non_positive_penalty_falls_back_and_warns() -> None:
 
     with dx.collect() as collected:
         result = emit_rhe_generics(
-            census,
+            _case(calendar),
             id_map,
-            effective,
+            census=census,
+            effective=effective,
             hydro_to_ree={5: 1},
-            calendar=calendar,
             start_id=0,
         )
 
@@ -543,11 +550,11 @@ def test_emit_rhe_generics_unknown_tipo_limite_treated_as_absolute_and_warns() -
 
     with dx.collect() as collected:
         result = emit_rhe_generics(
-            census,
+            _case(calendar),
             id_map,
-            effective,
+            census=census,
+            effective=effective,
             hydro_to_ree={5: 1},
-            calendar=calendar,
             start_id=0,
         )
 
@@ -566,11 +573,11 @@ def test_rhe_result_is_named_tuple_with_expected_fields() -> None:
 
     with dx.collect():
         result = emit_rhe_generics(
-            _census(),
+            _case([_stage(0, 730.0)]),
             id_map,
-            effective,
+            census=_census(),
+            effective=effective,
             hydro_to_ree={},
-            calendar=[_stage(0, 730.0)],
             start_id=0,
         )
 

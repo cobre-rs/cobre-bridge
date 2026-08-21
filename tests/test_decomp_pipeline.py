@@ -45,6 +45,7 @@ from cobre_bridge.decomp.single_term_bounds import HydroCapacities
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
 from cobre_bridge.diagnostics import Diagnostic
+from tests.conftest import make_decomp_case
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2),
@@ -56,6 +57,12 @@ _ID_MAP = DecompIdMap(
 def _calendar():
     hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
+
+
+def _scenario_case():
+    """A ``DecompCase`` carrying only ``calendar`` — the sole cached slot
+    ``convert_external_inflows``/``convert_inflow_stats_identity`` read."""
+    return make_decomp_case(Path("unused"), calendar=_calendar())
 
 
 def _hidr_frame() -> pd.DataFrame:
@@ -108,7 +115,10 @@ class TestScenarioEmitters:
     def test_external_inflows_are_incremental(self) -> None:
         hidr = _hidr_frame()
         table = convert_external_inflows(
-            _StubVazoes(), _effective_no_override(hidr), _ID_MAP, _calendar()
+            _scenario_case(),
+            _ID_MAP,
+            vazoes=_StubVazoes(),
+            effective=_effective_no_override(hidr),
         ).to_pandas()
         # 4 tree nodes × 2 hydros.
         assert len(table) == 8
@@ -121,7 +131,7 @@ class TestScenarioEmitters:
         assert fan[fan["hydro_id"] == 1]["value_m3s"].iloc[0] == pytest.approx(180.0)
 
     def test_identity_stats(self) -> None:
-        stats = convert_inflow_stats_identity(_ID_MAP, _calendar()).to_pandas()
+        stats = convert_inflow_stats_identity(_scenario_case(), _ID_MAP).to_pandas()
         assert len(stats) == 2 * 3
         assert set(stats["mean_m3s"]) == {0.0}
         assert set(stats["std_m3s"]) == {1.0}
@@ -179,7 +189,10 @@ class TestScenarioEmitters:
         vazoes.cenarios_gerados.loc[0, "estagio"] = 2
         with pytest.raises(ValueError, match="node-graph"):
             convert_external_inflows(
-                vazoes, _effective_no_override(_hidr_frame()), _ID_MAP, _calendar()
+                _scenario_case(),
+                _ID_MAP,
+                vazoes=vazoes,
+                effective=_effective_no_override(_hidr_frame()),
             )
 
 
@@ -604,13 +617,28 @@ def _run_cadastro_pipeline(
         dadger=Path("unused/dadger.rv0"),
         vazoes=Path("unused/vazoes.rv0"),
         hidr=Path("unused/hidr.dat"),
-        dadgnl=Path("unused/dadgnl.rv0") if gnl_emission is not None else None,
+        dadgnl=None,
         renovaveis=None,
         polinjus=None,
     )
     dadger = _CadastroDadger(ac_volmax_frame)
     hidr = _cadastro_hidr_frame()
     calendar = _calendar()
+    case = make_decomp_case(
+        files,
+        dadger=dadger,
+        hidr=hidr,
+        id_map=_CADASTRO_ID_MAP,
+        calendar=calendar,
+        renovaveis=None,
+        # A non-None sentinel enters convert_decomp_case's GNL wiring branch
+        # (gated on ``case.dadgnl is not None``); the model's own decode is
+        # patched below via ``anticipated_conv.read_gnl_model``, so the
+        # sentinel's identity never matters.
+        dadgnl=object() if gnl_emission is not None else None,
+        polinjus=None,
+        libs_restricao_eletrica=None,
+    )
 
     productivity_table = pa.table(
         {"equivalent_productivity_mw_per_m3s": pa.array([0.5, 0.6], type=pa.float64())}
@@ -656,13 +684,8 @@ def _run_cadastro_pipeline(
     ]
 
     patches: dict[str, object] = {
-        "cobre_bridge.decomp.pipeline.discover_decomp_files": files,
-        "cobre_bridge.decomp.pipeline.Dadger.read": dadger,
+        "cobre_bridge.decomp.pipeline.DecompCase.from_directory": case,
         "cobre_bridge.decomp.pipeline.Vazoes.read": object(),
-        "cobre_bridge.decomp.pipeline.hydro_conv.read_hidr": hidr,
-        "cobre_bridge.decomp.pipeline.DecompIdMap.from_dadger": _CADASTRO_ID_MAP,
-        "cobre_bridge.decomp.pipeline"
-        ".temporal_conv.operative_calendar_from_dadger": calendar,
         "cobre_bridge.decomp.pipeline.scenarios_conv.terminal_fan_probabilities": [1.0],
         "cobre_bridge.decomp.pipeline.config_conv.convert_config": {},
         "cobre_bridge.decomp.pipeline.network_conv._bus_deficit_costs": {},
@@ -704,11 +727,11 @@ def _run_cadastro_pipeline(
             ConstraintCensus(by_family={}, to_bounds=(), to_generic=to_generic)
         ),
         "cobre_bridge.decomp.pipeline.network_conv.pumping_station_id_map": {},
-        # ticket-023b: the mock DecompFiles below points at a placeholder,
-        # non-existent dadger path (Dadger.read is patched, so no real file
-        # I/O happens anywhere else in this fixture) — the E1 detection
-        # helpers read the raw deck files directly, so they must be patched
-        # here too, the same way the special-constraint reader above is.
+        # ticket-023b: the mock deck exposes no real files (DecompCase.from_directory
+        # is patched wholesale above, so no real file I/O happens anywhere in this
+        # fixture) — the E1 detection helpers read the raw deck files directly, so
+        # they must be patched here too, the same way the special-constraint
+        # reader above is.
         "cobre_bridge.decomp.pipeline"
         ".constraint_registers.detect_unreadable_electrical": list(
             unreadable_electrical
@@ -723,7 +746,8 @@ def _run_cadastro_pipeline(
         # convert_gnl's own decode/placement logic stays out of scope
         # (tests/test_decomp_anticipated.py owns it), only the routing of its
         # *return value* into the written case files is under test here.
-        patches["cobre_bridge.decomp.pipeline.Dadgnl.read"] = object()
+        # ``case.dadgnl`` is already the non-None sentinel set above, so only
+        # its downstream decode (read_gnl_model) needs patching here.
         patches["cobre_bridge.decomp.pipeline.anticipated_conv.read_gnl_model"] = (
             object()
         )

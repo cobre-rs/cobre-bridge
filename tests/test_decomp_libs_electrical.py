@@ -6,14 +6,16 @@ like idecomp's ``df=True`` accessors, so these run in CI with no real deck.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.group_bounds import GroupBoundEntry
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.libs_electrical import (
@@ -54,6 +56,7 @@ from cobre_bridge.decomp.libs_electrical import (
     resolve_disp_usih,
 )
 from cobre_bridge.decomp.temporal import OperativeStage
+from tests.conftest import make_decomp_case
 
 
 class _StubRestricoes:
@@ -885,6 +888,12 @@ class _StubElectricalDadger:
         return accessor
 
 
+def _case(
+    dadger: _StubElectricalDadger, calendar: Sequence[OperativeStage]
+) -> DecompCase:
+    return make_decomp_case(Path("unused"), dadger=dadger, calendar=calendar)
+
+
 def _dp(*rows: tuple, n_patamares: int) -> pd.DataFrame:
     """``DP`` rows shaped as idecomp's ``df=True`` accessor: (codigo_submercado,
     estagio, numero_patamares, carga_1, ..., carga_n)."""
@@ -904,7 +913,7 @@ def test_build_data_context_demanda_sin_and_demanda_submarket() -> None:
             n_patamares=2,
         )
     )
-    ctx = build_data_context(_model(), dadger, id_map, calendar)(0, 0)
+    ctx = build_data_context(_case(dadger, calendar), id_map, model=_model())(0, 0)
     assert ctx(ParsedTerm(coefficient=1.0, token="demanda_sin")) == 1500.0
     assert ctx(ParsedTerm(coefficient=1.0, token="demanda", args=(1,))) == 1000.0
 
@@ -916,8 +925,8 @@ def test_build_data_context_carga_ande_resolves_the_series() -> None:
         dp=_dp((1, 1, 2, 0.0, 0.0), n_patamares=2),
         ri=_ri((66, 1, 1, 50.0, 60.0), n_patamares=2),
     )
-    ctx0 = build_data_context(_model(), dadger, id_map, calendar)(0, 0)
-    ctx1 = build_data_context(_model(), dadger, id_map, calendar)(0, 1)
+    ctx0 = build_data_context(_case(dadger, calendar), id_map, model=_model())(0, 0)
+    ctx1 = build_data_context(_case(dadger, calendar), id_map, model=_model())(0, 1)
     term = ParsedTerm(coefficient=1.0, token="carga_ande")
     assert ctx0(term) == 50.0
     assert ctx1(term) == 60.0
@@ -931,7 +940,7 @@ def test_build_data_context_alias_stage_inherited_with_na_patamar_fallback() -> 
         aliases=("MMGDSIN",),
         alias_values={"MMGDSIN": {(0, None): 100.0, (2, 1): 500.0}},
     )
-    factory = build_data_context(model, dadger, id_map, calendar)
+    factory = build_data_context(_case(dadger, calendar), id_map, model=model)
     term = ParsedTerm(coefficient=1.0, token="alias", alias_name="MMGDSIN")
     # stage 0: no exact patamar entry, NA (all-blocks) covers both blocks.
     assert factory(0, 0)(term) == 100.0
@@ -946,7 +955,7 @@ def test_build_data_context_constant_resolves_to_one_not_its_value() -> None:
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
     calendar = _ri_calendar(1, n_blocks=1)
     dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 0.0), n_patamares=1))
-    ctx = build_data_context(_model(), dadger, id_map, calendar)(0, 0)
+    ctx = build_data_context(_case(dadger, calendar), id_map, model=_model())(0, 0)
     # epic-01-boundary carry-forward 4.2: the constant's own value lives in
     # the term's coefficient; ctx must return 1.0, never the value itself.
     assert ctx(ParsedTerm(coefficient=42.0, token="__const__")) == 1.0
@@ -956,7 +965,7 @@ def test_build_data_context_unknown_submarket_raises_unresolvable() -> None:
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
     calendar = _ri_calendar(1, n_blocks=1)
     dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 0.0), n_patamares=1))
-    ctx = build_data_context(_model(), dadger, id_map, calendar)(0, 0)
+    ctx = build_data_context(_case(dadger, calendar), id_map, model=_model())(0, 0)
     with pytest.raises(_UnresolvableBucketBTerm, match="99"):
         ctx(ParsedTerm(coefficient=1.0, token="demanda", args=(99,)))
 
@@ -966,7 +975,7 @@ def test_build_data_context_alias_with_no_value_raises_unresolvable() -> None:
     calendar = _ri_calendar(1, n_blocks=1)
     dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 0.0), n_patamares=1))
     model = _model(aliases=("MMGDSIN",))  # no values declared at all
-    ctx = build_data_context(model, dadger, id_map, calendar)(0, 0)
+    ctx = build_data_context(_case(dadger, calendar), id_map, model=model)(0, 0)
     with pytest.raises(_UnresolvableBucketBTerm, match="MMGDSIN"):
         ctx(ParsedTerm(coefficient=1.0, token="alias", alias_name="MMGDSIN"))
 
@@ -1079,7 +1088,7 @@ def test_assemble_bound_drops_and_warns_on_unresolvable_carga_ande() -> None:
     calendar = _ri_calendar(1, n_blocks=1)
     dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 1000.0), n_patamares=1))
     model = _model()
-    cell_ctx = build_data_context(model, dadger, id_map, calendar)(0, 0)
+    cell_ctx = build_data_context(_case(dadger, calendar), id_map, model=model)(0, 0)
     restriction = _inequacao(999, "carga_ande", ">=", "100")
 
     with dx.collect() as sink:
@@ -1382,11 +1391,12 @@ def test_build_available_power_for_disp_usih_sums_overlay_and_falls_back() -> No
     }
     hidr = pd.DataFrame(index=[261, 262])
 
+    case = make_decomp_case(Path("unused"), hidr=hidr)
     with patch(
         "cobre_bridge.decomp.libs_electrical._rated_envelope",
         return_value=(0.0, 1500.0),
     ):
-        a_h = build_available_power(overlay, hidr, id_map, effective=object())
+        a_h = build_available_power(case, id_map, overlay=overlay, effective=object())
 
     assert a_h.overlay == {(261, 0): 1000.0}
     assert a_h.rated_envelope == {261: 1500.0, 262: 1500.0}

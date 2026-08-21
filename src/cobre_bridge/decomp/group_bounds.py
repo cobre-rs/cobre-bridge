@@ -50,6 +50,7 @@ import pyarrow as pa
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _HYDRO_UNIT_GROUP_BOUNDS_SCHEMA = pa.schema(
@@ -132,8 +133,9 @@ def _hours_weighted(values: Sequence[float], stage: OperativeStage) -> float:
 
 
 def convert_hydro_unit_group_bounds(
+    case: DecompCase,
+    *,
     values: Mapping[tuple[int, int, int], GroupBoundEntry],
-    calendar: Sequence[OperativeStage],
 ) -> pa.Table:
     """Build ``hydro_unit_group_bounds`` from a hand-fed value mapping.
 
@@ -167,7 +169,7 @@ def convert_hydro_unit_group_bounds(
     if not values:
         return _empty()
 
-    stages_by_id = {stage.index: stage for stage in calendar}
+    stages_by_id = {stage.index: stage for stage in case.calendar}
 
     hydro_ids: list[int] = []
     group_ids: list[int] = []

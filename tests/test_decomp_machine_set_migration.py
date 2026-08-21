@@ -16,6 +16,7 @@ Tier-1: pure Python, no ``import cobre``, no ``example/`` read.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -24,6 +25,7 @@ from cobre_bridge.decomp.cadastro import EffectiveCadastro, MachineSet
 from cobre_bridge.decomp.hydro import convert_hydro_group_availability, convert_hydros
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
+from tests.conftest import make_decomp_case
 
 _HYDRO_CODE = 7
 _ID_MAP = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(_HYDRO_CODE,))
@@ -176,9 +178,10 @@ def test_constant_machine_set_matches_base_rated_sum() -> None:
     calendar = _calendar()
     effective = _no_override_effective(hidr, len(calendar))
 
-    doc = convert_hydros(
-        _StubDadger(uh=_uh_frame()), hidr, _ID_MAP, date(2026, 7, 18), effective
+    case = make_decomp_case(
+        Path("unused"), dadger=_StubDadger(uh=_uh_frame()), hidr=hidr, calendar=calendar
     )
+    doc = convert_hydros(case, _ID_MAP, effective=effective)
     gen = doc["hydros"][0]["generation"]
     assert gen["max_turbined_m3s"] == pytest.approx(100.0 / 0.72)
     assert gen["max_generation_mw"] == pytest.approx(100.0)
@@ -198,9 +201,10 @@ def test_mid_horizon_nummaq_drop_entity_declares_pre_drop_envelope() -> None:
     calendar = _calendar()
     effective = _dropping_machine_set_effective(hidr, len(calendar))
 
-    doc = convert_hydros(
-        _StubDadger(uh=_uh_frame()), hidr, _ID_MAP, date(2026, 7, 18), effective
+    case = make_decomp_case(
+        Path("unused"), dadger=_StubDadger(uh=_uh_frame()), hidr=hidr, calendar=calendar
     )
+    doc = convert_hydros(case, _ID_MAP, effective=effective)
     gen = doc["hydros"][0]["generation"]
     assert gen["max_turbined_m3s"] == pytest.approx(100.0 / 0.72)
     assert gen["max_generation_mw"] == pytest.approx(100.0)
@@ -221,9 +225,10 @@ def test_mid_horizon_nummaq_drop_overlay_only_at_reduced_stage() -> None:
     calendar = _calendar()
     effective = _dropping_machine_set_effective(hidr, len(calendar))
 
-    values = convert_hydro_group_availability(
-        _StubDadger(), hidr, _ID_MAP, calendar, effective
+    case = make_decomp_case(
+        Path("unused"), dadger=_StubDadger(), hidr=hidr, calendar=calendar
     )
+    values = convert_hydro_group_availability(case, _ID_MAP, effective=effective)
     hydro_id = _ID_MAP.hydro_id(_HYDRO_CODE)
 
     assert (hydro_id, 0, 0) not in values
@@ -267,9 +272,10 @@ def test_constant_machine_set_availability_matches_mp_fd_product() -> None:
         ]
     )
 
-    values = convert_hydro_group_availability(
-        _StubDadger(mp=mp, fd=fd), hidr, _ID_MAP, calendar, effective
+    case = make_decomp_case(
+        Path("unused"), dadger=_StubDadger(mp=mp, fd=fd), hidr=hidr, calendar=calendar
     )
+    values = convert_hydro_group_availability(case, _ID_MAP, effective=effective)
     hydro_id = _ID_MAP.hydro_id(_HYDRO_CODE)
 
     assert (hydro_id, 0, 0) not in values

@@ -22,13 +22,16 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 
 from cobre_bridge.decomp.bounds import convert_hydro_bounds
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
+from tests.conftest import make_decomp_case
 
 
 class _StubDadger:
@@ -128,6 +131,11 @@ class TestSyntheticUniformAndUhDeclared:
         df.index.name = "codigo_usina"
         return df
 
+    def _case(self, calendar: Sequence[OperativeStage]) -> DecompCase:
+        return make_decomp_case(
+            Path("unused"), dadger=self._dadger(), calendar=calendar
+        )
+
     def _effective(
         self,
         calendar: Sequence[OperativeStage],
@@ -144,7 +152,7 @@ class TestSyntheticUniformAndUhDeclared:
     def test_uniform_stage_emits_base_contribution_only(self) -> None:
         calendar = self._calendar()
         contributions = convert_hydro_bounds(
-            self._dadger(), self._ID_MAP, calendar, self._effective(calendar)
+            self._case(calendar), self._ID_MAP, effective=self._effective(calendar)
         )
 
         plant1_id = self._ID_MAP.hydro_id(1)
@@ -167,7 +175,7 @@ class TestSyntheticUniformAndUhDeclared:
             },
         )
         contributions = convert_hydro_bounds(
-            self._dadger(), self._ID_MAP, calendar, effective
+            self._case(calendar), self._ID_MAP, effective=effective
         )
         plant1_id = self._ID_MAP.hydro_id(1)
         assert [c for c in contributions if c.entity_id == plant1_id] == []
@@ -175,7 +183,7 @@ class TestSyntheticUniformAndUhDeclared:
     def test_uh_declared_rows_carry_no_block_id(self) -> None:
         calendar = self._calendar()
         contributions = convert_hydro_bounds(
-            self._dadger(), self._ID_MAP, calendar, self._effective(calendar)
+            self._case(calendar), self._ID_MAP, effective=self._effective(calendar)
         )
 
         # Criterion 4 (UH half): a UH-declared plant's contributions are all
@@ -191,7 +199,7 @@ class TestSyntheticUniformAndUhDeclared:
         calendar = self._calendar()
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.bounds"):
             contributions = convert_hydro_bounds(
-                self._dadger(), self._ID_MAP, calendar, self._effective(calendar)
+                self._case(calendar), self._ID_MAP, effective=self._effective(calendar)
             )
 
         # Criterion 4 (QDEF half, retired per AC7), same mixed deck as the
@@ -213,7 +221,7 @@ class TestSyntheticUniformAndUhDeclared:
         # unperturbed by the UH/QDEF plants sharing the same deck.
         calendar = self._calendar()
         contributions = convert_hydro_bounds(
-            self._dadger(), self._ID_MAP, calendar, self._effective(calendar)
+            self._case(calendar), self._ID_MAP, effective=self._effective(calendar)
         )
 
         plant2_id = self._ID_MAP.hydro_id(2)
@@ -244,7 +252,7 @@ class TestSyntheticUniformAndUhDeclared:
             stage_varying={(2, "vazao_minima_historica"): (40.0, 40.0, 0.0)},
         )
         contributions = convert_hydro_bounds(
-            self._dadger(), self._ID_MAP, calendar, effective
+            self._case(calendar), self._ID_MAP, effective=effective
         )
 
         plant2_id = self._ID_MAP.hydro_id(2)

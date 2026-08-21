@@ -25,7 +25,7 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from idecomp.decomp import Dadger, Dadgnl, Mlt, Vazoes
+from idecomp.decomp import Dadgnl, Mlt, Vazoes
 from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
@@ -50,12 +50,9 @@ from cobre_bridge.decomp.fcf.writer import (
     build_stage_cuts_payload,
     write_boundary_checkpoint,
 )
-from cobre_bridge.decomp.hydro import read_hidr
-from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.inflow_mlt import build_incremental_mlt, coupling_lag_means
-from cobre_bridge.decomp.pipeline import DecompFiles, discover_decomp_files
+from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.decomp.scenarios import convert_recent_observation_windows
-from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -63,6 +60,7 @@ if TYPE_CHECKING:
 
     from cobre_bridge.decomp.anticipated import GnlCommitmentModel
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
     from cobre_bridge.decomp.fcf.mapper import MappingResult
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -263,8 +261,8 @@ def _read_complexo_map(dadger_path: Path) -> dict[int, list[int]]:
     :func:`~cobre_bridge.decomp.fcf.mapper.map_boundary_cuts` replicates its
     coefficients onto these components. Each ``CX <complexo> <component>`` line
     appends ``component`` to ``complexo``'s list; returns an empty map when the
-    deck carries no ``CX`` register or the file is absent (the importer's own
-    ``Dadger.read`` validates the deck's presence upstream — this raw pass only
+    deck carries no ``CX`` register or the file is absent (the shared case's
+    ``dadger`` parse validates the deck's presence upstream — this raw pass only
     reads the ``CX`` lines idecomp does not model).
     """
     complexo_map: dict[int, list[int]] = {}
@@ -295,9 +293,7 @@ def _find_mlt(deck_dir: Path) -> Path | None:
 
 
 def _boundary_inflow_context(
-    deck_files: DecompFiles,
-    dadger: Dadger,
-    id_map: DecompIdMap,
+    case: DecompCase,
     *,
     coupling_month: int,
 ) -> (
@@ -318,31 +314,28 @@ def _boundary_inflow_context(
     unseeded lags-0 approximation (a logged tracked gap) rather than a raw seed
     the RHS would fail to offset — over-draining the reservoirs.
     """
-    mlt_path = _find_mlt(deck_files.dadger.parent)
+    mlt_path = _find_mlt(case.files.dadger.parent)
     if mlt_path is None:
         _LOG.warning(
             "no mlt.dat in %s; the boundary FCF's inflow-lag mean fold and the "
             "recent-observation seed are both skipped (the lag state stays at 0 "
             "-- a near-mean approximation, tracked gap), since seeding raw "
             "inflows without the seasonal-mean fold over-drains the reservoirs",
-            deck_files.dadger.parent,
+            case.files.dadger.parent,
         )
         return None
-    hidr = read_hidr(deck_files.hidr)
-    calendar = operative_calendar_from_dadger(dadger)
-    effective, _ = build_effective_cadastro(dadger, hidr, calendar)
+    effective, _ = build_effective_cadastro(case.dadger, case.hidr, case.calendar)
     incremental_mlt = build_incremental_mlt(
-        Mlt.read(str(mlt_path)).valores, effective, id_map
+        Mlt.read(str(mlt_path)).valores, effective, case.id_map
     )
     means = coupling_lag_means(incremental_mlt, coupling_month)
-    return effective, calendar, means
+    return effective, case.calendar, means
 
 
 def _seed_recent_observations(
     case_dir: Path,
-    deck_files: DecompFiles,
+    case: DecompCase,
     effective: EffectiveCadastro,
-    id_map: DecompIdMap,
     calendar: Sequence[OperativeStage],
 ) -> int:
     """Add ``recent_observations`` to the case's ``initial_conditions.json``.
@@ -358,7 +351,7 @@ def _seed_recent_observations(
     observation windows written (0 when the deck carries no observation tables).
     """
     windows = convert_recent_observation_windows(
-        Vazoes.read(str(deck_files.vazoes)), effective, id_map, calendar
+        Vazoes.read(str(case.files.vazoes)), effective, case.id_map, calendar
     )
     ic_path = case_dir / "initial_conditions.json"
     with ic_path.open(encoding="utf-8") as handle:
@@ -642,8 +635,7 @@ def _patch_policy_boundary(config_path: Path, *, source_stage: int) -> None:
 
 def import_boundary_fcf(
     case_dir: Path,
-    cortesh_path: Path | None,
-    cortes_path: Path | None,
+    case: DecompCase,
     *,
     work_dir: Path,
     cost_scale_factor: float,
@@ -651,17 +643,17 @@ def import_boundary_fcf(
     """Import the source model's boundary FCF into the converted case at
     ``case_dir``.
 
-    Gated on cut-file presence: if either ``cortesh_path`` or ``cortes_path``
-    is ``None``, this is a no-op — no ``boundary/`` directory is written, and
-    ``config.json`` is left untouched. Otherwise:
+    Gated on cut-file presence: if either ``case.files.cortesh`` or
+    ``case.files.cortes`` is ``None``, this is a no-op — no ``boundary/``
+    directory is written, and ``config.json`` is left untouched. Otherwise:
 
-    1. Rebuilds the :class:`~cobre_bridge.decomp.id_map.DecompIdMap` from the
-       deck at ``cortesh_path.parent`` (same-study: the boundary cut source
-       is the very deck whose ``dadger`` produced ``case_dir``, so no
-       separate deck path is needed).
-    2. Reads the header (``cortesh_path``) and the boundary-stage cut records
-       (``cortes_path``), deriving the boundary stage from the cut file's own
-       trailer when it is a single-stage partition export.
+    1. Reads the shared case's ``dadger``/``id_map`` (parsed once by the
+       caller, not re-parsed here) — same-study: the boundary cut source is
+       the very deck whose ``dadger`` produced ``case_dir``, so no separate
+       deck path is needed.
+    2. Reads the header (``case.files.cortesh``) and the boundary-stage cut
+       records (``case.files.cortes``), deriving the boundary stage from the
+       cut file's own trailer when it is a single-stage partition export.
     3. Checks the writer binding, then runs a 1-iteration in-process
        ``cobre.run.run`` pass on ``case_dir`` (checkpoint under ``work_dir``,
        the case is never mutated) to read back its terminal state-vector
@@ -713,16 +705,12 @@ def import_boundary_fcf(
         manifest), or the writer (``fcf/writer.py``, e.g. a mapped
         coefficient vector length mismatch).
     """
-    if cortesh_path is None or cortes_path is None:
+    if case.files.cortesh is None or case.files.cortes is None:
         _LOG.info("boundary FCF skipped — no cut files")
         return None
 
-    deck_files = discover_decomp_files(cortesh_path.parent)
-    dadger = Dadger.read(str(deck_files.dadger))
-    id_map = DecompIdMap.from_dadger(dadger)
-
-    cortesh = Cortesh.read(str(cortesh_path))
-    cuts = read_cortes(cortes_path, cortesh, boundary_stage=None)
+    cortesh = Cortesh.read(str(case.files.cortesh))
+    cuts = read_cortes(case.files.cortes, cortesh, boundary_stage=None)
     # `BoundaryCuts.boundary_stage` is typed `int`, but a single-stage export's
     # derived value inherits `numpy.int32` from `cortesh.ano_inicio_estudo`'s
     # own numpy dtype (confirmed against this deck) — narrow to a plain `int`
@@ -740,7 +728,7 @@ def import_boundary_fcf(
     # terms onto. The former state_space.inflow_lag_depth override was redundant
     # with that sizing and is rejected by cobre >= 0.14.
     manifest = bootstrap_terminal_manifest(case_dir, work_dir=work_dir)
-    gnl_plan = _build_gnl_ring_plan(case_dir, deck_files)
+    gnl_plan = _build_gnl_ring_plan(case_dir, case.files)
     # Inflow-lag mean fold + recent-observation seed (built together, shipped
     # together — see `_boundary_inflow_context`). The coupling month is the cut
     # stage's own calendar month (`boundary_stage` is calendar-anchored as
@@ -748,9 +736,7 @@ def import_boundary_fcf(
     # aligns each `pi_qafl` lag depth to `coupling_month - depth`. `None` (no
     # mlt.dat) leaves the lag state at 0 — no fold, no seed.
     coupling_month = ((boundary_stage - 1) % 12) + 1
-    inflow_context = _boundary_inflow_context(
-        deck_files, dadger, id_map, coupling_month=coupling_month
-    )
+    inflow_context = _boundary_inflow_context(case, coupling_month=coupling_month)
     inflow_lag_means = inflow_context[2] if inflow_context is not None else None
     # Read stages.json's per-block hours once; cost_unit_hours (the
     # intercept/storage/inflow-lag scale) is this same vector's sum, never a
@@ -761,7 +747,7 @@ def import_boundary_fcf(
     # complexo absent from the DECOMP model, so its coefficients replicate onto
     # the individual plants that share it (see map_boundary_cuts) rather than
     # being dropped.
-    complexo_components = _read_complexo_map(deck_files.dadger)
+    complexo_components = _read_complexo_map(case.files.dadger)
     # The DECOMP case has no PAR(p) model, so the bootstrap manifest carries no
     # HydroInflowLag slots; the deepest lag the boundary cuts reference is
     # declared to the writer, which reserves the canonical slots (cobre-side
@@ -771,7 +757,7 @@ def import_boundary_fcf(
     mapping = map_boundary_cuts(
         cuts,
         manifest,
-        id_map,
+        case.id_map,
         cost_unit_hours=cost_unit_hours,
         gnl_plan=gnl_plan,
         coupling_block_hours=coupling_block_hours,
@@ -820,9 +806,7 @@ def import_boundary_fcf(
     # ships without the RHS mean that offsets it (`_boundary_inflow_context`).
     if inflow_context is not None:
         effective, calendar, _ = inflow_context
-        n_windows = _seed_recent_observations(
-            case_dir, deck_files, effective, id_map, calendar
-        )
+        n_windows = _seed_recent_observations(case_dir, case, effective, calendar)
         _LOG.info(
             "boundary FCF inflow-lag coupling: folded the seasonal-mean (MLT) "
             "deviation into %d cut RHS(es) and seeded %d recent-observation "

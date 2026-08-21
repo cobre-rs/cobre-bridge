@@ -24,10 +24,10 @@ from cobre_bridge.decomp.thermal import _hours_weighted
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -246,10 +246,10 @@ def _signed_price(custo: float, kind: str) -> float:
 
 
 def convert_energy_contracts(
-    contracts: Sequence[Contract],
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    start_date: date,
+    *,
+    contracts: Sequence[Contract],
 ) -> dict:
     """Build ``energy_contracts.json`` from ``CI``/``CE`` (stage-1 base values).
 
@@ -258,8 +258,8 @@ def convert_energy_contracts(
     d41 import-contract shape. Total over ``contracts``: an empty list yields
     an empty ``"contracts"`` array without raising.
     """
-    op_date = start_date.isoformat()
-    first = calendar[0]
+    op_date = case.start_date.isoformat()
+    first = case.calendar[0]
 
     out: list[dict] = []
     for c in contracts:
@@ -296,8 +296,9 @@ _CONTRACT_BOUNDS_SCHEMA = pa.schema(
 
 
 def convert_contract_bounds(
+    case: DecompCase,
+    *,
     contracts: Sequence[Contract],
-    calendar: Sequence[OperativeStage],
 ) -> pa.Table:
     """Contract bounds: a stage-level base row plus sparse per-block overrides.
 
@@ -313,6 +314,7 @@ def convert_contract_bounds(
     ``convert_thermal_bounds``' and ``convert_lines``' sparse
     base-plus-override convention exactly.
     """
+    calendar = case.calendar
     contract_ids: list[int] = []
     stage_ids: list[int] = []
     mins: list[float] = []

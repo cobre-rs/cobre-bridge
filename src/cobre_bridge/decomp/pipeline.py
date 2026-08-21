@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from idecomp.decomp import Dadger, Dadgnl, Vazoes
+from idecomp.decomp import Vazoes
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge import emission_checks
@@ -50,6 +50,7 @@ from cobre_bridge.decomp import scenarios as scenarios_conv
 from cobre_bridge.decomp import temporal as temporal_conv
 from cobre_bridge.decomp import thermal as thermal_conv
 from cobre_bridge.decomp import travel_time as travel_time_conv
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.scalar_parameters import (
     build_decomp_scalar_parameters,
@@ -75,7 +76,7 @@ DECOMP_CLEARED_ARTIFACTS = ClearedArtifacts(
         "initial_conditions.json",
         "conversion_manifest.json",
         # DECOMP-only, conditional, root-level artifacts a re-run may not
-        # reproduce; the NEWAVE set never lists these (CONV-10).
+        # reproduce; the NEWAVE set never lists these.
         "post_study_stages.json",
     ),
 )
@@ -694,33 +695,27 @@ def _convert_decomp_case_impl(
     """
     step = on_phase if on_phase is not None else (lambda _label: None)
     step("Discovering deck")
-    files = discover_decomp_files(src)
-    _LOG.info("converting %s (revision %s)", src, files.revision)
+    case = DecompCase.from_directory(src)
+    id_map = case.id_map
+    dadger = case.dadger
+    calendar = case.calendar
+    _LOG.info("converting %s (revision %s)", src, case.files.revision)
 
-    dadger = Dadger.read(str(files.dadger))
-    vazoes = Vazoes.read(str(files.vazoes))
-    hidr = hydro_conv.read_hidr(files.hidr)
-    renovaveis = None
-    if files.renovaveis is not None:
-        from idecomp.libs import Renovaveis
+    vazoes = Vazoes.read(str(case.files.vazoes))
 
-        renovaveis = Renovaveis.read(str(files.renovaveis))
-
-    id_map = DecompIdMap.from_dadger(dadger)
     # Itaipu's split-plant topology needs a
     # synthesized SE<->IV line and, only when the deck carries the data,
     # the ANDE load on the IV bus -- both driven by this single
     # Itaipu(66)-operated check, computed once and reused by both wiring
     # sites below.
     itaipu_operated = hydro_conv._ITAIPU_CODE in id_map.hydro_codes
-    calendar = temporal_conv.operative_calendar_from_dadger(dadger)
     # Cadastro overrides: the per-stage-effective view of
     # the registry, folding in any temporal AC VOLMIN/VOLMAX/VAZMIN override —
     # read once and threaded to every consumer below (initial storage, the
     # entity reservoir envelope, the per-stage storage and minimum-outflow
     # bounds) so they all agree on the same effective values.
     effective, cadastro_report = cadastro_conv.build_effective_cadastro(
-        dadger, hidr, calendar
+        case.dadger, case.hidr, case.calendar
     )
     if cadastro_report.applied or cadastro_report.out_of_horizon:
         applied_desc = ", ".join(
@@ -750,7 +745,6 @@ def _convert_decomp_case_impl(
     relink_diagnostic = _topology_relink_diagnostic(effective, id_map)
     if relink_diagnostic is not None:
         dx.emit(relink_diagnostic, logger=_LOG)
-    start_date = calendar[0].start_date
     fan_probabilities = scenarios_conv.terminal_fan_probabilities(vazoes, calendar)
 
     tx = float(dadger.tx.taxa) / 100.0
@@ -790,7 +784,7 @@ def _convert_decomp_case_impl(
     # into a per-stage cobre risk measure, emitted uniformly across all stages
     # (temporal.stage_records) so cobre admits the gap stopping rule under CVaR
     # with enumerated forwards (it computes the exact risk-adjusted upper bound).
-    cvar = temporal_conv.resolve_cvar(dadger, files.cortesh)
+    cvar = temporal_conv.resolve_cvar(dadger, case.files.cortesh)
     if cvar is not None:
         dx.emit(
             dx.Diagnostic(
@@ -809,9 +803,9 @@ def _convert_decomp_case_impl(
             ),
             logger=_LOG,
         )
-    _write_json(dst / "config.json", config_conv.convert_config(dadger))
+    _write_json(dst / "config.json", config_conv.convert_config(case))
     stages_dict = temporal_conv.convert_stages(
-        calendar,
+        case,
         annual_discount_rate=tx,
         fan_probabilities=fan_probabilities,
         cvar=cvar,
@@ -824,7 +818,7 @@ def _convert_decomp_case_impl(
     # ±window around the initial volume); the rest keep constant productivity,
     # whose ρ_eq is likewise anchored at the initial volume (not the full-range
     # mean) — see hydro._equivalent_productivity_mw_per_m3s and decomp/fpha.py.
-    initial_volumes = hydro_conv._operated_initial_volumes(dadger, effective)
+    initial_volumes = hydro_conv._operated_initial_volumes(case, effective=effective)
     fpha_codes = fpha_conv.fpha_eligible_codes(effective, id_map)
     fpha_configs: dict[int, dict] = {}
     reference_volumes: dict[int, dict] = {}
@@ -871,24 +865,24 @@ def _convert_decomp_case_impl(
     # it with the left/right temporal-boundary arrays, and those need the thermal
     # ids assigned when thermals.json is built.
     initial_conditions_doc: dict = {
-        "storage": hydro_conv.convert_initial_storage(dadger, hidr, id_map, effective),
+        "storage": hydro_conv.convert_initial_storage(
+            case, id_map, effective=effective
+        ),
         "filling_storage": [],
     }
 
     system = dst / "system"
-    buses_doc = network_conv.convert_buses(dadger, id_map, start_date)
+    buses_doc = network_conv.convert_buses(case, id_map)
     _write_json(system / "buses.json", buses_doc)
     hydros_dict = hydro_conv.convert_hydros(
-        dadger, hidr, id_map, start_date, effective, fpha_codes=fpha_codes
+        case, id_map, effective=effective, fpha_codes=fpha_codes
     )
     # hydros.json is written after the bound tables are resolved (below): a
     # plant carrying a positive QDES diversion floor (min_diversion_m3s > 0)
     # must also declare its diversion channel, or cobre rejects the floor as
     # infeasible against the channel-less [0, 0] pin. That coupling can only be
     # applied once the resolved hydro_bounds are in hand.
-    lines_doc, line_bounds = network_conv.convert_lines(
-        dadger, id_map, calendar, start_date
-    )
+    lines_doc, line_bounds = network_conv.convert_lines(case, id_map)
     if itaipu_operated:
         # When Itaipu is operated (the split-plant topology relocates its 50 Hz
         # group to the IV bus), the IV bus needs a connection to SE. append_iv_se_line
@@ -896,12 +890,11 @@ def _convert_decomp_case_impl(
         # NOT already wire IV<->SE; when it does (as on most Itaipu decks), the
         # helper reuses that line -- its real operational capacity -- and adding
         # a second one would make cobre reject the duplicate.
-        itaipu_submercado = int(hidr.loc[hydro_conv._ITAIPU_CODE, "submercado"])
+        itaipu_submercado = int(case.hidr.loc[hydro_conv._ITAIPU_CODE, "submercado"])
         lines_doc, line_bounds = network_conv.append_iv_se_line(
-            lines_doc,
-            line_bounds,
-            calendar,
-            start_date,
+            case,
+            lines_doc=lines_doc,
+            line_bounds=line_bounds,
             source_bus_id=id_map.transhipment_bus_id,
             target_bus_id=id_map.bus_id(itaipu_submercado),
             capacity_mw=network_conv._itaipu_50hz_capacity_mw(dadger),
@@ -909,17 +902,17 @@ def _convert_decomp_case_impl(
     _write_json(system / "lines.json", lines_doc)
     _write_json(
         system / "pumping_stations.json",
-        network_conv.convert_pumping_stations(dadger, id_map, start_date),
+        network_conv.convert_pumping_stations(case, id_map),
     )
-    thermals_dict = thermal_conv.convert_thermals(dadger, id_map, calendar, start_date)
+    thermals_dict = thermal_conv.convert_thermals(case, id_map)
     # GNL (fuel-constrained) thermals are declared in dadgnl, absent from CT, so
     # the thermal converter never sees them. Read the commitment model and emit
     # the created thermals plus their anticipated ring: the mandatory left
     # boundary (past_anticipated_commitments) and any post-horizon deliveries as
     # the right boundary (future_anticipated_deliveries + post_study_stages.json).
     gnl_model = (
-        anticipated_conv.read_gnl_model(Dadgnl.read(str(files.dadgnl)))
-        if files.dadgnl is not None
+        anticipated_conv.read_gnl_model(case.dadgnl)
+        if case.dadgnl is not None
         else None
     )
     if gnl_model is not None:
@@ -968,26 +961,23 @@ def _convert_decomp_case_impl(
         system / "hydro_geometry.parquet",
         fpha_conv.convert_hydro_geometry(effective, id_map),
     )
-    tailrace_table = fpha_conv.convert_tailrace_curves(
-        fpha_conv.read_polinjus(files.polinjus) if files.polinjus is not None else None,
-        id_map,
-    )
+    tailrace_table = fpha_conv.convert_tailrace_curves(case, id_map)
     if tailrace_table is not None:
         _write_parquet(system / "tailrace_curves.parquet", tailrace_table)
-    ncs_registry = ncs_conv.convert_non_controllable_sources(
-        dadger, id_map, calendar, start_date, renovaveis
-    )
+    ncs_registry = ncs_conv.convert_non_controllable_sources(case, id_map)
     _write_json(system / "non_controllable_sources.json", ncs_registry)
 
     step("Converting scenarios")
     scenarios = dst / "scenarios"
     _write_parquet(
         scenarios / "inflow_seasonal_stats.parquet",
-        scenarios_conv.convert_inflow_stats_identity(id_map, calendar),
+        scenarios_conv.convert_inflow_stats_identity(case, id_map),
     )
     _write_parquet(
         scenarios / "external_inflow_scenarios.parquet",
-        scenarios_conv.convert_external_inflows(vazoes, effective, id_map, calendar),
+        scenarios_conv.convert_external_inflows(
+            case, id_map, vazoes=vazoes, effective=effective
+        ),
     )
     # The IV bus's carga_ande load is gated on the dadger RI
     # register being present -- independent of (and additional to) the
@@ -1004,20 +994,18 @@ def _convert_decomp_case_impl(
                 for stage_index, values in carga_ande.items()
             }
     load_stats = load_conv.convert_load_stats(
-        dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+        case, id_map, extra_bus_loads=extra_bus_loads
     )
     _write_parquet(scenarios / "load_seasonal_stats.parquet", load_stats)
     _write_json(
         scenarios / "load_factors.json",
-        load_conv.convert_load_factors(
-            dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
-        ),
+        load_conv.convert_load_factors(case, id_map, extra_bus_loads=extra_bus_loads),
     )
-    ncs_stats = ncs_conv.convert_ncs_stats(dadger, id_map, calendar, renovaveis)
+    ncs_stats = ncs_conv.convert_ncs_stats(case, id_map)
     _write_parquet(scenarios / "non_controllable_stats.parquet", ncs_stats)
     _write_json(
         scenarios / "non_controllable_factors.json",
-        ncs_conv.convert_ncs_factors(dadger, id_map, calendar, renovaveis),
+        ncs_conv.convert_ncs_factors(case, id_map),
     )
     # Under the node-native explicit tree every stochastic class is sourced
     # externally: inflow (the tree), NCS (renewables), and load. A
@@ -1065,7 +1053,7 @@ def _convert_decomp_case_impl(
     census = constraint_registers.read_constraints(dadger)
     pumping_ids = network_conv.pumping_station_id_map(dadger)
     thermal_generation_contribs, thermal_cost_table = (
-        thermal_conv.convert_thermal_bounds(dadger, id_map, calendar)
+        thermal_conv.convert_thermal_bounds(case, id_map)
     )
     # The RE `FU` single-hydro-generation and the RHQ `QTUR`/turbined bound
     # producers each clamp their emitted upper to the plant's own declared
@@ -1081,12 +1069,17 @@ def _convert_decomp_case_impl(
         for hydro in hydros_dict["hydros"]
     }
     contribs = [
-        *bounds_conv.convert_hydro_bounds(dadger, id_map, calendar, effective),
-        *bounds_conv.convert_storage_bounds(effective, id_map, calendar),
-        *bounds_conv.convert_volume_espera_bounds(dadger, id_map, calendar, effective),
+        *bounds_conv.convert_hydro_bounds(case, id_map, effective=effective),
+        *bounds_conv.convert_storage_bounds(case, id_map, effective=effective),
+        *bounds_conv.convert_volume_espera_bounds(case, id_map, effective=effective),
         *thermal_generation_contribs,
         *single_term_bounds.single_term_bound_contributions(
-            census, id_map, pumping_ids, calendar, effective, hydro_capacities
+            case,
+            id_map,
+            census=census,
+            pumping_station_ids=pumping_ids,
+            effective=effective,
+            hydro_capacities=hydro_capacities,
         ),
     ]
     # Base `desvio` diverters carry no QDES flow bound, so cobre pins their
@@ -1123,7 +1116,7 @@ def _convert_decomp_case_impl(
     # flow and over-generate. Mirrors the source model's dsvagua path.
     hydro_bounds = _merge_water_withdrawal(
         hydro_bounds,
-        bounds_conv.convert_irrigation_withdrawal(dadger, id_map, calendar),
+        bounds_conv.convert_irrigation_withdrawal(case, id_map),
     )
     # Attach the diversion channel to every hydro that carries a positive
     # diversion floor, then write hydros.json (its write was deferred from the
@@ -1192,7 +1185,7 @@ def _convert_decomp_case_impl(
     # is wired into the self-check block below.
     step("Converting constraints")
     availability_values = hydro_conv.convert_hydro_group_availability(
-        dadger, hidr, id_map, calendar, effective
+        case, id_map, effective=effective
     )
     # Itaipu's RI per-frequency must-run floors
     # (geracao_minima_50/60_hz) overlay the same per-group table as the
@@ -1203,7 +1196,7 @@ def _convert_decomp_case_impl(
     # as the availability max) rather than emitted as a second table.
     if itaipu_operated:
         for key, min_generation in hydro_conv.convert_itaipu_frequency_min_generation(
-            dadger, id_map, calendar
+            case, id_map
         ).items():
             existing = availability_values.get(key)
             availability_values[key] = (
@@ -1212,7 +1205,7 @@ def _convert_decomp_case_impl(
                 else group_bounds_conv.GroupBoundEntry(min_generation_mw=min_generation)
             )
     group_bounds = group_bounds_conv.convert_hydro_unit_group_bounds(
-        availability_values, calendar
+        case, values=availability_values
     )
 
     # The CI/CE energy-contract model, read once and
@@ -1223,9 +1216,11 @@ def _convert_decomp_case_impl(
     contracts = contracts_conv.read_contracts(dadger, calendar)
     contracts_conv.warn_nonnull_loss_factor(contracts)
     energy_contracts_doc = contracts_conv.convert_energy_contracts(
-        contracts, id_map, calendar, start_date
+        case, id_map, contracts=contracts
     )
-    contract_bounds_table = contracts_conv.convert_contract_bounds(contracts, calendar)
+    contract_bounds_table = contracts_conv.convert_contract_bounds(
+        case, contracts=contracts
+    )
 
     # Post-emission self-checks: mirror cheap cobre load invariants (rules 43,
     # 41, 45, 38, 36, and the block_id-range rule) over the in-memory artifacts
@@ -1301,12 +1296,9 @@ def _convert_decomp_case_impl(
     # (RE/RE-* or date-indexed) file -- that fallback stays on
     # detect_libs_electrical's flat warning (OQ-4).
     libs_electrical_model: libs_electrical_conv.LibsElectricalModel | None = None
-    if files.libs_restricao_eletrica is not None:
-        from idecomp.libs.restricoes import Restricoes
-
-        restricoes = Restricoes.read(str(files.libs_restricao_eletrica))
+    if case.libs_restricao_eletrica is not None:
         libs_electrical_model = libs_electrical_conv.read_libs_electrical(
-            restricoes, calendar
+            case.libs_restricao_eletrica, calendar
         )
 
     generic_constraints: list[dict] = []
@@ -1314,7 +1306,12 @@ def _convert_decomp_case_impl(
     next_generic_id = 0
 
     re_generics = constraints_conv.emit_re_generics(
-        census, id_map, line_map, big_m, calendar, next_generic_id
+        case,
+        id_map,
+        census=census,
+        line_map=line_map,
+        big_m=big_m,
+        start_id=next_generic_id,
     )
     if re_generics is not None:
         generic_constraints.extend(re_generics.constraints)
@@ -1322,7 +1319,13 @@ def _convert_decomp_case_impl(
         next_generic_id += len(re_generics.constraints)
 
     rhq_rhv_generics = constraints_conv.emit_rhq_rhv_generics(
-        census, id_map, pumping_ids, effective, big_m, calendar, next_generic_id
+        case,
+        id_map,
+        census=census,
+        pumping_station_ids=pumping_ids,
+        effective=effective,
+        big_m=big_m,
+        start_id=next_generic_id,
     )
     if rhq_rhv_generics is not None:
         generic_constraints.extend(rhq_rhv_generics.constraints)
@@ -1330,7 +1333,12 @@ def _convert_decomp_case_impl(
         next_generic_id += len(rhq_rhv_generics.constraints)
 
     rhe_generics = constraints_conv.emit_rhe_generics(
-        census, id_map, effective, hydro_to_ree, calendar, next_generic_id
+        case,
+        id_map,
+        census=census,
+        effective=effective,
+        hydro_to_ree=hydro_to_ree,
+        start_id=next_generic_id,
     )
     if rhe_generics.result is not None:
         generic_constraints.extend(rhe_generics.result.constraints)
@@ -1347,14 +1355,12 @@ def _convert_decomp_case_impl(
     libs_electrical_result: libs_electrical_emit.LibsElectricalResult | None = None
     if libs_electrical_model is not None:
         context_factory = libs_electrical_conv.build_data_context(
-            libs_electrical_model, dadger, id_map, calendar
+            case, id_map, model=libs_electrical_model
         )
         a_h = libs_electrical_conv.build_available_power(
-            availability_values, hidr, id_map, effective
+            case, id_map, overlay=availability_values, effective=effective
         )
-        ncs_id_by_pee_code = ncs_conv.build_pee_ncs_id_map(
-            dadger, id_map, calendar, renovaveis
-        )
+        ncs_id_by_pee_code = ncs_conv.build_pee_ncs_id_map(case, id_map)
         conjh_bus_by_code_group = {
             (id_map.hydro_codes[entry["id"]], group_index): group["bus_id"]
             for entry in hydros_dict["hydros"]
@@ -1409,7 +1415,9 @@ def _convert_decomp_case_impl(
     # E1: the FE/RHA/LIBs-electrical detection diagnostics each surface
     # once, through the structured sink, alongside the flat deferral warning
     # below (the matching clause is deduped out of that warning).
-    for detection in constraint_registers.detect_unreadable_electrical(files.dadger):
+    for detection in constraint_registers.detect_unreadable_electrical(
+        case.files.dadger
+    ):
         dx.emit(detection, logger=_LOG)
     # The flat presence warning is narrowed to the subset
     # `libs_electrical_model` (read once above) did NOT convert -- a

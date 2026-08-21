@@ -2839,9 +2839,12 @@ class TestCliInProcess:
     def test_convert_decomp_boundary_fcf_happy_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """With cut files present (the default), the importer runs with
-        ``cost_scale_factor=1.0``, exits 0, surfaces the C8 run recipe on
-        stderr, and the ``--json`` verdict carries ``summary["boundary_fcf"]``."""
+        """With cut files present (the default), the CLI builds exactly one
+        ``DecompCase`` for the FCF step and passes it positionally to the
+        importer, which runs with ``cost_scale_factor=1.0``, exits 0,
+        surfaces the C8 run recipe on stderr, and whose ``--json`` verdict
+        carries ``summary["boundary_fcf"]``."""
+        from cobre_bridge.decomp.case import DecompCase
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
@@ -2863,6 +2866,10 @@ class TestCliInProcess:
                 "cobre_bridge.decomp.fcf.import_boundary_fcf",
                 return_value=dst / "boundary",
             ) as mock_import,
+            patch(
+                "cobre_bridge.decomp.case.DecompCase.from_directory",
+                wraps=DecompCase.from_directory,
+            ) as mock_from_directory,
         ):
             code, stdout, stderr = self._invoke_main(
                 ["convert", "decomp", str(src), str(dst), "--json"],
@@ -2870,11 +2877,13 @@ class TestCliInProcess:
             )
 
         assert code == 0
+        mock_from_directory.assert_called_once()
         mock_capability.assert_called_once()
         mock_import.assert_called_once()
         assert mock_import.call_args.kwargs["cost_scale_factor"] == 1.0
         assert "cobre_bin" not in mock_import.call_args.kwargs
         assert mock_import.call_args.args[0] == dst
+        assert isinstance(mock_import.call_args.args[1], DecompCase)
         # C8 recipe surfaced on stderr regardless of --json.
         assert f"cobre run {dst}" in stderr
         assert f"--output={dst}" in stderr

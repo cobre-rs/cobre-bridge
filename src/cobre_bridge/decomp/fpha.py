@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 #: Half-width of the FPHA volume fitting window as a fraction of a plant's
@@ -75,7 +76,7 @@ def read_polinjus(path: Path):  # noqa: ANN201 (idecomp.libs type is optional)
     return UsinasHidreletricas.read(str(path))
 
 
-def convert_tailrace_curves(polinjus, id_map: DecompIdMap) -> pa.Table | None:  # noqa: ANN001
+def convert_tailrace_curves(case: DecompCase, id_map: DecompIdMap) -> pa.Table | None:
     """Build ``system/tailrace_curves.parquet`` from the ``polinjus`` families.
 
     Thin DECOMP wrapper over the shared
@@ -84,6 +85,7 @@ def convert_tailrace_curves(polinjus, id_map: DecompIdMap) -> pa.Table | None:  
     ``…_polinomio_segmento`` frames the source-model side reads. ``None`` when
     the deck has no ``polinjus`` or no segment maps to a converted hydro.
     """
+    polinjus = case.polinjus
     if polinjus is None:
         return None
     families = polinjus.hidreletrica_curvajusante(df=True)

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
         ConstraintCensus,
         ConstraintRecord,
@@ -450,10 +451,11 @@ def _hv_storage_contributions(
 
 
 def single_term_bound_contributions(
-    census: ConstraintCensus,
+    case: DecompCase,
     id_map: DecompIdMap,
+    *,
+    census: ConstraintCensus,
     pumping_station_ids: Mapping[int, int],
-    calendar: Sequence[OperativeStage],
     effective: EffectiveCadastro,
     hydro_capacities: Mapping[int, HydroCapacities],
 ) -> list[BoundContribution]:
@@ -497,6 +499,7 @@ def single_term_bound_contributions(
         ``"HQ"``/``"HV"``, or an ``"RE"`` record whose single term's variable
         is neither ``"generation"`` nor ``"thermal_generation"``.
     """
+    calendar = case.calendar
     contributions: list[BoundContribution] = []
     for record in census.to_bounds:
         if record.family == "RE":

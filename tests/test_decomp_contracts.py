@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.contracts import (
     _CONTRACT_BOUNDS_SCHEMA,
     _SCHEMA_URL,
@@ -26,6 +27,7 @@ from cobre_bridge.decomp.contracts import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
+from tests.conftest import make_decomp_case
 
 _COBRE_SCHEMA = (
     Path.home() / "git" / "cobre" / "schemas" / "energy_contracts.schema.json"
@@ -81,6 +83,10 @@ def _uniform_calendar() -> list[OperativeStage]:
 
 def _bus_id_map() -> DecompIdMap:
     return DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "S"))
+
+
+def _case(calendar: list[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), calendar=calendar)
 
 
 # ticket-007 (epic-03): ``decomp/pipeline.py`` no longer exposes module-level
@@ -315,9 +321,8 @@ def test_convert_energy_contracts_import_base_shape() -> None:
         ],
     )
 
-    result = convert_energy_contracts(
-        [contract], id_map, calendar, calendar[0].start_date
-    )
+    case = _case(calendar)
+    result = convert_energy_contracts(case, id_map, contracts=[contract])
 
     assert result["contracts"][0] == {
         "id": 0,
@@ -351,9 +356,8 @@ def test_convert_energy_contracts_export_price_is_negative() -> None:
         ],
     )
 
-    result = convert_energy_contracts(
-        [contract], id_map, calendar, calendar[0].start_date
-    )
+    case = _case(calendar)
+    result = convert_energy_contracts(case, id_map, contracts=[contract])
 
     assert result["contracts"][0]["price_per_mwh"] == -150.0
 
@@ -398,9 +402,8 @@ def test_convert_energy_contracts_validates_against_schema() -> None:
         ),
     ]
 
-    result = convert_energy_contracts(
-        contracts, id_map, calendar, calendar[0].start_date
-    )
+    case = _case(calendar)
+    result = convert_energy_contracts(case, id_map, contracts=contracts)
 
     schema = json.loads(_COBRE_SCHEMA.read_text(encoding="utf-8"))
     jsonschema.validate(result, schema)
@@ -409,8 +412,9 @@ def test_convert_energy_contracts_validates_against_schema() -> None:
 def test_convert_energy_contracts_empty_is_total() -> None:
     calendar = _uniform_calendar()
     id_map = _bus_id_map()
+    case = _case(calendar)
 
-    result = convert_energy_contracts([], id_map, calendar, calendar[0].start_date)
+    result = convert_energy_contracts(case, id_map, contracts=[])
 
     assert result == {"$schema": _SCHEMA_URL, "contracts": []}
 
@@ -432,7 +436,7 @@ def test_contract_bounds_uniform_emits_base_rows_only() -> None:
         stages=[stage, stage, stage],
     )
 
-    table = convert_contract_bounds([contract], calendar)
+    table = convert_contract_bounds(_case(calendar), contracts=[contract])
 
     assert table.num_rows == 3
     assert table.column("block_id").null_count == 3
@@ -465,7 +469,7 @@ def test_contract_bounds_nonuniform_max_emits_per_block_rows() -> None:
         stages=[nonuniform_stage, uniform_stage, uniform_stage],
     )
 
-    table = convert_contract_bounds([contract], calendar)
+    table = convert_contract_bounds(_case(calendar), contracts=[contract])
     stage0 = [row for row in table.to_pylist() if row["stage_id"] == 0]
 
     assert len(stage0) == 4
@@ -502,7 +506,7 @@ def test_contract_bounds_export_price_negated_per_block() -> None:
         stages=[nonuniform_stage, uniform_stage, uniform_stage],
     )
 
-    table = convert_contract_bounds([contract], calendar)
+    table = convert_contract_bounds(_case(calendar), contracts=[contract])
     overrides = sorted(
         (
             row
@@ -531,7 +535,7 @@ def test_contract_bounds_schema_roundtrips_through_parquet(tmp_path: Path) -> No
         bus_code=1,
         stages=[stage, stage, stage],
     )
-    table = convert_contract_bounds([contract], calendar)
+    table = convert_contract_bounds(_case(calendar), contracts=[contract])
     out = tmp_path / "contract_bounds.parquet"
 
     pq.write_table(table, out)
@@ -558,7 +562,7 @@ def test_contract_bounds_schema_roundtrips_through_parquet(tmp_path: Path) -> No
 def test_contract_bounds_empty_is_total() -> None:
     calendar = _uniform_calendar()
 
-    table = convert_contract_bounds([], calendar)
+    table = convert_contract_bounds(_case(calendar), contracts=[])
 
     assert table.num_rows == 0
     assert table.schema == _CONTRACT_BOUNDS_SCHEMA
@@ -665,11 +669,12 @@ def test_loss_factor_is_not_folded_into_numbers() -> None:
             ],
         )
 
+    case = _case(calendar)
     with_loss_factor = convert_energy_contracts(
-        [_contract(5.0)], id_map, calendar, calendar[0].start_date
+        case, id_map, contracts=[_contract(5.0)]
     )
     without_loss_factor = convert_energy_contracts(
-        [_contract(None)], id_map, calendar, calendar[0].start_date
+        case, id_map, contracts=[_contract(None)]
     )
 
     assert with_loss_factor == without_loss_factor
@@ -689,9 +694,7 @@ def test_integrated_ids_and_placeholder_and_window() -> None:
     dadger = _contracts_stub()
 
     contracts = read_contracts(dadger, calendar)
-    result = convert_energy_contracts(
-        contracts, id_map, calendar, calendar[0].start_date
-    )
+    result = convert_energy_contracts(_case(calendar), id_map, contracts=contracts)
 
     assert len(result["contracts"]) == 2
     by_id = {entry["id"]: entry for entry in result["contracts"]}
@@ -714,9 +717,7 @@ def test_integrated_export_sign_and_bus_mapping() -> None:
     dadger = _contracts_stub()
 
     contracts = read_contracts(dadger, calendar)
-    result = convert_energy_contracts(
-        contracts, id_map, calendar, calendar[0].start_date
-    )
+    result = convert_energy_contracts(_case(calendar), id_map, contracts=contracts)
 
     export_contract = next(c for c in contracts if c.kind == "export")
     export_entry = next(e for e in result["contracts"] if e["type"] == "export")
@@ -730,7 +731,7 @@ def test_integrated_carry_forward_and_per_block_sparsity() -> None:
     dadger = _contracts_stub()
 
     contracts = read_contracts(dadger, calendar)
-    table = convert_contract_bounds(contracts, calendar)
+    table = convert_contract_bounds(_case(calendar), contracts=contracts)
 
     import_contract = next(c for c in contracts if c.kind == "import")
     import_rows = [
@@ -783,10 +784,9 @@ def test_integrated_json_schema_and_parquet_roundtrip(tmp_path: Path) -> None:
     dadger = _contracts_stub()
 
     contracts = read_contracts(dadger, calendar)
-    result = convert_energy_contracts(
-        contracts, id_map, calendar, calendar[0].start_date
-    )
-    table = convert_contract_bounds(contracts, calendar)
+    case = _case(calendar)
+    result = convert_energy_contracts(case, id_map, contracts=contracts)
+    table = convert_contract_bounds(case, contracts=contracts)
 
     schema = json.loads(_COBRE_SCHEMA.read_text(encoding="utf-8"))
     jsonschema.validate(result, schema)
@@ -874,9 +874,7 @@ def test_d41_json_shape_roundtrip() -> None:
         ),
     ]
 
-    result = convert_energy_contracts(
-        contracts, id_map, calendar, calendar[0].start_date
-    )
+    result = convert_energy_contracts(_case(calendar), id_map, contracts=contracts)
 
     assert len(result["contracts"]) == 2
     for entry in result["contracts"]:
@@ -913,7 +911,7 @@ def test_d41_parquet_schema_superset() -> None:
         bus_code=1,
         stages=[stage, stage, stage],
     )
-    bridge_table = convert_contract_bounds([contract], calendar)
+    bridge_table = convert_contract_bounds(_case(calendar), contracts=[contract])
 
     d41_names = set(d41_table.schema.names)
     bridge_names = set(bridge_table.schema.names)

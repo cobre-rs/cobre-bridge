@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -32,44 +33,42 @@ from cobre_bridge.decomp.fcf.mapper import MappingResult
 from tests._fcf_fixtures import (
     make_boundary_cuts,
     make_cut_record,
+    make_id_map,
     make_manifest,
     make_mapped_cut,
     make_slot,
 )
+from tests.conftest import make_decomp_case, make_decomp_files
 
 if TYPE_CHECKING:
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
 
 
 def _mock_deck_and_cut_seams(
-    monkeypatch: pytest.MonkeyPatch, fake_cuts: BoundaryCuts
-) -> None:
-    """Monkeypatch the deck-discovery + cut-reader seams shared by every
-    binary-free ``import_boundary_fcf`` orchestration test below.
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_cuts: BoundaryCuts
+) -> DecompCase:
+    """Monkeypatch the cut-reader seams shared by every binary-free
+    ``import_boundary_fcf`` orchestration test below, and build the shared
+    ``DecompCase`` the importer reads instead of re-discovering/re-parsing
+    the deck.
 
-    Stubs ``discover_decomp_files``/``Dadger``/``DecompIdMap``/``Cortesh``
-    to minimal stand-ins (their return values are opaque placeholders — only
-    ``read_cortes`` needs a shape any downstream code inspects) and
-    ``read_cortes`` to return ``fake_cuts`` verbatim. Also stubs the
-    ``sys.modules['cobre']`` entry so ``import_boundary_fcf``'s own
-    unconditional ``import cobre`` (needed for ``cobre.__version__``)
-    resolves without the optional cobre-python wheel installed — the
-    epic-01 `"stub sys.modules['cobre']"` pattern
+    Stubs ``Cortesh``/``read_cortes`` to minimal stand-ins (their return
+    values are opaque placeholders — only ``read_cortes`` needs a shape any
+    downstream code inspects), so ``read_cortes`` returns ``fake_cuts``
+    verbatim, and stubs the ``sys.modules['cobre']`` entry so
+    ``import_boundary_fcf``'s own unconditional ``import cobre`` (needed for
+    ``cobre.__version__``) resolves without the optional cobre-python wheel
+    installed — the epic-01 `"stub sys.modules['cobre']"` pattern
     (``tests/test_decomp_fcf_bootstrap.py``), not a module attribute patch.
+
+    Returns a ``DecompCase`` with ``dadger``/``id_map``/``hidr``/``calendar``
+    pre-filled (opaque placeholders — the importer never re-parses them) and
+    ``files.cortesh``/``files.cortes``/``files.vazoes`` set under
+    ``tmp_path``. No real deck and no ``mlt.dat``, so the inflow-lag mean
+    fold and recent-observation seed both stay on their ``None`` no-op branch.
     """
     monkeypatch.setitem(sys.modules, "cobre", SimpleNamespace(__version__="0.13.0"))
-    monkeypatch.setattr(
-        "cobre_bridge.decomp.fcf.discover_decomp_files",
-        lambda _deck_dir: SimpleNamespace(dadger=Path("dadger.rv0"), dadgnl=None),
-    )
-    monkeypatch.setattr(
-        "cobre_bridge.decomp.fcf.Dadger",
-        SimpleNamespace(read=lambda _path: object()),
-    )
-    monkeypatch.setattr(
-        "cobre_bridge.decomp.fcf.DecompIdMap",
-        SimpleNamespace(from_dadger=lambda _dadger: object()),
-    )
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.Cortesh",
         SimpleNamespace(read=lambda _path: object()),
@@ -91,6 +90,19 @@ def _mock_deck_and_cut_seams(
         lambda _case_dir: [648.0],
     )
     monkeypatch.setattr("cobre_bridge.decomp.fcf.ensure_writer_binding", lambda: None)
+
+    files = make_decomp_files(
+        tmp_path,
+        cortesh=tmp_path / "deck" / "cortesh.dat",
+        cortes=tmp_path / "deck" / "cortes-010.dat",
+    )
+    return make_decomp_case(
+        files,
+        dadger=object(),
+        id_map=make_id_map(()),
+        hidr=object(),
+        calendar=[],
+    )
 
 
 def test_patch_policy_boundary_preserves_other_sections(tmp_path: Path) -> None:
@@ -154,8 +166,8 @@ def test_import_boundary_fcf_logs_c8_workaround(
 
     Needs no cobre binary, no real deck, and no installed cobre wheel: every
     seam that would touch any of the three (`bootstrap_terminal_manifest`,
-    the deck/cut readers, the checkpoint writer, and `import_boundary_fcf`'s
-    own internal `import cobre`) is monkeypatched to a minimal stand-in — a
+    the cut readers, the checkpoint writer, and `import_boundary_fcf`'s own
+    internal `import cobre`) is monkeypatched to a minimal stand-in — a
     "monkeypatched-shape unit path" — isolating the orchestration under
     test: that `import_boundary_fcf` returns `case_dir / "boundary"`,
     patches `config.json`'s `policy.boundary.source_stage` to the reader's
@@ -180,7 +192,7 @@ def test_import_boundary_fcf_logs_c8_workaround(
         records=(make_cut_record(pi_varm=(1.5,), rhs=10.0, forward_pass_index=0),),
         boundary_stage=10,
     )
-    _mock_deck_and_cut_seams(monkeypatch, fake_cuts)
+    case = _mock_deck_and_cut_seams(monkeypatch, tmp_path, fake_cuts)
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.bootstrap_terminal_manifest",
         lambda *_args, **_kwargs: make_manifest([make_slot(0, 0, 0)]),
@@ -203,8 +215,7 @@ def test_import_boundary_fcf_logs_c8_workaround(
     with caplog.at_level(logging.WARNING):
         boundary_dir = import_boundary_fcf(
             case_dir,
-            tmp_path / "deck" / "cortesh.dat",
-            tmp_path / "deck" / "cortes-010.dat",
+            case,
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
@@ -256,7 +267,7 @@ def test_import_boundary_fcf_rejects_storageless_manifest(
         records=(make_cut_record(pi_varm=(1.5,), rhs=10.0, forward_pass_index=0),),
         boundary_stage=10,
     )
-    _mock_deck_and_cut_seams(monkeypatch, fake_cuts)
+    case = _mock_deck_and_cut_seams(monkeypatch, tmp_path, fake_cuts)
     # Only a `HydroInflowLag` (entity_type 1) slot — no `HydroStorage`
     # (entity_type 0) slot at all — triggers `map_boundary_cuts`'s own
     # read-bug guard.
@@ -268,8 +279,57 @@ def test_import_boundary_fcf_rejects_storageless_manifest(
     with pytest.raises(ValueError, match="HydroStorage"):
         import_boundary_fcf(
             case_dir,
-            tmp_path / "deck" / "cortesh.dat",
-            tmp_path / "deck" / "cortes-010.dat",
+            case,
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
+
+
+def test_import_boundary_fcf_reuses_shared_case_no_reparse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC 2 — the importer reads the shared case's already-parsed ``dadger``/
+    ``id_map`` rather than re-discovering and re-parsing the deck itself: a
+    spy on ``idecomp.decomp.Dadger.read`` is never called when
+    ``import_boundary_fcf`` is handed a pre-parsed shared case."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "config.json").write_text("{}\n", encoding="utf-8")
+
+    fake_cuts = make_boundary_cuts(
+        plant_codes=(1,),
+        records=(make_cut_record(pi_varm=(1.5,), rhs=10.0, forward_pass_index=0),),
+        boundary_stage=10,
+    )
+    case = _mock_deck_and_cut_seams(monkeypatch, tmp_path, fake_cuts)
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.bootstrap_terminal_manifest",
+        lambda *_args, **_kwargs: make_manifest([make_slot(0, 0, 0)]),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.map_boundary_cuts",
+        lambda *_args, **_kwargs: MappingResult(
+            cuts=(make_mapped_cut(coefficients=(1.5,)),), dropped=()
+        ),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.build_stage_cuts_payload",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.write_boundary_checkpoint",
+        lambda *_args, **_kwargs: None,
+    )
+    read_spy = MagicMock(name="Dadger.read")
+    monkeypatch.setattr("idecomp.decomp.Dadger.read", read_spy)
+
+    boundary_dir = import_boundary_fcf(
+        case_dir,
+        case,
+        work_dir=tmp_path / "work",
+        cost_scale_factor=1.0,
+    )
+
+    assert boundary_dir == case_dir / "boundary"
+    read_spy.assert_not_called()

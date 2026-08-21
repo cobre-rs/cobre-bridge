@@ -96,7 +96,7 @@ class TestIdMapReconcile:
             )
             stack.enter_context(
                 patch(
-                    "cobre_bridge.decomp.pipeline.Dadger.read",
+                    "idecomp.decomp.Dadger.read",
                     return_value=object(),
                 )
             )

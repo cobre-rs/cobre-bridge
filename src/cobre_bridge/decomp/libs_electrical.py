@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from idecomp.libs.restricoes import Restricoes
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.group_bounds import GroupBoundEntry
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -1423,10 +1424,10 @@ def _submarket_bus_id(id_map: DecompIdMap, term: ParsedTerm) -> int:
 
 
 def build_data_context(
-    model: LibsElectricalModel,
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
+    *,
+    model: LibsElectricalModel,
 ) -> Callable[[int, int], DataContext]:
     """Build the per-(stage,block) :data:`DataContext` factory that drives
     :func:`assemble_bound` and the activation gate.
@@ -1469,8 +1470,9 @@ def build_data_context(
         turning this into a ``Severity.WARNING`` diagnostic and dropping the
         constraint (skip-not-partial), never a silently wrong bound.
     """
-    demand = _per_stage_block_loads(dadger, id_map, calendar)
-    carga_ande_series = read_carga_ande(dadger, calendar)
+    calendar = case.calendar
+    demand = _per_stage_block_loads(case.dadger, id_map, calendar)
+    carga_ande_series = read_carga_ande(case.dadger, calendar)
     n_submarkets = len(id_map.bus_codes)
 
     def context_for_cell(stage_index: int, block_index: int) -> DataContext:
@@ -2062,9 +2064,10 @@ class AvailablePower:
 
 
 def build_available_power(
-    overlay: Mapping[tuple[int, int, int], GroupBoundEntry],
-    hidr: pd.DataFrame,
+    case: DecompCase,
     id_map: DecompIdMap,
+    *,
+    overlay: Mapping[tuple[int, int, int], GroupBoundEntry],
     effective: EffectiveCadastro,
 ) -> AvailablePower:
     """Build the :class:`AvailablePower` lookup (Requirement 1) from
@@ -2089,6 +2092,7 @@ def build_available_power(
     the un-derated rated envelope — so :meth:`AvailablePower.resolve` never
     needs *hidr*/*effective* itself at resolve time.
     """
+    hidr = case.hidr
     code_by_hydro_id = {id_map.hydro_id(code): code for code in id_map.hydro_codes}
 
     overlay_sums: dict[tuple[int, int], float] = {}

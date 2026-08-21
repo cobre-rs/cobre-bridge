@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -98,9 +99,8 @@ def _stage_mean_mw(block_loads: Sequence[float], stage: OperativeStage) -> float
 
 
 def convert_load_stats(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
     *,
     extra_bus_loads: Mapping[tuple[int, int], list[float]] | None = None,
 ) -> pa.Table:
@@ -110,8 +110,9 @@ def convert_load_stats(
     ``DP`` (the transhipment bus) carry zero load unless *extra_bus_loads*
     (see :func:`_per_stage_block_loads`) supplies one.
     """
+    calendar = case.calendar
     loads = _per_stage_block_loads(
-        dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+        case.dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
     )
 
     bus_ids: list[int] = []
@@ -136,9 +137,8 @@ def convert_load_stats(
 
 
 def convert_load_factors(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
     *,
     extra_bus_loads: Mapping[tuple[int, int], list[float]] | None = None,
 ) -> dict:
@@ -150,8 +150,9 @@ def convert_load_factors(
     ``Σ_b factor_b·h_b = H`` invariant check below as every ``DP``-sourced
     row.
     """
+    calendar = case.calendar
     loads = _per_stage_block_loads(
-        dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+        case.dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
     )
 
     entries: list[dict] = []

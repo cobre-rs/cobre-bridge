@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,7 @@ import pytest
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.converters.network import MONTH_HOURS
 from cobre_bridge.decomp.anticipated import GnlCommitmentModel, GnlThermal
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.fcf import (
     _coupling_stage_hours,
     _emit_import_diagnostics,
@@ -49,6 +50,7 @@ from tests._fcf_fixtures import (
     make_mapped_cut,
     make_slot,
 )
+from tests.conftest import make_decomp_case
 
 
 def _has_writer_binding() -> bool:
@@ -131,16 +133,16 @@ def test_emit_import_diagnostics_no_dropped_gates_dropped_diagnostic_off() -> No
 def test_import_boundary_fcf_no_cut_files_is_noop(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC 4 — ``cortesh_path``/``cortes_path`` both ``None`` is an
+    """AC 4 — ``case.files.cortesh``/``case.files.cortes`` both ``None`` is an
     unconditional no-op: no ``boundary/`` directory, no binary invoked."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
+    case = make_decomp_case(tmp_path)
 
     with caplog.at_level(logging.INFO):
         result = import_boundary_fcf(
             case_dir,
-            None,
-            None,
+            case,
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
@@ -747,10 +749,16 @@ def mar26rv2_imported_case(
     case_dir = root / "converted"
     convert_decomp_case(_MAR26_DECK, case_dir, force=True)
 
+    # Pin the explicitly-named `cortes-004.dat` partition this fixture has
+    # always imported, overriding whatever cortes partition discovery
+    # resolves for this deck (`DecompFiles` is frozen, so `replace` rebuilds
+    # it rather than mutating in place).
+    case = DecompCase.from_directory(_MAR26_DECK)
+    case.files = replace(case.files, cortesh=_MAR26_CORTESH, cortes=_MAR26_CORTES)
+
     boundary_dir = import_boundary_fcf(
         case_dir,
-        _MAR26_CORTESH,
-        _MAR26_CORTES,
+        case,
         work_dir=root / "work",
         cost_scale_factor=1.0,
     )

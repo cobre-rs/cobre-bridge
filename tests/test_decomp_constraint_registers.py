@@ -24,7 +24,7 @@ from cobre_bridge.decomp.constraints import emit_re_generics, emit_rhq_rhv_gener
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.diagnostics import Severity
-from tests.conftest import _FakeDadger
+from tests.conftest import _FakeDadger, make_decomp_case
 
 
 def _stage(index: int, n_blocks: int) -> OperativeStage:
@@ -231,8 +231,9 @@ def test_re_thermal_only_no_double_emission() -> None:
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), thermal_codes=(5,))
     calendar = [_stage(0, 1), _stage(1, 1)]
 
+    case = make_decomp_case(Path("unused"), calendar=calendar)
     result = emit_re_generics(
-        census, id_map, {}, big_m=0.0, calendar=calendar, start_id=0
+        case, id_map, census=census, line_map={}, big_m=0.0, start_id=0
     )
 
     assert result is None
@@ -319,8 +320,15 @@ def test_hq_qbom_no_double_emission() -> None:
     effective = EffectiveCadastro(base=df, n_stages=1, stage_varying={})
     calendar = [_stage(0, 1)]
 
+    case = make_decomp_case(Path("unused"), calendar=calendar)
     result = emit_rhq_rhv_generics(
-        census, id_map, {}, effective, big_m=0.0, calendar=calendar, start_id=0
+        case,
+        id_map,
+        census=census,
+        pumping_station_ids={},
+        effective=effective,
+        big_m=0.0,
+        start_id=0,
     )
 
     assert result is None

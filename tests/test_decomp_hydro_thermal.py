@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.hydro import (
     _build_split_unit_groups,
     _evaporation_coefficients_mm,
@@ -21,6 +23,7 @@ from cobre_bridge.decomp.hydro import (
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import convert_thermal_bounds, convert_thermals
+from tests.conftest import make_decomp_case
 
 _EVAPORATION_COLUMNS = (
     "evaporacao_JAN",
@@ -112,6 +115,17 @@ _ID_MAP = DecompIdMap(
 def _calendar():
     hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
+
+
+def _case(dadger: object, hidr: pd.DataFrame | None = None) -> DecompCase:
+    """A ``DecompCase`` pre-filled with *dadger*/*hidr* and ``_calendar()`` —
+    the calendar's own stage-0 start date (2026-07-18) matches the raw
+    ``start_date``/``date(2026, 7, 18)`` every test here used to pass
+    directly."""
+    parsed = {"dadger": dadger, "calendar": _calendar()}
+    if hidr is not None:
+        parsed["hidr"] = hidr
+    return make_decomp_case(Path("unused"), **parsed)
 
 
 def _plant_row(
@@ -321,11 +335,9 @@ class TestConvertHydros:
         hidr = _hidr_frame()
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
             doc = convert_hydros(
-                _StubDadger(uh=_uh_frame()),
-                hidr,
+                _case(_StubDadger(uh=_uh_frame()), hidr),
                 _ID_MAP,
-                date(2026, 7, 18),
-                _no_override_effective(hidr),
+                effective=_no_override_effective(hidr),
             )
         hydros = doc["hydros"]
         assert [h["id"] for h in hydros] == [0, 1, 2]
@@ -359,11 +371,9 @@ class TestConvertHydros:
         hidr = _hidr_frame()
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
             doc = convert_hydros(
-                _StubDadger(uh=_uh_frame()),
-                hidr,
+                _case(_StubDadger(uh=_uh_frame()), hidr),
                 _ID_MAP,
-                date(2026, 7, 18),
-                _no_override_effective(hidr),
+                effective=_no_override_effective(hidr),
             )
         for h in doc["hydros"]:
             assert "bus_id" not in h
@@ -387,7 +397,9 @@ class TestConvertHydros:
     def test_initial_storage_formula(self) -> None:
         hidr = _hidr_frame()
         storage = convert_initial_storage(
-            _StubDadger(uh=_uh_frame()), hidr, _ID_MAP, _no_override_effective(hidr)
+            _case(_StubDadger(uh=_uh_frame())),
+            _ID_MAP,
+            effective=_no_override_effective(hidr),
         )
         by_id = {e["hydro_id"]: e["value_hm3"] for e in storage}
         assert by_id[0] == pytest.approx(100.0 + 0.5 * 400.0)
@@ -431,11 +443,9 @@ class TestItaipuBusRelabel:
             fd=_itaipu_frequency_frame(),
         )
         doc = convert_hydros(
-            dadger,
-            hidr,
+            _case(dadger, hidr),
             _ITAIPU_ID_MAP,
-            date(2026, 7, 18),
-            _no_override_effective(hidr),
+            effective=_no_override_effective(hidr),
         )
         itaipu = doc["hydros"][0]
         groups = {g["id"]: g for g in itaipu["unit_groups"]}
@@ -458,11 +468,9 @@ class TestItaipuBusRelabel:
             fd=_itaipu_frequency_frame(),
         )
         doc = convert_hydros(
-            dadger,
-            hidr,
+            _case(dadger, hidr),
             _ITAIPU_ID_MAP,
-            date(2026, 7, 18),
-            _no_override_effective(hidr),
+            effective=_no_override_effective(hidr),
         )
         itaipu = doc["hydros"][0]
         gen = itaipu["generation"]
@@ -509,11 +517,9 @@ def test_deferred_note_excludes_head_productivity(caplog) -> None:
     hidr = _hidr_frame()
     with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
         convert_hydros(
-            _StubDadger(uh=_uh_frame()),
-            hidr,
+            _case(_StubDadger(uh=_uh_frame()), hidr),
             _ID_MAP,
-            date(2026, 7, 18),
-            _no_override_effective(hidr),
+            effective=_no_override_effective(hidr),
         )
     assert not any("deferred hydro fidelity" in r.message for r in caplog.records)
 
@@ -540,7 +546,7 @@ class TestEffectiveCadastroSourcing:
         uh = _temporal_uh_frame(volume_inicial=50.0)
 
         doc = convert_hydros(
-            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, date(2026, 7, 18), effective
+            _case(_StubDadger(uh=uh), hidr), _TEMPORAL_ID_MAP, effective=effective
         )
         assert doc["hydros"][0]["reservoir"] == {
             "min_storage_hm3": 20.0,
@@ -548,7 +554,7 @@ class TestEffectiveCadastroSourcing:
         }
 
         storage = convert_initial_storage(
-            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, effective
+            _case(_StubDadger(uh=uh)), _TEMPORAL_ID_MAP, effective=effective
         )
         assert storage[0]["value_hm3"] == pytest.approx(20.0 + 0.5 * (100.0 - 20.0))
 
@@ -563,7 +569,7 @@ class TestEffectiveCadastroSourcing:
         uh = _temporal_uh_frame(volume_inicial=50.0)
 
         doc = convert_hydros(
-            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, date(2026, 7, 18), effective
+            _case(_StubDadger(uh=uh), hidr), _TEMPORAL_ID_MAP, effective=effective
         )
         reservoir = doc["hydros"][0]["reservoir"]
         assert reservoir["max_storage_hm3"] == 250.0
@@ -574,11 +580,10 @@ class TestEffectiveCadastroSourcing:
         useful volume — a later-stage ``VOLMAX`` raise must not leak into the
         start volume."""
         effective = _raised_envelope_effective()
-        hidr = _temporal_hidr_frame()
         uh = _temporal_uh_frame(volume_inicial=50.0)
 
         storage = convert_initial_storage(
-            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, effective
+            _case(_StubDadger(uh=uh)), _TEMPORAL_ID_MAP, effective=effective
         )
         assert storage[0]["value_hm3"] == pytest.approx(60.0)
 
@@ -614,10 +619,8 @@ def _ct_frame() -> pd.DataFrame:
 
 class TestConvertThermals:
     def test_registry_and_bounds(self) -> None:
-        calendar = _calendar()
-        doc = convert_thermals(
-            _StubDadger(ct=_ct_frame()), _ID_MAP, calendar, date(2026, 7, 18)
-        )
+        case = _case(_StubDadger(ct=_ct_frame()))
+        doc = convert_thermals(case, _ID_MAP)
         thermals = doc["thermals"]
         assert [t["id"] for t in thermals] == [0, 1]
         spread_expected = (400.0 * 15 + 300.0 * 64 + 200.0 * 89) / 168.0
@@ -625,7 +628,7 @@ class TestConvertThermals:
         assert thermals[1]["cost_per_mwh"] == pytest.approx(50.0)
         assert thermals[1]["generation"]["min_mw"] == pytest.approx(640.0)
 
-        bounds = convert_thermal_bounds(_StubDadger(ct=_ct_frame()), _ID_MAP, calendar)
+        bounds = convert_thermal_bounds(case, _ID_MAP)
         generation = bounds.generation
         cost = bounds.cost.to_pandas()
 
@@ -661,6 +664,4 @@ class TestConvertThermals:
         ct = _ct_frame()
         ct.loc[ct["codigo_usina"] == 20, "estagio"] = 2
         with pytest.raises(ValueError, match="stage 1"):
-            convert_thermals(
-                _StubDadger(ct=ct), _ID_MAP, _calendar(), date(2026, 7, 18)
-            )
+            convert_thermals(_case(_StubDadger(ct=ct)), _ID_MAP)

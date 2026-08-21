@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.case import DecompCase
+
 _SATURDAY = 5
 _WEEK_HOURS = 168.0
 _HOURS_PER_DAY = 24.0
@@ -386,7 +388,7 @@ def build_node_graph(
 
 
 def convert_stages(
-    calendar: Sequence[OperativeStage],
+    case: DecompCase,
     *,
     annual_discount_rate: float,
     fan_probabilities: Sequence[float],
@@ -400,7 +402,7 @@ def convert_stages(
     order-0 and pre-study inflows travel as dated windows. ``cvar`` (from
     :func:`resolve_cvar`) applies the deck's CVaR risk measure per stage.
     """
-    stages = stage_records(calendar, cvar)
+    stages = stage_records(case.calendar, cvar)
     nodes, transitions = build_node_graph(len(stages), fan_probabilities)
     return {
         "$schema": _STAGES_SCHEMA_URL,

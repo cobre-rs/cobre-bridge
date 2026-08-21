@@ -20,6 +20,7 @@ from cobre_bridge.decomp.temporal import (
     resolve_cvar,
     stage_records,
 )
+from tests.conftest import make_decomp_case
 
 # rv0-shaped block hours: five operative weeks then the aggregated month.
 _RV0_WEEK = [40.0, 48.0, 80.0]
@@ -130,8 +131,9 @@ class TestStageRecords:
             assert record["state_variables"]["storage"] is True
 
     def test_convert_stages_document(self) -> None:
+        case = make_decomp_case(Path("unused"), calendar=self._calendar())
         doc = convert_stages(
-            self._calendar(),
+            case,
             annual_discount_rate=0.12,
             fan_probabilities=[0.5, 0.5],
         )
@@ -331,7 +333,8 @@ class TestConvertConfigStoppingRules:
         return d
 
     def test_emits_gap_plus_iteration_rules(self) -> None:
-        cfg = convert_config(self._dadger())
+        case = make_decomp_case(Path("unused"), dadger=self._dadger())
+        cfg = convert_config(case)
         rules = cfg["training"]["stopping_rules"]
         assert [r["type"] for r in rules] == ["gap", "iteration_limit"]
         assert rules[0]["relative_tolerance"] == 0.001

@@ -29,10 +29,10 @@ from cobre_bridge.converters.network import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -91,9 +91,8 @@ def _bus_deficit_costs(dadger: Dadger) -> dict[int, float]:
 
 
 def convert_buses(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    start_date: date,
 ) -> dict:
     """Build the ``buses.json`` dict from ``SB`` + ``CD`` records.
 
@@ -103,8 +102,8 @@ def convert_buses(
     ``deficit_segments`` and defer to the global default — they carry no
     load, so the value is never priced.
     """
-    costs = _bus_deficit_costs(dadger)
-    op_date = start_date.isoformat()
+    costs = _bus_deficit_costs(case.dadger)
+    op_date = case.start_date.isoformat()
 
     buses: list[dict] = []
     for code in id_map.bus_codes:
@@ -220,10 +219,8 @@ _LINE_BOUNDS_SCHEMA = pa.schema(
 
 
 def convert_lines(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    start_date: date,
 ) -> tuple[dict, pa.Table]:
     """Convert the ``IA`` exchange network.
 
@@ -237,8 +234,9 @@ def convert_lines(
     limit as an absolute MW value, read directly with no factor round-trip.
     The unbounded sentinel (99999) passes through as a plain large capacity.
     """
-    dense = _ia_dense(dadger, calendar)
-    op_date = start_date.isoformat()
+    calendar = case.calendar
+    dense = _ia_dense(case.dadger, calendar)
+    op_date = case.start_date.isoformat()
 
     pairs = sorted(
         dense,
@@ -352,10 +350,10 @@ def _itaipu_50hz_capacity_mw(dadger: Dadger) -> float:
 
 
 def append_iv_se_line(
+    case: DecompCase,
+    *,
     lines_doc: dict,
     line_bounds: pa.Table,
-    calendar: Sequence[OperativeStage],
-    start_date: date,
     source_bus_id: int,
     target_bus_id: int,
     capacity_mw: float,
@@ -385,6 +383,7 @@ def append_iv_se_line(
     the source model declares no separate reverse limit for this
     converter-created link.
     """
+    calendar = case.calendar
     pair = frozenset({source_bus_id, target_bus_id})
     existing_line = next(
         (
@@ -403,7 +402,7 @@ def append_iv_se_line(
     new_line = {
         "id": line_id,
         "name": _IV_SE_LINE_NAME,
-        "operational_start_date": start_date.isoformat(),
+        "operational_start_date": case.start_date.isoformat(),
         "source_bus_id": source_bus_id,
         "target_bus_id": target_bus_id,
         "capacity": {"direct_mw": capacity_mw, "reverse_mw": capacity_mw},
@@ -443,9 +442,8 @@ def pumping_station_id_map(dadger: Dadger) -> dict[int, int]:
 
 
 def convert_pumping_stations(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    start_date: date,
 ) -> dict:
     """Convert the ``UE`` pumping stations (1:1).
 
@@ -454,12 +452,13 @@ def convert_pumping_stations(
     :func:`pumping_station_id_map`, the single authority for ``UE`` id
     assignment.
     """
+    dadger = case.dadger
     ue = dadger.ue(df=True)
     if ue is None or ue.empty:
         return {"$schema": _PUMPING_SCHEMA_URL, "pumping_stations": []}
 
     station_ids = pumping_station_id_map(dadger)
-    op_date = start_date.isoformat()
+    op_date = case.start_date.isoformat()
     stations: list[dict] = []
     for _, row in ue.sort_values("codigo_usina").iterrows():
         code = int(row["codigo_usina"])

@@ -77,12 +77,11 @@ from cobre_bridge.comparators.decomp_readers import (
 )
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.errors import FieldParseError
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
-        ConstraintCensus,
         ConstraintRecord,
         ConstraintTerm,
     )
@@ -871,31 +870,6 @@ def _line_entity_names(line_meta: list[dict], id_map: DecompIdMap) -> dict[int, 
     return names
 
 
-def _build_line_id_map(decomp_dir: Path) -> DecompIdMap | None:
-    """Best-effort id map for the corridor -> line alignment.
-
-    Mirrors :func:`_read_aligned_frames`'s own id-map construction (deck
-    discovery -> ``Dadger.read`` -> :meth:`DecompIdMap.from_dadger`), but
-    degrades to ``None`` on a missing/invalid deck instead of failing the
-    whole dataset build: the Network tab is one optional section among many,
-    and every fixture that exercises
-    ``build_decomp_dataset`` against a bare directory (every other level's
-    own tests) must keep working unchanged.
-    """
-    from idecomp.decomp import Dadger
-
-    from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
-
-    try:
-        files = discover_decomp_files(decomp_dir)
-        dadger = Dadger.read(str(files.dadger))
-        return DecompIdMap.from_dadger(dadger)
-    except (FileNotFoundError, ValueError, FieldParseError) as exc:
-        _LOG.info("No deck available for line alignment: %s", exc)
-        return None
-
-
 def _line_result_comparisons(
     decomp_dir: Path,
     cobre_output_dir: Path,
@@ -1570,9 +1544,9 @@ class _AlignedDecompFrames:
     """One run's DECOMP-side + Cobre-side frames, aligned to Cobre ids/stages.
 
     The shared read/align result :func:`build_decomp_dataset` builds on, via
-    :func:`_read_aligned_frames` — deck discovery, id-map construction,
-    per-level scenario averaging, and the matching Cobre means run exactly
-    once.
+    :func:`_read_aligned_frames` — per-level scenario averaging and the
+    matching Cobre means, off the shared :class:`~cobre_bridge.decomp.case.DecompCase`
+    parse, run exactly once.
     """
 
     source_hydro: pl.DataFrame
@@ -1595,32 +1569,27 @@ class _AlignedDecompFrames:
 
 
 def _read_aligned_frames(
-    decomp_dir: Path,
+    case: DecompCase,
     cobre_output_dir: Path,
     *,
     probabilities: pl.DataFrame | None = None,
 ) -> _AlignedDecompFrames:
     """Read and align both sides of one DECOMP-vs-Cobre comparison run.
 
-    ``decomp_dir`` is the deck directory (it must contain the ``dec_oper_*.csv``
-    result tables and the deck files needed to rebuild the id map, all directly
-    in that directory); ``cobre_output_dir`` is Cobre's output directory, whose
-    case directory supplies the entity registries. Entities the id map cannot
-    resolve are reported via ``unmapped`` rather than dropped in silence.
-    *probabilities* -- a :func:`_scenario_probabilities` lookup, built once
-    by :func:`build_decomp_dataset` -- is forwarded unchanged to every
-    per-level fold (:func:`_hydro_side`/:func:`_thermal_side`/
-    :func:`_bus_side`/:func:`_energy_balance_frames`); ``None`` keeps their
-    unweighted default.
+    *case* is the shared, once-parsed deck
+    (:class:`~cobre_bridge.decomp.case.DecompCase`, built once by
+    :func:`build_decomp_dataset`); its directory must also contain the
+    ``dec_oper_*.csv`` result tables read directly below.
+    ``cobre_output_dir`` is Cobre's output directory, whose case directory
+    supplies the entity registries. Entities the id map cannot resolve are
+    reported via ``unmapped`` rather than dropped in silence. *probabilities*
+    -- a :func:`_scenario_probabilities` lookup, built once by
+    :func:`build_decomp_dataset` -- is forwarded unchanged to every per-level
+    fold (:func:`_hydro_side`/:func:`_thermal_side`/:func:`_bus_side`/
+    :func:`_energy_balance_frames`); ``None`` keeps their unweighted default.
     """
-    from idecomp.decomp import Dadger
-
-    from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
-
-    files = discover_decomp_files(decomp_dir)
-    dadger = Dadger.read(str(files.dadger))
-    id_map = DecompIdMap.from_dadger(dadger)
+    decomp_dir = case.files.dadger.parent
+    id_map = case.id_map
 
     hydro_codes = {code: id_map.hydro_id(code) for code in id_map.hydro_codes}
     thermal_codes = {code: id_map.thermal_id(code) for code in id_map.thermal_codes}
@@ -2442,48 +2411,6 @@ def _evaporation_result_comparisons(
 # `emit_rhe_generics`) used to author each constraint's expression.
 
 
-@dataclass(frozen=True)
-class _DecompConstraintContext:
-    """Deck-derived inputs `_generic_constraint_lhs_decomp` needs beyond the
-    `dec_oper_*` tables: the special-constraint census (for RE/HQ/HV term
-    coefficients) and the id map (to translate a plant code to its cobre
-    hydro id for the HV storage floor)."""
-
-    census: ConstraintCensus
-    id_map: DecompIdMap
-
-
-def _decomp_constraint_context(decomp_dir: Path) -> _DecompConstraintContext | None:
-    """Best-effort census + id map for the DECOMP-side generic-constraint LHS.
-
-    Mirrors `_build_line_id_map`'s degrade-gracefully pattern (deck
-    discovery -> ``Dadger.read`` -> a from-dadger builder): a missing or
-    invalid deck yields ``None`` (logged, not raised) instead of failing the
-    whole dataset build -- the Constraints tab's DECOMP-side overlay is one
-    optional section among many.
-    """
-    from idecomp.decomp import Dadger
-
-    from cobre_bridge.decomp.constraint_registers import read_constraints
-    from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
-
-    try:
-        files = discover_decomp_files(decomp_dir)
-        dadger = Dadger.read(str(files.dadger))
-        return _DecompConstraintContext(
-            census=read_constraints(dadger),
-            id_map=DecompIdMap.from_dadger(dadger),
-        )
-    except (FileNotFoundError, ValueError, FieldParseError) as exc:
-        _LOG.info(
-            "No deck available for the DECOMP-side generic-constraint LHS "
-            "derivation: %s",
-            exc,
-        )
-        return None
-
-
 def _dec_oper_hydro_stage_frame(
     decomp_dir: Path, *, probabilities: pl.DataFrame | None = None
 ) -> pl.DataFrame:
@@ -2710,7 +2637,7 @@ _GC_LHS_SCHEMA = {
 
 
 def _generic_constraint_lhs_decomp(
-    decomp_dir: Path,
+    case: DecompCase,
     cobre_output_dir: Path,
     gc_constraints: list[dict],
     *,
@@ -2719,8 +2646,13 @@ def _generic_constraint_lhs_decomp(
     """Evaluate each generic constraint's LHS from the source model's own
     operation output.
 
-    *probabilities* is forwarded unchanged to every underlying
-    :func:`_scenario_mean` fold this derivation relies on
+    *case* is the shared, once-parsed deck :func:`build_decomp_dataset`
+    builds: its ``id_map`` resolves a plant code to its Cobre hydro id (the
+    HV storage floor), and ``dadger`` feeds the special-constraint census
+    (:func:`~cobre_bridge.decomp.constraint_registers.read_constraints`) --
+    neither is re-parsed here. The ``dec_oper_*`` tables are read directly
+    off *case*'s own directory. *probabilities* is forwarded unchanged to
+    every underlying :func:`_scenario_mean` fold this derivation relies on
     (:func:`_dec_oper_hydro_stage_frame`/:func:`_dec_oper_thermal_stage_frame`/
     :func:`_rhe_lhs_lookup`) -- see :func:`_hydro_side` for its
     scenario-weighting contract.
@@ -2754,21 +2686,21 @@ def _generic_constraint_lhs_decomp(
     if not gc_constraints:
         return pl.DataFrame(schema=_GC_LHS_SCHEMA)
 
-    context = _decomp_constraint_context(decomp_dir)
+    from cobre_bridge.decomp.constraint_registers import read_constraints
+
+    decomp_dir = case.files.dadger.parent
+    census = read_constraints(case.dadger)
     census_by_key: dict[tuple[str, int], ConstraintRecord] = {}
-    storage_lookup: dict[tuple[int, int], float] = {}
+    for records in census.by_family.values():
+        for record in records:
+            census_by_key[(record.family, record.constraint_id)] = record
+
     hydro_frame = _dec_oper_hydro_stage_frame(decomp_dir, probabilities=probabilities)
-    if context is not None:
-        for records in context.census.by_family.values():
-            for record in records:
-                census_by_key[(record.family, record.constraint_id)] = record
-        min_storage = {
-            i: float(m.get("min_storage_hm3") or 0.0)
-            for i, m in cobre_readers.read_cobre_hydro_metadata(
-                cobre_output_dir
-            ).items()
-        }
-        storage_lookup = _storage_lookup(hydro_frame, context.id_map, min_storage)
+    min_storage = {
+        i: float(m.get("min_storage_hm3") or 0.0)
+        for i, m in cobre_readers.read_cobre_hydro_metadata(cobre_output_dir).items()
+    }
+    storage_lookup = _storage_lookup(hydro_frame, case.id_map, min_storage)
 
     thermal_frame = _dec_oper_thermal_stage_frame(
         decomp_dir, probabilities=probabilities
@@ -2891,6 +2823,11 @@ def build_decomp_dataset(
 ) -> ComparisonDataset:
     """Build the canonical results dataset for a DECOMP-vs-Cobre comparison.
 
+    One :class:`~cobre_bridge.decomp.case.DecompCase` is built and shared
+    across the read/align (:func:`_read_aligned_frames`), Network/
+    Productivity/REE/evaporation, and Constraints sections below -- a single
+    deck parse for the whole dataset build.
+
     Reads and aligns both sides via :func:`_read_aligned_frames`, then emits
     the canonical :class:`~cobre_bridge.comparators.results.ResultComparison`
     shape and assembles it through the shared, source-agnostic
@@ -2974,14 +2911,17 @@ def build_decomp_dataset(
         dropped.
     """
     from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.decomp.case import DecompCase
 
+    # The single shared deck parse: every parse site below reads
+    # case.dadger/case.id_map rather than re-discovering and re-parsing the
+    # deck.
+    case = DecompCase.from_directory(decomp_dir)
     # Built once, threaded to every physical-variable _scenario_mean call
     # site below (never rebuilt per site -- relato2 parsing is not free).
     probabilities = _scenario_probabilities(decomp_dir)
 
-    aligned = _read_aligned_frames(
-        decomp_dir, cobre_output_dir, probabilities=probabilities
-    )
+    aligned = _read_aligned_frames(case, cobre_output_dir, probabilities=probabilities)
 
     results: list[ResultComparison] = []
     # Captured separately so the derived realized productivity
@@ -3014,7 +2954,9 @@ def build_decomp_dataset(
 
     # --- Network tab (line rows + line/line_bounds/line_meta) ---
     line_bounds, line_meta = _line_bounds_and_meta(cobre_output_dir)
-    line_id_map = _build_line_id_map(decomp_dir)
+    # The Network/Productivity/REE/evaporation sections below all reuse the
+    # shared case's id map rather than each re-parsing the deck.
+    line_id_map = case.id_map
     line_results, unresolved_lines = _line_result_comparisons(
         decomp_dir,
         cobre_output_dir,
@@ -3047,19 +2989,12 @@ def build_decomp_dataset(
         cobre_readers.read_cobre_hydro_bus_labels(cobre_output_dir),
     )
 
-    # --- Productivity tab's "Fitted production functions
-    # (FPHA)" section. Reuses ``line_id_map`` rather than rebuilding it a
-    # third time -- it already carries every hydro code -> Cobre id mapping
-    # this needs, and a fixture that leaves it ``None`` (no deck to read)
-    # keeps working, since `_fpha_metrics` treats ``id_map is None`` as
-    # "no FPHA section" rather than raising.
+    # --- Productivity tab's "Fitted production functions (FPHA)" section.
     fpha_metrics = _fpha_metrics(
         decomp_dir, cobre_output_dir, line_id_map, aligned.hydro_names
     )
 
-    # --- REE energy rollup via membership. Reuses ``line_id_map`` exactly
-    # like ``_fpha_metrics`` above -- the same hydro-code -> Cobre-id
-    # mapping, no third ``DecompIdMap`` rebuild.
+    # --- REE energy rollup via membership. ---
     ree_results, unmapped_ree = _ree_result_comparisons(
         decomp_dir,
         aligned.cobre_hydro,
@@ -3069,10 +3004,7 @@ def build_decomp_dataset(
     )
     results.extend(ree_results)
 
-    # --- evaporation comparison (hydro, "evaporation_m3s").
-    # Reuses ``line_id_map`` exactly like ``_fpha_metrics``/
-    # ``_ree_result_comparisons`` above -- the same hydro-code -> Cobre-id
-    # mapping, no fifth ``DecompIdMap`` rebuild. See
+    # --- evaporation comparison (hydro, "evaporation_m3s"). See
     # ``_evaporation_result_comparisons``'s docstring for the hm³ -> m³/s
     # reconciliation and the TRACKED COBRE-GAP WORKAROUND (C11) it surfaces.
     evaporation_results, unmapped_evaporation = _evaporation_result_comparisons(
@@ -3102,7 +3034,7 @@ def build_decomp_dataset(
     if gc_constraints:
         gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
         gc_lhs_nw = _generic_constraint_lhs_decomp(
-            decomp_dir, cobre_output_dir, gc_constraints, probabilities=probabilities
+            case, cobre_output_dir, gc_constraints, probabilities=probabilities
         )
     else:
         gc_lhs_cb = pl.DataFrame()

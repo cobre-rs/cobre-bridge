@@ -7,6 +7,8 @@ turbine efficiency, the VHA geometry table, and the tailrace-curves wrapper.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
@@ -20,6 +22,7 @@ from cobre_bridge.decomp.fpha import (
     turbine_efficiency,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
+from tests.conftest import make_decomp_case
 
 
 def _plant_row(
@@ -180,7 +183,8 @@ class _FakePolinjus:
 
 
 def test_convert_tailrace_curves_none_when_no_polinjus() -> None:
-    assert convert_tailrace_curves(None, _id_map((1,))) is None
+    case = make_decomp_case(Path("unused"), polinjus=None)
+    assert convert_tailrace_curves(case, _id_map((1,))) is None
 
 
 def test_convert_tailrace_curves_maps_families_to_hydro_ids() -> None:
@@ -205,7 +209,8 @@ def test_convert_tailrace_curves_maps_families_to_hydro_ids() -> None:
             "coeficiente_a4": [0.0],
         }
     )
-    table = convert_tailrace_curves(_FakePolinjus(families, segments), _id_map((1,)))
+    case = make_decomp_case(Path("unused"), polinjus=_FakePolinjus(families, segments))
+    table = convert_tailrace_curves(case, _id_map((1,)))
     assert table is not None
     df = table.to_pandas()
     assert df.iloc[0]["hydro_id"] == 0  # code 1 -> dense id 0

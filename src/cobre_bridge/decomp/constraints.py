@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
         ConstraintCensus,
         ConstraintRecord,
@@ -605,11 +606,12 @@ def _resolve_re_terms(
 
 
 def emit_re_generics(
-    census: ConstraintCensus,
+    case: DecompCase,
     id_map: DecompIdMap,
+    *,
+    census: ConstraintCensus,
     line_map: Mapping[tuple[int, int], int],
     big_m: float,
-    calendar: Sequence[OperativeStage],
     start_id: int,
 ) -> GenericConstraintResult | None:
     """Emit every generic ``RE`` constraint (multi-term hydro/thermal/interchange).
@@ -628,6 +630,7 @@ def emit_re_generics(
     Returns ``builder.result()`` — ``None`` when no RE generic constraint
     survives.
     """
+    calendar = case.calendar
     builder = _GenericBuilder(start_id)
     for record in census.to_generic:
         if record.family != "RE":
@@ -816,12 +819,13 @@ def _resolve_hv_varm(
 
 
 def emit_rhq_rhv_generics(
-    census: ConstraintCensus,
+    case: DecompCase,
     id_map: DecompIdMap,
+    *,
+    census: ConstraintCensus,
     pumping_station_ids: Mapping[int, int],
     effective: EffectiveCadastro,
     big_m: float,
-    calendar: Sequence[OperativeStage],
     start_id: int,
 ) -> GenericConstraintResult | None:
     """Emit every generic ``RHQ``/``RHV`` constraint (flow mixes and multi-``VARM``).
@@ -849,6 +853,7 @@ def emit_rhq_rhv_generics(
     *start_id* arrive from the caller (E7). Returns ``builder.result()`` —
     ``None`` when no RHQ/RHV generic constraint survives.
     """
+    calendar = case.calendar
     builder = _GenericBuilder(start_id)
     for record in census.to_generic:
         if record.family not in ("HQ", "HV"):
@@ -1123,11 +1128,12 @@ def _emit_rhe_unknown_tipo_limite(
 
 
 def emit_rhe_generics(
-    census: ConstraintCensus,
+    case: DecompCase,
     id_map: DecompIdMap,
+    *,
+    census: ConstraintCensus,
     effective: EffectiveCadastro,
     hydro_to_ree: Mapping[int, int],
-    calendar: Sequence[OperativeStage],
     start_id: int,
 ) -> RheResult:
     """Emit every generic ``HE`` (RHE stored-energy) constraint.
@@ -1165,6 +1171,7 @@ def emit_rhe_generics(
     ``computed`` default, mirroring the source model's emitter
     ``all_referenced_ids`` gate.
     """
+    calendar = case.calendar
     operated = set(id_map.hydro_codes)
     rho_acum_energy = _per_stage_rho_acum_energy(effective, operated, calendar)
 

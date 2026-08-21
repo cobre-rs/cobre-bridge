@@ -33,6 +33,9 @@ from _scan import REPO_ROOT, SRC_ROOT, iter_prose, iter_py_files, rel
 PATTERN = re.compile(
     r"\b[Ee]pics?\b|\b[Tt]ickets?\b|\b[Ss]prints?\b|\bT0[0-9][0-9]\b"
     r"|\bAC: |\bAC-[0-9]\b|\b[Dd]ecision [A-Z][0-9]+\b"
+    # Roadmap finding-ids (audit registry lives under the gitignored plans/):
+    # CONV-08, CMP-06, CLI-12, TST-04, GHA-2, ... a pip reader cannot resolve them.
+    r"|\b(?:CONV|CMP|CLI|TST|GHA)-[0-9]+\b"
 )
 
 HARD_DOCS = ["README.md", "CHANGELOG.md"]

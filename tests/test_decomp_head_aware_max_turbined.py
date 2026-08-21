@@ -24,15 +24,18 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 from idecomp.decomp.modelos.dadger import ACALTEFE
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.hydro import convert_hydro_group_availability, convert_hydros
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
+from tests.conftest import make_decomp_case
 
 #: ``h_op = ρ_eq / ρ_esp`` for every fixture below that uses the default
 #: head inputs (flat cota 100, tailrace 20, ρ_esp 0.01, no hydraulic loss):
@@ -123,6 +126,15 @@ def _calendar():
     return build_operative_calendar(date(2026, 7, 18), hours)
 
 
+def _case(dadger: object, hidr: pd.DataFrame) -> DecompCase:
+    """A ``DecompCase`` pre-filled with *dadger*/*hidr* and ``_calendar()`` —
+    the calendar's own stage-0 start date (2026-07-18) matches the raw
+    ``start_date`` every test here used to pass directly."""
+    return make_decomp_case(
+        Path("unused"), dadger=dadger, hidr=hidr, calendar=_calendar()
+    )
+
+
 class _FakeDadger:
     """A ``Dadger`` double covering only what ``convert_hydros``/
     ``convert_hydro_group_availability`` need here: ``uh`` (the operated
@@ -177,7 +189,7 @@ def test_affinity_lowers_runofriver_max_turbined() -> None:
     effective = EffectiveCadastro(base=hidr, n_stages=1, stage_varying={})
     dadger = _FakeDadger(uh=_uh_frame([1]))
 
-    doc = convert_hydros(dadger, hidr, id_map, date(2026, 7, 18), effective)
+    doc = convert_hydros(_case(dadger, hidr), id_map, effective=effective)
     gen = doc["hydros"][0]["generation"]
     expected = 100.0 * (_H_OP / 320.0) ** 0.5
     assert gen["max_turbined_m3s"] == pytest.approx(expected)
@@ -196,7 +208,7 @@ def test_power_cap_binds_below_affinity() -> None:
     effective = EffectiveCadastro(base=hidr, n_stages=1, stage_varying={})
     dadger = _FakeDadger(uh=_uh_frame([1]))
 
-    doc = convert_hydros(dadger, hidr, id_map, date(2026, 7, 18), effective)
+    doc = convert_hydros(_case(dadger, hidr), id_map, effective=effective)
     gen = doc["hydros"][0]["generation"]
     assert gen["max_turbined_m3s"] == pytest.approx(40.0 / 0.8)
     assert gen["max_generation_mw"] == pytest.approx(40.0)
@@ -223,10 +235,10 @@ def test_max_generation_rated_and_no_availability_derating() -> None:
     )
 
     doc_clean = convert_hydros(
-        dadger, hidr_clean, id_map, date(2026, 7, 18), effective_clean
+        _case(dadger, hidr_clean), id_map, effective=effective_clean
     )
     doc_derated = convert_hydros(
-        dadger, hidr_derated, id_map, date(2026, 7, 18), effective_derated
+        _case(dadger, hidr_derated), id_map, effective=effective_derated
     )
     gen_clean = doc_clean["hydros"][0]["generation"]
     gen_derated = doc_derated["hydros"][0]["generation"]
@@ -261,7 +273,9 @@ def test_per_stage_overlay_is_head_corrected() -> None:
     )
     dadger = _FakeDadger(uh=_uh_frame([1]))
 
-    values = convert_hydro_group_availability(dadger, hidr, id_map, calendar, effective)
+    values = convert_hydro_group_availability(
+        _case(dadger, hidr), id_map, effective=effective
+    )
     hydro_id = id_map.hydro_id(1)
 
     expected_stage2 = 100.0 * (40.0 / 160.0) ** 0.5
@@ -328,7 +342,7 @@ def test_reservoir_and_le_rated_invariant(
     effective = EffectiveCadastro(base=hidr, n_stages=1, stage_varying={})
     dadger = _FakeDadger(uh=_uh_frame([1]))
 
-    doc = convert_hydros(dadger, hidr, id_map, date(2026, 7, 18), effective)
+    doc = convert_hydros(_case(dadger, hidr), id_map, effective=effective)
     max_turbined = doc["hydros"][0]["generation"]["max_turbined_m3s"]
     assert max_turbined == pytest.approx(expected)
     assert max_turbined <= rated + 1e-9
@@ -350,7 +364,7 @@ def test_acaltefe_present_warns_and_proceeds(
     dadger = _FakeDadger(uh=_uh_frame([1]), altefe=altefe_rows)
 
     with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
-        doc = convert_hydros(dadger, hidr, id_map, date(2026, 7, 18), effective)
+        doc = convert_hydros(_case(dadger, hidr), id_map, effective=effective)
 
     assert any("ALTEFE" in r.message for r in caplog.records)
     gen = doc["hydros"][0]["generation"]
@@ -388,7 +402,7 @@ def test_itaipu_split_groups_use_conjunto_head_corrected_envelope() -> None:
     fd = mp.copy()
     dadger = _FakeDadger(uh=_uh_frame([66]), mp=mp, fd=fd)
 
-    doc = convert_hydros(dadger, hidr, id_map, date(2026, 7, 18), effective)
+    doc = convert_hydros(_case(dadger, hidr), id_map, effective=effective)
     itaipu = doc["hydros"][0]
     groups = {g["id"]: g for g in itaipu["unit_groups"]}
 

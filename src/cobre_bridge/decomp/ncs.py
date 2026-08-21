@@ -32,11 +32,11 @@ from cobre_bridge.converters.network import _NCS_FACTORS_SCHEMA_URL, _NCS_SCHEMA
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
 
     from idecomp.decomp import Dadger
     from idecomp.libs import Renovaveis
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -137,14 +137,12 @@ def _stage_mean_mw(blocks: Sequence[float], stage: OperativeStage) -> float:
 
 
 def convert_non_controllable_sources(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    start_date: date,
-    renovaveis: Renovaveis | None = None,
 ) -> dict:
     """Build ``non_controllable_sources.json`` (``PQ`` + renewable parks)."""
-    op_date = start_date.isoformat()
+    calendar = case.calendar
+    op_date = case.start_date.isoformat()
     entries = [
         {
             "id": s.ncs_id,
@@ -157,22 +155,21 @@ def convert_non_controllable_sources(
             # validated in docs/findings/ncs-must-run-treatment.md.
             "allow_curtailment": False,
         }
-        for s in _all_series(dadger, id_map, calendar, renovaveis)
+        for s in _all_series(case.dadger, id_map, calendar, case.renovaveis)
     ]
     return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": entries}
 
 
 def convert_ncs_stats(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    renovaveis: Renovaveis | None = None,
 ) -> pa.Table:
     """Build ``non_controllable_stats`` rows: availability fraction, std 0."""
+    calendar = case.calendar
     ncs_ids: list[int] = []
     stage_ids: list[int] = []
     means: list[float] = []
-    for s in _all_series(dadger, id_map, calendar, renovaveis):
+    for s in _all_series(case.dadger, id_map, calendar, case.renovaveis):
         max_gen = s.max_generation_mw
         for stage in calendar:
             mean_mw = _stage_mean_mw(s.per_stage_blocks[stage.index], stage)
@@ -195,10 +192,8 @@ def convert_ncs_stats(
 
 
 def convert_ncs_factors(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    renovaveis: Renovaveis | None = None,
 ) -> dict:
     """Build ``non_controllable_factors.json`` block shapes per (ncs, stage).
 
@@ -208,9 +203,10 @@ def convert_ncs_factors(
     positive factor — the schema requires factors > 0, and under must-run
     pinning the resulting availability is numerically zero anyway.
     """
+    calendar = case.calendar
     entries: list[dict] = []
     clamped = 0
-    for s in _all_series(dadger, id_map, calendar, renovaveis):
+    for s in _all_series(case.dadger, id_map, calendar, case.renovaveis):
         for stage in calendar:
             blocks = s.per_stage_blocks[stage.index]
             mean_mw = _stage_mean_mw(blocks, stage)
@@ -293,10 +289,8 @@ def _sorted_pee_codes(
 
 
 def build_pee_ncs_id_map(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    renovaveis: Renovaveis | None,
 ) -> dict[int, int]:
     """Public ``codigo_pee -> ncs_id`` map for the emitter, sharing
     :func:`_pee_series`'s ordering via :func:`_sorted_pee_codes`.
@@ -310,9 +304,11 @@ def build_pee_ncs_id_map(
     renewable parks (mirrors :func:`_all_series`'s "no renovaveis -> PQ
     only" convention).
     """
+    renovaveis = case.renovaveis
     if renovaveis is None:
         return {}
-    first_ncs_id = len(_pq_series(dadger, id_map, calendar))
+    calendar = case.calendar
+    first_ncs_id = len(_pq_series(case.dadger, id_map, calendar))
     sorted_codes = _sorted_pee_codes(renovaveis, calendar)
     return {code: first_ncs_id + offset for offset, code in enumerate(sorted_codes)}
 
