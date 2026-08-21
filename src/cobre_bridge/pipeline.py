@@ -27,7 +27,7 @@ from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import tailrace as tailrace_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
-from cobre_bridge.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
+from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
 from cobre_bridge.id_map import build_id_map
 
 logger = logging.getLogger(__name__)
@@ -92,24 +92,6 @@ class _WarningCollector(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if record.levelno >= logging.WARNING:
             self.messages.append(record.getMessage())
-
-
-class _ConstraintIdAllocator:
-    """Hands out contiguous, non-overlapping generic-constraint ID ranges.
-
-    VminOP, electric, and AGRINT constraints share one 0-based ID space. Each
-    converter is given the next free start ID; after it returns, ``advance(n)``
-    reserves the ``n`` IDs it produced so the next converter starts past them.
-    This replaces the by-hand offset arithmetic
-    (``start_id = vminop_count + electric_count``) that silently corrupts IDs if
-    a term is missed.
-    """
-
-    def __init__(self) -> None:
-        self.next_id = 0
-
-    def advance(self, count: int) -> None:
-        self.next_id += count
 
 
 def _compute_prod_media_sin_safe(case: NewaveCase) -> float | None:
@@ -443,30 +425,27 @@ def _convert_newave_case_impl(
         case, id_map
     )
 
-    constraint_ids = _ConstraintIdAllocator()
+    allocator = ConstraintIdAllocator()
 
     step("Converting constraints")
     logger.debug("Converting VminOP constraints")
-    vminop_result = constraints_conv.convert_vminop_constraints(case, id_map)
+    vminop_result = constraints_conv.convert_vminop_constraints(
+        case, id_map, allocator=allocator
+    )
     vminop_referenced_ids: list[int] = []
     rho_acum_overrides: dict[int, list[float]] = {}
     if vminop_result is not None:
         vminop_referenced_ids = list(vminop_result.referenced_hydro_ids)
         rho_acum_overrides = vminop_result.rho_acum_overrides
-        constraint_ids.advance(
-            len(vminop_result.constraints_dict.get("constraints", []))
-        )
 
     logger.debug("Converting electric constraints")
     electric_result = constraints_conv.convert_electric_constraints(
-        case, id_map, start_id=constraint_ids.next_id
+        case, id_map, allocator=allocator
     )
-    if electric_result is not None:
-        constraint_ids.advance(len(electric_result.constraints))
 
     logger.debug("Converting AGRINT group constraints")
     agrint_result = constraints_conv.convert_agrint_constraints(
-        case, id_map, start_id=constraint_ids.next_id
+        case, id_map, allocator=allocator
     )
 
     logger.debug("Converting load factors")
@@ -634,14 +613,7 @@ def _convert_newave_case_impl(
 
     if vminop_result is not None:
         all_constraints.extend(vminop_result.constraints_dict.get("constraints", []))
-        # VminOP bounds table has no block_id column; add a null column and
-        # reorder to match the canonical F3 schema.
-        vminop_bounds = vminop_result.bounds
-        vminop_bounds_extended = vminop_bounds.append_column(
-            pa.field("block_id", pa.int32()),
-            pa.array([None] * len(vminop_bounds), type=pa.int32()),
-        ).select(GENERIC_BOUNDS_COLUMNS)
-        bounds_tables.append(vminop_bounds_extended)
+        bounds_tables.append(vminop_result.bounds)
 
     if electric_result is not None:
         all_constraints.extend(electric_result.constraints)

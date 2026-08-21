@@ -24,8 +24,8 @@ over every active ``(stage, block)`` cell, renders the cell-invariant
 expression once via :func:`build_electrical_expression`, and synthesizes a
 per-restriction :class:`~cobre_bridge.decomp.constraint_registers.
 ConstraintRecord` that feeds the **existing** E1–E7
-:class:`~cobre_bridge.decomp.constraints._GenericBuilder` — never a new
-emitter. The pipeline wiring that builds *id_map*/*ncs_id_by_pee_code*/
+:class:`~cobre_bridge.generic_constraint_builder.GenericConstraintBuilder` —
+never a new emitter. The pipeline wiring that builds *id_map*/*ncs_id_by_pee_code*/
 *conjh_bus_by_code_group*/*line_map* from a real deck lives in the pipeline
 caller — this module only ever consumes those maps, never
 builds them (except :mod:`cobre_bridge.decomp.ncs`'s own
@@ -41,8 +41,8 @@ from typing import TYPE_CHECKING
 from cobre_bridge.decomp.constraint_registers import ConstraintRecord, StageBounds
 from cobre_bridge.decomp.constraints import (
     _format_expression,
-    _GenericBuilder,
     _hydro_generation_token,
+    slots_from_record,
 )
 from cobre_bridge.decomp.libs_electrical import (
     UnrecognizedElectricalToken,
@@ -50,6 +50,10 @@ from cobre_bridge.decomp.libs_electrical import (
     assemble_bound,
 )
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.generic_constraint_builder import (
+    ConstraintIdAllocator,
+    GenericConstraintBuilder,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -119,7 +123,7 @@ def _emit_ener_comerc_deferred(term: ParsedTerm) -> None:
 def _emit_unrecognized_token(code: int, err: UnrecognizedElectricalToken) -> None:
     """Emit the shared ``decomp-electrical-unrecognized-token`` WARNING for
     one restriction whose (expanded) formula references a well-formed but
-    undeclared identifier (TICKET-015's skip-not-partial containment)."""
+    undeclared identifier (skip-not-partial containment)."""
     emit(
         Diagnostic(
             code="decomp-electrical-unrecognized-token",
@@ -293,7 +297,7 @@ def build_electrical_expression(
 
 
 # ---------------------------------------------------------------------------
-# TICKET-012 — emit resolved restrictions through the E1–E7 _GenericBuilder
+# Emit resolved restrictions through the E1–E7 GenericConstraintBuilder
 # ---------------------------------------------------------------------------
 
 
@@ -334,7 +338,7 @@ def _synthesize_stage_bounds(
     its own block index and ``None`` at every inactive block of that stage.
 
     Each stage's tuples are exactly ``len(calendar[stage].block_hours)``
-    long — never shorter — since ``_GenericBuilder.add_two_sided`` clamps a
+    long — never shorter — since ``constraints.slots_from_record`` clamps a
     short tuple to the stage's real block count, which would silently drop
     a trailing active block instead of emitting its bound row (spec
     pitfall). A stage with no active cell at all is never a key here —
@@ -387,11 +391,11 @@ def emit_libs_electrical_generics(
     conjh_bus_by_code_group: Mapping[tuple[int, int], int],
     line_map: Mapping[tuple[int, int], int],
     big_m: float,
-    start_id: int,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> LibsElectricalResult:
     """Emit every resolved electrical restriction as one cobre generic
-    constraint, feeding the **existing** E1–E7 ``_GenericBuilder`` — never a
-    new emitter (spec §5).
+    constraint, feeding the **existing** E1–E7 ``GenericConstraintBuilder`` —
+    never a new emitter (spec §5).
 
     Iterates ``sorted(model.restrictions)`` (deterministic order). For each
     restriction:
@@ -425,7 +429,7 @@ def emit_libs_electrical_generics(
     - The surviving expression and per-active-cell bound values feed a
       synthesized :class:`~cobre_bridge.decomp.constraint_registers.
       ConstraintRecord` (``family="LIBS_ELEC"``, ``per_block=True``,
-      ``terms=()`` — ``add_two_sided`` reads only ``record.bounds``/
+      ``terms=()`` — ``slots_from_record`` reads only ``record.bounds``/
       ``record.per_block``), named ``LIBS_ELEC_{code}``.
 
     The slack penalty is *big_m* unless the restriction's own
@@ -436,10 +440,13 @@ def emit_libs_electrical_generics(
     violation, never a hard LP infeasibility (A3).
 
     Reads no deck: every input — *id_map*, *context_factory*, *a_h*,
-    *calendar*, the three id maps, *big_m*, *start_id* — arrives from the
-    caller.
+    *calendar*, the three id maps, *big_m* — arrives from the caller.
+    *allocator* defaults to a fresh :class:`ConstraintIdAllocator` (ids from
+    0) when omitted; the pipeline threads one shared instance across every
+    emitter.
     """
-    builder = _GenericBuilder(start_id)
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
     converted: list[int] = []
     deferred: dict[str, list[int]] = {
         "inactive": [],
@@ -511,13 +518,15 @@ def emit_libs_electrical_generics(
             bounds=bounds,
             per_block=True,
         )
-        builder.add_two_sided(
+        builder.add(
             name=f"LIBS_ELEC_{code}",
             description=f"LIBs electrical special constraint {code}",
             expression=expression,
-            big_m=_resolve_violation_penalty(restriction, big_m),
-            record=record,
-            calendar=calendar,
+            slack={
+                "enabled": True,
+                "penalty": _resolve_violation_penalty(restriction, big_m),
+            },
+            slots=slots_from_record(record, calendar),
         )
         converted.append(code)
 

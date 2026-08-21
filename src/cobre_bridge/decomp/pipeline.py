@@ -56,6 +56,7 @@ from cobre_bridge.decomp.scalar_parameters import (
     write_scalar_parameters,
 )
 from cobre_bridge.errors import SourceFileError
+from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
 from cobre_bridge.pipeline import (
     ClearedArtifacts,
     ConversionReport,
@@ -1283,7 +1284,7 @@ def _convert_decomp_case_impl(
 
     generic_constraints: list[dict] = []
     generic_bound_tables: list[pa.Table] = []
-    next_generic_id = 0
+    allocator = ConstraintIdAllocator()
 
     re_generics = constraints_conv.emit_re_generics(
         case,
@@ -1291,12 +1292,11 @@ def _convert_decomp_case_impl(
         census=census,
         line_map=line_map,
         big_m=big_m,
-        start_id=next_generic_id,
+        allocator=allocator,
     )
     if re_generics is not None:
         generic_constraints.extend(re_generics.constraints)
         generic_bound_tables.append(re_generics.bounds)
-        next_generic_id += len(re_generics.constraints)
 
     rhq_rhv_generics = constraints_conv.emit_rhq_rhv_generics(
         case,
@@ -1305,12 +1305,11 @@ def _convert_decomp_case_impl(
         pumping_station_ids=pumping_ids,
         effective=effective,
         big_m=big_m,
-        start_id=next_generic_id,
+        allocator=allocator,
     )
     if rhq_rhv_generics is not None:
         generic_constraints.extend(rhq_rhv_generics.constraints)
         generic_bound_tables.append(rhq_rhv_generics.bounds)
-        next_generic_id += len(rhq_rhv_generics.constraints)
 
     rhe_generics = constraints_conv.emit_rhe_generics(
         case,
@@ -1318,12 +1317,11 @@ def _convert_decomp_case_impl(
         census=census,
         effective=effective,
         hydro_to_ree=hydro_to_ree,
-        start_id=next_generic_id,
+        allocator=allocator,
     )
     if rhe_generics.result is not None:
         generic_constraints.extend(rhe_generics.result.constraints)
         generic_bound_tables.append(rhe_generics.result.bounds)
-        next_generic_id += len(rhe_generics.result.constraints)
 
     # The 4th generic-constraint emitter link -- every
     # LIBs-era long-form electrical restriction that resolved
@@ -1356,12 +1354,11 @@ def _convert_decomp_case_impl(
             conjh_bus_by_code_group,
             line_map,
             big_m,
-            next_generic_id,
+            allocator,
         )
         if libs_electrical_result.generic is not None:
             generic_constraints.extend(libs_electrical_result.generic.constraints)
             generic_bound_tables.append(libs_electrical_result.generic.bounds)
-            next_generic_id += len(libs_electrical_result.generic.constraints)
 
     if generic_constraints:
         writer.write_json(

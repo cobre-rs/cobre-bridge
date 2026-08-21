@@ -155,7 +155,6 @@ def test_emit_rhe_generics_absolute_round_trip() -> None:
         census=census,
         effective=effective,
         hydro_to_ree={5: 1},
-        start_id=0,
     )
 
     assert result.result is not None
@@ -205,7 +204,6 @@ def test_emit_rhe_generics_percentage_rhs() -> None:
         census=census,
         effective=effective,
         hydro_to_ree={5: 1},
-        start_id=0,
     )
 
     assert result.result is not None
@@ -263,7 +261,6 @@ def test_emit_rhe_generics_two_reservoir_cascade_override() -> None:
         census=census,
         effective=effective,
         hydro_to_ree={5: 1, 6: 1},
-        start_id=0,
     )
 
     assert result.result is not None
@@ -312,7 +309,6 @@ def test_emit_rhe_generics_run_of_river_excluded() -> None:
         census=census,
         effective=effective,
         hydro_to_ree={5: 1, 7: 1},
-        start_id=0,
     )
 
     assert result.result is not None
@@ -352,7 +348,6 @@ def test_emit_rhe_generics_no_storage_plants_skips_and_warns() -> None:
             census=census,
             effective=effective,
             hydro_to_ree={7: 1},
-            start_id=0,
         )
 
     assert result.result is None
@@ -385,7 +380,6 @@ def test_emit_rhe_generics_unmapped_ree_skips_and_warns() -> None:
             census=census,
             effective=effective,
             hydro_to_ree={},
-            start_id=0,
         )
 
     assert result.result is None
@@ -423,7 +417,6 @@ def test_emit_rhe_generics_energy_factor_scales_with_stage_hours() -> None:
         census=_census(record),
         effective=effective,
         hydro_to_ree={5: 1},
-        start_id=0,
     )
     monthly_result = emit_rhe_generics(
         _case([_stage(0, 730.0)]),
@@ -431,7 +424,6 @@ def test_emit_rhe_generics_energy_factor_scales_with_stage_hours() -> None:
         census=census,
         effective=effective,
         hydro_to_ree={5: 1},
-        start_id=0,
     )
 
     override_weekly = weekly_result.rho_acum_overrides[0][0]
@@ -479,7 +471,6 @@ def test_emit_rhe_generics_negative_cm_sign_subtracts() -> None:
         census=census,
         effective=effective,
         hydro_to_ree={5: 1, 6: 2},
-        start_id=0,
     )
 
     assert result.result is not None
@@ -520,7 +511,6 @@ def test_emit_rhe_generics_non_positive_penalty_falls_back_and_warns() -> None:
             census=census,
             effective=effective,
             hydro_to_ree={5: 1},
-            start_id=0,
         )
 
     assert result.result is not None
@@ -555,7 +545,6 @@ def test_emit_rhe_generics_unknown_tipo_limite_treated_as_absolute_and_warns() -
             census=census,
             effective=effective,
             hydro_to_ree={5: 1},
-            start_id=0,
         )
 
     assert result.result is not None
@@ -578,7 +567,6 @@ def test_rhe_result_is_named_tuple_with_expected_fields() -> None:
             census=_census(),
             effective=effective,
             hydro_to_ree={},
-            start_id=0,
         )
 
     assert result.result is None

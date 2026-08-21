@@ -36,6 +36,8 @@ PATTERN = re.compile(
     # Roadmap finding-ids (audit registry lives under the gitignored plans/):
     # CONV-08, CMP-06, CLI-12, TST-04, GHA-2, ... a pip reader cannot resolve them.
     r"|\b(?:CONV|CMP|CLI|TST|GHA)-[0-9]+\b"
+    # All-caps hyphenated plan-token form (TICKET-012, EPIC-08, SPRINT-3, ...).
+    r"|\b(?:TICKET|EPIC|SPRINT)-[0-9]+\b"
 )
 
 HARD_DOCS = ["README.md", "CHANGELOG.md"]

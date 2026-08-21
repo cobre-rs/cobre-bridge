@@ -685,7 +685,7 @@ class UnrecognizedElectricalToken(ValueError):
     :data:`_BUILTIN_BARE_TOKENS`.
 
     Raised only from :meth:`_ExpressionParser._parse_bare_name`'s
-    undeclared-identifier branch (TICKET-015) — never from a malformed-DSL
+    undeclared-identifier branch — never from a malformed-DSL
     raise (unbalanced parentheses, a non-numeric coefficient/argument,
     unexpected trailing content), which stays a plain :class:`ValueError`
     and remains fail-loud. A :class:`ValueError` subclass so an existing
@@ -965,7 +965,7 @@ def parse_linear_expression(
     UnrecognizedElectricalToken
         On a bare identifier that is well-formed but undeclared — neither a
         named expression, a data alias, nor a built-in bare token (a
-        :class:`ValueError` subclass; TICKET-015's per-restriction
+        :class:`ValueError` subclass; the per-restriction
         skip-not-partial signal — see its own docstring).
     ValueError
         On a cyclic named-expression/``re(R)`` reference, or a malformed
@@ -1344,7 +1344,7 @@ def is_always_active(rule: ActivationRule) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# TICKET-008 — bucket-B substitution + per-(stage,block) bound assembly
+# bucket-B substitution + per-(stage,block) bound assembly
 # ---------------------------------------------------------------------------
 
 
@@ -1722,7 +1722,7 @@ def assemble_bound(
     available power) terms into its per-(stage,block) numeric bound, leaving
     only its bucket-A (decision) terms structural — and sign-canonical for
     cobre — in the returned :class:`AssembledBound` (spec §4c; the bucket-C
-    fold is TICKET-010's reserve->gen-cap rewrite — see this module's header).
+    fold is the reserve->gen-cap rewrite — see this module's header).
 
     Classifies *restriction.lhs* (and, for a FORMULA restriction, only
     *.lhs* — it has no ``.rhs``) exactly once via :func:`classify_terms`,
@@ -1787,7 +1787,7 @@ def assemble_bound(
                 raise ValueError(
                     f"restriction {restriction.code}: a FORMULA restriction "
                     "carries a disp_usih term; the reserve->gen-cap rewrite "
-                    "(TICKET-010) only covers the documented INEQUACAO "
+                    "only covers the documented INEQUACAO "
                     "reserve pattern"
                 )
             return _fold_formula_bound(
@@ -1854,7 +1854,7 @@ def assemble_bound(
 
 
 # ---------------------------------------------------------------------------
-# TICKET-009 — per-(stage,block) activation-gate evaluation
+# per-(stage,block) activation-gate evaluation
 # ---------------------------------------------------------------------------
 
 
@@ -1984,7 +1984,7 @@ def active_cells(
 
 
 # ---------------------------------------------------------------------------
-# TICKET-010 — bucket-C ``disp_usih`` reserve -> gen-cap reformulation
+# bucket-C ``disp_usih`` reserve -> gen-cap reformulation
 # ---------------------------------------------------------------------------
 
 

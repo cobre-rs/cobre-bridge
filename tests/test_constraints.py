@@ -9,6 +9,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.constraints import (
     _curve_seasonalizes,
     _is_stored_energy_reservoir,
@@ -23,6 +24,10 @@ from cobre_bridge.converters.constraints import (
 )
 from cobre_bridge.converters.network import C_M3S2HM3
 from cobre_bridge.converters.scalar_parameters import build_scalar_parameters
+from cobre_bridge.generic_constraint_builder import (
+    GENERIC_BOUNDS_SCHEMA,
+    ConstraintIdAllocator,
+)
 from cobre_bridge.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
@@ -555,6 +560,42 @@ class TestParseFormula:
 # ---------------------------------------------------------------------------
 
 
+def _make_electric_re_case(tmp_path: Path) -> tuple[NewaveCase, NewaveIdMap]:
+    """Return a ``(case, id_map)`` pair for a single-code electric constraint:
+    ``indices.csv`` -> ``restricao-eletrica.csv`` declaring a two-sided
+    ``[50, 200]`` limit on ``ger_usih(10)`` over 2020, with ``dger``/``sistema``
+    mocked to a 1-year 2020 study carrying no exchange/deficit data.
+    """
+    from unittest.mock import MagicMock
+
+    indices = tmp_path / "indices.csv"
+    indices.write_text(
+        "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+        encoding="latin-1",
+    )
+    re_path = tmp_path / "restricao-eletrica.csv"
+    re_path.write_text(
+        "RE;1;1.0ger_usih(10)\n"
+        "RE-HORIZ-PER;1;2020/01;2020/12\n"
+        "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+        encoding="latin-1",
+    )
+
+    dger = MagicMock()
+    dger.mes_inicio_estudo = 1
+    dger.ano_inicio_estudo = 2020
+    dger.num_anos_estudo = 1
+    dger.num_anos_pos_estudo = 0
+
+    sistema = MagicMock()
+    sistema.limites_intercambio = None
+    sistema.custo_deficit = None
+
+    case = make_case(tmp_path, dger=dger, sistema=sistema, re_dat=None)
+    id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+    return case, id_map
+
+
 class TestConvertElectricConstraints:
     def test_returns_none_when_no_indices_csv(self, tmp_path: Path) -> None:
         """Return None gracefully when indices.csv is absent."""
@@ -582,33 +623,7 @@ class TestConvertElectricConstraints:
         unlike the DECOMP ``_GenericBuilder``, which does collapse a genuine
         band into one id). Each keeps today's row semantics: one endpoint
         populated, the other null (AC1/AC2)."""
-        from unittest.mock import MagicMock
-
-        indices = tmp_path / "indices.csv"
-        indices.write_text(
-            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
-            encoding="latin-1",
-        )
-        re_path = tmp_path / "restricao-eletrica.csv"
-        re_path.write_text(
-            "RE;1;1.0ger_usih(10)\n"
-            "RE-HORIZ-PER;1;2020/01;2020/12\n"
-            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
-            encoding="latin-1",
-        )
-
-        dger = MagicMock()
-        dger.mes_inicio_estudo = 1
-        dger.ano_inicio_estudo = 2020
-        dger.num_anos_estudo = 1
-        dger.num_anos_pos_estudo = 0
-
-        sistema = MagicMock()
-        sistema.limites_intercambio = None
-        sistema.custo_deficit = None
-
-        case = make_case(tmp_path, dger=dger, sistema=sistema, re_dat=None)
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+        case, id_map = _make_electric_re_case(tmp_path)
 
         result = convert_electric_constraints(case, id_map)
 
@@ -642,6 +657,23 @@ class TestConvertElectricConstraints:
         upper_ids = {r["constraint_id"] for r in upper_rows}
         assert lower_ids != upper_ids
         assert lower_ids | upper_ids == set(by_cid)
+
+    def test_bounds_schema_matches_canonical_generic_bounds_schema(
+        self, tmp_path: Path
+    ) -> None:
+        """NEWAVE's emitted bounds table now shares the canonical
+        ``GENERIC_BOUNDS_SCHEMA`` (``constraint_id``/``stage_id`` non-nullable)
+        instead of the legacy bare-``pa.table`` schema (all-nullable) — both
+        tracks route through the same ``GenericConstraintBuilder``, so NEWAVE
+        now matches DECOMP's schema strictness. This is a deliberate,
+        data-safe tightening (neither column is ever actually null on either
+        track), pinned here so it stays intentional rather than drifting."""
+        case, id_map = _make_electric_re_case(tmp_path)
+
+        result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        assert result.bounds.schema.equals(GENERIC_BOUNDS_SCHEMA)
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +754,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value=fake_line_map,
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         constraints, bounds_table = result
@@ -743,15 +775,15 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         for c in result[0]:
             assert set(c) == {"id", "name", "description", "expression", "slack"}
             assert c["slack"]["enabled"] is False
 
-    def test_start_id_offset_applied(self, tmp_path: Path) -> None:
-        """start_id is added to all constraint IDs."""
+    def test_allocator_offset_applied(self, tmp_path: Path) -> None:
+        """A non-default allocator's starting id is added to all constraint IDs."""
         agrint_path = tmp_path / "agrint.dat"
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
@@ -765,8 +797,10 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result_0 = convert_agrint_constraints(case, id_map, start_id=0)
-            result_5 = convert_agrint_constraints(case, id_map, start_id=5)
+            result_0 = convert_agrint_constraints(case, id_map)
+            result_5 = convert_agrint_constraints(
+                case, id_map, allocator=ConstraintIdAllocator(5)
+            )
 
         assert result_0 is not None and result_5 is not None
         ids_0 = [c["id"] for c in result_0[0]]
@@ -788,7 +822,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         _, bounds_table = result
@@ -832,7 +866,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         _, bounds = result
@@ -888,7 +922,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 11): 3, (3, 11): 4},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         constraints, _ = result
@@ -924,7 +958,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         # Group 1: flow(1->3), canonical (1,3) => line_direct, no leading '-'.
@@ -940,12 +974,52 @@ class TestConvertAgrintConstraints:
         assert not c2["expression"].startswith("-")
 
 
+class TestNewaveCrossEmitterAllocatorContiguity:
+    """Threading one ``ConstraintIdAllocator`` across emitter calls (as the
+    pipeline does) keeps ids contiguous, closing the old per-emitter
+    ``start_id`` arithmetic's gap-on-skip risk."""
+
+    def test_electric_then_agrint_share_contiguous_ids(self, tmp_path: Path) -> None:
+        electric_case, electric_id_map = _make_electric_re_case(tmp_path)
+
+        agrint_dir = tmp_path / "agrint_case"
+        agrint_dir.mkdir()
+        agrint_path = agrint_dir / "agrint.dat"
+        agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
+        (agrint_dir / "dger.dat").touch()
+        agrint_case = _make_minimal_case(
+            agrint_dir, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
+        agrint_id_map = NewaveIdMap(
+            subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[]
+        )
+
+        allocator = ConstraintIdAllocator()
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 3): 0},
+        ):
+            electric_result = convert_electric_constraints(
+                electric_case, electric_id_map, allocator=allocator
+            )
+            agrint_result = convert_agrint_constraints(
+                agrint_case, agrint_id_map, allocator=allocator
+            )
+
+        assert electric_result is not None and agrint_result is not None
+        electric_ids = [c["id"] for c in electric_result.constraints]
+        agrint_ids = [c["id"] for c in agrint_result.constraints]
+        # The two-sided bound still yields two single-sided ids under the
+        # shared allocator (Req 3's byte-preservation is unaffected by Req 5's
+        # id-threading change).
+        assert len(electric_ids) == 2
+        assert min(agrint_ids) == max(electric_ids) + 1
+
+
 class TestConstraintResultTypes:
     """The constraint converters return named tuples (named + index access)."""
 
     def test_vminop_result_named_and_tuple_access(self) -> None:
-        import pyarrow as pa
-
         from cobre_bridge.converters.constraints import VminopResult
 
         bounds = pa.table({"constraint_id": [0]})
@@ -962,8 +1036,6 @@ class TestConstraintResultTypes:
         assert ids == [3, 4]
 
     def test_generic_constraint_result_named_and_tuple_access(self) -> None:
-        import pyarrow as pa
-
         from cobre_bridge.converters.constraints import GenericConstraintResult
 
         bounds = pa.table({"constraint_id": [0]})

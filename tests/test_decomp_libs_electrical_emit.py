@@ -1,5 +1,5 @@
 """Tier-1 tests for the bucket-A -> cobre token map (TICKET-011) and the
-E1-E7 ``_GenericBuilder`` emit pipeline (TICKET-012).
+E1-E7 ``GenericConstraintBuilder`` emit pipeline (TICKET-012).
 
 Synthetic-fixture only, mirroring ``tests/test_decomp_libs_electrical.py``'s
 own convention: no ``example/`` read, no ``import cobre`` at module scope.
@@ -38,6 +38,7 @@ from cobre_bridge.decomp.libs_electrical_emit import (
 )
 from cobre_bridge.decomp.ncs import _pee_series, build_pee_ncs_id_map
 from cobre_bridge.decomp.temporal import OperativeStage
+from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
 from tests.conftest import make_decomp_case
 
 # ---------------------------------------------------------------------------
@@ -502,7 +503,6 @@ def test_emit_reserve_a1_end_to_end_generation_cap() -> None:
         {},
         {},
         big_m=999.0,
-        start_id=0,
     )
 
     assert result.converted_codes == (407,)
@@ -545,7 +545,6 @@ def test_emit_reserve_a3_negative_cap_stays_feasible_via_slack() -> None:
         {},
         {},
         big_m=999.0,
-        start_id=0,
     )
 
     assert result.generic is not None
@@ -573,7 +572,7 @@ def test_emit_active_only_stage0_block0_single_bounds_row() -> None:
     a_h = AvailablePower(overlay={}, rated_envelope={})
 
     result = emit_libs_electrical_generics(
-        model, id_map, factory, a_h, calendar, {}, {}, {}, big_m=999.0, start_id=0
+        model, id_map, factory, a_h, calendar, {}, {}, {}, big_m=999.0
     )
 
     assert result.generic is not None
@@ -611,7 +610,6 @@ def test_emit_violation_penalty_overrides_big_m() -> None:
         {},
         {},
         big_m=999.0,
-        start_id=0,
     )
 
     assert result.generic is not None
@@ -636,7 +634,7 @@ def test_emit_inactive_everywhere_defers_without_duplicate_diagnostic() -> None:
 
     with dx.collect() as sink:
         result = emit_libs_electrical_generics(
-            model, id_map, factory, a_h, calendar, {}, {}, {}, big_m=999.0, start_id=0
+            model, id_map, factory, a_h, calendar, {}, {}, {}, big_m=999.0
         )
 
     assert result.generic is None
@@ -667,7 +665,6 @@ def test_emit_unresolved_bucket_a_token_defers_without_partial_constraint() -> N
             {},
             {},
             big_m=999.0,
-            start_id=0,
         )
 
     assert result.generic is None
@@ -704,7 +701,6 @@ def test_emit_unresolved_bucket_bc_term_defers_whole_restriction() -> None:
             {},
             {},
             big_m=999.0,
-            start_id=0,
         )
 
     assert result.generic is None
@@ -755,7 +751,6 @@ def test_emit_cell_inconsistent_terms_raises_value_error_naming_restriction() ->
                 {},
                 {},
                 big_m=999.0,
-                start_id=0,
             )
 
 
@@ -784,7 +779,7 @@ def test_emit_sorted_restriction_codes_deterministic_ids() -> None:
         {},
         {},
         big_m=999.0,
-        start_id=5,
+        allocator=ConstraintIdAllocator(5),
     )
 
     assert result.converted_codes == (10, 20)
@@ -828,7 +823,6 @@ def test_emit_unrecognized_token_defers_one_restriction_sibling_converts() -> No
             {},
             {},
             big_m=999.0,
-            start_id=0,
         )
 
     assert result.converted_codes == (710,)
@@ -865,7 +859,6 @@ def test_emit_no_unrecognized_tokens_leaves_deferred_reason_empty() -> None:
         {},
         {},
         big_m=999.0,
-        start_id=0,
     )
 
     assert result.converted_codes == (711,)
@@ -910,7 +903,6 @@ def test_emit_propagates_plain_value_error_not_unrecognized_token() -> None:
                 {},
                 {},
                 big_m=999.0,
-                start_id=0,
             )
 
     assert not isinstance(exc_info.value, UnrecognizedElectricalToken)
@@ -950,7 +942,6 @@ def test_emit_unrecognized_token_in_activation_rule_defers_one_restriction() -> 
             {},
             {},
             big_m=999.0,
-            start_id=0,
         )
 
     assert result.converted_codes == (721,)
@@ -991,7 +982,6 @@ def test_emit_malformed_activation_rule_propagates_value_error() -> None:
             {},
             {},
             big_m=999.0,
-            start_id=0,
         )
 
     assert not isinstance(exc_info.value, UnrecognizedElectricalToken)

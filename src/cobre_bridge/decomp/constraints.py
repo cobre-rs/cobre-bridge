@@ -15,13 +15,16 @@ sense-free interval endpoints (``bound_lower``/``bound_upper`` — see
 This module stands up that shared scaffolding: the per-term expression-token
 dispatch (``_variable_token``), the ``FI``-interchange line resolver
 (``build_fi_line_map``/``resolve_fi_term``), the coefficient-string formatter
-(``_format_expression``), the ``GenericConstraintResult`` shape and its
-bounds schema, the ``BIG_M`` slack-penalty helper, and the
-``_GenericBuilder`` two-sided assembler, plus the multi-term ``RE`` emitter
+(``_format_expression``), the ``BIG_M`` slack-penalty helper, and
+``slots_from_record`` (the per-record (stage, block) slot enumeration feeding
+the shared :class:`~cobre_bridge.generic_constraint_builder.
+GenericConstraintBuilder`), plus the multi-term ``RE`` emitter
 (``emit_re_generics``) and the ``RHQ``/``RHV`` emitter (
 ``emit_rhq_rhv_generics``) built on top of it. This module mirrors — but
 never imports — the sibling ``converters/constraints.py`` emitter's
-``GenericConstraintResult``/``_parse_formula`` patterns.
+``_parse_formula`` pattern; both tracks share one
+``GenericConstraintBuilder``/``GenericConstraintResult``
+(:mod:`cobre_bridge.generic_constraint_builder`).
 
 GNL pre-processing (feature spec section 2.1/G4 -- abating commanded
 generation, aborting on uncommanded) is out of scope here: ``emit_re_generics``
@@ -51,16 +54,16 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, NamedTuple
 
-import pyarrow as pa
-
 from cobre_bridge.decomp.cadastro import effective_storage_range
 from cobre_bridge.decomp.constraint_registers import StageBounds
 from cobre_bridge.decomp.hydro import _downstream_operated
 from cobre_bridge.decomp.scalar_parameters import rho_acum_name
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.generic_constraint_format import (
-    GENERIC_BOUNDS_COLUMNS,
-    sense_to_interval,
+from cobre_bridge.generic_constraint_builder import (
+    ConstraintIdAllocator,
+    GenericConstraintBuilder,
+    GenericConstraintResult,
+    is_bounded,
 )
 from cobre_bridge.productivity import stored_energy_productivity
 
@@ -76,59 +79,7 @@ if TYPE_CHECKING:
     )
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
-
-
-class GenericConstraintResult(NamedTuple):
-    """Result of a generic-constraint emitter.
-
-    ``constraints`` is the list of constraint dicts (``{"id", "name",
-    "description", "expression", "slack"}`` — cobre's F3 sense-free shape,
-    see :mod:`cobre_bridge.generic_constraint_format`); ``bounds`` is the
-    per-``(constraint_id, stage_id, block_id)`` bounds table honouring
-    :data:`_GENERIC_BOUNDS_SCHEMA` (nullable ``bound_lower``/``bound_upper``
-    endpoints, no single ``bound``).
-    """
-
-    constraints: list[dict]
-    bounds: pa.Table
-
-
-#: Schema for the generic-constraint bounds table (F3 shape: see
-#: :data:`~cobre_bridge.generic_constraint_format.GENERIC_BOUNDS_COLUMNS`).
-#: ``block_id`` is nullable: ``None`` means "all blocks" (a stage-level
-#: constraint, or a per-block one whose bound applies uniformly).
-#: ``bound_lower``/``bound_upper`` are both nullable; the null-pattern
-#: encodes direction (lower-only, upper-only, or a genuine band with both
-#: populated) instead of a ``sense`` label.
-_GENERIC_BOUNDS_SCHEMA = pa.schema(
-    [
-        pa.field("constraint_id", pa.int32(), nullable=False),
-        pa.field("stage_id", pa.int32(), nullable=False),
-        pa.field("block_id", pa.int32(), nullable=True),
-        pa.field("bound_lower", pa.float64(), nullable=True),
-        pa.field("bound_upper", pa.float64(), nullable=True),
-    ]
-)
-# Keep this schema's field names in lockstep with the shared F3 column list —
-# a silent drift here would desync this module from the shared mapping helper.
-# A plain `assert` is stripped under `python -O`, which would silently drop
-# this load-bearing drift guard, so it is an explicit raise instead.
-if _GENERIC_BOUNDS_SCHEMA.names != list(GENERIC_BOUNDS_COLUMNS):
-    raise RuntimeError(
-        "decomp/constraints.py: _GENERIC_BOUNDS_SCHEMA field names "
-        f"{_GENERIC_BOUNDS_SCHEMA.names!r} have drifted from the shared "
-        f"GENERIC_BOUNDS_COLUMNS {list(GENERIC_BOUNDS_COLUMNS)!r} — update "
-        "one to match the other."
-    )
-
-#: The unbounded sentinel, mirroring ``decomp/bounds_accumulator._UNBOUNDED``:
-#: a bound whose magnitude is at or past this value carries no real limit.
-_UNBOUNDED = 1e21
-
-
-def _is_bounded(value: float | None) -> bool:
-    """True iff *value* is a real (non-``None``, non-sentinel) bound."""
-    return value is not None and abs(value) < _UNBOUNDED
+    from cobre_bridge.generic_constraint_builder import Slot
 
 
 #: The source model's ``num_max_iteracoes``-style deficit multiplier: the
@@ -364,144 +315,36 @@ def _format_expression(terms: Sequence[tuple[float, str]]) -> str | None:
     return " ".join(parts)
 
 
-def _slot_endpoints(
-    lower: float | None, upper: float | None
-) -> tuple[float | None, float | None]:
-    """Resolve one (stage, block) slot's raw (lower, upper) to F3 endpoints.
+def slots_from_record(
+    record: ConstraintRecord, calendar: Sequence[OperativeStage]
+) -> list[Slot]:
+    """Enumerate the exact (stage, block) slots *record*'s bounds cover.
 
-    Each bounded side is independent — this is not a single ``sense``, it is
-    the union of an optional ``">="`` floor and an optional ``"<="``
-    ceiling — so a genuinely two-sided slot keeps both endpoints. Each
-    bounded side is fed through :func:`sense_to_interval` for its own
-    direction, keeping only the half of that call's result the side
-    actually populates; an unbounded (``None``/``±1e21``) side stays
-    ``None``.
+    For a per-block record, one slot per
+    ``range(min(len(stage_bounds.lower), len(calendar[stage].block_hours)))``
+    block per declared stage (mirroring
+    ``single_term_bounds._per_block_contributions``'s clamp — a bounded slot
+    beyond the stage's real block count is dropped, never emitted as an
+    orphan row); for a stage-level record (``record.per_block is False``),
+    one slot per declared stage with ``block_id=None``. Feeds
+    :meth:`~cobre_bridge.generic_constraint_builder.GenericConstraintBuilder.add`,
+    which itself filters to slots bounded on either side.
     """
-    bound_lower: float | None = None
-    bound_upper: float | None = None
-    if lower is not None and _is_bounded(lower):
-        bound_lower = sense_to_interval(">=", lower)[0]
-    if upper is not None and _is_bounded(upper):
-        bound_upper = sense_to_interval("<=", upper)[1]
-    return bound_lower, bound_upper
-
-
-class _GenericBuilder:
-    """Assembles two-sided generic constraints sharing one 0-based id space.
-
-    ``start_id`` is the first id this builder assigns; later emitters thread
-    a running ``start_id`` across every builder so ids never collide (E7).
-    Each :meth:`add_two_sided` call appends zero or one constraint dict
-    (cobre's F3 interval carries both a limit's endpoints on a single
-    constraint, so a two-sided limit never needs two) plus that
-    constraint's companion bounds rows; :meth:`result` packages everything
-    added so far into a :class:`GenericConstraintResult`.
-    """
-
-    def __init__(self, start_id: int) -> None:
-        self._start_id = start_id
-        self._constraints: list[dict] = []
-        self._bound_cids: list[int] = []
-        self._bound_stages: list[int] = []
-        self._bound_blocks: list[int | None] = []
-        self._bound_lowers: list[float | None] = []
-        self._bound_uppers: list[float | None] = []
-
-    def add_two_sided(
-        self,
-        *,
-        name: str,
-        description: str,
-        expression: str,
-        big_m: float,
-        record: ConstraintRecord,
-        calendar: Sequence[OperativeStage],
-    ) -> None:
-        """Emit one generic constraint for a two-sided limit ``L <= expr <= U``.
-
-        cobre's F3 interval model carries both endpoints on a single
-        constraint (nullable ``bound_lower``/``bound_upper``, direction
-        encoded by the null-pattern — see
-        :mod:`cobre_bridge.generic_constraint_format`), so a band no longer
-        needs the pre-F3 ``<=``/``>=`` id pair: one id, and one row per
-        bounded (stage, block) slot, always suffice. A slot bounded on only
-        one side resolves that side through
-        :func:`~cobre_bridge.generic_constraint_format.sense_to_interval`
-        (the single direction is already known); a slot bounded on both
-        sides is a genuine band and keeps both endpoints on that same row.
-        Adds nothing (not even an id) when no slot is ever bounded on
-        either side.
-
-        For a per-block record, bound rows are emitted for
-        ``range(min(len(stage_bounds.lower), len(calendar[stage].block_hours)))``
-        blocks per declared stage (mirroring
-        ``single_term_bounds._per_block_contributions``'s clamp); for a
-        stage-level record (``record.per_block is False``), one row per
-        declared stage is emitted with ``block_id=None``.
-        """
-        # Enumerate the exact (stage, block) slots that will carry a bound row —
-        # per-block slots clamped to each stage's real block count, or one
-        # stage-level slot (block_id=None). The "any slot bounded" check below
-        # MUST be taken over these SAME clamped slots as the row emission: a
-        # bounded slot beyond the block count is dropped, so scanning the raw
-        # (up-to-5-wide) StageBounds would append a constraint dict with no
-        # companion RHS row (an orphan cobre cannot bind).
-        slots: list[tuple[int, int | None, float | None, float | None]] = []
-        for stage_index, stage_bounds in record.bounds.items():
-            if record.per_block:
-                n_slots = min(
-                    len(stage_bounds.lower), len(calendar[stage_index].block_hours)
-                )
-                slots.extend(
-                    (stage_index, b, stage_bounds.lower[b], stage_bounds.upper[b])
-                    for b in range(n_slots)
-                )
-            else:
-                slots.append(
-                    (stage_index, None, stage_bounds.lower[0], stage_bounds.upper[0])
-                )
-
-        bounded_slots = [
-            slot for slot in slots if _is_bounded(slot[2]) or _is_bounded(slot[3])
-        ]
-        if not bounded_slots:
-            return
-
-        constraint_id = self._start_id + len(self._constraints)
-        self._constraints.append(
-            {
-                "id": constraint_id,
-                "name": name,
-                "description": description,
-                "expression": expression,
-                "slack": {"enabled": True, "penalty": big_m},
-            }
-        )
-        for stage_index, block_id, lower, upper in bounded_slots:
-            bound_lower, bound_upper = _slot_endpoints(lower, upper)
-            self._bound_cids.append(constraint_id)
-            self._bound_stages.append(stage_index)
-            self._bound_blocks.append(block_id)
-            self._bound_lowers.append(bound_lower)
-            self._bound_uppers.append(bound_upper)
-
-    def result(self) -> GenericConstraintResult | None:
-        """Package everything added so far, or ``None`` if nothing was added."""
-        if not self._constraints:
-            return None
-        bounds = pa.table(
-            {
-                "constraint_id": pa.array(self._bound_cids, type=pa.int32()),
-                "stage_id": pa.array(self._bound_stages, type=pa.int32()),
-                "block_id": pa.array(self._bound_blocks, type=pa.int32()),
-                "bound_lower": pa.array(self._bound_lowers, type=pa.float64()),
-                "bound_upper": pa.array(self._bound_uppers, type=pa.float64()),
-            },
-            schema=_GENERIC_BOUNDS_SCHEMA,
-        )
-        return GenericConstraintResult(
-            constraints=list(self._constraints), bounds=bounds
-        )
+    slots: list[Slot] = []
+    for stage_index, stage_bounds in record.bounds.items():
+        if record.per_block:
+            n_slots = min(
+                len(stage_bounds.lower), len(calendar[stage_index].block_hours)
+            )
+            slots.extend(
+                (stage_index, b, stage_bounds.lower[b], stage_bounds.upper[b])
+                for b in range(n_slots)
+            )
+        else:
+            slots.append(
+                (stage_index, None, stage_bounds.lower[0], stage_bounds.upper[0])
+            )
+    return slots
 
 
 def _emit_re_frequency_split_deferred(term: ConstraintTerm) -> None:
@@ -612,26 +455,30 @@ def emit_re_generics(
     census: ConstraintCensus,
     line_map: Mapping[tuple[int, int], int],
     big_m: float,
-    start_id: int,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> GenericConstraintResult | None:
     """Emit every generic ``RE`` constraint (multi-term hydro/thermal/interchange).
 
     Iterates ``census.to_generic`` filtered to ``record.family == "RE"``,
     resolves each record's terms via :func:`_resolve_re_terms`, and feeds a
-    :class:`_GenericBuilder`; a record whose terms cannot all be resolved is
-    dropped entirely (skip-not-partial, one diagnostic per skipped
-    constraint — see :func:`_resolve_re_terms`). Single-hydro-generation RE
-    records never reach here — they lower to a plant bound in
-    ``single_term_bounds.py`` (``lowers_to_bound``). ``HQ``/``HV`` records
-    also present in ``census.to_generic`` are :func:`emit_rhq_rhv_generics`'s,
-    not this function's; ``HE`` records are unhandled (deferred).
+    :class:`~cobre_bridge.generic_constraint_builder.GenericConstraintBuilder`;
+    a record whose terms cannot all be resolved is dropped entirely
+    (skip-not-partial, one diagnostic per skipped constraint — see
+    :func:`_resolve_re_terms`). Single-hydro-generation RE records never
+    reach here — they lower to a plant bound in ``single_term_bounds.py``
+    (``lowers_to_bound``). ``HQ``/``HV`` records also present in
+    ``census.to_generic`` are :func:`emit_rhq_rhv_generics`'s, not this
+    function's; ``HE`` records are unhandled (deferred).
 
     Reads no ``dadger``; *big_m* and *line_map* arrive from the caller (E7).
-    Returns ``builder.result()`` — ``None`` when no RE generic constraint
-    survives.
+    *allocator* defaults to a fresh :class:`ConstraintIdAllocator` (ids from
+    0) when omitted; the pipeline threads one shared instance across every
+    emitter. Returns ``builder.result()`` — ``None`` when no RE generic
+    constraint survives.
     """
     calendar = case.calendar
-    builder = _GenericBuilder(start_id)
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
     for record in census.to_generic:
         if record.family != "RE":
             continue
@@ -641,13 +488,12 @@ def emit_re_generics(
         expression = _format_expression(terms)
         if expression is None:
             continue
-        builder.add_two_sided(
+        builder.add(
             name=f"RE_{record.constraint_id}",
             description=f"RE generic constraint {record.constraint_id}",
             expression=expression,
-            big_m=big_m,
-            record=record,
-            calendar=calendar,
+            slack={"enabled": True, "penalty": big_m},
+            slots=slots_from_record(record, calendar),
         )
     return builder.result()
 
@@ -760,11 +606,11 @@ def _emit_rhv_volume_tipo_deferred(record: ConstraintRecord, tipo: str) -> None:
 def _offset_if_bounded(value: float | None, offset: float) -> float | None:
     """Add *offset* to *value* iff it is a real bound; otherwise pass it through.
 
-    Mirrors :func:`_is_bounded`'s sentinel check, phrased so mypy narrows
-    *value* to ``float`` on the addition: a ``None`` or ``±1e21`` side never
-    gets an offset added to it.
+    Mirrors :func:`~cobre_bridge.generic_constraint_builder.is_bounded`'s
+    sentinel check, phrased so mypy narrows *value* to ``float`` on the
+    addition: a ``None`` or ``±1e21`` side never gets an offset added to it.
     """
-    if value is None or not _is_bounded(value):
+    if value is None or not is_bounded(value):
         return value
     return value + offset
 
@@ -787,7 +633,8 @@ def _resolve_hv_varm(
     volume, so the absolute RHS is the **per-term additive floor**: for each
     declared stage, ``offset = sum(cᵢ * effective_storage_range(effective,
     codeᵢ, stage)[0] for term i)``, added to whichever side of the record's
-    stage-level ``StageBounds`` is actually bounded (:func:`_is_bounded`) —
+    stage-level ``StageBounds`` is actually bounded
+    (:func:`~cobre_bridge.generic_constraint_builder.is_bounded`) —
     a ``±1e21``/``None`` side is left untouched, never offset. *calendar* is
     accepted for signature symmetry with the per-block resolvers (mirroring
     ``single_term_bounds._hv_storage_contributions``); ``VARM`` is
@@ -826,7 +673,7 @@ def emit_rhq_rhv_generics(
     pumping_station_ids: Mapping[int, int],
     effective: EffectiveCadastro,
     big_m: float,
-    start_id: int,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> GenericConstraintResult | None:
     """Emit every generic ``RHQ``/``RHV`` constraint (flow mixes and multi-``VARM``).
 
@@ -849,12 +696,16 @@ def emit_rhq_rhv_generics(
     RHQ/RHV records on a bounded variable never reach here — they lower to
     an entity bound in ``single_term_bounds.py`` (``lowers_to_bound``).
 
-    Reads no ``dadger``; *pumping_station_ids*, *effective*, *big_m*, and
-    *start_id* arrive from the caller (E7). Returns ``builder.result()`` —
-    ``None`` when no RHQ/RHV generic constraint survives.
+    Reads no ``dadger``; *pumping_station_ids*, *effective*, and *big_m*
+    arrive from the caller (E7). *allocator* defaults to a fresh
+    :class:`ConstraintIdAllocator` (ids from 0) when omitted; the pipeline
+    threads one shared instance across every emitter. Returns
+    ``builder.result()`` — ``None`` when no RHQ/RHV generic constraint
+    survives.
     """
     calendar = case.calendar
-    builder = _GenericBuilder(start_id)
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
     for record in census.to_generic:
         if record.family not in ("HQ", "HV"):
             continue
@@ -866,13 +717,12 @@ def emit_rhq_rhv_generics(
             expression = _format_expression(rhq_terms)
             if expression is None:
                 continue
-            builder.add_two_sided(
+            builder.add(
                 name=f"HQ_{record.constraint_id}",
                 description=f"RHQ generic constraint {record.constraint_id}",
                 expression=expression,
-                big_m=big_m,
-                record=record,
-                calendar=calendar,
+                slack={"enabled": True, "penalty": big_m},
+                slots=slots_from_record(record, calendar),
             )
             continue
 
@@ -891,13 +741,13 @@ def emit_rhq_rhv_generics(
         expression = _format_expression(hv_terms)
         if expression is None:
             continue
-        builder.add_two_sided(
+        adjusted_record = dataclasses.replace(record, bounds=adjusted_bounds)
+        builder.add(
             name=f"HV_{record.constraint_id}",
             description=f"RHV generic constraint {record.constraint_id}",
             expression=expression,
-            big_m=big_m,
-            record=dataclasses.replace(record, bounds=adjusted_bounds),
-            calendar=calendar,
+            slack={"enabled": True, "penalty": big_m},
+            slots=slots_from_record(adjusted_record, calendar),
         )
     return builder.result()
 
@@ -1134,7 +984,7 @@ def emit_rhe_generics(
     census: ConstraintCensus,
     effective: EffectiveCadastro,
     hydro_to_ree: Mapping[int, int],
-    start_id: int,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> RheResult:
     """Emit every generic ``HE`` (RHE stored-energy) constraint.
 
@@ -1163,13 +1013,14 @@ def emit_rhe_generics(
     (mirroring the source model's ``penalty <= 0 -> 1000.0`` fallback) — RHE is soft
     per its own penalty, never ``BIG_M``.
 
-    Reads no ``dadger``; *hydro_to_ree* and *start_id* arrive from the
-    caller (E7). Returns :class:`RheResult`: ``result`` is
-    ``builder.result()`` (``None`` when no RHE constraint survives);
-    ``rho_acum_overrides`` maps every referenced cobre hydro id to its
-    per-stage ρ_acum (MWmês/hm³) — unreferenced hydros keep cobre's
-    ``computed`` default, mirroring the source model's emitter
-    ``all_referenced_ids`` gate.
+    Reads no ``dadger``; *hydro_to_ree* arrives from the caller (E7).
+    *allocator* defaults to a fresh :class:`ConstraintIdAllocator` (ids from
+    0) when omitted; the pipeline threads one shared instance across every
+    emitter. Returns :class:`RheResult`: ``result`` is ``builder.result()``
+    (``None`` when no RHE constraint survives); ``rho_acum_overrides`` maps
+    every referenced cobre hydro id to its per-stage ρ_acum (MWmês/hm³) —
+    unreferenced hydros keep cobre's ``computed`` default, mirroring the
+    source model's emitter ``all_referenced_ids`` gate.
     """
     calendar = case.calendar
     operated = set(id_map.hydro_codes)
@@ -1179,7 +1030,8 @@ def emit_rhe_generics(
     for code, ree_code in hydro_to_ree.items():
         ree_to_hydros.setdefault(ree_code, []).append(code)
 
-    builder = _GenericBuilder(start_id)
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
     all_referenced_ids: set[int] = set()
 
     for record in census.to_generic:
@@ -1240,13 +1092,13 @@ def emit_rhe_generics(
                 rhs = limite
             new_bounds[stage_index] = StageBounds(lower=(rhs,), upper=(None,))
 
-        builder.add_two_sided(
+        adjusted_record = dataclasses.replace(record, bounds=new_bounds)
+        builder.add(
             name=f"RHE_{record.constraint_id}",
             description=f"RHE stored-energy constraint {record.constraint_id}",
             expression=expression,
-            big_m=penalty,
-            record=dataclasses.replace(record, bounds=new_bounds),
-            calendar=calendar,
+            slack={"enabled": True, "penalty": penalty},
+            slots=slots_from_record(adjusted_record, calendar),
         )
         all_referenced_ids.update(record_referenced_ids)
 

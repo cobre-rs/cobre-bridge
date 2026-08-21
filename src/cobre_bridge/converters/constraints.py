@@ -32,9 +32,10 @@ from cobre_bridge.converters.hydro import (
 from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.converters.temporal import _month_hours
-from cobre_bridge.generic_constraint_format import (
-    GENERIC_BOUNDS_COLUMNS,
-    sense_to_interval,
+from cobre_bridge.generic_constraint_builder import (
+    ConstraintIdAllocator,
+    GenericConstraintBuilder,
+    GenericConstraintResult,
 )
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.plants import active_hydros
@@ -70,26 +71,15 @@ class VminopResult(NamedTuple):
 
     Field order matches the legacy 4-tuple so existing index/destructure callers
     keep working; new code should use the names. ``constraints_dict`` is the full
-    ``{"$schema", "constraints": [...]}`` object; ``bounds`` has no ``block_id``
-    column (the pipeline adds a null one when merging).
+    ``{"$schema", "constraints": [...]}`` object; ``bounds`` is the full 5-column
+    F3 bounds table (``block_id`` always null — VminOP is stage-level, never
+    per-block).
     """
 
     constraints_dict: dict
     bounds: pa.Table
     referenced_hydro_ids: list[int]
     rho_acum_overrides: dict[int, list[float]]
-
-
-class GenericConstraintResult(NamedTuple):
-    """Result of the electric / AGRINT constraint converters.
-
-    ``constraints`` is the list of constraint dicts; ``bounds`` is the per-
-    ``(constraint_id, stage_id, block_id)`` bounds table. Field order matches the
-    legacy 2-tuple, so existing ``a, b = result`` callers keep working.
-    """
-
-    constraints: list[dict]
-    bounds: pa.Table
 
 
 def _build_hydro_downstream_map(
@@ -420,6 +410,7 @@ def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
 def convert_vminop_constraints(
     case: NewaveCase,
     id_map: NewaveIdMap,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> VminopResult | None:
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
 
@@ -441,6 +432,10 @@ def convert_vminop_constraints(
         Parsed the source model case.
     id_map:
         Entity ID mapping.
+    allocator:
+        Shared id source; defaults to a fresh :class:`ConstraintIdAllocator`
+        (ids from 0) when omitted. The pipeline threads one instance across
+        every emitter so ids stay contiguous across VminOP/electric/AGRINT.
 
     Returns
     -------
@@ -538,10 +533,8 @@ def convert_vminop_constraints(
         for code, values in per_stage_acc.items()
     }
 
-    # Map hydros to REEs
     hydro_to_ree = _build_hydro_to_ree(confhd_df, cadastro)
 
-    # Group hydros by REE
     ree_hydros: dict[int, list[int]] = defaultdict(list)
     for code, ree_code in hydro_to_ree.items():
         ree_hydros[ree_code].append(code)
@@ -562,13 +555,11 @@ def convert_vminop_constraints(
     # REEs that have constraints in curva.dat
     constraint_rees = sorted(curva_df["codigo_ree"].unique())
 
-    constraints: list[dict] = []
-    bound_constraint_ids: list[int] = []
-    bound_stage_ids: list[int] = []
-    bound_values: list[float] = []
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
     all_referenced_ids: set[int] = set()
 
-    for constraint_id, ree_code in enumerate(constraint_rees):
+    for ree_code in constraint_rees:
         ree_code = int(ree_code)
         hydros_in_ree = ree_hydros.get(ree_code, [])
 
@@ -659,18 +650,6 @@ def convert_vminop_constraints(
 
         all_referenced_ids.update(referenced_ids)
 
-        constraints.append(
-            {
-                "id": constraint_id,
-                "name": f"VminOP_{ree_name}",
-                "description": (
-                    f"Minimum stored energy for REE {ree_code} ({ree_name})"
-                ),
-                "expression": expression,
-                "slack": {"enabled": True, "penalty": penalty},
-            }
-        )
-
         # Build per-stage bounds from curva_df.
         # curva.dat only covers the study period. Extend into the post-study
         # ("Período Estático Final") per source-model's rule (manual table p.32-33):
@@ -681,8 +660,9 @@ def convert_vminop_constraints(
         study_months = _horizon.study_months
         ree_curva = curva_df[curva_df["codigo_ree"] == ree_code].sort_values("data")
 
-        # First pass: emit in-study bounds; build the per-calendar-month seasonal
+        # First pass: emit in-study slots; build the per-calendar-month seasonal
         # map and a per-stage map (the latter supplies the freeze value).
+        slots: list[tuple[int, int | None, float | None, float | None]] = []
         seasonal_pct: dict[int, float] = {}  # calendar_month -> last percentage
         pct_by_stage: dict[int, float] = {}
         for _, crow in ree_curva.iterrows():
@@ -693,10 +673,7 @@ def convert_vminop_constraints(
 
             percentage = float(crow["valor"])
             rhs = _rhs_at(stage_id, percentage)
-
-            bound_constraint_ids.append(constraint_id)
-            bound_stage_ids.append(stage_id)
-            bound_values.append(rhs)
+            slots.append((stage_id, None, rhs, None))
 
             seasonal_pct[dt.month] = percentage  # last value wins
             pct_by_stage[stage_id] = percentage
@@ -719,39 +696,29 @@ def convert_vminop_constraints(
                     pct = seasonal_pct.get(cal_month)
                 if pct is not None:
                     rhs = _rhs_at(stage_id, pct)
-                    bound_constraint_ids.append(constraint_id)
-                    bound_stage_ids.append(stage_id)
-                    bound_values.append(rhs)
+                    slots.append((stage_id, None, rhs, None))
 
-    if not constraints:
+        builder.add(
+            name=f"VminOP_{ree_name}",
+            description=f"Minimum stored energy for REE {ree_code} ({ree_name})",
+            expression=expression,
+            slack={"enabled": True, "penalty": penalty},
+            slots=slots,
+        )
+
+    result = builder.result()
+    if result is None:
         return None
 
     constraints_dict = {
         "$schema": _SCHEMA_URL,
-        "constraints": constraints,
+        "constraints": result.constraints,
     }
-
-    # VminOP is always a lower-bound (>=) constraint: every row's endpoint pair
-    # comes from the shared F3 mapping helper, so the upper endpoint is always
-    # null here.
-    bound_intervals = [sense_to_interval(">=", v) for v in bound_values]
-    bounds_table = pa.table(
-        {
-            "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
-            "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
-            "bound_lower": pa.array(
-                [lo for lo, _ in bound_intervals], type=pa.float64()
-            ),
-            "bound_upper": pa.array(
-                [up for _, up in bound_intervals], type=pa.float64()
-            ),
-        }
-    )
 
     _LOG.info(
         "Generated %d VminOP constraints with %d stage bounds.",
-        len(constraints),
-        len(bound_values),
+        len(result.constraints),
+        result.bounds.num_rows,
     )
 
     # Build the per_stage override for rho_acum_h{id}: map cobre hydro_id to
@@ -770,7 +737,7 @@ def convert_vminop_constraints(
 
     return VminopResult(
         constraints_dict,
-        bounds_table,
+        result.bounds,
         sorted(all_referenced_ids),
         rho_acum_overrides,
     )
@@ -894,10 +861,8 @@ def _build_line_id_map(case: NewaveCase) -> dict[tuple[int, int], int]:
     if limites_df is None or limites_df.empty:
         return {}
 
-    from datetime import datetime as _dt
-
     dger = case.dger
-    study_start_dt = _dt(dger.ano_inicio_estudo, dger.mes_inicio_estudo, 1)
+    study_start_dt = datetime(dger.ano_inicio_estudo, dger.mes_inicio_estudo, 1)
     first_month = limites_df[limites_df["data"] == study_start_dt]
     if first_month.empty:
         non_nan_df = limites_df.dropna(subset=["valor"])
@@ -1009,10 +974,8 @@ def _parse_formula(
             term_body = f"{abs_coeff} * {var}"
 
         if i == 0:
-            # First term: prepend minus sign if negative, nothing if positive.
             parts.append(f"- {term_body}" if is_negative else term_body)
         else:
-            # Subsequent terms: use binary +/- operator.
             parts.append(f"- {term_body}" if is_negative else f"+ {term_body}")
 
     return " ".join(parts)
@@ -1175,7 +1138,7 @@ def _parse_re_dat(
 def convert_electric_constraints(
     case: NewaveCase,
     id_map: NewaveIdMap,
-    start_id: int = 0,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> GenericConstraintResult | None:
     """Convert electric constraints from restricao-eletrica.csv and RE.DAT.
 
@@ -1190,9 +1153,10 @@ def convert_electric_constraints(
         Parsed the source model case.
     id_map:
         Entity ID mapping.
-    start_id:
-        First constraint ID to assign (so IDs do not collide with VminOP
-        constraints).
+    allocator:
+        Shared id source; defaults to a fresh :class:`ConstraintIdAllocator`
+        (ids from 0) when omitted. The pipeline threads one instance across
+        every emitter so IDs do not collide with VminOP constraints.
 
     Returns
     -------
@@ -1283,16 +1247,8 @@ def convert_electric_constraints(
         else {"enabled": False}
     )
 
-    constraints: list[dict] = []
-    bound_constraint_ids: list[int] = []
-    bound_stage_ids: list[int] = []
-    bound_block_ids: list[int | None] = []
-    bound_values: list[float] = []
-    # Each constraint id here is single-sided (a `<=` ceiling from `sup_id` or
-    # a `>=` floor from `inf_id`, never both), so this map lets the final
-    # bounds-table pass resolve each row's single value to the right F3
-    # endpoint via `sense_to_interval`.
-    constraint_senses: dict[int, str] = {}
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
 
     # Index restricao-eletrica.csv bounds by constraint code.
     csv_bounds_by_code: dict[int, list[tuple[str, str, int, float, float]]] = (
@@ -1393,28 +1349,18 @@ def convert_electric_constraints(
         inf_id: int | None = None
 
         if has_sup:
-            sup_id = start_id + len(constraints)
-            constraint_senses[sup_id] = "<="
-            constraints.append(
-                {
-                    "id": sup_id,
-                    "name": f"RE_{cod}",
-                    "description": f"Electric constraint {cod}",
-                    "expression": cobre_expr,
-                    "slack": slack_config,
-                }
+            sup_id = builder.add_constraint(
+                name=f"RE_{cod}",
+                description=f"Electric constraint {cod}",
+                expression=cobre_expr,
+                slack=slack_config,
             )
         if has_inf:
-            inf_id = start_id + len(constraints)
-            constraint_senses[inf_id] = ">="
-            constraints.append(
-                {
-                    "id": inf_id,
-                    "name": f"RE_{cod}",
-                    "description": f"Electric constraint {cod}",
-                    "expression": cobre_expr,
-                    "slack": slack_config,
-                }
+            inf_id = builder.add_constraint(
+                name=f"RE_{cod}",
+                description=f"Electric constraint {cod}",
+                expression=cobre_expr,
+                slack=slack_config,
             )
 
         # --- Emit bounds for the full horizon ---
@@ -1434,10 +1380,13 @@ def convert_electric_constraints(
                         # No RE.DAT data: seasonal extrapolation fallback.
                         sup_val = seasonal_sup.get((cal_month, block_id))
                     if sup_val is not None:
-                        bound_constraint_ids.append(sup_id)
-                        bound_stage_ids.append(stage_id)
-                        bound_block_ids.append(block_id)
-                        bound_values.append(sup_val)
+                        builder.add_bound_row(
+                            sup_id,
+                            stage_id=stage_id,
+                            block_id=block_id,
+                            lower=None,
+                            upper=sup_val,
+                        )
 
                 # Lower bound.
                 if inf_id is not None:
@@ -1447,47 +1396,27 @@ def convert_electric_constraints(
                     elif is_post_indiv:
                         inf_val = seasonal_inf.get((cal_month, block_id))
                     if inf_val is not None:
-                        bound_constraint_ids.append(inf_id)
-                        bound_stage_ids.append(stage_id)
-                        bound_block_ids.append(block_id)
-                        bound_values.append(inf_val)
+                        builder.add_bound_row(
+                            inf_id,
+                            stage_id=stage_id,
+                            block_id=block_id,
+                            lower=inf_val,
+                            upper=None,
+                        )
 
-    if not constraints:
+    result = builder.result()
+    if result is None:
         return None
-
-    # Each row's constraint id is single-sided (see `constraint_senses`), so
-    # every row's own value maps to exactly one F3 endpoint, the other null.
-    bound_intervals = [
-        sense_to_interval(constraint_senses[cid], v)
-        for cid, v in zip(bound_constraint_ids, bound_values, strict=True)
-    ]
-    # `.select(GENERIC_BOUNDS_COLUMNS)` pins the column order to the shared
-    # F3 constant rather than this dict literal's own order, so the two stay
-    # structurally in sync with `pipeline.py`'s merge (drift would raise at
-    # `pa.concat_tables`, not silently reorder a column).
-    bounds_table = pa.table(
-        {
-            "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
-            "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
-            "block_id": pa.array(bound_block_ids, type=pa.int32()),
-            "bound_lower": pa.array(
-                [lo for lo, _ in bound_intervals], type=pa.float64()
-            ),
-            "bound_upper": pa.array(
-                [up for _, up in bound_intervals], type=pa.float64()
-            ),
-        }
-    ).select(GENERIC_BOUNDS_COLUMNS)
 
     _LOG.info(
         "Generated %d electric constraints with %d bounds "
         "(individualizado cutoff at stage %d).",
-        len(constraints),
-        len(bound_values),
+        len(result.constraints),
+        result.bounds.num_rows,
         cutoff,
     )
 
-    return GenericConstraintResult(constraints, bounds_table)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1622,7 +1551,7 @@ def _parse_agrint(
 def convert_agrint_constraints(
     case: NewaveCase,
     id_map: NewaveIdMap,
-    start_id: int = 0,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> GenericConstraintResult | None:
     """Convert AGRINT.DAT exchange group constraints to Cobre generic constraints.
 
@@ -1636,8 +1565,10 @@ def convert_agrint_constraints(
         Parsed the source model case.
     id_map:
         Entity ID mapping (used indirectly via ``_build_line_id_map``).
-    start_id:
-        First constraint ID to assign (must not collide with other constraints).
+    allocator:
+        Shared id source; defaults to a fresh :class:`ConstraintIdAllocator`
+        (ids from 0) when omitted. The pipeline threads one instance across
+        every emitter so IDs do not collide with other constraints.
 
     Returns
     -------
@@ -1669,11 +1600,8 @@ def convert_agrint_constraints(
 
     line_id_map = _build_line_id_map(case)
 
-    constraints: list[dict] = []
-    bound_constraint_ids: list[int] = []
-    bound_stage_ids: list[int] = []
-    bound_block_ids: list[int] = []
-    bound_values: list[float] = []
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
 
     for group_id in sorted(groups.keys()):
         terms_raw = groups[group_id]
@@ -1723,17 +1651,6 @@ def convert_agrint_constraints(
                 parts.append(f"- {term_body}" if is_neg else f"+ {term_body}")
         expression = " ".join(parts)
 
-        constraint_id = start_id + len(constraints)
-        constraints.append(
-            {
-                "id": constraint_id,
-                "name": f"AGRINT_{group_id}",
-                "description": f"Exchange group constraint {group_id}",
-                "expression": expression,
-                "slack": {"enabled": False},
-            }
-        )
-
         # Collect study-period limit rows for this group, keyed by (stage, block).
         # AGRINT has no seasonalize flag: The source model freezes its post-study limits
         # at the last study stage value and ignores any post-study-dated agrint.dat
@@ -1767,12 +1684,11 @@ def convert_agrint_constraints(
                     m = 1
                     y += 1
 
-        # Emit study-period bounds.
-        for (stage_id, block_idx), lim_val in group_bounds.items():
-            bound_constraint_ids.append(constraint_id)
-            bound_stage_ids.append(stage_id)
-            bound_block_ids.append(block_idx)
-            bound_values.append(lim_val)
+        # Emit study-period slots.
+        slots: list[tuple[int, int | None, float | None, float | None]] = [
+            (stage_id, block_idx, None, lim_val)
+            for (stage_id, block_idx), lim_val in group_bounds.items()
+        ]
 
         # Freeze the last study stage value through the post-study tail.
         last_study_stage = study_months - 1
@@ -1782,36 +1698,24 @@ def convert_agrint_constraints(
                 if freeze_val is None:
                     continue
                 for stage_id in range(study_months, num_stages):
-                    bound_constraint_ids.append(constraint_id)
-                    bound_stage_ids.append(stage_id)
-                    bound_block_ids.append(block_idx)
-                    bound_values.append(freeze_val)
+                    slots.append((stage_id, block_idx, None, freeze_val))
 
-    if not constraints:
+        builder.add(
+            name=f"AGRINT_{group_id}",
+            description=f"Exchange group constraint {group_id}",
+            expression=expression,
+            slack={"enabled": False},
+            slots=slots,
+        )
+
+    result = builder.result()
+    if result is None:
         return None
-
-    # Every AGRINT constraint is a `<=` ceiling.
-    bound_intervals = [sense_to_interval("<=", v) for v in bound_values]
-    # `.select(GENERIC_BOUNDS_COLUMNS)` — see the electric-constraints writer
-    # above for why this pins the column order to the shared F3 constant.
-    bounds_table = pa.table(
-        {
-            "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
-            "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
-            "block_id": pa.array(bound_block_ids, type=pa.int32()),
-            "bound_lower": pa.array(
-                [lo for lo, _ in bound_intervals], type=pa.float64()
-            ),
-            "bound_upper": pa.array(
-                [up for _, up in bound_intervals], type=pa.float64()
-            ),
-        }
-    ).select(GENERIC_BOUNDS_COLUMNS)
 
     _LOG.info(
         "Generated %d AGRINT group constraints with %d bounds.",
-        len(constraints),
-        len(bound_values),
+        len(result.constraints),
+        result.bounds.num_rows,
     )
 
-    return GenericConstraintResult(constraints, bounds_table)
+    return result

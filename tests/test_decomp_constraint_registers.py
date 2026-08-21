@@ -232,9 +232,7 @@ def test_re_thermal_only_no_double_emission() -> None:
     calendar = [_stage(0, 1), _stage(1, 1)]
 
     case = make_decomp_case(Path("unused"), calendar=calendar)
-    result = emit_re_generics(
-        case, id_map, census=census, line_map={}, big_m=0.0, start_id=0
-    )
+    result = emit_re_generics(case, id_map, census=census, line_map={}, big_m=0.0)
 
     assert result is None
 
@@ -328,7 +326,6 @@ def test_hq_qbom_no_double_emission() -> None:
         pumping_station_ids={},
         effective=effective,
         big_m=0.0,
-        start_id=0,
     )
 
     assert result is None
