@@ -1000,7 +1000,6 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     confhd_df = confhd.usinas
     ree_df = ree_file.rees  # columns: codigo, nome, submercado, ...
 
-    # Apply MODIF.DAT permanent overrides before the main conversion loop.
     cadastro = _apply_permanent_overrides(cadastro, case)
 
     # Seasonal reference volumes per plant — when present, fed back into the evaporation
@@ -1050,7 +1049,6 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         d = stage_dates[t]
         return d.year, d.month
 
-    # Build REE-code -> subsystem-code mapping.
     ree_to_submercado: dict[int, int] = {}
     if ree_df is not None:
         for _, row in ree_df.iterrows():
@@ -1261,7 +1259,6 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 except KeyError:
                     pass
 
-        # Bus assignment via REE -> subsystem.
         ree_code = int(row["ree"])
         subsystem_code = ree_to_submercado.get(ree_code)
         if subsystem_code is None:
@@ -1294,7 +1291,6 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                 for m in range(1, 13)
             ]
 
-        # Hydraulic loss model derived from tipo_perda / perdas columns.
         tipo_perda = int(hreg.get("tipo_perda", 0) or 0)
         perdas_val = float(hreg.get("perdas", 0.0) or 0.0)
         if tipo_perda == 1 and perdas_val > 0 and not math.isnan(perdas_val):
@@ -2688,9 +2684,7 @@ def convert_storage_bounds(
 
         Maps MODIF override dicts to ``(year, month, value)`` change-points. The
         forward-fill, big-M clearing, and seasonalize-vs-freeze post-study logic
-        now live in the shared helper, so the bounds comparator
-        (``bounds_from_inputs``) and this converter stay in lock-step by
-        construction instead of via copied code.
+        live in the shared helper.
         """
         return seasonal_step_function(
             [(int(r["year"]), int(r["month"]), float(r["value"])) for r in recs],

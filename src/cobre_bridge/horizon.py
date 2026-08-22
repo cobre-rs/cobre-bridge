@@ -40,8 +40,8 @@ def is_effectively_infinite(value: float) -> bool:
     """Return True if *value* represents an unbounded bound.
 
     Catches both IEEE infinity and the source model's big-M sentinel (``abs(value) >=
-    BIG_M`` — the 99999 family meaning "no limit"). Shared by the bounds comparator and
-    the chart layer so the "is this bound unbounded?" test has one definition.
+    BIG_M`` — the 99999 family meaning "no limit"). Shared with the chart layer so
+    the "is this bound unbounded?" test has one definition.
     """
     return math.isinf(value) or abs(value) >= BIG_M
 
@@ -167,10 +167,8 @@ def seasonal_step_function(
     - ``False`` (e.g. VAZMINT / TURBMINT / TURBMAXT, which have no seasonalize
       flag): freeze the last study stage's value across the post-study tail.
 
-    This is the single source of truth shared by the storage-bounds converter
-    (``converters.hydro.convert_storage_bounds``) and the bounds comparator
-    (``comparators.bounds_from_inputs.compute_hydro_bounds``); keeping them in
-    lock-step is what lets ``compare bounds`` mean anything.
+    This is the single source of truth for the storage-bounds converter
+    (``converters.hydro.convert_storage_bounds``).
     """
     sm = horizon.start_month
     study_months = horizon.study_months

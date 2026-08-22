@@ -111,14 +111,12 @@ def _weighted_stage_mean(
     hour_sum = pl.col("hours").sum().alias("_total_hours")
     stage_aggs = [pl.col(c).first().alias(c) for c in stage_level_cols]
 
-    # Per scenario+entity+stage: weighted sum across blocks.
     per_scenario = (
         lf.join(bh, on=["stage_id", "block_id"])
         .group_by(["scenario_id", id_col, "stage_id"])
         .agg(weighted_aggs + [hour_sum] + stage_aggs)
     )
 
-    # Compute weighted mean per scenario, then mean across scenarios.
     with_means = per_scenario
     for c in value_cols:
         with_means = with_means.with_columns(
@@ -947,7 +945,7 @@ def read_cobre_line_bounds(cobre_output_dir: Path) -> pl.DataFrame:
     ``reverse_mw``. Absent parquet -> typed-empty frame + WARNING;
     present-but-corrupt -> :class:`CobreReadError`. Callers own their own
     ``block_id``-null filtering and any dict/lookup construction (kept in
-    the ANALYZE layer, e.g. ``comparators.bounds._read_converter_line_bounds``).
+    the ANALYZE layer).
     """
     empty = pl.DataFrame(schema=_LINE_BOUNDS_SCHEMA)
     case_dir = case_dir_for(cobre_output_dir)
@@ -1294,15 +1292,12 @@ def read_cobre_bus_aggregates(
     """
     block_hours = _load_block_hours(cobre_output_dir)
 
-    # --- Bus-level variables (load, deficit, excess) ---
     bus_lf = _scan_simulation_entity(cobre_output_dir, "buses")
     bus_vars = ["load_mw", "deficit_mw", "excess_mw"]
 
-    # --- Thermal generation aggregated by bus ---
     thermal_bus_map = _load_entity_bus_map(cobre_output_dir, "thermals", "thermal_id")
     thermal_lf = _scan_simulation_entity(cobre_output_dir, "thermals")
 
-    # --- NCS generation aggregated by bus ---
     ncs_bus_map = _load_entity_bus_map(
         cobre_output_dir, "non_controllable_sources", "non_controllable_id"
     )
@@ -1328,8 +1323,6 @@ def read_cobre_bus_aggregates(
         )
         joined = lf.join(mapping.lazy(), on=id_col)
 
-        # Sum generation across entities per bus within each
-        # (scenario, stage, block) first, then block-hours weight.
         bus_totals = joined.group_by(
             ["scenario_id", "bus_id", "stage_id", "block_id"]
         ).agg(pl.col(value_col).sum())
@@ -1488,7 +1481,6 @@ def read_cobre_bus_aggregates(
     if not frames:
         return pl.DataFrame()
 
-    # Join all frames on (scenario_id, bus_id, stage_id).
     merged = frames[0]
     for f in frames[1:]:
         merged = merged.join(
@@ -1498,7 +1490,6 @@ def read_cobre_bus_aggregates(
             coalesce=True,
         )
 
-    # Compute net load = load - NCS per scenario.
     if "load_mw" in merged.columns and "ncs_gen_mw" in merged.columns:
         merged = merged.with_columns(
             (
@@ -1765,7 +1756,6 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
             col_map[col] = "upper_bound_mean"
 
     if "iteration" not in col_map.values():
-        # Use row index as iteration.
         df = df.with_row_index("iteration")
         col_map["iteration"] = "iteration"
 

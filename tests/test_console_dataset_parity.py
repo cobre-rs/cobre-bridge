@@ -12,14 +12,12 @@ by formatting the matching ``dataset.summary`` / ``dataset.metadata`` values wit
 the printer's OWN helpers (``report._fmt_metric`` and the percent/correlation
 format strings). The ONLY computation the test performs is parsing printed text:
 every expected cell is derived FROM the dataset, never recomputed from raw
-``ResultComparison`` / ``BoundComparison`` rows. If a future edit makes a printer
-recompute a statistic instead of reading the dataset, the parsed cells diverge
-from the dataset-derived expected cells and the test fails.
+``ResultComparison`` rows. If a future edit makes a printer recompute a
+statistic instead of reading the dataset, the parsed cells diverge from the
+dataset-derived expected cells and the test fails.
 
-The summary printers now render Rich tables, so their single-source invariant is
-enforced solely by the parse-vs-dataset tests above. The mismatch listing is still
-plain text, so one byte-identical legacy-vs-dataset guard remains for it (mirroring
-the surviving ticket-008 guard in ``tests/test_analyze.py``).
+The summary printer now renders a Rich table, so its single-source invariant is
+enforced solely by the parse-vs-dataset tests below.
 
 Fixtures are hermetic synthetic in-memory data (NO real the source model case, NO
 ``inewave`` I/O), copied from ``tests/test_analyze.py`` and
@@ -34,16 +32,9 @@ from pathlib import Path
 
 import polars as pl
 
-from cobre_bridge.comparators.analyze import (
-    build_bounds_dataset,
-    build_results_dataset,
-)
-from cobre_bridge.comparators.bounds import BoundComparison
+from cobre_bridge.comparators.analyze import build_results_dataset
 from cobre_bridge.comparators.report import (
     _fmt_metric,
-    print_bounds_mismatches_from_dataset,
-    print_bounds_summary_from_dataset,
-    print_mismatches,
     print_results_summary_from_dataset,
 )
 from cobre_bridge.comparators.results import (
@@ -54,14 +45,10 @@ from cobre_bridge.comparators.results import (
 _NW = Path("/fake/nw")
 _COBRE = Path("/fake/cobre")
 _RESULTS_TOL = 1e-2
-_BOUNDS_TOL = 1e-3
 
 # Number of value columns in the per-variable results table, after the variable
 # name: Count, Mean|D|, Max|D|, WithinTol, sMAPE, r.
 _RESULTS_VALUE_COLS = 6
-# Bounds table rows are: <name> Compared Match Mismatch Rate% (the variable name
-# is space-free in the fixtures, so a whitespace split yields exactly 5 tokens).
-_BOUNDS_ROW_TOKENS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -132,60 +119,6 @@ def _make_results() -> list[ResultComparison]:
             cobre_value=5.0,
             abs_diff=5.0,
             rel_diff=None,
-        ),
-    ]
-
-
-def _make_bounds() -> list[BoundComparison]:
-    """Four bound comparisons across two variables, mixing match/mismatch."""
-    return [
-        BoundComparison(
-            entity_type="hydro",
-            entity_name="ITAIPU",
-            newave_code=10,
-            cobre_id=0,
-            stage=0,
-            variable="storage_max",
-            newave_value=29000.0,
-            cobre_value=29000.0,
-            diff=0.0,
-            match=True,
-        ),
-        BoundComparison(
-            entity_type="hydro",
-            entity_name="TUCURUI",
-            newave_code=20,
-            cobre_id=1,
-            stage=0,
-            variable="storage_max",
-            newave_value=50000.0,
-            cobre_value=49000.0,
-            diff=1000.0,
-            match=False,
-        ),
-        BoundComparison(
-            entity_type="thermal",
-            entity_name="ANGRA",
-            newave_code=30,
-            cobre_id=2,
-            stage=0,
-            variable="generation_max",
-            newave_value=1350.0,
-            cobre_value=1350.0,
-            diff=0.0,
-            match=True,
-        ),
-        BoundComparison(
-            entity_type="thermal",
-            entity_name="CUIABA",
-            newave_code=40,
-            cobre_id=3,
-            stage=1,
-            variable="generation_max",
-            newave_value=500.0,
-            cobre_value=450.0,
-            diff=50.0,
-            match=False,
         ),
     ]
 
@@ -278,71 +211,6 @@ def _parse_results_footer(text: str) -> tuple[int, dict[str, int]]:
     return total, by_entity_type
 
 
-def _parse_bounds_section(
-    lines: list[str], header_token: str
-) -> tuple[dict[str, tuple[int, int]], tuple[int, int, int] | None]:
-    """Parse one bounds table (by-type or by-variable) plus its ``Total`` row.
-
-    ``header_token`` is the first column header (``Type`` or ``Variable``).
-    Returns a ``{key: (match, mismatch)}`` map and the ``Total`` triple
-    ``(compared, match, mismatch)`` when present in this section, else ``None``.
-    """
-    rows: dict[str, tuple[int, int]] = {}
-    total_triple: tuple[int, int, int] | None = None
-    in_section = False
-    for raw in lines:
-        line = raw.strip()
-        if not line:
-            if in_section:
-                break
-            continue
-        if line.startswith(("✓ ", "⚠ ")):  # leading compare verdict line
-            continue
-        if set(line) <= {"=", "-", "━", "─"}:  # text underline or Rich table rule
-            continue
-        tokens = line.split()
-        if tokens[0] == header_token:
-            in_section = True
-            continue
-        if not in_section:
-            continue
-        # Rate column carries a trailing '%'; name is space-free in fixtures.
-        assert len(tokens) == _BOUNDS_ROW_TOKENS, (
-            f"unexpected bounds data row token count {len(tokens)} "
-            f"(expected {_BOUNDS_ROW_TOKENS}) in line: {raw!r}"
-        )
-        name = tokens[0]
-        compared = int(tokens[1].replace(",", ""))
-        match = int(tokens[2].replace(",", ""))
-        mismatch = int(tokens[3].replace(",", ""))
-        if name == "Total":
-            total_triple = (compared, match, mismatch)
-            continue
-        rows[name.lower()] = (match, mismatch)
-    return rows, total_triple
-
-
-def _parse_mismatch_header(text: str) -> tuple[int, int]:
-    """Parse ``Top N mismatches (of M total):`` -> ``(N, M)``."""
-    header = next(
-        line for line in text.splitlines() if line.strip().startswith("Top ")
-    ).strip()
-    tokens = header.split()
-    # "Top N mismatches (of M total):"
-    shown = int(tokens[1])
-    total = int(tokens[4])
-    return shown, total
-
-
-def _count_mismatch_detail_lines(text: str) -> int:
-    """Count the printed mismatch detail lines (indented, the source model=...)."""
-    return sum(
-        1
-        for line in text.splitlines()
-        if line.startswith("  ") and "NEWAVE=" in line and "Cobre=" in line
-    )
-
-
 # ---------------------------------------------------------------------------
 # Group 1: parsed-console-equals-dataset (results)
 # ---------------------------------------------------------------------------
@@ -422,94 +290,3 @@ def test_results_correlation_none_renders_na_from_dataset() -> None:
     )  # derived FROM dataset.summary (correlation None)
     assert parsed["lonely_var"][-1] == "N/A"  # the ``r`` column is the last cell
     assert parsed["lonely_var"] == expected_cells
-
-
-# ---------------------------------------------------------------------------
-# Group 2: parsed-console-equals-dataset (bounds)
-# ---------------------------------------------------------------------------
-
-
-def test_bounds_tables_equal_dataset_summary_counts() -> None:
-    dataset = build_bounds_dataset(_make_bounds())
-    text = _capture(
-        print_bounds_summary_from_dataset, dataset, _NW, _COBRE, _BOUNDS_TOL
-    )
-    lines = text.splitlines()
-
-    summary_counts = dataset.metadata["summary_counts"]
-    assert isinstance(summary_counts, dict)
-
-    # By-entity-type table carries the Total row; by-variable table does not.
-    by_type_parsed, total_triple = _parse_bounds_section(lines, "Type")
-    by_var_parsed, _ = _parse_bounds_section(lines, "Variable")
-
-    assert total_triple is not None, "Total row missing from bounds summary"
-    parsed_compared, parsed_matches, parsed_mismatches = total_triple
-    assert parsed_compared == summary_counts["total"]
-    assert parsed_matches == summary_counts["matches"]
-    assert parsed_mismatches == summary_counts["mismatches"]
-
-    expected_by_type = {
-        etype: (pair[0], pair[1])
-        for etype, pair in summary_counts["by_entity_type"].items()
-    }
-    assert by_type_parsed == expected_by_type
-
-    expected_by_var = {
-        var: (pair[0], pair[1]) for var, pair in summary_counts["by_variable"].items()
-    }
-    assert by_var_parsed == expected_by_var
-
-
-def test_bounds_mismatch_header_equals_listing_metadata() -> None:
-    dataset = build_bounds_dataset(_make_bounds())
-    text = _capture(print_bounds_mismatches_from_dataset, dataset)
-
-    shown, total = _parse_mismatch_header(text)
-    listing = dataset.metadata["mismatch_listing"]
-    assert isinstance(listing, dict)
-
-    assert total == listing["total"]
-    assert shown == _count_mismatch_detail_lines(text)
-
-
-def test_bounds_mismatch_truncation_footer_from_listing() -> None:
-    # Arrange: the bounds fixture carries >=2 mismatches; cap the listing at 1
-    # so the printer must truncate and emit its "... and N more." footer.
-    dataset = build_bounds_dataset(_make_bounds())
-    listing = dataset.metadata["mismatch_listing"]
-    assert isinstance(listing, dict)
-    total = listing["total"]
-    assert total >= 2, "fixture must have >=2 mismatches to exercise truncation"
-
-    # Act: render with max_rows=1 (positional, since _capture forwards *args).
-    text = _capture(print_bounds_mismatches_from_dataset, dataset, 1)
-
-    # Assert: header shows N==1 of M==total; exactly one detail line is printed;
-    # and the exact truncation footer the printer emits is present. M/total are
-    # derived from dataset.metadata, never recomputed from raw comparisons.
-    shown, header_total = _parse_mismatch_header(text)
-    assert shown == 1
-    assert header_total == total
-    assert _count_mismatch_detail_lines(text) == 1
-    assert f"... and {total - 1} more." in text
-
-
-# ---------------------------------------------------------------------------
-# Group 3: legacy-vs-dataset byte-identical guard (regression fence).
-#
-# The results- and bounds-summary printers now render Rich tables (no longer
-# byte-identical to a legacy text printer, which was removed). The single-source
-# invariant for those is instead enforced by the parse-vs-dataset tests above.
-# The mismatch listing is still plain text, so its byte-identical guard remains.
-# ---------------------------------------------------------------------------
-
-
-def test_bounds_mismatches_byte_identical_to_legacy() -> None:
-    results = _make_bounds()
-    dataset = build_bounds_dataset(results)
-
-    legacy_out = _capture(print_mismatches, results)
-    dataset_out = _capture(print_bounds_mismatches_from_dataset, dataset)
-
-    assert dataset_out == legacy_out

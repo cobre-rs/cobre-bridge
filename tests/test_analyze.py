@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
 from pathlib import Path
 from typing import cast
 
@@ -13,9 +11,6 @@ import polars as pl
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.analyze import (
     aggregate_percentile_band,
-    bounds_mismatch_listing,
-    bounds_summary_counts,
-    build_bounds_dataset,
     build_results_dataset,
     bus_groups_and_pct,
     cobre_sum_and_newave_sin,
@@ -27,24 +22,16 @@ from cobre_bridge.comparators.analyze import (
     plant_percentile_arrays,
     results_footer_counts,
     spillage_lookups,
-    summary_frame_from_bounds,
     summary_frame_from_results,
-    tidy_from_bounds,
     tidy_from_results,
     tidy_percentiles_from_percentile_data,
     tidy_results_dataset,
     top_divergences_from_results,
 )
-from cobre_bridge.comparators.bounds import BoundComparison
 from cobre_bridge.comparators.dataset import (
     SUMMARY_SCHEMA,
     TIDY_SCHEMA,
     ComparisonDataset,
-)
-from cobre_bridge.comparators.report import (
-    build_summary,
-    print_bounds_mismatches_from_dataset,
-    print_mismatches,
 )
 from cobre_bridge.comparators.results import (
     PercentileData,
@@ -58,7 +45,6 @@ from cobre_bridge.comparators.verdict import (
 
 
 def _make_results() -> list[ResultComparison]:
-    """Three result comparisons spanning two entity types."""
     return [
         ResultComparison(
             entity_type="hydro",
@@ -100,7 +86,6 @@ def _make_results() -> list[ResultComparison]:
 
 
 def _empty_summary() -> pl.DataFrame:
-    """An empty summary frame for ``ComparisonDataset`` validation."""
     return ComparisonDataset.empty().summary
 
 
@@ -249,7 +234,6 @@ def test_tidy_results_dataset_empty_inputs_validate() -> None:
 
 
 def _make_many_results(n: int) -> list[ResultComparison]:
-    """``n`` result comparisons with monotonically increasing ``abs_diff``."""
     return [
         ResultComparison(
             entity_type="hydro",
@@ -466,122 +450,6 @@ def test_render_only_covers_all_frame_metadata_keys(tmp_path: Path) -> None:
         )
 
 
-def _make_bounds() -> list[BoundComparison]:
-    """Four bound comparisons across two variables, mixing match/mismatch."""
-    return [
-        BoundComparison(
-            entity_type="hydro",
-            entity_name="ITAIPU",
-            newave_code=10,
-            cobre_id=0,
-            stage=0,
-            variable="storage_max",
-            newave_value=29000.0,
-            cobre_value=29000.0,
-            diff=0.0,
-            match=True,
-        ),
-        BoundComparison(
-            entity_type="hydro",
-            entity_name="TUCURUI",
-            newave_code=20,
-            cobre_id=1,
-            stage=0,
-            variable="storage_max",
-            newave_value=50000.0,
-            cobre_value=49000.0,
-            diff=1000.0,
-            match=False,
-        ),
-        BoundComparison(
-            entity_type="thermal",
-            entity_name="ANGRA",
-            newave_code=30,
-            cobre_id=2,
-            stage=0,
-            variable="generation_max",
-            newave_value=1350.0,
-            cobre_value=1350.0,
-            diff=0.0,
-            match=True,
-        ),
-        BoundComparison(
-            entity_type="thermal",
-            entity_name="CUIABA",
-            newave_code=40,
-            cobre_id=3,
-            stage=1,
-            variable="generation_max",
-            newave_value=500.0,
-            cobre_value=450.0,
-            diff=50.0,
-            match=False,
-        ),
-    ]
-
-
-def test_tidy_from_bounds_row_count_and_sources() -> None:
-    results = _make_bounds()
-
-    out = tidy_from_bounds(results)
-
-    assert out.height == 2 * len(results)
-    assert list(out.columns) == list(TIDY_SCHEMA)
-    assert set(out["source"].unique().to_list()) == {"newave", "cobre"}
-    assert out["bus"].unique().to_list() == [-1]
-    assert out["block"].unique().to_list() == [-1]
-
-
-def test_summary_from_bounds_within_tol_matches_build_summary() -> None:
-    results = _make_bounds()
-
-    out = summary_frame_from_bounds(results)
-    expected = build_summary(results)
-
-    assert list(out.columns) == list(SUMMARY_SCHEMA)
-    expected_schema = {name: dtype() for name, dtype in SUMMARY_SCHEMA.items()}
-    assert dict(out.schema) == expected_schema
-
-    for row in out.iter_rows(named=True):
-        matches, mismatches = expected.by_variable[row["variable"]]
-        assert row["within_tol_rate"] == matches / (matches + mismatches)
-        assert row["count"] == matches + mismatches
-        assert row["correlation"] is None
-
-
-def test_bounds_dataset_top_divergences_only_mismatches() -> None:
-    results = _make_bounds()
-
-    dataset = build_bounds_dataset(results)
-
-    dataset.validate()
-    divergences = dataset.metadata["top_divergences"]
-    assert isinstance(divergences, list)
-    assert all(d["match"] is False for d in divergences)
-    # Two mismatched rows in the fixture, largest abs(diff) first.
-    assert [d["entity_name"] for d in divergences] == ["TUCURUI", "CUIABA"]
-    assert dataset.tidy.height == 2 * len(results)
-
-
-def test_bounds_adapters_empty_inputs() -> None:
-    tidy = tidy_from_bounds([])
-    summary = summary_frame_from_bounds([])
-    dataset = build_bounds_dataset([])
-
-    assert tidy.height == 0
-    assert list(tidy.columns) == list(TIDY_SCHEMA)
-    assert summary.height == 0
-    assert list(summary.columns) == list(SUMMARY_SCHEMA)
-    dataset.validate()
-    assert dataset.metadata["top_divergences"] == []
-    summary_counts = dataset.metadata["summary_counts"]
-    assert isinstance(summary_counts, dict)
-    assert summary_counts["total"] == 0
-    mismatch_listing = dataset.metadata["mismatch_listing"]
-    assert isinstance(mismatch_listing, dict)
-    assert mismatch_listing["total"] == 0
-
-
 # -------------------------------------------------------------------
 # ticket-008: footer/summary count metadata
 # -------------------------------------------------------------------
@@ -607,96 +475,6 @@ def test_build_results_dataset_carries_footer_counts() -> None:
     assert isinstance(footer, dict)
     assert footer["total"] == legacy.total
     assert footer["by_entity_type"] == legacy.by_entity_type
-
-
-def test_bounds_summary_counts_matches_build_summary() -> None:
-    results = _make_bounds()
-
-    counts = bounds_summary_counts(results)
-    legacy = build_summary(results)
-
-    assert counts["total"] == legacy.total
-    assert counts["matches"] == legacy.matches
-    assert counts["mismatches"] == legacy.mismatches
-    # The metadata pairs are [match, mismatch] lists; legacy uses tuples.
-    by_type = counts["by_entity_type"]
-    assert isinstance(by_type, dict)
-    assert {k: tuple(v) for k, v in by_type.items()} == legacy.by_entity_type
-    by_var = counts["by_variable"]
-    assert isinstance(by_var, dict)
-    assert {k: tuple(v) for k, v in by_var.items()} == legacy.by_variable
-
-
-def test_build_bounds_dataset_carries_summary_and_mismatch_metadata() -> None:
-    results = _make_bounds()
-
-    dataset = build_bounds_dataset(results)
-
-    assert "summary_counts" in dataset.metadata
-    assert "mismatch_listing" in dataset.metadata
-    listing = dataset.metadata["mismatch_listing"]
-    assert isinstance(listing, dict)
-    # Two mismatches in the fixture; sorted by raw diff descending.
-    assert listing["total"] == 2
-    rows = listing["rows"]
-    assert isinstance(rows, list)
-    assert [r["entity_name"] for r in rows] == ["TUCURUI", "CUIABA"]
-    assert rows[0]["newave_code"] == 20
-
-
-def test_bounds_mismatch_listing_sorts_by_raw_diff_descending() -> None:
-    results = _make_bounds()
-
-    listing = bounds_mismatch_listing(results, max_rows=50)
-
-    diffs = [r["diff"] for r in listing["rows"]]
-    assert diffs == sorted(diffs, reverse=True)
-
-
-def test_bounds_mismatch_listing_respects_max_rows_but_keeps_total() -> None:
-    results = _make_bounds()
-
-    listing = bounds_mismatch_listing(results, max_rows=1)
-
-    assert listing["total"] == 2
-    rows = listing["rows"]
-    assert isinstance(rows, list)
-    assert len(rows) == 1
-    assert rows[0]["entity_name"] == "TUCURUI"
-
-
-# -------------------------------------------------------------------
-# ticket-008: byte-identical legacy-vs-dataset console printers
-# -------------------------------------------------------------------
-
-
-def _capture(func: object, *args: object) -> str:
-    """Run a stdout-writing printer and return the captured text."""
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        func(*args)  # type: ignore[operator]
-    return buffer.getvalue()
-
-
-def test_print_bounds_mismatches_from_dataset_matches_legacy() -> None:
-    results = _make_bounds()
-    dataset = build_bounds_dataset(results)
-
-    legacy_out = _capture(print_mismatches, results)
-    dataset_out = _capture(print_bounds_mismatches_from_dataset, dataset)
-
-    assert dataset_out == legacy_out
-
-
-def test_print_bounds_mismatches_from_dataset_matches_legacy_no_mismatches() -> None:
-    results = [r for r in _make_bounds() if r.match]
-    dataset = build_bounds_dataset(results)
-
-    legacy_out = _capture(print_mismatches, results)
-    dataset_out = _capture(print_bounds_mismatches_from_dataset, dataset)
-
-    assert dataset_out == legacy_out
-    assert dataset_out == "No mismatches found.\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1476,21 +1254,6 @@ def _summary_dataset(rows: list[dict[str, object]]) -> ComparisonDataset:
 
 class TestCompareVerdict:
     """Tests for ``build_compare_verdict`` reading only ``dataset.summary``."""
-
-    def test_verdict_bounds_fixture_counts_variables_and_worst(self) -> None:
-        results = _make_bounds()
-        dataset = build_bounds_dataset(results)
-
-        verdict = build_compare_verdict(dataset)
-
-        rows = dataset.summary.to_dicts()
-        assert verdict.total == 2
-        assert verdict.within_tol == 0
-        assert verdict.all_within_tol is False
-        # Derive the expected winner FROM the summary, never recompute sMAPE.
-        expected = min(rows, key=lambda r: (-float(r["max_smape"]), str(r["variable"])))
-        assert verdict.worst_variable == expected["variable"]
-        assert verdict.worst_smape == expected["max_smape"]
 
     def test_verdict_empty_dataset_returns_zeroed_verdict(self) -> None:
         dataset = build_results_dataset([], PercentileData(), 1e-2)

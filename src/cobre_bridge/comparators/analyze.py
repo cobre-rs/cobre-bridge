@@ -2,8 +2,7 @@
 
 These are the ANALYZE-layer adapters. They turn the existing
 ``list[ResultComparison]`` + ``PercentileData`` value frames produced by
-``results.py`` AND the ``list[BoundComparison]`` produced by ``bounds.py`` into
-the canonical tidy/long frame defined by
+``results.py`` into the canonical tidy/long frame defined by
 :data:`cobre_bridge.comparators.dataset.TIDY_SCHEMA`.
 
 It runs BEHIND the existing report flow (strangler-fig): it calls no readers and
@@ -26,7 +25,7 @@ from cobre_bridge.comparators.dataset import (
     TIDY_SCHEMA,
     ComparisonDataset,
 )
-from cobre_bridge.comparators.results import build_results_summary, smape
+from cobre_bridge.comparators.results import build_results_summary
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
@@ -35,7 +34,6 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from cobre_bridge.comparators.alignment import EntityAlignment, HydroEntity
-    from cobre_bridge.comparators.bounds import BoundComparison
     from cobre_bridge.comparators.results import PercentileData, ResultComparison
 
 _LOG = logging.getLogger(__name__)
@@ -376,278 +374,6 @@ def build_results_dataset(
         "nw_tim_stages": pct.nw_tim_stages,
         "cobre_training_seconds": pct.cobre_training_seconds,
         "cobre_iteration_timing": pct.cobre_iteration_timing,
-    }
-
-    dataset = ComparisonDataset(tidy=tidy, summary=summary, metadata=metadata)
-    dataset.validate()
-    return dataset
-
-
-def tidy_from_bounds(results: Sequence[BoundComparison]) -> pl.DataFrame:
-    """Map ``BoundComparison`` rows into tidy ``newave``/``cobre`` value rows.
-
-    Mirrors :func:`tidy_from_results` for the bounds engine. Each input row
-    yields exactly two tidy rows: one ``source="newave"`` with
-    ``value = r.newave_value`` and one ``source="cobre"`` with
-    ``value = r.cobre_value``. Both carry ``entity_id = r.cobre_id``,
-    ``entity_type = r.entity_type``, ``entity_name = r.entity_name``,
-    ``stage = r.stage``, ``variable = r.variable``, and the sentinels
-    ``bus = -1`` / ``block = -1``.
-
-    Args:
-        results: The bound comparisons to map; consumed verbatim.
-
-    Returns:
-        A frame conforming exactly (columns, order, dtypes) to
-        :data:`TIDY_SCHEMA`, with ``2 * len(results)`` rows. Empty ``results``
-        yields a 0-row frame.
-    """
-    return _tidy_newave_cobre_pair(results)
-
-
-def summary_frame_from_bounds(results: Sequence[BoundComparison]) -> pl.DataFrame:
-    """Project the bounds comparisons into a per-variable ``SUMMARY_SCHEMA`` frame.
-
-    Bounds use absolute tolerance, so the shared schema is filled with bounds
-    semantics: ``count`` is the number of comparisons for the variable;
-    ``mean_abs_diff`` / ``max_abs_diff`` are the mean / max of ``abs(r.diff)``;
-    ``within_tol_rate`` is the fraction of rows whose ``match`` is ``True``;
-    ``mean_smape`` / ``max_smape`` are computed via the shared
-    :func:`cobre_bridge.comparators.results.smape` over
-    ``(r.newave_value, r.cobre_value)``; ``correlation`` is always null.
-
-    Args:
-        results: The bound comparisons to summarize; consumed verbatim.
-
-    Returns:
-        A frame conforming exactly (columns, order, dtypes) to
-        :data:`SUMMARY_SCHEMA`, one row per variable. Empty ``results`` yields a
-        0-row frame.
-    """
-    if not results:
-        return pl.DataFrame(schema=SUMMARY_SCHEMA)
-
-    groups: dict[str, list[BoundComparison]] = {}
-    for r in results:
-        groups.setdefault(r.variable, []).append(r)
-
-    variables: list[str] = []
-    counts: list[int] = []
-    mean_abs_diff: list[float] = []
-    max_abs_diff: list[float] = []
-    mean_smape: list[float] = []
-    max_smape: list[float] = []
-    within_tol_rate: list[float] = []
-    correlation: list[float | None] = []
-
-    for variable, group in groups.items():
-        abs_diffs = [abs(r.diff) for r in group]
-        smapes = [smape(r.newave_value, r.cobre_value) for r in group]
-        n_match = sum(1 for r in group if r.match)
-
-        variables.append(variable)
-        counts.append(len(group))
-        mean_abs_diff.append(sum(abs_diffs) / len(group))
-        max_abs_diff.append(max(abs_diffs))
-        mean_smape.append(sum(smapes) / len(group))
-        max_smape.append(max(smapes))
-        within_tol_rate.append(n_match / len(group))
-        correlation.append(None)
-
-    frame = pl.DataFrame(
-        {
-            "variable": variables,
-            "count": counts,
-            "mean_abs_diff": mean_abs_diff,
-            "max_abs_diff": max_abs_diff,
-            "mean_smape": mean_smape,
-            "max_smape": max_smape,
-            "within_tol_rate": within_tol_rate,
-            "correlation": correlation,
-        },
-        schema=SUMMARY_SCHEMA,
-    )
-
-    return _conform_summary(frame)
-
-
-def top_divergences_from_bounds(
-    results: Sequence[BoundComparison],
-    n: int = 20,
-) -> list[dict[str, object]]:
-    """Return the ``n`` largest-``abs(diff)`` mismatched comparisons as dicts.
-
-    Only rows whose ``match`` is ``False`` are eligible. Sorted by descending
-    ``abs(diff)``, with ties broken by ``entity_name`` then ``variable`` so the
-    order is deterministic. Each row is projected into an explicit dict literal
-    (``BoundComparison`` is frozen, so attributes are read directly).
-
-    Args:
-        results: The bound comparisons to rank; consumed verbatim.
-        n: The maximum number of rows to return.
-
-    Returns:
-        A list of at most ``n`` dicts, each with keys ``entity_type``,
-        ``entity_name``, ``cobre_id``, ``stage``, ``variable``, ``newave_value``,
-        ``cobre_value``, ``diff``, ``match``. Empty/all-matching ``results``
-        yields ``[]``.
-    """
-    mismatches = [r for r in results if not r.match]
-    if not mismatches:
-        return []
-
-    ordered = sorted(
-        mismatches,
-        key=lambda r: (-abs(r.diff), r.entity_name, r.variable),
-    )
-
-    return [
-        {
-            "entity_type": r.entity_type,
-            "entity_name": r.entity_name,
-            "cobre_id": r.cobre_id,
-            "stage": r.stage,
-            "variable": r.variable,
-            "newave_value": r.newave_value,
-            "cobre_value": r.cobre_value,
-            "diff": r.diff,
-            "match": r.match,
-        }
-        for r in ordered[:n]
-    ]
-
-
-def bounds_summary_counts(
-    results: Sequence[BoundComparison],
-) -> dict[str, object]:
-    """Compute the bounds-summary match/mismatch counts as JSON-native metadata.
-
-    Mirrors the counting logic of
-    :func:`cobre_bridge.comparators.report.build_summary` (a row whose ``match``
-    is ``True`` increments the match count for its entity type and variable, else
-    the mismatch count) so the bounds console tables can be rendered from the
-    dataset metadata byte-identically — without importing ``report.py`` here and
-    without recomputing any diff. The integer counts are exact (not derived from
-    a fractional rate), so the printed ``Compared``/``Match``/``Mismatch``/``Rate``
-    columns reproduce the legacy output exactly.
-
-    Args:
-        results: The bound comparisons; consumed verbatim (one count each).
-
-    Returns:
-        A JSON-native dict with keys ``"total"``, ``"matches"``, ``"mismatches"``
-        (overall ints), and ``"by_entity_type"`` / ``"by_variable"`` — each a
-        ``dict[str, list[int]]`` mapping the key to a ``[match_count,
-        mismatch_count]`` pair. The mappings carry every entity type / variable
-        seen, matching ``build_summary``'s ``sorted`` union of matched and
-        mismatched keys.
-    """
-    type_counts: dict[str, list[int]] = {}
-    var_counts: dict[str, list[int]] = {}
-    matches = 0
-    mismatches = 0
-
-    for r in results:
-        type_pair = type_counts.setdefault(r.entity_type, [0, 0])
-        var_pair = var_counts.setdefault(r.variable, [0, 0])
-        if r.match:
-            matches += 1
-            type_pair[0] += 1
-            var_pair[0] += 1
-        else:
-            mismatches += 1
-            type_pair[1] += 1
-            var_pair[1] += 1
-
-    return {
-        "total": len(results),
-        "matches": matches,
-        "mismatches": mismatches,
-        "by_entity_type": type_counts,
-        "by_variable": var_counts,
-    }
-
-
-def bounds_mismatch_listing(
-    results: Sequence[BoundComparison],
-    max_rows: int = 50,
-) -> dict[str, object]:
-    """Project the bounds mismatches into the console-listing metadata.
-
-    Mirrors :func:`cobre_bridge.comparators.report.print_mismatches` EXACTLY so
-    the listing can be rendered from the dataset byte-identically: it filters to
-    ``not r.match``, sorts by **raw** ``diff`` descending (``reverse=True``, no
-    abs, no tie-break — the legacy ordering verbatim), and keeps the first
-    ``max_rows`` rows. The full mismatch count (before the cap) is carried so the
-    printer can reproduce the ``(of N total)`` header and the ``... and M more``
-    footer.
-
-    This is intentionally distinct from :func:`top_divergences_from_bounds`
-    (which is abs-sorted, tie-broken, capped at 20, and feeds the export
-    manifest) — the console listing has different ordering and cap semantics.
-
-    Args:
-        results: The bound comparisons; consumed verbatim.
-        max_rows: The number of rows to retain (the CLI fixes this at 50).
-
-    Returns:
-        A JSON-native dict with keys ``"total"`` (the full mismatch count) and
-        ``"rows"`` (at most ``max_rows`` dicts, each carrying ``entity_type``,
-        ``entity_name``, ``newave_code``, ``cobre_id``, ``stage``, ``variable``,
-        ``newave_value``, ``cobre_value`` and ``diff``).
-    """
-    mismatches = [r for r in results if not r.match]
-    mismatches.sort(key=lambda r: r.diff, reverse=True)
-    shown = mismatches[:max_rows]
-
-    rows: list[dict[str, object]] = [
-        {
-            "entity_type": r.entity_type,
-            "entity_name": r.entity_name,
-            "newave_code": r.newave_code,
-            "cobre_id": r.cobre_id,
-            "stage": r.stage,
-            "variable": r.variable,
-            "newave_value": r.newave_value,
-            "cobre_value": r.cobre_value,
-            "diff": r.diff,
-        }
-        for r in shown
-    ]
-
-    return {
-        "total": len(mismatches),
-        "rows": rows,
-    }
-
-
-def build_bounds_dataset(results: Sequence[BoundComparison]) -> ComparisonDataset:
-    """Assemble the canonical dataset for the bounds subcommand.
-
-    Combines the tidy frame from :func:`tidy_from_bounds`, the per-variable
-    summary from :func:`summary_frame_from_bounds`, and a metadata side-table
-    carrying the top mismatched divergences. Validates before returning.
-
-    Args:
-        results: The bound comparisons (``newave``/``cobre`` rows + summary).
-
-    Returns:
-        A validated :class:`ComparisonDataset` whose ``metadata`` holds
-        ``top_divergences`` (at most 20 mismatched rows, largest ``abs(diff)``
-        first), ``summary_counts`` (the exact match/mismatch integer counts
-        needed to render the console summary tables byte-identically) and
-        ``mismatch_listing`` (the raw-diff-sorted, 50-capped mismatch rows plus
-        the full mismatch count for the console listing).
-
-    Raises:
-        SchemaError: If the assembled dataset fails :meth:`validate`.
-    """
-    tidy = tidy_from_bounds(results)
-    summary = summary_frame_from_bounds(results)
-    metadata: dict[str, object] = {
-        "top_divergences": top_divergences_from_bounds(results),
-        "summary_counts": bounds_summary_counts(results),
-        "mismatch_listing": bounds_mismatch_listing(results),
     }
 
     dataset = ComparisonDataset(tidy=tidy, summary=summary, metadata=metadata)
@@ -1333,15 +1059,12 @@ def spillage_lookups(
     if not cobre_spill_energy.is_empty():
         for row in cobre_spill_energy.iter_rows(named=True):
             sid = int(row["stage_id"])
-            cb_lookup.setdefault("spill_energy_total_mw", {})[sid] = float(
-                row["total_mw"]
-            )
-            cb_lookup.setdefault("spill_energy_reservoir_mw", {})[sid] = float(
-                row["reservoir_mw"]
-            )
-            cb_lookup.setdefault("spill_energy_rorov_mw", {})[sid] = float(
-                row["rorov_mw"]
-            )
+            for lookup_key, column in (
+                ("spill_energy_total_mw", "total_mw"),
+                ("spill_energy_reservoir_mw", "reservoir_mw"),
+                ("spill_energy_rorov_mw", "rorov_mw"),
+            ):
+                cb_lookup.setdefault(lookup_key, {})[sid] = float(row[column])
 
     return nw_lookup, cb_lookup
 
@@ -1424,13 +1147,11 @@ def _tidy_one_percentile_frame(
 
 
 def _tidy_newave_cobre_pair(
-    results: Sequence[ResultComparison] | Sequence[BoundComparison],
+    results: Sequence[ResultComparison],
 ) -> pl.DataFrame:
     """Emit the two ``newave``/``cobre`` tidy rows per comparison.
 
-    Shared by :func:`tidy_from_results` and :func:`tidy_from_bounds`, which carry
-    the same ``entity_type``/``cobre_id``/``entity_name``/``stage``/``variable``/
-    ``newave_value``/``cobre_value`` fields. Returns a 0-row frame for empty input.
+    Used by :func:`tidy_from_results`. Returns a 0-row frame for empty input.
     """
     if not results:
         return pl.DataFrame(schema=TIDY_SCHEMA)

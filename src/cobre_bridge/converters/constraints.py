@@ -391,8 +391,8 @@ def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
     carry storage but are not part of the source model's stored energy.  This reproduces
     the plant set of pmo.dat's ``produtibilidade_acumulada_calculo_earm`` column.
 
-    Distinct from ``alignment._detect_reservoir_plants`` (useful-volume only):
-    that set is broader because it does not gate on ``tipo_regulacao``.
+    Narrower than a plain useful-volume test (``volume_maximo > volume_minimo``
+    alone): that broader criterion does not gate on ``tipo_regulacao``.
     """
     if code not in cadastro.index:
         return False
@@ -481,11 +481,9 @@ def convert_vminop_constraints(
     hidr = case.hidr
     ree_file = case.ree
 
-    cadastro = hidr.cadastro
-    cadastro = _apply_permanent_overrides(cadastro, case)
+    cadastro = _apply_permanent_overrides(hidr.cadastro, case)
     confhd_df = confhd.usinas
 
-    # Study horizon parameters
     _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
@@ -883,6 +881,28 @@ _TERM_RE = re.compile(
 )
 
 
+def _render_signed_expression(parsed_terms: list[tuple[float, str]]) -> str:
+    """Render (coefficient, variable) pairs into a signed sum expression string.
+
+    - Positive coefficient 1.0:  ``variable(id)``
+    - Positive coefficient other: ``coeff * variable(id)``
+    - Negative coefficient -1.0: ``- variable(id)``
+    - Negative coefficient other: ``- abs(coeff) * variable(id)``
+    - First term omits leading ``+``; subsequent positive terms use ``+ ``;
+      negative terms use ``- `` as binary subtraction.
+    """
+    parts: list[str] = []
+    for i, (coeff, var) in enumerate(parsed_terms):
+        abs_coeff = abs(coeff)
+        is_negative = coeff < 0.0
+        term_body = var if abs_coeff == 1.0 else f"{abs_coeff} * {var}"
+        if i == 0:
+            parts.append(f"- {term_body}" if is_negative else term_body)
+        else:
+            parts.append(f"- {term_body}" if is_negative else f"+ {term_body}")
+    return " ".join(parts)
+
+
 def _parse_formula(
     formula: str,
     id_map: NewaveIdMap,
@@ -891,15 +911,8 @@ def _parse_formula(
     """Translate a source-model RE formula into a Cobre expression string.
 
     Unknown plant codes or interchange pairs are skipped with a warning.
-    Returns ``None`` if no valid terms remain after translation.
-
-    Expression syntax rules:
-    - Positive coefficient 1.0:  ``variable(id)``
-    - Positive coefficient other: ``coeff * variable(id)``
-    - Negative coefficient -1.0: ``- variable(id)``
-    - Negative coefficient other: ``- abs(coeff) * variable(id)``
-    - First term omits leading ``+``; subsequent positive terms use ``+ ``;
-      negative terms use ``- `` as binary subtraction.
+    Returns ``None`` if no valid terms remain after translation. See
+    :func:`_render_signed_expression` for the output formatting rules.
     """
     # Each element: (effective_coeff: float, variable_str: str)
     parsed_terms: list[tuple[float, str]] = []
@@ -960,21 +973,7 @@ def _parse_formula(
     if not parsed_terms:
         return None
 
-    parts: list[str] = []
-    for i, (coeff, var) in enumerate(parsed_terms):
-        abs_coeff = abs(coeff)
-        is_negative = coeff < 0.0
-        if abs_coeff == 1.0:
-            term_body = var
-        else:
-            term_body = f"{abs_coeff} * {var}"
-
-        if i == 0:
-            parts.append(f"- {term_body}" if is_negative else term_body)
-        else:
-            parts.append(f"- {term_body}" if is_negative else f"+ {term_body}")
-
-    return " ".join(parts)
+    return _render_signed_expression(parsed_terms)
 
 
 def _parse_yyyymm(period_str: str) -> tuple[int, int]:
@@ -1074,7 +1073,6 @@ def _parse_re_dat(
     if rest_df is None or rest_df.empty:
         return conjuntos, re_dat_bounds
 
-    # Group rows by constraint code.
     for code, grp in rest_df.groupby("conjunto"):
         code = int(code)
         # Collect changepoints: [(stage_id, patamar, value)]
@@ -1180,7 +1178,6 @@ def convert_electric_constraints(
     if re_path is not None:
         expressions, horizons, bounds_rows = _parse_restricao_eletrica(re_path)
 
-    # Study horizon.
     _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
@@ -1587,7 +1584,6 @@ def convert_agrint_constraints(
     if not groups or not limits:
         return None
 
-    # Study horizon
     _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
@@ -1635,17 +1631,7 @@ def convert_agrint_constraints(
             )
             continue
 
-        # Render expression string
-        parts: list[str] = []
-        for i, (eff_coeff, var) in enumerate(parsed_terms):
-            abs_coeff = abs(eff_coeff)
-            is_neg = eff_coeff < 0.0
-            term_body = var if abs_coeff == 1.0 else f"{abs_coeff} * {var}"
-            if i == 0:
-                parts.append(f"- {term_body}" if is_neg else term_body)
-            else:
-                parts.append(f"- {term_body}" if is_neg else f"+ {term_body}")
-        expression = " ".join(parts)
+        expression = _render_signed_expression(parsed_terms)
 
         # Collect study-period limit rows for this group, keyed by (stage, block).
         # AGRINT has no seasonalize flag: The source model freezes its post-study limits

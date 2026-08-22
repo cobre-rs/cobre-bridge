@@ -321,7 +321,7 @@ def test_build_fpha_comparison_run_of_river_collapses_volume_axis() -> None:
             }
         ]
     )
-    hydros = [HydroEntity(newave_code=10, cobre_id=0, name="ROR", has_reservoir=False)]
+    hydros = [HydroEntity(newave_code=10, cobre_id=0, name="ROR")]
 
     metrics, surface, spill = build_fpha_comparison(nw, grid, cb, hydros)
 
@@ -388,7 +388,7 @@ def test_build_fpha_comparison_reconciles_useful_vs_absolute_volume() -> None:
             }
         ]
     )
-    hydros = [HydroEntity(newave_code=20, cobre_id=3, name="RES", has_reservoir=True)]
+    hydros = [HydroEntity(newave_code=20, cobre_id=3, name="RES")]
 
     metrics, surface, _ = build_fpha_comparison(nw, grid, cb, hydros)
 
@@ -451,7 +451,7 @@ def test_build_fpha_comparison_skips_plant_absent_on_one_side() -> None:
             }
         ]
     )
-    hydros = [HydroEntity(newave_code=10, cobre_id=0, name="ROR", has_reservoir=False)]
+    hydros = [HydroEntity(newave_code=10, cobre_id=0, name="ROR")]
 
     metrics, surface, spill = build_fpha_comparison(nw, grid, cb, hydros)
     assert metrics.is_empty()
