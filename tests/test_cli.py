@@ -1356,7 +1356,7 @@ class TestCliInProcess:
         # regardless of whichever cobre-python happens to be installed in the
         # dev/CI venv (which may itself now be older than MIN_COBRE_VERSION).
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version",
+            "cobre_bridge.cobre_compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         # Inject a fake ``cobre.io`` whose ``validate`` reports a failure with one
@@ -1429,7 +1429,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version",
+            "cobre_bridge.cobre_compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         cobre_pkg = types.ModuleType("cobre")
@@ -1488,7 +1488,7 @@ class TestCliInProcess:
         # regardless of whichever cobre-python happens to be installed in the
         # dev/CI venv (which may itself now be older than MIN_COBRE_VERSION).
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version",
+            "cobre_bridge.cobre_compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         cobre_pkg = types.ModuleType("cobre")
@@ -1873,7 +1873,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
+            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: "0.9.0"
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -1902,7 +1902,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
+            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: "0.9.0"
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -1944,7 +1944,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.9.0"
+            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: "0.9.0"
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -1987,7 +1987,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version", lambda: "0.12.0"
+            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: "0.12.0"
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -2033,7 +2033,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version",
+            "cobre_bridge.cobre_compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         validate = self._inject_cobre_io(
@@ -2066,7 +2066,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version", lambda: None
+            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: None
         )
         # Force ``import cobre.io`` to raise regardless of whether the real
         # cobre-python is installed in this environment (a ``None`` entry in
@@ -2100,7 +2100,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version", lambda: None
+            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: None
         )
         validate = self._inject_cobre_io(
             monkeypatch,
@@ -2141,7 +2141,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version",
+            "cobre_bridge.cobre_compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         interop_warning = (
@@ -2465,7 +2465,7 @@ class TestCliInProcess:
         dst = tmp_path / "dst"
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version",
+            "cobre_bridge.cobre_compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         interop_warning = (
@@ -2992,7 +2992,7 @@ class TestCliInProcess:
             return {"valid": False, "warnings": [], "errors": ["boom"]}
 
         monkeypatch.setattr(
-            "cobre_bridge.cli._installed_cobre_python_version",
+            "cobre_bridge.cobre_compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         self._inject_cobre_io(monkeypatch, MagicMock(side_effect=_fake_validate))

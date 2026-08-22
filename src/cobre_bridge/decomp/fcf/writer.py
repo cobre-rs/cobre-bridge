@@ -168,7 +168,7 @@ def write_boundary_checkpoint(
     boundary then self-describes its lag depth. ``0`` (the default, and the
     storage-only case) reserves no slots, leaving the checkpoint byte-identical to
     a no-lag boundary. The reservation is a cobre-side feature the pin and
-    :data:`~cobre_bridge.cli.MIN_COBRE_VERSION` floor guarantee is present.
+    :data:`~cobre_bridge.cobre_compat.MIN_COBRE_VERSION` floor guarantee is present.
 
     Raises
     ------

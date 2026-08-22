@@ -6,7 +6,7 @@ reused verbatim. The rated-capability sum is *not* reused as-is, though:
 :func:`_compute_max_turbined_rated_ac_adjusted` below is a DECOMP-only
 counterpart that layers the ``NUMCON``/``NUMMAQ``/``POTEFE``/``VAZEFE``
 machine-configuration overrides on top of the same per-conjunto registry
-data the shared ``converters.hydro._compute_max_turbined_rated`` reads —
+data the shared ``converters.hydro.bounds._compute_max_turbined_rated`` reads —
 some plants' *true* in-service machine count differs from ``hidr.dat``'s
 nameplate conjunto sum, and the shared helper (which the source-model side
 keeps byte-identical) exposes only the pre-summed total, not a per-conjunto
@@ -27,7 +27,7 @@ declared envelope itself.
 head-corrected
 engolimento, not the plain rated sum: :func:`_head_corrected_envelope`/
 :func:`_conjunto_head_corrected_envelope` mirror the source-model side's
-``converters.hydro._compute_max_turbined_head_corrected`` — derating the
+``converters.hydro.bounds._compute_max_turbined_head_corrected`` — derating the
 rated flow by the turbine affinity law ``(h_op / h_nom) ** k_turb`` and
 capping it at ``Σ n·p_nom / ρ_eq`` — using the per-stage
 ``h_op = ρ_eq / ρ_esp``. Two DECOMP-specific corrections vs the shared
@@ -255,8 +255,8 @@ def _compute_max_turbined_rated_ac_adjusted(
 ) -> tuple[float, float]:
     """Return ``(max_turbined, max_generation)`` — the AC-adjusted rated
     nameplate capacity at *stage_index* — the DECOMP-only counterpart to the
-    shared, un-derated, stage-invariant ``converters.hydro.
-    _compute_max_turbined_rated``.
+    shared, un-derated, stage-invariant
+    ``converters.hydro.bounds._compute_max_turbined_rated``.
 
     Sums :func:`_conjunto_rated_ac_adjusted` over every conjunto effective
     at *stage_index* (``effective.machine_conjunto_count(code,

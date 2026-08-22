@@ -1367,7 +1367,7 @@ class TestPerStageTurbinedEnvelopeHelper:
         from cobre_bridge.converters.hydro import _per_stage_turbined_envelope
 
         with patch(
-            "cobre_bridge.converters.hydro.convert_turbined_bounds_head_corrected",
+            "cobre_bridge.converters.hydro.bounds.convert_turbined_bounds_head_corrected",
             return_value=None,
         ):
             envelope = _per_stage_turbined_envelope(MagicMock(), MagicMock())
@@ -1387,7 +1387,7 @@ class TestPerStageTurbinedEnvelopeHelper:
             }
         )
         with patch(
-            "cobre_bridge.converters.hydro.convert_turbined_bounds_head_corrected",
+            "cobre_bridge.converters.hydro.bounds.convert_turbined_bounds_head_corrected",
             return_value=table,
         ):
             envelope = _per_stage_turbined_envelope(MagicMock(), MagicMock())
@@ -1918,13 +1918,13 @@ class TestConvertStorageBoundsPostStudy:
             confhd=mock_confhd,
         )
         with (
-            patch("cobre_bridge.converters.hydro.read_cadastro", return_value=cadastro),
+            patch("cobre_bridge.converters.hydro.bounds.read_cadastro", return_value=cadastro),
             patch(
-                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                "cobre_bridge.converters.hydro.bounds._extract_temporal_overrides",
                 return_value={10: overrides},
             ),
             patch(
-                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                "cobre_bridge.converters.hydro.bounds._read_ghmin_per_stage",
                 return_value={},
             ),
         ):
@@ -2037,9 +2037,9 @@ class TestConvertStorageBoundsMaxGenColumn:
             exph=None,
         )
         with (
-            patch("cobre_bridge.converters.hydro.read_cadastro", return_value=cadastro),
+            patch("cobre_bridge.converters.hydro.bounds.read_cadastro", return_value=cadastro),
             patch(
-                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                "cobre_bridge.converters.hydro.bounds._read_ghmin_per_stage",
                 return_value={10: {0: 100.0}},
             ),
         ):
@@ -2059,11 +2059,11 @@ class TestConvertStorageBoundsMaxGenColumn:
         id_map = _ne_filling_id_map()
         with (
             patch(
-                "cobre_bridge.converters.hydro.read_cadastro",
+                "cobre_bridge.converters.hydro.bounds.read_cadastro",
                 return_value=_make_ne_cadastro(),
             ),
             patch(
-                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                "cobre_bridge.converters.hydro.bounds._read_ghmin_per_stage",
                 return_value={1: {0: 100.0}},
             ),
         ):
@@ -2131,11 +2131,11 @@ class TestConvertStorageBoundsRamp:
         id_map = _ne_filling_id_map()
         with (
             patch(
-                "cobre_bridge.converters.hydro.read_cadastro",
+                "cobre_bridge.converters.hydro.bounds.read_cadastro",
                 return_value=_make_ne_cadastro(),
             ),
             patch(
-                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                "cobre_bridge.converters.hydro.bounds._read_ghmin_per_stage",
                 return_value={},
             ),
         ):
@@ -2208,11 +2208,11 @@ class TestConvertStorageBoundsRamp:
         id_map = _ne_filling_id_map()
         with (
             patch(
-                "cobre_bridge.converters.hydro.read_cadastro",
+                "cobre_bridge.converters.hydro.bounds.read_cadastro",
                 return_value=_make_ne_cadastro(),
             ),
             patch(
-                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                "cobre_bridge.converters.hydro.bounds._read_ghmin_per_stage",
                 return_value={},
             ),
         ):
@@ -2320,11 +2320,11 @@ class TestConvertStorageBoundsRamp:
         id_map = _ne_filling_id_map()
         with (
             patch(
-                "cobre_bridge.converters.hydro.read_cadastro",
+                "cobre_bridge.converters.hydro.bounds.read_cadastro",
                 return_value=_make_ne_cadastro(),
             ),
             patch(
-                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                "cobre_bridge.converters.hydro.bounds._read_ghmin_per_stage",
                 return_value={},
             ),
         ):
@@ -2354,12 +2354,12 @@ class TestConvertStorageBoundsRamp:
         juruena_id = id_map.hydro_id(309)
         with (
             patch(
-                "cobre_bridge.converters.hydro.read_cadastro",
+                "cobre_bridge.converters.hydro.bounds.read_cadastro",
                 return_value=_make_ne_cadastro(),
             ),
             # GHMIN for JURUENA (309) at stage 2 — inside the ramp window [2, 4).
             patch(
-                "cobre_bridge.converters.hydro._read_ghmin_per_stage",
+                "cobre_bridge.converters.hydro.bounds._read_ghmin_per_stage",
                 return_value={309: {2: 123.0}},
             ),
         ):
@@ -3063,7 +3063,7 @@ class TestProductivitySinMeans:
         confhd_obj.usinas = confhd
         case = make_case(tmp_path, hidr=hidr_obj, confhd=confhd_obj)
         overrides = patch(
-            "cobre_bridge.converters.hydro._apply_permanent_overrides",
+            "cobre_bridge.converters.hydro.productivity._apply_permanent_overrides",
             new=lambda cadastro, case: cadastro,
         )
         return case, overrides
@@ -3175,9 +3175,12 @@ class TestProductivitySinMeans:
         case, overrides = self._case(tmp_path, cadastro, confhd)
         with (
             overrides,
-            patch("cobre_bridge.converters.hydro._total_study_stages", return_value=4),
             patch(
-                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                "cobre_bridge.converters.hydro.productivity._total_study_stages",
+                return_value=4,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.productivity._extract_temporal_overrides",
                 return_value={},
             ),
         ):
@@ -3217,13 +3220,16 @@ class TestProductivitySinMeans:
         case, overrides = self._case(tmp_path, cadastro, confhd)
         with (
             overrides,
-            patch("cobre_bridge.converters.hydro._total_study_stages", return_value=3),
             patch(
-                "cobre_bridge.converters.hydro._extract_temporal_overrides",
+                "cobre_bridge.converters.hydro.productivity._total_study_stages",
+                return_value=3,
+            ),
+            patch(
+                "cobre_bridge.converters.hydro.productivity._extract_temporal_overrides",
                 return_value={1: [{"type": "CFUGA"}]},
             ),
             patch(
-                "cobre_bridge.converters.hydro._per_stage_equivalent_productivities",
+                "cobre_bridge.converters.hydro.productivity._per_stage_equivalent_productivities",
                 side_effect=fake_series,
             ),
         ):

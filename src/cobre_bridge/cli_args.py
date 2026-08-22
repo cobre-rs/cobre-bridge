@@ -78,3 +78,39 @@ class DashboardArgs(CommonArgs):
     case_dir: Path
     output: Path | None
     open_browser: bool
+
+
+#: The ``--format`` tokens the compare subcommands accept on the CLI.
+_VALID_CLI_FORMATS: frozenset[str] = frozenset(
+    {"console", "html", "csv", "parquet", "json", "all"}
+)
+
+
+def _parse_formats(raw: list[str] | None) -> set[str]:
+    """Parse ``--format`` tokens (comma-separated and/or repeatable) into a set.
+
+    Defaults to ``{"console", "parquet", "json"}`` when none given, so a plain
+    ``compare`` run still writes the queryable data artifacts (the always-on
+    behavior agents rely on). Expands ``"all"`` to every concrete format.
+    Raises ``ValueError`` naming the offending token on any unknown value.
+    """
+    if raw is None:
+        return {"console", "parquet", "json"}
+
+    formats: set[str] = set()
+    for element in raw:
+        for token in element.split(","):
+            cleaned = token.strip().lower()
+            if not cleaned:
+                continue
+            if cleaned not in _VALID_CLI_FORMATS:
+                msg = (
+                    f"unknown format '{cleaned}'; allowed formats are "
+                    f"{sorted(_VALID_CLI_FORMATS)}"
+                )
+                raise ValueError(msg)
+            if cleaned == "all":
+                formats |= {"console", "html", "csv", "parquet", "json"}
+            else:
+                formats.add(cleaned)
+    return formats

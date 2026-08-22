@@ -14,18 +14,36 @@ from typing import TYPE_CHECKING, Annotated, NoReturn
 import typer
 
 from cobre_bridge import __version__
-from cobre_bridge.cli_args import CheckArgs, CompareArgs, ConvertArgs, DashboardArgs
+from cobre_bridge.cli_args import (
+    CheckArgs,
+    CompareArgs,
+    ConvertArgs,
+    DashboardArgs,
+    _parse_formats,
+)
+from cobre_bridge.cobre_compat import MIN_COBRE_VERSION as MIN_COBRE_VERSION
+from cobre_bridge.cobre_validation import (
+    _partition_validation_warnings as _partition_validation_warnings,
+)
+from cobre_bridge.cobre_validation import _run_cobre_validation
 from cobre_bridge.config_resolution import (
     RESULTS_TOLERANCE_DEFAULT,
     load_config,
 )
-from cobre_bridge.diagnostics import Severity
+from cobre_bridge.conversion_manifest import _write_conversion_manifest
+from cobre_bridge.diagnostics import _write_diagnostics_json
 from cobre_bridge.errors import (
     BridgeError,
     CobreOutputError,
     SourceFileError,
     diagnostic_from_exception,
 )
+
+# noqa: F401 below -- re-exported so `cli._NULL_HANDLER` keeps resolving for the
+# ``test_configure_logging_levels`` import + the ``cli._configure_logging`` spy sites.
+from cobre_bridge.logging_config import NULL_HANDLER as _NULL_HANDLER  # noqa: F401
+from cobre_bridge.logging_config import configure_logging as _configure_logging
+from cobre_bridge.logging_config import restore_log_file_handler
 from cobre_bridge.preflight import PreflightVerdict
 from cobre_bridge.ui.console import (
     conversion_progress,
@@ -35,20 +53,20 @@ from cobre_bridge.ui.console import (
     render_checklist,
     render_conversion_summary,
     render_diagnostics,
-    render_error,
     spinner,
 )
 from cobre_bridge.verdict import (
+    _convert_status,
+    _convert_verdict_summary,
     build_verdict,
     check_summary,
     compare_summary,
-    convert_summary,
     dashboard_summary,
     decomp_dataset_summary,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping
 
     from rich.console import Console
 
@@ -56,100 +74,9 @@ if TYPE_CHECKING:
     from cobre_bridge.cli_args import CommonArgs
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
-    from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
-    from cobre_bridge.newave_files import NewaveFiles
     from cobre_bridge.pipeline import ConversionReport
-
-
-#: Minimum cobre / cobre-python version that can load the bridge's converted
-#: output. The manifest records it (single source of truth) and the
-#: ``--validate`` gate uses it to decide whether the installed cobre-python is
-#: new enough to validate the output. Keep the ``cobre-python`` pin in
-#: ``pyproject.toml`` in lockstep with this constant on any future bump.
-#:
-#: The floor is 0.14.3 because the emitted terminal boundary policy depends on
-#: it: 0.14.3's ``write_policy_checkpoint`` reserves the canonical inflow-lag
-#: state slots. On an older cobre those slots are absent and a boundary carrying
-#: inflow-lag gradient terms has its lag coupling silently dropped.
-MIN_COBRE_VERSION = "0.14.3"
-
-
-def _installed_cobre_python_version() -> str | None:
-    """Return the installed ``cobre-python`` distribution version, or ``None``.
-
-    The package imports as ``cobre`` but is distributed as ``cobre-python``;
-    this reads the distribution metadata. Returns ``None`` when it is not
-    installed, so the caller falls through to the generic "not installed" skip.
-    """
-    from importlib.metadata import PackageNotFoundError
-    from importlib.metadata import version as _dist_version
-
-    try:
-        return _dist_version("cobre-python")
-    except PackageNotFoundError:
-        return None
-
-
-def _cobre_python_supports_output(installed: str) -> bool:
-    """Whether an installed cobre-python *version* can load the bridge's output.
-
-    ``True`` when *installed* is at least :data:`MIN_COBRE_VERSION` by a numeric
-    release-segment comparison (so ``"0.10.0"`` and ``"0.11.2"`` qualify,
-    ``"0.9.1"`` does not). A non-numeric pre-release suffix on a segment is
-    ignored (``"0.10.0rc1"`` reads as ``0.10.0``); the gate only guards against an
-    obviously-older install, so the leniency is deliberate.
-    """
-
-    def _release(value: str) -> tuple[int, ...]:
-        parts: list[int] = []
-        for segment in value.split("."):
-            digits = ""
-            for char in segment:
-                if not char.isdigit():
-                    break
-                digits += char
-            parts.append(int(digits) if digits else 0)
-        return tuple(parts)
-
-    return _release(installed) >= _release(MIN_COBRE_VERSION)
-
-
-#: The ``--format`` tokens the compare subcommands accept on the CLI.
-_VALID_CLI_FORMATS: frozenset[str] = frozenset(
-    {"console", "html", "csv", "parquet", "json", "all"}
-)
-
-
-def _parse_formats(raw: list[str] | None) -> set[str]:
-    """Parse ``--format`` tokens (comma-separated and/or repeatable) into a set.
-
-    Defaults to ``{"console", "parquet", "json"}`` when none given, so a plain
-    ``compare`` run still writes the queryable data artifacts (the always-on
-    behavior agents rely on). Expands ``"all"`` to every concrete format.
-    Raises ``ValueError`` naming the offending token on any unknown value.
-    """
-    if raw is None:
-        return {"console", "parquet", "json"}
-
-    formats: set[str] = set()
-    for element in raw:
-        for token in element.split(","):
-            cleaned = token.strip().lower()
-            if not cleaned:
-                continue
-            if cleaned not in _VALID_CLI_FORMATS:
-                msg = (
-                    f"unknown format '{cleaned}'; allowed formats are "
-                    f"{sorted(_VALID_CLI_FORMATS)}"
-                )
-                raise ValueError(msg)
-            if cleaned == "all":
-                formats |= {"console", "html", "csv", "parquet", "json"}
-            else:
-                formats.add(cleaned)
-    return formats
 
 
 def _load_compare_context(
@@ -583,175 +510,6 @@ def _run_check(args: CheckArgs) -> None:
         raise typer.Exit(code=exit_code)
 
 
-def _validation_message(item: object) -> str:
-    """Extract the display text from a ``cobre.io.validate`` warning/error item.
-
-    Each item is either a plain string or a ``{"message": ...}`` dict; both
-    forms render and partition on the same text.
-    """
-    text = item.get("message", item) if isinstance(item, dict) else item
-    return str(text)
-
-
-def _partition_validation_warnings(
-    warnings: Sequence[object], whitelist_substrings: Sequence[str] = ()
-) -> tuple[list[object], list[object]]:
-    """Split ``cobre.io.validate`` ``warnings`` into ``(rendered, whitelisted)``.
-
-    A warning whose message (:func:`_validation_message`) contains any of
-    *whitelist_substrings* is whitelisted — not rendered as a "Validation
-    warning" and not counted in the rendered/blocking warning count; every
-    other warning goes to *rendered* exactly as before. An empty
-    *whitelist_substrings* — what ``convert newave`` passes — is the identity
-    partition: ``rendered == warnings`` and ``whitelisted == []``. Pure; never
-    touches ``errors``, and never suppresses a non-matching warning.
-    """
-    if not whitelist_substrings:
-        return list(warnings), []
-
-    rendered: list[object] = []
-    whitelisted: list[object] = []
-    for warning in warnings:
-        message = _validation_message(warning)
-        if any(substring in message for substring in whitelist_substrings):
-            whitelisted.append(warning)
-        else:
-            rendered.append(warning)
-    return rendered, whitelisted
-
-
-def _run_cobre_validation(
-    dst: Path,
-    *,
-    command: str,
-    summary: dict[str, object],
-    json_output: bool,
-    err_console: Console,
-    whitelist_substrings: Sequence[str] = (),
-) -> bool:
-    """Validate *dst* with the installed cobre-python and render the outcome.
-
-    Shared by every ``convert *`` command's ``--validate`` gate: the
-    :data:`MIN_COBRE_VERSION` skip, the ``cobre.io.validate`` call,
-    warning/error rendering (warnings are first partitioned through
-    :func:`_partition_validation_warnings` against *whitelist_substrings* —
-    ``convert newave`` passes an empty tuple, the identity case, so its
-    rendering stays byte-identical), and the machine-readable
-    ``summary["validation"]`` sub-object, populated only when *json_output*
-    is set. *command* names the caller in the whitelisted-note message;
-    *summary* is mutated in place.
-
-    Returns whether validation FAILED (``valid`` came back ``False``, or
-    ``cobre.io.validate`` itself raised) so the caller can flip its exit code
-    to 2 — a skipped validation (old/absent cobre-python) is never a failure.
-    Does not emit the enclosing ``--json`` verdict or raise ``typer.Exit``;
-    that stays the caller's job, run immediately after this returns.
-    """
-    installed = _installed_cobre_python_version()
-    if installed is not None and not _cobre_python_supports_output(installed):
-        print_status(
-            f"Note: converted output requires cobre-python >= "
-            f"{MIN_COBRE_VERSION} (installed cobre-python {installed} is "
-            f"older); skipping cobre-python validation.",
-            console=err_console,
-            style="#F5A623",
-        )
-        if json_output:
-            summary["validation"] = {
-                "ran": False,
-                "valid": None,
-                "warnings": 0,
-                "errors": 0,
-                "skipped_reason": "cobre-python-too-old",
-            }
-        return False
-
-    try:
-        import cobre.io  # type: ignore[import-untyped]
-    except ImportError:
-        print_status(
-            "Warning: cobre package not installed, skipping validation",
-            console=err_console,
-            style="#F5A623",
-        )
-        if json_output:
-            # Validation was requested but could not run; record that it was
-            # skipped so the absence of a real outcome is explicit.
-            summary["validation"] = {
-                "ran": False,
-                "valid": None,
-                "warnings": 0,
-                "errors": 0,
-            }
-        return False
-
-    try:
-        # cobre v0.6.x: cobre.io.validate is a function returning a
-        # report dict; it never raises (errors are surfaced as data).
-        result = cobre.io.validate(str(dst))
-    except Exception as exc:  # noqa: BLE001
-        render_error(f"Validation error: {exc}", console=err_console)
-        if json_output:
-            # Validation raised unexpectedly; still emit one JSON object so
-            # the --json contract (exactly one verdict on stdout) holds on
-            # this exit-2 path too. The conversion itself succeeded, so the
-            # summary is intact; only the validation outcome is an error.
-            summary["validation"] = {
-                "ran": False,
-                "valid": None,
-                "warnings": 0,
-                "errors": 1,
-            }
-        return True
-
-    raw_warnings = result.get("warnings", [])
-    errors = result.get("errors", [])
-    valid = bool(result.get("valid", False))
-
-    rendered_warnings, whitelisted_warnings = _partition_validation_warnings(
-        raw_warnings, whitelist_substrings
-    )
-
-    for warning in rendered_warnings:
-        print_status(
-            f"Validation warning: {_validation_message(warning)}",
-            console=err_console,
-            style="#F5A623",
-        )
-    if whitelisted_warnings:
-        # Whitelisted-but-present is worth one INFO note, never a WARNING —
-        # this is what tells the whitelist apart from a real suppression.
-        print_status(
-            f"Note: {len(whitelisted_warnings)} validation warning(s) matched "
-            "the expected external-solver-interop configuration for "
-            f"{command}; not rendered.",
-            console=err_console,
-        )
-
-    validation_failed = False
-    if not valid:
-        for err in errors:
-            print_status(
-                f"Validation error: {_validation_message(err)}",
-                console=err_console,
-                style="bold #DC4C4C",
-            )
-        print_status("Validation failed.", console=err_console, style="bold #DC4C4C")
-        validation_failed = True
-
-    if json_output:
-        # The machine-readable outcome under ``summary``; ``status`` stays
-        # derived from diagnostics only (validation never flips it).
-        summary["validation"] = {
-            "ran": True,
-            "valid": valid,
-            "warnings": len(rendered_warnings),
-            "errors": len(errors),
-        }
-
-    return validation_failed
-
-
 def _handle_conversion_pipeline_failure(
     exc: Exception, args: ConvertArgs, *, command: str, err_console: Console
 ) -> NoReturn:
@@ -917,39 +675,6 @@ def _run_newave_conversion(args: ConvertArgs) -> None:
     _gate_convert_exit(status, validation_failed=validation_failed)
 
 
-def _convert_verdict_summary(report: ConversionReport | None) -> dict[str, object]:
-    """The convert ``summary`` block — entity counts, zeroed when *report* is None.
-
-    A thin wrapper over :func:`cobre_bridge.verdict.convert_summary` that supplies
-    the five counts from a :class:`ConversionReport` (or all zeros on the failure
-    path, where ``report`` is ``None``). Keeping the count plumbing here lets the
-    real-run, failure, and dry-run call sites share one source of truth while the
-    key order itself stays owned by ``verdict.convert_summary``.
-    """
-    if report is None:
-        return convert_summary(0, 0, 0, 0, 0)
-    return convert_summary(
-        report.hydro_count,
-        report.thermal_count,
-        report.bus_count,
-        report.line_count,
-        report.stage_count,
-    )
-
-
-def _convert_status(diagnostics: Sequence[Diagnostic], *, success: str) -> str:
-    """Derive the convert verdict ``status`` from diagnostic severity ONLY.
-
-    Returns ``"error"`` when any diagnostic has ``ERROR`` severity, otherwise the
-    caller's *success* token (``"ok"`` for a real run, ``"dry-run"`` for a dry
-    run). Validation outcome never enters here — it lands in ``summary.validation``
-    and the exit code, keeping ``status`` a pure diagnostics signal.
-    """
-    if any(d.severity is Severity.ERROR for d in diagnostics):
-        return "error"
-    return success
-
-
 def _gate_convert_exit(status: str, *, validation_failed: bool) -> None:
     """Convert exit-code gate: validation failure (2) over error status (1)."""
     if validation_failed:
@@ -1014,193 +739,6 @@ def _fail(
     else:
         render_diagnostics([diag], console=args.err_console(), quiet=args.quiet)
     raise typer.Exit(code=code)
-
-
-def _write_diagnostics_json(
-    report: ConversionReport,
-    path: Path,
-    *,
-    diagnostics: Sequence[Diagnostic] | None = None,
-    console: Console,
-) -> None:
-    """Write the conversion counts + diagnostics to *path* as JSON.
-
-    ``diagnostics`` defaults to ``report.diagnostics`` (the plain
-    ``convert newave``/``convert decomp`` contract); a caller with additional
-    findings not yet folded into ``report`` — e.g. ``convert decomp
-    --boundary-fcf``'s importer diagnostics — passes the combined list
-    explicitly so the sidecar matches the ``--json`` verdict's merge.
-
-    A write failure is reported but does not change the exit code — the conversion
-    itself already succeeded.
-    """
-    resolved_diagnostics = report.diagnostics if diagnostics is None else diagnostics
-    payload = {
-        "summary": {
-            "hydros": report.hydro_count,
-            "thermals": report.thermal_count,
-            "buses": report.bus_count,
-            "lines": report.line_count,
-            "stages": report.stage_count,
-        },
-        "diagnostics": [d.to_dict() for d in resolved_diagnostics],
-    }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-    except OSError as exc:
-        print_status(
-            f"Warning: failed to write diagnostics JSON: {exc}",
-            console=console,
-            style="#F5A623",
-        )
-    else:
-        print_status(f"Diagnostics written to {path}", console=console)
-
-
-def _write_conversion_manifest(
-    report: ConversionReport,
-    src: Path,
-    dst: Path,
-    *,
-    command: str,
-    discover: Callable[[Path], NewaveFiles | DecompFiles],
-    console: Console,
-) -> None:
-    """Write the conversion provenance manifest into ``dst`` as JSON.
-
-    Rediscovers the source-model input files via *discover* (each command
-    passes its own files-dataclass constructor) to hash, builds a
-    :class:`ConversionManifest` labelled with *command* from the bridge
-    version/git SHA, the entity counts in *report*, and its diagnostics, then
-    writes it to ``dst / "conversion_manifest.json"``.
-
-    Both a discovery failure and a write failure are reported as warnings and
-    swallowed — the conversion itself already succeeded, so neither changes the
-    exit code.
-    """
-    from cobre_bridge.conversion_manifest import ConversionManifest
-    from cobre_bridge.provenance_manifest import (
-        hash_input_files,
-        summarize_diagnostics,
-    )
-
-    try:
-        files = discover(src)
-    except OSError as exc:
-        print_status(
-            f"Warning: failed to discover source files for conversion manifest: {exc}",
-            console=console,
-            style="#F5A623",
-        )
-        return
-
-    entity_counts = {
-        "hydros": report.hydro_count,
-        "thermals": report.thermal_count,
-        "buses": report.bus_count,
-        "lines": report.line_count,
-        "stages": report.stage_count,
-    }
-    # Record the minimum cobre version the output requires. Every converted case
-    # now emits a ``training.parallelism.backward_scheduler`` block (cobre 0.12.0+),
-    # ``operational_start_date`` on all system entities (cobre 0.10.0+), and a
-    # mandatory hydro ``unit_groups`` array with the top-level ``bus_id`` removed
-    # (cobre 0.13.0+), so the output is only loadable by cobre >= MIN_COBRE_VERSION.
-    manifest = ConversionManifest.create(
-        command,
-        src,
-        dst,
-        entity_counts=entity_counts,
-        input_files=hash_input_files(files),
-        diagnostics_summary=summarize_diagnostics(report.diagnostics),
-        diagnostics=[d.to_dict() for d in report.diagnostics],
-        min_cobre_version=MIN_COBRE_VERSION,
-    )
-
-    path = dst / "conversion_manifest.json"
-    try:
-        manifest.to_json(path)
-    except OSError as exc:
-        print_status(
-            f"Warning: failed to write conversion manifest: {exc}",
-            console=console,
-            style="#F5A623",
-        )
-    else:
-        print_status(f"Conversion manifest written to {path}", console=console)
-
-
-#: A no-op handler parked on the package logger when warnings are suppressed, so a
-#: suppressed record does not fall through to ``logging.lastResort`` (which would
-#: otherwise echo it to stderr, defeating the suppression).
-_NULL_HANDLER = logging.NullHandler()
-
-#: The ``--log-file`` DEBUG ``FileHandler`` attached to the package logger for the
-#: duration of a run, or ``None`` when no ``--log-file`` was given. ``main`` removes
-#: and closes it in its ``finally`` so it never leaks across in-process invocations
-#: (the autouse test fixture restores ``propagate``/level but NOT handlers).
-_LOG_FILE_HANDLER: logging.FileHandler | None = None
-
-
-def _configure_logging(verbose: int, log_file: Path | None) -> None:
-    """Configure logging for a CLI run.
-
-    *verbose* is a graduated count selecting the live console level:
-    ``0`` keeps ``cobre_bridge`` warnings recorded — the diagnostics collector and
-    ``--diagnostics-json`` rely on them — but off the live console (the Rich
-    diagnostics block is the single user-facing surface, and warnings are not
-    printed twice); ``1`` (``-v`` / ``--verbose``) raises the console to INFO; and
-    ``2`` or more (``-vv``) raises it to DEBUG.
-
-    This is a behavior change from the previous boolean ``--verbose``: a bare
-    ``--verbose`` used to mean DEBUG and now means INFO; ``-vv`` is required for the
-    full DEBUG firehose. ``--log-file`` (below) gives the complete DEBUG trace to
-    anyone who needs it regardless of the console level.
-
-    When *log_file* is not ``None``, a DEBUG ``FileHandler`` is attached to the
-    ``cobre_bridge`` logger and the package logger level is lowered to DEBUG, so the
-    file always captures the full trace even at console verbose ``0`` (the console
-    output stays at the ladder level — it is driven by ``basicConfig``/root, while
-    ``_NULL_HANDLER`` keeps suppressed records off ``logging.lastResort``). The
-    created handler is stored in the module-level ``_LOG_FILE_HANDLER`` so ``main``
-    can remove and close it; ``main`` also restores ``propagate`` afterwards.
-    """
-    global _LOG_FILE_HANDLER
-
-    pkg = logging.getLogger("cobre_bridge")
-    if verbose >= 1:
-        level = logging.DEBUG if verbose >= 2 else logging.INFO
-        logging.basicConfig(
-            level=level,
-            format="%(levelname)s %(name)s: %(message)s",
-        )
-        pkg.setLevel(level)
-        pkg.propagate = True
-        # Symmetric with the suppress branch below: drop the null handler so a
-        # verbose run after a suppressed one in the same process leaves the
-        # package logger in a clean state (removeHandler is a no-op if absent).
-        pkg.removeHandler(_NULL_HANDLER)
-    else:
-        # Leave the package logger level untouched (root's default WARNING already
-        # records warnings for the collector); just keep them off the live console.
-        if _NULL_HANDLER not in pkg.handlers:
-            pkg.addHandler(_NULL_HANDLER)
-        pkg.propagate = False
-
-    if log_file is not None:
-        # An unwritable path raises OSError here; it is deliberately not swallowed —
-        # an unwritable --log-file is a user error that should fail loudly through
-        # the per-command CLI boundary.
-        handler = logging.FileHandler(log_file, encoding="utf-8")
-        handler.setLevel(logging.DEBUG)
-        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
-        pkg.addHandler(handler)
-        # Lower the logger threshold so DEBUG records reach the file handler even
-        # when the console ladder leaves it at verbose 0.
-        pkg.setLevel(logging.DEBUG)
-        _LOG_FILE_HANDLER = handler
 
 
 # ---------------------------------------------------------------------------
@@ -2111,18 +1649,13 @@ def main() -> None:
     ``_configure_logging`` flips, and removes + closes any ``--log-file``
     ``FileHandler`` it attached, so a real CLI run never leaks logging state.
     """
-    global _LOG_FILE_HANDLER
-
     pkg_logger = logging.getLogger("cobre_bridge")
     prior_propagate = pkg_logger.propagate
     try:
         app()
     finally:
         pkg_logger.propagate = prior_propagate
-        if _LOG_FILE_HANDLER is not None:
-            pkg_logger.removeHandler(_LOG_FILE_HANDLER)
-            _LOG_FILE_HANDLER.close()
-            _LOG_FILE_HANDLER = None
+        restore_log_file_handler(pkg_logger)
 
 
 if __name__ == "__main__":
