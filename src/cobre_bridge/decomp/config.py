@@ -11,7 +11,7 @@ the external white-noise inflow model contributes no inflow-lag state, so cobre
 resolves a zero depth and reserving lag slots would be dead state (and would
 raise cobre's lag-blind-stage advisory for nothing). The inflow-lag depth is a
 property of the *boundary policy*: the boundary-FCF importer
-(``fcf/__init__.py``) reserves exactly the depth the loaded cuts reference — and
+(``fcf/importer.py``) reserves exactly the depth the loaded cuts reference — and
 only when a boundary policy is actually imported. cobre's own inflow-lag-depth
 inference (sized from PAR(p) plus the boundary policy) is slated to derive that
 depth from the checkpoint itself, retiring even the importer's patch.

@@ -1,7 +1,7 @@
 """Tests for the cobre-bridge CLI and conversion pipeline.
 
 Pipeline unit tests use ``unittest.mock.patch`` to replace the converter functions with
-canned return values so no real the source model files are needed.
+canned return values so no real source-model files are needed.
 
 CLI integration tests use two strategies:
 - Error-path tests invoke ``cobre-bridge`` as a subprocess (no mocking needed
@@ -2825,7 +2825,9 @@ class TestCliInProcess:
                 "cobre_bridge.decomp.pipeline.convert_decomp_case",
                 return_value=fake_report,
             ),
-            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+            patch(
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf"
+            ) as mock_import,
         ):
             code, _stdout, _stderr = self._invoke_main(
                 ["convert", "decomp", str(src), str(dst), "--no-fcf"],
@@ -2863,7 +2865,7 @@ class TestCliInProcess:
                 "cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"
             ) as mock_capability,
             patch(
-                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf",
                 return_value=dst / "boundary",
             ) as mock_import,
             patch(
@@ -2914,7 +2916,9 @@ class TestCliInProcess:
                 "cobre_bridge.decomp.pipeline.convert_decomp_case",
                 return_value=fake_report,
             ),
-            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+            patch(
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf"
+            ) as mock_import,
         ):
             code, _stdout, stderr = self._invoke_main(
                 ["convert", "decomp", str(src), str(dst)],
@@ -2949,7 +2953,9 @@ class TestCliInProcess:
                 "cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability",
                 side_effect=RuntimeError(REMEDIATION),
             ),
-            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+            patch(
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf"
+            ) as mock_import,
         ):
             code, _stdout, stderr = self._invoke_main(
                 ["convert", "decomp", str(src), str(dst)],
@@ -2998,7 +3004,7 @@ class TestCliInProcess:
             ),
             patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
             patch(
-                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf",
                 side_effect=_fake_import,
             ),
         ):
@@ -3034,7 +3040,9 @@ class TestCliInProcess:
                 "cobre_bridge.decomp.pipeline.convert_decomp_case",
                 return_value=fake_report,
             ),
-            patch("cobre_bridge.decomp.fcf.import_boundary_fcf") as mock_import,
+            patch(
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf"
+            ) as mock_import,
         ):
             code, _stdout, stderr = self._invoke_main(
                 ["convert", "decomp", str(src), str(dst), "--dry-run"],
@@ -3084,7 +3092,7 @@ class TestCliInProcess:
             ),
             patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
             patch(
-                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf",
                 side_effect=_fake_import,
             ),
         ):
@@ -3143,7 +3151,7 @@ class TestCliInProcess:
             ),
             patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
             patch(
-                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf",
                 side_effect=_fake_import,
             ),
         ):
@@ -3203,7 +3211,7 @@ class TestCliInProcess:
             ),
             patch("cobre_bridge.decomp.fcf.capability.ensure_boundary_fcf_capability"),
             patch(
-                "cobre_bridge.decomp.fcf.import_boundary_fcf",
+                "cobre_bridge.decomp.fcf.importer.import_boundary_fcf",
                 side_effect=_fake_import,
             ),
         ):
@@ -4609,7 +4617,7 @@ class TestCompareConfigEnvPrecedence:
         return workdir
 
     def _stub_readers(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Stub the heavy the-source-model / Cobre readers shared by both commands."""
+        """Stub the heavy source-model / Cobre readers shared by both commands."""
         from tests.conftest import make_nw_files
 
         # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import polars as pl
 import pyarrow as pa
-from idecomp.decomp import Vazoes
+from idecomp.decomp import Dadger, Vazoes
 
 from cobre_bridge import cobre_schemas, emission_checks
 from cobre_bridge import diagnostics as dx
@@ -90,6 +90,76 @@ DECOMP_CONVERSION_PHASE_LABELS: tuple[str, ...] = (
     "Converting constraints",
     "Writing outputs",
 )
+
+
+@dataclass
+class DecompCaseArtifacts:
+    """In-memory artifacts threaded across the six conversion phases.
+
+    ``_discover`` populates every field through ``tx``; ``_convert_core_entities``
+    and ``_convert_scenarios`` populate the rest of the entity-level fields;
+    ``_resolve_bounds`` and ``_convert_constraints`` populate the resolved
+    bound/constraint fields that ``_emit_and_write`` consumes. Every phase
+    reads its inputs back off the same bundle rather than its own locals, so
+    no value crosses a phase boundary through anything but *artifacts*. A
+    field not yet populated by the phase that owns it defaults to ``None``.
+    """
+
+    case: DecompCase
+    id_map: DecompIdMap
+    dadger: Dadger
+    calendar: list[temporal_conv.OperativeStage]
+    vazoes: Vazoes
+    effective: cadastro_conv.EffectiveCadastro
+    itaipu_operated: bool
+    fan_probabilities: list[float]
+    tx: float
+    config: dict | None = None
+    stages_dict: dict | None = None
+    hydros_dict: dict | None = None
+    thermals_dict: dict | None = None
+    buses_doc: dict | None = None
+    lines_doc: dict | None = None
+    line_bounds: pa.Table | None = None
+    initial_conditions: dict | None = None
+    deficit_cost: float | None = None
+    has_travel_time: bool | None = None
+    fpha_codes: set[int] | None = None
+    # Populated by `_resolve_bounds`.
+    census: constraint_registers.ConstraintCensus | None = None
+    pumping_ids: dict[int, int] | None = None
+    block_counts: dict[int, int] | None = None
+    hydro_bounds: pa.Table | None = None
+    thermal_bounds_table: pa.Table | None = None
+    pumping_bounds_table: pa.Table | None = None
+    # Populated by `_convert_constraints`.
+    availability_values: (
+        dict[tuple[int, int, int], group_bounds_conv.GroupBoundEntry] | None
+    ) = None
+    group_bounds: pa.Table | None = None
+    contract_bounds_table: pa.Table | None = None
+    energy_contracts_doc: dict | None = None
+    contracts: list[contracts_conv.Contract] | None = None
+
+
+@dataclass
+class FcfInputs:
+    """Optional out-parameter carrying the pipeline's in-memory ``config``/
+    ``initial_conditions`` dicts back to a caller that needs them post-return
+    (the boundary-FCF importer's ``config``/``initial_conditions`` params —
+    see ``fcf/importer.py::import_boundary_fcf``).
+
+    Deliberately not :class:`DecompCaseArtifacts`: that bundle carries several
+    mandatory fields (the parsed case, id map, calendar, and more) that are
+    unavailable to a caller before ``convert_decomp_case`` runs, so it cannot
+    be constructed ahead of the call the way an empty ``FcfInputs()`` can.
+    ``convert_decomp_case`` assigns the same dict objects it wrote onto the
+    passed instance, leaving both fields ``None`` when not requested (the
+    default) or on a failed conversion.
+    """
+
+    config: dict | None = None
+    initial_conditions: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -257,6 +327,12 @@ def discover_decomp_files(src: Path) -> DecompFiles:
 #: null on the result. Shared by :func:`_rejoin_thermal_cost`,
 #: :func:`_rejoin_contract_price`, and :func:`_attach_water_withdrawal`.
 _NULL_BLOCK_SENTINEL = -1
+
+#: The ``(stage_id, block_id)`` tail every resolved bound table sorts by,
+#: after its own leading entity-id column(s) -- shared by :func:`_resolve_bounds`
+#: and :func:`_convert_constraints` so the two phases can't drift onto
+#: different orderings for the same table shape.
+_BOUND_SORT_KEYS = [("stage_id", "ascending"), ("block_id", "ascending")]
 
 
 def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.Table:
@@ -676,6 +752,20 @@ def _attach_water_withdrawal(
     return merged.to_arrow()
 
 
+def _first_diversion_channel(
+    effective: cadastro_conv.EffectiveCadastro, code: int
+) -> cadastro_conv.DiversionChannel | None:
+    """The first stage's non-``None`` diversion channel for *code*, or ``None``
+    if it never has one -- shared by :func:`_diversion_channels` and
+    :func:`_base_diversion_channels`.
+    """
+    for stage in range(effective.n_stages):
+        channel = effective.diversion(code, stage)
+        if channel is not None:
+            return channel
+    return None
+
+
 def _diversion_channels(
     hydro_bounds: pa.Table,
     id_map: DecompIdMap,
@@ -715,12 +805,9 @@ def _diversion_channels(
     unresolved: list[int] = []
     for hydro_id in sorted(floored_ids):
         code = code_by_id.get(hydro_id)
-        channel = None
-        if code is not None:
-            for stage in range(effective.n_stages):
-                channel = effective.diversion(code, stage)
-                if channel is not None:
-                    break
+        channel = (
+            _first_diversion_channel(effective, code) if code is not None else None
+        )
         if (
             channel is None
             or channel.limit is None
@@ -769,11 +856,7 @@ def _base_diversion_channels(
         source_id = id_map.hydro_id(code)
         if source_id in already_bounded_ids:
             continue
-        channel = None
-        for stage in range(effective.n_stages):
-            channel = effective.diversion(code, stage)
-            if channel is not None:
-                break
+        channel = _first_diversion_channel(effective, code)
         if channel is None or channel.downstream not in operated:
             continue
         downstream_id = id_map.hydro_id(channel.downstream)
@@ -815,8 +898,8 @@ def _libs_electrical_census_diagnostic(
     its own per-restriction WARNING/INFO diagnostic).
 
     This supersedes the flat ``decomp-libs-electrical-present`` warning for
-    the converted subset (:func:`_convert_decomp_case_impl` suppresses that
-    warning once a model converts) -- this is the one place a caller reads
+    the converted subset (:func:`_emit_and_write` suppresses that warning
+    once a model converts) -- this is the one place a caller reads
     how much of the entry actually converted, so no "not converted" claim
     survives over it.
     """
@@ -848,120 +931,13 @@ def _libs_electrical_census_diagnostic(
     )
 
 
-def convert_decomp_case(
-    src: Path,
-    dst: Path,
-    *,
-    force: bool = False,
-    on_phase: Callable[[str], None] | None = None,
-    dry_run: bool = False,
-) -> ConversionReport:
-    """Convert one deck revision into a Cobre case directory.
-
-    Mirrors the NEWAVE twin ``convert_newave_case``'s return contract: wraps
-    the conversion in a top-level :func:`cobre_bridge.diagnostics.collect`
-    sink and a package-logger ``dx.WarningCollector`` so every structured
-    ``dx.emit`` finding *and* every residual ``logger.warning`` string is
-    captured, then returns them as one de-duplicated
-    :class:`~cobre_bridge.pipeline.ConversionReport`.
-
-    Parameters
-    ----------
-    dry_run:
-        When ``True``, run the full in-memory conversion but write nothing to
-        *dst* (no files, no subdirectories). The would-write paths are still
-        recorded in :attr:`~cobre_bridge.pipeline.ConversionReport.would_write_paths`.
-
-    Returns
-    -------
-    ConversionReport
-        Summary of what was converted: the five entity/stage counts, a
-        ``diagnostics`` list of every structured finding, and a ``warnings``
-        list of the WARNING-severity summaries.
-
-    Raises
-    ------
-    ValueError
-        If the post-emission self-checks (cobre 0.13 rules 43/41/45/38/36 and
-        the ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
-        find an ``ERROR``-severity violation in the converted artifacts. An
-        ``INFO`` finding (e.g. rule 43's "not applicable" report, emitted when
-        no hydro-bounds capacity column is populated) never raises. No report
-        is returned on this path.
-    FileExistsError
-        If *dst* already exists, is non-empty, and ``force`` is not set.
+def _discover(src: Path) -> DecompCaseArtifacts:
+    """The ``step("Discovering deck")`` phase: parse *src* via one
+    :class:`DecompCase`, resolve the cadastro override view (emitting its
+    overrides-applied/topology-relinked diagnostics), and compute the scalars
+    every later phase needs -- the Itaipu-operated flag, the terminal fan
+    probabilities, and the annual discount rate.
     """
-    # This refusal must run before the clearing try/except below: it is a
-    # "do not touch dst" guard, not a mid-write failure, so it must never
-    # reach ``clear_dst_contents`` and delete a pre-existing, unrelated case
-    # (mirrors the source model's own NEWAVE-twin ordering, which performs
-    # this check ahead of its own write/clear try block).
-    if dst.exists() and any(dst.iterdir()):
-        if not force:
-            raise FileExistsError(
-                f"{dst} already contains files; pass force to overwrite"
-            )
-        # --force over a populated dst: pre-clear the previous case's full
-        # artifact set before rewriting, so a conditional artifact this run
-        # does not reproduce (post_study_stages.json, boundary/) cannot
-        # survive. Skipped under a dry run, which never mutates dst.
-        if not dry_run:
-            clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
-
-    collector = dx.WarningCollector()
-    pkg_logger = logging.getLogger("cobre_bridge")
-    pkg_logger.addHandler(collector)
-    try:
-        # Structured diagnostics emitted by converters (and the inner
-        # emission-self-check re-emit loop below) land in ``collected``; any
-        # remaining ``logger.warning`` strings (the deferral warning, the
-        # topology non-itemized warning) are picked up by ``collector`` and
-        # bridged below, so every warning still surfaces.
-        with dx.collect() as collected:
-            report = _convert_decomp_case_impl(
-                src, dst, force=force, on_phase=on_phase, dry_run=dry_run
-            )
-    except BaseException:
-        # The write phase is a sequence of independent file writes with no
-        # rollback, so a failure partway through can leave a subset of the
-        # output files behind. Remove the known pipeline outputs so a
-        # half-written case is never mistaken for a complete one and a plain
-        # (no --force) re-run is not refused as "destination not empty".
-        # Skipped under a dry run: nothing was written, and dst may be a
-        # pre-existing populated directory the user never asked to clear.
-        if not dry_run:
-            clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
-        raise
-    finally:
-        pkg_logger.removeHandler(collector)
-    report.diagnostics = dx.finalize_diagnostics(collected, collector.messages)
-    # Backward-compatible flat WARNING strings derived from the diagnostics.
-    report.warnings = [
-        d.summary for d in report.diagnostics if d.severity is dx.Severity.WARNING
-    ]
-    return report
-
-
-def _convert_decomp_case_impl(
-    src: Path,
-    dst: Path,
-    *,
-    force: bool = False,
-    on_phase: Callable[[str], None] | None = None,
-    dry_run: bool = False,
-) -> ConversionReport:
-    """Run the DECOMP conversion pipeline (warning capture handled by the wrapper).
-
-    ``on_phase`` (when given) is called once at each boundary in
-    :data:`DECOMP_CONVERSION_PHASE_LABELS`, so the CLI can advance a progress bar
-    without the pipeline knowing anything about rendering.
-
-    When ``dry_run`` is ``True``, the build phases run exactly as for a real run,
-    but the write phase creates no directories and writes no files; the paths that
-    would have been written are still accumulated and recorded on the report.
-    """
-    step = on_phase if on_phase is not None else (lambda _label: None)
-    step("Discovering deck")
     case = DecompCase.from_directory(src)
     id_map = case.id_map
     dadger = case.dadger
@@ -1016,15 +992,36 @@ def _convert_decomp_case_impl(
 
     tx = float(dadger.tx.taxa) / 100.0
 
-    if not dry_run:
-        dst.mkdir(parents=True, exist_ok=True)
+    return DecompCaseArtifacts(
+        case=case,
+        id_map=id_map,
+        dadger=dadger,
+        calendar=calendar,
+        vazoes=vazoes,
+        effective=effective,
+        itaipu_operated=itaipu_operated,
+        fan_probabilities=fan_probabilities,
+        tx=tx,
+    )
 
-    # Every output path is routed through one ``CaseWriter`` so the
-    # would-write listing, the byte format, and the dry-run gate live in
-    # exactly one place, rather than guarding ~24 individual write sites.
-    writer = CaseWriter(dst, dry_run=dry_run)
 
-    step("Converting entities")
+def _convert_core_entities(artifacts: DecompCaseArtifacts, writer: CaseWriter) -> None:
+    """The ``step("Converting entities")`` phase: CVaR, ``config``/``stages``,
+    FPHA configs, productivity, penalties, the ``initial_conditions`` doc,
+    buses, hydros (kept on *artifacts*, not written -- the bounds phase defers
+    ``hydros.json`` for the diversion-channel coupling), lines (+ the Itaipu
+    SE<->IV line), pumping, thermals + the GNL splice, production models,
+    energy-productivity parquet, geometry, tailrace, and the
+    non-controllable-source registry. Populates *artifacts*' entity fields.
+    """
+    case = artifacts.case
+    id_map = artifacts.id_map
+    dadger = artifacts.dadger
+    effective = artifacts.effective
+    itaipu_operated = artifacts.itaipu_operated
+    tx = artifacts.tx
+    fan_probabilities = artifacts.fan_probabilities
+
     # DECOMP risk aversion (CVaR): resolve the AR register / FCF-header CVaR
     # into a per-stage cobre risk measure, emitted uniformly across all stages
     # (temporal.stage_records) so cobre admits the gap stopping rule under CVaR
@@ -1048,13 +1045,15 @@ def _convert_decomp_case_impl(
             ),
             logger=_LOG,
         )
-    writer.write_json("config.json", config_conv.convert_config(case))
+    artifacts.config = config_conv.convert_config(case)
+    writer.write_json("config.json", artifacts.config)
     stages_dict = temporal_conv.convert_stages(
         case,
         annual_discount_rate=tx,
         fan_probabilities=fan_probabilities,
         cvar=cvar,
     )
+    artifacts.stages_dict = stages_dict
     writer.write_json("stages.json", stages_dict)
 
     # FPHA-anchor fidelity: the source model fits each plant's hydro production
@@ -1065,6 +1064,7 @@ def _convert_decomp_case_impl(
     # mean) — see hydro._equivalent_productivity_mw_per_m3s and decomp/fpha.py.
     initial_volumes = hydro_conv._operated_initial_volumes(case, effective=effective)
     fpha_codes = fpha_conv.fpha_eligible_codes(effective, id_map)
+    artifacts.fpha_codes = fpha_codes
     fpha_configs: dict[int, dict] = {}
     reference_volumes: dict[int, dict] = {}
     for code in fpha_codes:
@@ -1087,6 +1087,7 @@ def _convert_decomp_case_impl(
     )
     deficit_costs = network_conv._bus_deficit_costs(dadger)
     deficit_cost = max(deficit_costs.values()) if deficit_costs else 0.0
+    artifacts.deficit_cost = deficit_cost
     writer.write_json(
         "penalties.json",
         config_conv.convert_penalties(
@@ -1106,6 +1107,7 @@ def _convert_decomp_case_impl(
     # is fixed. Removal condition tracked in the cobre repository's
     # conversion-found-improvements registry (C-travel-time).
     has_travel_time = bool(travel_time_conv.read_travel_times(dadger))
+    artifacts.has_travel_time = has_travel_time
     # Built here but written below (after GNL): an anticipated GNL fleet extends
     # it with the left/right temporal-boundary arrays, and those need the thermal
     # ids assigned when thermals.json is built.
@@ -1116,12 +1118,15 @@ def _convert_decomp_case_impl(
         ),
         "filling_storage": [],
     }
+    artifacts.initial_conditions = initial_conditions_doc
 
     buses_doc = network_conv.convert_buses(case, id_map)
+    artifacts.buses_doc = buses_doc
     writer.write_json("system/buses.json", buses_doc)
     hydros_dict = hydro_conv.convert_hydros(
         case, id_map, effective=effective, fpha_codes=fpha_codes
     )
+    artifacts.hydros_dict = hydros_dict
     # hydros.json is written after the bound tables are resolved (below): a
     # plant carrying a positive QDES diversion floor (min_diversion_m3s > 0)
     # must also declare its diversion channel, or cobre rejects the floor as
@@ -1144,6 +1149,8 @@ def _convert_decomp_case_impl(
             target_bus_id=id_map.bus_id(itaipu_submercado),
             capacity_mw=network_conv._itaipu_50hz_capacity_mw(dadger),
         )
+    artifacts.lines_doc = lines_doc
+    artifacts.line_bounds = line_bounds
     writer.write_json("system/lines.json", lines_doc)
     writer.write_json(
         "system/pumping_stations.json",
@@ -1185,13 +1192,14 @@ def _convert_decomp_case_impl(
             len(gnl.thermals),
             len(gnl.future_anticipated_deliveries),
         )
+    artifacts.thermals_dict = thermals_dict
     writer.write_json("system/thermals.json", thermals_dict)
     # The PAR inflow-lag seed (initial_conditions.recent_observations) is NOT
     # written here. The boundary cuts price the inflow-lag *deviation from the
     # seasonal mean* (MLT), not the absolute inflow, so a raw observation seed is
     # only correct once the cut RHS is folded by that same mean. Both the mean
     # fold and the raw seed are authored together by the boundary-FCF importer
-    # (`fcf/__init__.py::import_boundary_fcf`, which has the mlt.dat the fold
+    # (`fcf/importer.py::import_boundary_fcf`, which has the mlt.dat the fold
     # needs), patched onto this file after conversion -- so they can never ship
     # apart. A plain conversion (no boundary FCF) keeps the lag state at 0: its
     # inflow model is order 0 (no autoregression), so the lags are inert anyway.
@@ -1211,10 +1219,26 @@ def _convert_decomp_case_impl(
     tailrace_table = fpha_conv.convert_tailrace_curves(case, id_map)
     if tailrace_table is not None:
         writer.write_parquet("system/tailrace_curves.parquet", tailrace_table)
+
     ncs_registry = ncs_conv.convert_non_controllable_sources(case, id_map)
     writer.write_json("system/non_controllable_sources.json", ncs_registry)
 
-    step("Converting scenarios")
+
+def _convert_scenarios(artifacts: DecompCaseArtifacts, writer: CaseWriter) -> None:
+    """The ``step("Converting scenarios")`` phase: inflow stats, external
+    inflows, the Itaipu ``carga_ande`` extra bus loads, load stats/factors,
+    non-controllable-source stats/factors, and the deterministic external
+    non-controllable-source/load scenarios.
+    """
+    case = artifacts.case
+    id_map = artifacts.id_map
+    dadger = artifacts.dadger
+    calendar = artifacts.calendar
+    vazoes = artifacts.vazoes
+    effective = artifacts.effective
+    itaipu_operated = artifacts.itaipu_operated
+    fan_probabilities = artifacts.fan_probabilities
+
     writer.write_parquet(
         "scenarios/inflow_seasonal_stats.parquet",
         scenarios_conv.convert_inflow_stats_identity(case, id_map),
@@ -1286,15 +1310,26 @@ def _convert_decomp_case_impl(
         ),
     )
 
-    # Every per-entity bound — the legacy RQ/UH minimum-outflow, the per-stage
-    # storage envelope, the CT thermal generation bounds, and the RE/RHQ/RHV
-    # single-term special-constraint bounds — is collected as
-    # bounds_accumulator.BoundContribution objects and resolved through
-    # exactly ONE resolve() + build_bound_tables() pass, so a new special
-    # constraint colliding with a legacy bound on the same (entity, stage,
-    # block) cell correctly intersects instead of producing the
-    # two-rows-same-column parquet cobre rejects.
-    step("Resolving bounds")
+
+def _resolve_bounds(artifacts: DecompCaseArtifacts, writer: CaseWriter) -> None:
+    """The ``step("Resolving bounds")`` phase: resolve every hydro/thermal/
+    pumping/line bound, fold in the TI irrigation withdrawal and the
+    diversion channels, and write the diversion-coupled ``system/hydros.json``
+    (deferred from ``_convert_core_entities``'s system-file block for exactly
+    that coupling). Stores the resolved bound tables and the
+    ``census``/``pumping_ids``/``block_counts`` maps the later phases need back
+    onto *artifacts*.
+    """
+    case = artifacts.case
+    dadger = artifacts.dadger
+    calendar = artifacts.calendar
+    id_map = artifacts.id_map
+    effective = artifacts.effective
+    hydros_dict = artifacts.hydros_dict
+    assert hydros_dict is not None
+    line_bounds = artifacts.line_bounds
+    assert line_bounds is not None
+
     census = constraint_registers.read_constraints(dadger)
     pumping_ids = network_conv.pumping_station_id_map(dadger)
     thermal_generation_contribs, thermal_cost_table = (
@@ -1313,6 +1348,14 @@ def _convert_decomp_case_impl(
         )
         for hydro in hydros_dict["hydros"]
     }
+    # Every per-entity bound — the legacy RQ/UH minimum-outflow, the per-stage
+    # storage envelope, the CT thermal generation bounds, and the RE/RHQ/RHV
+    # single-term special-constraint bounds — is collected as
+    # bounds_accumulator.BoundContribution objects and resolved through
+    # exactly ONE resolve() + build_bound_tables() pass, so a new special
+    # constraint colliding with a legacy bound on the same (entity, stage,
+    # block) cell correctly intersects instead of producing the
+    # two-rows-same-column parquet cobre rejects.
     contribs = [
         *bounds_conv.convert_hydro_bounds(case, id_map, effective=effective),
         *bounds_conv.convert_storage_bounds(case, id_map, effective=effective),
@@ -1348,12 +1391,8 @@ def _convert_decomp_case_impl(
     bound_tables = bounds_accumulator.build_bound_tables(
         bounds_accumulator.resolve(contribs, block_counts)
     )
-    _bound_sort_keys = [
-        ("stage_id", "ascending"),
-        ("block_id", "ascending"),
-    ]
     hydro_bounds = bound_tables.hydro.sort_by(
-        [("hydro_id", "ascending"), *_bound_sort_keys]
+        [("hydro_id", "ascending"), *_BOUND_SORT_KEYS]
     )
     # Fold in the TI irrigation withdrawal (a consumptive water use cobre reads
     # from hydro_bounds.water_withdrawal_m3s): water lost to irrigation is
@@ -1365,12 +1404,12 @@ def _convert_decomp_case_impl(
         block_counts,
     )
     # Attach the diversion channel to every hydro that carries a positive
-    # diversion floor, then write hydros.json (its write was deferred from the
-    # system-file block above for exactly this). cobre couples the two: a
-    # `min_diversion_m3s > 0` row is infeasible unless the hydro also declares a
-    # `diversion` channel. The source deck already carries the channel (read
-    # into `effective.diversions`); this is the only place both the resolved
-    # floor and the channel are in hand.
+    # diversion floor, then write hydros.json (its write was deferred from
+    # `_convert_core_entities`'s system-file block for exactly this). cobre
+    # couples the two: a `min_diversion_m3s > 0` row is infeasible unless the
+    # hydro also declares a `diversion` channel. The source deck already
+    # carries the channel (read into `effective.diversions`); this is the
+    # only place both the resolved floor and the channel are in hand.
     diversion_channels, diversion_floor_no_channel = _diversion_channels(
         hydro_bounds, id_map, effective
     )
@@ -1418,9 +1457,9 @@ def _convert_decomp_case_impl(
     writer.write_json("system/hydros.json", hydros_dict)
     thermal_bounds_table = _rejoin_thermal_cost(
         bound_tables.thermal, thermal_cost_table
-    ).sort_by([("thermal_id", "ascending"), *_bound_sort_keys])
+    ).sort_by([("thermal_id", "ascending"), *_BOUND_SORT_KEYS])
     pumping_bounds_table = bound_tables.pumping.sort_by(
-        [("pumping_station_id", "ascending"), *_bound_sort_keys]
+        [("pumping_station_id", "ascending"), *_BOUND_SORT_KEYS]
     )
     # Line bounds now route through the same BoundContribution -> resolve()
     # primitive as hydro/thermal/pumping above: a colliding pair of
@@ -1443,7 +1482,34 @@ def _convert_decomp_case_impl(
         ],
         schema=network_conv._LINE_BOUNDS_SCHEMA,
         key_columns=("line_id", "stage_id", "block_id"),
-    ).sort_by([("line_id", "ascending"), *_bound_sort_keys])
+    ).sort_by([("line_id", "ascending"), *_BOUND_SORT_KEYS])
+
+    artifacts.census = census
+    artifacts.pumping_ids = pumping_ids
+    artifacts.block_counts = block_counts
+    artifacts.hydro_bounds = hydro_bounds
+    artifacts.thermal_bounds_table = thermal_bounds_table
+    artifacts.pumping_bounds_table = pumping_bounds_table
+    artifacts.line_bounds = line_bounds
+
+
+def _convert_constraints(artifacts: DecompCaseArtifacts, writer: CaseWriter) -> None:
+    """The ``step("Converting constraints")`` phase: build per-group
+    per-stage availability (+ the Itaipu frequency-floor overlay), resolve
+    the per-hydro ``group_bounds``, and build the ``contract_bounds_table``
+    via :func:`_rejoin_contract_price`. Stores ``availability_values``,
+    ``group_bounds``, ``contract_bounds_table``, ``energy_contracts_doc``,
+    and ``contracts`` onto *artifacts* for :func:`_emit_and_write`.
+    """
+    case = artifacts.case
+    dadger = artifacts.dadger
+    calendar = artifacts.calendar
+    id_map = artifacts.id_map
+    effective = artifacts.effective
+    itaipu_operated = artifacts.itaipu_operated
+    block_counts = artifacts.block_counts
+    assert block_counts is not None
+
     # Per-group per-stage availability (installed × MP ×
     # FD, capped by the ρ_eq·q_max hydraulic ceiling) for every plant,
     # single-group and Itaipu's own two per-frequency groups (code 66) alike.
@@ -1451,7 +1517,6 @@ def _convert_decomp_case_impl(
     # group's own declared envelope — so cobre rule 45 (a group-bound max_*
     # may not exceed that group's declared max) is now reachable; its mirror
     # is wired into the self-check block below.
-    step("Converting constraints")
     availability_values = hydro_conv.convert_hydro_group_availability(
         case, id_map, effective=effective
     )
@@ -1515,7 +1580,7 @@ def _convert_decomp_case_impl(
         [
             ("hydro_id", "ascending"),
             ("hydro_unit_group_id", "ascending"),
-            *_bound_sort_keys,
+            *_BOUND_SORT_KEYS,
         ]
     )
 
@@ -1533,9 +1598,10 @@ def _convert_decomp_case_impl(
         case, contracts=contracts
     )
     # Contract power bounds now route through the same BoundContribution ->
-    # resolve() primitive as hydro/thermal/pumping/line above; price_per_mwh
-    # is not a bound axis (it rides its own side-table, per
-    # bounds_accumulator's own AXES docstring), so it is rejoined afterward.
+    # resolve() primitive as the hydro/thermal/pumping/line bounds in
+    # `_resolve_bounds`; price_per_mwh is not a bound axis (it rides its own
+    # side-table, per bounds_accumulator's own AXES docstring), so it is
+    # rejoined afterward.
     contract_power_contribs = _row_group_contributions(
         contract_bounds_table.to_pylist(),
         family="contract",
@@ -1553,7 +1619,69 @@ def _convert_decomp_case_impl(
     )
     contract_bounds_table = _rejoin_contract_price(
         resolved_contract_power, contract_bounds_table
-    ).sort_by([("contract_id", "ascending"), *_bound_sort_keys])
+    ).sort_by([("contract_id", "ascending"), *_BOUND_SORT_KEYS])
+
+    artifacts.availability_values = availability_values
+    artifacts.group_bounds = group_bounds
+    artifacts.contract_bounds_table = contract_bounds_table
+    artifacts.energy_contracts_doc = energy_contracts_doc
+    artifacts.contracts = contracts
+
+
+def _emit_and_write(
+    artifacts: DecompCaseArtifacts, writer: CaseWriter
+) -> ConversionReport:
+    """The ``step("Writing outputs")`` phase: run the post-emission self-checks
+    (``emission_checks.run_and_gate``) before any constraint parquet is
+    written, write the bound parquets, emit the RE -> RHQ/RHV -> RHE ->
+    LIBs-electrical generic constraints over one shared
+    :class:`ConstraintIdAllocator`, write the generic-constraint artifacts and
+    scalar parameters, emit the detection diagnostics and the travel-time
+    deferral warning, and return the
+    :class:`~cobre_bridge.pipeline.ConversionReport` built from
+    ``writer.would_write``.
+    """
+    case = artifacts.case
+    dadger = artifacts.dadger
+    calendar = artifacts.calendar
+    id_map = artifacts.id_map
+    effective = artifacts.effective
+    fan_probabilities = artifacts.fan_probabilities
+    hydros_dict = artifacts.hydros_dict
+    assert hydros_dict is not None
+    thermals_dict = artifacts.thermals_dict
+    assert thermals_dict is not None
+    buses_doc = artifacts.buses_doc
+    assert buses_doc is not None
+    lines_doc = artifacts.lines_doc
+    assert lines_doc is not None
+    stages_dict = artifacts.stages_dict
+    assert stages_dict is not None
+    deficit_cost = artifacts.deficit_cost
+    assert deficit_cost is not None
+    has_travel_time = artifacts.has_travel_time
+    hydro_bounds = artifacts.hydro_bounds
+    assert hydro_bounds is not None
+    thermal_bounds_table = artifacts.thermal_bounds_table
+    assert thermal_bounds_table is not None
+    pumping_bounds_table = artifacts.pumping_bounds_table
+    assert pumping_bounds_table is not None
+    line_bounds = artifacts.line_bounds
+    assert line_bounds is not None
+    group_bounds = artifacts.group_bounds
+    assert group_bounds is not None
+    contract_bounds_table = artifacts.contract_bounds_table
+    assert contract_bounds_table is not None
+    census = artifacts.census
+    assert census is not None
+    pumping_ids = artifacts.pumping_ids
+    assert pumping_ids is not None
+    availability_values = artifacts.availability_values
+    assert availability_values is not None
+    contracts = artifacts.contracts
+    assert contracts is not None
+    energy_contracts_doc = artifacts.energy_contracts_doc
+    assert energy_contracts_doc is not None
 
     # Post-emission self-checks: mirror cheap cobre load invariants (rules 43,
     # 41, 45, 38, 36, and the block_id-range rule) over the in-memory artifacts
@@ -1562,7 +1690,6 @@ def _convert_decomp_case_impl(
     # single-term special constraint (e.g. an RE FU generation ceiling) lowers
     # to one; it raises when such a bound exceeds the entity's own declared
     # capacity. See cobre_bridge.emission_checks for the rule scope.
-    step("Writing outputs")
     bound_families = [
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds),
         emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
@@ -1609,12 +1736,12 @@ def _convert_decomp_case_impl(
         )
 
     # Emit every RE/RHQ/RHV/RHE special constraint that did NOT lower to an
-    # entity bound (`census.to_generic`, read once above) as a Cobre generic
-    # constraint, over one shared 0-based constraint-id allocator so ids
-    # never collide across emitters regardless of which family produced
-    # them. The three emitters run in this fixed order (E7); `big_m`,
-    # `line_map`, and `hydro_to_ree` are shared inputs every emitter needs
-    # but none of them reads the deck to build for itself.
+    # entity bound (`census.to_generic`, resolved once in `_resolve_bounds`)
+    # as a Cobre generic constraint, over one shared 0-based constraint-id
+    # allocator so ids never collide across emitters regardless of which
+    # family produced them. The three emitters run in this fixed order (E7);
+    # `big_m`, `line_map`, and `hydro_to_ree` are shared inputs every emitter
+    # needs but none of them reads the deck to build for itself.
     big_m = constraints_conv.big_m_penalty(deficit_cost)
     line_map = constraints_conv.build_fi_line_map(lines_doc["lines"])
     uh = dadger.uh(df=True)
@@ -1757,7 +1884,12 @@ def _convert_decomp_case_impl(
     # all despite the indices.csv entry (OQ-4). Once the long-form subset
     # converts, the census INFO below is authoritative and this flat warning
     # would otherwise be a stale "not converted" claim over that subset.
-    libs_detection = constraint_registers.detect_libs_electrical(src)
+    # `discover_decomp_files` always resolves every deck file (including
+    # `dadger`) as `src / name`, so `case.files.dadger.parent` recovers the
+    # deck root without a dedicated `src` field on the bundle.
+    libs_detection = constraint_registers.detect_libs_electrical(
+        case.files.dadger.parent
+    )
     if libs_detection is not None and libs_electrical_model is None:
         dx.emit(libs_detection, logger=_LOG)
     if libs_electrical_result is not None:
@@ -1768,8 +1900,9 @@ def _convert_decomp_case_impl(
     # is converted (cobre >= 0.14's C11 fix), and windowed inflow inputs are a
     # source-model concept that does not apply to the external explicit tree the
     # DECOMP path emits — so none of those are deferred. Only VI water travel
-    # time remains deferred (a tracked cobre-gap; see the note above where it is
-    # detected), and only when the deck actually carries it.
+    # time remains deferred (a tracked cobre-gap; see the note in
+    # `_convert_core_entities` where it is detected), and only when the deck
+    # actually carries it.
     if has_travel_time:
         _LOG.warning("deferred at this milestone: water travel time (VI present)")
     _LOG.info(
@@ -1789,3 +1922,164 @@ def _convert_decomp_case_impl(
         stage_count=len(calendar),
         would_write_paths=[str(p) for p in writer.would_write],
     )
+
+
+def convert_decomp_case(
+    src: Path,
+    dst: Path,
+    *,
+    force: bool = False,
+    on_phase: Callable[[str], None] | None = None,
+    dry_run: bool = False,
+    fcf_inputs_out: FcfInputs | None = None,
+) -> ConversionReport:
+    """Convert one deck revision into a Cobre case directory.
+
+    Mirrors the NEWAVE twin ``convert_newave_case``'s return contract: wraps
+    the conversion in a top-level :func:`cobre_bridge.diagnostics.collect`
+    sink and a package-logger ``dx.WarningCollector`` so every structured
+    ``dx.emit`` finding *and* every residual ``logger.warning`` string is
+    captured, then returns them as one de-duplicated
+    :class:`~cobre_bridge.pipeline.ConversionReport`.
+
+    Parameters
+    ----------
+    dry_run:
+        When ``True``, run the full in-memory conversion but write nothing to
+        *dst* (no files, no subdirectories). The would-write paths are still
+        recorded in :attr:`~cobre_bridge.pipeline.ConversionReport.would_write_paths`.
+    fcf_inputs_out:
+        Optional :class:`FcfInputs` out-parameter. When given, its
+        ``config``/``initial_conditions`` fields are assigned the same
+        in-memory dict objects this run wrote to ``config.json``/
+        ``initial_conditions.json``, so a caller (the CLI's boundary-FCF
+        step) can thread them into ``import_boundary_fcf`` without
+        re-reading either file. ``None`` (the default) leaves it unused.
+
+    Returns
+    -------
+    ConversionReport
+        Summary of what was converted: the five entity/stage counts, a
+        ``diagnostics`` list of every structured finding, and a ``warnings``
+        list of the WARNING-severity summaries.
+
+    Raises
+    ------
+    ValueError
+        If the post-emission self-checks (cobre 0.13 rules 43/41/45/38/36 and
+        the ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
+        find an ``ERROR``-severity violation in the converted artifacts. An
+        ``INFO`` finding (e.g. rule 43's "not applicable" report, emitted when
+        no hydro-bounds capacity column is populated) never raises. No report
+        is returned on this path.
+    FileExistsError
+        If *dst* already exists, is non-empty, and ``force`` is not set.
+    """
+    # This refusal must run before the clearing try/except below: it is a
+    # "do not touch dst" guard, not a mid-write failure, so it must never
+    # reach ``clear_dst_contents`` and delete a pre-existing, unrelated case
+    # (mirrors the source model's own NEWAVE-twin ordering, which performs
+    # this check ahead of its own write/clear try block).
+    if dst.exists() and any(dst.iterdir()):
+        if not force:
+            raise FileExistsError(
+                f"{dst} already contains files; pass force to overwrite"
+            )
+        # --force over a populated dst: pre-clear the previous case's full
+        # artifact set before rewriting, so a conditional artifact this run
+        # does not reproduce (post_study_stages.json, boundary/) cannot
+        # survive. Skipped under a dry run, which never mutates dst.
+        if not dry_run:
+            clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
+
+    collector = dx.WarningCollector()
+    pkg_logger = logging.getLogger("cobre_bridge")
+    pkg_logger.addHandler(collector)
+    try:
+        # Structured diagnostics emitted by converters (and the inner
+        # emission-self-check re-emit loop below) land in ``collected``; any
+        # remaining ``logger.warning`` strings (the deferral warning, the
+        # topology non-itemized warning) are picked up by ``collector`` and
+        # bridged below, so every warning still surfaces.
+        with dx.collect() as collected:
+            report = _convert_decomp_case_impl(
+                src,
+                dst,
+                force=force,
+                on_phase=on_phase,
+                dry_run=dry_run,
+                fcf_inputs_out=fcf_inputs_out,
+            )
+    except BaseException:
+        # The write phase is a sequence of independent file writes with no
+        # rollback, so a failure partway through can leave a subset of the
+        # output files behind. Remove the known pipeline outputs so a
+        # half-written case is never mistaken for a complete one and a plain
+        # (no --force) re-run is not refused as "destination not empty".
+        # Skipped under a dry run: nothing was written, and dst may be a
+        # pre-existing populated directory the user never asked to clear.
+        if not dry_run:
+            clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
+        raise
+    finally:
+        pkg_logger.removeHandler(collector)
+    report.diagnostics = dx.finalize_diagnostics(collected, collector.messages)
+    # Backward-compatible flat WARNING strings derived from the diagnostics.
+    report.warnings = [
+        d.summary for d in report.diagnostics if d.severity is dx.Severity.WARNING
+    ]
+    return report
+
+
+def _convert_decomp_case_impl(
+    src: Path,
+    dst: Path,
+    *,
+    force: bool = False,
+    on_phase: Callable[[str], None] | None = None,
+    dry_run: bool = False,
+    fcf_inputs_out: FcfInputs | None = None,
+) -> ConversionReport:
+    """Run the DECOMP conversion pipeline (warning capture handled by the wrapper).
+
+    ``on_phase`` (when given) is called once at each boundary in
+    :data:`DECOMP_CONVERSION_PHASE_LABELS`, so the CLI can advance a progress bar
+    without the pipeline knowing anything about rendering.
+
+    When ``dry_run`` is ``True``, the build phases run exactly as for a real run,
+    but the write phase creates no directories and writes no files; the paths that
+    would have been written are still accumulated and recorded on the report.
+
+    ``fcf_inputs_out`` (when given) receives the run's in-memory ``config``/
+    ``initial_conditions`` dicts — see :func:`convert_decomp_case`.
+    """
+    step = on_phase if on_phase is not None else (lambda _label: None)
+    step("Discovering deck")
+    artifacts = _discover(src)
+
+    if not dry_run:
+        dst.mkdir(parents=True, exist_ok=True)
+
+    # Every output path is routed through one ``CaseWriter`` so the
+    # would-write listing, the byte format, and the dry-run gate live in
+    # exactly one place, rather than guarding ~24 individual write sites.
+    writer = CaseWriter(dst, dry_run=dry_run)
+
+    step("Converting entities")
+    _convert_core_entities(artifacts, writer)
+
+    step("Converting scenarios")
+    _convert_scenarios(artifacts, writer)
+
+    step("Resolving bounds")
+    _resolve_bounds(artifacts, writer)
+
+    step("Converting constraints")
+    _convert_constraints(artifacts, writer)
+
+    step("Writing outputs")
+    report = _emit_and_write(artifacts, writer)
+    if fcf_inputs_out is not None:
+        fcf_inputs_out.config = artifacts.config
+        fcf_inputs_out.initial_conditions = artifacts.initial_conditions
+    return report

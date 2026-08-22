@@ -1,5 +1,5 @@
 """Tests for the boundary FCF importer orchestration
-(``fcf/__init__.py::import_boundary_fcf``).
+(``fcf/importer.py::import_boundary_fcf``).
 
 The GNL-ring and diagnostics tests below are tier-1 (synthetic fixtures, no
 deck, no cobre binary); the ``decomp-mar-26-rv2`` block further down is the
@@ -25,14 +25,14 @@ from cobre_bridge import diagnostics as dx
 from cobre_bridge.converters.network import MONTH_HOURS
 from cobre_bridge.decomp.anticipated import GnlCommitmentModel, GnlThermal
 from cobre_bridge.decomp.case import DecompCase
-from cobre_bridge.decomp.fcf import (
+from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, summarize_cut_families
+from cobre_bridge.decomp.fcf.importer import (
     _coupling_stage_hours,
     _emit_import_diagnostics,
     _gnl_targets_from,
     _post_horizon_start,
     import_boundary_fcf,
 )
-from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, summarize_cut_families
 from cobre_bridge.decomp.fcf.mapper import (
     DroppedTerm,
     GnlRingPlan,
@@ -40,7 +40,7 @@ from cobre_bridge.decomp.fcf.mapper import (
     MappingResult,
     map_boundary_cuts,
 )
-from cobre_bridge.decomp.pipeline import convert_decomp_case
+from cobre_bridge.decomp.pipeline import FcfInputs, convert_decomp_case
 from tests._fcf_fixtures import (
     make_boundary_cuts,
     make_cortes_header,
@@ -747,7 +747,8 @@ def mar26rv2_imported_case(
 
     root = tmp_path_factory.mktemp("fcf_importer_mar26rv2_e2e")
     case_dir = root / "converted"
-    convert_decomp_case(_MAR26_DECK, case_dir, force=True)
+    fcf_inputs = FcfInputs()
+    convert_decomp_case(_MAR26_DECK, case_dir, force=True, fcf_inputs_out=fcf_inputs)
 
     # Pin the explicitly-named `cortes-004.dat` partition this fixture has
     # always imported, overriding whatever cortes partition discovery
@@ -761,6 +762,8 @@ def mar26rv2_imported_case(
         case,
         work_dir=root / "work",
         cost_scale_factor=1.0,
+        config=fcf_inputs.config,
+        initial_conditions=fcf_inputs.initial_conditions,
     )
     assert boundary_dir is not None
     return _Mar26ImportedCase(case_dir=case_dir, boundary_dir=boundary_dir)

@@ -248,6 +248,31 @@ def _export_compare_artifacts(
     return formats, out_dir
 
 
+def _write_html_compare_report(
+    dataset: ComparisonDataset,
+    out_dir: Path,
+    args: CompareArgs,
+    *,
+    reference_label: str,
+) -> None:
+    """Build and write the opt-in HTML comparison report (``--format html``/``all``).
+
+    Shared by `compare newave` and `compare decomp`. The file is still written
+    under ``--json`` (it is a ``--format`` artifact); only its stdout advisory
+    is routed to stderr so stdout stays pure JSON.
+    """
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    html = build_comparison_report(dataset, reference_label=reference_label)
+    report_path = out_dir / "report.html"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(html, encoding="utf-8")
+    print_status(
+        f"HTML report written to {report_path}",
+        console=args.err_console() if args.json_output else None,
+    )
+
+
 def _resolve_compare_settings(args: CompareArgs) -> CompareArgs:
     """Return *args* with tolerance/format/out_dir filled in from config.
 
@@ -375,22 +400,8 @@ def _run_newave_comparison(args: CompareArgs) -> None:
         quiet_status=args.json_output,
     )
 
-    # HTML report (opt-in via --format html / all). The file is still written
-    # under --json (it is a --format artifact); only its stdout advisory is
-    # routed to stderr so stdout stays pure JSON.
     if "html" in formats:
-        from cobre_bridge.comparators.report_builder import (
-            build_comparison_report,
-        )
-
-        html = build_comparison_report(dataset)
-        report_path = out_dir / "report.html"
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(html, encoding="utf-8")
-        print_status(
-            f"HTML report written to {report_path}",
-            console=args.err_console() if args.json_output else None,
-        )
+        _write_html_compare_report(dataset, out_dir, args, reference_label="NEWAVE")
 
     if args.json_output:
         # ``status`` is DECOUPLED from the exit code (this command always
@@ -741,6 +752,30 @@ def _run_cobre_validation(
     return validation_failed
 
 
+def _handle_conversion_pipeline_failure(
+    exc: Exception, args: ConvertArgs, *, command: str, err_console: Console
+) -> NoReturn:
+    """Render/emit a pipeline failure verdict and exit 1 (shared by both tracks).
+
+    ``report`` is None on this path, so counts are zeroed and the dry-run
+    would-write listing is empty; ``status`` is "error" because
+    ``diagnostic_from_exception`` yields an ERROR-severity diagnostic.
+    """
+    diag = diagnostic_from_exception(exc, context="Conversion")
+    if args.json_output:
+        diagnostics = [diag]
+        summary = _convert_verdict_summary(None)
+        if args.dry_run:
+            summary["would_write"] = []
+            status = _convert_status(diagnostics, success="dry-run")
+        else:
+            status = _convert_status(diagnostics, success="ok")
+        _emit_convert_json(build_verdict(command, status, summary, diagnostics))
+    else:
+        render_diagnostics([diag], console=err_console, quiet=args.quiet)
+    raise typer.Exit(code=1)
+
+
 def _run_newave_conversion(args: ConvertArgs) -> None:
     """Execute the convert newave subcommand."""
     from cobre_bridge.newave_files import NewaveFiles
@@ -798,24 +833,9 @@ def _run_newave_conversion(args: ConvertArgs) -> None:
                 src, dst, on_phase=step, dry_run=args.dry_run
             )
     except Exception as exc:  # noqa: BLE001
-        diag = diagnostic_from_exception(exc, context="Conversion")
-        if args.json_output:
-            # Pipeline failure: ``report`` is None, so counts are zeroed and the
-            # dry-run path has an empty would-write listing. ``status`` is "error"
-            # because ``diagnostic_from_exception`` yields an ERROR-severity diag.
-            diagnostics = [diag]
-            summary = _convert_verdict_summary(None)
-            if args.dry_run:
-                summary["would_write"] = []
-                status = _convert_status(diagnostics, success="dry-run")
-            else:
-                status = _convert_status(diagnostics, success="ok")
-            _emit_convert_json(
-                build_verdict("convert newave", status, summary, diagnostics)
-            )
-        else:
-            render_diagnostics([diag], console=err_console, quiet=args.quiet)
-        raise typer.Exit(code=1)
+        _handle_conversion_pipeline_failure(
+            exc, args, command="convert newave", err_console=err_console
+        )
 
     if args.dry_run:
         # Dry run: report the would-write listing only; touch nothing on disk
@@ -1397,12 +1417,17 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.pipeline import (
         DECOMP_CONVERSION_PHASE_LABELS,
+        FcfInputs,
         convert_decomp_case,
         discover_decomp_files,
     )
 
     out_console = args.out_console()
     err_console = args.err_console()
+    # Threaded to `import_boundary_fcf` below, so it reuses the pipeline's own
+    # in-memory `config`/`initial_conditions` dicts instead of re-reading
+    # either file off disk.
+    fcf_inputs = FcfInputs()
 
     try:
         with conversion_progress(
@@ -1417,26 +1442,12 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
                 force=args.force,
                 on_phase=step,
                 dry_run=args.dry_run,
+                fcf_inputs_out=fcf_inputs,
             )
     except Exception as exc:  # noqa: BLE001
-        diag = diagnostic_from_exception(exc, context="Conversion")
-        if args.json_output:
-            # Pipeline failure: ``report`` is None, so counts are zeroed and the
-            # dry-run path has an empty would-write listing. ``status`` is "error"
-            # because ``diagnostic_from_exception`` yields an ERROR-severity diag.
-            diagnostics = [diag]
-            summary = _convert_verdict_summary(None)
-            if args.dry_run:
-                summary["would_write"] = []
-                status = _convert_status(diagnostics, success="dry-run")
-            else:
-                status = _convert_status(diagnostics, success="ok")
-            _emit_convert_json(
-                build_verdict("convert decomp", status, summary, diagnostics)
-            )
-        else:
-            render_diagnostics([diag], console=err_console, quiet=args.quiet)
-        raise typer.Exit(code=1)
+        _handle_conversion_pipeline_failure(
+            exc, args, command="convert decomp", err_console=err_console
+        )
 
     if args.dry_run:
         # Dry run: report the would-write listing only; touch nothing on disk
@@ -1541,10 +1552,10 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
 
         fcf_diags: list[Diagnostic] = []
         try:
-            from cobre_bridge.decomp.fcf import import_boundary_fcf
             from cobre_bridge.decomp.fcf.capability import (
                 ensure_boundary_fcf_capability,
             )
+            from cobre_bridge.decomp.fcf.importer import import_boundary_fcf
 
             ensure_boundary_fcf_capability()
 
@@ -1557,6 +1568,8 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
                     # legacy 1e6 scaling — the source cuts are authored in
                     # cobre's native scale already.
                     cost_scale_factor=1.0,
+                    config=fcf_inputs.config,
+                    initial_conditions=fcf_inputs.initial_conditions,
                 )
         except Exception as exc:  # noqa: BLE001
             diag = diagnostic_from_exception(exc, context="Boundary FCF import")
@@ -1589,7 +1602,7 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
         else:
             boundary_diagnostics = list(fcf_diags)
             # C8 surfacing (D7, TRACKED COBRE-GAP WORKAROUND — see
-            # ``fcf/__init__.py::_patch_policy_boundary`` and the cobre
+            # ``fcf/importer.py::_patch_policy_boundary`` and the cobre
             # repository's conversion-found-improvements registry): until cobre
             # resolves ``policy.boundary.path`` relative to case_dir rather than
             # the run's --output directory, this case must be run with
@@ -1827,22 +1840,8 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
         quiet_status=args.json_output,
     )
 
-    # HTML report (opt-in via --format html / all). The file is still written
-    # under --json (it is a --format artifact); only its stdout advisory is
-    # routed to stderr so stdout stays pure JSON.
     if "html" in formats:
-        from cobre_bridge.comparators.report_builder import (
-            build_comparison_report,
-        )
-
-        html = build_comparison_report(dataset, reference_label="DECOMP")
-        report_path = out_dir / "report.html"
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(html, encoding="utf-8")
-        print_status(
-            f"HTML report written to {report_path}",
-            console=args.err_console() if args.json_output else None,
-        )
+        _write_html_compare_report(dataset, out_dir, args, reference_label="DECOMP")
 
     if args.json_output:
         # ``status`` is DECOUPLED from the exit code (this command always

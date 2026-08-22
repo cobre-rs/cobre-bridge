@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -253,6 +254,79 @@ class TestPhaseLabels:
             "Converting constraints",
             "Writing outputs",
         )
+
+
+class TestDecompCaseArtifacts:
+    """ticket-013 (epic-03): the bundle ``_discover``/``_convert_core_entities``/
+    ``_convert_scenarios`` thread across the discovery/entity/scenario phases,
+    and the still-inline bounds/constraints/write phases read back off — must
+    carry every field those five functions (plus ticket-016's FCF importer,
+    which reads ``config``/``initial_conditions``) depend on."""
+
+    def test_field_contract(self) -> None:
+        from cobre_bridge.decomp.pipeline import DecompCaseArtifacts
+
+        field_names = {f.name for f in dataclasses.fields(DecompCaseArtifacts)}
+        assert {
+            "case",
+            "id_map",
+            "dadger",
+            "calendar",
+            "vazoes",
+            "effective",
+            "itaipu_operated",
+            "fan_probabilities",
+            "tx",
+            "config",
+            "stages_dict",
+            "hydros_dict",
+            "thermals_dict",
+            "buses_doc",
+            "lines_doc",
+            "line_bounds",
+            "initial_conditions",
+            "deficit_cost",
+            "has_travel_time",
+            "fpha_codes",
+        } <= field_names
+
+        # _discover's own fields are required (no default); every later-phase
+        # field defaults to None until _convert_core_entities/_convert_scenarios
+        # populate it.
+        artifacts = DecompCaseArtifacts(
+            case=object(),
+            id_map=_ID_MAP,
+            dadger=object(),
+            calendar=[],
+            vazoes=object(),
+            effective=object(),
+            itaipu_operated=False,
+            fan_probabilities=[1.0],
+            tx=0.1,
+        )
+        assert artifacts.config is None
+        assert artifacts.initial_conditions is None
+        assert artifacts.stages_dict is None
+        assert artifacts.hydros_dict is None
+        assert artifacts.thermals_dict is None
+        assert artifacts.lines_doc is None
+        assert artifacts.line_bounds is None
+
+        artifacts.config = {"a": 1}
+        artifacts.initial_conditions = {"storage": []}
+        artifacts.stages_dict = {"stages": []}
+        artifacts.hydros_dict = {"hydros": []}
+        artifacts.thermals_dict = {"thermals": []}
+        artifacts.lines_doc = {"lines": []}
+        artifacts.line_bounds = pa.table({"line_id": pa.array([], type=pa.int32())})
+        assert isinstance(artifacts.config, dict)
+        assert isinstance(artifacts.initial_conditions, dict)
+        assert isinstance(artifacts.stages_dict, dict)
+        assert isinstance(artifacts.hydros_dict, dict)
+        assert isinstance(artifacts.thermals_dict, dict)
+        assert isinstance(artifacts.id_map, DecompIdMap)
+        assert isinstance(artifacts.lines_doc, dict)
+        assert isinstance(artifacts.line_bounds, pa.Table)
 
 
 class TestEmissionCheckWiring:
