@@ -15,6 +15,7 @@ import pyarrow as pa
 
 from cobre_bridge import cobre_schemas, emission_checks
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.bound_merge import merge_bound_tables
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.converters import constraints as constraints_conv
@@ -166,7 +167,7 @@ def _merge_hydro_bounds(
 
     w = pl.from_arrow(withdrawal)
     s = pl.from_arrow(storage)
-    merged = w.join(s, on=["hydro_id", "stage_id"], how="full", coalesce=True)
+    merged = merge_bound_tables(w, s, on=["hydro_id", "stage_id"], precedence="base")
     merged = merged.sort("hydro_id", "stage_id")
     return merged.to_arrow()
 
@@ -193,14 +194,7 @@ def _fold_head_turbined_bounds(
         return h.sort("hydro_id", "stage_id").to_arrow()
 
     b = pl.from_arrow(base)
-    merged = b.join(h, on=["hydro_id", "stage_id"], how="full", coalesce=True)
-    if "max_turbined_m3s_right" in merged.columns:
-        # Explicit TURBMAXT (left) wins; head-derived (right) fills the rest.
-        merged = merged.with_columns(
-            pl.coalesce(["max_turbined_m3s", "max_turbined_m3s_right"]).alias(
-                "max_turbined_m3s"
-            )
-        ).drop("max_turbined_m3s_right")
+    merged = merge_bound_tables(b, h, on=["hydro_id", "stage_id"], precedence="base")
     merged = merged.sort("hydro_id", "stage_id")
     return merged.to_arrow()
 

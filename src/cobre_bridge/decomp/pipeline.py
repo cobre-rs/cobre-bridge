@@ -13,15 +13,18 @@ boundaries), no longer deferred.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import polars as pl
 import pyarrow as pa
 from idecomp.decomp import Vazoes
 
 from cobre_bridge import cobre_schemas, emission_checks
 from cobre_bridge import diagnostics as dx
+from cobre_bridge.bound_merge import merge_bound_tables
 from cobre_bridge.case_writer import CaseWriter
 from cobre_bridge.decomp import anticipated as anticipated_conv
 from cobre_bridge.decomp import bounds as bounds_conv
@@ -248,13 +251,23 @@ def discover_decomp_files(src: Path) -> DecompFiles:
     )
 
 
+#: Sentinel for a null ``block_id`` when joining two bound frames in polars:
+#: `nulls_equal` defaults to False, so two null block ids never match each
+#: other on their own; fill to this real value for the join, then restore
+#: null on the result. Shared by :func:`_rejoin_thermal_cost`,
+#: :func:`_rejoin_contract_price`, and :func:`_attach_water_withdrawal`.
+_NULL_BLOCK_SENTINEL = -1
+
+
 def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.Table:
     """Fold *cost_table* (``thermal.py``'s ``cost_per_mwh`` side-table) onto
     *thermal_bounds* (the accumulator's resolved ``THERMAL_BOUNDS_SCHEMA``
     table), restoring the ``cost_per_mwh`` column ``convert_thermal_bounds``
     carries alongside rather than through its bound contributions.
 
-    A full outer merge on ``(thermal_id, stage_id, block_id)`` — not a
+    Merged via :func:`~cobre_bridge.bound_merge.merge_bound_tables`
+    (``precedence="base"``, immaterial here since the two frames share no
+    non-key column) on ``(thermal_id, stage_id, block_id)`` — not a
     left-join keyed off *thermal_bounds* — because a ``(thermal, stage)``
     whose generation bound resolved entirely to per-block contributions
     (every block non-uniform, so ``resolve()`` never materializes a
@@ -271,7 +284,22 @@ def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.T
     cost_df = cost_table.to_pandas()
     for frame in (bounds_df, cost_df):
         frame["block_id"] = frame["block_id"].astype("Int64")
-    merged = bounds_df.merge(cost_df, on=key, how="outer")
+
+    bounds_pl = pl.from_pandas(bounds_df).with_columns(
+        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
+    )
+    cost_pl = pl.from_pandas(cost_df).with_columns(
+        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
+    )
+    merged_pl = merge_bound_tables(
+        bounds_pl, cost_pl, on=key, precedence="base"
+    ).with_columns(
+        pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
+        .then(None)
+        .otherwise(pl.col("block_id"))
+        .alias("block_id")
+    )
+    merged = merged_pl.to_pandas()
 
     schema = pa.schema(
         [
@@ -279,6 +307,202 @@ def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.T
             pa.field("cost_per_mwh", pa.float64(), nullable=True),
         ]
     )
+    return pa.table(
+        {field.name: pa.array(merged[field.name], type=field.type) for field in schema},
+        schema=schema,
+    )
+
+
+def _row_group_contributions(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    family: str,
+    id_column: str,
+    axes: Sequence[str],
+    contributor: str,
+) -> list[bounds_accumulator.BoundContribution]:
+    """Recover the accumulator's contribution discipline from an already
+    base-plus-sparse-per-block *rows* sequence (the ``convert_lines``/
+    ``convert_contract_bounds``/``convert_hydro_unit_group_bounds``
+    convention: one ``block_id = None`` base row per ``(id_column,
+    stage_id)``, plus one row per block -- every block, not just the
+    differing ones -- wherever that key is not block-uniform).
+
+    Per *axis*, independently per side (lower/upper): a side no per-block row
+    overrides contributes the base row's own value once, at ``block_id =
+    None`` -- ``resolve()`` then folds it onto every materialized block (this
+    is what lets ``hydro_unit_group``'s base-only ``max_generation_mw``
+    ceiling survive alongside a per-block-varying ``min_generation_mw``,
+    rather than being dropped with the rest of the base row). A side any
+    per-block row overrides drops the base row's own value for that side
+    instead: it is an hours-weighted average
+    (``convert_hydro_unit_group_bounds``'s/``convert_contract_bounds``'s own
+    fold), not a genuine additional bound, and intersecting it against the
+    per-block values it was averaged from could raise a lower or lower an
+    upper the source data never asked for.
+    """
+    groups: dict[tuple[object, object], list[Mapping[str, object]]] = {}
+    for row in rows:
+        groups.setdefault((row[id_column], row["stage_id"]), []).append(row)
+
+    contribs: list[bounds_accumulator.BoundContribution] = []
+    for (entity_id, stage_id), group_rows in groups.items():
+        base_row = next((r for r in group_rows if r["block_id"] is None), None)
+        block_rows = [r for r in group_rows if r["block_id"] is not None]
+
+        for axis in axes:
+            spec = bounds_accumulator.axis_spec(family, axis)
+            lower_overridden = spec.lower_column is not None and any(
+                r[spec.lower_column] is not None for r in block_rows
+            )
+            upper_overridden = spec.upper_column is not None and any(
+                r[spec.upper_column] is not None for r in block_rows
+            )
+
+            if base_row is not None:
+                base_lower = (
+                    base_row[spec.lower_column]
+                    if spec.lower_column and not lower_overridden
+                    else None
+                )
+                base_upper = (
+                    base_row[spec.upper_column]
+                    if spec.upper_column and not upper_overridden
+                    else None
+                )
+                if base_lower is not None or base_upper is not None:
+                    contribs.append(
+                        bounds_accumulator.BoundContribution(
+                            family=family,
+                            entity_id=entity_id,
+                            stage_id=stage_id,
+                            block_id=None,
+                            axis=axis,
+                            lower=base_lower,
+                            upper=base_upper,
+                            contributor=contributor,
+                        )
+                    )
+
+            for row in block_rows:
+                contribs.append(
+                    bounds_accumulator.BoundContribution(
+                        family=family,
+                        entity_id=entity_id,
+                        stage_id=stage_id,
+                        block_id=row["block_id"],
+                        axis=axis,
+                        lower=row[spec.lower_column] if spec.lower_column else None,
+                        upper=row[spec.upper_column] if spec.upper_column else None,
+                        contributor=contributor,
+                    )
+                )
+    return contribs
+
+
+def _fan_resolved_rows(
+    entries: Sequence[tuple[tuple[object, ...], bounds_accumulator.ResolvedRow]],
+    *,
+    schema: pa.Schema,
+    key_columns: Sequence[str],
+) -> pa.Table:
+    """Fan ``(key, ResolvedRow)`` pairs into *schema*, one row per distinct
+    *key* and one column per axis side -- the per-cell fan-out
+    ``bounds_accumulator.build_bound_tables`` performs for its own three
+    built-in families (hydro/thermal/pumping), reimplemented here for a
+    family outside that registry: line/hydro_unit_group/contract bounds
+    resolve through the same ``resolve()`` primitive but fan into their own
+    tables per that function's own docstring, since widening its registry
+    is out of this change's scope.
+
+    *key* names each output row's index-column values, in *key_columns*
+    order -- the caller composes it, since a family whose entity id is not
+    globally unique on its own (a hydro-unit-group row's key prepends the
+    owning ``hydro_id``, which :class:`~bounds_accumulator.ResolvedRow`
+    itself does not carry) needs a wider key than ``ResolvedRow`` supplies.
+    """
+    cells: dict[tuple[object, ...], dict[str, float]] = {}
+    for key, row in entries:
+        cell = cells.setdefault(key, {})
+        spec = bounds_accumulator.axis_spec(row.family, row.axis)
+        if spec.lower_column is not None and row.lower is not None:
+            cell[spec.lower_column] = row.lower
+        if spec.upper_column is not None and row.upper is not None:
+            cell[spec.upper_column] = row.upper
+
+    if not cells:
+        return pa.table(
+            {field.name: pa.array([], type=field.type) for field in schema},
+            schema=schema,
+        )
+
+    value_columns = [f.name for f in schema if f.name not in key_columns]
+    columns: dict[str, list[object]] = {f.name: [] for f in schema}
+    for key, cell in cells.items():
+        for name, value in zip(key_columns, key, strict=True):
+            columns[name].append(value)
+        for name in value_columns:
+            columns[name].append(cell.get(name))
+    return pa.table(
+        {
+            name: pa.array(values, type=schema.field(name).type)
+            for name, values in columns.items()
+        },
+        schema=schema,
+    )
+
+
+_CONTRACT_POWER_SCHEMA = pa.schema(
+    [
+        pa.field("contract_id", pa.int32(), nullable=False),
+        pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("block_id", pa.int32(), nullable=True),
+        pa.field("min_mw", pa.float64(), nullable=True),
+        pa.field("max_mw", pa.float64(), nullable=True),
+    ]
+)
+
+
+def _rejoin_contract_price(
+    contract_bounds: pa.Table, price_table: pa.Table
+) -> pa.Table:
+    """Fold *price_table*'s ``price_per_mwh`` (``contracts.py``'s own
+    materialized table, read only for that column) onto *contract_bounds*
+    (the accumulator's resolved, bound-only table), restoring the column
+    ``convert_contract_bounds`` carries alongside its bound contributions
+    rather than through one -- mirrors :func:`_rejoin_thermal_cost`.
+
+    A plain left join, not :func:`_rejoin_thermal_cost`'s outer merge: every
+    ``(contract, stage)`` key *contract_bounds* carries also has a matching
+    row in *price_table* at the same ``block_id`` (the two are derived from
+    the same base-vs-per-block decision in ``convert_contract_bounds``), so
+    there is no gap to fill from the other side -- only *price_table*'s
+    now-redundant base row (dropped by :func:`_row_group_contributions`
+    wherever per-block rows exist) to leave out. The ``-1`` block sentinel
+    mirrors :func:`_rejoin_thermal_cost`'s own (polars' join never matches
+    null keys against each other).
+    """
+    key = ["contract_id", "stage_id", "block_id"]
+    bounds_df = contract_bounds.to_pandas()
+    price_df = price_table.select([*key, "price_per_mwh"]).to_pandas()
+    for frame in (bounds_df, price_df):
+        frame["block_id"] = frame["block_id"].astype("Int64")
+
+    bounds_pl = pl.from_pandas(bounds_df).with_columns(
+        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
+    )
+    price_pl = pl.from_pandas(price_df).with_columns(
+        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
+    )
+    merged_pl = bounds_pl.join(price_pl, on=key, how="left").with_columns(
+        pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
+        .then(None)
+        .otherwise(pl.col("block_id"))
+        .alias("block_id")
+    )
+    merged = merged_pl.to_pandas()
+
+    schema = contracts_conv._CONTRACT_BOUNDS_SCHEMA
     return pa.table(
         {field.name: pa.array(merged[field.name], type=field.type) for field in schema},
         schema=schema,
@@ -362,39 +586,87 @@ def _topology_relink_diagnostic(
     )
 
 
-def _merge_water_withdrawal(
+#: The withdrawal axis's own side-table schema -- mirrors
+#: :func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`'s shape
+#: plus the ``block_id`` column :func:`_fan_resolved_rows` needs as a fan-out
+#: key (always ``None``: the axis is registered ``block_eligible=False``).
+_HYDRO_WITHDRAWAL_SCHEMA = pa.schema(
+    [
+        pa.field("hydro_id", pa.int32(), nullable=False),
+        pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("block_id", pa.int32(), nullable=True),
+        pa.field("water_withdrawal_m3s", pa.float64(), nullable=True),
+    ]
+)
+
+
+def _water_withdrawal_contributions(
+    withdrawal: pa.Table,
+) -> list[bounds_accumulator.BoundContribution]:
+    """Base-only ``("hydro", "water_withdrawal")`` contributions from
+    *withdrawal* (:func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`'s
+    per-(hydro, stage) table) -- one ``block_id=None`` contribution per row,
+    since irrigation withdrawal has no per-block dimension.
+    """
+    return [
+        bounds_accumulator.BoundContribution(
+            family="hydro",
+            entity_id=row["hydro_id"],
+            stage_id=row["stage_id"],
+            block_id=None,
+            axis="water_withdrawal",
+            lower=row["water_withdrawal_m3s"],
+            upper=None,
+            contributor="convert_irrigation_withdrawal",
+        )
+        for row in withdrawal.to_pylist()
+    ]
+
+
+def _attach_water_withdrawal(
     hydro_bounds: pa.Table,
     withdrawal: pa.Table | None,
+    block_counts: Mapping[int, int],
 ) -> pa.Table:
     """Fold the ``TI`` irrigation withdrawal into ``hydro_bounds``.
 
-    ``withdrawal`` carries a per-(hydro, stage) ``water_withdrawal_m3s`` value
-    (:func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`). It joins
-    onto ``hydro_bounds`` at ``block_id = None`` — the stage-level row cobre reads
-    a stage-scoped quantity from (the same null-block convention the storage and
-    minimum-outflow bounds already use) — matching an existing null-block row for
-    that ``(hydro, stage)`` or creating one where none exists; the per-block rows
-    (``block_id`` 0..n-1) never carry a withdrawal. A ``-1`` block sentinel keys
-    the join (block ids are non-negative, and matching on a null column is not
-    portable across polars versions) and is restored to null afterward. Returns
-    ``hydro_bounds`` unchanged when the deck declares no irrigation.
+    Routes *withdrawal*
+    (:func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`) through
+    the same ``BoundContribution`` -> :func:`bounds_accumulator.resolve`
+    primitive as every other hydro bound (so a withdrawal colliding with another
+    contributor on the axis loud-fails instead of one silently overwriting the
+    other), then attaches the resolved rows onto *hydro_bounds*.
+    ``water_withdrawal_m3s`` is not a ``HYDRO_BOUNDS_SCHEMA`` column (its axis
+    rides its own side-table, per that schema's own comment), so the resolved
+    rows fan out into their own table (:func:`_fan_resolved_rows`) and attach via
+    :func:`~cobre_bridge.bound_merge.merge_bound_tables` — mirroring
+    :func:`_rejoin_thermal_cost`'s ``-1`` block-id sentinel dance (polars' join
+    never matches null keys against each other), restored to null afterward.
+    Returns ``hydro_bounds`` unchanged when the deck declares no irrigation.
     """
     if withdrawal is None or withdrawal.num_rows == 0:
         return hydro_bounds
 
-    import polars as pl
-
-    _NULL_BLOCK = -1  # sentinel for the stage-level (block_id is null) row
-    hb = pl.from_arrow(hydro_bounds).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK)
+    resolved = bounds_accumulator.resolve(
+        _water_withdrawal_contributions(withdrawal), block_counts
     )
-    w = pl.from_arrow(withdrawal).with_columns(
-        pl.lit(_NULL_BLOCK, dtype=pl.Int32).alias("block_id")
+    withdrawal_bounds = _fan_resolved_rows(
+        [((row.entity_id, row.stage_id, row.block_id), row) for row in resolved],
+        schema=_HYDRO_WITHDRAWAL_SCHEMA,
+        key_columns=("hydro_id", "stage_id", "block_id"),
+    )
+
+    key = ["hydro_id", "stage_id", "block_id"]
+    hb = pl.from_arrow(hydro_bounds).with_columns(
+        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
+    )
+    w = pl.from_arrow(withdrawal_bounds).with_columns(
+        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
     )
     merged = (
-        hb.join(w, on=["hydro_id", "stage_id", "block_id"], how="full", coalesce=True)
+        merge_bound_tables(hb, w, on=key, precedence="base")
         .with_columns(
-            pl.when(pl.col("block_id") == _NULL_BLOCK)
+            pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
             .then(None)
             .otherwise(pl.col("block_id"))
             .alias("block_id")
@@ -1087,9 +1359,10 @@ def _convert_decomp_case_impl(
     # from hydro_bounds.water_withdrawal_m3s): water lost to irrigation is
     # unavailable for generation, so omitting it lets cobre turbine the extra
     # flow and over-generate. Mirrors the source model's dsvagua path.
-    hydro_bounds = _merge_water_withdrawal(
+    hydro_bounds = _attach_water_withdrawal(
         hydro_bounds,
         bounds_conv.convert_irrigation_withdrawal(case, id_map),
+        block_counts,
     )
     # Attach the diversion channel to every hydro that carries a positive
     # diversion floor, then write hydros.json (its write was deferred from the
@@ -1149,6 +1422,28 @@ def _convert_decomp_case_impl(
     pumping_bounds_table = bound_tables.pumping.sort_by(
         [("pumping_station_id", "ascending"), *_bound_sort_keys]
     )
+    # Line bounds now route through the same BoundContribution -> resolve()
+    # primitive as hydro/thermal/pumping above: a colliding pair of
+    # contributions on the direct/reverse axis intersects (or loud-fails on a
+    # genuine conflict) instead of one silently overwriting the other.
+    # bounds_accumulator.build_bound_tables only fans into its own three
+    # built-in tables, so line bounds fan out through _fan_resolved_rows
+    # instead (see its docstring).
+    line_contribs = _row_group_contributions(
+        line_bounds.to_pylist(),
+        family="line",
+        id_column="line_id",
+        axes=("direct", "reverse"),
+        contributor="convert_lines",
+    )
+    line_bounds = _fan_resolved_rows(
+        [
+            ((row.entity_id, row.stage_id, row.block_id), row)
+            for row in bounds_accumulator.resolve(line_contribs, block_counts)
+        ],
+        schema=network_conv._LINE_BOUNDS_SCHEMA,
+        key_columns=("line_id", "stage_id", "block_id"),
+    ).sort_by([("line_id", "ascending"), *_bound_sort_keys])
     # Per-group per-stage availability (installed × MP ×
     # FD, capped by the ρ_eq·q_max hydraulic ceiling) for every plant,
     # single-group and Itaipu's own two per-frequency groups (code 66) alike.
@@ -1180,6 +1475,49 @@ def _convert_decomp_case_impl(
     group_bounds = group_bounds_conv.convert_hydro_unit_group_bounds(
         case, values=availability_values
     )
+    # hydro_unit_group_id is scoped WITHIN its own hydro
+    # (_build_split_unit_groups/build_mirror_unit_group number each plant's
+    # own groups from 0), so one resolve() call spanning every hydro's rows
+    # at once would wrongly intersect hydro A's group 0 against hydro B's
+    # group 0; partition by hydro_id and resolve() each hydro's own groups
+    # independently instead.
+    group_rows_by_hydro: defaultdict[int, list[dict]] = defaultdict(list)
+    for row in group_bounds.to_pylist():
+        group_rows_by_hydro[row["hydro_id"]].append(row)
+    resolved_group_entries: list[
+        tuple[tuple[int, int, int, int | None], bounds_accumulator.ResolvedRow]
+    ] = []
+    for hydro_id, rows in group_rows_by_hydro.items():
+        per_hydro_contribs = _row_group_contributions(
+            rows,
+            family="hydro_unit_group",
+            id_column="hydro_unit_group_id",
+            axes=("turbined", "generation"),
+            contributor="group_bounds",
+        )
+        for resolved in bounds_accumulator.resolve(per_hydro_contribs, block_counts):
+            resolved_group_entries.append(
+                (
+                    (
+                        hydro_id,
+                        resolved.entity_id,
+                        resolved.stage_id,
+                        resolved.block_id,
+                    ),
+                    resolved,
+                )
+            )
+    group_bounds = _fan_resolved_rows(
+        resolved_group_entries,
+        schema=group_bounds_conv._HYDRO_UNIT_GROUP_BOUNDS_SCHEMA,
+        key_columns=("hydro_id", "hydro_unit_group_id", "stage_id", "block_id"),
+    ).sort_by(
+        [
+            ("hydro_id", "ascending"),
+            ("hydro_unit_group_id", "ascending"),
+            *_bound_sort_keys,
+        ]
+    )
 
     # The CI/CE energy-contract model, read once and
     # shared by both emitters. Real decks carry no usable contract data
@@ -1194,6 +1532,28 @@ def _convert_decomp_case_impl(
     contract_bounds_table = contracts_conv.convert_contract_bounds(
         case, contracts=contracts
     )
+    # Contract power bounds now route through the same BoundContribution ->
+    # resolve() primitive as hydro/thermal/pumping/line above; price_per_mwh
+    # is not a bound axis (it rides its own side-table, per
+    # bounds_accumulator's own AXES docstring), so it is rejoined afterward.
+    contract_power_contribs = _row_group_contributions(
+        contract_bounds_table.to_pylist(),
+        family="contract",
+        id_column="contract_id",
+        axes=("power",),
+        contributor="convert_contract_bounds",
+    )
+    resolved_contract_power = _fan_resolved_rows(
+        [
+            ((row.entity_id, row.stage_id, row.block_id), row)
+            for row in bounds_accumulator.resolve(contract_power_contribs, block_counts)
+        ],
+        schema=_CONTRACT_POWER_SCHEMA,
+        key_columns=("contract_id", "stage_id", "block_id"),
+    )
+    contract_bounds_table = _rejoin_contract_price(
+        resolved_contract_power, contract_bounds_table
+    ).sort_by([("contract_id", "ascending"), *_bound_sort_keys])
 
     # Post-emission self-checks: mirror cheap cobre load invariants (rules 43,
     # 41, 45, 38, 36, and the block_id-range rule) over the in-memory artifacts

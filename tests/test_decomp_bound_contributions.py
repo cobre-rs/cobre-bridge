@@ -47,6 +47,7 @@ from cobre_bridge.decomp.constraint_registers import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.network import convert_pumping_stations, pumping_station_id_map
+from cobre_bridge.decomp.pipeline import _row_group_contributions
 from cobre_bridge.decomp.single_term_bounds import single_term_bound_contributions
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.decomp.thermal import ThermalBounds, convert_thermal_bounds
@@ -313,6 +314,161 @@ class TestCollisionIntersection:
         assert row.axis == "outflow"
         assert row.lower == pytest.approx(30.0)  # max(20.0 RQ, 30.0 RHQ)
         assert row.upper is None
+
+    def test_line_direct_axis_collision_intersects_to_min_upper(self) -> None:
+        """A colliding pair on the ``line`` family's ``direct`` axis (now
+        routed through the accumulator, ticket-011) intersects to the
+        min-of-uppers -- an upper-only axis has no lower side to raise."""
+        contribs = [
+            BoundContribution(
+                family="line",
+                entity_id=0,
+                stage_id=0,
+                block_id=None,
+                axis="direct",
+                lower=None,
+                upper=500.0,
+                contributor="IA",
+            ),
+            BoundContribution(
+                family="line",
+                entity_id=0,
+                stage_id=0,
+                block_id=None,
+                axis="direct",
+                lower=None,
+                upper=300.0,
+                contributor="RE_12",
+            ),
+        ]
+
+        rows = resolve(contribs, {0: 1})
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.family == "line"
+        assert row.entity_id == 0
+        assert row.stage_id == 0
+        assert row.block_id is None
+        assert row.axis == "direct"
+        assert row.lower is None
+        assert row.upper == pytest.approx(300.0)  # min(500.0, 300.0)
+
+
+class TestRowGroupContributionsAsymmetricBaseOnlyColumn:
+    """``hydro_unit_group`` bounds can carry one axis side that varies per
+    block (``min_generation_mw``) alongside a sibling side that never does
+    (``max_generation_mw`` -- a base-only ceiling). ``_row_group_contributions``
+    must feed the base-only side into ``resolve()`` as its own base
+    contribution so it folds onto every materialized block row, rather than
+    being dropped along with the (block-varying) side's now-redundant base
+    average."""
+
+    def test_base_only_max_survives_onto_every_block_row(self) -> None:
+        rows = [
+            {
+                "hydro_unit_group_id": 0,
+                "stage_id": 0,
+                "block_id": None,
+                "min_turbined_m3s": None,
+                "max_turbined_m3s": None,
+                "min_generation_mw": 6300.0,
+                "max_generation_mw": 7000.0,
+            },
+            {
+                "hydro_unit_group_id": 0,
+                "stage_id": 0,
+                "block_id": 0,
+                "min_turbined_m3s": None,
+                "max_turbined_m3s": None,
+                "min_generation_mw": 6503.0,
+                "max_generation_mw": None,
+            },
+            {
+                "hydro_unit_group_id": 0,
+                "stage_id": 0,
+                "block_id": 1,
+                "min_turbined_m3s": None,
+                "max_turbined_m3s": None,
+                "min_generation_mw": 6139.0,
+                "max_generation_mw": None,
+            },
+        ]
+
+        contribs = _row_group_contributions(
+            rows,
+            family="hydro_unit_group",
+            id_column="hydro_unit_group_id",
+            axes=("turbined", "generation"),
+            contributor="group_bounds",
+        )
+
+        resolved = resolve(contribs, {0: 2})
+        generation_rows = {r.block_id: r for r in resolved if r.axis == "generation"}
+
+        assert set(generation_rows) == {0, 1}
+        assert all(row.block_id is not None for row in generation_rows.values())
+        assert generation_rows[0].lower == pytest.approx(6503.0)
+        assert generation_rows[0].upper == pytest.approx(7000.0)
+        assert generation_rows[1].lower == pytest.approx(6139.0)
+        assert generation_rows[1].upper == pytest.approx(7000.0)
+        # turbined has no value on either the base or the block rows --
+        # it must resolve to nothing, never a spurious empty row.
+        assert not any(row.axis == "turbined" for row in resolved)
+
+
+class TestWaterWithdrawalBaseOnlyAxis:
+    """AC3: ``("hydro", "water_withdrawal")`` is registered ``block_eligible =
+    False`` (ticket-010) — a hydro with a withdrawal value and no per-block
+    bound on the same (hydro, stage) must resolve to exactly the base row,
+    never a fabricated per-block row, even when the stage carries multiple
+    blocks. A deck that declares no withdrawal at all must leave
+    ``hydro_bounds`` untouched rather than resolving an empty contribution
+    list."""
+
+    def test_withdrawal_only_resolves_to_base_row_no_fabricated_blocks(
+        self,
+    ) -> None:
+        contribs = [
+            BoundContribution(
+                family="hydro",
+                entity_id=0,
+                stage_id=0,
+                block_id=None,
+                axis="water_withdrawal",
+                lower=12.5,
+                upper=None,
+                contributor="convert_irrigation_withdrawal",
+            )
+        ]
+
+        rows = resolve(contribs, {0: 3})
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.family == "hydro"
+        assert row.entity_id == 0
+        assert row.stage_id == 0
+        assert row.block_id is None
+        assert row.axis == "water_withdrawal"
+        assert row.lower == pytest.approx(12.5)
+        assert row.upper is None
+
+    def test_no_withdrawal_rows_is_a_noop(self) -> None:
+        """No accumulator resolution happens when the deck declares no
+        irrigation withdrawal -- ``hydro_bounds`` returns unchanged."""
+        import pyarrow as pa
+
+        from cobre_bridge.decomp.pipeline import _attach_water_withdrawal
+
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([1], pa.int32()),
+                "stage_id": pa.array([0], pa.int32()),
+                "block_id": pa.array([None], pa.int32()),
+            }
+        )
+        assert _attach_water_withdrawal(hydro_bounds, None, {0: 1}) is hydro_bounds
 
 
 class TestPumpingStationIdMapSingleAuthority:

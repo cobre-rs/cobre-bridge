@@ -266,59 +266,6 @@ def test_ti_unoperated_plant_returns_none(
     assert convert_irrigation_withdrawal(_case(dadger, calendar), id_map) is None
 
 
-def test_merge_water_withdrawal_lands_on_null_block_row() -> None:
-    import pyarrow as pa
-
-    from cobre_bridge.decomp.pipeline import _merge_water_withdrawal
-
-    # Existing bounds: a null-block stage-0 row (min_outflow) + a per-block row.
-    hydro_bounds = pa.table(
-        {
-            "hydro_id": pa.array([1, 1, 1], pa.int32()),
-            "stage_id": pa.array([0, 0, 1], pa.int32()),
-            "block_id": pa.array([None, 0, None], pa.int32()),
-            "min_outflow_m3s": pa.array([80.0, None, 80.0], pa.float64()),
-        }
-    )
-    withdrawal = pa.table(
-        {
-            "hydro_id": pa.array([1, 1], pa.int32()),
-            "stage_id": pa.array([0, 1], pa.int32()),
-            "water_withdrawal_m3s": pa.array([5.0, 6.0], pa.float64()),
-        }
-    )
-    merged = _merge_water_withdrawal(hydro_bounds, withdrawal)
-    rows = {
-        (h, s, b): w
-        for h, s, b, w in zip(
-            merged.column("hydro_id").to_pylist(),
-            merged.column("stage_id").to_pylist(),
-            merged.column("block_id").to_pylist(),
-            merged.column("water_withdrawal_m3s").to_pylist(),
-            strict=True,
-        )
-    }
-    # Withdrawal lands on the null-block rows only; the per-block row is untouched.
-    assert rows[(1, 0, None)] == 5.0
-    assert rows[(1, 1, None)] == 6.0
-    assert rows[(1, 0, 0)] is None
-
-
-def test_merge_water_withdrawal_none_is_noop() -> None:
-    import pyarrow as pa
-
-    from cobre_bridge.decomp.pipeline import _merge_water_withdrawal
-
-    hydro_bounds = pa.table(
-        {
-            "hydro_id": pa.array([1], pa.int32()),
-            "stage_id": pa.array([0], pa.int32()),
-            "block_id": pa.array([None], pa.int32()),
-        }
-    )
-    assert _merge_water_withdrawal(hydro_bounds, None) is hydro_bounds
-
-
 # EZ (percentual máximo do volume útil para acoplamento) is deliberately NOT
 # converted as an operational max-storage cap: it is an FCF-coupling formulation
 # detail, not an operational ceiling. Verified against dec_oper_usih on the

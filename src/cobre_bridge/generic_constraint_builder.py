@@ -90,8 +90,10 @@ if GENERIC_BOUNDS_SCHEMA.names != list(GENERIC_BOUNDS_COLUMNS):
         "one to match the other."
     )
 
-#: The unbounded sentinel, mirroring ``decomp/bounds_accumulator._UNBOUNDED``:
-#: a bound whose magnitude is at or past this value carries no real limit.
+#: The unbounded sentinel: a bound whose magnitude is at or past this value
+#: carries no real limit. Single source across both conversion tracks —
+#: ``decomp/bounds_accumulator.py`` imports :func:`is_bounded` (built on this
+#: constant) rather than redeclaring the sentinel.
 UNBOUNDED = 1e21
 
 
@@ -115,9 +117,9 @@ def slot_endpoints(
     """
     bound_lower: float | None = None
     bound_upper: float | None = None
-    if lower is not None and is_bounded(lower):
+    if is_bounded(lower):
         bound_lower = sense_to_interval(">=", lower)[0]
-    if upper is not None and is_bounded(upper):
+    if is_bounded(upper):
         bound_upper = sense_to_interval("<=", upper)[1]
     return bound_lower, bound_upper
 

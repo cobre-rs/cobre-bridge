@@ -7,8 +7,10 @@ rows setting the same column for the same ``(entity, stage, block)`` and
 must merge every contributor per axis into one consistent row set itself. This
 module lays the accumulator's foundation: a typed contribution record
 (:class:`BoundContribution`) and the static registry (:data:`AXES`) of which
-cobre bound axes exist per entity family, which are two-sided vs upper-only,
-and which are block-eligible vs stage-level, and the per-group
+cobre bound axes exist per entity family — ``hydro``, ``thermal``,
+``pumping``, ``line``, ``hydro_unit_group``, and ``contract`` — which are
+two-sided vs upper-only/lower-only, and which are block-eligible vs
+stage-level, and the per-group
 :func:`intersect` primitive that reduces a homogeneous group of
 contributions to one lower/upper pair.
 
@@ -17,12 +19,18 @@ shapes cobre's replace-not-merge semantics require: :func:`resolve` groups
 by ``(family, entity_id, stage_id, axis)`` and, per group, either intersects
 the base contributions into one all-blocks row or fully materializes one
 row per block (base contributions carried into every block) — never both.
+:func:`resolve` is generic across every registered family.
 
 Finally, :func:`build_bound_tables` fans the resolved rows out into the
 three widened parquet tables cobre reads (``hydro_bounds``,
 ``thermal_bounds``, ``pumping_bounds``): every axis resolved for the same
 ``(entity, stage, block)`` cell lands in that cell's **one** row, across
 different columns, because cobre rejects two rows for the same cell.
+``line``, ``hydro_unit_group``, and ``contract`` rows resolve through the
+same :func:`resolve` primitive but fan into their own family-specific
+tables elsewhere — :func:`build_bound_tables` knows only the three families
+above, so handing it a resolved row from another family silently drops
+that row from every output table.
 """
 
 from __future__ import annotations
@@ -33,6 +41,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import pyarrow as pa
 
+from cobre_bridge.generic_constraint_builder import is_bounded
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -41,7 +51,9 @@ if TYPE_CHECKING:
 class BoundContribution:
     """One contributor's proposed lower/upper bound on one entity/axis/slot.
 
-    ``family`` is ``"hydro"``/``"thermal"``/``"pumping"``; ``entity_id`` is the
+    ``family`` is one of the family strings :data:`AXES` keys on (``"hydro"``,
+    ``"thermal"``, ``"pumping"``, ``"line"``, ``"hydro_unit_group"``,
+    ``"contract"``); ``entity_id`` is the
     cobre 0-based id; ``block_id`` is ``None`` for a base/all-blocks row or the
     0-based block index for a per-block override; ``axis`` names the cobre
     bound axis (a key alongside ``family`` into :data:`AXES`); ``contributor``
@@ -64,11 +76,12 @@ class AxisSpec:
     """Static description of one cobre bound axis for one entity family.
 
     ``lower_column``/``upper_column`` are the exact cobre parquet column names
-    for that side, or ``None`` when the axis has no bound on that side (a
-    one-sided axis — none of the currently registered axes are, but
-    :func:`intersect` still enforces it for one that is). ``block_eligible``
-    is ``False`` for axes cobre rejects a ``block_id`` on (stage-level only,
-    e.g. storage).
+    for that side, or ``None`` when the axis has no bound on that side — a
+    one-sided axis, e.g. ``line``'s ``direct``/``reverse`` (upper-only) or
+    ``hydro``'s ``water_withdrawal`` (lower-only); :func:`intersect` enforces
+    the one-sided guard for every axis registered that way.
+    ``block_eligible`` is ``False`` for axes cobre rejects a ``block_id`` on
+    (stage-level only, e.g. storage and water_withdrawal).
     """
 
     family: str
@@ -78,9 +91,14 @@ class AxisSpec:
 
 
 #: The cobre bound axes this accumulator knows about, keyed by
-#: ``(family, axis)``. Covers exactly the verified cobre axes — do not invent
-#: axes cobre lacks (there is no net line-exchange axis; lines are emitted by
-#: ``convert_lines``, not this accumulator).
+#: ``(family, axis)``, across ``hydro``, ``thermal``, ``pumping``, ``line``,
+#: ``hydro_unit_group``, and ``contract``. Covers exactly the verified cobre
+#: axes — do not invent an axis cobre lacks (e.g. a single net-exchange axis
+#: for ``line``: cobre has no such column, only the two directional
+#: ``direct_mw``/``reverse_mw`` capacities registered below). A price/cost
+#: column (``contract``'s ``price_per_mwh``, ``thermal``'s
+#: ``cost_per_mwh``) is never registered here — it is not a bound, so it
+#: rides its own side-table outside this accumulator.
 AXES: Mapping[tuple[str, str], AxisSpec] = {
     ("hydro", "turbined"): AxisSpec(
         family="hydro",
@@ -118,6 +136,19 @@ AXES: Mapping[tuple[str, str], AxisSpec] = {
         upper_column="max_spillage_m3s",
         block_eligible=True,
     ),
+    # The `TI` irrigation-withdrawal register (`convert_irrigation_withdrawal`)
+    # supplies a compulsory removal, not a movable range — modeled lower-only
+    # (like `outflow`'s RQ/VAZMIN floor), never upper.
+    # `water_withdrawal_m3s` is not a column of `HYDRO_BOUNDS_SCHEMA` (mirrors
+    # `thermal`'s `cost_per_mwh`): it rides its own side-table joined onto
+    # `hydro_bounds` outside `build_bound_tables`, whose hydro fan-out covers
+    # only the axes `HYDRO_BOUNDS_SCHEMA` declares.
+    ("hydro", "water_withdrawal"): AxisSpec(
+        family="hydro",
+        lower_column="water_withdrawal_m3s",
+        upper_column=None,
+        block_eligible=False,
+    ),
     ("thermal", "generation"): AxisSpec(
         family="thermal",
         lower_column="min_generation_mw",
@@ -128,6 +159,45 @@ AXES: Mapping[tuple[str, str], AxisSpec] = {
         family="pumping",
         lower_column="min_m3s",
         upper_column="max_m3s",
+        block_eligible=True,
+    ),
+    # `convert_lines`/`decomp.network.convert_lines` emit one capacity per
+    # flow direction, not a min/max pair on one column — each direction is
+    # its own upper-only axis (a lower contribution on either loud-fails).
+    ("line", "direct"): AxisSpec(
+        family="line",
+        lower_column=None,
+        upper_column="direct_mw",
+        block_eligible=True,
+    ),
+    ("line", "reverse"): AxisSpec(
+        family="line",
+        lower_column=None,
+        upper_column="reverse_mw",
+        block_eligible=True,
+    ),
+    # `group_bounds.convert_hydro_unit_group_bounds` emits two two-sided axes
+    # (mirroring hydro's own `turbined`/`generation` naming, scoped to this
+    # family so the two never collide in `AXES`).
+    ("hydro_unit_group", "turbined"): AxisSpec(
+        family="hydro_unit_group",
+        lower_column="min_turbined_m3s",
+        upper_column="max_turbined_m3s",
+        block_eligible=True,
+    ),
+    ("hydro_unit_group", "generation"): AxisSpec(
+        family="hydro_unit_group",
+        lower_column="min_generation_mw",
+        upper_column="max_generation_mw",
+        block_eligible=True,
+    ),
+    # `contracts.convert_contract_bounds` also emits a `price_per_mwh` column
+    # alongside `min_mw`/`max_mw` — a signed price, not a bound, so (per the
+    # module comment above) it is never registered here.
+    ("contract", "power"): AxisSpec(
+        family="contract",
+        lower_column="min_mw",
+        upper_column="max_mw",
         block_eligible=True,
     ),
 }
@@ -150,11 +220,6 @@ def axis_spec(family: str, axis: str) -> AxisSpec:
         ) from err
 
 
-#: The unbounded sentinel (spec §2): a contribution whose bound magnitude is
-#: at or past this value contributes no bound on that side, mirroring the
-#: source model's own "no limit" convention.
-_UNBOUNDED = 1e21
-
 #: Mirrors the ``_floats_differ`` idiom in ``decomp/bounds.py`` — a relative
 #: tolerance so float noise on an intersection's edges never spuriously
 #: raises the empty-intersection conflict below.
@@ -164,13 +229,12 @@ _INTERSECTION_TOLERANCE = 1e-9
 def _effective(value: float | None) -> float | None:
     """*value* as an effective bound, or ``None`` for "no bound on that side".
 
-    ``None`` and a magnitude at or past :data:`_UNBOUNDED` both mean
-    unbounded. A genuine ``0.0`` is a real bound (e.g. a zeroed pumping
-    minimum) and passes through unchanged.
+    ``None`` and a magnitude at or past
+    :data:`~cobre_bridge.generic_constraint_builder.UNBOUNDED` both mean
+    unbounded (per :func:`is_bounded`). A genuine ``0.0`` is a real bound
+    (e.g. a zeroed pumping minimum) and passes through unchanged.
     """
-    if value is None or abs(value) >= _UNBOUNDED:
-        return None
-    return value
+    return value if is_bounded(value) else None
 
 
 def intersect(
@@ -187,14 +251,16 @@ def intersect(
     Raises
     ------
     ValueError
-        When ``spec.lower_column`` is ``None`` (a one-sided, upper-only axis
-        — none of the currently registered axes are, but the guard stands
-        for one that is) and some contribution supplies an effective lower —
-        a lower bound cannot land on an upper-only axis; the message names
-        the axis and the offending contributors. Also when an effective lower and
-        an effective upper both survive and the lower exceeds the upper past
-        float noise — the message names every contributing label and the
-        conflicting values.
+        When ``spec.lower_column`` is ``None`` (an upper-only axis, e.g.
+        ``line``'s ``direct``/``reverse``) and some contribution supplies an
+        effective lower, or symmetrically when ``spec.upper_column`` is
+        ``None`` (a lower-only axis, e.g. ``hydro``'s ``water_withdrawal``)
+        and some contribution supplies an effective upper — a bound cannot
+        land on the side a one-sided axis has no column for; the message
+        names the axis, the missing side, and the offending contributors.
+        Also when an effective lower and an effective upper both survive and
+        the lower exceeds the upper past float noise — the message names
+        every contributing label and the conflicting values.
     """
     lowers: list[tuple[float, str]] = []
     uppers: list[tuple[float, str]] = []
@@ -211,6 +277,13 @@ def intersect(
         raise ValueError(
             f"{spec.family} axis has no lower_column (upper-only) but "
             f"{offenders} supplied a lower bound"
+        )
+
+    if spec.upper_column is None and uppers:
+        offenders = ", ".join(f"{name}={value}" for value, name in uppers)
+        raise ValueError(
+            f"{spec.family} axis has no upper_column (lower-only) but "
+            f"{offenders} supplied an upper bound"
         )
 
     lower = max((value for value, _ in lowers), default=None)
