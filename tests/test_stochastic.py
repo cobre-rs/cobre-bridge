@@ -34,6 +34,7 @@ from cobre_bridge.dashboard.tabs.stochastic import (
     can_render,
     render,
 )
+from cobre_bridge.ui.css import dashboard_css
 
 # ---------------------------------------------------------------------------
 # Fixtures / factories
@@ -628,6 +629,21 @@ class TestRenderSectionTitles:
 
         assert isinstance(html, str)
         assert len(html) > 0
+
+    def test_explorer_wrapper_uses_responsive_container_class(self) -> None:
+        """The per-hydro explorer wrapper carries the class that stacks its
+        panes below 1024px, not the undefined `.explorer-layout` class."""
+        data = self._make_full_data()
+
+        html = render(data)
+
+        assert 'class="explorer-container"' in html
+        assert "explorer-layout" not in html
+        css = dashboard_css()
+        assert "@media (max-width: 1023px)" in css
+        media_block = css.split("@media (max-width: 1023px)", 1)[1]
+        assert ".explorer-container" in media_block
+        assert "flex-direction: column" in media_block
 
 
 # ---------------------------------------------------------------------------

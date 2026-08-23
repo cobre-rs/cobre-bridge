@@ -208,7 +208,7 @@ class TestCrossReferenceConsistency:
 
 
 # ---------------------------------------------------------------------------
-# _build_id_map fictitious plant filtering  (ticket-009)
+# build_id_map fictitious plant filtering  (ticket-009)
 # ---------------------------------------------------------------------------
 
 
@@ -242,7 +242,7 @@ def _fict_cadastro(rho: dict[int, float]) -> pd.DataFrame:
 
 
 class TestBuildIdMap:
-    """Unit tests for ``pipeline._build_id_map`` fictitious-plant filtering."""
+    """Unit tests for ``build_id_map`` fictitious-plant filtering."""
 
     @patch("inewave.newave.Hidr")
     @patch("inewave.newave.Ree")
@@ -284,9 +284,9 @@ class TestBuildIdMap:
         mock_ree.rees = None
         mock_ree_cls.read.return_value = mock_ree
 
-        from cobre_bridge.pipeline import _build_id_map
+        from cobre_bridge.id_map import build_id_map
 
-        id_map = _build_id_map(_make_nw_files(tmp_path))
+        id_map = build_id_map(_make_nw_files(tmp_path))
 
         # Only the two non-fictitious plants must appear.
         assert 1 in id_map.all_hydro_codes
@@ -357,9 +357,9 @@ class TestBuildIdMap:
         mock_ree.rees = None
         mock_ree_cls.read.return_value = mock_ree
 
-        from cobre_bridge.pipeline import _build_id_map
+        from cobre_bridge.id_map import build_id_map
 
-        id_map = _build_id_map(_make_nw_files(tmp_path))
+        id_map = build_id_map(_make_nw_files(tmp_path))
         assert len(id_map.all_hydro_codes) == n_real
 
     @patch("inewave.newave.Hidr")
@@ -397,9 +397,9 @@ class TestBuildIdMap:
         mock_ree.rees = None
         mock_ree_cls.read.return_value = mock_ree
 
-        from cobre_bridge.pipeline import _build_id_map
+        from cobre_bridge.id_map import build_id_map
 
-        id_map = _build_id_map(_make_nw_files(tmp_path))
+        id_map = build_id_map(_make_nw_files(tmp_path))
 
         assert 1 in id_map.all_hydro_codes
         assert 2 in id_map.all_hydro_codes

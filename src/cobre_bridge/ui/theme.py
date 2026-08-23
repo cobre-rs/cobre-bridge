@@ -39,10 +39,6 @@ COMPARISON_COLORS: dict[str, str] = {
 
 COPPER_ACCENT: str = "#B87333"
 
-CHART_PALETTES: dict[str, list[str]] = {
-    "default": BUS_COLORS,
-}
-
 # ``hydro`` is intentionally the same #4A90B8 as ``COLORS["hydro"]`` so the
 # entity reads identically across the generation charts and the hydro tab
 # (resolves the prior #4A90B8/#3B82F6 hydro collision).
@@ -57,6 +53,15 @@ PERFORMANCE_PHASE_COLORS: dict[str, str] = {
     "backward": "#14B8A6",
     "lp_solve": "#B87333",
     "overhead": "#6B7280",
+}
+
+# ``SEVERITY`` coincides with COLORS["thermal"]/["deficit"]/["ncs"], but a
+# severity is not an entity domain — kept as its own palette so a WARNING/ERROR
+# panel is never coupled to a domain token that happens to share its hex.
+SEVERITY: dict[str, str] = {
+    "warning": "#F5A623",
+    "error": "#DC4C4C",
+    "ok": "#4A8B6F",
 }
 
 BOUND_LINE_COLOR: str = "#6B7280"

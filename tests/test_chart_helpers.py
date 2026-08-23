@@ -1,8 +1,7 @@
 """Unit tests for cobre_bridge.dashboard.chart_helpers.
 
 Covers compute_percentiles, stage_hours_weighted_mean, add_mean_p50_band,
-add_bounds_overlay, make_chart_card, compute_npv_costs, group_costs, and
-compute_cost_summary.
+make_chart_card, compute_npv_costs, group_costs, and compute_cost_summary.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.dashboard.chart_helpers import (
     COST_GROUP_COLORS,
     COST_GROUPS,
-    add_bounds_overlay,
     add_mean_p50_band,
     compute_cost_summary,
     compute_npv_costs,
@@ -59,18 +57,6 @@ def percentile_df() -> pd.DataFrame:
             "p10": [float(i) * 0.8 for i in range(10)],
             "p50": [float(i) * 0.95 for i in range(10)],
             "p90": [float(i) * 1.2 for i in range(10)],
-        }
-    )
-
-
-@pytest.fixture()
-def bounds_df() -> pd.DataFrame:
-    """Return a bounds DataFrame with min_storage and max_storage columns."""
-    return pd.DataFrame(
-        {
-            "stage_id": list(range(1, 6)),
-            "min_storage": [10.0, 12.0, 11.0, 13.0, 14.0],
-            "max_storage": [90.0, 88.0, 92.0, 85.0, 87.0],
         }
     )
 
@@ -319,61 +305,6 @@ def test_add_mean_p50_band_show_p50_false(percentile_df: pd.DataFrame) -> None:
     )
     # mean + p10 lower + p90 upper = 3
     assert len(fig.data) == 3
-
-
-# ---------------------------------------------------------------------------
-# add_bounds_overlay
-# ---------------------------------------------------------------------------
-
-
-def test_add_bounds_overlay_both(bounds_df: pd.DataFrame) -> None:
-    """Two traces (min + max) are added when both columns are specified."""
-    fig = go.Figure()
-    result = add_bounds_overlay(
-        fig,
-        bounds_df,
-        "stage_id",
-        min_col="min_storage",
-        max_col="max_storage",
-    )
-
-    assert len(result.data) == 2
-    for trace in result.data:
-        assert trace.line.dash == "dash"
-        assert trace.line.color == "#6B7280"
-
-
-def test_add_bounds_overlay_min_only(bounds_df: pd.DataFrame) -> None:
-    """Only one trace is added when only min_col is specified."""
-    fig = go.Figure()
-    result = add_bounds_overlay(fig, bounds_df, "stage_id", min_col="min_storage")
-
-    assert len(result.data) == 1
-    assert "min_storage" in result.data[0].name
-
-
-def test_add_bounds_overlay_max_only(bounds_df: pd.DataFrame) -> None:
-    """Only one trace is added when only max_col is specified."""
-    fig = go.Figure()
-    result = add_bounds_overlay(fig, bounds_df, "stage_id", max_col="max_storage")
-
-    assert len(result.data) == 1
-    assert "max_storage" in result.data[0].name
-
-
-def test_add_bounds_overlay_none(bounds_df: pd.DataFrame) -> None:
-    """No-op when both min_col and max_col are None."""
-    fig = go.Figure()
-    result = add_bounds_overlay(fig, bounds_df, "stage_id")
-
-    assert len(result.data) == 0
-
-
-def test_add_bounds_overlay_returns_figure(bounds_df: pd.DataFrame) -> None:
-    """The function returns the same figure object (chaining support)."""
-    fig = go.Figure()
-    returned = add_bounds_overlay(fig, bounds_df, "stage_id", min_col="min_storage")
-    assert returned is fig
 
 
 # ---------------------------------------------------------------------------

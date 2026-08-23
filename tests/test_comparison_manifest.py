@@ -120,6 +120,26 @@ def test_git_sha_returns_none_on_nonzero_returncode(
     assert git_sha() is None
 
 
+@pytest.mark.skipif(not _in_git_checkout(), reason="not a git checkout")
+def test_git_sha_uses_bridge_repo_not_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``git_sha`` must resolve the bridge repo, not the caller's cwd."""
+    bridge_dir = Path(cobre_bridge.__file__).resolve().parent
+    expected = subprocess.run(
+        ["git", "-C", str(bridge_dir), "rev-parse", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+
+    monkeypatch.chdir(tmp_path)
+    result = git_sha()
+
+    assert result is not None
+    assert result == expected
+
+
 def test_manifest_json_roundtrip(tmp_path: Path) -> None:
     manifest = ComparisonManifest.create(
         "compare newave",

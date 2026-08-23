@@ -31,7 +31,6 @@ from cobre_bridge.ui.plotly_helpers import (
 )
 from cobre_bridge.ui.theme import (
     BUS_COLORS,
-    CHART_PALETTES,
     COLORS,
     COMPARISON_COLORS,
     COPPER_ACCENT,
@@ -101,12 +100,6 @@ def test_theme_copper_accent_value() -> None:
 def test_theme_comparison_colors_keys() -> None:
     """COMPARISON_COLORS must contain 'cobre', 'newave', 'diff', 'match'."""
     assert set(COMPARISON_COLORS.keys()) == {"cobre", "newave", "diff", "match"}
-
-
-def test_theme_chart_palettes_default_mirrors_bus_colors() -> None:
-    """CHART_PALETTES['default'] must be identical to BUS_COLORS."""
-    assert "default" in CHART_PALETTES
-    assert CHART_PALETTES["default"] is BUS_COLORS
 
 
 def test_legend_defaults_orientation() -> None:

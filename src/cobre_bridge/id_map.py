@@ -117,8 +117,7 @@ def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
     Reads ``confhd.dat`` (hydros, existing non-fictitious only), ``conft.dat``
     (thermals), ``sistema.dat`` + ``ree.dat`` (subsystems). This is the single public
     entry point shared by the conversion pipeline and the comparators, so both derive
-    the source model→Cobre mapping the same way (it used to live as a private
-    ``pipeline._build_id_map`` that the comparators reached into).
+    the source model→Cobre mapping the same way.
 
     This path-only entry point intentionally does **not** thread ``exph``, so it
     forwards ``exph=None`` to :func:`build_id_map_from_readers`: the comparators and

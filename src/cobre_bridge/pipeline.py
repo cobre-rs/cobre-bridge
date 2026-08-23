@@ -29,7 +29,6 @@ from cobre_bridge.converters import tailrace as tailrace_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
 from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
-from cobre_bridge.id_map import build_id_map
 
 logger = logging.getLogger(__name__)
 
@@ -139,11 +138,6 @@ def _compute_per_stage_sin_productivities(
         ZeroDivisionError,
     ):
         return None
-
-
-# Backward-compatible alias for importers still referencing this private name;
-# the builder itself lives in ``cobre_bridge.id_map.build_id_map``.
-_build_id_map = build_id_map
 
 
 def _merge_hydro_bounds(

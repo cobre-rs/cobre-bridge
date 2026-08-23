@@ -15,7 +15,6 @@ have no Cobre encoding today).
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -124,25 +123,6 @@ def convert_buses(
     }
 
 
-def convert_lines_placeholder() -> dict:
-    """An empty (but structurally required) ``lines.json``.
-
-    The exchange network waits on the ``IA`` accessor fix upstream; until
-    it lands the buses are deliberately unconnected — each subsystem
-    self-balances against its own deficit cost. (The file being mandatory
-    for a lineless study is tracked cobre-gap C4 in the cobre repository's
-    conversion-found-improvements registry.)
-    """
-    logging.getLogger(__name__).warning(
-        "exchange network deferred (IA accessor fix upstream): emitting an "
-        "empty lines.json — subsystems are unconnected and self-balance"
-    )
-    return {
-        "$schema": cobre_schemas.schema_url_for("system/lines.json"),
-        "lines": [],
-    }
-
-
 def _ia_dense(
     dadger: Dadger,
     calendar: Sequence[OperativeStage],
@@ -232,6 +212,12 @@ def convert_lines(
     (cobre rule 36). Block rows carry the ``IA`` record's own per-block
     limit as an absolute MW value, read directly with no factor round-trip.
     The unbounded sentinel (99999) passes through as a plain large capacity.
+
+    TRACKED COBRE-GAP WORKAROUND (C4, the cobre repository's
+    conversion-found-improvements registry): a deck that declares no ``IA``
+    pairs still emits ``system/lines.json`` with an empty ``lines`` list,
+    because cobre requires the file structurally even for a lineless study.
+    Remove this note when the registry's C4 entry closes.
     """
     calendar = case.calendar
     dense = _ia_dense(case.dadger, calendar)

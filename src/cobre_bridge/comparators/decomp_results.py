@@ -613,7 +613,7 @@ def _read_cobre_lines_index(cobre_output_dir: Path) -> dict[tuple[int, int], int
     """``{(source_bus_id, target_bus_id): line_id}`` from ``system/lines.json``.
 
     A missing ``system/lines.json`` -- e.g. a case predating the ``IA``
-    exchange-network converter (``decomp/network.py::convert_lines_placeholder``)
+    exchange-network converter (``decomp/network.py::convert_lines``)
     -- yields an empty index rather than raising: :func:`_corridor_line_alignment`
     then resolves nothing, and :func:`_interc_side` reports every corridor as
     unresolved instead of failing the comparison (the Network tab degrades to

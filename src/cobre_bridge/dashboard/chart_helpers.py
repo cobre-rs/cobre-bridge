@@ -2,9 +2,8 @@
 
 Provides reusable functions for building Plotly traces that follow the v2
 dashboard convention: every line chart shows a mean solid line, a p50/median
-dashed line, and a p10-p90 shaded band.  Bounds overlays and HTML card
-wrapping are also provided here so that all tab modules share a single,
-consistent implementation.
+dashed line, and a p10-p90 shaded band.  HTML card wrapping is also provided
+here so that all tab modules share a single, consistent implementation.
 
 Also provides NPV cost computation and cost category grouping helpers used
 by the Overview and Costs tabs.
@@ -28,7 +27,6 @@ from cobre_bridge.ui.plotly_helpers import (
 from cobre_bridge.ui.plotly_helpers import (
     fig_to_html,
 )
-from cobre_bridge.ui.theme import BOUND_LINE_COLOR
 
 try:
     import pandas as pd
@@ -204,75 +202,6 @@ def stage_hours_weighted_mean(
         )
         .collect(engine="streaming")
     )
-
-
-def add_bounds_overlay(
-    fig: go.Figure,
-    bounds_df: pd.DataFrame,
-    x_col: str,
-    min_col: str | None = None,
-    max_col: str | None = None,
-    row: int | None = None,
-    col: int | None = None,
-) -> go.Figure:
-    """Overlay dashed grey reference lines for min/max bounds on *fig*.
-
-    Either *min_col* or *max_col* (or both) may be specified.  When both are
-    ``None`` the function is a no-op.
-
-    Args:
-        fig: The :class:`plotly.graph_objects.Figure` to mutate.
-        bounds_df: DataFrame with one row per x value containing the bound
-            columns.  Must include ``x_col`` and whichever of *min_col* /
-            *max_col* are not ``None``.
-        x_col: Name of the x-axis column in *bounds_df*.
-        min_col: Column name for the lower bound; omitted when ``None``.
-        max_col: Column name for the upper bound; omitted when ``None``.
-        row: Subplot row (1-based).
-        col: Subplot column (1-based).
-
-    Returns:
-        The same *fig* object (enables method chaining).
-    """
-    if min_col is None and max_col is None:
-        return fig
-
-    subplot_kwargs: dict = {}
-    if row is not None:
-        subplot_kwargs["row"] = row
-    if col is not None:
-        subplot_kwargs["col"] = col
-
-    x = bounds_df[x_col]
-    bound_line = dict(color=BOUND_LINE_COLOR, width=1.5, dash="dash")
-
-    if min_col is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=bounds_df[min_col],
-                name=f"Min ({min_col})",
-                mode="lines",
-                line=bound_line,
-                showlegend=True,
-            ),
-            **subplot_kwargs,
-        )
-
-    if max_col is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=bounds_df[max_col],
-                name=f"Max ({max_col})",
-                mode="lines",
-                line=bound_line,
-                showlegend=True,
-            ),
-            **subplot_kwargs,
-        )
-
-    return fig
 
 
 def make_chart_card(

@@ -432,8 +432,8 @@ def _chart_gen_mix(data: DashboardData) -> go.Figure | None:
     return fig
 
 
-def _render_section_c(data: DashboardData) -> str:
-    """Render Section C — four metric cards."""
+def _render_metric_cards(data: DashboardData) -> str:
+    """Render the four key-metric cards."""
     # Expected cost (NPV)
     if data.costs.empty:
         cost_value_str = "N/A"
@@ -474,8 +474,8 @@ def _render_section_c(data: DashboardData) -> str:
     return section_title("Key Metrics") + metrics_grid(cards)
 
 
-def _render_section_d(data: DashboardData) -> str:
-    """Render Section D — cost breakdown bar chart and summary table."""
+def _render_cost_breakdown(data: DashboardData) -> str:
+    """Render the cost breakdown bar chart and summary table."""
     if data.costs.empty:
         return section_title("Cost Breakdown") + "<p>No cost data available.</p>"
 
@@ -495,8 +495,8 @@ def _quick_look_cell(chart_html: str, deep_link_html: str) -> str:
     return f"<div>{chart_html}{deep_link_html}</div>"
 
 
-def _render_section_e(data: DashboardData) -> str:
-    """Render Section E — quick-look mini charts."""
+def _render_quick_look_charts(data: DashboardData) -> str:
+    """Render the quick-look mini charts."""
     link_style = 'style="font-size:0.8rem;margin-top:0.25rem;"'
 
     # Training Bounds mini
@@ -552,7 +552,7 @@ def render(data: DashboardData) -> str:
     return (
         _run_identity_strip(data)
         + _run_status_strip(data)
-        + _render_section_c(data)
-        + _render_section_d(data)
-        + _render_section_e(data)
+        + _render_metric_cards(data)
+        + _render_cost_breakdown(data)
+        + _render_quick_look_charts(data)
     )

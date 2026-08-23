@@ -39,7 +39,7 @@ from rich.text import Text
 
 from cobre_bridge.diagnostics import Diagnostic, Severity
 from cobre_bridge.preflight import PreflightVerdict
-from cobre_bridge.ui.theme import COPPER_ACCENT
+from cobre_bridge.ui.theme import COPPER_ACCENT, SEVERITY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -60,8 +60,8 @@ MAX_TABLE_ROWS = 20
 #: Severity → Rich style. Amber/red track the dashboard palette; INFO is muted.
 _SEVERITY_STYLE: dict[Severity, str] = {
     Severity.INFO: "dim",
-    Severity.WARNING: "#F5A623",
-    Severity.ERROR: "bold #DC4C4C",
+    Severity.WARNING: SEVERITY["warning"],
+    Severity.ERROR: f"bold {SEVERITY['error']}",
 }
 
 #: Severity → glyph prefix shown in panel titles.
@@ -72,7 +72,7 @@ _SEVERITY_GLYPH: dict[Severity, str] = {
 }
 
 #: Success style reused for the ✓ summary banner and passing checklist lines.
-_SUCCESS_STYLE = "bold #4A8B6F"
+_SUCCESS_STYLE = f"bold {SEVERITY['ok']}"
 
 #: Verdict → (glyph, style, headline text) for the preflight checklist headline.
 #: Reuses the existing severity glyphs/colours: ⚠/✖ and the amber/red styles
@@ -133,7 +133,7 @@ def render_error(message: str, *, console: Console | None = None) -> None:
     existing stderr substring checks keep matching; colour is added only on a TTY.
     """
     target = console or get_console(stderr=True)
-    target.print(f"Error: {message}", style="bold #DC4C4C", soft_wrap=True)
+    target.print(f"Error: {message}", style=f"bold {SEVERITY['error']}", soft_wrap=True)
 
 
 def make_table(

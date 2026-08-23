@@ -434,10 +434,9 @@ def resolve(
 #: The three cobre bound-table schemas this accumulator fans resolved rows
 #: into. Every non-key column is float64-nullable: a cell that resolves no
 #: contribution on some axis simply carries ``null`` there, distinct from a
-#: genuine ``0.0`` bound. ``HYDRO_BOUNDS_SCHEMA`` widens ``decomp/bounds.py``'s
-#: ``_HYDRO_BOUNDS_SCHEMA`` to every hydro axis in :data:`AXES`, including the
-#: two-sided diversion and spillage axes that cobre's
-#: generic-constraint-authoring support added.
+#: genuine ``0.0`` bound. ``HYDRO_BOUNDS_SCHEMA`` covers every hydro axis in
+#: :data:`AXES`, including the two-sided diversion and spillage axes that
+#: cobre's generic-constraint-authoring support added.
 HYDRO_BOUNDS_SCHEMA = pa.schema(
     [
         pa.field("hydro_id", pa.int32(), nullable=False),

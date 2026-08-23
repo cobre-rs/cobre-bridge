@@ -50,17 +50,19 @@ from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.newave_files import NewaveFiles
 
-# Shared skip marker for tier-2 tests that need the optional cobre-python
-# wheel (`import cobre`). CI installs it via the `validation`/`test-roundtrip`
-# extras on the primary (3.13) job only; use ``find_spec`` (import-free) so
-# this module stays importable in a cobre-free environment. ``condition`` is
+# Shared skip marker for tier-2 tests that need `cobre-python` (`import
+# cobre`). It is a core dev dependency (installed via `.[dev]`), so it is
+# present on every CI job; this ``skipif`` guards only a deliberately
+# cobre-free environment (e.g. a partial dev checkout). Use ``find_spec``
+# (import-free) so this module stays importable there too. ``condition`` is
 # passed by keyword (rather than positionally) so ``.kwargs["condition"]`` is
 # introspectable.
 # Import via ``from tests.conftest import requires_cobre_python``.
 requires_cobre_python = pytest.mark.skipif(
     condition=importlib.util.find_spec("cobre") is None,
     reason=(
-        "requires the optional cobre-python wheel (validation / test-roundtrip extra)"
+        "requires cobre-python, a core dev dependency; this environment is "
+        "missing it (a deliberately cobre-free checkout)"
     ),
 )
 
