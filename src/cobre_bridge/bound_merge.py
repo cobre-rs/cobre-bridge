@@ -39,11 +39,7 @@ def merge_bound_tables(
         When a name in *on* is absent from *base* or from *overlay*.
     """
     missing = sorted(
-        {
-            name
-            for name in on
-            if name not in base.columns or name not in overlay.columns
-        }
+        {name for name in on if name not in base.columns or name not in overlay.columns}
     )
     if missing:
         raise ValueError(

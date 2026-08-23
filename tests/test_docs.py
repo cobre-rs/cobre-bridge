@@ -13,9 +13,12 @@ from pathlib import Path
 _CLI_DOCS = Path(__file__).resolve().parents[1] / "docs" / "cli.md"
 
 _REQUIRED_TOKENS: tuple[str, ...] = (
-    "convert",
-    "check",
-    "compare",
+    "convert newave",
+    "convert decomp",
+    "check newave",
+    "check decomp",
+    "compare newave",
+    "compare decomp",
     "dashboard",
     "--json",
     "--dry-run",

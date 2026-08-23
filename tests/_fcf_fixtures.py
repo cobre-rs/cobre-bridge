@@ -201,7 +201,7 @@ def synthetic_roundtrip(
     write_boundary_checkpoint -> cobre.results.load_policy` against
     `boundary_dir`, then returns the reloaded policy dict verbatim. `cobre`
     is imported lazily, inside this function body, so the rest of the
-    module stays importable without the optional cobre-python wheel — only
+    module stays importable without the cobre-python wheel — only
     call this from a `@requires_cobre_python`-guarded test. `gnl_plan`
     defaults to `None`, forwarded verbatim to `map_boundary_cuts`, so every
     existing caller keeps leaving the GNL ring at `0.0` unchanged; pass it to

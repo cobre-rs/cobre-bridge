@@ -7,11 +7,11 @@ set -euo pipefail
 RUFF="${RUFF:-.venv/bin/ruff}"
 command -v "$RUFF" >/dev/null 2>&1 || RUFF=ruff
 
-echo "==> ruff format --check (src, scripts/ci)..."
-"$RUFF" format --check src/ scripts/ci/
+echo "==> ruff format --check (whole tree)..."
+"$RUFF" format --check .
 
-echo "==> ruff check (src, scripts/ci)..."
-"$RUFF" check src/ scripts/ci/
+echo "==> ruff check (whole tree)..."
+"$RUFF" check .
 
 echo "==> plan-structure leak gate..."
 python3 scripts/ci/check_no_plan_leaks.py

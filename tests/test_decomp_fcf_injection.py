@@ -63,7 +63,7 @@ def _mock_deck_and_cut_seams(
     downstream code inspects), so ``read_cortes`` returns ``fake_cuts``
     verbatim, and stubs the ``sys.modules['cobre']`` entry so
     ``import_boundary_fcf``'s own unconditional ``import cobre`` (needed for
-    ``cobre.__version__``) resolves without the optional cobre-python wheel
+    ``cobre.__version__``) resolves without the cobre-python wheel
     installed — the epic-01 `"stub sys.modules['cobre']"` pattern
     (``tests/test_decomp_fcf_bootstrap.py``), not a module attribute patch.
 

@@ -2,7 +2,7 @@
 
 Epic 02 of ``plans/decomp-fcf-ci-hardening`` (see ``CLAUDE.md``'s "boundary-FCF
 test tiers" subsection) drove every ``tests/test_decomp_fcf_*.py`` module to
-collect without the optional ``cobre-python`` wheel and without the local,
+collect without the ``cobre-python`` wheel and without the local,
 gitignored ``example/`` decks. Nothing in the test runner enforces that going
 forward, so this module is a lightweight source-scan guard against
 regression: it reads each FCF test module's own text (never the decks it may

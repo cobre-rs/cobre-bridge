@@ -21,8 +21,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install ruff
-      - run: ruff check src/ scripts/ci/
-      - run: ruff format --check src/ scripts/ci/
+      - run: ruff check .
+      - run: ruff format --check .
       # Drift/rot gates — conventions in .claude/rules/, docs in scripts/README.md
       - run: python3 scripts/ci/check_no_plan_leaks.py
       - run: python3 scripts/ci/check_comment_refs.py

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Analyze and summarize cobre simulation results.
+r"""Analyze and summarize cobre simulation results.
 
 Usage:
     python scripts/analyze_results.py example/convertido/
     python scripts/analyze_results.py example/convertido/ --report costs
-    python scripts/analyze_results.py example/convertido/ --report hydro-detail --hydro 156
+    python scripts/analyze_results.py example/convertido/ \
+        --report hydro-detail --hydro 156
 """
 
 from __future__ import annotations
@@ -14,10 +15,8 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -78,7 +77,8 @@ def report_overview(case_dir: Path) -> None:
     print(f"  Iterations:   {int(last['iteration'])}")
     print(f"  Lower bound:  {last['lower_bound']:.4e}")
     print(
-        f"  Upper bound:  {last['upper_bound_mean']:.4e} +/- {last['upper_bound_std']:.4e}"
+        f"  Upper bound:  {last['upper_bound_mean']:.4e} +/- "
+        f"{last['upper_bound_std']:.4e}"
     )
     print(f"  Gap:          {last['gap_percent']:.2f}%")
     print()
@@ -117,7 +117,8 @@ def report_overview(case_dir: Path) -> None:
     print("BUS SUMMARY (avg over scenarios, sum over stages/blocks)")
     print("=" * 70)
     print(
-        f"  {'Bus':<15s} {'Load(GWh)':>12s} {'Deficit(GWh)':>14s} {'Excess(GWh)':>14s} {'AvgSpot':>10s}"
+        f"  {'Bus':<15s} {'Load(GWh)':>12s} {'Deficit(GWh)':>14s} "
+        f"{'Excess(GWh)':>14s} {'AvgSpot':>10s}"
     )
     for bus_id in sorted(buses["bus_id"].unique()):
         b = buses[buses["bus_id"] == bus_id]
@@ -127,7 +128,8 @@ def report_overview(case_dir: Path) -> None:
         avg_spot = b["spot_price"].mean()
         bname = name(names_map, "buses", bus_id)
         print(
-            f"  {bname:<15s} {avg_load:>12.0f} {avg_def:>14.1f} {avg_exc:>14.1f} {avg_spot:>10.2f}"
+            f"  {bname:<15s} {avg_load:>12.0f} {avg_def:>14.1f} "
+            f"{avg_exc:>14.1f} {avg_spot:>10.2f}"
         )
     print()
 
@@ -168,10 +170,12 @@ def report_overview(case_dir: Path) -> None:
         .mean()
     )
     print(
-        f"  Hydros spilling (avg):        {n_spilling:>12.0f} / {hydros['hydro_id'].nunique()}"
+        f"  Hydros spilling (avg):        {n_spilling:>12.0f} / "
+        f"{hydros['hydro_id'].nunique()}"
     )
     print(
-        f"  Hydros with inflow slack:     {n_slack:>12.0f} / {hydros['hydro_id'].nunique()}"
+        f"  Hydros with inflow slack:     {n_slack:>12.0f} / "
+        f"{hydros['hydro_id'].nunique()}"
     )
     print()
 
@@ -371,7 +375,8 @@ def report_exchanges(case_dir: Path) -> None:
                 )
             else:
                 print(
-                    f"  Line {lid} ({lname}): avg direct={avg_by_stage['direct'].mean():.1f}, "
+                    f"  Line {lid} ({lname}): avg direct="
+                    f"{avg_by_stage['direct'].mean():.1f}, "
                     f"reverse={avg_by_stage['reverse'].mean():.1f}"
                 )
         print()
