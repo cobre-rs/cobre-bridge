@@ -23,9 +23,12 @@ from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
 from cobre_bridge.ui.plotly_helpers import (
+    add_mean_p50_band as add_mean_p50_band,
+)
+from cobre_bridge.ui.plotly_helpers import (
     fig_to_html,
 )
-from cobre_bridge.ui.theme import BOUND_LINE_COLOR, hex_to_rgba
+from cobre_bridge.ui.theme import BOUND_LINE_COLOR
 
 try:
     import pandas as pd
@@ -143,122 +146,64 @@ def compute_percentiles(
     return result.reset_index()
 
 
-def add_mean_p50_band(
-    fig: go.Figure,
-    df: pd.DataFrame,
-    x_col: str,
-    name: str,
-    color: str,
-    row: int | None = None,
-    col: int | None = None,
-    show_band: bool = True,
-    show_p50: bool = True,
-) -> go.Figure:
-    """Add mean, p50, and p10-p90 band traces to *fig*.
+def stage_hours_weighted_mean(
+    lf: pl.LazyFrame | pl.DataFrame,
+    value_col: str,
+    group_cols: list[str],
+    stage_hours: dict[int, float] | pl.DataFrame,
+) -> pl.DataFrame:
+    """Collapse a per-stage rate across the horizon into one value per group.
 
-    The function adds up to three :class:`plotly.graph_objects.Scatter` traces:
-
-    * **Mean** — solid line, width 2, full opacity.
-    * **P50** — dashed line, width 1.5, 70% opacity (omitted when
-      *show_p50* is ``False``).
-    * **P10-P90 band** — two traces required by Plotly's ``fill="tonexty"``
-      convention: the lower bound (p10) is plotted first as an invisible line,
-      then the upper bound (p90) is plotted with ``fill="tonexty"`` at 15%
-      opacity (omitted when *show_band* is ``False``).
-
-    The function is a no-op when *df* is empty.
+    Weight a per-stage rate by stage hours; a bare ``.mean()`` gives a
+    648-hour stage the same weight as a 168-hour stage.
 
     Args:
-        fig: The :class:`plotly.graph_objects.Figure` to mutate.
-        df: Pre-computed percentile DataFrame as returned by
-            :func:`compute_percentiles`.  Must contain ``x_col``, ``"mean"``,
-            ``"p10"``, and ``"p90"`` columns (and ``"p50"`` when
-            *show_p50* is ``True``).
-        x_col: Name of the column used as the x-axis values.
-        name: Display name for the trace group (used in the legend).
-        color: Hex or CSS colour string for the traces.
-        row: Subplot row (1-based) for :meth:`~plotly.graph_objects.Figure.add_trace`.
-        col: Subplot column (1-based).
-        show_band: When ``False``, the p10-p90 filled area is omitted.
-        show_p50: When ``False``, the p50 dashed line is omitted.
+        lf: (Lazy)Frame carrying ``stage_id``, *value_col*, and every column
+            in *group_cols*.
+        value_col: Name of the per-stage rate column to collapse across
+            stages (e.g. MW, m3/s) — never an already-summed energy column.
+        group_cols: Columns identifying the groups the horizon is reduced to
+            (e.g. ``["scenario_id", "line_id"]``); must not include
+            ``stage_id``.
+        stage_hours: Either ``{stage_id: hours}`` or a DataFrame with
+            ``stage_id`` and ``_hours`` columns (e.g. summed from a
+            block-hours frame).
 
     Returns:
-        The same *fig* object (enables method chaining).
+        A :class:`polars.DataFrame` with ``[*group_cols, value_col]``, one
+        row per group, holding ``Σ(value·stage_hours) / Σ(stage_hours)``.
+        Empty (with the expected schema) when *lf* has no rows or the total
+        stage hours are zero.
     """
-    if df.empty:
-        return fig
+    if pl is None:  # pragma: no cover
+        raise ImportError("polars is required for stage_hours_weighted_mean")
 
-    subplot_kwargs: dict = {}
-    if row is not None:
-        subplot_kwargs["row"] = row
-    if col is not None:
-        subplot_kwargs["col"] = col
-
-    x = df[x_col]
-
-    # Mean (solid line)
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=df["mean"],
-            name=name,
-            legendgroup=name,
-            mode="lines",
-            line=dict(color=color, width=2),
-        ),
-        **subplot_kwargs,
+    hours_df = (
+        pl.DataFrame(
+            {
+                "stage_id": list(stage_hours.keys()),
+                "_hours": list(stage_hours.values()),
+            }
+        )
+        if isinstance(stage_hours, dict)
+        else stage_hours
     )
+    expected_cols = [*group_cols, value_col]
 
-    # P50 (dashed line)
-    if show_p50:
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=df["p50"],
-                name=f"{name} P50",
-                legendgroup=name,
-                showlegend=False,
-                mode="lines",
-                line=dict(color=color, width=1.5, dash="dash"),
-                opacity=0.7,
-            ),
-            **subplot_kwargs,
-        )
+    if hours_df.height == 0 or hours_df["_hours"].sum() == 0:
+        return pl.DataFrame(schema={c: pl.Float64 for c in expected_cols})
 
-    # P10-P90 band
-    if show_band:
-        # Lower bound (invisible, reference for fill)
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=df["p10"],
-                name=f"{name} P10",
-                legendgroup=name,
-                showlegend=False,
-                mode="lines",
-                line=dict(width=0),
-                hoverinfo="skip",
-            ),
-            **subplot_kwargs,
+    lazy = lf.lazy() if isinstance(lf, pl.DataFrame) else lf
+    return (
+        lazy.join(hours_df.lazy(), on="stage_id")
+        .group_by(group_cols)
+        .agg(
+            (
+                (pl.col(value_col) * pl.col("_hours")).sum() / pl.col("_hours").sum()
+            ).alias(value_col)
         )
-        # Upper bound (fills to p10)
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=df["p90"],
-                name=f"{name} Band",
-                legendgroup=name,
-                showlegend=False,
-                mode="lines",
-                line=dict(width=0),
-                fill="tonexty",
-                fillcolor=hex_to_rgba(color, 0.15),
-                hoverinfo="skip",
-            ),
-            **subplot_kwargs,
-        )
-
-    return fig
+        .collect(engine="streaming")
+    )
 
 
 def add_bounds_overlay(

@@ -423,7 +423,7 @@ def render(data: DashboardData) -> str:
 
     retry_content = chart_grid(
         [
-            _chart_retry_histogram(data.retry_histogram),
+            wrap_chart(_chart_retry_histogram(data.retry_histogram)),
             wrap_chart(chart_retry_level_heatmap(data.retry_histogram)),
         ]
     )

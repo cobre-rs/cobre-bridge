@@ -7,6 +7,7 @@ surfacing through the ``dashboard`` CLI command's diagnostics sink.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from cobre_bridge import diagnostics as dx
-from cobre_bridge.dashboard.data import load_temporal_context
+from cobre_bridge.dashboard.data import DashboardData, load_temporal_context
 from tests.conftest import hydro_with_group
 
 _DIAG_CODE = "dashboard-unweighted-tree-averages"
@@ -531,3 +532,200 @@ def test_build_full_case_fixture_is_valid(tmp_path: Path, tree: bool) -> None:
     build_dashboard(case_dir, output_path)
 
     assert output_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# DashboardData sub-struct hold + flat-field shim consistency
+# ---------------------------------------------------------------------------
+
+
+def _build_training_only_case(tmp_path: Path) -> Path:
+    """The two files ``DashboardData.load`` requires unconditionally
+    (``stages.json``, ``output/training/convergence.parquet``) and nothing
+    else -- every other loader degrades to an empty structure on a missing
+    optional file, so this reproduces a training-only case without a
+    ``output/simulation/`` tree at all.
+    """
+    case = tmp_path / "training_only_case"
+    case.mkdir()
+
+    _write_json(
+        case / "stages.json",
+        {
+            "stages": [
+                {"id": 0, "blocks": [{"id": 0, "hours": 730.0}]},
+                {"id": 1, "blocks": [{"id": 0, "hours": 730.0}]},
+                {"id": 2, "blocks": [{"id": 0, "hours": 730.0}]},
+            ]
+        },
+    )
+
+    conv_dir = case / "output" / "training"
+    conv_dir.mkdir(parents=True)
+    conv_table = pa.table(
+        {
+            "iteration": pa.array([1], type=pa.int32()),
+            "lower_bound": pa.array([1.0e9], type=pa.float64()),
+            "upper_bound_mean": pa.array([1.2e9], type=pa.float64()),
+            "upper_bound_std": pa.array([1.0e7], type=pa.float64()),
+            "gap_percent": pa.array([16.7], type=pa.float64()),
+            "cuts_added": pa.array([10], type=pa.int32()),
+            "cuts_removed": pa.array([0], type=pa.int32()),
+            "cuts_active": pa.array([10], type=pa.int64()),
+            "time_forward_ms": pa.array([100], type=pa.int64()),
+            "time_backward_ms": pa.array([200], type=pa.int64()),
+            "time_total_ms": pa.array([300], type=pa.int64()),
+            "forward_passes": pa.array([5], type=pa.int32()),
+            "lp_solves": pa.array([50], type=pa.int64()),
+        }
+    )
+    pq.write_table(conv_table, conv_dir / "convergence.parquet")
+    return case
+
+
+def _add_oversized_solver_sim(case_dir: Path, *, n_rows: int, completed: int) -> None:
+    """Write a ``solver/iterations.parquet`` with *n_rows* rows plus a
+    ``metadata.json`` recording fewer *completed* scenarios, so
+    ``DashboardData.load`` must head-filter ``solver_sim`` down to
+    *completed* rows (*n_rows* > *completed* is the caller's job to ensure).
+    """
+    solver_dir = case_dir / "output" / "simulation" / "solver"
+    solver_dir.mkdir(parents=True, exist_ok=True)
+    solver_table = pa.table(
+        {
+            "iteration": pa.array(list(range(1, n_rows + 1)), type=pa.int32()),
+            "solve_time_ms": pa.array([10.0] * n_rows, type=pa.float64()),
+            "lp_solves": pa.array([1] * n_rows, type=pa.int64()),
+        }
+    )
+    pq.write_table(solver_table, solver_dir / "iterations.parquet")
+    _write_json(
+        case_dir / "output" / "simulation" / "metadata.json",
+        {"scenarios": {"total": n_rows, "completed": completed, "failed": 0}},
+    )
+
+
+class TestDashboardDataHoldsSubstructs:
+    """``DashboardData`` holds the eight loader sub-structs verbatim and
+    exposes the historical flat field surface via read-only shims."""
+
+    def test_holds_eight_substructs(self) -> None:
+        fields = {f.name for f in dataclasses.fields(DashboardData)}
+        assert {
+            "temporal",
+            "entities",
+            "simulation",
+            "scenario",
+            "performance",
+            "stochastic",
+            "metadata",
+            "gc",
+        } <= fields
+
+    def test_shim_identity_matches_substruct_field(self, tmp_path: Path) -> None:
+        case_dir = _build_full_case(tmp_path, tree=False)
+
+        data = DashboardData.load(case_dir)
+
+        assert data.stage_hours is data.temporal.stage_hours
+        assert data.hydro_meta is data.entities.hydro_meta
+        assert data.hydros_lf is data.simulation.hydros_lf
+        assert data.correlation is data.stochastic.correlation
+
+    def test_solver_sim_head_filter_has_one_source_of_truth(
+        self, tmp_path: Path
+    ) -> None:
+        case_dir = _build_full_case(tmp_path, tree=False)
+        _add_oversized_solver_sim(case_dir, n_rows=5, completed=2)
+
+        data = DashboardData.load(case_dir)
+
+        assert data.solver_sim is data.performance.solver_sim
+        assert len(data.solver_sim) == 2
+
+    def test_derived_fields_on_simulation_case(self, tmp_path: Path) -> None:
+        case_dir = _build_full_case(tmp_path, tree=False)
+
+        data = DashboardData.load(case_dir)
+
+        assert data.simulation_available is True
+        assert data.n_scenarios == 2
+        assert data.n_stages == 2
+        assert data.case_name == case_dir.resolve().name
+
+    def test_derived_fields_on_training_only_case(self, tmp_path: Path) -> None:
+        case_dir = _build_training_only_case(tmp_path)
+
+        data = DashboardData.load(case_dir)
+
+        assert data.simulation_available is False
+        assert data.n_scenarios == 0
+        assert data.n_stages == 3
+        assert data.case_name == case_dir.resolve().name
+
+
+# ---------------------------------------------------------------------------
+# Partial output/stochastic/ (present dir, one sibling file missing) degrade
+# ---------------------------------------------------------------------------
+
+
+def _add_partial_stochastic_dir(case_dir: Path) -> None:
+    """Write ``output/stochastic/`` with every file present except
+    ``inflow_ar_coefficients.parquet`` -- the no-PAR/DECOMP-shaped fit shape
+    that used to crash ``load_stochastic_data``."""
+    stochastic_dir = case_dir / "output" / "stochastic"
+    stochastic_dir.mkdir(parents=True, exist_ok=True)
+
+    seasonal_stats_table = pa.table(
+        {
+            "hydro_id": pa.array([0, 0], type=pa.int32()),
+            "stage_id": pa.array([0, 1], type=pa.int32()),
+            "mean_m3s": pa.array([500.0, 480.0], type=pa.float64()),
+            "std_m3s": pa.array([50.0, 45.0], type=pa.float64()),
+        }
+    )
+    pq.write_table(
+        seasonal_stats_table, stochastic_dir / "inflow_seasonal_stats.parquet"
+    )
+
+    noise_table = pa.table(
+        {
+            "stage_id": pa.array([0, 0, 1, 1], type=pa.int32()),
+            "value": pa.array([0.1, -0.2, 0.05, -0.1], type=pa.float64()),
+        }
+    )
+    pq.write_table(noise_table, stochastic_dir / "noise_openings.parquet")
+
+    _write_json(
+        stochastic_dir / "fitting_report.json",
+        {"hydros": {"0": {"selected_order": 1}}},
+    )
+    # inflow_ar_coefficients.parquet deliberately omitted.
+
+
+class TestLoadStochasticDataPartialDirectory:
+    """The four stochastic-loader reads degrade per-file like ``correlation.json``
+    instead of raising ``FileNotFoundError`` when one sibling is absent."""
+
+    def test_absent_ar_coefficients_degrades_without_raising(
+        self, tmp_path: Path
+    ) -> None:
+        case_dir = _build_full_case(tmp_path, tree=False)
+        _add_partial_stochastic_dir(case_dir)
+
+        data = DashboardData.load(case_dir)
+
+        assert data.ar_coefficients.empty is True
+        assert data.stochastic_available is True
+
+    def test_stochastic_tab_renders_on_partial_directory(self, tmp_path: Path) -> None:
+        from cobre_bridge.dashboard.tabs import stochastic
+
+        case_dir = _build_full_case(tmp_path, tree=False)
+        _add_partial_stochastic_dir(case_dir)
+
+        data = DashboardData.load(case_dir)
+        html = stochastic.render(data)
+
+        assert isinstance(html, str)
+        assert html

@@ -1,7 +1,8 @@
 """Unit tests for cobre_bridge.dashboard.chart_helpers.
 
-Covers compute_percentiles, add_mean_p50_band, add_bounds_overlay,
-make_chart_card, compute_npv_costs, group_costs, and compute_cost_summary.
+Covers compute_percentiles, stage_hours_weighted_mean, add_mean_p50_band,
+add_bounds_overlay, make_chart_card, compute_npv_costs, group_costs, and
+compute_cost_summary.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from cobre_bridge.dashboard.chart_helpers import (
     compute_percentiles,
     group_costs,
     make_chart_card,
+    stage_hours_weighted_mean,
 )
 
 # ---------------------------------------------------------------------------
@@ -155,6 +157,95 @@ def test_compute_percentiles_custom_percentiles(
 
 
 # ---------------------------------------------------------------------------
+# stage_hours_weighted_mean
+# ---------------------------------------------------------------------------
+
+
+def test_stage_hours_weighted_mean_weights_by_stage_hours() -> None:
+    """A 648-hour stage outweighs a 168-hour stage, unlike a bare .mean().
+
+    stage 1: value=100, hours=168; stage 2: value=200, hours=648.
+    Weighted: (100*168 + 200*648) / (168 + 648) ~= 179.4, not the
+    unweighted mean of 150.0.
+    """
+    lf = pl.DataFrame(
+        {"stage_id": [1, 2], "line_id": [1, 1], "value": [100.0, 200.0]}
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 168.0, 2: 648.0})
+
+    assert result.height == 1
+    weighted = result["value"][0]
+    assert weighted == pytest.approx(179.41176, rel=1e-4)
+    assert weighted != pytest.approx(150.0)
+
+
+def test_stage_hours_weighted_mean_uniform_duration_matches_bare_mean() -> None:
+    """Equal stage hours reduce the weighted mean to the plain mean (no-op case)."""
+    lf = pl.DataFrame(
+        {"stage_id": [1, 2], "line_id": [1, 1], "value": [100.0, 200.0]}
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 720.0, 2: 720.0})
+
+    assert result["value"][0] == pytest.approx(150.0)
+
+
+def test_stage_hours_weighted_mean_stage_hours_as_dataframe() -> None:
+    """A stage-hours DataFrame (e.g. summed from a block-hours frame) works
+    the same as the ``{stage_id: hours}`` dict form."""
+    lf = pl.DataFrame(
+        {"stage_id": [1, 2], "line_id": [1, 1], "value": [100.0, 200.0]}
+    ).lazy()
+    stage_hours_df = pl.DataFrame({"stage_id": [1, 2], "_hours": [168.0, 648.0]})
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], stage_hours_df)
+
+    assert result["value"][0] == pytest.approx(179.41176, rel=1e-4)
+
+
+def test_stage_hours_weighted_mean_multiple_groups() -> None:
+    """Each group in group_cols is weighted independently."""
+    lf = pl.DataFrame(
+        {
+            "stage_id": [1, 2, 1, 2],
+            "line_id": [1, 1, 2, 2],
+            "value": [100.0, 200.0, 10.0, 20.0],
+        }
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 168.0, 2: 648.0})
+
+    by_line = dict(zip(result["line_id"].to_list(), result["value"].to_list()))
+    assert by_line[1] == pytest.approx(179.41176, rel=1e-4)
+    assert by_line[2] == pytest.approx(17.941176, rel=1e-4)
+
+
+def test_stage_hours_weighted_mean_empty_frame_returns_empty() -> None:
+    """An empty input frame is a no-op, not an error."""
+    lf = pl.DataFrame(
+        schema={"stage_id": pl.Int64, "line_id": pl.Int64, "value": pl.Float64}
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 168.0, 2: 648.0})
+
+    assert result.height == 0
+    assert list(result.columns) == ["line_id", "value"]
+
+
+def test_stage_hours_weighted_mean_zero_total_hours_returns_empty() -> None:
+    """Sigma(stage_hours) == 0 is a no-op rather than a division by zero."""
+    lf = pl.DataFrame(
+        {"stage_id": [1, 2], "line_id": [1, 1], "value": [100.0, 200.0]}
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 0.0, 2: 0.0})
+
+    assert result.height == 0
+    assert list(result.columns) == ["line_id", "value"]
+
+
+# ---------------------------------------------------------------------------
 # add_mean_p50_band
 # ---------------------------------------------------------------------------
 
@@ -192,6 +283,14 @@ def test_add_mean_p50_band_returns_figure(percentile_df: pd.DataFrame) -> None:
     fig = go.Figure()
     returned = add_mean_p50_band(fig, percentile_df, "stage_id", "Hydro", "#3B82F6")
     assert returned is fig
+
+
+def test_add_mean_p50_band_is_the_promoted_plotly_helpers_function() -> None:
+    """chart_helpers re-exports the helper promoted to ui.plotly_helpers rather
+    than defining its own copy — the two names must be the same object."""
+    from cobre_bridge.ui.plotly_helpers import add_mean_p50_band as _promoted
+
+    assert add_mean_p50_band is _promoted
 
 
 def test_add_mean_p50_band_empty_df() -> None:

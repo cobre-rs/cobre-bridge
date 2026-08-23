@@ -81,3 +81,11 @@ def hex_to_rgba(hex_color: str, alpha: float) -> str:
     g = int(h[2:4], 16)
     b = int(h[4:6], 16)
     return f"rgba({r},{g},{b},{alpha})"
+
+
+#: Canonical p10-p90 band colours, shared by the dashboard's go.Figure band
+#: helper and the comparators' raw-trace band. ``BAND_FILL`` is derived from
+#: the same hydro hue as the rest of the semantic palette rather than a bare
+#: literal, so the two consumers stay pinned to one source.
+BAND_FILL: str = hex_to_rgba(COLORS["hydro"], BAND_OPACITY)
+BAND_LINE: str = "rgba(255,255,255,0)"

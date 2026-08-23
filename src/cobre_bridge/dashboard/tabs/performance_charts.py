@@ -29,6 +29,13 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from cobre_bridge.dashboard.tabs.timing_phases import (
+    TOP_LEVEL_PHASE_COLUMNS as TOP_LEVEL_PHASE_COLUMNS,
+)
+from cobre_bridge.dashboard.tabs.timing_phases import (
+    active_top_level_phases,
+    build_timing_stacked_figure,
+)
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS as _LEGEND,
 )
@@ -42,17 +49,9 @@ from cobre_bridge.ui.plotly_helpers import (
 from cobre_bridge.ui.theme import COLORS, PERFORMANCE_PHASE_COLORS
 
 # ---------------------------------------------------------------------------
-# Timing column categorisation — single source of truth for all timing charts.
+# Timing column categorisation for the sub-component and aggregate-CPU
+# charts. The top-level phase config/detector/builder live in timing_phases.
 # ---------------------------------------------------------------------------
-
-TOP_LEVEL_PHASE_COLUMNS: tuple[str, ...] = (
-    "forward_wall_ms",
-    "backward_wall_ms",
-    "cut_selection_ms",
-    "mpi_allreduce_ms",
-    "lower_bound_ms",
-    "overhead_ms",
-)
 
 # Wall-time sub-components inside backward_wall_ms.
 BACKWARD_SUBCOMPONENT_COLUMNS: tuple[str, ...] = (
@@ -127,25 +126,6 @@ _TIMING_COMPONENT_COLORS: list[str] = [
 # ---------------------------------------------------------------------------
 
 
-_TOP_LEVEL_PHASE_LABELS: dict[str, tuple[str, str]] = {
-    "forward_wall_ms": ("Forward", PERFORMANCE_PHASE_COLORS["forward"]),
-    "backward_wall_ms": ("Backward", PERFORMANCE_PHASE_COLORS["backward"]),
-    "cut_selection_ms": ("Cut Selection", PERFORMANCE_PHASE_COLORS["lp_solve"]),
-    "lower_bound_ms": ("Lower Bound Eval", "#14B8A6"),
-    "mpi_allreduce_ms": ("MPI AllReduce", "#8B5CF6"),
-    "overhead_ms": ("Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
-}
-
-
-def _detect_top_level_columns(timing: pd.DataFrame) -> list[tuple[str, str, str]]:
-    """Return [(column, label, color)] for present top-level phases."""
-    return [
-        (col, _TOP_LEVEL_PHASE_LABELS[col][0], _TOP_LEVEL_PHASE_LABELS[col][1])
-        for col in TOP_LEVEL_PHASE_COLUMNS
-        if col in timing.columns and col in _TOP_LEVEL_PHASE_LABELS
-    ]
-
-
 def chart_iteration_timing_breakdown(timing: pd.DataFrame) -> str:
     """Stacked bar per iteration using ONLY top-level phases.
 
@@ -156,23 +136,11 @@ def chart_iteration_timing_breakdown(timing: pd.DataFrame) -> str:
     """
     if timing.empty:
         return "<p>No timing data available.</p>"
-
-    present = _detect_top_level_columns(timing)
-    if not present:
+    if not active_top_level_phases(timing):
         return "<p>No recognised top-level timing columns.</p>"
 
-    iters = timing["iteration"].tolist()
-    fig = go.Figure()
-    for col, label, color in present:
-        fig.add_trace(
-            go.Bar(
-                x=iters,
-                y=timing[col].tolist(),
-                name=label,
-                marker_color=color,
-                hovertemplate=f"{label}: %{{y:.0f}} ms<extra></extra>",
-            )
-        )
+    fig = build_timing_stacked_figure(timing)
+    assert fig is not None  # guarded above: timing non-empty + phases present
     return render_figure(
         fig,
         title="Iteration Timing — Top-Level Phases (non-overlapping, sums to total)",
@@ -768,7 +736,7 @@ def chart_timing_waterfall(timing: pd.DataFrame) -> str:
     if timing.empty:
         return "<p>No timing data available.</p>"
 
-    present = _detect_top_level_columns(timing)
+    present = active_top_level_phases(timing)
     if not present:
         return "<p>No recognised top-level timing columns.</p>"
 

@@ -18,9 +18,10 @@ from cobre_bridge.comparators.results import ResultComparison
 from cobre_bridge.ui.html import escape_text, json_for_script
 from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS as _LEGEND
 from cobre_bridge.ui.plotly_helpers import MARGIN_DEFAULTS as _MARGIN
+from cobre_bridge.ui.theme import BAND_FILL, BAND_LINE
 
-_BAND_FILL = "rgba(74,144,184,0.15)"
-_BAND_LINE = "rgba(255,255,255,0)"
+_BAND_FILL = BAND_FILL
+_BAND_LINE = BAND_LINE
 
 #: The four real Brazilian submarket buses, for a clean 2x2 facet grid. Shared
 #: by ``compare newave`` and ``compare decomp``, whose decks name the same

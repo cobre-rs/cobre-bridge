@@ -13,6 +13,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from cobre_bridge.dashboard.chart_helpers import make_chart_card
+from cobre_bridge.dashboard.tabs.timing_phases import (
+    active_top_level_phases,
+    build_timing_stacked_figure,
+)
 from cobre_bridge.ui.html import (
     chart_grid,
     collapsible_section,
@@ -24,7 +28,6 @@ from cobre_bridge.ui.plotly_helpers import apply_standard_layout
 from cobre_bridge.ui.theme import (
     COLORS,
     COPPER_ACCENT,
-    PERFORMANCE_PHASE_COLORS,
     hex_to_rgba,
 )
 
@@ -468,27 +471,6 @@ def _chart_cut_deactivation_heatmap(
     return fig_to_html(fig, unified_hover=False)
 
 
-_TOP_LEVEL_PHASE_CONFIG: tuple[tuple[str, str, str], ...] = (
-    ("forward_wall_ms", "Forward", PERFORMANCE_PHASE_COLORS["forward"]),
-    ("backward_wall_ms", "Backward", PERFORMANCE_PHASE_COLORS["backward"]),
-    ("cut_selection_ms", "Cut Selection", PERFORMANCE_PHASE_COLORS["lp_solve"]),
-    ("lower_bound_ms", "Lower Bound Eval", "#14B8A6"),
-    ("mpi_allreduce_ms", "MPI AllReduce", "#8B5CF6"),
-    ("overhead_ms", "Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
-)
-
-
-def _active_top_level_phases(
-    timing: pd.DataFrame,
-) -> list[tuple[str, str, str]]:
-    """Pick the top-level non-overlapping phase columns present in ``timing``."""
-    return [
-        (col, label, color)
-        for col, label, color in _TOP_LEVEL_PHASE_CONFIG
-        if col in timing.columns
-    ]
-
-
 def _chart_timing_stacked(timing: pd.DataFrame) -> go.Figure | None:
     """Stacked bar of top-level phases per iteration (sums to iteration total).
 
@@ -497,30 +479,9 @@ def _chart_timing_stacked(timing: pd.DataFrame) -> go.Figure | None:
     intentionally excluded here — they are visualised separately (see the
     Performance tab's *Backward Breakdown* section) so we do not double-count.
     """
-    if timing.empty:
+    fig = build_timing_stacked_figure(timing)
+    if fig is None:
         return None
-
-    phases = _active_top_level_phases(timing)
-    if not phases:
-        return None
-
-    iters = (
-        timing["iteration"].tolist()
-        if "iteration" in timing.columns
-        else list(range(len(timing)))
-    )
-
-    fig = go.Figure()
-    for col, label, color in phases:
-        fig.add_trace(
-            go.Bar(
-                x=iters,
-                y=timing[col].tolist(),
-                name=label,
-                marker_color=color,
-                hovertemplate=f"{label}: %{{y:.0f}} ms<extra></extra>",
-            )
-        )
 
     apply_standard_layout(
         fig,
@@ -536,7 +497,7 @@ def _chart_phase_distribution(timing: pd.DataFrame) -> go.Figure | None:
     if timing.empty:
         return None
 
-    phases = _active_top_level_phases(timing)
+    phases = active_top_level_phases(timing)
     if not phases:
         return None
 
